@@ -1,0 +1,16 @@
+# Per coding-guidelines/patterns/tooling.md: lefthook is the mandated
+# pre-commit orchestrator; every job here is a zero-warnings gate (a warning
+# fails the commit). Rust-only repo — language jobs for go/ts omitted.
+
+pre-commit:
+  parallel: true
+  commands:
+    gitleaks:
+      run: gitleaks git --staged --redact
+
+    rust-format:
+      glob: "*.rs"
+      run: cargo fmt -- --check
+    rust-lint:
+      glob: "*.rs"
+      run: cargo clippy --all-targets -- -D warnings

@@ -1,0 +1,28 @@
+[package]
+name = "shguard"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Parse-then-decide PreToolUse hook that blocks dangerous shell commands for AI coding agents"
+repository = "https://github.com/tsukasaI/shguard"
+
+[[bin]]
+name = "shguard"
+path = "src/bin/shguard.rs"
+
+# Per coding-guidelines/languages/rust.md: default clippy groups promoted
+# to deny, plus a small cherry-picked set of pedantic/nursery lints — NEVER
+# `clippy::pedantic = "warn"` or `clippy::nursery = "warn"` wholesale.
+[lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+complexity = { level = "deny", priority = -1 }
+perf = { level = "deny", priority = -1 }
+style = { level = "deny", priority = -1 }
+
+unwrap_used = "warn"
+expect_used = "warn"
+missing_errors_doc = "warn"
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"

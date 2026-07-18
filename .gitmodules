@@ -1,0 +1,3 @@
+[submodule "coding-guidelines"]
+	path = coding-guidelines
+	url = https://github.com/tsukasaI/coding-guidelines

@@ -1,0 +1,7 @@
+# Per coding-guidelines/patterns/tooling.md: keep the built-in rule set.
+# No custom rules or allowlist yet — suppressions need an audit trail; add
+# an [allowlist] only when a real false positive appears, never for a real
+# leaked credential (rotate it instead).
+
+[extend]
+useDefault = true
