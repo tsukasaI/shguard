@@ -6,6 +6,7 @@
 
 mod ast;
 pub mod normalize;
+mod parser;
 pub mod verdict;
 
 use verdict::{Reason, Verdict};

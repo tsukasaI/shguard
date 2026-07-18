@@ -10,6 +10,12 @@ repository = "https://github.com/tsukasaI/shguard"
 name = "shguard"
 path = "src/bin/shguard.rs"
 
+[dependencies]
+# Pinned exactly per docs/adr/0001-parser-crate.md — the fixture corpus in
+# src/parser.rs is the upgrade-compatibility gate for any version bump.
+brush-parser = "=0.4.0"
+thiserror = "2.0.18"
+
 # Per coding-guidelines/languages/rust.md: default clippy groups promoted
 # to deny, plus a small cherry-picked set of pedantic/nursery lints — NEVER
 # `clippy::pedantic = "warn"` or `clippy::nursery = "warn"` wholesale.

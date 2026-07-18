@@ -1,18 +1,19 @@
 //! shguard's own AST for a parsed bash command line.
 //!
-//! These types are shguard's, not any parser crate's: `src/parser.rs` (a
-//! later issue) will translate brush-parser's output into this shape so the
-//! rest of the pipeline never imports a brush-parser type (plan.md §1.1
-//! stage 1, docs/adr/0001-parser-crate.md). The shape here is sized to the
-//! fixture corpus the ADR validated brush-parser against: lists joined by
+//! These types are shguard's, not any parser crate's: `src/parser.rs`
+//! translates the selected parser crate's output (docs/adr/0001-parser-crate.md)
+//! into this shape so the rest of the pipeline never imports a type from
+//! that crate (plan.md §1.1 stage 1). The shape here is sized to the
+//! fixture corpus the ADR validated the selected crate against: lists joined by
 //! `;`/`&&`/`||`, pipelines, simple commands (assignments + words +
 //! redirections), and word pieces covering quoting, ANSI-C quoting,
 //! parameter/command/backquote substitution, tilde, brace alternation, and
 //! escape sequences.
 //!
-//! Not constructed anywhere yet: the parser adapter that builds these values
-//! lands in a later issue. Allowed dead code until then.
-#![allow(dead_code)]
+//! Constructed by `src/parser.rs` (the stage 1 adapter, B1). Consumed by the
+//! normalise stage (B2, a later issue) — `analyze()` does not wire parsing
+//! in yet, so nothing outside `parser.rs`'s own tests reads these values for
+//! now; that is expected until B4.
 
 /// A separator joining two [`Pipeline`]s in a [`CommandLine`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,9 +135,9 @@ pub(crate) enum FileRedirectionKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Word(pub(crate) Vec<WordPiece>);
 
-/// One piece of a [`Word`], mirroring the granularity brush-parser exposes
-/// (docs/adr/0001-parser-crate.md's evidence excerpts) — expressed as
-/// shguard's own type, not brush-parser's `WordPiece`.
+/// One piece of a [`Word`], mirroring the granularity the selected parser
+/// crate exposes (docs/adr/0001-parser-crate.md's evidence excerpts) —
+/// expressed as shguard's own type, not that crate's `WordPiece`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WordPiece {
     /// Unquoted literal text.
