@@ -1,0 +1,38 @@
+# shguard default allowlist (plan.md §1.1 stage 3, §6 item 8).
+#
+# Ships EMPTY: no [[entry]] tables below. Embedded into the binary via
+# `include_str!` (src/rules.rs) the same way rules/blocklist.toml is.
+#
+# Semantics (enforced in src/rules.rs's `apply_allowlist`, not just by
+# convention): a matching entry may downgrade an Ask verdict to Allow
+# ONLY — it can NEVER turn a Block into an Allow. Every applied
+# suppression is surfaced (the matched entry's id) so it lands in the
+# verdict's reason as an audit trail
+# (~/dotfiles/claude-code/rules/security.md: "suppressions need an audit
+# trail").
+#
+# Schema — identical matcher shape to rules/blocklist.toml's [[command]]:
+#
+#   id               non-empty, unique string; the suppression id
+#                    surfaced in the downgraded verdict's reason.
+#   reason           non-empty human-readable justification for why this
+#                    exact shape is trusted.
+#   command          exact command name (argv[0]). Mutually exclusive
+#                    with `command_prefix` — exactly one is required.
+#   command_prefix   command-name prefix.
+#   required_flags   optional list of flag specs, ALL required (ANDed) —
+#                    see rules/blocklist.toml's schema comment for the
+#                    short-flag vs exact-token distinction.
+#   targets          optional list of target alternatives, ANY one hit by
+#                    ANY argv token matches (ORed): `{ exact = "…" }` or
+#                    `{ prefix = "…" }`.
+#
+# Commented example — an operator who wants to allowlist a known-safe
+# `dd` invocation used by their own backup tooling, e.g. writing an image
+# to a specific, non-device backup file:
+#
+# [[entry]]
+# id = "trusted-dd-backup-image"
+# reason = "operator-verified backup script always writes to /srv/backups/"
+# command = "dd"
+# targets = [{ prefix = "of=/srv/backups/" }]

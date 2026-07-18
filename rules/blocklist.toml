@@ -1,0 +1,99 @@
+# shguard default blocklist (plan.md §1.1 stage 3).
+#
+# Embedded into the binary via `include_str!` (src/rules.rs) so the hook
+# works with zero setup. Matching is mechanical and exact over the
+# already-normalised argv (`crate::normalize`) — no regex over the raw
+# command string.
+#
+# Schema
+# ------
+#
+# [[command]] — matches one simple command's argv:
+#   id               non-empty, unique string; the audit-trail id surfaced
+#                    in a Block verdict's `matched_rule`.
+#   reason           non-empty human-readable justification.
+#   command          exact command name (argv[0]). Mutually exclusive with
+#                    `command_prefix` — exactly one of the two is required.
+#   command_prefix   command-name prefix (e.g. "mkfs." for the mkfs.* family).
+#   required_flags   optional list of flag specs, ALL required (ANDed):
+#                      - a single letter ("r") is a short flag, satisfied by
+#                        a combined cluster ("-rf") or a separated token
+#                        ("-r") — short-flag-aware.
+#                      - a "-"-prefixed string ("-delete", "--recursive") is
+#                        matched as an exact argv token (long options and
+#                        BSD-style single-dash long flags are never
+#                        letter-combinable).
+#                      - a "|"-separated spec ("r|--recursive") means "any
+#                        one of these" (ORed) — use this so a rule can't be
+#                        dodged by swapping a short flag for its long-option
+#                        spelling (`rm --recursive --force /`). Each
+#                        required_flags entry is still ANDed against the
+#                        others; only the alternatives *within* one entry
+#                        are ORed. An empty alternative ("r|", "|f") is a
+#                        load-time error.
+#   targets          optional list of target alternatives, ANY one hit by
+#                    ANY argv token matches (ORed): `{ exact = "…" }` or
+#                    `{ prefix = "…" }`. An empty/omitted list means "no
+#                    target constraint" (e.g. `shred`'s "any target").
+#
+# [[pipeline]] — matches the shape of a whole pipeline (the ported
+# curl|wget → sh installer-pipe pattern only; the general decode-fed-pipe
+# gate is a later issue, plan.md §4):
+#   id, reason       same as above.
+#   sources          command names; an earlier pipeline stage's command
+#                    name must be one of these.
+#   sinks            command names; the pipeline's final stage's command
+#                    name must be one of these.
+
+[[command]]
+id = "rm-recursive-force-dangerous-target"
+reason = "rm with recursive+force flags against a root-level, home, or device target"
+command = "rm"
+# "r|--recursive"/"f|--force": the short flag alone is not enough — GNU rm
+# accepts the long-option spellings too, and a rule keyed on `r`/`f` alone
+# is trivially dodged by `rm --recursive --force /`.
+required_flags = ["r|--recursive", "f|--force"]
+# "~/" (home ROOT, exact) is included alongside "~"; a `~/`-*prefix* is
+# deliberately NOT used here — `rm -rf ~/old-build` is routine cleanup and
+# must stay clean, only the bare home directory itself is a dangerous target.
+targets = [
+    { exact = "/" },
+    { exact = "/*" },
+    { exact = "~" },
+    { exact = "~/" },
+    { prefix = "/dev/" },
+]
+
+[[command]]
+id = "find-delete"
+reason = "find with -delete removes every matched file, unrecoverably"
+command = "find"
+required_flags = ["-delete"]
+
+[[command]]
+id = "dd-write-device"
+reason = "dd writing directly to a /dev/ device overwrites raw disk contents"
+command = "dd"
+targets = [{ prefix = "of=/dev/" }]
+
+[[command]]
+id = "truncate-zero"
+reason = "truncate -s zeroes/truncates the target file's contents in place"
+command = "truncate"
+required_flags = ["s"]
+
+[[command]]
+id = "shred"
+reason = "shred overwrites and unlinks its target, defeating recovery"
+command = "shred"
+
+[[command]]
+id = "mkfs-any-filesystem"
+reason = "mkfs.* formats a filesystem, destroying all data on the target"
+command_prefix = "mkfs."
+
+[[pipeline]]
+id = "curl-wget-pipe-to-shell"
+reason = "piping a downloaded script straight into an interpreter executes unreviewed remote code"
+sources = ["curl", "wget"]
+sinks = ["sh", "bash", "zsh"]

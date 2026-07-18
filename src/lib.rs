@@ -7,6 +7,7 @@
 mod ast;
 pub mod normalize;
 mod parser;
+mod rules;
 pub mod verdict;
 
 use verdict::{Reason, Verdict};
