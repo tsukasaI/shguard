@@ -1,0 +1,10 @@
+[package]
+name = "parser-compare"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Throwaway spike harness for shguard issue #6 (A1: parser-crate selection). Not part of the shguard crate."
+
+[dependencies]
+brush-parser = "=0.4.0"
+yash-syntax = "=0.23.1"
