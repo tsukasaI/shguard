@@ -92,26 +92,13 @@ use std::collections::HashMap;
 use crate::ast::{Assignment, CommandLine, Pipeline, SimpleCommand, Word, WordPiece};
 use crate::normalize::{self, NormalizedWord, Resolution, UnresolvableKind};
 use crate::parser;
-use crate::rules::Rules;
+use crate::rules::{PIPELINE_INTERPRETERS, Rules, SHELL_INTERPRETERS};
 use crate::verdict::{Decision, Reason, Verdict};
 
 /// Cap on how many levels deep a command/backquote substitution (or a
 /// resolved `bash -c` script) may recurse before this module fails closed —
 /// see the module docs' "Substitution recursion and the depth cap" section.
 const MAX_SUBSTITUTION_DEPTH: usize = 8;
-
-/// Shell interpreters whose `-c '<string>'` argument is itself shell
-/// syntax this module can recurse into (rule 6a).
-const SHELL_INTERPRETERS: &[&str] = &["bash", "sh", "zsh", "dash"];
-
-/// Interpreters a pipeline's final stage may be (rule 5b/5c). `xargs` names
-/// none of these itself — it is one of `crate::rules::effective_command`'s
-/// transparent wrappers, so a stage like `xargs sh` is resolved through to
-/// `sh` (its own first non-flag argument) before this list is even
-/// consulted.
-const PIPELINE_INTERPRETERS: &[&str] = &[
-    "sh", "bash", "zsh", "dash", "python", "python3", "node", "perl",
-];
 
 /// Analyzes a raw shell command line: parse -> per-simple-command normalise
 /// -> rules -> structural gate -> worst-decision-wins fold across every
