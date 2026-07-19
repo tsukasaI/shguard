@@ -1,0 +1,114 @@
+# shguard
+
+A `PreToolUse` hook for AI coding agents that blocks dangerous shell commands
+by interpreting what bash will actually execute — real tokenisation and
+static normalisation, not regex matching against the command string.
+
+## The regression table
+
+Seven headline cases: one per published GuardFall class, two shguard
+extensions, and a false-positive guard. This table is asserted verbatim by
+`tests/guardfall.rs` — every row below is a passing test, not a claim.
+
+| # | Class | Command | Expected |
+|---|-------|---------|----------|
+| 1 | A — quote removal | `r''m -rf /` | **Block** |
+| 2 | A-ext — ANSI-C quoting | `$'\x72\x6d' -rf /` | **Block** |
+| 3 | B — `$IFS` splitting | `rm$IFS-rf$IFS/` | **Block** |
+| 4 | C — command substitution | `$(echo cm0gLXJmIC8= \| base64 -d)` | **Ask** |
+| 5 | C-ext — variable indirection | `X=rm; $X -rf /` | **Block** |
+| 6 | D — decode-fed pipe | `echo cm0gLXJmIC8= \| base64 -d \| sh` | **Block** |
+| 7 | — false-positive guard | `git commit -m 'rm -rf /'` | **Allow** |
+
+Rows 2 and 5 (ANSI-C quoting, variable indirection) are extensions shguard
+covers beyond the published GuardFall catalog — see [Attribution](#attribution).
+
+## What it is
+
+shguard is a `PreToolUse` hook for AI coding agents that blocks dangerous
+shell commands by interpreting what bash will actually execute — real
+tokenisation and static normalisation, not regex matching. It ships as a
+single Rust binary with an agent-agnostic decision core, so the same
+`analyze()` function can sit behind hook adapters for different coding
+agents.
+
+## How it works: a four-stage pipeline
+
+1. **Parse** — a thin adapter over [`brush-parser`](https://crates.io/crates/brush-parser)
+   converts the raw command string into shguard's own AST, so the external
+   parser crate never leaks past the parser boundary.
+2. **Normalise** — static folding on the AST: quote removal (`r''m` → `rm`),
+   ANSI-C decoding (`$'\x72\x6d'` → `rm`), `$IFS` splitting, and tilde/brace
+   expansion. Only what is statically determinable is folded — no
+   environment lookups, no filesystem globbing, no execution.
+3. **Danger check** — an exact match of the resolved argv against
+   `rules/blocklist.toml`: does the token at this position match exactly.
+4. **Structural gate** — routes constructs whose value can't be statically
+   resolved by their *structure* rather than by guessing their value:
+   command-position substitutions (`$(...)`, bare `$VAR`) go to **Ask**;
+   decode-fed interpreter pipes (`base64 -d | sh`) go to **Block**.
+
+## Install
+
+```bash
+cargo install shguard
+```
+
+### Claude Code registration
+
+Add to `settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "shguard"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+## Limitations
+
+shguard mitigates the published GuardFall bypass classes plus the listed
+extensions, with the regression suite above as evidence — it does not
+eradicate shell-mediated destruction. Explicitly out of scope:
+
+1. **Runtime state.** Environment variables, aliases, shell functions, and
+   `PATH` shadowing set by *earlier* commands in a persistent session.
+   shguard analyzes one command string at a time; it has no session memory.
+2. **Semantic destructiveness of arbitrary programs.** A Python script that
+   deletes files, `make clean` with a hostile Makefile, `git push --force`
+   to the wrong remote — shguard's blocklist covers enumerated argv shapes,
+   not arbitrary program behavior.
+3. **Non-shell destructive edits.** An agent instructed to edit or delete
+   files destructively through its file-editing tools rather than through a
+   shell command never reaches this hook.
+4. **Multi-step attacks staged across Ask-approved commands.** Ask surfaces
+   an unresolvable command to a human for a decision; a hurried human can
+   still approve a staged payload one step at a time.
+
+## Attribution
+
+- The GuardFall bypass catalog (classes A–E) is from Adversa AI's research,
+  ["Open-source AI coding agents shell injection vulnerability"](https://adversa.ai/blog/opensource-ai-coding-agents-shell-injection-vulnerability/).
+- The tokenise-then-match design — parsing the command the way the shell
+  will, instead of pattern-matching the raw string — follows the approach
+  used by [Continue](https://continue.dev), the one agent in Adversa's
+  survey that held against the full catalog.
+- ANSI-C quoting (case 2) and variable indirection (case 5) are shguard
+  extensions beyond the published GuardFall catalog, not part of Adversa's
+  original classes.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option.
