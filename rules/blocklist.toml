@@ -125,6 +125,9 @@ command = "git"
 required_tokens = ["reset"]
 required_flags = ["--hard"]
 
+# Blocks all invocations including `git clean -n` (dry-run preview) —
+# intentional: matches the dotfiles hook's behavior, and the dry-run form
+# is harmless enough that a false-block here is low-cost.
 [[command]]
 id = "git-clean-any"
 reason = "git clean permanently deletes untracked files"

@@ -311,6 +311,22 @@ fn evaluate_simple_command(
 ) -> Verdict {
     let argv = normalize::normalize_argv(command);
 
+    // Redirect target check runs FIRST, before any early return —
+    // a redirection-only command (`> /dev/sda`) has empty argv but still
+    // carries dangerous redirections that must not slip through rule 9.
+    if let Some(rule) = check_redirect_targets(command, rules) {
+        let reason = Reason::new(format!(
+            "redirect target matches rule {:?}: {}",
+            rule.id().as_str(),
+            rule.reason().as_str()
+        ));
+        return match rule.decision() {
+            Decision::Block => Verdict::block(reason, argv, Some(rule.id().clone())),
+            Decision::Ask => Verdict::ask(reason, argv),
+            Decision::Allow => unreachable!("rules never carry Decision::Allow"),
+        };
+    }
+
     // Rule 9: assignments-only / empty / redirection-only commands do
     // nothing dangerous themselves. This also covers the edge case of a
     // command consisting only of a leading, unquoted `$IFS`-only word
@@ -404,21 +420,6 @@ fn evaluate_simple_command(
     if let Some(rule) = rules.match_command(&argv) {
         let reason = Reason::new(format!(
             "matches blocklist rule {:?}: {}",
-            rule.id().as_str(),
-            rule.reason().as_str()
-        ));
-        return match rule.decision() {
-            Decision::Block => Verdict::block(reason, argv, Some(rule.id().clone())),
-            Decision::Ask => Verdict::ask(reason, argv),
-            Decision::Allow => unreachable!("rules never carry Decision::Allow"),
-        };
-    }
-
-    // Redirect target check: output/append redirections whose target
-    // resolves to a dangerous path (block devices, critical system files).
-    if let Some(rule) = check_redirect_targets(command, rules) {
-        let reason = Reason::new(format!(
-            "redirect target matches rule {:?}: {}",
             rule.id().as_str(),
             rule.reason().as_str()
         ));

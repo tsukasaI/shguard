@@ -133,6 +133,12 @@ fn guardfall_redirect_and_tee_cases() {
         ("echo x > /dev/disk0", Decision::Block),
         ("echo x > /dev/rdisk0", Decision::Block),
         ("echo x > /dev/xvda", Decision::Block),
+        // Redirection-only commands (no argv) must still be caught.
+        ("> /etc/passwd", Decision::Block),
+        ("> /dev/sda", Decision::Block),
+        (">> /etc/shadow", Decision::Block),
+        // Redirect on a command with early-return path (sh -c).
+        ("sh -c 'echo hi' > /dev/sda", Decision::Block),
         ("tee /dev/sda", Decision::Block),
         ("tee /etc/passwd", Decision::Block),
         ("tee /etc/shadow", Decision::Block),

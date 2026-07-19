@@ -38,6 +38,11 @@ fn benign_corpus_no_false_positives() {
         "git commit -m \"fix: normalize output\"",
         "git tag v1.0.0",
         "git tag -a v2.0.0 -m \"release\"",
+        // These MUST NOT false-positive — token appears as data, not subcommand.
+        "git commit -m clean",
+        "git show rebase",
+        "git log --grep rebase",
+        "git checkout -b push",
         // Text searches mentioning dangerous strings as DATA, not commands.
         "rg \"rm -rf\" src/",
         "git commit -m 'rm -rf /'",

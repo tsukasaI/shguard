@@ -263,6 +263,15 @@ impl CommandRule {
     /// building block behind [`Self::matches`] (which also checks targets)
     /// and [`Self::matches_except_target`] (plan.md §4's NEW
     /// argument-position bare-`$VAR` refinement, `src/gate.rs`).
+    ///
+    /// `required_tokens` are matched positionally against the leading
+    /// non-dash-prefixed tokens in argv[1..] — `required_tokens[0]` must
+    /// be the first positional, `[1]` the second, etc. This prevents a
+    /// commit message or branch name containing "clean" or "rebase" from
+    /// triggering the wrong rule.
+    ///
+    /// Known gap: `git -C <path> push` places a non-dash token (`<path>`)
+    /// before the subcommand; the rule won't match in that case.
     #[must_use]
     fn matches_command_and_flags(&self, argv: &[NormalizedWord]) -> bool {
         let Some(name) = command_name(argv) else {
@@ -272,11 +281,25 @@ impl CommandRule {
             return false;
         }
         let rest = resolved_strings(&argv[1..]);
-        self.required_flags.iter().all(|flag| flag.satisfied(&rest))
-            && self
+        if !self.required_flags.iter().all(|flag| flag.satisfied(&rest)) {
+            return false;
+        }
+        if !self.required_tokens.is_empty() {
+            let positionals: Vec<&str> = rest
+                .iter()
+                .filter(|t| !t.starts_with('-'))
+                .copied()
+                .collect();
+            if !self
                 .required_tokens
                 .iter()
-                .all(|tok| rest.contains(&tok.as_str()))
+                .enumerate()
+                .all(|(i, tok)| positionals.get(i).is_some_and(|p| *p == tok.as_str()))
+            {
+                return false;
+            }
+        }
+        true
     }
 
     /// Whether this rule matches `argv`, the normalised argv of one simple
@@ -1764,6 +1787,55 @@ mod tests {
         assert!(
             rules
                 .match_command(&argv(&["git", "rebase", "main"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn required_tokens_positional_matching_prevents_false_positives() {
+        let toml = r#"
+            [[command]]
+            id = "git-clean-any"
+            reason = "clean"
+            command = "git"
+            required_tokens = ["clean"]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        // "clean" as a commit message (second positional) must NOT match.
+        assert!(
+            rules
+                .match_command(&argv(&["git", "commit", "-m", "clean"]))
+                .is_none()
+        );
+        // "clean" as first positional DOES match.
+        assert!(
+            rules
+                .match_command(&argv(&["git", "clean", "-fd"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn required_tokens_positional_not_anywhere_in_argv() {
+        let toml = r#"
+            [[command]]
+            id = "git-push-force"
+            reason = "force push"
+            command = "git"
+            required_tokens = ["push"]
+            required_flags = ["f|--force"]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        // "push" as a branch name (second positional) must NOT match.
+        assert!(
+            rules
+                .match_command(&argv(&["git", "checkout", "-f", "push"]))
+                .is_none()
+        );
+        // "push" as first positional DOES match.
+        assert!(
+            rules
+                .match_command(&argv(&["git", "push", "-f", "origin"]))
                 .is_some()
         );
     }
