@@ -11,9 +11,9 @@
 //! escape sequences.
 //!
 //! Constructed by `src/parser.rs` (the stage 1 adapter, B1). Consumed by the
-//! normalise stage (B2, a later issue) — `analyze()` does not wire parsing
-//! in yet, so nothing outside `parser.rs`'s own tests reads these values for
-//! now; that is expected until B4.
+//! normalise stage (`src/normalize.rs`, B2) and, for the raw substitution
+//! text and command-position shape that normalisation deliberately does not
+//! retain, by the structural gate (`src/gate.rs`, B4) directly.
 
 /// A separator joining two [`Pipeline`]s in a [`CommandLine`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

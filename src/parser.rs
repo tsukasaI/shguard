@@ -94,12 +94,8 @@ fn parser_options() -> BrushParserOptions {
 /// [`ParseError::Unsupported`] if it parses but contains a construct
 /// shguard's AST cannot represent (see the module docs).
 ///
-/// `analyze()` (`src/lib.rs`) does not call this yet — wiring stage 1 into
-/// the pipeline is B4, a later issue — so outside `#[cfg(test)]` this is
-/// currently only reachable from its own tests below. `dead_code` would
-/// otherwise flag `parse` and, transitively, every private helper it calls
-/// and every `crate::ast` type it constructs.
-#[allow(dead_code)]
+/// `analyze()` (`src/lib.rs`) calls this via `src/gate.rs` — stage 1 of the
+/// pipeline (plan.md §1.1).
 pub(crate) fn parse(command: &str) -> Result<CommandLine, ParseError> {
     let mut parser = BrushParser::new(Cursor::new(command.as_bytes()), &parser_options());
     let program = parser

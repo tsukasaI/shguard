@@ -213,11 +213,8 @@ const DEFAULT_IFS_WHITESPACE: &str = " \t\n";
 /// two separate words `rm$IFSa` and `rm$IFSb`, each of which then resolves
 /// (and potentially splits) on its own.
 ///
-/// `analyze()` (`src/lib.rs`) does not call this yet — wiring stage 2 into
-/// the pipeline is B4, a later issue — so outside `#[cfg(test)]` this, like
-/// `crate::parser::parse`, is currently only reachable from its own tests.
-/// `#[allow(dead_code)]` mirrors `parser::parse`'s for the same reason.
-#[allow(dead_code)]
+/// `analyze()` (`src/lib.rs`) calls this via `src/gate.rs` — stage 2 of the
+/// pipeline (plan.md §1.1).
 #[must_use]
 pub(crate) fn normalize_word(word: &Word) -> Vec<NormalizedWord> {
     fold_word(&word.0, true)
@@ -225,10 +222,8 @@ pub(crate) fn normalize_word(word: &Word) -> Vec<NormalizedWord> {
 
 /// Normalises every word of a [`SimpleCommand`] into one flat argv.
 ///
-/// A convenience wrapper over [`normalize_word`] so B3 (rules matching) and
-/// B4 (the structural gate) don't each have to flat-map it themselves. Not
-/// wired into `analyze()` yet (see [`normalize_word`]'s docs).
-#[allow(dead_code)]
+/// A convenience wrapper over [`normalize_word`] so the rules engine and
+/// the structural gate don't each have to flat-map it themselves.
 #[must_use]
 pub(crate) fn normalize_argv(command: &SimpleCommand) -> Vec<NormalizedWord> {
     command.words.iter().flat_map(normalize_word).collect()
@@ -258,8 +253,8 @@ pub(crate) fn normalize_argv(command: &SimpleCommand) -> Vec<NormalizedWord> {
 /// guessing at the lost literal text — a narrow, acknowledged divergence
 /// from bash, recorded here rather than silently worked around.
 ///
-/// Not wired into `analyze()` yet (see [`normalize_word`]'s docs).
-#[allow(dead_code)]
+/// Called from `src/gate.rs` to resolve same-command-line variable
+/// assignments (plan.md §4's rule 2).
 #[must_use]
 pub(crate) fn normalize_assignment_value(assignment: &Assignment) -> Vec<NormalizedWord> {
     fold_word(&assignment.value.0, false)

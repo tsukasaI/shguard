@@ -31,12 +31,12 @@
 //! composition root (a later issue) reads `rules/blocklist.toml`/an
 //! operator-supplied override file and hands the contents in as strings.
 //!
-//! `analyze()` (`src/lib.rs`) does not call any of this yet — wiring stage
-//! 3 into the pipeline is a later issue (issue #11 scope: "Do NOT wire
-//! into analyze()") — so, like `crate::parser::parse` and
-//! `crate::normalize::normalize_word`, this module's entry points are
-//! currently only reachable from their own tests. `#[allow(dead_code)]` on
-//! each entry point mirrors theirs for the same reason.
+//! `analyze()` (`src/lib.rs`) calls [`Rules::embedded`]/[`Rules::match_command`]/
+//! [`Rules::match_pipeline`] via `src/gate.rs`. [`Rules::with_override`] and
+//! everything in the [allowlist](#allowlist) section below remain unwired —
+//! see `src/gate.rs`'s module docs for why allowlist application is
+//! deferred — so those entry points are still reachable only from their own
+//! tests, hence their `#[allow(dead_code)]`.
 
 use std::collections::{HashMap, HashSet};
 
@@ -238,16 +238,31 @@ pub(crate) struct CommandRule {
 }
 
 impl CommandRule {
-    #[allow(dead_code)]
     #[must_use]
     pub(crate) fn id(&self) -> &RuleId {
         &self.id
     }
 
-    #[allow(dead_code)]
     #[must_use]
     pub(crate) fn reason(&self) -> &Reason {
         &self.reason
+    }
+
+    /// Whether this rule's command name and required flags match `argv`,
+    /// ignoring the target constraint entirely — the shared building block
+    /// behind [`Self::matches`] (which also checks targets) and
+    /// [`Self::matches_except_target`] (plan.md §4's NEW argument-position
+    /// bare-`$VAR` refinement, `src/gate.rs`).
+    #[must_use]
+    fn matches_command_and_flags(&self, argv: &[NormalizedWord]) -> bool {
+        let Some(name) = command_name(argv) else {
+            return false;
+        };
+        if !self.command.matches(name) {
+            return false;
+        }
+        let rest = resolved_strings(&argv[1..]);
+        self.required_flags.iter().all(|flag| flag.satisfied(&rest))
     }
 
     /// Whether this rule matches `argv`, the normalised argv of one simple
@@ -257,25 +272,38 @@ impl CommandRule {
     /// command name itself — never matches anything.
     #[must_use]
     fn matches(&self, argv: &[NormalizedWord]) -> bool {
-        let Some(name) = command_name(argv) else {
-            return false;
-        };
-        if !self.command.matches(name) {
+        if !self.matches_command_and_flags(argv) {
             return false;
         }
-
+        if self.targets.is_empty() {
+            return true;
+        }
         let rest = resolved_strings(&argv[1..]);
-        if !self.required_flags.iter().all(|flag| flag.satisfied(&rest)) {
-            return false;
-        }
-        if !self.targets.is_empty()
-            && !rest
+        rest.iter()
+            .any(|token| self.targets.iter().any(|t| t.matches(token)))
+    }
+
+    /// Partial-match probe for the structural gate (plan.md §4 NEW rule,
+    /// `src/gate.rs`): `true` when this rule's command+flags match `argv`
+    /// (the dangerous shape is present), this rule *has* a target
+    /// constraint (an empty `targets` list means "any target" and is
+    /// already a full match via [`Self::matches`] — nothing left to
+    /// refine), and `argv` contains at least one unresolvable word — so the
+    /// target itself could not be statically checked and might be exactly
+    /// the value this rule guards against (`rm -rf $HOME`).
+    ///
+    /// This is a "would this be dangerous if the target were known" probe,
+    /// never a match on its own: the gate uses it only to route an
+    /// otherwise-Allow argument-position bare `$VAR` to Ask, never to
+    /// Block — an unresolvable target must never silently upgrade to a
+    /// rule hit here.
+    #[must_use]
+    pub(crate) fn matches_except_target(&self, argv: &[NormalizedWord]) -> bool {
+        !self.targets.is_empty()
+            && self.matches_command_and_flags(argv)
+            && argv
                 .iter()
-                .any(|token| self.targets.iter().any(|t| t.matches(token)))
-        {
-            return false;
-        }
-        true
+                .any(|word| matches!(word.resolution(), Resolution::Unresolvable(_)))
     }
 }
 
@@ -293,13 +321,11 @@ pub(crate) struct PipelineRule {
 }
 
 impl PipelineRule {
-    #[allow(dead_code)]
     #[must_use]
     pub(crate) fn id(&self) -> &RuleId {
         &self.id
     }
 
-    #[allow(dead_code)]
     #[must_use]
     pub(crate) fn reason(&self) -> &Reason {
         &self.reason
@@ -516,7 +542,6 @@ impl Rules {
     /// invalid rule (empty id/reason, an empty/contradictory matcher, a
     /// malformed flag spec), or a duplicate rule id — fail-closed, never a
     /// silently-skipped rule.
-    #[allow(dead_code)]
     pub(crate) fn parse(toml: &str) -> Result<Self, RulesError> {
         let dto: RulesFileDto = toml::from_str(toml)?;
 
@@ -552,7 +577,6 @@ impl Rules {
     /// Returns [`RulesError`] if the embedded file itself is malformed —
     /// a unit test below asserts this never happens, so this is a startup
     /// error only if a future edit to `rules/blocklist.toml` breaks it.
-    #[allow(dead_code)]
     pub(crate) fn embedded() -> Result<Self, RulesError> {
         Self::parse(EMBEDDED_BLOCKLIST)
     }
@@ -618,7 +642,6 @@ impl Rules {
     }
 
     /// The first [`CommandRule`] that matches `argv`, if any.
-    #[allow(dead_code)]
     #[must_use]
     pub(crate) fn match_command(&self, argv: &[NormalizedWord]) -> Option<&CommandRule> {
         self.command_rules.iter().find(|rule| rule.matches(argv))
@@ -626,10 +649,24 @@ impl Rules {
 
     /// The first [`PipelineRule`] that matches `stages` (one normalised
     /// argv per pipeline stage, in order), if any.
-    #[allow(dead_code)]
     #[must_use]
     pub(crate) fn match_pipeline(&self, stages: &[Vec<NormalizedWord>]) -> Option<&PipelineRule> {
         self.pipeline_rules.iter().find(|rule| rule.matches(stages))
+    }
+
+    /// The first [`CommandRule`] for which [`CommandRule::matches_except_target`]
+    /// holds, if any — plan.md §4's NEW argument-position bare-`$VAR`
+    /// refinement (`src/gate.rs`). Like [`Self::match_command`]/
+    /// [`Self::match_pipeline`], this is a read-only probe: it never
+    /// mutates rule state and never itself constitutes a `Block`.
+    #[must_use]
+    pub(crate) fn match_command_except_target(
+        &self,
+        argv: &[NormalizedWord],
+    ) -> Option<&CommandRule> {
+        self.command_rules
+            .iter()
+            .find(|rule| rule.matches_except_target(argv))
     }
 }
 
@@ -1175,6 +1212,68 @@ mod tests {
         let rules = Rules::embedded().unwrap();
         let stages = vec![argv(&["cat", "script.sh"]), argv(&["bash"])];
         assert!(rules.match_pipeline(&stages).is_none());
+    }
+
+    // ==== NEW rule 4 partial-match API: matches_except_target /
+    // match_command_except_target (plan.md §4, src/gate.rs) ====
+
+    fn argv_with_unresolvable_tail(words: &[&str]) -> Vec<NormalizedWord> {
+        let mut out: Vec<NormalizedWord> =
+            words.iter().map(|w| NormalizedWord::resolved(*w)).collect();
+        out.push(NormalizedWord::unresolvable(
+            crate::normalize::UnresolvableKind::ParameterExpansion,
+        ));
+        out
+    }
+
+    #[test]
+    fn except_target_matches_when_flags_present_but_target_unresolvable() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv_with_unresolvable_tail(&["rm", "-rf"]);
+        // the ordinary full match must miss (the only candidate target
+        // token is unresolvable, so it can never satisfy `targets`)
+        assert!(rules.match_command(&cmd).is_none());
+        // but the except-target probe must catch it: same command+flags,
+        // target merely unknown rather than absent
+        let rule = rules.match_command_except_target(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "rm-recursive-force-dangerous-target");
+    }
+
+    #[test]
+    fn except_target_does_not_match_when_fully_resolved_and_clean() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["rm", "-rf", "./build"]);
+        assert!(rules.match_command(&cmd).is_none());
+        assert!(rules.match_command_except_target(&cmd).is_none());
+    }
+
+    #[test]
+    fn except_target_never_fires_for_a_rule_with_no_target_constraint() {
+        // `shred` has no `targets` list at all ("any target" is already a
+        // full match) — matches_except_target has nothing left to refine
+        // and must stay false even with an unresolvable argument present.
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv_with_unresolvable_tail(&["shred"]);
+        assert!(rules.match_command(&cmd).is_some());
+        assert!(rules.match_command_except_target(&cmd).is_none());
+    }
+
+    #[test]
+    fn except_target_does_not_match_an_unrelated_command() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv_with_unresolvable_tail(&["cd"]);
+        assert!(rules.match_command(&cmd).is_none());
+        assert!(rules.match_command_except_target(&cmd).is_none());
+    }
+
+    #[test]
+    fn except_target_requires_required_flags_too() {
+        // command name matches but a required flag (`-f`/`--force`) is
+        // absent — the danger shape itself is incomplete, so this must not
+        // fire just because a later word happens to be unresolvable.
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv_with_unresolvable_tail(&["rm", "-r"]);
+        assert!(rules.match_command_except_target(&cmd).is_none());
     }
 
     // ==== Shape robustness: unresolvable command name never matches,

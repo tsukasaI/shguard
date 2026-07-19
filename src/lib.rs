@@ -5,12 +5,13 @@
 //! GitHub issues (tsukasaI/shguard).
 
 mod ast;
+mod gate;
 pub mod normalize;
 mod parser;
 mod rules;
 pub mod verdict;
 
-use verdict::{Reason, Verdict};
+use verdict::Verdict;
 
 /// Analyzes a raw shell command line and returns the [`Verdict`] the hook
 /// adapter should act on.
@@ -21,8 +22,9 @@ use verdict::{Reason, Verdict};
 /// failure mode internal to the pipeline — a parse error, an unrecognised
 /// construct, anything the parse/normalise/rules/gate stages (plan.md §1.1)
 /// cannot resolve statically — folds into a fail-closed `Ask` verdict
-/// *inside* `analyze`, carrying a human-readable [`Reason`], rather than
-/// propagating outward as an `Err` the caller has to remember to handle.
+/// *inside* `analyze`, carrying a human-readable [`verdict::Reason`], rather
+/// than propagating outward as an `Err` the caller has to remember to
+/// handle.
 ///
 /// Why: the hook adapter (`src/bin/shguard.rs`) sits on Claude Code's
 /// PreToolUse stdin→stdout contract (plan.md §0.2) and must satisfy two
@@ -36,11 +38,12 @@ use verdict::{Reason, Verdict};
 /// and the adapter's job becomes trivial and impossible to get wrong: call
 /// `analyze`, always get a `Verdict`, always emit a `permissionDecision`.
 ///
-/// Currently a stub: the parse/normalise/rules/gate stages are not
-/// implemented yet (tracked in later issues), so every call returns `Ask`
-/// with reason "not implemented".
+/// The pipeline itself — parse (`src/parser.rs`) → normalise
+/// (`src/normalize.rs`) → rules (`src/rules.rs`) → structural gate
+/// (`src/gate.rs`) → worst-decision-wins fold — is composed in
+/// [`gate::analyze`]; see that module's docs for the full Block/Ask/Allow
+/// rule set.
 #[must_use]
 pub fn analyze(command: &str) -> Verdict {
-    let _ = command;
-    Verdict::ask(Reason::new("not implemented"), Vec::new())
+    gate::analyze(command)
 }
