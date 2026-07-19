@@ -1528,6 +1528,62 @@ mod tests {
         );
     }
 
+    // ==== Self-protection: literal ~/.config/shguard/ token ====
+
+    #[test]
+    fn self_protect_tee_literal_tilde_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["tee", "~/.config/shguard/config.toml"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn self_protect_cp_literal_tilde_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["cp", "evil.toml", "~/.config/shguard/config.toml"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn self_protect_sed_without_dash_i_does_not_match() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["sed", "s/x/y/", "~/.config/shguard/config.toml"]))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn self_protect_dd_of_literal_tilde_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "dd",
+                    "if=/dev/zero",
+                    "of=~/.config/shguard/config.toml"
+                ]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn self_protect_cp_unrelated_files_does_not_match() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["cp", "a.txt", "b.txt"]))
+                .is_none()
+        );
+    }
+
     // ==== Pipeline rule: curl|sh matches, cat|bash does not ====
 
     #[test]
