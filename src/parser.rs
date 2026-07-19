@@ -220,7 +220,13 @@ fn convert_simple_command(simple: &bast::SimpleCommand) -> Result<SimpleCommand,
 
     if let Some(prefix) = &simple.prefix {
         for item in &prefix.0 {
-            apply_prefix_or_suffix_item(item, &mut assignments, &mut words, &mut redirections)?;
+            apply_prefix_or_suffix_item(
+                item,
+                Position::Prefix,
+                &mut assignments,
+                &mut words,
+                &mut redirections,
+            )?;
         }
     }
 
@@ -230,7 +236,13 @@ fn convert_simple_command(simple: &bast::SimpleCommand) -> Result<SimpleCommand,
 
     if let Some(suffix) = &simple.suffix {
         for item in &suffix.0 {
-            apply_prefix_or_suffix_item(item, &mut assignments, &mut words, &mut redirections)?;
+            apply_prefix_or_suffix_item(
+                item,
+                Position::Suffix,
+                &mut assignments,
+                &mut words,
+                &mut redirections,
+            )?;
         }
     }
 
@@ -241,8 +253,18 @@ fn convert_simple_command(simple: &bast::SimpleCommand) -> Result<SimpleCommand,
     })
 }
 
+/// Whether a [`bast::CommandPrefixOrSuffixItem`] appears before or after the
+/// command word — the distinction [`apply_prefix_or_suffix_item`] needs to
+/// decide what an `AssignmentWord` item means (see that function's docs).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Position {
+    Prefix,
+    Suffix,
+}
+
 fn apply_prefix_or_suffix_item(
     item: &bast::CommandPrefixOrSuffixItem,
+    position: Position,
     assignments: &mut Vec<Assignment>,
     words: &mut Vec<Word>,
     redirections: &mut Vec<Redirection>,
@@ -254,9 +276,24 @@ fn apply_prefix_or_suffix_item(
         bast::CommandPrefixOrSuffixItem::Word(word) => {
             words.push(convert_word(word)?);
         }
-        bast::CommandPrefixOrSuffixItem::AssignmentWord(assignment, _raw_word) => {
-            assignments.push(convert_assignment(assignment)?);
-        }
+        // A `name=value`-shaped item is a real environment assignment only
+        // in PREFIX position (`VAR=v cmd`) — bash scopes it to the command's
+        // environment. The identical-looking shape in SUFFIX position
+        // (`cmd VAR=v`, e.g. `dd if=x of=y` or `make foo=bar`) is an
+        // ordinary argument to the command; bash never treats it as an
+        // assignment there. brush-parser's grammar tags both the same way
+        // (`AssignmentWord`), so the position this module already tracks is
+        // what disambiguates them — routing a suffix assignment-shaped word
+        // into `assignments` instead of `words` would make it vanish from
+        // argv entirely (the word never reaches normalisation or the
+        // blocklist), which is exactly how `dd if=/dev/zero of=/dev/sda`
+        // dodged the `dd-write-device` rule before this fix. The raw word
+        // (`bast::CommandPrefixOrSuffixItem::AssignmentWord`'s second field)
+        // is converted the same way any other word would be.
+        bast::CommandPrefixOrSuffixItem::AssignmentWord(assignment, raw_word) => match position {
+            Position::Prefix => assignments.push(convert_assignment(assignment)?),
+            Position::Suffix => words.push(convert_word(raw_word)?),
+        },
         bast::CommandPrefixOrSuffixItem::ProcessSubstitution(_, _) => {
             return Err(ParseError::unsupported("process substitution"));
         }
@@ -772,6 +809,43 @@ mod tests {
         assert!(
             matches!(result, Err(ParseError::Unsupported { .. })),
             "expected an unsupported-construct error, got {result:?}"
+        );
+    }
+
+    // ---- security-review fix (finding 1): a `name=value`-shaped SUFFIX item
+    // (after the command word) is an ordinary argument in real bash, not an
+    // assignment — `dd if=x of=y` runs `dd` with two argv words, it does not
+    // set shell variables `if`/`of`. Routing it into `assignments` made the
+    // word vanish from argv entirely, which is how `dd if=/dev/zero
+    // of=/dev/sda` dodged the `dd-write-device` blocklist rule. ----
+    #[test]
+    fn suffix_assignment_shaped_word_is_an_ordinary_argument() {
+        let cmd = parse_ok("dd if=/dev/zero of=/dev/sda");
+        assert!(
+            cmd.first.first.assignments.is_empty(),
+            "a suffix name=value item must not be recorded as an assignment: {:?}",
+            cmd.first.first.assignments
+        );
+        assert_eq!(
+            cmd.first.first.words[1].0,
+            vec![WordPiece::Literal("if=/dev/zero".to_string())]
+        );
+        assert_eq!(
+            cmd.first.first.words[2].0,
+            vec![WordPiece::Literal("of=/dev/sda".to_string())]
+        );
+    }
+
+    // ---- a PREFIX name=value item (before the command word) is still a
+    // real environment assignment, untouched by the finding-1 fix ----
+    #[test]
+    fn prefix_assignment_is_still_recorded_as_an_assignment() {
+        let cmd = parse_ok("VAR=v cmd");
+        assert_eq!(cmd.first.first.assignments.len(), 1);
+        assert_eq!(cmd.first.first.assignments[0].name, "VAR");
+        assert_eq!(
+            cmd.first.first.words[0].0,
+            vec![WordPiece::Literal("cmd".to_string())]
         );
     }
 }

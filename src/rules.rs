@@ -332,7 +332,11 @@ impl PipelineRule {
     }
 
     /// `stages` is one entry per pipeline stage, each the normalised argv
-    /// of that stage's simple command, in pipeline order.
+    /// of that stage's simple command, in pipeline order. Sink and source
+    /// stages are both resolved through [`effective_command`] (basename +
+    /// transparent-wrapper skip), not a raw exact-match on argv[0] — a
+    /// path-qualified or wrapped sink (`/bin/sh`, `nohup sh`) must not dodge
+    /// this rule (security-review fix, finding 2).
     #[must_use]
     fn matches(&self, stages: &[Vec<NormalizedWord>]) -> bool {
         let Some((sink_stage, source_stages)) = stages.split_last() else {
@@ -341,14 +345,15 @@ impl PipelineRule {
         if source_stages.is_empty() {
             return false;
         }
-        let Some(sink_name) = command_name(sink_stage) else {
+        let Some((sink_name, _)) = effective_command(sink_stage) else {
             return false;
         };
         if !self.sinks.iter().any(|sink| sink == sink_name) {
             return false;
         }
         source_stages.iter().any(|stage| {
-            command_name(stage).is_some_and(|name| self.sources.iter().any(|src| src == name))
+            effective_command(stage)
+                .is_some_and(|(name, _)| self.sources.iter().any(|src| src == name))
         })
     }
 }
@@ -374,6 +379,110 @@ fn resolved_strings(argv: &[NormalizedWord]) -> Vec<&str> {
             Resolution::Unresolvable(_) => None,
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------
+// Effective-command resolution (security-review fix: shared basename /
+// transparent-wrapper handling)
+// ---------------------------------------------------------------------
+
+/// Commands whose own name is never the thing a pipeline-shape rule cares
+/// about: running one delegates to whatever command its own arguments name,
+/// either literally (`env sh`/`nohup sh` runs `sh`) or via argument-shaped
+/// indirection (`xargs sh` invokes `sh` once per batch, feeding it piped-in
+/// arguments — the same "what actually runs" question as the others). See
+/// [`effective_command`].
+///
+/// Shared by `src/gate.rs`'s pipeline-shape rules (`is_interpreter_sink`/
+/// `is_decode_stage`) and [`PipelineRule::matches`] here, so a wrapped or
+/// path-qualified sink/source cannot dodge either check by construction —
+/// security-review finding 2: `/bin/sh`, `./sh`, `nohup sh`, `nice sh`,
+/// `env sh`, `command sh`, `exec sh`, `xargs -0 sh` must all resolve to the
+/// `sh` they actually run.
+///
+/// # Known limitation
+///
+/// Wrapper-argument skipping only recognises `-`-prefixed flags (plus
+/// `env`'s `NAME=value` form) as skippable; a wrapper flag that takes a
+/// separate value argument (`nice -n 19 sh`, `sudo -u root sh`) is not
+/// specially handled — the value token does not start with `-`, so it is
+/// mistaken for the wrapped command. None of this fix's required cases use
+/// such a flag; documented here rather than silently guessed around.
+const TRANSPARENT_WRAPPERS: &[&str] = &[
+    "env", "command", "nohup", "nice", "exec", "stdbuf", "setsid", "sudo", "xargs",
+];
+
+/// The basename of a command token: `/bin/sh` -> `sh`, `./sh` -> `sh`, a
+/// bare `sh` unchanged. A pure string operation on the already-normalised
+/// token — never a filesystem lookup or symlink resolution (this crate
+/// never touches the filesystem, module docs).
+fn basename(token: &str) -> &str {
+    token.rsplit('/').next().unwrap_or(token)
+}
+
+/// Whether `token` has the `NAME=value` shape of a POSIX environment
+/// assignment — `env`'s own leading-argument syntax (`env FOO=bar sh`): a
+/// non-empty run of ASCII letters/digits/underscore, not starting with a
+/// digit, followed by `=`. Used only so [`effective_command`] can skip past
+/// `env`'s assignment arguments the same way it skips `-`-flags.
+fn is_env_assignment_shape(token: &str) -> bool {
+    let Some((name, _value)) = token.split_once('=') else {
+        return false;
+    };
+    !name.is_empty()
+        && !name.starts_with(|c: char| c.is_ascii_digit())
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Finds the command a pipeline stage actually runs: the basename of
+/// `stage`'s command word, looking through any leading chain of
+/// [`TRANSPARENT_WRAPPERS`] (`nohup nice sh` resolves through both). Returns
+/// the effective command name plus the argv words after it, so a caller can
+/// still inspect the wrapped command's own flags (`is_decode_stage`'s
+/// `base64 -d` check must still see `-d` when reached through `env base64
+/// -d`).
+///
+/// Returns `None` — fail-closed, never a guess — when the stage is empty,
+/// the command word (or a wrapper's, mid-chain) is unresolvable, or a
+/// wrapper's own arguments consume the rest of the stage with no command
+/// left (`env` alone).
+#[must_use]
+pub(crate) fn effective_command(stage: &[NormalizedWord]) -> Option<(&str, &[NormalizedWord])> {
+    let mut rest = stage;
+    loop {
+        let (first, tail) = rest.split_first()?;
+        let Resolution::Resolved(name) = first.resolution() else {
+            return None;
+        };
+        let base = basename(name);
+        if TRANSPARENT_WRAPPERS.contains(&base) {
+            rest = skip_wrapper_arguments(base, tail);
+        } else {
+            return Some((base, tail));
+        }
+    }
+}
+
+/// Skips a transparent wrapper's own leading arguments (see
+/// [`effective_command`]'s docs): every `-`-prefixed token, plus
+/// `NAME=value` tokens when `wrapper == "env"`. Stops at the first token
+/// that is neither — that token is the wrapped command — or at the first
+/// unresolvable token, which leaves `effective_command`'s next loop
+/// iteration to fail closed to `None`.
+fn skip_wrapper_arguments<'a>(wrapper: &str, argv: &'a [NormalizedWord]) -> &'a [NormalizedWord] {
+    let mut idx = 0;
+    while idx < argv.len() {
+        let Resolution::Resolved(token) = argv[idx].resolution() else {
+            break;
+        };
+        let skippable =
+            token.starts_with('-') || (wrapper == "env" && is_env_assignment_shape(token));
+        if !skippable {
+            break;
+        }
+        idx += 1;
+    }
+    &argv[idx..]
 }
 
 // ---------------------------------------------------------------------
