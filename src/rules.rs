@@ -253,15 +253,23 @@ impl CommandRule {
     /// behind [`Self::matches`] (which also checks targets) and
     /// [`Self::matches_except_target`] (plan.md §4's NEW argument-position
     /// bare-`$VAR` refinement, `src/gate.rs`).
+    ///
+    /// Resolves through [`effective_command`] (basename + transparent-
+    /// wrapper skip) rather than a raw `argv[0]` compare — the same
+    /// resolution [`PipelineRule::matches`] already applies to pipeline
+    /// sinks/sources, so a path-qualified or wrapped command (`/bin/rm`,
+    /// `env rm`, `nohup rm`) cannot dodge a `command = "rm"` rule (security
+    /// review finding: this module previously matched `argv[0]` verbatim,
+    /// silently missing every wrapped/path-qualified invocation).
     #[must_use]
     fn matches_command_and_flags(&self, argv: &[NormalizedWord]) -> bool {
-        let Some(name) = command_name(argv) else {
+        let Some((name, rest_words)) = effective_command(argv) else {
             return false;
         };
         if !self.command.matches(name) {
             return false;
         }
-        let rest = resolved_strings(&argv[1..]);
+        let rest = resolved_strings(rest_words);
         self.required_flags.iter().all(|flag| flag.satisfied(&rest))
     }
 
@@ -278,7 +286,12 @@ impl CommandRule {
         if self.targets.is_empty() {
             return true;
         }
-        let rest = resolved_strings(&argv[1..]);
+        // `matches_command_and_flags` already succeeded, so `effective_command`
+        // is `Some` here; fail closed (no match) rather than unwrap regardless.
+        let Some((_, rest_words)) = effective_command(argv) else {
+            return false;
+        };
+        let rest = resolved_strings(rest_words);
         rest.iter()
             .any(|token| self.targets.iter().any(|t| t.matches(token)))
     }
@@ -355,15 +368,6 @@ impl PipelineRule {
             effective_command(stage)
                 .is_some_and(|(name, _)| self.sources.iter().any(|src| src == name))
         })
-    }
-}
-
-/// The command name (argv\[0\]) of a simple command, or `None` if it is
-/// empty or the first word did not statically resolve.
-fn command_name(argv: &[NormalizedWord]) -> Option<&str> {
-    match argv.first()?.resolution() {
-        Resolution::Resolved(s) => Some(s.as_str()),
-        Resolution::Unresolvable(_) => None,
     }
 }
 
@@ -997,6 +1001,76 @@ mod tests {
             rules
                 .match_command(&argv(&["rm", "-rf", "~/old-build"]))
                 .is_none()
+        );
+    }
+
+    // ==== Security review: CommandRule matching resolves basename + skips
+    // transparent wrappers, the same way PipelineRule matching already does
+    // (matches_command_and_flags now goes through effective_command instead
+    // of a raw argv[0] compare) ====
+
+    #[test]
+    fn rm_rf_root_matches_via_absolute_path() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["/bin/rm", "-rf", "/"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn rm_rf_root_matches_through_env_wrapper() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["env", "rm", "-rf", "/"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn rm_rf_root_matches_through_nohup_wrapper() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["nohup", "rm", "-rf", "/"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn custom_rule_matches_absolute_path_command() {
+        let toml = r#"
+            [[command]]
+            id = "deny-gh"
+            reason = "test"
+            command = "gh"
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["/opt/homebrew/bin/gh", "repo", "delete"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn custom_rule_matches_wrapped_command_with_wrapper_flags() {
+        let toml = r#"
+            [[command]]
+            id = "deny-gh"
+            reason = "test"
+            command = "gh"
+            required_flags = ["--yes"]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        // `env`'s own leading assignment argument must not be mistaken for
+        // one of gh's own required flags, nor prevent them being seen.
+        assert!(
+            rules
+                .match_command(&argv(&["env", "FOO=bar", "gh", "repo", "delete", "--yes"]))
+                .is_some()
         );
     }
 
