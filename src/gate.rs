@@ -48,8 +48,11 @@
 //! 9. Assignments-only and empty simple commands ("rule 9") — Allow; the
 //!    danger is in later *use* of the assignment, which rule 2 handles.
 //!    Redirection-only commands are also Allow by construction (redirection
-//!    targets are never fed into `normalize_argv`) — an honest, documented
-//!    limit: shguard does not reason about what a redirection overwrites.
+//!    targets are never fed into `normalize_argv`). However, output/append
+//!    redirect targets ARE checked against a curated device/critical-file
+//!    list (`rules/blocklist.toml`'s `[[redirect]]` rules) — only
+//!    statically-resolved targets are checked; unresolved targets fall
+//!    through to whatever the rest of the command would decide.
 //!
 //! Multi-command lines (`a; b && c`, pipelines) fold with worst-decision-
 //! wins (plan.md §6 item 7, `Decision`'s `Ord`).
@@ -89,7 +92,10 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{Assignment, CommandLine, Pipeline, SimpleCommand, Word, WordPiece};
+use crate::ast::{
+    Assignment, CommandLine, FileRedirectionKind, Pipeline, Redirection, SimpleCommand, Word,
+    WordPiece,
+};
 use crate::normalize::{self, NormalizedWord, Resolution, UnresolvableKind};
 use crate::parser;
 use crate::rules::Rules;
@@ -205,15 +211,16 @@ fn evaluate_pipeline(pipeline: &Pipeline, env: &mut Env, rules: &Rules, depth: u
 
     if let Some(rule) = rules.match_pipeline(&stage_argvs) {
         let argv = stage_argvs.last().cloned().unwrap_or_default();
-        let verdict = Verdict::block(
-            Reason::new(format!(
-                "pipeline matches blocklist rule {:?}: {}",
-                rule.id().as_str(),
-                rule.reason().as_str()
-            )),
-            argv,
-            Some(rule.id().clone()),
-        );
+        let reason = Reason::new(format!(
+            "pipeline matches blocklist rule {:?}: {}",
+            rule.id().as_str(),
+            rule.reason().as_str()
+        ));
+        let verdict = match rule.decision() {
+            Decision::Block => Verdict::block(reason, argv, Some(rule.id().clone())),
+            Decision::Ask => Verdict::ask(reason, argv),
+            Decision::Allow => unreachable!("rules never carry Decision::Allow"),
+        };
         worst = fold_worst(worst, verdict);
     }
 
@@ -262,6 +269,35 @@ fn evaluate_pipeline_shape(stages: &[Vec<NormalizedWord>]) -> Option<Verdict> {
     }
 }
 
+/// Checks output/append redirect targets against redirect rules. Returns
+/// the first matching rule, or `None` if no redirect target hits a rule.
+/// Only statically-resolved targets are checked; unresolvable targets fall
+/// through (no new Ask floor — the MVP scope limit).
+fn check_redirect_targets<'a>(
+    command: &SimpleCommand,
+    rules: &'a Rules,
+) -> Option<&'a crate::rules::RedirectRule> {
+    for redir in &command.redirections {
+        if let Redirection::File { kind, target } = redir {
+            if !matches!(
+                kind,
+                FileRedirectionKind::Output | FileRedirectionKind::Append
+            ) {
+                continue;
+            }
+            let normalized = normalize::normalize_word(target);
+            for word in &normalized {
+                if let Resolution::Resolved(s) = word.resolution()
+                    && let Some(rule) = rules.match_redirect_target(s)
+                {
+                    return Some(rule);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Evaluates one [`SimpleCommand`] against every per-command gate rule (1,
 /// 2, 4, 6, 7, 8, 9 — rule 3's recursion lives here too) plus the ordinary
 /// blocklist match (stage 3, `crate::rules::Rules::match_command`). `env`
@@ -274,6 +310,22 @@ fn evaluate_simple_command(
     depth: usize,
 ) -> Verdict {
     let argv = normalize::normalize_argv(command);
+
+    // Redirect target check runs FIRST, before any early return —
+    // a redirection-only command (`> /dev/sda`) has empty argv but still
+    // carries dangerous redirections that must not slip through rule 9.
+    if let Some(rule) = check_redirect_targets(command, rules) {
+        let reason = Reason::new(format!(
+            "redirect target matches rule {:?}: {}",
+            rule.id().as_str(),
+            rule.reason().as_str()
+        ));
+        return match rule.decision() {
+            Decision::Block => Verdict::block(reason, argv, Some(rule.id().clone())),
+            Decision::Ask => Verdict::ask(reason, argv),
+            Decision::Allow => unreachable!("rules never carry Decision::Allow"),
+        };
+    }
 
     // Rule 9: assignments-only / empty / redirection-only commands do
     // nothing dangerous themselves. This also covers the edge case of a
@@ -366,15 +418,16 @@ fn evaluate_simple_command(
 
     // Stage 3: the ordinary exact-argv blocklist match.
     if let Some(rule) = rules.match_command(&argv) {
-        return Verdict::block(
-            Reason::new(format!(
-                "matches blocklist rule {:?}: {}",
-                rule.id().as_str(),
-                rule.reason().as_str()
-            )),
-            argv,
-            Some(rule.id().clone()),
-        );
+        let reason = Reason::new(format!(
+            "matches blocklist rule {:?}: {}",
+            rule.id().as_str(),
+            rule.reason().as_str()
+        ));
+        return match rule.decision() {
+            Decision::Block => Verdict::block(reason, argv, Some(rule.id().clone())),
+            Decision::Ask => Verdict::ask(reason, argv),
+            Decision::Allow => unreachable!("rules never carry Decision::Allow"),
+        };
     }
 
     fold_floors(
