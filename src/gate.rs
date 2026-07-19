@@ -197,10 +197,6 @@ pub(crate) fn analyze(command: &str) -> Verdict {
 /// instead of loaded from the embedded defaults. [`analyze`]'s own
 /// behavior is unaffected — it always loads `Rules::embedded()`/
 /// `Allowlist::embedded()` itself, never this function's arguments.
-///
-/// Unwired pending `crate::lib`'s own `analyze_with_policy`/`crate::config`
-/// (the very next commit) — hence `#[allow(dead_code)]` until then.
-#[allow(dead_code)]
 #[must_use]
 pub(crate) fn analyze_with_policy(command: &str, rules: &Rules, allowlist: &Allowlist) -> Verdict {
     analyze_at_depth(command, 0, rules, allowlist)

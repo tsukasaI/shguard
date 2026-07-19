@@ -6,6 +6,7 @@
 
 pub mod adapter;
 mod ast;
+pub mod config;
 mod gate;
 pub mod normalize;
 mod parser;
@@ -47,4 +48,15 @@ use verdict::Verdict;
 #[must_use]
 pub fn analyze(command: &str) -> Verdict {
     gate::analyze(command)
+}
+
+/// Config-aware sibling of [`analyze`]: same pipeline and the same
+/// error/fail-closed posture, but `policy` (loaded once at the
+/// composition root via [`config::Policy::load`]) supplies the rules and
+/// allowlist instead of the embedded defaults alone. [`analyze`]'s own
+/// behavior and signature are untouched — this is an additional entry
+/// point, not a replacement.
+#[must_use]
+pub fn analyze_with_policy(command: &str, policy: &config::Policy) -> Verdict {
+    gate::analyze_with_policy(command, &policy.rules, &policy.allowlist)
 }

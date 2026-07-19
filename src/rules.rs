@@ -32,12 +32,12 @@
 //! operator-supplied override file and hands the contents in as strings.
 //!
 //! `analyze()` (`src/lib.rs`) calls [`Rules::embedded`]/[`Rules::match_command`]/
-//! [`Rules::match_pipeline`] via `src/gate.rs`. [`Rules::match_ask`], the
-//! [allowlist](#allowlist) section, and [`UserConfig`]/[`merge_user_config`]
-//! land in this commit unwired — `src/gate.rs`'s own threading of them into
-//! the evaluation pipeline (and `src/config.rs`'s composition-root loader)
-//! are the very next commits — so those entry points are still reachable
-//! only from their own tests here, hence their `#[allow(dead_code)]`.
+//! [`Rules::match_pipeline`] via `src/gate.rs`, always with an empty
+//! `Allowlist`/no `ask_rules`. `analyze_with_policy()` additionally
+//! threads [`Rules::match_ask`], the [allowlist](#allowlist) section, and
+//! whatever [`UserConfig`]/[`merge_user_config`] contributed — see
+//! `src/gate.rs`'s module docs for the evaluation order, and
+//! `src/config.rs` for where a user's config file is found and merged in.
 
 use std::collections::HashSet;
 
@@ -758,7 +758,6 @@ impl Rules {
     /// The first user-configured `ask` [`CommandRule`] that matches `argv`,
     /// if any. Always `None` for an embedded-only [`Rules`] (see the struct
     /// docs) — only [`merge_user_config`] populates `ask_rules`.
-    #[allow(dead_code)]
     #[must_use]
     pub(crate) fn match_ask(&self, argv: &[NormalizedWord]) -> Option<&CommandRule> {
         self.ask_rules.iter().find(|rule| rule.matches(argv))
@@ -800,7 +799,6 @@ impl Allowlist {
     /// Returns [`RulesError`] under the same conditions as
     /// [`Rules::parse`] (invalid TOML, a semantically invalid entry, or a
     /// duplicate id).
-    #[allow(dead_code)]
     pub(crate) fn parse(toml: &str) -> Result<Self, RulesError> {
         let dto: AllowlistFileDto = toml::from_str(toml)?;
         let entries = dto
@@ -819,7 +817,6 @@ impl Allowlist {
     /// # Errors
     ///
     /// Returns [`RulesError`] if the embedded file fails to parse.
-    #[allow(dead_code)]
     pub(crate) fn embedded() -> Result<Self, RulesError> {
         Self::parse(EMBEDDED_ALLOWLIST)
     }
@@ -863,7 +860,6 @@ pub(crate) enum AllowlistOutcome {
 ///
 /// The matched entry's id is always returned in the `Downgraded` case
 /// (never silently applied) — the audit-trail requirement.
-#[allow(dead_code)]
 #[must_use]
 pub(crate) fn apply_allowlist(verdict: &Verdict, allowlist: &Allowlist) -> AllowlistOutcome {
     if verdict.decision() != Decision::Ask {
@@ -938,7 +934,6 @@ impl UserConfig {
     /// together, one shared id-space, so an id can't dodge the check by
     /// moving arrays — or an `allow` entry matching a shell interpreter or
     /// transparent wrapper name (see [`matches_dangerous_allow_target`]).
-    #[allow(dead_code)]
     pub(crate) fn parse(toml: &str) -> Result<Self, RulesError> {
         let dto: UserConfigFileDto = toml::from_str(toml)?;
 
@@ -1002,7 +997,6 @@ impl UserConfig {
 /// # Errors
 ///
 /// Returns [`RulesError::DuplicateId`] on any id collision described above.
-#[allow(dead_code)]
 pub(crate) fn merge_user_config(
     blocklist: Rules,
     allowlist: Allowlist,
