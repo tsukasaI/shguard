@@ -627,8 +627,28 @@ fn convert_command_rule(dto: CommandRuleDto) -> Result<CommandRule, RulesError> 
 
 fn convert_target(rule_id: &str, dto: TargetDto) -> Result<TargetMatcher, RulesError> {
     match (dto.exact, dto.prefix) {
-        (Some(exact), None) => Ok(TargetMatcher::Exact(exact)),
-        (None, Some(prefix)) => Ok(TargetMatcher::Prefix(prefix)),
+        (Some(exact), None) => {
+            if exact.trim().is_empty() {
+                return Err(RulesError::invalid(
+                    rule_id,
+                    "target's `exact` must not be empty",
+                ));
+            }
+            Ok(TargetMatcher::Exact(exact))
+        }
+        (None, Some(prefix)) => {
+            // An empty prefix produces a universal matcher
+            // (`"".starts_with("")` is always true) — the same hazard
+            // `convert_command_rule` already guards against for an empty
+            // `command_prefix`.
+            if prefix.trim().is_empty() {
+                return Err(RulesError::invalid(
+                    rule_id,
+                    "target's `prefix` must not be empty",
+                ));
+            }
+            Ok(TargetMatcher::Prefix(prefix))
+        }
         (None, None) => Err(RulesError::invalid(
             rule_id,
             "target requires exactly one of `exact`/`prefix`",
@@ -1009,6 +1029,12 @@ pub(crate) fn merge_user_config(
         .chain(
             blocklist
                 .pipeline_rules
+                .iter()
+                .map(|r| r.id.as_str().to_string()),
+        )
+        .chain(
+            blocklist
+                .ask_rules
                 .iter()
                 .map(|r| r.id.as_str().to_string()),
         )
@@ -1849,6 +1875,39 @@ mod tests {
     }
 
     #[test]
+    fn empty_target_prefix_is_rejected() {
+        // An empty prefix is a silent universal matcher
+        // ("".starts_with("") is always true) — same hazard as an empty
+        // command_prefix, catastrophic once reachable from an allow entry.
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "some reason"
+            command = "rm"
+            targets = [{ prefix = "" }]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn empty_target_exact_is_rejected() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "some reason"
+            command = "rm"
+            targets = [{ exact = "" }]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
     fn unknown_field_in_command_rule_is_rejected() {
         let toml = r#"
             [[command]]
@@ -1962,6 +2021,40 @@ mod tests {
         let outcome = apply_allowlist(&block, &merged_allowlist);
         assert_eq!(outcome, AllowlistOutcome::Unchanged);
         assert_eq!(block.decision(), Decision::Block);
+    }
+
+    #[test]
+    fn merge_user_config_rejects_id_colliding_with_existing_ask_rule() {
+        // Adversarial-review finding: the id-collision id-space must also
+        // cover ask_rules already present in `blocklist` (e.g. from a
+        // prior merge, such as shguard's own self-protection pass) — not
+        // just command_rules/pipeline_rules/allowlist entries.
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let first_config = UserConfig::parse(
+            r#"
+            [[ask]]
+            id = "user-ask-gh"
+            reason = "confirm every gh invocation"
+            command = "gh"
+        "#,
+        )
+        .unwrap();
+        let (rules, allowlist) = merge_user_config(blocklist, allowlist, first_config).unwrap();
+
+        let second_config = UserConfig::parse(
+            r#"
+            [[deny]]
+            id = "user-ask-gh"
+            reason = "unrelated"
+            command = "totally-different-command"
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(
+            merge_user_config(rules, allowlist, second_config),
+            Err(RulesError::DuplicateId(id)) if id == "user-ask-gh"
+        ));
     }
 
     #[test]

@@ -491,17 +491,31 @@ fn evaluate_simple_command_core(
         Resolution::Resolved(name) => name.clone(),
     };
 
+    // Rules 6a/6b dispatch on the *effective* command name — resolved
+    // through `effective_command` (basename + transparent-wrapper skip),
+    // the same resolution `crate::rules::CommandRule` matching already
+    // uses — not the raw, possibly-wrapped `command_name` above. Without
+    // this, `env bash -c '...'`/`/bin/sh -c '...'` would skip rule 6a's
+    // recursion entirely (adversarial-review finding: a wrapper this
+    // module already resolves everywhere else was still dodging dispatch
+    // here). `evaluate_dash_c` itself scans the *full* `argv` for a `-c`
+    // token regardless of what precedes it, so passing the unmodified
+    // `argv` through still finds `-c` correctly once dispatch is gated on
+    // the right name.
+    let effective_name =
+        crate::rules::effective_command(&argv).map_or(command_name.as_str(), |(name, _)| name);
+
     // Rule 6a: `bash -c '<string>'`/`sh -c`/`zsh -c`/`dash -c` recurses the
     // script exactly like a substitution.
-    if SHELL_INTERPRETERS.contains(&command_name.as_str())
-        && let Some(outcome) = evaluate_dash_c(&argv, &command_name, rules, allowlist, depth)
+    if SHELL_INTERPRETERS.contains(&effective_name)
+        && let Some(outcome) = evaluate_dash_c(&argv, effective_name, rules, allowlist, depth)
     {
         return outcome;
     }
 
     // Rule 6b: `python -c`/`perl -e`/`node -e` — no introspection of
     // non-shell code, unconditional Ask floor.
-    let interpreter_code_floor = inline_code_flag(&command_name)
+    let interpreter_code_floor = inline_code_flag(effective_name)
         .is_some_and(|flag| argv.iter().any(|w| is_resolved_exactly(w, flag)));
 
     // Rule 7: any `$IFS`-derived word floors to Ask on a blocklist miss.
@@ -1146,6 +1160,35 @@ mod tests {
         assert_decision("sh -uc 'rm -rf /'", Decision::Block);
     }
 
+    // ==== Adversarial-review finding: rule 6a/6b dispatch must resolve the
+    // *effective* command name (basename + transparent-wrapper skip), not
+    // the raw, possibly-wrapped argv[0] — otherwise `env bash -c '...'`/
+    // `/bin/sh -c '...'` dodge rule 6a's recursion entirely, and
+    // `env python3 -c '...'` dodges rule 6b's Ask floor. ====
+
+    #[test]
+    fn env_wrapped_bash_dash_c_still_recurses_and_blocks() {
+        assert_decision("env bash -c 'rm -rf /'", Decision::Block);
+    }
+
+    #[test]
+    fn path_qualified_sh_dash_c_still_recurses_and_blocks() {
+        assert_decision("/bin/sh -c 'rm -rf /'", Decision::Block);
+    }
+
+    #[test]
+    fn env_wrapped_bash_dash_c_recurses_to_allow() {
+        assert_decision("env bash -c 'echo hi'", Decision::Allow);
+    }
+
+    #[test]
+    fn env_wrapped_python_dash_c_is_ask_floor() {
+        assert_decision(
+            "env python3 -c 'import os; os.system(\"rm -rf /\")'",
+            Decision::Ask,
+        );
+    }
+
     #[test]
     fn deep_nesting_past_the_cap_asks() {
         let mut command = "echo hi".to_string();
@@ -1475,6 +1518,20 @@ mod tests {
         "#,
         );
         let verdict = analyze_with_policy("bash -c 'gh repo delete'", &rules, &allowlist);
+        assert_eq!(verdict.decision(), Decision::Block);
+    }
+
+    #[test]
+    fn config_deny_rule_recurses_into_env_wrapped_bash_dash_c() {
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[deny]]
+            id = "user-deny-gh"
+            reason = "never run gh"
+            command = "gh"
+        "#,
+        );
+        let verdict = analyze_with_policy("env bash -c 'gh repo delete'", &rules, &allowlist);
         assert_eq!(verdict.decision(), Decision::Block);
     }
 
