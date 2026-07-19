@@ -192,6 +192,7 @@ shguard/
 │   ├── normalize.rs          # static folding → NormalizedWord
 │   ├── rules.rs              # TOML rule loading + argv matching
 │   ├── gate.rs               # structural routing
+│   ├── config.rs             # user config discovery + Policy::load (§6 item 8)
 │   └── bin/shguard.rs        # composition root + Claude Code adapter
 ├── rules/
 │   ├── blocklist.toml
@@ -352,7 +353,19 @@ shell-mediated destruction. README must state, verbatim in spirit:
 7. **Verdict on multi-command lines.** `a; b && c`: decided — analyze every
    simple command; the worst decision wins (Block > Ask > Allow). Noted here
    so the core-types issue encodes ordering on `Decision`.
-8. **Allowlist semantics.** `rules/allowlist.toml` exists in the layout; its
-   precedence (can it downgrade a Block? or only suppress Ask?) is **open** —
-   per the security guidelines, suppressions need an audit trail; decided in
-   the rules-engine issue, with suppressed-finding reporting required.
+8. **Allowlist semantics.** **Resolved.** An allowlist match downgrades
+   `Ask` → `Allow` only, never `Block` → `Allow` — `crate::rules::apply_allowlist`
+   is structurally Block-immune (its first check rejects any non-`Ask`
+   verdict before consulting the allowlist at all). The audit trail is
+   `Verdict::AllowSuppressed` (`src/verdict.rs`), carrying the matched
+   entry's id and reason. Extended into a full user-configurable
+   deny/ask/allow policy: `~/.config/shguard/config.toml` (or
+   `SHGUARD_CONFIG`), merged additively (never replace-by-id) onto the
+   embedded blocklist/allowlist by `crate::rules::merge_user_config`, with
+   a fixed deny→ask→allow evaluation order applied per simple command in
+   `crate::gate::evaluate_simple_command`. Implementation: `src/config.rs`
+   (discovery/loading), `src/rules.rs` (`UserConfig`, `merge_user_config`,
+   `Rules.ask_rules`), `src/gate.rs` (`analyze_with_policy`, the
+   allowlist-downgrade/ask-floor steps), `src/verdict.rs`
+   (`Verdict::allow_suppressed`). See the README's "Configuration" section
+   for the user-facing schema and precedence model.

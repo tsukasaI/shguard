@@ -76,6 +76,85 @@ Add to `settings.json`:
 }
 ```
 
+## Configuration
+
+By default shguard needs no setup — the embedded blocklist above is all
+that runs. To declare your own per-command policy, create
+`~/.config/shguard/config.toml` (or set `SHGUARD_CONFIG` to point at a
+different file):
+
+```toml
+[[ask]]
+id = "user-ask-gh"
+reason = "confirm every gh invocation before it runs"
+command = "gh"
+
+[[deny]]
+id = "user-deny-scary-tool"
+reason = "never run this"
+command = "scary-tool"
+
+[[allow]]
+id = "user-allow-rm"
+reason = "trust me"
+command = "rm"
+```
+
+Each entry needs a unique `id` (the audit-trail id surfaced in the
+decision reason) and a `reason`, plus one of `command`/`command_prefix` —
+optionally narrowed further with `required_flags`/`targets`, the same
+matcher shape `rules/blocklist.toml` itself uses (see that file's own
+schema comments).
+
+### Precedence: deny > ask > allow
+
+Evaluation is fixed, regardless of which array a rule came from: a `deny`
+match always wins; failing that, an `ask` match always wins over an
+`allow` match for the same command. A `deny`/`ask` entry can only ever
+*raise* what would otherwise be `Allow` — it can never be silently
+overridden by a broader `allow` entry elsewhere in the file. An `allow`
+entry can only ever *downgrade* an `Ask` that shguard's own structural
+analysis produced (an unresolvable construct, for instance) — it can
+**never** downgrade a `Block`, from the embedded blocklist or from your
+own `deny` entries. This mirrors Claude Code's own
+`permissions.{deny,ask,allow}` model.
+
+### Discovery
+
+`SHGUARD_CONFIG` (an explicit path) > `$XDG_CONFIG_HOME/shguard/config.toml`
+> `$HOME/.config/shguard/config.toml`. There is no project-local
+`.shguard.toml` auto-discovery: shguard's own threat model includes "the
+agent it's guarding might be adversarially prompted to defeat it," and a
+project-local config file would sit inside the same repository the agent
+already has Bash/Write/Edit access to — a user-global path is a
+meaningfully higher-friction target to tamper with.
+
+If `SHGUARD_CONFIG` is set but the file it names can't be read or fails to
+parse/validate, shguard fails closed — every command asks for human
+confirmation until the config is fixed, rather than silently falling back
+to the embedded blocklist alone. A default path that simply doesn't exist
+is not an error: that's the ordinary zero-config case.
+
+### Protecting the config file itself
+
+shguard automatically denies `tee`/`cp`/`mv`/`install`/`sed -i`/`dd of=`
+writes targeting its own resolved config path, and the literal
+`~/.config/shguard/` token for any user — an agent shouldn't be able to
+edit its own guardrails via a shell command. This is a partial mitigation,
+not a complete one: bare shell redirection (`cat > path <<EOF`, see
+Limitations below) is not analyzed by design, and a `SHGUARD_CONFIG`
+override set via a shell profile is outside shguard's visibility
+entirely.
+
+### What's not configurable (yet)
+
+Per-command policy is scoped to whole commands (`command`/`command_prefix`,
+optionally with `required_flags`/`targets`) — there is no subcommand-level
+matching (e.g. "allow `gh pr view` but ask before `gh repo delete`") in
+this version; declare separate rules keyed on flags/targets if you need
+finer granularity. Pipeline-shape rules (the `curl | sh` pattern and
+friends) are also not user-configurable.
+
 ## Limitations
 
 shguard mitigates the published GuardFall bypass classes plus the listed
@@ -95,6 +174,12 @@ eradicate shell-mediated destruction. Explicitly out of scope:
 4. **Multi-step attacks staged across Ask-approved commands.** Ask surfaces
    an unresolvable command to a human for a decision; a hurried human can
    still approve a staged payload one step at a time.
+5. **Redirection targets.** shguard never inspects what a shell redirection
+   (`>`, `>>`) overwrites — `cat > file <<EOF` is Allow by construction,
+   including when `file` is shguard's own config path. The
+   [config-file self-protection](#protecting-the-config-file-itself) rules
+   only see write-capable *commands* (`tee`, `cp`, `dd`, …) in argv, not
+   bare redirection.
 
 ## Attribution
 
