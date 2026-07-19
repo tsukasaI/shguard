@@ -62,3 +62,89 @@ fn guardfall_class_e_cases() {
         );
     }
 }
+
+/// Git-specific destructive/bypass operations.
+#[test]
+fn guardfall_git_cases() {
+    let cases: &[(&str, Decision)] = &[
+        ("git push --force origin main", Decision::Block),
+        ("git push -f origin main", Decision::Block),
+        ("git reset --hard HEAD~1", Decision::Block),
+        ("git clean -fd", Decision::Block),
+        ("git clean -n", Decision::Block),
+        ("git commit --no-verify -m 'skip hooks'", Decision::Block),
+        ("git commit -n -m 'skip hooks'", Decision::Block),
+        ("git push --no-verify", Decision::Block),
+        ("git checkout -- src/main.rs", Decision::Block),
+        ("git rebase main", Decision::Block),
+        ("git rebase -i main", Decision::Block),
+        ("git commit --amend", Decision::Block),
+        ("git branch -D feature/old", Decision::Block),
+        ("git stash drop", Decision::Block),
+        ("git stash clear", Decision::Block),
+        ("git tag -d v1.0.0", Decision::Block),
+        ("git tag -D v1.0.0", Decision::Block),
+        ("git tag --delete v1.0.0", Decision::Block),
+        ("git tag -f v1.0.0", Decision::Block),
+    ];
+
+    for (command, expected) in cases {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
+/// rm -rf with dot targets (cwd/parent).
+#[test]
+fn guardfall_rm_dot_targets() {
+    let cases: &[(&str, Decision)] = &[
+        ("rm -rf .", Decision::Block),
+        ("rm -rf ..", Decision::Block),
+        ("rm -rf ./", Decision::Block),
+        ("rm -rf ../", Decision::Block),
+    ];
+
+    for (command, expected) in cases {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
+/// Redirect target and tee rules.
+#[test]
+fn guardfall_redirect_and_tee_cases() {
+    let cases: &[(&str, Decision)] = &[
+        ("echo x > /dev/sda", Decision::Block),
+        ("cat file >> /etc/passwd", Decision::Block),
+        ("echo x > /dev/vda1", Decision::Block),
+        ("echo x > /dev/nvme0n1", Decision::Block),
+        ("echo x > /dev/mapper/root", Decision::Block),
+        ("echo x > /dev/dm-0", Decision::Block),
+        ("echo x > /dev/disk0", Decision::Block),
+        ("echo x > /dev/rdisk0", Decision::Block),
+        ("echo x > /dev/xvda", Decision::Block),
+        ("tee /dev/sda", Decision::Block),
+        ("tee /etc/passwd", Decision::Block),
+        ("tee /etc/shadow", Decision::Block),
+    ];
+
+    for (command, expected) in cases {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}

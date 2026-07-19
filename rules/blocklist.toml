@@ -12,6 +12,7 @@
 #   id               non-empty, unique string; the audit-trail id surfaced
 #                    in a Block verdict's `matched_rule`.
 #   reason           non-empty human-readable justification.
+#   decision         optional: "block" (default) or "ask".
 #   command          exact command name (argv[0]). Mutually exclusive with
 #                    `command_prefix` — exactly one of the two is required.
 #   command_prefix   command-name prefix (e.g. "mkfs." for the mkfs.* family).
@@ -31,6 +32,10 @@
 #                        others; only the alternatives *within* one entry
 #                        are ORed. An empty alternative ("r|", "|f") is a
 #                        load-time error.
+#   required_tokens  optional list of bare positional tokens (subcommands),
+#                    ALL required (ANDed). Each must be non-empty and must
+#                    NOT start with '-' (use required_flags for those).
+#                    Matched as exact strings against argv[1..].
 #   targets          optional list of target alternatives, ANY one hit by
 #                    ANY argv token matches (ORed): `{ exact = "…" }` or
 #                    `{ prefix = "…" }`. An empty/omitted list means "no
@@ -40,27 +45,37 @@
 # curl|wget → sh installer-pipe pattern only; the general decode-fed-pipe
 # gate is a later issue, plan.md §4):
 #   id, reason       same as above.
+#   decision         optional: "block" (default) or "ask".
 #   sources          command names; an earlier pipeline stage's command
 #                    name must be one of these.
 #   sinks            command names; the pipeline's final stage's command
 #                    name must be one of these.
+#
+# [[redirect]] — matches the target of an output/append redirection:
+#   id, reason       same as above.
+#   decision         optional: "block" (default) or "ask".
+#   targets          REQUIRED, non-empty list of target matchers (same
+#                    `{ exact = "…" }` / `{ prefix = "…" }` syntax).
+#                    Unlike [[command]], an empty list is a load-time error.
+
+# =====================================================================
+# File/disk destruction
+# =====================================================================
 
 [[command]]
 id = "rm-recursive-force-dangerous-target"
 reason = "rm with recursive+force flags against a root-level, home, or device target"
 command = "rm"
-# "r|--recursive"/"f|--force": the short flag alone is not enough — GNU rm
-# accepts the long-option spellings too, and a rule keyed on `r`/`f` alone
-# is trivially dodged by `rm --recursive --force /`.
 required_flags = ["r|--recursive", "f|--force"]
-# "~/" (home ROOT, exact) is included alongside "~"; a `~/`-*prefix* is
-# deliberately NOT used here — `rm -rf ~/old-build` is routine cleanup and
-# must stay clean, only the bare home directory itself is a dangerous target.
 targets = [
     { exact = "/" },
     { exact = "/*" },
     { exact = "~" },
     { exact = "~/" },
+    { exact = "." },
+    { exact = ".." },
+    { exact = "./" },
+    { exact = "../" },
     { prefix = "/dev/" },
 ]
 
@@ -91,6 +106,142 @@ command = "shred"
 id = "mkfs-any-filesystem"
 reason = "mkfs.* formats a filesystem, destroying all data on the target"
 command_prefix = "mkfs."
+
+# =====================================================================
+# Git — destructive/bypass operations
+# =====================================================================
+
+[[command]]
+id = "git-push-force"
+reason = "git push --force/-f overwrites remote history; --force-with-lease is the safe alternative"
+command = "git"
+required_tokens = ["push"]
+required_flags = ["f|--force"]
+
+[[command]]
+id = "git-reset-hard"
+reason = "git reset --hard irreversibly discards uncommitted changes"
+command = "git"
+required_tokens = ["reset"]
+required_flags = ["--hard"]
+
+[[command]]
+id = "git-clean-any"
+reason = "git clean permanently deletes untracked files"
+command = "git"
+required_tokens = ["clean"]
+
+# -n is --no-verify for `git commit` only (for `git push` it means --dry-run).
+# Known false-positive edge: a `-m` message argument starting with `-` and
+# containing 'n' may trigger (same class of imprecision as the dotfiles hook).
+[[command]]
+id = "git-commit-no-verify-short"
+reason = "git commit -n/--no-verify skips pre-commit and commit-msg hooks"
+command = "git"
+required_tokens = ["commit"]
+required_flags = ["n|--no-verify"]
+
+[[command]]
+id = "git-no-verify-any-subcommand"
+reason = "--no-verify bypasses pre-commit/commit-msg/pre-push hooks"
+command = "git"
+required_flags = ["--no-verify"]
+
+[[command]]
+id = "git-checkout-dashdash"
+reason = "git checkout -- <path> discards uncommitted working-tree changes"
+command = "git"
+required_tokens = ["checkout"]
+required_flags = ["--"]
+
+[[command]]
+id = "git-rebase"
+reason = "git rebase rewrites commit history"
+command = "git"
+required_tokens = ["rebase"]
+
+[[command]]
+id = "git-commit-amend"
+reason = "git commit --amend rewrites the previous commit"
+command = "git"
+required_tokens = ["commit"]
+required_flags = ["--amend"]
+
+# -D only (force-delete of unmerged branches). -d (safe, merged-only) is
+# intentionally not blocked. `--delete` alone = -d (safe form); -D requires
+# `--delete --force` in long form (not covered here — rare, acceptable gap).
+[[command]]
+id = "git-branch-force-delete"
+reason = "git branch -D force-deletes a branch, discarding unmerged commits"
+command = "git"
+required_tokens = ["branch"]
+required_flags = ["D"]
+
+[[command]]
+id = "git-stash-drop"
+reason = "git stash drop discards a stashed entry"
+command = "git"
+required_tokens = ["stash", "drop"]
+
+[[command]]
+id = "git-stash-clear"
+reason = "git stash clear discards all stashed entries"
+command = "git"
+required_tokens = ["stash", "clear"]
+
+[[command]]
+id = "git-tag-destructive"
+reason = "git tag -d/-D/--delete/-f deletes or force-overwrites a tag"
+command = "git"
+required_tokens = ["tag"]
+required_flags = ["d|D|--delete|f"]
+
+# =====================================================================
+# Redirect targets — block devices and critical system files
+# =====================================================================
+
+[[redirect]]
+id = "redirect-overwrite-device-or-critical-file"
+reason = "redirecting output to a raw block device or critical system file destroys data"
+targets = [
+    { prefix = "/dev/sd" },
+    { prefix = "/dev/hd" },
+    { prefix = "/dev/nvme" },
+    { prefix = "/dev/vd" },
+    { prefix = "/dev/xvd" },
+    { prefix = "/dev/mmcblk" },
+    { prefix = "/dev/mapper/" },
+    { prefix = "/dev/dm-" },
+    { prefix = "/dev/disk" },
+    { prefix = "/dev/rdisk" },
+    { exact = "/etc/passwd" },
+    { exact = "/etc/shadow" },
+]
+
+# tee writes to a file path via argv, not via shell redirect syntax —
+# same dangerous targets as the [[redirect]] rule above.
+[[command]]
+id = "tee-write-device-or-critical-file"
+reason = "tee writing to a raw block device or critical system file destroys data"
+command = "tee"
+targets = [
+    { prefix = "/dev/sd" },
+    { prefix = "/dev/hd" },
+    { prefix = "/dev/nvme" },
+    { prefix = "/dev/vd" },
+    { prefix = "/dev/xvd" },
+    { prefix = "/dev/mmcblk" },
+    { prefix = "/dev/mapper/" },
+    { prefix = "/dev/dm-" },
+    { prefix = "/dev/disk" },
+    { prefix = "/dev/rdisk" },
+    { exact = "/etc/passwd" },
+    { exact = "/etc/shadow" },
+]
+
+# =====================================================================
+# Pipeline — installer pipe
+# =====================================================================
 
 [[pipeline]]
 id = "curl-wget-pipe-to-shell"
