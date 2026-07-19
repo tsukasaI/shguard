@@ -4,6 +4,7 @@
 //! Design: `plan.md` at the repository root. Implementation tracked in
 //! GitHub issues (tsukasaI/shguard).
 
+pub mod adapter;
 mod ast;
 mod gate;
 pub mod normalize;
