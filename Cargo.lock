@@ -679,6 +679,7 @@ dependencies = [
  "brush-parser",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "toml",
 ]
