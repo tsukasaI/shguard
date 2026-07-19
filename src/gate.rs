@@ -558,9 +558,10 @@ fn evaluate_dash_c(
     rules: &Rules,
     depth: usize,
 ) -> Option<Verdict> {
-    let flag_index = argv
-        .iter()
-        .position(|word| is_resolved_exactly(word, "-c"))?;
+    let flag_index = argv.iter().position(|word| match word.resolution() {
+        Resolution::Resolved(s) => s == "-c" || short_cluster_contains(s, 'c'),
+        Resolution::Unresolvable(_) => false,
+    })?;
     let script_word = argv.get(flag_index + 1)?;
 
     let outer_argv = argv.to_vec();
@@ -966,6 +967,16 @@ mod tests {
     #[test]
     fn bash_dash_c_recurses_and_blocks() {
         assert_decision("bash -c 'rm -rf /'", Decision::Block);
+    }
+
+    #[test]
+    fn bash_clustered_dash_xc_recurses_and_blocks() {
+        assert_decision("bash -xc 'rm -rf /'", Decision::Block);
+    }
+
+    #[test]
+    fn sh_clustered_dash_uc_recurses_and_blocks() {
+        assert_decision("sh -uc 'rm -rf /'", Decision::Block);
     }
 
     #[test]
