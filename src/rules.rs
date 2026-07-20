@@ -1,12 +1,15 @@
 //! Stage 3 of the pipeline (plan.md §1.1): mechanical, exact matching of a
 //! resolved argv against `rules/blocklist.toml`/`rules/allowlist.toml`.
 //!
-//! Two rule kinds:
+//! Three rule kinds:
 //! - [`CommandRule`] matches one simple command's argv: a command-name
-//!   matcher, a set of required flags, and a set of target matchers.
+//!   matcher, a set of required flags, a set of required bare tokens
+//!   (subcommands/positional arguments), and a set of target matchers.
 //! - [`PipelineRule`] matches the shape of a whole pipeline (the ported
 //!   `curl|wget → sh` installer-pipe pattern only — the general decode-pipe
 //!   gate is a later issue, plan.md §1.1 stage 4).
+//! - [`RedirectRule`] matches a redirection target (output/append only)
+//!   against a dangerous-path list (block devices, critical system files).
 //!
 //! Everything here operates on already-normalised [`NormalizedWord`] values
 //! (`crate::normalize`, B2) — no raw strings, no regex over the command
@@ -15,7 +18,7 @@
 //!
 //! # Parse, don't validate
 //!
-//! [`CommandRuleDto`]/[`PipelineRuleDto`]/[`RulesFileDto`] are the only
+//! [`CommandRuleDto`]/[`PipelineRuleDto`]/[`RedirectRuleDto`]/[`RulesFileDto`] are the only
 //! serde-aware types in this module, private to it — the rest of the crate
 //! (and every other module) never sees a serde attribute or a TOML type
 //! (`coding-guidelines/principles.md`, "dependencies point inward"). Loading
@@ -233,8 +236,10 @@ impl TargetMatcher {
 pub(crate) struct CommandRule {
     id: RuleId,
     reason: Reason,
+    decision: Decision,
     command: CommandMatch,
     required_flags: Vec<FlagMatcher>,
+    required_tokens: Vec<String>,
     targets: Vec<TargetMatcher>,
 }
 
@@ -249,19 +254,37 @@ impl CommandRule {
         &self.reason
     }
 
-    /// Whether this rule's command name and required flags match `argv`,
-    /// ignoring the target constraint entirely — the shared building block
-    /// behind [`Self::matches`] (which also checks targets) and
-    /// [`Self::matches_except_target`] (plan.md §4's NEW argument-position
-    /// bare-`$VAR` refinement, `src/gate.rs`).
+    #[must_use]
+    pub(crate) fn decision(&self) -> Decision {
+        self.decision
+    }
+
+    /// Whether this rule's command name, required flags, and required
+    /// tokens match `argv`, ignoring the target constraint entirely — the
+    /// shared building block behind [`Self::matches`] (which also checks
+    /// targets) and [`Self::matches_except_target`] (plan.md §4's NEW
+    /// argument-position bare-`$VAR` refinement, `src/gate.rs`).
     ///
     /// Resolves through [`effective_command`] (basename + transparent-
-    /// wrapper skip) rather than a raw `argv[0]` compare — the same
-    /// resolution [`PipelineRule::matches`] already applies to pipeline
-    /// sinks/sources, so a path-qualified or wrapped command (`/bin/rm`,
-    /// `env rm`, `nohup rm`) cannot dodge a `command = "rm"` rule (security
-    /// review finding: this module previously matched `argv[0]` verbatim,
-    /// silently missing every wrapped/path-qualified invocation).
+    /// wrapper skip) rather than a raw `argv[0]`/`argv[1..]` compare — the
+    /// same resolution [`PipelineRule::matches`] already applies to
+    /// pipeline sinks/sources, so a path-qualified or wrapped command
+    /// (`/bin/rm`, `env rm`, `env git push --force`) cannot dodge a
+    /// `command = "rm"`/`command = "git"` rule (security review finding:
+    /// this module previously matched `argv[0]`/`argv[1..]` verbatim,
+    /// silently missing every wrapped/path-qualified invocation — and for
+    /// `required_tokens`, offsetting every positional index by one for any
+    /// wrapped command, since `argv[1..]` still included the wrapper's own
+    /// name).
+    ///
+    /// `required_tokens` are matched positionally against the leading
+    /// non-dash-prefixed tokens after the resolved command —
+    /// `required_tokens[0]` must be the first positional, `[1]` the
+    /// second, etc. This prevents a commit message or branch name
+    /// containing "clean" or "rebase" from triggering the wrong rule.
+    ///
+    /// Known gap: `git -C <path> push` places a non-dash token (`<path>`)
+    /// before the subcommand; the rule won't match in that case.
     #[must_use]
     fn matches_command_and_flags(&self, argv: &[NormalizedWord]) -> bool {
         let Some((name, rest_words)) = effective_command(argv) else {
@@ -271,7 +294,25 @@ impl CommandRule {
             return false;
         }
         let rest = resolved_strings(rest_words);
-        self.required_flags.iter().all(|flag| flag.satisfied(&rest))
+        if !self.required_flags.iter().all(|flag| flag.satisfied(&rest)) {
+            return false;
+        }
+        if !self.required_tokens.is_empty() {
+            let positionals: Vec<&str> = rest
+                .iter()
+                .filter(|t| !t.starts_with('-'))
+                .copied()
+                .collect();
+            if !self
+                .required_tokens
+                .iter()
+                .enumerate()
+                .all(|(i, tok)| positionals.get(i).is_some_and(|p| *p == tok.as_str()))
+            {
+                return false;
+            }
+        }
+        true
     }
 
     /// Whether this rule matches `argv`, the normalised argv of one simple
@@ -330,6 +371,7 @@ impl CommandRule {
 pub(crate) struct PipelineRule {
     id: RuleId,
     reason: Reason,
+    decision: Decision,
     sources: Vec<String>,
     sinks: Vec<String>,
 }
@@ -343,6 +385,11 @@ impl PipelineRule {
     #[must_use]
     pub(crate) fn reason(&self) -> &Reason {
         &self.reason
+    }
+
+    #[must_use]
+    pub(crate) fn decision(&self) -> Decision {
+        self.decision
     }
 
     /// `stages` is one entry per pipeline stage, each the normalised argv
@@ -516,6 +563,8 @@ struct RulesFileDto {
     command: Vec<CommandRuleDto>,
     #[serde(default)]
     pipeline: Vec<PipelineRuleDto>,
+    #[serde(default)]
+    redirect: Vec<RedirectRuleDto>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -530,10 +579,14 @@ struct AllowlistFileDto {
 struct CommandRuleDto {
     id: String,
     reason: String,
+    #[serde(default)]
+    decision: Option<String>,
     command: Option<String>,
     command_prefix: Option<String>,
     #[serde(default)]
     required_flags: Vec<String>,
+    #[serde(default)]
+    required_tokens: Vec<String>,
     #[serde(default)]
     targets: Vec<TargetDto>,
 }
@@ -550,15 +603,42 @@ struct TargetDto {
 struct PipelineRuleDto {
     id: String,
     reason: String,
+    #[serde(default)]
+    decision: Option<String>,
     sources: Vec<String>,
     sinks: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RedirectRuleDto {
+    id: String,
+    reason: String,
+    #[serde(default)]
+    decision: Option<String>,
+    targets: Vec<TargetDto>,
+}
+
+/// Parses an optional `decision` string into a [`Decision`], defaulting to
+/// `Block` when absent. Only `"block"` and `"ask"` are valid; anything else
+/// is a load-time error (fail-closed).
+fn parse_decision(rule_id: &str, raw: Option<&str>) -> Result<Decision, RulesError> {
+    match raw {
+        None | Some("block") => Ok(Decision::Block),
+        Some("ask") => Ok(Decision::Ask),
+        Some(other) => Err(RulesError::invalid(
+            rule_id,
+            format!("decision must be \"block\" or \"ask\", got {other:?}"),
+        )),
+    }
 }
 
 /// Converts a [`CommandRuleDto`] into a [`CommandRule`], rejecting every
 /// semantically-invalid shape at this one boundary: empty id, empty
 /// reason, neither/both of `command`/`command_prefix` set, an empty
-/// `command`/`command_prefix` value, a malformed flag spec, or a target
-/// with neither/both of `exact`/`prefix` set.
+/// `command`/`command_prefix` value, a malformed flag spec, an invalid
+/// required_tokens entry, or a target with neither/both of
+/// `exact`/`prefix` set.
 fn convert_command_rule(dto: CommandRuleDto) -> Result<CommandRule, RulesError> {
     if dto.id.trim().is_empty() {
         return Err(RulesError::invalid(&dto.id, "id must not be empty"));
@@ -602,6 +682,8 @@ fn convert_command_rule(dto: CommandRuleDto) -> Result<CommandRule, RulesError> 
         }
     };
 
+    let decision = parse_decision(&dto.id, dto.decision.as_deref())?;
+
     let required_flags = dto
         .required_flags
         .iter()
@@ -609,6 +691,23 @@ fn convert_command_rule(dto: CommandRuleDto) -> Result<CommandRule, RulesError> 
             FlagMatcher::parse(spec).map_err(|problem| RulesError::invalid(&dto.id, problem))
         })
         .collect::<Result<Vec<_>, _>>()?;
+
+    for token in &dto.required_tokens {
+        if token.trim().is_empty() {
+            return Err(RulesError::invalid(
+                &dto.id,
+                "required_tokens entry must not be empty",
+            ));
+        }
+        if token.starts_with('-') {
+            return Err(RulesError::invalid(
+                &dto.id,
+                format!(
+                    "required_tokens entry {token:?} starts with '-'; use required_flags for flags"
+                ),
+            ));
+        }
+    }
 
     let targets = dto
         .targets
@@ -619,8 +718,10 @@ fn convert_command_rule(dto: CommandRuleDto) -> Result<CommandRule, RulesError> 
     Ok(CommandRule {
         id: RuleId::new(dto.id),
         reason: Reason::new(dto.reason),
+        decision,
         command,
         required_flags,
+        required_tokens: dto.required_tokens,
         targets,
     })
 }
@@ -674,12 +775,79 @@ fn convert_pipeline_rule(dto: PipelineRuleDto) -> Result<PipelineRule, RulesErro
         ));
     }
 
+    let decision = parse_decision(&dto.id, dto.decision.as_deref())?;
+
     Ok(PipelineRule {
         id: RuleId::new(dto.id),
         reason: Reason::new(dto.reason),
+        decision,
         sources: dto.sources,
         sinks: dto.sinks,
     })
+}
+
+fn convert_redirect_rule(dto: RedirectRuleDto) -> Result<RedirectRule, RulesError> {
+    if dto.id.trim().is_empty() {
+        return Err(RulesError::invalid(&dto.id, "id must not be empty"));
+    }
+    if dto.reason.trim().is_empty() {
+        return Err(RulesError::invalid(&dto.id, "reason must not be empty"));
+    }
+    if dto.targets.is_empty() {
+        return Err(RulesError::invalid(
+            &dto.id,
+            "redirect rule requires at least one target",
+        ));
+    }
+
+    let decision = parse_decision(&dto.id, dto.decision.as_deref())?;
+
+    let targets = dto
+        .targets
+        .into_iter()
+        .map(|t| convert_target(&dto.id, t))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(RedirectRule {
+        id: RuleId::new(dto.id),
+        reason: Reason::new(dto.reason),
+        decision,
+        targets,
+    })
+}
+
+/// A rule matching the target of an output/append redirection (`>`, `>>`)
+/// against a curated list of dangerous paths (block devices, critical
+/// system files). Unlike [`CommandRule`], an empty `targets` list is a
+/// load-time error — matching any redirection would be far too broad.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RedirectRule {
+    id: RuleId,
+    reason: Reason,
+    decision: Decision,
+    targets: Vec<TargetMatcher>,
+}
+
+impl RedirectRule {
+    #[must_use]
+    pub(crate) fn id(&self) -> &RuleId {
+        &self.id
+    }
+
+    #[must_use]
+    pub(crate) fn reason(&self) -> &Reason {
+        &self.reason
+    }
+
+    #[must_use]
+    pub(crate) fn decision(&self) -> Decision {
+        self.decision
+    }
+
+    #[must_use]
+    fn matches(&self, target: &str) -> bool {
+        self.targets.iter().any(|t| t.matches(target))
+    }
 }
 
 /// Checks that no id in `ids` repeats — the duplicate-id-is-`Err` half of
@@ -698,8 +866,8 @@ fn reject_duplicate_ids<'a>(ids: impl Iterator<Item = &'a str>) -> Result<(), Ru
 // Rules (blocklist)
 // ---------------------------------------------------------------------
 
-/// A loaded, validated rule set: [`CommandRule`]s and [`PipelineRule`]s,
-/// every id unique within the set.
+/// A loaded, validated rule set: [`CommandRule`]s, [`PipelineRule`]s, and
+/// [`RedirectRule`]s, every id unique within the set.
 ///
 /// `ask_rules` is always empty for a [`Self::parse`]d/[`Self::embedded`]
 /// set — `RulesFileDto`/`rules/blocklist.toml` have no `[[ask]]` array of
@@ -710,6 +878,7 @@ fn reject_duplicate_ids<'a>(ids: impl Iterator<Item = &'a str>) -> Result<(), Ru
 pub(crate) struct Rules {
     command_rules: Vec<CommandRule>,
     pipeline_rules: Vec<PipelineRule>,
+    redirect_rules: Vec<RedirectRule>,
     ask_rules: Vec<CommandRule>,
 }
 
@@ -735,17 +904,24 @@ impl Rules {
             .into_iter()
             .map(convert_pipeline_rule)
             .collect::<Result<Vec<_>, _>>()?;
+        let redirect_rules = dto
+            .redirect
+            .into_iter()
+            .map(convert_redirect_rule)
+            .collect::<Result<Vec<_>, _>>()?;
 
         reject_duplicate_ids(
             command_rules
                 .iter()
                 .map(|r| r.id.as_str())
-                .chain(pipeline_rules.iter().map(|r| r.id.as_str())),
+                .chain(pipeline_rules.iter().map(|r| r.id.as_str()))
+                .chain(redirect_rules.iter().map(|r| r.id.as_str())),
         )?;
 
         Ok(Self {
             command_rules,
             pipeline_rules,
+            redirect_rules,
             ask_rules: Vec::new(),
         })
     }
@@ -773,6 +949,12 @@ impl Rules {
     #[must_use]
     pub(crate) fn match_pipeline(&self, stages: &[Vec<NormalizedWord>]) -> Option<&PipelineRule> {
         self.pipeline_rules.iter().find(|rule| rule.matches(stages))
+    }
+
+    /// The first [`RedirectRule`] whose target list matches `target`, if any.
+    #[must_use]
+    pub(crate) fn match_redirect_target(&self, target: &str) -> Option<&RedirectRule> {
+        self.redirect_rules.iter().find(|rule| rule.matches(target))
     }
 
     /// The first user-configured `ask` [`CommandRule`] that matches `argv`,
@@ -1034,6 +1216,12 @@ pub(crate) fn merge_user_config(
         )
         .chain(
             blocklist
+                .redirect_rules
+                .iter()
+                .map(|r| r.id.as_str().to_string()),
+        )
+        .chain(
+            blocklist
                 .ask_rules
                 .iter()
                 .map(|r| r.id.as_str().to_string()),
@@ -1066,6 +1254,7 @@ pub(crate) fn merge_user_config(
         Rules {
             command_rules,
             pipeline_rules: blocklist.pipeline_rules,
+            redirect_rules: blocklist.redirect_rules,
             ask_rules,
         },
         Allowlist { entries },
@@ -2073,5 +2262,333 @@ mod tests {
         let (merged, _) = merge_user_config(blocklist, allowlist, config).unwrap();
         assert!(merged.match_ask(&argv(&["gh", "pr", "view"])).is_some());
         assert!(merged.match_ask(&argv(&["ls"])).is_none());
+    }
+
+    // ==== required_tokens schema extension ====
+
+    #[test]
+    fn required_tokens_matches_bare_subcommand() {
+        let toml = r#"
+            [[command]]
+            id = "git-push-force"
+            reason = "force push"
+            command = "git"
+            required_tokens = ["push"]
+            required_flags = ["f|--force"]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["git", "push", "--force", "origin"]))
+                .is_some()
+        );
+        assert!(
+            rules
+                .match_command(&argv(&["git", "push", "-f", "origin"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn required_tokens_rejects_when_token_absent() {
+        let toml = r#"
+            [[command]]
+            id = "git-push-force"
+            reason = "force push"
+            command = "git"
+            required_tokens = ["push"]
+            required_flags = ["f|--force"]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        // "commit" present instead of "push"
+        assert!(
+            rules
+                .match_command(&argv(&["git", "commit", "--force"]))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn required_tokens_all_must_be_present() {
+        let toml = r#"
+            [[command]]
+            id = "git-stash-drop"
+            reason = "stash drop"
+            command = "git"
+            required_tokens = ["stash", "drop"]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["git", "stash", "drop"]))
+                .is_some()
+        );
+        // only one token present
+        assert!(rules.match_command(&argv(&["git", "stash"])).is_none());
+        assert!(rules.match_command(&argv(&["git", "drop"])).is_none());
+    }
+
+    #[test]
+    fn required_tokens_rejects_dash_prefixed_at_load_time() {
+        let toml = r#"
+            [[command]]
+            id = "bad"
+            reason = "flags belong in required_flags"
+            command = "git"
+            required_tokens = ["--force"]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn required_tokens_rejects_empty_entry() {
+        let toml = r#"
+            [[command]]
+            id = "bad"
+            reason = "empty token"
+            command = "git"
+            required_tokens = [""]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn required_tokens_does_not_match_flag_spelling() {
+        // "--rebase" (a flag in `git pull --rebase`) must not satisfy
+        // required_tokens = ["rebase"] — they're different namespaces.
+        let toml = r#"
+            [[command]]
+            id = "git-rebase"
+            reason = "rebase"
+            command = "git"
+            required_tokens = ["rebase"]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["git", "pull", "--rebase"]))
+                .is_none()
+        );
+        assert!(
+            rules
+                .match_command(&argv(&["git", "rebase", "main"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn required_tokens_positional_matching_prevents_false_positives() {
+        let toml = r#"
+            [[command]]
+            id = "git-clean-any"
+            reason = "clean"
+            command = "git"
+            required_tokens = ["clean"]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        // "clean" as a commit message (second positional) must NOT match.
+        assert!(
+            rules
+                .match_command(&argv(&["git", "commit", "-m", "clean"]))
+                .is_none()
+        );
+        // "clean" as first positional DOES match.
+        assert!(
+            rules
+                .match_command(&argv(&["git", "clean", "-fd"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn required_tokens_positional_not_anywhere_in_argv() {
+        let toml = r#"
+            [[command]]
+            id = "git-push-force"
+            reason = "force push"
+            command = "git"
+            required_tokens = ["push"]
+            required_flags = ["f|--force"]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        // "push" as a branch name (second positional) must NOT match.
+        assert!(
+            rules
+                .match_command(&argv(&["git", "checkout", "-f", "push"]))
+                .is_none()
+        );
+        // "push" as first positional DOES match.
+        assert!(
+            rules
+                .match_command(&argv(&["git", "push", "-f", "origin"]))
+                .is_some()
+        );
+    }
+
+    // ==== Merge-reconciliation finding: required_tokens must resolve
+    // through effective_command too, or a wrapped/path-qualified command
+    // reintroduces exactly the bypass the prerequisite effective_command
+    // fix closed for required_flags/targets — matching against raw
+    // argv[1..] instead of effective_command's rest_words would offset
+    // every positional index by one for any wrapped invocation, making
+    // required_tokens matching fail (a false negative / bypass) rather
+    // than just misalign. ====
+
+    #[test]
+    fn required_tokens_matches_through_env_wrapper() {
+        let toml = r#"
+            [[command]]
+            id = "git-push-force"
+            reason = "force push"
+            command = "git"
+            required_tokens = ["push"]
+            required_flags = ["f|--force"]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["env", "git", "push", "--force", "origin"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn embedded_git_push_force_rule_matches_through_env_wrapper() {
+        // Same as above, but against the real embedded rule (PR #20's
+        // git-push-force) rather than a hand-built fixture.
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["env", "git", "push", "--force", "origin"]))
+                .is_some()
+        );
+    }
+
+    // ==== decision field ====
+
+    #[test]
+    fn decision_defaults_to_block() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "test"
+            command = "rm"
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        let rule = rules.match_command(&argv(&["rm", "file"])).unwrap();
+        assert_eq!(rule.decision(), Decision::Block);
+    }
+
+    #[test]
+    fn decision_explicit_block() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "test"
+            command = "rm"
+            decision = "block"
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        let rule = rules.match_command(&argv(&["rm", "file"])).unwrap();
+        assert_eq!(rule.decision(), Decision::Block);
+    }
+
+    #[test]
+    fn decision_ask() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "test"
+            command = "rm"
+            decision = "ask"
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        let rule = rules.match_command(&argv(&["rm", "file"])).unwrap();
+        assert_eq!(rule.decision(), Decision::Ask);
+    }
+
+    #[test]
+    fn decision_invalid_value_is_err() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "test"
+            command = "rm"
+            decision = "allow"
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn pipeline_decision_field() {
+        let toml = r#"
+            [[pipeline]]
+            id = "x"
+            reason = "test"
+            decision = "ask"
+            sources = ["curl"]
+            sinks = ["sh"]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        let stages = vec![argv(&["curl", "http://x"]), argv(&["sh"])];
+        let rule = rules.match_pipeline(&stages).unwrap();
+        assert_eq!(rule.decision(), Decision::Ask);
+    }
+
+    // ==== redirect rule ====
+
+    #[test]
+    fn redirect_rule_matches_target() {
+        let toml = r#"
+            [[redirect]]
+            id = "dev-write"
+            reason = "writing to block device"
+            targets = [{ prefix = "/dev/sd" }]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        assert!(rules.match_redirect_target("/dev/sda").is_some());
+        assert!(rules.match_redirect_target("/dev/null").is_none());
+    }
+
+    #[test]
+    fn redirect_rule_empty_targets_is_err() {
+        let toml = r#"
+            [[redirect]]
+            id = "bad"
+            reason = "no targets"
+            targets = []
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn redirect_rule_shares_id_namespace() {
+        let toml = r#"
+            [[command]]
+            id = "shared-id"
+            reason = "command rule"
+            command = "rm"
+
+            [[redirect]]
+            id = "shared-id"
+            reason = "redirect rule"
+            targets = [{ exact = "/etc/passwd" }]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::DuplicateId(_))
+        ));
     }
 }

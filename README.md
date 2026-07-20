@@ -165,21 +165,24 @@ eradicate shell-mediated destruction. Explicitly out of scope:
    `PATH` shadowing set by *earlier* commands in a persistent session.
    shguard analyzes one command string at a time; it has no session memory.
 2. **Semantic destructiveness of arbitrary programs.** A Python script that
-   deletes files, `make clean` with a hostile Makefile, `git push --force`
-   to the wrong remote — shguard's blocklist covers enumerated argv shapes,
-   not arbitrary program behavior.
+   deletes files, or `make clean` with a hostile Makefile — shguard's
+   blocklist covers enumerated argv shapes (including a curated set of
+   dangerous `git` subcommand/flag combinations, e.g. `push --force`,
+   `reset --hard`, `commit --amend`), not arbitrary program behavior.
 3. **Non-shell destructive edits.** An agent instructed to edit or delete
    files destructively through its file-editing tools rather than through a
    shell command never reaches this hook.
 4. **Multi-step attacks staged across Ask-approved commands.** Ask surfaces
    an unresolvable command to a human for a decision; a hurried human can
    still approve a staged payload one step at a time.
-5. **Redirection targets.** shguard never inspects what a shell redirection
-   (`>`, `>>`) overwrites — `cat > file <<EOF` is Allow by construction,
-   including when `file` is shguard's own config path. The
+5. **Redirection targets, mostly.** Output/append redirection (`>`, `>>`)
+   targets are checked against a curated dangerous-path list (raw block
+   devices, `/etc/passwd`, `/etc/shadow`) — but that list doesn't include
+   shguard's own config path, so `cat > file <<EOF` is still Allow when
+   `file` is shguard's config file. The
    [config-file self-protection](#protecting-the-config-file-itself) rules
    only see write-capable *commands* (`tee`, `cp`, `dd`, …) in argv, not
-   bare redirection.
+   bare redirection, and heredoc bodies themselves are never inspected.
 
 ## Attribution
 
