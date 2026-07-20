@@ -21,9 +21,11 @@
 #                        a combined cluster ("-rf") or a separated token
 #                        ("-r") — short-flag-aware.
 #                      - a "-"-prefixed string ("-delete", "--recursive") is
-#                        matched as an exact argv token (long options and
-#                        BSD-style single-dash long flags are never
-#                        letter-combinable).
+#                        matched as an argv token, exact or with a "=value"
+#                        suffix appended (GNU long-option convention, e.g.
+#                        "--in-place" also matches "--in-place=.bak"; long
+#                        options and BSD-style single-dash long flags are
+#                        never letter-combinable).
 #                      - a "|"-separated spec ("r|--recursive") means "any
 #                        one of these" (ORed) — use this so a rule can't be
 #                        dodged by swapping a short flag for its long-option

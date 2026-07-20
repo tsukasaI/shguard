@@ -121,7 +121,10 @@ impl CommandMatch {
 /// flags `r` and `f`, and so does the separated form `-r -f` — both are
 /// combined-cluster tokens of length 1. [`Self::Token`] covers flags that
 /// are never letter-combinable: GNU long options (`--recursive`) and
-/// BSD-style single-dash long flags (`find -delete`).
+/// BSD-style single-dash long flags (`find -delete`). A `Token` also
+/// matches the GNU `--flag=value` spelling (`--in-place=.bak` satisfies a
+/// required `--in-place`) — this only ever widens the match, so it cannot
+/// dodge a rule that was already matching the bare flag.
 ///
 /// [`Self::AnyOf`] expresses "this requirement is satisfied by any one of
 /// several equivalent spellings" — e.g. a rule that must not be dodged by
@@ -134,7 +137,8 @@ impl CommandMatch {
 enum FlagMatcher {
     /// A single short-option letter.
     Short(char),
-    /// An exact argv token, matched verbatim.
+    /// A `-`-prefixed argv token, matched verbatim or with a `=value`
+    /// suffix (GNU long-option convention, e.g. `--in-place=.bak`).
     Token(String),
     /// Satisfied if any one alternative is satisfied.
     AnyOf(Vec<FlagMatcher>),
@@ -188,7 +192,12 @@ impl FlagMatcher {
             Self::Short(c) => argv
                 .iter()
                 .any(|token| short_cluster_chars(token).contains(c)),
-            Self::Token(token) => argv.contains(&token.as_str()),
+            Self::Token(token) => argv.iter().any(|arg| {
+                *arg == token.as_str()
+                    || arg
+                        .strip_prefix(token.as_str())
+                        .is_some_and(|rest| rest.starts_with('='))
+            }),
             Self::AnyOf(alternatives) => alternatives.iter().any(|alt| alt.satisfied(argv)),
         }
     }
@@ -1362,7 +1371,32 @@ mod tests {
         );
     }
 
+    // ---- FlagMatcher::Token also accepts a GNU "=value" suffix ----
+    #[test]
+    fn flag_matcher_token_matches_bare_flag() {
+        let flag = FlagMatcher::parse("--in-place").unwrap();
+        assert!(flag.satisfied(&["--in-place"]));
+    }
+
+    #[test]
+    fn flag_matcher_token_matches_equals_suffix() {
+        let flag = FlagMatcher::parse("--in-place").unwrap();
+        assert!(flag.satisfied(&["--in-place=.bak"]));
+    }
+
+    #[test]
+    fn flag_matcher_token_does_not_match_unrelated_suffix_without_equals() {
+        let flag = FlagMatcher::parse("--in-place").unwrap();
+        assert!(!flag.satisfied(&["--in-placefoo"]));
+    }
+
     // ---- regression: --force-with-lease must not satisfy a --force token ----
+    #[test]
+    fn flag_matcher_token_force_with_lease_does_not_satisfy_force() {
+        let flag = FlagMatcher::parse("--force").unwrap();
+        assert!(!flag.satisfied(&["--force-with-lease"]));
+    }
+
     #[test]
     fn git_push_force_with_lease_does_not_match_force_rule() {
         let rules = Rules::embedded().unwrap();
@@ -1824,6 +1858,21 @@ mod tests {
                 .match_command(&argv(&[
                     "sed",
                     "--in-place",
+                    "s/x/y/",
+                    "~/.config/shguard/config.toml"
+                ]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn self_protect_sed_in_place_equals_suffix_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "sed",
+                    "--in-place=.bak",
                     "s/x/y/",
                     "~/.config/shguard/config.toml"
                 ]))

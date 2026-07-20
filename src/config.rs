@@ -358,6 +358,12 @@ mod tests {
             "s/x/y/",
             "/home/user/.config/shguard/config.toml"
         ]));
+        assert!(matches(&[
+            "sed",
+            "--in-place=.bak",
+            "s/x/y/",
+            "/home/user/.config/shguard/config.toml"
+        ]));
         // sed without -i prints to stdout rather than writing in place.
         assert!(!matches(&[
             "sed",

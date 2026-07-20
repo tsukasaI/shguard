@@ -380,3 +380,18 @@ fn ln_symlink_swap_onto_literal_tilde_config_path_is_blocked() {
     );
     assert_eq!(permission_decision(&output), "deny");
 }
+
+#[test]
+fn sed_in_place_equals_suffix_onto_resolved_config_path_is_blocked() {
+    let (_dir, config_path) = write_config("");
+
+    let command = format!(
+        "sed --in-place=.bak s/x/y/ {}",
+        config_path.to_str().expect("path should be valid UTF-8")
+    );
+    let output = run_hook(
+        &bash_command(&command),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+}
