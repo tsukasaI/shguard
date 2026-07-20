@@ -301,6 +301,43 @@ fn shguard_config_takes_precedence_over_default_path() {
     assert_eq!(permission_decision(&output), "allow");
 }
 
+// A bare-filename SHGUARD_CONFIG (no directory component, e.g.
+// `SHGUARD_CONFIG=config.toml`) must still load a valid user config --
+// `Path::parent()` returns an empty path (not `None`) for a single-
+// component relative path, which previously fed an empty `prefix` into
+// the self-protection rule generator and failed the whole config load
+// (issue #24). `run_hook` doesn't set `current_dir`, so this test builds
+// the `Command` directly, mirroring `run_hook`'s env-isolation pattern.
+#[test]
+fn bare_filename_shguard_config_still_loads_a_valid_config() {
+    let dir = tempdir().expect("tempdir should create");
+    fs::write(
+        dir.path().join("config.toml"),
+        r#"
+        [[deny]]
+        id = "user-deny-scary-tool"
+        reason = "never run this"
+        command = "scary-tool"
+    "#,
+    )
+    .expect("config file should write");
+
+    let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
+    let assert = cmd
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("HOME")
+        .env("SHGUARD_CONFIG", "config.toml")
+        .current_dir(dir.path())
+        .write_stdin(bash_command("scary-tool --run"))
+        .assert()
+        .success();
+    let output: Value =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout should be valid JSON");
+
+    assert_eq!(permission_decision(&output), "deny");
+    assert!(permission_reason(&output).contains("user-deny-scary-tool"));
+}
+
 // ==== Recursion threading ====
 
 #[test]

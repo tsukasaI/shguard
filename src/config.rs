@@ -174,7 +174,19 @@ impl Policy {
             None => (blocklist, allowlist),
         };
 
-        let (rules, allowlist) = match path.as_deref().and_then(Path::parent) {
+        // `Path::parent()` returns `Some("")` (an empty path, not `None`)
+        // for a single-component relative path -- reachable via a bare-
+        // filename `SHGUARD_CONFIG` (e.g. `SHGUARD_CONFIG=config.toml`,
+        // no directory separator). There's no directory to protect in
+        // that case, so treat it like `None` rather than generating a
+        // `prefix = ""` self-protection rule, which `convert_target`'s
+        // empty-prefix guard would then reject as a hard config-load
+        // failure (issue #24).
+        let (rules, allowlist) = match path
+            .as_deref()
+            .and_then(Path::parent)
+            .filter(|dir| !dir.as_os_str().is_empty())
+        {
             Some(config_dir) => {
                 let toml = self_protection_toml(&config_dir.to_string_lossy());
                 let self_protection = UserConfig::parse(&toml)?;
