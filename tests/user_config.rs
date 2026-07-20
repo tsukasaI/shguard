@@ -183,6 +183,33 @@ fn shguard_config_pointing_at_missing_file_fails_closed() {
     assert!(!permission_reason(&output).is_empty());
 }
 
+// A present-but-non-UTF-8 `SHGUARD_CONFIG` must fail closed (hard error),
+// not silently collapse into "unset" and fall through to XDG/HOME
+// discovery (issue #23). `run_hook` takes `&str` envs, so this test builds
+// the `Command` directly, mirroring `run_hook`'s env-isolation pattern.
+#[test]
+#[cfg(unix)]
+fn shguard_config_non_utf8_fails_closed() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let non_utf8 = std::ffi::OsString::from_vec(vec![0xFF, 0xFE]);
+
+    let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
+    let assert = cmd
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("HOME")
+        .env("SHGUARD_CONFIG", non_utf8)
+        .write_stdin(bash_command("echo hi"))
+        .assert()
+        .success();
+    let output: Value =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout should be valid JSON");
+
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(permission_reason(&output).contains("SHGUARD_CONFIG"));
+    assert!(permission_reason(&output).contains("UTF-8"));
+}
+
 // ==== Discovery / precedence ====
 
 #[test]
