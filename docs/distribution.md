@@ -15,17 +15,10 @@ completes and CI is green.
 
 ## Homebrew
 
-```bash
-brew tap tsukasaI/shguard
-brew install shguard
-```
-
-Formula lives in the [homebrew-shguard](https://github.com/tsukasaI/homebrew-shguard) tap.
-
-### Keeping current
-After each release, update the formula's `url` and `sha256` to point to the
-new release binary and regenerated checksum. This can be automated with
-`brew bump-formula-pr` or a CI step in the release workflow.
+**Not yet available.** A `tsukasaI/homebrew-shguard` tap is planned for a
+future release; this section will be updated with `brew tap` / `brew
+install` instructions once the formula exists. Until then, install via
+crates.io or Nix (below).
 
 ## Nix
 

@@ -54,6 +54,12 @@ agents.
 cargo install shguard
 ```
 
+Or with Nix:
+
+```bash
+nix run github:tsukasaI/shguard
+```
+
 ### Claude Code registration
 
 Add to `settings.json`:
