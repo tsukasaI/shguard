@@ -60,6 +60,15 @@ impl RuleId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum VerdictDetail {
     Allow,
+    /// An `Allow` reached by downgrading an `Ask` via an allowlist match
+    /// (`crate::rules::apply_allowlist`) rather than the ordinary "resolved
+    /// and clean" path. `decision()` still reports `Decision::Allow` — this
+    /// is not a fourth decision, only a second way to arrive at `Allow`
+    /// that keeps its audit trail. See [`Verdict::allow_suppressed`].
+    AllowSuppressed {
+        suppressed_by: RuleId,
+        reason: Reason,
+    },
     Ask {
         reason: Reason,
     },
@@ -74,11 +83,12 @@ enum VerdictDetail {
 /// which rule matched.
 ///
 /// Fields are private (C-STRUCT-PRIVATE); the only public constructors are
-/// [`Verdict::allow`], [`Verdict::ask`], and [`Verdict::block`]. `ask` and
-/// `block` require a [`Reason`] by value, not `Option<Reason>` — there is no
-/// way to call either constructor without supplying one, so a reasonless
-/// `Ask`/`Block` cannot be constructed through the public API, and the
-/// private fields mean no other path (e.g. a struct literal) exists either.
+/// [`Verdict::allow`], [`Verdict::allow_suppressed`], [`Verdict::ask`], and
+/// [`Verdict::block`]. `ask` and `block` require a [`Reason`] by value, not
+/// `Option<Reason>` — there is no way to call either constructor without
+/// supplying one, so a reasonless `Ask`/`Block` cannot be constructed
+/// through the public API, and the private fields mean no other path (e.g.
+/// a struct literal) exists either.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Verdict {
     detail: VerdictDetail,
@@ -92,6 +102,28 @@ impl Verdict {
     pub fn allow(normalized_argv: Vec<NormalizedWord>) -> Self {
         Self {
             detail: VerdictDetail::Allow,
+            normalized_argv,
+        }
+    }
+
+    /// An `Allow` reached by downgrading an `Ask` verdict via an allowlist
+    /// match: `suppressed_by` is the id of the allowlist entry that matched
+    /// (the audit trail — `~/dotfiles/claude-code/rules/security.md`,
+    /// "suppressions need an audit trail"), and `reason` explains the
+    /// downgrade for the same audience `Ask`/`Block` reasons serve.
+    /// `decision()` still returns `Decision::Allow`; only [`Self::reason`]
+    /// and [`Self::suppressed_by`] distinguish this from [`Self::allow`].
+    #[must_use]
+    pub fn allow_suppressed(
+        normalized_argv: Vec<NormalizedWord>,
+        suppressed_by: RuleId,
+        reason: Reason,
+    ) -> Self {
+        Self {
+            detail: VerdictDetail::AllowSuppressed {
+                suppressed_by,
+                reason,
+            },
             normalized_argv,
         }
     }
@@ -136,33 +168,55 @@ impl Verdict {
         }
     }
 
-    /// The decision: `Allow`, `Ask`, or `Block`.
+    /// The decision: `Allow`, `Ask`, or `Block`. [`VerdictDetail::AllowSuppressed`]
+    /// still reports `Decision::Allow` — it is a second path to the same
+    /// decision, not a fourth decision (`Decision`'s `Ord`/"worst wins"
+    /// folding, `crate::gate::fold_worst`, treats it identically to a plain
+    /// `Allow`).
     #[must_use]
     pub fn decision(&self) -> Decision {
         match &self.detail {
-            VerdictDetail::Allow => Decision::Allow,
+            VerdictDetail::Allow | VerdictDetail::AllowSuppressed { .. } => Decision::Allow,
             VerdictDetail::Ask { .. } => Decision::Ask,
             VerdictDetail::Block { .. } => Decision::Block,
         }
     }
 
-    /// The verdict's justification. Always `Some` for `Ask`/`Block`, always
-    /// `None` for `Allow` — guaranteed by construction, not checked here.
+    /// The verdict's justification. Always `Some` for `Ask`/`Block`/
+    /// `AllowSuppressed`, always `None` for a plain `Allow` — guaranteed by
+    /// construction, not checked here.
     #[must_use]
     pub fn reason(&self) -> Option<&Reason> {
         match &self.detail {
             VerdictDetail::Allow => None,
-            VerdictDetail::Ask { reason } | VerdictDetail::Block { reason, .. } => Some(reason),
+            VerdictDetail::AllowSuppressed { reason, .. }
+            | VerdictDetail::Ask { reason }
+            | VerdictDetail::Block { reason, .. } => Some(reason),
         }
     }
 
     /// The id of the blocklist rule that matched, if this `Block` came from
-    /// an exact rule match rather than a structural decision.
+    /// an exact rule match rather than a structural decision. `None` for
+    /// both `Allow` variants — `AllowSuppressed`'s audit-trail id is a
+    /// distinct concept, see [`Self::suppressed_by`].
     #[must_use]
     pub fn matched_rule(&self) -> Option<&RuleId> {
         match &self.detail {
             VerdictDetail::Block { matched_rule, .. } => matched_rule.as_ref(),
-            VerdictDetail::Allow | VerdictDetail::Ask { .. } => None,
+            VerdictDetail::Allow
+            | VerdictDetail::AllowSuppressed { .. }
+            | VerdictDetail::Ask { .. } => None,
+        }
+    }
+
+    /// The id of the allowlist entry that downgraded this verdict from
+    /// `Ask` to `Allow`, if it was reached that way. `None` for every other
+    /// case, including a plain `Allow`.
+    #[must_use]
+    pub fn suppressed_by(&self) -> Option<&RuleId> {
+        match &self.detail {
+            VerdictDetail::AllowSuppressed { suppressed_by, .. } => Some(suppressed_by),
+            VerdictDetail::Allow | VerdictDetail::Ask { .. } | VerdictDetail::Block { .. } => None,
         }
     }
 
@@ -203,6 +257,28 @@ mod tests {
         assert_eq!(verdict.decision(), Decision::Allow);
         assert!(verdict.reason().is_none());
         assert!(verdict.matched_rule().is_none());
+    }
+
+    #[test]
+    fn allow_suppressed_carries_reason_and_suppressed_by() {
+        let verdict = Verdict::allow_suppressed(
+            Vec::new(),
+            RuleId::new("allow-ls"),
+            Reason::new("allowlisted by \"allow-ls\": read-only, always safe"),
+        );
+        assert_eq!(verdict.decision(), Decision::Allow);
+        assert_eq!(
+            verdict.reason().unwrap().as_str(),
+            "allowlisted by \"allow-ls\": read-only, always safe"
+        );
+        assert_eq!(verdict.suppressed_by().unwrap().as_str(), "allow-ls");
+        assert!(verdict.matched_rule().is_none());
+    }
+
+    #[test]
+    fn plain_allow_has_no_suppressed_by() {
+        let verdict = Verdict::allow(Vec::new());
+        assert!(verdict.suppressed_by().is_none());
     }
 
     #[test]

@@ -108,42 +108,80 @@ pub fn fail_closed(reason: &str) -> Value {
     output_json(PermissionDecision::Ask, reason)
 }
 
-/// Reads and analyses one Claude Code PreToolUse stdin payload, returning
-/// the `hookSpecificOutput` JSON the composition root writes to stdout.
+/// Parses `stdin` and pulls out the Bash command to analyse, if any — the
+/// stdin-JSON/tool-name/command-field extraction shared by [`handle`] and
+/// [`handle_with_policy`]; the only difference between them is which
+/// `analyze`-shaped function the extracted command goes to.
 ///
+/// `Ok(None)` means `tool_name != "Bash"` (out of scope by design, the
+/// caller should emit an ordinary `allow`). `Err(value)` is a ready-to-return
+/// fail-closed `ask` output — malformed JSON, or a `Bash` payload whose
+/// `tool_input.command` is missing or not a string.
+fn extract_bash_command(stdin: &str) -> Result<Option<String>, Value> {
+    let input: HookInput = serde_json::from_str(stdin).map_err(|err| {
+        fail_closed(&format!(
+            "shguard: could not parse PreToolUse stdin as JSON: {err}"
+        ))
+    })?;
+
+    if input.tool_name != "Bash" {
+        return Ok(None);
+    }
+
+    let command = input
+        .tool_input
+        .get("command")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            fail_closed("shguard: Bash tool_input is missing a string \"command\" field")
+        })?;
+
+    Ok(Some(command.to_string()))
+}
+
+/// Builds the `hookSpecificOutput` JSON for one stdin payload, given
+/// `analyze` (either [`crate::analyze`] or a closure over
+/// [`crate::analyze_with_policy`] and a policy) as the decision source.
 /// Never panics: every error path (malformed JSON, missing fields, wrong
 /// field types) folds to an `ask` decision with a descriptive reason — the
 /// same "single fold point, never crash, never silently allow" posture
-/// [`crate::analyze`] documents for its own internal failure modes.
-#[must_use]
-pub fn handle(stdin: &str) -> Value {
-    let input: HookInput = match serde_json::from_str(stdin) {
-        Ok(input) => input,
-        Err(err) => {
-            return fail_closed(&format!(
-                "shguard: could not parse PreToolUse stdin as JSON: {err}"
-            ));
+/// `crate::analyze` documents for its own internal failure modes.
+fn respond(stdin: &str, analyze: impl FnOnce(&str) -> crate::verdict::Verdict) -> Value {
+    let command = match extract_bash_command(stdin) {
+        Ok(Some(command)) => command,
+        Ok(None) => {
+            return output_json(
+                PermissionDecision::Allow,
+                "shguard only analyses commands run through the Bash tool",
+            );
         }
+        Err(fail_closed_output) => return fail_closed_output,
     };
 
-    if input.tool_name != "Bash" {
-        return output_json(
-            PermissionDecision::Allow,
-            "shguard only analyses commands run through the Bash tool",
-        );
-    }
-
-    let Some(command) = input.tool_input.get("command").and_then(Value::as_str) else {
-        return fail_closed("shguard: Bash tool_input is missing a string \"command\" field");
-    };
-
-    let verdict = crate::analyze(command);
+    let verdict = analyze(&command);
     let decision = PermissionDecision::from(verdict.decision());
     let reason = verdict
         .reason()
         .map_or("shguard: command cleared all checks", |r| r.as_str());
 
     output_json(decision, reason)
+}
+
+/// Reads and analyses one Claude Code PreToolUse stdin payload against the
+/// embedded blocklist/allowlist only, returning the `hookSpecificOutput`
+/// JSON the composition root writes to stdout.
+#[must_use]
+pub fn handle(stdin: &str) -> Value {
+    respond(stdin, crate::analyze)
+}
+
+/// Config-aware sibling of [`handle`]: same stdin/stdout contract, but
+/// `policy` (loaded once at the composition root via
+/// [`crate::config::Policy::load`]) supplies the rules and allowlist
+/// instead of the embedded defaults alone.
+#[must_use]
+pub fn handle_with_policy(stdin: &str, policy: &crate::config::Policy) -> Value {
+    respond(stdin, |command| crate::analyze_with_policy(command, policy))
 }
 
 #[cfg(test)]
@@ -217,5 +255,68 @@ mod tests {
         let stdin = r#"{"tool_name":"Bash","tool_input":{"command":42}}"#;
         let output = handle(stdin);
         assert_eq!(permission_decision(&output), "ask");
+    }
+
+    // ==== handle_with_policy ====
+
+    fn embedded_only_policy() -> crate::config::Policy {
+        crate::config::Policy {
+            rules: crate::rules::Rules::embedded().unwrap(),
+            allowlist: crate::rules::Allowlist::embedded().unwrap(),
+        }
+    }
+
+    #[test]
+    fn handle_with_policy_embedded_only_matches_handle() {
+        let policy = embedded_only_policy();
+        for stdin in [
+            r#"{"tool_name":"Bash","tool_input":{"command":"rm -rf /"}}"#,
+            r#"{"tool_name":"Bash","tool_input":{"command":"echo hi"}}"#,
+            r#"{"tool_name":"Bash","tool_input":{"command":"$(which python3)"}}"#,
+        ] {
+            assert_eq!(
+                permission_decision(&handle(stdin)),
+                permission_decision(&handle_with_policy(stdin, &policy)),
+                "{stdin:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn handle_with_policy_ask_rule_from_merged_config_asks() {
+        let blocklist = crate::rules::Rules::embedded().unwrap();
+        let allowlist = crate::rules::Allowlist::embedded().unwrap();
+        let user_config = crate::rules::UserConfig::parse(
+            r#"
+            [[ask]]
+            id = "user-ask-gh"
+            reason = "confirm every gh invocation"
+            command = "gh"
+        "#,
+        )
+        .unwrap();
+        let (rules, allowlist) =
+            crate::rules::merge_user_config(blocklist, allowlist, user_config).unwrap();
+        let policy = crate::config::Policy { rules, allowlist };
+
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"gh pr view"}}"#;
+        let output = handle_with_policy(stdin, &policy);
+        assert_eq!(permission_decision(&output), "ask");
+    }
+
+    #[test]
+    fn handle_with_policy_malformed_json_fails_closed_to_ask() {
+        let policy = embedded_only_policy();
+        let output = handle_with_policy("not json", &policy);
+        assert_eq!(permission_decision(&output), "ask");
+        assert!(!permission_reason(&output).is_empty());
+    }
+
+    #[test]
+    fn handle_with_policy_non_bash_tool_allows() {
+        let policy = embedded_only_policy();
+        let stdin = r#"{"tool_name":"Read","tool_input":{"file_path":"/etc/passwd"}}"#;
+        let output = handle_with_policy(stdin, &policy);
+        assert_eq!(permission_decision(&output), "allow");
     }
 }

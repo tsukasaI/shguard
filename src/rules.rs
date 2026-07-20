@@ -35,13 +35,14 @@
 //! operator-supplied override file and hands the contents in as strings.
 //!
 //! `analyze()` (`src/lib.rs`) calls [`Rules::embedded`]/[`Rules::match_command`]/
-//! [`Rules::match_pipeline`] via `src/gate.rs`. [`Rules::with_override`] and
-//! everything in the [allowlist](#allowlist) section below remain unwired —
-//! see `src/gate.rs`'s module docs for why allowlist application is
-//! deferred — so those entry points are still reachable only from their own
-//! tests, hence their `#[allow(dead_code)]`.
+//! [`Rules::match_pipeline`] via `src/gate.rs`, always with an empty
+//! `Allowlist`/no `ask_rules`. `analyze_with_policy()` additionally
+//! threads [`Rules::match_ask`], the [allowlist](#allowlist) section, and
+//! whatever [`UserConfig`]/[`merge_user_config`] contributed — see
+//! `src/gate.rs`'s module docs for the evaluation order, and
+//! `src/config.rs` for where a user's config file is found and merged in.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use serde::Deserialize;
 
@@ -258,29 +259,41 @@ impl CommandRule {
         self.decision
     }
 
-    /// Whether this rule's command name, required flags, and required tokens
-    /// match `argv`, ignoring the target constraint entirely — the shared
-    /// building block behind [`Self::matches`] (which also checks targets)
-    /// and [`Self::matches_except_target`] (plan.md §4's NEW
+    /// Whether this rule's command name, required flags, and required
+    /// tokens match `argv`, ignoring the target constraint entirely — the
+    /// shared building block behind [`Self::matches`] (which also checks
+    /// targets) and [`Self::matches_except_target`] (plan.md §4's NEW
     /// argument-position bare-`$VAR` refinement, `src/gate.rs`).
     ///
+    /// Resolves through [`effective_command`] (basename + transparent-
+    /// wrapper skip) rather than a raw `argv[0]`/`argv[1..]` compare — the
+    /// same resolution [`PipelineRule::matches`] already applies to
+    /// pipeline sinks/sources, so a path-qualified or wrapped command
+    /// (`/bin/rm`, `env rm`, `env git push --force`) cannot dodge a
+    /// `command = "rm"`/`command = "git"` rule (security review finding:
+    /// this module previously matched `argv[0]`/`argv[1..]` verbatim,
+    /// silently missing every wrapped/path-qualified invocation — and for
+    /// `required_tokens`, offsetting every positional index by one for any
+    /// wrapped command, since `argv[1..]` still included the wrapper's own
+    /// name).
+    ///
     /// `required_tokens` are matched positionally against the leading
-    /// non-dash-prefixed tokens in argv[1..] — `required_tokens[0]` must
-    /// be the first positional, `[1]` the second, etc. This prevents a
-    /// commit message or branch name containing "clean" or "rebase" from
-    /// triggering the wrong rule.
+    /// non-dash-prefixed tokens after the resolved command —
+    /// `required_tokens[0]` must be the first positional, `[1]` the
+    /// second, etc. This prevents a commit message or branch name
+    /// containing "clean" or "rebase" from triggering the wrong rule.
     ///
     /// Known gap: `git -C <path> push` places a non-dash token (`<path>`)
     /// before the subcommand; the rule won't match in that case.
     #[must_use]
     fn matches_command_and_flags(&self, argv: &[NormalizedWord]) -> bool {
-        let Some(name) = command_name(argv) else {
+        let Some((name, rest_words)) = effective_command(argv) else {
             return false;
         };
         if !self.command.matches(name) {
             return false;
         }
-        let rest = resolved_strings(&argv[1..]);
+        let rest = resolved_strings(rest_words);
         if !self.required_flags.iter().all(|flag| flag.satisfied(&rest)) {
             return false;
         }
@@ -315,7 +328,12 @@ impl CommandRule {
         if self.targets.is_empty() {
             return true;
         }
-        let rest = resolved_strings(&argv[1..]);
+        // `matches_command_and_flags` already succeeded, so `effective_command`
+        // is `Some` here; fail closed (no match) rather than unwrap regardless.
+        let Some((_, rest_words)) = effective_command(argv) else {
+            return false;
+        };
+        let rest = resolved_strings(rest_words);
         rest.iter()
             .any(|token| self.targets.iter().any(|t| t.matches(token)))
     }
@@ -401,15 +419,6 @@ impl PipelineRule {
     }
 }
 
-/// The command name (argv\[0\]) of a simple command, or `None` if it is
-/// empty or the first word did not statically resolve.
-fn command_name(argv: &[NormalizedWord]) -> Option<&str> {
-    match argv.first()?.resolution() {
-        Resolution::Resolved(s) => Some(s.as_str()),
-        Resolution::Unresolvable(_) => None,
-    }
-}
-
 /// The resolved strings of `argv`, in order, silently skipping any
 /// unresolvable word — never a guess at its value, never a panic. Skipping
 /// (rather than threading through a placeholder) is safe here because
@@ -451,8 +460,23 @@ fn resolved_strings(argv: &[NormalizedWord]) -> Vec<&str> {
 /// specially handled — the value token does not start with `-`, so it is
 /// mistaken for the wrapped command. None of this fix's required cases use
 /// such a flag; documented here rather than silently guessed around.
-const TRANSPARENT_WRAPPERS: &[&str] = &[
+pub(crate) const TRANSPARENT_WRAPPERS: &[&str] = &[
     "env", "command", "nohup", "nice", "exec", "stdbuf", "setsid", "sudo", "xargs",
+];
+
+/// Shell interpreters whose `-c '<string>'` argument `crate::gate` recurses
+/// into as shell syntax (rule 6a). Lives here, next to
+/// [`TRANSPARENT_WRAPPERS`], so this module's allow-entry validation
+/// (`matches_dangerous_allow_target`) can check a config entry against the
+/// same list `crate::gate` uses, without `rules` depending on `gate`
+/// ("dependencies point inward" — `gate` already depends on `rules`, not
+/// the reverse).
+pub(crate) const SHELL_INTERPRETERS: &[&str] = &["bash", "sh", "zsh", "dash"];
+
+/// Interpreters a pipeline's final stage may be (`crate::gate` rule 5b/5c).
+/// See [`SHELL_INTERPRETERS`]'s docs for why this lives here.
+pub(crate) const PIPELINE_INTERPRETERS: &[&str] = &[
+    "sh", "bash", "zsh", "dash", "python", "python3", "node", "perl",
 ];
 
 /// The basename of a command token: `/bin/sh` -> `sh`, `./sh` -> `sh`, a
@@ -533,6 +557,7 @@ fn skip_wrapper_arguments<'a>(wrapper: &str, argv: &'a [NormalizedWord]) -> &'a 
 // ---------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RulesFileDto {
     #[serde(default)]
     command: Vec<CommandRuleDto>,
@@ -543,12 +568,14 @@ struct RulesFileDto {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AllowlistFileDto {
     #[serde(default)]
     entry: Vec<CommandRuleDto>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CommandRuleDto {
     id: String,
     reason: String,
@@ -565,12 +592,14 @@ struct CommandRuleDto {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TargetDto {
     exact: Option<String>,
     prefix: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PipelineRuleDto {
     id: String,
     reason: String,
@@ -581,6 +610,7 @@ struct PipelineRuleDto {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RedirectRuleDto {
     id: String,
     reason: String,
@@ -605,9 +635,10 @@ fn parse_decision(rule_id: &str, raw: Option<&str>) -> Result<Decision, RulesErr
 
 /// Converts a [`CommandRuleDto`] into a [`CommandRule`], rejecting every
 /// semantically-invalid shape at this one boundary: empty id, empty
-/// reason, neither/both of `command`/`command_prefix` set, a malformed
-/// flag spec, an invalid required_tokens entry, or a target with
-/// neither/both of `exact`/`prefix` set.
+/// reason, neither/both of `command`/`command_prefix` set, an empty
+/// `command`/`command_prefix` value, a malformed flag spec, an invalid
+/// required_tokens entry, or a target with neither/both of
+/// `exact`/`prefix` set.
 fn convert_command_rule(dto: CommandRuleDto) -> Result<CommandRule, RulesError> {
     if dto.id.trim().is_empty() {
         return Err(RulesError::invalid(&dto.id, "id must not be empty"));
@@ -617,8 +648,26 @@ fn convert_command_rule(dto: CommandRuleDto) -> Result<CommandRule, RulesError> 
     }
 
     let command = match (dto.command, dto.command_prefix) {
-        (Some(exact), None) => CommandMatch::Exact(exact),
-        (None, Some(prefix)) => CommandMatch::Prefix(prefix),
+        (Some(exact), None) => {
+            if exact.trim().is_empty() {
+                return Err(RulesError::invalid(&dto.id, "`command` must not be empty"));
+            }
+            CommandMatch::Exact(exact)
+        }
+        (None, Some(prefix)) => {
+            // An empty `command_prefix` produces `CommandMatch::Prefix("")`,
+            // which matches every command name (`"".starts_with("")` is
+            // always true) — a silent universal matcher. Harmless in a
+            // `deny` entry (over-broad blocking); catastrophic in an
+            // `allow` entry (suppresses every `Ask` in the system).
+            if prefix.trim().is_empty() {
+                return Err(RulesError::invalid(
+                    &dto.id,
+                    "`command_prefix` must not be empty",
+                ));
+            }
+            CommandMatch::Prefix(prefix)
+        }
         (None, None) => {
             return Err(RulesError::invalid(
                 &dto.id,
@@ -679,8 +728,28 @@ fn convert_command_rule(dto: CommandRuleDto) -> Result<CommandRule, RulesError> 
 
 fn convert_target(rule_id: &str, dto: TargetDto) -> Result<TargetMatcher, RulesError> {
     match (dto.exact, dto.prefix) {
-        (Some(exact), None) => Ok(TargetMatcher::Exact(exact)),
-        (None, Some(prefix)) => Ok(TargetMatcher::Prefix(prefix)),
+        (Some(exact), None) => {
+            if exact.trim().is_empty() {
+                return Err(RulesError::invalid(
+                    rule_id,
+                    "target's `exact` must not be empty",
+                ));
+            }
+            Ok(TargetMatcher::Exact(exact))
+        }
+        (None, Some(prefix)) => {
+            // An empty prefix produces a universal matcher
+            // (`"".starts_with("")` is always true) — the same hazard
+            // `convert_command_rule` already guards against for an empty
+            // `command_prefix`.
+            if prefix.trim().is_empty() {
+                return Err(RulesError::invalid(
+                    rule_id,
+                    "target's `prefix` must not be empty",
+                ));
+            }
+            Ok(TargetMatcher::Prefix(prefix))
+        }
         (None, None) => Err(RulesError::invalid(
             rule_id,
             "target requires exactly one of `exact`/`prefix`",
@@ -799,11 +868,18 @@ fn reject_duplicate_ids<'a>(ids: impl Iterator<Item = &'a str>) -> Result<(), Ru
 
 /// A loaded, validated rule set: [`CommandRule`]s, [`PipelineRule`]s, and
 /// [`RedirectRule`]s, every id unique within the set.
+///
+/// `ask_rules` is always empty for a [`Self::parse`]d/[`Self::embedded`]
+/// set — `RulesFileDto`/`rules/blocklist.toml` have no `[[ask]]` array of
+/// their own. It is populated only by [`merge_user_config`], which is also
+/// the only place a user config's `[[ask]]` entries can reach a `Rules`
+/// value at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Rules {
     command_rules: Vec<CommandRule>,
     pipeline_rules: Vec<PipelineRule>,
     redirect_rules: Vec<RedirectRule>,
+    ask_rules: Vec<CommandRule>,
 }
 
 impl Rules {
@@ -846,6 +922,7 @@ impl Rules {
             command_rules,
             pipeline_rules,
             redirect_rules,
+            ask_rules: Vec::new(),
         })
     }
 
@@ -859,84 +936,6 @@ impl Rules {
     /// error only if a future edit to `rules/blocklist.toml` breaks it.
     pub(crate) fn embedded() -> Result<Self, RulesError> {
         Self::parse(EMBEDDED_BLOCKLIST)
-    }
-
-    /// Parses the embedded default blocklist, then layers `override_toml`
-    /// on top: a rule in `override_toml` whose id matches a builtin rule
-    /// **replaces** it; a new id **adds** to the set. Duplicate ids
-    /// *within* `override_toml` itself are still a load-time `Err` (that
-    /// check happens inside [`Self::parse`], before layering).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`RulesError`] if either the embedded blocklist or
-    /// `override_toml` fails to parse/validate.
-    #[allow(dead_code)]
-    pub(crate) fn with_override(override_toml: &str) -> Result<Self, RulesError> {
-        let base = Self::embedded()?;
-        let overrides = Self::parse(override_toml)?;
-        Ok(base.layer(overrides))
-    }
-
-    /// Merges `overrides` on top of `self` by id: same-id rules from
-    /// `overrides` replace `self`'s, new ids are appended.
-    fn layer(self, overrides: Self) -> Self {
-        let mut command_by_id: HashMap<String, CommandRule> = self
-            .command_rules
-            .into_iter()
-            .map(|r| (r.id.as_str().to_string(), r))
-            .collect();
-        let mut command_order: Vec<String> = command_by_id.keys().cloned().collect();
-        for rule in overrides.command_rules {
-            let id = rule.id.as_str().to_string();
-            if !command_by_id.contains_key(&id) {
-                command_order.push(id.clone());
-            }
-            command_by_id.insert(id, rule);
-        }
-
-        let mut pipeline_by_id: HashMap<String, PipelineRule> = self
-            .pipeline_rules
-            .into_iter()
-            .map(|r| (r.id.as_str().to_string(), r))
-            .collect();
-        let mut pipeline_order: Vec<String> = pipeline_by_id.keys().cloned().collect();
-        for rule in overrides.pipeline_rules {
-            let id = rule.id.as_str().to_string();
-            if !pipeline_by_id.contains_key(&id) {
-                pipeline_order.push(id.clone());
-            }
-            pipeline_by_id.insert(id, rule);
-        }
-
-        let mut redirect_by_id: HashMap<String, RedirectRule> = self
-            .redirect_rules
-            .into_iter()
-            .map(|r| (r.id.as_str().to_string(), r))
-            .collect();
-        let mut redirect_order: Vec<String> = redirect_by_id.keys().cloned().collect();
-        for rule in overrides.redirect_rules {
-            let id = rule.id.as_str().to_string();
-            if !redirect_by_id.contains_key(&id) {
-                redirect_order.push(id.clone());
-            }
-            redirect_by_id.insert(id, rule);
-        }
-
-        Self {
-            command_rules: command_order
-                .into_iter()
-                .filter_map(|id| command_by_id.remove(&id))
-                .collect(),
-            pipeline_rules: pipeline_order
-                .into_iter()
-                .filter_map(|id| pipeline_by_id.remove(&id))
-                .collect(),
-            redirect_rules: redirect_order
-                .into_iter()
-                .filter_map(|id| redirect_by_id.remove(&id))
-                .collect(),
-        }
     }
 
     /// The first [`CommandRule`] that matches `argv`, if any.
@@ -956,6 +955,14 @@ impl Rules {
     #[must_use]
     pub(crate) fn match_redirect_target(&self, target: &str) -> Option<&RedirectRule> {
         self.redirect_rules.iter().find(|rule| rule.matches(target))
+    }
+
+    /// The first user-configured `ask` [`CommandRule`] that matches `argv`,
+    /// if any. Always `None` for an embedded-only [`Rules`] (see the struct
+    /// docs) — only [`merge_user_config`] populates `ask_rules`.
+    #[must_use]
+    pub(crate) fn match_ask(&self, argv: &[NormalizedWord]) -> Option<&CommandRule> {
+        self.ask_rules.iter().find(|rule| rule.matches(argv))
     }
 
     /// The first [`CommandRule`] for which [`CommandRule::matches_except_target`]
@@ -994,7 +1001,6 @@ impl Allowlist {
     /// Returns [`RulesError`] under the same conditions as
     /// [`Rules::parse`] (invalid TOML, a semantically invalid entry, or a
     /// duplicate id).
-    #[allow(dead_code)]
     pub(crate) fn parse(toml: &str) -> Result<Self, RulesError> {
         let dto: AllowlistFileDto = toml::from_str(toml)?;
         let entries = dto
@@ -1013,7 +1019,6 @@ impl Allowlist {
     /// # Errors
     ///
     /// Returns [`RulesError`] if the embedded file fails to parse.
-    #[allow(dead_code)]
     pub(crate) fn embedded() -> Result<Self, RulesError> {
         Self::parse(EMBEDDED_ALLOWLIST)
     }
@@ -1057,7 +1062,6 @@ pub(crate) enum AllowlistOutcome {
 ///
 /// The matched entry's id is always returned in the `Downgraded` case
 /// (never silently applied) — the audit-trail requirement.
-#[allow(dead_code)]
 #[must_use]
 pub(crate) fn apply_allowlist(verdict: &Verdict, allowlist: &Allowlist) -> AllowlistOutcome {
     if verdict.decision() != Decision::Ask {
@@ -1075,6 +1079,186 @@ pub(crate) fn apply_allowlist(verdict: &Verdict, allowlist: &Allowlist) -> Allow
         },
         None => AllowlistOutcome::Unchanged,
     }
+}
+
+// ---------------------------------------------------------------------
+// User config (deny/ask/allow) — plan.md §6 item 8
+// ---------------------------------------------------------------------
+
+/// Whether `entry`'s matcher would match any known shell interpreter or
+/// transparent wrapper name (`SHELL_INTERPRETERS`/`PIPELINE_INTERPRETERS`/
+/// `TRANSPARENT_WRAPPERS`) — used to reject `allow` config entries that
+/// would suppress every recursion-derived `Ask` involving one of those
+/// names (`bash -c` recursion, a decode-fed pipeline sink, the
+/// substitution-depth-cap DoS guard's own fail-closed `Ask`), not just an
+/// entry that names one exactly: `entry.command`'s own `matches` is reused
+/// against every candidate name, so a `command_prefix = "b"` entry is
+/// caught the same way an exact `command = "bash"` entry would be — a
+/// `Prefix` matcher this permissive is exactly as dangerous as an exact
+/// one.
+fn matches_dangerous_allow_target(entry: &CommandRule) -> bool {
+    SHELL_INTERPRETERS
+        .iter()
+        .chain(PIPELINE_INTERPRETERS.iter())
+        .chain(TRANSPARENT_WRAPPERS.iter())
+        .any(|name| entry.command.matches(name))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UserConfigFileDto {
+    #[serde(default)]
+    deny: Vec<CommandRuleDto>,
+    #[serde(default)]
+    ask: Vec<CommandRuleDto>,
+    #[serde(default)]
+    allow: Vec<CommandRuleDto>,
+}
+
+/// A user-supplied policy config, parsed and validated but not yet merged
+/// with the embedded blocklist/allowlist — see [`merge_user_config`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UserConfig {
+    deny: Vec<CommandRule>,
+    ask: Vec<CommandRule>,
+    allow: Vec<CommandRule>,
+}
+
+impl UserConfig {
+    /// Parses `toml` (never a path — this module's "file I/O stays out of
+    /// this module" convention) into a validated [`UserConfig`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RulesError`] for invalid TOML syntax, a semantically
+    /// invalid entry (same checks as [`Rules::parse`]/[`Allowlist::parse`]),
+    /// a duplicate id — checked across all three of `deny`/`ask`/`allow`
+    /// together, one shared id-space, so an id can't dodge the check by
+    /// moving arrays — or an `allow` entry matching a shell interpreter or
+    /// transparent wrapper name (see [`matches_dangerous_allow_target`]).
+    pub(crate) fn parse(toml: &str) -> Result<Self, RulesError> {
+        let dto: UserConfigFileDto = toml::from_str(toml)?;
+
+        let deny = dto
+            .deny
+            .into_iter()
+            .map(convert_command_rule)
+            .collect::<Result<Vec<_>, _>>()?;
+        let ask = dto
+            .ask
+            .into_iter()
+            .map(convert_command_rule)
+            .collect::<Result<Vec<_>, _>>()?;
+        let allow = dto
+            .allow
+            .into_iter()
+            .map(convert_command_rule)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        reject_duplicate_ids(
+            deny.iter()
+                .map(|r| r.id.as_str())
+                .chain(ask.iter().map(|r| r.id.as_str()))
+                .chain(allow.iter().map(|r| r.id.as_str())),
+        )?;
+
+        for entry in &allow {
+            if matches_dangerous_allow_target(entry) {
+                return Err(RulesError::invalid(
+                    entry.id.as_str(),
+                    "an `allow` entry must not match a shell interpreter or transparent \
+                     wrapper name (bash, sh, env, xargs, ...) — this would suppress every \
+                     recursion-derived Ask involving that name, including the substitution-\
+                     depth-cap fail-closed guard's own Ask",
+                ));
+            }
+        }
+
+        Ok(Self { deny, ask, allow })
+    }
+}
+
+/// Merges a user config's `deny`/`ask`/`allow` onto the embedded blocklist
+/// plus allowlist, additively only, never replace-by-id (unlike the
+/// deleted `Rules::with_override`/`layer`).
+///
+/// Every id the user config introduces, across all three arrays, must be
+/// new versus `blocklist`'s command rule ids, `blocklist`'s pipeline rule
+/// ids, and `allowlist`'s entry ids — one shared id-space. A collision is a
+/// load-time [`RulesError::DuplicateId`], fail-closed, never a silent
+/// replace.
+///
+/// `deny` entries land in the returned `Rules`' `command_rules`, the
+/// existing Block-matching path, so `evaluate_simple_command` needs no
+/// change to pick them up. `ask` entries land in `ask_rules` (see
+/// [`Rules::match_ask`]). `allow` entries land in the returned
+/// `Allowlist`'s entries; the only path from a config `allow` entry to a
+/// permissive decision is [`apply_allowlist`], which is structurally
+/// Block-immune before it even consults its entries.
+///
+/// # Errors
+///
+/// Returns [`RulesError::DuplicateId`] on any id collision described above.
+pub(crate) fn merge_user_config(
+    blocklist: Rules,
+    allowlist: Allowlist,
+    user_config: UserConfig,
+) -> Result<(Rules, Allowlist), RulesError> {
+    let existing_ids: HashSet<String> = blocklist
+        .command_rules
+        .iter()
+        .map(|r| r.id.as_str().to_string())
+        .chain(
+            blocklist
+                .pipeline_rules
+                .iter()
+                .map(|r| r.id.as_str().to_string()),
+        )
+        .chain(
+            blocklist
+                .redirect_rules
+                .iter()
+                .map(|r| r.id.as_str().to_string()),
+        )
+        .chain(
+            blocklist
+                .ask_rules
+                .iter()
+                .map(|r| r.id.as_str().to_string()),
+        )
+        .chain(allowlist.entries.iter().map(|r| r.id.as_str().to_string()))
+        .collect();
+
+    for id in user_config
+        .deny
+        .iter()
+        .map(|r| r.id.as_str())
+        .chain(user_config.ask.iter().map(|r| r.id.as_str()))
+        .chain(user_config.allow.iter().map(|r| r.id.as_str()))
+    {
+        if existing_ids.contains(id) {
+            return Err(RulesError::DuplicateId(id.to_string()));
+        }
+    }
+
+    let mut command_rules = blocklist.command_rules;
+    command_rules.extend(user_config.deny);
+
+    let mut ask_rules = blocklist.ask_rules;
+    ask_rules.extend(user_config.ask);
+
+    let mut entries = allowlist.entries;
+    entries.extend(user_config.allow);
+
+    Ok((
+        Rules {
+            command_rules,
+            pipeline_rules: blocklist.pipeline_rules,
+            redirect_rules: blocklist.redirect_rules,
+            ask_rules,
+        },
+        Allowlist { entries },
+    ))
 }
 
 // ---------------------------------------------------------------------
@@ -1192,6 +1376,76 @@ mod tests {
             rules
                 .match_command(&argv(&["rm", "-rf", "~/old-build"]))
                 .is_none()
+        );
+    }
+
+    // ==== Security review: CommandRule matching resolves basename + skips
+    // transparent wrappers, the same way PipelineRule matching already does
+    // (matches_command_and_flags now goes through effective_command instead
+    // of a raw argv[0] compare) ====
+
+    #[test]
+    fn rm_rf_root_matches_via_absolute_path() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["/bin/rm", "-rf", "/"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn rm_rf_root_matches_through_env_wrapper() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["env", "rm", "-rf", "/"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn rm_rf_root_matches_through_nohup_wrapper() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["nohup", "rm", "-rf", "/"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn custom_rule_matches_absolute_path_command() {
+        let toml = r#"
+            [[command]]
+            id = "deny-gh"
+            reason = "test"
+            command = "gh"
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["/opt/homebrew/bin/gh", "repo", "delete"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn custom_rule_matches_wrapped_command_with_wrapper_flags() {
+        let toml = r#"
+            [[command]]
+            id = "deny-gh"
+            reason = "test"
+            command = "gh"
+            required_flags = ["--yes"]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        // `env`'s own leading assignment argument must not be mistaken for
+        // one of gh's own required flags, nor prevent them being seen.
+        assert!(
+            rules
+                .match_command(&argv(&["env", "FOO=bar", "gh", "repo", "delete", "--yes"]))
+                .is_some()
         );
     }
 
@@ -1489,6 +1743,62 @@ mod tests {
         );
     }
 
+    // ==== Self-protection: literal ~/.config/shguard/ token ====
+
+    #[test]
+    fn self_protect_tee_literal_tilde_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["tee", "~/.config/shguard/config.toml"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn self_protect_cp_literal_tilde_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["cp", "evil.toml", "~/.config/shguard/config.toml"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn self_protect_sed_without_dash_i_does_not_match() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["sed", "s/x/y/", "~/.config/shguard/config.toml"]))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn self_protect_dd_of_literal_tilde_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "dd",
+                    "if=/dev/zero",
+                    "of=~/.config/shguard/config.toml"
+                ]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn self_protect_cp_unrelated_files_does_not_match() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["cp", "a.txt", "b.txt"]))
+                .is_none()
+        );
+    }
+
     // ==== Pipeline rule: curl|sh matches, cat|bash does not ====
 
     #[test]
@@ -1635,42 +1945,323 @@ mod tests {
         assert!(FlagMatcher::parse("r||f").is_err());
     }
 
+    // ==== UserConfig::parse ====
+
     #[test]
-    fn command_rule_override_replaces_same_id() {
-        let base = r#"
-            [[command]]
-            id = "shared"
-            reason = "base reason"
-            command = "rm"
+    fn user_config_parses_deny_ask_allow() {
+        let toml = r#"
+            [[deny]]
+            id = "user-deny-scary"
+            reason = "never run this"
+            command = "scary-tool"
+
+            [[ask]]
+            id = "user-ask-gh"
+            reason = "confirm every gh invocation"
+            command = "gh"
+
+            [[allow]]
+            id = "user-allow-ls"
+            reason = "read-only, always safe"
+            command = "ls"
         "#;
-        let overridden = r#"
-            [[command]]
-            id = "shared"
-            reason = "overridden reason"
-            command = "shred"
-        "#;
-        let base_rules = Rules::parse(base).unwrap();
-        let over_rules = Rules::parse(overridden).unwrap();
-        let layered = base_rules.layer(over_rules);
-        let rule = layered
-            .match_command(&argv(&["shred", "/dev/sda"]))
-            .unwrap();
-        assert_eq!(rule.reason().as_str(), "overridden reason");
-        assert!(layered.match_command(&argv(&["rm", "/"])).is_none());
+        let config = UserConfig::parse(toml).unwrap();
+        assert_eq!(config.deny.len(), 1);
+        assert_eq!(config.ask.len(), 1);
+        assert_eq!(config.allow.len(), 1);
     }
 
     #[test]
-    fn with_override_adds_new_id_and_keeps_builtins() {
-        let extra = r#"
-            [[command]]
-            id = "extra-rule"
-            reason = "custom operator rule"
-            command = "wipe-everything"
+    fn user_config_rejects_duplicate_id_across_arrays() {
+        let toml = r#"
+            [[deny]]
+            id = "dup"
+            reason = "a"
+            command = "foo"
+
+            [[ask]]
+            id = "dup"
+            reason = "b"
+            command = "bar"
         "#;
-        let layered = Rules::with_override(extra).unwrap();
-        assert!(layered.match_command(&argv(&["wipe-everything"])).is_some());
+        assert!(matches!(
+            UserConfig::parse(toml),
+            Err(RulesError::DuplicateId(id)) if id == "dup"
+        ));
+    }
+
+    #[test]
+    fn user_config_rejects_allow_entry_matching_shell_interpreter_exactly() {
+        let toml = r#"
+            [[allow]]
+            id = "user-allow-bash"
+            reason = "trust me"
+            command = "bash"
+        "#;
+        assert!(matches!(
+            UserConfig::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn user_config_rejects_allow_entry_whose_prefix_captures_a_shell_interpreter() {
+        // command_prefix = "b" matches "bash" at runtime via CommandMatch::Prefix's
+        // own starts_with semantics, just as validly as an exact command = "bash"
+        // would — the inclusion-aware check must catch this too, not just equality.
+        let toml = r#"
+            [[allow]]
+            id = "user-allow-b-prefix"
+            reason = "trust me"
+            command_prefix = "b"
+        "#;
+        assert!(matches!(
+            UserConfig::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn user_config_rejects_allow_entry_matching_transparent_wrapper() {
+        let toml = r#"
+            [[allow]]
+            id = "user-allow-env"
+            reason = "trust me"
+            command = "env"
+        "#;
+        assert!(matches!(
+            UserConfig::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn empty_command_prefix_is_rejected() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "some reason"
+            command_prefix = ""
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn empty_command_is_rejected() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "some reason"
+            command = ""
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn empty_target_prefix_is_rejected() {
+        // An empty prefix is a silent universal matcher
+        // ("".starts_with("") is always true) — same hazard as an empty
+        // command_prefix, catastrophic once reachable from an allow entry.
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "some reason"
+            command = "rm"
+            targets = [{ prefix = "" }]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn empty_target_exact_is_rejected() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "some reason"
+            command = "rm"
+            targets = [{ exact = "" }]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn unknown_field_in_command_rule_is_rejected() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "some reason"
+            command = "rm"
+            target = [{ exact = "/" }]
+        "#;
+        assert!(Rules::parse(toml).is_err());
+    }
+
+    // ==== merge_user_config: additive, never replace-by-id ====
+
+    #[test]
+    fn merge_user_config_adds_new_ids_and_keeps_builtins() {
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let config = UserConfig::parse(
+            r#"
+            [[deny]]
+            id = "user-deny-scary"
+            reason = "never run this"
+            command = "scary-tool"
+        "#,
+        )
+        .unwrap();
+        let (merged, _) = merge_user_config(blocklist, allowlist, config).unwrap();
+        assert!(merged.match_command(&argv(&["scary-tool"])).is_some());
         // builtin still present
-        assert!(layered.match_command(&argv(&["rm", "-rf", "/"])).is_some());
+        assert!(merged.match_command(&argv(&["rm", "-rf", "/"])).is_some());
+    }
+
+    #[test]
+    fn merge_user_config_rejects_id_colliding_with_embedded_blocklist_id() {
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        // Real embedded id, reused by an unrelated-looking user rule.
+        let config = UserConfig::parse(
+            r#"
+            [[deny]]
+            id = "rm-recursive-force-dangerous-target"
+            reason = "totally different rule"
+            command = "totally-different-command"
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(
+            merge_user_config(blocklist, allowlist, config),
+            Err(RulesError::DuplicateId(id)) if id == "rm-recursive-force-dangerous-target"
+        ));
+    }
+
+    #[test]
+    fn merge_user_config_rejects_id_colliding_with_embedded_allowlist_id() {
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::parse(
+            r#"
+            [[entry]]
+            id = "shared-id"
+            reason = "existing allowlist entry"
+            command = "ls"
+        "#,
+        )
+        .unwrap();
+        let config = UserConfig::parse(
+            r#"
+            [[ask]]
+            id = "shared-id"
+            reason = "unrelated"
+            command = "gh"
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(
+            merge_user_config(blocklist, allowlist, config),
+            Err(RulesError::DuplicateId(id)) if id == "shared-id"
+        ));
+    }
+
+    #[test]
+    fn merged_allow_entry_cannot_convert_block_to_allow() {
+        // End-to-end version of dod_4_allowlist_cannot_convert_block_to_allow,
+        // but through the merge path — proves a config-declared allow entry
+        // is structurally Block-immune, same as a hand-built Allowlist.
+        let blocklist = Rules::embedded().unwrap();
+        let cmd = argv(&["rm", "-rf", "/"]);
+        let rule = blocklist.match_command(&cmd).unwrap();
+        let block = Verdict::block(
+            Reason::new(rule.reason().as_str().to_string()),
+            cmd.clone(),
+            Some(rule.id().clone()),
+        );
+
+        let allowlist = Allowlist::embedded().unwrap();
+        let config = UserConfig::parse(
+            r#"
+            [[allow]]
+            id = "user-trusts-rm"
+            reason = "operator trusts this exact shape"
+            command = "rm"
+            required_flags = ["r", "f"]
+            targets = [{ exact = "/" }]
+        "#,
+        )
+        .unwrap();
+        let (_, merged_allowlist) = merge_user_config(blocklist, allowlist, config).unwrap();
+
+        // sanity: the merged allowlist entry does match this argv
+        assert!(merged_allowlist.first_match(&cmd).is_some());
+
+        let outcome = apply_allowlist(&block, &merged_allowlist);
+        assert_eq!(outcome, AllowlistOutcome::Unchanged);
+        assert_eq!(block.decision(), Decision::Block);
+    }
+
+    #[test]
+    fn merge_user_config_rejects_id_colliding_with_existing_ask_rule() {
+        // Adversarial-review finding: the id-collision id-space must also
+        // cover ask_rules already present in `blocklist` (e.g. from a
+        // prior merge, such as shguard's own self-protection pass) — not
+        // just command_rules/pipeline_rules/allowlist entries.
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let first_config = UserConfig::parse(
+            r#"
+            [[ask]]
+            id = "user-ask-gh"
+            reason = "confirm every gh invocation"
+            command = "gh"
+        "#,
+        )
+        .unwrap();
+        let (rules, allowlist) = merge_user_config(blocklist, allowlist, first_config).unwrap();
+
+        let second_config = UserConfig::parse(
+            r#"
+            [[deny]]
+            id = "user-ask-gh"
+            reason = "unrelated"
+            command = "totally-different-command"
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(
+            merge_user_config(rules, allowlist, second_config),
+            Err(RulesError::DuplicateId(id)) if id == "user-ask-gh"
+        ));
+    }
+
+    #[test]
+    fn merge_user_config_ask_entries_are_reachable_via_match_ask() {
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let config = UserConfig::parse(
+            r#"
+            [[ask]]
+            id = "user-ask-gh"
+            reason = "confirm every gh invocation"
+            command = "gh"
+        "#,
+        )
+        .unwrap();
+        let (merged, _) = merge_user_config(blocklist, allowlist, config).unwrap();
+        assert!(merged.match_ask(&argv(&["gh", "pr", "view"])).is_some());
+        assert!(merged.match_ask(&argv(&["ls"])).is_none());
     }
 
     // ==== required_tokens schema extension ====
@@ -1836,6 +2427,45 @@ mod tests {
         assert!(
             rules
                 .match_command(&argv(&["git", "push", "-f", "origin"]))
+                .is_some()
+        );
+    }
+
+    // ==== Merge-reconciliation finding: required_tokens must resolve
+    // through effective_command too, or a wrapped/path-qualified command
+    // reintroduces exactly the bypass the prerequisite effective_command
+    // fix closed for required_flags/targets — matching against raw
+    // argv[1..] instead of effective_command's rest_words would offset
+    // every positional index by one for any wrapped invocation, making
+    // required_tokens matching fail (a false negative / bypass) rather
+    // than just misalign. ====
+
+    #[test]
+    fn required_tokens_matches_through_env_wrapper() {
+        let toml = r#"
+            [[command]]
+            id = "git-push-force"
+            reason = "force push"
+            command = "git"
+            required_tokens = ["push"]
+            required_flags = ["f|--force"]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["env", "git", "push", "--force", "origin"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn embedded_git_push_force_rule_matches_through_env_wrapper() {
+        // Same as above, but against the real embedded rule (PR #20's
+        // git-push-force) rather than a hand-built fixture.
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["env", "git", "push", "--force", "origin"]))
                 .is_some()
         );
     }
