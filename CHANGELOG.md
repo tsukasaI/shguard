@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+- `sudo`-prefixed commands now floor to Ask on a blocklist miss instead of
+  silently allowing, independent of whether the wrapped command trips its
+  own rule (#32). This includes `sudo` reached through other wrappers
+  (`env sudo ls`) and `sudo bash -c '<benign script>'`. The floor is not
+  config-overridable: an `allow` entry for the wrapped command
+  (`command = "gh"` vs `sudo gh pr view`) no longer clears it, and
+  `command = "sudo"` allow entries were already rejected at load time.
+
 ## [0.1.0] - 2026-07-20
 
 Initial release.

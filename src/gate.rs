@@ -53,6 +53,12 @@
 //!    list (`rules/blocklist.toml`'s `[[redirect]]` rules) — only
 //!    statically-resolved targets are checked; unresolved targets fall
 //!    through to whatever the rest of the command would decide.
+//! 10. `sudo` anywhere in a command's transparent-wrapper chain ("rule 10",
+//!     issue #32) — privilege escalation itself is gated: a blocklist miss
+//!     floors to Ask instead of Allow (`sudo whoami`, `env sudo ls`), while
+//!     a rule hit (`sudo rm -rf /`) still Blocks exactly as before. The
+//!     floor also holds on rule 6a's inner-Allow early return
+//!     (`sudo bash -c 'ls'`), which would otherwise bypass it.
 //!
 //! Multi-command lines (`a; b && c`, pipelines) fold with worst-decision-
 //! wins (plan.md §6 item 7, `Decision`'s `Ord`).
@@ -138,6 +144,17 @@
 //! command in that case is literally one of `SHELL_INTERPRETERS`, and a
 //! config `allow` entry covering an interpreter name is rejected at
 //! config-load time (`crate::rules::UserConfig::parse`).
+//!
+//! **A command whose wrapper chain passes through `sudo` (rule 10) is
+//! likewise never eligible for the allow-downgrade step.** Allow-entry
+//! matching resolves through `TRANSPARENT_WRAPPERS` exactly like rule
+//! matching, so an entry written for the unprivileged command
+//! (`[[allow]] command = "gh"`) would otherwise also clear
+//! `sudo gh pr view`'s rule-10 Ask — consent to a command is not consent
+//! to running it under privilege escalation. Combined with allow-entry
+//! validation already rejecting `command = "sudo"` entries themselves,
+//! there is deliberately no config mechanism at all that lifts the sudo
+//! floor (fail-closed; issue #32's confirmed trade-off).
 //!
 //! The pipeline-shape `Ask`/`Block` (rule 5b/5c, folded in
 //! [`evaluate_pipeline`] — outside any single simple command's own
@@ -444,10 +461,15 @@ fn evaluate_simple_command(
     let argv = normalize::normalize_argv(command);
     let ask_match = rules.match_ask(&argv);
     let has_argument_substitution = has_any_argument_position_substitution(command);
+    // Rule 10's allowlist guard (module docs): an allow entry matches
+    // through `sudo` the same way rules do, but consent to the unprivileged
+    // command is not consent to running it under privilege escalation — a
+    // sudo-floored Ask must never downgrade to Allow.
+    let sudo_in_chain = crate::rules::wrapper_chain_contains_sudo(&argv);
 
     let verdict = evaluate_simple_command_core(command, argv, env, rules, allowlist, depth);
 
-    let verdict = if has_argument_substitution {
+    let verdict = if has_argument_substitution || sudo_in_chain {
         verdict
     } else {
         apply_allowlist_downgrade(verdict, allowlist)
@@ -561,13 +583,20 @@ fn evaluate_simple_command_core(
     // search must scan instead.
     let effective = crate::rules::effective_command(&argv);
 
+    // Rule 10: a `sudo`-prefixed command floors to Ask on a blocklist miss —
+    // privilege escalation itself is the risk being gated, independent of
+    // whether the wrapped command trips its own rule (issue #32). Computed
+    // before rule 6a because that rule's inner-Allow early return below must
+    // not bypass the floor (`sudo bash -c 'ls'`).
+    let sudo_floor = crate::rules::wrapper_chain_contains_sudo(&argv);
+
     // Rule 6a: `bash -c '<string>'`/`sh -c`/`zsh -c`/`dash -c` recurses the
     // script exactly like a substitution.
     if let Some((name, rest_words)) = effective
         && SHELL_INTERPRETERS.contains(&name)
         && let Some(outcome) = evaluate_dash_c(&argv, rest_words, name, rules, allowlist, depth)
     {
-        return outcome;
+        return apply_sudo_floor(outcome, sudo_floor);
     }
 
     // Rule 6b: `python -c`/`perl -e`/`node -e` — no introspection of
@@ -619,13 +648,33 @@ fn evaluate_simple_command_core(
         argv,
         interpreter_code_floor,
         ifs_floor,
+        sudo_floor,
         opaque_kind,
         except_target_rule,
         substitution_result,
     )
 }
 
-/// Folds every non-Block-by-rule-match floor (rules 3/4/6b/7/8) into the
+/// Reason attached by the sudo floor (rule 10) wherever it fires — shared
+/// between [`fold_floors`] and [`apply_sudo_floor`] so both paths report
+/// identically.
+const SUDO_FLOOR_REASON: &str = "the command is invoked via sudo; privilege escalation is gated \
+     independent of whether the wrapped command trips its own rule";
+
+/// Applies the sudo floor (rule 10) to a verdict produced on an early-return
+/// path that can yield `Allow` before [`fold_floors`] runs — today only rule
+/// 6a's inner-Allow case (`sudo bash -c 'ls'`). Anything already Ask/Block
+/// passes through untouched; the floor only ever lifts Allow.
+fn apply_sudo_floor(verdict: Verdict, sudo_floor: bool) -> Verdict {
+    if sudo_floor && verdict.decision() == Decision::Allow {
+        let argv = verdict.normalized_argv().to_vec();
+        Verdict::ask(Reason::new(SUDO_FLOOR_REASON), argv)
+    } else {
+        verdict
+    }
+}
+
+/// Folds every non-Block-by-rule-match floor (rules 3/4/6b/7/8/10) into the
 /// final [`Verdict`] for one simple command, once the ordinary blocklist
 /// match has already come back clean. The only way this can still produce
 /// `Block` is rule 3's argument-position substitution recursion.
@@ -633,6 +682,7 @@ fn fold_floors(
     argv: Vec<NormalizedWord>,
     interpreter_code_floor: bool,
     ifs_floor: bool,
+    sudo_floor: bool,
     opaque_kind: Option<UnresolvableKind>,
     except_target_rule: Option<&crate::rules::CommandRule>,
     substitution_result: Option<Decision>,
@@ -655,6 +705,10 @@ fn fold_floors(
              the default-IFS fold wrong, so a blocklist miss never falls through to Allow"
                 .to_string(),
         );
+    }
+    if sudo_floor {
+        decision = decision.max(Decision::Ask);
+        reasons.push(SUDO_FLOOR_REASON.to_string());
     }
     if let Some(kind) = opaque_kind {
         decision = decision.max(Decision::Ask);
@@ -1652,5 +1706,73 @@ mod tests {
                 "{command:?}"
             );
         }
+    }
+
+    // ==== Issue #32: sudo floor (rule 10) ====
+
+    #[test]
+    fn sudo_whoami_floors_to_ask() {
+        assert_decision("sudo whoami", Decision::Ask);
+    }
+
+    #[test]
+    fn sudo_wrapped_rm_rf_root_still_blocks() {
+        assert_decision("sudo rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn env_wrapped_sudo_floors_to_ask() {
+        assert_decision("env sudo ls", Decision::Ask);
+    }
+
+    #[test]
+    fn sudo_wrapped_substitution_still_recurses_to_block() {
+        assert_decision("sudo ls $(rm -rf /)", Decision::Block);
+    }
+
+    #[test]
+    fn sudo_wrapped_bash_dash_c_still_recurses_and_blocks() {
+        assert_decision("sudo bash -c 'rm -rf /'", Decision::Block);
+    }
+
+    #[test]
+    fn sudo_wrapped_bash_dash_c_with_benign_inner_floors_to_ask() {
+        // Rule 6a's inner-Allow early return must not bypass the floor:
+        // without `apply_sudo_floor` on that path this is Allow.
+        assert_decision("sudo bash -c 'ls'", Decision::Ask);
+    }
+
+    #[test]
+    fn sudo_with_separated_value_flag_floors_to_ask() {
+        // `-u root`'s value token hides `rm` from the ordinary rule match
+        // (the wrapper-argument known limitation documented on
+        // `TRANSPARENT_WRAPPERS`); the floor still gates the escalation.
+        assert_decision("sudo -u root rm -rf /", Decision::Ask);
+    }
+
+    // ==== Wrapper-argument regression pins (from the issue #32 session) ====
+
+    #[test]
+    fn nice_with_separated_value_flag_misses_rule_and_allows() {
+        // Pins the `TRANSPARENT_WRAPPERS` known limitation as-is: `19` (the
+        // value of `-n 19`) is mistaken for the wrapped command, so the rm
+        // rule never matches and no floor applies. A fix belongs to a
+        // wrapper-argument-aware follow-up, not the sudo floor.
+        assert_decision("nice -n 19 rm -rf /", Decision::Allow);
+    }
+
+    #[test]
+    fn nice_with_attached_value_flag_still_blocks() {
+        assert_decision("nice -n19 rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn benign_inner_substitution_in_dangerous_target_position_stays_allow() {
+        // Pins rule 3's deliberate Allow-transparency (`echo $(date)`
+        // semantics) even when the outer shape would be dangerous if the
+        // substitution's *output* were the target: the inner command itself
+        // is benign, and rule 4's except-target refinement only covers bare
+        // `$VAR`, not substitutions.
+        assert_decision("rm -rf $(echo /)", Decision::Allow);
     }
 }

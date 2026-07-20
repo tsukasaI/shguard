@@ -561,6 +561,33 @@ fn skip_wrapper_arguments<'a>(wrapper: &str, argv: &'a [NormalizedWord]) -> &'a 
     &argv[idx..]
 }
 
+/// Whether `stage`'s wrapper-unwrap chain (the same walk as
+/// [`effective_command`]) passes through `sudo` at any hop, not just as the
+/// terminal resolved command — `env sudo ls` must be caught the same as a
+/// bare `sudo ls` (issue #32, `crate::gate` rule 10). Returning `false` on
+/// an unresolvable hop is not fail-open: `crate::gate`'s unresolvable-word
+/// floors (rules 2/8) already route those commands to Ask on their own.
+#[must_use]
+pub(crate) fn wrapper_chain_contains_sudo(stage: &[NormalizedWord]) -> bool {
+    let mut rest = stage;
+    loop {
+        let Some((first, tail)) = rest.split_first() else {
+            return false;
+        };
+        let Resolution::Resolved(name) = first.resolution() else {
+            return false;
+        };
+        let base = basename(name);
+        if base == "sudo" {
+            return true;
+        }
+        if !TRANSPARENT_WRAPPERS.contains(&base) {
+            return false;
+        }
+        rest = skip_wrapper_arguments(base, tail);
+    }
+}
+
 // ---------------------------------------------------------------------
 // Serde DTOs (private to this module — parse, don't validate)
 // ---------------------------------------------------------------------
@@ -1463,6 +1490,15 @@ mod tests {
                 .match_command(&argv(&["nohup", "rm", "-rf", "/"]))
                 .is_some()
         );
+    }
+
+    #[test]
+    fn wrapper_chain_contains_sudo_finds_sudo_through_env_wrapper() {
+        assert!(wrapper_chain_contains_sudo(&argv(&["sudo", "whoami"])));
+        assert!(wrapper_chain_contains_sudo(&argv(&["env", "sudo", "ls"])));
+        assert!(wrapper_chain_contains_sudo(&argv(&["/usr/bin/sudo", "ls"])));
+        assert!(!wrapper_chain_contains_sudo(&argv(&["env", "ls"])));
+        assert!(!wrapper_chain_contains_sudo(&argv(&["ls", "sudo"])));
     }
 
     #[test]
