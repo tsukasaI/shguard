@@ -1362,6 +1362,23 @@ mod tests {
         );
     }
 
+    // ---- regression: --force-with-lease must not satisfy a --force token ----
+    #[test]
+    fn git_push_force_with_lease_does_not_match_force_rule() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "git",
+                    "push",
+                    "--force-with-lease",
+                    "origin",
+                    "main"
+                ]))
+                .is_none()
+        );
+    }
+
     // ---- home root is dangerous; a path under home is routine cleanup ----
     #[test]
     fn rm_rf_home_root_matches() {
@@ -1799,6 +1816,74 @@ mod tests {
         );
     }
 
+    #[test]
+    fn self_protect_sed_in_place_long_option_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "sed",
+                    "--in-place",
+                    "s/x/y/",
+                    "~/.config/shguard/config.toml"
+                ]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn self_protect_rm_literal_tilde_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["rm", "~/.config/shguard/config.toml"]))
+                .is_some()
+        );
+    }
+
+    // rm -r on the bare directory (no trailing slash) — issue #22's core
+    // scenario, deleting the whole config directory in one shot.
+    #[test]
+    fn self_protect_rm_recursive_literal_tilde_directory_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["rm", "-r", "~/.config/shguard"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn self_protect_unlink_literal_tilde_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["unlink", "~/.config/shguard/config.toml"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn self_protect_ln_literal_tilde_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "ln",
+                    "-sf",
+                    "/dev/null",
+                    "~/.config/shguard/config.toml"
+                ]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn self_protect_rm_unrelated_file_does_not_match() {
+        let rules = Rules::embedded().unwrap();
+        assert!(rules.match_command(&argv(&["rm", "a.txt"])).is_none());
+    }
+
     // ==== Pipeline rule: curl|sh matches, cat|bash does not ====
 
     #[test]
@@ -1882,12 +1967,21 @@ mod tests {
 
     #[test]
     fn except_target_requires_required_flags_too() {
-        // command name matches but a required flag (`-f`/`--force`) is
-        // absent — the danger shape itself is incomplete, so this must not
-        // fire just because a later word happens to be unresolvable.
+        // `rm-recursive-force-dangerous-target` requires BOTH `r` and `f` —
+        // having only `-r` must not satisfy *that* rule's flag gating, even
+        // with an unresolvable tail. `match_command_except_target` may
+        // still return the flagless `self-protect-config-rm-tilde` rule
+        // instead (the same fail-safe "unresolvable target could be
+        // anything" refinement issue #22 extends to `rm`, already present
+        // for `cp`/`tee`/`mv`/`install`/`dd`) — what must not happen is the
+        // *dangerous-target* rule firing on an incomplete flag set.
         let rules = Rules::embedded().unwrap();
         let cmd = argv_with_unresolvable_tail(&["rm", "-r"]);
-        assert!(rules.match_command_except_target(&cmd).is_none());
+        let matched = rules.match_command_except_target(&cmd);
+        assert_ne!(
+            matched.map(|rule| rule.id().as_str()),
+            Some("rm-recursive-force-dangerous-target")
+        );
     }
 
     // ==== Shape robustness: unresolvable command name never matches,

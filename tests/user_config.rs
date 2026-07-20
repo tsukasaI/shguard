@@ -347,3 +347,36 @@ fn cp_onto_literal_tilde_config_path_is_blocked() {
     );
     assert_eq!(permission_decision(&output), "deny");
 }
+
+// rm -r on the bare config directory (no trailing slash) is issue #22's
+// core scenario: deleting the whole directory silently reverts the
+// user's custom policy to embedded-only.
+#[test]
+fn rm_recursive_on_config_directory_is_blocked() {
+    let home = tempdir().expect("tempdir should create");
+    let output = run_hook(
+        &bash_command("rm -r ~/.config/shguard"),
+        &[("HOME", home.path().to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+}
+
+#[test]
+fn unlink_onto_literal_tilde_config_path_is_blocked() {
+    let home = tempdir().expect("tempdir should create");
+    let output = run_hook(
+        &bash_command("unlink ~/.config/shguard/config.toml"),
+        &[("HOME", home.path().to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+}
+
+#[test]
+fn ln_symlink_swap_onto_literal_tilde_config_path_is_blocked() {
+    let home = tempdir().expect("tempdir should create");
+    let output = run_hook(
+        &bash_command("ln -sf /dev/null ~/.config/shguard/config.toml"),
+        &[("HOME", home.path().to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+}
