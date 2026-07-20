@@ -474,8 +474,10 @@ fn evaluate_simple_command_core(
     }
 
     // Rule 2 / rule 8 (command-position half): argv[0] unresolvable for any
-    // other reason.
-    let command_name = match argv[0].resolution() {
+    // other reason. `Resolved` itself is not captured here — rules 6a/6b
+    // below resolve the *effective* command name via `effective_command`
+    // instead of the raw `argv[0]`.
+    match argv[0].resolution() {
         Resolution::Unresolvable(UnresolvableKind::ParameterExpansion) => {
             return evaluate_command_position_bare_var(first_word_ast, argv, env, rules);
         }
@@ -488,35 +490,40 @@ fn evaluate_simple_command_core(
                 argv,
             );
         }
-        Resolution::Resolved(name) => name.clone(),
-    };
+        Resolution::Resolved(_) => {}
+    }
 
-    // Rules 6a/6b dispatch on the *effective* command name — resolved
-    // through `effective_command` (basename + transparent-wrapper skip),
-    // the same resolution `crate::rules::CommandRule` matching already
-    // uses — not the raw, possibly-wrapped `command_name` above. Without
-    // this, `env bash -c '...'`/`/bin/sh -c '...'` would skip rule 6a's
-    // recursion entirely (adversarial-review finding: a wrapper this
-    // module already resolves everywhere else was still dodging dispatch
-    // here). `evaluate_dash_c` itself scans the *full* `argv` for a `-c`
-    // token regardless of what precedes it, so passing the unmodified
-    // `argv` through still finds `-c` correctly once dispatch is gated on
-    // the right name.
-    let effective_name =
-        crate::rules::effective_command(&argv).map_or(command_name.as_str(), |(name, _)| name);
+    // Rules 6a/6b dispatch on the *effective* command name and its own
+    // arguments — resolved through `effective_command` (basename +
+    // transparent-wrapper skip), the same resolution
+    // `crate::rules::CommandRule` matching already uses — not the raw,
+    // possibly-wrapped `argv[0]`. Dispatching on the resolved name alone
+    // is not enough: a second adversarial-review round
+    // found that `evaluate_dash_c`'s own `-c` search, if run over the full
+    // `argv`, can latch onto a *wrapper's* own `-c`-shaped flag instead of
+    // the interpreter's (`exec -c bash -c '...'`, `setsid -c bash -c
+    // '...'` — both real flags `effective_command` already strips while
+    // walking to `bash`). `effective_command`'s `rest_words` — the tokens
+    // *after* the resolved interpreter, wrapper arguments already skipped
+    // — is what both rule 6a's `-c` search and rule 6b's inline-code-flag
+    // search must scan instead.
+    let effective = crate::rules::effective_command(&argv);
 
     // Rule 6a: `bash -c '<string>'`/`sh -c`/`zsh -c`/`dash -c` recurses the
     // script exactly like a substitution.
-    if SHELL_INTERPRETERS.contains(&effective_name)
-        && let Some(outcome) = evaluate_dash_c(&argv, effective_name, rules, allowlist, depth)
+    if let Some((name, rest_words)) = effective
+        && SHELL_INTERPRETERS.contains(&name)
+        && let Some(outcome) = evaluate_dash_c(&argv, rest_words, name, rules, allowlist, depth)
     {
         return outcome;
     }
 
     // Rule 6b: `python -c`/`perl -e`/`node -e` — no introspection of
     // non-shell code, unconditional Ask floor.
-    let interpreter_code_floor = inline_code_flag(effective_name)
-        .is_some_and(|flag| argv.iter().any(|w| is_resolved_exactly(w, flag)));
+    let interpreter_code_floor = effective.is_some_and(|(name, rest_words)| {
+        inline_code_flag(name)
+            .is_some_and(|flag| rest_words.iter().any(|w| is_resolved_exactly(w, flag)))
+    });
 
     // Rule 7: any `$IFS`-derived word floors to Ask on a blocklist miss.
     let ifs_floor = argv.iter().any(NormalizedWord::is_ifs_derived);
@@ -731,18 +738,29 @@ fn evaluate_command_position_bare_var(
 /// when there is no `-c` flag at all (not this shape). When `-c` is
 /// present but its argument did not statically resolve, fails closed to
 /// Ask rather than silently skipping the check.
+///
+/// `rest_words` — `effective_command`'s tokens *after* the resolved
+/// interpreter, any leading transparent wrapper's own arguments already
+/// stripped — is what gets searched for `-c`, not the full `argv`. A
+/// wrapper carrying its own `-c`-shaped flag (`exec -c bash -c '...'`,
+/// `setsid -c bash -c '...'`) would otherwise have that flag matched
+/// first, treating the *interpreter name* as the script and never
+/// recursing into the real one (adversarial-review finding: this is what
+/// searching the full `argv` here actually did). `argv` itself is kept
+/// only for `outer_argv`, the verdict's reported argv.
 fn evaluate_dash_c(
     argv: &[NormalizedWord],
+    rest_words: &[NormalizedWord],
     interpreter: &str,
     rules: &Rules,
     allowlist: &Allowlist,
     depth: usize,
 ) -> Option<Verdict> {
-    let flag_index = argv.iter().position(|word| match word.resolution() {
+    let flag_index = rest_words.iter().position(|word| match word.resolution() {
         Resolution::Resolved(s) => s == "-c" || short_cluster_contains(s, 'c'),
         Resolution::Unresolvable(_) => false,
     })?;
-    let script_word = argv.get(flag_index + 1)?;
+    let script_word = rest_words.get(flag_index + 1)?;
 
     let outer_argv = argv.to_vec();
     match script_word.resolution() {
@@ -1187,6 +1205,27 @@ mod tests {
             "env python3 -c 'import os; os.system(\"rm -rf /\")'",
             Decision::Ask,
         );
+    }
+
+    // ==== Second adversarial-review round: a wrapper carrying its own
+    // `-c`-shaped flag (`exec -c`, `setsid -c`) must not let
+    // evaluate_dash_c's `-c` search latch onto the wrapper's flag instead
+    // of the interpreter's — this bypassed rule 6a's recursion entirely
+    // even after the first round's effective-name-resolution fix. ====
+
+    #[test]
+    fn exec_dash_c_wrapped_bash_dash_c_still_recurses_and_blocks() {
+        assert_decision("exec -c bash -c 'rm -rf /'", Decision::Block);
+    }
+
+    #[test]
+    fn setsid_dash_c_wrapped_bash_dash_c_still_recurses_and_blocks() {
+        assert_decision("setsid -c bash -c 'rm -rf /'", Decision::Block);
+    }
+
+    #[test]
+    fn exec_dash_c_wrapped_bash_dash_c_recurses_to_allow() {
+        assert_decision("exec -c bash -c 'echo hi'", Decision::Allow);
     }
 
     #[test]
