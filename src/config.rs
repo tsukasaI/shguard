@@ -86,6 +86,11 @@ pub enum ConfigError {
     /// `pub(crate)`, so a public enum variant cannot name it directly.
     #[error("invalid user config: {0}")]
     InvalidConfig(String),
+    /// `var` is set in the environment but its value is not valid UTF-8 —
+    /// treated as a hard failure, not silently collapsed into "unset" the
+    /// way `std::env::var(..).ok()` would (see [`Policy::load`]).
+    #[error("{var} is set but is not valid UTF-8")]
+    InvalidEnvVar { var: &'static str },
 }
 
 impl From<crate::rules::RulesError> for ConfigError {
@@ -136,12 +141,27 @@ impl Policy {
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError`] if `SHGUARD_CONFIG` is set but the file it
-    /// names cannot be read, or if a found config file (explicit or
-    /// default) fails to parse/validate/merge, or if the default path
-    /// exists but fails to read for a reason other than "does not exist".
+    /// Returns [`ConfigError`] if `SHGUARD_CONFIG` is set (including to a
+    /// non-UTF-8 value) but the file it names cannot be read, or if a found
+    /// config file (explicit or default) fails to parse/validate/merge, or
+    /// if the default path exists but fails to read for a reason other
+    /// than "does not exist".
     pub fn load() -> Result<Self, ConfigError> {
-        let shguard_config = std::env::var("SHGUARD_CONFIG").ok();
+        // `var_os` (not `var(..).ok()`) so a *present* but non-UTF-8
+        // `SHGUARD_CONFIG` is distinguishable from *absent* — `var(..).ok()`
+        // collapses both into `None`, silently falling through to XDG/HOME
+        // discovery instead of the hard failure the "set to anything ⇒
+        // explicit" contract (module docs) requires.
+        let shguard_config = match std::env::var_os("SHGUARD_CONFIG") {
+            Some(value) => Some(
+                value
+                    .into_string()
+                    .map_err(|_| ConfigError::InvalidEnvVar {
+                        var: "SHGUARD_CONFIG",
+                    })?,
+            ),
+            None => None,
+        };
         let xdg_config_home = std::env::var("XDG_CONFIG_HOME").ok();
         let home = std::env::var("HOME").ok();
         let explicit = shguard_config.is_some();
