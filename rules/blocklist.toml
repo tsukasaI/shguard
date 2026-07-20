@@ -21,9 +21,11 @@
 #                        a combined cluster ("-rf") or a separated token
 #                        ("-r") — short-flag-aware.
 #                      - a "-"-prefixed string ("-delete", "--recursive") is
-#                        matched as an exact argv token (long options and
-#                        BSD-style single-dash long flags are never
-#                        letter-combinable).
+#                        matched as an argv token, exact or with a "=value"
+#                        suffix appended (GNU long-option convention, e.g.
+#                        "--in-place" also matches "--in-place=.bak"; long
+#                        options and BSD-style single-dash long flags are
+#                        never letter-combinable).
 #                      - a "|"-separated spec ("r|--recursive") means "any
 #                        one of these" (ORed) — use this so a rule can't be
 #                        dodged by swapping a short flag for its long-option
@@ -279,7 +281,7 @@ targets = [{ prefix = "~/.config/shguard/" }]
 id = "self-protect-config-mv-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "mv"
-targets = [{ prefix = "~/.config/shguard/" }]
+targets = [{ prefix = "~/.config/shguard/" }, { exact = "~/.config/shguard" }]
 
 [[command]]
 id = "self-protect-config-install-tilde"
@@ -291,7 +293,7 @@ targets = [{ prefix = "~/.config/shguard/" }]
 id = "self-protect-config-sed-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "sed"
-required_flags = ["i"]
+required_flags = ["i|--in-place"]
 targets = [{ prefix = "~/.config/shguard/" }]
 
 [[command]]
@@ -299,3 +301,27 @@ id = "self-protect-config-dd-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "dd"
 targets = [{ prefix = "of=~/.config/shguard/" }]
+
+# rm/unlink/ln get an `exact` alternative for the bare directory (no
+# trailing slash) alongside the `prefix` one — `rm -r
+# ~/.config/shguard` (deleting the whole directory) has no trailing
+# slash, so it wouldn't hit a prefix-only match the way a file *under*
+# the directory does (issue #22).
+
+[[command]]
+id = "self-protect-config-rm-tilde"
+reason = "writing to shguard's own config directory must never be scripted"
+command = "rm"
+targets = [{ prefix = "~/.config/shguard/" }, { exact = "~/.config/shguard" }]
+
+[[command]]
+id = "self-protect-config-unlink-tilde"
+reason = "writing to shguard's own config directory must never be scripted"
+command = "unlink"
+targets = [{ prefix = "~/.config/shguard/" }, { exact = "~/.config/shguard" }]
+
+[[command]]
+id = "self-protect-config-ln-tilde"
+reason = "writing to shguard's own config directory must never be scripted"
+command = "ln"
+targets = [{ prefix = "~/.config/shguard/" }, { exact = "~/.config/shguard" }]

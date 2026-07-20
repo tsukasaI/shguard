@@ -137,14 +137,26 @@ is not an error: that's the ordinary zero-config case.
 
 ### Protecting the config file itself
 
-shguard automatically denies `tee`/`cp`/`mv`/`install`/`sed -i`/`dd of=`
-writes targeting its own resolved config path, and the literal
-`~/.config/shguard/` token for any user — an agent shouldn't be able to
-edit its own guardrails via a shell command. This is a partial mitigation,
-not a complete one: bare shell redirection (`cat > path <<EOF`, see
-Limitations below) is not analyzed by design, and a `SHGUARD_CONFIG`
-override set via a shell profile is outside shguard's visibility
-entirely.
+shguard automatically denies `tee`/`cp`/`mv`/`install`/`sed -i`
+(or `--in-place`)/`dd of=`/`rm`/`unlink`/`ln` writes targeting its own
+resolved config path, and the literal `~/.config/shguard/` token for any
+user — an agent shouldn't be able to edit its own guardrails via a shell
+command. This is a partial mitigation, not a complete one:
+
+- Bare shell redirection (`cat > path <<EOF`, see Limitations below) is not
+  analyzed by design, and a `SHGUARD_CONFIG` override set via a shell
+  profile is outside shguard's visibility entirely.
+- A relative path after `cd`-ing into the config directory (`cd
+  ~/.config/shguard && cp evil.toml config.toml`) is not caught — shguard
+  never resolves argv tokens against the process's working directory.
+- Other write-capable tools (`rsync`, `truncate`, `shred`, …) are not
+  enumerated in this list at all.
+- `cp`/`install`/`tee`/`dd`/`sed` match a file *under* the config
+  directory, but not the bare directory path with no trailing slash
+  (`rm`/`unlink`/`ln`/`mv` do cover this).
+- Deleting or moving a *parent* of the config directory (e.g. `rm -rf
+  ~/.config`) is not caught — self-protection rules only match
+  `~/.config/shguard` and paths under it, not any of its ancestors.
 
 ### What's not configurable (yet)
 

@@ -374,3 +374,64 @@ fn cp_onto_literal_tilde_config_path_is_blocked() {
     );
     assert_eq!(permission_decision(&output), "deny");
 }
+
+// rm -r on the bare config directory (no trailing slash) is issue #22's
+// core scenario: deleting the whole directory silently reverts the
+// user's custom policy to embedded-only.
+#[test]
+fn rm_recursive_on_config_directory_is_blocked() {
+    let home = tempdir().expect("tempdir should create");
+    let output = run_hook(
+        &bash_command("rm -r ~/.config/shguard"),
+        &[("HOME", home.path().to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+}
+
+// mv on the bare config directory (no trailing slash) is the same class
+// of bug as rm above: moving the whole directory away silently reverts
+// the user's custom policy to embedded-only (issue #22).
+#[test]
+fn mv_on_config_directory_is_blocked() {
+    let home = tempdir().expect("tempdir should create");
+    let output = run_hook(
+        &bash_command("mv ~/.config/shguard /tmp/backup"),
+        &[("HOME", home.path().to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+}
+
+#[test]
+fn unlink_onto_literal_tilde_config_path_is_blocked() {
+    let home = tempdir().expect("tempdir should create");
+    let output = run_hook(
+        &bash_command("unlink ~/.config/shguard/config.toml"),
+        &[("HOME", home.path().to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+}
+
+#[test]
+fn ln_symlink_swap_onto_literal_tilde_config_path_is_blocked() {
+    let home = tempdir().expect("tempdir should create");
+    let output = run_hook(
+        &bash_command("ln -sf /dev/null ~/.config/shguard/config.toml"),
+        &[("HOME", home.path().to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+}
+
+#[test]
+fn sed_in_place_equals_suffix_onto_resolved_config_path_is_blocked() {
+    let (_dir, config_path) = write_config("");
+
+    let command = format!(
+        "sed --in-place=.bak s/x/y/ {}",
+        config_path.to_str().expect("path should be valid UTF-8")
+    );
+    let output = run_hook(
+        &bash_command(&command),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+}

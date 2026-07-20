@@ -244,7 +244,7 @@ targets = [{{ prefix = {quoted_dir} }}]
 id = "shguard-self-protect-config-sed"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "sed"
-required_flags = ["i"]
+required_flags = ["i|--in-place"]
 targets = [{{ prefix = {quoted_dir} }}]
 
 [[deny]]
@@ -252,6 +252,24 @@ id = "shguard-self-protect-config-dd"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "dd"
 targets = [{{ prefix = {quoted_dd_target} }}]
+
+[[deny]]
+id = "shguard-self-protect-config-rm"
+reason = "writing to shguard's own config directory must never be scripted"
+command = "rm"
+targets = [{{ prefix = {quoted_dir} }}]
+
+[[deny]]
+id = "shguard-self-protect-config-unlink"
+reason = "writing to shguard's own config directory must never be scripted"
+command = "unlink"
+targets = [{{ prefix = {quoted_dir} }}]
+
+[[deny]]
+id = "shguard-self-protect-config-ln"
+reason = "writing to shguard's own config directory must never be scripted"
+command = "ln"
+targets = [{{ prefix = {quoted_dir} }}]
 "#
     )
 }
@@ -354,6 +372,18 @@ mod tests {
             "s/x/y/",
             "/home/user/.config/shguard/config.toml"
         ]));
+        assert!(matches(&[
+            "sed",
+            "--in-place",
+            "s/x/y/",
+            "/home/user/.config/shguard/config.toml"
+        ]));
+        assert!(matches(&[
+            "sed",
+            "--in-place=.bak",
+            "s/x/y/",
+            "/home/user/.config/shguard/config.toml"
+        ]));
         // sed without -i prints to stdout rather than writing in place.
         assert!(!matches(&[
             "sed",
@@ -364,6 +394,20 @@ mod tests {
             "dd",
             "if=/dev/zero",
             "of=/home/user/.config/shguard/config.toml"
+        ]));
+        assert!(matches(&["rm", "/home/user/.config/shguard/config.toml"]));
+        // rm -r on the bare directory (no trailing slash) — issue #22's core
+        // scenario, deleting the whole config directory in one shot.
+        assert!(matches(&["rm", "-r", "/home/user/.config/shguard"]));
+        assert!(matches(&[
+            "unlink",
+            "/home/user/.config/shguard/config.toml"
+        ]));
+        assert!(matches(&[
+            "ln",
+            "-sf",
+            "/dev/null",
+            "/home/user/.config/shguard/config.toml"
         ]));
         assert!(!matches(&["cp", "a.txt", "b.txt"]));
     }

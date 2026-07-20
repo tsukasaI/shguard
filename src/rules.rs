@@ -121,7 +121,10 @@ impl CommandMatch {
 /// flags `r` and `f`, and so does the separated form `-r -f` — both are
 /// combined-cluster tokens of length 1. [`Self::Token`] covers flags that
 /// are never letter-combinable: GNU long options (`--recursive`) and
-/// BSD-style single-dash long flags (`find -delete`).
+/// BSD-style single-dash long flags (`find -delete`). A `Token` also
+/// matches the GNU `--flag=value` spelling (`--in-place=.bak` satisfies a
+/// required `--in-place`) — this only ever widens the match, so it cannot
+/// dodge a rule that was already matching the bare flag.
 ///
 /// [`Self::AnyOf`] expresses "this requirement is satisfied by any one of
 /// several equivalent spellings" — e.g. a rule that must not be dodged by
@@ -134,7 +137,8 @@ impl CommandMatch {
 enum FlagMatcher {
     /// A single short-option letter.
     Short(char),
-    /// An exact argv token, matched verbatim.
+    /// A `-`-prefixed argv token, matched verbatim or with a `=value`
+    /// suffix (GNU long-option convention, e.g. `--in-place=.bak`).
     Token(String),
     /// Satisfied if any one alternative is satisfied.
     AnyOf(Vec<FlagMatcher>),
@@ -188,7 +192,12 @@ impl FlagMatcher {
             Self::Short(c) => argv
                 .iter()
                 .any(|token| short_cluster_chars(token).contains(c)),
-            Self::Token(token) => argv.contains(&token.as_str()),
+            Self::Token(token) => argv.iter().any(|arg| {
+                *arg == token.as_str()
+                    || arg
+                        .strip_prefix(token.as_str())
+                        .is_some_and(|rest| rest.starts_with('='))
+            }),
             Self::AnyOf(alternatives) => alternatives.iter().any(|alt| alt.satisfied(argv)),
         }
     }
@@ -1362,6 +1371,48 @@ mod tests {
         );
     }
 
+    // ---- FlagMatcher::Token also accepts a GNU "=value" suffix ----
+    #[test]
+    fn flag_matcher_token_matches_bare_flag() {
+        let flag = FlagMatcher::parse("--in-place").unwrap();
+        assert!(flag.satisfied(&["--in-place"]));
+    }
+
+    #[test]
+    fn flag_matcher_token_matches_equals_suffix() {
+        let flag = FlagMatcher::parse("--in-place").unwrap();
+        assert!(flag.satisfied(&["--in-place=.bak"]));
+    }
+
+    #[test]
+    fn flag_matcher_token_does_not_match_unrelated_suffix_without_equals() {
+        let flag = FlagMatcher::parse("--in-place").unwrap();
+        assert!(!flag.satisfied(&["--in-placefoo"]));
+    }
+
+    // ---- regression: --force-with-lease must not satisfy a --force token ----
+    #[test]
+    fn flag_matcher_token_force_with_lease_does_not_satisfy_force() {
+        let flag = FlagMatcher::parse("--force").unwrap();
+        assert!(!flag.satisfied(&["--force-with-lease"]));
+    }
+
+    #[test]
+    fn git_push_force_with_lease_does_not_match_force_rule() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "git",
+                    "push",
+                    "--force-with-lease",
+                    "origin",
+                    "main"
+                ]))
+                .is_none()
+        );
+    }
+
     // ---- home root is dangerous; a path under home is routine cleanup ----
     #[test]
     fn rm_rf_home_root_matches() {
@@ -1799,6 +1850,104 @@ mod tests {
         );
     }
 
+    #[test]
+    fn self_protect_sed_in_place_long_option_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "sed",
+                    "--in-place",
+                    "s/x/y/",
+                    "~/.config/shguard/config.toml"
+                ]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn self_protect_sed_in_place_equals_suffix_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "sed",
+                    "--in-place=.bak",
+                    "s/x/y/",
+                    "~/.config/shguard/config.toml"
+                ]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn self_protect_rm_literal_tilde_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["rm", "~/.config/shguard/config.toml"]))
+                .is_some()
+        );
+    }
+
+    // rm -r on the bare directory (no trailing slash) — issue #22's core
+    // scenario, deleting the whole config directory in one shot.
+    #[test]
+    fn self_protect_rm_recursive_literal_tilde_directory_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["rm", "-r", "~/.config/shguard"]))
+                .is_some()
+        );
+    }
+
+    // mv on the bare directory (no trailing slash) — same class of bug as
+    // `self_protect_rm_recursive_literal_tilde_directory_matches` above:
+    // moving the whole config directory away silently reverts the user's
+    // custom deny policy to embedded-only, the exact impact issue #22 is
+    // about.
+    #[test]
+    fn self_protect_mv_literal_tilde_directory_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["mv", "~/.config/shguard", "/tmp/backup"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn self_protect_unlink_literal_tilde_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["unlink", "~/.config/shguard/config.toml"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn self_protect_ln_literal_tilde_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "ln",
+                    "-sf",
+                    "/dev/null",
+                    "~/.config/shguard/config.toml"
+                ]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn self_protect_rm_unrelated_file_does_not_match() {
+        let rules = Rules::embedded().unwrap();
+        assert!(rules.match_command(&argv(&["rm", "a.txt"])).is_none());
+    }
+
     // ==== Pipeline rule: curl|sh matches, cat|bash does not ====
 
     #[test]
@@ -1882,12 +2031,21 @@ mod tests {
 
     #[test]
     fn except_target_requires_required_flags_too() {
-        // command name matches but a required flag (`-f`/`--force`) is
-        // absent — the danger shape itself is incomplete, so this must not
-        // fire just because a later word happens to be unresolvable.
+        // `rm-recursive-force-dangerous-target` requires BOTH `r` and `f` —
+        // having only `-r` must not satisfy *that* rule's flag gating, even
+        // with an unresolvable tail. `match_command_except_target` may
+        // still return the flagless `self-protect-config-rm-tilde` rule
+        // instead (the same fail-safe "unresolvable target could be
+        // anything" refinement issue #22 extends to `rm`, already present
+        // for `cp`/`tee`/`mv`/`install`/`dd`) — what must not happen is the
+        // *dangerous-target* rule firing on an incomplete flag set.
         let rules = Rules::embedded().unwrap();
         let cmd = argv_with_unresolvable_tail(&["rm", "-r"]);
-        assert!(rules.match_command_except_target(&cmd).is_none());
+        let matched = rules.match_command_except_target(&cmd);
+        assert_ne!(
+            matched.map(|rule| rule.id().as_str()),
+            Some("rm-recursive-force-dangerous-target")
+        );
     }
 
     // ==== Shape robustness: unresolvable command name never matches,
