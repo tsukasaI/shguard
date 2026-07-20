@@ -5,6 +5,10 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Parse-then-decide PreToolUse hook that blocks dangerous shell commands for AI coding agents"
 repository = "https://github.com/tsukasaI/shguard"
+readme = "README.md"
+keywords = ["security", "shell", "cli", "hooks", "claude"]
+categories = ["command-line-utilities", "development-tools"]
+include = ["src/**", "rules/**", "tests/**", "/Cargo.toml", "/README.md", "/CHANGELOG.md", "/LICENSE-*"]
 
 [[bin]]
 name = "shguard"
