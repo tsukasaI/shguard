@@ -174,18 +174,25 @@ impl Policy {
             None => (blocklist, allowlist),
         };
 
-        // `Path::parent()` returns `Some("")` (an empty path, not `None`)
-        // for a single-component relative path -- reachable via a bare-
-        // filename `SHGUARD_CONFIG` (e.g. `SHGUARD_CONFIG=config.toml`,
-        // no directory separator). There's no directory to protect in
-        // that case, so treat it like `None` rather than generating a
-        // `prefix = ""` self-protection rule, which `convert_target`'s
-        // empty-prefix guard would then reject as a hard config-load
-        // failure (issue #24).
+        // `Path::parent()` can return a relative directory -- `Some("")`
+        // for a bare-filename `SHGUARD_CONFIG` (e.g.
+        // `SHGUARD_CONFIG=config.toml`, no directory separator), or
+        // `Some(".")`, `Some("..")`, `Some("foo")` for `./config.toml`,
+        // `../config.toml`, `foo/config.toml` respectively. None of these
+        // are usable self-protection targets: a relative prefix can never
+        // usefully protect anything, since `normalize.rs` deliberately
+        // never resolves the current working directory, so an agent can
+        // always dodge a relative prefix by writing via an absolute path
+        // instead -- while `TargetMatcher::matches`'s plain
+        // `starts_with(prefix)` means a relative prefix like `.` or `foo`
+        // over-matches unrelated, textually-similar paths (e.g. `.env`,
+        // `foo-other/x`). So skip self-protection rule generation whenever
+        // the parent isn't absolute, rather than only when it's empty
+        // (issue #24).
         let (rules, allowlist) = match path
             .as_deref()
             .and_then(Path::parent)
-            .filter(|dir| !dir.as_os_str().is_empty())
+            .filter(|dir| dir.is_absolute())
         {
             Some(config_dir) => {
                 let toml = self_protection_toml(&config_dir.to_string_lossy());
