@@ -151,9 +151,12 @@ command. This is a partial mitigation, not a complete one:
   never resolves argv tokens against the process's working directory.
 - Other write-capable tools (`rsync`, `truncate`, `shred`, …) are not
   enumerated in this list at all.
-- `mv`/`cp`/`install`/`tee`/`dd`/`sed` match a file *under* the config
+- `cp`/`install`/`tee`/`dd`/`sed` match a file *under* the config
   directory, but not the bare directory path with no trailing slash
-  (`rm`/`unlink`/`ln` do cover this).
+  (`rm`/`unlink`/`ln`/`mv` do cover this).
+- Deleting or moving a *parent* of the config directory (e.g. `rm -rf
+  ~/.config`) is not caught — self-protection rules only match
+  `~/.config/shguard` and paths under it, not any of its ancestors.
 
 ### What's not configurable (yet)
 

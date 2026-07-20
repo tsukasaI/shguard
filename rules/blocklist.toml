@@ -281,7 +281,7 @@ targets = [{ prefix = "~/.config/shguard/" }]
 id = "self-protect-config-mv-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "mv"
-targets = [{ prefix = "~/.config/shguard/" }]
+targets = [{ prefix = "~/.config/shguard/" }, { exact = "~/.config/shguard" }]
 
 [[command]]
 id = "self-protect-config-install-tilde"

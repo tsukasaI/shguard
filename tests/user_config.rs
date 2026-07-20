@@ -361,6 +361,19 @@ fn rm_recursive_on_config_directory_is_blocked() {
     assert_eq!(permission_decision(&output), "deny");
 }
 
+// mv on the bare config directory (no trailing slash) is the same class
+// of bug as rm above: moving the whole directory away silently reverts
+// the user's custom policy to embedded-only (issue #22).
+#[test]
+fn mv_on_config_directory_is_blocked() {
+    let home = tempdir().expect("tempdir should create");
+    let output = run_hook(
+        &bash_command("mv ~/.config/shguard /tmp/backup"),
+        &[("HOME", home.path().to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+}
+
 #[test]
 fn unlink_onto_literal_tilde_config_path_is_blocked() {
     let home = tempdir().expect("tempdir should create");

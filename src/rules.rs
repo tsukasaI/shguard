@@ -1902,6 +1902,21 @@ mod tests {
         );
     }
 
+    // mv on the bare directory (no trailing slash) — same class of bug as
+    // `self_protect_rm_recursive_literal_tilde_directory_matches` above:
+    // moving the whole config directory away silently reverts the user's
+    // custom deny policy to embedded-only, the exact impact issue #22 is
+    // about.
+    #[test]
+    fn self_protect_mv_literal_tilde_directory_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["mv", "~/.config/shguard", "/tmp/backup"]))
+                .is_some()
+        );
+    }
+
     #[test]
     fn self_protect_unlink_literal_tilde_matches() {
         let rules = Rules::embedded().unwrap();
