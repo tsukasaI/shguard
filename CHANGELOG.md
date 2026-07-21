@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+- The sudo floor (rule 10, #32) generalises to a unified escalation posture
+  covering `doas`, `su`, `pkexec`, and `run0` alongside `sudo` (#35, #36):
+  each is now a transparent wrapper, and a command wrapped by any of the
+  five floors on a blocklist miss exactly like `sudo` already did (including
+  through another wrapper, and on the `bash -c` inner-command path).
+- New top-level config key `escalation_floor` (default `"ask"`, `"deny"`
+  allowed, `"allow"` rejected at load) raises the floor for all five vectors
+  at once via `decision.max(escalation_floor)` — no sudo-specific or
+  per-vector config key. This resolves the known limitation noted in 0.2.0:
+  the floor itself is still not config-downgradable below its default.
+- A user `[[deny]]`/`[[ask]]` rule naming one of the five commands directly
+  (e.g. `command = "doas"`) is now reachable — rule matching checks every
+  hop of a command's wrapper-unwrap chain, not just the fully-resolved
+  effective command, so a rule for the wrapper itself and a rule for the
+  wrapped command can coexist and both fire correctly.
+
 ## [0.2.0] - 2026-07-21
 
 - `sudo`-prefixed commands now floor to Ask on a blocklist miss instead of

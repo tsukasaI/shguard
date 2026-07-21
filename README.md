@@ -125,6 +125,24 @@ analysis produced (an unresolvable construct, for instance) — it can
 own `deny` entries. This mirrors Claude Code's own
 `permissions.{deny,ask,allow}` model.
 
+### Escalation floor
+
+Any command wrapped by `sudo`, `doas`, `su`, `pkexec`, or `run0` — anywhere
+in its transparent-wrapper chain, not just as the first word (`env sudo ls`
+is caught the same as `sudo ls`) — is gated even on a blocklist miss:
+`sudo whoami` asks for confirmation by default, while `sudo rm -rf /` still
+blocks via the ordinary `rm` rule exactly as before. Set the top-level
+`escalation_floor` key to raise that default:
+
+```toml
+escalation_floor = "deny"  # default is "ask"; "allow" is rejected at load
+```
+
+`"allow"` is rejected when the config is loaded — there is no way to turn
+the floor off entirely, only to tighten it. A `[[deny]]`/`[[ask]]` entry
+naming one of the five commands directly (`command = "doas"`) is also
+reachable, independent of `escalation_floor`, the same as any other rule.
+
 ### Discovery
 
 `SHGUARD_CONFIG` (an explicit path) > `$XDG_CONFIG_HOME/shguard/config.toml`

@@ -268,24 +268,11 @@ impl CommandRule {
         self.decision
     }
 
-    /// Whether this rule's command name, required flags, and required
-    /// tokens match `argv`, ignoring the target constraint entirely — the
-    /// shared building block behind [`Self::matches`] (which also checks
-    /// targets) and [`Self::matches_except_target`] (plan.md §4's NEW
-    /// argument-position bare-`$VAR`-or-substitution refinement,
-    /// `src/gate.rs`).
-    ///
-    /// Resolves through [`effective_command`] (basename + transparent-
-    /// wrapper skip) rather than a raw `argv[0]`/`argv[1..]` compare — the
-    /// same resolution [`PipelineRule::matches`] already applies to
-    /// pipeline sinks/sources, so a path-qualified or wrapped command
-    /// (`/bin/rm`, `env rm`, `env git push --force`) cannot dodge a
-    /// `command = "rm"`/`command = "git"` rule (security review finding:
-    /// this module previously matched `argv[0]`/`argv[1..]` verbatim,
-    /// silently missing every wrapped/path-qualified invocation — and for
-    /// `required_tokens`, offsetting every positional index by one for any
-    /// wrapped command, since `argv[1..]` still included the wrapper's own
-    /// name).
+    /// Whether `rest_words` (already resolved past this rule's command
+    /// name) satisfies this rule's required flags and required tokens —
+    /// the constraint half of matching, factored out of
+    /// [`Self::matching_rest`] so it can be evaluated once per candidate
+    /// hop.
     ///
     /// `required_tokens` are matched positionally against the leading
     /// non-dash-prefixed tokens after the resolved command —
@@ -296,13 +283,7 @@ impl CommandRule {
     /// Known gap: `git -C <path> push` places a non-dash token (`<path>`)
     /// before the subcommand; the rule won't match in that case.
     #[must_use]
-    fn matches_command_and_flags(&self, argv: &[NormalizedWord]) -> bool {
-        let Some((name, rest_words)) = effective_command(argv) else {
-            return false;
-        };
-        if !self.command.matches(name) {
-            return false;
-        }
+    fn constraints_match(&self, rest_words: &[NormalizedWord]) -> bool {
         let rest = resolved_strings(rest_words);
         if !self.required_flags.iter().all(|flag| flag.satisfied(&rest)) {
             return false;
@@ -325,6 +306,52 @@ impl CommandRule {
         true
     }
 
+    /// Finds the hop, in `argv`'s wrapper-unwrap chain, at which this
+    /// rule's command name and constraints (flags/tokens) match, and
+    /// returns that hop's raw tail (its own arguments, unskipped — the
+    /// natural `rest` for [`Self::matches`]' subsequent target check).
+    /// `None` if no hop matches at all — the shared building block behind
+    /// [`Self::matches`] (which also checks targets) and
+    /// [`Self::matches_except_target`] (plan.md §4's NEW argument-position
+    /// bare-`$VAR`-or-substitution refinement, `src/gate.rs`).
+    ///
+    /// Unlike a single [`effective_command`] resolution, this checks the
+    /// rule at *every* hop of the chain, not just the terminal one: a rule
+    /// naming a wrapper itself (`command = "doas"`) must be reachable
+    /// (issues #35/#36) even though the wrapped command underneath it is
+    /// what [`effective_command`] alone would resolve to. A hop whose name
+    /// matches but whose constraints don't is not a match — the walk keeps
+    /// going past it if it's itself a transparent wrapper, exactly like
+    /// [`effective_command`]'s own walk (this is fail-closed for a
+    /// deny/ask rule: more chances to match, never fewer). This is also
+    /// the same resolution [`PipelineRule::matches`] already applies to
+    /// pipeline sinks/sources, so a path-qualified or wrapped command
+    /// (`/bin/rm`, `env rm`, `env git push --force`) cannot dodge a
+    /// `command = "rm"`/`command = "git"` rule (security review finding:
+    /// this module previously matched `argv[0]`/`argv[1..]` verbatim,
+    /// silently missing every wrapped/path-qualified invocation — and for
+    /// `required_tokens`, offsetting every positional index by one for any
+    /// wrapped command, since `argv[1..]` still included the wrapper's own
+    /// name).
+    #[must_use]
+    fn matching_rest<'a>(&self, argv: &'a [NormalizedWord]) -> Option<&'a [NormalizedWord]> {
+        let mut rest = argv;
+        loop {
+            let (first, tail) = rest.split_first()?;
+            let Resolution::Resolved(name) = first.resolution() else {
+                return None;
+            };
+            let base = basename(name);
+            if self.command.matches(base) && self.constraints_match(tail) {
+                return Some(tail);
+            }
+            if !TRANSPARENT_WRAPPERS.contains(&base) {
+                return None;
+            }
+            rest = skip_wrapper_arguments(base, tail);
+        }
+    }
+
     /// Whether this rule matches `argv`, the normalised argv of one simple
     /// command. Matching is mechanical and shape-based, not positional: a
     /// resolved-but-empty token (a bash quoted empty, `''`) never breaks
@@ -332,17 +359,12 @@ impl CommandRule {
     /// command name itself — never matches anything.
     #[must_use]
     fn matches(&self, argv: &[NormalizedWord]) -> bool {
-        if !self.matches_command_and_flags(argv) {
+        let Some(rest_words) = self.matching_rest(argv) else {
             return false;
-        }
+        };
         if self.targets.is_empty() {
             return true;
         }
-        // `matches_command_and_flags` already succeeded, so `effective_command`
-        // is `Some` here; fail closed (no match) rather than unwrap regardless.
-        let Some((_, rest_words)) = effective_command(argv) else {
-            return false;
-        };
         let rest = resolved_strings(rest_words);
         rest.iter()
             .any(|token| self.targets.iter().any(|t| t.matches(token)))
@@ -370,7 +392,7 @@ impl CommandRule {
     #[must_use]
     pub(crate) fn matches_except_target(&self, argv: &[NormalizedWord]) -> bool {
         !self.targets.is_empty()
-            && self.matches_command_and_flags(argv)
+            && self.matching_rest(argv).is_some()
             && argv
                 .iter()
                 .any(|word| matches!(word.resolution(), Resolution::Unresolvable(_)))
@@ -473,11 +495,31 @@ fn resolved_strings(argv: &[NormalizedWord]) -> Vec<&str> {
 /// `env`'s `NAME=value` form) as skippable; a wrapper flag that takes a
 /// separate value argument (`nice -n 19 sh`, `sudo -u root sh`) is not
 /// specially handled — the value token does not start with `-`, so it is
-/// mistaken for the wrapped command. None of this fix's required cases use
-/// such a flag; documented here rather than silently guessed around.
+/// mistaken for the wrapped command. `su`'s positional-username form
+/// (`su root -c 'sh'`) is the sharpest case of this: `root` is ordinary,
+/// common usage, not an edge case, and gets mistaken for the wrapped
+/// command the same way. None of this fix's required cases use such a
+/// flag; documented here rather than silently guessed around. The
+/// consequence is bounded: [`wrapper_chain_escalation`]'s `Contains` arm
+/// fires on the vector's own name alone, before any argument skipping, so
+/// this limitation can only ever under-resolve which *inner* rule would
+/// have blocked — it never turns an escalation floor into a silent Allow.
 pub(crate) const TRANSPARENT_WRAPPERS: &[&str] = &[
-    "env", "command", "nohup", "nice", "exec", "stdbuf", "setsid", "sudo", "xargs",
+    "env", "command", "nohup", "nice", "exec", "stdbuf", "setsid", "sudo", "xargs", "doas", "su",
+    "pkexec", "run0",
 ];
+
+/// The subset of [`TRANSPARENT_WRAPPERS`] that escalate privileges (issues
+/// #35/#36) — `crate::gate` rule 10 floors a blocklist miss to at least
+/// `escalation_floor`'s configured decision (default `Ask`) whenever one of
+/// these appears anywhere in a command's wrapper-unwrap chain, independent
+/// of whether the wrapped command trips its own rule. See
+/// [`wrapper_chain_escalation`]. Every entry here must also appear in
+/// [`TRANSPARENT_WRAPPERS`] (a unit test below pins this) — the allow-entry
+/// rejection in [`matches_dangerous_allow_target`] walks
+/// `TRANSPARENT_WRAPPERS`, not this list, so an escalation vector missing
+/// from `TRANSPARENT_WRAPPERS` would silently become allow-listable.
+pub(crate) const ESCALATION_VECTORS: &[&str] = &["sudo", "doas", "su", "pkexec", "run0"];
 
 /// Shell interpreters whose `-c '<string>'` argument `crate::gate` recurses
 /// into as shell syntax (rule 6a). Lives here, next to
@@ -568,51 +610,55 @@ fn skip_wrapper_arguments<'a>(wrapper: &str, argv: &'a [NormalizedWord]) -> &'a 
 }
 
 /// How `stage`'s wrapper-unwrap chain (the same walk as
-/// [`effective_command`]) relates to `sudo` — see [`wrapper_chain_sudo`].
+/// [`effective_command`]) relates to [`ESCALATION_VECTORS`] — see
+/// [`wrapper_chain_escalation`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WrapperChainSudo {
-    /// `sudo` appears at some hop of the chain.
-    Contains,
+pub(crate) enum WrapperChainEscalation {
+    /// One of [`ESCALATION_VECTORS`] appears at some hop of the chain —
+    /// carries which one (the `'static` entry from that constant), so
+    /// `crate::gate`'s floor reason can name it.
+    Contains(&'static str),
     /// The chain passed through at least one transparent wrapper and then
-    /// hit an unresolvable word — the wrapped command, possibly `sudo`
-    /// itself (`env $(echo sudo) ls`, `env $SUDO ls`), cannot be
-    /// determined statically.
+    /// hit an unresolvable word — the wrapped command, possibly an
+    /// escalation vector itself (`env $(echo sudo) ls`, `env $SUDO ls`),
+    /// cannot be determined statically.
     Unresolved,
-    /// The chain resolves and never passes through `sudo`.
+    /// The chain resolves and never passes through an escalation vector.
     Absent,
 }
 
-/// Classifies `stage`'s wrapper-unwrap chain against `sudo` at *any* hop,
-/// not just the terminal resolved command — `env sudo ls` must be caught
-/// the same as a bare `sudo ls` (issue #32, `crate::gate` rule 10).
+/// Classifies `stage`'s wrapper-unwrap chain against [`ESCALATION_VECTORS`]
+/// at *any* hop, not just the terminal resolved command — `env sudo ls`
+/// must be caught the same as a bare `sudo ls` (issue #32, generalised to
+/// `doas`/`su`/`pkexec`/`run0` by issues #35/#36; `crate::gate` rule 10).
 ///
-/// [`WrapperChainSudo::Unresolved`] is the fail-closed arm: past the first
-/// wrapper, an unresolvable word means what actually runs is unknowable,
-/// so `crate::gate` floors it to Ask rather than trusting it isn't `sudo`.
-/// An unresolvable *first* word needs no such handling here (`Absent`):
-/// that is command-position unresolvability, which gate rules 1/2 already
-/// floor before this classification is consulted.
+/// [`WrapperChainEscalation::Unresolved`] is the fail-closed arm: past the
+/// first wrapper, an unresolvable word means what actually runs is
+/// unknowable, so `crate::gate` floors it rather than trusting it isn't an
+/// escalation vector. An unresolvable *first* word needs no such handling
+/// here (`Absent`): that is command-position unresolvability, which gate
+/// rules 1/2 already floor before this classification is consulted.
 #[must_use]
-pub(crate) fn wrapper_chain_sudo(stage: &[NormalizedWord]) -> WrapperChainSudo {
+pub(crate) fn wrapper_chain_escalation(stage: &[NormalizedWord]) -> WrapperChainEscalation {
     let mut rest = stage;
     let mut passed_wrapper = false;
     loop {
         let Some((first, tail)) = rest.split_first() else {
-            return WrapperChainSudo::Absent;
+            return WrapperChainEscalation::Absent;
         };
         let Resolution::Resolved(name) = first.resolution() else {
             return if passed_wrapper {
-                WrapperChainSudo::Unresolved
+                WrapperChainEscalation::Unresolved
             } else {
-                WrapperChainSudo::Absent
+                WrapperChainEscalation::Absent
             };
         };
         let base = basename(name);
-        if base == "sudo" {
-            return WrapperChainSudo::Contains;
+        if let Some(&vector) = ESCALATION_VECTORS.iter().find(|v| **v == base) {
+            return WrapperChainEscalation::Contains(vector);
         }
         if !TRANSPARENT_WRAPPERS.contains(&base) {
-            return WrapperChainSudo::Absent;
+            return WrapperChainEscalation::Absent;
         }
         passed_wrapper = true;
         rest = skip_wrapper_arguments(base, tail);
@@ -696,6 +742,25 @@ fn parse_decision(rule_id: &str, raw: Option<&str>) -> Result<Decision, RulesErr
         Some(other) => Err(RulesError::invalid(
             rule_id,
             format!("decision must be \"block\" or \"ask\", got {other:?}"),
+        )),
+    }
+}
+
+/// Parses the optional top-level `escalation_floor` user-config key
+/// (issues #35/#36) into a [`Decision`], defaulting to `Decision::Ask`
+/// when absent. `"ask"` and `"deny"` are the only valid values; `"allow"`
+/// — which would lift the escalation floor entirely — is a load-time
+/// error (fail-closed), the same posture already applied to `[[allow]]`
+/// entries naming an escalation vector directly (see
+/// [`matches_dangerous_allow_target`]): there is deliberately no config
+/// mechanism at all that turns the floor off.
+fn parse_escalation_floor(raw: Option<&str>) -> Result<Decision, RulesError> {
+    match raw {
+        None | Some("ask") => Ok(Decision::Ask),
+        Some("deny") => Ok(Decision::Block),
+        Some(other) => Err(RulesError::invalid(
+            "escalation_floor",
+            format!("escalation_floor must be \"ask\" or \"deny\", got {other:?}"),
         )),
     }
 }
@@ -941,12 +1006,19 @@ fn reject_duplicate_ids<'a>(ids: impl Iterator<Item = &'a str>) -> Result<(), Ru
 /// their own. It is populated only by [`merge_user_config`], which is also
 /// the only place a user config's `[[ask]]` entries can reach a `Rules`
 /// value at all.
+///
+/// `escalation_floor` is likewise always [`Decision::Ask`] (the documented
+/// default) for a [`Self::parse`]d/[`Self::embedded`] set —
+/// `rules/blocklist.toml` carries no such key of its own, only a user
+/// config's top-level `escalation_floor` (issues #35/#36) can override it,
+/// via [`merge_user_config`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Rules {
     command_rules: Vec<CommandRule>,
     pipeline_rules: Vec<PipelineRule>,
     redirect_rules: Vec<RedirectRule>,
     ask_rules: Vec<CommandRule>,
+    escalation_floor: Decision,
 }
 
 impl Rules {
@@ -990,6 +1062,7 @@ impl Rules {
             pipeline_rules,
             redirect_rules,
             ask_rules: Vec::new(),
+            escalation_floor: Decision::Ask,
         })
     }
 
@@ -1046,6 +1119,15 @@ impl Rules {
         self.command_rules
             .iter()
             .find(|rule| rule.matches_except_target(argv))
+    }
+
+    /// The configured escalation floor (issues #35/#36, `crate::gate` rule
+    /// 10): `Decision::Ask` unless a user config set `escalation_floor =
+    /// "deny"` (see the struct docs and [`merge_user_config`]). Never
+    /// `Decision::Allow` — rejected at user-config load time.
+    #[must_use]
+    pub(crate) fn escalation_floor(&self) -> Decision {
+        self.escalation_floor
     }
 }
 
@@ -1181,6 +1263,8 @@ struct UserConfigFileDto {
     ask: Vec<CommandRuleDto>,
     #[serde(default)]
     allow: Vec<CommandRuleDto>,
+    #[serde(default)]
+    escalation_floor: Option<String>,
 }
 
 /// A user-supplied policy config, parsed and validated but not yet merged
@@ -1190,6 +1274,7 @@ pub(crate) struct UserConfig {
     deny: Vec<CommandRule>,
     ask: Vec<CommandRule>,
     allow: Vec<CommandRule>,
+    escalation_floor: Decision,
 }
 
 impl UserConfig {
@@ -1202,8 +1287,12 @@ impl UserConfig {
     /// invalid entry (same checks as [`Rules::parse`]/[`Allowlist::parse`]),
     /// a duplicate id — checked across all three of `deny`/`ask`/`allow`
     /// together, one shared id-space, so an id can't dodge the check by
-    /// moving arrays — or an `allow` entry matching a shell interpreter or
-    /// transparent wrapper name (see [`matches_dangerous_allow_target`]).
+    /// moving arrays — an `allow` entry matching a shell interpreter or
+    /// transparent wrapper name (see [`matches_dangerous_allow_target`]) —
+    /// or an invalid `escalation_floor` value (see
+    /// [`parse_escalation_floor`]; only `"ask"`/`"deny"` are accepted,
+    /// `"allow"` is rejected here the same as it already is for `[[allow]]`
+    /// entries naming an escalation vector).
     pub(crate) fn parse(toml: &str) -> Result<Self, RulesError> {
         let dto: UserConfigFileDto = toml::from_str(toml)?;
 
@@ -1222,6 +1311,7 @@ impl UserConfig {
             .into_iter()
             .map(convert_command_rule)
             .collect::<Result<Vec<_>, _>>()?;
+        let escalation_floor = parse_escalation_floor(dto.escalation_floor.as_deref())?;
 
         reject_duplicate_ids(
             deny.iter()
@@ -1242,7 +1332,12 @@ impl UserConfig {
             }
         }
 
-        Ok(Self { deny, ask, allow })
+        Ok(Self {
+            deny,
+            ask,
+            allow,
+            escalation_floor,
+        })
     }
 }
 
@@ -1262,7 +1357,10 @@ impl UserConfig {
 /// [`Rules::match_ask`]). `allow` entries land in the returned
 /// `Allowlist`'s entries; the only path from a config `allow` entry to a
 /// permissive decision is [`apply_allowlist`], which is structurally
-/// Block-immune before it even consults its entries.
+/// Block-immune before it even consults its entries. `escalation_floor`
+/// folds via `max` rather than overwriting — see the inline comment at
+/// that line for why an overwrite would be wrong given how
+/// `src/config.rs`'s `Policy::load` calls this function more than once.
 ///
 /// # Errors
 ///
@@ -1309,6 +1407,17 @@ pub(crate) fn merge_user_config(
         }
     }
 
+    // `.max()`, not overwrite: `Policy::load` (src/config.rs) calls this
+    // function a second time per self-protection directory, with a
+    // synthetic `UserConfig` that never sets `escalation_floor` (so it
+    // parses to the `Ask` default). An overwrite there would silently
+    // reset a real `escalation_floor = "deny"` from the user's own config
+    // back to `Ask` on that second call. Folding via `max` instead makes
+    // merging monotonic — it can only ever tighten the floor, matching
+    // `crate::gate`'s own floor-folding (`decision.max(...)`) and this
+    // module's fail-closed posture generally.
+    let escalation_floor = blocklist.escalation_floor.max(user_config.escalation_floor);
+
     let mut command_rules = blocklist.command_rules;
     command_rules.extend(user_config.deny);
 
@@ -1324,6 +1433,7 @@ pub(crate) fn merge_user_config(
             pipeline_rules: blocklist.pipeline_rules,
             redirect_rules: blocklist.redirect_rules,
             ask_rules,
+            escalation_floor,
         },
         Allowlist { entries },
     ))
@@ -1525,31 +1635,49 @@ mod tests {
     }
 
     #[test]
-    fn wrapper_chain_sudo_finds_sudo_through_env_wrapper() {
+    fn wrapper_chain_escalation_finds_sudo_through_env_wrapper() {
         assert_eq!(
-            wrapper_chain_sudo(&argv(&["sudo", "whoami"])),
-            WrapperChainSudo::Contains
+            wrapper_chain_escalation(&argv(&["sudo", "whoami"])),
+            WrapperChainEscalation::Contains("sudo")
         );
         assert_eq!(
-            wrapper_chain_sudo(&argv(&["env", "sudo", "ls"])),
-            WrapperChainSudo::Contains
+            wrapper_chain_escalation(&argv(&["env", "sudo", "ls"])),
+            WrapperChainEscalation::Contains("sudo")
         );
         assert_eq!(
-            wrapper_chain_sudo(&argv(&["/usr/bin/sudo", "ls"])),
-            WrapperChainSudo::Contains
+            wrapper_chain_escalation(&argv(&["/usr/bin/sudo", "ls"])),
+            WrapperChainEscalation::Contains("sudo")
         );
         assert_eq!(
-            wrapper_chain_sudo(&argv(&["env", "ls"])),
-            WrapperChainSudo::Absent
+            wrapper_chain_escalation(&argv(&["env", "ls"])),
+            WrapperChainEscalation::Absent
         );
         assert_eq!(
-            wrapper_chain_sudo(&argv(&["ls", "sudo"])),
-            WrapperChainSudo::Absent
+            wrapper_chain_escalation(&argv(&["ls", "sudo"])),
+            WrapperChainEscalation::Absent
         );
     }
 
     #[test]
-    fn wrapper_chain_sudo_fails_closed_on_unresolvable_wrapped_command() {
+    fn wrapper_chain_escalation_finds_each_escalation_vector() {
+        // issues #35/#36: doas/su/pkexec/run0 must be classified `Contains`
+        // exactly like sudo, both bare and through another wrapper.
+        for vector in ESCALATION_VECTORS {
+            assert_eq!(
+                wrapper_chain_escalation(&argv(&[vector, "whoami"])),
+                WrapperChainEscalation::Contains(vector),
+                "vector {vector:?} bare"
+            );
+            assert_eq!(
+                wrapper_chain_escalation(&argv(&["env", vector, "whoami"])),
+                WrapperChainEscalation::Contains(vector),
+                "vector {vector:?} through env"
+            );
+        }
+    }
+
+    #[test]
+    fn wrapper_chain_escalation_fails_closed_on_unresolvable_wrapped_command() {
         // `env $(echo sudo) ls` / `env $SUDO ls`: past a wrapper, an
         // unresolvable word could be sudo itself — Unresolved, never Absent.
         let mut past_wrapper = argv(&["env"]);
@@ -1558,16 +1686,31 @@ mod tests {
         ));
         past_wrapper.extend(argv(&["ls"]));
         assert_eq!(
-            wrapper_chain_sudo(&past_wrapper),
-            WrapperChainSudo::Unresolved
+            wrapper_chain_escalation(&past_wrapper),
+            WrapperChainEscalation::Unresolved
         );
 
         // An unresolvable FIRST word is command-position unresolvability —
         // gate rules 1/2 own it, so this helper reports Absent.
         assert_eq!(
-            wrapper_chain_sudo(&unresolvable_first(&["ls"])),
-            WrapperChainSudo::Absent
+            wrapper_chain_escalation(&unresolvable_first(&["ls"])),
+            WrapperChainEscalation::Absent
         );
+    }
+
+    #[test]
+    fn every_escalation_vector_is_a_transparent_wrapper() {
+        // matches_dangerous_allow_target (the `[[allow]]` rejection) walks
+        // TRANSPARENT_WRAPPERS, not ESCALATION_VECTORS — an escalation
+        // vector missing from TRANSPARENT_WRAPPERS would silently become
+        // allow-listable, so this invariant must hold without relying on
+        // the two lists being edited in lockstep by eye.
+        for vector in ESCALATION_VECTORS {
+            assert!(
+                TRANSPARENT_WRAPPERS.contains(vector),
+                "{vector:?} must be in TRANSPARENT_WRAPPERS"
+            );
+        }
     }
 
     #[test]
