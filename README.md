@@ -112,6 +112,73 @@ optionally narrowed further with `required_flags`/`targets`, the same
 matcher shape `rules/blocklist.toml` itself uses (see that file's own
 schema comments).
 
+### Excepting specific targets
+
+`deny`/`ask` entries can also carry `except_targets`, the opposite of
+`targets`: the rule matches unless the target matches one of these shapes.
+This expresses "gate this command except for a known-safe destination" —
+something `targets` alone (matches *only when* a target is hit) and
+`allow` layering (can only downgrade a structural Ask, never a config-level
+deny/ask — see [Precedence](#precedence-deny--ask--allow) below) can't do.
+
+```toml
+[[ask]]
+id = "curl-non-localhost"
+reason = "confirm before curl makes an outbound request to a non-localhost target"
+command = "curl"
+except_targets = [
+  { exact = "http://localhost" }, { prefix = "http://localhost:" }, { prefix = "http://localhost/" },
+  { exact = "https://localhost" }, { prefix = "https://localhost:" }, { prefix = "https://localhost/" },
+  { exact = "http://127.0.0.1" }, { prefix = "http://127.0.0.1:" }, { prefix = "http://127.0.0.1/" },
+  { exact = "https://127.0.0.1" }, { prefix = "https://127.0.0.1:" }, { prefix = "https://127.0.0.1/" },
+  { exact = "http://[::1]" }, { prefix = "http://[::1]:" }, { prefix = "http://[::1]/" },
+  { exact = "https://[::1]" }, { prefix = "https://[::1]:" }, { prefix = "https://[::1]/" },
+]
+
+[[ask]]
+id = "rsync-remote-spec"
+reason = "confirm before rsync touches a remote host"
+command = "rsync"
+except_targets = [
+  { prefix = "/" },
+  { prefix = "./" },
+  { prefix = "../" },
+  { prefix = "~" },
+  { exact = "." },
+]
+```
+
+The rule fires unless *every* candidate target token matches an
+`except_targets` alternative — a mix of a local and a remote `rsync`
+argument still asks, since the remote one is never excepted. A token whose
+value can't be statically resolved (a `$VAR`, a substitution) is never
+treated as excepted either, so a command with an unresolvable argument
+still asks rather than silently passing through. A target passed as a
+`--flag=value` token's attached value (e.g. `--url=`) is still checked
+against `except_targets`, not silently skipped just because the token
+itself starts with `-`.
+
+Note the curl example's `{ exact = … }` / `…:`/`…/`-suffixed alternatives,
+not a bare `{ prefix = "http://localhost" }`: `targets`/`except_targets`
+match on a plain string prefix, with no URL-authority parsing, so an
+unanchored prefix would also match `http://localhost.evil.example.com` (a
+different host that merely starts with the same characters) or
+`http://localhost@evil.example.com` (`localhost` as URL userinfo, not the
+host). Anchoring each alternative at a port/path boundary or an exact match
+closes both; it's still not a full URL parse (a colon-anchored prefix
+still matches userinfo-with-password forms like
+`http://localhost:pw@evil.example.com`, and query strings aren't handled
+either), so treat this as narrowing the gap, not eliminating it.
+
+`except_targets` also can't see a target glued directly onto a
+single-dash flag with no `=` separator — curl's `-xhttp://evil.example.com`
+short proxy-flag syntax, for instance. That shape is indistinguishable
+from an ordinary combined short-flag cluster (`-sSL`) by shape alone, so
+it's never recognised as a candidate at all; `curl http://localhost
+-xhttp://evil.example.com` would be wrongly excepted by the config above.
+Guard a command that uses this idiom with `required_flags`/a separate
+`deny` entry rather than relying on `except_targets` alone.
+
 ### Precedence: deny > ask > allow
 
 Evaluation is fixed, regardless of which array a rule came from: a `deny`
