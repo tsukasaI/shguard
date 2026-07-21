@@ -21,12 +21,19 @@
 //!    differ at runtime).
 //! 3. Argument-position `$()`/backtick ("rule 3") — recursed through the
 //!    full pipeline; the outer word is Allow-transparent (an inner Allow
-//!    does not force the outer command non-Allow), Ask/Block propagate.
-//! 4. Argument-position bare `$VAR` ("rule 4") — Allow by default
-//!    (`cd $HOME`), EXCEPT the NEW refinement: if the command+flags match a
-//!    target-constrained blocklist rule and the argv holds an unresolvable
-//!    word, the target could not be checked — route to Ask, never silently
-//!    Allow a `rm -rf $HOME`. See [`crate::rules::CommandRule::matches_except_target`].
+//!    does not force the outer command non-Allow) EXCEPT where rule 4's
+//!    target-constrained refinement independently routes to Ask because
+//!    that same substitution sits in a target-constrained rule's target
+//!    position (issue #34, `rm -rf $(echo /)`), Ask/Block propagate.
+//! 4. Argument-position bare `$VAR` or a `$()`/backtick substitution
+//!    ("rule 4") — Allow by default (`cd $HOME`, `echo $(date)`), EXCEPT
+//!    the NEW refinement: if the command+flags match a target-constrained
+//!    blocklist rule and the argv holds an unresolvable word — a bare
+//!    `$VAR`, or a substitution segment (even mixed with literal text,
+//!    `x$(echo /)`) whose own inner recursion may itself be a clean Allow
+//!    — the target could not be checked — route to Ask, never silently
+//!    Allow a `rm -rf $HOME` or `rm -rf $(echo /)`. See
+//!    [`crate::rules::CommandRule::matches_except_target`].
 //! 5. Pipeline shape ("rule 5") — the ported `curl|wget -> sh` rule
 //!    (`crate::rules::Rules::match_pipeline`) plus two NEW structural
 //!    rules: a decode/transform stage feeding an interpreter sink blocks
@@ -397,6 +404,22 @@ fn check_redirect_targets<'a>(
     None
 }
 
+/// Whether any word in `argument_words` contains a command/backquote
+/// substitution segment (`$(...)`/`` `...` ``), including a word mixing
+/// literal text with one (`x$(echo /)` normalises to a single
+/// `Unresolvable(CommandSubstitution)` word — see
+/// `crate::normalize`'s `mixed_literal_and_command_substitution_is_unresolvable`
+/// test). Shared by [`has_any_argument_position_substitution`] (rule 3's
+/// allow-downgrade-eligibility guard) and rule 4's except-target trigger in
+/// [`evaluate_simple_command_core`] (issue #34) — one source of truth so
+/// the two can never diverge, the same non-divergence rationale already
+/// documented for `sudo_chain`.
+fn has_argument_position_substitution(argument_words: &[Word]) -> bool {
+    argument_words
+        .iter()
+        .any(|word| !collect_substitutions(word).is_empty())
+}
+
 /// Whether `command`'s argument words (everything after the first
 /// non-empty word — the same forward scan
 /// [`evaluate_simple_command_core`] performs to locate `argument_words`)
@@ -413,9 +436,7 @@ fn has_any_argument_position_substitution(command: &SimpleCommand) -> bool {
     else {
         return false;
     };
-    command.words[first_word_idx + 1..]
-        .iter()
-        .any(|word| !collect_substitutions(word).is_empty())
+    has_argument_position_substitution(&command.words[first_word_idx + 1..])
 }
 
 /// Applies a user-configured allowlist match to `verdict`: `Ask` -> `Allow`
@@ -542,9 +563,17 @@ fn evaluate_simple_command_core(
         .position(|word| !normalize::normalize_word(word).is_empty())
         .map(|idx| (&command.words[idx], idx))
     else {
-        // Unreachable given `argv` is non-empty; kept as a non-panicking
-        // fallback rather than an `unwrap`/`expect`.
-        return Verdict::allow(argv);
+        // Unreachable given `argv` is non-empty; kept as a non-panicking,
+        // fail-closed fallback (Ask, never Allow — issue #37: a gate
+        // invariant violation is not evidence of safety) rather than an
+        // `unwrap`/`expect`.
+        return Verdict::ask(
+            Reason::new(
+                "gate invariant violated: argv is non-empty but no source word producing it \
+                 could be located; refusing to allow anything under a broken internal invariant",
+            ),
+            argv,
+        );
     };
     let (first_word_ast, first_word_idx) = first_word_ast;
     let argument_words = &command.words[first_word_idx + 1..];
@@ -640,10 +669,18 @@ fn evaluate_simple_command_core(
     let substitution_result =
         evaluate_argument_substitutions(argument_words, depth, rules, allowlist);
 
-    // Rule 4 (NEW): argument-position bare `$VAR` stays Allow by default,
-    // except when the command+flags match a target-constrained blocklist
-    // rule and the target itself is unresolvable.
-    let except_target_rule = if has_argument_position_bare_var(argument_words) {
+    // Rule 4 (NEW): argument-position bare `$VAR` or a `$()`/backtick
+    // substitution (issue #34 extends this rule beyond its original
+    // bare-`$VAR`-only trigger) stays Allow by default, except when the
+    // command+flags match a target-constrained blocklist rule and the
+    // target itself is unresolvable. A substitution's own inner recursion
+    // may itself be a clean Allow (rule 3's `echo $(date)` transparency)
+    // — that says the substitution is safe to *run*, not that its
+    // *output* is a safe target for this command, so it still routes here
+    // rather than falling through rule 3 alone.
+    let except_target_rule = if has_argument_position_bare_var(argument_words)
+        || has_argument_position_substitution(argument_words)
+    {
         rules.match_command_except_target(&argv)
     } else {
         None
@@ -750,7 +787,7 @@ fn fold_floors(
         decision = decision.max(Decision::Ask);
         reasons.push(format!(
             "command and flags match blocklist rule {:?}, but the target is an unresolved $VAR \
-             that could not be checked statically",
+             or command substitution that could not be checked statically",
             rule.id().as_str()
         ));
     }
@@ -1816,12 +1853,71 @@ mod tests {
     }
 
     #[test]
-    fn benign_inner_substitution_in_dangerous_target_position_stays_allow() {
-        // Pins rule 3's deliberate Allow-transparency (`echo $(date)`
-        // semantics) even when the outer shape would be dangerous if the
-        // substitution's *output* were the target: the inner command itself
-        // is benign, and rule 4's except-target refinement only covers bare
-        // `$VAR`, not substitutions.
-        assert_decision("rm -rf $(echo /)", Decision::Allow);
+    fn dangerous_target_position_substitution_asks_even_with_benign_inner() {
+        // Issue #34: rule 3's Allow-transparency (`echo $(date)` semantics)
+        // is correct for an ordinary argument, but the substitution here
+        // sits in `rm -rf`'s target position against a target-constrained
+        // blocklist rule — the inner command itself is benign (`echo /` is
+        // safe to run), but its *output* is what `rm -rf` would actually
+        // operate on, and that output is unknown statically. Rule 4's
+        // except-target refinement now covers substitution-shaped targets,
+        // not just bare `$VAR`, so this routes to Ask instead of Allow.
+        assert_decision("rm -rf $(echo /)", Decision::Ask);
+    }
+
+    #[test]
+    fn mixed_literal_and_substitution_in_dangerous_target_position_asks() {
+        // A word mixing literal text with a substitution (`x$(echo /)`)
+        // normalises to a single `Unresolvable(CommandSubstitution)` word,
+        // same as an unmixed `$(...)` word — the except-target trigger
+        // must catch this shape too.
+        assert_decision("rm -rf x$(echo /)", Decision::Ask);
+    }
+
+    #[test]
+    fn quoted_substitution_in_dangerous_target_position_asks() {
+        assert_decision(r#"rm -rf "$(echo /)""#, Decision::Ask);
+    }
+
+    #[test]
+    fn substitution_in_dangerous_target_position_still_blocks_when_inner_blocks() {
+        // The new except-target Ask trigger must never downgrade an
+        // existing Block: when the substitution's own inner command
+        // recurses to Block, rule 3's substitution result already carries
+        // Block, and `fold_floors`'s max-fold keeps it regardless of the
+        // new trigger also firing Ask.
+        assert_decision("rm -rf $(rm -rf /)", Decision::Block);
+    }
+
+    #[test]
+    fn invariant_violation_fallback_asks_not_allow() {
+        // Issue #37: `evaluate_simple_command_core`'s first-word-scan
+        // fallback is structurally unreachable through the normal
+        // parse -> normalize path (a non-empty `argv` guarantees some word
+        // produced it), but as a fail-closed security gate it must never
+        // default to Allow if that invariant is ever violated. Exercised
+        // directly here: an empty `command.words` paired with a
+        // hand-constructed non-empty `argv` deliberately breaks the
+        // invariant the normal caller (`evaluate_simple_command`) always
+        // upholds.
+        let command = SimpleCommand {
+            assignments: Vec::new(),
+            words: Vec::new(),
+            redirections: Vec::new(),
+        };
+        let argv = vec![NormalizedWord::resolved("placeholder")];
+        let rules = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let env = Env::new();
+        let verdict = evaluate_simple_command_core(
+            &command,
+            argv,
+            &env,
+            &rules,
+            &allowlist,
+            0,
+            WrapperChainSudo::Absent,
+        );
+        assert_eq!(verdict.decision(), Decision::Ask);
     }
 }
