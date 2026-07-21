@@ -46,14 +46,20 @@
 #                    `{ exact = "…" }` / `{ prefix = "…" }` shapes as
 #                    `targets` — the opposite direction (issue #30): the
 #                    rule matches normally unless every candidate target
-#                    token (the tokens `targets` matched, or every non-flag
-#                    token when `targets` is empty) also matches an
-#                    `except_targets` alternative. Never suppresses a match
-#                    when the command's argv contains an unresolvable word
-#                    (fail-closed). Example: `command = "curl"` with no
-#                    `targets` plus `except_targets = [{ prefix =
-#                    "http://localhost" }, { prefix = "http://127.0.0.1" }]`
-#                    asks on every curl except a localhost target.
+#                    token (the tokens `targets` matched, or every non-flag/
+#                    `--flag=value`-value token when `targets` is empty)
+#                    also matches an `except_targets` alternative. Never
+#                    suppresses a match when the command's argv contains an
+#                    unresolvable word (fail-closed). Example: `command =
+#                    "curl"` with no `targets` plus `except_targets =
+#                    [{ exact = "http://localhost" }, { prefix =
+#                    "http://localhost:" }, { prefix = "http://localhost/" }]`
+#                    asks on every curl except a localhost target — see the
+#                    README's "Excepting specific targets" section for why
+#                    each alternative is boundary-anchored like this rather
+#                    than a bare `{ prefix = "http://localhost" }`, and for
+#                    the disclosed single-dash-attached-value gap
+#                    (`-xhttp://evil.example.com`) this can't catch.
 #
 # [[pipeline]] — matches the shape of a whole pipeline (the ported
 # curl|wget → sh installer-pipe pattern only; the general decode-fed-pipe
