@@ -285,6 +285,15 @@ impl Policy {
 /// [`self_protection_toml`]'s generated rule ids, since the literal and
 /// resolved directories need distinct ids to coexist in one merged rule
 /// set.
+///
+/// The resolved directory is only ever added *alongside* a protectable
+/// literal one, never in its place: a relative `SHGUARD_CONFIG` (e.g.
+/// `SHGUARD_CONFIG=config.toml` in a CI/test harness) still yields no
+/// literal entry (issue #24's invariant), and canonicalizing it would
+/// otherwise resolve to the current working directory — protecting an
+/// entire project tree the agent can still dodge for the config file
+/// itself with a relative spelling (`cp evil.toml config.toml`), so that
+/// blanket rule would cost real usability for near-zero security value.
 fn self_protection_directories(path: &Path) -> Vec<(&'static str, PathBuf)> {
     let is_protectable = |dir: &Path| dir.is_absolute() && dir != Path::new("/");
 
@@ -292,7 +301,8 @@ fn self_protection_directories(path: &Path) -> Vec<(&'static str, PathBuf)> {
     if let Some(literal_dir) = path.parent().filter(|dir| is_protectable(dir)) {
         directories.push(("literal", literal_dir.to_path_buf()));
     }
-    if let Ok(canonical) = std::fs::canonicalize(path)
+    if !directories.is_empty()
+        && let Ok(canonical) = std::fs::canonicalize(path)
         && let Some(resolved_dir) = canonical.parent().filter(|dir| is_protectable(dir))
         && directories.iter().all(|(_, dir)| dir != resolved_dir)
     {
@@ -516,6 +526,20 @@ mod tests {
         // over-broad `prefix = "/"` self-protection rule denying writes to
         // almost any absolute path if not explicitly excluded.
         assert!(self_protection_directories(Path::new("/config.toml")).is_empty());
+    }
+
+    #[test]
+    fn relative_path_generates_no_self_protection_directories_even_if_it_canonicalizes() {
+        // A relative `SHGUARD_CONFIG` (e.g. `config.toml` in a CI/test
+        // harness) must still generate nothing, even when the relative path
+        // happens to exist and canonicalize successfully -- otherwise the
+        // resolved directory would silently become the current working
+        // directory, denying absolute-path writes across the whole project
+        // for near-zero security benefit (the config file itself stays
+        // writable via a relative spelling regardless). `Cargo.toml` is
+        // relative and canonicalizes (`cargo test`'s cwd is the crate
+        // root), pinning this without any tempdir/cwd mutation.
+        assert!(self_protection_directories(Path::new("Cargo.toml")).is_empty());
     }
 
     #[test]
