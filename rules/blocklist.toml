@@ -269,13 +269,13 @@ sinks = ["sh", "bash", "zsh"]
 id = "self-protect-config-tee-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "tee"
-targets = [{ prefix = "~/.config/shguard/" }]
+targets = [{ prefix = "~/.config/shguard/" }, { exact = "~/.config/shguard" }]
 
 [[command]]
 id = "self-protect-config-cp-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "cp"
-targets = [{ prefix = "~/.config/shguard/" }]
+targets = [{ prefix = "~/.config/shguard/" }, { exact = "~/.config/shguard" }]
 
 [[command]]
 id = "self-protect-config-mv-tilde"
@@ -287,26 +287,29 @@ targets = [{ prefix = "~/.config/shguard/" }, { exact = "~/.config/shguard" }]
 id = "self-protect-config-install-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "install"
-targets = [{ prefix = "~/.config/shguard/" }]
+targets = [{ prefix = "~/.config/shguard/" }, { exact = "~/.config/shguard" }]
 
 [[command]]
 id = "self-protect-config-sed-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "sed"
 required_flags = ["i|--in-place"]
-targets = [{ prefix = "~/.config/shguard/" }]
+targets = [{ prefix = "~/.config/shguard/" }, { exact = "~/.config/shguard" }]
 
 [[command]]
 id = "self-protect-config-dd-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "dd"
-targets = [{ prefix = "of=~/.config/shguard/" }]
+targets = [{ prefix = "of=~/.config/shguard/" }, { exact = "of=~/.config/shguard" }]
 
 # rm/unlink/ln get an `exact` alternative for the bare directory (no
 # trailing slash) alongside the `prefix` one — `rm -r
 # ~/.config/shguard` (deleting the whole directory) has no trailing
 # slash, so it wouldn't hit a prefix-only match the way a file *under*
-# the directory does (issue #22).
+# the directory does (issue #22). tee/cp/install/sed/dd above got the
+# same `exact` alternative later (issue #28 item 2), for the same reason:
+# `mv ~/.config/shguard /tmp/elsewhere` (renaming the whole directory
+# away) is the same bare-directory shape.
 
 [[command]]
 id = "self-protect-config-rm-tilde"
