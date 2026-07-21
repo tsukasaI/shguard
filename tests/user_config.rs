@@ -122,6 +122,29 @@ fn allow_rule_downgrades_a_matching_structural_ask() {
 // ==== Adversarial ====
 
 #[test]
+fn allow_entry_cannot_downgrade_the_sudo_floor_ask() {
+    // Issue #32 (gate rule 10): the entry below matches `sudo gh pr view`
+    // (allow-entry matching resolves through `sudo` like rule matching
+    // does), but consent to unprivileged `gh` is not consent to running it
+    // under privilege escalation — the sudo floor's Ask must survive.
+    let (_dir, config_path) = write_config(
+        r#"
+        [[allow]]
+        id = "user-allow-gh"
+        reason = "trusted"
+        command = "gh"
+    "#,
+    );
+
+    let output = run_hook(
+        &bash_command("sudo gh pr view"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(permission_reason(&output).contains("sudo"));
+}
+
+#[test]
 fn allow_entry_cannot_downgrade_an_embedded_block() {
     let (_dir, config_path) = write_config(
         r#"

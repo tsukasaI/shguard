@@ -561,6 +561,58 @@ fn skip_wrapper_arguments<'a>(wrapper: &str, argv: &'a [NormalizedWord]) -> &'a 
     &argv[idx..]
 }
 
+/// How `stage`'s wrapper-unwrap chain (the same walk as
+/// [`effective_command`]) relates to `sudo` — see [`wrapper_chain_sudo`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WrapperChainSudo {
+    /// `sudo` appears at some hop of the chain.
+    Contains,
+    /// The chain passed through at least one transparent wrapper and then
+    /// hit an unresolvable word — the wrapped command, possibly `sudo`
+    /// itself (`env $(echo sudo) ls`, `env $SUDO ls`), cannot be
+    /// determined statically.
+    Unresolved,
+    /// The chain resolves and never passes through `sudo`.
+    Absent,
+}
+
+/// Classifies `stage`'s wrapper-unwrap chain against `sudo` at *any* hop,
+/// not just the terminal resolved command — `env sudo ls` must be caught
+/// the same as a bare `sudo ls` (issue #32, `crate::gate` rule 10).
+///
+/// [`WrapperChainSudo::Unresolved`] is the fail-closed arm: past the first
+/// wrapper, an unresolvable word means what actually runs is unknowable,
+/// so `crate::gate` floors it to Ask rather than trusting it isn't `sudo`.
+/// An unresolvable *first* word needs no such handling here (`Absent`):
+/// that is command-position unresolvability, which gate rules 1/2 already
+/// floor before this classification is consulted.
+#[must_use]
+pub(crate) fn wrapper_chain_sudo(stage: &[NormalizedWord]) -> WrapperChainSudo {
+    let mut rest = stage;
+    let mut passed_wrapper = false;
+    loop {
+        let Some((first, tail)) = rest.split_first() else {
+            return WrapperChainSudo::Absent;
+        };
+        let Resolution::Resolved(name) = first.resolution() else {
+            return if passed_wrapper {
+                WrapperChainSudo::Unresolved
+            } else {
+                WrapperChainSudo::Absent
+            };
+        };
+        let base = basename(name);
+        if base == "sudo" {
+            return WrapperChainSudo::Contains;
+        }
+        if !TRANSPARENT_WRAPPERS.contains(&base) {
+            return WrapperChainSudo::Absent;
+        }
+        passed_wrapper = true;
+        rest = skip_wrapper_arguments(base, tail);
+    }
+}
+
 // ---------------------------------------------------------------------
 // Serde DTOs (private to this module — parse, don't validate)
 // ---------------------------------------------------------------------
@@ -1462,6 +1514,52 @@ mod tests {
             rules
                 .match_command(&argv(&["nohup", "rm", "-rf", "/"]))
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn wrapper_chain_sudo_finds_sudo_through_env_wrapper() {
+        assert_eq!(
+            wrapper_chain_sudo(&argv(&["sudo", "whoami"])),
+            WrapperChainSudo::Contains
+        );
+        assert_eq!(
+            wrapper_chain_sudo(&argv(&["env", "sudo", "ls"])),
+            WrapperChainSudo::Contains
+        );
+        assert_eq!(
+            wrapper_chain_sudo(&argv(&["/usr/bin/sudo", "ls"])),
+            WrapperChainSudo::Contains
+        );
+        assert_eq!(
+            wrapper_chain_sudo(&argv(&["env", "ls"])),
+            WrapperChainSudo::Absent
+        );
+        assert_eq!(
+            wrapper_chain_sudo(&argv(&["ls", "sudo"])),
+            WrapperChainSudo::Absent
+        );
+    }
+
+    #[test]
+    fn wrapper_chain_sudo_fails_closed_on_unresolvable_wrapped_command() {
+        // `env $(echo sudo) ls` / `env $SUDO ls`: past a wrapper, an
+        // unresolvable word could be sudo itself — Unresolved, never Absent.
+        let mut past_wrapper = argv(&["env"]);
+        past_wrapper.push(NormalizedWord::unresolvable(
+            crate::normalize::UnresolvableKind::CommandSubstitution,
+        ));
+        past_wrapper.extend(argv(&["ls"]));
+        assert_eq!(
+            wrapper_chain_sudo(&past_wrapper),
+            WrapperChainSudo::Unresolved
+        );
+
+        // An unresolvable FIRST word is command-position unresolvability —
+        // gate rules 1/2 own it, so this helper reports Absent.
+        assert_eq!(
+            wrapper_chain_sudo(&unresolvable_first(&["ls"])),
+            WrapperChainSudo::Absent
         );
     }
 
