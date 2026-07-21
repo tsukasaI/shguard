@@ -119,6 +119,104 @@ fn allow_rule_downgrades_a_matching_structural_ask() {
     assert_eq!(permission_decision(&output), "allow");
 }
 
+// ==== except_targets (issue #30) ====
+
+#[test]
+fn except_targets_lets_curl_reach_localhost_but_asks_for_other_hosts() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[ask]]
+        id = "user-ask-curl-non-localhost"
+        reason = "confirm curl to a non-localhost target"
+        command = "curl"
+        except_targets = [
+            { prefix = "http://localhost" },
+            { prefix = "http://127.0.0.1" },
+            { prefix = "https://localhost" },
+            { prefix = "https://127.0.0.1" },
+            { prefix = "http://[::1]" },
+            { prefix = "https://[::1]" },
+        ]
+    "#,
+    );
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+
+    for local_url in [
+        "http://localhost:8080/api",
+        "http://127.0.0.1/api",
+        "https://localhost/api",
+        "http://[::1]:9000/",
+    ] {
+        let output = run_hook(&bash_command(&format!("curl {local_url}")), &envs);
+        assert_eq!(
+            permission_decision(&output),
+            "allow",
+            "curl to {local_url} should not be caught by the rule"
+        );
+    }
+
+    let output = run_hook(&bash_command("curl https://evil.example.com"), &envs);
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(permission_reason(&output).contains("user-ask-curl-non-localhost"));
+}
+
+#[test]
+fn except_targets_gates_rsync_only_when_a_remote_spec_is_present() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[ask]]
+        id = "user-ask-rsync-remote"
+        reason = "confirm rsync touching a remote host"
+        command = "rsync"
+        except_targets = [
+            { prefix = "/" },
+            { prefix = "./" },
+            { prefix = "../" },
+            { prefix = "~" },
+            { exact = "." },
+        ]
+    "#,
+    );
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+
+    let output = run_hook(&bash_command("rsync -a ./src ./dst"), &envs);
+    assert_eq!(permission_decision(&output), "allow");
+
+    let output = run_hook(&bash_command("rsync -a ./src user@example.com:/dst"), &envs);
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(permission_reason(&output).contains("user-ask-rsync-remote"));
+
+    let output = run_hook(
+        &bash_command("rsync -a rsync://example.com/mod /dst"),
+        &envs,
+    );
+    assert_eq!(permission_decision(&output), "ask");
+}
+
+#[test]
+fn except_targets_invalid_matcher_shape_is_rejected_at_config_load() {
+    // `exact` and `prefix` set together on the same except_targets entry is
+    // the same "mutually exclusive" violation `targets` already rejects —
+    // must fail closed (every command asks) rather than silently ignoring
+    // the malformed entry.
+    let (_dir, config_path) = write_config(
+        r#"
+        [[ask]]
+        id = "user-ask-curl-bad-except"
+        reason = "confirm curl"
+        command = "curl"
+        except_targets = [{ exact = "http://localhost", prefix = "http://127.0.0.1" }]
+    "#,
+    );
+
+    let output = run_hook(
+        &bash_command("echo hi"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(!permission_reason(&output).is_empty());
+}
+
 // ==== Adversarial ====
 
 #[test]

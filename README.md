@@ -112,6 +112,49 @@ optionally narrowed further with `required_flags`/`targets`, the same
 matcher shape `rules/blocklist.toml` itself uses (see that file's own
 schema comments).
 
+### Excepting specific targets
+
+`deny`/`ask` entries can also carry `except_targets`, the opposite of
+`targets`: the rule matches unless the target matches one of these shapes.
+This expresses "gate this command except for a known-safe destination" —
+something `targets` alone (matches *only when* a target is hit) and
+`allow` layering (can only downgrade a structural Ask, never a config-level
+deny/ask — see [Precedence](#precedence-deny--ask--allow) below) can't do.
+
+```toml
+[[ask]]
+id = "curl-non-localhost"
+reason = "confirm before curl makes an outbound request to a non-localhost target"
+command = "curl"
+except_targets = [
+  { prefix = "http://localhost" },
+  { prefix = "http://127.0.0.1" },
+  { prefix = "https://localhost" },
+  { prefix = "https://127.0.0.1" },
+  { prefix = "http://[::1]" },
+  { prefix = "https://[::1]" },
+]
+
+[[ask]]
+id = "rsync-remote-spec"
+reason = "confirm before rsync touches a remote host"
+command = "rsync"
+except_targets = [
+  { prefix = "/" },
+  { prefix = "./" },
+  { prefix = "../" },
+  { prefix = "~" },
+  { exact = "." },
+]
+```
+
+The rule fires unless *every* candidate target token matches an
+`except_targets` alternative — a mix of a local and a remote `rsync`
+argument still asks, since the remote one is never excepted. A token whose
+value can't be statically resolved (a `$VAR`, a substitution) is never
+treated as excepted either, so a command with an unresolvable argument
+still asks rather than silently passing through.
+
 ### Precedence: deny > ask > allow
 
 Evaluation is fixed, regardless of which array a rule came from: a `deny`

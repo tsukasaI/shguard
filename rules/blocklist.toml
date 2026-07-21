@@ -42,6 +42,18 @@
 #                    ANY argv token matches (ORed): `{ exact = "…" }` or
 #                    `{ prefix = "…" }`. An empty/omitted list means "no
 #                    target constraint" (e.g. `shred`'s "any target").
+#   except_targets   optional list of target alternatives, same
+#                    `{ exact = "…" }` / `{ prefix = "…" }` shapes as
+#                    `targets` — the opposite direction (issue #30): the
+#                    rule matches normally unless every candidate target
+#                    token (the tokens `targets` matched, or every non-flag
+#                    token when `targets` is empty) also matches an
+#                    `except_targets` alternative. Never suppresses a match
+#                    when the command's argv contains an unresolvable word
+#                    (fail-closed). Example: `command = "curl"` with no
+#                    `targets` plus `except_targets = [{ prefix =
+#                    "http://localhost" }, { prefix = "http://127.0.0.1" }]`
+#                    asks on every curl except a localhost target.
 #
 # [[pipeline]] — matches the shape of a whole pipeline (the ported
 # curl|wget → sh installer-pipe pattern only; the general decode-fed-pipe
