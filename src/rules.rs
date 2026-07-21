@@ -272,7 +272,8 @@ impl CommandRule {
     /// tokens match `argv`, ignoring the target constraint entirely — the
     /// shared building block behind [`Self::matches`] (which also checks
     /// targets) and [`Self::matches_except_target`] (plan.md §4's NEW
-    /// argument-position bare-`$VAR` refinement, `src/gate.rs`).
+    /// argument-position bare-`$VAR`-or-substitution refinement,
+    /// `src/gate.rs`).
     ///
     /// Resolves through [`effective_command`] (basename + transparent-
     /// wrapper skip) rather than a raw `argv[0]`/`argv[1..]` compare — the
@@ -354,13 +355,18 @@ impl CommandRule {
     /// already a full match via [`Self::matches`] — nothing left to
     /// refine), and `argv` contains at least one unresolvable word — so the
     /// target itself could not be statically checked and might be exactly
-    /// the value this rule guards against (`rm -rf $HOME`).
+    /// the value this rule guards against. This kind-agnostic "any
+    /// unresolvable word" check covers both a bare `$VAR` (`rm -rf $HOME`)
+    /// and a `$()`/backtick substitution in target position (`rm -rf
+    /// $(echo /)`, issue #34) — both normalise to a
+    /// [`Resolution::Unresolvable`] word, so no substitution-specific
+    /// handling is needed here.
     ///
     /// This is a "would this be dangerous if the target were known" probe,
     /// never a match on its own: the gate uses it only to route an
-    /// otherwise-Allow argument-position bare `$VAR` to Ask, never to
-    /// Block — an unresolvable target must never silently upgrade to a
-    /// rule hit here.
+    /// otherwise-Allow argument-position bare `$VAR` or substitution to
+    /// Ask, never to Block — an unresolvable target must never silently
+    /// upgrade to a rule hit here.
     #[must_use]
     pub(crate) fn matches_except_target(&self, argv: &[NormalizedWord]) -> bool {
         !self.targets.is_empty()
@@ -1027,8 +1033,9 @@ impl Rules {
     }
 
     /// The first [`CommandRule`] for which [`CommandRule::matches_except_target`]
-    /// holds, if any — plan.md §4's NEW argument-position bare-`$VAR`
-    /// refinement (`src/gate.rs`). Like [`Self::match_command`]/
+    /// holds, if any — plan.md §4's NEW argument-position refinement
+    /// (`src/gate.rs`), covering both a bare `$VAR` and a `$()`/backtick
+    /// substitution in target position (issue #34). Like [`Self::match_command`]/
     /// [`Self::match_pipeline`], this is a read-only probe: it never
     /// mutates rule state and never itself constitutes a `Block`.
     #[must_use]
