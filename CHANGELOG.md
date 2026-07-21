@@ -15,6 +15,11 @@ All notable changes to this project are documented in this file.
   resolved (`env $(echo sudo) ls`, `env $SUDO ls` — at runtime these run
   whatever the substitution/variable holds, possibly `sudo`) now fails
   closed to Ask instead of allowing.
+- Known limitation: a user `[[deny]] command = "sudo"` rule remains
+  unreachable (rule matching resolves through `sudo` as a transparent
+  wrapper), so the floor's Ask is the strictest sudo-wide posture
+  expressible today; a config key to raise it to deny is tracked in
+  [#35](https://github.com/tsukasaI/shguard/issues/35).
 
 ## [0.1.0] - 2026-07-20
 
