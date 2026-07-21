@@ -366,17 +366,17 @@ impl CommandRule {
     ///
     /// When `except_targets` is non-empty (issue #30), a match found above
     /// is suppressed if every *candidate target token* — the tokens that
-    /// matched `targets` (or, when `targets` is empty, every non-flag
-    /// resolved token, since there's no narrower candidate set to draw
-    /// from) — also matches an `except_targets` alternative. This is a
-    /// deliberately conservative "ALL candidates excepted", not "ANY": an
-    /// "ANY" reading would let one incidental excepted token (e.g. a local
-    /// source path in a mixed local/remote `rsync` invocation) suppress the
-    /// whole rule even though another token is exactly what the rule
-    /// guards against. Suppression never triggers when `argv`'s tail
-    /// contains an [`Resolution::Unresolvable`] word — fail-closed: if a
-    /// token's value can't be statically known, it's never assumed to be
-    /// excepted.
+    /// matched `targets` (or, when `targets` is empty, every candidate
+    /// yielded by [`target_candidate`], since there's no narrower candidate
+    /// set to draw from) — also matches an `except_targets` alternative.
+    /// This is a deliberately conservative "ALL candidates excepted", not
+    /// "ANY": an "ANY" reading would let one incidental excepted token
+    /// (e.g. a local source path in a mixed local/remote `rsync`
+    /// invocation) suppress the whole rule even though another token is
+    /// exactly what the rule guards against. Suppression never triggers
+    /// when `argv`'s tail contains an [`Resolution::Unresolvable`] word —
+    /// fail-closed: if a token's value can't be statically known, it's
+    /// never assumed to be excepted.
     #[must_use]
     fn matches(&self, argv: &[NormalizedWord]) -> bool {
         let Some(rest_words) = self.matching_rest(argv) else {
@@ -405,8 +405,7 @@ impl CommandRule {
 
         let candidates: Vec<&str> = if self.targets.is_empty() {
             rest.iter()
-                .filter(|token| !token.starts_with('-'))
-                .copied()
+                .filter_map(|token| target_candidate(token))
                 .collect()
         } else {
             rest.iter()
@@ -524,6 +523,37 @@ fn resolved_strings(argv: &[NormalizedWord]) -> Vec<&str> {
             Resolution::Unresolvable(_) => None,
         })
         .collect()
+}
+
+/// The candidate target value `token` carries, if any — used by
+/// [`CommandRule::matches`]'s `except_targets` check (issue #30) when a
+/// rule has no `targets` list to draw its candidate set from. A token not
+/// starting with `-` is itself the candidate (an ordinary positional
+/// argument). A `--flag=value` token (GNU long-option convention, the same
+/// shape [`FlagMatcher::Token`] already recognises) carries its candidate
+/// in `value`, not the token as a whole — a target passed as `--url=`'s
+/// attached value must not silently escape the except-check just because
+/// the containing token starts with `-` (security-review finding: an
+/// earlier version filtered out every `-`-prefixed token wholesale, so
+/// `curl http://localhost --url=https://evil.example.com` was wrongly
+/// suppressed — the dangerous target was never examined at all). A bare
+/// flag (`-s`, `--verbose`, a short cluster) yields no candidate.
+///
+/// # Known limitation
+///
+/// A short flag with an attached value and no separator (`-ohttp://evil`)
+/// is not specially handled — same class of gap as
+/// [`skip_wrapper_arguments`]'s documented limitation on non-`-`-prefixed
+/// wrapper values. Not reachable by the `targets`-non-empty branch, which
+/// draws its candidates from `targets` matches instead of this function.
+fn target_candidate(token: &str) -> Option<&str> {
+    if !token.starts_with('-') {
+        return Some(token);
+    }
+    token
+        .strip_prefix("--")?
+        .split_once('=')
+        .map(|(_, value)| value)
 }
 
 // ---------------------------------------------------------------------
@@ -2499,6 +2529,49 @@ mod tests {
         assert!(
             rules
                 .match_command(&argv(&["curl", "-s", "http://localhost"]))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn except_targets_checks_a_flag_equals_value_target_not_just_positionals() {
+        // Security-review fix: a candidate-selection pass that dropped every
+        // `-`-prefixed token wholesale would let a dangerous target hiding
+        // in `--url=`'s attached value silently escape the except-check —
+        // the excepted `http://localhost` positional would then vacuously
+        // satisfy "all candidates excepted" on its own.
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "curl-non-localhost"
+            reason = "ask unless curl targets localhost"
+            decision = "ask"
+            command = "curl"
+            except_targets = [{ prefix = "http://localhost" }]
+        "#,
+        )
+        .unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "curl",
+                    "http://localhost",
+                    "--url=https://evil.example.com"
+                ]))
+                .is_some()
+        );
+        // The same attached-value shape must still be excepted when it
+        // really is localhost.
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "--url=http://localhost"]))
+                .is_none()
+        );
+        // A bare flag with no `=value` (a pure flag, not a candidate at
+        // all) must not be mistaken for an unexcepted target either.
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "--verbose", "http://localhost"]))
                 .is_none()
         );
     }

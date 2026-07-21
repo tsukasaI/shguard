@@ -127,12 +127,12 @@ id = "curl-non-localhost"
 reason = "confirm before curl makes an outbound request to a non-localhost target"
 command = "curl"
 except_targets = [
-  { prefix = "http://localhost" },
-  { prefix = "http://127.0.0.1" },
-  { prefix = "https://localhost" },
-  { prefix = "https://127.0.0.1" },
-  { prefix = "http://[::1]" },
-  { prefix = "https://[::1]" },
+  { exact = "http://localhost" }, { prefix = "http://localhost:" }, { prefix = "http://localhost/" },
+  { exact = "https://localhost" }, { prefix = "https://localhost:" }, { prefix = "https://localhost/" },
+  { exact = "http://127.0.0.1" }, { prefix = "http://127.0.0.1:" }, { prefix = "http://127.0.0.1/" },
+  { exact = "https://127.0.0.1" }, { prefix = "https://127.0.0.1:" }, { prefix = "https://127.0.0.1/" },
+  { exact = "http://[::1]" }, { prefix = "http://[::1]:" }, { prefix = "http://[::1]/" },
+  { exact = "https://[::1]" }, { prefix = "https://[::1]:" }, { prefix = "https://[::1]/" },
 ]
 
 [[ask]]
@@ -153,7 +153,20 @@ The rule fires unless *every* candidate target token matches an
 argument still asks, since the remote one is never excepted. A token whose
 value can't be statically resolved (a `$VAR`, a substitution) is never
 treated as excepted either, so a command with an unresolvable argument
-still asks rather than silently passing through.
+still asks rather than silently passing through. A target passed as a
+`--flag=value` token's attached value (e.g. `--url=`) is still checked
+against `except_targets`, not silently skipped just because the token
+itself starts with `-`.
+
+Note the curl example's `{ exact = … }` / `…:`/`…/`-suffixed alternatives,
+not a bare `{ prefix = "http://localhost" }`: `targets`/`except_targets`
+match on a plain string prefix, with no URL-authority parsing, so an
+unanchored prefix would also match `http://localhost.evil.example.com` (a
+different host that merely starts with the same characters) or
+`http://localhost@evil.example.com` (`localhost` as URL userinfo, not the
+host). Anchoring each alternative at a port/path boundary or an exact match
+closes both; it's still not a full URL parse (query strings, unusual
+userinfo forms), so treat this as narrowing the gap, not eliminating it.
 
 ### Precedence: deny > ask > allow
 
