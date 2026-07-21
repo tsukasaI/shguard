@@ -233,6 +233,57 @@ fn shguard_config_non_utf8_fails_closed() {
     assert!(permission_reason(&output).contains("UTF-8"));
 }
 
+// A present-but-non-UTF-8 `HOME` must fail closed (hard error), not
+// silently collapse into "unset" the way `std::env::var(..).ok()` would
+// (issue #28 item 1, same class of gap `SHGUARD_CONFIG` was already fixed
+// for in issue #23).
+#[test]
+#[cfg(unix)]
+fn home_non_utf8_fails_closed() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let non_utf8 = std::ffi::OsString::from_vec(vec![0xFF, 0xFE]);
+
+    let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
+    let assert = cmd
+        .env_remove("SHGUARD_CONFIG")
+        .env_remove("XDG_CONFIG_HOME")
+        .env("HOME", non_utf8)
+        .write_stdin(bash_command("echo hi"))
+        .assert()
+        .success();
+    let output: Value =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout should be valid JSON");
+
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(permission_reason(&output).contains("HOME"));
+    assert!(permission_reason(&output).contains("UTF-8"));
+}
+
+// Same as above but for `XDG_CONFIG_HOME` (issue #28 item 1).
+#[test]
+#[cfg(unix)]
+fn xdg_config_home_non_utf8_fails_closed() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let non_utf8 = std::ffi::OsString::from_vec(vec![0xFF, 0xFE]);
+
+    let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
+    let assert = cmd
+        .env_remove("SHGUARD_CONFIG")
+        .env("XDG_CONFIG_HOME", non_utf8)
+        .env_remove("HOME")
+        .write_stdin(bash_command("echo hi"))
+        .assert()
+        .success();
+    let output: Value =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout should be valid JSON");
+
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(permission_reason(&output).contains("XDG_CONFIG_HOME"));
+    assert!(permission_reason(&output).contains("UTF-8"));
+}
+
 // ==== Discovery / precedence ====
 
 #[test]
@@ -466,7 +517,74 @@ fn deny_rule_recurses_into_bash_dash_c() {
     assert_eq!(permission_decision(&output), "deny");
 }
 
+// A dangling symlink at the default config path must fail closed (`ask`),
+// not silently fall back to embedded-only coverage (issue #39):
+// `read_to_string` fails with the same `NotFound` kind a genuinely absent
+// path does, so only `symlink_metadata` (`lstat`) can tell "nothing here
+// at all" apart from "something's here but broken".
+#[test]
+#[cfg(unix)]
+fn dangling_default_symlink_fails_closed() {
+    let home = tempdir().expect("tempdir should create");
+    let config_dir = home.path().join(".config").join("shguard");
+    fs::create_dir_all(&config_dir).expect("config dir should create");
+    std::os::unix::fs::symlink(
+        config_dir.join("does-not-exist.toml"),
+        config_dir.join("config.toml"),
+    )
+    .expect("dangling symlink should create");
+
+    // grep foo bar matches no built-in blocklist entry, so an `allow`
+    // verdict here would mean the config load silently fell back to
+    // embedded-only instead of failing closed.
+    let output = run_hook(
+        &bash_command("grep foo bar"),
+        &[("HOME", home.path().to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(!permission_reason(&output).is_empty());
+}
+
 // ==== Self-protection ====
+
+// A config deployed as a symlink (e.g. into a dotfiles repo) must have its
+// *resolved target* protected too, not just the symlink path itself —
+// otherwise an agent can rewrite the real backing file directly, bypassing
+// self-protection entirely (issue #31).
+#[test]
+#[cfg(unix)]
+fn write_to_symlinked_config_canonical_target_is_denied() {
+    let real_dir = tempdir().expect("tempdir should create");
+    // Canonicalize the directory itself before joining the filename: on
+    // macOS a fresh tempdir lives under `/var/folders/...`, which
+    // `std::fs::canonicalize` resolves to `/private/var/folders/...` (`/var`
+    // is itself a symlink) — an OS quirk unrelated to this test's actual
+    // config symlink. Building `real_config` from the already-canonical
+    // directory keeps the command below targeting the same path
+    // `self_protection_directories`'s `canonicalize` call resolves to.
+    let real_dir_canonical = real_dir
+        .path()
+        .canonicalize()
+        .expect("tempdir should canonicalize");
+    let real_config = real_dir_canonical.join("config.toml");
+    fs::write(&real_config, "").expect("config file should write");
+
+    let home = tempdir().expect("tempdir should create");
+    let config_dir = home.path().join(".config").join("shguard");
+    fs::create_dir_all(&config_dir).expect("config dir should create");
+    std::os::unix::fs::symlink(&real_config, config_dir.join("config.toml"))
+        .expect("symlink should create");
+
+    let command = format!(
+        "cp evil.toml {}",
+        real_config.to_str().expect("path should be valid UTF-8")
+    );
+    let output = run_hook(
+        &bash_command(&command),
+        &[("HOME", home.path().to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+}
 
 #[test]
 fn cp_onto_resolved_config_path_is_blocked() {

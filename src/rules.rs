@@ -1921,6 +1921,60 @@ mod tests {
         );
     }
 
+    // tee/cp/install/sed/dd on the bare directory (no trailing slash) —
+    // same class of bug as rm/mv/unlink/ln above: these five commands only
+    // had a `prefix = "~/.config/shguard/"` target until issue #28 item 2
+    // added the bare-directory `exact` alternative to match.
+    #[test]
+    fn self_protect_tee_literal_tilde_directory_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["tee", "~/.config/shguard"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn self_protect_cp_literal_tilde_directory_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["cp", "-r", "~/.config/shguard", "/tmp/backup"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn self_protect_install_literal_tilde_directory_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["install", "evil.toml", "~/.config/shguard"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn self_protect_sed_literal_tilde_directory_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["sed", "-i", "s/x/y/", "~/.config/shguard"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn self_protect_dd_of_literal_tilde_directory_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["dd", "if=/dev/zero", "of=~/.config/shguard"]))
+                .is_some()
+        );
+    }
+
     #[test]
     fn self_protect_sed_without_dash_i_does_not_match() {
         let rules = Rules::embedded().unwrap();

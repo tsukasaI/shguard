@@ -28,23 +28,36 @@
 //! unreadable/unparseable/unmergeable, is a hard [`ConfigError`] —
 //! [`Policy::load`]'s caller refuses to evaluate any command until it's
 //! fixed, the same posture `Rules::embedded`'s own load failure already
-//! has (`crate::gate::analyze`). The default path simply not existing
-//! (`io::ErrorKind::NotFound`, `SHGUARD_CONFIG` unset) is the ordinary
+//! has (`crate::gate::analyze`). The default path simply not existing at
+//! all — `std::fs::symlink_metadata` itself returning
+//! `io::ErrorKind::NotFound`, `SHGUARD_CONFIG` unset — is the ordinary
 //! "never configured" case: silently proceed embedded-only, matching
-//! ripgrep's `RIPGREP_CONFIG_PATH` precedent. Any other I/O error on the
-//! default path (e.g. permission denied) is a hard failure too, not
-//! silently skipped.
+//! ripgrep's `RIPGREP_CONFIG_PATH` precedent. Anything else the default
+//! path could be — a dangling symlink, a directory, an unreadable file,
+//! or any other `lstat` error — is a hard failure too, not silently
+//! skipped (issue #39): `symlink_metadata` (not `read_to_string`'s own
+//! error) is what decides "nothing configured" vs. "something's there but
+//! broken", since a dangling symlink makes `read_to_string` fail with the
+//! same `NotFound` kind a genuinely absent path does.
 //!
 //! # Self-protecting the config file
 //!
 //! [`self_protection_toml`] generates `[[deny]]` rules, at load time,
-//! targeting the *resolved* config directory for common write-capable
-//! commands (`tee`, `cp`, `mv`, `install`, `sed -i`, `dd`'s `of=<path>`
-//! shape) — the one place this crate builds a rule's TOML text in code
-//! rather than reading it from a file, because the resolved directory is
-//! only known once `$HOME`/`$XDG_CONFIG_HOME` are read for *this*
-//! invocation; the embedded blocklist is fixed at compile time and cannot
-//! know an individual user's home directory. `rules/blocklist.toml`
+//! targeting the config directory for common write-capable commands
+//! (`tee`, `cp`, `mv`, `install`, `sed -i`, `dd`'s `of=<path>` shape) —
+//! the one place this crate builds a rule's TOML text in code rather than
+//! reading it from a file, because the directory is only known once
+//! `$HOME`/`$XDG_CONFIG_HOME` are read for *this* invocation; the
+//! embedded blocklist is fixed at compile time and cannot know an
+//! individual user's home directory. [`self_protection_directories`]
+//! `canonicalize`s the config path before generating rules, so a config
+//! deployed as a symlink (e.g. into a dotfiles repo, so the policy stays
+//! versioned) gets *two* directories protected — the symlink's own
+//! directory and its resolved target's directory — rather than only
+//! whichever one happens to be the literal path (issue #31). When the
+//! path doesn't canonicalize at all (nothing there yet, or a dangling
+//! symlink), only the literal directory is protected, same as before this
+//! fix. `rules/blocklist.toml`
 //! separately carries a *static* rule for the literal `~/.config/shguard/`
 //! token — `normalize.rs` never resolves `~`/`$HOME` to an actual
 //! filesystem path (no environment lookups anywhere in parse/normalise,
@@ -162,8 +175,28 @@ impl Policy {
             ),
             None => None,
         };
-        let xdg_config_home = std::env::var("XDG_CONFIG_HOME").ok();
-        let home = std::env::var("HOME").ok();
+        // Same `var_os` treatment as `SHGUARD_CONFIG` above (issue #28 item
+        // 1): a present-but-non-UTF-8 `HOME`/`XDG_CONFIG_HOME` must fail
+        // closed too, not collapse into "unset" via `var(..).ok()` and
+        // silently fall through to a different discovery source.
+        let xdg_config_home = match std::env::var_os("XDG_CONFIG_HOME") {
+            Some(value) => Some(
+                value
+                    .into_string()
+                    .map_err(|_| ConfigError::InvalidEnvVar {
+                        var: "XDG_CONFIG_HOME",
+                    })?,
+            ),
+            None => None,
+        };
+        let home = match std::env::var_os("HOME") {
+            Some(value) => Some(
+                value
+                    .into_string()
+                    .map_err(|_| ConfigError::InvalidEnvVar { var: "HOME" })?,
+            ),
+            None => None,
+        };
         let explicit = shguard_config.is_some();
 
         let path = Self::resolve_config_path(
@@ -176,48 +209,54 @@ impl Policy {
         let allowlist = Allowlist::embedded()?;
 
         let (rules, allowlist) = match &path {
-            Some(path) => match std::fs::read_to_string(path) {
-                Ok(contents) => {
-                    let user_config = UserConfig::parse(&contents)?;
-                    merge_user_config(blocklist, allowlist, user_config)?
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound && !explicit => {
+            Some(path) => {
+                // `symlink_metadata` (`lstat`), not `read_to_string`'s own
+                // error, decides "nothing configured" vs. "something's
+                // there but broken" (issue #39): a dangling symlink makes
+                // `read_to_string` fail with the same `NotFound` kind a
+                // genuinely absent path does, so only a clean `NotFound`
+                // from `lstat` itself -- meaning there truly is no file,
+                // symlink, or anything else at this path -- gets the
+                // silent embedded-only fallback, and only for the
+                // (non-explicit) default path.
+                let lstat = std::fs::symlink_metadata(path);
+                let truly_absent =
+                    matches!(&lstat, Err(err) if err.kind() == std::io::ErrorKind::NotFound);
+                if truly_absent && !explicit {
                     (blocklist, allowlist)
-                }
-                Err(err) => {
+                } else if let Err(err) = lstat {
                     return Err(ConfigError::Io {
                         path: path.clone(),
                         source: err,
                     });
+                } else {
+                    match std::fs::read_to_string(path) {
+                        Ok(contents) => {
+                            let user_config = UserConfig::parse(&contents)?;
+                            merge_user_config(blocklist, allowlist, user_config)?
+                        }
+                        Err(err) => {
+                            return Err(ConfigError::Io {
+                                path: path.clone(),
+                                source: err,
+                            });
+                        }
+                    }
                 }
-            },
+            }
             None => (blocklist, allowlist),
         };
 
-        // `Path::parent()` can return a relative directory -- `Some("")`
-        // for a bare-filename `SHGUARD_CONFIG` (e.g.
-        // `SHGUARD_CONFIG=config.toml`, no directory separator), or
-        // `Some(".")`, `Some("..")`, `Some("foo")` for `./config.toml`,
-        // `../config.toml`, `foo/config.toml` respectively. None of these
-        // are usable self-protection targets: a relative prefix can never
-        // usefully protect anything, since `normalize.rs` deliberately
-        // never resolves the current working directory, so an agent can
-        // always dodge a relative prefix by writing via an absolute path
-        // instead -- while `TargetMatcher::matches`'s plain
-        // `starts_with(prefix)` means a relative prefix like `.` or `foo`
-        // over-matches unrelated, textually-similar paths (e.g. `.env`,
-        // `foo-other/x`). So skip self-protection rule generation whenever
-        // the parent isn't absolute, rather than only when it's empty
-        // (issue #24).
-        let (rules, allowlist) = match path
-            .as_deref()
-            .and_then(Path::parent)
-            .filter(|dir| dir.is_absolute())
-        {
-            Some(config_dir) => {
-                let toml = self_protection_toml(&config_dir.to_string_lossy());
-                let self_protection = UserConfig::parse(&toml)?;
-                merge_user_config(rules, allowlist, self_protection)?
+        let (rules, allowlist) = match &path {
+            Some(path) => {
+                let mut rules = rules;
+                let mut allowlist = allowlist;
+                for (suffix, config_dir) in self_protection_directories(path) {
+                    let toml = self_protection_toml(&config_dir.to_string_lossy(), suffix);
+                    let self_protection = UserConfig::parse(&toml)?;
+                    (rules, allowlist) = merge_user_config(rules, allowlist, self_protection)?;
+                }
+                (rules, allowlist)
             }
             None => (rules, allowlist),
         };
@@ -226,66 +265,105 @@ impl Policy {
     }
 }
 
+/// Directories to generate self-protection rules for, given the resolved
+/// config `path` (see the module docs' "Self-protecting the config file"
+/// section): the path's own (literal) parent directory, plus — when
+/// `path` canonicalizes successfully — its resolved target's parent
+/// directory too, so a symlinked config's real file is protected as well
+/// as the symlink itself (issue #31). Deduplicated (an ordinary,
+/// non-symlinked config yields the same directory twice from both steps)
+/// and excludes any parent that isn't an absolute, non-root directory:
+/// a relative parent (`Some("")`/`Some(".")`/`Some("foo")`, from a
+/// bare-filename or relative `SHGUARD_CONFIG`) can never usefully protect
+/// anything, since `normalize.rs` deliberately never resolves the current
+/// working directory, and would over-match unrelated, textually-similar
+/// paths via `TargetMatcher::matches`'s plain `starts_with(prefix)`
+/// (issue #24); a bare `/` parent (from e.g. `SHGUARD_CONFIG=/config.toml`)
+/// would deny writes to almost any absolute path (issue #28 item 3).
+///
+/// Each returned entry is paired with a `suffix` distinguishing it in
+/// [`self_protection_toml`]'s generated rule ids, since the literal and
+/// resolved directories need distinct ids to coexist in one merged rule
+/// set.
+fn self_protection_directories(path: &Path) -> Vec<(&'static str, PathBuf)> {
+    let is_protectable = |dir: &Path| dir.is_absolute() && dir != Path::new("/");
+
+    let mut directories: Vec<(&'static str, PathBuf)> = Vec::new();
+    if let Some(literal_dir) = path.parent().filter(|dir| is_protectable(dir)) {
+        directories.push(("literal", literal_dir.to_path_buf()));
+    }
+    if let Ok(canonical) = std::fs::canonicalize(path)
+        && let Some(resolved_dir) = canonical.parent().filter(|dir| is_protectable(dir))
+        && directories.iter().all(|(_, dir)| dir != resolved_dir)
+    {
+        directories.push(("resolved", resolved_dir.to_path_buf()));
+    }
+    directories
+}
+
 /// Generates `[[deny]]`-array TOML text protecting `config_dir` (and
 /// everything under it) from common write-capable commands run through
 /// Bash — see the module docs' "Self-protecting the config file" section
-/// for why this is generated rather than read from a file.
-fn self_protection_toml(config_dir: &str) -> String {
+/// for why this is generated rather than read from a file. `suffix`
+/// disambiguates rule ids across multiple calls (one per directory
+/// returned by [`self_protection_directories`]) so they can be merged
+/// into one rule set without an id collision.
+fn self_protection_toml(config_dir: &str, suffix: &str) -> String {
     let quoted_dir = toml_quote(config_dir);
     let quoted_dd_target = toml_quote(&format!("of={config_dir}"));
     format!(
         r#"
 [[deny]]
-id = "shguard-self-protect-config-tee"
+id = "shguard-self-protect-config-tee-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "tee"
 targets = [{{ prefix = {quoted_dir} }}]
 
 [[deny]]
-id = "shguard-self-protect-config-cp"
+id = "shguard-self-protect-config-cp-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "cp"
 targets = [{{ prefix = {quoted_dir} }}]
 
 [[deny]]
-id = "shguard-self-protect-config-mv"
+id = "shguard-self-protect-config-mv-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "mv"
 targets = [{{ prefix = {quoted_dir} }}]
 
 [[deny]]
-id = "shguard-self-protect-config-install"
+id = "shguard-self-protect-config-install-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "install"
 targets = [{{ prefix = {quoted_dir} }}]
 
 [[deny]]
-id = "shguard-self-protect-config-sed"
+id = "shguard-self-protect-config-sed-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "sed"
 required_flags = ["i|--in-place"]
 targets = [{{ prefix = {quoted_dir} }}]
 
 [[deny]]
-id = "shguard-self-protect-config-dd"
+id = "shguard-self-protect-config-dd-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "dd"
 targets = [{{ prefix = {quoted_dd_target} }}]
 
 [[deny]]
-id = "shguard-self-protect-config-rm"
+id = "shguard-self-protect-config-rm-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "rm"
 targets = [{{ prefix = {quoted_dir} }}]
 
 [[deny]]
-id = "shguard-self-protect-config-unlink"
+id = "shguard-self-protect-config-unlink-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "unlink"
 targets = [{{ prefix = {quoted_dir} }}]
 
 [[deny]]
-id = "shguard-self-protect-config-ln"
+id = "shguard-self-protect-config-ln-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "ln"
 targets = [{{ prefix = {quoted_dir} }}]
@@ -357,7 +435,7 @@ mod tests {
     fn self_protection_rules_match_expected_write_commands_under_config_dir() {
         use crate::normalize::NormalizedWord;
 
-        let toml = self_protection_toml("/home/user/.config/shguard");
+        let toml = self_protection_toml("/home/user/.config/shguard", "literal");
         let user_config = UserConfig::parse(&toml).unwrap();
         let blocklist = Rules::embedded().unwrap();
         let allowlist = Allowlist::embedded().unwrap();
@@ -429,6 +507,15 @@ mod tests {
             "/home/user/.config/shguard/config.toml"
         ]));
         assert!(!matches(&["cp", "a.txt", "b.txt"]));
+    }
+
+    #[test]
+    fn root_only_parent_is_excluded_from_self_protection_directories() {
+        // SHGUARD_CONFIG=/config.toml (issue #28 item 3): `Path::parent()`
+        // returns `Some("/")`, which is absolute but would generate an
+        // over-broad `prefix = "/"` self-protection rule denying writes to
+        // almost any absolute path if not explicitly excluded.
+        assert!(self_protection_directories(Path::new("/config.toml")).is_empty());
     }
 
     #[test]
