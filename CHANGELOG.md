@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## [0.2.0] - 2026-07-21
 
 - `sudo`-prefixed commands now floor to Ask on a blocklist miss instead of
   silently allowing, independent of whether the wrapped command trips its
@@ -35,4 +35,5 @@ Initial release.
 - Ships as a single binary for macOS (aarch64, x86_64) and Linux
   (x86_64, aarch64), published via GitHub Releases and crates.io.
 
+[0.2.0]: https://github.com/tsukasaI/shguard/releases/tag/v0.2.0
 [0.1.0]: https://github.com/tsukasaI/shguard/releases/tag/v0.1.0
