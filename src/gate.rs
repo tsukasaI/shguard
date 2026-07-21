@@ -473,10 +473,14 @@ fn evaluate_simple_command(
     // sudo-floored Ask must never downgrade to Allow. `Unresolved` chains
     // are excluded too, fail-closed: no allow entry can currently match one
     // (matching needs a resolved effective command), but this guard must
-    // not silently depend on that staying true.
-    let sudo_in_chain = crate::rules::wrapper_chain_sudo(&argv) != WrapperChainSudo::Absent;
+    // not silently depend on that staying true. Classified once here and
+    // passed into `core` (same convention as `argv`) so the floor and this
+    // guard can never diverge.
+    let sudo_chain = crate::rules::wrapper_chain_sudo(&argv);
+    let sudo_in_chain = sudo_chain != WrapperChainSudo::Absent;
 
-    let verdict = evaluate_simple_command_core(command, argv, env, rules, allowlist, depth);
+    let verdict =
+        evaluate_simple_command_core(command, argv, env, rules, allowlist, depth, sudo_chain);
 
     let verdict = if has_argument_substitution || sudo_in_chain {
         verdict
@@ -487,10 +491,10 @@ fn evaluate_simple_command(
 }
 
 /// Evaluates one [`SimpleCommand`] against every per-command gate rule (1,
-/// 2, 4, 6, 7, 8, 9 — rule 3's recursion lives here too) plus the ordinary
-/// blocklist match (stage 3, `crate::rules::Rules::match_command`). `argv`
-/// is the command's already-normalised argv, computed once by
-/// [`evaluate_simple_command`] and passed in rather than recomputed here.
+/// 2, 4, 6, 7, 8, 9, 10 — rule 3's recursion lives here too) plus the
+/// ordinary blocklist match (stage 3, `crate::rules::Rules::match_command`).
+/// `argv` and `sudo_chain` are computed once by [`evaluate_simple_command`]
+/// (which needs both itself) and passed in rather than recomputed here.
 fn evaluate_simple_command_core(
     command: &SimpleCommand,
     argv: Vec<NormalizedWord>,
@@ -498,6 +502,7 @@ fn evaluate_simple_command_core(
     rules: &Rules,
     allowlist: &Allowlist,
     depth: usize,
+    sudo_chain: WrapperChainSudo,
 ) -> Verdict {
     // Redirect target check runs FIRST, before any early return —
     // a redirection-only command (`> /dev/sda`) has empty argv but still
@@ -602,7 +607,6 @@ fn evaluate_simple_command_core(
     // `apply_sudo_floor` needed on the rule 6a return for it, since rule 6a
     // requires a *resolved* effective command and can't fire on such a
     // chain.
-    let sudo_chain = crate::rules::wrapper_chain_sudo(&argv);
     let sudo_floor = sudo_chain == WrapperChainSudo::Contains;
 
     // Rule 6a: `bash -c '<string>'`/`sh -c`/`zsh -c`/`dash -c` recurses the
