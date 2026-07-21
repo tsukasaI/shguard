@@ -2590,6 +2590,46 @@ mod tests {
     }
 
     #[test]
+    fn merge_user_config_escalation_floor_survives_a_second_floor_less_merge() {
+        // Regression pin for issues #35/#36: `crate::config::Policy::load`
+        // calls `merge_user_config` a SECOND time per self-protection
+        // directory, with a synthetic config that never sets
+        // `escalation_floor` (so it parses to the `Ask` default). If that
+        // second call overwrote instead of folding via `max`, a real
+        // `escalation_floor = "deny"` from the user's own config would be
+        // silently reset back to `Ask` right after this first merge.
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let user_config = UserConfig::parse(
+            r#"
+            escalation_floor = "deny"
+        "#,
+        )
+        .unwrap();
+        let (rules, allowlist) = merge_user_config(blocklist, allowlist, user_config).unwrap();
+        assert_eq!(rules.escalation_floor(), Decision::Block);
+
+        // The self-protection merge: a floor-less config, same as
+        // `Policy::load` generates from `self_protection_toml`.
+        let self_protection = UserConfig::parse(
+            r#"
+            [[deny]]
+            id = "self-protect-example"
+            reason = "protect the config directory"
+            command = "tee"
+            targets = [{ prefix = "/home/user/.config/shguard" }]
+        "#,
+        )
+        .unwrap();
+        let (rules, _) = merge_user_config(rules, allowlist, self_protection).unwrap();
+        assert_eq!(
+            rules.escalation_floor(),
+            Decision::Block,
+            "a second, floor-less merge must not reset escalation_floor back to Ask"
+        );
+    }
+
+    #[test]
     fn merge_user_config_rejects_id_colliding_with_embedded_blocklist_id() {
         let blocklist = Rules::embedded().unwrap();
         let allowlist = Allowlist::embedded().unwrap();

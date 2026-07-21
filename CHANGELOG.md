@@ -19,6 +19,13 @@ All notable changes to this project are documented in this file.
   hop of a command's wrapper-unwrap chain, not just the fully-resolved
   effective command, so a rule for the wrapper itself and a rule for the
   wrapped command can coexist and both fire correctly.
+- **Compatibility note**: `doas`/`su`/`pkexec`/`run0` joining
+  `TRANSPARENT_WRAPPERS` means an existing `[[allow]]` entry that happens to
+  match one of them (exactly, or via a `command_prefix` that now collides,
+  e.g. `"do"` or `"run"`) is rejected at config load, where it previously
+  loaded fine — this fails shguard closed for every command until the entry
+  is removed or narrowed, the same load-time rejection `sudo`-matching
+  `[[allow]]` entries already had.
 
 ## [0.2.0] - 2026-07-21
 
