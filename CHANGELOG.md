@@ -11,6 +11,10 @@ All notable changes to this project are documented in this file.
   config-overridable: an `allow` entry for the wrapped command
   (`command = "gh"` vs `sudo gh pr view`) no longer clears it, and
   `command = "sudo"` allow entries were already rejected at load time.
+- A transparent-wrapper chain whose wrapped command cannot be statically
+  resolved (`env $(echo sudo) ls`, `env $SUDO ls` — at runtime these run
+  whatever the substitution/variable holds, possibly `sudo`) now fails
+  closed to Ask instead of allowing.
 
 ## [0.1.0] - 2026-07-20
 

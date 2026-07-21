@@ -58,7 +58,12 @@
 //!     floors to Ask instead of Allow (`sudo whoami`, `env sudo ls`), while
 //!     a rule hit (`sudo rm -rf /`) still Blocks exactly as before. The
 //!     floor also holds on rule 6a's inner-Allow early return
-//!     (`sudo bash -c 'ls'`), which would otherwise bypass it.
+//!     (`sudo bash -c 'ls'`), which would otherwise bypass it. Its
+//!     fail-closed half: a chain that passes through a wrapper and then
+//!     hits an unresolvable word (`env $(echo sudo) ls`, `env $SUDO ls`)
+//!     also floors to Ask — the wrapped command could be `sudo` itself,
+//!     and no other rule covers a non-opaque unresolvable in that
+//!     position.
 //!
 //! Multi-command lines (`a; b && c`, pipelines) fold with worst-decision-
 //! wins (plan.md §6 item 7, `Decision`'s `Ord`).
@@ -171,6 +176,7 @@ use crate::normalize::{self, NormalizedWord, Resolution, UnresolvableKind};
 use crate::parser;
 use crate::rules::{
     Allowlist, AllowlistOutcome, CommandRule, PIPELINE_INTERPRETERS, Rules, SHELL_INTERPRETERS,
+    WrapperChainSudo,
 };
 use crate::verdict::{Decision, Reason, Verdict};
 
@@ -464,8 +470,11 @@ fn evaluate_simple_command(
     // Rule 10's allowlist guard (module docs): an allow entry matches
     // through `sudo` the same way rules do, but consent to the unprivileged
     // command is not consent to running it under privilege escalation — a
-    // sudo-floored Ask must never downgrade to Allow.
-    let sudo_in_chain = crate::rules::wrapper_chain_contains_sudo(&argv);
+    // sudo-floored Ask must never downgrade to Allow. `Unresolved` chains
+    // are excluded too, fail-closed: no allow entry can currently match one
+    // (matching needs a resolved effective command), but this guard must
+    // not silently depend on that staying true.
+    let sudo_in_chain = crate::rules::wrapper_chain_sudo(&argv) != WrapperChainSudo::Absent;
 
     let verdict = evaluate_simple_command_core(command, argv, env, rules, allowlist, depth);
 
@@ -587,8 +596,14 @@ fn evaluate_simple_command_core(
     // privilege escalation itself is the risk being gated, independent of
     // whether the wrapped command trips its own rule (issue #32). Computed
     // before rule 6a because that rule's inner-Allow early return below must
-    // not bypass the floor (`sudo bash -c 'ls'`).
-    let sudo_floor = crate::rules::wrapper_chain_contains_sudo(&argv);
+    // not bypass the floor (`sudo bash -c 'ls'`). The `Unresolved` arm is
+    // rule 10's fail-closed half: past a wrapper, an unresolvable word could
+    // be `sudo` itself (`env $(echo sudo) ls`), so it floors too — no
+    // `apply_sudo_floor` needed on the rule 6a return for it, since rule 6a
+    // requires a *resolved* effective command and can't fire on such a
+    // chain.
+    let sudo_chain = crate::rules::wrapper_chain_sudo(&argv);
+    let sudo_floor = sudo_chain == WrapperChainSudo::Contains;
 
     // Rule 6a: `bash -c '<string>'`/`sh -c`/`zsh -c`/`dash -c` recurses the
     // script exactly like a substitution.
@@ -648,7 +663,7 @@ fn evaluate_simple_command_core(
         argv,
         interpreter_code_floor,
         ifs_floor,
-        sudo_floor,
+        sudo_chain,
         opaque_kind,
         except_target_rule,
         substitution_result,
@@ -682,7 +697,7 @@ fn fold_floors(
     argv: Vec<NormalizedWord>,
     interpreter_code_floor: bool,
     ifs_floor: bool,
-    sudo_floor: bool,
+    sudo_chain: WrapperChainSudo,
     opaque_kind: Option<UnresolvableKind>,
     except_target_rule: Option<&crate::rules::CommandRule>,
     substitution_result: Option<Decision>,
@@ -706,9 +721,20 @@ fn fold_floors(
                 .to_string(),
         );
     }
-    if sudo_floor {
-        decision = decision.max(Decision::Ask);
-        reasons.push(SUDO_FLOOR_REASON.to_string());
+    match sudo_chain {
+        WrapperChainSudo::Contains => {
+            decision = decision.max(Decision::Ask);
+            reasons.push(SUDO_FLOOR_REASON.to_string());
+        }
+        WrapperChainSudo::Unresolved => {
+            decision = decision.max(Decision::Ask);
+            reasons.push(
+                "a transparent wrapper's wrapped command could not be statically resolved, so \
+                 what actually runs (possibly sudo) is unknown"
+                    .to_string(),
+            );
+        }
+        WrapperChainSudo::Absent => {}
     }
     if let Some(kind) = opaque_kind {
         decision = decision.max(Decision::Ask);
@@ -1740,6 +1766,25 @@ mod tests {
         // Rule 6a's inner-Allow early return must not bypass the floor:
         // without `apply_sudo_floor` on that path this is Allow.
         assert_decision("sudo bash -c 'ls'", Decision::Ask);
+    }
+
+    #[test]
+    fn env_substitution_hiding_wrapped_command_floors_to_ask() {
+        // Rule 10's fail-closed half: past a wrapper, an unresolvable word
+        // could be sudo itself — at runtime this IS `sudo ls`.
+        assert_decision("env $(echo sudo) ls", Decision::Ask);
+    }
+
+    #[test]
+    fn env_bare_var_hiding_wrapped_command_floors_to_ask() {
+        assert_decision("env $SUDO ls", Decision::Ask);
+    }
+
+    #[test]
+    fn sudo_in_pipeline_stage_floors_to_ask() {
+        // Pipelines evaluate each stage through the same simple-command
+        // path, so the floor must hold per stage.
+        assert_decision("sudo whoami | cat", Decision::Ask);
     }
 
     #[test]
