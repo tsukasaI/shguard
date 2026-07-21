@@ -165,8 +165,19 @@ unanchored prefix would also match `http://localhost.evil.example.com` (a
 different host that merely starts with the same characters) or
 `http://localhost@evil.example.com` (`localhost` as URL userinfo, not the
 host). Anchoring each alternative at a port/path boundary or an exact match
-closes both; it's still not a full URL parse (query strings, unusual
-userinfo forms), so treat this as narrowing the gap, not eliminating it.
+closes both; it's still not a full URL parse (a colon-anchored prefix
+still matches userinfo-with-password forms like
+`http://localhost:pw@evil.example.com`, and query strings aren't handled
+either), so treat this as narrowing the gap, not eliminating it.
+
+`except_targets` also can't see a target glued directly onto a
+single-dash flag with no `=` separator — curl's `-xhttp://evil.example.com`
+short proxy-flag syntax, for instance. That shape is indistinguishable
+from an ordinary combined short-flag cluster (`-sSL`) by shape alone, so
+it's never recognised as a candidate at all; `curl http://localhost
+-xhttp://evil.example.com` would be wrongly excepted by the config above.
+Guard a command that uses this idiom with `required_flags`/a separate
+`deny` entry rather than relying on `except_targets` alone.
 
 ### Precedence: deny > ask > allow
 

