@@ -65,11 +65,14 @@
 #                    `-`/`--` (issue #48): a single letter is a short flag
 #                    ("o" for -o), anything longer is a long-option name
 #                    ("exclude" for --exclude). Only meaningful alongside
-#                    `except_targets` when `targets` is empty: for each
-#                    declared flag, its value — the following separated
-#                    argv token, or a long flag's attached `--name=value`
-#                    form — is consumed and excluded from the
-#                    except_targets candidate set entirely, so a
+#                    `except_targets` when `targets` is empty — a rule
+#                    declaring `value_flags` with `targets` non-empty, or
+#                    with no `except_targets` at all, is a load-time error
+#                    (the field would otherwise silently do nothing). For
+#                    each declared flag, its value — the following
+#                    separated argv token, or a long flag's attached
+#                    `--name=value` form — is consumed and excluded from
+#                    the except_targets candidate set entirely, so a
 #                    value-taking flag's own value (an output path, a
 #                    format string, an exclude pattern) is never mistaken
 #                    for the command's actual target. An undeclared flag's
@@ -93,7 +96,17 @@
 #                    the fix, never widens the gap); single-dash long
 #                    options (`-cp` for a hypothetical `--cp`-shaped flag)
 #                    aren't expressible either — only a bare `-x`/`--name`
-#                    token is recognised.
+#                    token is recognised. A bare `--` end-of-options
+#                    terminator permanently turns off value_flags matching
+#                    for every token after it, so a positional argument
+#                    that happens to spell a declared flag's name past `--`
+#                    (a real filename, not the flag) is never wrongly
+#                    consumed. Don't declare an *optional*-argument flag
+#                    (one that may or may not take a value depending on
+#                    invocation, e.g. GNU `--color[=WHEN]`) — when such a
+#                    flag appears bare, the next token is an unrelated
+#                    positional that would be wrongly consumed as if it
+#                    were the flag's value.
 #
 # [[pipeline]] — matches the shape of a whole pipeline (the ported
 # curl|wget → sh installer-pipe pattern only; the general decode-fed-pipe

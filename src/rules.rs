@@ -826,20 +826,40 @@ fn target_candidate(token: &str) -> Option<&str> {
 /// else falls through to [`target_candidate`], unchanged from before this
 /// field existed. An undeclared flag's value is untouched by any of this
 /// and keeps counting as a candidate — the existing fail-closed default.
+///
+/// A bare `--` token (the POSIX/GNU end-of-options terminator, not itself
+/// consumed as a preceding flag's separated value) permanently turns off
+/// `value_flags` matching for every token after it: everything from that
+/// point on is an ordinary positional argument by shell convention, so a
+/// value carrying the same text as a declared flag name (`rsync ./src/
+/// ./dst/ -- --exclude remote:evil`, where `--exclude`/`remote:evil` are
+/// literal filenames, not the `--exclude` flag) must not be mistaken for
+/// the flag and consumed — that would silently remove a genuine
+/// (non-excepted) target from the candidate set. Regression-tested by
+/// `value_flags_does_not_consume_positionals_after_end_of_options_terminator`
+/// below (security-review fix: an earlier version had no notion of `--`
+/// at all).
 fn value_flag_free_candidates<'a>(rest: &[&'a str], value_flags: &[ValueFlag]) -> Vec<&'a str> {
     let mut candidates = Vec::new();
     let mut skip_next = false;
+    let mut past_terminator = false;
     for token in rest {
         if skip_next {
             skip_next = false;
             continue;
         }
-        if value_flags.iter().any(|vf| vf.is_bare(token)) {
-            skip_next = true;
-            continue;
-        }
-        if value_flags.iter().any(|vf| vf.attached_value_token(token)) {
-            continue;
+        if !past_terminator {
+            if *token == "--" {
+                past_terminator = true;
+                continue;
+            }
+            if value_flags.iter().any(|vf| vf.is_bare(token)) {
+                skip_next = true;
+                continue;
+            }
+            if value_flags.iter().any(|vf| vf.attached_value_token(token)) {
+                continue;
+            }
         }
         if let Some(candidate) = target_candidate(token) {
             candidates.push(candidate);
@@ -1239,6 +1259,26 @@ fn convert_command_rule(dto: CommandRuleDto) -> Result<CommandRule, RulesError> 
         .iter()
         .map(|spec| ValueFlag::parse(spec).map_err(|problem| RulesError::invalid(&dto.id, problem)))
         .collect::<Result<Vec<_>, _>>()?;
+
+    // value_flags only ever affects the except_targets candidate walk in
+    // CommandRule::matches's `targets`-empty branch (module docs) — a rule
+    // that declares it alongside a non-empty `targets` list, or with no
+    // `except_targets` at all, would load successfully but have the field
+    // silently do nothing. "parse, don't validate" (module docs): catch
+    // that dead configuration at load time rather than let a rule author's
+    // mistake pass unnoticed.
+    if !value_flags.is_empty() && !targets.is_empty() {
+        return Err(RulesError::invalid(
+            &dto.id,
+            "value_flags has no effect when `targets` is non-empty",
+        ));
+    }
+    if !value_flags.is_empty() && except_targets.is_empty() {
+        return Err(RulesError::invalid(
+            &dto.id,
+            "value_flags has no effect without `except_targets`",
+        ));
+    }
 
     Ok(CommandRule {
         id: RuleId::new(dto.id),
@@ -3298,6 +3338,68 @@ mod tests {
         );
     }
 
+    // Security-review fix (PR #50 review): a bare `--` end-of-options
+    // terminator must permanently turn off value_flags matching for every
+    // token after it. Before this fix, a positional argument that happened
+    // to spell a declared flag's name (a legitimate filename, past `--`)
+    // was wrongly consumed as if it were the flag itself, silently
+    // dropping the *next* positional — the command's actual (non-excepted)
+    // target — from the candidate set and turning an Ask into a fail-open
+    // Allow.
+    #[test]
+    fn value_flags_does_not_consume_positionals_after_end_of_options_terminator() {
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "rsync-remote"
+            reason = "ask unless rsync stays local"
+            decision = "ask"
+            command = "rsync"
+            value_flags = ["exclude"]
+            except_targets = [{ prefix = "./" }]
+        "#,
+        )
+        .unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "rsync",
+                    "./src/",
+                    "./dst/",
+                    "--",
+                    "--exclude",
+                    "remote:evil"
+                ]))
+                .is_some(),
+            "remote:evil is a real positional target past --, not -exclude's value"
+        );
+    }
+
+    // `--` itself is never a candidate, on either side of the terminator
+    // boundary (matches pre-existing target_candidate behavior for any
+    // `-`-prefixed token with no `=value`).
+    #[test]
+    fn value_flags_end_of_options_terminator_is_never_itself_a_candidate() {
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "rsync-remote"
+            reason = "ask unless rsync stays local"
+            decision = "ask"
+            command = "rsync"
+            value_flags = ["exclude"]
+            except_targets = [{ prefix = "./" }]
+        "#,
+        )
+        .unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["rsync", "./src/", "--", "./dst/"]))
+                .is_none(),
+            "both real targets are excepted; the -- marker itself must not defeat that"
+        );
+    }
+
     #[test]
     fn value_flags_parse_rejects_bad_specs() {
         assert!(ValueFlag::parse("").is_err());
@@ -3324,6 +3426,45 @@ mod tests {
             reason = "some reason"
             command = "curl"
             value_flags = ["-o"]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    // value_flags only ever narrows the except_targets candidate walk in
+    // the `targets`-empty branch — declaring it with a non-empty `targets`
+    // list would silently do nothing, so it's rejected at load time
+    // instead (parse, don't validate: PR #50 review).
+    #[test]
+    fn value_flags_with_non_empty_targets_is_rejected_at_rule_load() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "some reason"
+            command = "curl"
+            value_flags = ["o"]
+            targets = [{ prefix = "http://" }]
+            except_targets = [{ prefix = "http://localhost" }]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    // Same dead-configuration hazard, the other half: value_flags with no
+    // except_targets at all never reaches the candidate walk it's meant to
+    // narrow.
+    #[test]
+    fn value_flags_without_except_targets_is_rejected_at_rule_load() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "some reason"
+            command = "curl"
+            value_flags = ["o"]
         "#;
         assert!(matches!(
             Rules::parse(toml),
