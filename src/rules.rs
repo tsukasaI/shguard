@@ -215,6 +215,94 @@ fn short_cluster_chars(token: &str) -> HashSet<char> {
     }
 }
 
+/// A flag declared (via a rule's `value_flags`, issue #48) to take a
+/// value that is never itself an except_targets candidate — narrows
+/// [`CommandRule::matches`]'s candidate collection so a value-taking
+/// flag's own value (an output path, a format string, an exclude
+/// pattern) isn't mistaken for the command's actual target. `spec` (the
+/// TOML string) carries no leading `-`/`--`: a single ASCII letter is a
+/// short flag (`"o"` matches the bare token `-o`), anything longer is a
+/// long-option name (`"exclude"` matches the bare token `--exclude` or
+/// its `--exclude=value` attached form). Undeclared flags are unaffected
+/// — their value keeps counting as a candidate, same fail-closed default
+/// as before this field existed.
+///
+/// # Known limitation
+///
+/// [`Self::is_bare`] matches a short flag only as a standalone token
+/// (`-o`), never inside a combined cluster (`-so`, `-fso`): shape-based
+/// matching can't tell which cluster position "owns" a following
+/// separated argument when the cluster mixes boolean and value-taking
+/// flags. A declared short flag glued into a cluster falls back to
+/// today's existing candidate treatment for the token that follows it —
+/// this only ever *narrows* the candidate set relative to not declaring
+/// the flag at all, so it cannot turn a real target invisible via this
+/// path (the cluster case just doesn't get the narrowing). A short
+/// flag's attached-value form with no `=` (`-oVALUE`) is likewise never
+/// recognised here, the same pre-existing gap [`target_candidate`]'s own
+/// docs disclose for `-xhttp://evil.example.com`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ValueFlag {
+    /// A single short-option letter, e.g. `Short('o')` for `-o`.
+    Short(char),
+    /// A long-option name without its `--` prefix, e.g. `Long("exclude"
+    /// .to_string())` for `--exclude`.
+    Long(String),
+}
+
+impl ValueFlag {
+    /// `spec` is a single ASCII alphabetic character (short flag) or an
+    /// ASCII alphanumeric/hyphen string of length > 1 (long-option name),
+    /// neither carrying a leading `-`. Anything else — empty, a leading
+    /// `-`, a `|`-alternative list, non-ASCII — is a load-time error.
+    fn parse(spec: &str) -> Result<Self, String> {
+        let mut chars = spec.chars();
+        match (chars.next(), chars.next()) {
+            (Some(c), None) if c.is_ascii_alphabetic() => Ok(Self::Short(c)),
+            (Some(first), Some(_))
+                if first.is_ascii_alphabetic()
+                    && spec.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') =>
+            {
+                Ok(Self::Long(spec.to_string()))
+            }
+            _ => Err(format!(
+                "invalid value_flags spec {spec:?}: expected a single letter (short flag) or \
+                 an alphanumeric/hyphen long-option name, neither with a leading '-'"
+            )),
+        }
+    }
+
+    /// Whether `token` is this flag's own bare spelling (`-o`/`--exclude`)
+    /// — a match here means the *next* argv token is this flag's
+    /// separated value, not a candidate itself.
+    fn is_bare(&self, token: &str) -> bool {
+        match self {
+            Self::Short(c) => {
+                let mut chars = token.chars();
+                chars.next() == Some('-') && chars.next() == Some(*c) && chars.next().is_none()
+            }
+            Self::Long(name) => token
+                .strip_prefix("--")
+                .is_some_and(|rest| rest == name.as_str()),
+        }
+    }
+
+    /// Whether `token` is this flag's `--name=value` attached form (long
+    /// flags only — short flags have no recognised attached-value shape,
+    /// see the type docs) — a match means the whole token is excluded
+    /// from candidates, not just non-a-candidate-because-it-starts-with-
+    /// dash.
+    fn attached_value_token(&self, token: &str) -> bool {
+        match self {
+            Self::Short(_) => false,
+            Self::Long(name) => token
+                .strip_prefix("--")
+                .and_then(|rest| rest.strip_prefix(name.as_str()))
+                .is_some_and(|rest| rest.starts_with('=')),
+        }
+    }
+}
+
 /// One alternative shape a dangerous target may take. A [`CommandRule`]'s
 /// `targets` list is a set of OR'd alternatives — the rule matches if any
 /// argv token satisfies any one of them (e.g. rm's target list holds `/`,
@@ -256,6 +344,7 @@ pub(crate) struct CommandRule {
     required_tokens: Vec<String>,
     targets: Vec<TargetMatcher>,
     except_targets: Vec<TargetMatcher>,
+    value_flags: Vec<ValueFlag>,
 }
 
 impl CommandRule {
@@ -367,16 +456,23 @@ impl CommandRule {
     /// When `except_targets` is non-empty (issue #30), a match found above
     /// is suppressed if every *candidate target token* — the tokens that
     /// matched `targets` (or, when `targets` is empty, every candidate
-    /// yielded by [`target_candidate`], since there's no narrower candidate
-    /// set to draw from) — also matches an `except_targets` alternative.
-    /// This is a deliberately conservative "ALL candidates excepted", not
-    /// "ANY": an "ANY" reading would let one incidental excepted token
-    /// (e.g. a local source path in a mixed local/remote `rsync`
-    /// invocation) suppress the whole rule even though another token is
-    /// exactly what the rule guards against. Suppression never triggers
-    /// when `argv`'s tail contains an [`Resolution::Unresolvable`] word —
-    /// fail-closed: if a token's value can't be statically known, it's
-    /// never assumed to be excepted.
+    /// yielded by [`value_flag_free_candidates`]/[`target_candidate`],
+    /// since there's no narrower candidate set to draw from) — also
+    /// matches an `except_targets` alternative. This is a deliberately
+    /// conservative "ALL candidates excepted", not "ANY": an "ANY" reading
+    /// would let one incidental excepted token (e.g. a local source path
+    /// in a mixed local/remote `rsync` invocation) suppress the whole rule
+    /// even though another token is exactly what the rule guards against.
+    /// Suppression never triggers when `argv`'s tail contains an
+    /// [`Resolution::Unresolvable`] word — fail-closed: if a token's value
+    /// can't be statically known, it's never assumed to be excepted. A
+    /// rule's `value_flags` (issue #48) further narrows the `targets`-
+    /// empty candidate set: a declared flag's own value (separated or
+    /// `--flag=value` attached) is consumed and never becomes a candidate
+    /// at all, so a value-taking flag's output path/format string/pattern
+    /// can't wrongly stand in the way of "all candidates excepted" for the
+    /// command's actual target. An undeclared flag's value is unaffected —
+    /// it keeps counting as a candidate, today's fail-closed default.
     #[must_use]
     fn matches(&self, argv: &[NormalizedWord]) -> bool {
         let Some(rest_words) = self.matching_rest(argv) else {
@@ -404,9 +500,7 @@ impl CommandRule {
         }
 
         let candidates: Vec<&str> = if self.targets.is_empty() {
-            rest.iter()
-                .filter_map(|token| target_candidate(token))
-                .collect()
+            value_flag_free_candidates(&rest, &self.value_flags)
         } else {
             rest.iter()
                 .filter(|token| self.matches_targets(token))
@@ -719,6 +813,41 @@ fn target_candidate(token: &str) -> Option<&str> {
         .map(|(_, value)| value)
 }
 
+/// The except_targets candidate set drawn from `rest` (already-resolved
+/// argv tail) with each declared `value_flags` entry's value consumed and
+/// excluded (issue #48) — a single left-to-right positional walk, only
+/// ever reached once the caller ([`CommandRule::matches`]) has already
+/// confirmed no token in the tail is unresolvable, so every token here is
+/// a known, concrete string. A token matching a declared flag's bare
+/// spelling (`-o`, `--exclude`) consumes the *next* token as that flag's
+/// separated value — neither token becomes a candidate. A token matching
+/// a declared long flag's `--name=value` attached form is excluded
+/// outright — its value never becomes a candidate either. Everything
+/// else falls through to [`target_candidate`], unchanged from before this
+/// field existed. An undeclared flag's value is untouched by any of this
+/// and keeps counting as a candidate — the existing fail-closed default.
+fn value_flag_free_candidates<'a>(rest: &[&'a str], value_flags: &[ValueFlag]) -> Vec<&'a str> {
+    let mut candidates = Vec::new();
+    let mut skip_next = false;
+    for token in rest {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if value_flags.iter().any(|vf| vf.is_bare(token)) {
+            skip_next = true;
+            continue;
+        }
+        if value_flags.iter().any(|vf| vf.attached_value_token(token)) {
+            continue;
+        }
+        if let Some(candidate) = target_candidate(token) {
+            candidates.push(candidate);
+        }
+    }
+    candidates
+}
+
 // ---------------------------------------------------------------------
 // Effective-command resolution (security-review fix: shared basename /
 // transparent-wrapper handling)
@@ -953,6 +1082,8 @@ struct CommandRuleDto {
     targets: Vec<TargetDto>,
     #[serde(default)]
     except_targets: Vec<TargetDto>,
+    #[serde(default)]
+    value_flags: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1020,8 +1151,8 @@ fn parse_escalation_floor(raw: Option<&str>) -> Result<Decision, RulesError> {
 /// semantically-invalid shape at this one boundary: empty id, empty
 /// reason, neither/both of `command`/`command_prefix` set, an empty
 /// `command`/`command_prefix` value, a malformed flag spec, an invalid
-/// required_tokens entry, or a target with neither/both of
-/// `exact`/`prefix` set.
+/// required_tokens entry, a target with neither/both of `exact`/`prefix`
+/// set, or a malformed `value_flags` spec.
 fn convert_command_rule(dto: CommandRuleDto) -> Result<CommandRule, RulesError> {
     if dto.id.trim().is_empty() {
         return Err(RulesError::invalid(&dto.id, "id must not be empty"));
@@ -1103,6 +1234,12 @@ fn convert_command_rule(dto: CommandRuleDto) -> Result<CommandRule, RulesError> 
         .map(|t| convert_target(&dto.id, t))
         .collect::<Result<Vec<_>, _>>()?;
 
+    let value_flags = dto
+        .value_flags
+        .iter()
+        .map(|spec| ValueFlag::parse(spec).map_err(|problem| RulesError::invalid(&dto.id, problem)))
+        .collect::<Result<Vec<_>, _>>()?;
+
     Ok(CommandRule {
         id: RuleId::new(dto.id),
         reason: Reason::new(dto.reason),
@@ -1112,6 +1249,7 @@ fn convert_command_rule(dto: CommandRuleDto) -> Result<CommandRule, RulesError> 
         required_tokens: dto.required_tokens,
         targets,
         except_targets,
+        value_flags,
     })
 }
 
@@ -2993,6 +3131,204 @@ mod tests {
                 .match_command(&argv(&["curl", "http://localhost"]))
                 .is_some()
         );
+    }
+
+    // ==== value_flags (issue #48) ====
+
+    fn curl_localhost_except_with_value_flags() -> &'static str {
+        r#"
+            [[command]]
+            id = "curl-non-localhost"
+            reason = "ask unless curl targets localhost"
+            decision = "ask"
+            command = "curl"
+            value_flags = ["o", "w", "m"]
+            except_targets = [{ prefix = "http://localhost" }]
+        "#
+    }
+
+    // The exact motivating example from issue #48: -o's output path and
+    // -w's format string must not stand in the way of "all candidates
+    // excepted" once declared, so the real (excepted) target lets the
+    // rule stay suppressed.
+    #[test]
+    fn value_flags_excludes_a_declared_short_flags_separated_value_from_candidates() {
+        let rules = Rules::parse(curl_localhost_except_with_value_flags()).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "curl",
+                    "-s",
+                    "-o",
+                    "/dev/null",
+                    "-w",
+                    "%{http_code}",
+                    "http://localhost:8787/"
+                ]))
+                .is_none()
+        );
+    }
+
+    // The rsync half of issue #48: --exclude's attached `=value` pattern
+    // must not be treated as a candidate once declared.
+    #[test]
+    fn value_flags_excludes_a_declared_long_flags_attached_value_from_candidates() {
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "rsync-remote"
+            reason = "ask unless rsync stays local"
+            decision = "ask"
+            command = "rsync"
+            value_flags = ["exclude"]
+            except_targets = [{ prefix = "./" }]
+        "#,
+        )
+        .unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "rsync",
+                    "-a",
+                    "--exclude=.git",
+                    "./src/",
+                    "./dst/"
+                ]))
+                .is_none()
+        );
+    }
+
+    // A declared long flag's separated value (no `=`) is consumed the same
+    // way as its attached form.
+    #[test]
+    fn value_flags_excludes_a_declared_long_flags_separated_value_from_candidates() {
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "rsync-remote"
+            reason = "ask unless rsync stays local"
+            decision = "ask"
+            command = "rsync"
+            value_flags = ["exclude"]
+            except_targets = [{ prefix = "./" }]
+        "#,
+        )
+        .unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "rsync",
+                    "-a",
+                    "--exclude",
+                    ".git",
+                    "./src/",
+                    "./dst/"
+                ]))
+                .is_none()
+        );
+    }
+
+    // An undeclared flag's value keeps counting as a candidate — today's
+    // fail-closed default is unchanged by adding value_flags support.
+    #[test]
+    fn undeclared_flag_value_still_counts_as_a_candidate() {
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "curl-non-localhost"
+            reason = "ask unless curl targets localhost"
+            decision = "ask"
+            command = "curl"
+            except_targets = [{ prefix = "http://localhost" }]
+        "#,
+        )
+        .unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "-o", "/dev/null", "http://localhost"]))
+                .is_some(),
+            "-o is not declared in value_flags, so /dev/null must still be an unexcepted candidate"
+        );
+    }
+
+    // A declared flag consuming the ONLY candidate must not vacuously
+    // suppress the rule: `all_excepted` requires a non-empty candidate set
+    // (Fable design-review finding) — an empty set must never read as "all
+    // of zero candidates excepted".
+    #[test]
+    fn value_flags_consuming_the_only_candidate_does_not_vacuously_allow() {
+        let rules = Rules::parse(curl_localhost_except_with_value_flags()).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "-o", "https://evil.example.com"]))
+                .is_some(),
+            "consuming the only candidate token must not read as \
+             \"all candidates excepted\" when there were none to check"
+        );
+    }
+
+    // Fail-closed still holds with value_flags declared: an unresolvable
+    // word anywhere in the tail must never let except_targets suppress the
+    // rule, even when every resolved candidate is either excepted or
+    // consumed by a declared value flag.
+    #[test]
+    fn value_flags_does_not_rescue_an_unresolvable_word() {
+        let rules = Rules::parse(curl_localhost_except_with_value_flags()).unwrap();
+        let mut cmd = argv(&["curl", "-o", "/dev/null", "http://localhost"]);
+        cmd.push(NormalizedWord::unresolvable(
+            crate::normalize::UnresolvableKind::ParameterExpansion,
+        ));
+        assert!(rules.match_command(&cmd).is_some());
+    }
+
+    // Known limitation, same class as target_candidate's disclosed
+    // single-dash-attached-value gap: a declared short flag glued into a
+    // combined cluster (`-so` for `s` + `o`) is not recognised as the
+    // flag's bare spelling, so the token after it is NOT consumed — this
+    // only ever narrows the candidate set relative to not declaring the
+    // flag at all, so it cannot turn a real target invisible.
+    #[test]
+    fn value_flags_short_flag_glued_into_a_cluster_is_not_consumed() {
+        let rules = Rules::parse(curl_localhost_except_with_value_flags()).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "-so", "/dev/null", "http://localhost"]))
+                .is_some(),
+            "known gap: -o glued into the -so cluster is not recognised as value_flags' -o"
+        );
+    }
+
+    #[test]
+    fn value_flags_parse_rejects_bad_specs() {
+        assert!(ValueFlag::parse("").is_err());
+        assert!(ValueFlag::parse("-o").is_err()); // leading dash not allowed
+        assert!(ValueFlag::parse("--exclude").is_err()); // leading dashes not allowed
+        assert!(ValueFlag::parse("1").is_err()); // not alphabetic
+        assert!(ValueFlag::parse("o|w").is_err()); // '|' alternatives not supported
+    }
+
+    #[test]
+    fn value_flags_parse_accepts_short_and_long_specs() {
+        assert_eq!(ValueFlag::parse("o").unwrap(), ValueFlag::Short('o'));
+        assert_eq!(
+            ValueFlag::parse("exclude").unwrap(),
+            ValueFlag::Long("exclude".to_string())
+        );
+    }
+
+    #[test]
+    fn value_flags_invalid_spec_is_rejected_at_rule_load() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "some reason"
+            command = "curl"
+            value_flags = ["-o"]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
     }
 
     // ==== Shape robustness: unresolvable command name never matches,

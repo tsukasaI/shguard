@@ -47,19 +47,53 @@
 #                    `targets` — the opposite direction (issue #30): the
 #                    rule matches normally unless every candidate target
 #                    token (the tokens `targets` matched, or every non-flag/
-#                    `--flag=value`-value token when `targets` is empty)
-#                    also matches an `except_targets` alternative. Never
-#                    suppresses a match when the command's argv contains an
-#                    unresolvable word (fail-closed). Example: `command =
-#                    "curl"` with no `targets` plus `except_targets =
-#                    [{ exact = "http://localhost" }, { prefix =
-#                    "http://localhost:" }, { prefix = "http://localhost/" }]`
-#                    asks on every curl except a localhost target — see the
-#                    README's "Excepting specific targets" section for why
-#                    each alternative is boundary-anchored like this rather
-#                    than a bare `{ prefix = "http://localhost" }`, and for
-#                    the disclosed single-dash-attached-value gap
+#                    `--flag=value`-value token when `targets` is empty,
+#                    narrowed further by `value_flags` below) also matches
+#                    an `except_targets` alternative. Never suppresses a
+#                    match when the command's argv contains an unresolvable
+#                    word (fail-closed). Example: `command = "curl"` with
+#                    no `targets` plus `except_targets = [{ exact =
+#                    "http://localhost" }, { prefix = "http://localhost:" },
+#                    { prefix = "http://localhost/" }]` asks on every curl
+#                    except a localhost target — see the README's
+#                    "Excepting specific targets" section for why each
+#                    alternative is boundary-anchored like this rather than
+#                    a bare `{ prefix = "http://localhost" }`, and for the
+#                    disclosed single-dash-attached-value gap
 #                    (`-xhttp://evil.example.com`) this can't catch.
+#   value_flags      optional list of flag names, each WITHOUT its leading
+#                    `-`/`--` (issue #48): a single letter is a short flag
+#                    ("o" for -o), anything longer is a long-option name
+#                    ("exclude" for --exclude). Only meaningful alongside
+#                    `except_targets` when `targets` is empty: for each
+#                    declared flag, its value — the following separated
+#                    argv token, or a long flag's attached `--name=value`
+#                    form — is consumed and excluded from the
+#                    except_targets candidate set entirely, so a
+#                    value-taking flag's own value (an output path, a
+#                    format string, an exclude pattern) is never mistaken
+#                    for the command's actual target. An undeclared flag's
+#                    value still counts as a candidate (the existing
+#                    fail-closed default). Example: `command = "curl"` with
+#                    `value_flags = ["o", "w", "m"]` plus the
+#                    `except_targets` above lets `curl -s -o /dev/null -w
+#                    "%{http_code}" http://localhost:8787/` resolve cleanly
+#                    instead of asking over -o's/-w's own values; `command
+#                    = "rsync"` with `value_flags = ["exclude"]` plus a
+#                    local-path `except_targets` list does the same for
+#                    `rsync -a --exclude=".git" ./src/ ./dst/`. Declaring a
+#                    flag here is a per-rule trust decision, same weight as
+#                    an `except_targets` entry itself: only declare a flag
+#                    whose value can never itself be (or point at) the
+#                    thing this rule guards against — misdeclaring one is
+#                    as much a bypass as a wrong except_targets pattern
+#                    would be. A short flag glued into a combined cluster
+#                    (`-so` for `-s -o`) is not recognised as the flag's
+#                    bare spelling, so its value is not consumed (narrows
+#                    the fix, never widens the gap); single-dash long
+#                    options (`-cp` for a hypothetical `--cp`-shaped flag)
+#                    aren't expressible either — only a bare `-x`/`--name`
+#                    token is recognised.
 #
 # [[pipeline]] — matches the shape of a whole pipeline (the ported
 # curl|wget → sh installer-pipe pattern only; the general decode-fed-pipe
