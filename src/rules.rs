@@ -460,6 +460,20 @@ impl CommandRule {
     /// which needs a hop's tail *before* deciding whether flags/tokens are
     /// satisfied, unlike [`Self::matching_rest`], which only ever returns a
     /// hop once both the name and the constraints already hold.
+    ///
+    /// # Known latent divergence from `matching_rest`
+    ///
+    /// [`Self::matching_rest`] keeps walking past a hop whose name matches
+    /// but whose constraints don't, as long as that hop's own base name is
+    /// itself a [`TRANSPARENT_WRAPPERS`] member (e.g. a rule naming `sudo`
+    /// as its `command`, reached through `env sudo ...`) — the deeper hop
+    /// underneath might still satisfy the rule. This function stops at the
+    /// first name match unconditionally, so for such a rule it would
+    /// return the wrapper's own tail rather than continuing to unwrap.
+    /// Currently unreachable — no rule in `rules/blocklist.toml` names a
+    /// `TRANSPARENT_WRAPPERS` entry as its `command` — but a future rule
+    /// that does would need this function taught the same continue-past-
+    /// a-wrapper behavior.
     #[must_use]
     fn matching_rest_by_name<'a>(
         &self,
@@ -543,6 +557,26 @@ impl CommandRule {
     /// `Ask`, never to `Block`. A rule already fully satisfied by resolved
     /// words alone is [`Self::matches`]'s job, not this one's — this
     /// returns `false` in that case so the two floors never double-count.
+    ///
+    /// # Blast radius beyond the motivating examples
+    ///
+    /// `required_flags` has no positional discipline to apply (flags are
+    /// presence-matched anywhere in the tail, never positionally, even in
+    /// [`Self::constraints_match`]'s own strict matching), so this floor
+    /// degrades to "any unresolvable word anywhere in the tail" for that
+    /// half of a rule's constraints — same as [`Self::matches_except_target`]'s
+    /// own target-ambiguity check. Combined with [`Self::relaxed_required_tokens_match`]
+    /// trivially returning `true` when a rule has no `required_tokens` at
+    /// all, a rule like `git-no-verify-any-subcommand` (`required_flags =
+    /// ["--no-verify"]`, no `required_tokens`) floors EVERY `git`
+    /// invocation containing an unresolvable word to `Ask`, regardless of
+    /// subcommand — not just the `find-delete`/`truncate-zero`/
+    /// `git-push-force` shapes this rule was written against. That is the
+    /// intended fail-closed consequence of having no positional
+    /// information to rule anything out (no per-command semantics, module
+    /// docs), not an oversight — see
+    /// `matches_except_flags_no_required_tokens_rule_fires_regardless_of_subcommand`
+    /// below for a pinned example.
     #[must_use]
     pub(crate) fn matches_except_flags(&self, argv: &[NormalizedWord]) -> bool {
         if !self.targets.is_empty()
@@ -2684,11 +2718,19 @@ mod tests {
     fn matches_except_flags_positional_discipline_rejects_wrong_subcommand() {
         // `git-push-force` requires `required_tokens = ["push"]`; a
         // resolved "commit" at that position proves the miss is real
-        // regardless of what an unresolvable word elsewhere might be —
-        // rule 4b must not treat every git invocation containing a
-        // substitution as if it might be `git push --force` (issue #42's
-        // design: each constraint kind floors by its own matching
-        // discipline, positional for `required_tokens`).
+        // regardless of what an unresolvable word elsewhere might be — this
+        // rule specifically must not treat a `git commit` invocation as if
+        // it might be `git push --force`.
+        //
+        // This does NOT mean the command floors to no rule at all: `git
+        // commit -m $(...)` still matches `git-commit-no-verify-short`
+        // (`required_tokens = ["commit"]`, `required_flags = ["n|--no-verify"]`)
+        // via this same mechanism, since an unresolvable word could
+        // plausibly be `--no-verify` — see
+        // `matches_except_flags_still_fires_via_a_different_rule_for_the_right_subcommand`
+        // below, which pins that positive case explicitly (code review
+        // finding on issue #42's PR: an `assert_ne` on one rule ID alone
+        // can misleadingly read as "no floor fires").
         let rules = Rules::embedded().unwrap();
         let cmd = vec![
             NormalizedWord::resolved("git"),
@@ -2701,6 +2743,46 @@ mod tests {
             matched.map(|rule| rule.id().as_str()),
             Some("git-push-force")
         );
+    }
+
+    #[test]
+    fn matches_except_flags_still_fires_via_a_different_rule_for_the_right_subcommand() {
+        // Same argv as the test above: `git-push-force` is correctly ruled
+        // out, but `git-commit-no-verify-short` (whose `required_tokens =
+        // ["commit"]` DOES match the resolved "commit" positional) still
+        // fires, since its `required_flags = ["n|--no-verify"]` could
+        // plausibly be the unresolved word.
+        let rules = Rules::embedded().unwrap();
+        let cmd = vec![
+            NormalizedWord::resolved("git"),
+            NormalizedWord::resolved("commit"),
+            NormalizedWord::resolved("-m"),
+            NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::CommandSubstitution),
+        ];
+        let rule = rules.match_command_except_flags(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "git-commit-no-verify-short");
+    }
+
+    #[test]
+    fn matches_except_flags_no_required_tokens_rule_fires_regardless_of_subcommand() {
+        // `git-no-verify-any-subcommand` has `required_flags =
+        // ["--no-verify"]` and NO `required_tokens` at all — with no
+        // positional constraint to narrow it, the floor for this
+        // particular rule degrades to "any `git` invocation containing an
+        // unresolvable word, regardless of subcommand." This is the
+        // intended fail-closed consequence of an empty `required_tokens`
+        // (no positional information exists to rule anything out), not a
+        // bug — pinned explicitly (code review finding: the floor's actual
+        // blast radius is broader than the find-delete/truncate-zero/
+        // git-push-force set the PR body names).
+        let rules = Rules::embedded().unwrap();
+        let cmd = vec![
+            NormalizedWord::resolved("git"),
+            NormalizedWord::resolved("status"),
+            NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::CommandSubstitution),
+        ];
+        let rule = rules.match_command_except_flags(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "git-no-verify-any-subcommand");
     }
 
     // ==== except_targets field (issue #30): "matches unless the target is

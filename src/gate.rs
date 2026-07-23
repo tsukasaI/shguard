@@ -41,8 +41,14 @@
 //!    so without this floor the danger flag/token itself could hide inside
 //!    an unresolvable word and fall through to a silent Allow (`find .
 //!    $(echo -delete)`, `truncate $(echo -s) 0 file.db`, `git push $(echo
-//!    --force) origin main`). Ask, never Allow. See
-//!    [`crate::rules::CommandRule::matches_except_flags`].
+//!    --force) origin main`). Ask, never Allow. Note the actual scope is
+//!    wider than these three examples: a rule with `required_flags` but
+//!    no `required_tokens` (e.g. `git-no-verify-any-subcommand`) has no
+//!    positional information to rule anything out, so it floors EVERY
+//!    invocation of its command containing an unresolvable word,
+//!    regardless of subcommand — the intended fail-closed consequence of
+//!    "no per-command semantics" (module docs), not a narrower opt-in per
+//!    rule. See [`crate::rules::CommandRule::matches_except_flags`].
 //! 5. Pipeline shape ("rule 5") — the ported `curl|wget -> sh` rule
 //!    (`crate::rules::Rules::match_pipeline`) plus two NEW structural
 //!    rules: a decode/transform stage feeding an interpreter sink blocks
@@ -2040,6 +2046,21 @@ mod tests {
         // to `Decision::Block`) — rule 4b's Ask floor must not be
         // reachable (and must not downgrade) this case.
         assert_decision("find . -delete $(echo x)", Decision::Block);
+    }
+
+    #[test]
+    fn git_no_verify_any_subcommand_floors_any_git_substitution_regardless_of_subcommand() {
+        // `git-no-verify-any-subcommand` has `required_flags = ["--no-verify"]`
+        // and NO `required_tokens` — with no positional constraint to rule
+        // anything out, rule 4b's floor for this rule degrades to "any `git`
+        // invocation containing an unresolvable word, regardless of
+        // subcommand" (code review finding on issue #42's PR: the floor's
+        // actual blast radius is broader than the find-delete/truncate-zero/
+        // git-push-force set the PR body names). This is the intended
+        // fail-closed consequence of `required_tokens` being empty, not a
+        // bug — pinned explicitly here rather than left implicit.
+        assert_decision("git status $(echo foo)", Decision::Ask);
+        assert_decision("git log $(cat ref)", Decision::Ask);
     }
 
     #[test]
