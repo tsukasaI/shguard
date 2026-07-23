@@ -179,6 +179,60 @@ it's never recognised as a candidate at all; `curl http://localhost
 Guard a command that uses this idiom with `required_flags`/a separate
 `deny` entry rather than relying on `except_targets` alone.
 
+By default, every non-flag/`--flag=value`-value token in the command's tail
+counts as a candidate — including a value-taking flag's own value. That
+over-counts for commands like the curl/rsync examples above: `curl -s -o
+/dev/null -w "%{http_code}" http://localhost:8787/` asks even though the
+real target is localhost, because `/dev/null` (the `-o` output path) and
+`%{http_code}` (the `-w` format string) are also treated as unexcepted
+candidates. `value_flags` narrows this: declare which flags take a value
+(without the leading `-`/`--` — a single letter is a short flag, anything
+longer a long-option name) and that value — separated or `--name=value`
+attached — is excluded from the candidate set entirely, never checked
+against `except_targets` one way or the other:
+
+```toml
+[[ask]]
+id = "curl-non-localhost"
+reason = "confirm before curl makes an outbound request to a non-localhost target"
+command = "curl"
+value_flags = ["o", "w", "m"]
+except_targets = [
+  { exact = "http://localhost" }, { prefix = "http://localhost:" }, { prefix = "http://localhost/" },
+]
+
+[[ask]]
+id = "rsync-remote-spec"
+reason = "confirm before rsync touches a remote host"
+command = "rsync"
+value_flags = ["exclude"]
+except_targets = [
+  { prefix = "/" },
+  { prefix = "./" },
+  { prefix = "../" },
+  { prefix = "~" },
+  { exact = "." },
+]
+```
+
+`value_flags` only has an effect alongside a non-empty `except_targets`
+and an empty `targets` (the shape both examples above already use) —
+declaring it anywhere else is a load-time error, since the field would
+otherwise silently do nothing. Declaring a flag here is a trust decision
+with the same weight as an `except_targets` entry itself: only declare a
+flag whose value can never itself be, or point at, the thing the rule
+guards against — misdeclaring one is as much a bypass as a wrong
+`except_targets` pattern would be. In particular, don't declare an
+*optional*-argument flag (one that may or may not take a value depending
+on invocation, e.g. GNU `--color[=WHEN]`) — when such a flag appears
+without its value, the *next* token is an unrelated positional, and
+`value_flags` would wrongly consume it as if it were that flag's value. A
+short flag is only recognised as its own standalone token (`-o`, never
+glued into a cluster like `-so`), and everything after a bare `--`
+end-of-options terminator is exempt from `value_flags` matching entirely
+(it's an ordinary positional by shell convention from that point on, even
+if its text happens to match a declared flag's name).
+
 ### Precedence: deny > ask > allow
 
 Evaluation is fixed, regardless of which array a rule came from: a `deny`
