@@ -452,6 +452,149 @@ impl CommandRule {
                 .iter()
                 .any(|word| matches!(word.resolution(), Resolution::Unresolvable(_)))
     }
+
+    /// Same wrapper-unwrap walk as [`Self::matching_rest`], but stopping at
+    /// the first hop whose command name alone matches `self.command` —
+    /// ignoring `required_flags`/`required_tokens` entirely. The shared
+    /// building block behind [`Self::matches_except_flags`] (issue #42),
+    /// which needs a hop's tail *before* deciding whether flags/tokens are
+    /// satisfied, unlike [`Self::matching_rest`], which only ever returns a
+    /// hop once both the name and the constraints already hold.
+    ///
+    /// # Known latent divergence from `matching_rest`
+    ///
+    /// [`Self::matching_rest`] keeps walking past a hop whose name matches
+    /// but whose constraints don't, as long as that hop's own base name is
+    /// itself a [`TRANSPARENT_WRAPPERS`] member (e.g. a rule naming `sudo`
+    /// as its `command`, reached through `env sudo ...`) — the deeper hop
+    /// underneath might still satisfy the rule. This function stops at the
+    /// first name match unconditionally, so for such a rule it would
+    /// return the wrapper's own tail rather than continuing to unwrap.
+    /// Currently unreachable — no rule in `rules/blocklist.toml` names a
+    /// `TRANSPARENT_WRAPPERS` entry as its `command` — but a future rule
+    /// that does would need this function taught the same continue-past-
+    /// a-wrapper behavior.
+    #[must_use]
+    fn matching_rest_by_name<'a>(
+        &self,
+        argv: &'a [NormalizedWord],
+    ) -> Option<&'a [NormalizedWord]> {
+        let mut rest = argv;
+        loop {
+            let (first, tail) = rest.split_first()?;
+            let Resolution::Resolved(name) = first.resolution() else {
+                return None;
+            };
+            let base = basename(name);
+            if self.command.matches(base) {
+                return Some(tail);
+            }
+            if !TRANSPARENT_WRAPPERS.contains(&base) {
+                return None;
+            }
+            rest = skip_wrapper_arguments(base, tail);
+        }
+    }
+
+    /// Whether `self.required_tokens` could plausibly be satisfied by
+    /// `rest_words` if every unresolvable word in it were replaced by some
+    /// (unknown) concrete string — [`Self::matches_except_flags`]'s
+    /// positional discipline, mirroring [`Self::constraints_match`]'s own
+    /// positional matching for `required_tokens` (resolved, non-dash-
+    /// prefixed tokens only, in order).
+    ///
+    /// A resolved, non-dash-prefixed word at slot `i` that does not equal
+    /// `required_tokens[i]` proves the miss is real — no unresolvable word
+    /// elsewhere can rescue it — so this returns `false` immediately rather
+    /// than treating every command sharing this rule's command name as
+    /// ambiguous (e.g. `git commit -m $(echo hi)` must not float to `Ask`
+    /// under `git-push-force`'s rule just because "commit" isn't "push").
+    /// An unresolvable word is conservatively counted as occupying a
+    /// positional slot (it might not start with `-`), since its own text is
+    /// unknown by construction ([`Resolution::Unresolvable`] carries no
+    /// source text).
+    #[must_use]
+    fn relaxed_required_tokens_match(&self, rest_words: &[NormalizedWord]) -> bool {
+        if self.required_tokens.is_empty() {
+            return true;
+        }
+        let mut positionals: Vec<Option<&str>> = Vec::new();
+        for word in rest_words {
+            match word.resolution() {
+                Resolution::Resolved(s) if !s.starts_with('-') => positionals.push(Some(s)),
+                Resolution::Resolved(_) => {}
+                Resolution::Unresolvable(_) => positionals.push(None),
+            }
+        }
+        self.required_tokens
+            .iter()
+            .enumerate()
+            .all(|(i, tok)| match positionals.get(i) {
+                Some(Some(p)) => *p == tok.as_str(),
+                Some(None) => true,
+                None => false,
+            })
+    }
+
+    /// Partial-match probe for the structural gate's flags/tokens floor
+    /// (issue #42, `src/gate.rs`): the counterpart to
+    /// [`Self::matches_except_target`] for a rule with no target
+    /// constraint at all (`targets` empty) — `find-delete`, `truncate-zero`,
+    /// `git-push-force`, and similar rules in `rules/blocklist.toml`, where
+    /// the danger IS the flag/token, not a target. `true` when this rule's
+    /// command name is reached through the wrapper chain, the rule declares
+    /// at least one `required_flags`/`required_tokens` constraint (a rule
+    /// with neither already matches on command name alone via
+    /// [`Self::matches`] — nothing left to refine), that constraint is
+    /// NOT satisfied by `argv`'s resolved words alone, and an unresolvable
+    /// word could plausibly be exactly the missing piece (`find . $(echo
+    /// -delete)`, `truncate $(echo -s) 0 file.db`, `git push $(echo
+    /// --force) origin main`).
+    ///
+    /// Like [`Self::matches_except_target`], this is a "would this be
+    /// dangerous if the flag/token were known" probe, never a match on its
+    /// own: the gate uses it only to route an otherwise-Allow command to
+    /// `Ask`, never to `Block`. A rule already fully satisfied by resolved
+    /// words alone is [`Self::matches`]'s job, not this one's — this
+    /// returns `false` in that case so the two floors never double-count.
+    ///
+    /// # Blast radius beyond the motivating examples
+    ///
+    /// `required_flags` has no positional discipline to apply (flags are
+    /// presence-matched anywhere in the tail, never positionally, even in
+    /// [`Self::constraints_match`]'s own strict matching), so this floor
+    /// degrades to "any unresolvable word anywhere in the tail" for that
+    /// half of a rule's constraints — same as [`Self::matches_except_target`]'s
+    /// own target-ambiguity check. Combined with [`Self::relaxed_required_tokens_match`]
+    /// trivially returning `true` when a rule has no `required_tokens` at
+    /// all, a rule like `git-no-verify-any-subcommand` (`required_flags =
+    /// ["--no-verify"]`, no `required_tokens`) floors EVERY `git`
+    /// invocation containing an unresolvable word to `Ask`, regardless of
+    /// subcommand — not just the `find-delete`/`truncate-zero`/
+    /// `git-push-force` shapes this rule was written against. That is the
+    /// intended fail-closed consequence of having no positional
+    /// information to rule anything out (no per-command semantics, module
+    /// docs), not an oversight — see
+    /// `matches_except_flags_no_required_tokens_rule_fires_regardless_of_subcommand`
+    /// below for a pinned example.
+    #[must_use]
+    pub(crate) fn matches_except_flags(&self, argv: &[NormalizedWord]) -> bool {
+        if !self.targets.is_empty()
+            || (self.required_flags.is_empty() && self.required_tokens.is_empty())
+        {
+            return false;
+        }
+        let Some(rest_words) = self.matching_rest_by_name(argv) else {
+            return false;
+        };
+        if self.constraints_match(rest_words) {
+            return false;
+        }
+        let has_unresolvable = rest_words
+            .iter()
+            .any(|w| matches!(w.resolution(), Resolution::Unresolvable(_)));
+        has_unresolvable && self.relaxed_required_tokens_match(rest_words)
+    }
 }
 
 /// A rule matching the shape of a whole pipeline: an earlier stage's
@@ -1233,6 +1376,23 @@ impl Rules {
         self.command_rules
             .iter()
             .find(|rule| rule.matches_except_target(argv))
+    }
+
+    /// The first [`CommandRule`] for which [`CommandRule::matches_except_flags`]
+    /// holds, if any — issue #42's NEW flags/tokens-only floor
+    /// (`src/gate.rs`), covering a flags-only blocklist rule (`targets`
+    /// empty) whose required flag/token might itself be hidden inside an
+    /// unresolvable word. Like [`Self::match_command_except_target`], this
+    /// is a read-only probe: it never mutates rule state and never itself
+    /// constitutes a `Block`.
+    #[must_use]
+    pub(crate) fn match_command_except_flags(
+        &self,
+        argv: &[NormalizedWord],
+    ) -> Option<&CommandRule> {
+        self.command_rules
+            .iter()
+            .find(|rule| rule.matches_except_flags(argv))
     }
 
     /// The configured escalation floor (issues #35/#36, `crate::gate` rule
@@ -2462,6 +2622,167 @@ mod tests {
             matched.map(|rule| rule.id().as_str()),
             Some("rm-recursive-force-dangerous-target")
         );
+    }
+
+    // ==== NEW rule 4b partial-match API: matches_except_flags /
+    // match_command_except_flags (issue #42, src/gate.rs) ====
+
+    #[test]
+    fn matches_except_flags_finds_hidden_find_delete_flag() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = vec![
+            NormalizedWord::resolved("find"),
+            NormalizedWord::resolved("."),
+            NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::CommandSubstitution),
+        ];
+        // the ordinary full match must miss (the literal "-delete"
+        // spelling isn't in any resolved word)
+        assert!(rules.match_command(&cmd).is_none());
+        // but the except-flags probe must catch it
+        let rule = rules.match_command_except_flags(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "find-delete");
+    }
+
+    #[test]
+    fn matches_except_flags_finds_hidden_truncate_flag() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = vec![
+            NormalizedWord::resolved("truncate"),
+            NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::CommandSubstitution),
+            NormalizedWord::resolved("0"),
+            NormalizedWord::resolved("file.db"),
+        ];
+        assert!(rules.match_command(&cmd).is_none());
+        let rule = rules.match_command_except_flags(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "truncate-zero");
+    }
+
+    #[test]
+    fn matches_except_flags_finds_hidden_git_push_force_flag() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = vec![
+            NormalizedWord::resolved("git"),
+            NormalizedWord::resolved("push"),
+            NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::CommandSubstitution),
+            NormalizedWord::resolved("origin"),
+            NormalizedWord::resolved("main"),
+        ];
+        assert!(rules.match_command(&cmd).is_none());
+        let rule = rules.match_command_except_flags(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "git-push-force");
+    }
+
+    #[test]
+    fn matches_except_flags_never_fires_for_a_rule_with_non_empty_targets() {
+        // `rm-recursive-force-dangerous-target` (and
+        // `self-protect-config-rm-tilde`) both have a `targets` list —
+        // rule 4's `matches_except_target` already covers this shape;
+        // rule 4b must stay out of the way.
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv_with_unresolvable_tail(&["rm", "-rf"]);
+        assert!(rules.match_command_except_target(&cmd).is_some());
+        assert!(rules.match_command_except_flags(&cmd).is_none());
+    }
+
+    #[test]
+    fn matches_except_flags_never_fires_for_a_rule_with_no_flag_or_token_constraint() {
+        // `shred` has no `required_flags`/`required_tokens` at all — any
+        // invocation is already a full match via `matches()`; rule 4b has
+        // nothing left to refine.
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv_with_unresolvable_tail(&["shred"]);
+        assert!(rules.match_command(&cmd).is_some());
+        assert!(rules.match_command_except_flags(&cmd).is_none());
+    }
+
+    #[test]
+    fn matches_except_flags_does_not_fire_when_fully_resolved_and_clean() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["find", ".", "-name", "foo"]);
+        assert!(rules.match_command(&cmd).is_none());
+        assert!(rules.match_command_except_flags(&cmd).is_none());
+    }
+
+    #[test]
+    fn matches_except_flags_is_false_when_already_a_full_strict_match() {
+        // `-delete` is already present as a resolved word — the ordinary
+        // match already fires; rule 4b must not also claim this case (no
+        // double-counting between the two floors).
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv_with_unresolvable_tail(&["find", ".", "-delete"]);
+        assert!(rules.match_command(&cmd).is_some());
+        assert!(rules.match_command_except_flags(&cmd).is_none());
+    }
+
+    #[test]
+    fn matches_except_flags_positional_discipline_rejects_wrong_subcommand() {
+        // `git-push-force` requires `required_tokens = ["push"]`; a
+        // resolved "commit" at that position proves the miss is real
+        // regardless of what an unresolvable word elsewhere might be — this
+        // rule specifically must not treat a `git commit` invocation as if
+        // it might be `git push --force`.
+        //
+        // This does NOT mean the command floors to no rule at all: `git
+        // commit -m $(...)` still matches `git-commit-no-verify-short`
+        // (`required_tokens = ["commit"]`, `required_flags = ["n|--no-verify"]`)
+        // via this same mechanism, since an unresolvable word could
+        // plausibly be `--no-verify` — see
+        // `matches_except_flags_still_fires_via_a_different_rule_for_the_right_subcommand`
+        // below, which pins that positive case explicitly (code review
+        // finding on issue #42's PR: an `assert_ne` on one rule ID alone
+        // can misleadingly read as "no floor fires").
+        let rules = Rules::embedded().unwrap();
+        let cmd = vec![
+            NormalizedWord::resolved("git"),
+            NormalizedWord::resolved("commit"),
+            NormalizedWord::resolved("-m"),
+            NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::CommandSubstitution),
+        ];
+        let matched = rules.match_command_except_flags(&cmd);
+        assert_ne!(
+            matched.map(|rule| rule.id().as_str()),
+            Some("git-push-force")
+        );
+    }
+
+    #[test]
+    fn matches_except_flags_still_fires_via_a_different_rule_for_the_right_subcommand() {
+        // Same argv as the test above: `git-push-force` is correctly ruled
+        // out, but `git-commit-no-verify-short` (whose `required_tokens =
+        // ["commit"]` DOES match the resolved "commit" positional) still
+        // fires, since its `required_flags = ["n|--no-verify"]` could
+        // plausibly be the unresolved word.
+        let rules = Rules::embedded().unwrap();
+        let cmd = vec![
+            NormalizedWord::resolved("git"),
+            NormalizedWord::resolved("commit"),
+            NormalizedWord::resolved("-m"),
+            NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::CommandSubstitution),
+        ];
+        let rule = rules.match_command_except_flags(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "git-commit-no-verify-short");
+    }
+
+    #[test]
+    fn matches_except_flags_no_required_tokens_rule_fires_regardless_of_subcommand() {
+        // `git-no-verify-any-subcommand` has `required_flags =
+        // ["--no-verify"]` and NO `required_tokens` at all — with no
+        // positional constraint to narrow it, the floor for this
+        // particular rule degrades to "any `git` invocation containing an
+        // unresolvable word, regardless of subcommand." This is the
+        // intended fail-closed consequence of an empty `required_tokens`
+        // (no positional information exists to rule anything out), not a
+        // bug — pinned explicitly (code review finding: the floor's actual
+        // blast radius is broader than the find-delete/truncate-zero/
+        // git-push-force set the PR body names).
+        let rules = Rules::embedded().unwrap();
+        let cmd = vec![
+            NormalizedWord::resolved("git"),
+            NormalizedWord::resolved("status"),
+            NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::CommandSubstitution),
+        ];
+        let rule = rules.match_command_except_flags(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "git-no-verify-any-subcommand");
     }
 
     // ==== except_targets field (issue #30): "matches unless the target is

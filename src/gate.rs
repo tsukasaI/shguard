@@ -33,7 +33,22 @@
 //!    `x$(echo /)`) whose own inner recursion may itself be a clean Allow
 //!    — the target could not be checked — route to Ask, never silently
 //!    Allow a `rm -rf $HOME` or `rm -rf $(echo /)`. See
-//!    [`crate::rules::CommandRule::matches_except_target`].
+//!    [`crate::rules::CommandRule::matches_except_target`]. "Rule 4b"
+//!    (issue #42) is the same argument-position ambiguity, but for a
+//!    flags-only blocklist rule with no target constraint at all (`targets`
+//!    empty, e.g. `find-delete`, `truncate-zero`, `git-push-force`) — rule
+//!    4 alone never covers these (it requires a non-empty `targets` list),
+//!    so without this floor the danger flag/token itself could hide inside
+//!    an unresolvable word and fall through to a silent Allow (`find .
+//!    $(echo -delete)`, `truncate $(echo -s) 0 file.db`, `git push $(echo
+//!    --force) origin main`). Ask, never Allow. Note the actual scope is
+//!    wider than these three examples: a rule with `required_flags` but
+//!    no `required_tokens` (e.g. `git-no-verify-any-subcommand`) has no
+//!    positional information to rule anything out, so it floors EVERY
+//!    invocation of its command containing an unresolvable word,
+//!    regardless of subcommand — the intended fail-closed consequence of
+//!    "no per-command semantics" (module docs), not a narrower opt-in per
+//!    rule. See [`crate::rules::CommandRule::matches_except_flags`].
 //! 5. Pipeline shape ("rule 5") — the ported `curl|wget -> sh` rule
 //!    (`crate::rules::Rules::match_pipeline`) plus two NEW structural
 //!    rules: a decode/transform stage feeding an interpreter sink blocks
@@ -709,6 +724,28 @@ fn evaluate_simple_command_core(
         None
     };
 
+    // Rule 4b (NEW, issue #42): the same argument-position-ambiguity
+    // trigger as rule 4, but for a flags-only blocklist rule (`targets`
+    // empty) whose required flag/token — not a target — is the danger
+    // (`find-delete`, `truncate-zero`, `git-push-force`). Rule 4 alone
+    // never covers these: its very first check requires a non-empty
+    // `targets` list. Without this floor, `find . $(echo -delete)` would
+    // fail rule 4 (empty `targets`) AND fail the ordinary blocklist match
+    // (the literal `-delete` spelling isn't in any *resolved* word), and
+    // fall through to a silent Allow. See
+    // `crate::rules::CommandRule::matches_except_flags`.
+    let except_flags_rule = if has_argument_position_bare_var(argument_words)
+        || has_argument_position_substitution(argument_words)
+    {
+        rules.match_command_except_flags(&argv)
+    } else {
+        None
+    };
+    let except_floors = ExceptFloors {
+        target: except_target_rule,
+        flags: except_flags_rule,
+    };
+
     // Stage 3: the ordinary exact-argv blocklist match.
     if let Some(rule) = rules.match_command(&argv) {
         let reason = Reason::new(format!(
@@ -729,7 +766,7 @@ fn evaluate_simple_command_core(
         ifs_floor,
         escalation_floor,
         opaque_kind,
-        except_target_rule,
+        except_floors,
         substitution_result,
     )
 }
@@ -797,18 +834,35 @@ fn apply_escalation_floor(
     }
 }
 
-/// Folds every non-Block-by-rule-match floor (rules 3/4/6b/7/8/10) into the
-/// final [`Verdict`] for one simple command, once the ordinary blocklist
-/// match has already come back clean. The only way this can still produce
-/// `Block` is rule 3's argument-position substitution recursion, or rule
-/// 10's escalation floor when `escalation_floor` is configured to `deny`.
+/// Rules 4 and 4b's argument-position-ambiguity floors, bundled into one
+/// parameter so [`fold_floors`] doesn't cross clippy's
+/// `too_many_arguments` threshold — see each field's own doc for what it
+/// floors.
+struct ExceptFloors<'a> {
+    /// Rule 4: command+flags/tokens already strictly match via resolved
+    /// words; the *target* is what's unresolved (`rm -rf $HOME`). See
+    /// [`crate::rules::CommandRule::matches_except_target`].
+    target: Option<&'a crate::rules::CommandRule>,
+    /// Rule 4b (issue #42): command name matches but required flags/tokens
+    /// don't strictly match resolved words alone; an unresolvable word
+    /// could plausibly be exactly the missing flag/token (`find . $(echo
+    /// -delete)`). See [`crate::rules::CommandRule::matches_except_flags`].
+    flags: Option<&'a crate::rules::CommandRule>,
+}
+
+/// Folds every non-Block-by-rule-match floor (rules 3/4/4b/6b/7/8/10) into
+/// the final [`Verdict`] for one simple command, once the ordinary
+/// blocklist match has already come back clean. The only way this can
+/// still produce `Block` is rule 3's argument-position substitution
+/// recursion, or rule 10's escalation floor when `escalation_floor` is
+/// configured to `deny`.
 fn fold_floors(
     argv: Vec<NormalizedWord>,
     interpreter_code_floor: bool,
     ifs_floor: bool,
     escalation_floor: Option<(Decision, String)>,
     opaque_kind: Option<UnresolvableKind>,
-    except_target_rule: Option<&crate::rules::CommandRule>,
+    except_floors: ExceptFloors<'_>,
     substitution_result: Option<Decision>,
 ) -> Verdict {
     let mut decision = Decision::Allow;
@@ -840,11 +894,19 @@ fn fold_floors(
             "a word is unresolvable ({kind:?}) and is not covered by a more specific structural rule"
         ));
     }
-    if let Some(rule) = except_target_rule {
+    if let Some(rule) = except_floors.target {
         decision = decision.max(Decision::Ask);
         reasons.push(format!(
             "command and flags match blocklist rule {:?}, but the target is an unresolved $VAR \
              or command substitution that could not be checked statically",
+            rule.id().as_str()
+        ));
+    }
+    if let Some(rule) = except_floors.flags {
+        decision = decision.max(Decision::Ask);
+        reasons.push(format!(
+            "command matches blocklist rule {:?}, but a required flag/token could not be fully \
+             checked because an argument is an unresolved $VAR or command substitution",
             rule.id().as_str()
         ));
     }
@@ -1944,6 +2006,61 @@ mod tests {
         // Block, and `fold_floors`'s max-fold keeps it regardless of the
         // new trigger also firing Ask.
         assert_decision("rm -rf $(rm -rf /)", Decision::Block);
+    }
+
+    // ==== Issue #42: rule 4b, the except-flags/except-tokens floor for
+    // flags-only rules (`targets` empty) — analogous to rule 4's
+    // except-target refinement, but the danger IS the flag/token itself,
+    // not a target ====
+
+    #[test]
+    fn find_delete_flag_hidden_in_substitution_asks() {
+        // `find-delete` (required_flags = ["-delete"], no `targets`) misses
+        // the ordinary blocklist match (the literal "-delete" spelling
+        // isn't in any resolved word) and, absent rule 4b, would fall
+        // through to a silent Allow.
+        assert_decision("find . $(echo -delete)", Decision::Ask);
+    }
+
+    #[test]
+    fn truncate_s_flag_hidden_in_substitution_asks() {
+        assert_decision("truncate $(echo -s) 0 file.db", Decision::Ask);
+    }
+
+    #[test]
+    fn git_push_force_flag_hidden_in_substitution_asks() {
+        assert_decision("git push $(echo --force) origin main", Decision::Ask);
+    }
+
+    #[test]
+    fn find_without_delete_and_without_ambiguity_still_allows() {
+        // No unresolvable word at all — rule 4b must not fire on an
+        // ordinary, fully-resolved miss.
+        assert_decision("find . -name foo", Decision::Allow);
+    }
+
+    #[test]
+    fn find_delete_already_resolved_still_blocks_not_merely_asks() {
+        // When `-delete` is already present as a resolved word, the
+        // ordinary blocklist match fires directly (`find-delete` defaults
+        // to `Decision::Block`) — rule 4b's Ask floor must not be
+        // reachable (and must not downgrade) this case.
+        assert_decision("find . -delete $(echo x)", Decision::Block);
+    }
+
+    #[test]
+    fn git_no_verify_any_subcommand_floors_any_git_substitution_regardless_of_subcommand() {
+        // `git-no-verify-any-subcommand` has `required_flags = ["--no-verify"]`
+        // and NO `required_tokens` — with no positional constraint to rule
+        // anything out, rule 4b's floor for this rule degrades to "any `git`
+        // invocation containing an unresolvable word, regardless of
+        // subcommand" (code review finding on issue #42's PR: the floor's
+        // actual blast radius is broader than the find-delete/truncate-zero/
+        // git-push-force set the PR body names). This is the intended
+        // fail-closed consequence of `required_tokens` being empty, not a
+        // bug — pinned explicitly here rather than left implicit.
+        assert_decision("git status $(echo foo)", Decision::Ask);
+        assert_decision("git log $(cat ref)", Decision::Ask);
     }
 
     #[test]
