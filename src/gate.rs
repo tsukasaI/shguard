@@ -1948,22 +1948,24 @@ mod tests {
     }
 
     #[test]
-    fn sudo_with_separated_value_flag_floors_to_ask() {
-        // `-u root`'s value token hides `rm` from the ordinary rule match
-        // (the wrapper-argument known limitation documented on
-        // `TRANSPARENT_WRAPPERS`); the floor still gates the escalation.
-        assert_decision("sudo -u root rm -rf /", Decision::Ask);
+    fn sudo_with_separated_value_flag_no_longer_hides_wrapped_command() {
+        // Issue #54 closed this `TRANSPARENT_WRAPPERS` known limitation:
+        // `sudo`'s `wrapper_value_flags` entry now skips `-u root`'s
+        // separated value along with the flag itself, so the rm rule
+        // reaches its own Block decision instead of only the escalation
+        // floor's Ask.
+        assert_decision("sudo -u root rm -rf /", Decision::Block);
     }
 
     // ==== Wrapper-argument regression pins (from the issue #32 session) ====
 
     #[test]
-    fn nice_with_separated_value_flag_misses_rule_and_allows() {
-        // Pins the `TRANSPARENT_WRAPPERS` known limitation as-is: `19` (the
-        // value of `-n 19`) is mistaken for the wrapped command, so the rm
-        // rule never matches and no floor applies. A fix belongs to a
-        // wrapper-argument-aware follow-up, not the sudo floor.
-        assert_decision("nice -n 19 rm -rf /", Decision::Allow);
+    fn nice_with_separated_value_flag_no_longer_misses_rule() {
+        // Issue #54 closed this `TRANSPARENT_WRAPPERS` known limitation:
+        // `nice`'s `wrapper_value_flags` entry now skips `-n 19`'s
+        // separated value along with the flag itself, so `19` is no
+        // longer mistaken for the wrapped command.
+        assert_decision("nice -n 19 rm -rf /", Decision::Block);
     }
 
     #[test]
@@ -2107,10 +2109,38 @@ mod tests {
 
     #[test]
     fn each_escalation_vector_wrapped_rm_rf_root_still_blocks() {
-        for vector in crate::rules::ESCALATION_VECTORS {
+        // `su` is excluded here — its grammar genuinely differs from the
+        // other vectors (`su [options] [-] [user [arg...]]` takes a
+        // positional username before any wrapped command), so `su rm -rf
+        // /` is not the same shape as `sudo rm -rf /`; see
+        // `su_positional_argument_hides_wrapped_command_but_floor_still_asks`
+        // below for that case.
+        for vector in crate::rules::ESCALATION_VECTORS
+            .iter()
+            .filter(|v| **v != "su")
+        {
             let command = format!("{vector} rm -rf /");
             assert_decision(&command, Decision::Block);
         }
+    }
+
+    #[test]
+    fn su_positional_argument_hides_wrapped_command_but_floor_still_asks() {
+        // Issue #54 gave `su` a `wrapper_positional_args` entry so `su
+        // root -c 'sh'` no longer mistakes the username `root` for the
+        // wrapped command. The trade-off: `su`'s real grammar (`su
+        // [options] [-] [user [arg...]]`) has no way to tell "no username,
+        // command follows directly" from "username follows" by shape
+        // alone, so `su rm -rf /` now reads `rm` as the (nonexistent)
+        // username positional rather than as the executed command — which
+        // matches real `su` behaviour: without `-c`, `su rm -rf /` would
+        // actually try to switch to a user named `rm`, not run `rm -rf
+        // /`. The rm blocklist rule is therefore never reached, but
+        // `wrapper_chain_escalation`'s name-only `Contains` arm (matched
+        // before any argument skipping) still floors the decision to Ask
+        // — under-resolving which inner rule would have blocked, never
+        // falling through to a silent Allow.
+        assert_decision("su rm -rf /", Decision::Ask);
     }
 
     #[test]

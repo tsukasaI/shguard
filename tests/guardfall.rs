@@ -120,6 +120,23 @@ fn guardfall_rm_dot_targets() {
     }
 }
 
+/// Issue #54: `timeout`/`ionice`/`flock` joined `TRANSPARENT_WRAPPERS`, so
+/// a wrapped `rm -rf /` must reach the same rm rule a bare invocation does.
+#[test]
+fn guardfall_transparent_wrapper_cases() {
+    let cases: &[(&str, Decision)] = &[("timeout 5 rm -rf /", Decision::Block)];
+
+    for (command, expected) in cases {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
 /// Redirect target and tee rules.
 #[test]
 fn guardfall_redirect_and_tee_cases() {
