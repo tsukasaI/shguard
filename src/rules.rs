@@ -2494,6 +2494,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn tar_extract_into_root_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["tar", "-xf", "evil.tar", "-C", "/"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn tar_extract_into_relative_dir_does_not_match() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["tar", "-xf", "x.tar", "-C", "./build"]))
+                .is_none()
+        );
+    }
+
     // ==== Self-protection: literal ~/.config/shguard/ token ====
 
     #[test]

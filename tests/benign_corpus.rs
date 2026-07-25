@@ -75,6 +75,11 @@ fn benign_corpus_no_false_positives() {
         // tee to safe targets.
         "tee output.log",
         "tee /tmp/build.log",
+        // tar — extraction/creation against non-root/home targets.
+        "tar -xzf node.tar.gz",
+        "tar -czf backup.tar.gz src/",
+        "tar -xf x.tar -C ./build",
+        "tar -xf x.tar -C ~/projects/app",
     ];
 
     for command in commands {

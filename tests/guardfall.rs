@@ -42,7 +42,7 @@ fn guardfall_headline_cases() {
 
 /// Class E: destructive commands outside the `rm` family (plan.md's
 /// blocklist schema) — `find -delete`, `dd` to a `/dev/` target, `shred`,
-/// and `truncate -s`.
+/// `truncate -s`, and `tar` extraction with -C/--directory into / or ~.
 #[test]
 fn guardfall_class_e_cases() {
     let cases: &[(&str, Decision)] = &[
@@ -50,6 +50,10 @@ fn guardfall_class_e_cases() {
         ("dd if=/dev/zero of=/dev/sda", Decision::Block),
         ("shred /dev/sda", Decision::Block),
         ("truncate -s 0 /important", Decision::Block),
+        ("tar -C / -x", Decision::Block),
+        ("tar -xf evil.tar -C /", Decision::Block),
+        ("tar --extract --directory=/ -f evil.tar", Decision::Block),
+        ("tar xf a.tar -C /", Decision::Ask),
     ];
 
     for (command, expected) in cases {
