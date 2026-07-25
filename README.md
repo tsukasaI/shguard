@@ -288,9 +288,11 @@ resolved config path, and the literal `~/.config/shguard/` token for any
 user — an agent shouldn't be able to edit its own guardrails via a shell
 command. This is a partial mitigation, not a complete one:
 
-- Bare shell redirection (`cat > path <<EOF`, see Limitations below) is not
-  analyzed by design, and a `SHGUARD_CONFIG` override set via a shell
-  profile is outside shguard's visibility entirely.
+- A redirection target that is itself a `$()`/backtick substitution has its
+  *inner command* checked (issue #51) — but the target *path* it resolves to
+  is not checked against this list at all (see Limitations below), so
+  `cat > path <<EOF` still is not caught this way, and a `SHGUARD_CONFIG`
+  override set via a shell profile is outside shguard's visibility entirely.
 - A relative path after `cd`-ing into the config directory (`cd
   ~/.config/shguard && cp evil.toml config.toml`) is not caught — shguard
   never resolves argv tokens against the process's working directory.
@@ -332,14 +334,19 @@ eradicate shell-mediated destruction. Explicitly out of scope:
 4. **Multi-step attacks staged across Ask-approved commands.** Ask surfaces
    an unresolvable command to a human for a decision; a hurried human can
    still approve a staged payload one step at a time.
-5. **Redirection targets, mostly.** Output/append redirection (`>`, `>>`)
-   targets are checked against a curated dangerous-path list (raw block
-   devices, `/etc/passwd`, `/etc/shadow`) — but that list doesn't include
-   shguard's own config path, so `cat > file <<EOF` is still Allow when
-   `file` is shguard's config file. The
+5. **Redirection target paths, mostly.** Output/append redirection (`>`,
+   `>>`) targets are checked against a curated dangerous-path list (raw
+   block devices, `/etc/passwd`, `/etc/shadow`) — but that list doesn't
+   include shguard's own config path, so `cat > file <<EOF` is still Allow
+   when `file` is shguard's config file. The
    [config-file self-protection](#protecting-the-config-file-itself) rules
    only see write-capable *commands* (`tee`, `cp`, `dd`, …) in argv, not
-   bare redirection, and heredoc bodies themselves are never inspected.
+   bare redirection. A `$()`/backtick substitution sitting in a redirection
+   target, or in an unquoted-delimiter heredoc body, IS recursively checked
+   (issue #51) — `echo hi > $(curl ... | sh)` and a heredoc body's
+   `$(rm -rf /)` are both denied — but only the substitution's *inner
+   command*, never the resolved target *path* itself, which stays the
+   unchecked case above.
 
 ## Attribution
 
