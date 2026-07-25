@@ -3400,6 +3400,42 @@ mod tests {
         );
     }
 
+    // A declared flag's separated value can itself be the literal text
+    // `--` (`--exclude --`) — real getopt semantics consume the very next
+    // token as the flag's value unconditionally, so this `--` is NOT the
+    // end-of-options terminator; value_flags matching stays live for
+    // everything after it, and a genuinely unexcepted target further down
+    // the tail must still be caught (PR #50 review, non-blocking follow-up).
+    #[test]
+    fn value_flags_declared_flags_value_can_itself_be_the_terminator_text() {
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "rsync-remote"
+            reason = "ask unless rsync stays local"
+            decision = "ask"
+            command = "rsync"
+            value_flags = ["exclude"]
+            except_targets = [{ prefix = "./" }]
+        "#,
+        )
+        .unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "rsync",
+                    "-a",
+                    "--exclude",
+                    "--",
+                    "./src/",
+                    "user@host:/remote"
+                ]))
+                .is_some(),
+            "-- here is --exclude's own value, not the terminator; \
+             user@host:/remote must still be checked and found unexcepted"
+        );
+    }
+
     #[test]
     fn value_flags_parse_rejects_bad_specs() {
         assert!(ValueFlag::parse("").is_err());
