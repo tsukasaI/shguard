@@ -44,8 +44,8 @@ use brush_parser::word::{self as bword};
 use brush_parser::{Parser as BrushParser, ParserOptions as BrushParserOptions, ast as bast};
 
 use crate::ast::{
-    Assignment, CommandLine, FileRedirectionKind, Pipeline, Redirection, Separator, SimpleCommand,
-    Word, WordPiece,
+    Assignment, CommandLine, FileRedirectionKind, MAX_BRACE_NESTING_DEPTH, Pipeline, Redirection,
+    Separator, SimpleCommand, Word, WordPiece,
 };
 
 /// Everything that can go wrong converting a raw command string into
@@ -86,17 +86,76 @@ fn parser_options() -> BrushParserOptions {
     BrushParserOptions::default()
 }
 
+/// Rejects `command` if either its `{`/`}` or its `(`/`)` nesting depth
+/// exceeds [`MAX_BRACE_NESTING_DEPTH`], *before* any recursive-descent
+/// parser (brush-parser's PEG grammar, or this module's own brace/word
+/// conversion) ever sees the text.
+///
+/// This is the primary defense against issue #52's abort: deeply nested
+/// `{`/`(` input (e.g. `{a,` repeated thousands of times, or `$(` repeated
+/// thousands of times) crashes with a stack overflow *inside
+/// brush-parser's own PEG grammar* — its mutually recursive descent has no
+/// depth limit of its own — before shguard's AST-level depth cap
+/// (`convert_brace_segment`/`convert_brace_members` in this module,
+/// `normalize::expand_braces`) ever gets a chance to run, because those
+/// only see brush-parser's *output*. A crash there is an uncatchable abort
+/// (`std::panic::catch_unwind` cannot intercept a stack overflow — see
+/// `src/bin/shguard.rs`'s module docs), so the only effective defense is a
+/// linear, non-recursive pre-scan that runs ahead of the parser and rejects
+/// the input outright. Both bracket kinds are counted in one pass (`{`/`}`
+/// alone would miss a `$(`-only attack, which was independently confirmed
+/// to abort even though it never touches shguard's AST-level brace cap at
+/// all) — see [`MAX_BRACE_NESTING_DEPTH`]'s docs for the chosen cap value
+/// and its trade-offs.
+///
+/// Scans bytes, not `char`s: `{`, `}`, `(`, `)` are all single-byte ASCII,
+/// and no UTF-8 continuation byte (`0x80..=0xBF`) can equal one of them, so
+/// counting raw bytes is exact for any valid UTF-8 input and avoids paying
+/// for UTF-8 decoding on a hot, security-critical scan.
+fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
+    let mut brace_depth: usize = 0;
+    let mut paren_depth: usize = 0;
+    for byte in command.bytes() {
+        match byte {
+            b'{' => {
+                brace_depth += 1;
+                if brace_depth > MAX_BRACE_NESTING_DEPTH {
+                    return Err(ParseError::unsupported(
+                        "brace nesting exceeds the raw depth cap",
+                    ));
+                }
+            }
+            b'}' => brace_depth = brace_depth.saturating_sub(1),
+            b'(' => {
+                paren_depth += 1;
+                if paren_depth > MAX_BRACE_NESTING_DEPTH {
+                    return Err(ParseError::unsupported(
+                        "parenthesis nesting exceeds the raw depth cap",
+                    ));
+                }
+            }
+            b')' => paren_depth = paren_depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Parses a raw shell command line into shguard's AST.
 ///
 /// # Errors
 ///
 /// Returns [`ParseError::Syntax`] if `command` is not valid shell syntax, or
 /// [`ParseError::Unsupported`] if it parses but contains a construct
-/// shguard's AST cannot represent (see the module docs).
+/// shguard's AST cannot represent (see the module docs), including raw
+/// `{`/`}`/`(`/`)` nesting past [`MAX_BRACE_NESTING_DEPTH`]
+/// ([`reject_excessive_raw_nesting`]).
 ///
 /// `analyze()` (`src/lib.rs`) calls this via `src/gate.rs` — stage 1 of the
 /// pipeline (plan.md §1.1).
 pub(crate) fn parse(command: &str) -> Result<CommandLine, ParseError> {
+    reject_excessive_raw_nesting(command)?;
+
     let mut parser = BrushParser::new(Cursor::new(command.as_bytes()), &parser_options());
     let program = parser
         .parse_program()
@@ -387,7 +446,7 @@ fn convert_word(word: &bast::Word) -> Result<Word, ParseError> {
 
     let mut pieces = Vec::new();
     for segment in brace_segments.into_iter().flatten() {
-        pieces.extend(convert_brace_segment(segment)?);
+        pieces.extend(convert_brace_segment(segment, 0)?);
     }
     Ok(Word(pieces))
 }
@@ -396,27 +455,50 @@ fn is_brace_expr(segment: &bword::BraceExpressionOrText) -> bool {
     matches!(segment, bword::BraceExpressionOrText::Expr(_))
 }
 
+/// Defense-in-depth companion to [`reject_excessive_raw_nesting`] (issue
+/// #52): that raw pre-scan is the primary defense and already keeps `depth`
+/// bounded by [`MAX_BRACE_NESTING_DEPTH`] in practice (brush-parser's own
+/// brace pre-pass only ever nests as deep as the source text does), but this
+/// cap is checked independently, at the point where *this module's own*
+/// recursion happens, so a future change to the raw scan (or a gap in it)
+/// cannot turn this mutual recursion into an unbounded one on its own.
+/// `depth` starts at 0 from [`convert_word`] and increases by one on every
+/// `convert_brace_segment` <-> `convert_brace_members` recursion.
 fn convert_brace_segment(
     segment: bword::BraceExpressionOrText,
+    depth: usize,
 ) -> Result<Vec<WordPiece>, ParseError> {
+    if depth > MAX_BRACE_NESTING_DEPTH {
+        return Err(ParseError::unsupported(
+            "brace nesting exceeds the AST depth cap",
+        ));
+    }
     match segment {
         bword::BraceExpressionOrText::Text(text) => convert_word_text(&text),
         bword::BraceExpressionOrText::Expr(members) => Ok(vec![WordPiece::BraceAlternation(
-            convert_brace_members(members)?,
+            convert_brace_members(members, depth + 1)?,
         )]),
     }
 }
 
+/// See [`convert_brace_segment`]'s docs for why this depth cap exists
+/// alongside the raw pre-scan.
 fn convert_brace_members(
     members: Vec<bword::BraceExpressionMember>,
+    depth: usize,
 ) -> Result<Vec<Word>, ParseError> {
+    if depth > MAX_BRACE_NESTING_DEPTH {
+        return Err(ParseError::unsupported(
+            "brace nesting exceeds the AST depth cap",
+        ));
+    }
     members
         .into_iter()
         .map(|member| match member {
             bword::BraceExpressionMember::Child(inner) => {
                 let mut pieces = Vec::new();
                 for segment in inner {
-                    pieces.extend(convert_brace_segment(segment)?);
+                    pieces.extend(convert_brace_segment(segment, depth + 1)?);
                 }
                 Ok(Word(pieces))
             }

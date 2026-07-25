@@ -15,6 +15,44 @@
 //! text and command-position shape that normalisation deliberately does not
 //! retain, by the structural gate (`src/gate.rs`, B4) directly.
 
+/// Shared nesting-depth cap for brace-alternation (`{`/`}`) and
+/// command-substitution (`(`/`)`) recursion, enforced independently by
+/// `src/parser.rs`'s raw pre-scan and AST-level depth cap and by
+/// `src/normalize.rs`'s `expand_braces` recursion (issue #52).
+///
+/// Placed here rather than in either consuming module because both
+/// `parser` and `normalize` already depend on `ast`, and sharing one
+/// constant across the two layers avoids a new `parser` -> `normalize`
+/// dependency that keeping it in either module would create.
+///
+/// # Why 64
+///
+/// Real brace nesting rarely exceeds 2-3 levels; one nesting level costs
+/// roughly 3KB of raw input (measured: `{a,`x3000 is the crash threshold on
+/// an 8MiB main-thread stack, so ~1 level per ~3KB), so 64 levels is a ~10x
+/// safety margin over the ~600-level budget `cargo test`'s 2MiB test-thread
+/// stack allows — comfortably clear of both the tested-safe range and any
+/// realistic legitimate nesting. It intentionally matches
+/// `normalize::MAX_BRACE_ALTERNATIVES` (also 64) rather than
+/// `gate::MAX_SUBSTITUTION_DEPTH` (8): the latter is an *analysis* recursion
+/// depth (each level re-evaluates a whole pipeline through the gate), while
+/// this is cheap *structural* recursion (descending into an AST/text shape).
+/// A cap as tight as 8 risks a false Ask when the raw scanner over-counts
+/// (e.g. `{`/`(` occurring inside a quoted string it does not parse
+/// quoting out of); 64 tolerates that over-count while still capping actual
+/// unbounded recursion.
+///
+/// # Known trade-off
+///
+/// The raw pre-scan in `src/parser.rs::parse` counts every `{`/`}`/`(`/`)`
+/// byte in the input, including ones inside quotes (e.g. a deeply nested
+/// JSON literal passed as a shell argument). Such input can hit this cap
+/// and fail closed to `Ask` even though it is not itself a nesting attack —
+/// an accepted false-positive cost of a scan that is deliberately linear
+/// and non-recursive (the only correctness property that matters for a
+/// stack-overflow defense).
+pub(crate) const MAX_BRACE_NESTING_DEPTH: usize = 64;
+
 /// A separator joining two [`Pipeline`]s in a [`CommandLine`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Separator {
