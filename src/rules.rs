@@ -1014,18 +1014,51 @@ pub(crate) fn effective_command(stage: &[NormalizedWord]) -> Option<(&str, &[Nor
 /// before this table existed. A wrapper absent from this table, or one
 /// whose flag isn't listed here, keeps that pre-existing dash-prefix-only
 /// behaviour; see [`TRANSPARENT_WRAPPERS`]'s doc for what stays open.
-fn wrapper_value_flags(wrapper: &str) -> &'static [ValueFlag] {
+///
+/// Each wrapper's short *and* long spelling is listed for every value flag
+/// (e.g. `timeout`'s `-s`/`--signal`): a long-only entry left out here
+/// would let its separated form (`--signal KILL 5 rm -rf /`) mistake the
+/// value for the wrapped command exactly as the pre-#54 short-flag gap
+/// did — [`ValueFlag::is_bare`] already treats `--signal` and `-s` as
+/// distinct spellings that must each be listed to be recognised. `flock`
+/// gained its own entry here for the same reason `nice`/`sudo` did: its
+/// `-w`/`--timeout` and `-E`/`--conflict-exit-code` flags take a separated
+/// value that would otherwise land in [`wrapper_positional_args`]'s
+/// lockfile slot (making the real lockfile argument the resolved command).
+fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
     match wrapper {
-        "nice" => &[ValueFlag::Short('n')],
-        "sudo" => &[ValueFlag::Short('u'), ValueFlag::Short('g')],
-        "doas" => &[ValueFlag::Short('u')],
-        "timeout" => &[ValueFlag::Short('s'), ValueFlag::Short('k')],
-        "ionice" => &[
+        "nice" => vec![
+            ValueFlag::Short('n'),
+            ValueFlag::Long("adjustment".to_string()),
+        ],
+        "sudo" => vec![
+            ValueFlag::Short('u'),
+            ValueFlag::Short('g'),
+            ValueFlag::Long("user".to_string()),
+            ValueFlag::Long("group".to_string()),
+        ],
+        "doas" => vec![ValueFlag::Short('u')],
+        "timeout" => vec![
+            ValueFlag::Short('s'),
+            ValueFlag::Short('k'),
+            ValueFlag::Long("signal".to_string()),
+            ValueFlag::Long("kill-after".to_string()),
+        ],
+        "ionice" => vec![
             ValueFlag::Short('c'),
             ValueFlag::Short('n'),
             ValueFlag::Short('p'),
+            ValueFlag::Long("class".to_string()),
+            ValueFlag::Long("classdata".to_string()),
+            ValueFlag::Long("pid".to_string()),
         ],
-        _ => &[],
+        "flock" => vec![
+            ValueFlag::Short('w'),
+            ValueFlag::Short('E'),
+            ValueFlag::Long("timeout".to_string()),
+            ValueFlag::Long("conflict-exit-code".to_string()),
+        ],
+        _ => vec![],
     }
 }
 
@@ -1071,6 +1104,14 @@ fn wrapper_positional_args(wrapper: &str) -> usize {
 /// positional arguments consume the entire tail (`flock -x 9` alone) leaves
 /// an empty slice, which `effective_command`'s next loop iteration turns
 /// into `None` — fail-closed, never a guess past the end.
+///
+/// A lone `--` end-of-options marker immediately after that (e.g. `flock
+/// /tmp/l -- rm -rf /`) is skipped too: it is never itself a command name,
+/// and without this a positional-consuming wrapper resolves it as the
+/// wrapped command, which matches no rule and silently allows (issue #54
+/// follow-up). A wrapper with no positional (`sudo -u root -- rm -rf /`)
+/// never reaches this check — the flag-skipping loop above already
+/// consumes `--` itself, since it starts with `-`.
 fn skip_wrapper_arguments<'a>(wrapper: &str, argv: &'a [NormalizedWord]) -> &'a [NormalizedWord] {
     let value_flags = wrapper_value_flags(wrapper);
     let mut idx = 0;
@@ -1090,6 +1131,11 @@ fn skip_wrapper_arguments<'a>(wrapper: &str, argv: &'a [NormalizedWord]) -> &'a 
         idx += 1;
     }
     idx = (idx + wrapper_positional_args(wrapper)).min(argv.len());
+    if let Some(Resolution::Resolved(token)) = argv.get(idx).map(NormalizedWord::resolution)
+        && token == "--"
+    {
+        idx += 1;
+    }
     &argv[idx..]
 }
 
@@ -2281,6 +2327,47 @@ mod tests {
         // is left — effective_command must fail closed to None rather
         // than guess past the end of argv.
         assert!(effective_command(&argv(&["flock", "-x", "9"])).is_none());
+    }
+
+    #[test]
+    fn timeout_long_signal_value_flag_does_not_hide_the_wrapped_command() {
+        // Regression: wrapper_value_flags originally listed only the short
+        // spelling (`-s`), so `--signal`'s separated value fell through to
+        // the duration positional and the real command was never reached.
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "timeout", "--signal", "KILL", "5", "rm", "-rf", "/"
+                ]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn flock_own_value_flags_do_not_hide_the_wrapped_command() {
+        // Regression: flock had no wrapper_value_flags entry at all, so
+        // `-w`'s separated timeout value was mistaken for the lock-target
+        // positional and the lockfile path became the resolved command.
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["flock", "-w", "10", "/tmp/l", "rm", "-rf", "/"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn flock_end_of_options_marker_does_not_hide_the_wrapped_command() {
+        // Regression: a `--` end-of-options marker following the
+        // lock-target positional (`flock <file> -- command`) was itself
+        // resolved as the wrapped command, matching no rule.
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["flock", "-x", "/tmp/l", "--", "rm", "-rf", "/"]))
+                .is_some()
+        );
     }
 
     #[test]
