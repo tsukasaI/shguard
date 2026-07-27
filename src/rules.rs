@@ -363,6 +363,16 @@ impl CommandRule {
         self.decision
     }
 
+    /// Whether `name` alone (no argv, no constraints) is this rule's
+    /// command matcher — used by
+    /// [`su_username_matches_blocklisted_command`] to check a bare token
+    /// against every rule's name without needing a full argv to run
+    /// [`Self::matches`] against.
+    #[must_use]
+    fn command_name_matches(&self, name: &str) -> bool {
+        self.command.matches(name)
+    }
+
     /// Whether `rest_words` (already resolved past this rule's command
     /// name) satisfies this rule's required flags and required tokens —
     /// the constraint half of matching, factored out of
@@ -1089,6 +1099,36 @@ fn wrapper_positional_args(wrapper: &str) -> usize {
     }
 }
 
+/// The flag-skipping half of [`skip_wrapper_arguments`], factored out so
+/// [`su_username_matches_blocklisted_command`] can find where `su`'s own
+/// flags end — and therefore which token occupies its positional
+/// "username" slot — without also applying [`wrapper_positional_args`]'s
+/// skip, which is exactly the token this function's caller needs to
+/// inspect rather than discard. Returns the index of the first token that
+/// is neither one of `wrapper`'s bare value flags nor `-`-prefixed (nor,
+/// for `env`, a `NAME=value` assignment) — i.e. where positional
+/// consumption would begin.
+fn skip_wrapper_flags(wrapper: &str, argv: &[NormalizedWord]) -> usize {
+    let value_flags = wrapper_value_flags(wrapper);
+    let mut idx = 0;
+    while idx < argv.len() {
+        let Resolution::Resolved(token) = argv[idx].resolution() else {
+            break;
+        };
+        if value_flags.iter().any(|vf| vf.is_bare(token)) {
+            idx = (idx + 2).min(argv.len());
+            continue;
+        }
+        let skippable =
+            token.starts_with('-') || (wrapper == "env" && is_env_assignment_shape(token));
+        if !skippable {
+            break;
+        }
+        idx += 1;
+    }
+    idx
+}
+
 /// Skips a transparent wrapper's own leading arguments (see
 /// [`effective_command`]'s docs): a token matching one of
 /// [`wrapper_value_flags`]'s bare spellings skips itself *and* the
@@ -1113,23 +1153,7 @@ fn wrapper_positional_args(wrapper: &str) -> usize {
 /// never reaches this check — the flag-skipping loop above already
 /// consumes `--` itself, since it starts with `-`.
 fn skip_wrapper_arguments<'a>(wrapper: &str, argv: &'a [NormalizedWord]) -> &'a [NormalizedWord] {
-    let value_flags = wrapper_value_flags(wrapper);
-    let mut idx = 0;
-    while idx < argv.len() {
-        let Resolution::Resolved(token) = argv[idx].resolution() else {
-            break;
-        };
-        if value_flags.iter().any(|vf| vf.is_bare(token)) {
-            idx = (idx + 2).min(argv.len());
-            continue;
-        }
-        let skippable =
-            token.starts_with('-') || (wrapper == "env" && is_env_assignment_shape(token));
-        if !skippable {
-            break;
-        }
-        idx += 1;
-    }
+    let mut idx = skip_wrapper_flags(wrapper, argv);
     idx = (idx + wrapper_positional_args(wrapper)).min(argv.len());
     if let Some(Resolution::Resolved(token)) = argv.get(idx).map(NormalizedWord::resolution)
         && token == "--"
@@ -1191,6 +1215,60 @@ pub(crate) fn wrapper_chain_escalation(stage: &[NormalizedWord]) -> WrapperChain
             return WrapperChainEscalation::Absent;
         }
         passed_wrapper = true;
+        rest = skip_wrapper_arguments(base, tail);
+    }
+}
+
+/// Whether `stage`'s wrapper-unwrap chain passes through `su` with a
+/// positional "username" slot whose value itself matches one of `rules`'
+/// command rules by name (issue #54 follow-up).
+///
+/// `su [options] [-] [user [args...]]` is shape-ambiguous: `su rm -rf /`
+/// can't be told apart from "su into a user literally named `rm`, with no
+/// command" by structure alone (see [`wrapper_positional_args`]'s docs on
+/// `su`), and `crate::gate`'s rule 10 already floors that ambiguity to at
+/// least `escalation_floor` (default `Ask`) because `su` is an
+/// [`ESCALATION_VECTORS`] entry. But when the username slot's value is
+/// *also* exactly the name a real blocklist rule targets, the coincidence
+/// is worth treating as that rule's own decision (typically `deny`) rather
+/// than only the generic floor — `su rm -rf /` reads at least as
+/// suspicious as `rm -rf /` itself.
+///
+/// Only `su` gets this treatment: `sudo`/`doas`'s user argument is always
+/// flag-introduced (`-u root`), so there is no bare positional slot for a
+/// command name to land in by coincidence in the first place.
+///
+/// Walks the same wrapper-unwrap chain as [`effective_command`] so a
+/// wrapped `su` (`env su rm -rf /`) is still caught, and reuses
+/// [`skip_wrapper_flags`] — not [`skip_wrapper_arguments`] — at the `su`
+/// hop specifically, since the whole point is to inspect the token
+/// [`wrapper_positional_args`]'s skip would otherwise discard unread.
+#[must_use]
+pub(crate) fn su_username_matches_blocklisted_command<'a>(
+    stage: &[NormalizedWord],
+    rules: &'a Rules,
+) -> Option<&'a CommandRule> {
+    let mut rest = stage;
+    loop {
+        let (first, tail) = rest.split_first()?;
+        let Resolution::Resolved(name) = first.resolution() else {
+            return None;
+        };
+        let base = basename(name);
+        if base == "su" {
+            let idx = skip_wrapper_flags(base, tail);
+            let Resolution::Resolved(candidate) = tail.get(idx)?.resolution() else {
+                return None;
+            };
+            let candidate_base = basename(candidate);
+            return rules
+                .command_rules
+                .iter()
+                .find(|rule| rule.command_name_matches(candidate_base));
+        }
+        if !TRANSPARENT_WRAPPERS.contains(&base) {
+            return None;
+        }
         rest = skip_wrapper_arguments(base, tail);
     }
 }
@@ -2317,6 +2395,49 @@ mod tests {
         let (name, rest) = effective_command(&words).unwrap();
         assert_eq!(name, "-c");
         assert_eq!(resolved_strings(rest), vec!["sh"]);
+    }
+
+    // ---- issue #54 follow-up: su_username_matches_blocklisted_command ----
+
+    #[test]
+    fn su_username_slot_matching_a_blocklist_command_name_is_found() {
+        let rules = Rules::embedded().unwrap();
+        let matched =
+            su_username_matches_blocklisted_command(&argv(&["su", "rm", "-rf", "/"]), &rules)
+                .unwrap();
+        assert_eq!(matched.id().as_str(), "rm-recursive-force-dangerous-target");
+    }
+
+    #[test]
+    fn su_username_slot_naming_a_real_user_is_not_flagged() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            su_username_matches_blocklisted_command(&argv(&["su", "alice", "-c", "ls"]), &rules)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn su_username_shadow_check_sees_through_an_outer_wrapper() {
+        let rules = Rules::embedded().unwrap();
+        let matched = su_username_matches_blocklisted_command(
+            &argv(&["env", "su", "rm", "-rf", "/"]),
+            &rules,
+        )
+        .unwrap();
+        assert_eq!(matched.id().as_str(), "rm-recursive-force-dangerous-target");
+    }
+
+    #[test]
+    fn su_username_shadow_check_does_not_apply_to_sudo() {
+        // sudo's user argument is always flag-introduced (`-u root`), so
+        // there is no bare positional slot for a command name to land in
+        // by coincidence — this check is `su`-specific.
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            su_username_matches_blocklisted_command(&argv(&["sudo", "rm", "-rf", "/"]), &rules)
+                .is_none()
+        );
     }
 
     #[test]

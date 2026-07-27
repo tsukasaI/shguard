@@ -676,6 +676,35 @@ fn evaluate_simple_command_core(
     let escalation_floor =
         escalation_floor_contribution(escalation_chain, rules.escalation_floor());
 
+    // Rule 10 refinement (issue #54 follow-up): `su`'s positional
+    // "username" slot is shape-ambiguous with a command name (see
+    // `crate::rules::su_username_matches_blocklisted_command`'s docs) —
+    // when that slot's value coincides with an actual blocklist rule's
+    // name, fold that rule's own decision into the floor computed above,
+    // taking whichever of the two is stricter (never weakening the
+    // generic escalation floor; `su`'s own presence in the chain already
+    // guarantees `escalation_floor` is `Some`, but this stays a `match`
+    // rather than an `unwrap` since nothing here depends on that).
+    let escalation_floor = match crate::rules::su_username_matches_blocklisted_command(&argv, rules)
+    {
+        Some(shadowed_rule) => {
+            let shadow = (
+                shadowed_rule.decision(),
+                format!(
+                    "su's username-position argument matches blocklist rule {:?}: {}; \
+                         treated as an attempt to run that command",
+                    shadowed_rule.id().as_str(),
+                    shadowed_rule.reason().as_str()
+                ),
+            );
+            Some(match escalation_floor {
+                Some(existing) if existing.0 >= shadow.0 => existing,
+                _ => shadow,
+            })
+        }
+        None => escalation_floor,
+    };
+
     // Rule 6a: `bash -c '<string>'`/`sh -c`/`zsh -c`/`dash -c` recurses the
     // script exactly like a substitution.
     if let Some((name, rest_words)) = effective
@@ -2113,7 +2142,7 @@ mod tests {
         // other vectors (`su [options] [-] [user [arg...]]` takes a
         // positional username before any wrapped command), so `su rm -rf
         // /` is not the same shape as `sudo rm -rf /`; see
-        // `su_positional_argument_hides_wrapped_command_but_floor_still_asks`
+        // `su_positional_argument_hides_wrapped_command_but_floor_still_blocks`
         // below for that case.
         for vector in crate::rules::ESCALATION_VECTORS
             .iter()
@@ -2125,22 +2154,25 @@ mod tests {
     }
 
     #[test]
-    fn su_positional_argument_hides_wrapped_command_but_floor_still_asks() {
+    fn su_positional_argument_hides_wrapped_command_but_floor_still_blocks() {
         // Issue #54 gave `su` a `wrapper_positional_args` entry so `su
         // root -c 'sh'` no longer mistakes the username `root` for the
         // wrapped command. The trade-off: `su`'s real grammar (`su
         // [options] [-] [user [arg...]]`) has no way to tell "no username,
         // command follows directly" from "username follows" by shape
-        // alone, so `su rm -rf /` now reads `rm` as the (nonexistent)
-        // username positional rather than as the executed command — which
-        // matches real `su` behaviour: without `-c`, `su rm -rf /` would
-        // actually try to switch to a user named `rm`, not run `rm -rf
-        // /`. The rm blocklist rule is therefore never reached, but
-        // `wrapper_chain_escalation`'s name-only `Contains` arm (matched
-        // before any argument skipping) still floors the decision to Ask
-        // — under-resolving which inner rule would have blocked, never
-        // falling through to a silent Allow.
-        assert_decision("su rm -rf /", Decision::Ask);
+        // alone, so `su rm -rf /` reads `rm` as the (nonexistent) username
+        // positional rather than as the executed command — which matches
+        // real `su` behaviour: without `-c`, `su rm -rf /` would actually
+        // try to switch to a user named `rm`, not run `rm -rf /`. The rm
+        // blocklist rule's own `matching_rest` walk is therefore never
+        // reached this way, but `su_username_matches_blocklisted_command`
+        // (a follow-up to issue #54) catches the coincidence that the
+        // username slot's value is itself a blocklisted command name, and
+        // floors to that rule's own decision (`deny`) — stricter than
+        // `wrapper_chain_escalation`'s generic name-only `Contains` floor
+        // (Ask) alone would give, on the theory that this coincidence
+        // reads at least as suspicious as `rm -rf /` itself.
+        assert_decision("su rm -rf /", Decision::Block);
     }
 
     #[test]
