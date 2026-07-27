@@ -8,12 +8,13 @@
 //! Never panics *observably*: every fallible step (config load, stdin read,
 //! JSON serialisation) is matched explicitly and falls back to the
 //! adapter's fail-closed `ask` output rather than unwinding, and [`main`]
-//! additionally wraps the whole composition ([`run`]) in
-//! [`std::panic::catch_unwind`] as a last-resort net for a panic reached
-//! through a path this file did not anticipate (e.g. inside a dependency).
-//! A panic here would otherwise fail *open* — Claude Code proceeds
-//! unguarded when the hook produces no decision at all — so an uncaught
-//! unwind is exactly as bad as never checking in the first place.
+//! additionally wraps the whole composition, including writing the
+//! decision to stdout ([`run_and_emit`]), in [`std::panic::catch_unwind`]
+//! as a last-resort net for a panic reached through a path this file did
+//! not anticipate (e.g. inside a dependency). A panic here would otherwise
+//! fail *open* — Claude Code proceeds unguarded when the hook produces no
+//! decision at all — so an uncaught unwind is exactly as bad as never
+//! checking in the first place.
 //!
 //! # `catch_unwind` is not a stack-overflow guard
 //!
@@ -70,15 +71,12 @@ fn main() {
 
     install_panic_hook();
 
-    let output = match std::panic::catch_unwind(run) {
-        Ok(output) => output,
-        Err(_) => shguard::adapter::fail_closed(
+    if std::panic::catch_unwind(run_and_emit).is_err() {
+        emit(shguard::adapter::fail_closed(
             "shguard: internal panic while evaluating the command; refusing to evaluate \
              (fail-closed)",
-        ),
-    };
-
-    emit(output);
+        ));
+    }
 }
 
 /// Installs a one-line panic hook in place of the Rust default (which
@@ -103,12 +101,13 @@ fn install_panic_hook() {
 /// fn item holds no state at all, so it satisfies `UnwindSafe` on its own
 /// and no such escape hatch is needed.
 ///
-/// The `catch_unwind` boundary in `main` covers everything in here,
-/// including [`shguard::config::Policy::load`] — a panic inside TOML
-/// parsing is exactly as fail-open as one anywhere else in this function.
-/// The `--version` branch in `main` is deliberately outside the boundary:
-/// it never touches config, stdin, or command evaluation, so there is
-/// nothing there for the fail-closed guarantee to protect.
+/// The `catch_unwind` boundary in `main` (via [`run_and_emit`]) covers
+/// everything in here, including [`shguard::config::Policy::load`] — a
+/// panic inside TOML parsing is exactly as fail-open as one anywhere else
+/// in this function. The `--version` branch in `main` is deliberately
+/// outside the boundary: it never touches config, stdin, or command
+/// evaluation, so there is nothing there for the fail-closed guarantee to
+/// protect.
 fn run() -> serde_json::Value {
     // Test-only panic injection (issue #52): there is no currently-known
     // reachable panic in this binary to regression-test the `catch_unwind`
@@ -161,6 +160,17 @@ fn run() -> serde_json::Value {
         // read error.
         Err(err) => shguard::adapter::fail_closed(&format!("shguard: could not read stdin: {err}")),
     }
+}
+
+/// `run` followed by `emit`, as one capture-free fn item so
+/// [`std::panic::catch_unwind`] in `main` covers the write to stdout as
+/// well as the decision logic — `emit` is written to never panic today,
+/// but the boundary should not depend on that staying true. A panic
+/// mid-write here (or anywhere in `run`) leaves nothing on stdout, exactly
+/// like an unhandled panic anywhere else in this fail-closed composition;
+/// `main` catches it and emits the fail-closed fallback itself.
+fn run_and_emit() {
+    emit(run());
 }
 
 /// Serialises `output` and writes it to stdout, falling back to the
