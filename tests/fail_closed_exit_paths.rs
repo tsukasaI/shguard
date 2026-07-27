@@ -131,6 +131,16 @@ fn oversized_stdin_fails_closed_to_ask() {
 /// (`#[cfg(debug_assertions)]` in `src/bin/shguard.rs::run`) that exists
 /// specifically so this fail-closed guarantee has a regression test, since
 /// no naturally reachable panic in this binary is currently known.
+///
+/// The injection point is compiled out under `cargo test --release`
+/// (`#[cfg(debug_assertions)]`), so `SHGUARD_TEST_PANIC` would be a no-op
+/// there and `echo hi` would resolve to `allow`, not `ask` — `ignore`d
+/// rather than asserted unconditionally so a release test run does not fail
+/// on behavior this test was never meant to cover.
+#[cfg_attr(
+    not(debug_assertions),
+    ignore = "SHGUARD_TEST_PANIC injection point is compiled out in release builds"
+)]
 #[test]
 fn injected_panic_fails_closed_to_ask() {
     let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
