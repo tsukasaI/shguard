@@ -44,8 +44,8 @@ use brush_parser::word::{self as bword};
 use brush_parser::{Parser as BrushParser, ParserOptions as BrushParserOptions, ast as bast};
 
 use crate::ast::{
-    Assignment, CommandLine, FileRedirectionKind, Pipeline, Redirection, Separator, SimpleCommand,
-    Word, WordPiece,
+    Assignment, CommandLine, FileRedirectionKind, MAX_BRACE_NESTING_DEPTH,
+    MAX_KEYWORD_NESTING_COUNT, Pipeline, Redirection, Separator, SimpleCommand, Word, WordPiece,
 };
 
 /// Everything that can go wrong converting a raw command string into
@@ -86,17 +86,138 @@ fn parser_options() -> BrushParserOptions {
     BrushParserOptions::default()
 }
 
+/// Reserved words that introduce a compound command brush-parser recurses
+/// into, counted (never decremented) by [`reject_excessive_raw_nesting`] —
+/// see [`MAX_KEYWORD_NESTING_COUNT`]'s docs for why a total count, and why
+/// this exact set.
+const NESTING_KEYWORDS: [&str; 5] = ["if", "while", "until", "for", "case"];
+
+/// Byte values [`reject_excessive_raw_nesting`] treats as ending a keyword
+/// token: whitespace and the shell metacharacters that can immediately
+/// follow a reserved word without an intervening space (e.g. `if;`,
+/// `for(`). Splitting on these — not only on whitespace — is what keeps the
+/// keyword count from *under*-counting a keyword glued to a metacharacter;
+/// under-counting is the unsafe direction (see [`MAX_KEYWORD_NESTING_COUNT`]).
+/// All are single-byte ASCII, so, like the bracket scan below, no UTF-8
+/// continuation byte can be mistaken for one and every split point this
+/// produces is a valid `str` boundary.
+fn is_token_boundary(byte: u8) -> bool {
+    matches!(
+        byte,
+        b' ' | b'\t' | b'\n' | b'\r' | b';' | b'&' | b'|' | b'(' | b')' | b'<' | b'>'
+    )
+}
+
+/// Rejects `command` if its `{`/`}` nesting depth, its `(`/`)` nesting
+/// depth, or its total count of [`NESTING_KEYWORDS`] occurrences exceeds
+/// [`MAX_BRACE_NESTING_DEPTH`] / [`MAX_KEYWORD_NESTING_COUNT`], *before* any
+/// recursive-descent parser (brush-parser's PEG grammar, or this module's
+/// own brace/word conversion) ever sees the text.
+///
+/// This is the primary defense against issue #52's abort: deeply nested
+/// `{`/`(` input (e.g. `{a,` repeated thousands of times, or `$(` repeated
+/// thousands of times), or deeply nested `if`/`while`/`until`/`for`/`case`
+/// compound commands, crash with a stack overflow *inside brush-parser's
+/// own PEG grammar* — its mutually recursive descent has no depth limit of
+/// its own, for either kind of nesting — before shguard's AST-level depth
+/// cap (`convert_brace_segment`/`convert_brace_members` in this module,
+/// `normalize::expand_braces`) ever gets a chance to run, because those
+/// only see brush-parser's *output*. A crash there is an uncatchable abort
+/// (`std::panic::catch_unwind` cannot intercept a stack overflow — see
+/// `src/bin/shguard.rs`'s module docs), so the only effective defense is a
+/// linear, non-recursive pre-scan that runs ahead of the parser and rejects
+/// the input outright. All three counters are tracked in one pass (`{`/`}`
+/// alone would miss a `$(`-only attack, which was independently confirmed
+/// to abort even though it never touches shguard's AST-level brace cap at
+/// all, and neither bracket alone catches a keyword-only attack like nested
+/// `if`/`then`/`fi` with no braces or parens at all) — see
+/// [`MAX_BRACE_NESTING_DEPTH`]'s and [`MAX_KEYWORD_NESTING_COUNT`]'s docs
+/// for the chosen cap values and their trade-offs.
+///
+/// Scans bytes, not `char`s: every byte this function compares against
+/// (`{`, `}`, `(`, `)`, and every [`is_token_boundary`] delimiter) is
+/// single-byte ASCII, and no UTF-8 continuation byte (`0x80..=0xBF`) can
+/// equal one of them, so counting and slicing on raw bytes is exact for any
+/// valid UTF-8 input and avoids paying for UTF-8 decoding on a hot,
+/// security-critical scan.
+fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
+    let mut brace_depth: usize = 0;
+    let mut paren_depth: usize = 0;
+    let mut keyword_count: usize = 0;
+    let mut token_start: Option<usize> = None;
+
+    let bytes = command.as_bytes();
+    for (i, &byte) in bytes.iter().enumerate() {
+        match byte {
+            b'{' => {
+                brace_depth += 1;
+                if brace_depth > MAX_BRACE_NESTING_DEPTH {
+                    return Err(ParseError::unsupported(
+                        "brace nesting exceeds the raw depth cap",
+                    ));
+                }
+            }
+            b'}' => brace_depth = brace_depth.saturating_sub(1),
+            b'(' => {
+                paren_depth += 1;
+                if paren_depth > MAX_BRACE_NESTING_DEPTH {
+                    return Err(ParseError::unsupported(
+                        "parenthesis nesting exceeds the raw depth cap",
+                    ));
+                }
+            }
+            b')' => paren_depth = paren_depth.saturating_sub(1),
+            _ => {}
+        }
+
+        if is_token_boundary(byte) {
+            if let Some(start) = token_start.take() {
+                check_keyword_token(&command[start..i], &mut keyword_count)?;
+            }
+        } else if token_start.is_none() {
+            token_start = Some(i);
+        }
+    }
+    if let Some(start) = token_start {
+        check_keyword_token(&command[start..], &mut keyword_count)?;
+    }
+
+    Ok(())
+}
+
+/// Increments `keyword_count` if `token` is one of [`NESTING_KEYWORDS`],
+/// rejecting once the running total exceeds [`MAX_KEYWORD_NESTING_COUNT`].
+/// Split out of [`reject_excessive_raw_nesting`] only to run once per
+/// completed token and once more for the trailing token at end-of-input,
+/// without duplicating the check-and-increment logic at both call sites.
+fn check_keyword_token(token: &str, keyword_count: &mut usize) -> Result<(), ParseError> {
+    if NESTING_KEYWORDS.contains(&token) {
+        *keyword_count += 1;
+        if *keyword_count > MAX_KEYWORD_NESTING_COUNT {
+            return Err(ParseError::unsupported(
+                "compound-command keyword nesting exceeds the raw count cap",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Parses a raw shell command line into shguard's AST.
 ///
 /// # Errors
 ///
 /// Returns [`ParseError::Syntax`] if `command` is not valid shell syntax, or
 /// [`ParseError::Unsupported`] if it parses but contains a construct
-/// shguard's AST cannot represent (see the module docs).
+/// shguard's AST cannot represent (see the module docs), including raw
+/// `{`/`}`/`(`/`)` nesting past [`MAX_BRACE_NESTING_DEPTH`] or
+/// [`NESTING_KEYWORDS`] nesting past [`MAX_KEYWORD_NESTING_COUNT`]
+/// ([`reject_excessive_raw_nesting`]).
 ///
 /// `analyze()` (`src/lib.rs`) calls this via `src/gate.rs` — stage 1 of the
 /// pipeline (plan.md §1.1).
 pub(crate) fn parse(command: &str) -> Result<CommandLine, ParseError> {
+    reject_excessive_raw_nesting(command)?;
+
     let mut parser = BrushParser::new(Cursor::new(command.as_bytes()), &parser_options());
     let program = parser
         .parse_program()
@@ -387,7 +508,7 @@ fn convert_word(word: &bast::Word) -> Result<Word, ParseError> {
 
     let mut pieces = Vec::new();
     for segment in brace_segments.into_iter().flatten() {
-        pieces.extend(convert_brace_segment(segment)?);
+        pieces.extend(convert_brace_segment(segment, 0)?);
     }
     Ok(Word(pieces))
 }
@@ -396,27 +517,61 @@ fn is_brace_expr(segment: &bword::BraceExpressionOrText) -> bool {
     matches!(segment, bword::BraceExpressionOrText::Expr(_))
 }
 
+/// Defense-in-depth companion to [`reject_excessive_raw_nesting`] (issue
+/// #52): that raw pre-scan is the primary defense and already keeps `depth`
+/// bounded by [`MAX_BRACE_NESTING_DEPTH`] in practice (brush-parser's own
+/// brace pre-pass only ever nests as deep as the source text does), but this
+/// cap is checked independently, at the point where *this module's own*
+/// recursion happens, so a future change to the raw scan (or a gap in it)
+/// cannot turn this mutual recursion into an unbounded one on its own.
+/// `depth` starts at 0 from [`convert_word`] and increases by exactly one
+/// per real nesting level: [`convert_brace_members`]'s `Child` arm is the
+/// only place that increments (going one level deeper into a nested
+/// brace's own segments) — the `Expr` arm below hands `depth` to
+/// [`convert_brace_members`] unchanged, since unwrapping `Expr` into its
+/// member list isn't itself a step deeper.
 fn convert_brace_segment(
     segment: bword::BraceExpressionOrText,
+    depth: usize,
 ) -> Result<Vec<WordPiece>, ParseError> {
+    if depth > MAX_BRACE_NESTING_DEPTH {
+        return Err(ParseError::unsupported(
+            "brace nesting exceeds the AST depth cap",
+        ));
+    }
     match segment {
         bword::BraceExpressionOrText::Text(text) => convert_word_text(&text),
+        // `depth`, not `depth + 1`: unwrapping `Expr` into its member list
+        // isn't itself a step deeper into the nesting — [`convert_brace_members`]'s
+        // own `Child` arm below is what actually descends into a nested
+        // brace's inner segments, and increments there. Incrementing at
+        // both hops double-counts each real nesting level (see this
+        // function's docs), miscalibrating this cap to roughly half of
+        // [`MAX_BRACE_NESTING_DEPTH`]'s intended 64-level threshold.
         bword::BraceExpressionOrText::Expr(members) => Ok(vec![WordPiece::BraceAlternation(
-            convert_brace_members(members)?,
+            convert_brace_members(members, depth)?,
         )]),
     }
 }
 
+/// See [`convert_brace_segment`]'s docs for why this depth cap exists
+/// alongside the raw pre-scan.
 fn convert_brace_members(
     members: Vec<bword::BraceExpressionMember>,
+    depth: usize,
 ) -> Result<Vec<Word>, ParseError> {
+    if depth > MAX_BRACE_NESTING_DEPTH {
+        return Err(ParseError::unsupported(
+            "brace nesting exceeds the AST depth cap",
+        ));
+    }
     members
         .into_iter()
         .map(|member| match member {
             bword::BraceExpressionMember::Child(inner) => {
                 let mut pieces = Vec::new();
                 for segment in inner {
-                    pieces.extend(convert_brace_segment(segment)?);
+                    pieces.extend(convert_brace_segment(segment, depth + 1)?);
                 }
                 Ok(Word(pieces))
             }
@@ -847,5 +1002,157 @@ mod tests {
             cmd.first.first.words[0].0,
             vec![WordPiece::Literal("cmd".to_string())]
         );
+    }
+
+    // ---- issue #52: reject_excessive_raw_nesting's exact boundary, not
+    // just far-exceeding values (the existing integration tests in
+    // tests/fail_closed_exit_paths.rs use 4000-8000x nesting, which proves
+    // the defense works but not that the cap sits exactly where
+    // MAX_BRACE_NESTING_DEPTH's docs claim) ----
+
+    #[test]
+    fn raw_brace_nesting_at_the_cap_still_parses() {
+        let command = format!("echo {}a{}", "{a,".repeat(64), "}".repeat(64));
+        assert!(parse(&command).is_ok());
+    }
+
+    #[test]
+    fn raw_brace_nesting_one_past_the_cap_is_rejected() {
+        let command = format!("echo {}a{}", "{a,".repeat(65), "}".repeat(65));
+        assert!(parse(&command).is_err());
+    }
+
+    #[test]
+    fn raw_paren_nesting_at_the_cap_still_parses() {
+        let command = format!("{}echo hi{}", "$(".repeat(64), ")".repeat(64));
+        assert!(parse(&command).is_ok());
+    }
+
+    #[test]
+    fn raw_paren_nesting_one_past_the_cap_is_rejected() {
+        let command = format!("{}echo hi{}", "$(".repeat(65), ")".repeat(65));
+        assert!(parse(&command).is_err());
+    }
+
+    // ---- issue #52 follow-up: reject_excessive_raw_nesting's keyword
+    // counter. shguard's AST does not model `if`/`while`/`for`/`case`
+    // compound commands at all, so parse() always rejects them as an
+    // unsupported construct regardless of nesting depth — these tests
+    // distinguish that pre-existing "unsupported construct" rejection from
+    // the new keyword-count rejection by asserting which error message
+    // comes back, not just that parse() errors. ----
+
+    fn unsupported_construct(command: &str) -> String {
+        match parse(command) {
+            Err(ParseError::Unsupported { construct }) => construct,
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn raw_keyword_nesting_at_the_cap_is_not_rejected_by_the_keyword_cap() {
+        let command = format!(
+            "{}a{}",
+            "if true; then ".repeat(MAX_KEYWORD_NESTING_COUNT),
+            "; fi".repeat(MAX_KEYWORD_NESTING_COUNT)
+        );
+        let construct = unsupported_construct(&command);
+        assert!(
+            !construct.contains("keyword nesting"),
+            "unexpected keyword-cap rejection at the cap: {construct}"
+        );
+    }
+
+    #[test]
+    fn raw_keyword_nesting_one_past_the_cap_is_rejected_by_the_keyword_cap() {
+        let command = format!(
+            "{}a{}",
+            "if true; then ".repeat(MAX_KEYWORD_NESTING_COUNT + 1),
+            "; fi".repeat(MAX_KEYWORD_NESTING_COUNT + 1)
+        );
+        let construct = unsupported_construct(&command);
+        assert!(
+            construct.contains("keyword nesting"),
+            "expected the keyword-cap rejection, got: {construct}"
+        );
+    }
+
+    /// Pins that the cap is a single total shared across all of
+    /// [`NESTING_KEYWORDS`], not a separate budget per keyword: none of
+    /// `if`/`for`/`while` alone reaches the cap, but their sum does.
+    #[test]
+    fn raw_keyword_nesting_cap_is_shared_across_keyword_kinds() {
+        let third = MAX_KEYWORD_NESTING_COUNT / 3 + 1;
+        let command = format!(
+            "{}{}{}a{}{}{}",
+            "if true; then ".repeat(third),
+            "for x in y; do ".repeat(third),
+            "while true; do ".repeat(third),
+            "; done".repeat(third),
+            "; done".repeat(third),
+            "; fi".repeat(third),
+        );
+        let construct = unsupported_construct(&command);
+        assert!(
+            construct.contains("keyword nesting"),
+            "expected the keyword-cap rejection, got: {construct}"
+        );
+    }
+
+    /// Regression pin for the reason [`MAX_KEYWORD_NESTING_COUNT`] counts
+    /// openers only and never decrements: a decrementing counter keyed on
+    /// closer words could be driven back down by injecting those words as
+    /// ordinary arguments (`echo fi`) inside input that still recurses past
+    /// brush-parser's overflow threshold. This nests `if` well past the cap
+    /// (not just one over it, unlike the boundary tests above — the point
+    /// here is the counting property, not the exact threshold) while
+    /// interleaving `echo fi`/`echo done` arguments at every level — a naive
+    /// decrementing scanner would read this as shallow; the actual,
+    /// non-decrementing scanner must still reject it.
+    #[test]
+    fn raw_keyword_nesting_is_not_defeated_by_closer_words_in_argument_position() {
+        let depth = MAX_KEYWORD_NESTING_COUNT * 5;
+        let command = format!(
+            "{}echo done{}",
+            "if true; then echo fi; ".repeat(depth),
+            " fi".repeat(depth)
+        );
+        let construct = unsupported_construct(&command);
+        assert!(
+            construct.contains("keyword nesting"),
+            "expected the keyword-cap rejection, got: {construct}"
+        );
+    }
+
+    // ---- issue #52: convert_brace_segment's own AST-level depth cap,
+    // built programmatically (the same approach normalize.rs's
+    // `programmatically_deep_brace_nesting_hits_the_depth_cap` test uses for
+    // its layer) — a raw command string can never reach this path in
+    // practice, since reject_excessive_raw_nesting above rejects nesting
+    // this deep before brush-parser ever builds a tree this shape, but this
+    // pins the AST-level cap as a defense-in-depth backstop in its own
+    // right, independent of the raw scan ----
+    #[test]
+    fn ast_level_brace_nesting_one_past_the_cap_is_rejected() {
+        let mut segment = bword::BraceExpressionOrText::Text("x".to_string());
+        for _ in 0..=MAX_BRACE_NESTING_DEPTH {
+            segment =
+                bword::BraceExpressionOrText::Expr(vec![bword::BraceExpressionMember::Child(
+                    vec![segment],
+                )]);
+        }
+        assert!(convert_brace_segment(segment, 0).is_err());
+    }
+
+    #[test]
+    fn ast_level_brace_nesting_at_the_cap_still_converts() {
+        let mut segment = bword::BraceExpressionOrText::Text("x".to_string());
+        for _ in 0..MAX_BRACE_NESTING_DEPTH {
+            segment =
+                bword::BraceExpressionOrText::Expr(vec![bword::BraceExpressionMember::Child(
+                    vec![segment],
+                )]);
+        }
+        assert!(convert_brace_segment(segment, 0).is_ok());
     }
 }

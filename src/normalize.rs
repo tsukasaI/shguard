@@ -176,7 +176,7 @@ impl NormalizedWord {
 // Stage-2 folding (B2)
 // ---------------------------------------------------------------------
 
-use crate::ast::{Assignment, SimpleCommand, Word, WordPiece};
+use crate::ast::{Assignment, MAX_BRACE_NESTING_DEPTH, SimpleCommand, Word, WordPiece};
 
 /// The three default-IFS whitespace characters bash uses when `IFS` is
 /// unset: space, tab, newline. This module never folds against any other
@@ -274,7 +274,7 @@ enum Chunk {
 /// (`allow_split = true`) and [`normalize_assignment_value`]
 /// (`allow_split = false`).
 fn fold_word(pieces: &[WordPiece], allow_split: bool) -> Vec<NormalizedWord> {
-    let alternatives = match expand_braces(pieces) {
+    let alternatives = match expand_braces(pieces, 0) {
         Ok(alternatives) => alternatives,
         // The whole word fails closed as one unresolvable word — never a
         // truncated subset of the product (see `ExpansionLimit`'s docs).
@@ -305,14 +305,32 @@ const MAX_BRACE_ALTERNATIVES: usize = 64;
 /// The product is bounded by [`MAX_BRACE_ALTERNATIVES`], checked while the
 /// product is being built (and inside every recursion) — the oversized
 /// `Vec` is never materialised.
-fn expand_braces(pieces: &[WordPiece]) -> Result<Vec<Vec<WordPiece>>, UnresolvableKind> {
+///
+/// `depth` (0 at the top call from [`fold_word`], +1 per recursion into a
+/// member's own pieces) is bounded by [`MAX_BRACE_NESTING_DEPTH`] — issue
+/// #52's defense-in-depth for this recursion, alongside `src/parser.rs`'s
+/// raw pre-scan (the primary defense: brace nesting this deep cannot
+/// actually reach this function in practice, since the parser rejects it
+/// first) and its own AST-level cap in `convert_brace_segment`/
+/// `convert_brace_members`. A word that exceeds the cap fails closed as one
+/// `Unresolvable(ExpansionLimit)` word — the same fail-closed shape (and the
+/// same `UnresolvableKind`) [`MAX_BRACE_ALTERNATIVES`]'s cap already uses,
+/// since both are "this word's brace structure is too large to safely
+/// expand" from the gate's point of view.
+fn expand_braces(
+    pieces: &[WordPiece],
+    depth: usize,
+) -> Result<Vec<Vec<WordPiece>>, UnresolvableKind> {
+    if depth > MAX_BRACE_NESTING_DEPTH {
+        return Err(UnresolvableKind::ExpansionLimit);
+    }
     let mut alternatives: Vec<Vec<WordPiece>> = vec![Vec::new()];
     for piece in pieces {
         if let WordPiece::BraceAlternation(members) = piece {
             let mut next = Vec::new();
             for prefix in &alternatives {
                 for member in members {
-                    for suffix in expand_braces(&member.0)? {
+                    for suffix in expand_braces(&member.0, depth + 1)? {
                         if next.len() >= MAX_BRACE_ALTERNATIVES {
                             return Err(UnresolvableKind::ExpansionLimit);
                         }
@@ -920,6 +938,30 @@ mod tests {
     fn brace_product_over_cap_is_expansion_limit() {
         // 2^7 = 128 > 64
         let words = first_word_normalized("a{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}");
+        assert_eq!(words.len(), 1);
+        assert_eq!(
+            *words[0].resolution(),
+            Resolution::Unresolvable(UnresolvableKind::ExpansionLimit)
+        );
+    }
+
+    // ---- issue #52: expand_braces's own depth cap, built programmatically
+    // ----
+    //
+    // A raw command string can never reach this path: `src/parser.rs`'s raw
+    // pre-scan (`reject_excessive_raw_nesting`) and its own AST-level cap
+    // (`convert_brace_segment`/`convert_brace_members`) both reject nesting
+    // this deep before a `WordPiece::BraceAlternation` tree this shape
+    // could ever be built by `parse()`. This test constructs the tree by
+    // hand to pin `expand_braces`'s depth cap as a defense-in-depth
+    // backstop in its own right, independent of the parser layer.
+    #[test]
+    fn programmatically_deep_brace_nesting_hits_the_depth_cap() {
+        let mut pieces = vec![WordPiece::Literal("x".to_string())];
+        for _ in 0..=MAX_BRACE_NESTING_DEPTH {
+            pieces = vec![WordPiece::BraceAlternation(vec![Word(pieces)])];
+        }
+        let words = fold_word(&pieces, true);
         assert_eq!(words.len(), 1);
         assert_eq!(
             *words[0].resolution(),
