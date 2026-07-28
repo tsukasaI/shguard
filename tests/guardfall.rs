@@ -124,7 +124,11 @@ fn guardfall_rm_dot_targets() {
 /// a wrapped `rm -rf /` must reach the same rm rule a bare invocation does.
 #[test]
 fn guardfall_transparent_wrapper_cases() {
-    let cases: &[(&str, Decision)] = &[("timeout 5 rm -rf /", Decision::Block)];
+    let cases: &[(&str, Decision)] = &[
+        ("timeout 5 rm -rf /", Decision::Block),
+        ("chrt -f 99 rm -rf /", Decision::Block),
+        ("taskset 0x1 rm -rf /", Decision::Block),
+    ];
 
     for (command, expected) in cases {
         let verdict = shguard::analyze(command);

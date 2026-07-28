@@ -930,7 +930,7 @@ fn value_flag_free_candidates<'a>(rest: &[&'a str], value_flags: &[ValueFlag]) -
 /// blocked — it never turns an escalation floor into a silent Allow.
 pub(crate) const TRANSPARENT_WRAPPERS: &[&str] = &[
     "env", "command", "nohup", "nice", "exec", "stdbuf", "setsid", "sudo", "xargs", "doas", "su",
-    "pkexec", "run0", "timeout", "ionice", "flock",
+    "pkexec", "run0", "timeout", "ionice", "flock", "chrt", "taskset",
 ];
 
 /// The subset of [`TRANSPARENT_WRAPPERS`] that escalate privileges (issues
@@ -1068,6 +1068,14 @@ fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
             ValueFlag::Long("timeout".to_string()),
             ValueFlag::Long("conflict-exit-code".to_string()),
         ],
+        "chrt" => vec![
+            ValueFlag::Short('T'),
+            ValueFlag::Short('P'),
+            ValueFlag::Short('D'),
+            ValueFlag::Long("sched-runtime".to_string()),
+            ValueFlag::Long("sched-period".to_string()),
+            ValueFlag::Long("sched-deadline".to_string()),
+        ],
         _ => vec![],
     }
 }
@@ -1087,6 +1095,16 @@ fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
 ///   invocation silently allows.
 /// - `su [options] [-] [user [args...]]` — the username, when present,
 ///   precedes the command `su` itself runs.
+/// - `chrt [options] priority command [args]` — the scheduling priority is
+///   a bare positional before the command, the same shape as `timeout`'s
+///   duration. `chrt`'s other mode, `chrt -p [priority] pid` (operate on
+///   an already-running process), never starts a new command at all, so
+///   treating whatever follows the skipped positional as "the command"
+///   there resolves to a bare PID and matches no rule — not a new gap,
+///   since there is no command in that mode to miss.
+/// - `taskset [options] mask command [args]` — the CPU affinity mask
+///   precedes the command, same shape again. `taskset -p [mask] pid`
+///   shares `chrt -p`'s no-new-command mode and the same non-gap.
 ///
 /// Applied by [`skip_wrapper_arguments`] *after* flag-skipping stops, so a
 /// leading run of flags (including a value-flag's separated value) is
@@ -1094,7 +1112,7 @@ fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
 /// follows.
 fn wrapper_positional_args(wrapper: &str) -> usize {
     match wrapper {
-        "timeout" | "flock" | "su" => 1,
+        "timeout" | "flock" | "su" | "chrt" | "taskset" => 1,
         _ => 0,
     }
 }
@@ -2329,6 +2347,32 @@ mod tests {
         assert!(
             rules
                 .match_command(&argv(&["flock", "/tmp/l", "rm", "-rf", "/"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn rm_rf_root_matches_through_chrt_wrapper() {
+        // Pins the positional priority skip: without it `99` would be
+        // mistaken for the command and `rm -rf /` would never reach the
+        // rm rule.
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["chrt", "-f", "99", "rm", "-rf", "/"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn rm_rf_root_matches_through_taskset_wrapper() {
+        // Pins the positional CPU-mask skip: without it `0x1` would be
+        // mistaken for the command and `rm -rf /` would never reach the
+        // rm rule.
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["taskset", "0x1", "rm", "-rf", "/"]))
                 .is_some()
         );
     }
