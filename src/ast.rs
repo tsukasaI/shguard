@@ -32,7 +32,11 @@
 /// an 8MiB main-thread stack, so ~1 level per ~3KB), so 64 levels is a ~10x
 /// safety margin over the ~600-level budget `cargo test`'s 2MiB test-thread
 /// stack allows — comfortably clear of both the tested-safe range and any
-/// realistic legitimate nesting. It intentionally matches
+/// realistic legitimate nesting. This measurement is tied to `brush-parser
+/// =0.4.0`'s specific recursion cost and the OS-default 8MiB main-thread
+/// stack (not a Rust guarantee — `ulimit -s` or a musl target can shrink
+/// it): re-measure the crash threshold before raising this cap on any
+/// `brush-parser` version bump. It intentionally matches
 /// `normalize::MAX_BRACE_ALTERNATIVES` (also 64) rather than
 /// `gate::MAX_SUBSTITUTION_DEPTH` (8): the latter is an *analysis* recursion
 /// depth (each level re-evaluates a whole pipeline through the gate), while

@@ -462,8 +462,12 @@ fn is_brace_expr(segment: &bword::BraceExpressionOrText) -> bool {
 /// cap is checked independently, at the point where *this module's own*
 /// recursion happens, so a future change to the raw scan (or a gap in it)
 /// cannot turn this mutual recursion into an unbounded one on its own.
-/// `depth` starts at 0 from [`convert_word`] and increases by one on every
-/// `convert_brace_segment` <-> `convert_brace_members` recursion.
+/// `depth` starts at 0 from [`convert_word`] and increases by exactly one
+/// per real nesting level: [`convert_brace_members`]'s `Child` arm is the
+/// only place that increments (going one level deeper into a nested
+/// brace's own segments) — the `Expr` arm below hands `depth` to
+/// [`convert_brace_members`] unchanged, since unwrapping `Expr` into its
+/// member list isn't itself a step deeper.
 fn convert_brace_segment(
     segment: bword::BraceExpressionOrText,
     depth: usize,
@@ -475,8 +479,15 @@ fn convert_brace_segment(
     }
     match segment {
         bword::BraceExpressionOrText::Text(text) => convert_word_text(&text),
+        // `depth`, not `depth + 1`: unwrapping `Expr` into its member list
+        // isn't itself a step deeper into the nesting — [`convert_brace_members`]'s
+        // own `Child` arm below is what actually descends into a nested
+        // brace's inner segments, and increments there. Incrementing at
+        // both hops double-counts each real nesting level (see this
+        // function's docs), miscalibrating this cap to roughly half of
+        // [`MAX_BRACE_NESTING_DEPTH`]'s intended 64-level threshold.
         bword::BraceExpressionOrText::Expr(members) => Ok(vec![WordPiece::BraceAlternation(
-            convert_brace_members(members, depth + 1)?,
+            convert_brace_members(members, depth)?,
         )]),
     }
 }
@@ -929,5 +940,67 @@ mod tests {
             cmd.first.first.words[0].0,
             vec![WordPiece::Literal("cmd".to_string())]
         );
+    }
+
+    // ---- issue #52: reject_excessive_raw_nesting's exact boundary, not
+    // just far-exceeding values (the existing integration tests in
+    // tests/fail_closed_exit_paths.rs use 4000-8000x nesting, which proves
+    // the defense works but not that the cap sits exactly where
+    // MAX_BRACE_NESTING_DEPTH's docs claim) ----
+
+    #[test]
+    fn raw_brace_nesting_at_the_cap_still_parses() {
+        let command = format!("echo {}a{}", "{a,".repeat(64), "}".repeat(64));
+        assert!(parse(&command).is_ok());
+    }
+
+    #[test]
+    fn raw_brace_nesting_one_past_the_cap_is_rejected() {
+        let command = format!("echo {}a{}", "{a,".repeat(65), "}".repeat(65));
+        assert!(parse(&command).is_err());
+    }
+
+    #[test]
+    fn raw_paren_nesting_at_the_cap_still_parses() {
+        let command = format!("{}echo hi{}", "$(".repeat(64), ")".repeat(64));
+        assert!(parse(&command).is_ok());
+    }
+
+    #[test]
+    fn raw_paren_nesting_one_past_the_cap_is_rejected() {
+        let command = format!("{}echo hi{}", "$(".repeat(65), ")".repeat(65));
+        assert!(parse(&command).is_err());
+    }
+
+    // ---- issue #52: convert_brace_segment's own AST-level depth cap,
+    // built programmatically (the same approach normalize.rs's
+    // `programmatically_deep_brace_nesting_hits_the_depth_cap` test uses for
+    // its layer) — a raw command string can never reach this path in
+    // practice, since reject_excessive_raw_nesting above rejects nesting
+    // this deep before brush-parser ever builds a tree this shape, but this
+    // pins the AST-level cap as a defense-in-depth backstop in its own
+    // right, independent of the raw scan ----
+    #[test]
+    fn ast_level_brace_nesting_one_past_the_cap_is_rejected() {
+        let mut segment = bword::BraceExpressionOrText::Text("x".to_string());
+        for _ in 0..=MAX_BRACE_NESTING_DEPTH {
+            segment =
+                bword::BraceExpressionOrText::Expr(vec![bword::BraceExpressionMember::Child(
+                    vec![segment],
+                )]);
+        }
+        assert!(convert_brace_segment(segment, 0).is_err());
+    }
+
+    #[test]
+    fn ast_level_brace_nesting_at_the_cap_still_converts() {
+        let mut segment = bword::BraceExpressionOrText::Text("x".to_string());
+        for _ in 0..MAX_BRACE_NESTING_DEPTH {
+            segment =
+                bword::BraceExpressionOrText::Expr(vec![bword::BraceExpressionMember::Child(
+                    vec![segment],
+                )]);
+        }
+        assert!(convert_brace_segment(segment, 0).is_ok());
     }
 }
