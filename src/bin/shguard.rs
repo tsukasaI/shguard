@@ -86,10 +86,30 @@ fn main() {
 /// a panic here is still worth being able to find in logs) is more
 /// appropriate than the default's verbosity. Installed once, in `main`,
 /// before the [`run`] the `catch_unwind` boundary wraps.
+///
+/// `RUST_BACKTRACE` is still honoured — a set operator debugging a report
+/// can opt into the full backtrace the same way they would for any other
+/// Rust binary — but capturing one is skipped entirely when the variable
+/// is unset (or `0`), matching the standard library's own hook: capture
+/// has a real cost, and this runs on every panic path in a hook meant to
+/// stay fast.
 fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         eprintln!("shguard: internal panic: {info}");
+        if backtrace_requested() {
+            eprintln!("{}", std::backtrace::Backtrace::force_capture());
+        }
     }));
+}
+
+/// Whether `RUST_BACKTRACE` requests a captured backtrace — any value
+/// other than unset or `"0"`, matching the standard library's own panic
+/// hook convention (`RUST_BACKTRACE=1`/`full` both count).
+fn backtrace_requested() -> bool {
+    match std::env::var_os("RUST_BACKTRACE") {
+        None => false,
+        Some(value) => value != "0",
+    }
 }
 
 /// The composition root's actual work — config load, stdin read, hand-off
