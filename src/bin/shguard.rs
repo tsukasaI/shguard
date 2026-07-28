@@ -93,11 +93,27 @@ fn main() {
 /// is unset (or `0`), matching the standard library's own hook: capture
 /// has a real cost, and this runs on every panic path in a hook meant to
 /// stay fast.
+///
+/// Writes via `writeln!` (which returns a `Result` this hook discards), not
+/// `eprintln!` (which panics on a write failure): this hook itself runs
+/// while `main`'s `catch_unwind` boundary is already unwinding, and a panic
+/// here — e.g. from a broken stderr pipe (`EPIPE`), which Claude Code's
+/// process tree can produce — would panic *during* a panic, which Rust
+/// resolves by aborting the process immediately, bypassing `catch_unwind`
+/// entirely and reopening the exact fail-open gap this whole boundary
+/// exists to close (live-confirmed: an injected panic with stderr's read
+/// end closed before the write aborts with empty stdout under `eprintln!`,
+/// and correctly falls back to `ask` once the write error is discarded
+/// instead).
 fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
-        eprintln!("shguard: internal panic: {info}");
+        let _ = writeln!(io::stderr(), "shguard: internal panic: {info}");
         if backtrace_requested() {
-            eprintln!("{}", std::backtrace::Backtrace::force_capture());
+            let _ = writeln!(
+                io::stderr(),
+                "{}",
+                std::backtrace::Backtrace::force_capture()
+            );
         }
     }));
 }

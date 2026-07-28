@@ -106,6 +106,73 @@ fn substitution_nesting_within_cap_still_recurses() {
     assert_eq!(permission_decision(&output), "allow");
 }
 
+// ==== B-1 follow-up: raw compound-command keyword nesting count ====
+//
+// The bracket counters above only catch `{`/`(` recursion. brush-parser's
+// recursive-descent grammar recurses exactly as unboundedly on nested
+// `if`/`while`/`until`/`for`/`case` compound commands — none of which
+// involve a brace or paren at all — so each of these independently aborted
+// (`rc=134`, empty stdout) before `reject_excessive_raw_nesting` grew a
+// keyword counter (`src/ast.rs::MAX_KEYWORD_NESTING_COUNT`).
+
+/// Before the fix: `rc=134`, empty stdout, `fatal runtime error: stack
+/// overflow` (live-confirmed abort threshold: 448 levels on an 8MiB
+/// main-thread stack).
+#[test]
+fn deep_if_nesting_fails_closed_to_ask_instead_of_aborting() {
+    let command = format!(
+        "{}echo hi{}",
+        "if true; then ".repeat(2000),
+        "; fi".repeat(2000)
+    );
+    let output = run_hook(&bash_command(&command));
+    assert_eq!(permission_decision(&output), "ask");
+}
+
+/// Before the fix: same abort (live-confirmed threshold: 401 levels, the
+/// lowest of the five keywords measured — [`MAX_KEYWORD_NESTING_COUNT`]'s
+/// margin is sized against this one).
+#[test]
+fn deep_case_nesting_fails_closed_to_ask_instead_of_aborting() {
+    let command = format!(
+        "{}echo hi{}",
+        "case x in x) ".repeat(2000),
+        ";; esac".repeat(2000)
+    );
+    let output = run_hook(&bash_command(&command));
+    assert_eq!(permission_decision(&output), "ask");
+}
+
+/// Before the fix: same abort (live-confirmed threshold: 420 levels).
+#[test]
+fn deep_for_nesting_fails_closed_to_ask_instead_of_aborting() {
+    let command = format!(
+        "{}echo hi{}",
+        "for x in y; do ".repeat(2000),
+        "; done".repeat(2000)
+    );
+    let output = run_hook(&bash_command(&command));
+    assert_eq!(permission_decision(&output), "ask");
+}
+
+/// Regression pin for why [`MAX_KEYWORD_NESTING_COUNT`] counts openers only
+/// and never decrements on a closer word: `fi`/`done`/`esac` are ordinary,
+/// valid arguments (`echo fi` resolves normally), so a counter that
+/// decremented on those words could be driven back toward zero by
+/// interleaving them as arguments inside input that still recurses past the
+/// overflow threshold. This nests `if` far past the cap while injecting
+/// `echo fi` at every level; it must still fail closed.
+#[test]
+fn keyword_nesting_is_not_defeated_by_closer_words_in_argument_position() {
+    let command = format!(
+        "{}echo done{}",
+        "if true; then echo fi; ".repeat(2000),
+        " fi".repeat(2000)
+    );
+    let output = run_hook(&bash_command(&command));
+    assert_eq!(permission_decision(&output), "ask");
+}
+
 // ==== B-2: stdin size cap ====
 
 /// Before the fix: stdin was read to completion with no bound at all.

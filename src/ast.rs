@@ -57,6 +57,62 @@
 /// stack-overflow defense).
 pub(crate) const MAX_BRACE_NESTING_DEPTH: usize = 64;
 
+/// Cap on the total count of reserved-word compound-command openers (`if`,
+/// `while`, `until`, `for`, `case`) `src/parser.rs`'s raw pre-scan tolerates
+/// in one command, enforced by [`crate::parser::reject_excessive_raw_nesting`]
+/// (issue #52 follow-up: brush-parser's recursive-descent grammar recurses
+/// once per nested compound command exactly as unboundedly as it does per
+/// nested brace/paren, and none of these five keywords involve a `{`/`(`
+/// character the existing [`MAX_BRACE_NESTING_DEPTH`] scan would catch).
+///
+/// Live-probed thresholds against `brush-parser =0.4.0`, on an 8MiB
+/// main-thread stack: `case` aborts first at 401 levels, `for` at 420,
+/// `until` at 446, `if` at 448 (`while` confirmed aborting by 2000). But
+/// per-level cost here is far higher than brace/paren nesting's ~3KB
+/// ([`MAX_BRACE_NESTING_DEPTH`]'s docs) — re-bisected under a 2MiB stack
+/// (`ulimit -s 2048`, matching `cargo test`'s per-test thread budget, the
+/// same target [`MAX_BRACE_NESTING_DEPTH`] is sized against): `case` aborts
+/// there at 99 levels, `if` at 110. An earlier version of this cap (128)
+/// was sized only against the 8MiB thresholds and **overflowed `cargo
+/// test`'s own thread** the first time its own boundary test ran — this
+/// value must clear the 2MiB budget, not just the main-thread one. 8 sits a
+/// ~12x margin below the lowest 2MiB threshold found (`case`'s 99),
+/// comfortably exceeding [`MAX_BRACE_NESTING_DEPTH`]'s own ~10x bar; this is
+/// a *count*, not a *depth*, so 8 is also generous headroom over any
+/// realistic legitimate use of these keywords — shguard's AST does not
+/// model any of these five as a compound command at all, so a single
+/// occurrence of any of them already always resolves to
+/// `Unsupported`/`Ask` regardless of this cap, and there is no
+/// false-positive cost to weigh against a tight value here. Re-measure both
+/// the 8MiB and 2MiB thresholds before raising this on any `brush-parser`
+/// version bump, same as [`MAX_BRACE_NESTING_DEPTH`].
+///
+/// `select` and `[[ … ]]` were probed too and excluded: brush-parser rejects
+/// both with an immediate syntax error rather than recursing on them, so
+/// they are not a stack-overflow vector at all. `function` is also excluded
+/// deliberately: its body is a brace group, so its recursion is already
+/// bounded by [`MAX_BRACE_NESTING_DEPTH`] and counting the keyword itself
+/// would only add false positives with no additional safety.
+///
+/// # Why a total count, not a balanced depth like [`MAX_BRACE_NESTING_DEPTH`]
+///
+/// A `{`/`}`/`(`/`)` depth counter that decrements on the closing character
+/// is safe because a bare closer in argument position (e.g. `echo }`) is
+/// either a shell syntax error or breaks the nesting it would need to fake —
+/// live-confirmed. The same is not true of keyword closers: `echo fi` and
+/// `echo done` are ordinary, valid arguments (live-confirmed to resolve
+/// normally), so a decrementing counter keyed on the words `fi`/`done`/`esac`
+/// could be driven back down by injecting those words as arguments inside
+/// genuinely-nested input that still recurses past the crash threshold —
+/// live-confirmed: `("if true; then echo fi; " x 2000) + "echo done" + ("
+/// fi" x 2000)` still aborts even though a naive decrementing counter reads
+/// its `fi` count as balanced against its `if` count throughout. Counting
+/// only openers, and never decrementing, has no closer for an attacker to
+/// inject against: the count can only ever overestimate true nesting depth
+/// (safe direction — an inflated count fails closed to `Ask` earlier, never
+/// later), never underestimate it.
+pub(crate) const MAX_KEYWORD_NESTING_COUNT: usize = 8;
+
 /// A separator joining two [`Pipeline`]s in a [`CommandLine`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Separator {
