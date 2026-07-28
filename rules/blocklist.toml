@@ -198,6 +198,15 @@ command_prefix = "mkfs."
 #      carry an absolute destination, bypassing the need for -C at all) is
 #      not covered. A flags-only ask rule could close this; left for a
 #      follow-up issue rather than folded in here.
+#   4. `targets`' `exact` matching does no path normalization, so any
+#      unnormalized spelling of root/home slips through as `allow`:
+#      `-C //`, `-C /.`, `-C /./`, `-C ~/..`, a relative climb like
+#      `-C ../../../..`, etc. all resolve to `/` or escape `$HOME` on a
+#      real filesystem but match none of the `exact` targets above. This
+#      is not tar-specific — every rule using `exact`/`prefix` targets
+#      (rm, dd, …) shares it — and closing it needs a new `TargetMatcher`
+#      variant that lexically normalizes before comparing, not a TOML-only
+#      fix. Tracked as a follow-up issue rather than folded in here.
 #
 # Why the target list is asymmetric — `-C/`/`--directory=/` are listed but
 # `-C~`/`--directory=~` are not. Tilde expansion only fires at the start of
