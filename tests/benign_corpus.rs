@@ -49,6 +49,10 @@ fn benign_corpus_no_false_positives() {
         // Argument-position substitutions with benign inner commands.
         "echo $(date)",
         "echo $(whoami)",
+        // Issue #51: expansion-position substitutions with benign inner
+        // commands (assignment RHS, heredoc body) must stay Allow too.
+        "X=$(date)",
+        "cat <<EOF\n$(pwd)\nEOF",
         // $VAR arguments (argument-position bare $VAR).
         "cd $HOME",
         "ls $PWD",

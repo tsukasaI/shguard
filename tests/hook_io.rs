@@ -39,6 +39,22 @@ fn block_triggering_command_denies_with_reason() {
     assert!(!permission_reason(&output).is_empty());
 }
 
+/// Issue #51: an expansion-position substitution (assignment RHS here) that
+/// was previously never scanned at all denies with a non-empty reason —
+/// exercised end-to-end through the real binary, not just `gate.rs`'s unit
+/// tests, the same reasoning `block_triggering_command_denies_with_reason`
+/// above already applies to argv-position rules. Safe to run non-isolated
+/// (no `SHGUARD_CONFIG`/env stubbing): the embedded blocklist alone already
+/// blocks `rm -rf /`, and `crate::rules::apply_allowlist` is structurally
+/// Block-immune, so no host-local user config could downgrade this.
+#[test]
+fn assignment_rhs_substitution_denies() {
+    let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"X=$(rm -rf /)"},"hook_event_name":"PreToolUse"}"#;
+    let output = run_hook(stdin);
+    assert_eq!(permission_decision(&output), "deny");
+    assert!(!permission_reason(&output).is_empty());
+}
+
 /// DoD 2: an unresolvable-but-legitimate construct asks.
 #[test]
 fn ask_case_asks() {
