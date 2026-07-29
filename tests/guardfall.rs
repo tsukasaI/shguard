@@ -54,6 +54,13 @@ fn guardfall_class_e_cases() {
         ("tar -xf evil.tar -C /", Decision::Block),
         ("tar --extract --directory=/ -f evil.tar", Decision::Block),
         ("tar xf a.tar -C /", Decision::Ask),
+        // ---- pins added after a fable-model review of PR #62: all of
+        // these already behaved correctly, just weren't yet asserted ----
+        ("tar -C ~ -xf evil.tar", Decision::Block),
+        ("tar -C~ -xf evil.tar", Decision::Allow), // literal `~`, not $HOME — see the TOML rule's docs
+        ("tar -xf evil.tar -C/", Decision::Block), // attached form of -C
+        ("tar -xCf evil.tar /", Decision::Block),  // dashed short-flag clustering
+        ("tar -C $HOME -xf evil.tar", Decision::Ask), // unresolvable target fails closed
     ];
 
     for (command, expected) in cases {
