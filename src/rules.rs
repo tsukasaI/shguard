@@ -363,16 +363,6 @@ impl CommandRule {
         self.decision
     }
 
-    /// Whether `name` alone (no argv, no constraints) is this rule's
-    /// command matcher — used by
-    /// [`su_username_matches_blocklisted_command`] to check a bare token
-    /// against every rule's name without needing a full argv to run
-    /// [`Self::matches`] against.
-    #[must_use]
-    fn command_name_matches(&self, name: &str) -> bool {
-        self.command.matches(name)
-    }
-
     /// Whether `rest_words` (already resolved past this rule's command
     /// name) satisfies this rule's required flags and required tokens —
     /// the constraint half of matching, factored out of
@@ -928,6 +918,18 @@ fn value_flag_free_candidates<'a>(rest: &[&'a str], value_flags: &[ValueFlag]) -
 /// the vector's own name alone, before any argument skipping, so this
 /// limitation can only ever under-resolve which *inner* rule would have
 /// blocked — it never turns an escalation floor into a silent Allow.
+///
+/// `flock`'s own `-c '<command>'` form (like `sh -c`/`bash -c`, real `flock`
+/// runs the string via `$SHELL -c`) is a *different* kind of gap, not bounded
+/// the same way: `-c` is not in [`wrapper_value_flags`], so its string
+/// argument is mistaken for the wrapped command and matches no rule, and
+/// `flock` is not an [`ESCALATION_VECTORS`] entry, so there is no floor to
+/// fall back on either — `flock /tmp/l -c 'rm -rf /'` silently `allow`s
+/// (fable-model review finding, tracked as issue #66). Fixing this needs
+/// `flock -c` to recurse into its string the way `crate::gate` rule 6a
+/// already does for shell interpreters, not another [`wrapper_value_flags`]
+/// entry — adding `-c` there would just skip the string outright, which is
+/// worse.
 pub(crate) const TRANSPARENT_WRAPPERS: &[&str] = &[
     "env", "command", "nohup", "nice", "exec", "stdbuf", "setsid", "sudo", "xargs", "doas", "su",
     "pkexec", "run0", "timeout", "ionice", "flock", "chrt", "taskset",
@@ -1134,7 +1136,23 @@ fn skip_wrapper_flags(wrapper: &str, argv: &[NormalizedWord]) -> usize {
             break;
         };
         if value_flags.iter().any(|vf| vf.is_bare(token)) {
-            idx = (idx + 2).min(argv.len());
+            // The flag token itself is always consumed; its separated
+            // value is consumed too only when resolved (fable-model review
+            // finding: an earlier version advanced past the value
+            // unconditionally, so `nice -n $X ls`/`timeout -s $X 5 ls`
+            // silently resolved `ls` as the wrapped command and allowed,
+            // even though the real flag value — and therefore what
+            // actually runs — is unknown, the same class of gap
+            // [`skip_wrapper_arguments`]'s positional-skip had). Stopping
+            // here, at the value token (or at the end of `argv` if the
+            // flag was the last token), leaves it for the caller's own
+            // `Resolution::Resolved` check to fail closed — this function
+            // never resolves anything itself.
+            idx += 1;
+            match argv.get(idx).map(NormalizedWord::resolution) {
+                Some(Resolution::Resolved(_)) => idx += 1,
+                _ => break,
+            }
             continue;
         }
         let skippable =
@@ -1157,11 +1175,24 @@ fn skip_wrapper_flags(wrapper: &str, argv: &[NormalizedWord]) -> usize {
 /// it declares any — or at the first unresolvable token, which leaves
 /// `effective_command`'s next loop iteration to fail closed to `None`.
 ///
-/// The positional count is applied unconditionally once flag-skipping
-/// stops, bounded by however many tokens remain: a wrapper whose value or
-/// positional arguments consume the entire tail (`flock -x 9` alone) leaves
-/// an empty slice, which `effective_command`'s next loop iteration turns
-/// into `None` — fail-closed, never a guess past the end.
+/// The positional count is applied once flag-skipping stops, one token at a
+/// time, and — like the flag-skipping loop above — stops early on the first
+/// [`Resolution::Unresolvable`] token rather than blindly counting past it
+/// (fable-model review finding: an earlier version added the count
+/// unconditionally, so `timeout $X ls`/`flock $F ls` silently resolved `ls`
+/// as the wrapped command and `allow`ed, even though the real positional
+/// value — and therefore what actually runs — is unknown; the 0-positional
+/// `env $X ls` already correctly fell to `WrapperChainEscalation::Unresolved`
+/// via the flag-skipping loop's own early stop, so the positional loop must
+/// match that same fail-closed shape). Left pointing at that unresolvable
+/// token (not past it), so the caller's own `Resolution::Resolved` check —
+/// [`effective_command`]'s loop, or [`wrapper_chain_escalation`]'s — is what
+/// actually fails closed; this function only ever stops early, never
+/// resolves anything itself. Also bounded by however many tokens remain: a
+/// wrapper whose value or positional arguments consume the entire tail
+/// (`flock -x 9` alone) leaves an empty slice, which `effective_command`'s
+/// next loop iteration turns into `None` — fail-closed, never a guess past
+/// the end.
 ///
 /// A lone `--` end-of-options marker immediately after that (e.g. `flock
 /// /tmp/l -- rm -rf /`) is skipped too: it is never itself a command name,
@@ -1172,7 +1203,14 @@ fn skip_wrapper_flags(wrapper: &str, argv: &[NormalizedWord]) -> usize {
 /// consumes `--` itself, since it starts with `-`.
 fn skip_wrapper_arguments<'a>(wrapper: &str, argv: &'a [NormalizedWord]) -> &'a [NormalizedWord] {
     let mut idx = skip_wrapper_flags(wrapper, argv);
-    idx = (idx + wrapper_positional_args(wrapper)).min(argv.len());
+    let mut positionals_remaining = wrapper_positional_args(wrapper);
+    while positionals_remaining > 0 {
+        let Some(Resolution::Resolved(_)) = argv.get(idx).map(NormalizedWord::resolution) else {
+            break;
+        };
+        idx += 1;
+        positionals_remaining -= 1;
+    }
     if let Some(Resolution::Resolved(token)) = argv.get(idx).map(NormalizedWord::resolution)
         && token == "--"
     {
@@ -1238,19 +1276,37 @@ pub(crate) fn wrapper_chain_escalation(stage: &[NormalizedWord]) -> WrapperChain
 }
 
 /// Whether `stage`'s wrapper-unwrap chain passes through `su` with a
-/// positional "username" slot whose value itself matches one of `rules`'
-/// command rules by name (issue #54 follow-up).
+/// positional "username" slot such that the username *and everything after
+/// it*, reinterpreted as their own command line, fully matches one of
+/// `rules`' command rules — name, required flags/tokens, and targets alike
+/// (issue #54 follow-up; tightened after a fable-model review caught the
+/// name-only version's false positives — see below).
 ///
 /// `su [options] [-] [user [args...]]` is shape-ambiguous: `su rm -rf /`
 /// can't be told apart from "su into a user literally named `rm`, with no
 /// command" by structure alone (see [`wrapper_positional_args`]'s docs on
 /// `su`), and `crate::gate`'s rule 10 already floors that ambiguity to at
 /// least `escalation_floor` (default `Ask`) because `su` is an
-/// [`ESCALATION_VECTORS`] entry. But when the username slot's value is
-/// *also* exactly the name a real blocklist rule targets, the coincidence
-/// is worth treating as that rule's own decision (typically `deny`) rather
-/// than only the generic floor — `su rm -rf /` reads at least as
-/// suspicious as `rm -rf /` itself.
+/// [`ESCALATION_VECTORS`] entry. But when the username slot and its
+/// trailing arguments, read as a command line, *fully* match a real
+/// blocklist rule — not just its command name — the coincidence is worth
+/// treating as that rule's own decision (typically `deny`) rather than only
+/// the generic floor: `su rm -rf /` reads at least as suspicious as `rm -rf
+/// /` itself.
+///
+/// Matching on name alone (an earlier version of this function) was wrong:
+/// `su - git` and `su git -c 'git pull'` — routine administration on any
+/// git server, since `git` is a standard system account — matched
+/// `git-push-force` by name and denied with a reason describing a
+/// force-push that appears nowhere in the command. Reusing
+/// [`CommandRule::matches`] (the same constraint/target-checked matcher
+/// [`Rules::match_command`] uses everywhere else) instead of a name-only
+/// check means the shadow only fires when the reinterpreted command line
+/// would itself have tripped the rule — exactly reproducing the pre-#54
+/// behaviour's own matching for the one case where it mattered (`su rm -rf
+/// /`, where `-rf /` are read as `rm`'s own arguments and satisfy its
+/// `required_flags`/targets), while leaving `su - git` at the generic Ask
+/// floor like any other unresolvable-intent `su` invocation.
 ///
 /// Only `su` gets this treatment: `sudo`/`doas`'s user argument is always
 /// flag-introduced (`-u root`), so there is no bare positional slot for a
@@ -1275,14 +1331,10 @@ pub(crate) fn su_username_matches_blocklisted_command<'a>(
         let base = basename(name);
         if base == "su" {
             let idx = skip_wrapper_flags(base, tail);
-            let Resolution::Resolved(candidate) = tail.get(idx)?.resolution() else {
-                return None;
-            };
-            let candidate_base = basename(candidate);
             return rules
                 .command_rules
                 .iter()
-                .find(|rule| rule.command_name_matches(candidate_base));
+                .find(|rule| rule.matches(&tail[idx..]));
         }
         if !TRANSPARENT_WRAPPERS.contains(&base) {
             return None;
@@ -2484,6 +2536,53 @@ mod tests {
         );
     }
 
+    // ---- regression (fable-model review): the shadow check must match a
+    // rule's full constraints, not just its command name, or a username
+    // that happens to share a blocklisted command's name (a routine system
+    // account like `git`) gets denied for a command it never ran ----
+
+    #[test]
+    fn su_username_naming_a_blocklisted_commands_own_account_is_not_flagged() {
+        // `git` is `git-push-force`'s command name, but bare `su - git`
+        // never runs `push --force` — the earlier name-only shadow check
+        // matched anyway. Constraint-checked matching correctly leaves this
+        // to the generic su escalation floor instead.
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            su_username_matches_blocklisted_command(&argv(&["su", "-", "git"]), &rules).is_none()
+        );
+    }
+
+    #[test]
+    fn su_username_with_trailing_args_that_do_not_satisfy_the_rule_is_not_flagged() {
+        // Same false positive, with trailing arguments present: `-c "git
+        // pull"` never satisfies `git-push-force`'s required push/--force
+        // flags, so this must not be flagged either.
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            su_username_matches_blocklisted_command(
+                &argv(&["su", "git", "-c", "git pull"]),
+                &rules
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn su_username_with_trailing_args_that_do_satisfy_the_rule_is_flagged() {
+        // The positive counterpart: when the username slot and its
+        // trailing arguments, read as their own command line, genuinely
+        // satisfy a rule's full constraints (not just its name), the shadow
+        // check must still catch it.
+        let rules = Rules::embedded().unwrap();
+        let matched = su_username_matches_blocklisted_command(
+            &argv(&["su", "git", "push", "--force", "origin", "main"]),
+            &rules,
+        )
+        .unwrap();
+        assert_eq!(matched.id().as_str(), "git-push-force");
+    }
+
     #[test]
     fn flock_fd_form_fails_closed() {
         // `flock -x 9` with no trailing command: the flag consumes `-x`,
@@ -2533,6 +2632,102 @@ mod tests {
                 .match_command(&argv(&["flock", "-x", "/tmp/l", "--", "rm", "-rf", "/"]))
                 .is_some()
         );
+    }
+
+    // ---- regression (fable-model review): a positional slot's value must
+    // fail closed the same as a flag-skipped value, instead of being
+    // blindly counted past regardless of resolution ----
+
+    fn argv_with_unresolvable_at(words: &[&str], unresolvable_at: usize) -> Vec<NormalizedWord> {
+        let mut out: Vec<NormalizedWord> =
+            words.iter().map(|w| NormalizedWord::resolved(*w)).collect();
+        out[unresolvable_at] =
+            NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::ParameterExpansion);
+        out
+    }
+
+    #[test]
+    fn timeout_positional_duration_unresolvable_fails_closed_to_unresolved() {
+        // Before this fix: the positional count was added unconditionally,
+        // so an unresolvable duration was skipped past anyway and `ls`
+        // resolved as the wrapped command — `allow`, even though the real
+        // duration (and therefore whether this is really `timeout ... ls`
+        // at all) is unknown.
+        let stage = argv_with_unresolvable_at(&["timeout", "X", "ls"], 1);
+        assert_eq!(
+            wrapper_chain_escalation(&stage),
+            WrapperChainEscalation::Unresolved
+        );
+        assert!(effective_command(&stage).is_none());
+    }
+
+    #[test]
+    fn flock_positional_lockfile_unresolvable_fails_closed_to_unresolved() {
+        let stage = argv_with_unresolvable_at(&["flock", "X", "ls"], 1);
+        assert_eq!(
+            wrapper_chain_escalation(&stage),
+            WrapperChainEscalation::Unresolved
+        );
+        assert!(effective_command(&stage).is_none());
+    }
+
+    #[test]
+    fn timeout_positional_duration_resolved_still_recurses_normally() {
+        // Same shape, resolved value: must still behave exactly as before
+        // this fix (the positional value is skipped, `ls` is the wrapped
+        // command).
+        let stage = argv(&["timeout", "5", "ls"]);
+        let (name, rest) = effective_command(&stage).unwrap();
+        assert_eq!(name, "ls");
+        assert!(rest.is_empty());
+    }
+
+    // ---- regression (fable-model review, round 2): a value-flag's
+    // separated value must fail closed the same as a positional value —
+    // this is the same "blind skip regardless of resolution" class F3
+    // fixed, found lurking one function over in skip_wrapper_flags ----
+
+    #[test]
+    fn nice_value_flags_separated_value_unresolvable_fails_closed_to_unresolved() {
+        // `nice -n $X ls`: before this fix, `-n`'s separated value was
+        // skipped unconditionally, so `ls` resolved as the wrapped command
+        // and the verdict was `allow` even though the real flag value is
+        // unknown.
+        let stage = argv_with_unresolvable_at(&["nice", "-n", "X", "ls"], 2);
+        assert_eq!(
+            wrapper_chain_escalation(&stage),
+            WrapperChainEscalation::Unresolved
+        );
+        assert!(effective_command(&stage).is_none());
+    }
+
+    #[test]
+    fn timeout_value_flags_separated_value_unresolvable_fails_closed_to_unresolved() {
+        let stage = argv_with_unresolvable_at(&["timeout", "-s", "X", "5", "ls"], 2);
+        assert_eq!(
+            wrapper_chain_escalation(&stage),
+            WrapperChainEscalation::Unresolved
+        );
+        assert!(effective_command(&stage).is_none());
+    }
+
+    #[test]
+    fn nice_value_flags_separated_value_resolved_still_recurses_normally() {
+        // Same shape, resolved value: must still behave exactly as before
+        // this fix.
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["nice", "-n", "19", "rm", "-rf", "/"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn nice_value_flag_with_no_following_token_fails_closed() {
+        // `nice -n` with nothing after it: the flag is consumed, there is
+        // no value token to check at all — must not guess past the end.
+        assert!(effective_command(&argv(&["nice", "-n"])).is_none());
     }
 
     #[test]
