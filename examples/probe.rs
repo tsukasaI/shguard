@@ -3,7 +3,19 @@
 //! compact JSON, one line per payload, in argument order.
 //!
 //! Usage: `cargo run -q --example probe -- '<payload>' ['<payload>' ...]`
-//! Output per line: `{"command": <payload>, "decision": <variant>, "reason": <string or null>}`
+//!
+//! ## Output contract
+//!
+//! Exactly one JSON line is emitted per payload, unconditionally, in
+//! argument order — a consumer may map line N to argument N with no
+//! exceptions. On the success path:
+//! `{"command": <payload>, "decision": <variant>, "reason": <string or null>}`
+//!
+//! If a given payload's verdict fails to serialise, that line is replaced
+//! in-position with `{"command": <payload>, "error": <message>}` rather than
+//! being skipped — skipping would shift every later payload's line up by
+//! one, silently re-attributing a later payload's verdict to an earlier
+//! position. The process still exits 2 and logs to stderr in that case.
 //!
 //! ## Decision vocabulary
 //!
@@ -58,6 +70,15 @@ fn main() {
             Err(err) => {
                 eprintln!("failed to serialise verdict for {payload:?}: {err}");
                 had_error = true;
+                // `Value`'s `Display` impl (unlike `serde_json::to_string`)
+                // is infallible, so this in-position error line always
+                // prints even though the success-path serialisation above
+                // did not.
+                let error_value = serde_json::json!({
+                    "command": payload,
+                    "error": err.to_string(),
+                });
+                println!("{error_value}");
             }
         }
     }
