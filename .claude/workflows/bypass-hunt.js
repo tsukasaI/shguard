@@ -459,7 +459,13 @@ const perClassResults = await pipeline(CLASSES, huntStage, verifyStage)
 // ---------------------------------------------------------------------
 // Aggregation sink. This is the ONE place that computes and asserts both
 // conservation laws:
-//   1. Class conservation: completed + failed === CLASSES.length.
+//   1. Class conservation: zero findings may only be reported when every
+//      class actually completed — completedCount === CLASSES.length. (Not
+//      completed + failed === CLASSES.length: classStatus only ever takes
+//      the values 'completed'/'failed', and this loop pushes exactly one
+//      census entry per class, so that sum is always true and can never
+//      catch a partial run — see the check itself, below, for the incident
+//      that motivated replacing it.)
 //   2. Candidate conservation (per class): candidates_emitted ===
 //      confirmed + refuted + inconclusive + dropped_by_cap.
 // Every lossy boundary upstream (Build/Hunt agent() throwing or dying,
@@ -467,7 +473,9 @@ const perClassResults = await pipeline(CLASSES, huntStage, verifyStage)
 // captured as a tagged, non-null value; this loop's only job is to fold
 // those tagged values into one census entry per class — by index, never by
 // filtering — so a class that never produced a tagged entry still gets one
-// here, synthesised as failed.
+// here, synthesised as failed. It also cross-checks each entry's carried
+// entry.cls against the class its index expects to catch pipeline order
+// corruption, which per-entry conservation arithmetic alone cannot detect.
 // ---------------------------------------------------------------------
 
 const confirmed = []
@@ -479,6 +487,7 @@ const schemaViolations = []
 let compositionCandidates = 0
 let droppedByCapTotal = 0
 let droppedSelfReportedTotal = 0
+let classOrderOk = true
 
 for (let i = 0; i < CLASSES.length; i++) {
   const cls = CLASSES[i]
@@ -489,6 +498,19 @@ for (let i = 0; i < CLASSES.length; i++) {
     result: null,
     verdicts: [],
     sliceOverflow: 0,
+  }
+
+  // entry.cls's keep: hunt/verify thread the class object through as
+  // entry.cls specifically so this index can be cross-checked against it.
+  // Without this, a pipeline order bug would report class C's result under
+  // class A's id — and because both conservation laws are per-entry and
+  // label-independent, they'd still balance, so a mislabeled finding would
+  // pass as `ok` silently.
+  if (entry.cls && entry.cls.id !== cls.id) {
+    classOrderOk = false
+    schemaViolations.push(
+      `class census index ${i}: expected class id ${cls.id} (position ${i}) but carried entry has class id ${entry.cls.id} — pipeline order was not preserved`,
+    )
   }
 
   const huntStatus = entry.huntStatus || 'errored'
@@ -534,6 +556,26 @@ for (let i = 0; i < CLASSES.length; i++) {
   let vInconclusive = 0
 
   for (const v of entry.verdicts || []) {
+    if (!v) {
+      // parallel() can yield a bare null in place of a slot; this loop has
+      // no surrounding try/catch, so `const {…} = null` below would throw
+      // and take the whole aggregation sink down with it — losing the
+      // census and all instrumentation for a run that otherwise completed.
+      // Skip-with-accounting instead: bucket it inconclusive rather than
+      // crash or silently drop it. This also keeps law 2 honest — a
+      // silently dropped slot would make the verified sum fall short of
+      // candidates_emitted and trip conservation law 2, but only if the
+      // loop survives to compute it.
+      vInconclusive += 1
+      inconclusive.push({
+        class_id: cls.id,
+        class_name: cls.name,
+        candidate: null,
+        verdict: null,
+        error: 'parallel yielded null verdict slot',
+      })
+      continue
+    }
     const { candidate, verdict, error } = v
     // A missing verdict, or an outcome outside the enum, is bucketed
     // inconclusive at the sink — never refuted, never dropped. This is the
@@ -600,9 +642,21 @@ for (let i = 0; i < CLASSES.length; i++) {
 }
 
 // --- Conservation law 1: class conservation ---
+// "Zero findings may only be reported when every class completed": checked
+// directly as completedCount === CLASSES.length, not as
+// `completed + failed === CLASSES.length` — classStatus only ever takes the
+// values 'completed'/'failed' and the loop above pushes exactly one census
+// entry per class, so that sum is always true and can never catch a partial
+// run (4 classes dying and 1 completing with zero candidates used to sail
+// through as `status: 'ok'`).
 const completedCount = classCensus.filter((c) => c.status === 'completed').length
-const failedCount = classCensus.filter((c) => c.status === 'failed').length
-const classConservationOk = completedCount + failedCount === CLASSES.length
+const failedClasses = classCensus.filter((c) => c.status === 'failed')
+const classConservationOk = completedCount === CLASSES.length
+
+// Genuine structural check (distinct from the law above, and not vacuous
+// like the deleted one): guards a future loop bug where classCensus ends up
+// short or long relative to CLASSES, which nothing else here would catch.
+const censusLengthOk = classCensus.length === CLASSES.length
 
 // --- Conservation law 2: candidate conservation, per class ---
 const conservationViolations = []
@@ -618,15 +672,17 @@ const candidateConservationOk = conservationViolations.length === 0
 
 const failureReasons = []
 if (!classConservationOk) {
-  failureReasons.push(
-    `class conservation failed: completed(${completedCount}) + failed(${failedCount}) !== CLASSES.length(${CLASSES.length})`,
-  )
+  const detail = failedClasses.map((c) => `${c.class_id} (${c.reason})`).join(', ')
+  failureReasons.push(`only ${completedCount}/${CLASSES.length} classes completed` + (detail ? `: ${detail}` : ''))
+}
+if (!censusLengthOk) {
+  failureReasons.push(`class census length mismatch: got ${classCensus.length}, expected ${CLASSES.length}`)
+}
+if (!classOrderOk) {
+  failureReasons.push('class order mismatch: pipeline did not preserve per-class ordering (see schema_violations)')
 }
 if (!candidateConservationOk) {
   failureReasons.push(`candidate conservation failed: ${conservationViolations.join('; ')}`)
-}
-if (completedCount === 0) {
-  failureReasons.push('zero classes completed')
 }
 
 const status = failureReasons.length > 0 ? 'incomplete' : 'ok'
