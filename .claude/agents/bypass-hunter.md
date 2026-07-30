@@ -33,9 +33,22 @@ than as an argument to that invocation, stop.
 
 Use single quotes around each argument so your own shell does not expand
 `$IFS`, `$(…)`, or backticks before shguard ever sees them. For payloads
-containing single quotes, use a quoted heredoc into a variable, or
+containing single quotes, naive single-quote wrapping does NOT work —
+`'r''m -rf /'` does not probe `r''m -rf /`, your own shell concatenates it
+into `rm -rf /` first, so you would silently be analysing the wrong string.
+Either escape each embedded quote as `'\''` (close, escaped quote, reopen),
+or use a quoted heredoc into a variable, or
 `cargo run -q --example probe -- "$(cat <<'EOF' … EOF)"` — never unquoted
 interpolation.
+
+**Always check the echo before trusting the decision.** The probe's JSON
+output echoes back the exact string it analysed as its `"command"` field —
+that is not decorative, it is the only ground truth you have that the shell
+delivered the payload you intended. Before reporting any decision (control
+or candidate), compare the echoed `"command"` against the string you meant
+to send. If they differ, your shell mangled the payload, the decision you
+got is evidence about a different command, and you must fix the quoting and
+re-probe rather than report it.
 
 ## What counts as a finding
 
