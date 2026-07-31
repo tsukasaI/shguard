@@ -1,2 +1,15 @@
-.claude/
+# The audit harness under .claude/ is versioned with the rules it audits, so
+# the rule data and the way it gets attacked share one history. Everything else
+# under .claude/ (plans, worktrees, local settings) stays out.
+#
+# `!.claude/` comes first on purpose: a global ignore (core.excludesFile) may
+# exclude the `.claude` *directory* itself, and git prunes excluded directories
+# during traversal — no negation below can reach inside one. Re-including the
+# directory here (repo .gitignore outranks the global file) lets git descend;
+# `.claude/*` then re-excludes its contents, and the three negations carve out
+# the harness.
+!.claude/
+.claude/*
+!.claude/agents/
+!.claude/workflows/
 /target
