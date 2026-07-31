@@ -75,17 +75,34 @@ pub(crate) const MAX_BRACE_NESTING_DEPTH: usize = 64;
 /// there at 99 levels, `if` at 110. An earlier version of this cap (128)
 /// was sized only against the 8MiB thresholds and **overflowed `cargo
 /// test`'s own thread** the first time its own boundary test ran — this
-/// value must clear the 2MiB budget, not just the main-thread one. 8 sits a
-/// ~12x margin below the lowest 2MiB threshold found (`case`'s 99),
+/// value must clear the 2MiB budget, not just the main-thread one. 16 sits a
+/// ~6x margin below the lowest 2MiB threshold found (`case`'s 99), still
 /// comfortably exceeding [`MAX_BRACE_NESTING_DEPTH`]'s own ~10x bar; this is
-/// a *count*, not a *depth*, so 8 is also generous headroom over any
-/// realistic legitimate use of these keywords — shguard's AST does not
-/// model any of these five as a compound command at all, so a single
-/// occurrence of any of them already always resolves to
-/// `Unsupported`/`Ask` regardless of this cap, and there is no
-/// false-positive cost to weigh against a tight value here. Re-measure both
-/// the 8MiB and 2MiB thresholds before raising this on any `brush-parser`
-/// version bump, same as [`MAX_BRACE_NESTING_DEPTH`].
+/// a *count*, not a *depth*, so 16 is also generous headroom over any
+/// realistic legitimate use of these keywords. Re-measure both the 8MiB and
+/// 2MiB thresholds before raising this on any `brush-parser` version bump,
+/// same as [`MAX_BRACE_NESTING_DEPTH`].
+///
+/// # Why 16, not 8 (issue #75)
+///
+/// `for`/`while`/`until` are now modeled as real [`Command::Compound`]
+/// variants (issue #75) — a single occurrence of one of them no longer
+/// automatically resolves to `Unsupported`/`Ask` regardless of this cap the
+/// way it used to when this cap was first sized at 8. That earlier sizing's
+/// "no false-positive cost to weigh" premise was already only true for
+/// *syntactic* keyword use, though: [`crate::parser::reject_excessive_raw_nesting`]
+/// counts raw bytes with no quote awareness, so a command whose *text*
+/// happens to contain the words `for`/`if`/`while`/`case`/`until` several
+/// times — a `git commit -m "..."` message being the clearest real example —
+/// was always able to trip this cap even though nothing is actually nested.
+/// Modeling `for`/`while`/`until` doesn't create that false-positive class,
+/// but it does raise the stakes of it: a real, legitimate one-liner chaining
+/// a couple of loops plus an `if` (still unmodeled, still hard-Asks on its
+/// own first use) can now sit closer to this budget than "always Ask
+/// anyway" made it matter before. Doubling to 16 keeps a healthy margin
+/// under the probed 2MiB-stack abort floor (`case`'s 99) while giving that
+/// realistic multi-loop one-liner — and the quoted-text false-count above —
+/// more headroom than 8 did.
 ///
 /// `select` and `[[ … ]]` were probed too and excluded: brush-parser rejects
 /// both with an immediate syntax error rather than recursing on them, so
@@ -111,7 +128,7 @@ pub(crate) const MAX_BRACE_NESTING_DEPTH: usize = 64;
 /// inject against: the count can only ever overestimate true nesting depth
 /// (safe direction — an inflated count fails closed to `Ask` earlier, never
 /// later), never underestimate it.
-pub(crate) const MAX_KEYWORD_NESTING_COUNT: usize = 8;
+pub(crate) const MAX_KEYWORD_NESTING_COUNT: usize = 16;
 
 /// A separator joining two [`Pipeline`]s in a [`CommandLine`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,14 +153,117 @@ pub(crate) struct CommandLine {
     pub(crate) rest: Vec<(Separator, Pipeline)>,
 }
 
-/// A pipeline: one or more [`SimpleCommand`]s connected by `|`.
+/// A pipeline: one or more [`Command`]s connected by `|`.
 ///
 /// Modelled as `first` + `rest` for the same non-empty-list reason as
 /// [`CommandLine`]: a pipeline can never have zero commands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Pipeline {
-    pub(crate) first: SimpleCommand,
-    pub(crate) rest: Vec<SimpleCommand>,
+    pub(crate) first: Command,
+    pub(crate) rest: Vec<Command>,
+}
+
+/// One command in a [`Pipeline`]: an ordinary simple command, a compound
+/// command (issue #75: `for`/`while`/`until`/subshell/brace group), or a
+/// function definition (issue #75).
+///
+/// A sum type rather than folding compound commands and function
+/// definitions into `SimpleCommand` itself: the three have almost nothing in
+/// common structurally (a compound command has a nested [`CommandLine`]
+/// body instead of `words`; a function definition has a name and a body but
+/// no argv at all), so a single struct with optional fields for all three
+/// shapes would make invalid combinations (a `SimpleCommand` with a `body`,
+/// a `ForClause` with `words: Vec<Word>` in the argv sense) representable
+/// when they should not be.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Command {
+    Simple(SimpleCommand),
+    Compound(CompoundCommand),
+    FunctionDefinition(FunctionDefinition),
+}
+
+/// A compound command (issue #75): `for`/`while`/`until`, a subshell, or a
+/// brace group, each carrying its own nested [`CommandLine`] body (and, for
+/// `while`/`until`, a condition `CommandLine` evaluated before each
+/// iteration) plus any redirections attached to the compound command as a
+/// whole (`for i in 1; do echo x; done > /dev/null` attaches the redirect to
+/// the loop, not to `echo`).
+///
+/// `BraceGroup` and `Subshell` get identical treatment everywhere shguard's
+/// gate evaluates them: the difference between "runs in a subshell" and
+/// "runs in the current shell" isn't meaningful to a static, non-executing
+/// analyzer that already gives every recursed body its own fresh
+/// environment (see `crate::gate`'s module docs). `BraceGroup` exists as its
+/// own variant (rather than being folded into `Subshell`) only because
+/// [`FunctionDefinition`]'s body is a brace group in virtually every real
+/// function, and keeping the two syntactically distinct mirrors
+/// brush-parser's own `CompoundCommand` shape.
+///
+/// Deliberately excludes `if`/`case` clauses, C-style arithmetic `for`, bare
+/// `((...))` arithmetic commands, and coprocesses — none of these were
+/// measured in issue #75's traffic sample, so they stay exactly as
+/// unsupported (translate-error, `Ask`) as before this change.
+///
+/// `body`/`condition` are `Box<CommandLine>`, not a bare `CommandLine`:
+/// `CommandLine` -> `Pipeline` -> `Command` -> `CompoundCommand` ->
+/// `CommandLine` is a recursive type with no fixed size without some
+/// indirection breaking the cycle, and this is the one point in it that
+/// needs boxing (`Command::Compound`/`Pipeline::first` stay unboxed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CompoundCommand {
+    BraceGroup {
+        body: Box<CommandLine>,
+        redirections: Vec<Redirection>,
+    },
+    Subshell {
+        body: Box<CommandLine>,
+        redirections: Vec<Redirection>,
+    },
+    ForClause {
+        variable: String,
+        /// The `in ...` word list. `None` when the `for` clause omits the
+        /// `in` entirely (bash then iterates `"$@"`) — kept distinct from
+        /// `Some(vec![])` (an explicit, empty `in` list, which iterates zero
+        /// times) rather than collapsing both to one representation.
+        words: Option<Vec<Word>>,
+        body: Box<CommandLine>,
+        redirections: Vec<Redirection>,
+    },
+    WhileClause {
+        condition: Box<CommandLine>,
+        body: Box<CommandLine>,
+        redirections: Vec<Redirection>,
+    },
+    UntilClause {
+        condition: Box<CommandLine>,
+        body: Box<CommandLine>,
+        redirections: Vec<Redirection>,
+    },
+}
+
+/// A function definition (issue #75): `name() { ...; }` (or the `function`
+/// keyword form). shguard evaluates the body eagerly at the definition site
+/// and folds its verdict worst-wins into the definition's own — it does
+/// **not** track the function name and inline it at call sites. Ignoring
+/// the body entirely (parse the definition, evaluate nothing) would turn
+/// `f() { rm -rf /; }; f` from an `Unsupported`/`Ask` line into a clean
+/// `Allow` (an unknown, no-rule-match command defaults to `Allow` —
+/// `crate::gate::fold_floors`), which is a deny-rule bypass, not a
+/// documented gap. Eager body evaluation closes that without needing any
+/// name-tracking or call-site resolution; the residual gap (a body that
+/// only becomes dangerous once called with a specific argument, e.g.
+/// `f() { rm -rf "$1"; }; f /`) already fails closed to `Ask` today via the
+/// ordinary unresolved-argument floor, not `Allow`.
+///
+/// Has no `redirections` field of its own: `bast::FunctionBody`'s optional
+/// redirect list (`f() { ...; } > log`) is exactly the same shape as
+/// `bast::Command::Compound`'s own attached-redirect list, so
+/// `src/parser.rs` folds it straight into `body`'s own `CompoundCommand`
+/// variant (its `redirections` field) rather than duplicating it here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FunctionDefinition {
+    pub(crate) name: Word,
+    pub(crate) body: Box<CompoundCommand>,
 }
 
 /// A single simple command: leading assignments, words (the command name and
@@ -162,7 +282,19 @@ pub(crate) struct SimpleCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Assignment {
     pub(crate) name: String,
-    pub(crate) value: Word,
+    pub(crate) value: AssignmentValue,
+}
+
+/// The right-hand side of an [`Assignment`]: an ordinary scalar value, or
+/// (issue #75) an array literal (`arr=(a b c)`). Kept as its own sum type
+/// rather than always a `Vec<Word>` (a scalar is not "an array of one
+/// element" — `NAME=` and `NAME=()` are observably different assignments in
+/// bash) so the two remain distinguishable through normalisation and the
+/// gate's expansion-position scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AssignmentValue {
+    Scalar(Word),
+    Array(Vec<Word>),
 }
 
 /// A redirection attached to a simple command (`>`, `<`, `>>`, a heredoc, …).
@@ -223,6 +355,17 @@ pub(crate) enum FileRedirectionKind {
     Output,
     /// `>>`
     Append,
+    /// `<&` (issue #75). `target` is still a plain [`Word`] — brush-parser
+    /// does not structurally distinguish a numeric fd/`-` target from a
+    /// filename one here (`bast::IoFileRedirectTarget::Duplicate`'s own docs:
+    /// "could be a filename, a file descriptor, or a file descriptor and a
+    /// '-'"), so that distinction is made in `crate::gate` once the target
+    /// has been resolved, not here.
+    DuplicateInput,
+    /// `>&` (issue #75). See [`FileRedirectionKind::DuplicateInput`]'s docs —
+    /// same target ambiguity applies (`2>&1` vs. `>&/dev/sda`, which is a
+    /// genuine file write bash treats identically to `> /dev/sda`).
+    DuplicateOutput,
 }
 
 /// A shell word: a sequence of [`WordPiece`]s. Kept as a sequence rather than
@@ -261,4 +404,42 @@ pub(crate) enum WordPiece {
     /// A backslash-escaped character, e.g. `\ ` inside an otherwise
     /// unquoted word.
     EscapeSequence(char),
+    /// `$((...))` (issue #75) — the raw, unparsed inner arithmetic text
+    /// (`bword::ParameterExpr`'s `UnexpandedArithmeticExpr.value`). Raw, not
+    /// a `Word`, for the same reason as [`WordPiece::CommandSubstitution`]:
+    /// bash performs command substitution *inside* an arithmetic expression
+    /// before evaluating it (`$(( $(rm -rf /) ))` really does run the `rm`),
+    /// so `crate::gate` must re-scan this raw text for embedded `$(...)`/
+    /// backtick substitutions the same way it already does for heredoc
+    /// bodies, rather than treating the whole expression as inert.
+    ArithmeticExpansion(String),
+    /// `<(...)`/`>(...)` (issue #75) — process substitution. Unlike
+    /// [`WordPiece::CommandSubstitution`], the inner command is **not** raw
+    /// text: brush-parser already parses it into a structural command list
+    /// (`bast::SubshellCommand`), so `body` is shguard's own already-parsed
+    /// [`CommandLine`], not a string to re-parse. `Box`ed because
+    /// `WordPiece` -> `CommandLine` -> ... -> `Word` -> `WordPiece` is
+    /// otherwise a recursive type with no fixed size. Occupies exactly one
+    /// [`Word`] position (bash expands `<(cmd)` to a single pathname-like
+    /// token), so — like [`WordPiece::CommandSubstitution`] — it never needs
+    /// a dedicated `SimpleCommand` field of its own: a bare process
+    /// substitution argument becomes a single-piece `Word`, and one used as
+    /// a redirect target becomes an ordinary [`Redirection::File`] target.
+    ProcessSubstitution {
+        direction: ProcessSubstitutionDirection,
+        body: Box<CommandLine>,
+    },
+}
+
+/// Whether a [`WordPiece::ProcessSubstitution`] reads from (`<(...)`) or
+/// writes to (`>(...)`) the substituted command. Kept for fidelity/debug
+/// output and future rule authoring even though it is not currently
+/// security-relevant to shguard's own analysis (both directions recurse
+/// through the same worst-wins evaluation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProcessSubstitutionDirection {
+    /// `<(...)`
+    Read,
+    /// `>(...)`
+    Write,
 }

