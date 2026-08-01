@@ -914,6 +914,15 @@ fn evaluate_simple_command_core(
     // Redirect target check runs FIRST, before any early return —
     // a redirection-only command (`> /dev/sda`) has empty argv but still
     // carries dangerous redirections that must not slip through rule 9.
+    // This return precedes `leftover_floor`'s computation below (issue
+    // #77's fable-review follow-up) and is not floored by it — currently
+    // safe only because every `[[redirect]]` rule is `Decision::Block`
+    // (`rules/blocklist.toml`) and user config has no redirect-rule table
+    // to add an `Ask`-decision one through, so this return can only ever
+    // produce `Block`, which no floor could lift anyway. If a redirect
+    // rule with a weaker decision is ever added, this return needs the
+    // same `apply_leftover_substitution_floor` wrapping the rules 1/2/6a/
+    // stage-3 returns already get.
     if let Some(rule) = check_redirect_targets(&command.redirections, rules) {
         let reason = Reason::new(format!(
             "redirect target matches rule {:?}: {}",
@@ -965,17 +974,43 @@ fn evaluate_simple_command_core(
     let argument_words = &command.words[first_word_idx + 1..];
 
     // Rule 1: command-position `$()`/backtick, or (issue #75) process
-    // substitution.
-    let command_position_subs = collect_substitutions(first_word_ast);
-    let command_position_proc_subs = collect_process_substitutions(first_word_ast);
+    // substitution. Issue #77: scoped to the brace alternative that
+    // actually determines `argv[0]` (`normalize::split_command_position`,
+    // which mirrors `normalize_word`'s own alternative selection) rather
+    // than the raw word's whole brace-alternation tree — a substitution
+    // living only in a *different* alternative resolves to an
+    // argument-position token once brace-expanded, not the command name.
+    let (command_position_pieces, leftover_alternatives) =
+        normalize::split_command_position(first_word_ast);
+    // Computed once, up front: this function has several early returns
+    // below (rules 1/2/6a) before `fold_floors` is ever reached, and a
+    // leftover substitution must still be able to escalate a verdict
+    // returned on any of them (fable-review follow-up to issue #77) — not
+    // only the blocklist-miss path `fold_floors`'s own `substitution_result`
+    // already covers.
+    let leftover_floor = evaluate_leftover_alternative_substitutions(
+        &leftover_alternatives,
+        depth,
+        rules,
+        allowlist,
+    );
+    let mut command_position_subs = Vec::new();
+    let mut command_position_proc_subs = Vec::new();
+    if let Some(pieces) = &command_position_pieces {
+        collect_substitutions_into(pieces, &mut command_position_subs);
+        collect_process_substitutions_into(pieces, &mut command_position_proc_subs);
+    }
     if !command_position_subs.is_empty() || !command_position_proc_subs.is_empty() {
-        return evaluate_command_position_substitution(
-            &command_position_subs,
-            &command_position_proc_subs,
-            argv,
-            rules,
-            allowlist,
-            depth,
+        return apply_leftover_substitution_floor(
+            evaluate_command_position_substitution(
+                &command_position_subs,
+                &command_position_proc_subs,
+                argv,
+                rules,
+                allowlist,
+                depth,
+            ),
+            leftover_floor,
         );
     }
 
@@ -985,15 +1020,21 @@ fn evaluate_simple_command_core(
     // instead of the raw `argv[0]`.
     match argv[0].resolution() {
         Resolution::Unresolvable(UnresolvableKind::ParameterExpansion) => {
-            return evaluate_command_position_bare_var(first_word_ast, argv, env, rules);
+            return apply_leftover_substitution_floor(
+                evaluate_command_position_bare_var(first_word_ast, argv, env, rules),
+                leftover_floor,
+            );
         }
         Resolution::Unresolvable(kind) => {
-            return Verdict::ask(
-                Reason::new(format!(
-                    "command position word is unresolvable ({kind:?}); which command will run \
-                     cannot be determined statically"
-                )),
-                argv,
+            return apply_leftover_substitution_floor(
+                Verdict::ask(
+                    Reason::new(format!(
+                        "command position word is unresolvable ({kind:?}); which command will \
+                         run cannot be determined statically"
+                    )),
+                    argv,
+                ),
+                leftover_floor,
             );
         }
         Resolution::Resolved(_) => {}
@@ -1067,7 +1108,10 @@ fn evaluate_simple_command_core(
         && SHELL_INTERPRETERS.contains(&name)
         && let Some(outcome) = evaluate_dash_c(&argv, rest_words, name, rules, allowlist, depth)
     {
-        return apply_escalation_floor(outcome, escalation_floor);
+        return apply_leftover_substitution_floor(
+            apply_escalation_floor(outcome, escalation_floor),
+            leftover_floor,
+        );
     }
 
     // Rule 6b: `python -c`/`perl -e`/`node -e` — no introspection of
@@ -1089,8 +1133,16 @@ fn evaluate_simple_command_core(
 
     // Rule 3: argument-position `$()`/backtick recursion. An inner Allow
     // never forces the outer command non-Allow; Ask/Block propagate.
-    let substitution_result =
-        evaluate_argument_substitutions(argument_words, depth, rules, allowlist);
+    // Issue #77: `leftover_floor` (computed up front, above) folds in the
+    // command-position word's own non-winning brace branches, which
+    // resolve to argument-position tokens once brace-expanded — a
+    // substitution living in one of them must still be recursed here,
+    // since `argument_words` alone (everything after `first_word_ast`)
+    // never sees content embedded in that same AST word.
+    let substitution_result = fold_optional_decision(
+        evaluate_argument_substitutions(argument_words, depth, rules, allowlist),
+        leftover_floor,
+    );
 
     // Rule 4 (NEW): argument-position bare `$VAR` or a `$()`/backtick
     // substitution (issue #34 extends this rule beyond its original
@@ -1129,18 +1181,24 @@ fn evaluate_simple_command_core(
         flags: except_flags_rule,
     };
 
-    // Stage 3: the ordinary exact-argv blocklist match.
+    // Stage 3: the ordinary exact-argv blocklist match. A rule can itself
+    // carry `Decision::Ask` (e.g. `tar-directory-root-or-home`) — the
+    // leftover-substitution floor must still be able to lift that to
+    // `Block` (fable-review follow-up to issue #77), the same as every
+    // other return in this function since `leftover_alternatives` became
+    // available.
     if let Some(rule) = rules.match_command(&argv) {
         let reason = Reason::new(format!(
             "matches blocklist rule {:?}: {}",
             rule.id().as_str(),
             rule.reason().as_str()
         ));
-        return match rule.decision() {
+        let verdict = match rule.decision() {
             Decision::Block => Verdict::block(reason, argv, Some(rule.id().clone())),
             Decision::Ask => Verdict::ask(reason, argv),
             Decision::Allow => unreachable!("rules never carry Decision::Allow"),
         };
+        return apply_leftover_substitution_floor(verdict, leftover_floor);
     }
 
     fold_floors(
@@ -1320,6 +1378,50 @@ fn apply_tar_dashless_floor(verdict: Verdict, floor: Option<(Decision, String)>)
     let reason = match verdict.reason() {
         Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
         None => floor_reason,
+    };
+    match floor_decision {
+        Decision::Block => Verdict::block(Reason::new(reason), argv, None),
+        Decision::Ask | Decision::Allow => Verdict::ask(Reason::new(reason), argv),
+    }
+}
+
+/// Applies issue #77's leftover-alternative substitution floor
+/// (`evaluate_leftover_alternative_substitutions`'s result) to a verdict —
+/// the same `decision.max(floor_decision)` max-lift every other floor in
+/// this module uses, kept as its own named function for the same
+/// self-documenting-call-site reason the others are (module docs'
+/// one-function-per-floor convention). Unlike the other floors here, this
+/// one is applied at MULTIPLE call sites (rules 1/2/6a's early returns,
+/// plus folded into [`fold_floors`]'s own `substitution_result`) rather
+/// than just once before `fold_floors` — see
+/// [`evaluate_simple_command_core`]'s `leftover_floor` binding for why:
+/// this function has several early returns that would otherwise never see
+/// a leftover branch's substitution at all (fable-review follow-up to
+/// issue #77). Reason text mirrors [`fold_floors`]'s own
+/// `substitution_result` messaging so a floored verdict reads the same
+/// regardless of which return path triggered it.
+fn apply_leftover_substitution_floor(verdict: Verdict, floor: Option<Decision>) -> Verdict {
+    let Some(floor_decision) = floor else {
+        return verdict;
+    };
+    if verdict.decision() >= floor_decision {
+        return verdict;
+    }
+    let argv = verdict.normalized_argv().to_vec();
+    let floor_reason = match floor_decision {
+        Decision::Block => {
+            "a command/backquote or process substitution living in a brace alternative other \
+             than the one determining the command name recurses to a command that is itself \
+             blocked"
+        }
+        Decision::Ask | Decision::Allow => {
+            "a command/backquote or process substitution living in a brace alternative other \
+             than the one determining the command name could not be resolved to Allow"
+        }
+    };
+    let reason = match verdict.reason() {
+        Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
+        None => floor_reason.to_string(),
     };
     match floor_decision {
         Decision::Block => Verdict::block(Reason::new(reason), argv, None),
@@ -1715,6 +1817,58 @@ fn evaluate_argument_substitutions(
         }
     }
     worst
+}
+
+/// Rule 3's counterpart for a command-position word's own non-winning
+/// brace-alternation branches (issue #77): `leftover_alternatives` is
+/// [`normalize::split_command_position`]'s second field, one already
+/// brace-expanded piece sequence per branch that resolves to an
+/// argument-position token rather than to any part of the command name.
+/// Recursed exactly like [`evaluate_argument_substitutions`] — Allow-
+/// transparent, Ask/Block propagate — since that is what these pieces
+/// *become* once the word is fully brace-expanded; without this, a
+/// dangerous substitution packed into the same `$IFS`-joined AST word as
+/// the command name (e.g. `rm$IFS-rf$IFS/{,$(evil)}`) would never be
+/// scanned by anything once rule 1 stops treating every substitution in
+/// that word as command-position-ambiguous.
+fn evaluate_leftover_alternative_substitutions(
+    leftover_alternatives: &[Vec<WordPiece>],
+    depth: usize,
+    rules: &Rules,
+    allowlist: &Allowlist,
+) -> Option<Decision> {
+    let mut worst: Option<Decision> = None;
+    let mut raise = |decision: Decision| {
+        if decision != Decision::Allow {
+            worst = Some(worst.map_or(decision, |current| current.max(decision)));
+        }
+    };
+    for pieces in leftover_alternatives {
+        let mut subs = Vec::new();
+        collect_substitutions_into(pieces, &mut subs);
+        for inner in subs {
+            raise(analyze_at_depth(inner, depth + 1, rules, allowlist).decision());
+        }
+        let mut proc_subs = Vec::new();
+        collect_process_substitutions_into(pieces, &mut proc_subs);
+        for inner in proc_subs {
+            raise(evaluate_command_line(inner, rules, allowlist, depth).decision());
+        }
+    }
+    worst
+}
+
+/// Combines two rule-3-shaped `Option<Decision>` floors (issue #77:
+/// [`evaluate_argument_substitutions`]'s and
+/// [`evaluate_leftover_alternative_substitutions`]'s) into one, the same
+/// worst-of-`Some` semantics [`fold_worst`] uses for [`Verdict`]s — `None`
+/// means "nothing to recurse", not "Allow", so it must never win over a
+/// `Some` from the other side. `Option<Decision>`'s derived `Ord` already
+/// gives exactly that (`None < Some(_)`, `Some` compared by `Decision`'s
+/// own worst-wins order), so this is `Option::max` under a name that says
+/// why it's being called here.
+fn fold_optional_decision(a: Option<Decision>, b: Option<Decision>) -> Option<Decision> {
+    a.max(b)
 }
 
 /// The result of [`scan_expansion_positions`] (rule 11): whether any

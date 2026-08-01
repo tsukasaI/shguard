@@ -198,6 +198,73 @@ fn guardfall_self_protection_normalization_cases() {
     }
 }
 
+/// Issue #77: brace alternation folded into a command-position word must
+/// not let a substitution living in a *non-winning* branch (one that
+/// resolves to an argument-position token once brace-expanded, not the
+/// command name) defeat rule 1's substitution scan.
+#[test]
+fn guardfall_issue_77_brace_command_position_cases() {
+    let cases: &[(&str, Decision)] = &[
+        // The empty member resolves first and cleanly, so it determines
+        // argv[0] ("rm -rf /") — unambiguous, must Block like the
+        // unobfuscated control.
+        ("rm$IFS-rf$IFS/{,$(true)}", Decision::Block),
+        // Real-spaces control: brace/substitution obfuscation removed
+        // entirely, must Block the same way.
+        ("rm -rf /{$(true),}", Decision::Block),
+        // A *dangerous* (non-inert) substitution in the non-winning branch
+        // must still be recursed and escalate the outer verdict — this is
+        // what stops the rule 1 narrowing above from silently dropping
+        // coverage of that branch (rule 3's argument-position channel).
+        ("echo$IFS/{,$(rm -rf /)}", Decision::Block),
+        // Members swapped: the substitution-carrying member is now tried
+        // FIRST, so it is the one that determines argv[0] this time —
+        // genuinely command-position-ambiguous, correctly recursed by
+        // rule 1 itself.
+        ("echo$IFS/{$(rm -rf /),}", Decision::Block),
+        // Known, separate gap tracked as issue #82: this ordering's
+        // winning alternative is "rm -rf /$(true)" as ONE opaque piece run
+        // — `resolve_pieces`' word-level short-circuit (its own docs:
+        // "foo$(x)bar is one Unresolvable word, not a partially-folded
+        // one") discards the already-resolved "rm"/"-rf"/"/" prefix along
+        // with the trailing inert substitution, the same way the
+        // brace-free `rm$IFS-rf$IFS/$(true)` already does. Fixing that
+        // needs a deeper change to `resolve_pieces`'s short-circuit
+        // contract, not this issue's brace-alternative scoping — pinned
+        // here as the current, honest (fail-closed, not a bypass) state.
+        ("rm$IFS-rf$IFS/{$(true),}", Decision::Ask),
+        // Fable-review follow-up to issue #77: a dangerous leftover-branch
+        // substitution must still escalate a verdict returned on one of
+        // `evaluate_simple_command_core`'s EARLY returns, not just the
+        // final blocklist-miss path — rule 1's own return (unresolvable
+        // `argv[0]`, an interpreter's own `-c` shell recursion, and an
+        // `ExpansionLimit` brace failure all return before ever reaching
+        // that final path). The narrowed rule 1 scan from this issue would
+        // otherwise silently stop scanning these branches entirely.
+        ("$FOO{,$(rm -rf /)}", Decision::Block), // rule 2's bare-var return
+        ("bash{,$(rm$IFS-rf$IFS/)} -c ls", Decision::Block), // rule 6a's `-c` recursion return
+        (
+            "a{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}$(rm -rf /)",
+            Decision::Block,
+        ), // ExpansionLimit return
+        // Stage 3's exact-argv blocklist match can itself return `Ask`
+        // (e.g. `tar-directory-root-or-home`) — the leftover floor must
+        // still lift that to `Block`, not just a rule that would otherwise
+        // return `Allow`.
+        ("tar{,$(rm -rf /)} xf evil.tar -C /", Decision::Block),
+    ];
+
+    for (command, expected) in cases {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
 /// Redirect target and tee rules.
 #[test]
 fn guardfall_redirect_and_tee_cases() {
