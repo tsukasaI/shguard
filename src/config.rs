@@ -54,14 +54,21 @@
 //! `$HOME`/`$XDG_CONFIG_HOME` are read for *this* invocation; the
 //! embedded blocklist is fixed at compile time and cannot know an
 //! individual user's home directory. [`self_protection_directories`]
-//! `canonicalize`s the config path before generating rules, so a config
-//! deployed as a symlink (e.g. into a dotfiles repo, so the policy stays
-//! versioned) gets *two* directories protected — the symlink's own
-//! directory and its resolved target's directory — rather than only
-//! whichever one happens to be the literal path (issue #31). When the
-//! path doesn't canonicalize at all (nothing there yet, or a dangling
-//! symlink), only the literal directory is protected, same as before this
-//! fix. `rules/blocklist.toml`
+//! walks the config path's full symlink chain, hop by hop, before
+//! generating rules, so a config deployed behind one *or more* symlinks
+//! (e.g. into a dotfiles repo, or behind a `stow`/`home-manager`-style
+//! layer of indirection, so the policy stays versioned) gets *every* hop's
+//! directory protected — the literal starting path's directory, each
+//! intermediate hop's directory, and the final resolved target's
+//! directory — rather than only the literal path and the fully-resolved
+//! end (issue #31 covered the single-hop case; issue #44 widens it to a
+//! chain of two or more). When a hop isn't itself a symlink (nothing there
+//! yet, or the final real file), only the directories walked up to that
+//! point are protected, same as before this fix for the single-hop case.
+//! The walk fails closed — a hard [`ConfigError`], refusing to load any
+//! config at all — if the chain exceeds a hop cap or contains a cycle,
+//! rather than silently protecting only a partial prefix of it (issue
+//! #44). `rules/blocklist.toml`
 //! separately carries a *static* rule for the literal `~/.config/shguard/`
 //! token — `normalize.rs` never resolves `~`/`$HOME` to an actual
 //! filesystem path (no environment lookups anywhere in parse/normalise,
@@ -76,6 +83,7 @@
 //! redirection target overwrites) and any `SHGUARD_CONFIG`-via-shell-
 //! profile vector are not caught by either.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::rules::{Allowlist, Rules, UserConfig, merge_user_config};
@@ -108,6 +116,15 @@ pub enum ConfigError {
     /// way `std::env::var(..).ok()` would (see [`Policy::load`]).
     #[error("{var} is set but is not valid UTF-8")]
     InvalidEnvVar { var: &'static str },
+    /// `path`'s symlink chain (walked hop by hop for self-protection —
+    /// see [`self_protection_directories`]) either exceeded
+    /// [`MAX_SYMLINK_HOPS`] or contained a cycle. A hard failure, same
+    /// posture as every other variant here (issue #44): silently
+    /// protecting only a partial prefix of an unexpectedly deep or cyclic
+    /// chain would be a silent security downgrade, not a graceful
+    /// degradation.
+    #[error("could not resolve the symlink chain for {path:?}: {reason}")]
+    SymlinkChain { path: PathBuf, reason: String },
 }
 
 impl From<crate::rules::RulesError> for ConfigError {
@@ -255,8 +272,8 @@ impl Policy {
             Some(path) => {
                 let mut rules = rules;
                 let mut allowlist = allowlist;
-                for (suffix, config_dir) in self_protection_directories(path) {
-                    let toml = self_protection_toml(&config_dir.to_string_lossy(), suffix);
+                for (suffix, config_dir) in self_protection_directories(path)? {
+                    let toml = self_protection_toml(&config_dir.to_string_lossy(), &suffix);
                     let self_protection = UserConfig::parse(&toml)?;
                     (rules, allowlist) = merge_user_config(rules, allowlist, self_protection)?;
                 }
@@ -269,13 +286,35 @@ impl Policy {
     }
 }
 
+/// Cap on symlink hops [`self_protection_directories`] walks when
+/// resolving the config path's full chain (issue #44): matches the order
+/// of magnitude of Linux's own `ELOOP` resolution limit (40 hops), so a
+/// chain deep enough that the OS itself would still successfully resolve
+/// it — and that `Policy::load`'s own `read_to_string` call would already
+/// have followed, by the time this walk runs — never spuriously hits this
+/// cap. Only a chain the OS itself would refuse, or one mutated between
+/// that `read_to_string` call and this walk (a TOCTOU race an adversarial
+/// guarded agent could attempt against its own config file), reaches it.
+const MAX_SYMLINK_HOPS: usize = 40;
+
 /// Directories to generate self-protection rules for, given the resolved
 /// config `path` (see the module docs' "Self-protecting the config file"
-/// section): the path's own (literal) parent directory, plus — when
-/// `path` canonicalizes successfully — its resolved target's parent
-/// directory too, so a symlinked config's real file is protected as well
-/// as the symlink itself (issue #31). Deduplicated (an ordinary,
-/// non-symlinked config yields the same directory twice from both steps)
+/// section): the path's own (literal) parent directory, plus the parent
+/// directory of *every* hop in `path`'s symlink chain, all the way to its
+/// final, fully-resolved target — so a config deployed behind a chain of
+/// two or more symlinks (e.g. a `stow`/`home-manager`/`chezmoi`-style
+/// layered dotfiles setup) has every intermediate hop protected too, not
+/// only the literal start and the fully-resolved end (issue #44, widening
+/// issue #31's single-hop fix). Walks `path` with `std::fs::read_link` in
+/// a loop, one hop at a time, resolving a relative symlink target against
+/// the *symlink's own* parent directory — normal filesystem
+/// symlink-resolution semantics, not the process's current working
+/// directory — and stops at the first hop that isn't itself a symlink
+/// (the final real file, or a path that doesn't exist yet), protecting
+/// that hop's parent directory too.
+///
+/// Deduplicated (an ordinary, non-symlinked config — or a chain where two
+/// hops happen to share a parent — yields the same directory only once)
 /// and excludes any parent that isn't an absolute, non-root directory:
 /// a relative parent (`Some("")`/`Some(".")`/`Some("foo")`, from a
 /// bare-filename or relative `SHGUARD_CONFIG`) can never usefully protect
@@ -286,33 +325,98 @@ impl Policy {
 /// would deny writes to almost any absolute path (issue #28 item 3).
 ///
 /// Each returned entry is paired with a `suffix` distinguishing it in
-/// [`self_protection_toml`]'s generated rule ids, since the literal and
-/// resolved directories need distinct ids to coexist in one merged rule
-/// set.
+/// [`self_protection_toml`]'s generated rule ids: `"literal"` for the
+/// starting parent, `"resolved"` for the final hop's parent, and
+/// `"hop-<n>"` for anything in between — extending the original
+/// `"literal"`/`"resolved"` pair (issue #31) rather than replacing it, so
+/// every hop's directory gets its own distinctly-id'd rule set that can be
+/// merged into one without an id collision.
 ///
-/// The resolved directory is only ever added *alongside* a protectable
-/// literal one, never in its place: a relative `SHGUARD_CONFIG` (e.g.
-/// `SHGUARD_CONFIG=config.toml` in a CI/test harness) still yields no
-/// literal entry (issue #24's invariant), and canonicalizing it would
-/// otherwise resolve to the current working directory — protecting an
-/// entire project tree the agent can still dodge for the config file
-/// itself with a relative spelling (`cp evil.toml config.toml`), so that
-/// blanket rule would cost real usability for near-zero security value.
-fn self_protection_directories(path: &Path) -> Vec<(&'static str, PathBuf)> {
+/// The walk only ever starts once the literal parent itself is
+/// protectable, same invariant issue #31 established and for the same
+/// reason: a relative `SHGUARD_CONFIG` (e.g. `SHGUARD_CONFIG=config.toml`
+/// in a CI/test harness) still yields nothing at all (issue #24's
+/// invariant), rather than silently protecting the current working
+/// directory the chain would otherwise resolve into — the config file
+/// itself stays dodgeable via a relative spelling regardless
+/// (`cp evil.toml config.toml`), so that blanket rule would cost real
+/// usability for near-zero security value.
+///
+/// # Errors
+///
+/// Fails closed with [`ConfigError::SymlinkChain`] — never silently
+/// protecting only a partial prefix of the chain — if it exceeds
+/// [`MAX_SYMLINK_HOPS`] or contains a cycle (a path already visited in
+/// this same chain reappears). [`Policy::load`]'s caller already treats
+/// *any* `ConfigError` as "refuse to evaluate any command until this is
+/// fixed" (`crate::bin::shguard::run`), the same fail-closed posture every
+/// other error in this module already has — strictly safer than
+/// evaluating commands against a chain resolved only up to the cap.
+fn self_protection_directories(path: &Path) -> Result<Vec<(String, PathBuf)>, ConfigError> {
     let is_protectable = |dir: &Path| dir.is_absolute() && dir != Path::new("/");
 
-    let mut directories: Vec<(&'static str, PathBuf)> = Vec::new();
-    if let Some(literal_dir) = path.parent().filter(|dir| is_protectable(dir)) {
-        directories.push(("literal", literal_dir.to_path_buf()));
+    let Some(literal_dir) = path.parent().filter(|dir| is_protectable(dir)) else {
+        return Ok(Vec::new());
+    };
+
+    // Walk the symlink chain hop by hop, collecting each hop's parent
+    // directory. `visited` starts with `path` itself so a symlink that
+    // (directly or transitively) points back at its own starting path is
+    // caught as a cycle rather than looping.
+    let mut chain_dirs: Vec<PathBuf> = vec![literal_dir.to_path_buf()];
+    let mut visited: HashSet<PathBuf> = HashSet::from([path.to_path_buf()]);
+    let mut current = path.to_path_buf();
+    let mut hops = 0usize;
+    loop {
+        let Ok(target) = std::fs::read_link(&current) else {
+            // Not a symlink -- the final real file, or nothing there yet.
+            break;
+        };
+        hops += 1;
+        if hops > MAX_SYMLINK_HOPS {
+            return Err(ConfigError::SymlinkChain {
+                path: path.to_path_buf(),
+                reason: format!("exceeds the {MAX_SYMLINK_HOPS}-hop resolution cap"),
+            });
+        }
+        let next = if target.is_absolute() {
+            target
+        } else {
+            // A relative symlink target resolves against the symlink's
+            // own directory, not the process's current working directory.
+            current
+                .parent()
+                .map_or_else(|| target.clone(), |parent| parent.join(&target))
+        };
+        if !visited.insert(next.clone()) {
+            return Err(ConfigError::SymlinkChain {
+                path: path.to_path_buf(),
+                reason: "contains a symlink cycle".to_string(),
+            });
+        }
+        current = next;
+        if let Some(dir) = current.parent().filter(|dir| is_protectable(dir)) {
+            chain_dirs.push(dir.to_path_buf());
+        }
     }
-    if !directories.is_empty()
-        && let Ok(canonical) = std::fs::canonicalize(path)
-        && let Some(resolved_dir) = canonical.parent().filter(|dir| is_protectable(dir))
-        && directories.iter().all(|(_, dir)| dir != resolved_dir)
-    {
-        directories.push(("resolved", resolved_dir.to_path_buf()));
+
+    let last_index = chain_dirs.len() - 1;
+    let mut directories: Vec<(String, PathBuf)> = Vec::with_capacity(chain_dirs.len());
+    for (index, dir) in chain_dirs.iter().enumerate() {
+        if directories.iter().any(|(_, existing)| existing == dir) {
+            continue;
+        }
+        let suffix = if index == 0 {
+            "literal".to_string()
+        } else if index == last_index {
+            "resolved".to_string()
+        } else {
+            format!("hop-{index}")
+        };
+        directories.push((suffix, dir.clone()));
     }
-    directories
+
+    Ok(directories)
 }
 
 /// Generates `[[deny]]`-array TOML text protecting `config_dir` (and
@@ -403,6 +507,7 @@ fn toml_quote(value: &str) -> String {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn shguard_config_takes_precedence_over_everything() {
@@ -550,7 +655,11 @@ mod tests {
         // returns `Some("/")`, which is absolute but would generate an
         // over-broad `prefix = "/"` self-protection rule denying writes to
         // almost any absolute path if not explicitly excluded.
-        assert!(self_protection_directories(Path::new("/config.toml")).is_empty());
+        assert!(
+            self_protection_directories(Path::new("/config.toml"))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -564,7 +673,131 @@ mod tests {
         // writable via a relative spelling regardless). `Cargo.toml` is
         // relative and canonicalizes (`cargo test`'s cwd is the crate
         // root), pinning this without any tempdir/cwd mutation.
-        assert!(self_protection_directories(Path::new("Cargo.toml")).is_empty());
+        assert!(
+            self_protection_directories(Path::new("Cargo.toml"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    // A chain of two symlinks (issue #44): every hop's own directory must
+    // be protected -- the literal starting path, the intermediate hop, and
+    // the final resolved target -- not just the literal start and the
+    // fully-resolved end the single-hop fix (issue #31) covered.
+    #[test]
+    #[cfg(unix)]
+    fn two_hop_symlink_chain_protects_every_hop() {
+        let root = tempdir().unwrap();
+        // Canonicalize first -- on macOS a fresh tempdir lives under
+        // `/var/folders/...`, which `std::fs::canonicalize` resolves to
+        // `/private/var/folders/...` (`/var` is itself a symlink) -- so the
+        // directories asserted below match exactly what
+        // `self_protection_directories` resolves to, mirroring
+        // `tests/user_config.rs`'s
+        // `write_to_symlinked_config_canonical_target_is_denied`.
+        let root_canonical = root.path().canonicalize().unwrap();
+
+        let literal_dir = root_canonical.join("literal");
+        let mid_dir = root_canonical.join("mid");
+        let real_dir = root_canonical.join("real");
+        std::fs::create_dir_all(&literal_dir).unwrap();
+        std::fs::create_dir_all(&mid_dir).unwrap();
+        std::fs::create_dir_all(&real_dir).unwrap();
+
+        let literal_path = literal_dir.join("config.toml");
+        let mid_path = mid_dir.join("config.toml");
+        let real_path = real_dir.join("config.toml");
+        std::fs::write(&real_path, "").unwrap();
+        std::os::unix::fs::symlink(&real_path, &mid_path).unwrap();
+        std::os::unix::fs::symlink(&mid_path, &literal_path).unwrap();
+
+        let directories = self_protection_directories(&literal_path).unwrap();
+        assert_eq!(
+            directories,
+            vec![
+                ("literal".to_string(), literal_dir),
+                ("hop-1".to_string(), mid_dir),
+                ("resolved".to_string(), real_dir),
+            ]
+        );
+    }
+
+    // A chain where two hops share the same parent directory must not
+    // generate a duplicate rule id for that directory (issue #44's
+    // dedup requirement) -- the intermediate hop here lives in the same
+    // directory as the literal start, so it must collapse away, leaving
+    // just `"literal"` and `"resolved"`, same shape as the single-hop
+    // case.
+    #[test]
+    #[cfg(unix)]
+    fn chain_with_shared_parent_directory_deduplicates_rule_ids() {
+        let root = tempdir().unwrap();
+        let root_canonical = root.path().canonicalize().unwrap();
+
+        let shared_dir = root_canonical.join("shared");
+        let real_dir = root_canonical.join("real");
+        std::fs::create_dir_all(&shared_dir).unwrap();
+        std::fs::create_dir_all(&real_dir).unwrap();
+
+        let literal_path = shared_dir.join("literal.toml");
+        let mid_path = shared_dir.join("mid.toml"); // same directory as literal_path
+        let real_path = real_dir.join("config.toml");
+        std::fs::write(&real_path, "").unwrap();
+        std::os::unix::fs::symlink(&real_path, &mid_path).unwrap();
+        std::os::unix::fs::symlink(&mid_path, &literal_path).unwrap();
+
+        let directories = self_protection_directories(&literal_path).unwrap();
+        assert_eq!(
+            directories,
+            vec![
+                ("literal".to_string(), shared_dir),
+                ("resolved".to_string(), real_dir),
+            ]
+        );
+    }
+
+    // A two-symlink cycle (a -> b -> a) must be detected and fail closed
+    // rather than hang (issue #44) -- the test itself completing at all is
+    // the pass condition for "doesn't loop forever".
+    #[test]
+    #[cfg(unix)]
+    fn symlink_cycle_is_detected_and_fails_closed() {
+        let root = tempdir().unwrap();
+        let root_canonical = root.path().canonicalize().unwrap();
+        let config_dir = root_canonical.join("config_dir");
+        std::fs::create_dir_all(&config_dir).unwrap();
+
+        let a_path = config_dir.join("a.toml");
+        let b_path = config_dir.join("b.toml");
+        std::os::unix::fs::symlink(&b_path, &a_path).unwrap();
+        std::os::unix::fs::symlink(&a_path, &b_path).unwrap();
+
+        let result = self_protection_directories(&a_path);
+        assert!(matches!(result, Err(ConfigError::SymlinkChain { .. })));
+    }
+
+    // A chain longer than `MAX_SYMLINK_HOPS` must fail closed the same way
+    // a cycle does, rather than hang or silently protect only a partial
+    // prefix (issue #44).
+    #[test]
+    #[cfg(unix)]
+    fn chain_exceeding_hop_cap_fails_closed() {
+        let root = tempdir().unwrap();
+        let root_canonical = root.path().canonicalize().unwrap();
+
+        // One more hop than the cap allows, terminating in a real file --
+        // so the only way this fails is the cap, never a missing target.
+        let hop_count = MAX_SYMLINK_HOPS + 2;
+        let paths: Vec<PathBuf> = (0..=hop_count)
+            .map(|n| root_canonical.join(format!("hop-{n}.toml")))
+            .collect();
+        std::fs::write(paths.last().unwrap(), "").unwrap();
+        for window in paths.windows(2) {
+            std::os::unix::fs::symlink(&window[1], &window[0]).unwrap();
+        }
+
+        let result = self_protection_directories(&paths[0]);
+        assert!(matches!(result, Err(ConfigError::SymlinkChain { .. })));
     }
 
     #[test]

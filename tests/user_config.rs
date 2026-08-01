@@ -791,6 +791,67 @@ fn write_to_symlinked_config_canonical_target_is_denied() {
     assert_eq!(permission_decision(&output), "deny");
 }
 
+// A config deployed behind a *chain* of two symlinks (e.g. a
+// `stow`/`home-manager`/`chezmoi`-style layer of indirection) must have
+// every hop protected, not just the literal start and the final resolved
+// target -- otherwise writing directly at the intermediate hop (itself a
+// symlink) bypasses self-protection and follows through to the real
+// config (issue #44, widening issue #31's single-hop fix).
+#[test]
+#[cfg(unix)]
+fn write_to_intermediate_hop_of_a_two_hop_symlink_chain_is_denied() {
+    let mid_dir = tempdir().expect("tempdir should create");
+    let real_dir = tempdir().expect("tempdir should create");
+    // Canonicalize first (macOS quirk: /var/folders/... resolves to
+    // /private/var/folders/...), same as
+    // `write_to_symlinked_config_canonical_target_is_denied` above, so the
+    // command below targets exactly what self-protection resolves to.
+    let mid_dir_canonical = mid_dir
+        .path()
+        .canonicalize()
+        .expect("tempdir should canonicalize");
+    let real_dir_canonical = real_dir
+        .path()
+        .canonicalize()
+        .expect("tempdir should canonicalize");
+
+    let real_config = real_dir_canonical.join("config.toml");
+    fs::write(&real_config, "").expect("config file should write");
+    let mid_config = mid_dir_canonical.join("config.toml");
+    std::os::unix::fs::symlink(&real_config, &mid_config).expect("symlink should create");
+
+    let home = tempdir().expect("tempdir should create");
+    let config_dir = home.path().join(".config").join("shguard");
+    fs::create_dir_all(&config_dir).expect("config dir should create");
+    std::os::unix::fs::symlink(&mid_config, config_dir.join("config.toml"))
+        .expect("symlink should create");
+
+    // Writing straight at the intermediate hop -- itself a symlink to the
+    // real file -- must be caught even though it's neither the literal
+    // config path nor the fully-resolved end.
+    let command = format!(
+        "cp evil.toml {}",
+        mid_config.to_str().expect("path should be valid UTF-8")
+    );
+    let output = run_hook(
+        &bash_command(&command),
+        &[("HOME", home.path().to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+
+    // The fully-resolved end must still be caught too (regression check
+    // against the single-hop fix this widens).
+    let command = format!(
+        "cp evil.toml {}",
+        real_config.to_str().expect("path should be valid UTF-8")
+    );
+    let output = run_hook(
+        &bash_command(&command),
+        &[("HOME", home.path().to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+}
+
 #[test]
 fn cp_onto_resolved_config_path_is_blocked() {
     let (_dir, config_path) = write_config("");
