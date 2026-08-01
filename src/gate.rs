@@ -2766,6 +2766,57 @@ mod tests {
         assert_decision("bash $(echo -c) 'rm -rf /'", Decision::Block);
     }
 
+    // ==== Issue #55: SHELL_INTERPRETERS was missing fish/ksh/tcsh/csh/ash,
+    // so rule 6a's `-c` recursion never fired for them. ====
+
+    #[test]
+    fn fish_dash_c_recurses_and_blocks() {
+        assert_decision("fish -c 'rm -rf /'", Decision::Block);
+    }
+
+    #[test]
+    fn ksh_dash_c_recurses_and_blocks() {
+        assert_decision("ksh -c 'rm -rf /'", Decision::Block);
+    }
+
+    // ==== Issue #57: mke2fs is the implementation behind mkfs.ext4 and
+    // wasn't matched by the `mkfs.` command_prefix rule. ====
+
+    #[test]
+    fn mke2fs_blocks() {
+        assert_decision("mke2fs -t ext4 /dev/sda1", Decision::Block);
+    }
+
+    // ==== Issue #58: truncate --size and git tag --force long forms
+    // weren't OR'd into required_flags. ====
+
+    #[test]
+    fn truncate_dash_dash_size_zero_blocks() {
+        assert_decision("truncate --size=0 important.db", Decision::Block);
+    }
+
+    #[test]
+    fn truncate_dash_s_zero_still_blocks() {
+        assert_decision("truncate -s 0 important.db", Decision::Block);
+    }
+
+    #[test]
+    fn git_tag_dash_dash_force_blocks() {
+        assert_decision("git tag --force v1.0 abc123", Decision::Block);
+    }
+
+    #[test]
+    fn git_tag_dash_f_still_blocks() {
+        assert_decision("git tag -f v1.0 abc123", Decision::Block);
+    }
+
+    // ==== Issue #59 E2-1: rsync missing from self-protection commands. ====
+
+    #[test]
+    fn rsync_self_protect_config_dir_blocks() {
+        assert_decision("rsync -a ./payload/ ~/.config/shguard/", Decision::Block);
+    }
+
     #[test]
     fn python_dash_c_hidden_behind_substitution_is_still_ask_floor() {
         assert_decision(

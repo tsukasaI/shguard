@@ -198,7 +198,7 @@ targets = [{ strip = "of=", normalized_prefix = "/dev/" }]
 id = "truncate-zero"
 reason = "truncate -s zeroes/truncates the target file's contents in place"
 command = "truncate"
-required_flags = ["s"]
+required_flags = ["s|--size"]
 
 [[command]]
 id = "shred"
@@ -209,6 +209,21 @@ command = "shred"
 id = "mkfs-any-filesystem"
 reason = "mkfs.* formats a filesystem, destroying all data on the target"
 command_prefix = "mkfs."
+
+[[command]]
+id = "mke2fs-any-filesystem"
+reason = "mke2fs is the implementation behind mkfs.ext*, formatting a filesystem and destroying all data"
+command = "mke2fs"
+
+[[command]]
+id = "mkdosfs-any-filesystem"
+reason = "mkdosfs is the implementation behind mkfs.vfat/mkfs.msdos, formatting a filesystem and destroying all data"
+command = "mkdosfs"
+
+[[command]]
+id = "mkntfs-any-filesystem"
+reason = "mkntfs is the implementation behind mkfs.ntfs, formatting a filesystem and destroying all data"
+command = "mkntfs"
 
 # tar extraction with -C/--directory into / or ~ overwrites arbitrary paths
 # with archive contents. Two rules, block before ask (rule order decides —
@@ -367,7 +382,7 @@ id = "git-tag-destructive"
 reason = "git tag -d/-D/--delete/-f deletes or force-overwrites a tag"
 command = "git"
 required_tokens = ["tag"]
-required_flags = ["d|D|--delete|f"]
+required_flags = ["d|D|--delete|f|--force"]
 
 # =====================================================================
 # Redirect targets — block devices and critical system files
@@ -500,4 +515,10 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.conf
 id = "self-protect-config-ln-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "ln"
+targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]
+
+[[command]]
+id = "self-protect-config-rsync-tilde"
+reason = "writing to shguard's own config directory must never be scripted"
+command = "rsync"
 targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]

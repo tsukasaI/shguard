@@ -44,7 +44,8 @@
 //!
 //! [`self_protection_toml`] generates `[[deny]]` rules, at load time,
 //! targeting the config directory for common write-capable commands
-//! (`tee`, `cp`, `mv`, `install`, `sed -i`, `dd`'s `of=<path>` shape) —
+//! (`tee`, `cp`, `mv`, `install`, `sed -i`, `dd`'s `of=<path>` shape,
+//! `rsync`) —
 //! the one place this crate builds a rule's TOML text in code rather than
 //! reading it from a file, because the directory is only known once
 //! `$HOME`/`$XDG_CONFIG_HOME` are read for *this* invocation; the
@@ -376,6 +377,12 @@ id = "shguard-self-protect-config-ln-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "ln"
 targets = [{{ normalized_prefix = {quoted_dir} }}]
+
+[[deny]]
+id = "shguard-self-protect-config-rsync-{suffix}"
+reason = "writing to shguard's own config directory must never be scripted"
+command = "rsync"
+targets = [{{ normalized_prefix = {quoted_dir} }}]
 "#
     )
 }
@@ -514,6 +521,12 @@ mod tests {
             "-sf",
             "/dev/null",
             "/home/user/.config/shguard/config.toml"
+        ]));
+        assert!(matches(&[
+            "rsync",
+            "-a",
+            "./payload/",
+            "/home/user/.config/shguard/"
         ]));
         assert!(!matches(&["cp", "a.txt", "b.txt"]));
     }

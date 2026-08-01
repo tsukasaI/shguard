@@ -1160,7 +1160,9 @@ pub(crate) const ESCALATION_VECTORS: &[&str] = &["sudo", "doas", "su", "pkexec",
 /// same list `crate::gate` uses, without `rules` depending on `gate`
 /// ("dependencies point inward" — `gate` already depends on `rules`, not
 /// the reverse).
-pub(crate) const SHELL_INTERPRETERS: &[&str] = &["bash", "sh", "zsh", "dash"];
+pub(crate) const SHELL_INTERPRETERS: &[&str] = &[
+    "bash", "sh", "zsh", "dash", "fish", "ksh", "tcsh", "csh", "ash",
+];
 
 /// Interpreters a pipeline's final stage may be (`crate::gate` rule 5b/5c).
 /// See [`SHELL_INTERPRETERS`]'s docs for why this lives here.
@@ -3627,6 +3629,17 @@ mod tests {
         );
     }
 
+    // issue #58 E1-1: --size long form wasn't OR'd into required_flags.
+    #[test]
+    fn truncate_dash_dash_size_zero_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["truncate", "--size=0", "x"]))
+                .is_some()
+        );
+    }
+
     #[test]
     fn shred_matches_any_target() {
         let rules = Rules::embedded().unwrap();
@@ -3639,6 +3652,18 @@ mod tests {
         assert!(
             rules
                 .match_command(&argv(&["mkfs.ext4", "/dev/sda1"]))
+                .is_some()
+        );
+    }
+
+    // issue #57: mke2fs is the implementation behind mkfs.ext4 on
+    // Debian/Ubuntu but isn't matched by the `mkfs.` command_prefix rule.
+    #[test]
+    fn mke2fs_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["mke2fs", "-t", "ext4", "/dev/sda1"]))
                 .is_some()
         );
     }
@@ -3869,6 +3894,28 @@ mod tests {
     fn self_protect_rm_unrelated_file_does_not_match() {
         let rules = Rules::embedded().unwrap();
         assert!(rules.match_command(&argv(&["rm", "a.txt"])).is_none());
+    }
+
+    // rsync (issue #59 E2-1): same bare-destination shape as cp, so it gets
+    // the same targets pattern with no required_flags.
+    #[test]
+    fn self_protect_rsync_literal_tilde_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["rsync", "-a", "./payload/", "~/.config/shguard/"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn self_protect_rsync_unrelated_files_does_not_match() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["rsync", "-a", "./src/", "./dst/"]))
+                .is_none()
+        );
     }
 
     // ==== Pipeline rule: curl|sh matches, cat|bash does not ====
@@ -4784,6 +4831,23 @@ mod tests {
             id = "user-allow-bash"
             reason = "trust me"
             command = "bash"
+        "#;
+        assert!(matches!(
+            UserConfig::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    // Issue #55: SHELL_INTERPRETERS gained fish/ksh/tcsh/csh/ash — the
+    // fail-closed allow-entry rejection above must catch these the same
+    // way it already catches "bash".
+    #[test]
+    fn user_config_rejects_allow_entry_matching_fish_exactly() {
+        let toml = r#"
+            [[allow]]
+            id = "user-allow-fish"
+            reason = "trust me"
+            command = "fish"
         "#;
         assert!(matches!(
             UserConfig::parse(toml),
