@@ -235,20 +235,24 @@ command = "mkntfs"
 #
 # Known limitations (same disclosure stance as the curl `-xURL` gap above
 # and the `git -C <path>` gap in src/rules.rs):
-#   1. Full old-style clustered invocation (`tar xfC a.tar /`) is not
-#      caught at all: `short_cluster_chars` (src/rules.rs) returns an empty
-#      set for a dash-less token, so `xfC` never satisfies `required_flags`
-#      the way `-xfC` would, and `required_tokens`' exact positional
-#      matching can't express the combinatorial `xf`/`xzf`/`xvf`/… blowup
-#      either. Closing this needs a new FlagMatcher variant — out of scope
-#      here, tracked as a follow-up issue.
-#   2. Non-root dangerous directories (`-C /etc`, `-C /usr`, …) are not
+#   1. Non-root dangerous directories (`-C /etc`, `-C /usr`, …) are not
 #      caught: a `prefix = "/"` target would also hit ordinary `-C /tmp/...`
 #      extractions, which is too many false positives for this rule.
-#   3. `-P`/`--absolute-names` (lets member paths inside the archive itself
-#      carry an absolute destination, bypassing the need for -C at all) is
-#      not covered. A flags-only ask rule could close this; left for a
-#      follow-up issue rather than folded in here.
+#
+# (Former item 1, the full old-style clustered invocation `tar xfC a.tar /`
+# not being caught at all — `short_cluster_chars` returns an empty set for
+# a dash-less token, so `xfC` never satisfied `required_flags` the way
+# `-xfC` would — is fixed as of issue #67: `tar_dashless_rewrite`
+# (src/rules.rs) rewrites a dash-less `x`+`C` cluster into the equivalent
+# dashed tokens before this rule's own `required_flags`/`targets` ever see
+# it, scoped strictly to `tar`'s own calling convention rather than a
+# generic `FlagMatcher` change.)
+#
+# (Former item 3, `-P`/`--absolute-names` letting an archive member's own
+# absolute path bypass `-C` entirely, is addressed as of issue #68 by the
+# separate `tar-absolute-names-ask` rule below — it can only ever be `ask`,
+# never `block`, since the actual danger lives inside the archive's own
+# member paths, invisible to a command-line-only analyzer.)
 #
 # (Former item 4, path-normalization bypass via `-C //`/`-C /.`/`-C ~/..`/
 # `-C ../../../..`, is fixed as of issue #65: the `normalized`/
@@ -291,6 +295,19 @@ targets = [
     { strip = "--directory=", normalized = "/" },
     { normalized = "~" },
 ]
+
+# -P/--absolute-names disables tar's default stripping of a leading `/`
+# from archive member paths, so a member path like `/etc/passwd` (embedded
+# in the archive itself, not visible on the command line) gets written to
+# that absolute path verbatim, regardless of -C. No targets at all — the
+# danger is invisible to a command-line-only analyzer, so this can only
+# ever be ask, never block; -P alone doesn't prove a dangerous archive.
+[[command]]
+id = "tar-absolute-names-ask"
+decision = "ask"
+reason = "tar -P/--absolute-names lets archive member paths carry an absolute destination, bypassing -C/--directory entirely"
+command = "tar"
+required_flags = ["x|--extract|--get", "P|--absolute-names"]
 
 # =====================================================================
 # Git — destructive/bypass operations

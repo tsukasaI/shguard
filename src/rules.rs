@@ -44,6 +44,7 @@
 //! `src/gate.rs`'s module docs for the evaluation order, and
 //! `src/config.rs` for where a user's config file is found and merged in.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 use serde::Deserialize;
@@ -214,6 +215,79 @@ fn short_cluster_chars(token: &str) -> HashSet<char> {
         Some(rest) if !rest.is_empty() && !rest.starts_with('-') => rest.chars().collect(),
         _ => HashSet::new(),
     }
+}
+
+/// tar-specific single-letter options this crate's rules ever need to see
+/// through a dash-less cluster (issue #67) — a deliberately small subset of
+/// GNU tar's actual option set, not an attempt at full coverage. `f`
+/// (`--file`) and `C` (`--directory`) each consume the following positional
+/// argument; every other letter here is boolean (mode/behavior flags that
+/// never take a value): `x` (extract), `c` (create), `t` (list), `z`
+/// (gzip), `v` (verbose). [`tar_dashless_rewrite`] treats any letter
+/// outside both sets as disqualifying — conservative by design, per its own
+/// docs.
+const TAR_DASHLESS_CONSUMING: &[char] = &['f', 'C'];
+const TAR_DASHLESS_BOOLEAN: &[char] = &['x', 'c', 't', 'z', 'v'];
+
+/// Rewrites a `tar` hop's dash-less leading option cluster (POSIX tar's own
+/// old-style calling convention, e.g. `tar xfC a.tar /`) into the
+/// equivalent dashed representation — a `-`-prefixed token per cluster
+/// letter, with each value-consuming letter's captured positional argument
+/// placed right after it as its own token — so it can flow through the
+/// exact same [`FlagMatcher`]/[`TargetMatcher`] machinery a written-with-
+/// dashes invocation already does, without either of those needing to know
+/// anything tar-specific (issue #67's own direction: this is tar's calling
+/// convention, not general shell syntax, so it doesn't belong in
+/// [`short_cluster_chars`]/[`FlagMatcher`]).
+///
+/// Fires only when `tail`'s first word is [`Resolution::Resolved`],
+/// non-empty, has no leading `-`, is composed entirely of characters from
+/// [`TAR_DASHLESS_CONSUMING`]/[`TAR_DASHLESS_BOOLEAN`], and contains both
+/// `x` and `C` — the specific shape the dash-less form's directory-change
+/// gap needs (a bare dash-less cluster with `x` but not `C`, e.g. `tar xf
+/// a.tar -C /`'s leading `xf`, is left untouched: the trailing `-C /` is
+/// already a normal dashed token pair that existing matching sees on its
+/// own, and rewriting `xf` too would make `tar xf a.tar -C /`'s decision
+/// drift from what it gets today). Any cluster letter outside the modeled
+/// sets disqualifies the whole cluster — conservative by design (module
+/// docs: never guess an alignment that might be wrong) — as does a
+/// value-consuming letter with no positional argument left to consume
+/// (`tar fC` alone). All of these return `None`: the caller falls through
+/// to ordinary dashed-only flag matching, exactly as before this function
+/// existed.
+///
+/// On success, returns the full rewritten tail: one or two synthetic
+/// tokens per cluster letter, followed by every argument the cluster
+/// didn't consume, unchanged (including any of *those* that are already
+/// `-`-prefixed, e.g. a trailing `-P` after the cluster).
+fn tar_dashless_rewrite(tail: &[NormalizedWord]) -> Option<Vec<NormalizedWord>> {
+    let (first, rest) = tail.split_first()?;
+    let Resolution::Resolved(cluster) = first.resolution() else {
+        return None;
+    };
+    if cluster.is_empty() || cluster.starts_with('-') {
+        return None;
+    }
+    if !cluster
+        .chars()
+        .all(|c| TAR_DASHLESS_CONSUMING.contains(&c) || TAR_DASHLESS_BOOLEAN.contains(&c))
+    {
+        return None;
+    }
+    if !(cluster.contains('x') && cluster.contains('C')) {
+        return None;
+    }
+
+    let mut rewritten = Vec::new();
+    let mut values = rest.iter();
+    for c in cluster.chars() {
+        rewritten.push(NormalizedWord::resolved(format!("-{c}")));
+        if TAR_DASHLESS_CONSUMING.contains(&c) {
+            rewritten.push(values.next()?.clone());
+        }
+    }
+    rewritten.extend(values.cloned());
+    Some(rewritten)
 }
 
 /// A flag declared (via a rule's `value_flags`, issue #48) to take a
@@ -622,8 +696,18 @@ impl CommandRule {
     /// `required_tokens`, offsetting every positional index by one for any
     /// wrapped command, since `argv[1..]` still included the wrapper's own
     /// name).
+    ///
+    /// When the resolved hop's own basename is `tar`, the tail is passed
+    /// through [`tar_dashless_rewrite`] first (issue #67): tar's own
+    /// calling convention allows a fully dash-less leading option cluster
+    /// (`tar xfC a.tar /`), which the generic flag matching below can't
+    /// see at all (`short_cluster_chars` returns an empty set for a
+    /// dash-less token). The rewrite is a no-op `Cow::Borrowed` for every
+    /// other command, and for any `tar` invocation that isn't the specific
+    /// dash-less `x`+`C` cluster shape the rewrite targets — see that
+    /// function's docs for exactly when it fires.
     #[must_use]
-    fn matching_rest<'a>(&self, argv: &'a [NormalizedWord]) -> Option<&'a [NormalizedWord]> {
+    fn matching_rest<'a>(&self, argv: &'a [NormalizedWord]) -> Option<Cow<'a, [NormalizedWord]>> {
         let mut rest = argv;
         loop {
             let (first, tail) = rest.split_first()?;
@@ -631,8 +715,15 @@ impl CommandRule {
                 return None;
             };
             let base = basename(name);
-            if self.command.matches(base) && self.constraints_match(tail) {
-                return Some(tail);
+            if self.command.matches(base) {
+                let effective: Cow<'a, [NormalizedWord]> = if base == "tar" {
+                    tar_dashless_rewrite(tail).map_or(Cow::Borrowed(tail), Cow::Owned)
+                } else {
+                    Cow::Borrowed(tail)
+                };
+                if self.constraints_match(&effective) {
+                    return Some(effective);
+                }
             }
             if !TRANSPARENT_WRAPPERS.contains(&base) {
                 return None;
@@ -672,7 +763,7 @@ impl CommandRule {
         let Some(rest_words) = self.matching_rest(argv) else {
             return false;
         };
-        let rest = resolved_strings(rest_words);
+        let rest = resolved_strings(&rest_words);
 
         let matched = if self.targets.is_empty() {
             true
@@ -3685,6 +3776,91 @@ mod tests {
             rules
                 .match_command(&argv(&["tar", "-xf", "x.tar", "-C", "./build"]))
                 .is_none()
+        );
+    }
+
+    // ==== issue #67: tar dash-less clustered invocation (`tar xfC a.tar /`) ====
+
+    // Headline case: the fully dash-less old-style cluster `xfC` glues
+    // extract (`x`), file (`f`), and directory (`C`) together with no
+    // leading `-` at all. `tar_dashless_rewrite` must see through this the
+    // same way it already sees through the dashed `-xfC`/`-xf -C`
+    // spellings, landing on the block rule (both `x` and `C` present,
+    // `-C`'s captured value is `/`).
+    #[test]
+    fn tar_dashless_cluster_extract_into_root_matches_block() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&["tar", "xfC", "evil.tar", "/"]))
+            .unwrap();
+        assert_eq!(matched.decision(), Decision::Block);
+        assert_eq!(matched.id().as_str(), "tar-extract-over-root-or-home");
+    }
+
+    // Regression: the pre-existing dash-aware form (`x` dash-less, `-C`
+    // already dashed) must keep getting exactly the decision it got before
+    // this fix — `tar_dashless_rewrite` only fires when a single dash-less
+    // cluster carries *both* `x` and `C` together, so a bare `xf` (no `C`)
+    // is left untouched and the separate `-C /` is picked up by
+    // tar-directory-root-or-home alone, same as always.
+    #[test]
+    fn tar_dashless_x_only_cluster_with_separate_dashed_c_still_asks() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&["tar", "xf", "evil.tar", "-C", "/"]))
+            .unwrap();
+        assert_eq!(matched.decision(), Decision::Ask);
+        assert_eq!(matched.id().as_str(), "tar-directory-root-or-home");
+    }
+
+    // Critical negative: an ordinary dash-less tar invocation with no `C`
+    // at all (create, gzip, verbose — no directory change) must never be
+    // caught by the dash-less rewrite. `tar_dashless_rewrite` requires
+    // both `x` and `C` in the same cluster before it rewrites anything, so
+    // `cfz` (no `x`, no `C`) is passed through unchanged.
+    #[test]
+    fn tar_dashless_create_cluster_without_directory_change_does_not_match() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["tar", "cfz", "archive.tar.gz", "somedir/"]))
+                .is_none()
+        );
+    }
+
+    // ==== issue #68: tar -P/--absolute-names bypasses -C entirely ====
+
+    #[test]
+    fn tar_extract_with_absolute_names_short_flag_asks() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&["tar", "-xf", "evil.tar", "-P"]))
+            .unwrap();
+        assert_eq!(matched.decision(), Decision::Ask);
+        assert_eq!(matched.id().as_str(), "tar-absolute-names-ask");
+    }
+
+    #[test]
+    fn tar_extract_with_absolute_names_long_flag_asks() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&["tar", "-xf", "evil.tar", "--absolute-names"]))
+            .unwrap();
+        assert_eq!(matched.decision(), Decision::Ask);
+        assert_eq!(matched.id().as_str(), "tar-absolute-names-ask");
+    }
+
+    // Negative: -P without an extract flag (creating an archive) must not
+    // match tar-absolute-names-ask — required_flags requires BOTH the
+    // extract flag and -P, not just -P alone.
+    #[test]
+    fn tar_create_with_absolute_names_does_not_match_absolute_names_rule() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["tar", "cf", "archive.tar", "somedir/", "-P"]))
+                .is_none(),
+            "tar create with -P must not match any tar rule (no extract flag present)"
         );
     }
 
