@@ -40,11 +40,36 @@
 #                    Matched as exact strings against argv[1..].
 #   targets          optional list of target alternatives, ANY one hit by
 #                    ANY argv token matches (ORed): `{ exact = "…" }` or
-#                    `{ prefix = "…" }`. An empty/omitted list means "no
-#                    target constraint" (e.g. `shred`'s "any target").
+#                    `{ prefix = "…" }` (raw byte comparison, no path
+#                    normalization), or `{ normalized = "…" }` /
+#                    `{ normalized_prefix = "…" }` (issue #65: lexically
+#                    normalizes the token — collapses `.`/`//`/trailing
+#                    slashes, resolves `..` — before comparing, so `//`,
+#                    `/.`, `~/..`, `../../../..`, etc. are recognized as
+#                    the same target `/`/`~` a literal spelling would be).
+#                    Exactly one of `exact`/`prefix`/`normalized`/
+#                    `normalized_prefix` is required per target entry. An
+#                    optional `strip = "…"` (only legal alongside
+#                    `normalized`/`normalized_prefix`) requires the token
+#                    to literally start with that string first (e.g.
+#                    `strip = "of="` for `dd`'s `of=/dev/sda`, `strip =
+#                    "-C"` for tar's attached `-C/` form) and normalizes
+#                    only the remainder. A `normalized`/`normalized_prefix`
+#                    value that itself normalizes to a pure relative
+#                    ascent, an escape past `$HOME`, or something opaque
+#                    (`""`, `~user`) is a load-time error — almost
+#                    certainly a rule author's mistake. Deliberately NOT
+#                    the default for `exact`/`prefix`: many targets aren't
+#                    paths at all (`dd`'s `of=` prefix, a glob like `/*`,
+#                    an `except_targets` URL prefix), and normalizing an
+#                    `except_targets` entry would silently widen an allow.
+#                    An empty/omitted `targets` list means "no target
+#                    constraint" (e.g. `shred`'s "any target").
 #   except_targets   optional list of target alternatives, same
 #                    `{ exact = "…" }` / `{ prefix = "…" }` shapes as
-#                    `targets` — the opposite direction (issue #30): the
+#                    `targets` (never `normalized`/`normalized_prefix` —
+#                    stays literal by policy, see above) — the opposite
+#                    direction (issue #30): the
 #                    rule matches normally unless every candidate target
 #                    token (the tokens `targets` matched, or every non-flag/
 #                    `--flag=value`-value token when `targets` is empty,
@@ -131,19 +156,30 @@
 
 [[command]]
 id = "rm-recursive-force-dangerous-target"
-reason = "rm with recursive+force flags against a root-level, home, or device target"
+reason = "rm with recursive+force flags against a root-level, home, device, or find-placeholder target"
 command = "rm"
 required_flags = ["r|--recursive", "f|--force"]
 targets = [
-    { exact = "/" },
+    { normalized = "/" },
     { exact = "/*" },
-    { exact = "~" },
-    { exact = "~/" },
-    { exact = "." },
-    { exact = ".." },
-    { exact = "./" },
-    { exact = "../" },
-    { prefix = "/dev/" },
+    { normalized = "~" },
+    { normalized = "." },
+    # ".."/"../" (previously separate `exact` entries) are subsumed by
+    # "/"'s pure-ascent widening (issue #65): `{ normalized = "/" }` also
+    # matches any token that lexically normalizes to a pure relative
+    # ascent with no remaining components (`Rel{ascent>=1, comps:[]}`),
+    # which both ".." and "../" do — see src/rules.rs's `TargetMatcher::
+    # NormalizedExact` match arm.
+    { normalized_prefix = "/dev/" },
+    # `{}` is `find -exec`/`-execdir`/`-ok`/`-okdir`'s own placeholder for
+    # "whatever path find matched" (issue #72) — statically as uncontrolled
+    # a target as `/`: `find -exec rm -rf {} \;` deletes every match,
+    # regardless of the search root. shguard's `find -exec` recursion
+    # (`crate::gate::scan_recursable_slots`) feeds the payload's literal
+    # `{}` text straight into this same rule rather than trying to
+    # special-case it, so this target entry is what makes that recursion
+    # actually catch the canonical "delete everything found" pattern.
+    { exact = "{}" },
 ]
 
 [[command]]
@@ -156,13 +192,13 @@ required_flags = ["-delete"]
 id = "dd-write-device"
 reason = "dd writing directly to a /dev/ device overwrites raw disk contents"
 command = "dd"
-targets = [{ prefix = "of=/dev/" }]
+targets = [{ strip = "of=", normalized_prefix = "/dev/" }]
 
 [[command]]
 id = "truncate-zero"
 reason = "truncate -s zeroes/truncates the target file's contents in place"
 command = "truncate"
-required_flags = ["s"]
+required_flags = ["s|--size"]
 
 [[command]]
 id = "shred"
@@ -174,6 +210,27 @@ id = "mkfs-any-filesystem"
 reason = "mkfs.* formats a filesystem, destroying all data on the target"
 command_prefix = "mkfs."
 
+[[command]]
+id = "mke2fs-any-filesystem"
+reason = "mke2fs is the implementation behind mkfs.ext*, formatting a filesystem and destroying all data"
+command = "mke2fs"
+
+[[command]]
+id = "mkdosfs-any-filesystem"
+reason = "mkdosfs is the implementation behind mkfs.vfat/mkfs.msdos, formatting a filesystem and destroying all data"
+command = "mkdosfs"
+
+[[command]]
+id = "mkntfs-any-filesystem"
+reason = "mkntfs is the implementation behind mkfs.ntfs, formatting a filesystem and destroying all data"
+command = "mkntfs"
+
+[[command]]
+id = "mkfs-dispatcher-any-filesystem"
+reason = "mkfs -t <type> dispatches to mkfs.<type>, formatting a filesystem and destroying all data on the target"
+command = "mkfs"
+required_flags = ["t|--type"]
+
 # tar extraction with -C/--directory into / or ~ overwrites arbitrary paths
 # with archive contents. Two rules, block before ask (rule order decides —
 # first match in this file wins): the block rule requires an explicit
@@ -184,29 +241,31 @@ command_prefix = "mkfs."
 #
 # Known limitations (same disclosure stance as the curl `-xURL` gap above
 # and the `git -C <path>` gap in src/rules.rs):
-#   1. Full old-style clustered invocation (`tar xfC a.tar /`) is not
-#      caught at all: `short_cluster_chars` (src/rules.rs) returns an empty
-#      set for a dash-less token, so `xfC` never satisfies `required_flags`
-#      the way `-xfC` would, and `required_tokens`' exact positional
-#      matching can't express the combinatorial `xf`/`xzf`/`xvf`/… blowup
-#      either. Closing this needs a new FlagMatcher variant — out of scope
-#      here, tracked as a follow-up issue.
-#   2. Non-root dangerous directories (`-C /etc`, `-C /usr`, …) are not
+#   1. Non-root dangerous directories (`-C /etc`, `-C /usr`, …) are not
 #      caught: a `prefix = "/"` target would also hit ordinary `-C /tmp/...`
 #      extractions, which is too many false positives for this rule.
-#   3. `-P`/`--absolute-names` (lets member paths inside the archive itself
-#      carry an absolute destination, bypassing the need for -C at all) is
-#      not covered. A flags-only ask rule could close this; left for a
-#      follow-up issue rather than folded in here.
-#   4. `targets`' `exact` matching does no path normalization, so any
-#      unnormalized spelling of root/home slips through as `allow`:
-#      `-C //`, `-C /.`, `-C /./`, `-C ~/..`, a relative climb like
-#      `-C ../../../..`, etc. all resolve to `/` or escape `$HOME` on a
-#      real filesystem but match none of the `exact` targets above. This
-#      is not tar-specific — every rule using `exact`/`prefix` targets
-#      (rm, dd, …) shares it — and closing it needs a new `TargetMatcher`
-#      variant that lexically normalizes before comparing, not a TOML-only
-#      fix. Tracked as a follow-up issue rather than folded in here.
+#
+# (Former item 1, the full old-style clustered invocation `tar xfC a.tar /`
+# not being caught at all — `short_cluster_chars` returns an empty set for
+# a dash-less token, so `xfC` never satisfied `required_flags` the way
+# `-xfC` would — is fixed as of issue #67: `tar_dashless_rewrite`
+# (src/rules.rs) rewrites a dash-less `x`+`C` cluster into the equivalent
+# dashed tokens before this rule's own `required_flags`/`targets` ever see
+# it, scoped strictly to `tar`'s own calling convention rather than a
+# generic `FlagMatcher` change.)
+#
+# (Former item 3, `-P`/`--absolute-names` letting an archive member's own
+# absolute path bypass `-C` entirely, is addressed as of issue #68 by the
+# separate `tar-absolute-names-ask` rule below — it can only ever be `ask`,
+# never `block`, since the actual danger lives inside the archive's own
+# member paths, invisible to a command-line-only analyzer.)
+#
+# (Former item 4, path-normalization bypass via `-C //`/`-C /.`/`-C ~/..`/
+# `-C ../../../..`, is fixed as of issue #65: the `normalized`/
+# `normalized_prefix`/`strip` target forms below lexically normalize before
+# comparing, so every one of those spellings now resolves to the same `/`/
+# `~` target a literal spelling would. Still not tar-specific, and still
+# shared by every rule using the new forms.)
 #
 # Why the target list is asymmetric — `-C/`/`--directory=/` are listed but
 # `-C~`/`--directory=~` are not. Tilde expansion only fires at the start of
@@ -224,11 +283,10 @@ reason = "tar extraction with -C/--directory into / or ~ overwrites arbitrary sy
 command = "tar"
 required_flags = ["x|--extract|--get", "C|--directory"]
 targets = [
-    { exact = "/" },
-    { exact = "-C/" },
-    { exact = "--directory=/" },
-    { exact = "~" },
-    { exact = "~/" },
+    { normalized = "/" },
+    { strip = "-C", normalized = "/" },
+    { strip = "--directory=", normalized = "/" },
+    { normalized = "~" },
 ]
 
 [[command]]
@@ -238,12 +296,24 @@ reason = "tar with -C/--directory pointed at / or ~ operates far outside the wor
 command = "tar"
 required_flags = ["C|--directory"]
 targets = [
-    { exact = "/" },
-    { exact = "-C/" },
-    { exact = "--directory=/" },
-    { exact = "~" },
-    { exact = "~/" },
+    { normalized = "/" },
+    { strip = "-C", normalized = "/" },
+    { strip = "--directory=", normalized = "/" },
+    { normalized = "~" },
 ]
+
+# -P/--absolute-names disables tar's default stripping of a leading `/`
+# from archive member paths, so a member path like `/etc/passwd` (embedded
+# in the archive itself, not visible on the command line) gets written to
+# that absolute path verbatim, regardless of -C. No targets at all — the
+# danger is invisible to a command-line-only analyzer, so this can only
+# ever be ask, never block; -P alone doesn't prove a dangerous archive.
+[[command]]
+id = "tar-absolute-names-ask"
+decision = "ask"
+reason = "tar -P/--absolute-names lets archive member paths carry an absolute destination, bypassing -C/--directory entirely"
+command = "tar"
+required_flags = ["x|--extract|--get", "P|--absolute-names"]
 
 # =====================================================================
 # Git — destructive/bypass operations
@@ -335,7 +405,7 @@ id = "git-tag-destructive"
 reason = "git tag -d/-D/--delete/-f deletes or force-overwrites a tag"
 command = "git"
 required_tokens = ["tag"]
-required_flags = ["d|D|--delete|f"]
+required_flags = ["d|D|--delete|f|--force"]
 
 # =====================================================================
 # Redirect targets — block devices and critical system files
@@ -345,18 +415,18 @@ required_flags = ["d|D|--delete|f"]
 id = "redirect-overwrite-device-or-critical-file"
 reason = "redirecting output to a raw block device or critical system file destroys data"
 targets = [
-    { prefix = "/dev/sd" },
-    { prefix = "/dev/hd" },
-    { prefix = "/dev/nvme" },
-    { prefix = "/dev/vd" },
-    { prefix = "/dev/xvd" },
-    { prefix = "/dev/mmcblk" },
-    { prefix = "/dev/mapper/" },
-    { prefix = "/dev/dm-" },
-    { prefix = "/dev/disk" },
-    { prefix = "/dev/rdisk" },
-    { exact = "/etc/passwd" },
-    { exact = "/etc/shadow" },
+    { normalized_prefix = "/dev/sd" },
+    { normalized_prefix = "/dev/hd" },
+    { normalized_prefix = "/dev/nvme" },
+    { normalized_prefix = "/dev/vd" },
+    { normalized_prefix = "/dev/xvd" },
+    { normalized_prefix = "/dev/mmcblk" },
+    { normalized_prefix = "/dev/mapper/" },
+    { normalized_prefix = "/dev/dm-" },
+    { normalized_prefix = "/dev/disk" },
+    { normalized_prefix = "/dev/rdisk" },
+    { normalized = "/etc/passwd" },
+    { normalized = "/etc/shadow" },
 ]
 
 # tee writes to a file path via argv, not via shell redirect syntax —
@@ -366,18 +436,18 @@ id = "tee-write-device-or-critical-file"
 reason = "tee writing to a raw block device or critical system file destroys data"
 command = "tee"
 targets = [
-    { prefix = "/dev/sd" },
-    { prefix = "/dev/hd" },
-    { prefix = "/dev/nvme" },
-    { prefix = "/dev/vd" },
-    { prefix = "/dev/xvd" },
-    { prefix = "/dev/mmcblk" },
-    { prefix = "/dev/mapper/" },
-    { prefix = "/dev/dm-" },
-    { prefix = "/dev/disk" },
-    { prefix = "/dev/rdisk" },
-    { exact = "/etc/passwd" },
-    { exact = "/etc/shadow" },
+    { normalized_prefix = "/dev/sd" },
+    { normalized_prefix = "/dev/hd" },
+    { normalized_prefix = "/dev/nvme" },
+    { normalized_prefix = "/dev/vd" },
+    { normalized_prefix = "/dev/xvd" },
+    { normalized_prefix = "/dev/mmcblk" },
+    { normalized_prefix = "/dev/mapper/" },
+    { normalized_prefix = "/dev/dm-" },
+    { normalized_prefix = "/dev/disk" },
+    { normalized_prefix = "/dev/rdisk" },
+    { normalized = "/etc/passwd" },
+    { normalized = "/etc/shadow" },
 ]
 
 # =====================================================================
@@ -388,7 +458,10 @@ targets = [
 id = "curl-wget-pipe-to-shell"
 reason = "piping a downloaded script straight into an interpreter executes unreviewed remote code"
 sources = ["curl", "wget"]
-sinks = ["sh", "bash", "zsh"]
+# Keep in sync with src/rules.rs's SHELL_INTERPRETERS/is_pipeline_interpreter —
+# issue #55 added fish/ksh/tcsh/csh/ash there but this list drifted (a real
+# bypass: `curl ... | ksh` reached Allow until this was fixed).
+sinks = ["sh", "bash", "zsh", "fish", "ksh", "tcsh", "csh", "ash"]
 
 # Self-protection: the literal "~/.config/shguard/" token (plan.md §6 item 8).
 # `~` is never resolved to an actual filesystem path by normalize.rs (no
@@ -405,62 +478,73 @@ sinks = ["sh", "bash", "zsh"]
 id = "self-protect-config-tee-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "tee"
-targets = [{ prefix = "~/.config/shguard/" }, { exact = "~/.config/shguard" }]
+targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]
 
 [[command]]
 id = "self-protect-config-cp-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "cp"
-targets = [{ prefix = "~/.config/shguard/" }, { exact = "~/.config/shguard" }]
+targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]
 
 [[command]]
 id = "self-protect-config-mv-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "mv"
-targets = [{ prefix = "~/.config/shguard/" }, { exact = "~/.config/shguard" }]
+targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]
 
 [[command]]
 id = "self-protect-config-install-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "install"
-targets = [{ prefix = "~/.config/shguard/" }, { exact = "~/.config/shguard" }]
+targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]
 
 [[command]]
 id = "self-protect-config-sed-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "sed"
 required_flags = ["i|--in-place"]
-targets = [{ prefix = "~/.config/shguard/" }, { exact = "~/.config/shguard" }]
+targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]
 
 [[command]]
 id = "self-protect-config-dd-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "dd"
-targets = [{ prefix = "of=~/.config/shguard/" }, { exact = "of=~/.config/shguard" }]
+targets = [
+    { strip = "of=", normalized_prefix = "~/.config/shguard/" },
+    { strip = "of=", normalized = "~/.config/shguard" },
+]
 
-# rm/unlink/ln get an `exact` alternative for the bare directory (no
-# trailing slash) alongside the `prefix` one — `rm -r
+# rm/unlink/ln get a `normalized` alternative for the bare directory (no
+# trailing slash) alongside the `normalized_prefix` one — `rm -r
 # ~/.config/shguard` (deleting the whole directory) has no trailing
 # slash, so it wouldn't hit a prefix-only match the way a file *under*
 # the directory does (issue #22). tee/cp/install/sed/dd above got the
-# same `exact` alternative later (issue #28 item 2), for the same reason:
-# `mv ~/.config/shguard /tmp/elsewhere` (renaming the whole directory
-# away) is the same bare-directory shape.
+# same bare-directory alternative later (issue #28 item 2), for the same
+# reason: `mv ~/.config/shguard /tmp/elsewhere` (renaming the whole
+# directory away) is the same bare-directory shape. (Both alternatives
+# migrated from `exact`/`prefix` to `normalized`/`normalized_prefix` in
+# issue #65, closing a `//`/`/.`/`..`-style normalization bypass.)
 
 [[command]]
 id = "self-protect-config-rm-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "rm"
-targets = [{ prefix = "~/.config/shguard/" }, { exact = "~/.config/shguard" }]
+targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]
 
 [[command]]
 id = "self-protect-config-unlink-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "unlink"
-targets = [{ prefix = "~/.config/shguard/" }, { exact = "~/.config/shguard" }]
+targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]
 
 [[command]]
 id = "self-protect-config-ln-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "ln"
-targets = [{ prefix = "~/.config/shguard/" }, { exact = "~/.config/shguard" }]
+targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]
+
+[[command]]
+id = "self-protect-config-rsync-tilde"
+reason = "writing to shguard's own config directory must never be scripted"
+command = "rsync"
+targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]

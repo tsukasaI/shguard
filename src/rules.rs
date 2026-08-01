@@ -44,10 +44,12 @@
 //! `src/gate.rs`'s module docs for the evaluation order, and
 //! `src/config.rs` for where a user's config file is found and merged in.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 use serde::Deserialize;
 
+use crate::gate::{FlagScan, scan_for_flag};
 use crate::normalize::{NormalizedWord, Resolution};
 use crate::verdict::{Decision, Reason, RuleId, Verdict};
 
@@ -215,6 +217,145 @@ fn short_cluster_chars(token: &str) -> HashSet<char> {
     }
 }
 
+/// tar-specific single-letter options this crate's rules ever need to see
+/// through a dash-less cluster (issue #67, expanded by the Fable review's
+/// fail-open finding) — GNU tar's commonly-used boolean/value-less single
+/// letters, not an attempt at exhaustive coverage of tar's entire option
+/// set. `f` (`--file`) and `C` (`--directory`) each consume the following
+/// positional argument; every other letter here is boolean (mode/behavior
+/// flags that never take a value): `x` (extract), `c` (create), `t`
+/// (list), `z` (gzip), `v` (verbose), `j` (bzip2), `J` (xz), `a`
+/// (auto-compress), `Z` (compress), `k` (keep-old-files), `p`
+/// (preserve-permissions), `w` (interactive), `m` (no-mtime), `O`
+/// (to-stdout), `h` (dereference), `S` (sparse), `P` (absolute-names — the
+/// rewrite's own synthetic `-P` token is then seen by the separate
+/// `tar-absolute-names-ask` rule exactly as a written-with-dashes `-P`
+/// would be). This list can never be exhaustive (tar keeps adding
+/// options), which is exactly why [`tar_dashless_cluster`] no longer
+/// treats an unmodeled letter as "not a cluster at all" — see its own
+/// docs.
+const TAR_DASHLESS_CONSUMING: &[char] = &['f', 'C'];
+const TAR_DASHLESS_BOOLEAN: &[char] = &[
+    'x', 'c', 't', 'z', 'v', 'j', 'J', 'a', 'Z', 'k', 'p', 'w', 'm', 'O', 'h', 'S', 'P',
+];
+
+/// [`tar_dashless_cluster`]'s three-way outcome — mirrors the fail-closed
+/// "definitely / definitely-not / uncertain" shape `crate::gate`'s
+/// `FlagScan` uses for flag-position scans (an unresolvable word "might be
+/// the flag", never "definitely not"), expressed here over a `tar` hop's
+/// tail instead of a generic flag-position scan, since recognizing tar's
+/// own dash-less calling convention is tar-specific, not a general
+/// `FlagMatcher` concern (see [`tar_dashless_cluster`]'s docs).
+pub(crate) enum TarDashlessCluster {
+    /// A recognized `x`+`C` dash-less cluster, already rewritten into its
+    /// dashed-token equivalent — the caller should match flags/targets
+    /// against this instead of the original tail.
+    Recognized(Vec<NormalizedWord>),
+    /// `tail`'s first word isn't a plausible dash-less option cluster at
+    /// all (unresolved, empty, `-`-prefixed, contains a non-alphabetic
+    /// character, or has no `x`) — ordinary dashed-only matching applies,
+    /// completely untouched.
+    NotApplicable,
+    /// A *plausible* dash-less cluster — fully alphabetic, contains `x` —
+    /// but with at least one letter outside
+    /// [`TAR_DASHLESS_CONSUMING`]/[`TAR_DASHLESS_BOOLEAN`]. Before the
+    /// Fable review's fix, a single unmodeled letter (`j`, `a`, …)
+    /// disqualified the ENTIRE cluster, silently falling through to
+    /// dashed-only matching that can't see a dash-less token at all —
+    /// `tar xjfC evil.tar.bz2 /` reached `Allow`. The caller must never
+    /// treat this the same as [`Self::NotApplicable`]: it must floor the
+    /// decision to `Ask` instead (this crate's tar option coverage can
+    /// never be exhaustive, so "next new letter I didn't think of" must
+    /// fail closed, not open).
+    Unmodeled,
+}
+
+/// Classifies a `tar` hop's dash-less leading option cluster (POSIX tar's
+/// own old-style calling convention, e.g. `tar xfC a.tar /`) — see
+/// [`TarDashlessCluster`] for the three possible outcomes and
+/// [`tar_dashless_rewrite`] for the [`FlagMatcher`]/[`TargetMatcher`]-
+/// facing wrapper most callers actually want.
+///
+/// [`TarDashlessCluster::Recognized`] fires only when `tail`'s first word
+/// is [`Resolution::Resolved`], non-empty, has no leading `-`, is composed
+/// entirely of ASCII alphabetic characters all drawn from
+/// [`TAR_DASHLESS_CONSUMING`]/[`TAR_DASHLESS_BOOLEAN`], and contains both
+/// `x` and `C` — the specific shape the dash-less form's directory-change
+/// gap needs (a bare dash-less cluster with `x` but not `C`, e.g. `tar xf
+/// a.tar -C /`'s leading `xf`, is left untouched: the trailing `-C /` is
+/// already a normal dashed token pair that existing matching sees on its
+/// own, and rewriting `xf` too would make `tar xf a.tar -C /`'s decision
+/// drift from what it gets today). A value-consuming letter with no
+/// positional argument left to consume (`tar fC` alone, which also lacks
+/// `x` so never reaches this case anyway) falls back to
+/// [`TarDashlessCluster::NotApplicable`], matching this function's
+/// pre-Fable-review behavior for that shape exactly.
+///
+/// On success, [`TarDashlessCluster::Recognized`] carries the full
+/// rewritten tail: one or two synthetic tokens per cluster letter,
+/// followed by every argument the cluster didn't consume, unchanged
+/// (including any of *those* that are already `-`-prefixed, e.g. a
+/// trailing `-P` after the cluster).
+pub(crate) fn tar_dashless_cluster(tail: &[NormalizedWord]) -> TarDashlessCluster {
+    let Some((first, rest)) = tail.split_first() else {
+        return TarDashlessCluster::NotApplicable;
+    };
+    let Resolution::Resolved(cluster) = first.resolution() else {
+        return TarDashlessCluster::NotApplicable;
+    };
+    if cluster.is_empty()
+        || cluster.starts_with('-')
+        || !cluster.chars().all(|c| c.is_ascii_alphabetic())
+    {
+        return TarDashlessCluster::NotApplicable;
+    }
+    if !cluster.contains('x') {
+        return TarDashlessCluster::NotApplicable;
+    }
+    if !cluster
+        .chars()
+        .all(|c| TAR_DASHLESS_CONSUMING.contains(&c) || TAR_DASHLESS_BOOLEAN.contains(&c))
+    {
+        return TarDashlessCluster::Unmodeled;
+    }
+    if !cluster.contains('C') {
+        return TarDashlessCluster::NotApplicable;
+    }
+
+    let mut rewritten = Vec::new();
+    let mut values = rest.iter();
+    for c in cluster.chars() {
+        rewritten.push(NormalizedWord::resolved(format!("-{c}")));
+        if TAR_DASHLESS_CONSUMING.contains(&c) {
+            let Some(value) = values.next() else {
+                return TarDashlessCluster::NotApplicable;
+            };
+            rewritten.push(value.clone());
+        }
+    }
+    rewritten.extend(values.cloned());
+    TarDashlessCluster::Recognized(rewritten)
+}
+
+/// [`FlagMatcher`]/[`TargetMatcher`]-facing wrapper over
+/// [`tar_dashless_cluster`]: `Some` only for
+/// [`TarDashlessCluster::Recognized`], `None` for both
+/// [`TarDashlessCluster::NotApplicable`] and
+/// [`TarDashlessCluster::Unmodeled`] — a per-`CommandRule` flag/target
+/// match has no way to express "fail this whole command line closed to
+/// Ask", so an unmodeled cluster falls through here exactly like a
+/// not-applicable one; `crate::gate`'s own floor
+/// (`crate::rules::tar_dashless_cluster`'s `Unmodeled` arm) is what
+/// actually enforces the fail-closed Ask for that case, independent of
+/// whether any particular rule's flags/targets would otherwise have
+/// matched.
+fn tar_dashless_rewrite(tail: &[NormalizedWord]) -> Option<Vec<NormalizedWord>> {
+    match tar_dashless_cluster(tail) {
+        TarDashlessCluster::Recognized(rewritten) => Some(rewritten),
+        TarDashlessCluster::NotApplicable | TarDashlessCluster::Unmodeled => None,
+    }
+}
+
 /// A flag declared (via a rule's `value_flags`, issue #48) to take a
 /// value that is never itself an except_targets candidate — narrows
 /// [`CommandRule::matches`]'s candidate collection so a value-taking
@@ -307,10 +448,40 @@ impl ValueFlag {
 /// `targets` list is a set of OR'd alternatives — the rule matches if any
 /// argv token satisfies any one of them (e.g. rm's target list holds `/`,
 /// `/*`, `~`, and a `/dev/` prefix as separate alternatives).
+///
+/// [`Self::Exact`]/[`Self::Prefix`] compare raw bytes only — no path
+/// normalization, by deliberate choice (issue #65): many target values
+/// aren't paths at all (`dd`'s `of=` prefix, a glob like `/*`, an
+/// `except_targets` URL prefix), and normalizing an `except_targets` entry
+/// would silently *widen* an allow. [`Self::NormalizedExact`]/
+/// [`Self::NormalizedPrefix`] are the opt-in, path-aware siblings a rule
+/// author reaches for explicitly when a target genuinely is a filesystem
+/// path — see [`lexical_normalize`] for the normalization algorithm and
+/// [`Self::matches`] for each variant's match semantics.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TargetMatcher {
     Exact(String),
     Prefix(String),
+    /// Path-aware equality: the token (after an optional [`strip_target`]
+    /// prefix removal) is lexically normalized and compared against a
+    /// pre-normalized target [`PathForm`], plus two fail-closed widenings
+    /// — see [`Self::matches`].
+    NormalizedExact {
+        /// A literal prefix the token must carry before the path itself
+        /// begins (e.g. `"of="` for `dd`'s `of=/dev/sda`, `"-C"` for
+        /// tar's attached `-C/` form) — `None` when the whole token is
+        /// the path.
+        strip: Option<String>,
+        target: PathForm,
+    },
+    /// Path-aware prefix match: the token (after an optional `strip`) is
+    /// lexically normalized, rendered to its canonical string form via
+    /// [`canonical_render`], and compared with `starts_with` against a
+    /// pre-rendered `canon` — see [`Self::matches`].
+    NormalizedPrefix {
+        strip: Option<String>,
+        canon: String,
+    },
 }
 
 impl TargetMatcher {
@@ -318,7 +489,170 @@ impl TargetMatcher {
         match self {
             Self::Exact(exact) => token == exact,
             Self::Prefix(prefix) => token.starts_with(prefix.as_str()),
+            Self::NormalizedExact { strip, target } => {
+                let Some(remainder) = strip_target(strip.as_deref(), token) else {
+                    return false;
+                };
+                let form = lexical_normalize(remainder);
+                if form == *target {
+                    return true;
+                }
+                // Fail-closed widenings (issue #65): shguard never knows
+                // the invoking shell's cwd, so a pure relative ascent
+                // (`..`, `../..`, `../../../..`, …) might resolve to `/`
+                // at any depth, and a `~`-anchored token that pops past
+                // $HOME (`~/..`) has provably left it even though the
+                // exact resulting path is unknown. No other target shape
+                // widens like this — `Opaque` never matches anything.
+                match (target, &form) {
+                    (
+                        PathForm::Abs(comps),
+                        PathForm::Rel {
+                            ascent,
+                            comps: rel_comps,
+                        },
+                    ) => comps.is_empty() && *ascent >= 1 && rel_comps.is_empty(),
+                    (PathForm::Home(comps), PathForm::EscapesHome) => comps.is_empty(),
+                    _ => false,
+                }
+            }
+            Self::NormalizedPrefix { strip, canon } => {
+                let Some(remainder) = strip_target(strip.as_deref(), token) else {
+                    return false;
+                };
+                canonical_render(&lexical_normalize(remainder))
+                    .is_some_and(|rendered| rendered.starts_with(canon.as_str()))
+            }
         }
+    }
+}
+
+/// Strips `prefix` (a [`TargetMatcher::NormalizedExact`]/
+/// [`TargetMatcher::NormalizedPrefix`]'s optional `strip`) from `token`,
+/// or returns `token` unchanged when there's nothing declared to strip.
+/// `None` means `token` didn't literally carry the prefix at all — a
+/// non-match, never "fall back to normalizing the whole token instead".
+fn strip_target<'a>(prefix: Option<&str>, token: &'a str) -> Option<&'a str> {
+    match prefix {
+        Some(p) => token.strip_prefix(p),
+        None => Some(token),
+    }
+}
+
+/// A lexically normalized rendering of a path-shaped token (issue #65):
+/// [`TargetMatcher::Exact`]/[`Prefix`]'s pure byte-level comparison lets
+/// `//`, `/.`, `~/..`, `../../../..`, and similar respellings of `/`/`~`
+/// slip past a rule's dangerous-target list even though a real shell would
+/// treat them identically. Built by [`lexical_normalize`], which collapses
+/// `.`/`//`/trailing slashes and resolves `..` against components already
+/// seen in the same token — exactly what a shell does lexically, before
+/// ever touching the filesystem. No filesystem access, ever:
+/// `std::fs::canonicalize` would be wrong here — shguard does static/
+/// offline analysis (a target path may not exist yet, e.g. inside an
+/// unextracted tar archive) and never knows the invoking shell's cwd.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PathForm {
+    /// Anchored at `/`: `Abs(comps)` renders as `/` + `comps.join("/")`;
+    /// `Abs(vec![])` is `/` itself.
+    Abs(Vec<String>),
+    /// Anchored at `~`/`$HOME`: `Home(comps)` renders as `~/` +
+    /// `comps.join("/")`; `Home(vec![])` is `~` itself.
+    Home(Vec<String>),
+    /// A `~`-anchored token whose `..` popped past `$HOME` — provably
+    /// outside it, even though the exact resulting path is unknown.
+    EscapesHome,
+    /// Relative to an unknown cwd: `ascent` leading `..` components that
+    /// couldn't be canceled by an earlier component in the same token,
+    /// followed by `comps`. `Rel { ascent: 0, comps: vec![] }` is `.`
+    /// itself — the cwd shguard starts at, never itself dangerous.
+    Rel { ascent: u32, comps: Vec<String> },
+    /// Matches nothing: the empty string, or a `~user`/`~+`/`~-` token —
+    /// none of those expand to `$HOME`, they reach the command literally.
+    Opaque,
+}
+
+/// Lexically normalizes `token` into a [`PathForm`] — see the type docs
+/// for why this never touches the filesystem. Mirrors what a POSIX shell
+/// does to a path lexically, before any command sees it: `.`/`//`/
+/// trailing-slash segments collapse away, and a `..` cancels the nearest
+/// still-pending component in the same token (`a/../b` → `b`) rather than
+/// literally appearing in the output. A `..` with nothing left to cancel
+/// is anchor-dependent: under `/` it's a no-op (POSIX: `/..` == `/`);
+/// under `~` it proves the result has left `$HOME`
+/// ([`PathForm::EscapesHome`]); otherwise (a bare relative token) it
+/// becomes one unit of unresolved ascent ([`PathForm::Rel`]'s `ascent`) —
+/// shguard has no cwd to resolve it against.
+fn lexical_normalize(token: &str) -> PathForm {
+    if token.is_empty() {
+        return PathForm::Opaque;
+    }
+    // `~user`, `~+`, `~-` reach the command literally — only a bare `~`
+    // or a `~/`-prefixed token is `$HOME`-anchored.
+    if token.starts_with('~') && token != "~" && !token.starts_with("~/") {
+        return PathForm::Opaque;
+    }
+
+    enum Anchor {
+        Abs,
+        Home,
+        Rel,
+    }
+
+    let (anchor, rest) = if let Some(rest) = token.strip_prefix('/') {
+        (Anchor::Abs, rest)
+    } else if token == "~" {
+        (Anchor::Home, "")
+    } else if let Some(rest) = token.strip_prefix("~/") {
+        (Anchor::Home, rest)
+    } else {
+        (Anchor::Rel, token)
+    };
+
+    let mut stack: Vec<String> = Vec::new();
+    let mut ascent: u32 = 0;
+    let mut escaped = false;
+    for comp in rest.split('/') {
+        if comp.is_empty() || comp == "." {
+            continue;
+        }
+        if comp == ".." {
+            if stack.pop().is_some() {
+                continue;
+            }
+            match anchor {
+                Anchor::Abs => {}
+                Anchor::Home => escaped = true,
+                Anchor::Rel => ascent = ascent.saturating_add(1),
+            }
+        } else if !escaped {
+            stack.push(comp.to_string());
+        }
+    }
+
+    match anchor {
+        Anchor::Abs => PathForm::Abs(stack),
+        Anchor::Home if escaped => PathForm::EscapesHome,
+        Anchor::Home => PathForm::Home(stack),
+        Anchor::Rel => PathForm::Rel {
+            ascent,
+            comps: stack,
+        },
+    }
+}
+
+/// The canonical string rendering of a [`PathForm`], used only by
+/// [`TargetMatcher::NormalizedPrefix`]'s `starts_with` comparison — `None`
+/// for any shape with no unambiguous canonical string (`EscapesHome`,
+/// `Opaque`, unresolved ascent, or a relative token with named components
+/// but no anchor to render from: none of those have a starting point).
+fn canonical_render(form: &PathForm) -> Option<String> {
+    match form {
+        PathForm::Abs(comps) if comps.is_empty() => Some("/".to_string()),
+        PathForm::Abs(comps) => Some(format!("/{}", comps.join("/"))),
+        PathForm::Home(comps) if comps.is_empty() => Some("~".to_string()),
+        PathForm::Home(comps) => Some(format!("~/{}", comps.join("/"))),
+        PathForm::Rel { ascent: 0, comps } if comps.is_empty() => Some(".".to_string()),
+        _ => None,
     }
 }
 
@@ -428,8 +762,18 @@ impl CommandRule {
     /// `required_tokens`, offsetting every positional index by one for any
     /// wrapped command, since `argv[1..]` still included the wrapper's own
     /// name).
+    ///
+    /// When the resolved hop's own basename is `tar`, the tail is passed
+    /// through [`tar_dashless_rewrite`] first (issue #67): tar's own
+    /// calling convention allows a fully dash-less leading option cluster
+    /// (`tar xfC a.tar /`), which the generic flag matching below can't
+    /// see at all (`short_cluster_chars` returns an empty set for a
+    /// dash-less token). The rewrite is a no-op `Cow::Borrowed` for every
+    /// other command, and for any `tar` invocation that isn't the specific
+    /// dash-less `x`+`C` cluster shape the rewrite targets — see that
+    /// function's docs for exactly when it fires.
     #[must_use]
-    fn matching_rest<'a>(&self, argv: &'a [NormalizedWord]) -> Option<&'a [NormalizedWord]> {
+    fn matching_rest<'a>(&self, argv: &'a [NormalizedWord]) -> Option<Cow<'a, [NormalizedWord]>> {
         let mut rest = argv;
         loop {
             let (first, tail) = rest.split_first()?;
@@ -437,8 +781,15 @@ impl CommandRule {
                 return None;
             };
             let base = basename(name);
-            if self.command.matches(base) && self.constraints_match(tail) {
-                return Some(tail);
+            if self.command.matches(base) {
+                let effective: Cow<'a, [NormalizedWord]> = if base == "tar" {
+                    tar_dashless_rewrite(tail).map_or(Cow::Borrowed(tail), Cow::Owned)
+                } else {
+                    Cow::Borrowed(tail)
+                };
+                if self.constraints_match(&effective) {
+                    return Some(effective);
+                }
             }
             if !TRANSPARENT_WRAPPERS.contains(&base) {
                 return None;
@@ -478,7 +829,7 @@ impl CommandRule {
         let Some(rest_words) = self.matching_rest(argv) else {
             return false;
         };
-        let rest = resolved_strings(rest_words);
+        let rest = resolved_strings(&rest_words);
 
         let matched = if self.targets.is_empty() {
             true
@@ -899,37 +1250,49 @@ fn value_flag_free_candidates<'a>(rest: &[&'a str], value_flags: &[ValueFlag]) -
 /// form `su root -c 'sh'`.
 ///
 /// What remains open: a wrapper's flag that takes a separate value token
-/// but isn't in [`wrapper_value_flags`] (e.g. `command`, `nohup`, `exec`,
-/// `stdbuf`, `setsid`, `xargs`, `pkexec`, `run0` have no entries there) is
-/// still mistaken for the wrapped command, the same way every wrapper
-/// behaved before this table existed. `su` is the sharpest surviving case,
-/// in two ways: its own `-c COMMAND` flag is not in [`wrapper_value_flags`],
-/// so `su -c 'sh' root` (options-before-user order) consumes `'sh'` — not
-/// `root` — as [`wrapper_positional_args`]'s username slot (only the `su
-/// root -c 'sh'` user-before-options form is closed); and because real
-/// `su` grammar (`su [options] [-] [user [arg...]]`) gives no shape-based
-/// way to tell "no username, command follows directly" from "username
-/// follows", the positional slot unconditionally consumes whatever token
-/// comes first — so `su rm -rf /`, which pre-#54 happened to resolve `rm`
-/// as the wrapped command, now reads `rm` as the username instead (this
-/// actually matches real `su` behaviour more closely: without `-c`, `su
-/// rm -rf /` would not execute `rm -rf /` at all). Both cases are bounded
-/// the same way: [`wrapper_chain_escalation`]'s `Contains` arm fires on
-/// the vector's own name alone, before any argument skipping, so this
-/// limitation can only ever under-resolve which *inner* rule would have
-/// blocked — it never turns an escalation floor into a silent Allow.
+/// but isn't in [`wrapper_value_flags`] (e.g. `nohup`, `exec`, `stdbuf`,
+/// `setsid`, `xargs`, `pkexec`, `run0` have no entries there) is still
+/// mistaken for the wrapped command, the same way every wrapper behaved
+/// before this table existed. `su` keeps a narrower residual gap of this
+/// same shape even though its own `-c`/`--command` flag IS now in
+/// [`wrapper_value_flags`] (issues #64/#66): [`skip_wrapper_flags`] only
+/// recognises a value flag occurring *before*
+/// [`wrapper_positional_args`]'s username slot is consumed, so `su -c 'sh'
+/// root` (options-before-user order) resolves cleanly through
+/// [`effective_command`], but `su root -c 'sh'` (user-before-options)
+/// still has the username slot consume `root` first, leaving `-c` to be
+/// mistaken for the *next* hop's command name by [`effective_command`]'s
+/// own walk. This residual gap is harmless for the actual security
+/// question, though, unlike the pre-#64/#66 state: [`RECURSABLE_SLOTS`]/
+/// [`wrapper_shell_string_scripts`] finds `su`'s `-c` flag independent of
+/// word order — it scans `su`'s whole argument tail, not just the region
+/// [`skip_wrapper_flags`] stops at — so the script value is still
+/// recursed into either way; only the unrelated question of what
+/// [`effective_command`] itself reports as "the resolved command name"
+/// stays order-sensitive. Separately, because real `su` grammar (`su
+/// [options] [-] [user [arg...]]`) gives no shape-based way to tell "no
+/// username, command follows directly" from "username follows", the
+/// positional slot unconditionally consumes whatever token comes first —
+/// so `su rm -rf /`, which pre-#54 happened to resolve `rm` as the wrapped
+/// command, now reads `rm` as the username instead (this actually matches
+/// real `su` behaviour more closely: without `-c`, `su rm -rf /` would not
+/// execute `rm -rf /` at all). All three cases are bounded the same way:
+/// [`wrapper_chain_escalation`]'s `Contains` arm fires on the vector's own
+/// name alone, before any argument skipping, so this limitation can only
+/// ever under-resolve which *inner* rule would have blocked — it never
+/// turns an escalation floor into a silent Allow.
 ///
-/// `flock`'s own `-c '<command>'` form (like `sh -c`/`bash -c`, real `flock`
-/// runs the string via `$SHELL -c`) is a *different* kind of gap, not bounded
-/// the same way: `-c` is not in [`wrapper_value_flags`], so its string
-/// argument is mistaken for the wrapped command and matches no rule, and
-/// `flock` is not an [`ESCALATION_VECTORS`] entry, so there is no floor to
-/// fall back on either — `flock /tmp/l -c 'rm -rf /'` silently `allow`s
-/// (fable-model review finding, tracked as issue #66). Fixing this needs
-/// `flock -c` to recurse into its string the way `crate::gate` rule 6a
-/// already does for shell interpreters, not another [`wrapper_value_flags`]
-/// entry — adding `-c` there would just skip the string outright, which is
-/// worse.
+/// `flock`'s own `-c '<command>'` form (like `sh -c`/`bash -c`, real
+/// `flock` runs the string via `$SHELL -c`) was a *different* kind of gap,
+/// not bounded the same way: `flock` is not an [`ESCALATION_VECTORS`]
+/// entry, so there was no floor to fall back on if its `-c` string were
+/// merely skipped — `flock /tmp/l -c 'rm -rf /'` silently `allow`ed
+/// (fable-model review finding, issue #66). Fixed (issues #64/#66) by
+/// [`RECURSABLE_SLOTS`]/[`wrapper_shell_string_scripts`]: `-c`/`--command`
+/// is in [`wrapper_value_flags`] so its value is never mistaken for the
+/// wrapped command by ordinary matching, and `crate::gate`'s wrapper-layer
+/// floor recurses that value as a shell-command string exactly like rule
+/// 6a already does for `sh -c`/`bash -c`, rather than merely skipping it.
 pub(crate) const TRANSPARENT_WRAPPERS: &[&str] = &[
     "env", "command", "nohup", "nice", "exec", "stdbuf", "setsid", "sudo", "xargs", "doas", "su",
     "pkexec", "run0", "timeout", "ionice", "flock", "chrt", "taskset",
@@ -954,12 +1317,125 @@ pub(crate) const ESCALATION_VECTORS: &[&str] = &["sudo", "doas", "su", "pkexec",
 /// same list `crate::gate` uses, without `rules` depending on `gate`
 /// ("dependencies point inward" — `gate` already depends on `rules`, not
 /// the reverse).
-pub(crate) const SHELL_INTERPRETERS: &[&str] = &["bash", "sh", "zsh", "dash"];
+pub(crate) const SHELL_INTERPRETERS: &[&str] = &[
+    "bash", "sh", "zsh", "dash", "fish", "ksh", "tcsh", "csh", "ash",
+];
 
-/// Interpreters a pipeline's final stage may be (`crate::gate` rule 5b/5c).
-/// See [`SHELL_INTERPRETERS`]'s docs for why this lives here.
-pub(crate) const PIPELINE_INTERPRETERS: &[&str] = &[
-    "sh", "bash", "zsh", "dash", "python", "python3", "node", "perl",
+/// Non-shell interpreters a pipeline's final stage may additionally be
+/// (`crate::gate` rule 5b/5c), beyond every shell already named in
+/// [`SHELL_INTERPRETERS`]. Kept as a *separate* small list, rather than a
+/// second hand-maintained copy of the shell names, specifically so the two
+/// lists cannot drift apart again the way they did for issue #55: that fix
+/// added `fish`/`ksh`/`tcsh`/`csh`/`ash` to `SHELL_INTERPRETERS` alone, and
+/// this file's own former `PIPELINE_INTERPRETERS` literal silently kept
+/// missing them, letting `base64 -d payload | ksh` reach `Allow`. See
+/// [`is_pipeline_interpreter`], the single place both lists are consulted
+/// together.
+const EXTRA_PIPELINE_INTERPRETERS: &[&str] = &["python", "python3", "node", "perl"];
+
+/// Whether `name` is an interpreter a pipeline's final stage may be
+/// (`crate::gate` rule 5b/5c) — every [`SHELL_INTERPRETERS`] entry, plus
+/// [`EXTRA_PIPELINE_INTERPRETERS`]'s non-shell interpreters. Always call
+/// this rather than consulting either list alone, so a future addition to
+/// `SHELL_INTERPRETERS` (a new shell) is automatically also recognised as a
+/// pipeline sink, with nothing left to keep in sync by hand.
+#[must_use]
+pub(crate) fn is_pipeline_interpreter(name: &str) -> bool {
+    SHELL_INTERPRETERS.contains(&name) || EXTRA_PIPELINE_INTERPRETERS.contains(&name)
+}
+
+/// How a [`RecursableSlot`]'s value should be recursed — see
+/// [`RECURSABLE_SLOTS`]'s own docs for the two constructs this
+/// distinguishes.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum RecurseMode {
+    /// The flag's value is a shell-command string, re-tokenised and
+    /// recursed the same way rule 6a (`crate::gate`'s `evaluate_dash_c`)
+    /// already recurses `sh -c`/`bash -c` (issues #64/#66: `flock -c`/
+    /// `su -c` run their string via `$SHELL -c` too).
+    ShellString,
+    /// The flag starts a direct argv — no shell involved at all (issue
+    /// #72: `find -exec`/`-execdir`/`-ok`/`-okdir` run their payload
+    /// directly). The span runs from the word after the flag up to the
+    /// first word resolving to one of `terminators`.
+    DirectArgv {
+        terminators: &'static [&'static str],
+    },
+}
+
+/// One command+flag combination whose value is itself a command to
+/// recurse into, rather than an opaque argument
+/// [`skip_wrapper_arguments`]/[`wrapper_value_flags`] can simply skip
+/// (issues #64/#66/#72). Deliberately does NOT cover `bash`/`sh`/`zsh`/
+/// `dash -c` — rule 6a's own `-c` search
+/// (`crate::gate::evaluate_dash_c`) operates over
+/// [`effective_command`]'s `rest_words` (the tokens after the resolved
+/// *interpreter*, with any leading wrapper's own arguments already
+/// skipped), a different coordinate system from this table's per-wrapper-
+/// hop scan (`crate::gate::scan_recursable_slots`,
+/// [`wrapper_shell_string_scripts`]); folding `SHELL_INTERPRETERS` into
+/// this table would need reconciling the two, for no behavioural gain.
+pub(crate) struct RecursableSlot {
+    pub(crate) command: &'static str,
+    pub(crate) flag: &'static str,
+    pub(crate) mode: RecurseMode,
+}
+
+/// See [`RecursableSlot`]'s docs. `crate::gate` consumes this in two ways:
+/// [`wrapper_shell_string_scripts`] walks it for every [`RecurseMode::ShellString`]
+/// entry while unwrapping a stage's transparent-wrapper chain, and
+/// `crate::gate::scan_recursable_slots` walks it directly for `find`'s
+/// [`RecurseMode::DirectArgv`] entries (that construct has no wrapper chain
+/// to unwrap — `find` itself is never in [`TRANSPARENT_WRAPPERS`]).
+pub(crate) const RECURSABLE_SLOTS: &[RecursableSlot] = &[
+    RecursableSlot {
+        command: "flock",
+        flag: "-c",
+        mode: RecurseMode::ShellString,
+    },
+    RecursableSlot {
+        command: "flock",
+        flag: "--command",
+        mode: RecurseMode::ShellString,
+    },
+    RecursableSlot {
+        command: "su",
+        flag: "-c",
+        mode: RecurseMode::ShellString,
+    },
+    RecursableSlot {
+        command: "su",
+        flag: "--command",
+        mode: RecurseMode::ShellString,
+    },
+    RecursableSlot {
+        command: "find",
+        flag: "-exec",
+        mode: RecurseMode::DirectArgv {
+            terminators: &[";", "+"],
+        },
+    },
+    RecursableSlot {
+        command: "find",
+        flag: "-execdir",
+        mode: RecurseMode::DirectArgv {
+            terminators: &[";", "+"],
+        },
+    },
+    RecursableSlot {
+        command: "find",
+        flag: "-ok",
+        mode: RecurseMode::DirectArgv {
+            terminators: &[";", "+"],
+        },
+    },
+    RecursableSlot {
+        command: "find",
+        flag: "-okdir",
+        mode: RecurseMode::DirectArgv {
+            terminators: &[";", "+"],
+        },
+    },
 ];
 
 /// The basename of a command token: `/bin/sh` -> `sh`, `./sh` -> `sh`, a
@@ -1067,8 +1543,22 @@ fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
         "flock" => vec![
             ValueFlag::Short('w'),
             ValueFlag::Short('E'),
+            ValueFlag::Short('c'),
             ValueFlag::Long("timeout".to_string()),
             ValueFlag::Long("conflict-exit-code".to_string()),
+            ValueFlag::Long("command".to_string()),
+        ],
+        // Issues #64/#66: `su`'s own `-c`/`--command` flag (like `flock`'s)
+        // takes a separated shell-command-string value. Listing it here
+        // stops that string from being mistaken for the wrapped command by
+        // `effective_command`'s ordinary skip — the actual recursion into
+        // its content happens separately, via `RECURSABLE_SLOTS`/
+        // `wrapper_shell_string_scripts`, not by this table alone (adding
+        // a value flag here only ever means "skip this value", never
+        // "recurse into it").
+        "su" => vec![
+            ValueFlag::Short('c'),
+            ValueFlag::Long("command".to_string()),
         ],
         "chrt" => vec![
             ValueFlag::Short('T'),
@@ -1275,6 +1765,79 @@ pub(crate) fn wrapper_chain_escalation(stage: &[NormalizedWord]) -> WrapperChain
     }
 }
 
+/// One [`RecurseMode::ShellString`] slot's value, found while walking a
+/// stage's transparent-wrapper chain (issues #64/#66) — see
+/// [`wrapper_shell_string_scripts`].
+pub(crate) enum ScriptSlot {
+    /// The flag's value resolved to a concrete shell-command string, ready
+    /// for `crate::gate` to recurse the same way rule 6a recurses `sh
+    /// -c`/`bash -c`.
+    Resolved(String),
+    /// The flag's own position, or its value, could not be statically
+    /// resolved — the fail-closed counterpart of [`FlagScan::Uncertain`]:
+    /// an unresolvable word at either position must never read as "no
+    /// script to worry about".
+    Unresolvable,
+}
+
+/// Finds every [`RecurseMode::ShellString`] [`RecursableSlot`]'s script
+/// value along `stage`'s transparent-wrapper chain (today: `flock`/`su`'s
+/// `-c`/`--command`, issues #64/#66). Mirrors the same wrapper-unwrap walk
+/// [`effective_command`]/[`wrapper_chain_escalation`] perform, but — unlike
+/// both of those — does not stop at the first hop and does not rely on
+/// [`skip_wrapper_flags`]'s own flag-then-positional ordering to find the
+/// flag: each wrapper hop's *entire* argument tail is scanned for its
+/// `RECURSABLE_SLOTS` flag via [`scan_for_flag`], independent of whether
+/// that flag sits before or after the wrapper's own positional slot (see
+/// [`TRANSPARENT_WRAPPERS`]'s docs on why `su -c 'sh' root` and `su root
+/// -c 'sh'` must both be found, even though only the former resolves
+/// cleanly through [`effective_command`] itself). This is deliberately
+/// broader than [`skip_wrapper_flags`]'s own boundary — a same-hop token
+/// that happens to also look like `-c`/`--command` but belongs to a
+/// different, unrelated flag on some other wrapper would still be found
+/// here; accepted because this function only ever produces an
+/// [`ScriptSlot::Unresolvable`]/[`ScriptSlot::Resolved`] *floor* (never an
+/// early-return Allow, per `crate::gate`'s wrapper-layer docs), so a
+/// mismatch can only cost an extra recursion or an over-cautious Ask, never
+/// a silent Allow.
+#[must_use]
+pub(crate) fn wrapper_shell_string_scripts(stage: &[NormalizedWord]) -> Vec<ScriptSlot> {
+    let mut slots = Vec::new();
+    let mut rest = stage;
+    while let Some((first, tail)) = rest.split_first() {
+        let Resolution::Resolved(name) = first.resolution() else {
+            break;
+        };
+        let base = basename(name);
+        if !TRANSPARENT_WRAPPERS.contains(&base) {
+            break;
+        }
+        for slot in RECURSABLE_SLOTS
+            .iter()
+            .filter(|slot| slot.command == base && matches!(slot.mode, RecurseMode::ShellString))
+        {
+            match scan_for_flag(tail, |s| s == slot.flag) {
+                FlagScan::Found(i) => match tail.get(i + 1).map(NormalizedWord::resolution) {
+                    Some(Resolution::Resolved(script)) => {
+                        slots.push(ScriptSlot::Resolved(script.clone()));
+                    }
+                    Some(Resolution::Unresolvable(_)) => slots.push(ScriptSlot::Unresolvable),
+                    // No word follows the flag at all — the same shape
+                    // `crate::gate::evaluate_dash_c` treats as "not this
+                    // shape" (`rest_words.get(flag_index + 1)?`) rather
+                    // than an Ask floor: a `-c` with nothing after it names
+                    // no command to worry about.
+                    None => {}
+                },
+                FlagScan::Uncertain(_) => slots.push(ScriptSlot::Unresolvable),
+                FlagScan::Absent => {}
+            }
+        }
+        rest = skip_wrapper_arguments(base, tail);
+    }
+    slots
+}
+
 /// Whether `stage`'s wrapper-unwrap chain passes through `su` with a
 /// positional "username" slot such that the username *and everything after
 /// it*, reinterpreted as their own command line, fully matches one of
@@ -1391,6 +1954,9 @@ struct CommandRuleDto {
 struct TargetDto {
     exact: Option<String>,
     prefix: Option<String>,
+    normalized: Option<String>,
+    normalized_prefix: Option<String>,
+    strip: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1526,12 +2092,12 @@ fn convert_command_rule(dto: CommandRuleDto) -> Result<CommandRule, RulesError> 
     let targets = dto
         .targets
         .into_iter()
-        .map(|t| convert_target(&dto.id, t))
+        .map(|t| convert_target(&dto.id, t, false))
         .collect::<Result<Vec<_>, _>>()?;
     let except_targets = dto
         .except_targets
         .into_iter()
-        .map(|t| convert_target(&dto.id, t))
+        .map(|t| convert_target(&dto.id, t, true))
         .collect::<Result<Vec<_>, _>>()?;
 
     let value_flags = dto
@@ -1573,9 +2139,59 @@ fn convert_command_rule(dto: CommandRuleDto) -> Result<CommandRule, RulesError> 
     })
 }
 
-fn convert_target(rule_id: &str, dto: TargetDto) -> Result<TargetMatcher, RulesError> {
-    match (dto.exact, dto.prefix) {
-        (Some(exact), None) => {
+/// Converts one `targets`/`except_targets` TOML entry into a
+/// [`TargetMatcher`]. `is_except_target` is `true` only for an
+/// `except_targets` entry — [`TargetMatcher::Exact`]'s/
+/// [`TargetMatcher::Prefix`]'s own docs (issue #65) explain why: an
+/// `except_targets` entry must stay literal, never `normalized`/
+/// `normalized_prefix`, because normalizing a carve-out would silently
+/// *widen* an allow, which must always be an explicit, deliberate rule-
+/// author choice, never an accidental side effect of reaching for the
+/// wrong TOML key. Before this check existed, that policy was documented
+/// only in comments — the TOML deserializer accepted
+/// `normalized`/`normalized_prefix` inside `except_targets` with no
+/// complaint (Fable-review finding; no shipped rule misused this, but it
+/// was an unenforced footgun for any future rule author).
+fn convert_target(
+    rule_id: &str,
+    dto: TargetDto,
+    is_except_target: bool,
+) -> Result<TargetMatcher, RulesError> {
+    let set_count = usize::from(dto.exact.is_some())
+        + usize::from(dto.prefix.is_some())
+        + usize::from(dto.normalized.is_some())
+        + usize::from(dto.normalized_prefix.is_some());
+    if set_count != 1 {
+        return Err(RulesError::invalid(
+            rule_id,
+            "target requires exactly one of `exact`/`prefix`/`normalized`/`normalized_prefix`",
+        ));
+    }
+    if is_except_target && (dto.normalized.is_some() || dto.normalized_prefix.is_some()) {
+        return Err(RulesError::invalid(
+            rule_id,
+            "except_targets entries must be `exact`/`prefix` (literal); `normalized`/\
+             `normalized_prefix` would silently widen an allow by normalizing the carve-out, \
+             which must always be an explicit, deliberate choice",
+        ));
+    }
+    if dto.strip.is_some() && dto.normalized.is_none() && dto.normalized_prefix.is_none() {
+        return Err(RulesError::invalid(
+            rule_id,
+            "target's `strip` is only valid alongside `normalized`/`normalized_prefix`",
+        ));
+    }
+    if dto.strip.as_deref().is_some_and(str::is_empty) {
+        return Err(RulesError::invalid(
+            rule_id,
+            "target's `strip` must not be empty",
+        ));
+    }
+
+    // `set_count == 1` above guarantees exactly one of these four is
+    // `Some` — the wildcard arm is unreachable, not a fallback.
+    match (dto.exact, dto.prefix, dto.normalized, dto.normalized_prefix) {
+        (Some(exact), None, None, None) => {
             if exact.trim().is_empty() {
                 return Err(RulesError::invalid(
                     rule_id,
@@ -1584,7 +2200,7 @@ fn convert_target(rule_id: &str, dto: TargetDto) -> Result<TargetMatcher, RulesE
             }
             Ok(TargetMatcher::Exact(exact))
         }
-        (None, Some(prefix)) => {
+        (None, Some(prefix), None, None) => {
             // An empty prefix produces a universal matcher
             // (`"".starts_with("")` is always true) — the same hazard
             // `convert_command_rule` already guards against for an empty
@@ -1597,15 +2213,89 @@ fn convert_target(rule_id: &str, dto: TargetDto) -> Result<TargetMatcher, RulesE
             }
             Ok(TargetMatcher::Prefix(prefix))
         }
-        (None, None) => Err(RulesError::invalid(
-            rule_id,
-            "target requires exactly one of `exact`/`prefix`",
-        )),
-        (Some(_), Some(_)) => Err(RulesError::invalid(
-            rule_id,
-            "target's `exact` and `prefix` are mutually exclusive",
-        )),
+        (None, None, Some(normalized), None) => {
+            if normalized.trim().is_empty() {
+                return Err(RulesError::invalid(
+                    rule_id,
+                    "target's `normalized` must not be empty",
+                ));
+            }
+            let target = lexical_normalize(&normalized);
+            reject_degenerate_normalized_target(rule_id, &normalized, &target)?;
+            Ok(TargetMatcher::NormalizedExact {
+                strip: dto.strip,
+                target,
+            })
+        }
+        (None, None, None, Some(normalized_prefix)) => {
+            if normalized_prefix.trim().is_empty() {
+                return Err(RulesError::invalid(
+                    rule_id,
+                    "target's `normalized_prefix` must not be empty",
+                ));
+            }
+            let form = lexical_normalize(&normalized_prefix);
+            reject_degenerate_normalized_target(rule_id, &normalized_prefix, &form)?;
+            let Some(mut canon) = canonical_render(&form) else {
+                return Err(RulesError::invalid(
+                    rule_id,
+                    format!(
+                        "target's `normalized_prefix` {normalized_prefix:?} has no canonical \
+                         rendering to prefix-match against"
+                    ),
+                ));
+            };
+            // Preserve the author's trailing-slash intent:
+            // `normalized_prefix = "/dev/"` must only match tokens at or
+            // below that directory boundary (today's `Prefix` behavior
+            // for a slash-terminated prefix), while `normalized_prefix =
+            // "/dev/sd"` (no trailing slash) keeps matching by plain
+            // string prefix (`/dev/sda`, `/dev/sdb1`, …) — canonical
+            // rendering alone always drops a trailing slash (`/dev/`
+            // renders as `/dev`), so it's re-added here whenever the
+            // author wrote one.
+            if normalized_prefix.ends_with('/') && !canon.ends_with('/') {
+                canon.push('/');
+            }
+            Ok(TargetMatcher::NormalizedPrefix {
+                strip: dto.strip,
+                canon,
+            })
+        }
+        _ => unreachable!("set_count == 1 checked above: exactly one alternative is Some"),
     }
+}
+
+/// Load-time guard for [`TargetMatcher::NormalizedExact`]/
+/// [`TargetMatcher::NormalizedPrefix`]'s target value (issue #65): a
+/// `normalized`/`normalized_prefix` TOML value that itself normalizes to a
+/// form that could never usefully match anything — pure ascent
+/// (`PathForm::Rel { ascent > 0, .. }`, e.g. a rule author wrote
+/// `normalized = ".."`), [`PathForm::EscapesHome`], or [`PathForm::Opaque`]
+/// — is almost certainly a mistake, not an intentional target. Fail loudly
+/// at load time rather than silently at match time ("parse, don't
+/// validate", module docs).
+fn reject_degenerate_normalized_target(
+    rule_id: &str,
+    raw: &str,
+    form: &PathForm,
+) -> Result<(), RulesError> {
+    let degenerate = match form {
+        PathForm::Rel { ascent, .. } => *ascent > 0,
+        PathForm::EscapesHome | PathForm::Opaque => true,
+        PathForm::Abs(_) | PathForm::Home(_) => false,
+    };
+    if degenerate {
+        return Err(RulesError::invalid(
+            rule_id,
+            format!(
+                "target's normalized value {raw:?} normalizes to a form that can never \
+                 usefully match (pure ascent, escapes $HOME, or opaque) — this is almost \
+                 certainly a mistake"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn convert_pipeline_rule(dto: PipelineRuleDto) -> Result<PipelineRule, RulesError> {
@@ -1652,7 +2342,7 @@ fn convert_redirect_rule(dto: RedirectRuleDto) -> Result<RedirectRule, RulesErro
     let targets = dto
         .targets
         .into_iter()
-        .map(|t| convert_target(&dto.id, t))
+        .map(|t| convert_target(&dto.id, t, false))
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(RedirectRule {
@@ -1968,7 +2658,7 @@ pub(crate) fn apply_allowlist(verdict: &Verdict, allowlist: &Allowlist) -> Allow
 // ---------------------------------------------------------------------
 
 /// Whether `entry`'s matcher would match any known shell interpreter or
-/// transparent wrapper name (`SHELL_INTERPRETERS`/`PIPELINE_INTERPRETERS`/
+/// transparent wrapper name (`SHELL_INTERPRETERS`/`EXTRA_PIPELINE_INTERPRETERS`/
 /// `TRANSPARENT_WRAPPERS`) — used to reject `allow` config entries that
 /// would suppress every recursion-derived `Ask` involving one of those
 /// names (`bash -c` recursion, a decode-fed pipeline sink, the
@@ -1981,7 +2671,7 @@ pub(crate) fn apply_allowlist(verdict: &Verdict, allowlist: &Allowlist) -> Allow
 fn matches_dangerous_allow_target(entry: &CommandRule) -> bool {
     SHELL_INTERPRETERS
         .iter()
-        .chain(PIPELINE_INTERPRETERS.iter())
+        .chain(EXTRA_PIPELINE_INTERPRETERS.iter())
         .chain(TRANSPARENT_WRAPPERS.iter())
         .any(|name| entry.command.matches(name))
 }
@@ -2480,13 +3170,26 @@ mod tests {
     #[test]
     fn su_positional_username_is_skipped() {
         // `su [options] [-] [user [args...]]`: the username occupies one
-        // positional slot before the command su itself runs. `su`'s own
-        // `-c COMMAND` flag is not in `wrapper_value_flags` (documented
-        // as a residual limitation on `TRANSPARENT_WRAPPERS`), so only
-        // the user-before-options ordering closes cleanly: `root` no
-        // longer gets mistaken for the wrapped command, but `-c` (not
-        // `sh`) surfaces as the resolved "command" name. This pins that
-        // shape rather than asserting full correctness of `su -c`.
+        // positional slot before the command su itself runs.
+        //
+        // UPDATED (issues #64/#66): `su`'s own `-c`/`--command` flag IS now
+        // in `wrapper_value_flags`, but that alone doesn't change this
+        // test's expectation — `skip_wrapper_flags` only recognises a
+        // value flag occurring BEFORE the username positional is consumed
+        // (`su -c 'sh' root`, options-before-user order), and this test
+        // uses the opposite, user-before-options order (`su root -c sh`):
+        // `root` is consumed by the positional slot first, leaving `-c` to
+        // be mistaken for the *next* hop's resolved "command" name by
+        // `effective_command`'s own walk, exactly as before. This still
+        // pins that shape rather than asserting full correctness of `su
+        // -c` through `effective_command` specifically — the actual
+        // security fix for this exact word order is
+        // `wrapper_shell_string_scripts`, which finds `su`'s `-c` flag
+        // independent of word order by scanning `su`'s whole argument
+        // tail rather than relying on `skip_wrapper_flags`'s boundary; see
+        // `crate::gate`'s `su_dash_c_user_before_options_order_still_blocks`
+        // test for the end-to-end behaviour this test's own narrower
+        // `effective_command` shape doesn't capture.
         let words = argv(&["su", "root", "-c", "sh"]);
         let (name, rest) = effective_command(&words).unwrap();
         assert_eq!(name, "-c");
@@ -3122,6 +3825,17 @@ mod tests {
         );
     }
 
+    // issue #58 E1-1: --size long form wasn't OR'd into required_flags.
+    #[test]
+    fn truncate_dash_dash_size_zero_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["truncate", "--size=0", "x"]))
+                .is_some()
+        );
+    }
+
     #[test]
     fn shred_matches_any_target() {
         let rules = Rules::embedded().unwrap();
@@ -3134,6 +3848,18 @@ mod tests {
         assert!(
             rules
                 .match_command(&argv(&["mkfs.ext4", "/dev/sda1"]))
+                .is_some()
+        );
+    }
+
+    // issue #57: mke2fs is the implementation behind mkfs.ext4 on
+    // Debian/Ubuntu but isn't matched by the `mkfs.` command_prefix rule.
+    #[test]
+    fn mke2fs_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["mke2fs", "-t", "ext4", "/dev/sda1"]))
                 .is_some()
         );
     }
@@ -3155,6 +3881,107 @@ mod tests {
             rules
                 .match_command(&argv(&["tar", "-xf", "x.tar", "-C", "./build"]))
                 .is_none()
+        );
+    }
+
+    // ==== issue #67: tar dash-less clustered invocation (`tar xfC a.tar /`) ====
+
+    // Headline case: the fully dash-less old-style cluster `xfC` glues
+    // extract (`x`), file (`f`), and directory (`C`) together with no
+    // leading `-` at all. `tar_dashless_rewrite` must see through this the
+    // same way it already sees through the dashed `-xfC`/`-xf -C`
+    // spellings, landing on the block rule (both `x` and `C` present,
+    // `-C`'s captured value is `/`).
+    #[test]
+    fn tar_dashless_cluster_extract_into_root_matches_block() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&["tar", "xfC", "evil.tar", "/"]))
+            .unwrap();
+        assert_eq!(matched.decision(), Decision::Block);
+        assert_eq!(matched.id().as_str(), "tar-extract-over-root-or-home");
+    }
+
+    // Regression: the pre-existing dash-aware form (`x` dash-less, `-C`
+    // already dashed) must keep getting exactly the decision it got before
+    // this fix — `tar_dashless_rewrite` only fires when a single dash-less
+    // cluster carries *both* `x` and `C` together, so a bare `xf` (no `C`)
+    // is left untouched and the separate `-C /` is picked up by
+    // tar-directory-root-or-home alone, same as always.
+    #[test]
+    fn tar_dashless_x_only_cluster_with_separate_dashed_c_still_asks() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&["tar", "xf", "evil.tar", "-C", "/"]))
+            .unwrap();
+        assert_eq!(matched.decision(), Decision::Ask);
+        assert_eq!(matched.id().as_str(), "tar-directory-root-or-home");
+    }
+
+    // Critical negative: an ordinary dash-less tar invocation with no `C`
+    // at all (create, gzip, verbose — no directory change) must never be
+    // caught by the dash-less rewrite. `tar_dashless_rewrite` requires
+    // both `x` and `C` in the same cluster before it rewrites anything, so
+    // `cfz` (no `x`, no `C`) is passed through unchanged.
+    #[test]
+    fn tar_dashless_create_cluster_without_directory_change_does_not_match() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["tar", "cfz", "archive.tar.gz", "somedir/"]))
+                .is_none()
+        );
+    }
+
+    // Fable-review fix: `P` was added to TAR_DASHLESS_BOOLEAN alongside the
+    // other newly-modeled letters — verifies the rewrite's synthetic `-P`
+    // token is seen by the separate `tar-absolute-names-ask` rule exactly
+    // as a written-with-dashes `-P` would be. Uses a non-root `-C` target
+    // (`/tmp/foo`) so the higher-priority over-root/home block/ask rules
+    // don't fire first and mask this rule's own match.
+    #[test]
+    fn tar_dashless_cluster_with_p_letter_matches_absolute_names_ask() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&["tar", "xfCP", "evil.tar", "/tmp/foo"]))
+            .unwrap();
+        assert_eq!(matched.decision(), Decision::Ask);
+        assert_eq!(matched.id().as_str(), "tar-absolute-names-ask");
+    }
+
+    // ==== issue #68: tar -P/--absolute-names bypasses -C entirely ====
+
+    #[test]
+    fn tar_extract_with_absolute_names_short_flag_asks() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&["tar", "-xf", "evil.tar", "-P"]))
+            .unwrap();
+        assert_eq!(matched.decision(), Decision::Ask);
+        assert_eq!(matched.id().as_str(), "tar-absolute-names-ask");
+    }
+
+    #[test]
+    fn tar_extract_with_absolute_names_long_flag_asks() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&["tar", "-xf", "evil.tar", "--absolute-names"]))
+            .unwrap();
+        assert_eq!(matched.decision(), Decision::Ask);
+        assert_eq!(matched.id().as_str(), "tar-absolute-names-ask");
+    }
+
+    // Negative: -P without an extract flag (creating an archive) must not
+    // match tar-absolute-names-ask — required_flags requires BOTH the
+    // extract flag and -P, not just -P alone.
+    #[test]
+    fn tar_create_with_absolute_names_does_not_match_absolute_names_rule() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["tar", "cf", "archive.tar", "somedir/", "-P"]))
+                .is_none(),
+            "tar create with -P must not match any tar rule (no extract flag present)"
         );
     }
 
@@ -3366,6 +4193,28 @@ mod tests {
         assert!(rules.match_command(&argv(&["rm", "a.txt"])).is_none());
     }
 
+    // rsync (issue #59 E2-1): same bare-destination shape as cp, so it gets
+    // the same targets pattern with no required_flags.
+    #[test]
+    fn self_protect_rsync_literal_tilde_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["rsync", "-a", "./payload/", "~/.config/shguard/"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn self_protect_rsync_unrelated_files_does_not_match() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["rsync", "-a", "./src/", "./dst/"]))
+                .is_none()
+        );
+    }
+
     // ==== Pipeline rule: curl|sh matches, cat|bash does not ====
 
     #[test]
@@ -3463,6 +4312,26 @@ mod tests {
         assert_ne!(
             matched.map(|rule| rule.id().as_str()),
             Some("rm-recursive-force-dangerous-target")
+        );
+    }
+
+    // Companion to the test above (code review finding on issue #59's audit,
+    // same class as `matches_except_flags_positional_discipline_rejects_wrong_subcommand`'s
+    // own companion `matches_except_flags_still_fires_via_a_different_rule_for_the_right_subcommand`):
+    // an `assert_ne` on one rule id alone would still pass if NO rule
+    // matched at all — a silent regression. Pin the positive expectation:
+    // the same argv still floors to `self-protect-config-rm-tilde`
+    // (flagless, targets the config directory), since its lack of a
+    // `required_flags` constraint means the missing `-f` never disqualifies
+    // it the way it disqualifies `rm-recursive-force-dangerous-target`.
+    #[test]
+    fn except_target_requires_required_flags_too_still_fires_self_protect_rule() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv_with_unresolvable_tail(&["rm", "-r"]);
+        let matched = rules.match_command_except_target(&cmd);
+        assert_eq!(
+            matched.map(|rule| rule.id().as_str()),
+            Some("self-protect-config-rm-tilde")
         );
     }
 
@@ -4286,6 +5155,23 @@ mod tests {
         ));
     }
 
+    // Issue #55: SHELL_INTERPRETERS gained fish/ksh/tcsh/csh/ash — the
+    // fail-closed allow-entry rejection above must catch these the same
+    // way it already catches "bash".
+    #[test]
+    fn user_config_rejects_allow_entry_matching_fish_exactly() {
+        let toml = r#"
+            [[allow]]
+            id = "user-allow-fish"
+            reason = "trust me"
+            command = "fish"
+        "#;
+        assert!(matches!(
+            UserConfig::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
     #[test]
     fn user_config_rejects_allow_entry_whose_prefix_captures_a_shell_interpreter() {
         // command_prefix = "b" matches "bash" at runtime via CommandMatch::Prefix's
@@ -4421,6 +5307,58 @@ mod tests {
             Rules::parse(toml),
             Err(RulesError::InvalidRule { .. })
         ));
+    }
+
+    // Fable-review fix: `except_targets` must stay literal (`exact`/
+    // `prefix`) — `normalized`/`normalized_prefix` would silently *widen*
+    // an allow by normalizing the carve-out. This was documented policy
+    // but unenforced at load time until now.
+    #[test]
+    fn except_targets_normalized_is_rejected() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "some reason"
+            command = "tar"
+            targets = [{ normalized = "/" }]
+            except_targets = [{ normalized = "/tmp" }]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn except_targets_normalized_prefix_is_rejected() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "some reason"
+            command = "tar"
+            targets = [{ normalized = "/" }]
+            except_targets = [{ normalized_prefix = "/tmp/" }]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    // A `targets` entry (not `except_targets`) must still accept
+    // `normalized`/`normalized_prefix` freely — this check is scoped to
+    // `except_targets` only, never a blanket rejection of the normalized
+    // forms.
+    #[test]
+    fn targets_normalized_is_still_accepted() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "some reason"
+            command = "tar"
+            targets = [{ normalized = "/" }]
+        "#;
+        assert!(Rules::parse(toml).is_ok());
     }
 
     #[test]

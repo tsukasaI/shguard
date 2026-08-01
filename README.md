@@ -283,7 +283,7 @@ is not an error: that's the ordinary zero-config case.
 ### Protecting the config file itself
 
 shguard automatically denies `tee`/`cp`/`mv`/`install`/`sed -i`
-(or `--in-place`)/`dd of=`/`rm`/`unlink`/`ln` writes targeting its own
+(or `--in-place`)/`dd of=`/`rm`/`unlink`/`ln`/`rsync` writes targeting its own
 resolved config path, and the literal `~/.config/shguard/` token for any
 user — an agent shouldn't be able to edit its own guardrails via a shell
 command. This is a partial mitigation, not a complete one:
@@ -296,7 +296,7 @@ command. This is a partial mitigation, not a complete one:
 - A relative path after `cd`-ing into the config directory (`cd
   ~/.config/shguard && cp evil.toml config.toml`) is not caught — shguard
   never resolves argv tokens against the process's working directory.
-- Other write-capable tools (`rsync`, `truncate`, `shred`, …) are not
+- Other write-capable tools (`truncate`, `shred`, …) are not
   enumerated in this list at all.
 - `cp`/`install`/`tee`/`dd`/`sed` match a file *under* the config
   directory, but not the bare directory path with no trailing slash
