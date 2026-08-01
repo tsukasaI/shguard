@@ -75,6 +75,21 @@ pub enum UnresolvableKind {
     /// would exceed it fails closed as one `Unresolvable` word rather than
     /// a truncated or partial guess — the B4 gate routes it to `Ask`.
     ExpansionLimit,
+    /// The word contains an arithmetic expansion (`$((...))`, issue #75)
+    /// whose runtime value cannot be known statically. Kept distinct from
+    /// [`UnresolvableKind::CommandSubstitution`] (rather than folded into
+    /// it) because `crate::gate` also re-scans this piece's raw text for an
+    /// embedded `$(...)`/backtick substitution — a distinct reason belongs
+    /// to a distinct kind so the `Ask`/`Block` reason a caller reports names
+    /// the actual construct.
+    ArithmeticExpansion,
+    /// The word contains a process substitution (`<(...)`/`>(...)`, issue
+    /// #75) whose runtime output/behavior cannot be known statically. Kept
+    /// distinct from [`UnresolvableKind::CommandSubstitution`] because its
+    /// AST payload is a structural `CommandLine` (`crate::ast`), not a raw
+    /// string — `crate::gate` recurses it via a different code path (direct
+    /// AST descent, not a re-parse), and the reported reason should say so.
+    ProcessSubstitution,
     /// The word contains a structural shape this stage cannot fold without
     /// guessing, and that (per shguard's AST and the parser adapter that
     /// builds it) should not be reachable through normal parsing at all.
@@ -176,7 +191,9 @@ impl NormalizedWord {
 // Stage-2 folding (B2)
 // ---------------------------------------------------------------------
 
-use crate::ast::{Assignment, MAX_BRACE_NESTING_DEPTH, SimpleCommand, Word, WordPiece};
+use crate::ast::{
+    Assignment, AssignmentValue, MAX_BRACE_NESTING_DEPTH, SimpleCommand, Word, WordPiece,
+};
 
 /// The three default-IFS whitespace characters bash uses when `IFS` is
 /// unset: space, tab, newline. This module never folds against any other
@@ -257,7 +274,16 @@ pub(crate) fn normalize_argv(command: &SimpleCommand) -> Vec<NormalizedWord> {
 /// assignments (plan.md §4's rule 2).
 #[must_use]
 pub(crate) fn normalize_assignment_value(assignment: &Assignment) -> Vec<NormalizedWord> {
-    fold_word(&assignment.value.0, false)
+    match &assignment.value {
+        AssignmentValue::Scalar(word) => fold_word(&word.0, false),
+        // Array assignments (issue #75) are not modeled for `$NAME`
+        // resolution: bash aliases a bare `$NAME` to `${NAME[0]}` for an
+        // indexed array, but shguard doesn't track array elements once
+        // resolved. Returning zero words here (rather than guessing at
+        // "the first element") never matches `apply_one`'s `[one]` case, so
+        // `Env` correctly never claims a resolution it can't stand behind.
+        AssignmentValue::Array(_) => Vec::new(),
+    }
 }
 
 /// One fragment of a piece sequence's resolved value: literal text, or a
@@ -430,6 +456,15 @@ fn resolve_piece(
         WordPiece::CommandSubstitution(_) | WordPiece::BackquotedSubstitution(_) => {
             Err(UnresolvableKind::CommandSubstitution)
         }
+        // Opaque regardless of what `crate::gate`'s raw-text rescan finds
+        // inside it (issue #75) — the rescan only exists to let a `Block`
+        // from an embedded `$(...)` escalate above this `Ask` floor, not to
+        // resolve the expansion itself.
+        WordPiece::ArithmeticExpansion(_) => Err(UnresolvableKind::ArithmeticExpansion),
+        // Opaque regardless of what the substituted command's own recursive
+        // evaluation decides (issue #75) — same "floor, not a resolution"
+        // relationship as arithmetic expansion above.
+        WordPiece::ProcessSubstitution { .. } => Err(UnresolvableKind::ProcessSubstitution),
         // Literal textual form only (`~`, `~user`, `~+`, `~-`, …). Resolving
         // to an actual home directory would require an env lookup, which
         // this stage never performs (module docs); blocklist rules match on
@@ -718,7 +753,7 @@ fn decode_ansi_c(raw: &str) -> Result<String, UnresolvableKind> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::ast::CommandLine;
+    use crate::ast::{Command, CommandLine};
 
     fn parse_ok(command: &str) -> CommandLine {
         match crate::parser::parse(command) {
@@ -727,14 +762,24 @@ mod tests {
         }
     }
 
+    /// Unwraps a [`Command::Simple`], panicking otherwise — every fixture in
+    /// this module parses to an ordinary simple command (issue #75: `Pipeline`
+    /// holds `Command`, not `SimpleCommand`, directly).
+    fn simple(command: &Command) -> &SimpleCommand {
+        match command {
+            Command::Simple(simple) => simple,
+            other => panic!("expected a simple command, got {other:?}"),
+        }
+    }
+
     fn first_word_normalized(command: &str) -> Vec<NormalizedWord> {
         let cmd = parse_ok(command);
-        normalize_word(&cmd.first.first.words[0])
+        normalize_word(&simple(&cmd.first.first).words[0])
     }
 
     fn argv_of(command: &str) -> Vec<NormalizedWord> {
         let cmd = parse_ok(command);
-        normalize_argv(&cmd.first.first)
+        normalize_argv(simple(&cmd.first.first))
     }
 
     fn resolved_strings(words: &[NormalizedWord]) -> Vec<&str> {
@@ -907,7 +952,7 @@ mod tests {
     #[test]
     fn assignment_value_simple() {
         let cmd = parse_ok("X=rm");
-        let words = normalize_assignment_value(&cmd.first.first.assignments[0]);
+        let words = normalize_assignment_value(&simple(&cmd.first.first).assignments[0]);
         assert_eq!(resolved_strings(&words), vec!["rm"]);
     }
 
@@ -916,7 +961,7 @@ mod tests {
     #[test]
     fn assignment_value_ifs_does_not_split() {
         let cmd = parse_ok("X=rm$IFS-rf");
-        let words = normalize_assignment_value(&cmd.first.first.assignments[0]);
+        let words = normalize_assignment_value(&simple(&cmd.first.first).assignments[0]);
         assert_eq!(words.len(), 1);
         assert_eq!(
             *words[0].resolution(),
