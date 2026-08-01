@@ -452,7 +452,10 @@ targets = [
 id = "curl-wget-pipe-to-shell"
 reason = "piping a downloaded script straight into an interpreter executes unreviewed remote code"
 sources = ["curl", "wget"]
-sinks = ["sh", "bash", "zsh"]
+# Keep in sync with src/rules.rs's SHELL_INTERPRETERS/is_pipeline_interpreter —
+# issue #55 added fish/ksh/tcsh/csh/ash there but this list drifted (a real
+# bypass: `curl ... | ksh` reached Allow until this was fixed).
+sinks = ["sh", "bash", "zsh", "fish", "ksh", "tcsh", "csh", "ash"]
 
 # Self-protection: the literal "~/.config/shguard/" token (plan.md §6 item 8).
 # `~` is never resolved to an actual filesystem path by normalize.rs (no

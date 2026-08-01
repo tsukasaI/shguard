@@ -218,64 +218,108 @@ fn short_cluster_chars(token: &str) -> HashSet<char> {
 }
 
 /// tar-specific single-letter options this crate's rules ever need to see
-/// through a dash-less cluster (issue #67) — a deliberately small subset of
-/// GNU tar's actual option set, not an attempt at full coverage. `f`
-/// (`--file`) and `C` (`--directory`) each consume the following positional
-/// argument; every other letter here is boolean (mode/behavior flags that
-/// never take a value): `x` (extract), `c` (create), `t` (list), `z`
-/// (gzip), `v` (verbose). [`tar_dashless_rewrite`] treats any letter
-/// outside both sets as disqualifying — conservative by design, per its own
+/// through a dash-less cluster (issue #67, expanded by the Fable review's
+/// fail-open finding) — GNU tar's commonly-used boolean/value-less single
+/// letters, not an attempt at exhaustive coverage of tar's entire option
+/// set. `f` (`--file`) and `C` (`--directory`) each consume the following
+/// positional argument; every other letter here is boolean (mode/behavior
+/// flags that never take a value): `x` (extract), `c` (create), `t`
+/// (list), `z` (gzip), `v` (verbose), `j` (bzip2), `J` (xz), `a`
+/// (auto-compress), `Z` (compress), `k` (keep-old-files), `p`
+/// (preserve-permissions), `w` (interactive), `m` (no-mtime), `O`
+/// (to-stdout), `h` (dereference), `S` (sparse), `P` (absolute-names — the
+/// rewrite's own synthetic `-P` token is then seen by the separate
+/// `tar-absolute-names-ask` rule exactly as a written-with-dashes `-P`
+/// would be). This list can never be exhaustive (tar keeps adding
+/// options), which is exactly why [`tar_dashless_cluster`] no longer
+/// treats an unmodeled letter as "not a cluster at all" — see its own
 /// docs.
 const TAR_DASHLESS_CONSUMING: &[char] = &['f', 'C'];
-const TAR_DASHLESS_BOOLEAN: &[char] = &['x', 'c', 't', 'z', 'v'];
+const TAR_DASHLESS_BOOLEAN: &[char] = &[
+    'x', 'c', 't', 'z', 'v', 'j', 'J', 'a', 'Z', 'k', 'p', 'w', 'm', 'O', 'h', 'S', 'P',
+];
 
-/// Rewrites a `tar` hop's dash-less leading option cluster (POSIX tar's own
-/// old-style calling convention, e.g. `tar xfC a.tar /`) into the
-/// equivalent dashed representation — a `-`-prefixed token per cluster
-/// letter, with each value-consuming letter's captured positional argument
-/// placed right after it as its own token — so it can flow through the
-/// exact same [`FlagMatcher`]/[`TargetMatcher`] machinery a written-with-
-/// dashes invocation already does, without either of those needing to know
-/// anything tar-specific (issue #67's own direction: this is tar's calling
-/// convention, not general shell syntax, so it doesn't belong in
-/// [`short_cluster_chars`]/[`FlagMatcher`]).
+/// [`tar_dashless_cluster`]'s three-way outcome — mirrors the fail-closed
+/// "definitely / definitely-not / uncertain" shape `crate::gate`'s
+/// `FlagScan` uses for flag-position scans (an unresolvable word "might be
+/// the flag", never "definitely not"), expressed here over a `tar` hop's
+/// tail instead of a generic flag-position scan, since recognizing tar's
+/// own dash-less calling convention is tar-specific, not a general
+/// `FlagMatcher` concern (see [`tar_dashless_cluster`]'s docs).
+pub(crate) enum TarDashlessCluster {
+    /// A recognized `x`+`C` dash-less cluster, already rewritten into its
+    /// dashed-token equivalent — the caller should match flags/targets
+    /// against this instead of the original tail.
+    Recognized(Vec<NormalizedWord>),
+    /// `tail`'s first word isn't a plausible dash-less option cluster at
+    /// all (unresolved, empty, `-`-prefixed, contains a non-alphabetic
+    /// character, or has no `x`) — ordinary dashed-only matching applies,
+    /// completely untouched.
+    NotApplicable,
+    /// A *plausible* dash-less cluster — fully alphabetic, contains `x` —
+    /// but with at least one letter outside
+    /// [`TAR_DASHLESS_CONSUMING`]/[`TAR_DASHLESS_BOOLEAN`]. Before the
+    /// Fable review's fix, a single unmodeled letter (`j`, `a`, …)
+    /// disqualified the ENTIRE cluster, silently falling through to
+    /// dashed-only matching that can't see a dash-less token at all —
+    /// `tar xjfC evil.tar.bz2 /` reached `Allow`. The caller must never
+    /// treat this the same as [`Self::NotApplicable`]: it must floor the
+    /// decision to `Ask` instead (this crate's tar option coverage can
+    /// never be exhaustive, so "next new letter I didn't think of" must
+    /// fail closed, not open).
+    Unmodeled,
+}
+
+/// Classifies a `tar` hop's dash-less leading option cluster (POSIX tar's
+/// own old-style calling convention, e.g. `tar xfC a.tar /`) — see
+/// [`TarDashlessCluster`] for the three possible outcomes and
+/// [`tar_dashless_rewrite`] for the [`FlagMatcher`]/[`TargetMatcher`]-
+/// facing wrapper most callers actually want.
 ///
-/// Fires only when `tail`'s first word is [`Resolution::Resolved`],
-/// non-empty, has no leading `-`, is composed entirely of characters from
+/// [`TarDashlessCluster::Recognized`] fires only when `tail`'s first word
+/// is [`Resolution::Resolved`], non-empty, has no leading `-`, is composed
+/// entirely of ASCII alphabetic characters all drawn from
 /// [`TAR_DASHLESS_CONSUMING`]/[`TAR_DASHLESS_BOOLEAN`], and contains both
 /// `x` and `C` — the specific shape the dash-less form's directory-change
 /// gap needs (a bare dash-less cluster with `x` but not `C`, e.g. `tar xf
 /// a.tar -C /`'s leading `xf`, is left untouched: the trailing `-C /` is
 /// already a normal dashed token pair that existing matching sees on its
 /// own, and rewriting `xf` too would make `tar xf a.tar -C /`'s decision
-/// drift from what it gets today). Any cluster letter outside the modeled
-/// sets disqualifies the whole cluster — conservative by design (module
-/// docs: never guess an alignment that might be wrong) — as does a
-/// value-consuming letter with no positional argument left to consume
-/// (`tar fC` alone). All of these return `None`: the caller falls through
-/// to ordinary dashed-only flag matching, exactly as before this function
-/// existed.
+/// drift from what it gets today). A value-consuming letter with no
+/// positional argument left to consume (`tar fC` alone, which also lacks
+/// `x` so never reaches this case anyway) falls back to
+/// [`TarDashlessCluster::NotApplicable`], matching this function's
+/// pre-Fable-review behavior for that shape exactly.
 ///
-/// On success, returns the full rewritten tail: one or two synthetic
-/// tokens per cluster letter, followed by every argument the cluster
-/// didn't consume, unchanged (including any of *those* that are already
-/// `-`-prefixed, e.g. a trailing `-P` after the cluster).
-fn tar_dashless_rewrite(tail: &[NormalizedWord]) -> Option<Vec<NormalizedWord>> {
-    let (first, rest) = tail.split_first()?;
-    let Resolution::Resolved(cluster) = first.resolution() else {
-        return None;
+/// On success, [`TarDashlessCluster::Recognized`] carries the full
+/// rewritten tail: one or two synthetic tokens per cluster letter,
+/// followed by every argument the cluster didn't consume, unchanged
+/// (including any of *those* that are already `-`-prefixed, e.g. a
+/// trailing `-P` after the cluster).
+pub(crate) fn tar_dashless_cluster(tail: &[NormalizedWord]) -> TarDashlessCluster {
+    let Some((first, rest)) = tail.split_first() else {
+        return TarDashlessCluster::NotApplicable;
     };
-    if cluster.is_empty() || cluster.starts_with('-') {
-        return None;
+    let Resolution::Resolved(cluster) = first.resolution() else {
+        return TarDashlessCluster::NotApplicable;
+    };
+    if cluster.is_empty()
+        || cluster.starts_with('-')
+        || !cluster.chars().all(|c| c.is_ascii_alphabetic())
+    {
+        return TarDashlessCluster::NotApplicable;
+    }
+    if !cluster.contains('x') {
+        return TarDashlessCluster::NotApplicable;
     }
     if !cluster
         .chars()
         .all(|c| TAR_DASHLESS_CONSUMING.contains(&c) || TAR_DASHLESS_BOOLEAN.contains(&c))
     {
-        return None;
+        return TarDashlessCluster::Unmodeled;
     }
-    if !(cluster.contains('x') && cluster.contains('C')) {
-        return None;
+    if !cluster.contains('C') {
+        return TarDashlessCluster::NotApplicable;
     }
 
     let mut rewritten = Vec::new();
@@ -283,11 +327,33 @@ fn tar_dashless_rewrite(tail: &[NormalizedWord]) -> Option<Vec<NormalizedWord>> 
     for c in cluster.chars() {
         rewritten.push(NormalizedWord::resolved(format!("-{c}")));
         if TAR_DASHLESS_CONSUMING.contains(&c) {
-            rewritten.push(values.next()?.clone());
+            let Some(value) = values.next() else {
+                return TarDashlessCluster::NotApplicable;
+            };
+            rewritten.push(value.clone());
         }
     }
     rewritten.extend(values.cloned());
-    Some(rewritten)
+    TarDashlessCluster::Recognized(rewritten)
+}
+
+/// [`FlagMatcher`]/[`TargetMatcher`]-facing wrapper over
+/// [`tar_dashless_cluster`]: `Some` only for
+/// [`TarDashlessCluster::Recognized`], `None` for both
+/// [`TarDashlessCluster::NotApplicable`] and
+/// [`TarDashlessCluster::Unmodeled`] — a per-`CommandRule` flag/target
+/// match has no way to express "fail this whole command line closed to
+/// Ask", so an unmodeled cluster falls through here exactly like a
+/// not-applicable one; `crate::gate`'s own floor
+/// (`crate::rules::tar_dashless_cluster`'s `Unmodeled` arm) is what
+/// actually enforces the fail-closed Ask for that case, independent of
+/// whether any particular rule's flags/targets would otherwise have
+/// matched.
+fn tar_dashless_rewrite(tail: &[NormalizedWord]) -> Option<Vec<NormalizedWord>> {
+    match tar_dashless_cluster(tail) {
+        TarDashlessCluster::Recognized(rewritten) => Some(rewritten),
+        TarDashlessCluster::NotApplicable | TarDashlessCluster::Unmodeled => None,
+    }
 }
 
 /// A flag declared (via a rule's `value_flags`, issue #48) to take a
@@ -1255,11 +1321,28 @@ pub(crate) const SHELL_INTERPRETERS: &[&str] = &[
     "bash", "sh", "zsh", "dash", "fish", "ksh", "tcsh", "csh", "ash",
 ];
 
-/// Interpreters a pipeline's final stage may be (`crate::gate` rule 5b/5c).
-/// See [`SHELL_INTERPRETERS`]'s docs for why this lives here.
-pub(crate) const PIPELINE_INTERPRETERS: &[&str] = &[
-    "sh", "bash", "zsh", "dash", "python", "python3", "node", "perl",
-];
+/// Non-shell interpreters a pipeline's final stage may additionally be
+/// (`crate::gate` rule 5b/5c), beyond every shell already named in
+/// [`SHELL_INTERPRETERS`]. Kept as a *separate* small list, rather than a
+/// second hand-maintained copy of the shell names, specifically so the two
+/// lists cannot drift apart again the way they did for issue #55: that fix
+/// added `fish`/`ksh`/`tcsh`/`csh`/`ash` to `SHELL_INTERPRETERS` alone, and
+/// this file's own former `PIPELINE_INTERPRETERS` literal silently kept
+/// missing them, letting `base64 -d payload | ksh` reach `Allow`. See
+/// [`is_pipeline_interpreter`], the single place both lists are consulted
+/// together.
+const EXTRA_PIPELINE_INTERPRETERS: &[&str] = &["python", "python3", "node", "perl"];
+
+/// Whether `name` is an interpreter a pipeline's final stage may be
+/// (`crate::gate` rule 5b/5c) — every [`SHELL_INTERPRETERS`] entry, plus
+/// [`EXTRA_PIPELINE_INTERPRETERS`]'s non-shell interpreters. Always call
+/// this rather than consulting either list alone, so a future addition to
+/// `SHELL_INTERPRETERS` (a new shell) is automatically also recognised as a
+/// pipeline sink, with nothing left to keep in sync by hand.
+#[must_use]
+pub(crate) fn is_pipeline_interpreter(name: &str) -> bool {
+    SHELL_INTERPRETERS.contains(&name) || EXTRA_PIPELINE_INTERPRETERS.contains(&name)
+}
 
 /// How a [`RecursableSlot`]'s value should be recursed — see
 /// [`RECURSABLE_SLOTS`]'s own docs for the two constructs this
@@ -2012,12 +2095,12 @@ fn convert_command_rule(dto: CommandRuleDto) -> Result<CommandRule, RulesError> 
     let targets = dto
         .targets
         .into_iter()
-        .map(|t| convert_target(&dto.id, t))
+        .map(|t| convert_target(&dto.id, t, false))
         .collect::<Result<Vec<_>, _>>()?;
     let except_targets = dto
         .except_targets
         .into_iter()
-        .map(|t| convert_target(&dto.id, t))
+        .map(|t| convert_target(&dto.id, t, true))
         .collect::<Result<Vec<_>, _>>()?;
 
     let value_flags = dto
@@ -2059,7 +2142,24 @@ fn convert_command_rule(dto: CommandRuleDto) -> Result<CommandRule, RulesError> 
     })
 }
 
-fn convert_target(rule_id: &str, dto: TargetDto) -> Result<TargetMatcher, RulesError> {
+/// Converts one `targets`/`except_targets` TOML entry into a
+/// [`TargetMatcher`]. `is_except_target` is `true` only for an
+/// `except_targets` entry — [`TargetMatcher::Exact`]'s/
+/// [`TargetMatcher::Prefix`]'s own docs (issue #65) explain why: an
+/// `except_targets` entry must stay literal, never `normalized`/
+/// `normalized_prefix`, because normalizing a carve-out would silently
+/// *widen* an allow, which must always be an explicit, deliberate rule-
+/// author choice, never an accidental side effect of reaching for the
+/// wrong TOML key. Before this check existed, that policy was documented
+/// only in comments — the TOML deserializer accepted
+/// `normalized`/`normalized_prefix` inside `except_targets` with no
+/// complaint (Fable-review finding; no shipped rule misused this, but it
+/// was an unenforced footgun for any future rule author).
+fn convert_target(
+    rule_id: &str,
+    dto: TargetDto,
+    is_except_target: bool,
+) -> Result<TargetMatcher, RulesError> {
     let set_count = usize::from(dto.exact.is_some())
         + usize::from(dto.prefix.is_some())
         + usize::from(dto.normalized.is_some())
@@ -2068,6 +2168,14 @@ fn convert_target(rule_id: &str, dto: TargetDto) -> Result<TargetMatcher, RulesE
         return Err(RulesError::invalid(
             rule_id,
             "target requires exactly one of `exact`/`prefix`/`normalized`/`normalized_prefix`",
+        ));
+    }
+    if is_except_target && (dto.normalized.is_some() || dto.normalized_prefix.is_some()) {
+        return Err(RulesError::invalid(
+            rule_id,
+            "except_targets entries must be `exact`/`prefix` (literal); `normalized`/\
+             `normalized_prefix` would silently widen an allow by normalizing the carve-out, \
+             which must always be an explicit, deliberate choice",
         ));
     }
     if dto.strip.is_some() && dto.normalized.is_none() && dto.normalized_prefix.is_none() {
@@ -2237,7 +2345,7 @@ fn convert_redirect_rule(dto: RedirectRuleDto) -> Result<RedirectRule, RulesErro
     let targets = dto
         .targets
         .into_iter()
-        .map(|t| convert_target(&dto.id, t))
+        .map(|t| convert_target(&dto.id, t, false))
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(RedirectRule {
@@ -2553,7 +2661,7 @@ pub(crate) fn apply_allowlist(verdict: &Verdict, allowlist: &Allowlist) -> Allow
 // ---------------------------------------------------------------------
 
 /// Whether `entry`'s matcher would match any known shell interpreter or
-/// transparent wrapper name (`SHELL_INTERPRETERS`/`PIPELINE_INTERPRETERS`/
+/// transparent wrapper name (`SHELL_INTERPRETERS`/`EXTRA_PIPELINE_INTERPRETERS`/
 /// `TRANSPARENT_WRAPPERS`) — used to reject `allow` config entries that
 /// would suppress every recursion-derived `Ask` involving one of those
 /// names (`bash -c` recursion, a decode-fed pipeline sink, the
@@ -2566,7 +2674,7 @@ pub(crate) fn apply_allowlist(verdict: &Verdict, allowlist: &Allowlist) -> Allow
 fn matches_dangerous_allow_target(entry: &CommandRule) -> bool {
     SHELL_INTERPRETERS
         .iter()
-        .chain(PIPELINE_INTERPRETERS.iter())
+        .chain(EXTRA_PIPELINE_INTERPRETERS.iter())
         .chain(TRANSPARENT_WRAPPERS.iter())
         .any(|name| entry.command.matches(name))
 }
@@ -3826,6 +3934,22 @@ mod tests {
                 .match_command(&argv(&["tar", "cfz", "archive.tar.gz", "somedir/"]))
                 .is_none()
         );
+    }
+
+    // Fable-review fix: `P` was added to TAR_DASHLESS_BOOLEAN alongside the
+    // other newly-modeled letters — verifies the rewrite's synthetic `-P`
+    // token is seen by the separate `tar-absolute-names-ask` rule exactly
+    // as a written-with-dashes `-P` would be. Uses a non-root `-C` target
+    // (`/tmp/foo`) so the higher-priority over-root/home block/ask rules
+    // don't fire first and mask this rule's own match.
+    #[test]
+    fn tar_dashless_cluster_with_p_letter_matches_absolute_names_ask() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&["tar", "xfCP", "evil.tar", "/tmp/foo"]))
+            .unwrap();
+        assert_eq!(matched.decision(), Decision::Ask);
+        assert_eq!(matched.id().as_str(), "tar-absolute-names-ask");
     }
 
     // ==== issue #68: tar -P/--absolute-names bypasses -C entirely ====
@@ -5186,6 +5310,58 @@ mod tests {
             Rules::parse(toml),
             Err(RulesError::InvalidRule { .. })
         ));
+    }
+
+    // Fable-review fix: `except_targets` must stay literal (`exact`/
+    // `prefix`) — `normalized`/`normalized_prefix` would silently *widen*
+    // an allow by normalizing the carve-out. This was documented policy
+    // but unenforced at load time until now.
+    #[test]
+    fn except_targets_normalized_is_rejected() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "some reason"
+            command = "tar"
+            targets = [{ normalized = "/" }]
+            except_targets = [{ normalized = "/tmp" }]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn except_targets_normalized_prefix_is_rejected() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "some reason"
+            command = "tar"
+            targets = [{ normalized = "/" }]
+            except_targets = [{ normalized_prefix = "/tmp/" }]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    // A `targets` entry (not `except_targets`) must still accept
+    // `normalized`/`normalized_prefix` freely — this check is scoped to
+    // `except_targets` only, never a blanket rejection of the normalized
+    // forms.
+    #[test]
+    fn targets_normalized_is_still_accepted() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "some reason"
+            command = "tar"
+            targets = [{ normalized = "/" }]
+        "#;
+        assert!(Rules::parse(toml).is_ok());
     }
 
     #[test]
