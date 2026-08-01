@@ -1849,6 +1849,47 @@ fn evaluate_argument_substitutions(
 /// the command name (e.g. `rm$IFS-rf$IFS/{,$(evil)}`) would never be
 /// scanned by anything once rule 1 stops treating every substitution in
 /// that word as command-position-ambiguous.
+///
+/// # The unconditional splitting-companion floor (second AND fourth
+/// /security-review round follow-ups)
+///
+/// Rule 3's transparency assumes one opaque (`Unresolvable`) word is one
+/// argv slot's value — true for an ordinary argument-position substitution
+/// (`rm -rf $(x)`), where a dangerous flag sits in its OWN, separately
+/// resolved word. It does NOT hold for a leftover alternative that also
+/// contains a piece that could stand in for a literal separator or
+/// otherwise multiply this alternative's token count: absent the
+/// substitution, that piece would have split (or itself made opaque) this
+/// alternative into MULTIPLE tokens, but `resolve_pieces`' word-level
+/// short-circuit (its own docs: "one Unresolvable word, not a partially-
+/// folded one") collapses the whole run — flag, target, and substitution
+/// alike — into a single opaque word the moment it hits ANY unresolvable
+/// piece. `sed{,$IFS-i$IFS$(x)$IFS<config path>}` is the `$IFS` case;
+/// `sed{,-i${f}$(x)${f}<config path>}` (with a same-line `f=' '`) is
+/// exactly as exploitable — `${f}` is just as unresolvable as `$IFS` from
+/// this stage's point of view (`normalize::resolve_piece` has no more idea
+/// what `$f` holds than what a same-line `IFS=` reassignment would make
+/// `$IFS` hold), and a real shell word-splits ANY unquoted parameter
+/// expansion whose value happens to contain whitespace, not only `$IFS`
+/// literally. Recursing `x` alone (Allow) says nothing about whether `-i`
+/// is hidden alongside it in either shape, and there is no separately-
+/// resolved token left for rule 4's `matches_except_target` to check
+/// against `targets` either — the ONLY place either shape can be floored
+/// is here, unconditionally, regardless of what the substitution(s)
+/// inside recurse to. `ArithmeticExpansion`/`ProcessSubstitution` pieces
+/// count as companions too, for defense in depth: whichever piece
+/// `resolve_pieces` happens to error on FIRST determines the resulting
+/// word's own `UnresolvableKind`, so a `CommandSubstitution` earlier in
+/// the same piece run can hide a later `ArithmeticExpansion`/
+/// `ProcessSubstitution` from [`is_opaque_unresolvable`]'s own,
+/// argv-level floor. An alternative with none of these — just a
+/// substitution and otherwise only `Literal`/`SingleQuoted`/
+/// `EscapeSequence`/`AnsiCQuoted`/`Tilde` pieces (none of which can ever
+/// split or add opacity, matching real bash: ANSI-C/backslash-escaped
+/// whitespace is quoting, not a word-split point) — stays purely
+/// transparent (its own recursion result is the only signal), since it is
+/// genuinely just one token, no different from an ordinary argument-
+/// position substitution slot.
 fn evaluate_leftover_alternative_substitutions(
     leftover_alternatives: &[Vec<WordPiece>],
     depth: usize,
@@ -1864,11 +1905,25 @@ fn evaluate_leftover_alternative_substitutions(
     for pieces in leftover_alternatives {
         let mut subs = Vec::new();
         collect_substitutions_into(pieces, &mut subs);
+        let mut proc_subs = Vec::new();
+        collect_process_substitutions_into(pieces, &mut proc_subs);
+
+        let has_substitution = !subs.is_empty() || !proc_subs.is_empty();
+        let has_splitting_or_opaque_companion = pieces.iter().any(|piece| {
+            matches!(
+                piece,
+                WordPiece::ParameterExpansion(_)
+                    | WordPiece::ArithmeticExpansion(_)
+                    | WordPiece::ProcessSubstitution { .. }
+            )
+        });
+        if has_substitution && has_splitting_or_opaque_companion {
+            raise(Decision::Ask);
+        }
+
         for inner in subs {
             raise(analyze_at_depth(inner, depth + 1, rules, allowlist).decision());
         }
-        let mut proc_subs = Vec::new();
-        collect_process_substitutions_into(pieces, &mut proc_subs);
         for inner in proc_subs {
             raise(evaluate_command_line(inner, rules, allowlist, depth).decision());
         }

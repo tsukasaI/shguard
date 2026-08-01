@@ -319,6 +319,58 @@ fn guardfall_issue_77_brace_command_position_cases() {
         // fixed here.
         ("rm{,$IFS-rf$IFS/$(true)}", Decision::Ask),
         ("rm -rf$IFS/$(true)", Decision::Ask), // brace-free control, same limit
+        // A third /security-review pass found this exact "flag and target
+        // both hidden" shape ALSO reachable via `$IFS`-packing a non-
+        // winning brace alternative (rather than the plain, brace-free
+        // form above) — and, unlike the brace-free form, this ordering was
+        // `Ask` on `main` (rule 1's old blanket scan happened to catch it,
+        // purely as a side effect of not distinguishing winning from
+        // leftover branches) and regressed to `Allow` on this branch
+        // before `evaluate_leftover_alternative_substitutions` grew an
+        // unconditional floor for exactly this shape (see that function's
+        // own doc comment): a leftover alternative that contains BOTH an
+        // unquoted `$IFS` piece and a substitution can never be trusted to
+        // be "just one argv slot's value" the way an ordinary argument-
+        // position substitution is, since `$IFS` splitting would have
+        // multiplied it into several tokens had the substitution not
+        // short-circuited that split entirely.
+        (
+            "sed{,$IFS-i$IFS$(printf x)$IFS~/.config/shguard/config.toml}",
+            Decision::Ask,
+        ),
+        (
+            "{sed,-i$IFS$(printf x)$IFS~/.config/shguard/config.toml}",
+            Decision::Ask,
+        ),
+        // Same shape with the substitution itself inert — confirms the
+        // floor is unconditional (does not depend on what `$(true)`
+        // recurses to), unlike `leftover_floor`'s ordinary transparency.
+        (
+            "sed{,$IFS-i$IFS$(true)$IFS~/.config/shguard/config.toml}",
+            Decision::Ask,
+        ),
+        // A fourth /security-review pass found the floor above was too
+        // narrow: it only recognized `$IFS` by name, but ANY bare
+        // parameter expansion is just as unresolvable to this stage
+        // (`normalize::resolve_piece` has no more idea what `$f` holds
+        // than what a same-line `IFS=` reassignment would make `$IFS`
+        // hold) — and a real shell word-splits ANY unquoted expansion
+        // whose runtime value contains whitespace, not only literal
+        // `$IFS`. `${f}`/`$*`/`$@` are fully equivalent stand-ins once a
+        // same-line assignment sets the variable to a space; confirmed
+        // with the assignment made explicit below rather than assumed.
+        (
+            "f=' '; sed{,-i${f}$(printf p)${f}/home/user/.config/shguard/config.toml}",
+            Decision::Ask,
+        ),
+        (
+            "sed{,-i$*$(true)~/.config/shguard/config.toml}",
+            Decision::Ask,
+        ),
+        (
+            "sed{,-i$@$(true)~/.config/shguard/config.toml}",
+            Decision::Ask,
+        ),
     ];
     // NOT pinned above (deliberately — see issue #85, filed for exactly
     // this): `sed` is a command where the gap just above is a genuine
