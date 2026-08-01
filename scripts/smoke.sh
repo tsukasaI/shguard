@@ -22,6 +22,14 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 2
 fi
 
+# Isolate the run from the developer's real user config (issue #59, E2-5):
+# without this, a `~/.config/shguard/config.toml` on the machine running
+# this script silently changes which fixtures pass or fail. `/dev/null`
+# reads as an empty (zero-rule) config, not a missing one -- verified
+# against src/config.rs's load path -- so this deterministically exercises
+# the embedded ruleset only.
+export SHGUARD_CONFIG=/dev/null
+
 pass=0
 fail=0
 
