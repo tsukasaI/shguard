@@ -7,7 +7,10 @@
 //!
 //! `SHGUARD_CONFIG` env var (any value counts as "set", even `""`) >
 //! `$XDG_CONFIG_HOME/shguard/config.toml` (an empty `XDG_CONFIG_HOME`
-//! counts as unset, per the XDG spec) > `$HOME/.config/shguard/config.toml`.
+//! counts as unset, per the XDG spec) > `$HOME/.config/shguard/config.toml`
+//! (an empty `HOME` counts as unset too, same as `XDG_CONFIG_HOME` — an
+//! empty string is never treated as "search relative to the current
+//! working directory", issue #59).
 //! No project-local `.shguard.toml` auto-discovery: shguard's own threat
 //! model includes "the agent it's guarding might be adversarially
 //! prompted to defeat it," and a project-local config file sits inside
@@ -140,7 +143,7 @@ impl Policy {
         if let Some(xdg) = xdg_config_home.filter(|s| !s.is_empty()) {
             return Some(Path::new(xdg).join("shguard").join("config.toml"));
         }
-        home.map(|home| {
+        home.filter(|s| !s.is_empty()).map(|home| {
             Path::new(home)
                 .join(".config")
                 .join("shguard")
@@ -430,6 +433,16 @@ mod tests {
             path,
             Some(PathBuf::from("/home/.config/shguard/config.toml"))
         );
+    }
+
+    // E2-2 (issue #59): `HOME=""` must not resolve to a CWD-relative
+    // `.config/shguard/config.toml` — the same "empty counts as unset"
+    // treatment `empty_xdg_config_home_counts_as_unset` already pins for
+    // `XDG_CONFIG_HOME`.
+    #[test]
+    fn empty_home_counts_as_unset() {
+        let path = Policy::resolve_config_path(None, None, Some(""));
+        assert_eq!(path, None);
     }
 
     #[test]
