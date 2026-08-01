@@ -1804,10 +1804,7 @@ pub(crate) enum ScriptSlot {
 pub(crate) fn wrapper_shell_string_scripts(stage: &[NormalizedWord]) -> Vec<ScriptSlot> {
     let mut slots = Vec::new();
     let mut rest = stage;
-    loop {
-        let Some((first, tail)) = rest.split_first() else {
-            break;
-        };
+    while let Some((first, tail)) = rest.split_first() {
         let Resolution::Resolved(name) = first.resolution() else {
             break;
         };

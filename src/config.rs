@@ -367,11 +367,9 @@ fn self_protection_directories(path: &Path) -> Result<Vec<(String, PathBuf)>, Co
     let mut visited: HashSet<PathBuf> = HashSet::from([path.to_path_buf()]);
     let mut current = path.to_path_buf();
     let mut hops = 0usize;
-    loop {
-        let Ok(target) = std::fs::read_link(&current) else {
-            // Not a symlink -- the final real file, or nothing there yet.
-            break;
-        };
+    // Loop ends when `current` is not a symlink -- the final real file, or
+    // nothing there yet.
+    while let Ok(target) = std::fs::read_link(&current) {
         hops += 1;
         if hops > MAX_SYMLINK_HOPS {
             return Err(ConfigError::SymlinkChain {
