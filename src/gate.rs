@@ -58,7 +58,11 @@
 //!    script string, if statically resolved, recurses through the full
 //!    pipeline exactly like a substitution. `python -c`/`perl -e`/`node -e`
 //!    ("rule 6b") are not shell — this module never introspects non-shell
-//!    code, so their presence is an unconditional Ask floor.
+//!    code, so their presence is an unconditional Ask floor. Rules 5b, 6a,
+//!    and 6b all locate a flag by scanning argv positionally
+//!    ([`scan_for_flag`]); per issues #71/#53, an `Unresolvable` word at a
+//!    scanned position is treated as "might be the flag", never as
+//!    "definitely not" — fail-closed, per plan.md §4.
 //! 7. `$IFS`-derived words ("rule 7") — normalise.rs already folds against
 //!    the *default* IFS; this module adds the untrusted floor: a blocklist
 //!    hit still Blocks, but a miss is Ask, never Allow, because a same-line
@@ -1010,7 +1014,7 @@ fn evaluate_simple_command_core(
     // non-shell code, unconditional Ask floor.
     let interpreter_code_floor = effective.is_some_and(|(name, rest_words)| {
         inline_code_flag(name)
-            .is_some_and(|flag| rest_words.iter().any(|w| is_resolved_exactly(w, flag)))
+            .is_some_and(|flag| scan_for_flag(rest_words, |s| s == flag).possibly_found())
     });
 
     // Rule 7: any `$IFS`-derived word floors to Ask on a blocklist miss.
@@ -1391,7 +1395,10 @@ fn evaluate_command_position_bare_var(
 /// Rule 6a: `bash -c '<string>'`/`sh -c`/`zsh -c`/`dash -c`. Returns `None`
 /// when there is no `-c` flag at all (not this shape). When `-c` is
 /// present but its argument did not statically resolve, fails closed to
-/// Ask rather than silently skipping the check.
+/// Ask rather than silently skipping the check. When the `-c` flag's own
+/// *position* is occupied by an unresolvable word (`bash $(echo -c) '...'`)
+/// this also fails closed — issue #71 — rather than silently treating that
+/// word as "definitely not `-c`" and letting the whole rule not fire.
 ///
 /// `rest_words` — `effective_command`'s tokens *after* the resolved
 /// interpreter, any leading transparent wrapper's own arguments already
@@ -1410,13 +1417,66 @@ fn evaluate_dash_c(
     allowlist: &Allowlist,
     depth: usize,
 ) -> Option<Verdict> {
-    let flag_index = rest_words.iter().position(|word| match word.resolution() {
-        Resolution::Resolved(s) => s == "-c" || short_cluster_contains(s, 'c'),
-        Resolution::Unresolvable(_) => false,
-    })?;
+    let outer_argv = argv.to_vec();
+    let flag_index =
+        match scan_for_flag(rest_words, |s| s == "-c" || short_cluster_contains(s, 'c')) {
+            FlagScan::Found(i) => i,
+            FlagScan::Uncertain(i) => {
+                return Some(match rest_words.get(i + 1) {
+                    Some(script_word) => match script_word.resolution() {
+                        Resolution::Resolved(script) => {
+                            let inner = analyze_at_depth(script, depth + 1, rules, allowlist);
+                            let reason = format!(
+                                "`{interpreter}`'s `-c` flag position could not be statically \
+                             resolved, but a trailing word recurses through the full pipeline; \
+                             inner decision: {:?}{}",
+                                inner.decision(),
+                                inner
+                                    .reason()
+                                    .map(|r| format!(" ({})", r.as_str()))
+                                    .unwrap_or_default()
+                            );
+                            match inner.decision() {
+                                Decision::Block => Verdict::block(
+                                    Reason::new(reason),
+                                    outer_argv,
+                                    inner.matched_rule().cloned(),
+                                ),
+                                Decision::Ask => Verdict::ask(Reason::new(reason), outer_argv),
+                                // An inner Allow does not clear the outer
+                                // uncertainty — the flag position itself is
+                                // still unresolvable, so this floors to Ask
+                                // rather than propagating the inner Allow.
+                                Decision::Allow => Verdict::ask(
+                                    Reason::new(format!(
+                                        "`{interpreter}`'s `-c` flag position could not be \
+                                     statically resolved; a trailing word recursed to Allow, \
+                                     but the flag position itself might still be `-c`"
+                                    )),
+                                    outer_argv,
+                                ),
+                            }
+                        }
+                        Resolution::Unresolvable(_) => Verdict::ask(
+                            Reason::new(format!(
+                                "`{interpreter}`'s `-c` flag position could not be statically \
+                             resolved, and neither could its trailing argument"
+                            )),
+                            outer_argv,
+                        ),
+                    },
+                    None => Verdict::ask(
+                        Reason::new(format!(
+                            "`{interpreter}`'s `-c` flag position could not be statically resolved"
+                        )),
+                        outer_argv,
+                    ),
+                });
+            }
+            FlagScan::Absent => return None,
+        };
     let script_word = rest_words.get(flag_index + 1)?;
 
-    let outer_argv = argv.to_vec();
     match script_word.resolution() {
         Resolution::Resolved(script) => {
             let inner = analyze_at_depth(script, depth + 1, rules, allowlist);
@@ -2075,11 +2135,6 @@ fn bare_parameter_name(word: &Word) -> Option<&str> {
     }
 }
 
-/// Whether `word` resolved to exactly the literal string `expected`.
-fn is_resolved_exactly(word: &NormalizedWord, expected: &str) -> bool {
-    matches!(word.resolution(), Resolution::Resolved(s) if s == expected)
-}
-
 /// Splits `value` on bash's default-IFS whitespace (space/tab/newline),
 /// dropping empty fields — the same field-splitting behaviour an unquoted
 /// `$VAR` in command position undergoes at runtime. Used by rule 2 to
@@ -2137,19 +2192,6 @@ fn inline_code_flag(name: &str) -> Option<&'static str> {
     }
 }
 
-/// The resolved strings of `stage`, in order, silently skipping any
-/// unresolvable word — the same membership-based-matching rationale as
-/// `crate::rules`' private `resolved_strings`.
-fn resolved_strings_of(stage: &[NormalizedWord]) -> Vec<&str> {
-    stage
-        .iter()
-        .filter_map(|w| match w.resolution() {
-            Resolution::Resolved(s) => Some(s.as_str()),
-            Resolution::Unresolvable(_) => None,
-        })
-        .collect()
-}
-
 /// Rule 5: whether `stage` is an interpreter a pipeline may terminate in.
 /// Resolved through [`crate::rules::effective_command`] (basename +
 /// transparent-wrapper skip), so a path-qualified or wrapped sink
@@ -2170,6 +2212,43 @@ fn short_cluster_contains(token: &str, c: char) -> bool {
         .is_some_and(|rest| !rest.is_empty() && !rest.starts_with('-') && rest.contains(c))
 }
 
+/// Result of scanning a word slice left-to-right for a flag token when some
+/// words may be [`Resolution::Unresolvable`]. The scan stops at the FIRST
+/// word that is either a resolved match or unresolvable — an unresolvable
+/// word earlier than a resolved match wins, because position matters (a
+/// word we cannot read at an earlier position may be the flag, or may
+/// demote a later literal flag to a positional argument).
+#[must_use]
+enum FlagScan {
+    Found(usize),
+    Uncertain(usize),
+    Absent,
+}
+
+impl FlagScan {
+    /// `true` unless the flag is provably absent (`Found` and `Uncertain`
+    /// both count — fail-closed per issues #71/#53: an unresolvable word
+    /// that might be the flag must never be treated the same as its
+    /// confirmed absence).
+    fn possibly_found(&self) -> bool {
+        !matches!(self, Self::Absent)
+    }
+}
+
+/// Scans `words` left-to-right for the first word that either resolves and
+/// satisfies `matches`, or is unresolvable (see [`FlagScan`]'s docs for why
+/// an earlier unresolvable word wins over a later resolved match).
+fn scan_for_flag(words: &[NormalizedWord], matches: impl Fn(&str) -> bool) -> FlagScan {
+    for (i, w) in words.iter().enumerate() {
+        match w.resolution() {
+            Resolution::Resolved(s) if matches(s) => return FlagScan::Found(i),
+            Resolution::Resolved(_) => {}
+            Resolution::Unresolvable(_) => return FlagScan::Uncertain(i),
+        }
+    }
+    FlagScan::Absent
+}
+
 /// Rule 5b: whether `stage` is a decode/transform command in the sense
 /// this module cares about (`base64 -d`/`--decode`, `xxd -r`, `openssl enc
 /// -d`, `rev`, `tr`) — the fixed, code-level policy set named in the gate
@@ -2179,17 +2258,32 @@ fn short_cluster_contains(token: &str, c: char) -> bool {
 /// [`crate::rules::effective_command`], so `env base64 -d` still reaches
 /// the same `-d` flag check as a bare `base64 -d` (security-review fix,
 /// finding 2).
+///
+/// Every flag check below uses [`scan_for_flag`] rather than filtering
+/// `rest_words` down to only its resolved strings first — issue #53 C-1:
+/// hiding the flag behind a command substitution (`base64 $(echo -d)`)
+/// must not silently read as "no decode flag present". An unresolvable
+/// word anywhere a flag could be counts as "possibly a decode stage",
+/// closing toward Block per plan.md §4's fail-closed principle. The
+/// `openssl` subcommand check applies the same reasoning to its first
+/// word: an unresolvable first word might be `enc`, so it counts too.
 fn is_decode_stage(stage: &[NormalizedWord]) -> bool {
     let Some((name, rest_words)) = crate::rules::effective_command(stage) else {
         return false;
     };
-    let rest = resolved_strings_of(rest_words);
     match name {
-        "base64" => rest
-            .iter()
-            .any(|token| *token == "--decode" || short_cluster_contains(token, 'd')),
-        "xxd" => rest.contains(&"-r"),
-        "openssl" => rest.first() == Some(&"enc") && rest.contains(&"-d"),
+        "base64" => scan_for_flag(rest_words, |s| {
+            s == "--decode" || short_cluster_contains(s, 'd')
+        })
+        .possibly_found(),
+        "xxd" => scan_for_flag(rest_words, |s| s == "-r").possibly_found(),
+        "openssl" => {
+            let first_could_be_enc = rest_words.first().is_some_and(|w| match w.resolution() {
+                Resolution::Resolved(s) => s == "enc",
+                Resolution::Unresolvable(_) => true,
+            });
+            first_could_be_enc && scan_for_flag(rest_words, |s| s == "-d").possibly_found()
+        }
         "rev" | "tr" => true,
         _ => false,
     }
@@ -2364,6 +2458,39 @@ mod tests {
     #[test]
     fn sh_clustered_dash_uc_recurses_and_blocks() {
         assert_decision("sh -uc 'rm -rf /'", Decision::Block);
+    }
+
+    // ==== Issues #71/#53: an unresolvable word at a scanned flag position
+    // must never read as "definitely not the flag" — `scan_for_flag`'s
+    // fail-closed handling of `Resolution::Unresolvable`. ====
+
+    #[test]
+    fn bash_dash_c_hidden_behind_substitution_still_recurses_and_blocks() {
+        // Issue #71's headline case: without the fix, the unresolvable
+        // `$(echo -c)` made `evaluate_dash_c`'s flag search skip past it
+        // entirely, rule 6a never fired, and `rm -rf /` reached Allow.
+        assert_decision("bash $(echo -c) 'rm -rf /'", Decision::Block);
+    }
+
+    #[test]
+    fn python_dash_c_hidden_behind_substitution_is_still_ask_floor() {
+        assert_decision(
+            "python3 $(echo -c) 'import os; os.system(\"rm -rf /\")'",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn base64_decode_flag_hidden_behind_substitution_still_blocks() {
+        // Issue #53 C-1: `resolved_strings_of` used to drop the unresolvable
+        // word, so `is_decode_stage` saw no decode flag at all and this
+        // downgraded from Block to Ask.
+        assert_decision("base64 $(echo -d) payload.txt | sh", Decision::Block);
+    }
+
+    #[test]
+    fn base64_no_decode_stage_still_asks() {
+        assert_decision("base64 payload.txt | sh", Decision::Ask);
     }
 
     // ==== Adversarial-review finding: rule 6a/6b dispatch must resolve the
