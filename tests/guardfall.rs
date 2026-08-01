@@ -319,21 +319,26 @@ fn guardfall_issue_77_brace_command_position_cases() {
         // fixed here.
         ("rm{,$IFS-rf$IFS/$(true)}", Decision::Ask),
         ("rm -rf$IFS/$(true)", Decision::Ask), // brace-free control, same limit
-        // A third /security-review pass found this exact "flag and target
-        // both hidden" shape ALSO reachable via `$IFS`-packing a non-
-        // winning brace alternative (rather than the plain, brace-free
-        // form above) — and, unlike the brace-free form, this ordering was
-        // `Ask` on `main` (rule 1's old blanket scan happened to catch it,
-        // purely as a side effect of not distinguishing winning from
-        // leftover branches) and regressed to `Allow` on this branch
-        // before `evaluate_leftover_alternative_substitutions` grew an
-        // unconditional floor for exactly this shape (see that function's
-        // own doc comment): a leftover alternative that contains BOTH an
-        // unquoted `$IFS` piece and a substitution can never be trusted to
-        // be "just one argv slot's value" the way an ordinary argument-
-        // position substitution is, since `$IFS` splitting would have
-        // multiplied it into several tokens had the substitution not
-        // short-circuited that split entirely.
+        // Three further /security-review passes found this exact "flag and
+        // target both hidden" shape ALSO reachable via a non-winning brace
+        // alternative that glues literal `-i` text to a substitution via
+        // SOME OTHER piece riding alongside it — unlike the plain,
+        // brace-free form above, every ordering below was `Ask` on `main`
+        // (rule 1's old blanket scan happened to catch it, purely as a
+        // side effect of not distinguishing winning from leftover
+        // branches) and regressed to `Allow` on this branch, through three
+        // successively-broadened attempts at the fix, before
+        // `evaluate_leftover_alternative_substitutions` landed on an
+        // unconditional floor for ANY leftover alternative built from more
+        // than one piece (see that function's own doc comment for the full
+        // "second/fourth/fifth round" history): `$IFS` itself; ANY bare
+        // parameter expansion (`${f}`/`$*`/`$@`, just as unresolvable to
+        // this stage as `$IFS` and just as capable of holding a runtime
+        // space); and finally the substitution's OWN output standing in
+        // for the separator (`$(printf " ")`), with no `$IFS`/`$VAR`
+        // involved at all — none of them are "just one argv slot's value"
+        // the way a genuinely single-piece argument-position substitution
+        // is.
         (
             "sed{,$IFS-i$IFS$(printf x)$IFS~/.config/shguard/config.toml}",
             Decision::Ask,
@@ -349,16 +354,6 @@ fn guardfall_issue_77_brace_command_position_cases() {
             "sed{,$IFS-i$IFS$(true)$IFS~/.config/shguard/config.toml}",
             Decision::Ask,
         ),
-        // A fourth /security-review pass found the floor above was too
-        // narrow: it only recognized `$IFS` by name, but ANY bare
-        // parameter expansion is just as unresolvable to this stage
-        // (`normalize::resolve_piece` has no more idea what `$f` holds
-        // than what a same-line `IFS=` reassignment would make `$IFS`
-        // hold) — and a real shell word-splits ANY unquoted expansion
-        // whose runtime value contains whitespace, not only literal
-        // `$IFS`. `${f}`/`$*`/`$@` are fully equivalent stand-ins once a
-        // same-line assignment sets the variable to a space; confirmed
-        // with the assignment made explicit below rather than assumed.
         (
             "f=' '; sed{,-i${f}$(printf p)${f}/home/user/.config/shguard/config.toml}",
             Decision::Ask,
@@ -369,6 +364,13 @@ fn guardfall_issue_77_brace_command_position_cases() {
         ),
         (
             "sed{,-i$@$(true)~/.config/shguard/config.toml}",
+            Decision::Ask,
+        ),
+        // No `$IFS`/`$VAR` at all here — the substitution's own runtime
+        // output (a space) is the separator, and only the substitution
+        // piece itself sits beside the literal `-i` text.
+        (
+            "{sed,-i$(printf \" \")~/.config/shguard/config.toml}",
             Decision::Ask,
         ),
     ];

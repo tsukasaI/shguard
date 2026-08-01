@@ -1850,46 +1850,46 @@ fn evaluate_argument_substitutions(
 /// scanned by anything once rule 1 stops treating every substitution in
 /// that word as command-position-ambiguous.
 ///
-/// # The unconditional splitting-companion floor (second AND fourth
+/// # The unconditional multi-piece floor (second, fourth, and fifth
 /// /security-review round follow-ups)
 ///
 /// Rule 3's transparency assumes one opaque (`Unresolvable`) word is one
 /// argv slot's value — true for an ordinary argument-position substitution
 /// (`rm -rf $(x)`), where a dangerous flag sits in its OWN, separately
-/// resolved word. It does NOT hold for a leftover alternative that also
-/// contains a piece that could stand in for a literal separator or
-/// otherwise multiply this alternative's token count: absent the
-/// substitution, that piece would have split (or itself made opaque) this
-/// alternative into MULTIPLE tokens, but `resolve_pieces`' word-level
-/// short-circuit (its own docs: "one Unresolvable word, not a partially-
-/// folded one") collapses the whole run — flag, target, and substitution
-/// alike — into a single opaque word the moment it hits ANY unresolvable
-/// piece. `sed{,$IFS-i$IFS$(x)$IFS<config path>}` is the `$IFS` case;
-/// `sed{,-i${f}$(x)${f}<config path>}` (with a same-line `f=' '`) is
-/// exactly as exploitable — `${f}` is just as unresolvable as `$IFS` from
-/// this stage's point of view (`normalize::resolve_piece` has no more idea
-/// what `$f` holds than what a same-line `IFS=` reassignment would make
-/// `$IFS` hold), and a real shell word-splits ANY unquoted parameter
-/// expansion whose value happens to contain whitespace, not only `$IFS`
-/// literally. Recursing `x` alone (Allow) says nothing about whether `-i`
-/// is hidden alongside it in either shape, and there is no separately-
-/// resolved token left for rule 4's `matches_except_target` to check
-/// against `targets` either — the ONLY place either shape can be floored
-/// is here, unconditionally, regardless of what the substitution(s)
-/// inside recurse to. `ArithmeticExpansion`/`ProcessSubstitution` pieces
-/// count as companions too, for defense in depth: whichever piece
-/// `resolve_pieces` happens to error on FIRST determines the resulting
-/// word's own `UnresolvableKind`, so a `CommandSubstitution` earlier in
-/// the same piece run can hide a later `ArithmeticExpansion`/
-/// `ProcessSubstitution` from [`is_opaque_unresolvable`]'s own,
-/// argv-level floor. An alternative with none of these — just a
-/// substitution and otherwise only `Literal`/`SingleQuoted`/
-/// `EscapeSequence`/`AnsiCQuoted`/`Tilde` pieces (none of which can ever
-/// split or add opacity, matching real bash: ANSI-C/backslash-escaped
-/// whitespace is quoting, not a word-split point) — stays purely
-/// transparent (its own recursion result is the only signal), since it is
-/// genuinely just one token, no different from an ordinary argument-
-/// position substitution slot.
+/// resolved word. It does NOT hold for a leftover alternative built from
+/// MORE THAN ONE piece: `resolve_pieces`' word-level short-circuit (its own
+/// docs: "one Unresolvable word, not a partially-folded one") collapses
+/// the *entire* piece run — flag, target, and substitution alike — into a
+/// single opaque word the moment it hits the first unresolvable piece,
+/// discarding whatever else was glued alongside it. What that "whatever
+/// else" is doesn't matter — this went through three narrower, each-time-
+/// insufficient attempts before landing here:
+/// - `sed{,$IFS-i$IFS$(x)$IFS<config path>}`: `$IFS` glued beside the
+///   substitution would have split into multiple tokens.
+/// - `sed{,-i${f}$(x)${f}<config path>}` (same-line `f=' '`): `${f}` is
+///   just as unresolvable to this stage as `$IFS` (`normalize::resolve_piece`
+///   has no more idea what `$f` holds than what a same-line `IFS=`
+///   reassignment would make `$IFS` hold), and a real shell word-splits
+///   ANY unquoted expansion whose runtime value contains whitespace, not
+///   only one literally named `IFS`.
+/// - `sed{,-i$(printf " ")<config path>}`: the substitution's OWN runtime
+///   output can be the separator — no `$IFS`/`$VAR` involved at all, just
+///   literal `-i` glued directly to the substitution.
+///
+/// All three collapse to one opaque word with something else riding along
+/// beside the substitution — which is exactly what "more than one piece in
+/// this alternative" means, regardless of which specific piece kind that
+/// something else is. Recursing the substitution alone (Allow, in every
+/// example above) says nothing about whether `-i` is hidden alongside it,
+/// and there is no separately-resolved token left for rule 4's
+/// `matches_except_target` to check against `targets` either — the ONLY
+/// place any of these shapes can be floored is here, unconditionally,
+/// regardless of what the substitution(s) inside recurse to. A leftover
+/// alternative that is JUST the substitution alone (`pieces.len() == 1`,
+/// e.g. `{rm,-rf,$(printf /)}`'s `$(printf /)` member) has nothing to hide
+/// beside it and stays purely transparent (its own recursion result is the
+/// only signal) — genuinely just one token, no different from an ordinary
+/// argument-position substitution slot.
 fn evaluate_leftover_alternative_substitutions(
     leftover_alternatives: &[Vec<WordPiece>],
     depth: usize,
@@ -1909,15 +1909,27 @@ fn evaluate_leftover_alternative_substitutions(
         collect_process_substitutions_into(pieces, &mut proc_subs);
 
         let has_substitution = !subs.is_empty() || !proc_subs.is_empty();
-        let has_splitting_or_opaque_companion = pieces.iter().any(|piece| {
-            matches!(
-                piece,
-                WordPiece::ParameterExpansion(_)
-                    | WordPiece::ArithmeticExpansion(_)
-                    | WordPiece::ProcessSubstitution { .. }
-            )
-        });
-        if has_substitution && has_splitting_or_opaque_companion {
+        // Fifth /security-review round's follow-up: a piece-*kind* check
+        // (only `ParameterExpansion`/`ArithmeticExpansion`/
+        // `ProcessSubstitution` counted as "companions") missed that a
+        // command/backquote substitution's own OUTPUT can just as well
+        // stand in for a literal separator at runtime (`$(printf " ")`
+        // emits a space) — the substitution piece itself is the
+        // "companion" in that shape, not some other piece kind. The real
+        // dividing line isn't which piece kind sits beside the
+        // substitution, it's whether there IS a piece beside it at all:
+        // any top-level piece count above 1 means this alternative glues
+        // together AT LEAST two things `resolve_pieces`' short-circuit (its
+        // own docs: "one Unresolvable word, not a partially-folded one")
+        // then collapses into a single opaque blob the moment it hits the
+        // first unresolvable piece — which can hide literal flag/target
+        // text beside the substitution regardless of what specifically
+        // sits next to it. A leftover alternative that is JUST the
+        // substitution alone (`pieces.len() == 1`, e.g. `{rm,-rf,$(printf
+        // /)}`'s `$(printf /)` member) has nothing to hide beside it and
+        // stays purely transparent — no different from an ordinary
+        // argument-position substitution slot.
+        if has_substitution && pieces.len() > 1 {
             raise(Decision::Ask);
         }
 
