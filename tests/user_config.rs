@@ -448,6 +448,49 @@ fn xdg_config_home_non_utf8_fails_closed() {
 
 // ==== Discovery / precedence ====
 
+// Regression for E2-2 (issue #59): `HOME=""` must not fall back to a
+// CWD-relative `.config/shguard/config.toml` -- an agent that can't set
+// its own `HOME` but *can* write files (Bash/Write access, the same
+// threat model `src/config.rs`'s module docs describe) could otherwise
+// plant a malicious config at a relative path and have it silently loaded
+// on the next invocation that happens to run with an empty `HOME`. Plants
+// a `[[deny]]` rule for `ls` at `<tempdir>/.config/shguard/config.toml`,
+// runs the binary from that tempdir with `HOME=""` and no
+// `SHGUARD_CONFIG`/`XDG_CONFIG_HOME`, and confirms `ls -la` still gets its
+// ordinary built-in-rules decision (`allow`) instead of the planted `deny`.
+// `run_hook` doesn't set `current_dir`, so this test builds the `Command`
+// directly, mirroring `run_hook`'s env-isolation pattern.
+#[test]
+fn empty_home_does_not_fall_back_to_cwd_relative_config() {
+    let dir = tempdir().expect("tempdir should create");
+    let config_dir = dir.path().join(".config").join("shguard");
+    fs::create_dir_all(&config_dir).expect("config dir should create");
+    fs::write(
+        config_dir.join("config.toml"),
+        r#"
+        [[deny]]
+        id = "planted-by-agent"
+        reason = "planted via a CWD-relative config, must never be loaded"
+        command = "ls"
+    "#,
+    )
+    .expect("config file should write");
+
+    let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
+    let assert = cmd
+        .env_remove("SHGUARD_CONFIG")
+        .env_remove("XDG_CONFIG_HOME")
+        .env("HOME", "")
+        .current_dir(dir.path())
+        .write_stdin(bash_command("ls -la"))
+        .assert()
+        .success();
+    let output: Value =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout should be valid JSON");
+
+    assert_eq!(permission_decision(&output), "allow");
+}
+
 #[test]
 fn absent_default_path_behaves_like_zero_config() {
     let home = tempdir().expect("tempdir should create");
