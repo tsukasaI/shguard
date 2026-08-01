@@ -608,11 +608,12 @@ fn evaluate_function_definition(
 }
 
 /// Rule 5b/5c: a pipeline whose final stage is an interpreter. A decode or
-/// transform stage anywhere upstream (`base64 -d`, `xxd -r`, `openssl enc
-/// -d`, `rev`, `tr`) blocks — the payload is deliberately hidden from
-/// static analysis and there is no routine agent workflow that pipes
-/// decoded data into an interpreter. Without a decode stage, the content is
-/// merely unknowable, not deliberately hidden, so it asks instead.
+/// transform stage anywhere upstream (`base64 -d`, `base32 -d`, `xxd -r`,
+/// `openssl enc -d`, `gunzip`, `zcat`, `uudecode`, `rev`, `tr`) blocks — the
+/// payload is deliberately hidden from static analysis and there is no
+/// routine agent workflow that pipes decoded data into an interpreter.
+/// Without a decode stage, the content is merely unknowable, not
+/// deliberately hidden, so it asks instead.
 ///
 /// Returns `None` when the shape does not apply at all (fewer than two
 /// stages, or the final stage is not an interpreter) — the caller folds
@@ -627,9 +628,10 @@ fn evaluate_pipeline_shape(stages: &[Vec<NormalizedWord>]) -> Option<Verdict> {
     if earlier.iter().any(|stage| is_decode_stage(stage)) {
         Some(Verdict::block(
             Reason::new(
-                "pipeline decodes/transforms data upstream (base64/xxd/openssl/rev/tr) and pipes \
-                 the result into an interpreter — the payload is deliberately hidden from static \
-                 analysis and no routine agent workflow needs this shape",
+                "pipeline decodes/transforms data upstream (base64/base32/xxd/openssl/gunzip/zcat/\
+                 uudecode/rev/tr) and pipes the result into an interpreter — the payload is \
+                 deliberately hidden from static analysis and no routine agent workflow needs \
+                 this shape",
             ),
             last.clone(),
             None,
@@ -2250,14 +2252,14 @@ fn scan_for_flag(words: &[NormalizedWord], matches: impl Fn(&str) -> bool) -> Fl
 }
 
 /// Rule 5b: whether `stage` is a decode/transform command in the sense
-/// this module cares about (`base64 -d`/`--decode`, `xxd -r`, `openssl enc
-/// -d`, `rev`, `tr`) — the fixed, code-level policy set named in the gate
-/// rules (not user-editable via `rules/blocklist.toml`, unlike stage 3's
-/// rules — this is structural policy about pipeline *shape*, not an
-/// exact-argv match). Also resolved through
-/// [`crate::rules::effective_command`], so `env base64 -d` still reaches
-/// the same `-d` flag check as a bare `base64 -d` (security-review fix,
-/// finding 2).
+/// this module cares about (`base64`/`base32` `-d`/`--decode`, `xxd -r`,
+/// `openssl enc -d`, `gunzip`, `zcat`, `uudecode`, `rev`, `tr`) — the fixed,
+/// code-level policy set named in the gate rules (not user-editable via
+/// `rules/blocklist.toml`, unlike stage 3's rules — this is structural
+/// policy about pipeline *shape*, not an exact-argv match). Also resolved
+/// through [`crate::rules::effective_command`], so `env base64 -d` still
+/// reaches the same `-d` flag check as a bare `base64 -d` (security-review
+/// fix, finding 2).
 ///
 /// Every flag check below uses [`scan_for_flag`] rather than filtering
 /// `rest_words` down to only its resolved strings first — issue #53 C-1:
@@ -2267,12 +2269,16 @@ fn scan_for_flag(words: &[NormalizedWord], matches: impl Fn(&str) -> bool) -> Fl
 /// closing toward Block per plan.md §4's fail-closed principle. The
 /// `openssl` subcommand check applies the same reasoning to its first
 /// word: an unresolvable first word might be `enc`, so it counts too.
+///
+/// `gunzip`, `zcat`, and `uudecode` (issue #53 C-2) join `rev`/`tr` as
+/// unconditional matches — decompression/decoding is these commands' only
+/// purpose, with no flag that turns it off.
 fn is_decode_stage(stage: &[NormalizedWord]) -> bool {
     let Some((name, rest_words)) = crate::rules::effective_command(stage) else {
         return false;
     };
     match name {
-        "base64" => scan_for_flag(rest_words, |s| {
+        "base64" | "base32" => scan_for_flag(rest_words, |s| {
             s == "--decode" || short_cluster_contains(s, 'd')
         })
         .possibly_found(),
@@ -2284,7 +2290,7 @@ fn is_decode_stage(stage: &[NormalizedWord]) -> bool {
             });
             first_could_be_enc && scan_for_flag(rest_words, |s| s == "-d").possibly_found()
         }
-        "rev" | "tr" => true,
+        "rev" | "tr" | "gunzip" | "zcat" | "uudecode" => true,
         _ => false,
     }
 }
@@ -2491,6 +2497,18 @@ mod tests {
     #[test]
     fn base64_no_decode_stage_still_asks() {
         assert_decision("base64 payload.txt | sh", Decision::Ask);
+    }
+
+    // ==== Issue #53 C-2: decode-stage enumeration gaps (base32/gunzip). ====
+
+    #[test]
+    fn base32_decode_fed_interpreter_pipe_blocks() {
+        assert_decision("base32 -d payload.txt | sh", Decision::Block);
+    }
+
+    #[test]
+    fn gunzip_fed_interpreter_pipe_blocks() {
+        assert_decision("gunzip -c payload.gz | sh", Decision::Block);
     }
 
     // ==== Adversarial-review finding: rule 6a/6b dispatch must resolve the
