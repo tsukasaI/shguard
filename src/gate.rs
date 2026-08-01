@@ -2678,14 +2678,26 @@ pub(crate) fn scan_for_flag(words: &[NormalizedWord], matches: impl Fn(&str) -> 
 ///
 /// `gunzip`, `zcat`, and `uudecode` (issue #53 C-2) join `rev`/`tr` as
 /// unconditional matches — decompression/decoding is these commands' only
-/// purpose, with no flag that turns it off.
+/// purpose, with no flag that turns it off. `gzip` itself is NOT
+/// unconditional like `gunzip` — bare `gzip file` compresses, so it only
+/// counts as a decode stage when a decompress flag (`-d`/`--decompress`/
+/// `--uncompress`, including short-cluster combos like `-dc`) is present
+/// (bypass-hunt finding against this branch: `gzip -d` is the fully
+/// standard way to decompress with the `gzip` binary itself, `gunzip`
+/// being just a convenience alias for it).
 fn is_decode_stage(stage: &[NormalizedWord]) -> bool {
     let Some((name, rest_words)) = crate::rules::effective_command(stage) else {
         return false;
     };
     match name {
+        // BSD/macOS `base64`/`base32` spell their decode flag `-D`
+        // (uppercase) alongside the GNU `-d`/`--decode` spelling
+        // (bypass-hunt finding against this branch) — checked here via an
+        // explicit uppercase alternative rather than making
+        // `short_cluster_contains` itself case-insensitive, since other
+        // commands (e.g. `tar -x`/`-X`) use case to mean different things.
         "base64" | "base32" => scan_for_flag(rest_words, |s| {
-            s == "--decode" || short_cluster_contains(s, 'd')
+            s == "--decode" || short_cluster_contains(s, 'd') || short_cluster_contains(s, 'D')
         })
         .possibly_found(),
         "xxd" => scan_for_flag(rest_words, |s| s == "-r").possibly_found(),
@@ -2696,6 +2708,10 @@ fn is_decode_stage(stage: &[NormalizedWord]) -> bool {
             });
             first_could_be_enc && scan_for_flag(rest_words, |s| s == "-d").possibly_found()
         }
+        "gzip" => scan_for_flag(rest_words, |s| {
+            s == "--decompress" || s == "--uncompress" || short_cluster_contains(s, 'd')
+        })
+        .possibly_found(),
         "rev" | "tr" | "gunzip" | "zcat" | "uudecode" => true,
         _ => false,
     }
@@ -2936,6 +2952,22 @@ mod tests {
         assert_decision("mke2fs -t ext4 /dev/sda1", Decision::Block);
     }
 
+    // ==== bypass-hunt finding against this branch: bare `mkfs -t <type>`
+    // dispatches to `mkfs.<type>` but wasn't matched by the `mkfs.`
+    // command_prefix rule. ====
+
+    #[test]
+    fn mkfs_dispatcher_with_type_flag_blocks() {
+        assert_decision("mkfs -t ext4 /dev/sda1", Decision::Block);
+    }
+
+    #[test]
+    fn mkfs_without_type_flag_does_not_falsely_match_dispatcher_rule() {
+        // `mkfs` with no `-t`/`--type` just prints usage and does nothing
+        // destructive; no other rule claims bare `mkfs` either.
+        assert_decision("mkfs /dev/sda1", Decision::Allow);
+    }
+
     // ==== Issue #58: truncate --size and git tag --force long forms
     // weren't OR'd into required_flags. ====
 
@@ -2997,6 +3029,57 @@ mod tests {
     #[test]
     fn gunzip_fed_interpreter_pipe_blocks() {
         assert_decision("gunzip -c payload.gz | sh", Decision::Block);
+    }
+
+    // ==== bypass-hunt findings against this branch: base64 -D / gzip -d. ====
+
+    #[test]
+    fn base64_uppercase_decode_flag_fed_interpreter_pipe_blocks() {
+        // BSD/macOS `base64 -D` (uppercase) is the live decode flag on
+        // macOS; `is_decode_stage` only checked the lowercase `-d`/
+        // `--decode` spellings, so this reached Ask instead of Block.
+        assert_decision("echo cm0gLXJmIC8= | base64 -D | sh", Decision::Block);
+    }
+
+    #[test]
+    fn base64_lowercase_decode_flag_still_blocks() {
+        assert_decision("echo cm0gLXJmIC8= | base64 -d | sh", Decision::Block);
+    }
+
+    #[test]
+    fn gzip_decompress_short_flag_fed_interpreter_pipe_blocks() {
+        // `gzip -d` decompresses exactly like `gunzip`; `is_decode_stage`
+        // had no arm for `gzip` at all, so this reached Ask instead of
+        // Block.
+        assert_decision(
+            "echo H4sIAAAAAAAA/0vLL0oFAA== | gzip -d | sh",
+            Decision::Block,
+        );
+    }
+
+    #[test]
+    fn gzip_decompress_long_flag_fed_interpreter_pipe_blocks() {
+        assert_decision(
+            "echo H4sIAAAAAAAA/0vLL0oFAA== | gzip --decompress | sh",
+            Decision::Block,
+        );
+    }
+
+    #[test]
+    fn gzip_bare_compress_is_not_a_decode_stage() {
+        // Bare `gzip file` COMPRESSES, it does not decompress — must not be
+        // treated as a decode stage just because the command name is
+        // `gzip`.
+        assert_decision("gzip -c file.txt | wc -c", Decision::Allow);
+    }
+
+    #[test]
+    fn gzip_compress_flag_fed_interpreter_pipe_only_asks() {
+        // Same false-positive check as above, but with an interpreter sink
+        // present: `-c` (write to stdout) is not a decompress flag, so this
+        // must fall through to the plain "unknown piped content" Ask, not
+        // the decode-stage Block.
+        assert_decision("gzip -c file.txt | sh", Decision::Ask);
     }
 
     // ==== Adversarial-review finding: rule 6a/6b dispatch must resolve the

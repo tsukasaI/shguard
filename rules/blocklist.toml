@@ -225,6 +225,12 @@ id = "mkntfs-any-filesystem"
 reason = "mkntfs is the implementation behind mkfs.ntfs, formatting a filesystem and destroying all data"
 command = "mkntfs"
 
+[[command]]
+id = "mkfs-dispatcher-any-filesystem"
+reason = "mkfs -t <type> dispatches to mkfs.<type>, formatting a filesystem and destroying all data on the target"
+command = "mkfs"
+required_flags = ["t|--type"]
+
 # tar extraction with -C/--directory into / or ~ overwrites arbitrary paths
 # with archive contents. Two rules, block before ask (rule order decides —
 # first match in this file wins): the block rule requires an explicit
