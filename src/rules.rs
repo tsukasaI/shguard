@@ -4194,6 +4194,26 @@ mod tests {
         );
     }
 
+    // Companion to the test above (code review finding on issue #59's audit,
+    // same class as `matches_except_flags_positional_discipline_rejects_wrong_subcommand`'s
+    // own companion `matches_except_flags_still_fires_via_a_different_rule_for_the_right_subcommand`):
+    // an `assert_ne` on one rule id alone would still pass if NO rule
+    // matched at all — a silent regression. Pin the positive expectation:
+    // the same argv still floors to `self-protect-config-rm-tilde`
+    // (flagless, targets the config directory), since its lack of a
+    // `required_flags` constraint means the missing `-f` never disqualifies
+    // it the way it disqualifies `rm-recursive-force-dangerous-target`.
+    #[test]
+    fn except_target_requires_required_flags_too_still_fires_self_protect_rule() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv_with_unresolvable_tail(&["rm", "-r"]);
+        let matched = rules.match_command_except_target(&cmd);
+        assert_eq!(
+            matched.map(|rule| rule.id().as_str()),
+            Some("self-protect-config-rm-tilde")
+        );
+    }
+
     // ==== NEW rule 4b partial-match API: matches_except_flags /
     // match_command_except_flags (issue #42, src/gate.rs) ====
 
