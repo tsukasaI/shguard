@@ -1060,9 +1060,9 @@ fn evaluate_simple_command_core(
     // — that says the substitution is safe to *run*, not that its
     // *output* is a safe target for this command, so it still routes here
     // rather than falling through rule 3 alone.
-    let except_target_rule = if has_argument_position_bare_var(argument_words)
-        || has_argument_position_substitution(argument_words)
-    {
+    let argument_position_ambiguous = has_argument_position_bare_var(argument_words)
+        || has_argument_position_substitution(argument_words);
+    let except_target_rule = if argument_position_ambiguous {
         rules.match_command_except_target(&argv)
     } else {
         None
@@ -1078,9 +1078,7 @@ fn evaluate_simple_command_core(
     // (the literal `-delete` spelling isn't in any *resolved* word), and
     // fall through to a silent Allow. See
     // `crate::rules::CommandRule::matches_except_flags`.
-    let except_flags_rule = if has_argument_position_bare_var(argument_words)
-        || has_argument_position_substitution(argument_words)
-    {
+    let except_flags_rule = if argument_position_ambiguous {
         rules.match_command_except_flags(&argv)
     } else {
         None

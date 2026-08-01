@@ -639,6 +639,16 @@ fn convert_heredoc(heredoc: &bast::IoHereDocument) -> Result<Redirection, ParseE
 /// docs/adr/0001-parser-crate.md's evidence for construct #15).
 fn convert_word(word: &bast::Word) -> Result<Word, ParseError> {
     let raw = word.value.as_str();
+    // Cheap pre-check (E2-6, issue #59): a word with no `{` at all — the
+    // common case — can never contain a brace expansion, so skip the
+    // brace-expansion pre-pass entirely and fall straight through to the
+    // ordinary word parse below, rather than parsing the same text twice.
+    // Purely a hot-path dedup: behavior for a `{`-containing word (valid
+    // or malformed) is unchanged, since it still takes the exact same path
+    // through `parse_brace_expansions` it always did.
+    if !raw.contains('{') {
+        return Ok(Word(convert_word_text(raw)?));
+    }
     let brace_segments = bword::parse_brace_expansions(raw, &parser_options())
         .map_err(|err| ParseError::syntax(format!("brace-expansion parse of {raw:?}: {err}")))?;
 
@@ -1038,6 +1048,19 @@ mod tests {
                 Word(vec![WordPiece::Literal("b".to_string())]),
             ])]
         );
+    }
+
+    // Regression for E2-6 (issue #59): `convert_word`'s `raw.contains('{')`
+    // pre-check must only skip the brace-expansion pre-pass for words with
+    // no `{` at all — a word that contains `{` but forms no valid brace
+    // expansion (no comma/range, unbalanced) still takes the exact same
+    // `parse_brace_expansions` path it did before the pre-check existed,
+    // landing on the same plain-literal result.
+    #[test]
+    fn brace_like_text_without_valid_expansion_parses_as_literal() {
+        let cmd = parse_ok("echo {foo");
+        let word = &simple(&cmd.first.first).words[1];
+        assert_eq!(word.0, vec![WordPiece::Literal("{foo".to_string())]);
     }
 
     // ---- 16. pipeline ----
