@@ -871,13 +871,12 @@ impl CommandRule {
     }
 
     /// Partial-match probe for the structural gate (plan.md §4 NEW rule,
-    /// `src/gate.rs`): `true` when this rule's command+flags match `argv`
-    /// (the dangerous shape is present), this rule *has* a target
-    /// constraint (an empty `targets` list means "any target" and is
-    /// already a full match via [`Self::matches`] — nothing left to
-    /// refine), and `argv` contains at least one unresolvable word — so the
-    /// target itself could not be statically checked and might be exactly
-    /// the value this rule guards against. This kind-agnostic "any
+    /// `src/gate.rs`): `true` when this rule's command matches `argv`, this
+    /// rule *has* a target constraint (an empty `targets` list means "any
+    /// target" and is already a full match via [`Self::matches`] — nothing
+    /// left to refine), and `argv` contains at least one unresolvable word
+    /// — so the target itself could not be statically checked and might be
+    /// exactly the value this rule guards against. This kind-agnostic "any
     /// unresolvable word" check covers both a bare `$VAR` (`rm -rf $HOME`)
     /// and a `$()`/backtick substitution in target position (`rm -rf
     /// $(echo /)`, issue #34) — both normalise to a
@@ -889,13 +888,48 @@ impl CommandRule {
     /// otherwise-Allow argument-position bare `$VAR` or substitution to
     /// Ask, never to Block — an unresolvable target must never silently
     /// upgrade to a rule hit here.
+    ///
+    /// # Required flags/tokens: strict or relaxed (fable/security-review
+    /// follow-up to issue #77)
+    ///
+    /// The ordinary, strict shape is [`Self::constraints_match`] holding
+    /// outright — flags/tokens already resolve-and-match, only the target
+    /// is ambiguous (`rm -rf $HOME`). But a required flag can itself be
+    /// hidden inside the SAME unresolvable word as (or a sibling brace
+    /// alternative to) the target — `rm{,$IFS-rf$IFS/$(evil)}`'s leftover
+    /// branch, or plain `sed -i$(true) ~/.config/shguard/config.toml` —
+    /// in which case `constraints_match` can never succeed (the flag is
+    /// never a *resolved* token at all) even though the danger is exactly
+    /// as real. When `constraints_match` fails, this falls back to the
+    /// same coarse relaxation [`Self::matches_except_flags`] already
+    /// applies to flags-only rules — an unresolvable word could plausibly
+    /// BE the missing flag — but narrowed to only fire when a resolved
+    /// token already matches this rule's own `targets` pattern (via
+    /// [`Self::matches_targets`]): without that narrowing, ANY unresolvable
+    /// argument to this rule's command (`rm some-backup-$(date).tar.gz`,
+    /// no `-rf` in sight) would float to `Ask` regardless of whether the
+    /// target looks remotely dangerous, which the pre-fix behavior never
+    /// did and this fix must not introduce either.
     #[must_use]
     pub(crate) fn matches_except_target(&self, argv: &[NormalizedWord]) -> bool {
-        !self.targets.is_empty()
-            && self.matching_rest(argv).is_some()
-            && argv
-                .iter()
-                .any(|word| matches!(word.resolution(), Resolution::Unresolvable(_)))
+        if self.targets.is_empty() {
+            return false;
+        }
+        let Some(rest_words) = self.matching_rest_by_name(argv) else {
+            return false;
+        };
+        let has_unresolvable = rest_words
+            .iter()
+            .any(|w| matches!(w.resolution(), Resolution::Unresolvable(_)));
+        if !has_unresolvable || !self.relaxed_required_tokens_match(rest_words) {
+            return false;
+        }
+        if self.constraints_match(rest_words) {
+            return true;
+        }
+        resolved_strings(rest_words)
+            .iter()
+            .any(|token| self.matches_targets(token))
     }
 
     /// Same wrapper-unwrap walk as [`Self::matching_rest`], but stopping at

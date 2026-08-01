@@ -1153,8 +1153,26 @@ fn evaluate_simple_command_core(
     // — that says the substitution is safe to *run*, not that its
     // *output* is a safe target for this command, so it still routes here
     // rather than falling through rule 3 alone.
+    //
+    // Fable/security-review follow-up to issue #77: `has_argument_position_bare_var`/
+    // `has_argument_position_substitution` only walk `argument_words` — the
+    // raw AST words strictly after the command-position word — so a
+    // substitution embedded in that SAME word (a non-winning brace
+    // alternative, `leftover_alternatives` above) never trips this trigger,
+    // even though it already produced a genuinely `Unresolvable` element of
+    // `argv` (via `normalize_argv`, unrelated to any of this issue's
+    // classification logic). `rules.match_command_except_target`/
+    // `match_command_except_flags` already treat "any `Unresolvable` word in
+    // `argv`" as the relevant ambiguity signal internally (see
+    // `CommandRule::matches_except_target`'s `has_unresolvable` check) — this
+    // OR arm just makes the outer trigger match what those functions already
+    // require, instead of gatekeeping them behind a narrower, AST-only view
+    // that misses content packed into the command-position word itself.
     let argument_position_ambiguous = has_argument_position_bare_var(argument_words)
-        || has_argument_position_substitution(argument_words);
+        || has_argument_position_substitution(argument_words)
+        || argv[1..]
+            .iter()
+            .any(|word| matches!(word.resolution(), Resolution::Unresolvable(_)));
     let except_target_rule = if argument_position_ambiguous {
         rules.match_command_except_target(&argv)
     } else {

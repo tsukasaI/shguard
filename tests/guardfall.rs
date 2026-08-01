@@ -252,7 +252,90 @@ fn guardfall_issue_77_brace_command_position_cases() {
         // still lift that to `Block`, not just a rule that would otherwise
         // return `Allow`.
         ("tar{,$(rm -rf /)} xf evil.tar -C /", Decision::Block),
+        // Independent fable + /security-review follow-up: a brace member
+        // that's benign TO RUN (`printf /`, `printf -- -delete`, `printf
+        // -- --force`) still supplies a literal, dangerous FLAG or TARGET
+        // token once brace-expanded — `leftover_floor` only checks the
+        // recursed substitution's own decision (which is a clean Allow
+        // here), so it cannot catch this on its own. What actually closes
+        // this is `argument_position_ambiguous` (rule 4/4b's trigger)
+        // seeing the `Unresolvable` word this alternative still
+        // contributes to the ordinary `argv` (unrelated to any of this
+        // issue's own classification logic) — previously gated behind
+        // `has_argument_position_substitution(argument_words)` alone,
+        // which is blind to content packed into the SAME AST word as the
+        // command name. Each of the three matches structurally the same
+        // way the real argument-word equivalent already does (e.g. `rm -rf
+        // $(echo /)`, `find . $(echo -delete)`), and the argv shapes here
+        // are pinned by existing `matches_except_target`/
+        // `matches_except_flags` unit tests in `src/rules.rs` — this is
+        // that same mechanism, just reachable through this issue's new
+        // `leftover_alternatives` path too.
+        ("{rm,-rf,$(printf /)}", Decision::Ask), // rule 4: flags resolved, target hidden
+        ("{find,.,$(printf -- -delete)}", Decision::Ask), // rule 4b: flags-only rule
+        ("{git,push,$(printf -- --force)}", Decision::Ask), // rule 4b: flags-only rule
+        // A second /security-review pass found the same class of bug in a
+        // shape rule 4 alone (before `CommandRule::matches_except_target`
+        // was also relaxed, `src/rules.rs`) could NOT resolve: the required
+        // FLAG hidden while the TARGET is separately resolved-and-clean.
+        // `self-protect-config-sed-tilde` (flag `-i`, target the shguard
+        // config dir) has no flagless or flags-only sibling rule the way
+        // `rm`/`tar` do, so this reached a genuine `Allow` (not merely a
+        // weaker `Ask`) until `matches_except_target` learned to relax
+        // `constraints_match` the same coarse way `matches_except_flags`
+        // already does for flags-only rules — gated on a RESOLVED token
+        // already matching the rule's OWN target pattern, so an unrelated
+        // `rm some-backup-$(date).tar.gz` (no target-pattern match at all)
+        // is not swept up too (see that function's own doc comment).
+        (
+            "{sed,$(printf -- -i),~/.config/shguard/config.toml}",
+            Decision::Ask,
+        ),
+        (
+            "{sed,-i$(true),~/.config/shguard/config.toml}",
+            Decision::Ask,
+        ),
+        ("sed -i$(true) ~/.config/shguard/config.toml", Decision::Ask), // brace-free control, same bug
+        // A command whose flag is unrelated to any dangerous shape must
+        // stay untouched by the relaxation above — no target-pattern match
+        // at all, so `matches_except_target` must not fire speculatively.
+        ("rm foo.txt $(date)", Decision::Ask), // still only self-protect-config-rm-tilde's flagless catch-all, not rm-recursive-force
+        // The one shape `matches_except_target`'s relaxation still cannot
+        // resolve on its own (not specific to brace alternation — see the
+        // plain `rm -rf$IFS/$(true)` control below, which hits the exact
+        // same limit): when the required FLAG **and** the TARGET are BOTH
+        // swallowed into the SAME opaque substitution-bearing word (no
+        // resolved token survives to check against `targets` at all),
+        // `rm-recursive-force-dangerous-target` itself still never fires.
+        // `self-protect-config-rm-tilde` (a flagless, target-only
+        // self-protection rule for `rm`) still floors the outer verdict to
+        // `Ask` regardless, since it only needs "some word is unresolvable"
+        // to refuse ruling out its own target pattern — so this stays a
+        // fail-closed `Ask`, not a bypass, for `rm` specifically. A command
+        // with a required-flags-AND-target rule but no such flagless
+        // sibling would not get this same rescue; that narrower residual
+        // gap is pre-existing (reproduces with no braces at all) and
+        // orthogonal to this issue's brace-alternative classification, not
+        // fixed here.
+        ("rm{,$IFS-rf$IFS/$(true)}", Decision::Ask),
+        ("rm -rf$IFS/$(true)", Decision::Ask), // brace-free control, same limit
     ];
+    // NOT pinned above (deliberately — see issue #85, filed for exactly
+    // this): `sed` is a command where the gap just above is a genuine
+    // `Allow`, not merely a weaker `Ask` the way `rm`'s is —
+    // `sed $(printf -- -i) $(printf ~/.config/shguard/config.toml)` is
+    // Allow both on `main` and on this branch. A tempting-looking fix
+    // (give `sed` a flagless, ask-decision self-protect sibling mirroring
+    // `self-protect-config-rm-tilde`) was tried and reverted here: it
+    // broke `rules::tests::self_protect_sed_without_dash_i_does_not_match`,
+    // because unlike `rm`/`tee`/`cp`/`mv`/`install` (any invocation
+    // touching the target IS the dangerous act), a `sed` invocation with
+    // no `-i` at all only ever reads and prints to stdout — it never
+    // writes to its target, so treating "any sed touching the config dir"
+    // as suspicious would falsely flag a completely harmless read.
+    // Closing this needs a narrower mechanism than a flagless sibling.
+    // Not asserted here as a passing case: a genuine bypass should not
+    // read as an accepted, green regression pin.
 
     for (command, expected) in cases {
         let verdict = shguard::analyze(command);
