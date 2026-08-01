@@ -390,6 +390,26 @@ fn guardfall_issue_77_brace_command_position_cases() {
     // Closing this needs a narrower mechanism than a flagless sibling.
     // Not asserted here as a passing case: a genuine bypass should not
     // read as an accepted, green regression pin.
+    //
+    // A follow-up fable review found the SAME root cause reachable via one
+    // more route: a single command/backquote substitution whose own
+    // runtime OUTPUT combines both the flag and the target
+    // (`{sed,$(printf -- "-i /home/user/.config/shguard/config.toml")}` —
+    // one leftover alternative, `pieces.len() == 1`, so it stays purely
+    // transparent per `evaluate_leftover_alternative_substitutions`'s own
+    // "just one token" design — recursing `printf` alone is Allow, and
+    // nothing else can see what its OUTPUT will be). Confirmed this is
+    // NOT specific to brace alternation: the plain, brace-free
+    // `sed $(printf -- "-i /home/user/.config/shguard/config.toml")` is
+    // ALSO `Allow` on `main` — this is exactly issue #85's pre-existing
+    // gap (a single substitution's unknowable runtime output can combine
+    // multiple tokens, which no static analysis here can rule out) with
+    // one more way to spell it, not a new vulnerability class. `main`
+    // happened to Ask for the brace-wrapped spelling specifically (rule
+    // 1's old blanket scan caught ANY substitution in the command-position
+    // word, by accident, same as every other case pinned above), so this
+    // spelling is now tracked as an addendum to #85 rather than a new
+    // issue.
 
     for (command, expected) in cases {
         let verdict = shguard::analyze(command);
