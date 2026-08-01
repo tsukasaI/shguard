@@ -131,7 +131,7 @@
 
 [[command]]
 id = "rm-recursive-force-dangerous-target"
-reason = "rm with recursive+force flags against a root-level, home, or device target"
+reason = "rm with recursive+force flags against a root-level, home, device, or find-placeholder target"
 command = "rm"
 required_flags = ["r|--recursive", "f|--force"]
 targets = [
@@ -144,6 +144,15 @@ targets = [
     { exact = "./" },
     { exact = "../" },
     { prefix = "/dev/" },
+    # `{}` is `find -exec`/`-execdir`/`-ok`/`-okdir`'s own placeholder for
+    # "whatever path find matched" (issue #72) — statically as uncontrolled
+    # a target as `/`: `find -exec rm -rf {} \;` deletes every match,
+    # regardless of the search root. shguard's `find -exec` recursion
+    # (`crate::gate::scan_recursable_slots`) feeds the payload's literal
+    # `{}` text straight into this same rule rather than trying to
+    # special-case it, so this target entry is what makes that recursion
+    # actually catch the canonical "delete everything found" pattern.
+    { exact = "{}" },
 ]
 
 [[command]]

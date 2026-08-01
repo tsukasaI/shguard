@@ -48,6 +48,7 @@ use std::collections::HashSet;
 
 use serde::Deserialize;
 
+use crate::gate::{FlagScan, scan_for_flag};
 use crate::normalize::{NormalizedWord, Resolution};
 use crate::verdict::{Decision, Reason, RuleId, Verdict};
 
@@ -899,37 +900,49 @@ fn value_flag_free_candidates<'a>(rest: &[&'a str], value_flags: &[ValueFlag]) -
 /// form `su root -c 'sh'`.
 ///
 /// What remains open: a wrapper's flag that takes a separate value token
-/// but isn't in [`wrapper_value_flags`] (e.g. `command`, `nohup`, `exec`,
-/// `stdbuf`, `setsid`, `xargs`, `pkexec`, `run0` have no entries there) is
-/// still mistaken for the wrapped command, the same way every wrapper
-/// behaved before this table existed. `su` is the sharpest surviving case,
-/// in two ways: its own `-c COMMAND` flag is not in [`wrapper_value_flags`],
-/// so `su -c 'sh' root` (options-before-user order) consumes `'sh'` — not
-/// `root` — as [`wrapper_positional_args`]'s username slot (only the `su
-/// root -c 'sh'` user-before-options form is closed); and because real
-/// `su` grammar (`su [options] [-] [user [arg...]]`) gives no shape-based
-/// way to tell "no username, command follows directly" from "username
-/// follows", the positional slot unconditionally consumes whatever token
-/// comes first — so `su rm -rf /`, which pre-#54 happened to resolve `rm`
-/// as the wrapped command, now reads `rm` as the username instead (this
-/// actually matches real `su` behaviour more closely: without `-c`, `su
-/// rm -rf /` would not execute `rm -rf /` at all). Both cases are bounded
-/// the same way: [`wrapper_chain_escalation`]'s `Contains` arm fires on
-/// the vector's own name alone, before any argument skipping, so this
-/// limitation can only ever under-resolve which *inner* rule would have
-/// blocked — it never turns an escalation floor into a silent Allow.
+/// but isn't in [`wrapper_value_flags`] (e.g. `nohup`, `exec`, `stdbuf`,
+/// `setsid`, `xargs`, `pkexec`, `run0` have no entries there) is still
+/// mistaken for the wrapped command, the same way every wrapper behaved
+/// before this table existed. `su` keeps a narrower residual gap of this
+/// same shape even though its own `-c`/`--command` flag IS now in
+/// [`wrapper_value_flags`] (issues #64/#66): [`skip_wrapper_flags`] only
+/// recognises a value flag occurring *before*
+/// [`wrapper_positional_args`]'s username slot is consumed, so `su -c 'sh'
+/// root` (options-before-user order) resolves cleanly through
+/// [`effective_command`], but `su root -c 'sh'` (user-before-options)
+/// still has the username slot consume `root` first, leaving `-c` to be
+/// mistaken for the *next* hop's command name by [`effective_command`]'s
+/// own walk. This residual gap is harmless for the actual security
+/// question, though, unlike the pre-#64/#66 state: [`RECURSABLE_SLOTS`]/
+/// [`wrapper_shell_string_scripts`] finds `su`'s `-c` flag independent of
+/// word order — it scans `su`'s whole argument tail, not just the region
+/// [`skip_wrapper_flags`] stops at — so the script value is still
+/// recursed into either way; only the unrelated question of what
+/// [`effective_command`] itself reports as "the resolved command name"
+/// stays order-sensitive. Separately, because real `su` grammar (`su
+/// [options] [-] [user [arg...]]`) gives no shape-based way to tell "no
+/// username, command follows directly" from "username follows", the
+/// positional slot unconditionally consumes whatever token comes first —
+/// so `su rm -rf /`, which pre-#54 happened to resolve `rm` as the wrapped
+/// command, now reads `rm` as the username instead (this actually matches
+/// real `su` behaviour more closely: without `-c`, `su rm -rf /` would not
+/// execute `rm -rf /` at all). All three cases are bounded the same way:
+/// [`wrapper_chain_escalation`]'s `Contains` arm fires on the vector's own
+/// name alone, before any argument skipping, so this limitation can only
+/// ever under-resolve which *inner* rule would have blocked — it never
+/// turns an escalation floor into a silent Allow.
 ///
-/// `flock`'s own `-c '<command>'` form (like `sh -c`/`bash -c`, real `flock`
-/// runs the string via `$SHELL -c`) is a *different* kind of gap, not bounded
-/// the same way: `-c` is not in [`wrapper_value_flags`], so its string
-/// argument is mistaken for the wrapped command and matches no rule, and
-/// `flock` is not an [`ESCALATION_VECTORS`] entry, so there is no floor to
-/// fall back on either — `flock /tmp/l -c 'rm -rf /'` silently `allow`s
-/// (fable-model review finding, tracked as issue #66). Fixing this needs
-/// `flock -c` to recurse into its string the way `crate::gate` rule 6a
-/// already does for shell interpreters, not another [`wrapper_value_flags`]
-/// entry — adding `-c` there would just skip the string outright, which is
-/// worse.
+/// `flock`'s own `-c '<command>'` form (like `sh -c`/`bash -c`, real
+/// `flock` runs the string via `$SHELL -c`) was a *different* kind of gap,
+/// not bounded the same way: `flock` is not an [`ESCALATION_VECTORS`]
+/// entry, so there was no floor to fall back on if its `-c` string were
+/// merely skipped — `flock /tmp/l -c 'rm -rf /'` silently `allow`ed
+/// (fable-model review finding, issue #66). Fixed (issues #64/#66) by
+/// [`RECURSABLE_SLOTS`]/[`wrapper_shell_string_scripts`]: `-c`/`--command`
+/// is in [`wrapper_value_flags`] so its value is never mistaken for the
+/// wrapped command by ordinary matching, and `crate::gate`'s wrapper-layer
+/// floor recurses that value as a shell-command string exactly like rule
+/// 6a already does for `sh -c`/`bash -c`, rather than merely skipping it.
 pub(crate) const TRANSPARENT_WRAPPERS: &[&str] = &[
     "env", "command", "nohup", "nice", "exec", "stdbuf", "setsid", "sudo", "xargs", "doas", "su",
     "pkexec", "run0", "timeout", "ionice", "flock", "chrt", "taskset",
@@ -960,6 +973,100 @@ pub(crate) const SHELL_INTERPRETERS: &[&str] = &["bash", "sh", "zsh", "dash"];
 /// See [`SHELL_INTERPRETERS`]'s docs for why this lives here.
 pub(crate) const PIPELINE_INTERPRETERS: &[&str] = &[
     "sh", "bash", "zsh", "dash", "python", "python3", "node", "perl",
+];
+
+/// How a [`RecursableSlot`]'s value should be recursed — see
+/// [`RECURSABLE_SLOTS`]'s own docs for the two constructs this
+/// distinguishes.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum RecurseMode {
+    /// The flag's value is a shell-command string, re-tokenised and
+    /// recursed the same way rule 6a (`crate::gate`'s `evaluate_dash_c`)
+    /// already recurses `sh -c`/`bash -c` (issues #64/#66: `flock -c`/
+    /// `su -c` run their string via `$SHELL -c` too).
+    ShellString,
+    /// The flag starts a direct argv — no shell involved at all (issue
+    /// #72: `find -exec`/`-execdir`/`-ok`/`-okdir` run their payload
+    /// directly). The span runs from the word after the flag up to the
+    /// first word resolving to one of `terminators`.
+    DirectArgv {
+        terminators: &'static [&'static str],
+    },
+}
+
+/// One command+flag combination whose value is itself a command to
+/// recurse into, rather than an opaque argument
+/// [`skip_wrapper_arguments`]/[`wrapper_value_flags`] can simply skip
+/// (issues #64/#66/#72). Deliberately does NOT cover `bash`/`sh`/`zsh`/
+/// `dash -c` — rule 6a's own `-c` search
+/// (`crate::gate::evaluate_dash_c`) operates over
+/// [`effective_command`]'s `rest_words` (the tokens after the resolved
+/// *interpreter*, with any leading wrapper's own arguments already
+/// skipped), a different coordinate system from this table's per-wrapper-
+/// hop scan (`crate::gate::scan_recursable_slots`,
+/// [`wrapper_shell_string_scripts`]); folding `SHELL_INTERPRETERS` into
+/// this table would need reconciling the two, for no behavioural gain.
+pub(crate) struct RecursableSlot {
+    pub(crate) command: &'static str,
+    pub(crate) flag: &'static str,
+    pub(crate) mode: RecurseMode,
+}
+
+/// See [`RecursableSlot`]'s docs. `crate::gate` consumes this in two ways:
+/// [`wrapper_shell_string_scripts`] walks it for every [`RecurseMode::ShellString`]
+/// entry while unwrapping a stage's transparent-wrapper chain, and
+/// `crate::gate::scan_recursable_slots` walks it directly for `find`'s
+/// [`RecurseMode::DirectArgv`] entries (that construct has no wrapper chain
+/// to unwrap — `find` itself is never in [`TRANSPARENT_WRAPPERS`]).
+pub(crate) const RECURSABLE_SLOTS: &[RecursableSlot] = &[
+    RecursableSlot {
+        command: "flock",
+        flag: "-c",
+        mode: RecurseMode::ShellString,
+    },
+    RecursableSlot {
+        command: "flock",
+        flag: "--command",
+        mode: RecurseMode::ShellString,
+    },
+    RecursableSlot {
+        command: "su",
+        flag: "-c",
+        mode: RecurseMode::ShellString,
+    },
+    RecursableSlot {
+        command: "su",
+        flag: "--command",
+        mode: RecurseMode::ShellString,
+    },
+    RecursableSlot {
+        command: "find",
+        flag: "-exec",
+        mode: RecurseMode::DirectArgv {
+            terminators: &[";", "+"],
+        },
+    },
+    RecursableSlot {
+        command: "find",
+        flag: "-execdir",
+        mode: RecurseMode::DirectArgv {
+            terminators: &[";", "+"],
+        },
+    },
+    RecursableSlot {
+        command: "find",
+        flag: "-ok",
+        mode: RecurseMode::DirectArgv {
+            terminators: &[";", "+"],
+        },
+    },
+    RecursableSlot {
+        command: "find",
+        flag: "-okdir",
+        mode: RecurseMode::DirectArgv {
+            terminators: &[";", "+"],
+        },
+    },
 ];
 
 /// The basename of a command token: `/bin/sh` -> `sh`, `./sh` -> `sh`, a
@@ -1067,8 +1174,22 @@ fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
         "flock" => vec![
             ValueFlag::Short('w'),
             ValueFlag::Short('E'),
+            ValueFlag::Short('c'),
             ValueFlag::Long("timeout".to_string()),
             ValueFlag::Long("conflict-exit-code".to_string()),
+            ValueFlag::Long("command".to_string()),
+        ],
+        // Issues #64/#66: `su`'s own `-c`/`--command` flag (like `flock`'s)
+        // takes a separated shell-command-string value. Listing it here
+        // stops that string from being mistaken for the wrapped command by
+        // `effective_command`'s ordinary skip — the actual recursion into
+        // its content happens separately, via `RECURSABLE_SLOTS`/
+        // `wrapper_shell_string_scripts`, not by this table alone (adding
+        // a value flag here only ever means "skip this value", never
+        // "recurse into it").
+        "su" => vec![
+            ValueFlag::Short('c'),
+            ValueFlag::Long("command".to_string()),
         ],
         "chrt" => vec![
             ValueFlag::Short('T'),
@@ -1273,6 +1394,82 @@ pub(crate) fn wrapper_chain_escalation(stage: &[NormalizedWord]) -> WrapperChain
         passed_wrapper = true;
         rest = skip_wrapper_arguments(base, tail);
     }
+}
+
+/// One [`RecurseMode::ShellString`] slot's value, found while walking a
+/// stage's transparent-wrapper chain (issues #64/#66) — see
+/// [`wrapper_shell_string_scripts`].
+pub(crate) enum ScriptSlot {
+    /// The flag's value resolved to a concrete shell-command string, ready
+    /// for `crate::gate` to recurse the same way rule 6a recurses `sh
+    /// -c`/`bash -c`.
+    Resolved(String),
+    /// The flag's own position, or its value, could not be statically
+    /// resolved — the fail-closed counterpart of [`FlagScan::Uncertain`]:
+    /// an unresolvable word at either position must never read as "no
+    /// script to worry about".
+    Unresolvable,
+}
+
+/// Finds every [`RecurseMode::ShellString`] [`RecursableSlot`]'s script
+/// value along `stage`'s transparent-wrapper chain (today: `flock`/`su`'s
+/// `-c`/`--command`, issues #64/#66). Mirrors the same wrapper-unwrap walk
+/// [`effective_command`]/[`wrapper_chain_escalation`] perform, but — unlike
+/// both of those — does not stop at the first hop and does not rely on
+/// [`skip_wrapper_flags`]'s own flag-then-positional ordering to find the
+/// flag: each wrapper hop's *entire* argument tail is scanned for its
+/// `RECURSABLE_SLOTS` flag via [`scan_for_flag`], independent of whether
+/// that flag sits before or after the wrapper's own positional slot (see
+/// [`TRANSPARENT_WRAPPERS`]'s docs on why `su -c 'sh' root` and `su root
+/// -c 'sh'` must both be found, even though only the former resolves
+/// cleanly through [`effective_command`] itself). This is deliberately
+/// broader than [`skip_wrapper_flags`]'s own boundary — a same-hop token
+/// that happens to also look like `-c`/`--command` but belongs to a
+/// different, unrelated flag on some other wrapper would still be found
+/// here; accepted because this function only ever produces an
+/// [`ScriptSlot::Unresolvable`]/[`ScriptSlot::Resolved`] *floor* (never an
+/// early-return Allow, per `crate::gate`'s wrapper-layer docs), so a
+/// mismatch can only cost an extra recursion or an over-cautious Ask, never
+/// a silent Allow.
+#[must_use]
+pub(crate) fn wrapper_shell_string_scripts(stage: &[NormalizedWord]) -> Vec<ScriptSlot> {
+    let mut slots = Vec::new();
+    let mut rest = stage;
+    loop {
+        let Some((first, tail)) = rest.split_first() else {
+            break;
+        };
+        let Resolution::Resolved(name) = first.resolution() else {
+            break;
+        };
+        let base = basename(name);
+        if !TRANSPARENT_WRAPPERS.contains(&base) {
+            break;
+        }
+        for slot in RECURSABLE_SLOTS
+            .iter()
+            .filter(|slot| slot.command == base && matches!(slot.mode, RecurseMode::ShellString))
+        {
+            match scan_for_flag(tail, |s| s == slot.flag) {
+                FlagScan::Found(i) => match tail.get(i + 1).map(NormalizedWord::resolution) {
+                    Some(Resolution::Resolved(script)) => {
+                        slots.push(ScriptSlot::Resolved(script.clone()));
+                    }
+                    Some(Resolution::Unresolvable(_)) => slots.push(ScriptSlot::Unresolvable),
+                    // No word follows the flag at all — the same shape
+                    // `crate::gate::evaluate_dash_c` treats as "not this
+                    // shape" (`rest_words.get(flag_index + 1)?`) rather
+                    // than an Ask floor: a `-c` with nothing after it names
+                    // no command to worry about.
+                    None => {}
+                },
+                FlagScan::Uncertain(_) => slots.push(ScriptSlot::Unresolvable),
+                FlagScan::Absent => {}
+            }
+        }
+        rest = skip_wrapper_arguments(base, tail);
+    }
+    slots
 }
 
 /// Whether `stage`'s wrapper-unwrap chain passes through `su` with a
@@ -2480,13 +2677,26 @@ mod tests {
     #[test]
     fn su_positional_username_is_skipped() {
         // `su [options] [-] [user [args...]]`: the username occupies one
-        // positional slot before the command su itself runs. `su`'s own
-        // `-c COMMAND` flag is not in `wrapper_value_flags` (documented
-        // as a residual limitation on `TRANSPARENT_WRAPPERS`), so only
-        // the user-before-options ordering closes cleanly: `root` no
-        // longer gets mistaken for the wrapped command, but `-c` (not
-        // `sh`) surfaces as the resolved "command" name. This pins that
-        // shape rather than asserting full correctness of `su -c`.
+        // positional slot before the command su itself runs.
+        //
+        // UPDATED (issues #64/#66): `su`'s own `-c`/`--command` flag IS now
+        // in `wrapper_value_flags`, but that alone doesn't change this
+        // test's expectation — `skip_wrapper_flags` only recognises a
+        // value flag occurring BEFORE the username positional is consumed
+        // (`su -c 'sh' root`, options-before-user order), and this test
+        // uses the opposite, user-before-options order (`su root -c sh`):
+        // `root` is consumed by the positional slot first, leaving `-c` to
+        // be mistaken for the *next* hop's resolved "command" name by
+        // `effective_command`'s own walk, exactly as before. This still
+        // pins that shape rather than asserting full correctness of `su
+        // -c` through `effective_command` specifically — the actual
+        // security fix for this exact word order is
+        // `wrapper_shell_string_scripts`, which finds `su`'s `-c` flag
+        // independent of word order by scanning `su`'s whole argument
+        // tail rather than relying on `skip_wrapper_flags`'s boundary; see
+        // `crate::gate`'s `su_dash_c_user_before_options_order_still_blocks`
+        // test for the end-to-end behaviour this test's own narrower
+        // `effective_command` shape doesn't capture.
         let words = argv(&["su", "root", "-c", "sh"]);
         let (name, rest) = effective_command(&words).unwrap();
         assert_eq!(name, "-c");

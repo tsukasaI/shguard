@@ -812,6 +812,14 @@ fn evaluate_simple_command(
     // `fold_floors` entirely, and a floor placed inside `core` would vanish
     // on exactly those paths (module docs, rule 11).
     let expansion = scan_expansion_positions(command, depth, rules, allowlist);
+    // Issues #64/#66/#72: the flock/su `-c` shell-string floor and the
+    // `find -exec`/`-execdir`/`-ok`/`-okdir` direct-argv floor. Computed
+    // here, in the wrapper layer, for the same reason rule 11's `expansion`
+    // floor is: `core` has early returns (rule 6a's inner-Allow chief among
+    // them) that bypass `fold_floors` entirely, and a floor placed inside
+    // `core` would vanish on exactly those paths. Needs `&argv` before it
+    // is moved into `evaluate_simple_command_core` below.
+    let recursable = scan_recursable_slots(command, &argv, rules, allowlist, depth);
 
     let verdict = evaluate_simple_command_core(
         command,
@@ -823,14 +831,23 @@ fn evaluate_simple_command(
         escalation_chain,
     );
     let verdict = apply_expansion_floor(verdict, expansion.floor);
+    let verdict = apply_recursable_floor(verdict, recursable.floor);
 
     // Rule 11's allowlist guard: the same presence-based reasoning as
     // `has_argument_substitution` above (module docs, "User config
     // precedence") — an inner Ask/Block that propagated up from an
     // expansion-position substitution must never be suppressed by an allow
     // entry written for the *outer* command name, which was never about the
-    // inner substitution's unresolved command.
-    let verdict = if has_argument_substitution || expansion.has_any || escalation_in_chain {
+    // inner substitution's unresolved command. `recursable.has_any` extends
+    // the same reasoning to the flock/su `-c` and `find -exec` floors
+    // (issues #64/#66/#72): an allow entry written for `flock`/`find`
+    // itself is not consent to whatever command their `-c`/`-exec` payload
+    // names.
+    let verdict = if has_argument_substitution
+        || expansion.has_any
+        || escalation_in_chain
+        || recursable.has_any
+    {
         verdict
     } else {
         apply_allowlist_downgrade(verdict, allowlist)
@@ -1190,6 +1207,31 @@ fn apply_expansion_floor(verdict: Verdict, floor: Option<(Decision, String)>) ->
     }
 }
 
+/// Applies [`scan_recursable_slots`]'s combined floor (issues #64/#66/#72:
+/// the flock/su `-c` shell-string floor and the `find -exec`/`-execdir`/
+/// `-ok`/`-okdir` direct-argv floor) to `verdict` — the same
+/// `decision.max(floor_decision)` max-lift [`apply_expansion_floor`]/
+/// [`apply_escalation_floor`] already use, kept as its own named function
+/// for the same self-documenting-call-site reason those two are (module
+/// docs' one-function-per-floor convention).
+fn apply_recursable_floor(verdict: Verdict, floor: Option<(Decision, String)>) -> Verdict {
+    let Some((floor_decision, floor_reason)) = floor else {
+        return verdict;
+    };
+    if verdict.decision() >= floor_decision {
+        return verdict;
+    }
+    let argv = verdict.normalized_argv().to_vec();
+    let reason = match verdict.reason() {
+        Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
+        None => floor_reason,
+    };
+    match floor_decision {
+        Decision::Block => Verdict::block(Reason::new(reason), argv, None),
+        Decision::Ask | Decision::Allow => Verdict::ask(Reason::new(reason), argv),
+    }
+}
+
 /// Rules 4 and 4b's argument-position-ambiguity floors, bundled into one
 /// parameter so [`fold_floors`] doesn't cross clippy's
 /// `too_many_arguments` threshold — see each field's own doc for what it
@@ -1480,33 +1522,69 @@ fn evaluate_dash_c(
     let script_word = rest_words.get(flag_index + 1)?;
 
     match script_word.resolution() {
-        Resolution::Resolved(script) => {
-            let inner = analyze_at_depth(script, depth + 1, rules, allowlist);
-            let reason = format!(
-                "`{interpreter} -c` argument recurses through the full pipeline; inner decision: \
-                 {:?}{}",
-                inner.decision(),
-                inner
-                    .reason()
-                    .map(|r| format!(" ({})", r.as_str()))
-                    .unwrap_or_default()
-            );
-            Some(match inner.decision() {
-                Decision::Block => Verdict::block(
-                    Reason::new(reason),
-                    outer_argv,
-                    inner.matched_rule().cloned(),
-                ),
-                Decision::Ask => Verdict::ask(Reason::new(reason), outer_argv),
-                Decision::Allow => Verdict::allow(outer_argv),
-            })
-        }
+        Resolution::Resolved(script) => Some(recurse_shell_string(
+            script,
+            outer_argv,
+            &format!("`{interpreter} -c` argument"),
+            depth,
+            rules,
+            allowlist,
+        )),
         Resolution::Unresolvable(_) => Some(Verdict::ask(
             Reason::new(format!(
                 "`{interpreter} -c` argument could not be statically resolved"
             )),
             outer_argv,
         )),
+    }
+}
+
+/// Recurses a statically-resolved shell-command string through the full
+/// pipeline one level deeper, mapping the inner [`Verdict`]'s decision to
+/// an outer one that carries `outer_argv` (the *wrapping* command's own
+/// argv — e.g. `bash -c '<script>'`'s or `flock ... -c '<script>'`'s own
+/// argv, never the recursed string's) so the reported argv always names
+/// what the caller actually typed. `label` names the specific construct
+/// (`` `bash -c` argument ``, `` a transparent wrapper's `-c` argument ``)
+/// for the combined reason string.
+///
+/// The reusable core of rule 6a's own recursion ([`evaluate_dash_c`]),
+/// factored out (issues #64/#66) so the flock/su `-c` wrapper-layer floor
+/// (`crate::gate`'s wrapper layer, via
+/// [`crate::rules::wrapper_shell_string_scripts`]) can recurse its own
+/// statically-resolved script the exact same way rather than duplicating
+/// this mapping. An inner `Allow` propagates as `Allow` at both call
+/// sites: by the time either caller reaches here, the `-c`/`--command`
+/// flag's own position has already been confirmed (not merely "possibly
+/// present" — [`evaluate_dash_c`]'s `Uncertain` arm and
+/// [`crate::rules::ScriptSlot::Unresolvable`] are both handled separately,
+/// before this function is ever called), so there is nothing left
+/// uncertain for an inner Allow to hide.
+fn recurse_shell_string(
+    script: &str,
+    outer_argv: Vec<NormalizedWord>,
+    label: &str,
+    depth: usize,
+    rules: &Rules,
+    allowlist: &Allowlist,
+) -> Verdict {
+    let inner = analyze_at_depth(script, depth + 1, rules, allowlist);
+    let reason = format!(
+        "{label} recurses through the full pipeline; inner decision: {:?}{}",
+        inner.decision(),
+        inner
+            .reason()
+            .map(|r| format!(" ({})", r.as_str()))
+            .unwrap_or_default()
+    );
+    match inner.decision() {
+        Decision::Block => Verdict::block(
+            Reason::new(reason),
+            outer_argv,
+            inner.matched_rule().cloned(),
+        ),
+        Decision::Ask => Verdict::ask(Reason::new(reason), outer_argv),
+        Decision::Allow => Verdict::allow(outer_argv),
     }
 }
 
@@ -1746,6 +1824,208 @@ fn raise_expansion_floor(
     if should_replace {
         *floor = Some((decision, reason));
     }
+}
+
+/// The result of [`scan_recursable_slots`] (issues #64/#66/#72): whether
+/// any `flock`/`su` `-c`/`--command` shell-string slot or `find`
+/// `-exec`/`-execdir`/`-ok`/`-okdir` direct-argv clause was found at all
+/// (`has_any` — presence, not outcome, the same convention
+/// [`ExpansionPositionScan`]'s own `has_any` uses for rule 11's
+/// allow-downgrade guard, generalised here to this pair of NEW recursable
+/// constructs), and the worst non-`Allow` decision folded across every
+/// slot found, paired with a reason (`floor`, `None` when every slot found
+/// — if any — recursed to `Allow`).
+struct RecursableScan {
+    has_any: bool,
+    floor: Option<(Decision, String)>,
+}
+
+/// Scans one [`SimpleCommand`] for the two NEW "direct command value"
+/// constructs (`crate::rules::RECURSABLE_SLOTS`): `flock`/`su`'s
+/// `-c`/`--command` shell-string argument (issues #64/#66, same recursion
+/// shape as rule 6a) and `find`'s `-exec`/`-execdir`/`-ok`/`-okdir` payload
+/// (issue #72, no shell at all — a direct argv span recursed via
+/// structural AST descent, the same "already-parsed, no re-parse
+/// amplification" reasoning the module docs give for process-substitution
+/// recursion). Combined into one scan/struct because both need the exact
+/// same allow-downgrade guard in [`evaluate_simple_command`]'s wrapper
+/// layer.
+fn scan_recursable_slots(
+    command: &SimpleCommand,
+    argv: &[NormalizedWord],
+    rules: &Rules,
+    allowlist: &Allowlist,
+    depth: usize,
+) -> RecursableScan {
+    let mut has_any = false;
+    let mut floor: Option<(Decision, String)> = None;
+
+    for slot in crate::rules::wrapper_shell_string_scripts(argv) {
+        has_any = true;
+        match slot {
+            crate::rules::ScriptSlot::Unresolvable => raise_expansion_floor(
+                &mut floor,
+                Decision::Ask,
+                "a transparent wrapper's `-c`/`--command` flag (`flock -c`/`su -c`) or its \
+                 value could not be statically resolved; the shell-command string it would run \
+                 is unknown"
+                    .to_string(),
+            ),
+            crate::rules::ScriptSlot::Resolved(script) => {
+                let inner = recurse_shell_string(
+                    &script,
+                    argv.to_vec(),
+                    "a transparent wrapper's `-c`/`--command` shell-string argument",
+                    depth,
+                    rules,
+                    allowlist,
+                );
+                raise_expansion_floor(
+                    &mut floor,
+                    inner.decision(),
+                    inner
+                        .reason()
+                        .map(|r| r.as_str().to_string())
+                        .unwrap_or_default(),
+                );
+            }
+        }
+    }
+
+    let is_find = crate::rules::effective_command(argv).is_some_and(|(name, _)| name == "find");
+    if is_find {
+        let mut i = 0;
+        while i < command.words.len() {
+            match find_exec_flag_kind(&command.words[i]) {
+                FindExecFlagKind::No => {
+                    i += 1;
+                }
+                FindExecFlagKind::Unresolvable => {
+                    has_any = true;
+                    raise_expansion_floor(
+                        &mut floor,
+                        Decision::Ask,
+                        "an argument to `find` could not be statically resolved and might be \
+                         `-exec`/`-execdir`/`-ok`/`-okdir`, whose payload would need to be \
+                         recursed as a direct command"
+                            .to_string(),
+                    );
+                    i += 1;
+                }
+                FindExecFlagKind::Yes(terminators) => {
+                    has_any = true;
+                    let span_start = i + 1;
+                    let span_end = command.words[span_start..]
+                        .iter()
+                        .position(|word| is_find_exec_terminator(word, terminators))
+                        .map_or(command.words.len(), |offset| span_start + offset);
+
+                    if span_start < span_end {
+                        let synthetic = SimpleCommand {
+                            assignments: Vec::new(),
+                            words: command.words[span_start..span_end].to_vec(),
+                            redirections: Vec::new(),
+                        };
+                        let inner = evaluate_simple_command(
+                            &synthetic,
+                            &Env::new(),
+                            rules,
+                            allowlist,
+                            depth,
+                        );
+                        raise_expansion_floor(
+                            &mut floor,
+                            inner.decision(),
+                            format!(
+                                "`find`'s `-exec`/`-execdir`/`-ok`/`-okdir` payload recurses \
+                                 through the full pipeline; inner decision: {:?}{}",
+                                inner.decision(),
+                                inner
+                                    .reason()
+                                    .map(|r| format!(" ({})", r.as_str()))
+                                    .unwrap_or_default()
+                            ),
+                        );
+                    }
+
+                    // Fail-closed (design note, issue #72): when no
+                    // terminator is found, `span_end` is
+                    // `command.words.len()` and this advances past the end
+                    // of the loop, having already recursed the entire
+                    // remainder as this clause's payload — never silently
+                    // dropping a trailing, unterminated `-exec` payload.
+                    i = span_end + 1;
+                }
+            }
+        }
+    }
+
+    RecursableScan { has_any, floor }
+}
+
+/// Whether AST word `word` is one of `find`'s
+/// [`crate::rules::RecurseMode::DirectArgv`] flags (`-exec`/`-execdir`/
+/// `-ok`/`-okdir`, issue #72) — see [`FindExecFlagKind`].
+fn find_exec_flag_kind(word: &Word) -> FindExecFlagKind {
+    match normalize::normalize_word(word).as_slice() {
+        [nw] => match nw.resolution() {
+            Resolution::Resolved(s) => crate::rules::RECURSABLE_SLOTS
+                .iter()
+                .find_map(|slot| match slot.mode {
+                    crate::rules::RecurseMode::DirectArgv { terminators }
+                        if slot.command == "find" && slot.flag == s =>
+                    {
+                        Some(terminators)
+                    }
+                    _ => None,
+                })
+                .map_or(FindExecFlagKind::No, FindExecFlagKind::Yes),
+            Resolution::Unresolvable(_) => FindExecFlagKind::Unresolvable,
+        },
+        // Zero or multiple normalised words (an `$IFS`-vanishing word, or
+        // one multiplied by brace alternation/`$IFS` splitting) is never a
+        // literal flag spelling — treated as ordinary non-flag content
+        // rather than a scanned position; `-exec`/`-execdir`/`-ok`/`-okdir`
+        // themselves are never realistically written in a shape that
+        // multiplies like this.
+        _ => FindExecFlagKind::No,
+    }
+}
+
+/// The three outcomes [`find_exec_flag_kind`] can report for one AST word,
+/// mirroring [`FlagScan`]'s fail-closed shape (an unresolvable word "might
+/// be the flag", never "definitely not") but over AST [`Word`]s directly
+/// rather than [`NormalizedWord`]s — [`scan_recursable_slots`] needs the
+/// real `Word` nodes past a `Yes` flag to build the recursed synthetic
+/// command, not just resolved strings. `Yes` carries the matched slot's
+/// own [`crate::rules::RecurseMode::DirectArgv`] terminator list (`;`/`+`
+/// for every entry today, but read from [`crate::rules::RECURSABLE_SLOTS`]
+/// rather than hard-coded here, so a future slot with a different
+/// terminator set is honoured automatically).
+enum FindExecFlagKind {
+    Yes(&'static [&'static str]),
+    Unresolvable,
+    No,
+}
+
+/// Whether AST word `word` is one of `terminators` (`find`'s
+/// `-exec`/`-execdir`/`-ok`/`-okdir` clause terminator — a literal `;`,
+/// which reaches here as a plain resolved word since the parser's
+/// escape-sequence folding already consumed `\;`'s backslash before
+/// normalisation, see `crate::ast::WordPiece::EscapeSequence`, or `+`). An
+/// unresolved or multi-word position is never treated as a terminator
+/// (fail-closed the OTHER direction from [`find_exec_flag_kind`]: if this
+/// function can't positively confirm a terminator,
+/// [`scan_recursable_slots`]'s span keeps growing rather than stopping
+/// early — per issue #72's design, "no terminator found" already fails
+/// closed by consuming the rest of the command as the payload, so an
+/// ambiguous position must not be mistaken for the terminator that would
+/// cut that payload short).
+fn is_find_exec_terminator(word: &Word, terminators: &[&str]) -> bool {
+    matches!(
+        normalize::normalize_word(word).as_slice(),
+        [nw] if matches!(nw.resolution(), Resolution::Resolved(s) if terminators.contains(&s.as_str()))
+    )
 }
 
 /// Whether any word in `argument_words` normalises to a bare, unresolvable
@@ -2220,8 +2500,16 @@ fn short_cluster_contains(token: &str, c: char) -> bool {
 /// word earlier than a resolved match wins, because position matters (a
 /// word we cannot read at an earlier position may be the flag, or may
 /// demote a later literal flag to a positional argument).
+///
+/// `pub(crate)` (issues #64/#66/#72): `crate::rules::wrapper_shell_string_scripts`
+/// reuses this exact primitive to locate `flock`/`su`'s `-c`/`--command`
+/// flag, rather than duplicating the same fail-closed scan logic there —
+/// one exception to this module's usual "gate depends on rules, not the
+/// reverse" direction (see [`crate::rules::TRANSPARENT_WRAPPERS`]'s docs),
+/// accepted deliberately so the flag-position fail-closed semantics these
+/// two types encode can never drift between the two call sites.
 #[must_use]
-enum FlagScan {
+pub(crate) enum FlagScan {
     Found(usize),
     Uncertain(usize),
     Absent,
@@ -2240,7 +2528,7 @@ impl FlagScan {
 /// Scans `words` left-to-right for the first word that either resolves and
 /// satisfies `matches`, or is unresolvable (see [`FlagScan`]'s docs for why
 /// an earlier unresolvable word wins over a later resolved match).
-fn scan_for_flag(words: &[NormalizedWord], matches: impl Fn(&str) -> bool) -> FlagScan {
+pub(crate) fn scan_for_flag(words: &[NormalizedWord], matches: impl Fn(&str) -> bool) -> FlagScan {
     for (i, w) in words.iter().enumerate() {
         match w.resolution() {
             Resolution::Resolved(s) if matches(s) => return FlagScan::Found(i),
@@ -3726,5 +4014,113 @@ mod tests {
     #[test]
     fn write_duplication_redirect_to_a_device_still_blocks() {
         assert_decision("echo x >&/dev/sda", Decision::Block);
+    }
+
+    // ==== Issues #64/#66/#72: flock/su `-c` and `find -exec`/`-execdir`/
+    // `-ok`/`-okdir` recurse into their direct-command values instead of
+    // silently allowing them (`crate::rules::RECURSABLE_SLOTS`) ====
+
+    #[test]
+    fn find_delete_still_blocks() {
+        // Regression: the existing rule this whole family of gaps was
+        // compared against in issue #72 (`find -delete` already blocked,
+        // `find -exec rm -rf {}` didn't) must be unaffected by this change.
+        assert_decision("find /x -delete", Decision::Block);
+    }
+
+    #[test]
+    fn find_exec_rm_rf_now_blocks() {
+        // Issue #72's headline case: `find`'s `-exec` action is the more
+        // common way to delete via `find` than `-delete`, and was silently
+        // reaching Allow before this fix.
+        assert_decision(r"find /x -exec rm -rf {} \;", Decision::Block);
+    }
+
+    #[test]
+    fn find_execdir_rm_rf_with_plus_terminator_blocks() {
+        // The `-execdir`/`+`-terminator variant: same span-extraction
+        // logic, `+` is just a second valid terminator spelling.
+        assert_decision(r"find /x -execdir rm -rf {} +", Decision::Block);
+    }
+
+    #[test]
+    fn find_exec_benign_payload_allows() {
+        assert_decision(r"find /x -exec echo hi \;", Decision::Allow);
+    }
+
+    #[test]
+    fn find_exec_unterminated_clause_still_fails_closed_to_block() {
+        // No trailing `\;`/`+` at all: the span-extraction fails closed by
+        // consuming the rest of the command as the payload, rather than
+        // silently dropping an unterminated `-exec` clause.
+        assert_decision("find /x -exec rm -rf {}", Decision::Block);
+    }
+
+    #[test]
+    fn find_exec_wrapped_command_recurses_the_full_pipeline() {
+        // The `-exec` payload is itself a `sh -c '<string>'` invocation —
+        // structural AST descent into the synthetic recursed command must
+        // still let rule 6a fire inside it.
+        assert_decision(r#"find /x -exec sh -c "rm -rf /" \;"#, Decision::Block);
+    }
+
+    #[test]
+    fn sudo_wrapped_find_exec_still_blocks() {
+        // `effective_command` must resolve through the wrapper chain
+        // first, so `find -exec` is still recognised when `find` itself is
+        // invoked via `sudo`.
+        assert_decision(r"sudo find /x -exec rm -rf {} \;", Decision::Block);
+    }
+
+    #[test]
+    fn find_unresolvable_flag_position_asks_at_minimum() {
+        // The flag position itself is unresolvable (`$(echo -exec)`) — a
+        // Thread-A-style fail-closed floor, not a silent skip past the
+        // ambiguous position.
+        assert_decision(r"find $(echo -exec) rm -rf {} \;", Decision::Ask);
+    }
+
+    #[test]
+    fn flock_dash_c_rm_rf_blocks() {
+        // Issues #64/#66's headline case: `flock`'s `-c` execution form was
+        // not recursed into at all and silently reached Allow.
+        assert_decision("flock /tmp/l -c 'rm -rf /'", Decision::Block);
+    }
+
+    #[test]
+    fn flock_dash_c_benign_command_allows() {
+        // Matches what the equivalent `sh -c 'ls'` rule-6a case already
+        // resolves to — the recursed string itself is harmless.
+        assert_decision("flock /tmp/l -c 'ls'", Decision::Allow);
+    }
+
+    #[test]
+    fn flock_long_command_flag_blocks() {
+        assert_decision(r#"flock /tmp/l --command "rm -rf /""#, Decision::Block);
+    }
+
+    #[test]
+    fn su_dash_c_rm_rf_blocks() {
+        // Issue #64's note that `su -c` was only "lucky" (caught by
+        // `wrapper_chain_escalation`'s generic Ask floor, not its own
+        // recursion) is confirmed clean here: this is a Block, not merely
+        // an Ask, and the reason names the recursed inner command.
+        assert_decision("su -c 'rm -rf /' root", Decision::Block);
+    }
+
+    #[test]
+    fn su_dash_c_user_before_options_order_still_blocks() {
+        // `su root -c 'rm -rf /'` (user-before-options order):
+        // `effective_command` itself still can't resolve `su`'s wrapped
+        // command cleanly in this word order (see
+        // `crate::rules::TRANSPARENT_WRAPPERS`'s docs), but
+        // `wrapper_shell_string_scripts` finds `-c` independent of word
+        // order, so the dangerous content is still caught.
+        assert_decision("su root -c 'rm -rf /'", Decision::Block);
+    }
+
+    #[test]
+    fn flock_dash_c_flag_position_unresolvable_asks() {
+        assert_decision(r#"flock /tmp/l $(echo -c) "rm -rf /""#, Decision::Ask);
     }
 }
