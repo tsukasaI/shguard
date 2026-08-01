@@ -320,63 +320,62 @@ fn self_protection_directories(path: &Path) -> Vec<(&'static str, PathBuf)> {
 /// into one rule set without an id collision.
 fn self_protection_toml(config_dir: &str, suffix: &str) -> String {
     let quoted_dir = toml_quote(config_dir);
-    let quoted_dd_target = toml_quote(&format!("of={config_dir}"));
     format!(
         r#"
 [[deny]]
 id = "shguard-self-protect-config-tee-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "tee"
-targets = [{{ prefix = {quoted_dir} }}]
+targets = [{{ normalized_prefix = {quoted_dir} }}]
 
 [[deny]]
 id = "shguard-self-protect-config-cp-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "cp"
-targets = [{{ prefix = {quoted_dir} }}]
+targets = [{{ normalized_prefix = {quoted_dir} }}]
 
 [[deny]]
 id = "shguard-self-protect-config-mv-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "mv"
-targets = [{{ prefix = {quoted_dir} }}]
+targets = [{{ normalized_prefix = {quoted_dir} }}]
 
 [[deny]]
 id = "shguard-self-protect-config-install-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "install"
-targets = [{{ prefix = {quoted_dir} }}]
+targets = [{{ normalized_prefix = {quoted_dir} }}]
 
 [[deny]]
 id = "shguard-self-protect-config-sed-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "sed"
 required_flags = ["i|--in-place"]
-targets = [{{ prefix = {quoted_dir} }}]
+targets = [{{ normalized_prefix = {quoted_dir} }}]
 
 [[deny]]
 id = "shguard-self-protect-config-dd-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "dd"
-targets = [{{ prefix = {quoted_dd_target} }}]
+targets = [{{ strip = "of=", normalized_prefix = {quoted_dir} }}]
 
 [[deny]]
 id = "shguard-self-protect-config-rm-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "rm"
-targets = [{{ prefix = {quoted_dir} }}]
+targets = [{{ normalized_prefix = {quoted_dir} }}]
 
 [[deny]]
 id = "shguard-self-protect-config-unlink-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "unlink"
-targets = [{{ prefix = {quoted_dir} }}]
+targets = [{{ normalized_prefix = {quoted_dir} }}]
 
 [[deny]]
 id = "shguard-self-protect-config-ln-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "ln"
-targets = [{{ prefix = {quoted_dir} }}]
+targets = [{{ normalized_prefix = {quoted_dir} }}]
 "#
     )
 }

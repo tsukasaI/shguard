@@ -48,6 +48,9 @@ fn guardfall_class_e_cases() {
     let cases: &[(&str, Decision)] = &[
         ("find /x -delete", Decision::Block),
         ("dd if=/dev/zero of=/dev/sda", Decision::Block),
+        // issue #65: `//dev/sda` lexically normalizes to `/dev/sda` —
+        // the old byte-exact `prefix = "of=/dev/"` target missed it.
+        ("dd if=/dev/zero of=//dev/sda", Decision::Block),
         ("shred /dev/sda", Decision::Block),
         ("truncate -s 0 /important", Decision::Block),
         ("tar -C / -x", Decision::Block),
@@ -61,6 +64,20 @@ fn guardfall_class_e_cases() {
         ("tar -xf evil.tar -C/", Decision::Block), // attached form of -C
         ("tar -xCf evil.tar /", Decision::Block),  // dashed short-flag clustering
         ("tar -C $HOME -xf evil.tar", Decision::Ask), // unresolvable target fails closed
+        // ---- issue #65: path normalization bypasses — a real shell
+        // treats each of these identically to `-C /`/`-C ~`, but the old
+        // pure-byte `exact`/`prefix` targets missed every one of them ----
+        ("tar -xf evil.tar -C /", Decision::Block), // regression pin, unchanged
+        ("tar -xf evil.tar -C //", Decision::Block), // was Allow before issue #65
+        ("tar -xf evil.tar -C /.", Decision::Block), // was Allow before issue #65
+        ("tar -xf evil.tar -C ~/..", Decision::Block), // was Allow before issue #65
+        ("tar -xf evil.tar -C ../../../..", Decision::Block), // was Allow before issue #65
+        // A dotted-but-concrete path must not false-positive against "/".
+        ("tar -xf evil.tar -C /some/real/./path", Decision::Allow),
+        // Deliberate behavior change (issue #65): a pure relative ascent
+        // might resolve to "/" from an unknown cwd, so it now fails closed
+        // to Block rather than Allow.
+        ("tar -xf evil.tar -C ..", Decision::Block),
     ];
 
     for (command, expected) in cases {
@@ -118,6 +135,9 @@ fn guardfall_rm_dot_targets() {
         ("rm -rf ..", Decision::Block),
         ("rm -rf ./", Decision::Block),
         ("rm -rf ../", Decision::Block),
+        // issue #65: `//` lexically normalizes to the same target `/`
+        // does — the old byte-exact `exact = "/"` target missed it.
+        ("rm -rf //", Decision::Block),
     ];
 
     for (command, expected) in cases {
@@ -139,6 +159,32 @@ fn guardfall_transparent_wrapper_cases() {
         ("timeout 5 rm -rf /", Decision::Block),
         ("chrt -f 99 rm -rf /", Decision::Block),
         ("taskset 0x1 rm -rf /", Decision::Block),
+    ];
+
+    for (command, expected) in cases {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
+/// Issue #65: self-protection's `normalized_prefix`/`normalized` targets
+/// (the literal `~/.config/shguard/` half — `src/config.rs`'s dynamically
+/// generated resolved-path half is covered separately in
+/// `tests/user_config.rs`, which drives the real binary with an actual
+/// config path) must still catch a `.`-padded or double-slash respelling
+/// of the config directory, not just the literal spelling.
+#[test]
+fn guardfall_self_protection_normalization_cases() {
+    let cases: &[(&str, Decision)] = &[
+        ("tee ~/.config/shguard/config.toml", Decision::Block), // regression pin
+        ("tee ~/.config//shguard/config.toml", Decision::Block), // double slash
+        ("tee ~/.config/./shguard/config.toml", Decision::Block), // dot-padded
+        ("tee ~/.config/other/config.toml", Decision::Allow),   // must not over-match
     ];
 
     for (command, expected) in cases {

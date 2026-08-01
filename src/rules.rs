@@ -308,10 +308,40 @@ impl ValueFlag {
 /// `targets` list is a set of OR'd alternatives — the rule matches if any
 /// argv token satisfies any one of them (e.g. rm's target list holds `/`,
 /// `/*`, `~`, and a `/dev/` prefix as separate alternatives).
+///
+/// [`Self::Exact`]/[`Self::Prefix`] compare raw bytes only — no path
+/// normalization, by deliberate choice (issue #65): many target values
+/// aren't paths at all (`dd`'s `of=` prefix, a glob like `/*`, an
+/// `except_targets` URL prefix), and normalizing an `except_targets` entry
+/// would silently *widen* an allow. [`Self::NormalizedExact`]/
+/// [`Self::NormalizedPrefix`] are the opt-in, path-aware siblings a rule
+/// author reaches for explicitly when a target genuinely is a filesystem
+/// path — see [`lexical_normalize`] for the normalization algorithm and
+/// [`Self::matches`] for each variant's match semantics.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TargetMatcher {
     Exact(String),
     Prefix(String),
+    /// Path-aware equality: the token (after an optional [`strip_target`]
+    /// prefix removal) is lexically normalized and compared against a
+    /// pre-normalized target [`PathForm`], plus two fail-closed widenings
+    /// — see [`Self::matches`].
+    NormalizedExact {
+        /// A literal prefix the token must carry before the path itself
+        /// begins (e.g. `"of="` for `dd`'s `of=/dev/sda`, `"-C"` for
+        /// tar's attached `-C/` form) — `None` when the whole token is
+        /// the path.
+        strip: Option<String>,
+        target: PathForm,
+    },
+    /// Path-aware prefix match: the token (after an optional `strip`) is
+    /// lexically normalized, rendered to its canonical string form via
+    /// [`canonical_render`], and compared with `starts_with` against a
+    /// pre-rendered `canon` — see [`Self::matches`].
+    NormalizedPrefix {
+        strip: Option<String>,
+        canon: String,
+    },
 }
 
 impl TargetMatcher {
@@ -319,7 +349,170 @@ impl TargetMatcher {
         match self {
             Self::Exact(exact) => token == exact,
             Self::Prefix(prefix) => token.starts_with(prefix.as_str()),
+            Self::NormalizedExact { strip, target } => {
+                let Some(remainder) = strip_target(strip.as_deref(), token) else {
+                    return false;
+                };
+                let form = lexical_normalize(remainder);
+                if form == *target {
+                    return true;
+                }
+                // Fail-closed widenings (issue #65): shguard never knows
+                // the invoking shell's cwd, so a pure relative ascent
+                // (`..`, `../..`, `../../../..`, …) might resolve to `/`
+                // at any depth, and a `~`-anchored token that pops past
+                // $HOME (`~/..`) has provably left it even though the
+                // exact resulting path is unknown. No other target shape
+                // widens like this — `Opaque` never matches anything.
+                match (target, &form) {
+                    (
+                        PathForm::Abs(comps),
+                        PathForm::Rel {
+                            ascent,
+                            comps: rel_comps,
+                        },
+                    ) => comps.is_empty() && *ascent >= 1 && rel_comps.is_empty(),
+                    (PathForm::Home(comps), PathForm::EscapesHome) => comps.is_empty(),
+                    _ => false,
+                }
+            }
+            Self::NormalizedPrefix { strip, canon } => {
+                let Some(remainder) = strip_target(strip.as_deref(), token) else {
+                    return false;
+                };
+                canonical_render(&lexical_normalize(remainder))
+                    .is_some_and(|rendered| rendered.starts_with(canon.as_str()))
+            }
         }
+    }
+}
+
+/// Strips `prefix` (a [`TargetMatcher::NormalizedExact`]/
+/// [`TargetMatcher::NormalizedPrefix`]'s optional `strip`) from `token`,
+/// or returns `token` unchanged when there's nothing declared to strip.
+/// `None` means `token` didn't literally carry the prefix at all — a
+/// non-match, never "fall back to normalizing the whole token instead".
+fn strip_target<'a>(prefix: Option<&str>, token: &'a str) -> Option<&'a str> {
+    match prefix {
+        Some(p) => token.strip_prefix(p),
+        None => Some(token),
+    }
+}
+
+/// A lexically normalized rendering of a path-shaped token (issue #65):
+/// [`TargetMatcher::Exact`]/[`Prefix`]'s pure byte-level comparison lets
+/// `//`, `/.`, `~/..`, `../../../..`, and similar respellings of `/`/`~`
+/// slip past a rule's dangerous-target list even though a real shell would
+/// treat them identically. Built by [`lexical_normalize`], which collapses
+/// `.`/`//`/trailing slashes and resolves `..` against components already
+/// seen in the same token — exactly what a shell does lexically, before
+/// ever touching the filesystem. No filesystem access, ever:
+/// `std::fs::canonicalize` would be wrong here — shguard does static/
+/// offline analysis (a target path may not exist yet, e.g. inside an
+/// unextracted tar archive) and never knows the invoking shell's cwd.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PathForm {
+    /// Anchored at `/`: `Abs(comps)` renders as `/` + `comps.join("/")`;
+    /// `Abs(vec![])` is `/` itself.
+    Abs(Vec<String>),
+    /// Anchored at `~`/`$HOME`: `Home(comps)` renders as `~/` +
+    /// `comps.join("/")`; `Home(vec![])` is `~` itself.
+    Home(Vec<String>),
+    /// A `~`-anchored token whose `..` popped past `$HOME` — provably
+    /// outside it, even though the exact resulting path is unknown.
+    EscapesHome,
+    /// Relative to an unknown cwd: `ascent` leading `..` components that
+    /// couldn't be canceled by an earlier component in the same token,
+    /// followed by `comps`. `Rel { ascent: 0, comps: vec![] }` is `.`
+    /// itself — the cwd shguard starts at, never itself dangerous.
+    Rel { ascent: u32, comps: Vec<String> },
+    /// Matches nothing: the empty string, or a `~user`/`~+`/`~-` token —
+    /// none of those expand to `$HOME`, they reach the command literally.
+    Opaque,
+}
+
+/// Lexically normalizes `token` into a [`PathForm`] — see the type docs
+/// for why this never touches the filesystem. Mirrors what a POSIX shell
+/// does to a path lexically, before any command sees it: `.`/`//`/
+/// trailing-slash segments collapse away, and a `..` cancels the nearest
+/// still-pending component in the same token (`a/../b` → `b`) rather than
+/// literally appearing in the output. A `..` with nothing left to cancel
+/// is anchor-dependent: under `/` it's a no-op (POSIX: `/..` == `/`);
+/// under `~` it proves the result has left `$HOME`
+/// ([`PathForm::EscapesHome`]); otherwise (a bare relative token) it
+/// becomes one unit of unresolved ascent ([`PathForm::Rel`]'s `ascent`) —
+/// shguard has no cwd to resolve it against.
+fn lexical_normalize(token: &str) -> PathForm {
+    if token.is_empty() {
+        return PathForm::Opaque;
+    }
+    // `~user`, `~+`, `~-` reach the command literally — only a bare `~`
+    // or a `~/`-prefixed token is `$HOME`-anchored.
+    if token.starts_with('~') && token != "~" && !token.starts_with("~/") {
+        return PathForm::Opaque;
+    }
+
+    enum Anchor {
+        Abs,
+        Home,
+        Rel,
+    }
+
+    let (anchor, rest) = if let Some(rest) = token.strip_prefix('/') {
+        (Anchor::Abs, rest)
+    } else if token == "~" {
+        (Anchor::Home, "")
+    } else if let Some(rest) = token.strip_prefix("~/") {
+        (Anchor::Home, rest)
+    } else {
+        (Anchor::Rel, token)
+    };
+
+    let mut stack: Vec<String> = Vec::new();
+    let mut ascent: u32 = 0;
+    let mut escaped = false;
+    for comp in rest.split('/') {
+        if comp.is_empty() || comp == "." {
+            continue;
+        }
+        if comp == ".." {
+            if stack.pop().is_some() {
+                continue;
+            }
+            match anchor {
+                Anchor::Abs => {}
+                Anchor::Home => escaped = true,
+                Anchor::Rel => ascent = ascent.saturating_add(1),
+            }
+        } else if !escaped {
+            stack.push(comp.to_string());
+        }
+    }
+
+    match anchor {
+        Anchor::Abs => PathForm::Abs(stack),
+        Anchor::Home if escaped => PathForm::EscapesHome,
+        Anchor::Home => PathForm::Home(stack),
+        Anchor::Rel => PathForm::Rel {
+            ascent,
+            comps: stack,
+        },
+    }
+}
+
+/// The canonical string rendering of a [`PathForm`], used only by
+/// [`TargetMatcher::NormalizedPrefix`]'s `starts_with` comparison — `None`
+/// for any shape with no unambiguous canonical string (`EscapesHome`,
+/// `Opaque`, unresolved ascent, or a relative token with named components
+/// but no anchor to render from: none of those have a starting point).
+fn canonical_render(form: &PathForm) -> Option<String> {
+    match form {
+        PathForm::Abs(comps) if comps.is_empty() => Some("/".to_string()),
+        PathForm::Abs(comps) => Some(format!("/{}", comps.join("/"))),
+        PathForm::Home(comps) if comps.is_empty() => Some("~".to_string()),
+        PathForm::Home(comps) => Some(format!("~/{}", comps.join("/"))),
+        PathForm::Rel { ascent: 0, comps } if comps.is_empty() => Some(".".to_string()),
+        _ => None,
     }
 }
 
@@ -1588,6 +1781,9 @@ struct CommandRuleDto {
 struct TargetDto {
     exact: Option<String>,
     prefix: Option<String>,
+    normalized: Option<String>,
+    normalized_prefix: Option<String>,
+    strip: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1771,8 +1967,33 @@ fn convert_command_rule(dto: CommandRuleDto) -> Result<CommandRule, RulesError> 
 }
 
 fn convert_target(rule_id: &str, dto: TargetDto) -> Result<TargetMatcher, RulesError> {
-    match (dto.exact, dto.prefix) {
-        (Some(exact), None) => {
+    let set_count = usize::from(dto.exact.is_some())
+        + usize::from(dto.prefix.is_some())
+        + usize::from(dto.normalized.is_some())
+        + usize::from(dto.normalized_prefix.is_some());
+    if set_count != 1 {
+        return Err(RulesError::invalid(
+            rule_id,
+            "target requires exactly one of `exact`/`prefix`/`normalized`/`normalized_prefix`",
+        ));
+    }
+    if dto.strip.is_some() && dto.normalized.is_none() && dto.normalized_prefix.is_none() {
+        return Err(RulesError::invalid(
+            rule_id,
+            "target's `strip` is only valid alongside `normalized`/`normalized_prefix`",
+        ));
+    }
+    if dto.strip.as_deref().is_some_and(str::is_empty) {
+        return Err(RulesError::invalid(
+            rule_id,
+            "target's `strip` must not be empty",
+        ));
+    }
+
+    // `set_count == 1` above guarantees exactly one of these four is
+    // `Some` — the wildcard arm is unreachable, not a fallback.
+    match (dto.exact, dto.prefix, dto.normalized, dto.normalized_prefix) {
+        (Some(exact), None, None, None) => {
             if exact.trim().is_empty() {
                 return Err(RulesError::invalid(
                     rule_id,
@@ -1781,7 +2002,7 @@ fn convert_target(rule_id: &str, dto: TargetDto) -> Result<TargetMatcher, RulesE
             }
             Ok(TargetMatcher::Exact(exact))
         }
-        (None, Some(prefix)) => {
+        (None, Some(prefix), None, None) => {
             // An empty prefix produces a universal matcher
             // (`"".starts_with("")` is always true) — the same hazard
             // `convert_command_rule` already guards against for an empty
@@ -1794,15 +2015,89 @@ fn convert_target(rule_id: &str, dto: TargetDto) -> Result<TargetMatcher, RulesE
             }
             Ok(TargetMatcher::Prefix(prefix))
         }
-        (None, None) => Err(RulesError::invalid(
-            rule_id,
-            "target requires exactly one of `exact`/`prefix`",
-        )),
-        (Some(_), Some(_)) => Err(RulesError::invalid(
-            rule_id,
-            "target's `exact` and `prefix` are mutually exclusive",
-        )),
+        (None, None, Some(normalized), None) => {
+            if normalized.trim().is_empty() {
+                return Err(RulesError::invalid(
+                    rule_id,
+                    "target's `normalized` must not be empty",
+                ));
+            }
+            let target = lexical_normalize(&normalized);
+            reject_degenerate_normalized_target(rule_id, &normalized, &target)?;
+            Ok(TargetMatcher::NormalizedExact {
+                strip: dto.strip,
+                target,
+            })
+        }
+        (None, None, None, Some(normalized_prefix)) => {
+            if normalized_prefix.trim().is_empty() {
+                return Err(RulesError::invalid(
+                    rule_id,
+                    "target's `normalized_prefix` must not be empty",
+                ));
+            }
+            let form = lexical_normalize(&normalized_prefix);
+            reject_degenerate_normalized_target(rule_id, &normalized_prefix, &form)?;
+            let Some(mut canon) = canonical_render(&form) else {
+                return Err(RulesError::invalid(
+                    rule_id,
+                    format!(
+                        "target's `normalized_prefix` {normalized_prefix:?} has no canonical \
+                         rendering to prefix-match against"
+                    ),
+                ));
+            };
+            // Preserve the author's trailing-slash intent:
+            // `normalized_prefix = "/dev/"` must only match tokens at or
+            // below that directory boundary (today's `Prefix` behavior
+            // for a slash-terminated prefix), while `normalized_prefix =
+            // "/dev/sd"` (no trailing slash) keeps matching by plain
+            // string prefix (`/dev/sda`, `/dev/sdb1`, …) — canonical
+            // rendering alone always drops a trailing slash (`/dev/`
+            // renders as `/dev`), so it's re-added here whenever the
+            // author wrote one.
+            if normalized_prefix.ends_with('/') && !canon.ends_with('/') {
+                canon.push('/');
+            }
+            Ok(TargetMatcher::NormalizedPrefix {
+                strip: dto.strip,
+                canon,
+            })
+        }
+        _ => unreachable!("set_count == 1 checked above: exactly one alternative is Some"),
     }
+}
+
+/// Load-time guard for [`TargetMatcher::NormalizedExact`]/
+/// [`TargetMatcher::NormalizedPrefix`]'s target value (issue #65): a
+/// `normalized`/`normalized_prefix` TOML value that itself normalizes to a
+/// form that could never usefully match anything — pure ascent
+/// (`PathForm::Rel { ascent > 0, .. }`, e.g. a rule author wrote
+/// `normalized = ".."`), [`PathForm::EscapesHome`], or [`PathForm::Opaque`]
+/// — is almost certainly a mistake, not an intentional target. Fail loudly
+/// at load time rather than silently at match time ("parse, don't
+/// validate", module docs).
+fn reject_degenerate_normalized_target(
+    rule_id: &str,
+    raw: &str,
+    form: &PathForm,
+) -> Result<(), RulesError> {
+    let degenerate = match form {
+        PathForm::Rel { ascent, .. } => *ascent > 0,
+        PathForm::EscapesHome | PathForm::Opaque => true,
+        PathForm::Abs(_) | PathForm::Home(_) => false,
+    };
+    if degenerate {
+        return Err(RulesError::invalid(
+            rule_id,
+            format!(
+                "target's normalized value {raw:?} normalizes to a form that can never \
+                 usefully match (pure ascent, escapes $HOME, or opaque) — this is almost \
+                 certainly a mistake"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn convert_pipeline_rule(dto: PipelineRuleDto) -> Result<PipelineRule, RulesError> {
