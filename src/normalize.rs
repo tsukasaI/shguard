@@ -316,6 +316,63 @@ fn fold_word(pieces: &[WordPiece], allow_split: bool) -> Vec<NormalizedWord> {
     out
 }
 
+/// Splits a command-position [`Word`]'s brace-alternation structure into
+/// the piece sequence that determines `argv[0]` (the first alternative
+/// [`fold_word`] would fold into at least one output word — "the winning
+/// alternative") and the piece sequences of every other alternative, each
+/// of which resolves to an argument-position token once brace-expanded
+/// rather than to any part of the command name (issue #77).
+///
+/// Mirrors `fold_word`'s own iteration over [`expand_braces`]'s output so
+/// the two can never diverge: `crate::gate`'s rule 1 needs to know which
+/// raw pieces of a command-position word actually determine `argv[0]`,
+/// rather than treating a substitution found anywhere in the word's brace
+/// tree as command-position-ambiguous. `rm$IFS-rf$IFS/{,$(true)}`'s
+/// `$(true)` branch never stands in for `rm` — it only ever contributes a
+/// trailing argument-position word once the brace is expanded — so it must
+/// not float rule 1's "which command will run" ambiguity, even though it
+/// does still need scanning as an argument-position substitution (rule 3's
+/// job, via the returned leftover pieces).
+///
+/// Returns `(None, [word.0.clone()])` when brace expansion itself fails
+/// ([`UnresolvableKind::ExpansionLimit`]): `fold_word`'s matching arm folds
+/// the whole word to one `Unresolvable` word in that case, so there is no
+/// winning alternative to hand back — the caller already floors the
+/// decision on that kind through the ordinary unresolvable-`argv[0]` path.
+/// The raw, un-expanded pieces still go out as the sole leftover entry,
+/// though: `collect_substitutions_into`/`collect_process_substitutions_into`
+/// (`crate::gate`) already walk into [`WordPiece::BraceAlternation`]
+/// members directly with no expansion needed, so any substitution the word
+/// contains is still found and recursed rather than silently dropped along
+/// with the abandoned brace expansion.
+#[must_use]
+pub(crate) fn split_command_position(word: &Word) -> (Option<Vec<WordPiece>>, Vec<Vec<WordPiece>>) {
+    let Ok(alternatives) = expand_braces(&word.0, 0) else {
+        return (None, vec![word.0.clone()]);
+    };
+    let mut winning = None;
+    let mut leftover = Vec::new();
+    for alternative in alternatives {
+        // Every alternative but the first to produce a word is, by
+        // definition, not the one determining `argv[0]` — no need to
+        // re-resolve once `winning` is already set.
+        let produces_word = winning.is_none()
+            && match resolve_pieces(&alternative, true) {
+                // Any unresolvable piece makes this whole alternative one
+                // opaque word (`resolve_pieces`' word-level short-circuit
+                // — see its own docs), never zero words.
+                Err(_) => true,
+                Ok((chunks, ifs_derived)) => !chunks_to_words(chunks, ifs_derived).is_empty(),
+            };
+        if produces_word {
+            winning = Some(alternative);
+        } else {
+            leftover.push(alternative);
+        }
+    }
+    (winning, leftover)
+}
+
 /// Cap on the cartesian product of brace alternatives one word may expand
 /// to. Real agent commands rarely exceed single digits; the cap exists so a
 /// crafted `{a,b}{a,b}…` word cannot blow up memory — rationale in
@@ -1019,5 +1076,65 @@ mod tests {
     fn brace_product_under_cap_folds_normally() {
         let words = first_word_normalized("x{a,b}{c,d}");
         assert_eq!(resolved_strings(&words), vec!["xac", "xad", "xbc", "xbd"]);
+    }
+
+    // ==== split_command_position (issue #77) ====
+
+    fn first_word(cmd: &CommandLine) -> &Word {
+        &simple(&cmd.first.first).words[0]
+    }
+
+    // The empty brace member resolves first and cleanly (no substitution),
+    // so it is the alternative that determines argv[0] — the substitution
+    // in the OTHER member never stands in for the command name.
+    #[test]
+    fn split_command_position_empty_member_wins_when_tried_first() {
+        let cmd = parse_ok("rm$IFS-rf$IFS/{,$(true)}");
+        let (winning, leftover) = split_command_position(first_word(&cmd));
+        let winning = winning.unwrap();
+        assert!(resolve_pieces(&winning, true).is_ok());
+        assert_eq!(leftover.len(), 1);
+        assert!(resolve_pieces(&leftover[0], true).is_err());
+    }
+
+    // Same word, members swapped: the substitution-carrying member is now
+    // tried FIRST (mirrors `fold_word`'s left-to-right member order), so
+    // IT determines argv[0] this time — genuinely ambiguous, unlike the
+    // ordering above.
+    #[test]
+    fn split_command_position_substitution_member_wins_when_tried_first() {
+        let cmd = parse_ok("rm$IFS-rf$IFS/{$(true),}");
+        let (winning, leftover) = split_command_position(first_word(&cmd));
+        let winning = winning.unwrap();
+        assert!(resolve_pieces(&winning, true).is_err());
+        assert_eq!(leftover.len(), 1);
+        assert!(resolve_pieces(&leftover[0], true).is_ok());
+    }
+
+    // No brace alternation at all: the whole word is the winning
+    // alternative, verbatim, with nothing left over.
+    #[test]
+    fn split_command_position_no_braces_is_the_whole_word() {
+        let cmd = parse_ok("rm -rf /");
+        let word = first_word(&cmd);
+        let (winning, leftover) = split_command_position(word);
+        assert_eq!(winning.as_deref(), Some(word.0.as_slice()));
+        assert!(leftover.is_empty());
+    }
+
+    // A brace product past MAX_BRACE_ALTERNATIVES fails closed with no
+    // winning alternative at all (mirrors `fold_word`'s own
+    // `ExpansionLimit` fail-closed arm) — never a guessed or partial
+    // winner. The raw, un-expanded pieces still come back as the sole
+    // leftover entry (issue #77 fable-review follow-up), so a
+    // substitution elsewhere in the word is not silently dropped just
+    // because the brace product itself was too large to expand.
+    #[test]
+    fn split_command_position_expansion_limit_has_no_winner() {
+        let cmd = parse_ok("a{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}$(rm -rf /)");
+        let word = first_word(&cmd);
+        let (winning, leftover) = split_command_position(word);
+        assert!(winning.is_none());
+        assert_eq!(leftover, vec![word.0.clone()]);
     }
 }
