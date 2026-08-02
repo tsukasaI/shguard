@@ -525,6 +525,83 @@ impl TargetMatcher {
             }
         }
     }
+
+    /// issue #78's Ask-only floor check: true when `token` normalizes to
+    /// an unresolved ascent-then-descent shape (`Rel { ascent > 0, comps:
+    /// non-empty }` — pure ascent alone is already [`Self::matches`]'s
+    /// existing certain widening, untouched here) whose descended-into
+    /// tail plausibly lands inside this matcher's own dangerous
+    /// namespace. Forward-only (`starts_with`/exact-equality, never the
+    /// reverse): a token that hasn't yet spelled out enough of the
+    /// dangerous prefix (`../../dev` against `/dev/sd`) must NOT trip
+    /// this — that's what keeps ordinary relative paths (`tar -C
+    /// ../build`) from false-positiving, since no rule's `canon`/`target`
+    /// shares a prefix with `/build`. Deliberately NOT folded into
+    /// `Self::matches`: shguard has no cwd to prove the ascent actually
+    /// bottoms out at the right depth, so this must only ever feed a
+    /// `gate.rs` floor capped at `Ask` (see
+    /// `crate::gate::scan_ascent_descent_floor`), never the matched
+    /// rule's own (often stricter) decision.
+    ///
+    /// Known gaps (fable-review findings against the first draft, not yet
+    /// fixed):
+    /// - A `~`-anchored ascent past `$HOME` (`~/../../dev/sda`) normalizes
+    ///   to [`PathForm::EscapesHome`], which carries no descended-into
+    ///   tail for this check to consume — tracked as issue #90.
+    /// - This check doesn't consult a rule's `except_targets`. No
+    ///   embedded rule currently pairs a `normalized`/`normalized_prefix`
+    ///   target with an `except_targets` carve-out, so this is latent,
+    ///   not live — but a future one would have its except-carve-out
+    ///   over-floored to `Ask` by this check.
+    /// - A hypothetical rule with a bare `/` or `~`
+    ///   `normalized_prefix` (not currently rejected by
+    ///   `reject_degenerate_normalized_target`, and no embedded rule uses
+    ///   one) would blanket-floor every ascent-then-descent token — the
+    ///   same latent shape `TargetMatcher::matches`'s existing
+    ///   `NormalizedPrefix` already has.
+    fn ascent_descent_plausible(&self, token: &str) -> bool {
+        let strip = match self {
+            Self::NormalizedPrefix { strip, .. } | Self::NormalizedExact { strip, .. } => strip,
+            Self::Exact(_) | Self::Prefix(_) => return false,
+        };
+        let Some(remainder) = strip_target(strip.as_deref(), token) else {
+            return false;
+        };
+        let PathForm::Rel { ascent, comps } = lexical_normalize(remainder) else {
+            return false;
+        };
+        if ascent == 0 || comps.is_empty() {
+            return false;
+        }
+        match self {
+            Self::NormalizedPrefix { canon, .. } => {
+                let candidate = if canon.starts_with('/') {
+                    abs_render(&comps)
+                } else if canon.starts_with('~') {
+                    format!("~/{}", comps.join("/"))
+                } else {
+                    return false; // degenerate canon (e.g. "."), never plausible
+                };
+                candidate.starts_with(canon.as_str())
+            }
+            Self::NormalizedExact { target, .. } => matches!(
+                target,
+                PathForm::Abs(target_comps) | PathForm::Home(target_comps)
+                    if !target_comps.is_empty() && *target_comps == comps
+            ),
+            Self::Exact(_) | Self::Prefix(_) => unreachable!("filtered out above"),
+        }
+    }
+}
+
+/// Renders `comps` as if it were the tail of an absolute path (`/` +
+/// `comps`) — used only by [`TargetMatcher::ascent_descent_plausible`] to
+/// test whether an unresolved-ascent token *could plausibly* land inside a
+/// dangerous rule's own namespace, never as a real canonical rendering
+/// (contrast [`canonical_render`], which stays `None` for `Rel { ascent >
+/// 0, .. }` precisely because it is *not* provable).
+fn abs_render(comps: &[String]) -> String {
+    format!("/{}", comps.join("/"))
 }
 
 /// Strips `prefix` (a [`TargetMatcher::NormalizedExact`]/
@@ -1073,6 +1150,30 @@ impl CommandRule {
             .iter()
             .any(|w| matches!(w.resolution(), Resolution::Unresolvable(_)));
         has_unresolvable && self.relaxed_required_tokens_match(rest_words)
+    }
+
+    /// issue #78: true when this rule's command+flags match `argv` (via
+    /// [`Self::matching_rest`], the same full constraint check
+    /// [`Self::matches`] uses) and some resolved tail token normalizes to
+    /// an unresolved ascent-then-descent shape that plausibly lands
+    /// inside one of this rule's own `NormalizedPrefix`/`NormalizedExact`
+    /// targets. Read-only probe, same shape as
+    /// [`Self::matches_except_target`]/[`Self::matches_except_flags`] —
+    /// never itself a match, only a `gate.rs` floor's input (see
+    /// `crate::gate::scan_ascent_descent_floor`).
+    #[must_use]
+    pub(crate) fn matches_ascent_descent_floor(&self, argv: &[NormalizedWord]) -> bool {
+        if self.targets.is_empty() {
+            return false;
+        }
+        let Some(rest_words) = self.matching_rest(argv) else {
+            return false;
+        };
+        resolved_strings(&rest_words).iter().any(|token| {
+            self.targets
+                .iter()
+                .any(|t| t.ascent_descent_plausible(token))
+        })
     }
 }
 
@@ -2419,6 +2520,22 @@ impl RedirectRule {
     fn matches(&self, target: &str) -> bool {
         self.targets.iter().any(|t| t.matches(target))
     }
+
+    /// issue #78: true when `target` (a redirect's resolved target word)
+    /// normalizes to an unresolved ascent-then-descent shape that
+    /// plausibly lands inside one of this rule's own targets — the same
+    /// gap [`CommandRule::matches_ascent_descent_floor`] closes for
+    /// argv-based targets (`dd of=...`, `tee ...`), but for shell
+    /// redirect syntax (`> ...`, `>> ...`), which carries the identical
+    /// `/dev/*`/`/etc/passwd`/`/etc/shadow` target namespace via
+    /// `redirect-overwrite-device-or-critical-file`. Read-only probe,
+    /// never itself a match (see `crate::gate::scan_redirect_ascent_descent_floor`).
+    #[must_use]
+    fn ascent_descent_plausible(&self, target: &str) -> bool {
+        self.targets
+            .iter()
+            .any(|t| t.ascent_descent_plausible(target))
+    }
 }
 
 /// Checks that no id in `ids` repeats — the duplicate-id-is-`Err` half of
@@ -2536,6 +2653,21 @@ impl Rules {
         self.redirect_rules.iter().find(|rule| rule.matches(target))
     }
 
+    /// The first [`RedirectRule`] for which
+    /// [`RedirectRule::ascent_descent_plausible`] holds against `target`,
+    /// if any — issue #78's floor extended to shell redirect syntax. Like
+    /// [`Self::match_command_ascent_descent`], a read-only probe: never
+    /// mutates rule state, never itself constitutes a match.
+    #[must_use]
+    pub(crate) fn match_redirect_target_ascent_descent(
+        &self,
+        target: &str,
+    ) -> Option<&RedirectRule> {
+        self.redirect_rules
+            .iter()
+            .find(|rule| rule.ascent_descent_plausible(target))
+    }
+
     /// The first user-configured `ask` [`CommandRule`] that matches `argv`,
     /// if any. Always `None` for an embedded-only [`Rules`] (see the struct
     /// docs) — only [`merge_user_config`] populates `ask_rules`.
@@ -2575,6 +2707,21 @@ impl Rules {
         self.command_rules
             .iter()
             .find(|rule| rule.matches_except_flags(argv))
+    }
+
+    /// The first [`CommandRule`] for which
+    /// [`CommandRule::matches_ascent_descent_floor`] holds, if any —
+    /// issue #78's unresolved-ascent-then-descent floor (`src/gate.rs`).
+    /// Like [`Self::match_command_except_target`], a read-only probe:
+    /// never mutates rule state, never itself constitutes a match.
+    #[must_use]
+    pub(crate) fn match_command_ascent_descent(
+        &self,
+        argv: &[NormalizedWord],
+    ) -> Option<&CommandRule> {
+        self.command_rules
+            .iter()
+            .find(|rule| rule.matches_ascent_descent_floor(argv))
     }
 
     /// The configured escalation floor (issues #35/#36, `crate::gate` rule
@@ -3053,6 +3200,112 @@ mod tests {
                 .match_command(&argv(&["rm", "-rf", "~/old-build"]))
                 .is_none()
         );
+    }
+
+    // ==== Issue #78: an unresolved ascent-then-descent token (`../../dev/
+    // sda`-shaped) floors to Ask via Rules::match_command_ascent_descent,
+    // when it plausibly lands inside a rule's own NormalizedPrefix/
+    // NormalizedExact namespace — distinct from ordinary match_command,
+    // which must stay None (the ascent can't be proven, only flagged).
+    // ====
+
+    #[test]
+    fn ascent_descent_dd_write_device_floors() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["dd", "of=../../../../dev/sda"]);
+        assert!(rules.match_command(&cmd).is_none());
+        let rule = rules.match_command_ascent_descent(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "dd-write-device");
+    }
+
+    #[test]
+    fn ascent_descent_rm_rf_dev_prefix_floors() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["rm", "-rf", "../../dev/sda"]);
+        let rule = rules.match_command_ascent_descent(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "rm-recursive-force-dangerous-target");
+    }
+
+    #[test]
+    fn ascent_descent_etc_passwd_normalized_exact_floors() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["tee", "../../../etc/passwd"]);
+        let rule = rules.match_command_ascent_descent(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "tee-write-device-or-critical-file");
+    }
+
+    #[test]
+    fn ascent_descent_self_protection_home_floors() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["cp", "x", "../../../../.config/shguard/hooks/x"]);
+        assert!(rules.match_command_ascent_descent(&cmd).is_some());
+    }
+
+    // ==== Issue #78 (fable-review follow-up): the same ascent-descent gap,
+    // but reached via shell redirect syntax (`> ...`) rather than argv,
+    // which carries the identical /dev/*//etc/passwd//etc/shadow namespace
+    // through a separate Rust type (RedirectRule, not CommandRule). ====
+
+    #[test]
+    fn ascent_descent_redirect_etc_passwd_floors() {
+        let rules = Rules::embedded().unwrap();
+        let rule = rules
+            .match_redirect_target_ascent_descent("../../../../etc/passwd")
+            .unwrap();
+        assert_eq!(
+            rule.id().as_str(),
+            "redirect-overwrite-device-or-critical-file"
+        );
+    }
+
+    #[test]
+    fn ascent_descent_redirect_dev_prefix_floors() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_redirect_target_ascent_descent("../../../../dev/sda1")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn ascent_descent_redirect_ordinary_sibling_file_does_not_floor() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_redirect_target_ascent_descent("../build/output.txt")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn ascent_descent_ordinary_sibling_dir_does_not_floor() {
+        // The issue's own explicit noise-guard example: no rule targets
+        // `../build`'s namespace, so this must stay Allow.
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["tar", "-C", "../build", "-x", "-f", "a.tar"]);
+        assert!(rules.match_command_ascent_descent(&cmd).is_none());
+    }
+
+    #[test]
+    fn ascent_descent_partial_prefix_does_not_floor() {
+        // Near-miss: comps = ["dev"] alone, "/dev" does not start_with
+        // "/dev/" — important regression guard for the forward-only
+        // design (a token that hasn't yet spelled out the full dangerous
+        // prefix must not trip the floor).
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["dd", "of=../../dev"]);
+        assert!(rules.match_command_ascent_descent(&cmd).is_none());
+    }
+
+    #[test]
+    fn ascent_descent_pure_ascent_no_descent_unaffected() {
+        // Pure ascent (no trailing comps) is the *existing* NormalizedExact
+        // widening's territory, not this floor's — confirms no double-
+        // counting between the two mechanisms.
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["dd", "of=../../../.."]);
+        assert!(rules.match_command_ascent_descent(&cmd).is_none());
     }
 
     // ==== Security review: CommandRule matching resolves basename + skips
