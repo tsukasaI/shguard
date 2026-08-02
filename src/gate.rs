@@ -3723,6 +3723,15 @@ mod tests {
     }
 
     #[test]
+    fn rm_rf_root_and_named_user_home_still_blocks() {
+        // Fable-review nitpick on PR #89: pin that a hard Block (from an
+        // unrelated target on the same command line) outranks the
+        // named-user-home floor's Ask, not just that the floor produces
+        // Ask when nothing stronger is present.
+        assert_decision("rm -rf / ~someuser", Decision::Block);
+    }
+
+    #[test]
     fn rm_rf_dirstack_tilde_plus_allows() {
         assert_decision("rm -rf ~+", Decision::Allow);
     }
@@ -3751,6 +3760,31 @@ mod tests {
         // `~username` token that would delete another account's home if
         // it expanded — the floor must survive the allowlist downgrade.
         let verdict = analyze_with_policy("rm -rf ~someuser", &rules, &allowlist);
+        assert_eq!(verdict.decision(), Decision::Ask);
+    }
+
+    #[test]
+    fn user_config_ask_rule_still_floors_on_named_user_home() {
+        // Fable-review finding on PR #89: match_command_named_user_home
+        // originally scanned only the embedded blocklist's command_rules,
+        // leaving a user-config [[ask]] entry with its own bare-`~`
+        // target uncovered — the same asymmetry #80 fixed for blocklist
+        // rules, surviving for user config.
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[ask]]
+            id = "user-ask-cp-tilde"
+            reason = "confirm cp into a home directory"
+            command = "cp"
+            targets = [{ normalized = "~" }]
+        "#,
+        );
+        let verdict = analyze_with_policy("cp -r x ~someuser", &rules, &allowlist);
+        assert_eq!(verdict.decision(), Decision::Ask);
+        // Regression guard: the certain bare-`~` case via the same
+        // user-config rule must be unaffected (already Ask via the rule
+        // itself, not via this floor).
+        let verdict = analyze_with_policy("cp -r x ~", &rules, &allowlist);
         assert_eq!(verdict.decision(), Decision::Ask);
     }
 

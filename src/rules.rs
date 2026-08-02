@@ -2714,8 +2714,15 @@ impl Rules {
         &self,
         argv: &[NormalizedWord],
     ) -> Option<&CommandRule> {
+        // Fable-review finding (PR #89): a user-config `[[ask]]` rule
+        // (`ask_rules`) with its own bare-`~` target is just as eligible
+        // for this floor as an embedded blocklist rule (`command_rules`)
+        // — both are `CommandRule`s. Scanning only `command_rules` would
+        // leave the same `~username`-vs-bare-`~` asymmetry #80 fixed for
+        // the blocklist alive for user config.
         self.command_rules
             .iter()
+            .chain(self.ask_rules.iter())
             .find(|rule| rule.matches_named_user_home_floor(argv))
     }
 
