@@ -1489,27 +1489,29 @@ fn apply_tar_dashless_floor(verdict: Verdict, floor: Option<(Decision, String)>)
     }
 }
 
-/// Issue #78: `Some(Ask, reason)` when `argv` matches a blocklist rule's
-/// command+flags and some resolved tail token normalizes to an unresolved
-/// ascent-then-descent shape (`crate::rules::CommandRule::
-/// matches_ascent_descent_floor`) that plausibly lands inside one of that
-/// rule's own `NormalizedPrefix`/`NormalizedExact` targets — `None`
-/// otherwise. Always capped at `Ask`, never the matched rule's own
-/// decision (often `Block`): shguard has no cwd to resolve the ascent
-/// against, so this can never be proven, only flagged. Kept independent
-/// of `CommandRule::matches` for the same reason
-/// [`scan_tar_dashless_unmodeled_floor`] is: a per-token match has no way
-/// to say "this specific token can only ever be Ask" while the same
-/// rule's other targets stay at its own fixed decision.
+/// Issue #78: `Some(Ask, reason)` when `argv` matches a rule's command+
+/// flags — an embedded blocklist rule, a user-config `[[deny]]` entry, or
+/// a user-config `[[ask]]` entry (`Rules::match_command_ascent_descent`
+/// scans both `command_rules` and `ask_rules`) — and some resolved tail
+/// token normalizes to an unresolved ascent-then-descent shape
+/// (`crate::rules::CommandRule::matches_ascent_descent_floor`) that
+/// plausibly lands inside one of that rule's own `NormalizedPrefix`/
+/// `NormalizedExact` targets — `None` otherwise. Always capped at `Ask`,
+/// never the matched rule's own decision (often `Block`): shguard has no
+/// cwd to resolve the ascent against, so this can never be proven, only
+/// flagged. Kept independent of `CommandRule::matches` for the same
+/// reason [`scan_tar_dashless_unmodeled_floor`] is: a per-token match has
+/// no way to say "this specific token can only ever be Ask" while the
+/// same rule's other targets stay at its own fixed decision.
 fn scan_ascent_descent_floor(argv: &[NormalizedWord], rules: &Rules) -> Option<(Decision, String)> {
     let rule = rules.match_command_ascent_descent(argv)?;
     Some((
         Decision::Ask,
         format!(
             "a target token ascends via `..` past an unknown number of directories, then \
-             descends into a shape that would match blocklist rule {:?} ({}) if the ascent \
-             bottomed out there; shguard has no cwd to resolve the ascent against, so this \
-             can't be proven, only flagged",
+             descends into a shape that would match rule {:?} ({}) if the ascent bottomed out \
+             there; shguard has no cwd to resolve the ascent against, so this can't be proven, \
+             only flagged",
             rule.id().as_str(),
             rule.reason().as_str(),
         ),
@@ -3793,6 +3795,16 @@ mod tests {
     }
 
     #[test]
+    fn rm_rf_root_and_ascent_descent_still_blocks() {
+        // Same pin as commit 89cb6d7's rm_rf_root_and_named_user_home_
+        // still_blocks for the sibling floor: a hard Block (from an
+        // unrelated target on the same command line) must outrank the
+        // ascent-descent floor's Ask, not just "the floor produces Ask
+        // when nothing stronger is present".
+        assert_decision("rm -rf / ../../dev/sda", Decision::Block);
+    }
+
+    #[test]
     fn tar_dash_c_sibling_build_dir_allows() {
         // Full-pipeline noise-guard case: no rule targets `../build`'s
         // namespace, so an ordinary sibling-directory `tar -C` must stay
@@ -3821,6 +3833,30 @@ mod tests {
         // allowlist downgrade.
         let verdict = analyze_with_policy("dd of=../../../../dev/sda", &rules, &allowlist);
         assert_eq!(verdict.decision(), Decision::Ask);
+    }
+
+    #[test]
+    fn user_config_ask_rule_still_floors_on_ascent_descent() {
+        // Fable-review finding on PR #113 (same asymmetry class as
+        // commit 89cb6d7 fixed for the sibling named-user-home floor):
+        // match_command_ascent_descent originally scanned only the
+        // embedded blocklist's command_rules, leaving a user-config
+        // [[ask]] entry's own normalized/normalized_prefix target
+        // uncovered — its literal spelling correctly Asks, but an
+        // ascent-obfuscated spelling of the same target silently Allowed.
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[ask]]
+            id = "user-ask-cmd-prod"
+            reason = "confirm writes into prod"
+            command = "cmd"
+            targets = [{ normalized_prefix = "~/prod/" }]
+        "#,
+        );
+        let direct = analyze_with_policy("cmd x ~/prod/y", &rules, &allowlist);
+        assert_eq!(direct.decision(), Decision::Ask);
+        let evasive = analyze_with_policy("cmd x ../../prod/y", &rules, &allowlist);
+        assert_eq!(evasive.decision(), Decision::Ask);
     }
 
     #[test]

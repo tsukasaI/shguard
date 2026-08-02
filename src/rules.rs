@@ -2719,8 +2719,19 @@ impl Rules {
         &self,
         argv: &[NormalizedWord],
     ) -> Option<&CommandRule> {
+        // Fable-review finding (PR #113), same class as commit 89cb6d7's
+        // fix for the sibling named-user-home floor: a user-config
+        // `[[ask]]` rule (`ask_rules`) with its own `normalized`/
+        // `normalized_prefix` target is just as eligible for this floor
+        // as an embedded blocklist rule (`command_rules`) — both are
+        // `CommandRule`s. Scanning only `command_rules` would leave the
+        // literal-vs-ascent-obfuscated-spelling asymmetry alive for user
+        // config: the literal spelling correctly Asks via the rule
+        // itself, but an ascent-then-descent respelling of the same
+        // target silently Allowed.
         self.command_rules
             .iter()
+            .chain(self.ask_rules.iter())
             .find(|rule| rule.matches_ascent_descent_floor(argv))
     }
 
