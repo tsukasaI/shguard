@@ -3205,6 +3205,20 @@ mod tests {
         assert_decision("mke2fs -t ext4 /dev/sda1", Decision::Block);
     }
 
+    // ==== Issue #81: mkswap destroys the target device's/partition's
+    // filesystem signature, same destructive shape as mkfs.*/mke2fs, but
+    // wasn't caught by any existing rule. ====
+
+    #[test]
+    fn mkswap_blocks() {
+        assert_decision("mkswap /dev/sda1", Decision::Block);
+    }
+
+    #[test]
+    fn mkswap_blocks_through_sudo_wrapper() {
+        assert_decision("sudo mkswap /dev/sda1", Decision::Block);
+    }
+
     // ==== bypass-hunt finding against this branch: bare `mkfs -t <type>`
     // dispatches to `mkfs.<type>` but wasn't matched by the `mkfs.`
     // command_prefix rule. ====
