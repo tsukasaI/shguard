@@ -226,6 +226,11 @@ reason = "mkntfs is the implementation behind mkfs.ntfs, formatting a filesystem
 command = "mkntfs"
 
 [[command]]
+id = "mkswap-any-device"
+reason = "mkswap overwrites the target device's/partition's signature to initialize it as swap space, destroying any existing filesystem or data"
+command = "mkswap"
+
+[[command]]
 id = "mkfs-dispatcher-any-filesystem"
 reason = "mkfs -t <type> dispatches to mkfs.<type>, formatting a filesystem and destroying all data on the target"
 command = "mkfs"
