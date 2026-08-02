@@ -3214,6 +3214,11 @@ mod tests {
         assert_decision("mkswap /dev/sda1", Decision::Block);
     }
 
+    #[test]
+    fn mkswap_blocks_through_sudo_wrapper() {
+        assert_decision("sudo mkswap /dev/sda1", Decision::Block);
+    }
+
     // ==== bypass-hunt finding against this branch: bare `mkfs -t <type>`
     // dispatches to `mkfs.<type>` but wasn't matched by the `mkfs.`
     // command_prefix rule. ====
