@@ -856,6 +856,11 @@ fn evaluate_simple_command(
     // for the same reason `recursable`/`expansion` are: this floor must
     // survive `core`'s early returns too.
     let tar_dashless_floor = scan_tar_dashless_unmodeled_floor(&argv);
+    // Issue #80: a `~username` token that would hit one of a matched
+    // rule's own bare-`~` targets if it expanded. Computed here for the
+    // same reason `tar_dashless_floor` is: this floor must survive
+    // `core`'s early returns too.
+    let named_user_home_floor = scan_named_user_home_floor(&argv, rules);
 
     let verdict = evaluate_simple_command_core(
         command,
@@ -867,9 +872,11 @@ fn evaluate_simple_command(
         escalation_chain,
     );
     let tar_dashless_floor_present = tar_dashless_floor.is_some();
+    let named_user_home_floor_present = named_user_home_floor.is_some();
     let verdict = apply_expansion_floor(verdict, expansion.floor);
     let verdict = apply_recursable_floor(verdict, recursable.floor);
     let verdict = apply_tar_dashless_floor(verdict, tar_dashless_floor);
+    let verdict = apply_named_user_home_floor(verdict, named_user_home_floor);
 
     // Rule 11's allowlist guard: the same presence-based reasoning as
     // `has_argument_substitution` above (module docs, "User config
@@ -882,12 +889,17 @@ fn evaluate_simple_command(
     // itself is not consent to whatever command their `-c`/`-exec` payload
     // names. `tar_dashless_floor.is_some()` extends it once more: an allow
     // entry for `tar` is not consent to a dash-less cluster this crate
-    // cannot even parse.
+    // cannot even parse. `named_user_home_floor_present` (issue #80)
+    // extends it once more: an allow entry for `rm`/`tar` is not consent
+    // to a `~username` token that would hit that same rule's bare-`~`
+    // target if it expanded — the floor's uncertainty is orthogonal to
+    // whatever the allowlist entry was written to permit.
     let verdict = if has_argument_substitution
         || expansion.has_any
         || escalation_in_chain
         || recursable.has_any
         || tar_dashless_floor_present
+        || named_user_home_floor_present
     {
         verdict
     } else {
@@ -1386,6 +1398,62 @@ fn scan_tar_dashless_unmodeled_floor(argv: &[NormalizedWord]) -> Option<(Decisio
 /// self-documenting-call-site reason the others are (module docs'
 /// one-function-per-floor convention).
 fn apply_tar_dashless_floor(verdict: Verdict, floor: Option<(Decision, String)>) -> Verdict {
+    let Some((floor_decision, floor_reason)) = floor else {
+        return verdict;
+    };
+    if verdict.decision() >= floor_decision {
+        return verdict;
+    }
+    let argv = verdict.normalized_argv().to_vec();
+    let reason = match verdict.reason() {
+        Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
+        None => floor_reason,
+    };
+    match floor_decision {
+        Decision::Block => Verdict::block(Reason::new(reason), argv, None),
+        Decision::Ask | Decision::Allow => Verdict::ask(Reason::new(reason), argv),
+    }
+}
+
+/// Issue #80: `Some(Ask, reason)` when `argv` matches a rule's command+
+/// flags — an embedded blocklist rule, a user-config `[[deny]]` entry, or
+/// a user-config `[[ask]]` entry (`Rules::match_command_named_user_home`
+/// scans both `command_rules` and `ask_rules`) — and some resolved tail
+/// token is a `~username` shorthand
+/// (`crate::rules::CommandRule::matches_named_user_home_floor`) that would
+/// hit one of that rule's own bare-`~` targets if it expanded — `None`
+/// otherwise. Always capped at `Ask`, never the matched rule's own
+/// decision (often `Block`): unlike a bare `~`, `~username` only expands
+/// to a real home directory if that account exists and is reachable,
+/// neither of which shguard can verify statically, so the rule's
+/// certainty-calibrated decision must not be inherited here. Kept
+/// independent of `CommandRule::matches` for the same reason
+/// [`scan_tar_dashless_unmodeled_floor`] is: a per-token match has no way
+/// to say "this specific token can only ever be Ask" while the same rule's
+/// other targets stay at its own fixed decision.
+fn scan_named_user_home_floor(
+    argv: &[NormalizedWord],
+    rules: &Rules,
+) -> Option<(Decision, String)> {
+    let rule = rules.match_command_named_user_home(argv)?;
+    Some((
+        Decision::Ask,
+        format!(
+            "a target token is a named-user home shorthand (`~user`) that would match rule \
+             {:?} ({}) if `~user` expanded to an existing account's home directory; shguard \
+             cannot verify that account exists or is reachable",
+            rule.id().as_str(),
+            rule.reason().as_str(),
+        ),
+    ))
+}
+
+/// Applies [`scan_named_user_home_floor`]'s floor to `verdict` — the same
+/// `decision.max(floor_decision)` max-lift every other floor in this
+/// module uses, kept as its own named function for the same
+/// self-documenting-call-site reason the others are (module docs'
+/// one-function-per-floor convention).
+fn apply_named_user_home_floor(verdict: Verdict, floor: Option<(Decision, String)>) -> Verdict {
     let Some((floor_decision, floor_reason)) = floor else {
         return verdict;
     };
@@ -3654,6 +3722,87 @@ mod tests {
         // reports `NotApplicable`, never `Unmodeled` — ordinary harmless
         // `tar` usage must not regress to Ask/Block.
         assert_decision("tar cfz archive.tar.gz somedir/", Decision::Allow);
+    }
+
+    // ==== Issue #80: `~username` floors to Ask end-to-end, never inherits
+    // the matched rule's own (often Block) decision ====
+
+    #[test]
+    fn rm_rf_named_user_home_asks() {
+        assert_decision("rm -rf ~someuser", Decision::Ask);
+    }
+
+    #[test]
+    fn rm_rf_bare_home_still_blocks() {
+        // Regression: the new floor must not weaken the existing certain
+        // bare-`~` case, which stays a hard Block via the rule itself.
+        assert_decision("rm -rf ~", Decision::Block);
+    }
+
+    #[test]
+    fn rm_rf_root_and_named_user_home_still_blocks() {
+        // Fable-review nitpick on PR #89: pin that a hard Block (from an
+        // unrelated target on the same command line) outranks the
+        // named-user-home floor's Ask, not just that the floor produces
+        // Ask when nothing stronger is present.
+        assert_decision("rm -rf / ~someuser", Decision::Block);
+    }
+
+    #[test]
+    fn rm_rf_dirstack_tilde_plus_allows() {
+        assert_decision("rm -rf ~+", Decision::Allow);
+    }
+
+    #[test]
+    fn sudo_rm_rf_named_user_home_asks() {
+        assert_decision("sudo rm -rf ~someuser", Decision::Ask);
+    }
+
+    #[test]
+    fn piped_rm_rf_named_user_home_asks() {
+        assert_decision("true | rm -rf ~someuser", Decision::Ask);
+    }
+
+    #[test]
+    fn allowlisted_rm_still_asks_on_named_user_home() {
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[allow]]
+            id = "user-allow-rm"
+            reason = "trust me"
+            command = "rm"
+        "#,
+        );
+        // An allow entry for `rm` is consent to `rm` in general, not to a
+        // `~username` token that would delete another account's home if
+        // it expanded — the floor must survive the allowlist downgrade.
+        let verdict = analyze_with_policy("rm -rf ~someuser", &rules, &allowlist);
+        assert_eq!(verdict.decision(), Decision::Ask);
+    }
+
+    #[test]
+    fn user_config_ask_rule_still_floors_on_named_user_home() {
+        // Fable-review finding on PR #89: match_command_named_user_home
+        // originally scanned only the embedded blocklist's command_rules,
+        // leaving a user-config [[ask]] entry with its own bare-`~`
+        // target uncovered — the same asymmetry #80 fixed for blocklist
+        // rules, surviving for user config.
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[ask]]
+            id = "user-ask-cp-tilde"
+            reason = "confirm cp into a home directory"
+            command = "cp"
+            targets = [{ normalized = "~" }]
+        "#,
+        );
+        let verdict = analyze_with_policy("cp -r x ~someuser", &rules, &allowlist);
+        assert_eq!(verdict.decision(), Decision::Ask);
+        // Regression guard: the certain bare-`~` case via the same
+        // user-config rule must be unaffected (already Ask via the rule
+        // itself, not via this floor).
+        let verdict = analyze_with_policy("cp -r x ~", &rules, &allowlist);
+        assert_eq!(verdict.decision(), Decision::Ask);
     }
 
     // ==== User config precedence: deny > ask > allow (plan.md §6 item 8) ====

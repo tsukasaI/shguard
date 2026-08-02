@@ -525,6 +525,37 @@ impl TargetMatcher {
             }
         }
     }
+
+    /// issue #80's Ask-only floor check: true when this matcher targets a
+    /// bare `~` (`NormalizedExact { target: Home(comps), .. }` with empty
+    /// `comps`, e.g. `{ normalized = "~" }`) and `token` normalizes to
+    /// [`PathForm::NamedUserHome`] or [`PathForm::NamedUserHomeEscapes`].
+    /// Deliberately NOT folded into [`Self::matches`]'s widening table:
+    /// that table's matches inherit the rule's own (often `Block`)
+    /// decision, calibrated for the *certain* bare-`~` case — but
+    /// `~username` only expands to a real home directory if that account
+    /// exists and is reachable, which shguard cannot verify, so this must
+    /// only ever feed a `gate.rs` floor capped at `Ask` (see
+    /// `crate::gate::scan_named_user_home_floor`).
+    fn named_user_home_plausible(&self, token: &str) -> bool {
+        let Self::NormalizedExact {
+            strip,
+            target: PathForm::Home(comps),
+        } = self
+        else {
+            return false;
+        };
+        if !comps.is_empty() {
+            return false;
+        }
+        let Some(remainder) = strip_target(strip.as_deref(), token) else {
+            return false;
+        };
+        matches!(
+            lexical_normalize(remainder),
+            PathForm::NamedUserHome | PathForm::NamedUserHomeEscapes
+        )
+    }
 }
 
 /// Strips `prefix` (a [`TargetMatcher::NormalizedExact`]/
@@ -566,9 +597,44 @@ enum PathForm {
     /// followed by `comps`. `Rel { ascent: 0, comps: vec![] }` is `.`
     /// itself — the cwd shguard starts at, never itself dangerous.
     Rel { ascent: u32, comps: Vec<String> },
-    /// Matches nothing: the empty string, or a `~user`/`~+`/`~-` token —
-    /// none of those expand to `$HOME`, they reach the command literally.
+    /// A `~username` token that normalizes to that user's bare home
+    /// (issue #80): either exactly `~username`, or `~username/` /
+    /// `~username/.` / `~username//` — anything that collapses to no
+    /// remaining components, the same way `~/`/`~//` collapse to bare
+    /// `Home(vec![])`. Shell-expands to that account's home directory if
+    /// it exists and is reachable — neither of which shguard can verify
+    /// statically. A trailing subdirectory that does NOT collapse away
+    /// (`~username/data`) stays [`PathForm::Opaque`]: out of scope by
+    /// design, symmetric with `Home`/`EscapesHome` only ever covering `~`
+    /// itself, not an arbitrary `~/subdir`.
+    NamedUserHome,
+    /// A `~username/..`-shaped token whose `..` popped past that user's
+    /// home — provably outside it, even though the exact resulting path
+    /// is unknown (mirrors [`PathForm::EscapesHome`] for a named user
+    /// rather than the invoker's own `$HOME`).
+    NamedUserHomeEscapes,
+    /// Matches nothing: the empty string, a `~username/subdir` token (see
+    /// [`PathForm::NamedUserHome`]'s docs), or a `~+`/`~-`/`~N`/`~+N`/`~-N`
+    /// directory-stack shorthand. The dirstack forms do NOT "reach the
+    /// command literally" as an earlier version of this comment claimed —
+    /// a real shell expands `~+`/`~-` to `$PWD`/`$OLDPWD` and `~N`-shaped
+    /// forms to a numbered pushd/popd entry — shguard just doesn't model
+    /// that expansion yet (tracked as issue #88; this is a known gap, not
+    /// a deliberate "these are safe" classification).
     Opaque,
+}
+
+/// True for `+`/`-`/`N`/`+N`/`-N` (`N` one or more ASCII digits) — bash/zsh
+/// directory-stack shorthand (`~+`/`~-` expand to `$PWD`/`$OLDPWD`,
+/// `~N`/`~+N`/`~-N` to a numbered pushd/popd entry), never a real account
+/// name. Used by [`lexical_normalize`] to keep dirstack tokens out of
+/// [`PathForm::NamedUserHome`]/[`NamedUserHomeEscapes`].
+fn is_dirstack_shape(prefix: &str) -> bool {
+    if prefix == "+" || prefix == "-" {
+        return true;
+    }
+    let digits = prefix.strip_prefix(['+', '-']).unwrap_or(prefix);
+    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
 }
 
 /// Lexically normalizes `token` into a [`PathForm`] — see the type docs
@@ -586,10 +652,45 @@ fn lexical_normalize(token: &str) -> PathForm {
     if token.is_empty() {
         return PathForm::Opaque;
     }
-    // `~user`, `~+`, `~-` reach the command literally — only a bare `~`
-    // or a `~/`-prefixed token is `$HOME`-anchored.
+    // Only a bare `~` or a `~/`-prefixed token is `$HOME`-anchored. Any
+    // other `~`-prefixed token is either a directory-stack shorthand
+    // (`~+`/`~-`/`~N`/`~+N`/`~-N`, not modeled — `Opaque`) or a
+    // `~username` tilde (issue #80): a real shell takes everything up to
+    // the first `/` as the account name (`getpwnam`-style — no username
+    // syntax validation, so any non-empty, non-dirstack prefix counts,
+    // matching this project's allowlist-over-denylist preference for the
+    // *dangerous* class) and expands the rest lexically against that
+    // account's home, same as `~/...` does against `$HOME`.
     if token.starts_with('~') && token != "~" && !token.starts_with("~/") {
-        return PathForm::Opaque;
+        let rest = &token[1..];
+        let (user, path_rest) = match rest.find('/') {
+            Some(i) => (&rest[..i], &rest[i + 1..]),
+            None => (rest, ""),
+        };
+        if user.is_empty() || is_dirstack_shape(user) {
+            return PathForm::Opaque;
+        }
+        let mut stack: Vec<String> = Vec::new();
+        let mut escaped = false;
+        for comp in path_rest.split('/') {
+            if comp.is_empty() || comp == "." {
+                continue;
+            }
+            if comp == ".." {
+                if stack.pop().is_none() {
+                    escaped = true;
+                }
+            } else if !escaped {
+                stack.push(comp.to_string());
+            }
+        }
+        return if escaped {
+            PathForm::NamedUserHomeEscapes
+        } else if stack.is_empty() {
+            PathForm::NamedUserHome
+        } else {
+            PathForm::Opaque
+        };
     }
 
     enum Anchor {
@@ -1073,6 +1174,29 @@ impl CommandRule {
             .iter()
             .any(|w| matches!(w.resolution(), Resolution::Unresolvable(_)));
         has_unresolvable && self.relaxed_required_tokens_match(rest_words)
+    }
+
+    /// issue #80: true when this rule's command+flags match `argv` (via
+    /// [`Self::matching_rest`], the same full constraint check
+    /// [`Self::matches`] uses) and some resolved tail token is a
+    /// `~username` shorthand that would hit one of this rule's own
+    /// bare-`~` targets if it expanded. Read-only probe, same shape as
+    /// [`Self::matches_except_target`]/[`Self::matches_except_flags`] —
+    /// never itself a match, only a `gate.rs` floor's input (see
+    /// `crate::gate::scan_named_user_home_floor`).
+    #[must_use]
+    pub(crate) fn matches_named_user_home_floor(&self, argv: &[NormalizedWord]) -> bool {
+        if self.targets.is_empty() {
+            return false;
+        }
+        let Some(rest_words) = self.matching_rest(argv) else {
+            return false;
+        };
+        resolved_strings(&rest_words).iter().any(|token| {
+            self.targets
+                .iter()
+                .any(|t| t.named_user_home_plausible(token))
+        })
     }
 }
 
@@ -2316,7 +2440,10 @@ fn reject_degenerate_normalized_target(
 ) -> Result<(), RulesError> {
     let degenerate = match form {
         PathForm::Rel { ascent, .. } => *ascent > 0,
-        PathForm::EscapesHome | PathForm::Opaque => true,
+        PathForm::EscapesHome
+        | PathForm::Opaque
+        | PathForm::NamedUserHome
+        | PathForm::NamedUserHomeEscapes => true,
         PathForm::Abs(_) | PathForm::Home(_) => false,
     };
     if degenerate {
@@ -2575,6 +2702,28 @@ impl Rules {
         self.command_rules
             .iter()
             .find(|rule| rule.matches_except_flags(argv))
+    }
+
+    /// The first [`CommandRule`] for which
+    /// [`CommandRule::matches_named_user_home_floor`] holds, if any —
+    /// issue #80's `~username` floor (`src/gate.rs`). Like
+    /// [`Self::match_command_except_target`], a read-only probe: never
+    /// mutates rule state, never itself constitutes a match.
+    #[must_use]
+    pub(crate) fn match_command_named_user_home(
+        &self,
+        argv: &[NormalizedWord],
+    ) -> Option<&CommandRule> {
+        // Fable-review finding (PR #89): a user-config `[[ask]]` rule
+        // (`ask_rules`) with its own bare-`~` target is just as eligible
+        // for this floor as an embedded blocklist rule (`command_rules`)
+        // — both are `CommandRule`s. Scanning only `command_rules` would
+        // leave the same `~username`-vs-bare-`~` asymmetry #80 fixed for
+        // the blocklist alive for user config.
+        self.command_rules
+            .iter()
+            .chain(self.ask_rules.iter())
+            .find(|rule| rule.matches_named_user_home_floor(argv))
     }
 
     /// The configured escalation floor (issues #35/#36, `crate::gate` rule
@@ -3053,6 +3202,163 @@ mod tests {
                 .match_command(&argv(&["rm", "-rf", "~/old-build"]))
                 .is_none()
         );
+    }
+
+    // ==== Issue #80: `~username` (another user's home) floors to Ask via
+    // Rules::match_command_named_user_home, distinct from the certain
+    // bare-`~` case above, which must keep hard-matching via match_command
+    // unaffected. ====
+
+    #[test]
+    fn named_user_home_rm_rf_floors_but_does_not_hard_match() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["rm", "-rf", "~someuser"]);
+        assert!(rules.match_command(&cmd).is_none());
+        let rule = rules.match_command_named_user_home(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "rm-recursive-force-dangerous-target");
+    }
+
+    #[test]
+    fn named_user_home_tar_extract_dash_c_floors() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["tar", "-x", "-C", "~alice", "-f", "a.tar"]);
+        assert!(rules.match_command(&cmd).is_none());
+        let rule = rules.match_command_named_user_home(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "tar-extract-over-root-or-home");
+    }
+
+    #[test]
+    fn named_user_home_tar_directory_ask_rule_floors() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["tar", "-C", "~bob", "-f", "a.tar"]);
+        let rule = rules.match_command_named_user_home(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "tar-directory-root-or-home");
+    }
+
+    #[test]
+    fn named_user_home_with_underscore_and_digits_floors() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["rm", "-rf", "~user_2"]);
+        assert!(rules.match_command_named_user_home(&cmd).is_some());
+    }
+
+    #[test]
+    fn named_user_home_dotted_username_floors() {
+        // Fable-review finding: shells don't validate username syntax
+        // (`getpwnam` takes anything up to the first `/`), so a dotted
+        // account name (common on macOS/AD/sssd-joined Linux) must still
+        // floor — an allowlist-shaped charset check would have missed it.
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["rm", "-rf", "~john.doe"]);
+        assert!(rules.match_command_named_user_home(&cmd).is_some());
+    }
+
+    #[test]
+    fn named_user_home_trailing_slash_still_floors() {
+        // Fable-review finding: a real shell takes the tilde-prefix as
+        // everything up to the first `/`, so `~root/` expands to the same
+        // directory as `~root` — verified via `printf '[%s]' ~root/`.
+        // Must not silently collapse to Opaque the way a naive "reject
+        // any embedded `/`" check would.
+        let rules = Rules::embedded().unwrap();
+        for cmd in [
+            argv(&["rm", "-rf", "~root/"]),
+            argv(&["rm", "-rf", "~root//"]),
+            argv(&["rm", "-rf", "~root/."]),
+        ] {
+            assert!(
+                rules.match_command_named_user_home(&cmd).is_some(),
+                "{cmd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn named_user_home_ascent_past_named_home_floors() {
+        // Fable-review finding: `~alice/..`/`~alice/../..` provably left
+        // alice's home (mirrors the existing EscapesHome widening for the
+        // invoker's own `$HOME`), even though the exact resulting path
+        // (`/Users`, `/`, ...) is unknown statically.
+        let rules = Rules::embedded().unwrap();
+        for cmd in [
+            argv(&["tar", "-x", "-C", "~alice/..", "-f", "a.tar"]),
+            argv(&["tar", "-x", "-C", "~alice/../..", "-f", "a.tar"]),
+        ] {
+            assert!(
+                rules.match_command_named_user_home(&cmd).is_some(),
+                "{cmd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn named_user_home_dirstack_plus_does_not_floor() {
+        // `~+` is NOT "safe" — a real shell expands it to `$PWD`, an
+        // un-modeled gap distinct from this floor's own `~username`
+        // scope; tracked as issue #88. This only asserts the new
+        // NamedUserHome floor correctly stays out of the way of it.
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["rm", "-rf", "~+"]);
+        assert!(rules.match_command(&cmd).is_none());
+        assert!(rules.match_command_named_user_home(&cmd).is_none());
+    }
+
+    #[test]
+    fn named_user_home_dirstack_minus_does_not_floor() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["rm", "-rf", "~-"]);
+        assert!(rules.match_command_named_user_home(&cmd).is_none());
+    }
+
+    #[test]
+    fn named_user_home_dirstack_numbered_does_not_floor() {
+        let rules = Rules::embedded().unwrap();
+        for cmd in [
+            argv(&["rm", "-rf", "~5"]),
+            argv(&["rm", "-rf", "~+3"]),
+            argv(&["rm", "-rf", "~-3"]),
+        ] {
+            assert!(
+                rules.match_command_named_user_home(&cmd).is_none(),
+                "{cmd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn named_user_home_subdir_out_of_scope_does_not_floor() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["rm", "-rf", "~someuser/data"]);
+        assert!(rules.match_command_named_user_home(&cmd).is_none());
+    }
+
+    #[test]
+    fn named_user_home_floor_reachable_through_sudo_wrapper() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["sudo", "rm", "-rf", "~someuser"]);
+        assert!(rules.match_command_named_user_home(&cmd).is_some());
+    }
+
+    #[test]
+    fn named_user_home_floor_reachable_through_env_wrapper() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["env", "rm", "-rf", "~someuser"]);
+        assert!(rules.match_command_named_user_home(&cmd).is_some());
+    }
+
+    #[test]
+    fn named_user_home_own_bare_home_still_hard_matches() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["rm", "-rf", "~"]);
+        assert!(rules.match_command(&cmd).is_some());
+    }
+
+    #[test]
+    fn named_user_home_own_subdir_stays_out_of_scope() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["rm", "-rf", "~/foo"]);
+        assert!(rules.match_command(&cmd).is_none());
+        assert!(rules.match_command_named_user_home(&cmd).is_none());
     }
 
     // ==== Security review: CommandRule matching resolves basename + skips
