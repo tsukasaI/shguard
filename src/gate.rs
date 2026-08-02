@@ -1415,8 +1415,11 @@ fn apply_tar_dashless_floor(verdict: Verdict, floor: Option<(Decision, String)>)
     }
 }
 
-/// Issue #80: `Some(Ask, reason)` when `argv` matches a blocklist rule's
-/// command+flags and some resolved tail token is a `~username` shorthand
+/// Issue #80: `Some(Ask, reason)` when `argv` matches a rule's command+
+/// flags — an embedded blocklist rule, a user-config `[[deny]]` entry, or
+/// a user-config `[[ask]]` entry (`Rules::match_command_named_user_home`
+/// scans both `command_rules` and `ask_rules`) — and some resolved tail
+/// token is a `~username` shorthand
 /// (`crate::rules::CommandRule::matches_named_user_home_floor`) that would
 /// hit one of that rule's own bare-`~` targets if it expanded — `None`
 /// otherwise. Always capped at `Ask`, never the matched rule's own
@@ -1436,9 +1439,9 @@ fn scan_named_user_home_floor(
     Some((
         Decision::Ask,
         format!(
-            "a target token is a named-user home shorthand (`~user`) that would match \
-             blocklist rule {:?} ({}) if `~user` expanded to an existing account's home \
-             directory; shguard cannot verify that account exists or is reachable",
+            "a target token is a named-user home shorthand (`~user`) that would match rule \
+             {:?} ({}) if `~user` expanded to an existing account's home directory; shguard \
+             cannot verify that account exists or is reachable",
             rule.id().as_str(),
             rule.reason().as_str(),
         ),
