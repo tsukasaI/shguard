@@ -617,6 +617,25 @@ fn evaluate_compound_command(
         worst = fold_worst(worst, verdict);
     }
 
+    // Issue #78 (fable-review follow-up): the same ascent-then-descent
+    // floor `evaluate_simple_command` applies to a command's own
+    // redirects, extended to a compound command's own attached redirects
+    // (`{ ...; } > ../../../../etc/passwd`) — a hard match above already
+    // covers the certain case, this covers the plausible-but-unprovable
+    // one, always capped at Ask.
+    if let Some((floor_decision, floor_reason)) =
+        scan_redirect_ascent_descent_floor(redirections, rules)
+    {
+        let argv = worst.normalized_argv().to_vec();
+        let floored = match floor_decision {
+            Decision::Ask => Verdict::ask(Reason::new(floor_reason), argv),
+            Decision::Block | Decision::Allow => {
+                unreachable!("scan_redirect_ascent_descent_floor only ever produces Ask")
+            }
+        };
+        worst = fold_worst(worst, floored);
+    }
+
     worst
 }
 
@@ -686,6 +705,19 @@ fn check_redirect_targets<'a>(
     redirections: &[Redirection],
     rules: &'a Rules,
 ) -> Option<&'a crate::rules::RedirectRule> {
+    resolved_redirect_write_targets(redirections)
+        .iter()
+        .find_map(|target| rules.match_redirect_target(target))
+}
+
+/// Every resolved target word from `redirections` whose kind represents a
+/// genuine filesystem write (issue #75's Output/Append and discriminated
+/// DuplicateOutput) — the same target set [`check_redirect_targets`]
+/// checks against redirect rules, extracted so
+/// [`scan_redirect_ascent_descent_floor`] (issue #78) can reuse the exact
+/// same applicability filtering rather than duplicating it.
+fn resolved_redirect_write_targets(redirections: &[Redirection]) -> Vec<String> {
+    let mut targets = Vec::new();
     for redir in redirections {
         let Redirection::File { kind, target } = redir else {
             continue;
@@ -720,14 +752,43 @@ fn check_redirect_targets<'a>(
             continue;
         }
         for word in &normalized {
-            if let Resolution::Resolved(s) = word.resolution()
-                && let Some(rule) = rules.match_redirect_target(s)
-            {
-                return Some(rule);
+            if let Resolution::Resolved(s) = word.resolution() {
+                targets.push(s.to_string());
             }
         }
     }
-    None
+    targets
+}
+
+/// Issue #78: `Some(Ask, reason)` when any resolved redirect-write target
+/// in `redirections` (via [`resolved_redirect_write_targets`]) normalizes
+/// to an unresolved ascent-then-descent shape that plausibly lands inside
+/// one of [`crate::rules::RedirectRule`]'s own targets
+/// (`redirect-overwrite-device-or-critical-file`'s `/dev/*`/`/etc/passwd`/
+/// `/etc/shadow` namespace) — `None` otherwise. Same Ask-only floor
+/// reasoning as [`scan_ascent_descent_floor`], extended to shell redirect
+/// syntax (`> ...`, `>> ...`) rather than argv-based targets (`dd
+/// of=...`), which carries the identical target namespace via a separate
+/// Rust type (`RedirectRule`, not `CommandRule`) — a fable-review finding
+/// against the `CommandRule`-only version of this floor.
+fn scan_redirect_ascent_descent_floor(
+    redirections: &[Redirection],
+    rules: &Rules,
+) -> Option<(Decision, String)> {
+    let rule = resolved_redirect_write_targets(redirections)
+        .iter()
+        .find_map(|target| rules.match_redirect_target_ascent_descent(target))?;
+    Some((
+        Decision::Ask,
+        format!(
+            "a redirect target ascends via `..` past an unknown number of directories, then \
+             descends into a shape that would match redirect rule {:?} ({}) if the ascent \
+             bottomed out there; shguard has no cwd to resolve the ascent against, so this \
+             can't be proven, only flagged",
+            rule.id().as_str(),
+            rule.reason().as_str(),
+        ),
+    ))
 }
 
 /// Whether a resolved duplication-redirect target value denotes a real fd
@@ -856,6 +917,21 @@ fn evaluate_simple_command(
     // for the same reason `recursable`/`expansion` are: this floor must
     // survive `core`'s early returns too.
     let tar_dashless_floor = scan_tar_dashless_unmodeled_floor(&argv);
+    // Issue #78: a target token that ascends via `..` past an unknown
+    // number of directories, then descends into a shape that would match
+    // a rule's own dangerous-target namespace. Computed here for the same
+    // reason `tar_dashless_floor` is: this floor must survive `core`'s
+    // early returns too.
+    let ascent_descent_floor = scan_ascent_descent_floor(&argv, rules);
+    // Issue #78 (fable-review follow-up): the same ascent-then-descent gap,
+    // but for the command's own shell-redirect targets (`> ...`/`>> ...`)
+    // rather than argv-based ones — a separate Rust type (`RedirectRule`)
+    // carries the identical `/dev/*`/`/etc/passwd`/`/etc/shadow` namespace.
+    // Computed here for the same reason: this floor must survive `core`'s
+    // early returns too (`core`'s own `check_redirect_targets` call is a
+    // hard match on the *unwidened* target set, so it doesn't see this).
+    let redirect_ascent_descent_floor =
+        scan_redirect_ascent_descent_floor(&command.redirections, rules);
     // Issue #80: a `~username` token that would hit one of a matched
     // rule's own bare-`~` targets if it expanded. Computed here for the
     // same reason `tar_dashless_floor` is: this floor must survive
@@ -872,10 +948,14 @@ fn evaluate_simple_command(
         escalation_chain,
     );
     let tar_dashless_floor_present = tar_dashless_floor.is_some();
+    let ascent_descent_floor_present = ascent_descent_floor.is_some();
+    let redirect_ascent_descent_floor_present = redirect_ascent_descent_floor.is_some();
     let named_user_home_floor_present = named_user_home_floor.is_some();
     let verdict = apply_expansion_floor(verdict, expansion.floor);
     let verdict = apply_recursable_floor(verdict, recursable.floor);
     let verdict = apply_tar_dashless_floor(verdict, tar_dashless_floor);
+    let verdict = apply_ascent_descent_floor(verdict, ascent_descent_floor);
+    let verdict = apply_ascent_descent_floor(verdict, redirect_ascent_descent_floor);
     let verdict = apply_named_user_home_floor(verdict, named_user_home_floor);
 
     // Rule 11's allowlist guard: the same presence-based reasoning as
@@ -889,16 +969,23 @@ fn evaluate_simple_command(
     // itself is not consent to whatever command their `-c`/`-exec` payload
     // names. `tar_dashless_floor.is_some()` extends it once more: an allow
     // entry for `tar` is not consent to a dash-less cluster this crate
-    // cannot even parse. `named_user_home_floor_present` (issue #80)
-    // extends it once more: an allow entry for `rm`/`tar` is not consent
-    // to a `~username` token that would hit that same rule's bare-`~`
-    // target if it expanded — the floor's uncertainty is orthogonal to
-    // whatever the allowlist entry was written to permit.
+    // cannot even parse. `ascent_descent_floor_present`/
+    // `redirect_ascent_descent_floor_present` (issue #78) extend it once
+    // more: an allow entry for `dd`/`rm`/`tar`/etc. is not consent to an
+    // ascent-then-descent token (argv-based or redirect-based) that
+    // plausibly lands in that same rule's own dangerous namespace.
+    // `named_user_home_floor_present` (issue #80) extends it once more: an
+    // allow entry for `rm`/`tar` is not consent to a `~username` token
+    // that would hit that same rule's bare-`~` target if it expanded — the
+    // floor's uncertainty is orthogonal to whatever the allowlist entry
+    // was written to permit.
     let verdict = if has_argument_substitution
         || expansion.has_any
         || escalation_in_chain
         || recursable.has_any
         || tar_dashless_floor_present
+        || ascent_descent_floor_present
+        || redirect_ascent_descent_floor_present
         || named_user_home_floor_present
     {
         verdict
@@ -1398,6 +1485,58 @@ fn scan_tar_dashless_unmodeled_floor(argv: &[NormalizedWord]) -> Option<(Decisio
 /// self-documenting-call-site reason the others are (module docs'
 /// one-function-per-floor convention).
 fn apply_tar_dashless_floor(verdict: Verdict, floor: Option<(Decision, String)>) -> Verdict {
+    let Some((floor_decision, floor_reason)) = floor else {
+        return verdict;
+    };
+    if verdict.decision() >= floor_decision {
+        return verdict;
+    }
+    let argv = verdict.normalized_argv().to_vec();
+    let reason = match verdict.reason() {
+        Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
+        None => floor_reason,
+    };
+    match floor_decision {
+        Decision::Block => Verdict::block(Reason::new(reason), argv, None),
+        Decision::Ask | Decision::Allow => Verdict::ask(Reason::new(reason), argv),
+    }
+}
+
+/// Issue #78: `Some(Ask, reason)` when `argv` matches a rule's command+
+/// flags — an embedded blocklist rule, a user-config `[[deny]]` entry, or
+/// a user-config `[[ask]]` entry (`Rules::match_command_ascent_descent`
+/// scans both `command_rules` and `ask_rules`) — and some resolved tail
+/// token normalizes to an unresolved ascent-then-descent shape
+/// (`crate::rules::CommandRule::matches_ascent_descent_floor`) that
+/// plausibly lands inside one of that rule's own `NormalizedPrefix`/
+/// `NormalizedExact` targets — `None` otherwise. Always capped at `Ask`,
+/// never the matched rule's own decision (often `Block`): shguard has no
+/// cwd to resolve the ascent against, so this can never be proven, only
+/// flagged. Kept independent of `CommandRule::matches` for the same
+/// reason [`scan_tar_dashless_unmodeled_floor`] is: a per-token match has
+/// no way to say "this specific token can only ever be Ask" while the
+/// same rule's other targets stay at its own fixed decision.
+fn scan_ascent_descent_floor(argv: &[NormalizedWord], rules: &Rules) -> Option<(Decision, String)> {
+    let rule = rules.match_command_ascent_descent(argv)?;
+    Some((
+        Decision::Ask,
+        format!(
+            "a target token ascends via `..` past an unknown number of directories, then \
+             descends into a shape that would match rule {:?} ({}) if the ascent bottomed out \
+             there; shguard has no cwd to resolve the ascent against, so this can't be proven, \
+             only flagged",
+            rule.id().as_str(),
+            rule.reason().as_str(),
+        ),
+    ))
+}
+
+/// Applies [`scan_ascent_descent_floor`]'s floor to `verdict` — the same
+/// `decision.max(floor_decision)` max-lift every other floor in this
+/// module uses, kept as its own named function for the same
+/// self-documenting-call-site reason the others are (module docs'
+/// one-function-per-floor convention).
+fn apply_ascent_descent_floor(verdict: Verdict, floor: Option<(Decision, String)>) -> Verdict {
     let Some((floor_decision, floor_reason)) = floor else {
         return verdict;
     };
@@ -3722,6 +3861,131 @@ mod tests {
         // reports `NotApplicable`, never `Unmodeled` — ordinary harmless
         // `tar` usage must not regress to Ask/Block.
         assert_decision("tar cfz archive.tar.gz somedir/", Decision::Allow);
+    }
+
+    // ==== Issue #78: unresolved ascent-then-descent floors to Ask
+    // end-to-end, never inherits the matched rule's own (often Block)
+    // decision ====
+
+    #[test]
+    fn dd_ascent_descent_to_dev_asks() {
+        assert_decision("dd of=../../../../dev/sda", Decision::Ask);
+    }
+
+    #[test]
+    fn rm_rf_ascent_descent_to_dev_asks() {
+        assert_decision("rm -rf ../../dev/sda", Decision::Ask);
+    }
+
+    #[test]
+    fn rm_rf_root_and_ascent_descent_still_blocks() {
+        // Same pin as commit 89cb6d7's rm_rf_root_and_named_user_home_
+        // still_blocks for the sibling floor: a hard Block (from an
+        // unrelated target on the same command line) must outrank the
+        // ascent-descent floor's Ask, not just "the floor produces Ask
+        // when nothing stronger is present".
+        assert_decision("rm -rf / ../../dev/sda", Decision::Block);
+    }
+
+    #[test]
+    fn tar_dash_c_sibling_build_dir_allows() {
+        // Full-pipeline noise-guard case: no rule targets `../build`'s
+        // namespace, so an ordinary sibling-directory `tar -C` must stay
+        // Allow.
+        assert_decision("tar -C ../build -x -f a.tar", Decision::Allow);
+    }
+
+    #[test]
+    fn cp_ascent_descent_self_protection_asks() {
+        assert_decision("cp x ../../../../.config/shguard/hooks/x", Decision::Ask);
+    }
+
+    #[test]
+    fn allowlisted_dd_still_asks_on_ascent_descent() {
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[allow]]
+            id = "user-allow-dd"
+            reason = "trust me"
+            command = "dd"
+        "#,
+        );
+        // An allow entry for `dd` is consent to `dd` in general, not to an
+        // ascent-then-descent token that plausibly lands on a raw device
+        // if the ascent bottomed out there — the floor must survive the
+        // allowlist downgrade.
+        let verdict = analyze_with_policy("dd of=../../../../dev/sda", &rules, &allowlist);
+        assert_eq!(verdict.decision(), Decision::Ask);
+    }
+
+    #[test]
+    fn user_config_ask_rule_still_floors_on_ascent_descent() {
+        // Fable-review finding on PR #113 (same asymmetry class as
+        // commit 89cb6d7 fixed for the sibling named-user-home floor):
+        // match_command_ascent_descent originally scanned only the
+        // embedded blocklist's command_rules, leaving a user-config
+        // [[ask]] entry's own normalized/normalized_prefix target
+        // uncovered — its literal spelling correctly Asks, but an
+        // ascent-obfuscated spelling of the same target silently Allowed.
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[ask]]
+            id = "user-ask-cmd-prod"
+            reason = "confirm writes into prod"
+            command = "cmd"
+            targets = [{ normalized_prefix = "~/prod/" }]
+        "#,
+        );
+        let direct = analyze_with_policy("cmd x ~/prod/y", &rules, &allowlist);
+        assert_eq!(direct.decision(), Decision::Ask);
+        let evasive = analyze_with_policy("cmd x ../../prod/y", &rules, &allowlist);
+        assert_eq!(evasive.decision(), Decision::Ask);
+    }
+
+    #[test]
+    fn allowlisted_echo_still_asks_on_redirect_ascent_descent() {
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[allow]]
+            id = "user-allow-echo"
+            reason = "trust me"
+            command = "echo"
+        "#,
+        );
+        // Same guard as allowlisted_dd_still_asks_on_ascent_descent, but
+        // for the redirect-side floor (crate::rules::RedirectRule) rather
+        // than the argv-side one.
+        let verdict = analyze_with_policy("echo x > ../../../../etc/passwd", &rules, &allowlist);
+        assert_eq!(verdict.decision(), Decision::Ask);
+    }
+
+    // ==== Issue #78 (fable-review follow-up): the same ascent-descent
+    // floor via shell redirect syntax, both on a simple command and on a
+    // compound command's own attached redirects ====
+
+    #[test]
+    fn redirect_ascent_descent_to_etc_passwd_asks() {
+        assert_decision("echo x > ../../../../etc/passwd", Decision::Ask);
+    }
+
+    #[test]
+    fn redirect_ascent_descent_to_dev_asks() {
+        assert_decision("cat foo > ../../../../dev/sda1", Decision::Ask);
+    }
+
+    #[test]
+    fn redirect_ascent_descent_append_to_etc_shadow_asks() {
+        assert_decision("echo x >> ../../../../etc/shadow", Decision::Ask);
+    }
+
+    #[test]
+    fn redirect_ascent_descent_ordinary_sibling_file_allows() {
+        assert_decision("echo x > ../build/output.txt", Decision::Allow);
+    }
+
+    #[test]
+    fn compound_command_redirect_ascent_descent_to_etc_passwd_asks() {
+        assert_decision("{ echo x; } > ../../../../etc/passwd", Decision::Ask);
     }
 
     // ==== Issue #80: `~username` floors to Ask end-to-end, never inherits
