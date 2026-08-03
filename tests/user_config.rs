@@ -119,6 +119,71 @@ fn allow_rule_downgrades_a_matching_structural_ask() {
     assert_eq!(permission_decision(&output), "allow");
 }
 
+// ==== issue #83: allowlist-downgrade eligibility must also account for a
+// substitution hidden in the command-position word's own non-winning
+// brace alternative, not just an ordinary argument-position one ====
+
+#[test]
+fn allow_rule_cannot_launder_a_command_position_leftover_substitution() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[allow]]
+        id = "allow-tar"
+        reason = "test"
+        command = "tar"
+    "#,
+    );
+
+    // The issue's own repro: an allow entry for the literal command `tar`
+    // must not downgrade a `tar-directory-root-or-home` Ask when the
+    // command-position word's leftover brace alternative hides an
+    // unresolved substitution — the winning alternative ("tar") resolves
+    // cleanly and matches the allow entry, but the substitution riding
+    // alongside it in the OTHER alternative is exactly as unresolved a
+    // runtime value as an ordinary argument-position one.
+    let output = run_hook(
+        &bash_command("tar{,$($EVIL)} xf evil.tar -C /"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "ask");
+
+    // Same gap, reached via a process substitution instead of a command
+    // substitution (issue #75's sibling construct) — collect_process_substitutions_into
+    // must be scanned here too, not just collect_substitutions_into.
+    let output = run_hook(
+        &bash_command("tar{,<(x)} xf evil.tar -C /"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "ask");
+}
+
+#[test]
+fn allow_rule_still_downgrades_a_substitution_free_leftover() {
+    // The false-positive boundary: a command-position word with a brace
+    // alternative that resolves to ordinary literal text (no substitution
+    // anywhere in either alternative) must still downgrade normally — the
+    // new guard is scoped to an actual substitution in the leftover
+    // alternative, not "any brace alternation present at all". Uses `rm`
+    // rather than `tar` deliberately: `tar`'s own dash-less-cluster floor
+    // (issue #67) independently trips on the brace-multiplied extra token
+    // this shape produces (`rm{,x}` → `rmx`... "tarx"-shaped for `tar`),
+    // which would falsely confirm the wrong mechanism if used here.
+    let (_dir, config_path) = write_config(
+        r#"
+        [[allow]]
+        id = "user-allow-rm"
+        reason = "trust me"
+        command = "rm"
+    "#,
+    );
+
+    let output = run_hook(
+        &bash_command("rm{,x} -rf $HOME"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "allow");
+}
+
 // ==== except_targets (issue #30) ====
 
 fn curl_localhost_except_config() -> &'static str {

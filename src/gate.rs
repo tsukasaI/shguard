@@ -253,6 +253,21 @@
 //! config `allow` entry covering an interpreter name is rejected at
 //! config-load time (`crate::rules::UserConfig::parse`).
 //!
+//! **A command-position word's own non-winning brace alternative hiding a
+//! substitution is a THIRD case, and it DOES need a guard (issue #83)** —
+//! unlike rule 1's winning-alternative case just above, a leftover
+//! alternative's substitution never touches `argv[0]`
+//! (`normalize::split_command_position`, issue #77): the winning
+//! alternative can still resolve to a real command name an allow entry
+//! matches, while the substitution packed into a *different* alternative
+//! of that same word is an unresolved runtime value no less than an
+//! ordinary argument-position one — `tar{,$($EVIL)} xf evil.tar -C /`
+//! with an `allow` entry for `tar` must stay ineligible for downgrade the
+//! same way `tar $($EVIL) xf evil.tar -C /` already is.
+//! [`has_command_position_leftover_substitution`] is the guard for this,
+//! independent of [`has_any_argument_position_substitution`] (which never
+//! looks inside the command-position word at all).
+//!
 //! **A command whose wrapper chain passes through an escalation vector
 //! (rule 10) is likewise never eligible for the allow-downgrade step.**
 //! Allow-entry matching resolves through `TRANSPARENT_WRAPPERS` exactly
@@ -814,23 +829,62 @@ fn has_argument_position_substitution(argument_words: &[Word]) -> bool {
     })
 }
 
-/// Whether `command`'s argument words (everything after the first
-/// non-empty word — the same forward scan
-/// [`evaluate_simple_command_core`] performs to locate `argument_words`)
-/// contain any argument-position command/backquote substitution (rule 3).
-/// Computed independently of, and before, running the full rule set, so
-/// [`evaluate_simple_command`] can decide allow-downgrade eligibility —
-/// see the module docs on why a command with an argument-position
-/// substitution is never eligible.
-fn has_any_argument_position_substitution(command: &SimpleCommand) -> bool {
-    let Some(first_word_idx) = command
+/// The index of `command`'s first non-vanishing word — the same forward
+/// scan [`evaluate_simple_command_core`] performs to locate its own
+/// `first_word_ast`, skipping a leading word that normalises to zero
+/// output words (e.g. an unquoted, `$IFS`-only word). `None` when every
+/// word vanishes (`argv` would be empty). Shared by every guard that needs
+/// "where does the command-position word start" without needing `core`'s
+/// other early-return-guarded computations (issue #83 follow-up: this used
+/// to be duplicated inline at each call site, which is how the command-
+/// position-leftover-substitution gap went unnoticed for as long as it
+/// did — one lookup, reused, so the different guards can never drift on
+/// what "first word" means).
+fn first_non_vanishing_word_idx(command: &SimpleCommand) -> Option<usize> {
+    command
         .words
         .iter()
         .position(|word| !normalize::normalize_word(word).is_empty())
-    else {
+}
+
+/// Whether `command`'s argument words (everything after the first
+/// non-empty word) contain any argument-position command/backquote
+/// substitution (rule 3). Computed independently of, and before, running
+/// the full rule set, so [`evaluate_simple_command`] can decide
+/// allow-downgrade eligibility — see the module docs on why a command with
+/// an argument-position substitution is never eligible.
+fn has_any_argument_position_substitution(command: &SimpleCommand) -> bool {
+    let Some(first_word_idx) = first_non_vanishing_word_idx(command) else {
         return false;
     };
     has_argument_position_substitution(&command.words[first_word_idx + 1..])
+}
+
+/// Whether the command-position word's own non-winning brace alternatives
+/// (`normalize::split_command_position`'s leftover pieces) contain a
+/// command/backquote or process substitution (issue #83). A substitution
+/// living in the WINNING alternative needs no guard here at all — it makes
+/// `argv[0]` itself unresolvable, so rule 1 fires and no `CommandRule`
+/// allow entry can match a command name that was never resolved (module
+/// docs, the paragraph on rule 1 needing no eligibility guard). But a
+/// substitution in a LEFTOVER alternative does not touch `argv[0]`
+/// (`split_command_position`'s whole point, issue #77) — the winning
+/// alternative can resolve cleanly to a real command name an allow entry
+/// matches, while the leftover alternative's substitution is still an
+/// unresolved runtime value the same way an ordinary argument-position one
+/// is. Computed independently of, and before, running the full rule set,
+/// mirroring [`has_any_argument_position_substitution`] exactly (a pure
+/// presence check, not [`evaluate_leftover_alternative_substitutions`]'s
+/// job of recursing what a leftover substitution resolves *to*).
+fn has_command_position_leftover_substitution(command: &SimpleCommand) -> bool {
+    let Some(first_word_idx) = first_non_vanishing_word_idx(command) else {
+        return false;
+    };
+    let (_, leftover_alternatives) =
+        normalize::split_command_position(&command.words[first_word_idx]);
+    leftover_alternatives
+        .iter()
+        .any(|pieces| alternative_has_substitution(pieces))
 }
 
 /// Applies a user-configured allowlist match to `verdict`: `Ask` -> `Allow`
@@ -882,6 +936,16 @@ fn evaluate_simple_command(
     let argv = normalize::normalize_argv(command);
     let ask_match = rules.match_ask(&argv);
     let has_argument_substitution = has_any_argument_position_substitution(command);
+    // Issue #83's allowlist guard (module docs): a substitution living in
+    // the command-position word's own non-winning brace alternative is
+    // just as unresolved a runtime value as an ordinary argument-position
+    // one, but it doesn't make `argv[0]` itself unresolvable the way a
+    // WINNING-alternative substitution would — the winning alternative can
+    // still resolve to a real command name an allow entry matches, while
+    // the leftover alternative's substitution goes unexamined by every
+    // other guard here. `has_argument_substitution` above never sees it
+    // either: it only scans words strictly after the command-position one.
+    let has_leftover_substitution = has_command_position_leftover_substitution(command);
     // Rule 10's allowlist guard (module docs): an allow entry matches
     // through an escalation vector the same way rules do, but consent to
     // the unprivileged command is not consent to running it under
@@ -978,8 +1042,14 @@ fn evaluate_simple_command(
     // allow entry for `rm`/`tar` is not consent to a `~username` token
     // that would hit that same rule's bare-`~` target if it expanded — the
     // floor's uncertainty is orthogonal to whatever the allowlist entry
-    // was written to permit.
+    // was written to permit. `has_command_position_leftover_substitution`
+    // (issue #83) extends it once more: an allow entry for the command
+    // name the WINNING brace alternative resolves to is not consent to an
+    // unresolved substitution hiding in a LEFTOVER alternative of that
+    // same command-position word — see this function's own comment above
+    // for why the winning-alternative case needs no separate guard.
     let verdict = if has_argument_substitution
+        || has_leftover_substitution
         || expansion.has_any
         || escalation_in_chain
         || recursable.has_any
@@ -1051,11 +1121,8 @@ fn evaluate_simple_command_core(
     // above, just not the *only* word) is skipped rather than mistaken for
     // the command word. `argv` non-empty guarantees at least one such word
     // exists.
-    let Some(first_word_ast) = command
-        .words
-        .iter()
-        .position(|word| !normalize::normalize_word(word).is_empty())
-        .map(|idx| (&command.words[idx], idx))
+    let Some(first_word_ast) =
+        first_non_vanishing_word_idx(command).map(|idx| (&command.words[idx], idx))
     else {
         // Unreachable given `argv` is non-empty; kept as a non-panicking,
         // fail-closed fallback (Ask, never Allow — issue #37: a gate
@@ -2637,6 +2704,24 @@ fn fold_worst(current: Verdict, new: Verdict) -> Verdict {
     } else {
         current
     }
+}
+
+/// Whether `pieces` — one brace-alternation member's piece sequence —
+/// contains a command/backquote or process substitution anywhere in its
+/// tree (issue #83). A pure presence check for callers that only need the
+/// boolean, not the substitutions themselves; `evaluate_leftover_alternative_substitutions`
+/// needs the actual collected substitutions to recurse into, so it keeps
+/// its own inline `collect_substitutions_into`/`collect_process_substitutions_into`
+/// calls rather than using this and discarding the result.
+fn alternative_has_substitution(pieces: &[WordPiece]) -> bool {
+    let mut subs = Vec::new();
+    collect_substitutions_into(pieces, &mut subs);
+    if !subs.is_empty() {
+        return true;
+    }
+    let mut proc_subs = Vec::new();
+    collect_process_substitutions_into(pieces, &mut proc_subs);
+    !proc_subs.is_empty()
 }
 
 /// Recursively collects the raw, unparsed inner command string of every
