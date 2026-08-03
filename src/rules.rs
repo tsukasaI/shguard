@@ -579,8 +579,8 @@ impl TargetMatcher {
     /// reason about the escaped-past anchor's own *basename* reappearing
     /// mid-tail (e.g. `~alice/../bob/.config/shguard/x`, where `bob`
     /// happens to be the invoking user, would need to re-descend through
-    /// a name this check has no way to know). Tracked as a follow-up
-    /// issue, not fixed here.
+    /// a name this check has no way to know). Tracked as issue #118, not
+    /// fixed here.
     ///
     /// Known gaps (fable-review findings against the first draft, not yet
     /// fixed):
@@ -1151,6 +1151,56 @@ impl CommandRule {
     /// no `-rf` in sight) would float to `Ask` regardless of whether the
     /// target looks remotely dangerous, which the pre-fix behavior never
     /// did and this fix must not introduce either.
+    ///
+    /// # A third case: flag AND target both hidden together (issue #85)
+    ///
+    /// The two relaxations above both assume at least ONE resolved token
+    /// survives in the tail to check something against (flags via
+    /// `constraints_match`, or the target via `matches_targets`). Neither
+    /// fires when a required flag and the target are hidden inside the
+    /// SAME unresolvable word (`sed $(echo -i ~/.config/shguard/config.toml)`)
+    /// or a pair of sibling ones (`sed $(printf -- -i) $(printf
+    /// ~/.config/shguard/config.toml)`) — there is no resolved token left
+    /// to check either constraint against. This branch closes that gap:
+    /// when the ENTIRE tail is unresolvable — not merely "some unresolvable
+    /// word exists" — that's still plausibly this rule's own dangerous
+    /// shape. A rule with neither `required_flags` nor `required_tokens`
+    /// (a bare-target rule) never reaches this branch at all: relaxation #1
+    /// (`constraints_match`, above) is vacuously true for it regardless of
+    /// any resolved content, so it always returns at that earlier `if`
+    /// first — this branch is reachable only for a rule that DOES declare a
+    /// flag/token constraint, with no separate check needed for that here.
+    /// Requiring the WHOLE tail to be opaque, not just `has_unresolvable`
+    /// (already required above), is deliberate: a resolved token elsewhere
+    /// in the tail is not proof the rule's own danger is absent (see the
+    /// residual gap below), but at least one rule shape — sed, whose first
+    /// non-option operand is its edit script, not a target — has resolved
+    /// content that's part of neither the flag nor the target and must not
+    /// by itself defeat this relaxation.
+    ///
+    /// Blast radius beyond the motivating example (mirrors
+    /// [`Self::matches_except_flags`]'s own documented trade-off for
+    /// `git-no-verify-any-subcommand`, which floors EVERY `git` invocation
+    /// containing an unresolvable word — no per-command semantics, module
+    /// docs): any `sed` invocation whose entire tail is a single
+    /// unresolvable word floors to `Ask` via `self-protect-config-sed-tilde`,
+    /// regardless of any actual connection to shguard's config path — e.g.
+    /// `sed $(cat unrelated-script)`. Narrower than that `git` case (only
+    /// an all-opaque tail counts, not "any unresolvable word anywhere") and
+    /// Ask-only, never Block, same as every relaxation in this function —
+    /// an accepted, intentional trade-off, not an oversight.
+    ///
+    /// Known residual gap (fable-review finding against the first draft,
+    /// not fixed here): a decoy resolved token can still defeat this
+    /// branch even when the danger is real and exploitable. GNU `sed`
+    /// permutes options after operands (POSIX getopt-style), so `sed
+    /// 's/a/b/' $(echo -i ~/.config/shguard/config.toml)` still performs
+    /// the in-place edit at runtime — but its tail has ONE resolved token
+    /// (`'s/a/b/'`), so this branch stays silent for it. Closing this fully
+    /// needs sed-specific positional semantics (which operand is the
+    /// script vs. a file), not a generic flag/target check — tracked as
+    /// issue #117 rather than folded into this fix, which stays a
+    /// command-agnostic relaxation like its two siblings above.
     #[must_use]
     pub(crate) fn matches_except_target(&self, argv: &[NormalizedWord]) -> bool {
         if self.targets.is_empty() {
@@ -1168,9 +1218,15 @@ impl CommandRule {
         if self.constraints_match(rest_words) {
             return true;
         }
-        resolved_strings(rest_words)
+        if resolved_strings(rest_words)
             .iter()
             .any(|token| self.matches_targets(token))
+        {
+            return true;
+        }
+        rest_words
+            .iter()
+            .all(|w| matches!(w.resolution(), Resolution::Unresolvable(_)))
     }
 
     /// Same wrapper-unwrap walk as [`Self::matching_rest`], but stopping at
@@ -5083,6 +5139,71 @@ mod tests {
             matched.map(|rule| rule.id().as_str()),
             Some("self-protect-config-rm-tilde")
         );
+    }
+
+    // ==== Issue #85: matches_except_target's third relaxation — a
+    // required flag AND the target hidden together, entire tail
+    // unresolvable ====
+
+    fn all_unresolvable_tail(command: &str, n: usize) -> Vec<NormalizedWord> {
+        let mut out = vec![NormalizedWord::resolved(command)];
+        out.extend((0..n).map(|_| {
+            NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::CommandSubstitution)
+        }));
+        out
+    }
+
+    #[test]
+    fn except_target_fires_when_flag_and_target_share_one_opaque_word() {
+        // sed $(echo -i ~/.config/shguard/config.toml) — one substitution
+        // supplying both the flag and the target at runtime.
+        let rules = Rules::embedded().unwrap();
+        let cmd = all_unresolvable_tail("sed", 1);
+        assert!(rules.match_command(&cmd).is_none());
+        let rule = rules.match_command_except_target(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "self-protect-config-sed-tilde");
+    }
+
+    #[test]
+    fn except_target_fires_when_flag_and_target_are_two_sibling_opaque_words() {
+        // sed $(printf -- -i) $(printf ~/.config/shguard/config.toml) —
+        // flag and target each hidden in their own separate substitution.
+        let rules = Rules::embedded().unwrap();
+        let cmd = all_unresolvable_tail("sed", 2);
+        assert!(rules.match_command(&cmd).is_none());
+        let rule = rules.match_command_except_target(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "self-protect-config-sed-tilde");
+    }
+
+    #[test]
+    fn except_target_does_not_fire_when_a_resolved_token_survives_in_the_tail() {
+        // sed 's/x/y/' /some/normal/file $(compute-suffix) — a resolved
+        // script and a resolved, non-matching file both survive alongside
+        // one incidental unresolvable arg. The third relaxation requires
+        // the ENTIRE tail to be unresolvable precisely so this stays
+        // Allow — resolved content elsewhere must not be swept up just
+        // because *some* word in the same invocation is opaque.
+        let rules = Rules::embedded().unwrap();
+        let mut cmd = argv(&["sed", "s/x/y/", "/some/normal/file"]);
+        cmd.push(NormalizedWord::unresolvable(
+            crate::normalize::UnresolvableKind::CommandSubstitution,
+        ));
+        assert!(rules.match_command_except_target(&cmd).is_none());
+    }
+
+    #[test]
+    fn except_target_third_relaxation_requires_a_required_flag_or_token() {
+        // A target-only rule (no required_flags/required_tokens) already
+        // gets an all-opaque tail via the first relaxation's trivially-true
+        // constraints_match — the third relaxation must not double up on
+        // (or otherwise be needed for) that shape. Confirmed via `unlink`,
+        // whose only command rule is the flagless
+        // `self-protect-config-unlink-tilde` (no sibling target-only rule
+        // to introduce ambiguity about which one `.find()` returns first).
+        let rules = Rules::embedded().unwrap();
+        let cmd = all_unresolvable_tail("unlink", 1);
+        let rule = rules.match_command_except_target(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "self-protect-config-unlink-tilde");
     }
 
     // ==== NEW rule 4b partial-match API: matches_except_flags /

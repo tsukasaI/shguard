@@ -300,25 +300,23 @@ fn guardfall_issue_77_brace_command_position_cases() {
         // stay untouched by the relaxation above — no target-pattern match
         // at all, so `matches_except_target` must not fire speculatively.
         ("rm foo.txt $(date)", Decision::Ask), // still only self-protect-config-rm-tilde's flagless catch-all, not rm-recursive-force
-        // The one shape `matches_except_target`'s relaxation still cannot
-        // resolve on its own (not specific to brace alternation — see the
-        // plain `rm -rf$IFS/$(true)` control below, which hits the exact
-        // same limit): when the required FLAG **and** the TARGET are BOTH
-        // swallowed into the SAME opaque substitution-bearing word (no
-        // resolved token survives to check against `targets` at all),
-        // `rm-recursive-force-dangerous-target` itself still never fires.
-        // `self-protect-config-rm-tilde` (a flagless, target-only
-        // self-protection rule for `rm`) still floors the outer verdict to
-        // `Ask` regardless, since it only needs "some word is unresolvable"
-        // to refuse ruling out its own target pattern — so this stays a
-        // fail-closed `Ask`, not a bypass, for `rm` specifically. A command
-        // with a required-flags-AND-target rule but no such flagless
-        // sibling would not get this same rescue; that narrower residual
-        // gap is pre-existing (reproduces with no braces at all) and
-        // orthogonal to this issue's brace-alternative classification, not
-        // fixed here.
+        // Issue #85 follow-up: when the required FLAG **and** the TARGET
+        // are BOTH swallowed into the SAME opaque substitution-bearing
+        // word (no resolved token survives to check against `targets` at
+        // all — not specific to brace alternation, see the plain `rm
+        // -rf$IFS/$(true)` control below), `matches_except_target` grew a
+        // third relaxation: when this rule declares a required flag/token
+        // and the ENTIRE tail is unresolvable, that's still plausibly this
+        // rule's own dangerous shape. So `rm-recursive-force-dangerous-target`
+        // itself now fires here directly (confirmed via the probe example,
+        // not merely inferred) — before issue #85, only the flagless,
+        // target-only `self-protect-config-rm-tilde` sibling rescued this
+        // specific case for `rm`; a required-flags-AND-target rule with no
+        // such flagless sibling (`self-protect-config-sed-tilde`) had no
+        // rescue at all, which is what issue #85 was filed against (see
+        // the sed cases and their own comment further below).
         ("rm{,$IFS-rf$IFS/$(true)}", Decision::Ask),
-        ("rm -rf$IFS/$(true)", Decision::Ask), // brace-free control, same limit
+        ("rm -rf$IFS/$(true)", Decision::Ask), // brace-free control, same shape
         // Three further /security-review passes found this exact "flag and
         // target both hidden" shape ALSO reachable via a non-winning brace
         // alternative that glues literal `-i` text to a substitution via
@@ -373,43 +371,68 @@ fn guardfall_issue_77_brace_command_position_cases() {
             "{sed,-i$(printf \" \")~/.config/shguard/config.toml}",
             Decision::Ask,
         ),
+        // Issue #85: the required FLAG (`-i`) and the TARGET (the shguard
+        // config dir) hidden together, with NO resolved token anywhere in
+        // the tail to check either constraint against — `sed` has no
+        // flagless self-protect sibling (unlike `rm`/`tee`/`cp`/`mv`/
+        // `install`, see the "why the obvious fix is wrong" note in the
+        // issue: a flagless sibling would wrongly flag a harmless
+        // `sed -n '1p' ~/.config/shguard/config.toml` read), so this
+        // reached a genuine `Allow`, not merely a weaker `Ask`, until
+        // `CommandRule::matches_except_target` (src/rules.rs) grew a third
+        // relaxation: a rule with a required flag/token whose ENTIRE tail
+        // is unresolvable is still plausibly its own dangerous shape.
+        // Fixed and now pinned (previously left deliberately unpinned —
+        // a genuine bypass should not read as an accepted, green
+        // regression pin — but now that it Asks, it belongs here like
+        // every other case in this test).
+        (
+            "sed $(echo -i ~/.config/shguard/config.toml)",
+            Decision::Ask,
+        ),
+        (
+            "sed $(printf -- -i) $(printf ~/.config/shguard/config.toml)",
+            Decision::Ask,
+        ),
+        // End-to-end pin (fable-review follow-up) for the exact invariant
+        // issue #85's own text calls out as the reason a flagless sibling
+        // rule was rejected: a resolved, no-`-i` read of the config file
+        // must stay Allow. Only unit-level coverage of this existed before
+        // (`self_protect_sed_without_dash_i_does_not_match`, which checks
+        // `CommandRule::matches` directly) — nothing in this file, whose
+        // whole purpose is pinning end-to-end gate verdicts, exercised the
+        // full `shguard::analyze` path for it.
+        ("sed -n '1p' ~/.config/shguard/config.toml", Decision::Allow),
+        // Addendum: the SAME root cause reachable via a single
+        // command/backquote substitution whose own runtime OUTPUT combines
+        // both the flag and the target in one word — confirmed not
+        // specific to brace alternation (the brace-free control below hits
+        // the identical gap; the brace-wrapped spelling was `Ask` on old
+        // `main` only because rule 1's old blanket scan caught ANY
+        // substitution in the command-position word, by accident).
+        (
+            "{sed,$(printf -- \"-i /home/user/.config/shguard/config.toml\")}",
+            Decision::Ask,
+        ),
+        (
+            "sed $(printf -- \"-i /home/user/.config/shguard/config.toml\")",
+            Decision::Ask,
+        ),
     ];
-    // NOT pinned above (deliberately — see issue #85, filed for exactly
-    // this): `sed` is a command where the gap just above is a genuine
-    // `Allow`, not merely a weaker `Ask` the way `rm`'s is —
-    // `sed $(printf -- -i) $(printf ~/.config/shguard/config.toml)` is
-    // Allow both on `main` and on this branch. A tempting-looking fix
-    // (give `sed` a flagless, ask-decision self-protect sibling mirroring
-    // `self-protect-config-rm-tilde`) was tried and reverted here: it
-    // broke `rules::tests::self_protect_sed_without_dash_i_does_not_match`,
-    // because unlike `rm`/`tee`/`cp`/`mv`/`install` (any invocation
-    // touching the target IS the dangerous act), a `sed` invocation with
-    // no `-i` at all only ever reads and prints to stdout — it never
-    // writes to its target, so treating "any sed touching the config dir"
-    // as suspicious would falsely flag a completely harmless read.
-    // Closing this needs a narrower mechanism than a flagless sibling.
-    // Not asserted here as a passing case: a genuine bypass should not
-    // read as an accepted, green regression pin.
-    //
-    // A follow-up fable review found the SAME root cause reachable via one
-    // more route: a single command/backquote substitution whose own
-    // runtime OUTPUT combines both the flag and the target
-    // (`{sed,$(printf -- "-i /home/user/.config/shguard/config.toml")}` —
-    // one leftover alternative, `pieces.len() == 1`, so it stays purely
-    // transparent per `evaluate_leftover_alternative_substitutions`'s own
-    // "just one token" design — recursing `printf` alone is Allow, and
-    // nothing else can see what its OUTPUT will be). Confirmed this is
-    // NOT specific to brace alternation: the plain, brace-free
-    // `sed $(printf -- "-i /home/user/.config/shguard/config.toml")` is
-    // ALSO `Allow` on `main` — this is exactly issue #85's pre-existing
-    // gap (a single substitution's unknowable runtime output can combine
-    // multiple tokens, which no static analysis here can rule out) with
-    // one more way to spell it, not a new vulnerability class. `main`
-    // happened to Ask for the brace-wrapped spelling specifically (rule
-    // 1's old blanket scan caught ANY substitution in the command-position
-    // word, by accident, same as every other case pinned above), so this
-    // spelling is now tracked as an addendum to #85 rather than a new
-    // issue.
+    // Known residual gap (fable-review finding against issue #85's fix,
+    // NOT closed here — tracked as issue #117, not pinned as a passing
+    // case since a genuine bypass should not read as an accepted, green
+    // regression pin): a decoy RESOLVED token elsewhere in the tail
+    // still defeats the new relaxation above, even when the danger is real
+    // and exploitable. GNU sed permutes options after operands (POSIX
+    // getopt-style), so `sed 's/a/b/' $(echo -i ~/.config/shguard/config.toml)`
+    // still performs the in-place edit at runtime, but its tail has one
+    // resolved token (`'s/a/b/'`, sed's own edit script) alongside the
+    // hidden flag+target substitution — the new relaxation only fires when
+    // the WHOLE tail is unresolvable, so a single resolved decoy is enough
+    // to keep it silent. Closing this fully needs sed-specific positional
+    // semantics (which operand is the script vs. a target file), not a
+    // generic flag/target check.
 
     for (command, expected) in cases {
         let verdict = shguard::analyze(command);

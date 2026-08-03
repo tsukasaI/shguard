@@ -1717,8 +1717,9 @@ fn fold_floors(
     if let Some(rule) = except_floors.target {
         decision = decision.max(Decision::Ask);
         reasons.push(format!(
-            "command and flags match blocklist rule {:?}, but the target is an unresolved $VAR \
-             or command substitution that could not be checked statically",
+            "command matches blocklist rule {:?}, but its required flag(s) and/or target could \
+             not be fully checked because an argument is an unresolved $VAR or command \
+             substitution",
             rule.id().as_str()
         ));
     }
