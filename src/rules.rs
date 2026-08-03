@@ -501,9 +501,19 @@ impl TargetMatcher {
                 // the invoking shell's cwd, so a pure relative ascent
                 // (`..`, `../..`, `../../../..`, …) might resolve to `/`
                 // at any depth, and a `~`-anchored token that pops past
-                // $HOME (`~/..`) has provably left it even though the
-                // exact resulting path is unknown. No other target shape
-                // widens like this — `Opaque` never matches anything.
+                // $HOME (`~/..`) has provably left it — even though the
+                // exact resulting path (and, since issue #90, any tail
+                // descended into after the escape) is unknown. No other
+                // target shape widens like this — `Opaque` never matches
+                // anything. The tail is deliberately ignored below: this
+                // arm only fires for a rule targeting bare `~`
+                // (`comps.is_empty()`), and ANY escape — regardless of
+                // what follows it — is still certain to have left that
+                // bare-`~` target, so narrowing this to an empty tail
+                // would regress a token like `~/../../home/alice` (which
+                // matches no rule's dangerous namespace, so issue #90's
+                // Ask-only floor can't catch it either) from Block back to
+                // Allow.
                 match (target, &form) {
                     (
                         PathForm::Abs(comps),
@@ -512,7 +522,7 @@ impl TargetMatcher {
                             comps: rel_comps,
                         },
                     ) => comps.is_empty() && *ascent >= 1 && rel_comps.is_empty(),
-                    (PathForm::Home(comps), PathForm::EscapesHome) => comps.is_empty(),
+                    (PathForm::Home(comps), PathForm::EscapesHome(_)) => comps.is_empty(),
                     _ => false,
                 }
             }
@@ -543,11 +553,37 @@ impl TargetMatcher {
     /// `crate::gate::scan_ascent_descent_floor`), never the matched
     /// rule's own (often stricter) decision.
     ///
+    /// Since issue #90, a `~`/`~username`-anchored ascent past its anchor
+    /// (`~/../../dev/sda`, `~someuser/../../../dev/sda`) is covered too:
+    /// [`PathForm::EscapesHome`]/[`PathForm::NamedUserHomeEscapes`] now
+    /// carry the descended-into tail the same way [`PathForm::Rel`]
+    /// carries `comps`, and this check consumes either shape uniformly.
+    /// The candidate-building below picks ONE rendering of that tail per
+    /// call — absolute (`/`) or `~`-anchored, based solely on the
+    /// matched rule's own `canon` — and applies it uniformly across all
+    /// three source shapes, including the two escape shapes. In
+    /// particular a `~`-anchored `canon` is NOT excluded just because the
+    /// token's own source shape already escaped its anchor — even though
+    /// "escaped its own anchor" sounds like it should rule out a
+    /// `~`-anchored candidate, shguard cannot disprove it: `$HOME=/`
+    /// degenerately collapses
+    /// `~/..` back to `~` itself, and a named user's home
+    /// (`~someuser`) may sit anywhere relative to the invoker's own
+    /// `$HOME` (e.g. a sibling directory), so a tail that looks like it
+    /// escaped could still plausibly land back under `~`. This is the
+    /// same fail-closed, can't-prove-it-so-Ask-not-Block posture as the
+    /// `Rel` case, not a new false-positive class.
+    ///
+    /// Known residual gap: this check is purely forward — it can prefix-
+    /// match a tail against a rule's dangerous namespace, but can't
+    /// reason about the escaped-past anchor's own *basename* reappearing
+    /// mid-tail (e.g. `~alice/../bob/.config/shguard/x`, where `bob`
+    /// happens to be the invoking user, would need to re-descend through
+    /// a name this check has no way to know). Tracked as a follow-up
+    /// issue, not fixed here.
+    ///
     /// Known gaps (fable-review findings against the first draft, not yet
     /// fixed):
-    /// - A `~`-anchored ascent past `$HOME` (`~/../../dev/sda`) normalizes
-    ///   to [`PathForm::EscapesHome`], which carries no descended-into
-    ///   tail for this check to consume — tracked as issue #90.
     /// - This check doesn't consult a rule's `except_targets`. No
     ///   embedded rule currently pairs a `normalized`/`normalized_prefix`
     ///   target with an `except_targets` carve-out, so this is latent,
@@ -567,10 +603,12 @@ impl TargetMatcher {
         let Some(remainder) = strip_target(strip.as_deref(), token) else {
             return false;
         };
-        let PathForm::Rel { ascent, comps } = lexical_normalize(remainder) else {
-            return false;
+        let comps = match lexical_normalize(remainder) {
+            PathForm::Rel { ascent, comps } if ascent >= 1 => comps,
+            PathForm::EscapesHome(comps) | PathForm::NamedUserHomeEscapes(comps) => comps,
+            _ => return false,
         };
-        if ascent == 0 || comps.is_empty() {
+        if comps.is_empty() {
             return false;
         }
         match self {
@@ -632,7 +670,7 @@ impl TargetMatcher {
         };
         matches!(
             lexical_normalize(remainder),
-            PathForm::NamedUserHome | PathForm::NamedUserHomeEscapes
+            PathForm::NamedUserHome | PathForm::NamedUserHomeEscapes(_)
         )
     }
 }
@@ -669,8 +707,13 @@ enum PathForm {
     /// `comps.join("/")`; `Home(vec![])` is `~` itself.
     Home(Vec<String>),
     /// A `~`-anchored token whose `..` popped past `$HOME` — provably
-    /// outside it, even though the exact resulting path is unknown.
-    EscapesHome,
+    /// outside it, even though the exact resulting path is unknown. The
+    /// `Vec<String>` is the tail of components seen *after* the escape
+    /// point (issue #90; mirrors [`PathForm::Rel`]'s own `comps`) — e.g.
+    /// `~/../../dev/sda` is `EscapesHome(["dev", "sda"])`. Empty when
+    /// nothing follows the escaping `..` (`~/../..` is `EscapesHome(
+    /// vec![])`).
+    EscapesHome(Vec<String>),
     /// Relative to an unknown cwd: `ascent` leading `..` components that
     /// couldn't be canceled by an earlier component in the same token,
     /// followed by `comps`. `Rel { ascent: 0, comps: vec![] }` is `.`
@@ -690,8 +733,9 @@ enum PathForm {
     /// A `~username/..`-shaped token whose `..` popped past that user's
     /// home — provably outside it, even though the exact resulting path
     /// is unknown (mirrors [`PathForm::EscapesHome`] for a named user
-    /// rather than the invoker's own `$HOME`).
-    NamedUserHomeEscapes,
+    /// rather than the invoker's own `$HOME`). Carries the post-escape
+    /// tail the same way `EscapesHome` does (issue #90).
+    NamedUserHomeEscapes(Vec<String>),
     /// Matches nothing: the empty string, a `~username/subdir` token (see
     /// [`PathForm::NamedUserHome`]'s docs), or a `~+`/`~-`/`~N`/`~+N`/`~-N`
     /// directory-stack shorthand. The dirstack forms do NOT "reach the
@@ -724,9 +768,11 @@ fn is_dirstack_shape(prefix: &str) -> bool {
 /// literally appearing in the output. A `..` with nothing left to cancel
 /// is anchor-dependent: under `/` it's a no-op (POSIX: `/..` == `/`);
 /// under `~` it proves the result has left `$HOME`
-/// ([`PathForm::EscapesHome`]); otherwise (a bare relative token) it
-/// becomes one unit of unresolved ascent ([`PathForm::Rel`]'s `ascent`) —
-/// shguard has no cwd to resolve it against.
+/// ([`PathForm::EscapesHome`], which keeps accumulating any components
+/// that follow the escaping `..` into its own tail — issue #90); otherwise
+/// (a bare relative token) it becomes one unit of unresolved ascent
+/// ([`PathForm::Rel`]'s `ascent`) — shguard has no cwd to resolve it
+/// against.
 fn lexical_normalize(token: &str) -> PathForm {
     if token.is_empty() {
         return PathForm::Opaque;
@@ -759,12 +805,16 @@ fn lexical_normalize(token: &str) -> PathForm {
                 if stack.pop().is_none() {
                     escaped = true;
                 }
-            } else if !escaped {
+            } else {
+                // issue #90: keep accumulating into `stack` past the
+                // escape point (with the same cancel-nearest `..`
+                // semantics) instead of dropping the tail — it becomes
+                // `NamedUserHomeEscapes`'s payload below.
                 stack.push(comp.to_string());
             }
         }
         return if escaped {
-            PathForm::NamedUserHomeEscapes
+            PathForm::NamedUserHomeEscapes(stack)
         } else if stack.is_empty() {
             PathForm::NamedUserHome
         } else {
@@ -804,14 +854,19 @@ fn lexical_normalize(token: &str) -> PathForm {
                 Anchor::Home => escaped = true,
                 Anchor::Rel => ascent = ascent.saturating_add(1),
             }
-        } else if !escaped {
+        } else {
+            // issue #90: keep accumulating into `stack` past the escape
+            // point (with the same cancel-nearest `..` semantics) instead
+            // of dropping the tail — it becomes `EscapesHome`'s payload
+            // below. `escaped` is only ever set for `Anchor::Home`, so
+            // this is a no-op change for `Abs`/`Rel`.
             stack.push(comp.to_string());
         }
     }
 
     match anchor {
         Anchor::Abs => PathForm::Abs(stack),
-        Anchor::Home if escaped => PathForm::EscapesHome,
+        Anchor::Home if escaped => PathForm::EscapesHome(stack),
         Anchor::Home => PathForm::Home(stack),
         Anchor::Rel => PathForm::Rel {
             ascent,
@@ -832,6 +887,12 @@ fn canonical_render(form: &PathForm) -> Option<String> {
         PathForm::Home(comps) if comps.is_empty() => Some("~".to_string()),
         PathForm::Home(comps) => Some(format!("~/{}", comps.join("/"))),
         PathForm::Rel { ascent: 0, comps } if comps.is_empty() => Some(".".to_string()),
+        // issue #90: an escaped-anchor tail must NEVER render here — doing
+        // so would let `NormalizedPrefix::matches` treat it as a *certain*
+        // match (inheriting the rule's often-`Block` decision) instead of
+        // the Ask-only floor `TargetMatcher::ascent_descent_plausible`
+        // deliberately keeps it capped at.
+        PathForm::EscapesHome(_) | PathForm::NamedUserHomeEscapes(_) => None,
         _ => None,
     }
 }
@@ -2543,10 +2604,10 @@ fn reject_degenerate_normalized_target(
 ) -> Result<(), RulesError> {
     let degenerate = match form {
         PathForm::Rel { ascent, .. } => *ascent > 0,
-        PathForm::EscapesHome
+        PathForm::EscapesHome(_)
         | PathForm::Opaque
         | PathForm::NamedUserHome
-        | PathForm::NamedUserHomeEscapes => true,
+        | PathForm::NamedUserHomeEscapes(_) => true,
         PathForm::Abs(_) | PathForm::Home(_) => false,
     };
     if degenerate {
@@ -3467,6 +3528,89 @@ mod tests {
         // counting between the two mechanisms.
         let rules = Rules::embedded().unwrap();
         let cmd = argv(&["dd", "of=../../../.."]);
+        assert!(rules.match_command_ascent_descent(&cmd).is_none());
+    }
+
+    // ==== Issue #90: a `~`/`~username`-anchored ascent-then-descent token
+    // (`~/../../dev/sda`, `~someuser/../../../dev/sda`-shaped) floors to
+    // Ask the same way #78's bare-relative-ascent floor does — the
+    // descended-into tail is no longer dropped by lexical_normalize once
+    // the token has popped past its `~`/`~username` anchor. ====
+
+    #[test]
+    fn ascent_descent_home_escape_dd_write_device_floors() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["dd", "of=~/../../dev/sda"]);
+        assert!(rules.match_command(&cmd).is_none());
+        let rule = rules.match_command_ascent_descent(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "dd-write-device");
+    }
+
+    #[test]
+    fn ascent_descent_home_escape_etc_passwd_normalized_exact_floors() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["tee", "~/../../../etc/passwd"]);
+        let rule = rules.match_command_ascent_descent(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "tee-write-device-or-critical-file");
+    }
+
+    #[test]
+    fn ascent_descent_named_user_home_escape_dd_write_device_floors() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["dd", "of=~someuser/../../../dev/sda"]);
+        assert!(rules.match_command(&cmd).is_none());
+        let rule = rules.match_command_ascent_descent(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "dd-write-device");
+    }
+
+    #[test]
+    fn ascent_descent_redirect_home_escape_etc_passwd_floors() {
+        // Fable-review finding: the same lexical_normalize fix also closes
+        // this bypass via shell redirect syntax (RedirectRule, a separate
+        // Rust type from CommandRule sharing TargetMatcher underneath),
+        // which the issue's own repro didn't cover.
+        let rules = Rules::embedded().unwrap();
+        let rule = rules
+            .match_redirect_target_ascent_descent("~/../../etc/passwd")
+            .unwrap();
+        assert_eq!(
+            rule.id().as_str(),
+            "redirect-overwrite-device-or-critical-file"
+        );
+    }
+
+    #[test]
+    fn ascent_descent_home_escape_tail_cancels_correctly() {
+        // `..` after the escape point must still cancel the nearest
+        // *post-escape* component (same cancel-nearest semantics as
+        // PathForm::Rel's own comps) rather than being ignored — a
+        // trailing cancel-to-empty must NOT floor.
+        let rules = Rules::embedded().unwrap();
+        let floors = argv(&["dd", "of=~/../a/../../dev/sda"]);
+        let rule = rules.match_command_ascent_descent(&floors).unwrap();
+        assert_eq!(rule.id().as_str(), "dd-write-device");
+        let cancels_to_empty = argv(&["dd", "of=~/../dev/.."]);
+        assert!(
+            rules
+                .match_command_ascent_descent(&cancels_to_empty)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn ascent_descent_home_escape_ordinary_sibling_does_not_floor() {
+        // The same noise-guard as the bare-relative-ascent case: an
+        // escaped `~` token descending into an ordinary, non-dangerous
+        // path must stay Allow.
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["cp", "x", "~/../shared/file"]);
+        assert!(rules.match_command_ascent_descent(&cmd).is_none());
+    }
+
+    #[test]
+    fn ascent_descent_home_escape_partial_prefix_does_not_floor() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["dd", "of=~/../../dev"]);
         assert!(rules.match_command_ascent_descent(&cmd).is_none());
     }
 
