@@ -168,6 +168,12 @@ fn guardfall_transparent_wrapper_cases() {
         ("timeout 5 rm -rf /", Decision::Block),
         ("chrt -f 99 rm -rf /", Decision::Block),
         ("taskset 0x1 rm -rf /", Decision::Block),
+        // Issue #114: busybox mkswap /dev/sda1 (the issue's own repro).
+        ("busybox mkswap /dev/sda1", Decision::Block),
+        // Same issue, in the rm -rf / shape every sibling wrapper case
+        // above uses — pins the busybox->rm resolution path specifically,
+        // independent of the mkswap case above.
+        ("busybox rm -rf /", Decision::Block),
     ];
 
     for (command, expected) in cases {
