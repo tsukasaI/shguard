@@ -673,6 +673,32 @@ impl TargetMatcher {
             PathForm::NamedUserHome | PathForm::NamedUserHomeEscapes(_)
         )
     }
+
+    /// issue #88's Ask-only floor check: true when this matcher declares
+    /// no `strip` prefix and `token` itself normalizes to
+    /// [`PathForm::DirStack`]. `~+`/`~-`/`~N` expand against
+    /// `$PWD`/`$OLDPWD`/a pushd-stack entry — an anchor no [`PathForm`] a
+    /// target can declare represents, so unlike
+    /// [`Self::named_user_home_plausible`]/[`Self::ascent_descent_plausible`]
+    /// there is no target *value* to compare against (the anchor is
+    /// unbounded by construction). The correlation available here is the
+    /// *slot* instead: a `strip: Some(..)` target (e.g. `dd`'s `of=`)
+    /// expects an ATTACHED token (`of=/dev/sda`), and a bare
+    /// `~+`/`~-`/`~N` glued after that same flag (`of=~+`) doesn't
+    /// tilde-expand in the first place — a separate zsh-`magic_equal_subst`
+    /// question, tracked as issue #134 — so `strip: Some(..)` targets are
+    /// excluded here the same way they're excluded from ever actually
+    /// matching an unattached dirstack token.
+    fn dirstack_plausible(&self, token: &str) -> bool {
+        let strip = match self {
+            Self::NormalizedExact { strip, .. } | Self::NormalizedPrefix { strip, .. } => strip,
+            Self::Exact(_) | Self::Prefix(_) => return false,
+        };
+        if strip.is_some() {
+            return false;
+        }
+        matches!(lexical_normalize(token), PathForm::DirStack)
+    }
 }
 
 /// Strips `prefix` (a [`TargetMatcher::NormalizedExact`]/
@@ -736,21 +762,40 @@ enum PathForm {
     /// rather than the invoker's own `$HOME`). Carries the post-escape
     /// tail the same way `EscapesHome` does (issue #90).
     NamedUserHomeEscapes(Vec<String>),
+    /// A bare `~+`/`~-`/`~N`/`~+N`/`~-N` directory-stack shorthand (`N` one
+    /// or more ASCII digits) — either exactly that, or `.`/`.`-padded
+    /// equivalents (`~+/.`, `~+//`) that collapse to no remaining
+    /// components, the same way `~/.`/`~username/.` collapse to their own
+    /// bare forms. A real shell expands `~+`/`~-` to `$PWD`/`$OLDPWD` and
+    /// `~N`-shaped forms to a numbered `pushd`/`popd` directory-stack
+    /// entry (issue #88) — an arbitrary, unbounded directory shguard has
+    /// no cwd or directory stack to resolve against, so this only ever
+    /// feeds a `gate.rs` floor capped at `Ask`
+    /// (`crate::gate::scan_dirstack_tilde_floor`), the same floor a bare,
+    /// literal `$PWD`/`$OLDPWD` reference already gets via the
+    /// unresolved-`$VAR` floor (rule 4) — never a rule's own (often
+    /// `Block`) decision, since unlike a bare `~` every shell expands
+    /// identically, whether `~+`/`~-`/`~N` denote a *specific* dangerous
+    /// target can't be known statically.
+    ///
+    /// A subdirectory tail that does NOT collapse away (`~-/etc/passwd`,
+    /// `~2/dev/sda`), or a `..` that pops past the (unknown) anchor, stays
+    /// [`PathForm::Opaque`] instead — deliberately out of scope for issue
+    /// #88, mirroring [`PathForm::NamedUserHome`]'s own "bare anchor only,
+    /// not an arbitrary subdirectory" boundary; tracked as issue #133.
+    DirStack,
     /// Matches nothing: the empty string, a `~username/subdir` token (see
-    /// [`PathForm::NamedUserHome`]'s docs), or a `~+`/`~-`/`~N`/`~+N`/`~-N`
-    /// directory-stack shorthand. The dirstack forms do NOT "reach the
-    /// command literally" as an earlier version of this comment claimed —
-    /// a real shell expands `~+`/`~-` to `$PWD`/`$OLDPWD` and `~N`-shaped
-    /// forms to a numbered pushd/popd entry — shguard just doesn't model
-    /// that expansion yet (tracked as issue #88; this is a known gap, not
-    /// a deliberate "these are safe" classification).
+    /// [`PathForm::NamedUserHome`]'s docs), or a dirstack-shaped tilde
+    /// token with a non-collapsing subdirectory tail or an escaping `..`
+    /// (see [`PathForm::DirStack`]'s docs — issue #133).
     Opaque,
 }
 
 /// True for `+`/`-`/`N`/`+N`/`-N` (`N` one or more ASCII digits) — bash/zsh
 /// directory-stack shorthand (`~+`/`~-` expand to `$PWD`/`$OLDPWD`,
 /// `~N`/`~+N`/`~-N` to a numbered pushd/popd entry), never a real account
-/// name. Used by [`lexical_normalize`] to keep dirstack tokens out of
+/// name. Used by [`lexical_normalize`] to route these tokens to
+/// [`PathForm::DirStack`]/[`PathForm::Opaque`] (issue #88) instead of
 /// [`PathForm::NamedUserHome`]/[`NamedUserHomeEscapes`].
 fn is_dirstack_shape(prefix: &str) -> bool {
     if prefix == "+" || prefix == "-" {
@@ -779,22 +824,23 @@ fn lexical_normalize(token: &str) -> PathForm {
     }
     // Only a bare `~` or a `~/`-prefixed token is `$HOME`-anchored. Any
     // other `~`-prefixed token is either a directory-stack shorthand
-    // (`~+`/`~-`/`~N`/`~+N`/`~-N`, not modeled — `Opaque`) or a
-    // `~username` tilde (issue #80): a real shell takes everything up to
-    // the first `/` as the account name (`getpwnam`-style — no username
-    // syntax validation, so any non-empty, non-dirstack prefix counts,
-    // matching this project's allowlist-over-denylist preference for the
-    // *dangerous* class) and expands the rest lexically against that
-    // account's home, same as `~/...` does against `$HOME`.
+    // (`~+`/`~-`/`~N`/`~+N`/`~-N`, issue #88) or a `~username` tilde
+    // (issue #80): a real shell takes everything up to the first `/` as
+    // the account name (`getpwnam`-style — no username syntax validation,
+    // so any non-empty, non-dirstack prefix counts, matching this
+    // project's allowlist-over-denylist preference for the *dangerous*
+    // class) and expands the rest lexically against that account's home,
+    // same as `~/...` does against `$HOME`.
     if token.starts_with('~') && token != "~" && !token.starts_with("~/") {
         let rest = &token[1..];
         let (user, path_rest) = match rest.find('/') {
             Some(i) => (&rest[..i], &rest[i + 1..]),
             None => (rest, ""),
         };
-        if user.is_empty() || is_dirstack_shape(user) {
+        if user.is_empty() {
             return PathForm::Opaque;
         }
+        let dirstack = is_dirstack_shape(user);
         let mut stack: Vec<String> = Vec::new();
         let mut escaped = false;
         for comp in path_rest.split('/') {
@@ -812,6 +858,20 @@ fn lexical_normalize(token: &str) -> PathForm {
                 // `NamedUserHomeEscapes`'s payload below.
                 stack.push(comp.to_string());
             }
+        }
+        // issue #88: a dirstack-shaped `user` (`+`/`-`/`N`/`+N`/`-N`) is
+        // never a real account name, so it takes this separate branch
+        // rather than falling into the `NamedUserHome`/`NamedUserHomeEscapes`
+        // classification below — sharing the same accumulation loop above
+        // so `~+/.`/`~+//` still collapse to bare `DirStack` the same way
+        // `~/.`/`~username/.` collapse to their own bare forms. A
+        // non-collapsing tail or an escape stays `Opaque` (issue #133).
+        if dirstack {
+            return if !escaped && stack.is_empty() {
+                PathForm::DirStack
+            } else {
+                PathForm::Opaque
+            };
         }
         return if escaped {
             PathForm::NamedUserHomeEscapes(stack)
@@ -1419,6 +1479,41 @@ impl CommandRule {
         })
     }
 
+    /// issue #88: true when this rule's command+flags match `argv` (via
+    /// [`Self::matching_rest`], the same full constraint check
+    /// [`Self::matches`] uses) and some resolved tail token is a
+    /// directory-stack tilde shorthand (`~+`/`~-`/`~N`/`~+N`/`~-N`,
+    /// [`PathForm::DirStack`]) that could plausibly occupy one of this
+    /// rule's own `targets`' slots ([`TargetMatcher::dirstack_plausible`]).
+    /// Read-only probe, same shape as
+    /// [`Self::matches_except_target`]/[`Self::matches_except_flags`] —
+    /// never itself a match, only a `gate.rs` floor's input (see
+    /// `crate::gate::scan_dirstack_tilde_floor`).
+    ///
+    /// Same slot-correlation shape as
+    /// [`Self::matches_named_user_home_floor`]/
+    /// [`Self::matches_ascent_descent_floor`], but without their target
+    /// *value* comparison: `~+`/`~-`/`~N` expand against
+    /// `$PWD`/`$OLDPWD`/a pushd-stack entry, an anchor no [`PathForm`] a
+    /// target can declare represents, so there is nothing about a
+    /// specific target's own value to check — only whether the target's
+    /// slot (`strip: None`, i.e. accepts a bare, unattached token) could
+    /// even receive one. `self.targets.is_empty()` is still excluded: a
+    /// rule with no target constraint already matches unconditionally via
+    /// [`Self::matches`], so there is nothing for this floor to add.
+    #[must_use]
+    pub(crate) fn matches_dirstack_tilde_floor(&self, argv: &[NormalizedWord]) -> bool {
+        if self.targets.is_empty() {
+            return false;
+        }
+        let Some(rest_words) = self.matching_rest(argv) else {
+            return false;
+        };
+        resolved_strings(&rest_words)
+            .iter()
+            .any(|token| self.targets.iter().any(|t| t.dirstack_plausible(token)))
+    }
+
     /// issue #115: true when this rule's command+flags match `argv` (via
     /// [`Self::matching_rest`], the same full constraint check
     /// [`Self::matches`] uses), this rule ALSO declares a bare-`~` target
@@ -1509,6 +1604,16 @@ impl CommandRule {
 /// [`CommandRule::matches_directory_equals_tilde_floor`]'s own job (shell/
 /// option-dependent, never provable) — this function only answers "what
 /// would it expand to if it did."
+///
+/// Deliberately does NOT recognize [`PathForm::DirStack`] (issue #88, e.g.
+/// `--directory=~+`): unlike `NamedUserHome`/`EscapesHome`, which expand
+/// against the SAME anchor (`$HOME`) this function's caller already
+/// requires the rule to have a bare-`~` target for, `~+`/`~-`/`~N` expand
+/// to `$PWD`/`$OLDPWD`/a dirstack entry — a fundamentally different,
+/// unrelated anchor. Folding it in here would produce a floor whose
+/// reported reason ("would hit this rule's bare-`~` target") is not
+/// actually true for a `$PWD`/`$OLDPWD`-anchored token. Tracked as a
+/// follow-up (issue #134) rather than a same-shape widening here.
 fn tilde_reachable_via_magic_equal_subst(remainder: &str) -> bool {
     match lexical_normalize(remainder) {
         PathForm::Home(comps) => comps.is_empty(),
@@ -2779,7 +2884,8 @@ fn reject_degenerate_normalized_target(
         PathForm::EscapesHome(_)
         | PathForm::Opaque
         | PathForm::NamedUserHome
-        | PathForm::NamedUserHomeEscapes(_) => true,
+        | PathForm::NamedUserHomeEscapes(_)
+        | PathForm::DirStack => true,
         PathForm::Abs(_) | PathForm::Home(_) => false,
     };
     if degenerate {
@@ -2787,8 +2893,8 @@ fn reject_degenerate_normalized_target(
             rule_id,
             format!(
                 "target's normalized value {raw:?} normalizes to a form that can never \
-                 usefully match (pure ascent, escapes $HOME, or opaque) — this is almost \
-                 certainly a mistake"
+                 usefully match (pure ascent, escapes $HOME, a directory-stack shorthand, or \
+                 opaque) — this is almost certainly a mistake"
             ),
         ));
     }
@@ -3117,6 +3223,24 @@ impl Rules {
             .iter()
             .chain(self.ask_rules.iter())
             .find(|rule| rule.matches_named_user_home_floor(argv))
+    }
+
+    /// The first [`CommandRule`] for which
+    /// [`CommandRule::matches_dirstack_tilde_floor`] holds, if any — issue
+    /// #88's directory-stack tilde floor (`src/gate.rs`). Like
+    /// [`Self::match_command_named_user_home`], scans both `command_rules`
+    /// and `ask_rules` (a user-config rule with its own targets is just as
+    /// eligible for this floor as an embedded one) and is a read-only
+    /// probe: never mutates rule state, never itself constitutes a match.
+    #[must_use]
+    pub(crate) fn match_command_dirstack_tilde(
+        &self,
+        argv: &[NormalizedWord],
+    ) -> Option<&CommandRule> {
+        self.command_rules
+            .iter()
+            .chain(self.ask_rules.iter())
+            .find(|rule| rule.matches_dirstack_tilde_floor(argv))
     }
 
     /// The first [`CommandRule`] for which
@@ -3960,6 +4084,115 @@ mod tests {
         let cmd = argv(&["rm", "-rf", "~/foo"]);
         assert!(rules.match_command(&cmd).is_none());
         assert!(rules.match_command_named_user_home(&cmd).is_none());
+    }
+
+    // ==== Issue #88: a `~+`/`~-`/`~N`/`~+N`/`~-N` directory-stack tilde
+    // token floors to Ask via Rules::match_command_dirstack_tilde — these
+    // expand to `$PWD`/`$OLDPWD`/a numbered pushd/popd entry, an arbitrary
+    // directory shguard has no cwd or directory stack to resolve against,
+    // the same uncertainty a literal `$PWD`/`$OLDPWD` reference already
+    // gets via the unresolved-`$VAR` floor (rule 4). ====
+
+    #[test]
+    fn dirstack_tilde_plus_floors_but_does_not_hard_match() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["rm", "-rf", "~+"]);
+        assert!(rules.match_command(&cmd).is_none());
+        let rule = rules.match_command_dirstack_tilde(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "rm-recursive-force-dangerous-target");
+    }
+
+    #[test]
+    fn dirstack_tilde_minus_floors() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["rm", "-rf", "~-"]);
+        assert!(rules.match_command_dirstack_tilde(&cmd).is_some());
+    }
+
+    #[test]
+    fn dirstack_tilde_numbered_forms_floor() {
+        let rules = Rules::embedded().unwrap();
+        for cmd in [
+            argv(&["rm", "-rf", "~5"]),
+            argv(&["rm", "-rf", "~+3"]),
+            argv(&["rm", "-rf", "~-3"]),
+        ] {
+            assert!(
+                rules.match_command_dirstack_tilde(&cmd).is_some(),
+                "{cmd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dirstack_tilde_dot_padded_forms_still_floor() {
+        // Mirrors `~/.`/`~username/.` collapsing to their own bare forms:
+        // trailing `.`/`//` noise doesn't defeat the bare-anchor shape.
+        let rules = Rules::embedded().unwrap();
+        for cmd in [argv(&["rm", "-rf", "~+/."]), argv(&["rm", "-rf", "~+//"])] {
+            assert!(
+                rules.match_command_dirstack_tilde(&cmd).is_some(),
+                "{cmd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dirstack_tilde_subdir_tail_stays_out_of_scope() {
+        // A real subdirectory tail (`~-/etc/passwd`, an anchor that is
+        // NOT cwd-relative like `~+` is) is deliberately out of #88's
+        // scope, mirroring `~username/subdir`'s own boundary — tracked as
+        // issue #133, not fixed here.
+        let rules = Rules::embedded().unwrap();
+        for cmd in [
+            argv(&["rm", "-rf", "~+/foo"]),
+            argv(&["rm", "-rf", "~-/etc/passwd"]),
+            argv(&["rm", "-rf", "~2/dev/sda"]),
+        ] {
+            assert!(rules.match_command(&cmd).is_none(), "{cmd:?}");
+            assert!(
+                rules.match_command_dirstack_tilde(&cmd).is_none(),
+                "{cmd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dirstack_tilde_escape_stays_out_of_scope() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["rm", "-rf", "~+/.."]);
+        assert!(rules.match_command_dirstack_tilde(&cmd).is_none());
+    }
+
+    #[test]
+    fn dirstack_tilde_floor_reachable_through_sudo_wrapper() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["sudo", "rm", "-rf", "~+"]);
+        assert!(rules.match_command_dirstack_tilde(&cmd).is_some());
+    }
+
+    #[test]
+    fn dirstack_tilde_stray_token_no_longer_floors_strip_only_rule() {
+        // Code review follow-up: matches_dirstack_tilde_floor is now
+        // correlated to a target's own slot (`strip: None`), mirroring
+        // named_user_home/ascent_descent, rather than firing on any
+        // dirstack-shaped token anywhere in the tail. dd-write-device's
+        // sole target requires an attached `of=` prefix — a bare,
+        // unattached `~+` can never occupy that slot (`of=~+` doesn't
+        // tilde-expand in the first place, issue #134) — so a stray `~+`
+        // elsewhere in the tail no longer floors this rule to Ask.
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["dd", "of=/tmp/safe-file", "~+"]);
+        assert!(rules.match_command_dirstack_tilde(&cmd).is_none());
+    }
+
+    #[test]
+    fn dirstack_tilde_stray_token_no_longer_floors_self_protect_dd() {
+        // Same narrowing as above, for self-protect-config-dd-tilde,
+        // whose targets are also all strip="of=".
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["dd", "of=/tmp/safe-file", "~-"]);
+        assert!(rules.match_command_dirstack_tilde(&cmd).is_none());
     }
 
     // ==== Issue #115: a tilde attached directly after an `=`-terminated
@@ -6433,6 +6666,26 @@ mod tests {
             reason = "some reason"
             command = "rm"
             targets = [{ prefix = "" }]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn dirstack_shaped_normalized_target_is_rejected() {
+        // Issue #88: a rule author declaring `normalized = "~+"` as a
+        // literal target is as nonsensical as `normalized = ".."`/
+        // `normalized = "~user"` — it can never usefully match, since
+        // `PathForm::DirStack` only ever comes from an ARGUMENT (the
+        // resolved-string classification), never a rule's own target.
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "some reason"
+            command = "rm"
+            targets = [{ normalized = "~+" }]
         "#;
         assert!(matches!(
             Rules::parse(toml),

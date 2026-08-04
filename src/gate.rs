@@ -1001,6 +1001,11 @@ fn evaluate_simple_command(
     // same reason `tar_dashless_floor` is: this floor must survive
     // `core`'s early returns too.
     let named_user_home_floor = scan_named_user_home_floor(&argv, rules);
+    // Issue #88: a `~+`/`~-`/`~N` directory-stack tilde token that would
+    // hit a matched rule's own target if it expanded to the directory it
+    // denotes. Computed here for the same reason the other floors above
+    // are: this floor must survive `core`'s early returns too.
+    let dirstack_tilde_floor = scan_dirstack_tilde_floor(&argv, rules);
     // Issue #115: a tilde attached directly after an `=`-terminated flag
     // (`--directory=~`, `--directory=~alice`) that would hit a matched
     // rule's own bare-`~` target if zsh's `magic_equal_subst` option
@@ -1021,6 +1026,7 @@ fn evaluate_simple_command(
     let ascent_descent_floor_present = ascent_descent_floor.is_some();
     let redirect_ascent_descent_floor_present = redirect_ascent_descent_floor.is_some();
     let named_user_home_floor_present = named_user_home_floor.is_some();
+    let dirstack_tilde_floor_present = dirstack_tilde_floor.is_some();
     let directory_equals_tilde_floor_present = directory_equals_tilde_floor.is_some();
     let verdict = apply_expansion_floor(verdict, expansion.floor);
     let verdict = apply_recursable_floor(verdict, recursable.floor);
@@ -1028,6 +1034,7 @@ fn evaluate_simple_command(
     let verdict = apply_ascent_descent_floor(verdict, ascent_descent_floor);
     let verdict = apply_ascent_descent_floor(verdict, redirect_ascent_descent_floor);
     let verdict = apply_named_user_home_floor(verdict, named_user_home_floor);
+    let verdict = apply_dirstack_tilde_floor(verdict, dirstack_tilde_floor);
     let verdict = apply_directory_equals_tilde_floor(verdict, directory_equals_tilde_floor);
 
     // Rule 11's allowlist guard: the same presence-based reasoning as
@@ -1050,7 +1057,11 @@ fn evaluate_simple_command(
     // allow entry for `rm`/`tar` is not consent to a `~username` token
     // that would hit that same rule's bare-`~` target if it expanded — the
     // floor's uncertainty is orthogonal to whatever the allowlist entry
-    // was written to permit. `has_command_position_leftover_substitution`
+    // was written to permit. `dirstack_tilde_floor_present` (issue #88)
+    // extends it once more, for the same reason: an allow entry for
+    // `rm`/`tar` is not consent to a `~+`/`~-`/`~N` token that would hit
+    // that same rule's own target if it expanded to the directory it
+    // denotes. `has_command_position_leftover_substitution`
     // (issue #83) extends it once more: an allow entry for the command
     // name the WINNING brace alternative resolves to is not consent to an
     // unresolved substitution hiding in a LEFTOVER alternative of that
@@ -1070,6 +1081,7 @@ fn evaluate_simple_command(
         || ascent_descent_floor_present
         || redirect_ascent_descent_floor_present
         || named_user_home_floor_present
+        || dirstack_tilde_floor_present
         || directory_equals_tilde_floor_present
     {
         verdict
@@ -1674,6 +1686,65 @@ fn scan_named_user_home_floor(
 /// self-documenting-call-site reason the others are (module docs'
 /// one-function-per-floor convention).
 fn apply_named_user_home_floor(verdict: Verdict, floor: Option<(Decision, String)>) -> Verdict {
+    let Some((floor_decision, floor_reason)) = floor else {
+        return verdict;
+    };
+    if verdict.decision() >= floor_decision {
+        return verdict;
+    }
+    let argv = verdict.normalized_argv().to_vec();
+    let reason = match verdict.reason() {
+        Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
+        None => floor_reason,
+    };
+    match floor_decision {
+        Decision::Block => Verdict::block(Reason::new(reason), argv, None),
+        Decision::Ask | Decision::Allow => Verdict::ask(Reason::new(reason), argv),
+    }
+}
+
+/// Issue #88: `Some(Ask, reason)` when `argv` matches a rule's command+
+/// flags — an embedded blocklist rule, a user-config `[[deny]]` entry, or
+/// a user-config `[[ask]]` entry (`Rules::match_command_dirstack_tilde`
+/// scans both `command_rules` and `ask_rules`) — and some resolved tail
+/// token is a directory-stack tilde shorthand (`~+`/`~-`/`~N`/`~+N`/`~-N`)
+/// that could plausibly occupy one of that rule's own `targets`' slots
+/// (`crate::rules::CommandRule::matches_dirstack_tilde_floor`, correlated
+/// the same way the #80/#115 floors below are — see that function's own
+/// docs for what "plausibly occupy" means here) — `None` otherwise.
+/// Always capped at `Ask`, never the matched rule's own
+/// decision (often `Block`): `~+`/`~-` expand to `$PWD`/`$OLDPWD` and
+/// `~N`/`~+N`/`~-N` to a numbered pushd/popd directory-stack entry —
+/// shguard has no cwd or directory stack to resolve any of these against,
+/// so it can never be more certain than "this could be the dangerous
+/// target if it expanded to one," the same floor a bare, literal
+/// `$PWD`/`$OLDPWD` reference already gets via the unresolved-`$VAR` floor
+/// (rule 4) — this is that same uncertainty for a syntactically different
+/// construct that resolves to a concrete string rather than staying
+/// `Unresolvable`. Kept independent of `CommandRule::matches` for the same
+/// reason [`scan_named_user_home_floor`] is: a per-token match has no way
+/// to say "this specific token can only ever be Ask" while the same
+/// rule's other targets stay at its own fixed decision.
+fn scan_dirstack_tilde_floor(argv: &[NormalizedWord], rules: &Rules) -> Option<(Decision, String)> {
+    let rule = rules.match_command_dirstack_tilde(argv)?;
+    Some((
+        Decision::Ask,
+        format!(
+            "a target token is a directory-stack tilde shorthand (`~+`/`~-`/`~N`) that would \
+             match rule {:?} ({}) if it expanded to the directory it denotes ($PWD/$OLDPWD/a \
+             pushd-stack entry); shguard has no cwd or directory stack to resolve it against",
+            rule.id().as_str(),
+            rule.reason().as_str(),
+        ),
+    ))
+}
+
+/// Applies [`scan_dirstack_tilde_floor`]'s floor to `verdict` — the same
+/// `decision.max(floor_decision)` max-lift every other floor in this
+/// module uses, kept as its own named function for the same
+/// self-documenting-call-site reason the others are (module docs'
+/// one-function-per-floor convention).
+fn apply_dirstack_tilde_floor(verdict: Verdict, floor: Option<(Decision, String)>) -> Verdict {
     let Some((floor_decision, floor_reason)) = floor else {
         return verdict;
     };
@@ -4207,11 +4278,6 @@ mod tests {
     }
 
     #[test]
-    fn rm_rf_dirstack_tilde_plus_allows() {
-        assert_decision("rm -rf ~+", Decision::Allow);
-    }
-
-    #[test]
     fn sudo_rm_rf_named_user_home_asks() {
         assert_decision("sudo rm -rf ~someuser", Decision::Ask);
     }
@@ -4261,6 +4327,102 @@ mod tests {
         // itself, not via this floor).
         let verdict = analyze_with_policy("cp -r x ~", &rules, &allowlist);
         assert_eq!(verdict.decision(), Decision::Ask);
+    }
+
+    // ==== Issue #88: `~+`/`~-`/`~N` directory-stack tilde forms float to
+    // Ask via scan_dirstack_tilde_floor — these expand to
+    // `$PWD`/`$OLDPWD`/a numbered pushd/popd entry, the same uncertainty a
+    // literal `$PWD`/`$OLDPWD` reference already gets. ====
+
+    #[test]
+    fn rm_rf_dirstack_tilde_plus_asks() {
+        assert_decision("rm -rf ~+", Decision::Ask);
+    }
+
+    #[test]
+    fn rm_rf_dirstack_tilde_minus_asks() {
+        assert_decision("rm -rf ~-", Decision::Ask);
+    }
+
+    #[test]
+    fn rm_rf_dirstack_tilde_numbered_asks() {
+        assert_decision("rm -rf ~3", Decision::Ask);
+    }
+
+    #[test]
+    fn rm_rf_dirstack_tilde_subdir_tail_still_allows() {
+        // Issue #133 (not fixed here): a real subdirectory tail after a
+        // dirstack anchor stays out of #88's scope.
+        assert_decision("rm -rf ~-/etc/passwd", Decision::Allow);
+    }
+
+    #[test]
+    fn sudo_rm_rf_dirstack_tilde_asks() {
+        assert_decision("sudo rm -rf ~+", Decision::Ask);
+    }
+
+    #[test]
+    fn rm_rf_quoted_dirstack_tilde_lookalike_still_asks() {
+        // Quoting-blind by design, same as every other tilde
+        // classification in this module (e.g. a single-quoted
+        // `~/../../etc/passwd` already Blocks identically to its unquoted
+        // form) — a real shell would NOT tilde-expand a single-quoted
+        // `'~+'`, but shguard's resolved-string-based classification
+        // doesn't distinguish.
+        assert_decision("rm -rf '~+'", Decision::Ask);
+    }
+
+    #[test]
+    fn rm_rf_ordinary_relative_path_is_unaffected() {
+        // Regression guard: an ordinary relative target that merely looks
+        // path-shaped must not be swept up by the new floor.
+        assert_decision("rm -rf plain-dir-name", Decision::Allow);
+    }
+
+    #[test]
+    fn allowlisted_rm_still_asks_on_dirstack_tilde() {
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[allow]]
+            id = "user-allow-rm"
+            reason = "trust me"
+            command = "rm"
+        "#,
+        );
+        // An allow entry for `rm` is consent to `rm` in general, not to a
+        // `~+`/`~-`/`~N` token that would hit the same rule's target if it
+        // expanded — the floor must survive the allowlist downgrade.
+        let verdict = analyze_with_policy("rm -rf ~+", &rules, &allowlist);
+        assert_eq!(verdict.decision(), Decision::Ask);
+    }
+
+    #[test]
+    fn user_config_ask_rule_still_floors_on_dirstack_tilde() {
+        // Mirrors user_config_ask_rule_still_floors_on_named_user_home:
+        // match_command_dirstack_tilde must scan ask_rules too, not just
+        // the embedded blocklist's command_rules.
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[ask]]
+            id = "user-ask-cp-tilde"
+            reason = "confirm cp into a home directory"
+            command = "cp"
+            targets = [{ normalized = "~" }]
+        "#,
+        );
+        let verdict = analyze_with_policy("cp -r x ~+", &rules, &allowlist);
+        assert_eq!(verdict.decision(), Decision::Ask);
+    }
+
+    #[test]
+    fn dd_stray_dirstack_tilde_no_longer_floors_when_target_is_strip_only() {
+        // Code review follow-up: the floor now correlates against a
+        // target's own slot (dd's sole targets all require an attached
+        // `of=` prefix), so a stray, unattached `~+` elsewhere in the
+        // tail no longer floors this command to Ask — `of=/tmp/safe-file`
+        // itself doesn't hit dd-write-device's `/dev/` target either, so
+        // this now Allows.
+        assert_decision("dd of=/tmp/safe-file ~+", Decision::Allow);
     }
 
     // ==== User config precedence: deny > ask > allow (plan.md §6 item 8) ====
