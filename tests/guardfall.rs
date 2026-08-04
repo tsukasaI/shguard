@@ -78,6 +78,15 @@ fn guardfall_class_e_cases() {
         // might resolve to "/" from an unknown cwd, so it now fails closed
         // to Block rather than Allow.
         ("tar -xf evil.tar -C ..", Decision::Block),
+        // Issue #115: `--directory=~` (the `=`-attached long-flag form)
+        // floors to Ask, not the certain Block a separated `-C ~` gets —
+        // zsh's magic_equal_subst option (off by default) is the only
+        // thing that can make this expand, so shguard can only flag it.
+        ("tar -x --directory=~ -f a.tar", Decision::Ask),
+        // Block already outranks the floor when a DIFFERENT target on the
+        // same invocation certainly matches — the floor's `decision.max`
+        // must never downgrade an existing Block.
+        ("tar -x -C / --directory=~ -f a.tar", Decision::Block),
     ];
 
     for (command, expected) in cases {

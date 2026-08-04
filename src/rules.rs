@@ -1418,6 +1418,105 @@ impl CommandRule {
                 .any(|t| t.named_user_home_plausible(token))
         })
     }
+
+    /// issue #115: true when this rule's command+flags match `argv` (via
+    /// [`Self::matching_rest`], the same full constraint check
+    /// [`Self::matches`] uses), this rule ALSO declares a bare-`~` target
+    /// (`NormalizedExact { target: PathForm::Home(comps), .. }` with empty
+    /// `comps`) among its own `targets`, and some resolved tail token
+    /// attaches a tilde directly after an `=`-terminated `strip` prefix
+    /// this SAME rule already declares elsewhere in `targets` (e.g.
+    /// `--directory=~`, `--directory=~alice`) in a shape that would hit
+    /// that bare-`~` target if it expanded.
+    ///
+    /// zsh's `magic_equal_subst` option (off by default) extends tilde/
+    /// parameter expansion to any `word=value`-shaped argument, not just a
+    /// genuine variable assignment — so under that option, `--directory=~`
+    /// DOES tilde-expand (verified live against zsh 5.9), unlike the
+    /// universal-across-shells bare-`~`-as-its-own-word case
+    /// [`Self::matches`]'s own widening already treats as certain. `-C~`
+    /// (no `=`) is unaffected — `magic_equal_subst` only ever matches an
+    /// `=`-shaped word — so only `strip` values ending in `=` are eligible
+    /// attach prefixes here. Deliberately NOT added directly to `targets`:
+    /// doing so would make `Self::matches`'s exact-equality widening
+    /// hard-match the bare-tilde case too, reintroducing the false
+    /// positive the original design excluded `-C~`/`--directory=~` for
+    /// (most shells never expand this at all). Scoped by what the rule
+    /// itself already declares in `targets` (an existing `=`-terminated
+    /// `strip` entry, an existing bare-`~` target) rather than a
+    /// hardcoded flag string, so this generalizes to any future rule with
+    /// the same shape with no Rust change. Read-only probe, same shape as
+    /// [`Self::matches_named_user_home_floor`] — never itself a match,
+    /// only a `gate.rs` floor's input (see
+    /// `crate::gate::scan_directory_equals_tilde_floor`).
+    #[must_use]
+    pub(crate) fn matches_directory_equals_tilde_floor(&self, argv: &[NormalizedWord]) -> bool {
+        if self.targets.is_empty() {
+            return false;
+        }
+        let has_bare_tilde_target = self.targets.iter().any(|t| {
+            matches!(
+                t,
+                TargetMatcher::NormalizedExact {
+                    target: PathForm::Home(comps),
+                    ..
+                } if comps.is_empty()
+            )
+        });
+        if !has_bare_tilde_target {
+            return false;
+        }
+        let attach_prefixes: Vec<&str> = self
+            .targets
+            .iter()
+            .filter_map(|t| match t {
+                TargetMatcher::NormalizedExact {
+                    strip: Some(strip), ..
+                }
+                | TargetMatcher::NormalizedPrefix {
+                    strip: Some(strip), ..
+                } if strip.ends_with('=') => Some(strip.as_str()),
+                _ => None,
+            })
+            .collect();
+        if attach_prefixes.is_empty() {
+            return false;
+        }
+        let Some(rest_words) = self.matching_rest(argv) else {
+            return false;
+        };
+        resolved_strings(&rest_words).iter().any(|token| {
+            attach_prefixes.iter().any(|prefix| {
+                token
+                    .strip_prefix(*prefix)
+                    .is_some_and(tilde_reachable_via_magic_equal_subst)
+            })
+        })
+    }
+}
+
+/// Whether `remainder` (a token's content after stripping an `=`-
+/// terminated flag prefix, e.g. `--directory=`) is a shape that would hit
+/// a bare-`~` target if zsh's `magic_equal_subst` option expanded it
+/// (issue #115) — exactly the forms that would hit that target if the
+/// token were instead its own separate, unattached word: [`PathForm::Home`]
+/// (empty comps) and [`PathForm::EscapesHome`] both hard-match there via
+/// [`TargetMatcher::matches`]'s own widening (issues #65/#90);
+/// [`PathForm::NamedUserHome`]/[`PathForm::NamedUserHomeEscapes`] instead
+/// float via the existing named-user floor (issue #80,
+/// [`TargetMatcher::named_user_home_plausible`]). The separate question of whether
+/// the token even expands at all, glued to a flag like this, is
+/// [`CommandRule::matches_directory_equals_tilde_floor`]'s own job (shell/
+/// option-dependent, never provable) — this function only answers "what
+/// would it expand to if it did."
+fn tilde_reachable_via_magic_equal_subst(remainder: &str) -> bool {
+    match lexical_normalize(remainder) {
+        PathForm::Home(comps) => comps.is_empty(),
+        PathForm::EscapesHome(_) | PathForm::NamedUserHome | PathForm::NamedUserHomeEscapes(_) => {
+            true
+        }
+        _ => false,
+    }
 }
 
 /// A rule matching the shape of a whole pipeline: an earlier stage's
@@ -3003,6 +3102,25 @@ impl Rules {
             .find(|rule| rule.matches_named_user_home_floor(argv))
     }
 
+    /// The first [`CommandRule`] for which
+    /// [`CommandRule::matches_directory_equals_tilde_floor`] holds, if any
+    /// — issue #115's zsh `magic_equal_subst` floor (`src/gate.rs`). Like
+    /// [`Self::match_command_named_user_home`], scans both
+    /// `command_rules` and `ask_rules` (a user-config rule with the same
+    /// `=`-terminated-strip + bare-`~`-target shape is just as eligible)
+    /// and is a read-only probe: never mutates rule state, never itself
+    /// constitutes a match.
+    #[must_use]
+    pub(crate) fn match_command_directory_equals_tilde(
+        &self,
+        argv: &[NormalizedWord],
+    ) -> Option<&CommandRule> {
+        self.command_rules
+            .iter()
+            .chain(self.ask_rules.iter())
+            .find(|rule| rule.matches_directory_equals_tilde_floor(argv))
+    }
+
     /// The configured escalation floor (issues #35/#36, `crate::gate` rule
     /// 10): `Decision::Ask` unless a user config set `escalation_floor =
     /// "deny"` (see the struct docs and [`merge_user_config`]). Never
@@ -3825,6 +3943,116 @@ mod tests {
         let cmd = argv(&["rm", "-rf", "~/foo"]);
         assert!(rules.match_command(&cmd).is_none());
         assert!(rules.match_command_named_user_home(&cmd).is_none());
+    }
+
+    // ==== Issue #115: a tilde attached directly after an `=`-terminated
+    // flag (`--directory=~`, `--directory=~user`) floors to Ask via
+    // Rules::match_command_directory_equals_tilde — zsh's magic_equal_subst
+    // option (off by default) makes this shape shell-option-dependent,
+    // unlike the certain, universal-across-shells bare-`~`-as-its-own-word
+    // case. `-C~` (no `=`) stays unaffected and out of scope. ====
+
+    #[test]
+    fn directory_equals_tilde_bare_floors_but_does_not_hard_match() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["tar", "-x", "--directory=~", "-f", "a.tar"]);
+        assert!(rules.match_command(&cmd).is_none());
+        let rule = rules.match_command_directory_equals_tilde(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "tar-extract-over-root-or-home");
+    }
+
+    #[test]
+    fn directory_equals_tilde_named_user_floors() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["tar", "-x", "--directory=~alice", "-f", "a.tar"]);
+        assert!(rules.match_command(&cmd).is_none());
+        let rule = rules.match_command_directory_equals_tilde(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "tar-extract-over-root-or-home");
+    }
+
+    #[test]
+    fn directory_equals_tilde_escaping_home_floors() {
+        // `--directory=~/..`/`--directory=~/.` — still provably an escape-
+        // or-collapse-to-bare-home shape if magic_equal_subst expanded it.
+        let rules = Rules::embedded().unwrap();
+        for cmd in [
+            argv(&["tar", "-x", "--directory=~/..", "-f", "a.tar"]),
+            argv(&["tar", "-x", "--directory=~/.", "-f", "a.tar"]),
+        ] {
+            assert!(
+                rules.match_command_directory_equals_tilde(&cmd).is_some(),
+                "{cmd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn directory_equals_tilde_dash_c_short_flag_does_not_floor() {
+        // magic_equal_subst only ever matches an `=`-shaped word; `-C~` has
+        // no `=`, so it's unaffected by the option and stays out of scope.
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["tar", "-x", "-C~", "-f", "a.tar"]);
+        assert!(rules.match_command(&cmd).is_none());
+        assert!(rules.match_command_directory_equals_tilde(&cmd).is_none());
+    }
+
+    #[test]
+    fn directory_equals_tilde_subdir_does_not_floor() {
+        // `--directory=~/subdir` would expand outside this rule's own
+        // dangerous namespace even if magic_equal_subst fired — the
+        // separated-word equivalent (`tar -C ~/subdir -f a.tar`) is
+        // already Allow today, so the attached form must not become
+        // *stricter* than the form it's no more dangerous than.
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["tar", "-x", "--directory=~/subdir", "-f", "a.tar"]);
+        assert!(rules.match_command_directory_equals_tilde(&cmd).is_none());
+    }
+
+    #[test]
+    fn directory_equals_tilde_dirstack_form_does_not_floor() {
+        // `~+`/`~-`/`~N` are directory-stack shorthand (issue #88's
+        // territory), not a `~`/`~user` shape this floor covers.
+        let rules = Rules::embedded().unwrap();
+        for cmd in [
+            argv(&["tar", "-x", "--directory=~+", "-f", "a.tar"]),
+            argv(&["tar", "-x", "--directory=~-", "-f", "a.tar"]),
+            argv(&["tar", "-x", "--directory=~5", "-f", "a.tar"]),
+        ] {
+            assert!(
+                rules.match_command_directory_equals_tilde(&cmd).is_none(),
+                "{cmd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn directory_equals_tilde_separated_bare_tilde_still_hard_matches() {
+        // The already-working, certain, universal-across-shells baseline
+        // (a bare `~` as its own space-separated word) must be unaffected
+        // by this floor's addition — it keeps matching via `matches()`'s
+        // own existing widening, not this floor.
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["tar", "-x", "--directory", "~", "-f", "a.tar"]);
+        assert!(rules.match_command(&cmd).is_some());
+    }
+
+    #[test]
+    fn directory_equals_tilde_floor_reachable_through_env_wrapper() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["env", "tar", "-x", "--directory=~", "-f", "a.tar"]);
+        assert!(rules.match_command_directory_equals_tilde(&cmd).is_some());
+    }
+
+    #[test]
+    fn directory_equals_tilde_requires_an_equals_terminated_strip_on_the_rule() {
+        // `rm-recursive-force-dangerous-target` has a bare-`~` target but
+        // no `=`-terminated `strip` entry anywhere in its own targets —
+        // magic_equal_subst's mechanism has nothing to do with rm's flags
+        // at all, so a rule shaped like this must never floor on an
+        // arbitrary `--flag=~token`, no matter what the flag is called.
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["rm", "-rf", "--totally-unrelated-flag=~"]);
+        assert!(rules.match_command_directory_equals_tilde(&cmd).is_none());
     }
 
     // ==== Security review: CommandRule matching resolves basename + skips

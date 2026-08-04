@@ -184,6 +184,62 @@ fn allow_rule_still_downgrades_a_substitution_free_leftover() {
     assert_eq!(permission_decision(&output), "allow");
 }
 
+// ==== issue #115: allow entries must not launder a `--directory=~`-shaped
+// token past the zsh-magic_equal_subst floor either ====
+
+#[test]
+fn allow_rule_cannot_launder_a_directory_equals_tilde_token() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[allow]]
+        id = "allow-tar"
+        reason = "test"
+        command = "tar"
+    "#,
+    );
+
+    let output = run_hook(
+        &bash_command("tar -x --directory=~ -f a.tar"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "ask");
+
+    let output = run_hook(
+        &bash_command("tar -x --directory=~alice -f a.tar"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "ask");
+}
+
+#[test]
+fn user_config_ask_rule_reaches_the_directory_equals_tilde_floor_too() {
+    // `Rules::match_command_directory_equals_tilde` chains `command_rules`
+    // and `ask_rules` — a user-config `[[ask]]` entry with the same
+    // `=`-terminated-strip + bare-`~`-target shape is just as eligible as
+    // an embedded blocklist rule. Uses a made-up command name (`mytool`,
+    // no embedded rule at all) so this genuinely exercises the ask_rules
+    // half of the chain rather than being shadowed by an embedded tar rule.
+    let (_dir, config_path) = write_config(
+        r#"
+        [[ask]]
+        id = "user-ask-mytool-directory-tilde"
+        reason = "confirm mytool with a home-directory target"
+        command = "mytool"
+        targets = [
+            { strip = "--directory=", normalized = "/" },
+            { normalized = "~" },
+        ]
+    "#,
+    );
+
+    let output = run_hook(
+        &bash_command("mytool --directory=~"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(permission_reason(&output).contains("user-ask-mytool-directory-tilde"));
+}
+
 // ==== except_targets (issue #30) ====
 
 fn curl_localhost_except_config() -> &'static str {

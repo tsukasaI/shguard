@@ -273,15 +273,34 @@ required_flags = ["t|--type"]
 # shared by every rule using the new forms.)
 #
 # Why the target list is asymmetric — `-C/`/`--directory=/` are listed but
-# `-C~`/`--directory=~` are not. Tilde expansion only fires at the start of
-# a word, or after `=` in a word that is itself a valid variable
-# assignment; a `-`-prefixed flag token is neither, so `-C~` and
-# `--directory=~` reach tar as a literal `~` (verified: `printf '[%s]' -C~
-# --directory=~ ~` prints `[-C~] [--directory=~] [/Users/…]`), and tar does
-# no tilde expansion of its own. Those forms chdir into a directory *named*
-# `~` relative to the cwd, never `$HOME` — matching them would be a false
-# positive. `/` needs no expansion to mean the root directory, which is why
-# its attached forms do belong here.
+# `-C~`/`--directory=~` are not. Under POSIX/bash defaults, tilde expansion
+# only fires at the start of a word, or after `=` in a word that is itself
+# a valid variable assignment; a `-`-prefixed flag token is neither, so
+# `-C~` and `--directory=~` reach tar as a literal `~` (verified: `printf
+# '[%s]' -C~ --directory=~ ~` prints `[-C~] [--directory=~] [/Users/…]`),
+# and tar does no tilde expansion of its own. Those forms chdir into a
+# directory *named* `~` relative to the cwd, never `$HOME` — matching them
+# would be a false positive under the shells most invocations actually
+# run under. `/` needs no expansion to mean the root directory, which is
+# why its attached forms do belong here.
+#
+# `-C~` stays excluded even accounting for the caveat below (re-verified
+# live under zsh 5.9 with `magic_equal_subst` set: `-C~` is still
+# literal — the option only ever matches an `=`-shaped word, and `-C~` has
+# no `=`). `--directory=~`/`--directory=~user` do NOT get a symmetric
+# certain-match/hard-Block target the way `--directory=/` does, though:
+# issue #115 found that zsh's `magic_equal_subst` option (off by default,
+# but some `.zshrc`s set it) extends tilde/parameter expansion to ANY
+# `word=value`-shaped argument, not just a genuine variable assignment —
+# so under that option, `--directory=~`/`--directory=~user` DO tilde-
+# expand (verified live: `zsh -o magic_equal_subst -c "printf '[%s]'
+# --directory=~"` prints the real `$HOME`, not the literal string).
+# Since shguard cannot observe the invoking shell's options, this can only
+# ever be flagged, never proven either way — handled by a dedicated
+# Ask-only floor (`CommandRule::matches_directory_equals_tilde_floor` /
+# `crate::gate::scan_directory_equals_tilde_floor`) rather than a `targets`
+# entry, specifically so it floors without ever inheriting this rule's own
+# (often `Block`) decision the way a certain match would.
 [[command]]
 id = "tar-extract-over-root-or-home"
 reason = "tar extraction with -C/--directory into / or ~ overwrites arbitrary system/home paths with archive contents"
