@@ -286,14 +286,26 @@ pub(crate) fn normalize_assignment_value(assignment: &Assignment) -> Vec<Normali
     }
 }
 
-/// One fragment of a piece sequence's resolved value: literal text, or a
-/// point where an unquoted `$IFS` splits the word.
+/// One fragment of a piece sequence's resolved value: literal text, a
+/// point where an unquoted `$IFS` splits the word, or (issue #82) a piece
+/// whose own value couldn't be folded.
 ///
 /// `Split` is only ever produced when folding is called with
-/// `allow_split = true` — see [`resolve_piece`].
+/// `allow_split = true` — see [`resolve_piece`]. `Unresolvable` makes data,
+/// not control flow, out of what a piece's own resolution failure means:
+/// [`resolve_pieces`] never short-circuits across piece boundaries, so an
+/// unresolvable piece never discards `Chunk`s (including `Split` points)
+/// already produced by earlier pieces in the same run — see
+/// [`chunks_to_words`] for how a `$IFS`-delimited segment containing one of
+/// these differs from a clean segment (issue #82: `rm$IFS-rf$IFS/$(true)`
+/// must still recognise `rm`/`-rf` as clean, resolved segments, isolating
+/// only the trailing `/$(true)` segment as opaque, rather than collapsing
+/// the entire piece run to one opaque word the moment any piece anywhere in
+/// it fails to fold).
 enum Chunk {
     Literal(String),
     Split,
+    Unresolvable(UnresolvableKind),
 }
 
 /// The shared brace-then-resolve fold for both [`normalize_word`]
@@ -308,10 +320,8 @@ fn fold_word(pieces: &[WordPiece], allow_split: bool) -> Vec<NormalizedWord> {
     };
     let mut out = Vec::new();
     for alternative in alternatives {
-        match resolve_pieces(&alternative, allow_split) {
-            Err(kind) => out.push(NormalizedWord::unresolvable(kind)),
-            Ok((chunks, ifs_derived)) => out.extend(chunks_to_words(chunks, ifs_derived)),
-        }
+        let (chunks, ifs_derived) = resolve_pieces(&alternative, allow_split);
+        out.extend(chunks_to_words(chunks, ifs_derived));
     }
     out
 }
@@ -356,21 +366,91 @@ pub(crate) fn split_command_position(word: &Word) -> (Option<Vec<WordPiece>>, Ve
         // Every alternative but the first to produce a word is, by
         // definition, not the one determining `argv[0]` — no need to
         // re-resolve once `winning` is already set.
-        let produces_word = winning.is_none()
-            && match resolve_pieces(&alternative, true) {
-                // Any unresolvable piece makes this whole alternative one
-                // opaque word (`resolve_pieces`' word-level short-circuit
-                // — see its own docs), never zero words.
-                Err(_) => true,
-                Ok((chunks, ifs_derived)) => !chunks_to_words(chunks, ifs_derived).is_empty(),
-            };
+        let produces_word = winning.is_none() && {
+            let (chunks, ifs_derived) = resolve_pieces(&alternative, true);
+            !chunks_to_words(chunks, ifs_derived).is_empty()
+        };
         if produces_word {
             winning = Some(alternative);
         } else {
             leftover.push(alternative);
         }
     }
+    // Issue #82: the winning alternative's OWN pieces can still be
+    // `$IFS`-packed (`rm$IFS-rf$IFS/$(true)`, no braces involved at all) —
+    // only the piece run contributing to `argv[0]` itself (the FIRST
+    // non-empty `$IFS`-delimited segment, exactly the one
+    // `chunks_to_words` would pick as the first output word) actually
+    // determines `argv[0]`; a substitution after that segment's boundary
+    // is command-position-ambiguous only in the same sense a brace-leftover
+    // substitution is (issue #77), not in the "which command will run"
+    // sense rule 1 exists for. Splitting this out here — rather than as a
+    // separate helper only rule 1 consults — means
+    // `has_command_position_leftover_substitution`'s allowlist-eligibility
+    // guard (issue #83) sees it too: that guard's own doc rests on "a
+    // substitution in the winning alternative always makes `argv[0]`
+    // unresolvable, so rule 1 fires and no allow entry can match" — true
+    // before this change, but only because the winning alternative was
+    // never split any further than this.
+    let winning = winning.map(|pieces| {
+        let Some((command_position, remainder)) = split_at_first_word_boundary(&pieces) else {
+            return pieces;
+        };
+        leftover.push(remainder);
+        command_position
+    });
     (winning, leftover)
+}
+
+/// Splits `pieces` at the `$IFS` boundary ending the first non-empty
+/// segment `chunks_to_words` would fold it into — `None` if `pieces` has no
+/// such boundary at all (no top-level `$IFS` piece, or every `$IFS` piece
+/// is itself leading/consecutive with nothing but empty segments before
+/// it, so the whole run stays one command-position piece sequence exactly
+/// as before issue #82).
+///
+/// Walks `pieces` and [`resolve_pieces`]'s own resolved [`Chunk`]s for them
+/// in lockstep — sound only because every `WordPiece` variant folds to
+/// exactly one top-level `Chunk` (`resolve_piece`'s own match: one
+/// `Literal`/`Split`/`Unresolvable` per piece; a nested
+/// [`WordPiece::DoubleQuoted`] sequence's own internal complexity always
+/// collapses to a single outer `Chunk` too, since it's folded with
+/// `allow_split = false` and can never itself produce `Chunk::Split`) — so
+/// `pieces[i]` and the resolved `chunks[i]` always refer to the same piece.
+///
+/// A segment counts as non-empty once it has seen a non-empty `Literal`
+/// chunk or an `Unresolvable` chunk (mirroring [`chunks_to_words`]'s own
+/// "an unresolvable segment always produces a word, never filtered as
+/// empty" rule) — a `Split` seen before that point is a leading/consecutive
+/// split whose preceding segment would itself be filtered away by
+/// `chunks_to_words`, so it is skipped rather than treated as the boundary
+/// (`$IFSrm`'s leading `$IFS` must not truncate `argv[0]` down to nothing).
+///
+/// The returned remainder starts at (and includes) the boundary's own
+/// `$IFS` piece, not just what follows it: a leftover whose own
+/// `Vec<WordPiece>` has length 1 is exempt from
+/// `evaluate_leftover_alternative_substitutions`'s floor (a lone,
+/// fully-transparent substitution/process-substitution piece with nothing
+/// else glued to it recurses on its own merits instead, `crate::gate`
+/// docs) — keeping the triggering `$IFS` piece in the remainder keeps its
+/// length at 2+, so it keeps flooring to `Ask` exactly like every other
+/// multi-piece leftover, the same way a real trailing argument would.
+#[must_use]
+fn split_at_first_word_boundary(pieces: &[WordPiece]) -> Option<(Vec<WordPiece>, Vec<WordPiece>)> {
+    let (chunks, _) = resolve_pieces(pieces, true);
+    debug_assert_eq!(pieces.len(), chunks.len());
+    let mut segment_nonempty = false;
+    for (idx, chunk) in chunks.iter().enumerate() {
+        match chunk {
+            Chunk::Split if segment_nonempty => {
+                return Some((pieces[..idx].to_vec(), pieces[idx..].to_vec()));
+            }
+            Chunk::Split => segment_nonempty = false,
+            Chunk::Literal(text) => segment_nonempty |= !text.is_empty(),
+            Chunk::Unresolvable(_) => segment_nonempty = true,
+        }
+    }
+    None
 }
 
 /// Cap on the cartesian product of brace alternatives one word may expand
@@ -434,24 +514,27 @@ fn expand_braces(
 }
 
 /// Resolves a brace-free piece sequence into its [`Chunk`]s plus whether
-/// `$IFS` was involved anywhere in it. Short-circuits (word-level
-/// granularity, plan.md §1.1 rule 4) the moment any piece is unresolvable —
-/// `foo$(x)bar` is one `Unresolvable` word, not a partially-folded one.
-fn resolve_pieces(
-    pieces: &[WordPiece],
-    allow_split: bool,
-) -> Result<(Vec<Chunk>, bool), UnresolvableKind> {
-    let mut chunks = Vec::new();
+/// `$IFS` was involved anywhere in it. Infallible (issue #82): every piece
+/// contributes exactly one `Chunk` to the output — including a piece whose
+/// own value couldn't be folded, which contributes a [`Chunk::Unresolvable`]
+/// rather than aborting the whole run. This one-piece-to-one-chunk shape is
+/// load-bearing, not incidental: [`split_at_first_word_boundary`] walks
+/// `pieces` and this function's own resolved `chunks` in lockstep, which is
+/// only sound because the correspondence holds exactly.
+fn resolve_pieces(pieces: &[WordPiece], allow_split: bool) -> (Vec<Chunk>, bool) {
+    let mut chunks = Vec::with_capacity(pieces.len());
     let mut ifs_derived = false;
     for piece in pieces {
-        let (piece_chunks, piece_ifs) = resolve_piece(piece, allow_split)?;
-        chunks.extend(piece_chunks);
+        let (chunk, piece_ifs) = resolve_piece(piece, allow_split);
+        chunks.push(chunk);
         ifs_derived |= piece_ifs;
     }
-    Ok((chunks, ifs_derived))
+    (chunks, ifs_derived)
 }
 
-/// Resolves one [`WordPiece`] into [`Chunk`]s.
+/// Resolves one [`WordPiece`] into a single [`Chunk`] (issue #82: never more
+/// or fewer than one — see [`resolve_pieces`]'s docs on why that
+/// correspondence must hold exactly).
 ///
 /// `allow_split` distinguishes the two contexts that matter for `$IFS`
 /// (plan.md §4): `true` for an ordinary unquoted top-level piece (may
@@ -459,33 +542,44 @@ fn resolve_pieces(
 /// non-splitting context — [`WordPiece::DoubleQuoted`] content (bash never
 /// splits inside double quotes) and assignment values (bash never
 /// word-splits an assignment's RHS at all) both thread `false` down.
-fn resolve_piece(
-    piece: &WordPiece,
-    allow_split: bool,
-) -> Result<(Vec<Chunk>, bool), UnresolvableKind> {
+fn resolve_piece(piece: &WordPiece, allow_split: bool) -> (Chunk, bool) {
     match piece {
         WordPiece::Literal(text) | WordPiece::SingleQuoted(text) => {
-            Ok((vec![Chunk::Literal(text.clone())], false))
+            (Chunk::Literal(text.clone()), false)
         }
-        WordPiece::EscapeSequence(ch) => Ok((vec![Chunk::Literal(ch.to_string())], false)),
-        WordPiece::AnsiCQuoted(raw) => {
-            let decoded = decode_ansi_c(raw)?;
-            Ok((vec![Chunk::Literal(decoded)], false))
-        }
+        WordPiece::EscapeSequence(ch) => (Chunk::Literal(ch.to_string()), false),
+        WordPiece::AnsiCQuoted(raw) => match decode_ansi_c(raw) {
+            Ok(decoded) => (Chunk::Literal(decoded), false),
+            Err(kind) => (Chunk::Unresolvable(kind), false),
+        },
         WordPiece::DoubleQuoted(inner) => {
             // Double-quoted content never splits, regardless of the outer
             // context, so the recursive resolve always threads
             // `allow_split = false` — no `Chunk::Split` can come back out
-            // of `resolve_pieces` here, so only `Chunk::Literal` is ever
-            // seen below.
-            let (inner_chunks, ifs_derived) = resolve_pieces(inner, false)?;
+            // of `resolve_pieces` here, so a lone `Chunk::Unresolvable`
+            // anywhere inside makes the WHOLE double-quoted sequence one
+            // `Chunk::Unresolvable` too (the first one found; matches this
+            // module's existing "one bad piece poisons its containing,
+            // non-splitting run" behavior — issue #82 only changes that
+            // rule at the TOP-LEVEL, `$IFS`-splittable layer, never inside
+            // a quoted, non-splitting one). `ifs_derived` still propagates
+            // even when the result is `Unresolvable` — a `$IFS` piece
+            // folded to its literal default-whitespace text before the
+            // poisoning piece was reached, so rule 7's floor (a same-line
+            // `IFS=` reassignment could make that already-folded text
+            // wrong) still applies.
+            let (inner_chunks, ifs_derived) = resolve_pieces(inner, false);
             let mut buf = String::new();
             for chunk in inner_chunks {
-                if let Chunk::Literal(text) = chunk {
-                    buf.push_str(&text);
+                match chunk {
+                    Chunk::Literal(text) => buf.push_str(&text),
+                    Chunk::Unresolvable(kind) => return (Chunk::Unresolvable(kind), ifs_derived),
+                    Chunk::Split => unreachable!(
+                        "allow_split=false never produces Chunk::Split (resolve_piece's own IFS arm)"
+                    ),
                 }
             }
-            Ok((vec![Chunk::Literal(buf)], ifs_derived))
+            (Chunk::Literal(buf), ifs_derived)
         }
         // `$IFS`/`${IFS}` (plan.md §4, Class B): unquoted and split-eligible
         // becomes a split point; otherwise (double-quoted, or an
@@ -493,15 +587,15 @@ fn resolve_piece(
         // Either way `$IFS` was "involved", so `ifs_derived` is always set.
         WordPiece::ParameterExpansion(name) if name == "IFS" => {
             if allow_split {
-                Ok((vec![Chunk::Split], true))
+                (Chunk::Split, true)
             } else {
-                Ok((
-                    vec![Chunk::Literal(DEFAULT_IFS_WHITESPACE.to_string())],
-                    true,
-                ))
+                (Chunk::Literal(DEFAULT_IFS_WHITESPACE.to_string()), true)
             }
         }
-        WordPiece::ParameterExpansion(_) => Err(UnresolvableKind::ParameterExpansion),
+        WordPiece::ParameterExpansion(_) => (
+            Chunk::Unresolvable(UnresolvableKind::ParameterExpansion),
+            false,
+        ),
         // Both forms of command substitution carry the same static
         // unknowability; `UnresolvableKind::CommandSubstitution`'s own docs
         // already cover "`$(...)` or `` `...` ``", so no separate kind is
@@ -510,18 +604,25 @@ fn resolve_piece(
         // already carry the raw inner string), so this kind does not need
         // to carry it too — duplicating it here would be a second source of
         // truth for data the AST already owns.
-        WordPiece::CommandSubstitution(_) | WordPiece::BackquotedSubstitution(_) => {
-            Err(UnresolvableKind::CommandSubstitution)
-        }
+        WordPiece::CommandSubstitution(_) | WordPiece::BackquotedSubstitution(_) => (
+            Chunk::Unresolvable(UnresolvableKind::CommandSubstitution),
+            false,
+        ),
         // Opaque regardless of what `crate::gate`'s raw-text rescan finds
         // inside it (issue #75) — the rescan only exists to let a `Block`
         // from an embedded `$(...)` escalate above this `Ask` floor, not to
         // resolve the expansion itself.
-        WordPiece::ArithmeticExpansion(_) => Err(UnresolvableKind::ArithmeticExpansion),
+        WordPiece::ArithmeticExpansion(_) => (
+            Chunk::Unresolvable(UnresolvableKind::ArithmeticExpansion),
+            false,
+        ),
         // Opaque regardless of what the substituted command's own recursive
         // evaluation decides (issue #75) — same "floor, not a resolution"
         // relationship as arithmetic expansion above.
-        WordPiece::ProcessSubstitution { .. } => Err(UnresolvableKind::ProcessSubstitution),
+        WordPiece::ProcessSubstitution { .. } => (
+            Chunk::Unresolvable(UnresolvableKind::ProcessSubstitution),
+            false,
+        ),
         // Literal textual form only (`~`, `~user`, `~+`, `~-`, …). Resolving
         // to an actual home directory would require an env lookup, which
         // this stage never performs (module docs); blocklist rules match on
@@ -533,7 +634,7 @@ fn resolve_piece(
             } else {
                 format!("~{user}")
             };
-            Ok((vec![Chunk::Literal(text)], false))
+            (Chunk::Literal(text), false)
         }
         WordPiece::BraceAlternation(_) => {
             // Structurally unreachable in practice: `expand_braces` strips
@@ -548,49 +649,74 @@ fn resolve_piece(
             // by guessing one alternative (forbidden — never a guessed
             // string), fail closed: the word becomes `Unresolvable` and the
             // gate routes it to Ask.
-            Err(UnresolvableKind::UnsupportedStructure)
+            (
+                Chunk::Unresolvable(UnresolvableKind::UnsupportedStructure),
+                false,
+            )
         }
     }
 }
 
 /// Turns one alternative's resolved [`Chunk`]s into the [`NormalizedWord`]s
-/// it denotes: one word if no `$IFS` split occurred (even if empty — an
-/// empty quoted word like `''` is `Resolved("")` and is kept, plan.md §1.1
-/// rule 7), otherwise one word per non-empty segment between split points
-/// (leading/trailing/consecutive splits never produce empty segments,
-/// matching bash's whitespace-IFS splitting).
+/// it denotes.
+///
+/// Uniformly segments `chunks` at every [`Chunk::Split`] boundary — even
+/// when no split occurred at all, which is just the one-segment case — into
+/// one `Result<String, UnresolvableKind>` per segment: `Ok` accumulates
+/// every [`Chunk::Literal`] in the segment; a [`Chunk::Unresolvable`]
+/// anywhere in it poisons the whole segment to `Err` (the first kind found
+/// — mirrors this module's pre-issue-#82 "one bad piece poisons the whole
+/// run" precedent, now scoped to one segment instead of the whole
+/// alternative). Each segment then becomes zero or one words:
+/// - `Err(kind)` ALWAYS produces exactly one [`NormalizedWord::unresolvable`],
+///   never filtered as potentially empty: an unresolvable segment's true
+///   expansion length can't be known statically (this stage never executes
+///   anything, module docs), so assuming it would vanish the way a resolved
+///   empty segment does would be a guess, not a fold (issue #82's own
+///   motivating case, `rm$IFS-rf$IFS/$(true)`, must isolate `/$(true)` as
+///   exactly one opaque word, not zero).
+/// - `Ok(text)` becomes [`NormalizedWord::resolved`] (or
+///   [`NormalizedWord::resolved_ifs_derived`] if `ifs_derived`) UNLESS it is
+///   empty AND more than one segment exists in total — i.e. a real `$IFS`
+///   split happened somewhere in this alternative, so bash's own
+///   leading/trailing/consecutive-split-never-produces-an-empty-field rule
+///   applies. A single-segment (no split occurred anywhere) empty literal
+///   is always kept: an empty quoted word like `''` is `Resolved("")` and
+///   must not vanish (plan.md §1.1 rule 7).
 fn chunks_to_words(chunks: Vec<Chunk>, ifs_derived: bool) -> Vec<NormalizedWord> {
-    let split_occurred = chunks.iter().any(|chunk| matches!(chunk, Chunk::Split));
-
-    if !split_occurred {
-        let mut buf = String::new();
-        for chunk in chunks {
-            if let Chunk::Literal(text) = chunk {
-                buf.push_str(&text);
-            }
-        }
-        let word = if ifs_derived {
-            NormalizedWord::resolved_ifs_derived(buf)
-        } else {
-            NormalizedWord::resolved(buf)
-        };
-        return vec![word];
-    }
-
     let mut segments = Vec::new();
-    let mut current = String::new();
+    let mut current: Result<String, UnresolvableKind> = Ok(String::new());
     for chunk in chunks {
         match chunk {
-            Chunk::Literal(text) => current.push_str(&text),
-            Chunk::Split => segments.push(std::mem::take(&mut current)),
+            Chunk::Literal(text) => {
+                if let Ok(buf) = &mut current {
+                    buf.push_str(&text);
+                }
+            }
+            Chunk::Unresolvable(kind) => {
+                if current.is_ok() {
+                    current = Err(kind);
+                }
+            }
+            Chunk::Split => {
+                segments.push(std::mem::replace(&mut current, Ok(String::new())));
+            }
         }
     }
     segments.push(current);
 
+    let single_segment = segments.len() == 1;
     segments
         .into_iter()
-        .filter(|segment| !segment.is_empty())
-        .map(NormalizedWord::resolved_ifs_derived)
+        .filter_map(|segment| match segment {
+            Err(kind) => Some(NormalizedWord::unresolvable(kind)),
+            Ok(text) if single_segment || !text.is_empty() => Some(if ifs_derived {
+                NormalizedWord::resolved_ifs_derived(text)
+            } else {
+                NormalizedWord::resolved(text)
+            }),
+            Ok(_) => None,
+        })
         .collect()
 }
 
@@ -1084,31 +1210,64 @@ mod tests {
         &simple(&cmd.first.first).words[0]
     }
 
-    // The empty brace member resolves first and cleanly (no substitution),
-    // so it is the alternative that determines argv[0] — the substitution
-    // in the OTHER member never stands in for the command name.
+    /// Folds `pieces` as an ordinary top-level (`allow_split = true`) run —
+    /// a test-only convenience wrapping [`resolve_pieces`]/[`chunks_to_words`]
+    /// together, mirroring what `fold_word` does for one alternative.
+    fn fold_pieces(pieces: &[WordPiece]) -> Vec<NormalizedWord> {
+        let (chunks, ifs_derived) = resolve_pieces(pieces, true);
+        chunks_to_words(chunks, ifs_derived)
+    }
+
+    fn contains_unresolvable(words: &[NormalizedWord]) -> bool {
+        words
+            .iter()
+            .any(|w| matches!(w.resolution(), Resolution::Unresolvable(_)))
+    }
+
+    // Issue #82: the winning alternative's own `$IFS` packing is now ALSO
+    // isolated (not just brace membership) — `winning` narrows to just the
+    // `rm` piece run in BOTH this test and the one below, and the
+    // substitution-carrying remainder becomes an ADDITIONAL leftover entry
+    // rather than ever living inside `winning`. Before issue #82, this test
+    // asserted `winning` resolved cleanly as a WHOLE (it happened to,
+    // incidentally, since the empty brace member carries no substitution at
+    // all) — post-#82 it resolves to exactly `["rm"]`, a stronger and more
+    // precise claim.
     #[test]
     fn split_command_position_empty_member_wins_when_tried_first() {
         let cmd = parse_ok("rm$IFS-rf$IFS/{,$(true)}");
         let (winning, leftover) = split_command_position(first_word(&cmd));
         let winning = winning.unwrap();
-        assert!(resolve_pieces(&winning, true).is_ok());
-        assert_eq!(leftover.len(), 1);
-        assert!(resolve_pieces(&leftover[0], true).is_err());
+        assert_eq!(resolved_strings(&fold_pieces(&winning)), vec!["rm"]);
+        // One leftover from the losing brace member (issue #77), one from
+        // the winning alternative's own post-`$IFS`-split remainder (issue
+        // #82) — the substitution lives in the FORMER here, since the
+        // winning alternative (the empty member) carries none of its own.
+        assert_eq!(leftover.len(), 2);
+        assert!(contains_unresolvable(&fold_pieces(&leftover[0])));
+        assert!(!contains_unresolvable(&fold_pieces(&leftover[1])));
     }
 
     // Same word, members swapped: the substitution-carrying member is now
-    // tried FIRST (mirrors `fold_word`'s left-to-right member order), so
-    // IT determines argv[0] this time — genuinely ambiguous, unlike the
-    // ordering above.
+    // tried FIRST (mirrors `fold_word`'s left-to-right member order), so it
+    // WINS the brace selection this time — but issue #82's `$IFS`-boundary
+    // split still isolates `rm` alone as `winning`, moving the substitution
+    // into the winning alternative's own remainder leftover instead. Before
+    // issue #82, this was the genuinely-ambiguous case (the substitution
+    // really did make `argv[0]` itself unresolvable, since nothing scoped
+    // the winning alternative down further than brace membership) — #82
+    // narrows it the same way #77 narrowed brace membership.
     #[test]
     fn split_command_position_substitution_member_wins_when_tried_first() {
         let cmd = parse_ok("rm$IFS-rf$IFS/{$(true),}");
         let (winning, leftover) = split_command_position(first_word(&cmd));
         let winning = winning.unwrap();
-        assert!(resolve_pieces(&winning, true).is_err());
-        assert_eq!(leftover.len(), 1);
-        assert!(resolve_pieces(&leftover[0], true).is_ok());
+        assert_eq!(resolved_strings(&fold_pieces(&winning)), vec!["rm"]);
+        assert_eq!(leftover.len(), 2);
+        // The losing brace member (the empty one) carries no substitution;
+        // the winning alternative's own `$IFS`-remainder does.
+        assert!(!contains_unresolvable(&fold_pieces(&leftover[0])));
+        assert!(contains_unresolvable(&fold_pieces(&leftover[1])));
     }
 
     // No brace alternation at all: the whole word is the winning

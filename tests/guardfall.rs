@@ -237,17 +237,19 @@ fn guardfall_issue_77_brace_command_position_cases() {
         // genuinely command-position-ambiguous, correctly recursed by
         // rule 1 itself.
         ("echo$IFS/{$(rm -rf /),}", Decision::Block),
-        // Known, separate gap tracked as issue #82: this ordering's
-        // winning alternative is "rm -rf /$(true)" as ONE opaque piece run
-        // — `resolve_pieces`' word-level short-circuit (its own docs:
-        // "foo$(x)bar is one Unresolvable word, not a partially-folded
-        // one") discards the already-resolved "rm"/"-rf"/"/" prefix along
-        // with the trailing inert substitution, the same way the
-        // brace-free `rm$IFS-rf$IFS/$(true)` already does. Fixing that
-        // needs a deeper change to `resolve_pieces`'s short-circuit
-        // contract, not this issue's brace-alternative scoping — pinned
-        // here as the current, honest (fail-closed, not a bypass) state.
-        ("rm$IFS-rf$IFS/{$(true),}", Decision::Ask),
+        // Issue #82 (fixed): this ordering's winning alternative used to
+        // fold to "rm -rf /$(true)" as ONE opaque piece run —
+        // `resolve_pieces`'s former word-level short-circuit discarded the
+        // already-resolved "rm"/"-rf"/"/" prefix along with the trailing
+        // inert substitution. Now Block: `resolve_pieces`/`chunks_to_words`
+        // isolate only the trailing `/$(true)` segment as opaque, and the
+        // OTHER (empty) brace member's own concatenated "rm -rf /" tokens
+        // land in the same `argv` regardless (real bash brace-expansion
+        // semantics: a command-position word's alternatives all contribute
+        // argv words to the SAME invocation, not "try member A, else B") —
+        // so the literal "/" from that member hard-matches
+        // `rm-recursive-force-dangerous-target` on its own merits.
+        ("rm$IFS-rf$IFS/{$(true),}", Decision::Block),
         // Fable-review follow-up to issue #77: a dangerous leftover-branch
         // substitution must still escalate a verdict returned on one of
         // `evaluate_simple_command_core`'s EARLY returns, not just the
@@ -352,20 +354,33 @@ fn guardfall_issue_77_brace_command_position_cases() {
         // involved at all — none of them are "just one argv slot's value"
         // the way a genuinely single-piece argument-position substitution
         // is.
+        //
+        // Issue #82 upgrade: the two `$IFS`-separated cases below now
+        // Block outright, stronger than the `Ask`-only floor they used to
+        // need. `$IFS` (unlike `$*`/`$@`/`${f}`/a substitution's own
+        // output) is the one separator `resolve_pieces`/`chunks_to_words`
+        // treat as a genuine split point — so `-i` and the tilde-path,
+        // both literal text on either side of an ACTUAL `$IFS` piece, now
+        // resolve as two separate, clean argv words instead of collapsing
+        // into one opaque blob alongside the substitution between them.
+        // With both the required flag and the target visible as literal
+        // tokens, `self-protect-config-sed-tilde` hard-matches via the
+        // ordinary `Self::matches` path — no floor needed at all.
         (
             "sed{,$IFS-i$IFS$(printf x)$IFS~/.config/shguard/config.toml}",
-            Decision::Ask,
+            Decision::Block,
         ),
         (
             "{sed,-i$IFS$(printf x)$IFS~/.config/shguard/config.toml}",
-            Decision::Ask,
+            Decision::Block,
         ),
         // Same shape with the substitution itself inert — confirms the
-        // floor is unconditional (does not depend on what `$(true)`
-        // recurses to), unlike `leftover_floor`'s ordinary transparency.
+        // upgrade to `Block` above does not depend on what `$(true)`
+        // recurses to either: `-i`/the tilde-path resolve as clean words
+        // regardless of the substitution's own content.
         (
             "sed{,$IFS-i$IFS$(true)$IFS~/.config/shguard/config.toml}",
-            Decision::Ask,
+            Decision::Block,
         ),
         (
             "f=' '; sed{,-i${f}$(printf p)${f}/home/user/.config/shguard/config.toml}",
