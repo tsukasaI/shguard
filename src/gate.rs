@@ -3033,10 +3033,23 @@ struct HeredocScan<'a> {
 /// parsed as a command line), unlike the heredoc body's own top level
 /// (see [`collect_heredoc_substitutions`]'s docs on why quotes are inert
 /// out there).
+///
+/// [`QuoteState::AnsiC`] (issue #69) is deliberately a separate state from
+/// [`QuoteState::Single`], not a flag on it: bash's plain `'...'` and
+/// ANSI-C `$'...'` have different escape grammars inside the SAME
+/// terminating character (`'`) — plain single quotes have NO escape
+/// processing at all (a `\` inside one is just a literal backslash, never
+/// escapes the closing `'`), while `$'...'` treats `\'` as an escaped
+/// literal quote that does NOT close the string. Only entered from
+/// [`QuoteState::None`] on seeing `$` immediately followed by `'` (the
+/// two-byte `$'` opener consumed together) — this scanner never enters it
+/// mid-quote (e.g. from inside `Double`), since bash's own grammar doesn't
+/// recognize `$'` as special there either.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QuoteState {
     None,
     Single,
+    AnsiC,
     Double,
 }
 
@@ -3208,10 +3221,52 @@ fn consume_nested_token<'a>(
 /// Finds the matching close paren for a `$(` whose content starts at
 /// `bytes[start]` (the byte right after the opening `$(`), respecting
 /// nested parens (`depth`, starting at 1) and ordinary shell single-/
-/// double-quoting within the span — `$(echo ")")` must not close on the
-/// quoted `)`. Returns the captured inner text and the index just past the
-/// matching close paren, or `None` if the body runs out first
+/// double-/ANSI-C-quoting within the span — `$(echo ")")` must not close
+/// on the quoted `)`. Returns the captured inner text and the index just
+/// past the matching close paren, or `None` if the body runs out first
 /// (unterminated).
+///
+/// Issue #69 fixed two divergences from bash's real `$(...)` grammar here:
+/// - `QuoteState::AnsiC` (entered on an unquoted `$'`) gives `$'...'`
+///   backslash-escape awareness, distinct from plain `'...'`
+///   ([`QuoteState::Single`], correctly left with none) — bash's ANSI-C
+///   quoting treats `\'` as an escaped literal quote that does NOT close
+///   the string, so without this a real `$'it\'s'`-shaped span mistook the
+///   escaped quote for the closing one, desyncing paren-depth tracking
+///   from bash's actual parse.
+/// - `QuoteState::None` now skips ANY backslash-escaped character as one
+///   unit (mirroring `Double`'s existing shape), not just inside quotes —
+///   bash's unquoted top level treats `\` as escaping exactly the next
+///   character, so an escaped `\(`/`\)` must not affect `depth` the way an
+///   unescaped one does. This is checked before the `$'` detection below,
+///   which is what makes `\$'` (escaped dollar, then a REAL plain `'...'`
+///   string) resolve correctly: the backslash case consumes `\$` as one
+///   unit, so the following `'` is examined fresh next iteration, never
+///   mistaken for an ANSI-C opener.
+///
+/// Known residual imprecision, not fixed here: `$$'...'` (`$$`, the shell
+/// PID special parameter, immediately followed by a real plain `'...'`
+/// string) is misread as `$` + an ANSI-C `$'...'` opener, since this scan
+/// has no notion of `$$` as its own two-character token. Depending on
+/// whether the quoted content contains an escaped `\'`, this can make the
+/// span close either LATER than bash's real parse (ordinary over-capture:
+/// the captured superset fails to parse and floors to `Ask`) or, more
+/// subtly, EARLIER — e.g. `$$'\''`: bash reads `$$` then a plain quote
+/// that closes at the first `'`, immediately followed by a second `'`
+/// that opens ANOTHER quote, which stays open through what this scanner
+/// mistakes for the real closing paren. An early close is still
+/// fail-closed, but not for the over-capture reason above: whenever the
+/// span closes early, bash's own parse is — by construction — still
+/// inside that open quote at the very same byte offset (that's the only
+/// way a real `)` could fail to be bash's closing paren there), so the
+/// captured (truncated) prefix itself always ends with an unbalanced
+/// quote and is not valid shell syntax on its own. shguard's per-word
+/// re-parse (`bword::parse` via `convert_word_text` in parser.rs) rejects
+/// it, which surfaces as a `parser::parse` `Err` and floors to `Ask` in
+/// `analyze_at_depth` — the same fail-closed posture this scanner's other
+/// gaps already have. `$$` immediately followed by `'` is a vanishingly
+/// rare real-world shape (the PID glued directly to a quoted string with
+/// no separator).
 fn scan_paren_span<'a>(bytes: &[u8], body: &'a str, start: usize) -> Option<(&'a str, usize)> {
     let n = bytes.len();
     let mut depth = 1usize;
@@ -3222,6 +3277,16 @@ fn scan_paren_span<'a>(bytes: &[u8], body: &'a str, start: usize) -> Option<(&'a
         let c = bytes[i];
         match quote {
             QuoteState::Single => {
+                if c == b'\'' {
+                    quote = QuoteState::None;
+                }
+                i += 1;
+            }
+            QuoteState::AnsiC => {
+                if c == b'\\' && i + 1 < n {
+                    i += 2;
+                    continue;
+                }
                 if c == b'\'' {
                     quote = QuoteState::None;
                 }
@@ -3238,6 +3303,15 @@ fn scan_paren_span<'a>(bytes: &[u8], body: &'a str, start: usize) -> Option<(&'a
                 i += 1;
             }
             QuoteState::None => {
+                if c == b'\\' && i + 1 < n {
+                    i += 2;
+                    continue;
+                }
+                if c == b'$' && i + 1 < n && bytes[i + 1] == b'\'' {
+                    quote = QuoteState::AnsiC;
+                    i += 2;
+                    continue;
+                }
                 match c {
                     b'\'' => quote = QuoteState::Single,
                     b'"' => quote = QuoteState::Double,
@@ -5331,6 +5405,29 @@ mod tests {
         assert_decision("cat <<EOF\n`rm -rf /`\nEOF", Decision::Block);
     }
 
+    // ==== Issue #69: end-to-end pins for scan_paren_span's ANSI-C-quoting
+    // and escaped-paren fixes ====
+
+    #[test]
+    fn heredoc_body_ansi_c_escaped_quote_still_blocks() {
+        assert_decision(
+            "cat <<EOF\n$(echo $'it\\'s'; rm -rf /)\nEOF",
+            Decision::Block,
+        );
+    }
+
+    #[test]
+    fn heredoc_body_escaped_paren_still_blocks() {
+        assert_decision("cat <<EOF\n$(echo \\) ; rm -rf /)\nEOF", Decision::Block);
+    }
+
+    #[test]
+    fn heredoc_body_plain_ansi_c_string_stays_allow() {
+        // Ordinary, non-adversarial `$'...'` usage inside a heredoc-
+        // embedded substitution must be unaffected.
+        assert_decision("cat <<EOF\n$(echo $'hello')\nEOF", Decision::Allow);
+    }
+
     // ==== Issue #51: `collect_heredoc_substitutions` unit coverage ====
 
     #[test]
@@ -5375,6 +5472,113 @@ mod tests {
         let scan = collect_heredoc_substitutions("'$(rm -rf /)'");
         assert_eq!(scan.substitutions, vec!["rm -rf /"]);
         assert!(!scan.unterminated);
+    }
+
+    // ==== Issue #69: scan_paren_span's ANSI-C-quoting and escaped-paren
+    // awareness ====
+
+    #[test]
+    fn scan_paren_span_ansi_c_escaped_quote_does_not_end_the_string() {
+        // `$'it\'s'` is bash's ANSI-C quoting: the `\'` is an escaped
+        // literal quote, does NOT close the string — unlike a plain
+        // `'...'`, which has no escape processing at all. Before this fix,
+        // `$'` was indistinguishable from a bare `'`, so the escaped quote
+        // was mistaken for the closing one, and the string effectively
+        // never closed within this content (no further `'` follows),
+        // leaving the span unterminated.
+        let scan = collect_heredoc_substitutions(r"$(echo $'it\'s'; rm -rf /)");
+        assert_eq!(scan.substitutions, vec![r"echo $'it\'s'; rm -rf /"]);
+        assert!(!scan.unterminated);
+    }
+
+    #[test]
+    fn scan_paren_span_ansi_c_string_containing_a_literal_paren() {
+        let scan = collect_heredoc_substitutions(r"$(echo $'a)b')");
+        assert_eq!(scan.substitutions, vec![r"echo $'a)b'"]);
+        assert!(!scan.unterminated);
+    }
+
+    #[test]
+    fn scan_paren_span_unterminated_ansi_c_string_is_flagged() {
+        let scan = collect_heredoc_substitutions(r"$(echo $'abc");
+        assert!(scan.unterminated);
+    }
+
+    #[test]
+    fn scan_paren_span_empty_ansi_c_string() {
+        let scan = collect_heredoc_substitutions(r"$(echo $''; rm -rf /)");
+        assert_eq!(scan.substitutions, vec![r"echo $''; rm -rf /"]);
+        assert!(!scan.unterminated);
+    }
+
+    #[test]
+    fn scan_paren_span_dollar_dollar_ansi_c_misread_still_asks() {
+        // Documented residual gap: `$$` (the shell PID special parameter)
+        // immediately followed by a real plain `'...'` is misread as `$`
+        // + an ANSI-C `$'...'` opener. When the quoted content itself
+        // contains an escaped `\'`, this can make the span close EARLIER
+        // than bash's real parse rather than later (see the doc comment
+        // on `scan_paren_span`): bash reads `$$` then a plain quote that
+        // closes at the first `'`, immediately followed by a second `'`
+        // that opens ANOTHER quote which stays open through what this
+        // scanner mistakes for the real closing paren — so the captured
+        // prefix drops the trailing `; rm -rf /` entirely.
+        let scan = collect_heredoc_substitutions(r"$(echo $$'\'')'; rm -rf /)");
+        assert_eq!(scan.substitutions, vec![r"echo $$'\''"]);
+        assert!(!scan.unterminated);
+        // Still fail-closed end-to-end: the truncated capture itself ends
+        // on an unbalanced quote, which shguard's parser rejects, and a
+        // parse failure floors to Ask, not Allow.
+        assert_decision("cat <<EOF\n$(echo $$'\\'')'; rm -rf /)\nEOF", Decision::Ask);
+    }
+
+    #[test]
+    fn scan_paren_span_plain_single_quotes_still_have_no_escape_processing() {
+        // Regression guard: this fix must not give plain `'...'` (no `$`
+        // prefix) any escape awareness — real bash single quotes have
+        // none at all, so a bare `\` inside one is just a literal
+        // backslash, and the very next `'` always closes.
+        let scan = collect_heredoc_substitutions(r"$(echo 'a\'; rm -rf /)");
+        assert_eq!(scan.substitutions, vec![r"echo 'a\'; rm -rf /"]);
+        assert!(!scan.unterminated);
+    }
+
+    #[test]
+    fn scan_paren_span_escaped_paren_does_not_affect_depth() {
+        // `\)` at the span's unquoted top level is a literal, non-special
+        // paren in real bash — before this fix it still decremented
+        // `depth`, closing the span early and leaving the real danger
+        // (`rm -rf /`) in unscanned trailing text.
+        let scan = collect_heredoc_substitutions(r"$(echo \) ; rm -rf /)");
+        assert_eq!(scan.substitutions, vec![r"echo \) ; rm -rf /"]);
+        assert!(!scan.unterminated);
+    }
+
+    #[test]
+    fn scan_paren_span_escaped_paren_inside_double_quotes_still_works() {
+        // Already handled by the pre-existing `Double` arm — pinned here
+        // so a future refactor of the new `None`-arm escape handling
+        // can't regress it.
+        let scan = collect_heredoc_substitutions(r#"$(echo "\)")"#);
+        assert_eq!(scan.substitutions, vec![r#"echo "\)""#]);
+        assert!(!scan.unterminated);
+    }
+
+    #[test]
+    fn scan_paren_span_double_backslash_still_closes_on_the_following_paren() {
+        // `\\` escapes only the backslash itself, so the following `)`
+        // is NOT escaped and closes the span normally — guards against an
+        // over-eager escape implementation swallowing a real closing
+        // paren.
+        let scan = collect_heredoc_substitutions(r"$(echo \\)");
+        assert_eq!(scan.substitutions, vec![r"echo \\"]);
+        assert!(!scan.unterminated);
+    }
+
+    #[test]
+    fn scan_paren_span_trailing_lone_backslash_is_unterminated() {
+        let scan = collect_heredoc_substitutions(r"$(foo \");
+        assert!(scan.unterminated);
     }
 
     #[test]
