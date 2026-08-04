@@ -244,29 +244,40 @@
 //! never about it. [`has_any_argument_position_substitution`] is the
 //! (conservative — it excludes eligibility whenever a substitution is
 //! merely *present*, whether or not it resolves cleanly) guard for this.
-//! Two related recursion paths need no such guard: rule 1 (command-position
-//! substitution) can never match any allowlist entry at all, because
-//! `argv[0]` is unresolvable whenever rule 1 fires, and every
-//! `CommandRule` matcher requires a resolved command name; rule 6a
-//! (`bash -c '<string>'`) doesn't need it either, because the *outer*
+//! One related recursion path needs no such guard: rule 6a
+//! (`bash -c '<string>'`) doesn't need it, because the *outer*
 //! command in that case is literally one of `SHELL_INTERPRETERS`, and a
 //! config `allow` entry covering an interpreter name is rejected at
 //! config-load time (`crate::rules::UserConfig::parse`).
 //!
 //! **A command-position word's own non-winning brace alternative hiding a
 //! substitution is a THIRD case, and it DOES need a guard (issue #83)** —
-//! unlike rule 1's winning-alternative case just above, a leftover
-//! alternative's substitution never touches `argv[0]`
-//! (`normalize::split_command_position`, issue #77): the winning
-//! alternative can still resolve to a real command name an allow entry
-//! matches, while the substitution packed into a *different* alternative
-//! of that same word is an unresolved runtime value no less than an
-//! ordinary argument-position one — `tar{,$($EVIL)} xf evil.tar -C /`
-//! with an `allow` entry for `tar` must stay ineligible for downgrade the
-//! same way `tar $($EVIL) xf evil.tar -C /` already is.
+//! unlike rule 1's winning-alternative case, a leftover alternative's
+//! substitution never touches `argv[0]` (`normalize::split_command_position`,
+//! issue #77): the winning alternative can still resolve to a real command
+//! name an allow entry matches, while the substitution packed into a
+//! *different* alternative of that same word is an unresolved runtime value
+//! no less than an ordinary argument-position one — `tar{,$($EVIL)} xf
+//! evil.tar -C /` with an `allow` entry for `tar` must stay ineligible for
+//! downgrade the same way `tar $($EVIL) xf evil.tar -C /` already is.
 //! [`has_command_position_leftover_substitution`] is the guard for this,
 //! independent of [`has_any_argument_position_substitution`] (which never
 //! looks inside the command-position word at all).
+//!
+//! **Issue #82 extends this same THIRD case to `$IFS`-packing, not just
+//! brace membership**: `split_command_position` narrows `argv[0]` down to
+//! only the piece run before the winning alternative's first `$IFS` split
+//! point, feeding everything from that point on into the SAME
+//! `leftover_alternatives` `has_command_position_leftover_substitution`
+//! already scans — so rule 1 (command-position substitution) is NO LONGER
+//! guaranteed to fire whenever the command-position word contains a
+//! substitution ANYWHERE: `ls$IFS$(evil)` resolves `argv[0]` to `"ls"`
+//! cleanly, with `$(evil)` living in the `$IFS`-remainder leftover instead
+//! of making `argv[0]` itself unresolvable. Without
+//! `has_command_position_leftover_substitution` also covering this
+//! remainder, an `allow` entry for `ls` would launder it to `Allow` — the
+//! exact same risk the brace case above already guards against, now via
+//! the same mechanism.
 //!
 //! **A command whose wrapper chain passes through an escalation vector
 //! (rule 10) is likewise never eligible for the allow-downgrade step.**
@@ -860,17 +871,19 @@ fn has_any_argument_position_substitution(command: &SimpleCommand) -> bool {
     has_argument_position_substitution(&command.words[first_word_idx + 1..])
 }
 
-/// Whether the command-position word's own non-winning brace alternatives
-/// (`normalize::split_command_position`'s leftover pieces) contain a
-/// command/backquote or process substitution (issue #83). A substitution
-/// living in the WINNING alternative needs no guard here at all — it makes
-/// `argv[0]` itself unresolvable, so rule 1 fires and no `CommandRule`
-/// allow entry can match a command name that was never resolved (module
-/// docs, the paragraph on rule 1 needing no eligibility guard). But a
-/// substitution in a LEFTOVER alternative does not touch `argv[0]`
-/// (`split_command_position`'s whole point, issue #77) — the winning
-/// alternative can resolve cleanly to a real command name an allow entry
-/// matches, while the leftover alternative's substitution is still an
+/// Whether the command-position word's own leftover pieces
+/// (`normalize::split_command_position`'s second return value) contain a
+/// command/backquote or process substitution — both a non-winning brace
+/// alternative (issue #83) and, since issue #82, the winning alternative's
+/// own post-`$IFS`-split remainder. A substitution living in the piece run
+/// that actually determines `argv[0]` (before any brace/`$IFS` narrowing)
+/// needs no guard here at all — it makes `argv[0]` itself unresolvable, so
+/// rule 1 fires and no `CommandRule` allow entry can match a command name
+/// that was never resolved. But a substitution in a LEFTOVER piece run does
+/// not touch `argv[0]` (`split_command_position`'s whole point) — the
+/// winning, narrowed-down command-position pieces can resolve cleanly to a
+/// real command name an allow entry matches (`ls$IFS$(evil)` resolves
+/// `argv[0]` to `"ls"`), while the leftover's substitution is still an
 /// unresolved runtime value the same way an ordinary argument-position one
 /// is. Computed independently of, and before, running the full rule set,
 /// mirroring [`has_any_argument_position_substitution`] exactly (a pure
@@ -1172,6 +1185,12 @@ fn evaluate_simple_command_core(
     // than the raw word's whole brace-alternation tree — a substitution
     // living only in a *different* alternative resolves to an
     // argument-position token once brace-expanded, not the command name.
+    // Issue #82: `split_command_position` narrows this further, to the
+    // piece run strictly before the winning alternative's own first
+    // `$IFS` split point — a substitution after that point (`ls$IFS$(x)`,
+    // no braces involved at all) is likewise argument-position-shaped, not
+    // command-position-ambiguous, once real word-splitting is accounted
+    // for.
     let (command_position_pieces, leftover_alternatives) =
         normalize::split_command_position(first_word_ast);
     // Computed once, up front: this function has several early returns
@@ -2277,33 +2296,42 @@ fn evaluate_argument_substitutions(
 /// argv slot's value — true for an ordinary argument-position substitution
 /// (`rm -rf $(x)`), where a dangerous flag sits in its OWN, separately
 /// resolved word. It does NOT hold for a leftover alternative built from
-/// MORE THAN ONE piece: `resolve_pieces`' word-level short-circuit (its own
-/// docs: "one Unresolvable word, not a partially-folded one") collapses
-/// the *entire* piece run — flag, target, and substitution alike — into a
-/// single opaque word the moment it hits the first unresolvable piece,
-/// discarding whatever else was glued alongside it. What that "whatever
-/// else" is doesn't matter — this went through three narrower, each-time-
+/// MORE THAN ONE piece and glued together with something other than a real
+/// `$IFS` split point: `resolve_pieces`/`chunks_to_words`
+/// (`src/normalize.rs`) only isolate an unresolvable piece from its
+/// neighbors at an ACTUAL `$IFS`-derived split boundary (issue #82) — any
+/// OTHER kind of glue between a resolved flag/target and a substitution
+/// still collapses the whole piece run into one opaque word, discarding
+/// the resolved text alongside it, the same way this module's word-level
+/// folding always has. This went through three narrower, each-time-
 /// insufficient attempts before landing here:
-/// - `sed{,$IFS-i$IFS$(x)$IFS<config path>}`: `$IFS` glued beside the
-///   substitution would have split into multiple tokens.
 /// - `sed{,-i${f}$(x)${f}<config path>}` (same-line `f=' '`): `${f}` is
-///   just as unresolvable to this stage as `$IFS` (`normalize::resolve_piece`
+///   just as unresolvable to this stage as an unquoted `$IFS` piece would
+///   be if `resolve_pieces` didn't special-case it (`normalize::resolve_piece`
 ///   has no more idea what `$f` holds than what a same-line `IFS=`
-///   reassignment would make `$IFS` hold), and a real shell word-splits
-///   ANY unquoted expansion whose runtime value contains whitespace, not
-///   only one literally named `IFS`.
+///   reassignment would make `$IFS` hold) — a real shell word-splits ANY
+///   unquoted expansion whose runtime value contains whitespace, not only
+///   one literally named `IFS`, but only the literal `$IFS` piece itself
+///   is treated as a genuine, always-splits boundary here.
 /// - `sed{,-i$(printf " ")<config path>}`: the substitution's OWN runtime
 ///   output can be the separator — no `$IFS`/`$VAR` involved at all, just
 ///   literal `-i` glued directly to the substitution.
+/// - (Closed by issue #82, no longer an example of THIS floor's own
+///   necessity, though still floored here as a fallback: `sed{,$IFS-i$IFS
+///   $(x)$IFS<config path>}` — a literal `$IFS` piece now really is
+///   recognised as a split point, so `-i`/`<config path>` resolve as
+///   separate, clean argv words and this shape now hard-matches
+///   `self-protect-config-sed-tilde` directly via the ordinary blocklist
+///   path, before this floor is even consulted.)
 ///
-/// All three collapse to one opaque word with something else riding along
-/// beside the substitution — which is exactly what "more than one piece in
-/// this alternative" means, regardless of which specific piece kind that
-/// something else is. Recursing the substitution alone (Allow, in every
-/// example above) says nothing about whether `-i` is hidden alongside it,
-/// and there is no separately-resolved token left for rule 4's
+/// The remaining two collapse to one opaque word with something else riding
+/// along beside the substitution — which is exactly what "more than one
+/// piece in this alternative" means, regardless of which specific piece
+/// kind that something else is. Recursing the substitution alone (Allow, in
+/// both examples above) says nothing about whether `-i` is hidden alongside
+/// it, and there is no separately-resolved token left for rule 4's
 /// `matches_except_target` to check against `targets` either — the ONLY
-/// place any of these shapes can be floored is here, unconditionally,
+/// place either of these shapes can be floored is here, unconditionally,
 /// regardless of what the substitution(s) inside recurse to. A leftover
 /// alternative that is JUST the substitution alone (`pieces.len() == 1`,
 /// e.g. `{rm,-rf,$(printf /)}`'s `$(printf /)` member) has nothing to hide
@@ -2339,12 +2367,14 @@ fn evaluate_leftover_alternative_substitutions(
         // dividing line isn't which piece kind sits beside the
         // substitution, it's whether there IS a piece beside it at all:
         // any top-level piece count above 1 means this alternative glues
-        // together AT LEAST two things `resolve_pieces`' short-circuit (its
-        // own docs: "one Unresolvable word, not a partially-folded one")
-        // then collapses into a single opaque blob the moment it hits the
-        // first unresolvable piece — which can hide literal flag/target
-        // text beside the substitution regardless of what specifically
-        // sits next to it. A leftover alternative that is JUST the
+        // together AT LEAST two things — unless every piece is cleanly
+        // separated by an actual `$IFS` split point, `resolve_pieces`/
+        // `chunks_to_words` (`src/normalize.rs`, issue #82) still collapse
+        // the glued run into a single opaque blob the moment they hit an
+        // unresolvable piece with no `$IFS` boundary isolating it — which
+        // can hide literal flag/target text beside the substitution
+        // regardless of what specifically sits next to it. A leftover
+        // alternative that is JUST the
         // substitution alone (`pieces.len() == 1`, e.g. `{rm,-rf,$(printf
         // /)}`'s `$(printf /)` member) has nothing to hide beside it and
         // stays purely transparent — no different from an ordinary
@@ -2761,27 +2791,56 @@ fn scan_recursable_slots(
 fn find_exec_flag_kind(word: &Word) -> FindExecFlagKind {
     match normalize::normalize_word(word).as_slice() {
         [nw] => match nw.resolution() {
-            Resolution::Resolved(s) => crate::rules::RECURSABLE_SLOTS
-                .iter()
-                .find_map(|slot| match slot.mode {
-                    crate::rules::RecurseMode::DirectArgv { terminators }
-                        if slot.command == "find" && slot.flag == s =>
-                    {
-                        Some(terminators)
-                    }
-                    _ => None,
-                })
+            Resolution::Resolved(s) => direct_argv_terminators_for("find", s)
                 .map_or(FindExecFlagKind::No, FindExecFlagKind::Yes),
             Resolution::Unresolvable(_) => FindExecFlagKind::Unresolvable,
         },
-        // Zero or multiple normalised words (an `$IFS`-vanishing word, or
-        // one multiplied by brace alternation/`$IFS` splitting) is never a
-        // literal flag spelling — treated as ordinary non-flag content
-        // rather than a scanned position; `-exec`/`-execdir`/`-ok`/`-okdir`
-        // themselves are never realistically written in a shape that
-        // multiplies like this.
-        _ => FindExecFlagKind::No,
+        // Issue #82 fallout: `$IFS` splitting (or brace alternation) can
+        // multiply a SINGLE AST word into several logical argv positions —
+        // including `command.words[0]` itself, which issue #82 established
+        // can fuse `find` with a later flag via `$IFS`
+        // (`find$IFS-exec$IFS...`). Pre-#82 this always collapsed to one
+        // opaque `Unresolvable` word, which the arm above already floors;
+        // now that a mixed word can partially resolve, a plain "multiple
+        // words is never a flag spelling" fallback would silently miss both
+        // an unresolvable position that might be `-exec`-adjacent AND a
+        // fully literal `-exec` fused this way — this scan cannot safely
+        // recurse a payload fused into the same AST word (unlike the
+        // ordinary case, its trailing command isn't its own
+        // `command.words` entries `scan_recursable_slots` could slice), so
+        // fail closed to `Unresolvable` (an `Ask` floor, never silently
+        // `No`) whenever any split-out position is itself unresolvable or
+        // literally spells one of `find`'s `DirectArgv` flags.
+        multiple => {
+            let ambiguous = multiple.iter().any(|nw| match nw.resolution() {
+                Resolution::Unresolvable(_) => true,
+                Resolution::Resolved(s) => direct_argv_terminators_for("find", s).is_some(),
+            });
+            if ambiguous {
+                FindExecFlagKind::Unresolvable
+            } else {
+                FindExecFlagKind::No
+            }
+        }
     }
+}
+
+/// The [`crate::rules::RecurseMode::DirectArgv`] terminator list for
+/// `command`'s recursable slot matching literal flag spelling `flag`, if
+/// any — the lookup [`find_exec_flag_kind`] needs from both its
+/// exactly-one-normalised-word arm and its `$IFS`-multiplied arm, factored
+/// out so the two can never drift on what counts as a match.
+fn direct_argv_terminators_for(command: &str, flag: &str) -> Option<&'static [&'static str]> {
+    crate::rules::RECURSABLE_SLOTS
+        .iter()
+        .find_map(|slot| match slot.mode {
+            crate::rules::RecurseMode::DirectArgv { terminators }
+                if slot.command == command && slot.flag == flag =>
+            {
+                Some(terminators)
+            }
+            _ => None,
+        })
 }
 
 /// The three outcomes [`find_exec_flag_kind`] can report for one AST word,
@@ -2891,10 +2950,12 @@ fn collect_substitutions_into<'a>(pieces: &'a [WordPiece], out: &mut Vec<&'a str
             // `collect_heredoc_substitutions`'s docs, which already handle
             // exactly this "arithmetic span, but a nested `$(...)` inside it
             // still expands" case for heredoc bodies). Reusing that scanner
-            // here is what makes it safe to treat the surrounding word as
-            // merely opaque (`UnresolvableKind::ArithmeticExpansion`,
-            // floored to Ask by `is_opaque_unresolvable`) rather than
-            // hiding an embedded `$(rm -rf /)` inside it entirely. Any
+            // here is what makes it safe to treat the surrounding segment
+            // (issue #82: the piece run between `$IFS` split points, or the
+            // whole word if there are none) as merely opaque
+            // (`UnresolvableKind::ArithmeticExpansion`, floored to Ask by
+            // `is_opaque_unresolvable`) rather than hiding an embedded
+            // `$(rm -rf /)` inside it entirely. Any
             // unterminated `$(`/backtick this scan finds is not surfaced
             // separately — the opaque-kind floor already guarantees at
             // least `Ask` regardless.
@@ -3876,6 +3937,147 @@ mod tests {
     #[test]
     fn backquote_command_position_asks() {
         assert_decision("`echo hi`", Decision::Ask);
+    }
+
+    // ==== Issue #82: an `$IFS`-packed command-position word's trailing
+    // segment (after the last `$IFS` split point) is no longer swept into
+    // one opaque `argv[0]` blob along with the resolved leading segments —
+    // `resolve_pieces`/`chunks_to_words` (src/normalize.rs) isolate just
+    // the unresolvable segment, and `split_command_position` narrows rule
+    // 1's own command-position scan to match, moving a trailing
+    // substitution into the SAME leftover-substitution floor a brace
+    // leftover already uses (issue #77). ====
+
+    #[test]
+    fn ifs_packed_trailing_substitution_asks_with_specific_rule_reason() {
+        // The issue's own repro: decision stays Ask (never a bypass), but
+        // the reason now names the accurate rule instead of the old
+        // generic "command position contains a substitution" catch-all.
+        let verdict = decide("rm$IFS-rf$IFS/$(true)");
+        assert_eq!(verdict.decision(), Decision::Ask);
+        let reason = verdict.reason().unwrap().as_str();
+        assert!(
+            reason.contains("rm-recursive-force-dangerous-target"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn ifs_packed_trailing_substitution_with_extra_literal_target_blocks() {
+        // Parity with the un-packed control (`rm -rf / $(true)`, already
+        // Block on `main`): once `argv[0]`/`argv[1]` resolve to "rm"/"-rf"
+        // and the trailing segment's substitution is isolated, a
+        // dangerous target elsewhere in the SAME word (here, a second
+        // `$IFS`-separated literal "/" after the substitution) still
+        // hard-matches directly.
+        assert_decision("rm$IFS-rf$IFS/$IFS$(true)", Decision::Block);
+        assert_decision("rm -rf / $(true)", Decision::Block); // parity control
+    }
+
+    #[test]
+    fn allowlisted_ls_cannot_launder_an_ifs_packed_trailing_substitution() {
+        // Security-critical: `has_command_position_leftover_substitution`'s
+        // allowlist-eligibility guard must see this trailing-segment
+        // substitution as a leftover (issue #82's whole point of also
+        // narrowing `split_command_position`, not just `resolve_pieces`) —
+        // otherwise `argv[0]` resolving cleanly to "ls" would let an
+        // `[[allow]] command = "ls"` entry downgrade this to `Allow`,
+        // laundering an unresolved command/backquote substitution through
+        // an allowlist entry that was never consent to it.
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[allow]]
+            id = "user-allow-ls"
+            reason = "trust me"
+            command = "ls"
+        "#,
+        );
+        let verdict = analyze_with_policy("ls$IFS$(evil)", &rules, &allowlist);
+        assert_eq!(verdict.decision(), Decision::Ask);
+    }
+
+    #[test]
+    fn allowlisted_find_cannot_launder_an_ifs_packed_exec_flag() {
+        // Security-critical (fable code-review catch on this same issue
+        // #82 PR): `find_exec_flag_kind`'s `[nw]`-single-normalised-word
+        // arm was written back when `command.words[0]` could only ever
+        // normalise to exactly one word or collapse entirely to one opaque
+        // `Unresolvable` word. Issue #82's own fix broke that premise —
+        // `find$IFS-exec$IFS...` now normalises `command.words[0]` into
+        // MULTIPLE words (`"find"` + the fused `-exec` flag and its
+        // payload), which the old `_ => FindExecFlagKind::No` fallback
+        // silently treated as "definitely not a flag position", never
+        // raising `recursable.has_any` — so an `[[allow]] command = "find"`
+        // entry could launder a fully literal, fused `-exec rm -rf / \;`
+        // payload straight to `Allow` with no unresolvable content at all.
+        // Also covers the milder case (`$FLAGS` genuinely unresolvable)
+        // that regressed the same way.
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[allow]]
+            id = "user-allow-find"
+            reason = "trust me"
+            command = "find"
+        "#,
+        );
+        for cmd in [
+            "find$IFS-exec$IFSrm$IFS-rf$IFS/$IFS\\;",
+            "find$IFS.$IFS-exec$IFSrm$IFS-rf$IFS{}$IFS\\;",
+            "find$IFS$FLAGS",
+            "find${IFS}$FLAGS",
+        ] {
+            let verdict = analyze_with_policy(cmd, &rules, &allowlist);
+            assert_eq!(verdict.decision(), Decision::Ask, "{cmd:?}");
+        }
+        // Parity control: a packed `find` word with no flag-like or
+        // unresolvable split-out segment stays allow-eligible — the fix
+        // must not floor every `$IFS`-split `find` command to `Ask`.
+        let verdict = analyze_with_policy("find$IFS.$IFS-name$IFS*.txt", &rules, &allowlist);
+        assert_eq!(verdict.decision(), Decision::Allow);
+    }
+
+    #[test]
+    fn ifs_packed_trailing_substitution_with_transparent_command_still_asks() {
+        // The leftover floor (`evaluate_leftover_alternative_substitutions`)
+        // must still fire even for a command as harmless as `ls` with
+        // nothing dangerous anywhere — the remainder leftover
+        // (`$IFS` + the substitution piece) has length >= 2, so it floors
+        // to `Ask` regardless of what the substitution recurses to,
+        // exactly the same way a brace leftover of length > 1 already
+        // does (issue #77).
+        assert_decision("ls$IFS$(true)", Decision::Ask);
+    }
+
+    #[test]
+    fn ifs_packed_word_with_only_ifs_derived_words_still_asks_via_rule_7() {
+        // A packed word with NO substitution at all (just `$IFS` splitting
+        // a variable reference's resolved text into multiple argv words)
+        // must still Ask via rule 7's `ifs_floor` (a same-line `IFS=`
+        // reassignment could make the split wrong) — this floor is
+        // unrelated to issue #82's own mechanism and must not regress.
+        assert_decision("ls$IFS$FLAGS", Decision::Ask);
+    }
+
+    #[test]
+    fn quoted_ifs_before_substitution_still_fires_rule_1() {
+        // A `$IFS` reference INSIDE double quotes never actually splits at
+        // runtime (bash never splits inside double quotes) — `resolve_piece`
+        // folds it to the literal default-IFS text instead of a `Chunk::Split`
+        // point, so nothing precedes the substitution that could isolate it
+        // as a trailing segment. This must stay genuinely
+        // command-position-ambiguous, caught by rule 1 itself, not
+        // narrowed away by issue #82's `$IFS`-boundary scan.
+        assert_decision("ls\"$IFS\"$(rm -rf /)", Decision::Block);
+    }
+
+    #[test]
+    fn leading_substitution_in_ifs_packed_word_still_floors_argv_zero() {
+        // A substitution BEFORE any `$IFS` split point (not just after,
+        // issue #82's main case) is the first segment — genuinely
+        // command-position-ambiguous, since it's the piece run that would
+        // determine `argv[0]` itself. Must stay exactly as uncertain as
+        // before this issue's fix, not accidentally narrowed away.
+        assert_decision("$(true)$IFS-rf$IFS/", Decision::Ask);
     }
 
     // ==== Own coverage: rules explicitly named in the issue but not in the
