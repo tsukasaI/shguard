@@ -356,6 +356,24 @@ fn tar_dashless_rewrite(tail: &[NormalizedWord]) -> Option<Vec<NormalizedWord>> 
     }
 }
 
+/// The tail a rule's flag/target checks should actually see for one
+/// wrapper-chain hop: `tail` rewritten via [`tar_dashless_rewrite`] when
+/// `base` is `tar`, unchanged otherwise. Shared by
+/// [`CommandRule::matching_rest`] and [`CommandRule::matching_rest_by_name`]
+/// (issue #86) so the two walkers can't silently diverge on this point —
+/// each previously duplicated this same `if base == "tar" { ... }` block
+/// verbatim.
+fn tar_dashless_effective_tail<'a>(
+    base: &str,
+    tail: &'a [NormalizedWord],
+) -> Cow<'a, [NormalizedWord]> {
+    if base == "tar" {
+        tar_dashless_rewrite(tail).map_or(Cow::Borrowed(tail), Cow::Owned)
+    } else {
+        Cow::Borrowed(tail)
+    }
+}
+
 /// A flag declared (via a rule's `value_flags`, issue #48) to take a
 /// value that is never itself an except_targets candidate — narrows
 /// [`CommandRule::matches`]'s candidate collection so a value-taking
@@ -1041,9 +1059,11 @@ impl CommandRule {
     /// returns that hop's raw tail (its own arguments, unskipped — the
     /// natural `rest` for [`Self::matches`]' subsequent target check).
     /// `None` if no hop matches at all — the shared building block behind
-    /// [`Self::matches`] (which also checks targets) and
-    /// [`Self::matches_except_target`] (plan.md §4's NEW argument-position
-    /// bare-`$VAR`-or-substitution refinement, `src/gate.rs`).
+    /// [`Self::matches`] (which also checks targets). PR #84 switched
+    /// [`Self::matches_except_target`] to [`Self::matching_rest_by_name`]
+    /// instead — that function now shares this tar-dashless-rewrite step
+    /// via [`tar_dashless_effective_tail`] (issue #86), so the two helpers
+    /// can't diverge on this point.
     ///
     /// Unlike a single [`effective_command`] resolution, this checks the
     /// rule at *every* hop of the chain, not just the terminal one: a rule
@@ -1065,14 +1085,15 @@ impl CommandRule {
     /// name).
     ///
     /// When the resolved hop's own basename is `tar`, the tail is passed
-    /// through [`tar_dashless_rewrite`] first (issue #67): tar's own
-    /// calling convention allows a fully dash-less leading option cluster
-    /// (`tar xfC a.tar /`), which the generic flag matching below can't
-    /// see at all (`short_cluster_chars` returns an empty set for a
-    /// dash-less token). The rewrite is a no-op `Cow::Borrowed` for every
-    /// other command, and for any `tar` invocation that isn't the specific
-    /// dash-less `x`+`C` cluster shape the rewrite targets — see that
-    /// function's docs for exactly when it fires.
+    /// through [`tar_dashless_effective_tail`]/[`tar_dashless_rewrite`]
+    /// first (issue #67): tar's own calling convention allows a fully
+    /// dash-less leading option cluster (`tar xfC a.tar /`), which the
+    /// generic flag matching below can't see at all (`short_cluster_chars`
+    /// returns an empty set for a dash-less token). The rewrite is a no-op
+    /// `Cow::Borrowed` for every other command, and for any `tar`
+    /// invocation that isn't the specific dash-less `x`+`C` cluster shape
+    /// the rewrite targets — see that function's docs for exactly when it
+    /// fires.
     #[must_use]
     fn matching_rest<'a>(&self, argv: &'a [NormalizedWord]) -> Option<Cow<'a, [NormalizedWord]>> {
         let mut rest = argv;
@@ -1083,11 +1104,7 @@ impl CommandRule {
             };
             let base = basename(name);
             if self.command.matches(base) {
-                let effective: Cow<'a, [NormalizedWord]> = if base == "tar" {
-                    tar_dashless_rewrite(tail).map_or(Cow::Borrowed(tail), Cow::Owned)
-                } else {
-                    Cow::Borrowed(tail)
-                };
+                let effective = tar_dashless_effective_tail(base, tail);
                 if self.constraints_match(&effective) {
                     return Some(effective);
                 }
@@ -1272,13 +1289,13 @@ impl CommandRule {
         let has_unresolvable = rest_words
             .iter()
             .any(|w| matches!(w.resolution(), Resolution::Unresolvable(_)));
-        if !has_unresolvable || !self.relaxed_required_tokens_match(rest_words) {
+        if !has_unresolvable || !self.relaxed_required_tokens_match(&rest_words) {
             return false;
         }
-        if self.constraints_match(rest_words) {
+        if self.constraints_match(&rest_words) {
             return true;
         }
-        if resolved_strings(rest_words)
+        if resolved_strings(&rest_words)
             .iter()
             .any(|token| self.matches_targets(token))
         {
@@ -1292,10 +1309,33 @@ impl CommandRule {
     /// Same wrapper-unwrap walk as [`Self::matching_rest`], but stopping at
     /// the first hop whose command name alone matches `self.command` —
     /// ignoring `required_flags`/`required_tokens` entirely. The shared
-    /// building block behind [`Self::matches_except_flags`] (issue #42),
-    /// which needs a hop's tail *before* deciding whether flags/tokens are
+    /// building block behind [`Self::matches_except_flags`] (issue #42) and
+    /// [`Self::matches_except_target`] (issue #86, since PR #84), both of
+    /// which need a hop's tail *before* deciding whether flags/tokens are
     /// satisfied, unlike [`Self::matching_rest`], which only ever returns a
     /// hop once both the name and the constraints already hold.
+    ///
+    /// Applies [`tar_dashless_effective_tail`] to the returned tail — the
+    /// same helper [`Self::matching_rest`] uses (issue #86), so the two
+    /// walkers can't diverge on this point. Without it, a dash-less
+    /// leading option cluster (`tar xfC a.tar /`) is invisible to
+    /// [`Self::matches_except_target`]/[`Self::matches_except_flags`]'s own
+    /// flag/token checks, even though the ordinary [`Self::matches`] path
+    /// (via [`Self::matching_rest`]) already sees it — for
+    /// `matches_except_target`, this silently dropped a rule's own match
+    /// entirely for a dashless-cluster command, leaving only a coarser
+    /// sibling rule's reason string to attribute the `Ask` to (issue #86's
+    /// own repro: `tar xfC a.tar $(echo /)` loses
+    /// `tar-extract-over-root-or-home`'s accurate reason, keeping only
+    /// `tar-absolute-names-ask`'s, which names a flag this command doesn't
+    /// have). For `matches_except_flags`, the missing rewrite only ever
+    /// made `constraints_match` fail *more* often than it should (never
+    /// less), which can only make `matches_except_flags` fire *more*
+    /// broadly than intended — never miss a rule the way
+    /// `matches_except_target` did — but left the same "resolved words
+    /// alone already satisfy this rule" invariant its own docs promise
+    /// (`Self::matches_except_flags`) unenforced for a dashless-cluster
+    /// tar command whose flags happen to already be fully resolved.
     ///
     /// # Known latent divergence from `matching_rest`
     ///
@@ -1314,7 +1354,7 @@ impl CommandRule {
     fn matching_rest_by_name<'a>(
         &self,
         argv: &'a [NormalizedWord],
-    ) -> Option<&'a [NormalizedWord]> {
+    ) -> Option<Cow<'a, [NormalizedWord]>> {
         let mut rest = argv;
         loop {
             let (first, tail) = rest.split_first()?;
@@ -1323,7 +1363,7 @@ impl CommandRule {
             };
             let base = basename(name);
             if self.command.matches(base) {
-                return Some(tail);
+                return Some(tar_dashless_effective_tail(base, tail));
             }
             if !TRANSPARENT_WRAPPERS.contains(&base) {
                 return None;
@@ -1423,13 +1463,13 @@ impl CommandRule {
         let Some(rest_words) = self.matching_rest_by_name(argv) else {
             return false;
         };
-        if self.constraints_match(rest_words) {
+        if self.constraints_match(&rest_words) {
             return false;
         }
         let has_unresolvable = rest_words
             .iter()
             .any(|w| matches!(w.resolution(), Resolution::Unresolvable(_)));
-        has_unresolvable && self.relaxed_required_tokens_match(rest_words)
+        has_unresolvable && self.relaxed_required_tokens_match(&rest_words)
     }
 
     /// issue #78: true when this rule's command+flags match `argv` (via
@@ -5288,6 +5328,103 @@ mod tests {
             .unwrap();
         assert_eq!(matched.decision(), Decision::Ask);
         assert_eq!(matched.id().as_str(), "tar-absolute-names-ask");
+    }
+
+    // ==== issue #86: matching_rest_by_name gained the same tar-dashless
+    // rewrite matching_rest already had, so matches_except_target/
+    // matches_except_flags can see a dash-less x+C cluster's flags too ====
+
+    #[test]
+    fn tar_dashless_cluster_except_target_finds_extract_over_root_rule() {
+        // The issue's own repro shape: `tar xfC a.tar $(echo /)` — before
+        // this fix, matches_except_target couldn't see `-x`/`-C` inside
+        // the un-rewritten `xfC` cluster, so tar-extract-over-root-or-home
+        // silently missed, leaving only the coarser tar-absolute-names-ask
+        // (whose reason names a flag this command doesn't have) to
+        // attribute the Ask to.
+        let rules = Rules::embedded().unwrap();
+        let cmd = {
+            let mut v = argv(&["tar", "xfC", "a.tar"]);
+            v.push(NormalizedWord::unresolvable(
+                crate::normalize::UnresolvableKind::CommandSubstitution,
+            ));
+            v
+        };
+        assert!(rules.match_command(&cmd).is_none());
+        let rule = rules.match_command_except_target(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "tar-extract-over-root-or-home");
+    }
+
+    #[test]
+    fn tar_already_dashed_except_target_unaffected_by_rewrite() {
+        // Regression guard: an ordinary, already-dashed tar command (no
+        // dash-less cluster to rewrite) must keep finding the same rule
+        // it always did.
+        let rules = Rules::embedded().unwrap();
+        let cmd = {
+            let mut v = argv(&["tar", "-x", "-f", "a.tar", "-C"]);
+            v.push(NormalizedWord::unresolvable(
+                crate::normalize::UnresolvableKind::CommandSubstitution,
+            ));
+            v
+        };
+        let rule = rules.match_command_except_target(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "tar-extract-over-root-or-home");
+    }
+
+    #[test]
+    fn tar_dashless_unmodeled_cluster_except_flags_unaffected_by_rewrite() {
+        // `xbfC` is a plausible dash-less cluster (all-alphabetic,
+        // contains `x`) but `b` isn't in TAR_DASHLESS_CONSUMING/BOOLEAN,
+        // so tar_dashless_rewrite returns None (TarDashlessCluster::Unmodeled)
+        // and matching_rest_by_name's new Cow fallback must return the
+        // ORIGINAL tail unchanged, exactly as it did before this fix —
+        // exercising the map_or(Cow::Borrowed(tail), ...) fallback branch
+        // without panicking or changing which rule matches_except_flags
+        // finds. (The Unmodeled shape itself always separately floors to
+        // Ask via crate::gate::scan_tar_dashless_unmodeled_floor,
+        // regardless of this rewrite — untouched by this fix.)
+        let rules = Rules::embedded().unwrap();
+        let cmd = {
+            let mut v = argv(&["tar", "xbfC", "a.tar"]);
+            v.push(NormalizedWord::unresolvable(
+                crate::normalize::UnresolvableKind::CommandSubstitution,
+            ));
+            v
+        };
+        let rule = rules.match_command_except_flags(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "tar-absolute-names-ask");
+    }
+
+    #[test]
+    fn tar_dashless_recognized_cluster_avoids_double_counting_in_except_flags() {
+        // The invariant matches_except_flags's own docs promise: "a rule
+        // already fully satisfied by resolved words alone is matches's
+        // job, not this one's". `xPfC` rewrites to `-x -P -f a.tar -C
+        // /tmp`, which fully (and strictly) satisfies tar-absolute-names-
+        // ask's required_flags (x + P) via resolved words alone — before
+        // this fix, matches_except_flags couldn't see that (the un-
+        // rewritten `xPfC` token satisfies neither `-x` nor `-P`
+        // literally), so it would have wrongly returned true here too,
+        // double-counting the same rule as both a full match and a floor.
+        //
+        // The trailing unresolvable word is load-bearing: without it,
+        // `has_unresolvable` is false and `matches_except_flags` returns
+        // `None` unconditionally (via its own separate, unrelated guard),
+        // regardless of whether the rewrite fires — which would make this
+        // test pass even if `matching_rest_by_name`'s rewrite step were
+        // deleted.
+        let rules = Rules::embedded().unwrap();
+        let cmd = {
+            let mut v = argv(&["tar", "xPfC", "a.tar", "/tmp/foo"]);
+            v.push(NormalizedWord::unresolvable(
+                crate::normalize::UnresolvableKind::CommandSubstitution,
+            ));
+            v
+        };
+        let matched = rules.match_command(&cmd).unwrap();
+        assert_eq!(matched.id().as_str(), "tar-absolute-names-ask");
+        assert!(rules.match_command_except_flags(&cmd).is_none());
     }
 
     // ==== issue #68: tar -P/--absolute-names bypasses -C entirely ====
