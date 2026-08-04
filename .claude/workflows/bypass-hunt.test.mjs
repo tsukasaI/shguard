@@ -258,3 +258,37 @@ test('null verdict slot (the historical "Change 5 filter(Boolean) deletion" regr
   assert.equal(result.inconclusive.length, 1)
   assert.equal(result.inconclusive[0].error, 'parallel yielded null verdict slot')
 })
+
+test('a candidate missing prior_art is flagged in schema_violations, without failing the run', async () => {
+  // prior_art is required by HUNT_SCHEMA, but a schema-violating agent can
+  // still omit it (or return a blank string) -- mirrors the dropped_count/
+  // expected_decision defensive checks already pinned above: a missing
+  // self-reported field must leave a trace, not silently read the same as a
+  // genuinely-checked "none".
+  const fixture = allCleanFixture()
+  fixture[0] = cleanEntry('A', {
+    candidates: [
+      {
+        payload: 'whatever',
+        class_id: 'A',
+        intent: 'irrelevant to this test',
+        observed_decision: 'Allow',
+        expected_decision: 'Block',
+        control_payload: CONTROL.A.control,
+        control_decision: 'Block',
+        mechanisms: ['A'],
+      },
+    ],
+  })
+  fixture[0].verdicts = [
+    {
+      candidate: fixture[0].result.candidates[0],
+      verdict: { outcome: 'confirmed', observed_decision: 'Allow', reason: 'reproduced' },
+      error: null,
+    },
+  ]
+  const { result } = await runAggregate(fixture)
+  assert.equal(result.status, 'ok')
+  assert.equal(result.schema_violations.length, 1)
+  assert.match(result.schema_violations[0], /class A: candidate "whatever" is missing prior_art/)
+})
