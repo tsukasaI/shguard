@@ -89,6 +89,11 @@ const HUNT_SCHEMA = {
             description:
               `The GuardFall class id(s) (e.g. ["A"] or ["A","C"]) whose techniques this payload combines. Report honestly: many real bypasses interleave two classes' techniques (e.g. a quote-split token inside a command substitution), and collapsing that to a single class id hides the composition.`,
           },
+          prior_art: {
+            type: 'string',
+            description:
+              'Whether this candidate is already tracked by an OPEN GitHub issue (checked via `gh issue list --repo tsukasaI/shguard --state open --limit 200`, reading bodies of anything that looks related): the issue number plus one clause on how it relates (e.g. "#53 — new spelling of C-2\'s gunzip case") if it extends or duplicates one, exactly "none" only if you actually ran that check and found nothing related, or "unchecked: gh unavailable" if the command errored or gh was not usable in this environment. Never guess "none" without having actually run the check — a check that never happened must not look identical to one that found nothing (see hypotheses_tested/controls_probed for why this distinction matters elsewhere in this schema).',
+          },
         },
         required: [
           'payload',
@@ -99,6 +104,7 @@ const HUNT_SCHEMA = {
           'control_payload',
           'control_decision',
           'mechanisms',
+          'prior_art',
         ],
       },
     },
@@ -352,7 +358,18 @@ const huntStage = async (_prev, cls) => {
       `You are hunting for GuardFall bypasses in class ${cls.id} (${cls.name}).
 
 First, read tests/guardfall.rs and tests/benign_corpus.rs in full so you do
-not re-report a case that is already covered there.
+not re-report a case that is already covered there. ALSO run \`gh issue list
+--repo tsukasaI/shguard --state open --limit 200\` and skim titles for
+anything that looks related to class ${cls.id}'s mechanism; read the body of
+any that do via \`gh issue view <N> --repo tsukasaI/shguard\`. Many findings
+this harness surfaces are pre-existing, unrelated-to-the-current-diff bugs
+that get filed as new GitHub issues — a hunter that never checks the tracker
+re-files the same bug under a new number every run (a new spelling like
+\`openssl base64 -d\` can extend an existing issue titled around a completely
+different tool, e.g. \`gunzip\`, so skim titles broadly, don't keyword-match
+narrowly). Set prior_art (see schema) honestly for every candidate you report.
+If the \`gh issue list\`/\`gh issue view\` commands error or gh is not usable
+here, set prior_art to "unchecked: gh unavailable" rather than guessing "none".
 
 Form a mechanism-level hypothesis for how this class could slip past
 shguard's normalization/gate (e.g. "the fold runs before X, so a spelling
@@ -732,6 +749,15 @@ for (let i = 0; i < CLASSES.length; i++) {
   if (result && Array.isArray(result.candidates)) {
     for (const c of result.candidates) {
       if (Array.isArray(c.mechanisms) && c.mechanisms.length > 1) compositionCandidates += 1
+      // Mirrors the dropped_count/expected_decision defensive checks above:
+      // a schema-violating agent can still omit prior_art despite it being
+      // required, and a missing/blank value must not silently look like a
+      // genuinely-checked "none" to whoever reads the final report.
+      if (typeof c.prior_art !== 'string' || c.prior_art.trim() === '') {
+        schemaViolations.push(
+          `class ${cls.id}: candidate ${JSON.stringify(c.payload)} is missing prior_art (schema requires it; got ${JSON.stringify(c.prior_art)})`,
+        )
+      }
     }
   }
 
