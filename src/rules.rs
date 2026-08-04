@@ -1770,9 +1770,26 @@ fn value_flag_free_candidates<'a>(rest: &[&'a str], value_flags: &[ValueFlag]) -
 /// wrapped command by ordinary matching, and `crate::gate`'s wrapper-layer
 /// floor recurses that value as a shell-command string exactly like rule
 /// 6a already does for `sh -c`/`bash -c`, rather than merely skipping it.
+///
+/// `busybox` (issue #114) is a multi-call binary: `busybox <applet> args...`
+/// runs `<applet>` exactly as if invoked directly, so `busybox mkswap
+/// /dev/sda1`/`busybox rm -rf /`/`busybox sh -c 'rm -rf /'` all reached
+/// `Allow` before this entry, since the resolved command name was always
+/// the literal string `"busybox"`, matching no rule. Deliberately no
+/// [`wrapper_value_flags`]/[`wrapper_positional_args`] entry: real
+/// busybox's own global options (`--help`/`--install`/`--list`/`--show`)
+/// are terminal — its dispatcher handles them and exits, it never falls
+/// through to run a later argv word as an applet — so there is no
+/// `busybox --flag VALUE applet args...` shape whose `VALUE` could be
+/// mistaken for the wrapped command; the generic dash-prefix skip in
+/// [`skip_wrapper_flags`] can only ever over-resolve a global-flag
+/// invocation (e.g. `busybox --show rm` resolving `rm`, the safe
+/// direction), never swallow a real applet name. Not itself an
+/// [`ESCALATION_VECTORS`] entry — busybox is a dispatcher, not a
+/// privilege-escalation mechanism.
 pub(crate) const TRANSPARENT_WRAPPERS: &[&str] = &[
     "env", "command", "nohup", "nice", "exec", "stdbuf", "setsid", "sudo", "xargs", "doas", "su",
-    "pkexec", "run0", "timeout", "ionice", "flock", "chrt", "taskset",
+    "pkexec", "run0", "timeout", "ionice", "flock", "chrt", "taskset", "busybox",
 ];
 
 /// The subset of [`TRANSPARENT_WRAPPERS`] that escalate privileges (issues
@@ -4273,6 +4290,63 @@ mod tests {
         );
     }
 
+    // ==== Issue #114: TRANSPARENT_WRAPPERS gained busybox ====
+
+    #[test]
+    fn mkswap_matches_through_busybox_wrapper() {
+        // The issue's own reproduction: `busybox mkswap /dev/sda1` behaves
+        // identically to a bare `mkswap /dev/sda1` and must match the same
+        // rule.
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["busybox", "mkswap", "/dev/sda1"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn rm_rf_root_matches_through_busybox_wrapper() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["busybox", "rm", "-rf", "/"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn wrapper_chain_escalation_finds_every_vector_through_busybox() {
+        // Mirrors wrapper_chain_escalation_finds_each_escalation_vector's
+        // "through env" case, but through busybox — every ESCALATION_VECTORS
+        // entry must still floor when reached via busybox's empty flag/
+        // positional tables, not just su. (A "vector before busybox", e.g.
+        // `sudo busybox rm -rf /`, would be vacuous coverage here: the
+        // per-hop ESCALATION_VECTORS check fires on `sudo` before
+        // `busybox` is ever inspected, so that ordering can't exercise
+        // busybox's TRANSPARENT_WRAPPERS membership at all — this loop
+        // only tests the direction that actually depends on it.)
+        for vector in ESCALATION_VECTORS {
+            assert_eq!(
+                wrapper_chain_escalation(&argv(&["busybox", vector, "whoami"])),
+                WrapperChainEscalation::Contains(vector),
+                "vector {vector:?} through busybox"
+            );
+        }
+    }
+
+    #[test]
+    fn wrapper_chain_escalation_is_absent_for_busybox_alone() {
+        // Guards against a future regression that adds busybox to
+        // ESCALATION_VECTORS, contradicting TRANSPARENT_WRAPPERS' doc
+        // comment ("busybox is a dispatcher, not a privilege-escalation
+        // mechanism") with no test failing to catch it.
+        assert_eq!(
+            wrapper_chain_escalation(&argv(&["busybox", "rm", "-rf", "/"])),
+            WrapperChainEscalation::Absent
+        );
+    }
+
     // ---- regression (fable-model review): the shadow check must match a
     // rule's full constraints, not just its command name, or a username
     // that happens to share a blocklisted command's name (a routine system
@@ -6295,6 +6369,24 @@ mod tests {
             id = "user-allow-env"
             reason = "trust me"
             command = "env"
+        "#;
+        assert!(matches!(
+            UserConfig::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn user_config_rejects_allow_entry_matching_busybox() {
+        // Issue #114: busybox joined TRANSPARENT_WRAPPERS, so an
+        // `[[allow]] command = "busybox"` entry must be rejected the same
+        // way `env`'s is above — otherwise it would launder every
+        // busybox-wrapped Ask/Block floor to Allow.
+        let toml = r#"
+            [[allow]]
+            id = "user-allow-busybox"
+            reason = "trust me"
+            command = "busybox"
         "#;
         assert!(matches!(
             UserConfig::parse(toml),
