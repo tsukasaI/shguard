@@ -4128,6 +4128,33 @@ mod tests {
         assert_decision("tar cfz archive.tar.gz somedir/", Decision::Allow);
     }
 
+    // ==== Issue #86: matches_except_target/matches_except_flags can now
+    // see a dash-less x+C cluster's flags, restoring accurate reason-
+    // string attribution (no decision-level change — both before and
+    // after, these commands correctly reach Ask). ====
+
+    #[test]
+    fn tar_dashless_cluster_hidden_target_attributes_to_extract_over_root_rule() {
+        // The issue's own repro: before this fix, only the coarser
+        // tar-absolute-names-ask rule's reason showed (naming a flag this
+        // command doesn't have); now tar-extract-over-root-or-home's own,
+        // accurate reason is present too.
+        let verdict = analyze("tar xfC a.tar $(echo /)");
+        assert_eq!(verdict.decision(), Decision::Ask);
+        let reason = verdict.reason().unwrap().as_str();
+        assert!(reason.contains("tar-extract-over-root-or-home"), "{reason}");
+    }
+
+    #[test]
+    fn tar_dashless_unmodeled_cluster_with_hidden_target_still_asks() {
+        // `xbfC`'s `b` is unmodeled, so tar_dashless_rewrite returns None
+        // and matching_rest_by_name's new Cow fallback returns the
+        // original tail unchanged — this must not panic, and the command
+        // must still reach Ask (via the separate, untouched
+        // scan_tar_dashless_unmodeled_floor, independent of this fix).
+        assert_decision("tar xbfC a.tar $(echo /)", Decision::Ask);
+    }
+
     // ==== Issue #78: unresolved ascent-then-descent floors to Ask
     // end-to-end, never inherits the matched rule's own (often Block)
     // decision ====
