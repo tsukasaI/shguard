@@ -1001,6 +1001,12 @@ fn evaluate_simple_command(
     // same reason `tar_dashless_floor` is: this floor must survive
     // `core`'s early returns too.
     let named_user_home_floor = scan_named_user_home_floor(&argv, rules);
+    // Issue #115: a tilde attached directly after an `=`-terminated flag
+    // (`--directory=~`, `--directory=~alice`) that would hit a matched
+    // rule's own bare-`~` target if zsh's `magic_equal_subst` option
+    // expanded it. Computed here for the same reason the other floors
+    // above are: this floor must survive `core`'s early returns too.
+    let directory_equals_tilde_floor = scan_directory_equals_tilde_floor(&argv, rules);
 
     let verdict = evaluate_simple_command_core(
         command,
@@ -1015,12 +1021,14 @@ fn evaluate_simple_command(
     let ascent_descent_floor_present = ascent_descent_floor.is_some();
     let redirect_ascent_descent_floor_present = redirect_ascent_descent_floor.is_some();
     let named_user_home_floor_present = named_user_home_floor.is_some();
+    let directory_equals_tilde_floor_present = directory_equals_tilde_floor.is_some();
     let verdict = apply_expansion_floor(verdict, expansion.floor);
     let verdict = apply_recursable_floor(verdict, recursable.floor);
     let verdict = apply_tar_dashless_floor(verdict, tar_dashless_floor);
     let verdict = apply_ascent_descent_floor(verdict, ascent_descent_floor);
     let verdict = apply_ascent_descent_floor(verdict, redirect_ascent_descent_floor);
     let verdict = apply_named_user_home_floor(verdict, named_user_home_floor);
+    let verdict = apply_directory_equals_tilde_floor(verdict, directory_equals_tilde_floor);
 
     // Rule 11's allowlist guard: the same presence-based reasoning as
     // `has_argument_substitution` above (module docs, "User config
@@ -1048,6 +1056,11 @@ fn evaluate_simple_command(
     // unresolved substitution hiding in a LEFTOVER alternative of that
     // same command-position word — see this function's own comment above
     // for why the winning-alternative case needs no separate guard.
+    // `directory_equals_tilde_floor_present` (issue #115) extends it once
+    // more: an allow entry for `tar` is not consent to a `--directory=~`-
+    // shaped token that would hit that same rule's bare-`~` target under
+    // zsh's `magic_equal_subst` option — shguard cannot know whether the
+    // invoking shell has that (off-by-default) option set.
     let verdict = if has_argument_substitution
         || has_leftover_substitution
         || expansion.has_any
@@ -1057,6 +1070,7 @@ fn evaluate_simple_command(
         || ascent_descent_floor_present
         || redirect_ascent_descent_floor_present
         || named_user_home_floor_present
+        || directory_equals_tilde_floor_present
     {
         verdict
     } else {
@@ -1660,6 +1674,66 @@ fn scan_named_user_home_floor(
 /// self-documenting-call-site reason the others are (module docs'
 /// one-function-per-floor convention).
 fn apply_named_user_home_floor(verdict: Verdict, floor: Option<(Decision, String)>) -> Verdict {
+    let Some((floor_decision, floor_reason)) = floor else {
+        return verdict;
+    };
+    if verdict.decision() >= floor_decision {
+        return verdict;
+    }
+    let argv = verdict.normalized_argv().to_vec();
+    let reason = match verdict.reason() {
+        Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
+        None => floor_reason,
+    };
+    match floor_decision {
+        Decision::Block => Verdict::block(Reason::new(reason), argv, None),
+        Decision::Ask | Decision::Allow => Verdict::ask(Reason::new(reason), argv),
+    }
+}
+
+/// Issue #115: `Some(Ask, reason)` when `argv` matches a rule's command+
+/// flags — an embedded blocklist rule, a user-config `[[deny]]` entry, or
+/// a user-config `[[ask]]` entry (`Rules::match_command_directory_equals_tilde`
+/// scans both `command_rules` and `ask_rules`) — and some resolved tail
+/// token attaches a tilde directly after an `=`-terminated flag prefix the
+/// same rule declares
+/// (`crate::rules::CommandRule::matches_directory_equals_tilde_floor`) in
+/// a shape that would hit that rule's own bare-`~` target if zsh's
+/// `magic_equal_subst` option expanded it — `None` otherwise. Always
+/// capped at `Ask`, never the matched rule's own decision (often
+/// `Block`): unlike a bare, unattached `~` (which every shell expands
+/// identically), whether `--directory=~` expands at all depends on an
+/// off-by-default zsh option shguard cannot observe from the command
+/// string alone. Kept independent of `CommandRule::matches` for the same
+/// reason [`scan_named_user_home_floor`] is: a per-token match has no way
+/// to say "this specific token can only ever be Ask" while the same
+/// rule's other targets stay at its own fixed decision.
+fn scan_directory_equals_tilde_floor(
+    argv: &[NormalizedWord],
+    rules: &Rules,
+) -> Option<(Decision, String)> {
+    let rule = rules.match_command_directory_equals_tilde(argv)?;
+    Some((
+        Decision::Ask,
+        format!(
+            "a target token attaches `~`/`~user` directly after an `=`-terminated flag, which \
+             would match rule {:?} ({}) if the invoking shell's zsh `magic_equal_subst` option \
+             (off by default) expanded it; shguard cannot observe the invoking shell's options",
+            rule.id().as_str(),
+            rule.reason().as_str(),
+        ),
+    ))
+}
+
+/// Applies [`scan_directory_equals_tilde_floor`]'s floor to `verdict` —
+/// the same `decision.max(floor_decision)` max-lift every other floor in
+/// this module uses, kept as its own named function for the same
+/// self-documenting-call-site reason the others are (module docs'
+/// one-function-per-floor convention).
+fn apply_directory_equals_tilde_floor(
+    verdict: Verdict,
+    floor: Option<(Decision, String)>,
+) -> Verdict {
     let Some((floor_decision, floor_reason)) = floor else {
         return verdict;
     };
