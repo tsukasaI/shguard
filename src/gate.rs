@@ -5171,6 +5171,18 @@ mod tests {
         // `"$*"` is NOT the same exception — it genuinely joins to one
         // string when quoted, so it keeps resolving to Allow.
         assert_decision(r#"git commit -m "$*""#, Decision::Allow);
+        // Third fable-review finding on this same fix: `resolve_piece`'s
+        // `DoubleQuoted` arm originally returned on the FIRST unresolvable
+        // inner chunk, so a safe chunk (`$*`/`$VAR`/`$(...)`) preceding
+        // `$@` inside the SAME quotes masked `$@`'s danger — `"$*$@"`
+        // word-splits at runtime (`set -- a --no-verify; ... "$*$@"` is two
+        // words, the second being `--no-verify`) and wrongly resolved to
+        // Allow before the `DoubleQuoted` arm was fixed to AND every inner
+        // chunk's guarantee, mirroring `chunks_to_words`.
+        assert_decision(r#"git commit -m "$*$@""#, Decision::Ask);
+        assert_decision(r#"git commit -m "$VAR$@""#, Decision::Ask);
+        assert_decision(r#"git commit -m "$(echo x)$@""#, Decision::Ask);
+        assert_decision(r#"git commit -m "$@$*""#, Decision::Ask);
     }
 
     #[test]

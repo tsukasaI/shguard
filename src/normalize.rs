@@ -639,7 +639,7 @@ fn resolve_piece(piece: &WordPiece, allow_split: bool) -> (Chunk, bool) {
             // `allow_split = false` — no `Chunk::Split` can come back out
             // of `resolve_pieces` here, so a lone `Chunk::Unresolvable`
             // anywhere inside makes the WHOLE double-quoted sequence one
-            // `Chunk::Unresolvable` too (the first one found; matches this
+            // `Chunk::Unresolvable` too (the first KIND found; matches this
             // module's existing "one bad piece poisons its containing,
             // non-splitting run" behavior — issue #82 only changes that
             // rule at the TOP-LEVEL, `$IFS`-splittable layer, never inside
@@ -649,23 +649,50 @@ fn resolve_piece(piece: &WordPiece, allow_split: bool) -> (Chunk, bool) {
             // poisoning piece was reached, so rule 7's floor (a same-line
             // `IFS=` reassignment could make that already-folded text
             // wrong) still applies.
+            //
+            // `single_word` (issue #149, second fable-review finding on
+            // this same fix): must be ANDed across EVERY inner
+            // `Unresolvable` chunk, not just the first — mirroring
+            // `chunks_to_words`'s own aggregation exactly, and for the same
+            // reason. Most inner pieces earn `single_word = true`
+            // uniformly here (they're all resolved with `allow_split =
+            // false`), EXCEPT `"$@"` (see the `ParameterExpansion` arm
+            // below), which is unguaranteed regardless of quoting — so
+            // `"$*$@"` (an ordinary quoted `$*` — safe alone — followed by
+            // `$@` — never safe) must not let the first chunk's safety
+            // mask the second chunk's danger. An early return on the FIRST
+            // `Unresolvable` chunk (this function's shape before this fix)
+            // would do exactly that: `git commit -m "$*$@"` word-splits at
+            // runtime and can smuggle in a real `--no-verify` after the
+            // "value," identical in kind to the bug `single_word` exists
+            // to catch.
             let (inner_chunks, ifs_derived) = resolve_pieces(inner, false);
             let mut buf = String::new();
+            let mut unresolvable: Option<(UnresolvableKind, bool)> = None;
             for chunk in inner_chunks {
                 match chunk {
-                    Chunk::Literal(text) => buf.push_str(&text),
-                    // `single_word` propagates unchanged: every inner piece
-                    // was itself resolved with `allow_split=false`, so
-                    // whatever guarantee it earned already reflects that.
+                    Chunk::Literal(text) => {
+                        if unresolvable.is_none() {
+                            buf.push_str(&text);
+                        }
+                    }
                     Chunk::Unresolvable(kind, single_word) => {
-                        return (Chunk::Unresolvable(kind, single_word), ifs_derived);
+                        unresolvable = Some(match unresolvable {
+                            None => (kind, single_word),
+                            Some((first_kind, guaranteed_so_far)) => {
+                                (first_kind, guaranteed_so_far && single_word)
+                            }
+                        });
                     }
                     Chunk::Split => unreachable!(
                         "allow_split=false never produces Chunk::Split (resolve_piece's own IFS arm)"
                     ),
                 }
             }
-            (Chunk::Literal(buf), ifs_derived)
+            match unresolvable {
+                Some((kind, single_word)) => (Chunk::Unresolvable(kind, single_word), ifs_derived),
+                None => (Chunk::Literal(buf), ifs_derived),
+            }
         }
         // `$IFS`/`${IFS}` (plan.md §4, Class B): unquoted and split-eligible
         // becomes a split point; otherwise (double-quoted, or an
@@ -1324,6 +1351,43 @@ mod tests {
         let argv = argv_of(r#"true "$*""#);
         assert_eq!(argv.len(), 2);
         assert!(argv[1].is_single_word());
+    }
+
+    // ==== the DoubleQuoted arm's own aggregation trap (issue #149, third
+    // fable-review finding): a safe chunk (`$*`/`$VAR`/`$(...)`) followed by
+    // `$@` inside the SAME pair of double quotes must not let the first
+    // chunk's guarantee mask the second chunk's danger — this is the exact
+    // shape `chunks_to_words`'s own aggregation already handles correctly;
+    // `resolve_piece`'s `DoubleQuoted` arm needed the identical fix. ====
+
+    #[test]
+    fn quoted_star_then_at_is_not_single_word() {
+        let argv = argv_of(r#"true "$*$@""#);
+        assert_eq!(argv.len(), 2);
+        assert!(!argv[1].is_single_word());
+    }
+
+    #[test]
+    fn quoted_var_then_at_is_not_single_word() {
+        let argv = argv_of(r#"true "$VAR$@""#);
+        assert_eq!(argv.len(), 2);
+        assert!(!argv[1].is_single_word());
+    }
+
+    #[test]
+    fn quoted_command_substitution_then_at_is_not_single_word() {
+        let argv = argv_of(r#"true "$(echo x)$@""#);
+        assert_eq!(argv.len(), 2);
+        assert!(!argv[1].is_single_word());
+    }
+
+    #[test]
+    fn quoted_at_then_star_is_not_single_word() {
+        // Order flipped from the cases above — pins that the fix isn't
+        // itself order-dependent in the other direction.
+        let argv = argv_of(r#"true "$@$*""#);
+        assert_eq!(argv.len(), 2);
+        assert!(!argv[1].is_single_word());
     }
 
     #[test]
