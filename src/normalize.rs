@@ -682,8 +682,23 @@ fn resolve_piece(piece: &WordPiece, allow_split: bool) -> (Chunk, bool) {
         // guaranteed to be exactly one runtime word even though its value
         // is unknown; an unquoted one (`$VAR`) is NOT, since that unknown
         // value could contain IFS whitespace and word-split at runtime.
-        WordPiece::ParameterExpansion(_) => (
-            Chunk::Unresolvable(UnresolvableKind::ParameterExpansion, !allow_split),
+        //
+        // `"$@"` is the one documented exception to "double quotes prevent
+        // splitting" in the entire shell grammar (fable code-review finding
+        // on this fix itself): it always expands to one runtime word PER
+        // POSITIONAL PARAMETER, even quoted — `set -- x --no-verify; git
+        // commit -m "$@"` actually runs as `git commit -m x --no-verify`,
+        // the exact same class of bypass this fix exists to close, just
+        // through a special parameter instead of `$(...)`. Never
+        // single-word regardless of `allow_split`. `"$*"` is NOT this
+        // exception — it always joins to exactly one string under quoting
+        // (only its join separator, not its word count, depends on IFS),
+        // so it keeps the ordinary `!allow_split` treatment.
+        WordPiece::ParameterExpansion(name) => (
+            Chunk::Unresolvable(
+                UnresolvableKind::ParameterExpansion,
+                name != "@" && !allow_split,
+            ),
             false,
         ),
         // Both forms of command substitution carry the same static
@@ -1281,6 +1296,34 @@ mod tests {
         let argv = argv_of("true $FOO");
         assert_eq!(argv.len(), 2);
         assert!(!argv[1].is_single_word());
+    }
+
+    // `"$@"` (fable code-review finding on issue #146/#149's own fix): the
+    // one exception to "double quotes prevent splitting" in the shell
+    // grammar — it splits into one word per positional parameter even
+    // quoted, so it must NEVER be single-word regardless of `allow_split`.
+    #[test]
+    fn quoted_dollar_at_is_not_single_word() {
+        let argv = argv_of(r#"true "$@""#);
+        assert_eq!(argv.len(), 2);
+        assert!(!argv[1].is_single_word());
+    }
+
+    #[test]
+    fn unquoted_dollar_at_is_not_single_word() {
+        let argv = argv_of("true $@");
+        assert_eq!(argv.len(), 2);
+        assert!(!argv[1].is_single_word());
+    }
+
+    // `"$*"` genuinely joins to exactly one string when quoted (only its
+    // separator, not its word count, depends on IFS) — it is NOT the same
+    // exception `"$@"` is, and stays single-word.
+    #[test]
+    fn quoted_dollar_star_is_single_word() {
+        let argv = argv_of(r#"true "$*""#);
+        assert_eq!(argv.len(), 2);
+        assert!(argv[1].is_single_word());
     }
 
     #[test]

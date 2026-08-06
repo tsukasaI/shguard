@@ -5161,6 +5161,16 @@ mod tests {
         // let the quoted piece's safety leak into the whole word's
         // guarantee — the unquoted piece alone is enough to keep this Ask.
         assert_decision(r#"git commit -m "$(echo a)"$(echo b)"#, Decision::Ask);
+        // `"$@"` (fable code-review finding on this very fix): the one
+        // exception to "double quotes prevent splitting" — it splits into
+        // one word per positional parameter even quoted, so `set -- x
+        // --no-verify; git commit -m "$@"` actually runs as `git commit -m
+        // x --no-verify` at runtime. Must stay Ask even though it's
+        // quoted, unlike every other quoted expansion this fix allows.
+        assert_decision(r#"git commit -m "$@""#, Decision::Ask);
+        // `"$*"` is NOT the same exception — it genuinely joins to one
+        // string when quoted, so it keeps resolving to Allow.
+        assert_decision(r#"git commit -m "$*""#, Decision::Allow);
     }
 
     #[test]
