@@ -1468,7 +1468,10 @@ impl CommandRule {
         }
         let has_unresolvable = rest_words
             .iter()
-            .any(|w| matches!(w.resolution(), Resolution::Unresolvable(_)));
+            .zip(value_flag_consumed(&rest_words, &self.value_flags))
+            .any(|(w, consumed)| {
+                !consumed && matches!(w.resolution(), Resolution::Unresolvable(_))
+            });
         has_unresolvable && self.relaxed_required_tokens_match(&rest_words)
     }
 
@@ -1839,6 +1842,53 @@ fn value_flag_free_candidates<'a>(rest: &[&'a str], value_flags: &[ValueFlag]) -
         }
     }
     candidates
+}
+
+/// `rest_words`, one `bool` per word, marking each word consumed as a
+/// declared `value_flags` entry's separated value (issue #146) — the
+/// counterpart to [`value_flag_free_candidates`] for
+/// [`CommandRule::matches_except_flags`]'s "could this unresolvable word
+/// plausibly be the missing required flag/token" floor. Unlike that
+/// function's precondition, some words here may themselves be unresolvable
+/// (that's the floor's whole reason for existing), so this walks
+/// [`NormalizedWord`]s directly instead of pre-resolved `&str`s, and only
+/// needs to know *whether* a word is consumed, not render a candidate list.
+///
+/// A word is consumed when the immediately preceding word is **resolved**
+/// and matches a declared flag's bare spelling (`-m`, never a cluster or
+/// attached-value form — same shape and same known limitations as
+/// [`ValueFlag`]'s own docs); a resolved literal `--` permanently turns off
+/// consumption for every word after it, mirroring
+/// [`value_flag_free_candidates`]'s own terminator handling. An
+/// unresolvable word can never itself be recognised as a declared flag's
+/// bare spelling — its text is unknown by construction — so it never
+/// triggers consumption of the word after it, only ever gets consumed
+/// itself.
+fn value_flag_consumed(rest_words: &[NormalizedWord], value_flags: &[ValueFlag]) -> Vec<bool> {
+    let mut consumed = vec![false; rest_words.len()];
+    let mut skip_next = false;
+    let mut past_terminator = false;
+    for (i, word) in rest_words.iter().enumerate() {
+        if skip_next {
+            consumed[i] = true;
+            skip_next = false;
+            continue;
+        }
+        if past_terminator {
+            continue;
+        }
+        let Resolution::Resolved(token) = word.resolution() else {
+            continue;
+        };
+        if token == "--" {
+            past_terminator = true;
+            continue;
+        }
+        if value_flags.iter().any(|vf| vf.is_bare(token)) {
+            skip_next = true;
+        }
+    }
+    consumed
 }
 
 // ---------------------------------------------------------------------
@@ -2745,23 +2795,30 @@ fn convert_command_rule(dto: CommandRuleDto) -> Result<CommandRule, RulesError> 
         .map(|spec| ValueFlag::parse(spec).map_err(|problem| RulesError::invalid(&dto.id, problem)))
         .collect::<Result<Vec<_>, _>>()?;
 
-    // value_flags only ever affects the except_targets candidate walk in
-    // CommandRule::matches's `targets`-empty branch (module docs) — a rule
-    // that declares it alongside a non-empty `targets` list, or with no
-    // `except_targets` at all, would load successfully but have the field
-    // silently do nothing. "parse, don't validate" (module docs): catch
-    // that dead configuration at load time rather than let a rule author's
-    // mistake pass unnoticed.
+    // value_flags narrows two candidate walks, both reachable only when
+    // `targets` is empty (module docs on both consumers): the except_targets
+    // walk in CommandRule::matches's `targets`-empty branch, and (issue
+    // #146) matches_except_flags's "could this unresolvable word plausibly
+    // be the missing required flag/token" floor. A rule that declares it
+    // alongside a non-empty `targets` list, or with none of
+    // `except_targets`/`required_flags`/`required_tokens` at all, would
+    // load successfully but have the field silently do nothing. "parse,
+    // don't validate" (module docs): catch that dead configuration at load
+    // time rather than let a rule author's mistake pass unnoticed.
     if !value_flags.is_empty() && !targets.is_empty() {
         return Err(RulesError::invalid(
             &dto.id,
             "value_flags has no effect when `targets` is non-empty",
         ));
     }
-    if !value_flags.is_empty() && except_targets.is_empty() {
+    if !value_flags.is_empty()
+        && except_targets.is_empty()
+        && required_flags.is_empty()
+        && dto.required_tokens.is_empty()
+    {
         return Err(RulesError::invalid(
             &dto.id,
-            "value_flags has no effect without `except_targets`",
+            "value_flags has no effect without `except_targets` or `required_flags`/`required_tokens`",
         ));
     }
 
@@ -5976,15 +6033,18 @@ mod tests {
         // rule specifically must not treat a `git commit` invocation as if
         // it might be `git push --force`.
         //
-        // This does NOT mean the command floors to no rule at all: `git
-        // commit -m $(...)` still matches `git-commit-no-verify-short`
-        // (`required_tokens = ["commit"]`, `required_flags = ["n|--no-verify"]`)
-        // via this same mechanism, since an unresolvable word could
-        // plausibly be `--no-verify` — see
-        // `matches_except_flags_still_fires_via_a_different_rule_for_the_right_subcommand`
-        // below, which pins that positive case explicitly (code review
-        // finding on issue #42's PR: an `assert_ne` on one rule ID alone
-        // can misleadingly read as "no floor fires").
+        // This does NOT mean the command floors to no rule at all in
+        // general: an unresolvable word NOT immediately consumed as a
+        // declared `value_flags` entry's value still matches
+        // `git-commit-no-verify-short` for the right subcommand — see
+        // `matches_except_flags_still_fires_for_the_right_subcommand_when_not_consumed`
+        // below (code review finding on issue #42's PR: an `assert_ne` on
+        // one rule ID alone can misleadingly read as "no floor fires"). This
+        // particular argv (`-m` immediately before the unresolvable word)
+        // floors to no rule at all post-issue-#146, since
+        // `git-commit-no-verify-short`'s declared `value_flags = ["m",
+        // "message"]` now consumes it — see
+        // `matches_except_flags_value_flags_suppresses_the_floor_for_a_consumed_word`.
         let rules = Rules::embedded().unwrap();
         let cmd = vec![
             NormalizedWord::resolved("git"),
@@ -6000,17 +6060,38 @@ mod tests {
     }
 
     #[test]
-    fn matches_except_flags_still_fires_via_a_different_rule_for_the_right_subcommand() {
-        // Same argv as the test above: `git-push-force` is correctly ruled
-        // out, but `git-commit-no-verify-short` (whose `required_tokens =
-        // ["commit"]` DOES match the resolved "commit" positional) still
-        // fires, since its `required_flags = ["n|--no-verify"]` could
-        // plausibly be the unresolved word.
+    fn matches_except_flags_value_flags_suppresses_the_floor_for_a_consumed_word() {
+        // issue #146: same argv as the test above (`git commit -m
+        // <unresolvable>`) — before `git-commit-no-verify-short` declared
+        // `value_flags = ["m", "message"]`, this floored to Ask via that
+        // rule (the unresolvable word looked like a possible
+        // `-n|--no-verify`). Declaring `-m` as a value flag tells the floor
+        // it's `-m`'s consumed value instead, so no rule matches at all —
+        // this is what lets `git commit -m "$(cat <<'EOF' ... EOF)"` (a
+        // heredoc commit message) resolve to Allow.
         let rules = Rules::embedded().unwrap();
         let cmd = vec![
             NormalizedWord::resolved("git"),
             NormalizedWord::resolved("commit"),
             NormalizedWord::resolved("-m"),
+            NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::CommandSubstitution),
+        ];
+        assert!(rules.match_command_except_flags(&cmd).is_none());
+    }
+
+    #[test]
+    fn matches_except_flags_still_fires_for_the_right_subcommand_when_not_consumed() {
+        // Same shape as the test above, but the unresolvable word is NOT
+        // immediately preceded by a declared value flag — `value_flags`
+        // only ever narrows the specific word it consumes, never the floor
+        // in general, so `git-commit-no-verify-short` (`required_tokens =
+        // ["commit"]` matches the resolved "commit" positional) still fires,
+        // since `required_flags = ["n|--no-verify"]` could plausibly be
+        // this unresolved word.
+        let rules = Rules::embedded().unwrap();
+        let cmd = vec![
+            NormalizedWord::resolved("git"),
+            NormalizedWord::resolved("commit"),
             NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::CommandSubstitution),
         ];
         let rule = rules.match_command_except_flags(&cmd).unwrap();
@@ -6019,17 +6100,29 @@ mod tests {
 
     #[test]
     fn matches_except_flags_no_required_tokens_rule_fires_regardless_of_subcommand() {
-        // `git-no-verify-any-subcommand` has `required_flags =
-        // ["--no-verify"]` and NO `required_tokens` at all — with no
-        // positional constraint to narrow it, the floor for this
-        // particular rule degrades to "any `git` invocation containing an
-        // unresolvable word, regardless of subcommand." This is the
-        // intended fail-closed consequence of an empty `required_tokens`
-        // (no positional information exists to rule anything out), not a
-        // bug — pinned explicitly (code review finding: the floor's actual
-        // blast radius is broader than the find-delete/truncate-zero/
-        // git-push-force set the PR body names).
-        let rules = Rules::embedded().unwrap();
+        // A `required_flags`-only rule with NO `required_tokens` at all has
+        // no positional constraint to narrow it, so the floor degrades to
+        // "any invocation of this command containing an unresolvable word,
+        // regardless of subcommand." This was pinned against the embedded
+        // `git-no-verify-any-subcommand` rule before issue #146 split it
+        // into per-subcommand rules (each of which now has
+        // `required_tokens`, precisely to avoid this over-broad shape for
+        // git specifically — see `rules/blocklist.toml`'s comment on the
+        // split). The underlying mechanism this test guards is general
+        // rather than tied to any one embedded rule, so it's pinned here
+        // against a synthetic rule instead (code review finding on issue
+        // #42's PR: the floor's actual blast radius is broader than the
+        // find-delete/truncate-zero/git-push-force set the PR body names).
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "git-no-verify-any-subcommand"
+            reason = "--no-verify bypasses pre-commit/commit-msg/pre-push hooks"
+            command = "git"
+            required_flags = ["--no-verify"]
+        "#,
+        )
+        .unwrap();
         let cmd = vec![
             NormalizedWord::resolved("git"),
             NormalizedWord::resolved("status"),
@@ -6582,6 +6675,80 @@ mod tests {
             Rules::parse(toml),
             Err(RulesError::InvalidRule { .. })
         ));
+    }
+
+    // ==== value_flags on a required_flags/required_tokens-only rule
+    // (issue #146): narrows matches_except_flags's floor instead of
+    // except_targets' candidate walk ====
+
+    fn git_commit_no_verify_with_value_flags() -> &'static str {
+        r#"
+            [[command]]
+            id = "git-commit-no-verify-short"
+            reason = "git commit -n/--no-verify skips pre-commit and commit-msg hooks"
+            command = "git"
+            required_tokens = ["commit"]
+            required_flags = ["n|--no-verify"]
+            value_flags = ["m", "message"]
+        "#
+    }
+
+    #[test]
+    fn value_flags_on_required_flags_only_rule_loads_successfully() {
+        // The counterpart to `value_flags_without_except_targets_is_rejected_at_rule_load`:
+        // a `required_flags`/`required_tokens`-bearing rule with empty
+        // `targets` and no `except_targets` at all is now a legal home for
+        // `value_flags`, not just an `except_targets`-bearing one.
+        assert!(Rules::parse(git_commit_no_verify_with_value_flags()).is_ok());
+    }
+
+    #[test]
+    fn value_flags_consumes_a_declared_flags_separated_value_in_the_flags_floor() {
+        let rules = Rules::parse(git_commit_no_verify_with_value_flags()).unwrap();
+        let cmd = vec![
+            NormalizedWord::resolved("git"),
+            NormalizedWord::resolved("commit"),
+            NormalizedWord::resolved("-m"),
+            NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::CommandSubstitution),
+        ];
+        assert!(rules.match_command_except_flags(&cmd).is_none());
+    }
+
+    #[test]
+    fn value_flags_end_of_options_terminator_stops_consumption_in_the_flags_floor() {
+        // Same shape as `value_flags_does_not_consume_positionals_after_end_of_options_terminator`
+        // (the except_targets counterpart) but for the flags floor: a
+        // resolved literal `--` before `-m` means `-m` is an ordinary
+        // positional by shell convention, not the declared flag, so it
+        // must not consume the following unresolvable word.
+        let rules = Rules::parse(git_commit_no_verify_with_value_flags()).unwrap();
+        let cmd = vec![
+            NormalizedWord::resolved("git"),
+            NormalizedWord::resolved("commit"),
+            NormalizedWord::resolved("--"),
+            NormalizedWord::resolved("-m"),
+            NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::CommandSubstitution),
+        ];
+        let rule = rules.match_command_except_flags(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "git-commit-no-verify-short");
+    }
+
+    #[test]
+    fn value_flags_unresolvable_flag_token_does_not_consume_in_the_flags_floor() {
+        // The consumer must be a RESOLVED literal matching the declared
+        // flag's bare spelling — an unresolvable word can never be
+        // recognised as `-m` itself (its text is unknown by construction),
+        // so it never triggers consumption of the word after it; both stay
+        // candidates and the floor still fires.
+        let rules = Rules::parse(git_commit_no_verify_with_value_flags()).unwrap();
+        let cmd = vec![
+            NormalizedWord::resolved("git"),
+            NormalizedWord::resolved("commit"),
+            NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::CommandSubstitution),
+            NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::CommandSubstitution),
+        ];
+        let rule = rules.match_command_except_flags(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "git-commit-no-verify-short");
     }
 
     // ==== Shape robustness: unresolvable command name never matches,

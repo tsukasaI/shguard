@@ -369,17 +369,82 @@ required_tokens = ["clean"]
 # -n is --no-verify for `git commit` only (for `git push` it means --dry-run).
 # Known false-positive edge: a `-m` message argument starting with `-` and
 # containing 'n' may trigger (same class of imprecision as the dotfiles hook).
+# `value_flags` (issue #146) tells the unresolved-word floor that `-m`'s
+# value is a value, not a candidate for `-n|--no-verify` — this is what
+# lets `git commit -m "$(cat <<'EOF' ... EOF)"` (a heredoc commit message)
+# resolve to Allow instead of Ask. Only the separated bare-flag form (`-m
+# msg`/`--message msg`) is covered: a `-am` combined-short-flag cluster and
+# an attached `--message=$(...)` form both still Ask, by design (see
+# `ValueFlag`'s own docs in src/rules.rs for why clusters/attached-unresolvable
+# forms aren't recognised).
 [[command]]
 id = "git-commit-no-verify-short"
 reason = "git commit -n/--no-verify skips pre-commit and commit-msg hooks"
 command = "git"
 required_tokens = ["commit"]
 required_flags = ["n|--no-verify"]
+value_flags = ["m", "message"]
+
+# issue #146: `git-no-verify-any-subcommand` (a single required_flags-only
+# rule spanning every git subcommand) used to live here. It's replaced by
+# the explicit enumeration below because `-m`'s arity is subcommand-
+# dependent (value-taking on commit/merge, boolean on rebase/am) — a single
+# rule spanning all of git cannot safely declare `value_flags = ["m"]`
+# without opening a hook-bypass hole on the subcommands where `-m` is
+# boolean (confirmed: `git am -m "$(echo --no-verify)"` would wrongly Allow
+# under a shared rule; `git rebase -m "$(echo --no-verify)"` would lose its
+# own floor too, though the blanket `git-rebase` Block below still catches
+# it regardless). Enumeration verified against `git 2.55.0`'s Main Porcelain
+# commands (`man git-<subcommand>`, one at a time) for every subcommand
+# that honors `--no-verify` at all:
+#   commit, merge, pull, push, rebase, am
+# `rebase` needs no rule of its own: `git-rebase` below already blocks
+# every invocation unconditionally, regardless of flags. Every other Main
+# Porcelain subcommand (fetch, clone, tag, branch, …) rejects `--no-verify`
+# as an unknown option in this git version, so an unresolvable word in one
+# of them no longer floors to Ask — re-audit this enumeration on git
+# upgrades (a future subcommand could gain `--no-verify` support). One
+# non-Porcelain exception is already covered explicitly below: `git p4
+# submit --no-verify` (a Foreign Interfaces command, checked separately)
+# also bypasses hooks.
+[[command]]
+id = "git-merge-no-verify"
+reason = "git merge --no-verify bypasses pre-merge-commit and commit-msg hooks"
+command = "git"
+required_tokens = ["merge"]
+required_flags = ["--no-verify"]
+value_flags = ["m", "message"]
 
 [[command]]
-id = "git-no-verify-any-subcommand"
-reason = "--no-verify bypasses pre-commit/commit-msg/pre-push hooks"
+id = "git-pull-no-verify"
+reason = "git pull --no-verify bypasses pre-merge-commit and commit-msg hooks"
 command = "git"
+required_tokens = ["pull"]
+required_flags = ["--no-verify"]
+
+[[command]]
+id = "git-push-no-verify"
+reason = "git push --no-verify bypasses the pre-push hook"
+command = "git"
+required_tokens = ["push"]
+required_flags = ["--no-verify"]
+
+[[command]]
+id = "git-am-no-verify"
+reason = "git am -n/--no-verify bypasses applypatch-msg and pre-applypatch hooks"
+command = "git"
+required_tokens = ["am"]
+required_flags = ["n|--no-verify"]
+
+# git-p4 (Foreign Interfaces, not a Main Porcelain command — outside the
+# enumeration comment above) has its own --no-verify, bypassing the
+# p4-pre-submit/p4-changelist/p4-prepare-changelist hooks. No value_flags:
+# `git p4 submit` has no -m/--message flag.
+[[command]]
+id = "git-p4-submit-no-verify"
+reason = "git p4 submit --no-verify bypasses p4-pre-submit/p4-changelist/p4-prepare-changelist hooks"
+command = "git"
+required_tokens = ["p4", "submit"]
 required_flags = ["--no-verify"]
 
 [[command]]
@@ -389,18 +454,27 @@ command = "git"
 required_tokens = ["checkout"]
 required_flags = ["--"]
 
+# No required_flags: every invocation blocks unconditionally, which is also
+# why the git-*-no-verify enumeration above has no git-rebase-no-verify —
+# `--no-verify` on rebase (rebase's `-m` is boolean `--merge`, so it can't
+# safely declare value_flags) is already covered by this blanket Block.
 [[command]]
 id = "git-rebase"
 reason = "git rebase rewrites commit history"
 command = "git"
 required_tokens = ["rebase"]
 
+# value_flags (issue #146, same reasoning as git-commit-no-verify-short
+# above): without it, `git commit -m "$(...)"` would still Ask via THIS
+# rule even after the no-verify rule is fixed — its own required_flags
+# floor mistakes -m's value for a possible --amend.
 [[command]]
 id = "git-commit-amend"
 reason = "git commit --amend rewrites the previous commit"
 command = "git"
 required_tokens = ["commit"]
 required_flags = ["--amend"]
+value_flags = ["m", "message"]
 
 # -D only (force-delete of unmerged branches). -d (safe, merged-only) is
 # intentionally not blocked. `--delete` alone = -d (safe form); -D requires

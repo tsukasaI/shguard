@@ -43,12 +43,19 @@
 //!    $(echo -delete)`, `truncate $(echo -s) 0 file.db`, `git push $(echo
 //!    --force) origin main`). Ask, never Allow. Note the actual scope is
 //!    wider than these three examples: a rule with `required_flags` but
-//!    no `required_tokens` (e.g. `git-no-verify-any-subcommand`) has no
-//!    positional information to rule anything out, so it floors EVERY
-//!    invocation of its command containing an unresolvable word,
-//!    regardless of subcommand — the intended fail-closed consequence of
-//!    "no per-command semantics" (module docs), not a narrower opt-in per
-//!    rule. See [`crate::rules::CommandRule::matches_except_flags`].
+//!    no `required_tokens` has no positional information to rule anything
+//!    out, so it floors EVERY invocation of its command containing an
+//!    unresolvable word, regardless of subcommand — the intended
+//!    fail-closed consequence of "no per-command semantics" (module docs),
+//!    not a narrower opt-in per rule. A declared `value_flags` entry
+//!    (issue #146) narrows this per word, not per rule: it excludes a
+//!    specific value-taking flag's own value from candidacy, which is why
+//!    a rule spanning multiple subcommands with different flag arities
+//!    (e.g. git's `-m`, value-taking on `commit`/`merge` but boolean on
+//!    `rebase`/`am`) must pin a single subcommand via `required_tokens`
+//!    before it can safely declare one — see `rules/blocklist.toml`'s
+//!    `git-commit-no-verify-short`/`git-*-no-verify` rules. See
+//!    [`crate::rules::CommandRule::matches_except_flags`].
 //! 5. Pipeline shape ("rule 5") — the ported `curl|wget -> sh` rule
 //!    (`crate::rules::Rules::match_pipeline`) plus two NEW structural
 //!    rules: a decode/transform stage feeding an interpreter sink blocks
@@ -5074,18 +5081,84 @@ mod tests {
     }
 
     #[test]
-    fn git_no_verify_any_subcommand_floors_any_git_substitution_regardless_of_subcommand() {
-        // `git-no-verify-any-subcommand` has `required_flags = ["--no-verify"]`
-        // and NO `required_tokens` — with no positional constraint to rule
-        // anything out, rule 4b's floor for this rule degrades to "any `git`
+    fn git_no_verify_split_narrows_unresolvable_word_coverage_to_the_enumerated_subcommands() {
+        // issue #146: `git-no-verify-any-subcommand` (`required_flags =
+        // ["--no-verify"]`, NO `required_tokens`) used to floor any `git`
         // invocation containing an unresolvable word, regardless of
-        // subcommand" (code review finding on issue #42's PR: the floor's
-        // actual blast radius is broader than the find-delete/truncate-zero/
-        // git-push-force set the PR body names). This is the intended
-        // fail-closed consequence of `required_tokens` being empty, not a
-        // bug — pinned explicitly here rather than left implicit.
-        assert_decision("git status $(echo foo)", Decision::Ask);
-        assert_decision("git log $(cat ref)", Decision::Ask);
+        // subcommand — rule 4b degrading to "any invocation of this
+        // command" when a rule has no positional constraint to narrow it.
+        // It's replaced by an explicit per-subcommand enumeration (see
+        // `rules/blocklist.toml`'s comment on the split) because a single
+        // rule spanning all of git can't safely declare `value_flags`
+        // (`-m`'s arity is subcommand-dependent). Net effect: a subcommand
+        // outside the enumeration no longer floors on an unresolvable word
+        // — documented, intentional narrowing, pinned here rather than left
+        // implicit. `commit`/`merge`/`pull`/`push`/`am` (the enumerated
+        // subcommands, `rebase` needs no rule of its own — see
+        // `git-rebase`'s comment) still floor/block as before.
+        assert_decision("git status $(echo foo)", Decision::Allow);
+        assert_decision("git log $(cat ref)", Decision::Allow);
+        assert_decision("git pull $(echo foo)", Decision::Ask);
+        assert_decision("git push $(echo foo)", Decision::Ask);
+        assert_decision("git am $(echo foo)", Decision::Ask);
+    }
+
+    #[test]
+    fn git_commit_no_verify_value_flags_suppresses_the_floor_for_the_message_value() {
+        // issue #146's repro: a heredoc (or any command-substitution-built)
+        // commit message used to Ask, because the unresolvable `-m` value
+        // looked exactly as plausible a `--no-verify` as a real hidden flag
+        // would. `git-commit-no-verify-short`'s `value_flags = ["m",
+        // "message"]` (and `git-commit-amend`'s own copy, needed for the
+        // same reason — see its comment in `rules/blocklist.toml`) fixes
+        // this without weakening the resolved-literal case.
+        assert_decision(r#"git commit -m "$(echo hi)""#, Decision::Allow);
+        assert_decision(
+            "git commit -m \"$(cat <<'EOF'\nline one\nline two\nEOF\n)\"",
+            Decision::Allow,
+        );
+        assert_decision(r#"git merge -m "$(echo hi)" branch"#, Decision::Allow);
+        // The declared flag's long-form spelling, separately from its short
+        // form — `value_flags = ["m", "message"]` declares both, and only
+        // "m" is exercised above.
+        assert_decision(r#"git commit --message "$(echo hi)""#, Decision::Allow);
+        // Resolved literal `--no-verify` is unaffected by the floor change
+        // — still caught by the ordinary strict match, not the floor.
+        assert_decision(r#"git commit --no-verify -m "$(echo hi)""#, Decision::Block);
+        // A value flag's own token being unresolvable never triggers
+        // consumption — the consumer must be a resolved literal.
+        assert_decision(r#"git commit "$(echo -m)" "$(echo hi)""#, Decision::Ask);
+        // Known, documented residue (blocklist.toml's comment on this
+        // rule): a combined short-flag cluster and an attached
+        // `--message=$(...)` form aren't recognised by `ValueFlag`'s
+        // is_bare (never matches inside a cluster) or by consumption
+        // (can't see inside an already-unresolvable word) — both still Ask.
+        assert_decision(r#"git commit -am "$(echo hi)""#, Decision::Ask);
+        assert_decision(r#"git commit --message="$(echo hi)""#, Decision::Ask);
+    }
+
+    #[test]
+    fn git_p4_submit_no_verify_still_blocks_after_the_broad_rule_split() {
+        // issue #146 code-review finding: `git-no-verify-any-subcommand`'s
+        // removal (replaced by the Main-Porcelain enumeration) silently
+        // dropped `git p4 submit --no-verify` from Block to Allow — `p4` is
+        // a Foreign Interfaces command, outside that enumeration, but its
+        // `--no-verify` bypasses the p4-pre-submit/p4-changelist hooks just
+        // as much as the enumerated subcommands' does. `git-p4-submit-no-verify`
+        // restores this as an explicit exception.
+        assert_decision("git p4 submit --no-verify", Decision::Block);
+    }
+
+    #[test]
+    fn git_rebase_and_am_do_not_declare_value_flags_for_their_boolean_m() {
+        // issue #146: `-m` is value-taking on commit/merge but boolean on
+        // rebase (`--merge`) and am (`--message-id`) — `git-rebase-no-verify`
+        // doesn't exist (the unconditional `git-rebase` rule already blocks
+        // every invocation) and `git-am-no-verify` declares no `value_flags`
+        // at all, so these keep flooring on an unresolvable word exactly as
+        // before the split.
+        assert_decision(r#"git rebase -m "$(echo hi)" main"#, Decision::Block);
+        assert_decision(r#"git am -m "$(echo hi)" f.mbox"#, Decision::Ask);
     }
 
     #[test]
