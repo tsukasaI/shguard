@@ -5138,6 +5138,32 @@ mod tests {
     }
 
     #[test]
+    fn git_commit_no_verify_value_flags_does_not_consume_an_unquoted_expansion() {
+        // issue #149 (code-review finding on issue #146's own PR, verified
+        // live before this fix landed: `git commit -m $(printf "x
+        // --no-verify")` wrongly resolved to Allow). An UNQUOTED expansion
+        // after `-m` is word-split by bash at runtime — `-m $(printf "x
+        // --no-verify")` actually executes as `-m x --no-verify`, smuggling
+        // a real `--no-verify` in as a separate word right after the
+        // "value." `value_flags` consumption must require
+        // `NormalizedWord::is_single_word` (only true for a quoted
+        // expansion) before excluding a word from the "could this be the
+        // missing flag" floor — these must all stay `Ask`, matching `main`'s
+        // pre-`value_flags` behavior exactly, not silently regress to
+        // `Allow`.
+        assert_decision("git commit -m $(echo hi)", Decision::Ask);
+        assert_decision(r#"git commit -m $(printf "x --no-verify")"#, Decision::Ask);
+        assert_decision("git commit -m $MSG", Decision::Ask);
+        assert_decision("git merge -m $(echo hi) branch", Decision::Ask);
+        // The aggregation trap (normalize.rs's own design discussion,
+        // pinned again here end-to-end): a quoted piece glued directly to
+        // an unquoted one, with no `$IFS` boundary between them, must not
+        // let the quoted piece's safety leak into the whole word's
+        // guarantee — the unquoted piece alone is enough to keep this Ask.
+        assert_decision(r#"git commit -m "$(echo a)"$(echo b)"#, Decision::Ask);
+    }
+
+    #[test]
     fn git_p4_submit_no_verify_still_blocks_after_the_broad_rule_split() {
         // issue #146 code-review finding: `git-no-verify-any-subcommand`'s
         // removal (replaced by the Main-Porcelain enumeration) silently

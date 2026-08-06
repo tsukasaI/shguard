@@ -123,31 +123,54 @@ pub enum Resolution {
 
 /// A normalised word: its [`Resolution`] plus provenance.
 ///
-/// The provenance flag exists because "resolved" and "trustworthy" are not
-/// the same claim: plan.md §1.1/§4 folds `$IFS`-containing words using the
-/// *default* IFS, but a same-line `IFS=` assignment can make that fold
-/// wrong. Such a word is legitimately both `Resolved` *and* untrusted — the
-/// structural gate (a later issue) needs to tell it apart from an ordinarily
-/// resolved word (e.g. to still check it against the blocklist but never let
-/// a miss fall through to `Allow`). Wrapping `Resolution` in a struct with
-/// an `ifs_derived` flag makes that combined state representable instead of
-/// forcing a third `Resolution` variant that would duplicate the resolved
-/// string case.
+/// The provenance flags exist because "resolved"/"unresolvable" alone don't
+/// capture everything downstream matching needs to know:
+///
+/// - `ifs_derived`: "resolved" and "trustworthy" are not the same claim —
+///   plan.md §1.1/§4 folds `$IFS`-containing words using the *default* IFS,
+///   but a same-line `IFS=` assignment can make that fold wrong. Such a word
+///   is legitimately both `Resolved` *and* untrusted — the structural gate
+///   (a later issue) needs to tell it apart from an ordinarily resolved word
+///   (e.g. to still check it against the blocklist but never let a miss
+///   fall through to `Allow`).
+/// - `single_word` (issue #146's `value_flags`-on-`matches_except_flags`
+///   follow-up, GitHub issue #149 tracks generalising this): "unresolvable"
+///   alone doesn't say whether this word position is GUARANTEED to denote
+///   exactly one runtime shell word. A quoted expansion (`"$(...)"`,
+///   `"$VAR"`) is — bash never word-splits inside double quotes. An
+///   *unquoted* one (`$(...)`, `$VAR`) is NOT — its unknown runtime value
+///   could contain IFS whitespace and split into several argv words, one of
+///   which could be something entirely different from what a caller
+///   expects to find at this position. Any mechanism that treats an
+///   unresolvable word as safely "just a value" at a specific position
+///   (rather than merely "presence somewhere in the tail forces Ask") MUST
+///   consult [`Self::is_single_word`] first — see
+///   `crate::rules::value_flag_consumed`, the motivating consumer.
+///
+/// Wrapping `Resolution` in a struct with these flags makes each combined
+/// state representable instead of forcing extra `Resolution` variants that
+/// would duplicate the resolved/unresolvable string cases.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NormalizedWord {
     resolution: Resolution,
     ifs_derived: bool,
+    single_word: bool,
 }
 
 impl NormalizedWord {
     /// A word resolved to a concrete value by ordinary static folding
     /// (quote removal, ANSI-C decoding, tilde/brace expansion — not `$IFS`
-    /// folding).
+    /// folding). Always [`Self::is_single_word`]: a resolved word's text is
+    /// already fully known, so any unquoted whitespace it would have
+    /// word-split on has already been accounted for by this stage's own
+    /// splitting logic (`chunks_to_words`) — there is no remaining count
+    /// uncertainty to track.
     #[must_use]
     pub fn resolved(value: impl Into<String>) -> Self {
         Self {
             resolution: Resolution::Resolved(value.into()),
             ifs_derived: false,
+            single_word: true,
         }
     }
 
@@ -160,15 +183,46 @@ impl NormalizedWord {
         Self {
             resolution: Resolution::Resolved(value.into()),
             ifs_derived: true,
+            single_word: true,
         }
     }
 
-    /// A word whose value could not be resolved statically.
+    /// A word whose value could not be resolved statically, and whose
+    /// runtime word COUNT at this position is also not guaranteed to be
+    /// exactly one (the fail-closed default — [`Self::is_single_word`] is
+    /// `false`). Use this for anything reached through an unquoted,
+    /// split-eligible context, or for a kind whose splitting behavior
+    /// hasn't been specifically argued safe (see
+    /// [`Self::unresolvable_single_word`]'s docs for the narrower case that
+    /// isn't).
     #[must_use]
     pub fn unresolvable(kind: UnresolvableKind) -> Self {
         Self {
             resolution: Resolution::Unresolvable(kind),
             ifs_derived: false,
+            single_word: false,
+        }
+    }
+
+    /// A word whose value could not be resolved statically, but whose
+    /// runtime word count at this position IS guaranteed to be exactly one
+    /// (a quoted expansion, e.g. `"$(...)"`/`"$VAR"` — bash never
+    /// word-splits inside double quotes, so whatever this expands to at
+    /// runtime is, by construction, one argv word, even though its content
+    /// is unknown). Only [`resolve_piece`]'s expansion arms construct this,
+    /// driven by the `allow_split` context already threaded through
+    /// `src/normalize.rs`'s folding — never call this directly for a kind
+    /// whose splitting behavior hasn't been argued safe (e.g.
+    /// `ArithmeticExpansion`/`ProcessSubstitution` stay conservatively
+    /// [`Self::unresolvable`] even when quoted, deferring that narrower
+    /// optimization rather than bundling an unreviewed claim into this fix
+    /// — GitHub issue #149).
+    #[must_use]
+    pub(crate) fn unresolvable_single_word(kind: UnresolvableKind) -> Self {
+        Self {
+            resolution: Resolution::Unresolvable(kind),
+            ifs_derived: false,
+            single_word: true,
         }
     }
 
@@ -184,6 +238,22 @@ impl NormalizedWord {
     #[must_use]
     pub fn is_ifs_derived(&self) -> bool {
         self.ifs_derived
+    }
+
+    /// Whether this word is GUARANTEED to denote exactly one runtime shell
+    /// word — always `true` for a [`Resolution::Resolved`] word; for a
+    /// [`Resolution::Unresolvable`] one, `true` only when every expansion
+    /// contributing to it was reached through a non-splitting (quoted)
+    /// context. `false` is the fail-closed default for any unresolvable
+    /// word not specifically constructed via
+    /// [`Self::unresolvable_single_word`] — see that constructor's docs and
+    /// `crate::rules::value_flag_consumed` for why this distinction matters
+    /// (issue #146/#149): treating an unquoted expansion as safely "just a
+    /// value" at a specific argv position would let its unknown runtime
+    /// word-split smuggle in an entirely different, dangerous word.
+    #[must_use]
+    pub(crate) fn is_single_word(&self) -> bool {
+        self.single_word
     }
 }
 
@@ -305,7 +375,15 @@ pub(crate) fn normalize_assignment_value(assignment: &Assignment) -> Vec<Normali
 enum Chunk {
     Literal(String),
     Split,
-    Unresolvable(UnresolvableKind),
+    /// `bool`: whether THIS piece's contribution is guaranteed to be part
+    /// of exactly one runtime word (issue #146/#149) — `true` when it was
+    /// resolved with `allow_split = false` (a quoted/non-splitting
+    /// context) for a kind whose splitting behavior has been argued safe,
+    /// `false` otherwise (the fail-closed default). [`chunks_to_words`]
+    /// ANDs this across every `Unresolvable` chunk in a segment, since one
+    /// splittable piece anywhere in an otherwise-quoted word still makes
+    /// the WHOLE resulting word's runtime count uncertain.
+    Unresolvable(UnresolvableKind, bool),
 }
 
 /// The shared brace-then-resolve fold for both [`normalize_word`]
@@ -447,7 +525,7 @@ fn split_at_first_word_boundary(pieces: &[WordPiece]) -> Option<(Vec<WordPiece>,
             }
             Chunk::Split => segment_nonempty = false,
             Chunk::Literal(text) => segment_nonempty |= !text.is_empty(),
-            Chunk::Unresolvable(_) => segment_nonempty = true,
+            Chunk::Unresolvable(_, _) => segment_nonempty = true,
         }
     }
     None
@@ -550,7 +628,10 @@ fn resolve_piece(piece: &WordPiece, allow_split: bool) -> (Chunk, bool) {
         WordPiece::EscapeSequence(ch) => (Chunk::Literal(ch.to_string()), false),
         WordPiece::AnsiCQuoted(raw) => match decode_ansi_c(raw) {
             Ok(decoded) => (Chunk::Literal(decoded), false),
-            Err(kind) => (Chunk::Unresolvable(kind), false),
+            // Not argued single-word-safe (issue #149): conservatively
+            // unguaranteed even though $'...' syntax itself never splits —
+            // narrowing this is deferred, not bundled into this fix.
+            Err(kind) => (Chunk::Unresolvable(kind, false), false),
         },
         WordPiece::DoubleQuoted(inner) => {
             // Double-quoted content never splits, regardless of the outer
@@ -573,7 +654,12 @@ fn resolve_piece(piece: &WordPiece, allow_split: bool) -> (Chunk, bool) {
             for chunk in inner_chunks {
                 match chunk {
                     Chunk::Literal(text) => buf.push_str(&text),
-                    Chunk::Unresolvable(kind) => return (Chunk::Unresolvable(kind), ifs_derived),
+                    // `single_word` propagates unchanged: every inner piece
+                    // was itself resolved with `allow_split=false`, so
+                    // whatever guarantee it earned already reflects that.
+                    Chunk::Unresolvable(kind, single_word) => {
+                        return (Chunk::Unresolvable(kind, single_word), ifs_derived);
+                    }
                     Chunk::Split => unreachable!(
                         "allow_split=false never produces Chunk::Split (resolve_piece's own IFS arm)"
                     ),
@@ -592,8 +678,12 @@ fn resolve_piece(piece: &WordPiece, allow_split: bool) -> (Chunk, bool) {
                 (Chunk::Literal(DEFAULT_IFS_WHITESPACE.to_string()), true)
             }
         }
+        // issue #146/#149: `!allow_split` — a quoted (`"$VAR"`) reference is
+        // guaranteed to be exactly one runtime word even though its value
+        // is unknown; an unquoted one (`$VAR`) is NOT, since that unknown
+        // value could contain IFS whitespace and word-split at runtime.
         WordPiece::ParameterExpansion(_) => (
-            Chunk::Unresolvable(UnresolvableKind::ParameterExpansion),
+            Chunk::Unresolvable(UnresolvableKind::ParameterExpansion, !allow_split),
             false,
         ),
         // Both forms of command substitution carry the same static
@@ -603,24 +693,35 @@ fn resolve_piece(piece: &WordPiece, allow_split: bool) -> (Chunk, bool) {
         // (`crate::ast::WordPiece::CommandSubstitution`/`BackquotedSubstitution`
         // already carry the raw inner string), so this kind does not need
         // to carry it too — duplicating it here would be a second source of
-        // truth for data the AST already owns.
+        // truth for data the AST already owns. `!allow_split`: same
+        // quoted-vs-unquoted reasoning as `ParameterExpansion` above — this
+        // is the exact case issue #146/#149 motivated (`git commit -m
+        // "$(...)"` is single-word-safe; `git commit -m $(...)` is not).
         WordPiece::CommandSubstitution(_) | WordPiece::BackquotedSubstitution(_) => (
-            Chunk::Unresolvable(UnresolvableKind::CommandSubstitution),
+            Chunk::Unresolvable(UnresolvableKind::CommandSubstitution, !allow_split),
             false,
         ),
         // Opaque regardless of what `crate::gate`'s raw-text rescan finds
         // inside it (issue #75) — the rescan only exists to let a `Block`
         // from an embedded `$(...)` escalate above this `Ask` floor, not to
-        // resolve the expansion itself.
+        // resolve the expansion itself. Not argued single-word-safe even
+        // when quoted (issue #149): an arithmetic result is always a
+        // whitespace-free integer under the default IFS, which WOULD make
+        // it safe unconditionally, but that claim is deferred to its own
+        // review rather than bundled into this fix — conservatively
+        // unguaranteed regardless of `allow_split`.
         WordPiece::ArithmeticExpansion(_) => (
-            Chunk::Unresolvable(UnresolvableKind::ArithmeticExpansion),
+            Chunk::Unresolvable(UnresolvableKind::ArithmeticExpansion, false),
             false,
         ),
         // Opaque regardless of what the substituted command's own recursive
         // evaluation decides (issue #75) — same "floor, not a resolution"
-        // relationship as arithmetic expansion above.
+        // relationship as arithmetic expansion above. Conservatively
+        // unguaranteed regardless of `allow_split` (issue #149) — no
+        // established reasoning for why a process substitution's runtime
+        // shape would be single-word-safe.
         WordPiece::ProcessSubstitution { .. } => (
-            Chunk::Unresolvable(UnresolvableKind::ProcessSubstitution),
+            Chunk::Unresolvable(UnresolvableKind::ProcessSubstitution, false),
             false,
         ),
         // Literal textual form only (`~`, `~user`, `~+`, `~-`, …). Resolving
@@ -648,9 +749,11 @@ fn resolve_piece(piece: &WordPiece, allow_split: bool) -> (Chunk, bool) {
             // (docs/adr/0001-parser-crate.md). Rather than panic, or fold
             // by guessing one alternative (forbidden — never a guessed
             // string), fail closed: the word becomes `Unresolvable` and the
-            // gate routes it to Ask.
+            // gate routes it to Ask. Conservatively unguaranteed (issue
+            // #149) — an unreachable-in-practice shape gets no special
+            // single-word reasoning.
             (
-                Chunk::Unresolvable(UnresolvableKind::UnsupportedStructure),
+                Chunk::Unresolvable(UnresolvableKind::UnsupportedStructure, false),
                 false,
             )
         }
@@ -662,13 +765,20 @@ fn resolve_piece(piece: &WordPiece, allow_split: bool) -> (Chunk, bool) {
 ///
 /// Uniformly segments `chunks` at every [`Chunk::Split`] boundary — even
 /// when no split occurred at all, which is just the one-segment case — into
-/// one `Result<String, UnresolvableKind>` per segment: `Ok` accumulates
-/// every [`Chunk::Literal`] in the segment; a [`Chunk::Unresolvable`]
-/// anywhere in it poisons the whole segment to `Err` (the first kind found
-/// — mirrors this module's pre-issue-#82 "one bad piece poisons the whole
-/// run" precedent, now scoped to one segment instead of the whole
-/// alternative). Each segment then becomes zero or one words:
-/// - `Err(kind)` ALWAYS produces exactly one [`NormalizedWord::unresolvable`],
+/// one `Result<String, (UnresolvableKind, bool)>` per segment: `Ok`
+/// accumulates every [`Chunk::Literal`] in the segment; a
+/// [`Chunk::Unresolvable`] anywhere in it poisons the whole segment to
+/// `Err` (the first kind found — mirrors this module's pre-issue-#82 "one
+/// bad piece poisons the whole run" precedent, now scoped to one segment
+/// instead of the whole alternative). The `bool` (issue #146/#149) is
+/// every `Chunk::Unresolvable`'s own single-word flag ANDed together across
+/// the WHOLE segment, not just the poisoning chunk's — a later splittable
+/// piece in an otherwise-quoted segment (`"$(a)"$(b)`) still makes the
+/// whole resulting word's runtime count uncertain, even though only the
+/// first chunk's *kind* is kept for the reported reason. Each segment then
+/// becomes zero or one words:
+/// - `Err((kind, single_word))` ALWAYS produces exactly one
+///   [`NormalizedWord::unresolvable`]/[`NormalizedWord::unresolvable_single_word`],
 ///   never filtered as potentially empty: an unresolvable segment's true
 ///   expansion length can't be known statically (this stage never executes
 ///   anything, module docs), so assuming it would vanish the way a resolved
@@ -685,7 +795,7 @@ fn resolve_piece(piece: &WordPiece, allow_split: bool) -> (Chunk, bool) {
 ///   must not vanish (plan.md §1.1 rule 7).
 fn chunks_to_words(chunks: Vec<Chunk>, ifs_derived: bool) -> Vec<NormalizedWord> {
     let mut segments = Vec::new();
-    let mut current: Result<String, UnresolvableKind> = Ok(String::new());
+    let mut current: Result<String, (UnresolvableKind, bool)> = Ok(String::new());
     for chunk in chunks {
         match chunk {
             Chunk::Literal(text) => {
@@ -693,10 +803,17 @@ fn chunks_to_words(chunks: Vec<Chunk>, ifs_derived: bool) -> Vec<NormalizedWord>
                     buf.push_str(&text);
                 }
             }
-            Chunk::Unresolvable(kind) => {
-                if current.is_ok() {
-                    current = Err(kind);
-                }
+            Chunk::Unresolvable(kind, single_word) => {
+                current = match current {
+                    Ok(_) => Err((kind, single_word)),
+                    // Keep the FIRST kind (unchanged from before issue
+                    // #149), but AND every chunk's single_word flag in —
+                    // one splittable piece anywhere in the segment revokes
+                    // the whole segment's guarantee.
+                    Err((first_kind, guaranteed_so_far)) => {
+                        Err((first_kind, guaranteed_so_far && single_word))
+                    }
+                };
             }
             Chunk::Split => {
                 segments.push(std::mem::replace(&mut current, Ok(String::new())));
@@ -709,7 +826,8 @@ fn chunks_to_words(chunks: Vec<Chunk>, ifs_derived: bool) -> Vec<NormalizedWord>
     segments
         .into_iter()
         .filter_map(|segment| match segment {
-            Err(kind) => Some(NormalizedWord::unresolvable(kind)),
+            Err((kind, true)) => Some(NormalizedWord::unresolvable_single_word(kind)),
+            Err((kind, false)) => Some(NormalizedWord::unresolvable(kind)),
             Ok(text) if single_segment || !text.is_empty() => Some(if ifs_derived {
                 NormalizedWord::resolved_ifs_derived(text)
             } else {
@@ -1129,6 +1247,73 @@ mod tests {
             *words[0].resolution(),
             Resolution::Unresolvable(UnresolvableKind::CommandSubstitution)
         );
+    }
+
+    // ==== single-word guarantee (issue #146/#149): a quoted expansion is
+    // guaranteed to be exactly one runtime shell word even though its
+    // value is unknown; an unquoted one is NOT, since word-splitting could
+    // smuggle in additional words at runtime — this is what
+    // `crate::rules::value_flag_consumed` must be able to tell apart. ====
+
+    #[test]
+    fn quoted_command_substitution_is_single_word() {
+        let argv = argv_of(r#"true "$(date)""#);
+        assert_eq!(argv.len(), 2);
+        assert!(argv[1].is_single_word());
+    }
+
+    #[test]
+    fn unquoted_command_substitution_is_not_single_word() {
+        let argv = argv_of("true $(date)");
+        assert_eq!(argv.len(), 2);
+        assert!(!argv[1].is_single_word());
+    }
+
+    #[test]
+    fn quoted_parameter_expansion_is_single_word() {
+        let argv = argv_of(r#"true "$FOO""#);
+        assert_eq!(argv.len(), 2);
+        assert!(argv[1].is_single_word());
+    }
+
+    #[test]
+    fn unquoted_parameter_expansion_is_not_single_word() {
+        let argv = argv_of("true $FOO");
+        assert_eq!(argv.len(), 2);
+        assert!(!argv[1].is_single_word());
+    }
+
+    #[test]
+    fn resolved_word_is_always_single_word() {
+        let argv = argv_of("true literal");
+        assert_eq!(argv.len(), 2);
+        assert!(argv[1].is_single_word());
+    }
+
+    // The aggregation trap (issue #149's own design discussion): a quoted
+    // piece followed immediately by an unquoted one, glued into ONE word
+    // with no $IFS boundary between them — the segment's guarantee must be
+    // the AND over every contributing chunk, not just the first (poisoning)
+    // one, or this would wrongly read as single-word-safe from the quoted
+    // piece alone.
+    #[test]
+    fn mixed_quoted_then_unquoted_substitution_is_not_single_word() {
+        let argv = argv_of(r#"true "$(a)"$(b)"#);
+        assert_eq!(argv.len(), 2);
+        assert!(!argv[1].is_single_word());
+    }
+
+    // Same trap, opposite order: unquoted first, quoted second — the
+    // unquoted piece's contribution must not be discarded just because the
+    // FIRST chunk (which decides the reported `kind`) came from the quoted
+    // side... here it's the other way round (unquoted first), so this also
+    // pins that the AND doesn't accidentally short-circuit on the first
+    // chunk's own value in either direction.
+    #[test]
+    fn mixed_unquoted_then_quoted_substitution_is_not_single_word() {
+        let argv = argv_of(r#"true $(a)"$(b)""#);
+        assert_eq!(argv.len(), 2);
+        assert!(!argv[1].is_single_word());
     }
 
     // ---- normalize_assignment_value: the canonical B4 use case ----

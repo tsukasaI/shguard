@@ -1864,14 +1864,33 @@ fn value_flag_free_candidates<'a>(rest: &[&'a str], value_flags: &[ValueFlag]) -
 /// bare spelling — its text is unknown by construction — so it never
 /// triggers consumption of the word after it, only ever gets consumed
 /// itself.
+///
+/// **The word being consumed must itself be
+/// [`NormalizedWord::is_single_word`] (issue #146's own follow-up regression,
+/// tracked at GitHub issue #149)** — otherwise this function would
+/// mistakenly treat an *unquoted* expansion (`git commit -m $(evil)`) the
+/// same as a *quoted* one (`git commit -m "$(evil)"`): bash word-splits an
+/// unquoted expansion's unknown runtime value, so it can silently smuggle
+/// in an entirely different, dangerous word right after the declared
+/// flag's "value" — e.g. `-m $(printf "x --no-verify")` actually runs as
+/// `-m x --no-verify`, and a value-flags declaration that blindly excluded
+/// this position from candidacy would let the real `--no-verify` sail
+/// through unnoticed. A quoted expansion carries no such risk (bash never
+/// splits inside double quotes), which is exactly what
+/// `is_single_word` distinguishes. A word failing this check is simply left
+/// unmarked (`consumed[i]` stays `false`) — it keeps floating as an
+/// ordinary unresolvable candidate, exactly as if no `value_flags` entry
+/// had matched at all (the pre-issue-#146 behavior, correctly conservative).
 fn value_flag_consumed(rest_words: &[NormalizedWord], value_flags: &[ValueFlag]) -> Vec<bool> {
     let mut consumed = vec![false; rest_words.len()];
     let mut skip_next = false;
     let mut past_terminator = false;
     for (i, word) in rest_words.iter().enumerate() {
         if skip_next {
-            consumed[i] = true;
             skip_next = false;
+            if word.is_single_word() {
+                consumed[i] = true;
+            }
             continue;
         }
         if past_terminator {
@@ -6062,7 +6081,10 @@ mod tests {
     #[test]
     fn matches_except_flags_value_flags_suppresses_the_floor_for_a_consumed_word() {
         // issue #146: same argv as the test above (`git commit -m
-        // <unresolvable>`) — before `git-commit-no-verify-short` declared
+        // <unresolvable>`), with the unresolvable word constructed as
+        // `unresolvable_single_word` — simulating a QUOTED substitution
+        // (`git commit -m "$(...)"`), which IS guaranteed to be exactly one
+        // runtime word. Before `git-commit-no-verify-short` declared
         // `value_flags = ["m", "message"]`, this floored to Ask via that
         // rule (the unresolvable word looked like a possible
         // `-n|--no-verify`). Declaring `-m` as a value flag tells the floor
@@ -6074,9 +6096,33 @@ mod tests {
             NormalizedWord::resolved("git"),
             NormalizedWord::resolved("commit"),
             NormalizedWord::resolved("-m"),
-            NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::CommandSubstitution),
+            NormalizedWord::unresolvable_single_word(
+                crate::normalize::UnresolvableKind::CommandSubstitution,
+            ),
         ];
         assert!(rules.match_command_except_flags(&cmd).is_none());
+    }
+
+    #[test]
+    fn matches_except_flags_value_flags_does_not_suppress_the_floor_for_an_unquoted_word() {
+        // issue #149 (code-review finding on this issue's own PR): same
+        // argv shape, but the unresolvable word is constructed as plain
+        // `unresolvable` — simulating an UNQUOTED substitution (`git commit
+        // -m $(...)`), which bash word-splits at runtime. A `value_flags`
+        // declaration must NOT consume this: `-m $(printf "x --no-verify")`
+        // actually runs as `-m x --no-verify`, smuggling a real
+        // `--no-verify` in as a separate word right after the "value" —
+        // the floor must still fire so this stays `Ask`, not silently
+        // become `Allow`.
+        let rules = Rules::embedded().unwrap();
+        let cmd = vec![
+            NormalizedWord::resolved("git"),
+            NormalizedWord::resolved("commit"),
+            NormalizedWord::resolved("-m"),
+            NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::CommandSubstitution),
+        ];
+        let rule = rules.match_command_except_flags(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "git-commit-no-verify-short");
     }
 
     #[test]
@@ -6704,6 +6750,28 @@ mod tests {
 
     #[test]
     fn value_flags_consumes_a_declared_flags_separated_value_in_the_flags_floor() {
+        // Simulates a QUOTED substitution (`-m "$(...)"`), guaranteed to be
+        // exactly one runtime word — the safe case `value_flags` is meant
+        // to suppress the floor for.
+        let rules = Rules::parse(git_commit_no_verify_with_value_flags()).unwrap();
+        let cmd = vec![
+            NormalizedWord::resolved("git"),
+            NormalizedWord::resolved("commit"),
+            NormalizedWord::resolved("-m"),
+            NormalizedWord::unresolvable_single_word(
+                crate::normalize::UnresolvableKind::CommandSubstitution,
+            ),
+        ];
+        assert!(rules.match_command_except_flags(&cmd).is_none());
+    }
+
+    #[test]
+    fn value_flags_does_not_consume_an_unquoted_declared_flags_value_in_the_flags_floor() {
+        // issue #149: simulates an UNQUOTED substitution (`-m $(...)`),
+        // which bash word-splits at runtime and can smuggle in an
+        // additional, dangerous word right after the declared flag's
+        // "value" — `value_flags` must NOT consume this; the floor keeps
+        // firing.
         let rules = Rules::parse(git_commit_no_verify_with_value_flags()).unwrap();
         let cmd = vec![
             NormalizedWord::resolved("git"),
@@ -6711,7 +6779,8 @@ mod tests {
             NormalizedWord::resolved("-m"),
             NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::CommandSubstitution),
         ];
-        assert!(rules.match_command_except_flags(&cmd).is_none());
+        let rule = rules.match_command_except_flags(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "git-commit-no-verify-short");
     }
 
     #[test]
