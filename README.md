@@ -216,22 +216,53 @@ except_targets = [
 ```
 
 `value_flags` only has an effect alongside a non-empty `except_targets`
-and an empty `targets` (the shape both examples above already use) —
-declaring it anywhere else is a load-time error, since the field would
-otherwise silently do nothing. Declaring a flag here is a trust decision
-with the same weight as an `except_targets` entry itself: only declare a
-flag whose value can never itself be, or point at, the thing the rule
-guards against — misdeclaring one is as much a bypass as a wrong
-`except_targets` pattern would be. In particular, don't declare an
-*optional*-argument flag (one that may or may not take a value depending
-on invocation, e.g. GNU `--color[=WHEN]`) — when such a flag appears
-without its value, the *next* token is an unrelated positional, and
-`value_flags` would wrongly consume it as if it were that flag's value. A
-short flag is only recognised as its own standalone token (`-o`, never
-glued into a cluster like `-so`), and everything after a bare `--`
-end-of-options terminator is exempt from `value_flags` matching entirely
-(it's an ordinary positional by shell convention from that point on, even
-if its text happens to match a declared flag's name).
+and an empty `targets`, OR (issue #146) alongside a non-empty
+`required_flags`/`required_tokens` and an empty `targets` — declaring it
+anywhere else is a load-time error, since the field would otherwise
+silently do nothing. In the `required_flags`/`required_tokens` shape, it
+narrows a different floor: whether an unresolvable word in the command's
+tail (`$VAR`, `$(...)`) *could plausibly be* one of the rule's required
+flags/tokens. Without declaring the flag that precedes it as a
+`value_flags` entry, a value-taking flag's own value gets mistaken for a
+free token that might be the dangerous flag itself — `git commit -m
+"$(cat <<'EOF' ... EOF)"` (a heredoc commit message) would otherwise ask
+for confirmation, because the message text looks exactly as unresolvable
+as a hidden `--no-verify` would:
+
+```toml
+[[command]]
+id = "git-commit-no-verify-short"
+reason = "git commit -n/--no-verify skips pre-commit and commit-msg hooks"
+command = "git"
+required_tokens = ["commit"]
+required_flags = ["n|--no-verify"]
+value_flags = ["m", "message"]
+```
+
+Declaring a flag here is a trust decision with the same weight as an
+`except_targets` entry itself: only declare a flag whose value can never
+itself be, or point at, the thing the rule guards against — misdeclaring
+one is as much a bypass as a wrong `except_targets` pattern would be. In
+particular, don't declare an *optional*-argument flag (one that may or may
+not take a value depending on invocation, e.g. GNU `--color[=WHEN]`) —
+when such a flag appears without its value, the *next* token is an
+unrelated positional, and `value_flags` would wrongly consume it as if it
+were that flag's value. A short flag is only recognised as its own
+standalone token (`-o`, never glued into a cluster like `-so`), and
+everything after a bare `--` end-of-options terminator is exempt from
+`value_flags` matching entirely (it's an ordinary positional by shell
+convention from that point on, even if its text happens to match a
+declared flag's name).
+
+**Subcommand-dispatched commands need one more caveat.** A flag's arity can
+depend on which subcommand it's attached to — git's `-m` takes a value on
+`commit`/`merge` but is a boolean flag on `rebase` (`--merge`) and `am`
+(`--message-id`). Only declare `value_flags` on a rule that pins a single
+subcommand via `required_tokens` (as the example above does with
+`["commit"]`); declaring it on a rule with no `required_tokens` at all —
+one meant to span every subcommand of a dispatched command — can turn a
+real flag into an accidentally-swallowed value on the subcommands where
+your declared flag doesn't actually take one.
 
 ### Precedence: deny > ask > allow
 
