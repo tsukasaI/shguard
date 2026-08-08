@@ -1022,11 +1022,14 @@ impl CommandRule {
     /// [`Self::matching_rest`] so it can be evaluated once per candidate
     /// hop.
     ///
-    /// `required_tokens` are matched positionally against the leading
-    /// non-dash-prefixed tokens after the resolved command —
+    /// `required_tokens` are matched via [`Positionals`] against the
+    /// leading non-dash-prefixed tokens after the resolved command —
     /// `required_tokens[0]` must be the first positional, `[1]` the
     /// second, etc. This prevents a commit message or branch name
     /// containing "clean" or "rebase" from triggering the wrong rule.
+    /// [`Positionals`]' alignment ends at the first unresolvable word,
+    /// except one this rule's own `value_flags` declares as a flag's
+    /// value (e.g. `-m`'s argument) rather than a positional.
     ///
     /// Known gap: `git -C <path> push` places a non-dash token (`<path>`)
     /// before the subcommand; the rule won't match in that case.
@@ -1036,20 +1039,9 @@ impl CommandRule {
         if !self.required_flags.iter().all(|flag| flag.satisfied(&rest)) {
             return false;
         }
-        if !self.required_tokens.is_empty() {
-            let positionals: Vec<&str> = rest
-                .iter()
-                .filter(|t| !t.starts_with('-'))
-                .copied()
-                .collect();
-            if !self
-                .required_tokens
-                .iter()
-                .enumerate()
-                .all(|(i, tok)| positionals.get(i).is_some_and(|p| *p == tok.as_str()))
-            {
-                return false;
-            }
+        let consumed = value_flag_consumed(rest_words, &self.value_flags);
+        if !Positionals::new(rest_words, &consumed).confirms(&self.required_tokens) {
+            return false;
         }
         true
     }
@@ -1380,36 +1372,19 @@ impl CommandRule {
     /// prefixed tokens only, in order).
     ///
     /// A resolved, non-dash-prefixed word at slot `i` that does not equal
-    /// `required_tokens[i]` proves the miss is real — no unresolvable word
-    /// elsewhere can rescue it — so this returns `false` immediately rather
-    /// than treating every command sharing this rule's command name as
-    /// ambiguous (e.g. `git commit -m $(echo hi)` must not float to `Ask`
-    /// under `git-push-force`'s rule just because "commit" isn't "push").
-    /// An unresolvable word is conservatively counted as occupying a
-    /// positional slot (it might not start with `-`), since its own text is
-    /// unknown by construction ([`Resolution::Unresolvable`] carries no
-    /// source text).
+    /// `required_tokens[i]` proves the miss is real — the mismatch sits in
+    /// the aligned prefix, before any unresolvable word, so nothing past it
+    /// can rescue it — so this returns `false` immediately rather than
+    /// treating every command sharing this rule's command name as ambiguous
+    /// (e.g. `git commit -m $(echo hi)` must not float to `Ask` under
+    /// `git-push-force`'s rule just because "commit" isn't "push"). A
+    /// missing slot is rescuable only when alignment stopped early on an
+    /// unresolvable word ([`Positionals::cannot_rule_out`]) — a slot missing
+    /// from a fully-resolved sequence is a proven absence, not an unknown.
     #[must_use]
     fn relaxed_required_tokens_match(&self, rest_words: &[NormalizedWord]) -> bool {
-        if self.required_tokens.is_empty() {
-            return true;
-        }
-        let mut positionals: Vec<Option<&str>> = Vec::new();
-        for word in rest_words {
-            match word.resolution() {
-                Resolution::Resolved(s) if !s.starts_with('-') => positionals.push(Some(s)),
-                Resolution::Resolved(_) => {}
-                Resolution::Unresolvable(_) => positionals.push(None),
-            }
-        }
-        self.required_tokens
-            .iter()
-            .enumerate()
-            .all(|(i, tok)| match positionals.get(i) {
-                Some(Some(p)) => *p == tok.as_str(),
-                Some(None) => true,
-                None => false,
-            })
+        let consumed = value_flag_consumed(rest_words, &self.value_flags);
+        Positionals::new(rest_words, &consumed).cannot_rule_out(&self.required_tokens)
     }
 
     /// Partial-match probe for the structural gate's flags/tokens floor
@@ -1721,6 +1696,85 @@ impl PipelineRule {
             effective_command(stage)
                 .is_some_and(|(name, _)| self.sources.iter().any(|src| src == name))
         })
+    }
+}
+
+/// The positional (non-dash-prefixed) words of a tail, aligned only up to
+/// the first unresolvable word — [`CommandRule::constraints_match`] and
+/// [`CommandRule::relaxed_required_tokens_match`]'s shared positional
+/// arithmetic (issue #149). Unlike [`resolved_strings`], an unresolvable
+/// word is not skipped past: skipping it would left-shift every later
+/// index, letting a resolved word downstream of an unknown one masquerade
+/// as an earlier positional it never was ([`resolved_strings`]'s doc names
+/// this as exactly the reasoning that doesn't hold once a matcher goes
+/// positional). Stopping at the first unresolvable word instead keeps
+/// `aligned`'s indices sound for everything before it, at the cost of
+/// knowing nothing about anything after it. Exception: a word already
+/// consumed as this rule's own declared value-flag's value (see
+/// [`Self::new`]) is skipped rather than stopping alignment.
+struct Positionals<'a> {
+    /// The non-dash-prefixed words up to (and not including) the first
+    /// unresolvable word, in order. Indices into this slice are the real
+    /// positional indices — sound because nothing before the first
+    /// unresolvable word could have been shifted by one being dropped.
+    aligned: Vec<&'a str>,
+    /// `false` when alignment stopped early because of an unresolvable
+    /// word; `true` when the whole tail was resolved and `aligned` is the
+    /// complete positional list.
+    complete: bool,
+}
+
+impl<'a> Positionals<'a> {
+    /// `consumed[i]` marks that `words[i]` is a declared `value_flags`
+    /// entry's value (from [`value_flag_consumed`]), not a positional in
+    /// its own right — a consumed *unresolvable* word is skipped rather
+    /// than stopping alignment, since the rule's own `value_flags`
+    /// declaration already says this slot isn't a positional, so treating
+    /// it as transparent costs no soundness. A consumed *resolved* word
+    /// still goes through the ordinary dash-prefix check unchanged.
+    fn new(words: &'a [NormalizedWord], consumed: &[bool]) -> Self {
+        let mut aligned = Vec::new();
+        let mut complete = true;
+        for (word, &is_consumed) in words.iter().zip(consumed) {
+            match word.resolution() {
+                Resolution::Resolved(s) if !s.starts_with('-') => aligned.push(s.as_str()),
+                Resolution::Resolved(_) => {} // dash-prefixed flag: not a positional, keep scanning
+                Resolution::Unresolvable(_) if is_consumed => {}
+                Resolution::Unresolvable(_) => {
+                    complete = false;
+                    break;
+                }
+            }
+        }
+        Self { aligned, complete }
+    }
+
+    /// Strict: can we PROVE required tokens are present, in order, in the
+    /// resolved prefix? Ignoring `complete` here is INTENTIONAL: `aligned`
+    /// only ever contains words before the first unresolvable word, so a
+    /// later unresolvable word can never disturb an already-matched
+    /// prefix's indices (constraints_match's use case).
+    fn confirms(&self, required: &[String]) -> bool {
+        required
+            .iter()
+            .enumerate()
+            .all(|(i, tok)| self.aligned.get(i).is_some_and(|p| *p == tok.as_str()))
+    }
+
+    /// Floor: can we fail to RULE OUT required tokens? A resolved slot that
+    /// mismatches is a proven miss (real text, checked). A missing slot is
+    /// rescuable only if we stopped early on an unresolvable word
+    /// (`!complete`) — if the sequence was fully resolved with no
+    /// unresolvable word at all, a missing slot means the token position
+    /// genuinely doesn't exist (relaxed_required_tokens_match's use case).
+    fn cannot_rule_out(&self, required: &[String]) -> bool {
+        required
+            .iter()
+            .enumerate()
+            .all(|(i, tok)| match self.aligned.get(i) {
+                Some(p) => *p == tok.as_str(),
+                None => !self.complete,
+            })
     }
 }
 
@@ -7712,5 +7766,317 @@ mod tests {
             Rules::parse(toml),
             Err(RulesError::DuplicateId(_))
         ));
+    }
+
+    // ==== Issue #149: `Positionals` — the shared positional arithmetic
+    // behind `constraints_match` (strict) and
+    // `relaxed_required_tokens_match` (Ask floor), replacing each
+    // function's own ad hoc index math over resolved/unresolvable words ====
+
+    fn tokens(words: &[&str]) -> Vec<String> {
+        words.iter().map(|w| w.to_string()).collect()
+    }
+
+    /// An all-`false` `value_flag_consumed` mask of length `n`, for
+    /// [`Positionals`] unit tests that aren't exercising `value_flags`.
+    fn no_consumed(n: usize) -> Vec<bool> {
+        vec![false; n]
+    }
+
+    #[test]
+    fn positionals_confirms_ignores_a_later_unresolvable_word() {
+        // p4 submit $(...) --no-verify — the required prefix is fully
+        // resolved and aligned; a later unresolvable word must not
+        // un-confirm an already-proven match. Locks against the rejected
+        // fix (`confirms` short-circuiting on `!complete`), which would
+        // have broken exactly this case.
+        let words = vec![
+            NormalizedWord::resolved("p4"),
+            NormalizedWord::resolved("submit"),
+            NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::ParameterExpansion),
+            NormalizedWord::resolved("--no-verify"),
+        ];
+        assert!(
+            Positionals::new(&words, &no_consumed(words.len()))
+                .confirms(&tokens(&["p4", "submit"]))
+        );
+    }
+
+    #[test]
+    fn positionals_cannot_rule_out_is_false_when_fully_resolved_and_too_short() {
+        // No unresolvable word anywhere: a missing slot is a proven
+        // absence, not an unknown.
+        let words = vec![NormalizedWord::resolved("p4")];
+        assert!(
+            !Positionals::new(&words, &no_consumed(words.len()))
+                .cannot_rule_out(&tokens(&["p4", "submit"]))
+        );
+    }
+
+    #[test]
+    fn positionals_empty_required_tokens_always_confirm_and_never_rule_out() {
+        let words = vec![
+            NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::ParameterExpansion),
+            NormalizedWord::resolved("anything"),
+        ];
+        let positionals = Positionals::new(&words, &no_consumed(words.len()));
+        assert!(positionals.confirms(&[]));
+        assert!(positionals.cannot_rule_out(&[]));
+    }
+
+    #[test]
+    fn positionals_cannot_rule_out_when_unresolvable_word_precedes_the_prefix() {
+        // Finding 1 regression: the unresolvable word might vanish at
+        // runtime, so it must not be assumed to occupy slot 0 and rule
+        // "p4" out of ever appearing there.
+        let words = vec![
+            NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::ParameterExpansion),
+            NormalizedWord::resolved("p4"),
+            NormalizedWord::resolved("submit"),
+        ];
+        assert!(
+            Positionals::new(&words, &no_consumed(words.len()))
+                .cannot_rule_out(&tokens(&["p4", "submit"]))
+        );
+    }
+
+    #[test]
+    fn positionals_unresolvable_before_push_is_not_a_mismatch() {
+        // The old confirms/resolved_strings mechanism used a drop-based
+        // scan that silently skipped past the unresolvable word, so it
+        // wrongly counted "push" as slot 0 and returned true here.
+        // Positionals::confirms correctly stops alignment at the
+        // unresolvable word instead, so "push" never enters `aligned` and
+        // confirms is false; cannot_rule_out stays true since alignment
+        // stopped early rather than proving "push" absent.
+        let words = vec![
+            NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::ParameterExpansion),
+            NormalizedWord::resolved("push"),
+            NormalizedWord::resolved("origin"),
+        ];
+        let positionals = Positionals::new(&words, &no_consumed(words.len()));
+        assert!(!positionals.confirms(&tokens(&["push"])));
+        assert!(positionals.cannot_rule_out(&tokens(&["push"])));
+
+        // Extend to a two-token required (["push", "origin"]): the actual
+        // right-shift-preventing behavior this type exists for. Without
+        // stopping alignment at the unresolvable word, "push" would
+        // mis-index into slot 0 and falsely prove "origin" absent from
+        // slot 1; cannot_rule_out correctly stays true instead, since
+        // alignment stopped early before either required token could be
+        // checked.
+        assert!(positionals.cannot_rule_out(&tokens(&["push", "origin"])));
+    }
+
+    #[test]
+    fn positionals_confirms_happy_path_fully_resolved() {
+        let words = argv(&["push", "origin", "main"]);
+        assert!(Positionals::new(&words, &no_consumed(words.len())).confirms(&tokens(&["push"])));
+    }
+
+    #[test]
+    fn positionals_confirms_false_on_resolved_mismatch_despite_unresolvable_tail() {
+        // git commit -m $(echo hi) shape: "commit" in the aligned prefix is
+        // a proven miss for required=["push"] — the unresolvable tail
+        // can't rescue it.
+        let words = vec![
+            NormalizedWord::resolved("commit"),
+            NormalizedWord::resolved("-m"),
+            NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::CommandSubstitution),
+        ];
+        assert!(!Positionals::new(&words, &no_consumed(words.len())).confirms(&tokens(&["push"])));
+    }
+
+    // ---- call-site regressions: the same fix through
+    // relaxed_required_tokens_match/constraints_match via the public
+    // match_command_except_flags/match_command_except_target/match_command
+    // entry points ----
+
+    #[test]
+    fn matches_except_flags_floors_when_unresolvable_word_precedes_required_tokens() {
+        // git $(echo -C /tmp) p4 submit --no-verify — an unresolvable word
+        // between "git" and the required "p4 submit" prefix must not be
+        // miscounted as consuming slot 0 and ruling "p4" out; this must
+        // still float to the Ask floor via matches_except_flags, not be
+        // silently missed.
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "git-p4-submit-no-verify"
+            reason = "ask before a p4 submit that skips hooks"
+            decision = "ask"
+            command = "git"
+            required_tokens = ["p4", "submit"]
+        "#,
+        )
+        .unwrap();
+        let cmd = vec![
+            NormalizedWord::resolved("git"),
+            NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::CommandSubstitution),
+            NormalizedWord::resolved("p4"),
+            NormalizedWord::resolved("submit"),
+            NormalizedWord::resolved("--no-verify"),
+        ];
+        let rule = rules.match_command_except_flags(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "git-p4-submit-no-verify");
+    }
+
+    #[test]
+    fn matches_except_target_still_fires_for_a_rule_combining_targets_and_required_tokens() {
+        // Synthetic: no shipped rule in rules/blocklist.toml or
+        // allowlist.toml combines `targets` and `required_tokens` on the
+        // same rule today, but matches_except_target's logic doesn't
+        // assume they're mutually exclusive — this pins that a
+        // hypothetical/future rule doing so still floors to Ask instead of
+        // opening a silent Allow gap when an unresolvable word sits before
+        // the required token.
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "widget-publish-prod"
+            reason = "ask before publishing to prod"
+            decision = "ask"
+            command = "widget"
+            required_tokens = ["publish"]
+            targets = [{ exact = "prod" }]
+        "#,
+        )
+        .unwrap();
+        let cmd = vec![
+            NormalizedWord::resolved("widget"),
+            NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::CommandSubstitution),
+            NormalizedWord::resolved("publish"),
+            NormalizedWord::resolved("prod"),
+        ];
+        let rule = rules.match_command_except_target(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "widget-publish-prod");
+    }
+
+    #[test]
+    fn constraints_match_flags_still_match_with_an_unresolvable_word_in_the_tail() {
+        // required_flags is membership-based via resolved_strings, left
+        // untouched by this fix — an unresolvable word elsewhere in the
+        // tail must not stop an otherwise-satisfied required flag from
+        // still matching.
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "git-push-force-any-branch"
+            reason = "ask before a force push"
+            decision = "ask"
+            command = "git"
+            required_flags = ["--force"]
+        "#,
+        )
+        .unwrap();
+        let cmd = vec![
+            NormalizedWord::resolved("git"),
+            NormalizedWord::resolved("push"),
+            NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::CommandSubstitution),
+            NormalizedWord::resolved("--force"),
+        ];
+        let rule = rules.match_command(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "git-push-force-any-branch");
+    }
+
+    #[test]
+    fn constraints_match_skips_a_consumed_unresolvable_value_flag_argument() {
+        // Finding 1 regression: git -m "$X" commit --no-verify, mirroring
+        // the shipped git-commit-no-verify-short rule (required_tokens =
+        // ["commit"], value_flags = ["m", "message"]). "$X" (a quoted,
+        // single-word command substitution) is -m's declared value, not a
+        // positional — Positionals must skip past it rather than stopping
+        // alignment there, or "commit" never gets checked and the rule
+        // goes silently invisible for this shape.
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "git-commit-no-verify-short"
+            reason = "git commit -n/--no-verify skips pre-commit and commit-msg hooks"
+            decision = "ask"
+            command = "git"
+            required_tokens = ["commit"]
+            required_flags = ["n|--no-verify"]
+            value_flags = ["m", "message"]
+        "#,
+        )
+        .unwrap();
+        let cmd = vec![
+            NormalizedWord::resolved("git"),
+            NormalizedWord::resolved("-m"),
+            NormalizedWord::unresolvable_single_word(
+                crate::normalize::UnresolvableKind::CommandSubstitution,
+            ),
+            NormalizedWord::resolved("commit"),
+            NormalizedWord::resolved("--no-verify"),
+        ];
+        let rule = rules.match_command(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "git-commit-no-verify-short");
+    }
+
+    #[test]
+    fn positionals_confirms_true_when_the_only_unresolvable_word_is_consumed() {
+        // The Positionals-level mechanism behind the fix above, isolated
+        // from rule-matching: a consumed unresolvable word must not break
+        // alignment, so "commit" (past it) still enters `aligned`.
+        let words = vec![
+            NormalizedWord::resolved("-m"),
+            NormalizedWord::unresolvable_single_word(
+                crate::normalize::UnresolvableKind::CommandSubstitution,
+            ),
+            NormalizedWord::resolved("commit"),
+        ];
+        let consumed = vec![false, true, false];
+        assert!(Positionals::new(&words, &consumed).confirms(&tokens(&["commit"])));
+    }
+
+    #[test]
+    fn constraints_match_unaffected_when_value_flag_argument_is_resolved() {
+        // Acceptance case from issue #146/#148, left untouched by this
+        // fix: git commit -m hello --no-verify, fully resolved, no
+        // unresolvable word anywhere. Must still match exactly as before —
+        // "hello" is a consumed *Resolved* word, so it goes through the
+        // ordinary dash-prefix check unchanged rather than being skipped
+        // (the "constraint that matters" for this fix: only a consumed
+        // *Unresolvable* word is alignment-transparent).
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "git-commit-no-verify-short"
+            reason = "git commit -n/--no-verify skips pre-commit and commit-msg hooks"
+            decision = "ask"
+            command = "git"
+            required_tokens = ["commit"]
+            required_flags = ["n|--no-verify"]
+            value_flags = ["m", "message"]
+        "#,
+        )
+        .unwrap();
+        let cmd = vec![
+            NormalizedWord::resolved("git"),
+            NormalizedWord::resolved("commit"),
+            NormalizedWord::resolved("-m"),
+            NormalizedWord::resolved("hello"),
+            NormalizedWord::resolved("--no-verify"),
+        ];
+        let rule = rules.match_command(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "git-commit-no-verify-short");
+
+        // Pins the constraint from the other direction: with "-m hello"
+        // BEFORE "commit" (a resolved, consumed value-flag argument),
+        // "hello" must still occupy its own positional slot rather than
+        // being skipped — it is a pre-existing "known gap" (a resolved
+        // non-dash token ahead of the subcommand shifts the required
+        // token out of alignment), unrelated to and unfixed by this
+        // change. Skipping consumed Resolved words too (the forbidden,
+        // over-eager implementation) would wrongly make this match.
+        let shifted_cmd = vec![
+            NormalizedWord::resolved("git"),
+            NormalizedWord::resolved("-m"),
+            NormalizedWord::resolved("hello"),
+            NormalizedWord::resolved("commit"),
+            NormalizedWord::resolved("--no-verify"),
+        ];
+        assert!(rules.match_command(&shifted_cmd).is_none());
     }
 }
