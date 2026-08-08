@@ -470,7 +470,8 @@ fn convert_simple_command(simple: &bast::SimpleCommand) -> Result<SimpleCommand,
 
 /// Whether a [`bast::CommandPrefixOrSuffixItem`] appears before or after the
 /// command word — the distinction [`apply_prefix_or_suffix_item`] needs to
-/// decide what an `AssignmentWord` item means (see that function's docs).
+/// decide what an `AssignmentWord` item means (see its `AssignmentWord`
+/// match arm).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Position {
     Prefix,
@@ -1150,7 +1151,8 @@ mod tests {
     }
 
     // ---- a `name=value`-shaped SUFFIX item is an ordinary argument, not an
-    // assignment (see apply_prefix_or_suffix_item's docs for why) ----
+    // assignment (see the `AssignmentWord` arm in
+    // apply_prefix_or_suffix_item for why) ----
     #[test]
     fn suffix_assignment_shaped_word_is_an_ordinary_argument() {
         let cmd = parse_ok("dd if=/dev/zero of=/dev/sda");
@@ -1170,7 +1172,8 @@ mod tests {
     }
 
     // ---- a PREFIX name=value item (before the command word) is still a
-    // real environment assignment (see apply_prefix_or_suffix_item's docs) ----
+    // real environment assignment (see the `AssignmentWord` arm in
+    // apply_prefix_or_suffix_item) ----
     #[test]
     fn prefix_assignment_is_still_recorded_as_an_assignment() {
         let cmd = parse_ok("VAR=v cmd");
