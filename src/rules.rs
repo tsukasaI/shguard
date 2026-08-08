@@ -218,10 +218,10 @@ fn short_cluster_chars(token: &str) -> HashSet<char> {
 }
 
 /// tar-specific single-letter options this crate's rules ever need to see
-/// through a dash-less cluster (issue #67, expanded by the Fable review's
-/// fail-open finding) — GNU tar's commonly-used boolean/value-less single
-/// letters, not an attempt at exhaustive coverage of tar's entire option
-/// set. `f` (`--file`) and `C` (`--directory`) each consume the following
+/// through a dash-less cluster (issue #67) — GNU tar's commonly-used
+/// boolean/value-less single letters, not an attempt at exhaustive
+/// coverage of tar's entire option set. `f` (`--file`) and `C`
+/// (`--directory`) each consume the following
 /// positional argument; every other letter here is boolean (mode/behavior
 /// flags that never take a value): `x` (extract), `c` (create), `t`
 /// (list), `z` (gzip), `v` (verbose), `j` (bzip2), `J` (xz), `a`
@@ -258,15 +258,15 @@ pub(crate) enum TarDashlessCluster {
     NotApplicable,
     /// A *plausible* dash-less cluster — fully alphabetic, contains `x` —
     /// but with at least one letter outside
-    /// [`TAR_DASHLESS_CONSUMING`]/[`TAR_DASHLESS_BOOLEAN`]. Before the
-    /// Fable review's fix, a single unmodeled letter (`j`, `a`, …)
-    /// disqualified the ENTIRE cluster, silently falling through to
-    /// dashed-only matching that can't see a dash-less token at all —
-    /// `tar xjfC evil.tar.bz2 /` reached `Allow`. The caller must never
-    /// treat this the same as [`Self::NotApplicable`]: it must floor the
-    /// decision to `Ask` instead (this crate's tar option coverage can
-    /// never be exhaustive, so "next new letter I didn't think of" must
-    /// fail closed, not open).
+    /// [`TAR_DASHLESS_CONSUMING`]/[`TAR_DASHLESS_BOOLEAN`]. Treating a
+    /// single unmodeled letter (`j`, `a`, …) as disqualifying the ENTIRE
+    /// cluster would silently fall through to dashed-only matching that
+    /// can't see a dash-less token at all — `tar xjfC evil.tar.bz2 /`
+    /// would reach `Allow`. The caller must never treat this the same as
+    /// [`Self::NotApplicable`]: it must floor the decision to `Ask`
+    /// instead (this crate's tar option coverage can never be
+    /// exhaustive, so "next new letter I didn't think of" must fail
+    /// closed, not open).
     Unmodeled,
 }
 
@@ -288,8 +288,7 @@ pub(crate) enum TarDashlessCluster {
 /// drift from what it gets today). A value-consuming letter with no
 /// positional argument left to consume (`tar fC` alone, which also lacks
 /// `x` so never reaches this case anyway) falls back to
-/// [`TarDashlessCluster::NotApplicable`], matching this function's
-/// pre-Fable-review behavior for that shape exactly.
+/// [`TarDashlessCluster::NotApplicable`], unchanged for that shape.
 ///
 /// On success, [`TarDashlessCluster::Recognized`] carries the full
 /// rewritten tail: one or two synthetic tokens per cluster letter,
@@ -600,8 +599,7 @@ impl TargetMatcher {
     /// a name this check has no way to know). Tracked as issue #118, not
     /// fixed here.
     ///
-    /// Known gaps (fable-review findings against the first draft, not yet
-    /// fixed):
+    /// Known gaps (not yet fixed):
     /// - This check doesn't consult a rule's `except_targets`. No
     ///   embedded rule currently pairs a `normalized`/`normalized_prefix`
     ///   target with an `except_targets` carve-out, so this is latent,
@@ -1069,12 +1067,7 @@ impl CommandRule {
     /// the same resolution [`PipelineRule::matches`] already applies to
     /// pipeline sinks/sources, so a path-qualified or wrapped command
     /// (`/bin/rm`, `env rm`, `env git push --force`) cannot dodge a
-    /// `command = "rm"`/`command = "git"` rule (security review finding:
-    /// this module previously matched `argv[0]`/`argv[1..]` verbatim,
-    /// silently missing every wrapped/path-qualified invocation — and for
-    /// `required_tokens`, offsetting every positional index by one for any
-    /// wrapped command, since `argv[1..]` still included the wrapper's own
-    /// name).
+    /// `command = "rm"`/`command = "git"` rule.
     ///
     /// When the resolved hop's own basename is `tar`, the tail is passed
     /// through [`tar_dashless_effective_tail`]/[`tar_dashless_rewrite`]
@@ -1199,8 +1192,7 @@ impl CommandRule {
     /// Ask, never to Block — an unresolvable target must never silently
     /// upgrade to a rule hit here.
     ///
-    /// # Required flags/tokens: strict or relaxed (fable/security-review
-    /// follow-up to issue #77)
+    /// # Required flags/tokens: strict or relaxed (issue #77 follow-up)
     ///
     /// The ordinary, strict shape is [`Self::constraints_match`] holding
     /// outright — flags/tokens already resolve-and-match, only the target
@@ -1259,9 +1251,9 @@ impl CommandRule {
     /// Ask-only, never Block, same as every relaxation in this function —
     /// an accepted, intentional trade-off, not an oversight.
     ///
-    /// Known residual gap (fable-review finding against the first draft,
-    /// not fixed here): a decoy resolved token can still defeat this
-    /// branch even when the danger is real and exploitable. GNU `sed`
+    /// Known residual gap (not fixed here): a decoy resolved token can
+    /// still defeat this branch even when the danger is real and
+    /// exploitable. GNU `sed`
     /// permutes options after operands (POSIX getopt-style), so `sed
     /// 's/a/b/' $(echo -i ~/.config/shguard/config.toml)` still performs
     /// the in-place edit at runtime — but its tail has ONE resolved token
@@ -1677,7 +1669,7 @@ impl PipelineRule {
     /// stages are both resolved through [`effective_command`] (basename +
     /// transparent-wrapper skip), not a raw exact-match on argv[0] — a
     /// path-qualified or wrapped sink (`/bin/sh`, `nohup sh`) must not dodge
-    /// this rule (security-review fix, finding 2).
+    /// this rule.
     #[must_use]
     fn matches(&self, stages: &[Vec<NormalizedWord>]) -> bool {
         let Some((sink_stage, source_stages)) = stages.split_last() else {
@@ -1800,11 +1792,11 @@ fn resolved_strings(argv: &[NormalizedWord]) -> Vec<&str> {
 /// shape [`FlagMatcher::Token`] already recognises) carries its candidate
 /// in `value`, not the token as a whole — a target passed as `--url=`'s
 /// attached value must not silently escape the except-check just because
-/// the containing token starts with `-` (security-review finding: an
-/// earlier version filtered out every `-`-prefixed token wholesale, so
-/// `curl http://localhost --url=https://evil.example.com` was wrongly
-/// suppressed — the dangerous target was never examined at all). A bare
-/// flag (`-s`, `--verbose`, a short cluster) yields no candidate.
+/// the containing token starts with `-`: excluding every `-`-prefixed
+/// token wholesale would let `curl http://localhost
+/// --url=https://evil.example.com` wrongly suppress the rule without the
+/// dangerous target ever being examined. A bare flag (`-s`, `--verbose`,
+/// a short cluster) yields no candidate.
 ///
 /// # Known limitation — NOT merely cosmetic
 ///
@@ -1867,8 +1859,7 @@ fn target_candidate(token: &str) -> Option<&str> {
 /// the flag and consumed — that would silently remove a genuine
 /// (non-excepted) target from the candidate set. Regression-tested by
 /// `value_flags_does_not_consume_positionals_after_end_of_options_terminator`
-/// below (security-review fix: an earlier version had no notion of `--`
-/// at all).
+/// below.
 fn value_flag_free_candidates<'a>(rest: &[&'a str], value_flags: &[ValueFlag]) -> Vec<&'a str> {
     let mut candidates = Vec::new();
     let mut skip_next = false;
@@ -1965,8 +1956,8 @@ fn value_flag_consumed(rest_words: &[NormalizedWord], value_flags: &[ValueFlag])
 }
 
 // ---------------------------------------------------------------------
-// Effective-command resolution (security-review fix: shared basename /
-// transparent-wrapper handling)
+// Effective-command resolution (shared basename / transparent-wrapper
+// handling)
 // ---------------------------------------------------------------------
 
 /// Commands whose own name is never the thing a pipeline-shape rule cares
@@ -1978,10 +1969,10 @@ fn value_flag_consumed(rest_words: &[NormalizedWord], value_flags: &[ValueFlag])
 ///
 /// Shared by `src/gate.rs`'s pipeline-shape rules (`is_interpreter_sink`/
 /// `is_decode_stage`) and [`PipelineRule::matches`] here, so a wrapped or
-/// path-qualified sink/source cannot dodge either check by construction —
-/// security-review finding 2: `/bin/sh`, `./sh`, `nohup sh`, `nice sh`,
-/// `env sh`, `command sh`, `exec sh`, `xargs -0 sh` must all resolve to the
-/// `sh` they actually run.
+/// path-qualified sink/source cannot dodge either check by construction:
+/// `/bin/sh`, `./sh`, `nohup sh`, `nice sh`, `env sh`, `command sh`,
+/// `exec sh`, `xargs -0 sh` must all resolve to the `sh` they actually
+/// run.
 ///
 /// # Known limitation
 ///
@@ -2032,7 +2023,7 @@ fn value_flag_consumed(rest_words: &[NormalizedWord], value_flags: &[ValueFlag])
 /// not bounded the same way: `flock` is not an [`ESCALATION_VECTORS`]
 /// entry, so there was no floor to fall back on if its `-c` string were
 /// merely skipped — `flock /tmp/l -c 'rm -rf /'` silently `allow`ed
-/// (fable-model review finding, issue #66). Fixed (issues #64/#66) by
+/// (issue #66). Fixed (issues #64/#66) by
 /// [`RECURSABLE_SLOTS`]/[`wrapper_shell_string_scripts`]: `-c`/`--command`
 /// is in [`wrapper_value_flags`] so its value is never mistaken for the
 /// wrapped command by ordinary matching, and `crate::gate`'s wrapper-layer
@@ -2389,17 +2380,16 @@ fn skip_wrapper_flags(wrapper: &str, argv: &[NormalizedWord]) -> usize {
         };
         if value_flags.iter().any(|vf| vf.is_bare(token)) {
             // The flag token itself is always consumed; its separated
-            // value is consumed too only when resolved (fable-model review
-            // finding: an earlier version advanced past the value
-            // unconditionally, so `nice -n $X ls`/`timeout -s $X 5 ls`
-            // silently resolved `ls` as the wrapped command and allowed,
-            // even though the real flag value — and therefore what
-            // actually runs — is unknown, the same class of gap
-            // [`skip_wrapper_arguments`]'s positional-skip had). Stopping
-            // here, at the value token (or at the end of `argv` if the
-            // flag was the last token), leaves it for the caller's own
-            // `Resolution::Resolved` check to fail closed — this function
-            // never resolves anything itself.
+            // value is consumed too only when resolved: advancing past an
+            // unresolvable value unconditionally would let `nice -n $X
+            // ls`/`timeout -s $X 5 ls` silently resolve `ls` as the
+            // wrapped command and allow it, even though the real flag
+            // value — and therefore what actually runs — is unknown, the
+            // same class of gap [`skip_wrapper_arguments`]'s
+            // positional-skip has. Stopping here, at the value token (or
+            // at the end of `argv` if the flag was the last token), leaves
+            // it for the caller's own `Resolution::Resolved` check to fail
+            // closed — this function never resolves anything itself.
             idx += 1;
             match argv.get(idx).map(NormalizedWord::resolution) {
                 Some(Resolution::Resolved(_)) => idx += 1,
@@ -2429,14 +2419,14 @@ fn skip_wrapper_flags(wrapper: &str, argv: &[NormalizedWord]) -> usize {
 ///
 /// The positional count is applied once flag-skipping stops, one token at a
 /// time, and — like the flag-skipping loop above — stops early on the first
-/// [`Resolution::Unresolvable`] token rather than blindly counting past it
-/// (fable-model review finding: an earlier version added the count
-/// unconditionally, so `timeout $X ls`/`flock $F ls` silently resolved `ls`
-/// as the wrapped command and `allow`ed, even though the real positional
-/// value — and therefore what actually runs — is unknown; the 0-positional
-/// `env $X ls` already correctly fell to `WrapperChainEscalation::Unresolved`
-/// via the flag-skipping loop's own early stop, so the positional loop must
-/// match that same fail-closed shape). Left pointing at that unresolvable
+/// [`Resolution::Unresolvable`] token rather than blindly counting past it:
+/// counting past an unresolvable token unconditionally would let `timeout
+/// $X ls`/`flock $F ls` silently resolve `ls` as the wrapped command and
+/// `allow` it, even though the real positional value — and therefore what
+/// actually runs — is unknown; the 0-positional `env $X ls` already
+/// correctly falls to `WrapperChainEscalation::Unresolved` via the
+/// flag-skipping loop's own early stop, so the positional loop must match
+/// that same fail-closed shape. Left pointing at that unresolvable
 /// token (not past it), so the caller's own `Resolution::Resolved` check —
 /// [`effective_command`]'s loop, or [`wrapper_chain_escalation`]'s — is what
 /// actually fails closed; this function only ever stops early, never
@@ -2604,8 +2594,7 @@ pub(crate) fn wrapper_shell_string_scripts(stage: &[NormalizedWord]) -> Vec<Scri
 /// positional "username" slot such that the username *and everything after
 /// it*, reinterpreted as their own command line, fully matches one of
 /// `rules`' command rules — name, required flags/tokens, and targets alike
-/// (issue #54 follow-up; tightened after a fable-model review caught the
-/// name-only version's false positives — see below).
+/// (issue #54 follow-up — see below for why name-only matching is wrong).
 ///
 /// `su [options] [-] [user [args...]]` is shape-ambiguous: `su rm -rf /`
 /// can't be told apart from "su into a user literally named `rm`, with no
@@ -2916,11 +2905,7 @@ fn convert_command_rule(dto: CommandRuleDto) -> Result<CommandRule, RulesError> 
 /// `normalized_prefix`, because normalizing a carve-out would silently
 /// *widen* an allow, which must always be an explicit, deliberate rule-
 /// author choice, never an accidental side effect of reaching for the
-/// wrong TOML key. Before this check existed, that policy was documented
-/// only in comments — the TOML deserializer accepted
-/// `normalized`/`normalized_prefix` inside `except_targets` with no
-/// complaint (Fable-review finding; no shipped rule misused this, but it
-/// was an unenforced footgun for any future rule author).
+/// wrong TOML key.
 fn convert_target(
     rule_id: &str,
     dto: TargetDto,
@@ -3357,15 +3342,13 @@ impl Rules {
         &self,
         argv: &[NormalizedWord],
     ) -> Option<&CommandRule> {
-        // Fable-review finding (PR #113), same class as commit 89cb6d7's
-        // fix for the sibling named-user-home floor: a user-config
-        // `[[ask]]` rule (`ask_rules`) with its own `normalized`/
-        // `normalized_prefix` target is just as eligible for this floor
-        // as an embedded blocklist rule (`command_rules`) — both are
-        // `CommandRule`s. Scanning only `command_rules` would leave the
-        // literal-vs-ascent-obfuscated-spelling asymmetry alive for user
-        // config: the literal spelling correctly Asks via the rule
-        // itself, but an ascent-then-descent respelling of the same
+        // A user-config `[[ask]]` rule (`ask_rules`) with its own
+        // `normalized`/`normalized_prefix` target is just as eligible for
+        // this floor as an embedded blocklist rule (`command_rules`) —
+        // both are `CommandRule`s. Scanning only `command_rules` would
+        // leave the literal-vs-ascent-obfuscated-spelling asymmetry alive
+        // for user config: the literal spelling correctly Asks via the
+        // rule itself, but an ascent-then-descent respelling of the same
         // target silently Allowed.
         self.command_rules
             .iter()
@@ -3383,10 +3366,10 @@ impl Rules {
         &self,
         argv: &[NormalizedWord],
     ) -> Option<&CommandRule> {
-        // Fable-review finding (PR #89): a user-config `[[ask]]` rule
-        // (`ask_rules`) with its own bare-`~` target is just as eligible
-        // for this floor as an embedded blocklist rule (`command_rules`)
-        // — both are `CommandRule`s. Scanning only `command_rules` would
+        // A user-config `[[ask]]` rule (`ask_rules`) with its own
+        // bare-`~` target is just as eligible for this floor as an
+        // embedded blocklist rule (`command_rules`) — both are
+        // `CommandRule`s. Scanning only `command_rules` would
         // leave the same `~username`-vs-bare-`~` asymmetry #80 fixed for
         // the blocklist alive for user config.
         self.command_rules
@@ -3949,7 +3932,7 @@ mod tests {
         assert!(rules.match_command_ascent_descent(&cmd).is_some());
     }
 
-    // ==== Issue #78 (fable-review follow-up): the same ascent-descent gap,
+    // ==== Issue #78 follow-up: the same ascent-descent gap,
     // but reached via shell redirect syntax (`> ...`) rather than argv,
     // which carries the identical /dev/*//etc/passwd//etc/shadow namespace
     // through a separate Rust type (RedirectRule, not CommandRule). ====
@@ -4050,10 +4033,9 @@ mod tests {
 
     #[test]
     fn ascent_descent_redirect_home_escape_etc_passwd_floors() {
-        // Fable-review finding: the same lexical_normalize fix also closes
-        // this bypass via shell redirect syntax (RedirectRule, a separate
-        // Rust type from CommandRule sharing TargetMatcher underneath),
-        // which the issue's own repro didn't cover.
+        // The same lexical_normalize fix also closes this bypass via
+        // shell redirect syntax (RedirectRule, a separate Rust type from
+        // CommandRule sharing TargetMatcher underneath).
         let rules = Rules::embedded().unwrap();
         let rule = rules
             .match_redirect_target_ascent_descent("~/../../etc/passwd")
@@ -4139,10 +4121,10 @@ mod tests {
 
     #[test]
     fn named_user_home_dotted_username_floors() {
-        // Fable-review finding: shells don't validate username syntax
-        // (`getpwnam` takes anything up to the first `/`), so a dotted
-        // account name (common on macOS/AD/sssd-joined Linux) must still
-        // floor — an allowlist-shaped charset check would have missed it.
+        // Shells don't validate username syntax (`getpwnam` takes
+        // anything up to the first `/`), so a dotted account name (common
+        // on macOS/AD/sssd-joined Linux) must still floor — an
+        // allowlist-shaped charset check would have missed it.
         let rules = Rules::embedded().unwrap();
         let cmd = argv(&["rm", "-rf", "~john.doe"]);
         assert!(rules.match_command_named_user_home(&cmd).is_some());
@@ -4150,11 +4132,11 @@ mod tests {
 
     #[test]
     fn named_user_home_trailing_slash_still_floors() {
-        // Fable-review finding: a real shell takes the tilde-prefix as
-        // everything up to the first `/`, so `~root/` expands to the same
-        // directory as `~root` — verified via `printf '[%s]' ~root/`.
-        // Must not silently collapse to Opaque the way a naive "reject
-        // any embedded `/`" check would.
+        // A real shell takes the tilde-prefix as everything up to the
+        // first `/`, so `~root/` expands to the same directory as
+        // `~root` — verified via `printf '[%s]' ~root/`. Must not
+        // silently collapse to Opaque the way a naive "reject any
+        // embedded `/`" check would.
         let rules = Rules::embedded().unwrap();
         for cmd in [
             argv(&["rm", "-rf", "~root/"]),
@@ -4170,10 +4152,10 @@ mod tests {
 
     #[test]
     fn named_user_home_ascent_past_named_home_floors() {
-        // Fable-review finding: `~alice/..`/`~alice/../..` provably left
-        // alice's home (mirrors the existing EscapesHome widening for the
-        // invoker's own `$HOME`), even though the exact resulting path
-        // (`/Users`, `/`, ...) is unknown statically.
+        // `~alice/..`/`~alice/../..` provably left alice's home (mirrors
+        // the existing EscapesHome widening for the invoker's own
+        // `$HOME`), even though the exact resulting path (`/Users`, `/`,
+        // ...) is unknown statically.
         let rules = Rules::embedded().unwrap();
         for cmd in [
             argv(&["tar", "-x", "-C", "~alice/..", "-f", "a.tar"]),
@@ -4343,14 +4325,14 @@ mod tests {
 
     #[test]
     fn dirstack_tilde_stray_token_no_longer_floors_strip_only_rule() {
-        // Code review follow-up: matches_dirstack_tilde_floor is now
-        // correlated to a target's own slot (`strip: None`), mirroring
-        // named_user_home/ascent_descent, rather than firing on any
-        // dirstack-shaped token anywhere in the tail. dd-write-device's
-        // sole target requires an attached `of=` prefix — a bare,
-        // unattached `~+` can never occupy that slot (`of=~+` doesn't
-        // tilde-expand in the first place, issue #134) — so a stray `~+`
-        // elsewhere in the tail no longer floors this rule to Ask.
+        // matches_dirstack_tilde_floor is correlated to a target's own
+        // slot (`strip: None`), mirroring named_user_home/ascent_descent,
+        // rather than firing on any dirstack-shaped token anywhere in the
+        // tail. dd-write-device's sole target requires an attached `of=`
+        // prefix — a bare, unattached `~+` can never occupy that slot
+        // (`of=~+` doesn't tilde-expand in the first place, issue #134) —
+        // so a stray `~+` elsewhere in the tail no longer floors this
+        // rule to Ask.
         let rules = Rules::embedded().unwrap();
         let cmd = argv(&["dd", "of=/tmp/safe-file", "~+"]);
         assert!(rules.match_command_dirstack_tilde(&cmd).is_none());
@@ -4475,9 +4457,9 @@ mod tests {
         assert!(rules.match_command_directory_equals_tilde(&cmd).is_none());
     }
 
-    // ==== Security review: CommandRule matching resolves basename + skips
-    // transparent wrappers, the same way PipelineRule matching already does
-    // (matches_command_and_flags now goes through effective_command instead
+    // ==== CommandRule matching resolves basename + skips transparent
+    // wrappers, the same way PipelineRule matching already does
+    // (matches_command_and_flags goes through effective_command instead
     // of a raw argv[0] compare) ====
 
     #[test]
@@ -4750,10 +4732,10 @@ mod tests {
         );
     }
 
-    // ---- regression (fable-model review): the shadow check must match a
-    // rule's full constraints, not just its command name, or a username
-    // that happens to share a blocklisted command's name (a routine system
-    // account like `git`) gets denied for a command it never ran ----
+    // ---- regression: the shadow check must match a rule's full
+    // constraints, not just its command name, or a username that happens
+    // to share a blocklisted command's name (a routine system account
+    // like `git`) gets denied for a command it never ran ----
 
     #[test]
     fn su_username_naming_a_blocklisted_commands_own_account_is_not_flagged() {
@@ -4848,9 +4830,9 @@ mod tests {
         );
     }
 
-    // ---- regression (fable-model review): a positional slot's value must
-    // fail closed the same as a flag-skipped value, instead of being
-    // blindly counted past regardless of resolution ----
+    // ---- regression: a positional slot's value must fail closed the
+    // same as a flag-skipped value, instead of being blindly counted past
+    // regardless of resolution ----
 
     fn argv_with_unresolvable_at(words: &[&str], unresolvable_at: usize) -> Vec<NormalizedWord> {
         let mut out: Vec<NormalizedWord> =
@@ -4862,11 +4844,10 @@ mod tests {
 
     #[test]
     fn timeout_positional_duration_unresolvable_fails_closed_to_unresolved() {
-        // Before this fix: the positional count was added unconditionally,
-        // so an unresolvable duration was skipped past anyway and `ls`
-        // resolved as the wrapped command — `allow`, even though the real
-        // duration (and therefore whether this is really `timeout ... ls`
-        // at all) is unknown.
+        // An unresolvable duration must fail closed: skipping past it
+        // unconditionally would resolve `ls` as the wrapped command —
+        // `allow`, even though the real duration (and therefore whether
+        // this is really `timeout ... ls` at all) is unknown.
         let stage = argv_with_unresolvable_at(&["timeout", "X", "ls"], 1);
         assert_eq!(
             wrapper_chain_escalation(&stage),
@@ -4887,26 +4868,24 @@ mod tests {
 
     #[test]
     fn timeout_positional_duration_resolved_still_recurses_normally() {
-        // Same shape, resolved value: must still behave exactly as before
-        // this fix (the positional value is skipped, `ls` is the wrapped
-        // command).
+        // Same shape, resolved value: the positional value is skipped,
+        // `ls` is the wrapped command.
         let stage = argv(&["timeout", "5", "ls"]);
         let (name, rest) = effective_command(&stage).unwrap();
         assert_eq!(name, "ls");
         assert!(rest.is_empty());
     }
 
-    // ---- regression (fable-model review, round 2): a value-flag's
-    // separated value must fail closed the same as a positional value —
-    // this is the same "blind skip regardless of resolution" class F3
-    // fixed, found lurking one function over in skip_wrapper_flags ----
+    // ---- regression: a value-flag's separated value must fail closed
+    // the same as a positional value — the same "blind skip regardless
+    // of resolution" class, found lurking one function over in
+    // skip_wrapper_flags ----
 
     #[test]
     fn nice_value_flags_separated_value_unresolvable_fails_closed_to_unresolved() {
-        // `nice -n $X ls`: before this fix, `-n`'s separated value was
-        // skipped unconditionally, so `ls` resolved as the wrapped command
-        // and the verdict was `allow` even though the real flag value is
-        // unknown.
+        // `nice -n $X ls`: skipping `-n`'s separated value unconditionally
+        // would resolve `ls` as the wrapped command and verdict `allow`,
+        // even though the real flag value is unknown.
         let stage = argv_with_unresolvable_at(&["nice", "-n", "X", "ls"], 2);
         assert_eq!(
             wrapper_chain_escalation(&stage),
@@ -4927,8 +4906,7 @@ mod tests {
 
     #[test]
     fn nice_value_flags_separated_value_resolved_still_recurses_normally() {
-        // Same shape, resolved value: must still behave exactly as before
-        // this fix.
+        // Same shape, resolved value: recurses normally.
         let rules = Rules::embedded().unwrap();
         assert!(
             rules
@@ -5444,8 +5422,7 @@ mod tests {
         );
     }
 
-    // Fable-review fix: `P` was added to TAR_DASHLESS_BOOLEAN alongside the
-    // other newly-modeled letters — verifies the rewrite's synthetic `-P`
+    // Verifies the rewrite's synthetic `-P`
     // token is seen by the separate `tar-absolute-names-ask` rule exactly
     // as a written-with-dashes `-P` would be. Uses a non-root `-C` target
     // (`/tmp/foo`) so the higher-priority over-root/home block/ask rules
@@ -5466,12 +5443,9 @@ mod tests {
 
     #[test]
     fn tar_dashless_cluster_except_target_finds_extract_over_root_rule() {
-        // The issue's own repro shape: `tar xfC a.tar $(echo /)` — before
-        // this fix, matches_except_target couldn't see `-x`/`-C` inside
-        // the un-rewritten `xfC` cluster, so tar-extract-over-root-or-home
-        // silently missed, leaving only the coarser tar-absolute-names-ask
-        // (whose reason names a flag this command doesn't have) to
-        // attribute the Ask to.
+        // The issue's own repro shape: `tar xfC a.tar $(echo /)` — see
+        // matching_rest_by_name's docs for why matches_except_target must
+        // see `-x`/`-C` inside the un-rewritten `xfC` cluster.
         let rules = Rules::embedded().unwrap();
         let cmd = {
             let mut v = argv(&["tar", "xfC", "a.tar"]);
@@ -5923,8 +5897,8 @@ mod tests {
         );
     }
 
-    // Companion to the test above (code review finding on issue #59's audit,
-    // same class as `matches_except_flags_positional_discipline_rejects_wrong_subcommand`'s
+    // Companion to the test above (same class as
+    // `matches_except_flags_positional_discipline_rejects_wrong_subcommand`'s
     // own companion `matches_except_flags_still_fires_via_a_different_rule_for_the_right_subcommand`):
     // an `assert_ne` on one rule id alone would still pass if NO rule
     // matched at all — a silent regression. Pin the positive expectation:
@@ -6111,9 +6085,9 @@ mod tests {
         // declared `value_flags` entry's value still matches
         // `git-commit-no-verify-short` for the right subcommand — see
         // `matches_except_flags_still_fires_for_the_right_subcommand_when_not_consumed`
-        // below (code review finding on issue #42's PR: an `assert_ne` on
-        // one rule ID alone can misleadingly read as "no floor fires"). This
-        // particular argv (`-m` immediately before the unresolvable word)
+        // below (an `assert_ne` on one rule ID alone can misleadingly
+        // read as "no floor fires"). This particular argv (`-m`
+        // immediately before the unresolvable word)
         // floors to no rule at all post-issue-#146, since
         // `git-commit-no-verify-short`'s declared `value_flags = ["m",
         // "message"]` now consumes it — see
@@ -6159,10 +6133,10 @@ mod tests {
 
     #[test]
     fn matches_except_flags_value_flags_does_not_suppress_the_floor_for_an_unquoted_word() {
-        // issue #149 (code-review finding on this issue's own PR): same
-        // argv shape, but the unresolvable word is constructed as plain
-        // `unresolvable` — simulating an UNQUOTED substitution (`git commit
-        // -m $(...)`), which bash word-splits at runtime. A `value_flags`
+        // issue #149: same argv shape, but the unresolvable word is
+        // constructed as plain `unresolvable` — simulating an UNQUOTED
+        // substitution (`git commit -m $(...)`), which bash word-splits
+        // at runtime. A `value_flags`
         // declaration must NOT consume this: `-m $(printf "x --no-verify")`
         // actually runs as `-m x --no-verify`, smuggling a real
         // `--no-verify` in as a separate word right after the "value" —
@@ -6210,9 +6184,9 @@ mod tests {
         // git specifically — see `rules/blocklist.toml`'s comment on the
         // split). The underlying mechanism this test guards is general
         // rather than tied to any one embedded rule, so it's pinned here
-        // against a synthetic rule instead (code review finding on issue
-        // #42's PR: the floor's actual blast radius is broader than the
-        // find-delete/truncate-zero/git-push-force set the PR body names).
+        // against a synthetic rule instead: the floor's actual blast
+        // radius is broader than the find-delete/truncate-zero/git-push-force
+        // set.
         let rules = Rules::parse(
             r#"
             [[command]]
@@ -6323,11 +6297,11 @@ mod tests {
 
     #[test]
     fn except_targets_checks_a_flag_equals_value_target_not_just_positionals() {
-        // Security-review fix: a candidate-selection pass that dropped every
-        // `-`-prefixed token wholesale would let a dangerous target hiding
-        // in `--url=`'s attached value silently escape the except-check —
-        // the excepted `http://localhost` positional would then vacuously
-        // satisfy "all candidates excepted" on its own.
+        // A candidate-selection pass that dropped every `-`-prefixed
+        // token wholesale would let a dangerous target hiding in
+        // `--url=`'s attached value silently escape the except-check —
+        // the excepted `http://localhost` positional would then
+        // vacuously satisfy "all candidates excepted" on its own.
         let rules = Rules::parse(
             r#"
             [[command]]
@@ -6562,8 +6536,7 @@ mod tests {
 
     // A declared flag consuming the ONLY candidate must not vacuously
     // suppress the rule: `all_excepted` requires a non-empty candidate set
-    // (Fable design-review finding) — an empty set must never read as "all
-    // of zero candidates excepted".
+    // — an empty set must never read as "all of zero candidates excepted".
     #[test]
     fn value_flags_consuming_the_only_candidate_does_not_vacuously_allow() {
         let rules = Rules::parse(curl_localhost_except_with_value_flags()).unwrap();
@@ -6607,14 +6580,13 @@ mod tests {
         );
     }
 
-    // Security-review fix (PR #50 review): a bare `--` end-of-options
-    // terminator must permanently turn off value_flags matching for every
-    // token after it. Before this fix, a positional argument that happened
-    // to spell a declared flag's name (a legitimate filename, past `--`)
-    // was wrongly consumed as if it were the flag itself, silently
-    // dropping the *next* positional — the command's actual (non-excepted)
-    // target — from the candidate set and turning an Ask into a fail-open
-    // Allow.
+    // A bare `--` end-of-options terminator must permanently turn off
+    // value_flags matching for every token after it: without this, a
+    // positional argument that happens to spell a declared flag's name (a
+    // legitimate filename, past `--`) would be wrongly consumed as if it
+    // were the flag itself, silently dropping the *next* positional — the
+    // command's actual (non-excepted) target — from the candidate set and
+    // turning an Ask into a fail-open Allow.
     #[test]
     fn value_flags_does_not_consume_positionals_after_end_of_options_terminator() {
         let rules = Rules::parse(
@@ -6674,7 +6646,7 @@ mod tests {
     // token as the flag's value unconditionally, so this `--` is NOT the
     // end-of-options terminator; value_flags matching stays live for
     // everything after it, and a genuinely unexcepted target further down
-    // the tail must still be caught (PR #50 review, non-blocking follow-up).
+    // the tail must still be caught.
     #[test]
     fn value_flags_declared_flags_value_can_itself_be_the_terminator_text() {
         let rules = Rules::parse(
@@ -6741,7 +6713,7 @@ mod tests {
     // value_flags only ever narrows the except_targets candidate walk in
     // the `targets`-empty branch — declaring it with a non-empty `targets`
     // list would silently do nothing, so it's rejected at load time
-    // instead (parse, don't validate: PR #50 review).
+    // instead (parse, don't validate).
     #[test]
     fn value_flags_with_non_empty_targets_is_rejected_at_rule_load() {
         let toml = r#"
@@ -7180,10 +7152,9 @@ mod tests {
         ));
     }
 
-    // Fable-review fix: `except_targets` must stay literal (`exact`/
-    // `prefix`) — `normalized`/`normalized_prefix` would silently *widen*
-    // an allow by normalizing the carve-out. This was documented policy
-    // but unenforced at load time until now.
+    // `except_targets` must stay literal (`exact`/`prefix`) —
+    // `normalized`/`normalized_prefix` would silently *widen* an allow by
+    // normalizing the carve-out.
     #[test]
     fn except_targets_normalized_is_rejected() {
         let toml = r#"
@@ -7390,10 +7361,10 @@ mod tests {
 
     #[test]
     fn merge_user_config_rejects_id_colliding_with_existing_ask_rule() {
-        // Adversarial-review finding: the id-collision id-space must also
-        // cover ask_rules already present in `blocklist` (e.g. from a
-        // prior merge, such as shguard's own self-protection pass) — not
-        // just command_rules/pipeline_rules/allowlist entries.
+        // The id-collision id-space must also cover ask_rules already
+        // present in `blocklist` (e.g. from a prior merge, such as
+        // shguard's own self-protection pass) — not just
+        // command_rules/pipeline_rules/allowlist entries.
         let blocklist = Rules::embedded().unwrap();
         let allowlist = Allowlist::embedded().unwrap();
         let first_config = UserConfig::parse(
@@ -7607,12 +7578,11 @@ mod tests {
         );
     }
 
-    // ==== Merge-reconciliation finding: required_tokens must resolve
-    // through effective_command too, or a wrapped/path-qualified command
-    // reintroduces exactly the bypass the prerequisite effective_command
-    // fix closed for required_flags/targets — matching against raw
-    // argv[1..] instead of effective_command's rest_words would offset
-    // every positional index by one for any wrapped invocation, making
+    // ==== required_tokens must resolve through effective_command too, or
+    // a wrapped/path-qualified command reintroduces exactly the bypass
+    // closed for required_flags/targets — matching against raw argv[1..]
+    // instead of effective_command's rest_words would offset every
+    // positional index by one for any wrapped invocation, making
     // required_tokens matching fail (a false negative / bypass) rather
     // than just misalign. ====
 
@@ -7826,9 +7796,9 @@ mod tests {
 
     #[test]
     fn positionals_cannot_rule_out_when_unresolvable_word_precedes_the_prefix() {
-        // Finding 1 regression: the unresolvable word might vanish at
-        // runtime, so it must not be assumed to occupy slot 0 and rule
-        // "p4" out of ever appearing there.
+        // The unresolvable word might vanish at runtime, so it must not
+        // be assumed to occupy slot 0 and rule "p4" out of ever appearing
+        // there.
         let words = vec![
             NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::ParameterExpansion),
             NormalizedWord::resolved("p4"),
@@ -7981,8 +7951,8 @@ mod tests {
 
     #[test]
     fn constraints_match_skips_a_consumed_unresolvable_value_flag_argument() {
-        // Finding 1 regression: git -m "$X" commit --no-verify, mirroring
-        // the shipped git-commit-no-verify-short rule (required_tokens =
+        // git -m "$X" commit --no-verify, mirroring the shipped
+        // git-commit-no-verify-short rule (required_tokens =
         // ["commit"], value_flags = ["m", "message"]). "$X" (a quoted,
         // single-word command substitution) is -m's declared value, not a
         // positional — Positionals must skip past it rather than stopping

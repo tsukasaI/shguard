@@ -484,8 +484,7 @@ pub(crate) fn split_command_position(word: &Word) -> (Option<Vec<WordPiece>>, Ve
 /// segment `chunks_to_words` would fold it into — `None` if `pieces` has no
 /// such boundary at all (no top-level `$IFS` piece, or every `$IFS` piece
 /// is itself leading/consecutive with nothing but empty segments before
-/// it, so the whole run stays one command-position piece sequence exactly
-/// as before issue #82).
+/// it, so the whole run stays one command-position piece sequence).
 ///
 /// Walks `pieces` and [`resolve_pieces`]'s own resolved [`Chunk`]s for them
 /// in lockstep — sound only because every `WordPiece` variant folds to
@@ -650,8 +649,7 @@ fn resolve_piece(piece: &WordPiece, allow_split: bool) -> (Chunk, bool) {
             // `IFS=` reassignment could make that already-folded text
             // wrong) still applies.
             //
-            // `single_word` (issue #149, second fable-review finding on
-            // this same fix): must be ANDed across EVERY inner
+            // `single_word` (issue #149): must be ANDed across EVERY inner
             // `Unresolvable` chunk, not just the first — mirroring
             // `chunks_to_words`'s own aggregation exactly, and for the same
             // reason. Most inner pieces earn `single_word = true`
@@ -661,11 +659,10 @@ fn resolve_piece(piece: &WordPiece, allow_split: bool) -> (Chunk, bool) {
             // `"$*$@"` (an ordinary quoted `$*` — safe alone — followed by
             // `$@` — never safe) must not let the first chunk's safety
             // mask the second chunk's danger. An early return on the FIRST
-            // `Unresolvable` chunk (this function's shape before this fix)
-            // would do exactly that: `git commit -m "$*$@"` word-splits at
-            // runtime and can smuggle in a real `--no-verify` after the
-            // "value," identical in kind to the bug `single_word` exists
-            // to catch.
+            // `Unresolvable` chunk would do exactly that: `git commit -m
+            // "$*$@"` word-splits at runtime and can smuggle in a real
+            // `--no-verify` after the "value," identical in kind to the bug
+            // `single_word` exists to catch.
             let (inner_chunks, ifs_derived) = resolve_pieces(inner, false);
             let mut buf = String::new();
             let mut unresolvable: Option<(UnresolvableKind, bool)> = None;
@@ -711,13 +708,12 @@ fn resolve_piece(piece: &WordPiece, allow_split: bool) -> (Chunk, bool) {
         // value could contain IFS whitespace and word-split at runtime.
         //
         // `"$@"` is the one documented exception to "double quotes prevent
-        // splitting" in the entire shell grammar (fable code-review finding
-        // on this fix itself): it always expands to one runtime word PER
-        // POSITIONAL PARAMETER, even quoted — `set -- x --no-verify; git
-        // commit -m "$@"` actually runs as `git commit -m x --no-verify`,
-        // the exact same class of bypass this fix exists to close, just
-        // through a special parameter instead of `$(...)`. Never
-        // single-word regardless of `allow_split`. `"$*"` is NOT this
+        // splitting" in the entire shell grammar: it always expands to one
+        // runtime word PER POSITIONAL PARAMETER, even quoted — `set -- x
+        // --no-verify; git commit -m "$@"` actually runs as `git commit -m
+        // x --no-verify`, the exact same class of bypass this fix exists to
+        // close, just through a special parameter instead of `$(...)`.
+        // Never single-word regardless of `allow_split`. `"$*"` is NOT this
         // exception — it always joins to exactly one string under quoting
         // (only its join separator, not its word count, depends on IFS),
         // so it keeps the ordinary `!allow_split` treatment.
@@ -810,9 +806,7 @@ fn resolve_piece(piece: &WordPiece, allow_split: bool) -> (Chunk, bool) {
 /// one `Result<String, (UnresolvableKind, bool)>` per segment: `Ok`
 /// accumulates every [`Chunk::Literal`] in the segment; a
 /// [`Chunk::Unresolvable`] anywhere in it poisons the whole segment to
-/// `Err` (the first kind found — mirrors this module's pre-issue-#82 "one
-/// bad piece poisons the whole run" precedent, now scoped to one segment
-/// instead of the whole alternative). The `bool` (issue #146/#149) is
+/// `Err` (the first kind found). The `bool` (issue #146/#149) is
 /// every `Chunk::Unresolvable`'s own single-word flag ANDed together across
 /// the WHOLE segment, not just the poisoning chunk's — a later splittable
 /// piece in an otherwise-quoted segment (`"$(a)"$(b)`) still makes the
@@ -848,10 +842,9 @@ fn chunks_to_words(chunks: Vec<Chunk>, ifs_derived: bool) -> Vec<NormalizedWord>
             Chunk::Unresolvable(kind, single_word) => {
                 current = match current {
                     Ok(_) => Err((kind, single_word)),
-                    // Keep the FIRST kind (unchanged from before issue
-                    // #149), but AND every chunk's single_word flag in —
-                    // one splittable piece anywhere in the segment revokes
-                    // the whole segment's guarantee.
+                    // Keep the FIRST kind, but AND every chunk's
+                    // single_word flag in — one splittable piece anywhere
+                    // in the segment revokes the whole segment's guarantee.
                     Err((first_kind, guaranteed_so_far)) => {
                         Err((first_kind, guaranteed_so_far && single_word))
                     }
@@ -1139,35 +1132,30 @@ mod tests {
 
     // ==== DoD assertions (issue #10), going through parse() + normalize ====
 
-    // ---- 1. r''m -rf / -> ["rm", "-rf", "/"] ----
     #[test]
     fn dod_1_adjacent_single_quote() {
         let argv = argv_of("r''m -rf /");
         assert_eq!(resolved_strings(&argv), vec!["rm", "-rf", "/"]);
     }
 
-    // ---- 2. "r"m -> ["rm"] ----
     #[test]
     fn dod_2_adjacent_double_quote() {
         let argv = argv_of("\"r\"m");
         assert_eq!(resolved_strings(&argv), vec!["rm"]);
     }
 
-    // ---- 3. r\m -> ["rm"] ----
     #[test]
     fn dod_3_escaped_backslash() {
         let argv = argv_of("r\\m");
         assert_eq!(resolved_strings(&argv), vec!["rm"]);
     }
 
-    // ---- 4. $'\x72\x6d' -> ["rm"] ----
     #[test]
     fn dod_4_ansi_c_hex() {
         let argv = argv_of("$'\\x72\\x6d'");
         assert_eq!(resolved_strings(&argv), vec!["rm"]);
     }
 
-    // ---- 5. rm$IFS-rf$IFS/ -> ["rm", "-rf", "/"], each ifs_derived ----
     #[test]
     fn dod_5_ifs_splitting() {
         let argv = argv_of("rm$IFS-rf$IFS/");
@@ -1178,7 +1166,6 @@ mod tests {
         );
     }
 
-    // ---- 6. $(date) -> Unresolvable, not a string ----
     #[test]
     fn dod_6_command_substitution_is_unresolvable() {
         let words = first_word_normalized("$(date)");
@@ -1248,7 +1235,6 @@ mod tests {
     // ---- brace multiplication with a surrounding prefix ----
     #[test]
     fn brace_multiplication_with_prefix() {
-        // sanity: argv carries "echo" then the two brace expansions
         let argv = argv_of("echo pre{a,b}");
         assert_eq!(resolved_strings(&argv), vec!["echo", "prea", "preb"]);
     }
@@ -1325,10 +1311,10 @@ mod tests {
         assert!(!argv[1].is_single_word());
     }
 
-    // `"$@"` (fable code-review finding on issue #146/#149's own fix): the
-    // one exception to "double quotes prevent splitting" in the shell
-    // grammar — it splits into one word per positional parameter even
-    // quoted, so it must NEVER be single-word regardless of `allow_split`.
+    // `"$@"` (issue #146/#149) is the one exception to "double quotes
+    // prevent splitting" in the shell grammar — it splits into one word per
+    // positional parameter even quoted, so it must NEVER be single-word
+    // regardless of `allow_split`.
     #[test]
     fn quoted_dollar_at_is_not_single_word() {
         let argv = argv_of(r#"true "$@""#);
@@ -1353,12 +1339,11 @@ mod tests {
         assert!(argv[1].is_single_word());
     }
 
-    // ==== the DoubleQuoted arm's own aggregation trap (issue #149, third
-    // fable-review finding): a safe chunk (`$*`/`$VAR`/`$(...)`) followed by
-    // `$@` inside the SAME pair of double quotes must not let the first
-    // chunk's guarantee mask the second chunk's danger — this is the exact
-    // shape `chunks_to_words`'s own aggregation already handles correctly;
-    // `resolve_piece`'s `DoubleQuoted` arm needed the identical fix. ====
+    // ==== the DoubleQuoted arm's own aggregation trap (issue #149): a safe
+    // chunk (`$*`/`$VAR`/`$(...)`) followed by `$@` inside the SAME pair of
+    // double quotes must not let the first chunk's guarantee mask the
+    // second chunk's danger — the same shape `chunks_to_words`'s own
+    // aggregation already handles. ====
 
     #[test]
     fn quoted_star_then_at_is_not_single_word() {
@@ -1397,7 +1382,7 @@ mod tests {
         assert!(argv[1].is_single_word());
     }
 
-    // The aggregation trap (issue #149's own design discussion): a quoted
+    // The aggregation trap (issue #149): a quoted
     // piece followed immediately by an unquoted one, glued into ONE word
     // with no $IFS boundary between them — the segment's guarantee must be
     // the AND over every contributing chunk, not just the first (poisoning)
@@ -1577,9 +1562,9 @@ mod tests {
     // winning alternative at all (mirrors `fold_word`'s own
     // `ExpansionLimit` fail-closed arm) — never a guessed or partial
     // winner. The raw, un-expanded pieces still come back as the sole
-    // leftover entry (issue #77 fable-review follow-up), so a
-    // substitution elsewhere in the word is not silently dropped just
-    // because the brace product itself was too large to expand.
+    // leftover entry, so a substitution elsewhere in the word is not
+    // silently dropped just because the brace product itself was too large
+    // to expand.
     #[test]
     fn split_command_position_expansion_limit_has_no_winner() {
         let cmd = parse_ok("a{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}$(rm -rf /)");

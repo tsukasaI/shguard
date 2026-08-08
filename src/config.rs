@@ -40,8 +40,7 @@
 //! or any other `lstat` error — is a hard failure too, not silently
 //! skipped (issue #39): `symlink_metadata` (not `read_to_string`'s own
 //! error) is what decides "nothing configured" vs. "something's there but
-//! broken", since a dangling symlink makes `read_to_string` fail with the
-//! same `NotFound` kind a genuinely absent path does.
+//! broken".
 //!
 //! # Self-protecting the config file
 //!
@@ -54,21 +53,13 @@
 //! `$HOME`/`$XDG_CONFIG_HOME` are read for *this* invocation; the
 //! embedded blocklist is fixed at compile time and cannot know an
 //! individual user's home directory. [`self_protection_directories`]
-//! walks the config path's full symlink chain, hop by hop, before
-//! generating rules, so a config deployed behind one *or more* symlinks
-//! (e.g. into a dotfiles repo, or behind a `stow`/`home-manager`-style
-//! layer of indirection, so the policy stays versioned) gets *every* hop's
-//! directory protected — the literal starting path's directory, each
-//! intermediate hop's directory, and the final resolved target's
-//! directory — rather than only the literal path and the fully-resolved
-//! end (issue #31 covered the single-hop case; issue #44 widens it to a
-//! chain of two or more). When a hop isn't itself a symlink (nothing there
-//! yet, or the final real file), only the directories walked up to that
-//! point are protected, same as before this fix for the single-hop case.
-//! The walk fails closed — a hard [`ConfigError`], refusing to load any
-//! config at all — if the chain exceeds a hop cap or contains a cycle,
-//! rather than silently protecting only a partial prefix of it (issue
-//! #44). `rules/blocklist.toml`
+//! walks the config path's full symlink chain, hop by hop, so a config
+//! deployed behind one *or more* symlinks (e.g. into a dotfiles repo
+//! behind a `stow`/`home-manager`-style layer of indirection) gets
+//! *every* hop's directory protected, not only the literal path and the
+//! fully-resolved end — see [`self_protection_directories`]'s own docs for
+//! the walk's mechanics and its fail-closed behavior on a too-long or
+//! cyclic chain. `rules/blocklist.toml`
 //! separately carries a *static* rule for the literal `~/.config/shguard/`
 //! token — `normalize.rs` never resolves `~`/`$HOME` to an actual
 //! filesystem path (no environment lookups anywhere in parse/normalise,
@@ -198,8 +189,7 @@ impl Policy {
         };
         // Same `var_os` treatment as `SHGUARD_CONFIG` above (issue #28 item
         // 1): a present-but-non-UTF-8 `HOME`/`XDG_CONFIG_HOME` must fail
-        // closed too, not collapse into "unset" via `var(..).ok()` and
-        // silently fall through to a different discovery source.
+        // closed too.
         let xdg_config_home = match std::env::var_os("XDG_CONFIG_HOME") {
             Some(value) => Some(
                 value
@@ -304,8 +294,8 @@ const MAX_SYMLINK_HOPS: usize = 40;
 /// final, fully-resolved target — so a config deployed behind a chain of
 /// two or more symlinks (e.g. a `stow`/`home-manager`/`chezmoi`-style
 /// layered dotfiles setup) has every intermediate hop protected too, not
-/// only the literal start and the fully-resolved end (issue #44, widening
-/// issue #31's single-hop fix). Walks `path` with `std::fs::read_link` in
+/// only the literal start and the fully-resolved end (issues #31, #44).
+/// Walks `path` with `std::fs::read_link` in
 /// a loop, one hop at a time, resolving a relative symlink target against
 /// the *symlink's own* parent directory — normal filesystem
 /// symlink-resolution semantics, not the process's current working
@@ -327,10 +317,9 @@ const MAX_SYMLINK_HOPS: usize = 40;
 /// Each returned entry is paired with a `suffix` distinguishing it in
 /// [`self_protection_toml`]'s generated rule ids: `"literal"` for the
 /// starting parent, `"resolved"` for the final hop's parent, and
-/// `"hop-<n>"` for anything in between — extending the original
-/// `"literal"`/`"resolved"` pair (issue #31) rather than replacing it, so
-/// every hop's directory gets its own distinctly-id'd rule set that can be
-/// merged into one without an id collision.
+/// `"hop-<n>"` for anything in between (issue #31), so every hop's
+/// directory gets its own distinctly-id'd rule set that can be merged
+/// into one without an id collision.
 ///
 /// The walk only ever starts once the literal parent itself is
 /// protectable, same invariant issue #31 established and for the same
@@ -663,14 +652,10 @@ mod tests {
     #[test]
     fn relative_path_generates_no_self_protection_directories_even_if_it_canonicalizes() {
         // A relative `SHGUARD_CONFIG` (e.g. `config.toml` in a CI/test
-        // harness) must still generate nothing, even when the relative path
-        // happens to exist and canonicalize successfully -- otherwise the
-        // resolved directory would silently become the current working
-        // directory, denying absolute-path writes across the whole project
-        // for near-zero security benefit (the config file itself stays
-        // writable via a relative spelling regardless). `Cargo.toml` is
-        // relative and canonicalizes (`cargo test`'s cwd is the crate
-        // root), pinning this without any tempdir/cwd mutation.
+        // harness) must still generate nothing, even when it canonicalizes
+        // successfully (see `self_protection_directories`'s docs for why).
+        // `Cargo.toml` is relative and canonicalizes (`cargo test`'s cwd is
+        // the crate root), pinning this without any tempdir/cwd mutation.
         assert!(
             self_protection_directories(Path::new("Cargo.toml"))
                 .unwrap()
@@ -678,10 +663,8 @@ mod tests {
         );
     }
 
-    // A chain of two symlinks (issue #44): every hop's own directory must
-    // be protected -- the literal starting path, the intermediate hop, and
-    // the final resolved target -- not just the literal start and the
-    // fully-resolved end the single-hop fix (issue #31) covered.
+    // A chain of two symlinks (issue #44): every hop's own directory --
+    // literal, intermediate, and resolved -- must be protected.
     #[test]
     #[cfg(unix)]
     fn two_hop_symlink_chain_protects_every_hop() {

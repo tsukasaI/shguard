@@ -336,14 +336,11 @@ fn convert_command(command: &bast::Command) -> Result<Command, ParseError> {
 }
 
 /// Converts the subset of `bast::CompoundCommand` shguard's AST can
-/// represent (issue #75: brace group, subshell, `for`/`while`/`until` —
-/// each measured in the issue's traffic sample) into shguard's own
-/// [`CompoundCommand`], attaching `redirects` (the compound command's own
-/// redirect list, e.g. `for i in 1; do :; done > /dev/null`) uniformly
-/// across every variant. Every other `bast::CompoundCommand` variant
-/// (`if`/`case`, C-style arithmetic `for`, bare `((...))`, coprocess) has
-/// zero measured occurrences in that sample and stays exactly as
-/// unsupported as before this change, via [`describe_compound`].
+/// represent (module docs: brace group, subshell, `for`/`while`/`until`)
+/// into shguard's own [`CompoundCommand`], attaching `redirects` (the
+/// compound command's own redirect list, e.g. `for i in 1; do :; done >
+/// /dev/null`) uniformly across every variant. Every other variant is
+/// unsupported (module docs), via [`describe_compound`].
 fn convert_compound_command(
     compound: &bast::CompoundCommand,
     redirects: &Option<bast::RedirectList>,
@@ -473,7 +470,8 @@ fn convert_simple_command(simple: &bast::SimpleCommand) -> Result<SimpleCommand,
 
 /// Whether a [`bast::CommandPrefixOrSuffixItem`] appears before or after the
 /// command word — the distinction [`apply_prefix_or_suffix_item`] needs to
-/// decide what an `AssignmentWord` item means (see that function's docs).
+/// decide what an `AssignmentWord` item means (see its `AssignmentWord`
+/// match arm).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Position {
     Prefix,
@@ -613,8 +611,8 @@ fn convert_redirect_target(target: &bast::IoFileRedirectTarget) -> Result<Word, 
         bast::IoFileRedirectTarget::Filename(word)
         | bast::IoFileRedirectTarget::Duplicate(word) => convert_word(word),
         // Never actually constructed by brush-parser's own grammar (no
-        // production references it) — kept `Unsupported` for exhaustiveness
-        // only, same disposition as before this change.
+        // production references it) — kept `Unsupported` only for
+        // exhaustiveness.
         bast::IoFileRedirectTarget::Fd(_) => {
             Err(ParseError::unsupported("fd-duplication redirect target"))
         }
@@ -695,12 +693,9 @@ fn convert_brace_segment(
     }
     match segment {
         bword::BraceExpressionOrText::Text(text) => convert_word_text(&text),
-        // `depth`, not `depth + 1`: unwrapping `Expr` into its member list
-        // isn't itself a step deeper into the nesting — [`convert_brace_members`]'s
-        // own `Child` arm below is what actually descends into a nested
-        // brace's inner segments, and increments there. Incrementing at
-        // both hops double-counts each real nesting level (see this
-        // function's docs), miscalibrating this cap to roughly half of
+        // `depth`, not `depth + 1` (see this function's docs on why) —
+        // incrementing here too would double-count each nesting level,
+        // miscalibrating this cap to roughly half of
         // [`MAX_BRACE_NESTING_DEPTH`]'s intended 64-level threshold.
         bword::BraceExpressionOrText::Expr(members) => Ok(vec![WordPiece::BraceAlternation(
             convert_brace_members(members, depth)?,
@@ -1050,12 +1045,9 @@ mod tests {
         );
     }
 
-    // Regression for E2-6 (issue #59): `convert_word`'s `raw.contains('{')`
-    // pre-check must only skip the brace-expansion pre-pass for words with
-    // no `{` at all — a word that contains `{` but forms no valid brace
-    // expansion (no comma/range, unbalanced) still takes the exact same
-    // `parse_brace_expansions` path it did before the pre-check existed,
-    // landing on the same plain-literal result.
+    // Regression pin for issue #59 (E2-6): see convert_word's pre-check
+    // docs for why a `{`-containing word with no valid expansion still
+    // parses as a literal.
     #[test]
     fn brace_like_text_without_valid_expansion_parses_as_literal() {
         let cmd = parse_ok("echo {foo");
@@ -1094,7 +1086,7 @@ mod tests {
         }
     }
 
-    // ---- DoD item 3: unparseable input yields Err, not a panic ----
+    // ---- unparseable input yields Err, not a panic ----
     #[test]
     fn unparseable_input_is_syntax_error() {
         let result = parse("((((");
@@ -1104,7 +1096,7 @@ mod tests {
         );
     }
 
-    // ---- DoD item 3: parseable-but-unsupported construct yields
+    // ---- parseable-but-unsupported construct yields
     // Err(ParseError::Unsupported), not a silent drop ----
     #[test]
     fn if_statement_is_unsupported() {
@@ -1115,9 +1107,8 @@ mod tests {
         );
     }
 
-    // ---- newline separation is semantically `;` (review fix): brush-parser
-    // gives "a\nb" two separate top-level `complete_commands`, but bash runs
-    // them identically to "a; b" — both must fold into one CommandLine. ----
+    // ---- newline separation folds into one CommandLine exactly like `;`
+    // (see parse()'s docs) ----
     #[test]
     fn newline_separated_commands_flatten_like_semicolon() {
         let cmd = parse_ok("a\nb");
@@ -1159,12 +1150,9 @@ mod tests {
         );
     }
 
-    // ---- security-review fix (finding 1): a `name=value`-shaped SUFFIX item
-    // (after the command word) is an ordinary argument in real bash, not an
-    // assignment — `dd if=x of=y` runs `dd` with two argv words, it does not
-    // set shell variables `if`/`of`. Routing it into `assignments` made the
-    // word vanish from argv entirely, which is how `dd if=/dev/zero
-    // of=/dev/sda` dodged the `dd-write-device` blocklist rule. ----
+    // ---- a `name=value`-shaped SUFFIX item is an ordinary argument, not an
+    // assignment (see the `AssignmentWord` arm in
+    // apply_prefix_or_suffix_item for why) ----
     #[test]
     fn suffix_assignment_shaped_word_is_an_ordinary_argument() {
         let cmd = parse_ok("dd if=/dev/zero of=/dev/sda");
@@ -1184,7 +1172,8 @@ mod tests {
     }
 
     // ---- a PREFIX name=value item (before the command word) is still a
-    // real environment assignment, untouched by the finding-1 fix ----
+    // real environment assignment (see the `AssignmentWord` arm in
+    // apply_prefix_or_suffix_item) ----
     #[test]
     fn prefix_assignment_is_still_recorded_as_an_assignment() {
         let cmd = parse_ok("VAR=v cmd");
