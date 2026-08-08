@@ -18,6 +18,13 @@
 #                    command name and the remaining words are prepended onto
 #                    `required_tokens`, so "gh repo delete" is equivalent to
 #                    command = "gh", required_tokens = ["repo", "delete"].
+#                    Don't also list those sugar words in `required_tokens`
+#                    — they're prepended automatically, so duplicating them
+#                    there (`required_tokens = ["repo", "delete"]` alongside
+#                    this `command`) desugars to `["repo", "delete", "repo",
+#                    "delete"]`, matching only the nonsensical `gh repo
+#                    delete repo delete ...` and silently dead for the
+#                    intended rule.
 #                    Mutually exclusive with `command_prefix` — exactly one
 #                    of the two is required.
 #   command_prefix   command-name prefix (e.g. "mkfs." for the mkfs.* family).
@@ -92,7 +99,15 @@
 #                    alternative is boundary-anchored like this rather than
 #                    a bare `{ prefix = "http://localhost" }`, and for the
 #                    disclosed single-dash-attached-value gap
-#                    (`-xhttp://evil.example.com`) this can't catch.
+#                    (`-xhttp://evil.example.com`) this can't catch. When
+#                    `targets` is empty, the sugar-derived subcommand words
+#                    from a multi-word `command` are candidates too (e.g.
+#                    command = "gh repo delete" with except_targets =
+#                    [{prefix = "sandbox/"}] has candidates ["repo",
+#                    "delete", "sandbox/x"]) — "repo"/"delete" never match
+#                    an except_targets alternative, so "all candidates
+#                    excepted" can never hold and the rule always fires
+#                    (fail-closed, not a bypass, but likely not intended).
 #   value_flags      optional list of flag names, each WITHOUT its leading
 #                    `-`/`--` (issue #48): a single letter is a short flag
 #                    ("o" for -o), anything longer is a long-option name

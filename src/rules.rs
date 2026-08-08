@@ -7735,6 +7735,31 @@ mod tests {
     }
 
     #[test]
+    fn command_prefix_containing_tab_or_newline_is_also_a_load_time_error() {
+        // The rejection is `char::is_whitespace`-based, not a literal-space
+        // check -- confirm a TOML-escaped tab and newline are caught too.
+        for toml in [
+            r#"
+            [[command]]
+            id = "bad"
+            reason = "test"
+            command_prefix = "gh\trepo"
+        "#,
+            r#"
+            [[command]]
+            id = "bad"
+            reason = "test"
+            command_prefix = "gh\nrepo"
+        "#,
+        ] {
+            assert!(matches!(
+                Rules::parse(toml),
+                Err(RulesError::InvalidRule { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn user_config_rejects_allow_entry_using_multi_word_command_sugar_matching_shell_interpreter() {
         // The sugar's CommandMatch::Exact("bash") must trigger the same
         // dangerous-allow-target rejection a plain `command = "bash"`

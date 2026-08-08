@@ -237,6 +237,27 @@ fn multi_word_command_ask_rule_matches_through_leading_flags() {
     assert_eq!(permission_decision(&output), "ask");
 }
 
+// Pins the third decision path (block) for the sugar -- the tests above
+// only cover ask/allow.
+#[test]
+fn multi_word_command_deny_rule_blocks_matching_subcommand_sequence() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[deny]]
+        id = "user-deny-gh-repo-delete"
+        reason = "never delete a repo"
+        command = "gh repo delete"
+    "#,
+    );
+
+    let output = run_hook(
+        &bash_command("gh repo delete octo/rally"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+    assert!(permission_reason(&output).contains("user-deny-gh-repo-delete"));
+}
+
 // ==== issue #83: allowlist-downgrade eligibility must also account for a
 // substitution hidden in the command-position word's own non-winning
 // brace alternative, not just an ordinary argument-position one ====
