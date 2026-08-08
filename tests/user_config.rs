@@ -180,17 +180,18 @@ fn multi_word_command_ask_rule_does_not_over_match_bare_or_partial_command() {
 // The headline scenario: a subcommand-scoped `[[allow]]` (sugar-derived
 // required_tokens) carves an exception out of a broader whole-command
 // `Ask`. Uses `[[deny]] decision = "ask"`, not the `[[ask]]` table:
-// `[[ask]]` is a floor applied AFTER the allowlist downgrade specifically
-// so it can never be lifted by an `allow` entry (src/gate.rs module docs,
-// "ask beats allow everywhere it matters") -- a `[[deny]]` entry with
-// `decision = "ask"` produces a structural Ask instead, which IS eligible
-// for allowlist downgrade, the mechanism this test actually exercises.
+// `[[ask]]` is a floor applied AFTER the allowlist downgrade, so it can
+// never be lifted by an `allow` entry (src/gate.rs module docs: a broad
+// `deny`/`ask` must never be overridable by a narrower `allow`) -- a
+// `[[deny]]` entry with `decision = "ask"` produces a structural Ask
+// instead, which IS eligible for allowlist downgrade, the mechanism this
+// test actually exercises.
 #[test]
 fn subcommand_scoped_allow_carves_exception_out_of_broader_ask() {
     let (_dir, config_path) = write_config(
         r#"
         [[deny]]
-        id = "user-ask-gh"
+        id = "user-gate-gh"
         reason = "confirm every gh invocation"
         decision = "ask"
         command = "gh"
@@ -208,11 +209,11 @@ fn subcommand_scoped_allow_carves_exception_out_of_broader_ask() {
 
     let output = run_hook(&bash_command("gh repo delete octo/rally"), &envs);
     assert_eq!(permission_decision(&output), "ask");
-    assert!(permission_reason(&output).contains("user-ask-gh"));
+    assert!(permission_reason(&output).contains("user-gate-gh"));
 
     let output = run_hook(&bash_command("gh"), &envs);
     assert_eq!(permission_decision(&output), "ask");
-    assert!(permission_reason(&output).contains("user-ask-gh"));
+    assert!(permission_reason(&output).contains("user-gate-gh"));
 }
 
 // Dash-prefixed words between the command name and its subcommand sequence
