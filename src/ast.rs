@@ -72,10 +72,8 @@ pub(crate) const MAX_BRACE_NESTING_DEPTH: usize = 64;
 /// ([`MAX_BRACE_NESTING_DEPTH`]'s docs) — re-bisected under a 2MiB stack
 /// (`ulimit -s 2048`, matching `cargo test`'s per-test thread budget, the
 /// same target [`MAX_BRACE_NESTING_DEPTH`] is sized against): `case` aborts
-/// there at 99 levels, `if` at 110. An earlier version of this cap (128)
-/// was sized only against the 8MiB thresholds and **overflowed `cargo
-/// test`'s own thread** the first time its own boundary test ran — this
-/// value must clear the 2MiB budget, not just the main-thread one. 16 sits a
+/// there at 99 levels, `if` at 110. This value must clear the 2MiB budget,
+/// not just the main-thread one. 16 sits a
 /// ~6x margin below the lowest 2MiB threshold found (`case`'s 99), still
 /// comfortably exceeding [`MAX_BRACE_NESTING_DEPTH`]'s own ~10x bar; this is
 /// a *count*, not a *depth*, so 16 is also generous headroom over any

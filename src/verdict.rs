@@ -84,11 +84,9 @@ enum VerdictDetail {
 ///
 /// Fields are private (C-STRUCT-PRIVATE); the only public constructors are
 /// [`Verdict::allow`], [`Verdict::allow_suppressed`], [`Verdict::ask`], and
-/// [`Verdict::block`]. `ask` and `block` require a [`Reason`] by value, not
-/// `Option<Reason>` — there is no way to call either constructor without
-/// supplying one, so a reasonless `Ask`/`Block` cannot be constructed
-/// through the public API, and the private fields mean no other path (e.g.
-/// a struct literal) exists either.
+/// [`Verdict::block`]. Combined with [`Reason`]'s mandatory-by-type shape,
+/// no reasonless `Ask`/`Block` can be constructed through the public API,
+/// nor via a struct literal (the fields are private).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Verdict {
     detail: VerdictDetail,
@@ -110,9 +108,10 @@ impl Verdict {
     /// match: `suppressed_by` is the id of the allowlist entry that matched
     /// (the audit trail — `~/dotfiles/claude-code/rules/security.md`,
     /// "suppressions need an audit trail"), and `reason` explains the
-    /// downgrade for the same audience `Ask`/`Block` reasons serve.
-    /// `decision()` still returns `Decision::Allow`; only [`Self::reason`]
-    /// and [`Self::suppressed_by`] distinguish this from [`Self::allow`].
+    /// downgrade for the same audience `Ask`/`Block` reasons serve. Only
+    /// [`Self::reason`] and [`Self::suppressed_by`] distinguish this from
+    /// [`Self::allow`] — see [`VerdictDetail::AllowSuppressed`] for why
+    /// `decision()` doesn't treat it as a fourth outcome.
     #[must_use]
     pub fn allow_suppressed(
         normalized_argv: Vec<NormalizedWord>,
@@ -169,10 +168,8 @@ impl Verdict {
     }
 
     /// The decision: `Allow`, `Ask`, or `Block`. [`VerdictDetail::AllowSuppressed`]
-    /// still reports `Decision::Allow` — it is a second path to the same
-    /// decision, not a fourth decision (`Decision`'s `Ord`/"worst wins"
-    /// folding, `crate::gate::fold_worst`, treats it identically to a plain
-    /// `Allow`).
+    /// folds to `Decision::Allow` here too, so `crate::gate::fold_worst`'s
+    /// worst-wins ordering treats it identically to a plain `Allow`.
     #[must_use]
     pub fn decision(&self) -> Decision {
         match &self.detail {

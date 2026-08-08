@@ -89,7 +89,6 @@ impl From<Decision> for PermissionDecision {
     }
 }
 
-/// Builds the `hookSpecificOutput` JSON envelope for a decision + reason.
 fn output_json(decision: PermissionDecision, reason: &str) -> Value {
     serde_json::json!({
         "hookSpecificOutput": {
