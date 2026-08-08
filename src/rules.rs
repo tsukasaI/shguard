@@ -2767,10 +2767,14 @@ fn parse_escalation_floor(raw: Option<&str>) -> Result<Decision, RulesError> {
 /// Converts a [`CommandRuleDto`] into a [`CommandRule`], rejecting every
 /// semantically-invalid shape at this one boundary: empty id, empty
 /// reason, neither/both of `command`/`command_prefix` set, an empty
-/// `command`/`command_prefix` value, a malformed flag spec, an invalid
+/// `command`/`command_prefix` value, a `command_prefix` containing
+/// whitespace, a multi-word `command` with a flag-looking word (leading
+/// `-`) after the first, a malformed flag spec, an invalid
 /// required_tokens entry, a target with neither/both of `exact`/`prefix`
-/// set, or a malformed `value_flags` spec.
-fn convert_command_rule(dto: CommandRuleDto) -> Result<CommandRule, RulesError> {
+/// set, or a malformed `value_flags` spec. A multi-word `command` (e.g.
+/// `"gh repo delete"`) desugars to the first word as the command name plus
+/// the remaining words prepended onto `required_tokens`.
+fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesError> {
     if dto.id.trim().is_empty() {
         return Err(RulesError::invalid(&dto.id, "id must not be empty"));
     }
@@ -2783,7 +2787,25 @@ fn convert_command_rule(dto: CommandRuleDto) -> Result<CommandRule, RulesError> 
             if exact.trim().is_empty() {
                 return Err(RulesError::invalid(&dto.id, "`command` must not be empty"));
             }
-            CommandMatch::Exact(exact)
+            let mut words = exact.split_whitespace();
+            let name = match words.next() {
+                Some(name) => name.to_string(),
+                None => unreachable!("non-empty-after-trim string yields at least one word"),
+            };
+            let sugar_tokens: Vec<String> = words.map(str::to_string).collect();
+            for token in &sugar_tokens {
+                if token.starts_with('-') {
+                    return Err(RulesError::invalid(
+                        &dto.id,
+                        format!(
+                            "command word {token:?} looks like a flag; use required_flags \
+                             instead of a multi-word command"
+                        ),
+                    ));
+                }
+            }
+            dto.required_tokens.splice(0..0, sugar_tokens);
+            CommandMatch::Exact(name)
         }
         (None, Some(prefix)) => {
             // An empty `command_prefix` produces `CommandMatch::Prefix("")`,
@@ -2795,6 +2817,13 @@ fn convert_command_rule(dto: CommandRuleDto) -> Result<CommandRule, RulesError> 
                 return Err(RulesError::invalid(
                     &dto.id,
                     "`command_prefix` must not be empty",
+                ));
+            }
+            if prefix.contains(char::is_whitespace) {
+                return Err(RulesError::invalid(
+                    &dto.id,
+                    "`command_prefix` must not contain whitespace — subcommand-sequence \
+                     matching is only available via `command`, not `command_prefix`",
                 ));
             }
             CommandMatch::Prefix(prefix)
@@ -7613,6 +7642,118 @@ mod tests {
             rules
                 .match_command(&argv(&["env", "git", "push", "--force", "origin"]))
                 .is_some()
+        );
+    }
+
+    // ==== multi-word `command` sugar (issue #96) ====
+
+    #[test]
+    fn multi_word_command_desugars_to_equivalent_required_tokens_rule() {
+        let sugar_toml = r#"
+            [[command]]
+            id = "gh-repo-delete"
+            reason = "test"
+            command = "gh repo delete"
+        "#;
+        let manual_toml = r#"
+            [[command]]
+            id = "gh-repo-delete"
+            reason = "test"
+            command = "gh"
+            required_tokens = ["repo", "delete"]
+        "#;
+        let sugar_rules = Rules::parse(sugar_toml).unwrap();
+        let manual_rules = Rules::parse(manual_toml).unwrap();
+        assert_eq!(sugar_rules.command_rules[0], manual_rules.command_rules[0]);
+    }
+
+    #[test]
+    fn multi_word_command_sugar_is_equivalent_regardless_of_split_point() {
+        // "gh repo delete" (all sugar), "gh repo" + required_tokens =
+        // ["delete"] (partial sugar), and "gh" + required_tokens =
+        // ["repo", "delete"] (no sugar) must all desugar to the identical
+        // CommandRule.
+        let all_sugar = r#"
+            [[command]]
+            id = "gh-repo-delete"
+            reason = "test"
+            command = "gh repo delete"
+        "#;
+        let partial_sugar = r#"
+            [[command]]
+            id = "gh-repo-delete"
+            reason = "test"
+            command = "gh repo"
+            required_tokens = ["delete"]
+        "#;
+        let no_sugar = r#"
+            [[command]]
+            id = "gh-repo-delete"
+            reason = "test"
+            command = "gh"
+            required_tokens = ["repo", "delete"]
+        "#;
+        let a = Rules::parse(all_sugar).unwrap();
+        let b = Rules::parse(partial_sugar).unwrap();
+        let c = Rules::parse(no_sugar).unwrap();
+        assert_eq!(a.command_rules[0], b.command_rules[0]);
+        assert_eq!(b.command_rules[0], c.command_rules[0]);
+    }
+
+    #[test]
+    fn multi_word_command_rejects_flag_looking_word_at_load_time() {
+        let toml = r#"
+            [[command]]
+            id = "bad"
+            reason = "flags belong in required_flags"
+            command = "rm -rf"
+        "#;
+        let err = Rules::parse(toml).unwrap_err();
+        let RulesError::InvalidRule { problem, .. } = &err else {
+            panic!("expected InvalidRule, got {err:?}");
+        };
+        // Must name `command`, not `required_tokens` — the rule author
+        // wrote a multi-word `command`, not a required_tokens entry.
+        assert!(
+            problem.contains("command"),
+            "error should name `command`, got {problem:?}"
+        );
+    }
+
+    #[test]
+    fn command_prefix_containing_whitespace_is_a_load_time_error() {
+        let toml = r#"
+            [[command]]
+            id = "bad"
+            reason = "test"
+            command_prefix = "gh repo"
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn user_config_rejects_allow_entry_using_multi_word_command_sugar_matching_shell_interpreter() {
+        // The sugar's CommandMatch::Exact("bash") must trigger the same
+        // dangerous-allow-target rejection a plain `command = "bash"`
+        // allow entry would (matches_dangerous_allow_target walks
+        // entry.command, populated identically regardless of how the
+        // subcommand sequence was spelled).
+        let toml = r#"
+            [[allow]]
+            id = "user-allow-bash-extra"
+            reason = "trust me"
+            command = "bash extra"
+        "#;
+        let err = UserConfig::parse(toml).unwrap_err();
+        let RulesError::InvalidRule { problem, .. } = &err else {
+            panic!("expected InvalidRule, got {err:?}");
+        };
+        assert!(
+            problem.contains("shell interpreter"),
+            "error should be the dangerous-allow-target rejection, got {problem:?}"
         );
     }
 

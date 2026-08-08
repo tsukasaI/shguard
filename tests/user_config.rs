@@ -119,6 +119,123 @@ fn allow_rule_downgrades_a_matching_structural_ask() {
     assert_eq!(permission_decision(&output), "allow");
 }
 
+// ==== issue #96: multi-word `command` sugar (subcommand-level matching) ====
+
+#[test]
+fn multi_word_command_ask_rule_fires_for_matching_subcommand_sequence() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[ask]]
+        id = "user-ask-gh-repo-delete"
+        reason = "confirm repo deletion"
+        command = "gh repo delete"
+    "#,
+    );
+
+    let output = run_hook(
+        &bash_command("gh repo delete octo/rally"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(permission_reason(&output).contains("user-ask-gh-repo-delete"));
+}
+
+#[test]
+fn multi_word_command_ask_rule_does_not_over_match_a_different_subcommand() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[ask]]
+        id = "user-ask-gh-repo-delete"
+        reason = "confirm repo deletion"
+        command = "gh repo delete"
+    "#,
+    );
+
+    let output = run_hook(
+        &bash_command("gh pr view"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "allow");
+}
+
+#[test]
+fn multi_word_command_ask_rule_does_not_over_match_bare_or_partial_command() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[ask]]
+        id = "user-ask-gh-repo-delete"
+        reason = "confirm repo deletion"
+        command = "gh repo delete"
+    "#,
+    );
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+
+    let output = run_hook(&bash_command("gh"), &envs);
+    assert_eq!(permission_decision(&output), "allow");
+
+    let output = run_hook(&bash_command("gh status"), &envs);
+    assert_eq!(permission_decision(&output), "allow");
+}
+
+// The headline scenario: a subcommand-scoped `[[allow]]` (sugar-derived
+// required_tokens) carves an exception out of a broader whole-command
+// `Ask`. Uses `[[deny]] decision = "ask"`, not the `[[ask]]` table:
+// `[[ask]]` is a floor applied AFTER the allowlist downgrade specifically
+// so it can never be lifted by an `allow` entry (src/gate.rs module docs,
+// "ask beats allow everywhere it matters") -- a `[[deny]]` entry with
+// `decision = "ask"` produces a structural Ask instead, which IS eligible
+// for allowlist downgrade, the mechanism this test actually exercises.
+#[test]
+fn subcommand_scoped_allow_carves_exception_out_of_broader_ask() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[deny]]
+        id = "user-ask-gh"
+        reason = "confirm every gh invocation"
+        decision = "ask"
+        command = "gh"
+
+        [[allow]]
+        id = "user-allow-gh-pr-view"
+        reason = "read-only, always safe"
+        command = "gh pr view"
+    "#,
+    );
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+
+    let output = run_hook(&bash_command("gh pr view"), &envs);
+    assert_eq!(permission_decision(&output), "allow");
+
+    let output = run_hook(&bash_command("gh repo delete octo/rally"), &envs);
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(permission_reason(&output).contains("user-ask-gh"));
+
+    let output = run_hook(&bash_command("gh"), &envs);
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(permission_reason(&output).contains("user-ask-gh"));
+}
+
+// Dash-prefixed words between the command name and its subcommand sequence
+// must not break the match -- existing required_tokens/Positionals
+// behavior, the sugar just inherits it.
+#[test]
+fn multi_word_command_ask_rule_matches_through_leading_flags() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[ask]]
+        id = "user-ask-gh-repo-delete"
+        reason = "confirm repo deletion"
+        command = "gh repo delete"
+    "#,
+    );
+
+    let output = run_hook(
+        &bash_command("gh --verbose repo delete octo/rally"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "ask");
+}
+
 // ==== issue #83: allowlist-downgrade eligibility must also account for a
 // substitution hidden in the command-position word's own non-winning
 // brace alternative, not just an ordinary argument-position one ====

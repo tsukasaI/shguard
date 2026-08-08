@@ -338,12 +338,19 @@ command. This is a partial mitigation, not a complete one:
 
 ### What's not configurable (yet)
 
-Per-command policy is scoped to whole commands (`command`/`command_prefix`,
-optionally with `required_flags`/`targets`) — there is no subcommand-level
-matching (e.g. "allow `gh pr view` but ask before `gh repo delete`") in
-this version; declare separate rules keyed on flags/targets if you need
-finer granularity. Pipeline-shape rules (the `curl | sh` pattern and
-friends) are also not user-configurable.
+Per-command policy can be scoped to a subcommand sequence: a multi-word
+`command` value matches a leading sequence of positional words, e.g.
+`command = "gh repo delete"` asks only before `gh repo delete ...`, while
+`gh pr view` (and bare `gh`) fall through to their default `Allow` since no
+rule fires for them — no separate `allow` entry needed. Under the hood this
+desugars to a single-word `command` plus `required_tokens` (`command =
+"gh"`, `required_tokens = ["repo", "delete"]`), so it inherits that shape's
+own gap: a resolved flag *value* occupying one of the subcommand's
+positional slots can defeat the match the same way it can defeat a
+hand-written `required_tokens` rule — see the `value_flags`/subcommand-
+arity discussion above. `command_prefix` does not support this sugar;
+whitespace in a `command_prefix` value is a load-time error. Pipeline-shape
+rules (the `curl | sh` pattern and friends) are also not user-configurable.
 
 ## Limitations
 

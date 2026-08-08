@@ -13,9 +13,16 @@
 #                    in a Block verdict's `matched_rule`.
 #   reason           non-empty human-readable justification.
 #   decision         optional: "block" (default) or "ask".
-#   command          exact command name (argv[0]). Mutually exclusive with
-#                    `command_prefix` — exactly one of the two is required.
+#   command          exact command name (argv[0]). A multi-word value (e.g.
+#                    "gh repo delete") is sugar: the first word becomes the
+#                    command name and the remaining words are prepended onto
+#                    `required_tokens`, so "gh repo delete" is equivalent to
+#                    command = "gh", required_tokens = ["repo", "delete"].
+#                    Mutually exclusive with `command_prefix` — exactly one
+#                    of the two is required.
 #   command_prefix   command-name prefix (e.g. "mkfs." for the mkfs.* family).
+#                    Must not contain whitespace — the multi-word sugar above
+#                    is only available via `command`.
 #   required_flags   optional list of flag specs, ALL required (ANDed):
 #                      - a single letter ("r") is a short flag, satisfied by
 #                        a combined cluster ("-rf") or a separated token
