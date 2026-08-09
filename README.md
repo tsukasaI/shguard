@@ -411,6 +411,18 @@ eradicate shell-mediated destruction. Explicitly out of scope:
    code review. When such a stage is the pipeline's *final* one, the line
    additionally floors to at least Ask unconditionally, since rule 5's
    interpreter-sink check has no argv left to inspect there at all.
+7. **Ask reaching a human depends on how the host CLI is invoked, not
+   just on shguard's decision.** Measured against Claude Code 2.1.226
+   (issue #91, full tables and methodology in
+   [`docs/threat-model.md`](docs/threat-model.md)): in headless (`-p`)
+   mode, an Ask never reaches a human in any `--permission-mode` —
+   there's no TTY to prompt, so it resolves to a fail-closed deny instead.
+   In interactive (TTY) mode, Ask does reach a human in all 6 modes,
+   including `bypassPermissions` — verified up to a 15-minute unattended
+   wait for `bypassPermissions` specifically, with no auto-resolution
+   observed. `dontAsk` mode is asymmetric: it still prompts for a
+   hook-driven Ask, but auto-denies (rather than prompting) an Ask that
+   comes from a `settings.json` permission rule instead of the hook.
 
 ## Attribution
 
