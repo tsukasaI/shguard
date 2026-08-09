@@ -47,6 +47,17 @@ All notable changes to this project are documented in this file.
   matches a shell interpreter) — and per this project's fail-closed
   design, any user-config load error makes the hook Ask on every single
   command until the config is fixed, not silently ignore the bad entry.
+- **Compatibility note**: the `required_tokens` + `except_targets`
+  dead-config rejection (issue #96) is not limited to configs that use the
+  new `command` sugar or that contain whitespace — it applies to any
+  command rule with that shape, sugar or not. A pre-existing, hand-written,
+  sugar-free rule that loaded fine before this PR — e.g. `command = "gh"`
+  with `required_tokens = ["repo", "delete"]` and `except_targets = [{
+  prefix = "sandbox/" }]` (`targets`/`value_flags` both empty) — now fails
+  to load, because none of `except_targets`' alternatives cover the
+  literal words "repo"/"delete". Same fail-closed consequence as the other
+  entries above: the whole config is rejected, not just the offending
+  rule.
 
 ## [0.2.0] - 2026-07-21
 

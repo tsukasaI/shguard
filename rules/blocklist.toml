@@ -109,10 +109,20 @@
 #                    from a multi-word `command` are candidates too (e.g.
 #                    command = "gh repo delete" with except_targets =
 #                    [{prefix = "sandbox/"}] has candidates ["repo",
-#                    "delete", "sandbox/x"]) — "repo"/"delete" never match
-#                    an except_targets alternative, so "all candidates
-#                    excepted" can never hold and the rule always fires
-#                    (fail-closed, not a bypass, but likely not intended).
+#                    "delete", "sandbox/x"]). This exact example — no
+#                    except_targets alternative covers "repo" or "delete" —
+#                    is a load-time error: those two words can never be
+#                    excepted, so except_targets could never suppress the
+#                    rule, which is provably-dead config rather than a
+#                    working (if surprising) carve-out. The general shape
+#                    (required_tokens + except_targets with empty targets)
+#                    is not banned outright, though — if every
+#                    required_tokens word is covered by some except_targets
+#                    alternative (e.g. adding {exact="repo"} and
+#                    {exact="delete"} to the list above, alongside the
+#                    "sandbox/" prefix), the rule loads and the carve-out
+#                    works correctly. Both shapes are covered by this
+#                    project's own tests.
 #   value_flags      optional list of flag names, each WITHOUT its leading
 #                    `-`/`--` (issue #48): a single letter is a short flag
 #                    ("o" for -o), anything longer is a long-option name

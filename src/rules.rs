@@ -2781,6 +2781,28 @@ fn reject_flag_looking_word(
     Ok(())
 }
 
+/// Finds the largest `k` such that the last `k` words of `sugar_tokens`
+/// (the words a multi-word `command` prepends onto `required_tokens` as
+/// subcommand sugar) equal the first `k` words of `required_tokens` — a
+/// boundary overlap between what the sugar already implies and what the
+/// rule author additionally wrote by hand. Deliberately partial: it only
+/// catches an overlap AT THE sugar/required_tokens BOUNDARY, not a
+/// duplication anywhere else — e.g. sugar_tokens = `["a", "b", "c"]` with
+/// required_tokens = `["b"]` is NOT caught (sugar's 1-word tail is
+/// `["c"]`, which doesn't match required_tokens' 1-word head `["b"]`).
+/// Accepted trade-off: widening to "does any required_tokens word appear
+/// anywhere in sugar_tokens" would raise false-positive risk for unclear
+/// benefit.
+fn sugar_required_tokens_overlap(
+    sugar_tokens: &[String],
+    required_tokens: &[String],
+) -> Option<usize> {
+    let max_k = sugar_tokens.len().min(required_tokens.len());
+    (1..=max_k)
+        .rev()
+        .find(|&k| sugar_tokens[sugar_tokens.len() - k..] == required_tokens[..k])
+}
+
 /// Converts a [`CommandRuleDto`] into a [`CommandRule`], rejecting every
 /// semantically-invalid shape at this one boundary: empty id, empty
 /// reason, neither/both of `command`/`command_prefix` set, an empty
@@ -2818,21 +2840,17 @@ fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesErr
                     )
                 })?;
             }
-            // Deliberately partial: only catches required_tokens that
-            // literally begins with the sugar's own sequence — a lesser
-            // overlap like required_tokens = ["delete"] alone (merging to
-            // ["repo", "delete", "delete"]) is also plausibly a mistake
-            // but is not caught here.
-            if !sugar_tokens.is_empty() && dto.required_tokens.starts_with(&sugar_tokens) {
+            if let Some(k) = sugar_required_tokens_overlap(&sugar_tokens, &dto.required_tokens) {
                 return Err(RulesError::invalid(
                     &dto.id,
                     format!(
-                        "required_tokens already starts with {sugar_tokens:?}, the same words \
-                         `command` = {exact:?} prepends automatically as subcommand sugar — if \
-                         this is a mistake, remove the duplicated words from required_tokens; if \
-                         the sequence genuinely repeats, either spell the whole thing in \
-                         `command` (e.g. command = \"foo bar bar\") or drop the sugar entirely \
-                         and spell every word in required_tokens by hand"
+                        "required_tokens begins with {:?}, which overlaps the last {k} word(s) \
+                         `command` = {exact:?} already implies via its multi-word sugar \
+                         ({sugar_tokens:?}) — if this is a mistake, remove the overlap from \
+                         required_tokens; if the sequence genuinely repeats, either spell the \
+                         whole thing in `command` (e.g. command = \"foo bar bar\") or drop the \
+                         sugar entirely and spell every word in required_tokens by hand",
+                        &dto.required_tokens[..k],
                     ),
                 ));
             }
@@ -2874,6 +2892,15 @@ fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesErr
         }
     };
 
+    // Explicit merge point: `required_tokens` is fully determined once the
+    // `command`/`command_prefix` match above concludes (the `command` arm
+    // may have spliced sugar words into it; `command_prefix` never touches
+    // it). Binding it to a local here — a partial move out of `dto` — makes
+    // every reader below use the post-merge value by construction; an
+    // accidental later read of `dto.required_tokens` would be a compile
+    // error instead of a silent pre-merge bug.
+    let required_tokens = dto.required_tokens;
+
     let decision = parse_decision(&dto.id, dto.decision.as_deref())?;
 
     let required_flags = dto
@@ -2884,7 +2911,15 @@ fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesErr
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    for token in &dto.required_tokens {
+    // This loop re-validates every token, including sugar-derived ones the
+    // `command` arm above already validated via reject_flag_looking_word.
+    // That's currently pure redundancy, not a live second line of defense:
+    // sugar validation runs first and returns an error before any splice
+    // happens, and `split_whitespace` can never yield an empty token — so
+    // this loop can never actually reject a sugar-derived token today. It's
+    // kept so a future edit to the sugar-validation logic that silently
+    // diverges from this one still gets caught here.
+    for token in &required_tokens {
         if token.trim().is_empty() {
             return Err(RulesError::invalid(
                 &dto.id,
@@ -2932,7 +2967,7 @@ fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesErr
     if !value_flags.is_empty()
         && except_targets.is_empty()
         && required_flags.is_empty()
-        && dto.required_tokens.is_empty()
+        && required_tokens.is_empty()
     {
         return Err(RulesError::invalid(
             &dto.id,
@@ -2955,8 +2990,7 @@ fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesErr
     if targets.is_empty()
         && !except_targets.is_empty()
         && value_flags.is_empty()
-        && let Some(unexcepted) = dto
-            .required_tokens
+        && let Some(unexcepted) = required_tokens
             .iter()
             .find(|t| !except_targets.iter().any(|e| e.matches(t)))
     {
@@ -2977,7 +3011,7 @@ fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesErr
         decision,
         command,
         required_flags,
-        required_tokens: dto.required_tokens,
+        required_tokens,
         targets,
         except_targets,
         value_flags,
@@ -7872,6 +7906,90 @@ mod tests {
             reason = "test"
             command = "gh repo"
             required_tokens = ["delete"]
+        "#;
+        assert!(Rules::parse(toml).is_ok());
+    }
+
+    #[test]
+    fn multi_word_command_sugar_partial_boundary_overlap_is_rejected_at_load_time() {
+        // The fail-open repro that motivated the boundary-overlap rewrite:
+        // sugar_tokens = ["repo", "delete"], required_tokens = ["delete"].
+        // The old check only looked for required_tokens.starts_with(&sugar_tokens)
+        // (a k=2 full-prefix match), so this k=1 partial overlap sailed
+        // through and spliced to required_tokens = ["repo", "delete",
+        // "delete"] -- a rule that can never match a real `gh repo delete`
+        // invocation (position 2 would need to literally be "delete"
+        // again), silently never firing.
+        let toml = r#"
+            [[command]]
+            id = "gh-repo-delete"
+            reason = "test"
+            command = "gh repo delete"
+            required_tokens = ["delete"]
+        "#;
+        let err = Rules::parse(toml).unwrap_err();
+        let RulesError::InvalidRule { problem, .. } = &err else {
+            panic!("expected InvalidRule, got {err:?}");
+        };
+        assert!(
+            problem.contains("\"delete\""),
+            "error should name the overlapping word, got {problem:?}"
+        );
+    }
+
+    #[test]
+    fn multi_word_command_sugar_overlap_check_reports_the_largest_matching_k() {
+        // sugar_tokens = ["a", "b", "b"], required_tokens = ["b", "b", "c"].
+        // Both k=1 (sugar's last word "b" vs required_tokens' first word
+        // "b") and k=2 (sugar's last two words ["b", "b"] vs
+        // required_tokens' first two ["b", "b"]) match; k=3 (the full
+        // sugar length) does not (sugar's first word is "a", required_tokens'
+        // is "b"). The largest-first search order must report k=2, not the
+        // first k it happens to try -- a smallest-first implementation
+        // would report "last 1 word(s)" instead and fail this assertion.
+        let toml = r#"
+            [[command]]
+            id = "periodic-tail"
+            reason = "test"
+            command = "x a b b"
+            required_tokens = ["b", "b", "c"]
+        "#;
+        let err = Rules::parse(toml).unwrap_err();
+        let RulesError::InvalidRule { problem, .. } = &err else {
+            panic!("expected InvalidRule, got {err:?}");
+        };
+        assert!(
+            problem.contains("last 2 word"),
+            "error should report the largest overlap (k=2), got {problem:?}"
+        );
+    }
+
+    #[test]
+    fn whole_repeating_sequence_spelled_as_all_sugar_loads() {
+        // The legal respelling of a genuinely-repeating sequence: put the
+        // whole thing in `command` and leave required_tokens empty, rather
+        // than splitting it across `command` sugar and a hand-written
+        // required_tokens that would trigger the overlap check above.
+        let toml = r#"
+            [[command]]
+            id = "npm-run-run"
+            reason = "test"
+            command = "npm run run"
+        "#;
+        assert!(Rules::parse(toml).is_ok());
+    }
+
+    #[test]
+    fn whole_repeating_sequence_spelled_as_hand_written_required_tokens_loads() {
+        // The other legal respelling: no sugar at all, every word spelled
+        // out by hand in required_tokens. sugar_tokens is empty here, so
+        // the overlap check has nothing to compare against and never fires.
+        let toml = r#"
+            [[command]]
+            id = "npm-run-run"
+            reason = "test"
+            command = "npm"
+            required_tokens = ["run", "run"]
         "#;
         assert!(Rules::parse(toml).is_ok());
     }
