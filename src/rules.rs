@@ -2764,6 +2764,23 @@ fn parse_escalation_floor(raw: Option<&str>) -> Result<Decision, RulesError> {
     }
 }
 
+/// Rejects a `-`-prefixed word as flag-looking — shared predicate for both
+/// the multi-word `command` sugar and `required_tokens` entries, each of
+/// which supplies its own message so the error still names the right
+/// field (misattributing the field was itself a finding fixed earlier in
+/// this PR's review history, so the two call sites deliberately don't
+/// share wording).
+fn reject_flag_looking_word(
+    id: &str,
+    word: &str,
+    message: impl FnOnce() -> String,
+) -> Result<(), RulesError> {
+    if word.starts_with('-') {
+        return Err(RulesError::invalid(id, message()));
+    }
+    Ok(())
+}
+
 /// Converts a [`CommandRuleDto`] into a [`CommandRule`], rejecting every
 /// semantically-invalid shape at this one boundary: empty id, empty
 /// reason, neither/both of `command`/`command_prefix` set, an empty
@@ -2794,15 +2811,33 @@ fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesErr
             };
             let sugar_tokens: Vec<String> = words.map(str::to_string).collect();
             for token in &sugar_tokens {
-                if token.starts_with('-') {
-                    return Err(RulesError::invalid(
-                        &dto.id,
-                        format!(
-                            "command word {token:?} looks like a flag; use required_flags \
-                             instead of a multi-word command"
-                        ),
-                    ));
-                }
+                reject_flag_looking_word(&dto.id, token, || {
+                    format!(
+                        "command word {token:?} looks like a flag; use required_flags \
+                         instead of a multi-word command"
+                    )
+                })?;
+            }
+            // Deliberately partial: only catches required_tokens that
+            // literally begins with the sugar's own sequence — a lesser
+            // overlap like required_tokens = ["delete"] alone (merging to
+            // ["repo", "delete", "delete"]) is also plausibly a mistake
+            // but is not caught here.
+            if !sugar_tokens.is_empty()
+                && dto.required_tokens.len() >= sugar_tokens.len()
+                && dto.required_tokens[..sugar_tokens.len()] == sugar_tokens[..]
+            {
+                return Err(RulesError::invalid(
+                    &dto.id,
+                    format!(
+                        "required_tokens already starts with {sugar_tokens:?}, the same words \
+                         `command` = {exact:?} prepends automatically as subcommand sugar — if \
+                         this is a mistake, remove the duplicated words from required_tokens; if \
+                         the sequence genuinely repeats, either spell the whole thing in \
+                         `command` (e.g. command = \"foo bar bar\") or drop the sugar entirely \
+                         and spell every word in required_tokens by hand"
+                    ),
+                ));
             }
             dto.required_tokens.splice(0..0, sugar_tokens);
             CommandMatch::Exact(name)
@@ -2859,14 +2894,9 @@ fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesErr
                 "required_tokens entry must not be empty",
             ));
         }
-        if token.starts_with('-') {
-            return Err(RulesError::invalid(
-                &dto.id,
-                format!(
-                    "required_tokens entry {token:?} starts with '-'; use required_flags for flags"
-                ),
-            ));
-        }
+        reject_flag_looking_word(&dto.id, token, || {
+            format!("required_tokens entry {token:?} starts with '-'; use required_flags for flags")
+        })?;
     }
 
     let targets = dto
@@ -2910,6 +2940,37 @@ fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesErr
         return Err(RulesError::invalid(
             &dto.id,
             "value_flags has no effect without `except_targets` or `required_flags`/`required_tokens`",
+        ));
+    }
+
+    // required_tokens + except_targets dead-config check (second review
+    // round, issue #96): deliberately narrower than "both non-empty is
+    // always an error" — a required_tokens word covered by its own
+    // except_targets entry (e.g. `command = "gh repo delete"` with
+    // except_targets matching "repo", "delete", and a target prefix) is a
+    // legitimate, functional carve-out. Only a required_tokens word
+    // matched by NONE of the except_targets alternatives is provably
+    // always an except_targets candidate that can never be excepted —
+    // i.e. dead. The value_flags.is_empty() gate matters because a
+    // value-flag-consumed resolved word can drop out of the except_targets
+    // candidate set entirely, which would make "provably dead" overclaim
+    // in a contrived case.
+    if targets.is_empty()
+        && !except_targets.is_empty()
+        && value_flags.is_empty()
+        && let Some(unexcepted) = dto
+            .required_tokens
+            .iter()
+            .find(|t| !except_targets.iter().any(|e| e.matches(t)))
+    {
+        return Err(RulesError::invalid(
+            &dto.id,
+            format!(
+                "except_targets can never suppress this rule: required_tokens entry {unexcepted:?} \
+                 is always an except_targets candidate but matches none of the except_targets \
+                 alternatives — add explicit `targets`, cover this subcommand word with its own \
+                 except_targets entry, or remove except_targets"
+            ),
         ));
     }
 
@@ -7780,6 +7841,87 @@ mod tests {
             problem.contains("shell interpreter"),
             "error should be the dangerous-allow-target rejection, got {problem:?}"
         );
+    }
+
+    // ==== duplicate sugar words in required_tokens (second review round,
+    // issue #96) ====
+
+    #[test]
+    fn multi_word_command_sugar_duplicated_in_required_tokens_is_rejected_at_load_time() {
+        let toml = r#"
+            [[command]]
+            id = "gh-repo-delete"
+            reason = "test"
+            command = "gh repo delete"
+            required_tokens = ["repo", "delete"]
+        "#;
+        let err = Rules::parse(toml).unwrap_err();
+        let RulesError::InvalidRule { problem, .. } = &err else {
+            panic!("expected InvalidRule, got {err:?}");
+        };
+        assert!(
+            problem.contains("repo") && problem.contains("delete"),
+            "error should name the repeated sugar words, got {problem:?}"
+        );
+    }
+
+    #[test]
+    fn multi_word_command_sugar_with_non_overlapping_required_tokens_still_loads() {
+        // sugar_tokens = ["repo"], required_tokens = ["delete"] -- no
+        // shared prefix, so this is not the duplicate-prefix shape and
+        // must not be a false positive.
+        let toml = r#"
+            [[command]]
+            id = "gh-repo-delete"
+            reason = "test"
+            command = "gh repo"
+            required_tokens = ["delete"]
+        "#;
+        assert!(Rules::parse(toml).is_ok());
+    }
+
+    // ==== required_tokens + except_targets dead-config check (second
+    // review round, issue #96) ====
+
+    #[test]
+    fn required_tokens_word_never_covered_by_except_targets_is_rejected_at_load_time() {
+        // Neither "repo" nor "delete" is ever excepted by a "sandbox/"
+        // prefix matcher, so except_targets can never suppress this rule
+        // -- provably dead.
+        let toml = r#"
+            [[command]]
+            id = "gh-repo-delete"
+            reason = "test"
+            command = "gh repo delete"
+            except_targets = [{ prefix = "sandbox/" }]
+        "#;
+        let err = Rules::parse(toml).unwrap_err();
+        let RulesError::InvalidRule { problem, .. } = &err else {
+            panic!("expected InvalidRule, got {err:?}");
+        };
+        assert!(
+            problem.contains("\"repo\""),
+            "error should name the unexcepted required_tokens word, got {problem:?}"
+        );
+    }
+
+    #[test]
+    fn required_tokens_word_fully_covered_by_except_targets_loads_successfully() {
+        // Every required_tokens word ("repo", "delete") has its own
+        // except_targets entry, alongside a genuine target carve-out
+        // ("my-org/") -- a legitimate, functional except_targets rule,
+        // not the blunt "required_tokens + except_targets = always error"
+        // shape this check must not reject.
+        let toml = r#"
+            [[command]]
+            id = "gh-repo-delete"
+            reason = "test"
+            command = "gh repo delete"
+            except_targets = [
+                { exact = "repo" }, { exact = "delete" }, { prefix = "my-org/" },
+            ]
+        "#;
+        assert!(Rules::parse(toml).is_ok());
     }
 
     // ==== decision field ====

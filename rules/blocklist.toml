@@ -13,18 +13,23 @@
 #                    in a Block verdict's `matched_rule`.
 #   reason           non-empty human-readable justification.
 #   decision         optional: "block" (default) or "ask".
-#   command          exact command name (argv[0]). A multi-word value (e.g.
+#   command          exact command name (argv[0]). Whitespace in `command`
+#                    is ALWAYS interpreted as the subcommand-sugar split
+#                    below — there is no way to exact-match a literal
+#                    space-containing command name; accepted as a
+#                    deliberate trade-off given how rare such command names
+#                    are in practice. A multi-word value (e.g.
 #                    "gh repo delete") is sugar: the first word becomes the
 #                    command name and the remaining words are prepended onto
 #                    `required_tokens`, so "gh repo delete" is equivalent to
 #                    command = "gh", required_tokens = ["repo", "delete"].
 #                    Don't also list those sugar words in `required_tokens`
-#                    — they're prepended automatically, so duplicating them
-#                    there (`required_tokens = ["repo", "delete"]` alongside
-#                    this `command`) desugars to `["repo", "delete", "repo",
-#                    "delete"]`, matching only the nonsensical `gh repo
-#                    delete repo delete ...` and silently dead for the
-#                    intended rule.
+#                    — they're prepended automatically, so an explicit
+#                    `required_tokens` that literally starts with the same
+#                    words (`required_tokens = ["repo", "delete"]` alongside
+#                    this `command`) is rejected at load time rather than
+#                    silently desugaring to the dead `["repo", "delete",
+#                    "repo", "delete"]`.
 #                    Mutually exclusive with `command_prefix` — exactly one
 #                    of the two is required.
 #   command_prefix   command-name prefix (e.g. "mkfs." for the mkfs.* family).

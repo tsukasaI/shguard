@@ -541,6 +541,38 @@ fn except_targets_invalid_matcher_shape_is_rejected_at_config_load() {
     assert!(!permission_reason(&output).is_empty());
 }
 
+// Regression (second fable review round, issue #96): a required_tokens
+// word (from `command`'s multi-word sugar) is itself a candidate in the
+// `targets`-empty except_targets walk. A blunt "required_tokens +
+// except_targets = always a load-time error" check would reject this rule
+// even though it's fully functional -- every required_tokens word
+// ("repo", "delete") has its own except_targets entry, alongside the real
+// carve-out ("my-org/"). This exercises real matching end-to-end, not just
+// successful parse, so it would have caught that blunt version's false
+// positive.
+#[test]
+fn except_targets_covering_every_required_tokens_word_still_excepts_correctly() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[ask]]
+        id = "user-ask-gh-repo-delete"
+        reason = "confirm gh repo delete outside my-org"
+        command = "gh repo delete"
+        except_targets = [
+            { exact = "repo" }, { exact = "delete" }, { prefix = "my-org/" },
+        ]
+    "#,
+    );
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+
+    let output = run_hook(&bash_command("gh repo delete my-org/some-repo"), &envs);
+    assert_eq!(permission_decision(&output), "allow");
+
+    let output = run_hook(&bash_command("gh repo delete other-org/some-repo"), &envs);
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(permission_reason(&output).contains("user-ask-gh-repo-delete"));
+}
+
 // ==== Adversarial ====
 
 #[test]

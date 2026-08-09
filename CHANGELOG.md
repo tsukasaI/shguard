@@ -26,6 +26,27 @@ All notable changes to this project are documented in this file.
   loaded fine — this fails shguard closed for every command until the entry
   is removed or narrowed, the same load-time rejection `sudo`-matching
   `[[allow]]` entries already had.
+- **Compatibility note**: a `command` value containing whitespace (issue
+  #96) used to be inert — `CommandMatch::Exact` compared it against one
+  whole resolved argv token, which a multi-word value could never equal,
+  so it silently matched nothing — and now desugars into a command name
+  plus `required_tokens`, making it live. A config that harmlessly did
+  nothing before an shguard upgrade can start actively matching (and, in
+  an `[[allow]]` entry, downgrading `Ask` to `Allow`) after upgrading —
+  audit existing configs for accidental whitespace in `command` values,
+  especially in `[[allow]]` entries. As a consequence, exact-matching a
+  literal command name that itself contains a space (e.g. from a quoted
+  `argv[0]` like `'my prog' --arg`) is no longer possible — whitespace in
+  `command` is now unconditionally the subcommand-sugar split, with no
+  escape hatch; accepted as a deliberate trade-off, since no known
+  real-world command has a literal space in argv[0] and no rule in this
+  repo relied on the old behavior. This also means several previously-
+  loading configs now fail to load instead (a multi-word `command` with a
+  flag-looking extra word, e.g. `command = "rm -rf"`; whitespace in
+  `command_prefix`; an `[[allow]]` entry whose sugar-derived command name
+  matches a shell interpreter) — and per this project's fail-closed
+  design, any user-config load error makes the hook Ask on every single
+  command until the config is fixed, not silently ignore the bad entry.
 
 ## [0.2.0] - 2026-07-21
 
