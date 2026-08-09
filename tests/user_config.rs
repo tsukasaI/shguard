@@ -541,7 +541,7 @@ fn except_targets_invalid_matcher_shape_is_rejected_at_config_load() {
     assert!(!permission_reason(&output).is_empty());
 }
 
-// Regression (second fable review round, issue #96): a required_tokens
+// Regression (issue #96): a required_tokens
 // word (from `command`'s multi-word sugar) is itself a candidate in the
 // `targets`-empty except_targets walk. A blunt "required_tokens +
 // except_targets = always a load-time error" check would reject this rule

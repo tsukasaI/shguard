@@ -2767,9 +2767,9 @@ fn parse_escalation_floor(raw: Option<&str>) -> Result<Decision, RulesError> {
 /// Rejects a `-`-prefixed word as flag-looking — shared predicate for both
 /// the multi-word `command` sugar and `required_tokens` entries, each of
 /// which supplies its own message so the error still names the right
-/// field (misattributing the field was itself a finding fixed earlier in
-/// this PR's review history, so the two call sites deliberately don't
-/// share wording).
+/// field: the two call sites intentionally use different wording — one
+/// names `command`, the other `required_tokens` — so an error always
+/// points at the field the rule author actually wrote.
 fn reject_flag_looking_word(
     id: &str,
     word: &str,
@@ -2823,10 +2823,7 @@ fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesErr
             // overlap like required_tokens = ["delete"] alone (merging to
             // ["repo", "delete", "delete"]) is also plausibly a mistake
             // but is not caught here.
-            if !sugar_tokens.is_empty()
-                && dto.required_tokens.len() >= sugar_tokens.len()
-                && dto.required_tokens[..sugar_tokens.len()] == sugar_tokens[..]
-            {
+            if !sugar_tokens.is_empty() && dto.required_tokens.starts_with(&sugar_tokens) {
                 return Err(RulesError::invalid(
                     &dto.id,
                     format!(
@@ -2943,8 +2940,8 @@ fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesErr
         ));
     }
 
-    // required_tokens + except_targets dead-config check (second review
-    // round, issue #96): deliberately narrower than "both non-empty is
+    // required_tokens + except_targets dead-config check (issue #96):
+    // deliberately narrower than "both non-empty is
     // always an error" — a required_tokens word covered by its own
     // except_targets entry (e.g. `command = "gh repo delete"` with
     // except_targets matching "repo", "delete", and a target prefix) is a
@@ -7843,8 +7840,7 @@ mod tests {
         );
     }
 
-    // ==== duplicate sugar words in required_tokens (second review round,
-    // issue #96) ====
+    // ==== duplicate sugar words in required_tokens (issue #96) ====
 
     #[test]
     fn multi_word_command_sugar_duplicated_in_required_tokens_is_rejected_at_load_time() {
@@ -7880,8 +7876,7 @@ mod tests {
         assert!(Rules::parse(toml).is_ok());
     }
 
-    // ==== required_tokens + except_targets dead-config check (second
-    // review round, issue #96) ====
+    // ==== required_tokens + except_targets dead-config check (issue #96) ====
 
     #[test]
     fn required_tokens_word_never_covered_by_except_targets_is_rejected_at_load_time() {
