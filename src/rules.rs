@@ -2766,10 +2766,8 @@ fn parse_escalation_floor(raw: Option<&str>) -> Result<Decision, RulesError> {
 
 /// Rejects a `-`-prefixed word as flag-looking — shared predicate for both
 /// the multi-word `command` sugar and `required_tokens` entries, each of
-/// which supplies its own message so the error still names the right
-/// field: the two call sites intentionally use different wording — one
-/// names `command`, the other `required_tokens` — so an error always
-/// points at the field the rule author actually wrote.
+/// which supplies its own message so the error always names the field the
+/// rule author actually wrote.
 fn reject_flag_looking_word(
     id: &str,
     word: &str,
@@ -2792,7 +2790,11 @@ fn reject_flag_looking_word(
 /// `["c"]`, which doesn't match required_tokens' 1-word head `["b"]`).
 /// Accepted trade-off: widening to "does any required_tokens word appear
 /// anywhere in sugar_tokens" would raise false-positive risk for unclear
-/// benefit.
+/// benefit. Also not caught: a required_tokens entry with internal
+/// whitespace (e.g. `"repo delete"` as a single token) never equals a
+/// single sugar word, so it can collide with sugar words without this
+/// check seeing it — accepted, since permitting internal whitespace at all
+/// is what makes the legitimate quoted-positional case possible.
 fn sugar_required_tokens_overlap(
     sugar_tokens: &[String],
     required_tokens: &[String],
@@ -2800,7 +2802,7 @@ fn sugar_required_tokens_overlap(
     let max_k = sugar_tokens.len().min(required_tokens.len());
     (1..=max_k)
         .rev()
-        .find(|&k| sugar_tokens[sugar_tokens.len() - k..] == required_tokens[..k])
+        .find(|&k| sugar_tokens.ends_with(&required_tokens[..k]))
 }
 
 /// Converts a [`CommandRuleDto`] into a [`CommandRule`], rejecting every
@@ -2911,19 +2913,25 @@ fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesErr
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    // This loop re-validates every token, including sugar-derived ones the
-    // `command` arm above already validated via reject_flag_looking_word.
-    // That's currently pure redundancy, not a live second line of defense:
-    // sugar validation runs first and returns an error before any splice
-    // happens, and `split_whitespace` can never yield an empty token — so
-    // this loop can never actually reject a sugar-derived token today. It's
-    // kept so a future edit to the sugar-validation logic that silently
-    // diverges from this one still gets caught here.
+    // Re-walks sugar-derived tokens the `command` arm already validated —
+    // redundant today (the sugar loop errors first; `split_whitespace`
+    // yields no empties) and load-time cheap. The rejection predicate is
+    // single-sourced in `reject_flag_looking_word`, so the sites can only
+    // diverge in walk coverage; this loop backstops exactly that.
     for token in &required_tokens {
         if token.trim().is_empty() {
             return Err(RulesError::invalid(
                 &dto.id,
                 "required_tokens entry must not be empty",
+            ));
+        }
+        if token != token.trim() {
+            return Err(RulesError::invalid(
+                &dto.id,
+                format!(
+                    "required_tokens entry {token:?} has leading/trailing whitespace, \
+                     which can never match a resolved argv word"
+                ),
             ));
         }
         reject_flag_looking_word(&dto.id, token, || {
@@ -7627,6 +7635,42 @@ mod tests {
     }
 
     #[test]
+    fn required_tokens_rejects_leading_or_trailing_whitespace() {
+        // "delete " can never equal a resolved argv word (e.g. from
+        // `gh repo delete`, which tokenizes to "delete" with no trailing
+        // space) -- the same fail-open dead-rule shape as an exact
+        // sugar/required_tokens duplicate, just via padding instead of
+        // repetition.
+        let toml = r#"
+            [[command]]
+            id = "bad"
+            reason = "padded token"
+            command = "gh repo"
+            required_tokens = ["delete "]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn required_tokens_allows_internal_whitespace() {
+        // A resolved argv word can legitimately contain an internal space
+        // when it came from a quoted shell argument (e.g. `mytool "foo
+        // bar"` resolves to the single word "foo bar") -- only
+        // leading/trailing whitespace is rejected, not internal.
+        let toml = r#"
+            [[command]]
+            id = "ok"
+            reason = "quoted positional"
+            command = "mytool"
+            required_tokens = ["foo bar"]
+        "#;
+        assert!(Rules::parse(toml).is_ok());
+    }
+
+    #[test]
     fn required_tokens_does_not_match_flag_spelling() {
         // "--rebase" (a flag in `git pull --rebase`) must not satisfy
         // required_tokens = ["rebase"] — they're different namespaces.
@@ -7912,14 +7956,10 @@ mod tests {
 
     #[test]
     fn multi_word_command_sugar_partial_boundary_overlap_is_rejected_at_load_time() {
-        // The fail-open repro that motivated the boundary-overlap rewrite:
-        // sugar_tokens = ["repo", "delete"], required_tokens = ["delete"].
-        // The old check only looked for required_tokens.starts_with(&sugar_tokens)
-        // (a k=2 full-prefix match), so this k=1 partial overlap sailed
-        // through and spliced to required_tokens = ["repo", "delete",
-        // "delete"] -- a rule that can never match a real `gh repo delete`
-        // invocation (position 2 would need to literally be "delete"
-        // again), silently never firing.
+        // sugar_tokens = ["repo", "delete"], required_tokens = ["delete"]:
+        // a k=1 boundary overlap (sugar's last word equals required_tokens'
+        // first word) is rejected at load time, not just a k=n full-prefix
+        // overlap.
         let toml = r#"
             [[command]]
             id = "gh-repo-delete"

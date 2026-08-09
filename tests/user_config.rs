@@ -541,15 +541,13 @@ fn except_targets_invalid_matcher_shape_is_rejected_at_config_load() {
     assert!(!permission_reason(&output).is_empty());
 }
 
-// Regression (issue #96): a required_tokens
-// word (from `command`'s multi-word sugar) is itself a candidate in the
-// `targets`-empty except_targets walk. A blunt "required_tokens +
-// except_targets = always a load-time error" check would reject this rule
-// even though it's fully functional -- every required_tokens word
-// ("repo", "delete") has its own except_targets entry, alongside the real
-// carve-out ("my-org/"). This exercises real matching end-to-end, not just
-// successful parse, so it would have caught that blunt version's false
-// positive.
+// Regression (issue #96): a required_tokens word (from `command`'s
+// multi-word sugar) fully covered by except_targets alternatives -- every
+// required_tokens word ("repo", "delete") has its own except_targets
+// entry, alongside the real carve-out ("my-org/") -- produces a working
+// carve-out: the rule excepts matching invocations while still firing on
+// non-excepted ones. Exercises real matching end-to-end, not just
+// successful parse.
 #[test]
 fn except_targets_covering_every_required_tokens_word_still_excepts_correctly() {
     let (_dir, config_path) = write_config(

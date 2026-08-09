@@ -28,8 +28,9 @@ All notable changes to this project are documented in this file.
   `[[allow]]` entries already had.
 - **Compatibility note**: a `command` value containing whitespace (issue
   #96) used to be inert — `CommandMatch::Exact` compared it against one
-  whole resolved argv token, which a multi-word value could never equal,
-  so it silently matched nothing — and now desugars into a command name
+  whole resolved argv token, which a `command` value containing any
+  whitespace (leading, trailing, or between multiple words) could never
+  equal, so it silently matched nothing — and now desugars into a command name
   plus `required_tokens`, making it live. A config that harmlessly did
   nothing before an shguard upgrade can start actively matching (and, in
   an `[[allow]]` entry, downgrading `Ask` to `Allow`) after upgrading —
@@ -58,6 +59,12 @@ All notable changes to this project are documented in this file.
   literal words "repo"/"delete". Same fail-closed consequence as the other
   entries above: the whole config is rejected, not just the offending
   rule.
+- **Compatibility note**: a `required_tokens` entry with leading or
+  trailing whitespace (e.g. `"delete "`) is now rejected at load time — it
+  can never equal a resolved argv word, so it previously loaded and
+  silently never matched. Internal whitespace stays legal (e.g. `"repo
+  delete"` as one token, matching a quoted positional argument). Same
+  fail-closed consequence as the entries above.
 
 ## [0.2.0] - 2026-07-21
 
