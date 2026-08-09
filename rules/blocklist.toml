@@ -13,9 +13,28 @@
 #                    in a Block verdict's `matched_rule`.
 #   reason           non-empty human-readable justification.
 #   decision         optional: "block" (default) or "ask".
-#   command          exact command name (argv[0]). Mutually exclusive with
-#                    `command_prefix` — exactly one of the two is required.
+#   command          exact command name (argv[0]). Whitespace in `command`
+#                    is ALWAYS interpreted as the subcommand-sugar split
+#                    below — there is no way to exact-match a literal
+#                    space-containing command name; accepted as a
+#                    deliberate trade-off given how rare such command names
+#                    are in practice. A multi-word value (e.g.
+#                    "gh repo delete") is sugar: the first word becomes the
+#                    command name and the remaining words are prepended onto
+#                    `required_tokens`, so "gh repo delete" is equivalent to
+#                    command = "gh", required_tokens = ["repo", "delete"].
+#                    Don't also list those sugar words in `required_tokens`
+#                    — they're prepended automatically, so an explicit
+#                    `required_tokens` that literally starts with the same
+#                    words (`required_tokens = ["repo", "delete"]` alongside
+#                    this `command`) is rejected at load time rather than
+#                    silently desugaring to the dead `["repo", "delete",
+#                    "repo", "delete"]`.
+#                    Mutually exclusive with `command_prefix` — exactly one
+#                    of the two is required.
 #   command_prefix   command-name prefix (e.g. "mkfs." for the mkfs.* family).
+#                    Must not contain whitespace — the multi-word sugar above
+#                    is only available via `command`.
 #   required_flags   optional list of flag specs, ALL required (ANDed):
 #                      - a single letter ("r") is a short flag, satisfied by
 #                        a combined cluster ("-rf") or a separated token
@@ -85,7 +104,25 @@
 #                    alternative is boundary-anchored like this rather than
 #                    a bare `{ prefix = "http://localhost" }`, and for the
 #                    disclosed single-dash-attached-value gap
-#                    (`-xhttp://evil.example.com`) this can't catch.
+#                    (`-xhttp://evil.example.com`) this can't catch. When
+#                    `targets` is empty, the sugar-derived subcommand words
+#                    from a multi-word `command` are candidates too (e.g.
+#                    command = "gh repo delete" with except_targets =
+#                    [{prefix = "sandbox/"}] has candidates ["repo",
+#                    "delete", "sandbox/x"]). This exact example — no
+#                    except_targets alternative covers "repo" or "delete" —
+#                    is a load-time error: those two words can never be
+#                    excepted, so except_targets could never suppress the
+#                    rule, which is provably-dead config rather than a
+#                    working (if surprising) carve-out. The general shape
+#                    (required_tokens + except_targets with empty targets)
+#                    is not banned outright, though — if every
+#                    required_tokens word is covered by some except_targets
+#                    alternative (e.g. adding {exact="repo"} and
+#                    {exact="delete"} to the list above, alongside the
+#                    "sandbox/" prefix), the rule loads and the carve-out
+#                    works correctly. Both shapes are covered by this
+#                    project's own tests.
 #   value_flags      optional list of flag names, each WITHOUT its leading
 #                    `-`/`--` (issue #48): a single letter is a short flag
 #                    ("o" for -o), anything longer is a long-option name

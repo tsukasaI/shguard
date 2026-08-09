@@ -119,6 +119,145 @@ fn allow_rule_downgrades_a_matching_structural_ask() {
     assert_eq!(permission_decision(&output), "allow");
 }
 
+// ==== issue #96: multi-word `command` sugar (subcommand-level matching) ====
+
+#[test]
+fn multi_word_command_ask_rule_fires_for_matching_subcommand_sequence() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[ask]]
+        id = "user-ask-gh-repo-delete"
+        reason = "confirm repo deletion"
+        command = "gh repo delete"
+    "#,
+    );
+
+    let output = run_hook(
+        &bash_command("gh repo delete octo/rally"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(permission_reason(&output).contains("user-ask-gh-repo-delete"));
+}
+
+#[test]
+fn multi_word_command_ask_rule_does_not_over_match_a_different_subcommand() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[ask]]
+        id = "user-ask-gh-repo-delete"
+        reason = "confirm repo deletion"
+        command = "gh repo delete"
+    "#,
+    );
+
+    let output = run_hook(
+        &bash_command("gh pr view"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "allow");
+}
+
+#[test]
+fn multi_word_command_ask_rule_does_not_over_match_bare_or_partial_command() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[ask]]
+        id = "user-ask-gh-repo-delete"
+        reason = "confirm repo deletion"
+        command = "gh repo delete"
+    "#,
+    );
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+
+    let output = run_hook(&bash_command("gh"), &envs);
+    assert_eq!(permission_decision(&output), "allow");
+
+    let output = run_hook(&bash_command("gh status"), &envs);
+    assert_eq!(permission_decision(&output), "allow");
+}
+
+// The headline scenario: a subcommand-scoped `[[allow]]` (sugar-derived
+// required_tokens) carves an exception out of a broader whole-command
+// `Ask`. Uses `[[deny]] decision = "ask"`, not the `[[ask]]` table:
+// `[[ask]]` is a floor applied AFTER the allowlist downgrade, so it can
+// never be lifted by an `allow` entry (src/gate.rs module docs: a broad
+// `deny`/`ask` must never be overridable by a narrower `allow`) -- a
+// `[[deny]]` entry with `decision = "ask"` produces a structural Ask
+// instead, which IS eligible for allowlist downgrade, the mechanism this
+// test actually exercises.
+#[test]
+fn subcommand_scoped_allow_carves_exception_out_of_broader_ask() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[deny]]
+        id = "user-gate-gh"
+        reason = "confirm every gh invocation"
+        decision = "ask"
+        command = "gh"
+
+        [[allow]]
+        id = "user-allow-gh-pr-view"
+        reason = "read-only, always safe"
+        command = "gh pr view"
+    "#,
+    );
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+
+    let output = run_hook(&bash_command("gh pr view"), &envs);
+    assert_eq!(permission_decision(&output), "allow");
+
+    let output = run_hook(&bash_command("gh repo delete octo/rally"), &envs);
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(permission_reason(&output).contains("user-gate-gh"));
+
+    let output = run_hook(&bash_command("gh"), &envs);
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(permission_reason(&output).contains("user-gate-gh"));
+}
+
+// Dash-prefixed words between the command name and its subcommand sequence
+// must not break the match -- existing required_tokens/Positionals
+// behavior, the sugar just inherits it.
+#[test]
+fn multi_word_command_ask_rule_matches_through_leading_flags() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[ask]]
+        id = "user-ask-gh-repo-delete"
+        reason = "confirm repo deletion"
+        command = "gh repo delete"
+    "#,
+    );
+
+    let output = run_hook(
+        &bash_command("gh --verbose repo delete octo/rally"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "ask");
+}
+
+// Pins the third decision path (block) for the sugar -- the tests above
+// only cover ask/allow.
+#[test]
+fn multi_word_command_deny_rule_blocks_matching_subcommand_sequence() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[deny]]
+        id = "user-deny-gh-repo-delete"
+        reason = "never delete a repo"
+        command = "gh repo delete"
+    "#,
+    );
+
+    let output = run_hook(
+        &bash_command("gh repo delete octo/rally"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+    assert!(permission_reason(&output).contains("user-deny-gh-repo-delete"));
+}
+
 // ==== issue #83: allowlist-downgrade eligibility must also account for a
 // substitution hidden in the command-position word's own non-winning
 // brace alternative, not just an ordinary argument-position one ====
@@ -400,6 +539,36 @@ fn except_targets_invalid_matcher_shape_is_rejected_at_config_load() {
     );
     assert_eq!(permission_decision(&output), "ask");
     assert!(!permission_reason(&output).is_empty());
+}
+
+// Regression (issue #96): a required_tokens word (from `command`'s
+// multi-word sugar) fully covered by except_targets alternatives -- every
+// required_tokens word ("repo", "delete") has its own except_targets
+// entry, alongside the real carve-out ("my-org/") -- produces a working
+// carve-out: the rule excepts matching invocations while still firing on
+// non-excepted ones. Exercises real matching end-to-end, not just
+// successful parse.
+#[test]
+fn except_targets_covering_every_required_tokens_word_still_excepts_correctly() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[ask]]
+        id = "user-ask-gh-repo-delete"
+        reason = "confirm gh repo delete outside my-org"
+        command = "gh repo delete"
+        except_targets = [
+            { exact = "repo" }, { exact = "delete" }, { prefix = "my-org/" },
+        ]
+    "#,
+    );
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+
+    let output = run_hook(&bash_command("gh repo delete my-org/some-repo"), &envs);
+    assert_eq!(permission_decision(&output), "allow");
+
+    let output = run_hook(&bash_command("gh repo delete other-org/some-repo"), &envs);
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(permission_reason(&output).contains("user-ask-gh-repo-delete"));
 }
 
 // ==== Adversarial ====

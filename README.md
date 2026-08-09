@@ -264,18 +264,35 @@ one meant to span every subcommand of a dispatched command — can turn a
 real flag into an accidentally-swallowed value on the subcommands where
 your declared flag doesn't actually take one.
 
+Per-command policy can be scoped to a subcommand sequence: a multi-word
+`command` value matches a leading sequence of positional words, e.g.
+`command = "gh repo delete"` asks only before `gh repo delete ...`, while
+`gh pr view` (and bare `gh`) fall through to their default `Allow` since no
+rule fires for them — no separate `allow` entry needed. Under the hood this
+desugars to a single-word `command` plus `required_tokens` (`command =
+"gh"`, `required_tokens = ["repo", "delete"]`), so it inherits that
+shape's own gap: a resolved flag *value* occupying one of the
+subcommand's positional slots can defeat the match the same way it can
+defeat a hand-written `required_tokens` rule — see the
+`value_flags`/subcommand-arity discussion above.
+
 ### Precedence: deny > ask > allow
 
 Evaluation is fixed, regardless of which array a rule came from: a `deny`
 match always wins; failing that, an `ask` match always wins over an
 `allow` match for the same command. A `deny`/`ask` entry can only ever
 *raise* what would otherwise be `Allow` — it can never be silently
-overridden by a broader `allow` entry elsewhere in the file. An `allow`
-entry can only ever *downgrade* an `Ask` that shguard's own structural
-analysis produced (an unresolvable construct, for instance) — it can
-**never** downgrade a `Block`, from the embedded blocklist or from your
-own `deny` entries. This mirrors Claude Code's own
-`permissions.{deny,ask,allow}` model.
+overridden by a broader `allow` entry elsewhere in the file. This holds
+unconditionally for `[[ask]]`-table entries and for `[[deny]]` entries
+using the default `decision = "block"`; a `[[deny]]` entry with
+`decision = "ask"` instead produces a structural `Ask` — the same kind an
+embedded ask-decision blocklist rule would — which a narrower `[[allow]]`
+entry in the same config **can** downgrade. An `allow` entry can only ever
+*downgrade* an `Ask` that shguard's own structural analysis or an
+ask-decision rule produced (an unresolvable construct, or a `[[deny]]`
+entry with `decision = "ask"`, for instance) — it can **never** downgrade a
+`Block`, from the embedded blocklist or from your own `deny` entries. This
+mirrors Claude Code's own `permissions.{deny,ask,allow}` model.
 
 ### Escalation floor
 
@@ -338,12 +355,10 @@ command. This is a partial mitigation, not a complete one:
 
 ### What's not configurable (yet)
 
-Per-command policy is scoped to whole commands (`command`/`command_prefix`,
-optionally with `required_flags`/`targets`) — there is no subcommand-level
-matching (e.g. "allow `gh pr view` but ask before `gh repo delete`") in
-this version; declare separate rules keyed on flags/targets if you need
-finer granularity. Pipeline-shape rules (the `curl | sh` pattern and
-friends) are also not user-configurable.
+`command_prefix` does not support the multi-word `command` sugar
+described above; whitespace in a `command_prefix` value is a load-time
+error. Pipeline-shape rules (the `curl | sh` pattern and friends) are
+also not user-configurable.
 
 ## Limitations
 
