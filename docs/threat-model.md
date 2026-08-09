@@ -21,11 +21,15 @@ internals and may not hold across versions — see
 [Reproduction method](#reproduction-method) below to re-verify on a
 version bump.
 
-Paths of the form `evidence/…` below refer to this investigation's
-captured artifacts (debug logs, CSV summaries, session transcripts),
-preserved alongside the issue #91 pull request rather than shipped in
-this repo. The [Reproduction method](#reproduction-method) section is
-written to be sufficient to regenerate them on demand.
+Paths of the form `evidence/…` below name this investigation's captured
+artifacts (debug logs, CSV summaries, session transcripts) as they existed
+on the machine that ran the issue #91 investigation — they are citations
+identifying what kind of evidence backs each claim, not links to files
+preserved anywhere durable; the artifacts themselves lived under an
+ephemeral local path and were not retained. The
+[Reproduction method](#reproduction-method) section below is the durable
+record: it is written to contain enough detail for someone to regenerate
+the same artifacts from scratch.
 
 **Scope note**: issue #91's acceptance criteria name a possible follow-up
 — an `ask_under_bypass` config setting that would escalate Ask to Deny
@@ -47,9 +51,11 @@ is not designed or filed here.
 | `dontAsk` | Executes, 3ms | Denied, fail-closed, no prompt, 6ms | Denied, fail-closed, no prompt, 1ms |
 | `plan` | Bash never dispatched (see note) | Bash never dispatched (see note) | Bash never dispatched (see note) |
 
-All 18 cells (6 modes x 3 decisions) were exercised with a forced-decision
-synthetic hook and cross-checked against `debug.log` timestamps and
-`output.json`'s `permission_denials` count.
+All 18 cells (6 modes x 3 decisions) were run; in 15 of them a
+forced-decision synthetic hook was invoked and cross-checked against
+`debug.log` timestamps and `output.json`'s `permission_denials` count
+(the 3 `plan` cells instead confirmed Bash is never dispatched to the
+hook at all — see the `plan` row's note below).
 
 - **Allow** executes in every mode, including `bypassPermissions`, in
   3-4ms (`Hook result has permissionBehavior=allow` immediately followed
@@ -83,7 +89,7 @@ synthetic hook and cross-checked against `debug.log` timestamps and
 | `dontAsk` | Executes immediately, no dialog | Dialog renders, holds; no auto-resolution within 300s | Denied immediately, no dialog |
 | `plan` | ExitPlanMode dialog gates first (see note) | ExitPlanMode dialog gates first, then Bash-level ask dialog also holds (see note) | ExitPlanMode dialog gates first (see note) |
 
-The interactive Allow/Deny cells and the basic six Ask cells are cited
+The interactive Allow/Block cells and the basic six Ask cells are cited
 from `evidence/interactive-isolated/RESULTS.csv` (isolation-verified
 re-runs — see [Investigation-integrity finding](#investigation-integrity-remote-control-contamination)
 below for why the isolated re-run is the citable source rather than the
@@ -112,15 +118,21 @@ beyond the tested horizon is unmeasured.
   which renders its own separate confirmation dialog with the same
   genuine-wait behaviour as the Bash-hook dialog. Only after exiting plan
   mode does the model attempt Bash, which then hits the same hook-Ask
-  dialog pattern as every other mode. In the isolated re-run, the
-  Bash-level ask for `plan` mode was confirmed to genuinely stay
-  unresolved with zero local input for the remainder of the observation
-  window (`evidence/interactive-isolated/RESULTS.csv`, `plan-ask` row).
+  dialog pattern as every other mode. For the `plan` x Allow and `plan` x
+  Block cells: once the ExitPlanMode gate is resolved, Bash then executes
+  (Allow) or is denied (Block) the same as every other mode — but that
+  ExitPlanMode-gate resolution was only observed under the
+  since-diagnosed contaminated condition (see
+  [Investigation-integrity finding](#investigation-integrity-remote-control-contamination)
+  below) and was not independently re-run in isolation; treat those two
+  cells as directionally consistent, not independently re-verified. The
+  `plan` x Ask cell, by contrast, WAS re-verified clean under isolation:
+  in the isolated re-run, the Bash-level ask for `plan` mode was
+  confirmed to genuinely stay unresolved with zero local input for the
+  remainder of the observation window
+  (`evidence/interactive-isolated/RESULTS.csv`, `plan-ask` row).
 
 ## Investigation-integrity: remote-control contamination
-
-This is a real finding about the investigation's own methodology, not a
-footnote.
 
 This machine's real Claude Code configuration has
 `remoteControlAtStartup: true`. That setting opens an ambient
@@ -210,9 +222,12 @@ this matrix back to real shguard:
   synthetic test hook's Ask output shows an identical
   `hookSpecificOutput.{hookEventName,permissionDecision,permissionDecisionReason}`
   shape — same paths, same types (`evidence/task1/structural-comparison.txt`:
-  "IDENTICAL SHAPE (path+type)"). Claude Code's permission-resolution
-  mechanism only reads this JSON shape, so it treats real shguard's Ask
-  output identically to every synthetic-hook cell in the matrix above.
+  "IDENTICAL SHAPE (path+type)"). Across the matrix, the observed
+  permission-resolution behaviour varied only with this JSON shape,
+  supporting (though not directly proving, since Claude Code's
+  implementation wasn't inspected) that real shguard's Ask output would
+  be treated identically to every synthetic-hook cell in the matrix
+  above.
 - **Interactive fidelity run**: running real shguard as the hook for the
   `bypassPermissions` x ask cell (`evidence/interactive-shguard/bypassPermissions-ask-real-shguard`)
   also showed a real dialog rendering. This specific run was **not**
@@ -256,9 +271,9 @@ bump:
    array of stream events, not a single object) and cross-reference
    `debug.log` for `Hook result has permissionBehavior=...` and
    `[Stall] tool_dispatch_start ... permissionDecisionMs=...` lines.
-5. **Interactive cells**: since `tmux` is not available in this
-   environment, drive the interactive TTY session with `expect`, scripting
-   a bounded unattended window (300s for most cells; extend to 900s under
+5. **Interactive cells**: drive the interactive TTY session with `expect`
+   (or `tmux send-keys`, if available), scripting a bounded unattended
+   window (300s for most cells; extend to 900s under
    `caffeinate -i` for the headline `bypassPermissions` x ask cell) during
    which zero local keystrokes are sent, then check for zero marker
    creation, zero `tool_dispatch_start`, and zero remote-bridge activity

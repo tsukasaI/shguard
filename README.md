@@ -416,13 +416,19 @@ eradicate shell-mediated destruction. Explicitly out of scope:
    (issue #91, full tables and methodology in
    [`docs/threat-model.md`](docs/threat-model.md)): in headless (`-p`)
    mode, an Ask never reaches a human in any `--permission-mode` —
-   there's no TTY to prompt, so it resolves to a fail-closed deny instead.
-   In interactive (TTY) mode, Ask does reach a human in all 6 modes,
-   including `bypassPermissions` — verified up to a 15-minute unattended
-   wait for `bypassPermissions` specifically, with no auto-resolution
-   observed. `dontAsk` mode is asymmetric: it still prompts for a
-   hook-driven Ask, but auto-denies (rather than prompting) an Ask that
-   comes from a `settings.json` permission rule instead of the hook.
+   there's no TTY to prompt, so it resolves to a fail-closed deny in the
+   5 modes where Bash is dispatched at all headlessly (`plan` mode never
+   dispatches Bash headlessly in the first place, so there's nothing to
+   deny). In interactive (TTY) mode, Ask does reach a human in all 6
+   modes, including `bypassPermissions` (for `plan` mode, after the
+   ExitPlanMode confirmation resolves first) — verified up to a
+   15-minute unattended wait for `bypassPermissions` specifically (using
+   a shape-matched synthetic test hook; see docs/threat-model.md's
+   fidelity section for how this extends to real shguard), with no
+   auto-resolution observed. `dontAsk` mode is asymmetric: it still
+   prompts for a hook-driven Ask, but auto-denies (rather than prompting)
+   an Ask that comes from a `settings.json` permission rule instead of
+   the hook.
 
 ## Attribution
 
