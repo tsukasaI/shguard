@@ -367,8 +367,11 @@ extensions, with the regression suite above as evidence — it does not
 eradicate shell-mediated destruction. Explicitly out of scope:
 
 1. **Runtime state.** Environment variables, aliases, shell functions, and
-   `PATH` shadowing set by *earlier* commands in a persistent session.
-   shguard analyzes one command string at a time; it has no session memory.
+   `PATH` shadowing set by *earlier* commands in a persistent session are
+   invisible to shguard — it analyzes one command string at a time, with
+   no session memory. See [the threat model's session-state
+   assumption](docs/threat-model.md#session-state-is-invisible-to-shguard)
+   for the reasoning.
 2. **Semantic destructiveness of arbitrary programs.** A Python script that
    deletes files, or `make clean` with a hostile Makefile — shguard's
    blocklist covers enumerated argv shapes (including a curated set of
@@ -376,7 +379,9 @@ eradicate shell-mediated destruction. Explicitly out of scope:
    `reset --hard`, `commit --amend`), not arbitrary program behavior.
 3. **Non-shell destructive edits.** An agent instructed to edit or delete
    files destructively through its file-editing tools rather than through a
-   shell command never reaches this hook.
+   shell command never reaches this hook — see [the threat model's
+   non-shell-attack-paths
+   scope](docs/threat-model.md#non-shell-attack-paths-are-out-of-scope).
 4. **Multi-step attacks staged across Ask-approved commands.** Ask surfaces
    an unresolvable command to a human for a decision; a hurried human can
    still approve a staged payload one step at a time.
@@ -412,23 +417,14 @@ eradicate shell-mediated destruction. Explicitly out of scope:
    additionally floors to at least Ask unconditionally, since rule 5's
    interpreter-sink check has no argv left to inspect there at all.
 7. **Ask reaching a human depends on how the host CLI is invoked, not
-   just on shguard's decision.** Measured against Claude Code 2.1.226
-   (issue #91, full tables and methodology in
-   [`docs/threat-model.md`](docs/threat-model.md)): in headless (`-p`)
-   mode, an Ask never reaches a human in any `--permission-mode` —
-   there's no TTY to prompt, so it resolves to a fail-closed deny in the
-   5 modes where Bash is dispatched at all headlessly (`plan` mode never
-   dispatches Bash headlessly in the first place, so there's nothing to
-   deny). In interactive (TTY) mode, Ask does reach a human in all 6
-   modes, including `bypassPermissions` (for `plan` mode, after the
-   ExitPlanMode confirmation resolves first) — verified up to a
-   15-minute unattended wait for `bypassPermissions` specifically (using
-   a shape-matched synthetic test hook; see docs/threat-model.md's
-   fidelity section for how this extends to real shguard), with no
-   auto-resolution observed. `dontAsk` mode is asymmetric: it still
-   prompts for a hook-driven Ask, but auto-denies (rather than prompting)
-   an Ask that comes from a `settings.json` permission rule instead of
-   the hook.
+   just on shguard's decision.** Headlessly (`-p`), Ask never reaches a
+   human in any `--permission-mode` and fails closed instead; interactively
+   it does reach a human in every mode, including `bypassPermissions`,
+   with one asymmetry in how `dontAsk` handles a `settings.json`-driven
+   ask versus a hook-driven one. Measured against Claude Code 2.1.226 —
+   see the [permission-mode × decision
+   matrix](docs/threat-model.md#empirical-backing-permission-mode--decision-matrix-issue-91)
+   (issue #91) for the full headless/interactive tables and methodology.
 
 ## Attribution
 
