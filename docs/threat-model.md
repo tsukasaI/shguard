@@ -28,10 +28,11 @@ only signal that survives the agent itself being compromised.
 This has a corollary that completes the confused-deputy story: because
 shguard treats the command string as its only signal, shguard's own
 parser and normalizer — the `brush-parser` adapter, and the quote/ANSI-C/
-`$IFS` folding described in the README's "How it works" section — are
-themselves attack surface. An obfuscated command designed to evade a
-naive string match is exactly the case the published GuardFall bypass
-classes, and shguard's blocklist/structural-gate stages, exist to handle.
+`$IFS` folding described in the README's "How it works: a four-stage
+pipeline" section — are themselves attack surface. An obfuscated command
+designed to evade a naive string match is exactly the case the published
+GuardFall bypass classes, and shguard's blocklist/structural-gate stages,
+exist to handle.
 
 ### Session state is invisible to shguard
 
@@ -84,7 +85,7 @@ set of permission-mode values.
 
 ## Empirical backing: permission-mode × decision matrix (issue #91)
 
-This document tables how Claude Code's `--permission-mode` values resolve
+This section tables how Claude Code's `--permission-mode` values resolve
 this hook's `Allow` / `Ask` / `Block` decisions, for both headless (`-p`)
 and interactive (TTY) execution. It answers the load-bearing question
 behind shguard's design: shguard's decisions only matter if the host CLI
@@ -371,4 +372,3 @@ bump:
 7. **shguard fidelity**: compare real shguard's stdout JSON shape against
    the synthetic hook's, and optionally re-run the headline interactive
    cell with real shguard substituted for the synthetic hook.
-</content>

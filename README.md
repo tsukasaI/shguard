@@ -418,10 +418,11 @@ eradicate shell-mediated destruction. Explicitly out of scope:
    interpreter-sink check has no argv left to inspect there at all.
 7. **Ask reaching a human depends on how the host CLI is invoked, not
    just on shguard's decision.** Headlessly (`-p`), Ask never reaches a
-   human in any `--permission-mode` and fails closed instead; interactively
-   it does reach a human in every mode, including `bypassPermissions`,
-   with one asymmetry in how `dontAsk` handles a `settings.json`-driven
-   ask versus a hook-driven one. Measured against Claude Code 2.1.226 —
+   human and fails closed instead, in every mode that dispatches Bash
+   headlessly (`plan` never does); interactively it does reach a human in
+   every mode, including `bypassPermissions`, with one asymmetry in how
+   `dontAsk` handles a `settings.json`-driven ask versus a hook-driven
+   one. Measured against Claude Code 2.1.226 —
    see the [permission-mode × decision
    matrix](docs/threat-model.md#empirical-backing-permission-mode--decision-matrix-issue-91)
    (issue #91) for the full headless/interactive tables and methodology.
