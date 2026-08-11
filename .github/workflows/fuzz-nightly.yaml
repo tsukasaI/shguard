@@ -71,11 +71,19 @@ jobs:
             bash_argv=$(jq -r '.bash_argv | @json' <<<"$line")
             bash_version=$(jq -r '.bash_version' <<<"$line")
 
-            title="fuzz: shguard/bash argv divergence for ${candidate}"
-            title="${title:0:250}"
+            # A short hash of the candidate, embedded in the title, is the
+            # dedup key -- fable review follow-up: searching GitHub's issue
+            # search on the raw candidate text is fragile, since candidates
+            # routinely contain `"` (the quote-split mechanism) and other
+            # search-significant characters that unbalance the search
+            # phrase and can make an existing issue invisible to the lookup,
+            # filing a duplicate every night. A hash has none of those
+            # characters and is stable across runs for the same candidate.
+            candidate_hash=$(printf '%s' "$candidate" | sha256sum | cut -c1-12)
+            title="fuzz: shguard/bash argv divergence (${candidate_hash})"
 
             existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --label fuzz-divergence --state open \
-              --search "in:title \"${candidate}\"" --json number --jq '.[0].number // empty')
+              --search "in:title \"${candidate_hash}\"" --json number --jq '.[0].number // empty')
             if [[ -n "$existing" ]]; then
               echo "Skipping duplicate for candidate (already tracked in #$existing): $candidate"
               continue

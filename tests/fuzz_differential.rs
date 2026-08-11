@@ -180,7 +180,7 @@ const ABSOLUTE_COMMAND_PREFIXES: &[&str] = &[
 /// after a run of whitespace containing a real newline, counts as
 /// "command position" -- a plain space does not, since `echo /bin/rm` is
 /// just an ordinary argument to `echo`, never an invocation of `/bin/rm`).
-const COMMAND_BOUNDARY: &[char] = &[';', '&', '|', '`', '('];
+const COMMAND_BOUNDARY: &[char] = &[';', '&', '|', '`', '(', '{'];
 
 fn contains_absolute_path_invocation(text: &str) -> bool {
     for prefix in ABSOLUTE_COMMAND_PREFIXES {
@@ -226,6 +226,8 @@ fn contains_dangerous_redirect(text: &str) -> bool {
         // scan correctly positioned either way).
         } else if c == b'<' && j < n && bytes[j] == b'>' {
             j += 1; // `<>` read-write redirect.
+        } else if c == b'>' && j < n && bytes[j] == b'|' {
+            j += 1; // `>|` clobber-override write (fable review follow-up).
         }
         while j < n && bytes[j].is_ascii_whitespace() {
             j += 1;
@@ -256,6 +258,10 @@ fn absolute_path_and_redirect_guard_rejects_crafted_bypass_attempts() {
         "echo hi && /usr/bin/rm -rf /"
     ));
     assert!(contains_absolute_path_invocation("$(/sbin/reboot)"));
+    // A brace command GROUP (`{ ...; }`) also puts its contents in command
+    // position (fable review follow-up) -- the mutator never generates
+    // this shape, but the guard should not silently miss it either.
+    assert!(contains_absolute_path_invocation("{ /bin/rm -rf /; }"));
     // Not at a command boundary -- an ordinary argument to `echo`, not an
     // invocation of `/bin/rm`. Still fully safe to attempt (see the
     // sandbox self-test below); this only documents the guard's own
@@ -264,6 +270,10 @@ fn absolute_path_and_redirect_guard_rejects_crafted_bypass_attempts() {
 
     assert!(contains_dangerous_redirect("echo hi > /etc/passwd"));
     assert!(contains_dangerous_redirect("echo hi >> /etc/shadow"));
+    // `>|` (clobber-override, ignores `set -o noclobber`) is still a write
+    // redirect -- fable review follow-up, the byte-scanner previously left
+    // the `|` unconsumed and never reached the target text.
+    assert!(contains_dangerous_redirect("echo hi >| /etc/passwd"));
     assert!(contains_dangerous_redirect("$(: > /etc/cron.d/x)"));
     assert!(contains_dangerous_redirect(
         "`: > /root/.ssh/authorized_keys`"
@@ -581,6 +591,17 @@ fn find_real_bash() -> PathBuf {
     PathBuf::from("/bin/bash")
 }
 
+/// Single-quotes `s` for safe splicing into a bash script string (fable
+/// review follow-up): [`find_real_bash`]'s resolved path was previously
+/// interpolated unquoted, so a `PATH` entry containing whitespace would
+/// word-split and silently break the capture. Escapes an embedded single
+/// quote by closing, emitting an escaped quote, and reopening -- the
+/// standard POSIX-shell single-quote escape, though a resolved bash binary
+/// path is never expected to contain one in practice.
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
 /// The inner echo-back script, pre-quoted for direct splicing into the
 /// outer wrapper: single-quoted so the OUTER bash passes it through
 /// untouched, and the INNER bash (which actually runs it) sees exactly
@@ -650,7 +671,7 @@ impl Sandbox {
         }
         let script = format!(
             "{bash} -c {inner} -- {stage}",
-            bash = self.bash_path.display(),
+            bash = shell_single_quote(&self.bash_path.display().to_string()),
             inner = INNER_ECHO_SCRIPT_QUOTED,
             stage = stage_text,
         );
@@ -1112,10 +1133,23 @@ enum SkipReason {
 /// capture/comparison code), but fixing `src/normalize.rs` is out of scope
 /// for issue #93 (see this file's own module docs and the `#[ignore]`d
 /// `known_gap_unquoted_empty_brace_member_is_not_elided` test below for the
-/// full reproducer). Recognized by SHAPE (not a fixed string list) so any
-/// future random draw hitting the same root cause is correctly bucketed
-/// without narrowing the generator's own mechanism pool.
-fn is_known_empty_brace_elision_gap(shguard_argv: &[String], bash_argv: &[String]) -> bool {
+/// full reproducer). Recognized by SHAPE, gated on the stage text actually
+/// containing an unquoted empty brace member (`{,`/`,}`, exactly what
+/// [`brace_wrap`] generates) -- fable-review follow-up: an earlier version
+/// matched on the argv shape alone ("shguard's argv, with every empty word
+/// stripped, equals bash's argv"), which is broader than this root cause
+/// and would have silently absorbed ANY future `src/normalize.rs`
+/// regression that spuriously injects an unrelated empty `Resolved("")`
+/// word into the same bucket. Requiring the brace-member marker in the
+/// source text keeps the bucket scoped to the one diagnosed mechanism.
+fn is_known_empty_brace_elision_gap(
+    stage_text: &str,
+    shguard_argv: &[String],
+    bash_argv: &[String],
+) -> bool {
+    if !stage_text.contains(",}") && !stage_text.contains("{,") {
+        return false;
+    }
     let without_empties: Vec<&String> = shguard_argv.iter().filter(|s| !s.is_empty()).collect();
     without_empties.len() == bash_argv.len() && without_empties.into_iter().eq(bash_argv.iter())
 }
@@ -1148,7 +1182,7 @@ fn compare_stage(
         Ok(Some(DivergenceReport {
             candidate: stage_text.to_string(),
             decision: verdict.decision(),
-            known_open: is_known_empty_brace_elision_gap(&resolved, &bash_argv),
+            known_open: is_known_empty_brace_elision_gap(stage_text, &resolved, &bash_argv),
             shguard_argv: resolved,
             bash_argv,
         }))
