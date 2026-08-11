@@ -1,6 +1,91 @@
-# Permission-mode threat model (issue #91)
+# Threat model
 
-This document tables how Claude Code's `--permission-mode` values resolve
+This document states shguard's threat model in general: what it assumes
+about the agent it protects, what it can and cannot see, and what its
+three decisions (Block/Ask/Allow) actually promise. The final section —
+the permission-mode × decision matrix from issue #91 — is the concrete
+empirical backing for the enforcement claims made in the promises
+section below, measured against one real host (Claude Code).
+
+## Scope assumptions
+
+### The protected agent can itself be adversarially prompted
+
+shguard's threat model assumes the coding agent invoking shell commands
+may itself be manipulated — via prompt injection, a compromised context
+window, or a confused-deputy scenario where the agent is tricked into
+acting on behalf of an attacker — into emitting a dangerous command. This
+holds regardless of whether the agent's operator intended anything
+harmful.
+
+shguard's job is to catch the resulting command, not to reason about the
+agent's intent or trustworthiness. The command string is shguard's only
+input by design, not because a richer signal was unavailable: an
+adversarially-prompted agent's stated intent can't be trusted any more
+than its command can, so evaluating the command's own structure is the
+only signal that survives the agent itself being compromised.
+
+This has a corollary that completes the confused-deputy story: because
+shguard treats the command string as its only signal, shguard's own
+parser and normalizer — the `brush-parser` adapter, and the quote/ANSI-C/
+`$IFS` folding described in the README's "How it works: a four-stage
+pipeline" section — are themselves attack surface. An obfuscated command
+designed to evade a naive string match is exactly the case the published
+GuardFall bypass classes, and shguard's blocklist/structural-gate stages,
+exist to handle.
+
+### Session state is invisible to shguard
+
+Each call to `analyze()` sees exactly one command string in isolation.
+Environment variables, aliases, shell function definitions, and the
+current working directory established by an earlier `cd` in the same
+persistent session are not visible to a later `analyze()` call — shguard
+has no session memory, unless a future opt-in tracking feature changes
+this.
+
+### Non-shell attack paths are out of scope
+
+Any tool channel that doesn't pass through the shell hook never reaches
+shguard — file-editing tools, network tools, MCP tools, and any other
+tool type the host agent exposes now or adds later. shguard is a
+shell-command gate, not a general action gate: an agent instructed to
+cause harm through a non-shell tool is entirely outside what shguard can
+see or influence.
+
+## What Block / Ask / Allow promise
+
+What shguard itself guarantees: each decision — Block, Ask, or Allow — is
+a deterministic function of the command string and the active rule set
+(the embedded blocklist plus any user config), evaluated the same way
+every time for the same input.
+
+What shguard cannot guarantee on its own is that the decision has any
+effect: the host CLI must additionally enforce it. All three decisions
+are contingent on host enforcement, not just Ask — a host that ignores a
+Block decision and executes the command anyway, or that re-evaluates
+permissions through a second layer and lets a broader rule override the
+hook's decision, would make shguard's decision meaningless regardless of
+which decision it was. The double-evaluation section below is direct
+evidence for this: if Block/Allow enforcement were unconditionally
+guaranteed, that section's finding — that a `settings.json` permission
+rule can independently re-gate a command the hook already decided —
+wouldn't need to exist.
+
+Ask is the most acutely contingent of the three. Block and Allow are
+binary: the command either runs or it doesn't, and there is no
+intermediate state for the host to get wrong beyond executing or
+suppressing. Ask's entire promise, by contrast, is "a human gets to
+decide" — and whether a rendered prompt actually reaches a human, or
+silently auto-resolves one way or the other without anyone seeing it,
+depends entirely on the host's permission-mode behavior.
+
+The following section is the empirical measurement behind these
+enforcement claims, for one specific host (Claude Code) and one specific
+set of permission-mode values.
+
+## Empirical backing: permission-mode × decision matrix (issue #91)
+
+This section tables how Claude Code's `--permission-mode` values resolve
 this hook's `Allow` / `Ask` / `Block` decisions, for both headless (`-p`)
 and interactive (TTY) execution. It answers the load-bearing question
 behind shguard's design: shguard's decisions only matter if the host CLI
@@ -40,7 +125,7 @@ it, with zero auto-resolution observed in an isolated, unattended
 15-minute (900s) window. That follow-up's premise does not apply, so it
 is not designed or filed here.
 
-## Headless (`-p`, no TTY)
+### Headless (`-p`, no TTY)
 
 | Mode | Allow | Ask | Block |
 |---|---|---|---|
@@ -78,7 +163,7 @@ hook at all — see the `plan` row's note below).
   is ever reached — not a case of the tool being unavailable, and not a
   hook-decision outcome.
 
-## Interactive (TTY)
+### Interactive (TTY)
 
 | Mode | Allow | Ask | Block |
 |---|---|---|---|
@@ -132,7 +217,7 @@ beyond the tested horizon is unmeasured.
   remainder of the observation window
   (`evidence/interactive-isolated/RESULTS.csv`, `plan-ask` row).
 
-## Investigation-integrity: remote-control contamination
+### Investigation-integrity: remote-control contamination
 
 This machine's real Claude Code configuration has
 `remoteControlAtStartup: true`. That setting opens an ambient
@@ -174,7 +259,7 @@ per-run verification (grep the run's own `debug.log` for
 not just an aggregate line count — ambient session-open/close bridge
 chatter appears in every session and is not by itself contamination).
 
-## Double-evaluation and the `dontAsk` asymmetry
+### Double-evaluation and the `dontAsk` asymmetry
 
 Issue #91's scope question 3 asked whether a hook's decision and a
 `settings.json`-driven permission rule are independently evaluated, and
@@ -211,7 +296,7 @@ same command:
   interactive matrix above), while a **`settings.json` rule**-driven ask
   auto-denies with no prompt at all.
 
-## shguard fidelity check
+### shguard fidelity check
 
 Two checks tie the synthetic forced-decision hook used for the rest of
 this matrix back to real shguard:
@@ -241,7 +326,7 @@ to real shguard. The real-shguard interactive cell itself, though, was
 only observed under the since-diagnosed contaminated condition; treat
 that specific cell as a residual gap, not as independently re-verified.
 
-## Reproduction method
+### Reproduction method
 
 To reproduce or re-verify this matrix on a future Claude Code version
 bump:
