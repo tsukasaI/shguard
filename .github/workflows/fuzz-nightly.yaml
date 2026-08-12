@@ -1,0 +1,128 @@
+# Nightly sweep of the differential fuzzer (tests/fuzz_differential.rs,
+# issue #93): runs with a much larger iteration count and a run-specific
+# seed than the always-on `cargo test` default, and auto-files a GitHub
+# issue when it finds a genuinely new shguard-vs-bash argv divergence (one
+# `KNOWN_OPEN_FINDINGS`/`is_known_empty_brace_elision_gap` doesn't already
+# track). See CONTRIBUTING.md's "Triaging a fuzzer-found divergence"
+# section for what happens after an issue lands here.
+
+name: Fuzz nightly
+
+on:
+  schedule:
+    # 03:17 UTC daily -- off an hourly boundary to avoid the GitHub Actions
+    # scheduler's own top-of-hour load spike.
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master (2026-07-18); pinned per repo README, toolchain selected via `with.toolchain`
+        with:
+          toolchain: stable
+
+      - name: Run differential fuzzer
+        id: fuzz
+        env:
+          # `github.run_id` is unique and monotonically increasing per run,
+          # so nightly sweeps don't all repeat the exact same PRNG sequence
+          # the way the hardcoded `cargo test` default does.
+          SHGUARD_FUZZ_SEED: ${{ github.run_id }}
+          SHGUARD_FUZZ_ITERATIONS: 5000
+          SHGUARD_FUZZ_REPORT_PATH: ${{ runner.temp }}/shguard-fuzz-report.jsonl
+        run: cargo test --test fuzz_differential -- --nocapture
+
+      - name: File an issue for any new divergence
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHGUARD_FUZZ_REPORT_PATH: ${{ runner.temp }}/shguard-fuzz-report.jsonl
+        run: |
+          set -euo pipefail
+          REPORT="$SHGUARD_FUZZ_REPORT_PATH"
+
+          if [[ ! -s "$REPORT" ]]; then
+            echo "fuzz step failed but no report file was written -- likely a harness bug, not a divergence. Not filing an issue; check the job log above."
+            exit 0
+          fi
+
+          gh label create fuzz-divergence \
+            --color b60205 \
+            --description "Auto-filed by the nightly differential fuzzer (issue #93)" \
+            --force
+
+          # Only a genuinely NEW divergence (not one is_known_empty_brace_elision_gap
+          # or KNOWN_OPEN_FINDINGS already tracks) should ever reach this report file
+          # in the first place -- the fuzz test itself only fails on those -- but
+          # filter defensively rather than trust that invariant blindly.
+          filed_any=0
+          while IFS= read -r line; do
+            filed_any=1
+            candidate=$(jq -r '.candidate' <<<"$line")
+            decision=$(jq -r '.decision' <<<"$line")
+            shguard_argv=$(jq -r '.shguard_argv | @json' <<<"$line")
+            bash_argv=$(jq -r '.bash_argv | @json' <<<"$line")
+            bash_version=$(jq -r '.bash_version' <<<"$line")
+
+            # A short hash of the candidate, embedded in the title, is the
+            # dedup key -- fable review follow-up: searching GitHub's issue
+            # search on the raw candidate text is fragile, since candidates
+            # routinely contain `"` (the quote-split mechanism) and other
+            # search-significant characters that unbalance the search
+            # phrase and can make an existing issue invisible to the lookup,
+            # filing a duplicate every night. A hash has none of those
+            # characters and is stable across runs for the same candidate.
+            candidate_hash=$(printf '%s' "$candidate" | sha256sum | cut -c1-12)
+            title="fuzz: shguard/bash argv divergence (${candidate_hash})"
+
+            existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --label fuzz-divergence --state open \
+              --search "in:title \"${candidate_hash}\"" --json number --jq '.[0].number // empty')
+            if [[ -n "$existing" ]]; then
+              echo "Skipping duplicate for candidate (already tracked in #$existing): $candidate"
+              continue
+            fi
+
+            # Built as an array of lines (each element a plain, non-heredoc
+            # string) rather than a heredoc: this `run:` block is itself a
+            # YAML literal block nested inside a `while` loop, so a heredoc's
+            # closing delimiter would need to sit at column 0 to be
+            # recognized -- easy to break silently on the next edit. An
+            # array + `printf '%s\n'` join has no such indentation trap.
+            lines=(
+              "Auto-filed by the nightly differential fuzzer (\`.github/workflows/fuzz-nightly.yaml\`, issue #93)."
+              ""
+              "**Candidate**"
+              ""
+              "\`\`\`"
+              "$candidate"
+              "\`\`\`"
+              ""
+              "**shguard decision:** $decision"
+              ""
+              "**shguard normalized argv:**"
+              "\`\`\`json"
+              "$shguard_argv"
+              "\`\`\`"
+              ""
+              "**real bash argv ($bash_version):**"
+              "\`\`\`json"
+              "$bash_argv"
+              "\`\`\`"
+              ""
+              "See CONTRIBUTING.md's \"Triaging a fuzzer-found divergence\" section for how to reproduce this locally and decide which of the three buckets it falls into (genuine new bypass class, over-strict false positive, or harness bug)."
+            )
+            body=$(printf '%s\n' "${lines[@]}")
+
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --label fuzz-divergence --body "$body"
+          done < <(jq -c 'select(.known_open == false)' "$REPORT")
+
+          if [[ "$filed_any" -eq 0 ]]; then
+            echo "Report file was non-empty but contained no known_open==false entries -- nothing to file."
+          fi
