@@ -560,7 +560,16 @@ const SHIM_COMMANDS: &[&str] = &[
 /// exits 0. It does not need to behave like the real tool at all -- only
 /// that nothing dangerous ever runs, and that a self-test can confirm IT
 /// (not the real binary) was the thing invoked.
-const SHIM_SCRIPT: &str = "#!/bin/sh\nif [ -n \"$SHGUARD_FUZZ_SHIM_LOG\" ]; then\n  { printf '%s' \"$0\"; for a in \"$@\"; do printf '\\x1f%s' \"$a\"; done; printf '\\n'; } >> \"$SHGUARD_FUZZ_SHIM_LOG\"\nfi\nexit 0\n";
+///
+/// Uses `\037` (the 0x1F unit separator in POSIX octal-escape form), not
+/// `\x1f`: CI-discovered portability bug (this passed locally against
+/// macOS's `/bin/sh` but failed against Ubuntu's, which is `dash` --
+/// `\xHH` hex escapes in `printf`'s format string are a GNU/bash
+/// extension, not POSIX, and dash's builtin `printf` emits the four
+/// literal characters `\`, `x`, `1`, `f` instead of one 0x1F byte when it
+/// doesn't recognise the escape. `\ddd` octal is POSIX-specified and
+/// portable across both.
+const SHIM_SCRIPT: &str = "#!/bin/sh\nif [ -n \"$SHGUARD_FUZZ_SHIM_LOG\" ]; then\n  { printf '%s' \"$0\"; for a in \"$@\"; do printf '\\037%s' \"$a\"; done; printf '\\n'; } >> \"$SHGUARD_FUZZ_SHIM_LOG\"\nfi\nexit 0\n";
 
 fn build_shims(dir: &Path) {
     for name in SHIM_COMMANDS {
