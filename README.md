@@ -174,10 +174,35 @@ either), so treat this as narrowing the gap, not eliminating it.
 single-dash flag with no `=` separator — curl's `-xhttp://evil.example.com`
 short proxy-flag syntax, for instance. That shape is indistinguishable
 from an ordinary combined short-flag cluster (`-sSL`) by shape alone, so
-it's never recognised as a candidate at all; `curl http://localhost
--xhttp://evil.example.com` would be wrongly excepted by the config above.
-Guard a command that uses this idiom with `required_flags`/a separate
-`deny` entry rather than relying on `except_targets` alone.
+it's never recognised as a candidate at all by default; `curl
+http://localhost -xhttp://evil.example.com` would be wrongly excepted by
+the config above. Declare the flag via `attached_value_flags` to opt a
+rule into recognising it:
+
+```toml
+[[ask]]
+id = "curl-non-localhost"
+reason = "confirm before curl makes an outbound request to a non-localhost target"
+command = "curl"
+attached_value_flags = ["x"]
+except_targets = [
+  { exact = "http://localhost" }, { prefix = "http://localhost:" }, { prefix = "http://localhost/" },
+  # ... other localhost/127.0.0.1/[::1] variants, as above
+]
+```
+
+With `x` declared, `-xhttp://evil.example.com`'s glued value becomes a
+candidate too, so it's checked against `except_targets` like any other
+target — the rule above now correctly asks instead of being wrongly
+suppressed. This is opt-in and per-flag: it only recognises the exact
+leading `-<letter>` shape (a declared flag glued into a cluster like
+`-sxURL` is still not recognised — same shape-based limitation as
+`required_flags`' own cluster handling), and only takes effect on a rule
+that also declares `except_targets` with no `targets` list — `shguard`
+rejects the field at load time otherwise, since it would silently do
+nothing. For a command using this idiom without declaring the flag here,
+guard it with `required_flags`/a separate `deny` entry instead of relying
+on `except_targets` alone.
 
 By default, every non-flag/`--flag=value`-value token in the command's tail
 counts as a candidate — including a value-taking flag's own value. That
