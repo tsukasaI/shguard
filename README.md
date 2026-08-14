@@ -122,7 +122,9 @@ grouping syntax is needed for the common compound shapes:
   "the short spelling OR the long spelling", so a rule can't be dodged by
   swapping one flag spelling for the other.
 - **Across `required_flags` entries, and against `required_tokens`, it's
-  AND.** Every entry in the list must be satisfied.
+  AND.** Every entry in the list must be satisfied — `required_tokens`
+  specifically as an ordered leading-positional match, not mere presence
+  anywhere in argv, but still a conjunction with everything else.
 - **Across `targets` alternatives, it's OR.** The rule fires if *any* argv
   token matches *any* one of the listed targets — so `required_flags`
   (AND-of-ORs) combined with `targets` (OR) already expresses "flag AND
