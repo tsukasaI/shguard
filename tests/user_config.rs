@@ -1296,6 +1296,7 @@ fn ask_decision_deny_plus_narrow_allow_rescues_a_secrets_scanner_invocation() {
 
     let output = run_hook(&bash_command("trufflehog filesystem .env"), &envs);
     assert_eq!(permission_decision(&output), "allow");
+    assert!(permission_reason(&output).contains("user-allow-trufflehog-filesystem"));
 
     let output = run_hook(
         &bash_command("trufflehog git https://example.com/evil"),

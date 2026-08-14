@@ -310,11 +310,15 @@ for an escape hatch:
   meant for `git` silently swallows an unrelated tool that happens to
   share the prefix.
 - **If the deny genuinely needs to be broad, set `decision = "ask"` on it
-  and add a narrow `[[allow]]` naming the scanner invocation exactly.** A
-  `[[deny]]` entry with `decision = "ask"` produces a structural `Ask`,
-  which — unlike a block-decision deny — a matching `[[allow]]` entry can
-  downgrade back to `Allow`. This is the one allow-side rescue the
-  precedence model permits, and it's the correct tool for this case.
+  and add a narrow `[[allow]]` pinning the scanner's leading subcommand
+  words.** A `[[deny]]` entry with `decision = "ask"` produces a
+  structural `Ask`, which — unlike a block-decision deny — a matching
+  `[[allow]]` entry can downgrade back to `Allow`. This is the one
+  allow-side rescue the precedence model permits, and it's the correct
+  tool for this case. As with any multi-word `command` sugar (see above),
+  the allow matches the pinned leading words plus *any* trailing flags or
+  extra positionals — it is not an exact-invocation match, so keep it as
+  tight as the leading words allow.
 - For target-shaped carve-outs (e.g. exempting one path rather than one
   command), see `except_targets` instead.
 
