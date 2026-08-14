@@ -7056,6 +7056,52 @@ mod tests {
         assert_eq!(config.allow.len(), 1);
     }
 
+    // ==== issue #98: "flag AND (target A OR target B)" composition is
+    // already expressible with the existing required_flags/targets fields
+    // — required_flags ANDs across entries (each entry itself an OR via
+    // "|"), targets ORs across every alternative — no new schema primitive
+    // needed. Pinned here at the isolated CommandRule level (not through
+    // the embedded blocklist/merge_user_config) because the embedded
+    // blocklist's own git-push-force rule already denies every `git push
+    // --force` regardless of branch, which would mask whether THIS rule's
+    // own flag/target composition is doing the work. ====
+
+    fn protected_branch_force_push_rule() -> CommandRule {
+        let toml = r#"
+            [[deny]]
+            id = "user-deny-protected-branch-force-push"
+            reason = "force push to a protected branch"
+            command = "git push"
+            required_flags = ["f|--force"]
+            targets = [{ exact = "main" }, { exact = "master" }]
+        "#;
+        UserConfig::parse(toml)
+            .unwrap()
+            .deny
+            .into_iter()
+            .next()
+            .unwrap()
+    }
+
+    #[test]
+    fn flag_and_target_composition_denies_force_push_to_either_protected_branch() {
+        let rule = protected_branch_force_push_rule();
+        assert!(rule.matches(&argv(&["git", "push", "--force", "origin", "main"])));
+        assert!(rule.matches(&argv(&["git", "push", "--force", "origin", "master"])));
+    }
+
+    #[test]
+    fn flag_and_target_composition_does_not_match_an_unprotected_branch() {
+        let rule = protected_branch_force_push_rule();
+        assert!(!rule.matches(&argv(&["git", "push", "--force", "origin", "feature"])));
+    }
+
+    #[test]
+    fn flag_and_target_composition_does_not_match_without_the_flag() {
+        let rule = protected_branch_force_push_rule();
+        assert!(!rule.matches(&argv(&["git", "push", "origin", "main"])));
+    }
+
     #[test]
     fn user_config_rejects_duplicate_id_across_arrays() {
         let toml = r#"

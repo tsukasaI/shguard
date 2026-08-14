@@ -112,6 +112,61 @@ optionally narrowed further with `required_flags`/`targets`, the same
 matcher shape `rules/blocklist.toml` itself uses (see that file's own
 schema comments).
 
+### Composing conditions: AND/OR without a separate syntax
+
+`required_flags`/`targets` already compose as a real boolean expression,
+not a bare AND across opaque fields — no separate `any_of`/`all_of`
+grouping syntax is needed for the common compound shapes:
+
+- **Within one `required_flags` entry, `|` is OR.** `"f|--force"` means
+  "the short spelling OR the long spelling", so a rule can't be dodged by
+  swapping one flag spelling for the other.
+- **Across `required_flags` entries, and against `required_tokens`, it's
+  AND.** Every entry in the list must be satisfied.
+- **Across `targets` alternatives, it's OR.** The rule fires if *any* argv
+  token matches *any* one of the listed targets — so `required_flags`
+  (AND-of-ORs) combined with `targets` (OR) already expresses "flag AND
+  (target A OR target B)":
+
+  ```toml
+  [[deny]]
+  id = "user-deny-protected-branch-force-push"
+  reason = "force push to a protected branch"
+  command = "git push"
+  required_flags = ["f|--force"]
+  targets = [{ exact = "main" }, { exact = "master" }]
+  ```
+
+  `git push --force origin main` and `git push --force origin master` are
+  both denied; `git push --force origin feature` and a plain `git push
+  origin main` (no `--force`) are both untouched by this rule.
+- **Across separate `[[deny]]`/`[[ask]]`/`[[allow]]` entries, it's OR.**
+  The rule set as a whole is a disjunction — "any of N independent
+  condition-sets" is N separate entries, not a single rule needing its
+  own top-level OR primitive.
+
+Two caveats on the example above, not fixed by this section — narrowing
+the gap, not eliminating it, the same posture `except_targets`' own docs
+below take:
+
+- The embedded blocklist already denies **every** `git push --force`
+  regardless of branch (`rules/blocklist.toml`'s `git-push-force` rule) —
+  the example above illustrates the composition syntax, it is not itself
+  what protects `main`/`master` from a force push; that protection already
+  exists unconditionally.
+- `{ exact = "main" }` matches the branch name as a bare positional
+  argument; it does not parse a git refspec, so `git push --force origin
+  main:main`, `git push --force origin HEAD:main`, or `git push --force
+  origin refs/heads/main` are not recognised as targeting `main` by this
+  matcher shape. Widening this to cover refspec forms is a separate,
+  git-specific concern, not part of `targets`' general boolean composition.
+
+The one shape genuinely not expressible today is AND *between* two
+`targets` alternatives within a single rule ("some token matches X AND some
+other token matches Y") — `targets` only ever ORs. No rule in the embedded
+blocklist needs that shape; if one arises, it's a scoped follow-up, not
+something to design speculatively ahead of a concrete need.
+
 ### Excepting specific targets
 
 `deny`/`ask` entries can also carry `except_targets`, the opposite of
