@@ -1227,3 +1227,51 @@ fn sed_in_place_equals_suffix_onto_resolved_config_path_is_blocked() {
     );
     assert_eq!(permission_decision(&output), "deny");
 }
+
+// issue #99: a rule's deny_message surfaces to the agent as
+// hookSpecificOutput.additionalContext, distinct from permissionDecisionReason.
+#[test]
+fn user_config_deny_message_surfaces_as_additional_context() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[deny]]
+        id = "user-deny-scary-tool"
+        reason = "never run this"
+        command = "scary-tool"
+        deny_message = "use safe-tool instead"
+    "#,
+    );
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+
+    let output = run_hook(&bash_command("scary-tool --run"), &envs);
+    assert_eq!(permission_decision(&output), "deny");
+    assert_eq!(
+        output["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap(),
+        "use safe-tool instead"
+    );
+    assert!(permission_reason(&output).contains("user-deny-scary-tool"));
+}
+
+#[test]
+fn user_config_rule_without_deny_message_omits_additional_context() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[deny]]
+        id = "user-deny-scary-tool"
+        reason = "never run this"
+        command = "scary-tool"
+    "#,
+    );
+    let output = run_hook(
+        &bash_command("scary-tool --run"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+    assert!(
+        output["hookSpecificOutput"]
+            .get("additionalContext")
+            .is_none()
+    );
+}

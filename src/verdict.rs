@@ -36,6 +36,31 @@ impl Reason {
     }
 }
 
+/// Optional actionable guidance for a non-`Allow` verdict, distinct from
+/// [`Reason`] (issue #99). `Reason` explains to a human/log *why* the
+/// decision was made; `DenyMessage` — when a matched rule declares one —
+/// is guidance for the *agent* that issued the command, surfaced by the
+/// Claude Code adapter via `additionalContext` rather than folded into
+/// `permissionDecisionReason` (see `src/adapter.rs`'s module doc for the
+/// verified wire format). A newtype rather than a bare `String` so a
+/// caller can't accidentally pass a `Reason`'s text where a `DenyMessage`
+/// belongs, or vice versa — the two travel to different fields in the
+/// hook's stdout and are read by different audiences.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DenyMessage(String);
+
+impl DenyMessage {
+    #[must_use]
+    pub fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// The id of a blocklist rule (`rules/blocklist.toml`, a later issue).
 ///
 /// Newtype per C-NEWTYPE: a rule id is not an interchangeable `String`.
@@ -71,10 +96,12 @@ enum VerdictDetail {
     },
     Ask {
         reason: Reason,
+        deny_message: Option<DenyMessage>,
     },
     Block {
         reason: Reason,
         matched_rule: Option<RuleId>,
+        deny_message: Option<DenyMessage>,
     },
 }
 
@@ -129,10 +156,15 @@ impl Verdict {
 
     /// An `Ask` verdict: `reason` explains what could not be statically
     /// resolved or decided, for the human the hook adapter will prompt.
+    /// Carries no [`DenyMessage`] — attach one with [`Self::with_deny_message`]
+    /// when a matched rule declares one (issue #99).
     #[must_use]
     pub fn ask(reason: Reason, normalized_argv: Vec<NormalizedWord>) -> Self {
         Self {
-            detail: VerdictDetail::Ask { reason },
+            detail: VerdictDetail::Ask {
+                reason,
+                deny_message: None,
+            },
             normalized_argv,
         }
     }
@@ -140,7 +172,9 @@ impl Verdict {
     /// A `Block` verdict: `reason` explains why, and `matched_rule` is the
     /// id of the blocklist rule that matched — `None` for a block decided
     /// structurally rather than by an exact rule match (plan.md §4, e.g. a
-    /// decode-fed interpreter pipe).
+    /// decode-fed interpreter pipe). Carries no [`DenyMessage`] — attach
+    /// one with [`Self::with_deny_message`] when a matched rule declares
+    /// one (issue #99).
     ///
     /// A `Block` without a reason cannot be constructed: `reason` is a
     /// [`Reason`], not `Option<Reason>`, so there is no argument that means
@@ -162,9 +196,35 @@ impl Verdict {
             detail: VerdictDetail::Block {
                 reason,
                 matched_rule,
+                deny_message: None,
             },
             normalized_argv,
         }
+    }
+
+    /// Attaches `deny_message` to an `Ask`/`Block` verdict — a no-op on
+    /// `Allow`/`AllowSuppressed` (there is no rule-declared guidance to
+    /// attach to a clean pass; callers only ever chain this immediately
+    /// after [`Self::ask`]/[`Self::block`] at a rule-matched call site, so
+    /// this is never actually reached for an `Allow`-shaped verdict in
+    /// practice). Kept as a separate builder rather than an extra
+    /// constructor parameter so the ~25 structural (non-rule-matched)
+    /// [`Self::ask`]/[`Self::block`] call sites in `src/gate.rs` are
+    /// unaffected — only the handful of rule-matched sites that have a
+    /// [`crate::rules`] rule object to read a `deny_message` from need to
+    /// call this.
+    #[must_use]
+    pub fn with_deny_message(mut self, deny_message: Option<DenyMessage>) -> Self {
+        match &mut self.detail {
+            VerdictDetail::Ask {
+                deny_message: dm, ..
+            }
+            | VerdictDetail::Block {
+                deny_message: dm, ..
+            } => *dm = deny_message,
+            VerdictDetail::Allow | VerdictDetail::AllowSuppressed { .. } => {}
+        }
+        self
     }
 
     /// The decision: `Allow`, `Ask`, or `Block`. [`VerdictDetail::AllowSuppressed`]
@@ -187,7 +247,7 @@ impl Verdict {
         match &self.detail {
             VerdictDetail::Allow => None,
             VerdictDetail::AllowSuppressed { reason, .. }
-            | VerdictDetail::Ask { reason }
+            | VerdictDetail::Ask { reason, .. }
             | VerdictDetail::Block { reason, .. } => Some(reason),
         }
     }
@@ -203,6 +263,20 @@ impl Verdict {
             VerdictDetail::Allow
             | VerdictDetail::AllowSuppressed { .. }
             | VerdictDetail::Ask { .. } => None,
+        }
+    }
+
+    /// The matched rule's actionable guidance for the agent (issue #99),
+    /// distinct from [`Self::reason`] — `None` unless a rule declared
+    /// `deny_message` AND [`Self::with_deny_message`] attached it. Always
+    /// `None` for both `Allow` variants.
+    #[must_use]
+    pub fn deny_message(&self) -> Option<&DenyMessage> {
+        match &self.detail {
+            VerdictDetail::Ask { deny_message, .. } | VerdictDetail::Block { deny_message, .. } => {
+                deny_message.as_ref()
+            }
+            VerdictDetail::Allow | VerdictDetail::AllowSuppressed { .. } => None,
         }
     }
 
@@ -291,5 +365,50 @@ mod tests {
         );
         assert_eq!(verdict.decision(), Decision::Block);
         assert_eq!(verdict.matched_rule().unwrap().as_str(), "rm-rf-root");
+    }
+
+    // ==== issue #99: DenyMessage ====
+
+    #[test]
+    fn ask_and_block_have_no_deny_message_by_default() {
+        let verdict = Verdict::ask(Reason::new("unresolvable construct"), Vec::new());
+        assert!(verdict.deny_message().is_none());
+
+        let verdict = Verdict::block(Reason::new("matches rule"), Vec::new(), None);
+        assert!(verdict.deny_message().is_none());
+    }
+
+    #[test]
+    fn with_deny_message_attaches_to_block_and_ask() {
+        let verdict = Verdict::block(Reason::new("matches rule"), Vec::new(), None)
+            .with_deny_message(Some(DenyMessage::new("use --force-with-lease instead")));
+        assert_eq!(
+            verdict.deny_message().unwrap().as_str(),
+            "use --force-with-lease instead"
+        );
+        // reason is untouched by attaching a deny_message.
+        assert_eq!(verdict.reason().unwrap().as_str(), "matches rule");
+
+        let verdict = Verdict::ask(Reason::new("unresolvable construct"), Vec::new())
+            .with_deny_message(Some(DenyMessage::new("try again with a literal path")));
+        assert_eq!(
+            verdict.deny_message().unwrap().as_str(),
+            "try again with a literal path"
+        );
+    }
+
+    #[test]
+    fn with_deny_message_is_a_no_op_on_allow() {
+        let verdict = Verdict::allow(Vec::new())
+            .with_deny_message(Some(DenyMessage::new("should never be visible")));
+        assert!(verdict.deny_message().is_none());
+
+        let verdict = Verdict::allow_suppressed(
+            Vec::new(),
+            RuleId::new("allow-ls"),
+            Reason::new("allowlisted"),
+        )
+        .with_deny_message(Some(DenyMessage::new("should never be visible")));
+        assert!(verdict.deny_message().is_none());
     }
 }
