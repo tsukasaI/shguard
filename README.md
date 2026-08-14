@@ -112,6 +112,45 @@ optionally narrowed further with `required_flags`/`targets`, the same
 matcher shape `rules/blocklist.toml` itself uses (see that file's own
 schema comments).
 
+### Declaring pipeline-shape rules
+
+`[[ask]]`/`[[deny]]`/`[[allow]]` each match one simple command. A separate
+`[[pipeline]]` array matches the *shape of a whole pipeline* instead — an
+earlier stage's command name against `sources`, the final stage's command
+name against `sinks` — the same mechanism backing the embedded blocklist's
+own `curl | sh`/`wget | sh` installer-pipe protection (`rules/
+blocklist.toml`'s `curl-wget-pipe-to-shell` rule; distinct from the
+regression table's row 6 decode-fed-pipe case, which is a separate,
+hardcoded structural-gate check, not a `[[pipeline]]` rule). Declaring your
+own lets you forbid additional pipeline shapes (e.g. a team that also
+wants to catch `curl ... | python3`) without a code change:
+
+```toml
+[[pipeline]]
+id = "user-forbid-curl-python"
+reason = "forbid piping a downloaded script into python3"
+decision = "block"
+sources = ["curl", "wget"]
+sinks = ["python3"]
+```
+
+`decision` is `"block"` (default) or `"ask"` — there is no `"allow"` value
+for a pipeline entry, unlike `command`/`command_prefix` rules. `sources`/
+`sinks` are exact command names (no `command_prefix`-style prefix
+matching): each pipeline stage is resolved to its own command name the
+same way a `command`-matched rule resolves argv[0] — basename, with any
+transparent wrapper (`env`, `nohup`, `timeout`, ...) skipped — so
+`/bin/sh` or `env sh` as a sink is caught exactly like a bare `sh` would
+be. The rule matches when *any* earlier stage's resolved name is in
+`sources` and the *final* stage's resolved name is in `sinks`.
+
+User-declared pipeline rules are purely additive: they're checked after
+every embedded pipeline rule (`rules/blocklist.toml`'s own `[[pipeline]]`
+entries) and after the structural gate's separate hardcoded decode-fed-pipe
+detection, so a user rule can only ever add new forbidden shapes — it can
+never weaken or shadow a built-in one, even if it declares the exact same
+`sources`/`sinks` and a weaker `decision`.
+
 ### Excepting specific targets
 
 `deny`/`ask` entries can also carry `except_targets`, the opposite of
