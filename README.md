@@ -144,12 +144,16 @@ transparent wrapper (`env`, `nohup`, `timeout`, ...) skipped — so
 be. The rule matches when *any* earlier stage's resolved name is in
 `sources` and the *final* stage's resolved name is in `sinks`.
 
-User-declared pipeline rules are purely additive: they're checked after
-every embedded pipeline rule (`rules/blocklist.toml`'s own `[[pipeline]]`
-entries) and after the structural gate's separate hardcoded decode-fed-pipe
-detection, so a user rule can only ever add new forbidden shapes — it can
-never weaken or shadow a built-in one, even if it declares the exact same
-`sources`/`sinks` and a weaker `decision`.
+User-declared pipeline rules are purely additive. Within the `[[pipeline]]`
+mechanism itself, they're checked after every embedded pipeline rule
+(`rules/blocklist.toml`'s own `[[pipeline]]` entries), so a user rule can
+never shadow a built-in one even if it declares the exact same
+`sources`/`sinks` with a weaker `decision`. Against the structural gate's
+separate, hardcoded decode-fed-pipe detection (the regression table's row
+6), the guarantee comes from a different mechanism, not check order: the
+gate folds the *worst* verdict across every check it runs, so a weaker
+verdict from a user pipeline rule can never suppress a Block the
+decode-fed-pipe detection independently produces for the same command.
 
 ### Excepting specific targets
 
