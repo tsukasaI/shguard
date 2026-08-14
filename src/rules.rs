@@ -6649,8 +6649,9 @@ mod tests {
         // Same command as the known-gap test above, but with `x` declared
         // via attached_value_flags: the glued proxy target now becomes a
         // candidate, so it's checked against except_targets and correctly
-        // fails to match (all-excepted no longer holds vacuously) — the
-        // rule fires instead of being wrongly suppressed.
+        // fails to match (all-excepted no longer holds over the widened
+        // candidate set) — the rule fires instead of being wrongly
+        // suppressed.
         let rules = Rules::parse(
             r#"
             [[command]]
@@ -6801,6 +6802,21 @@ mod tests {
                 .is_some(),
             "a '-x=value' token's candidate is the verbatim '=value' text, which fails closed \
              against a http://-prefixed except_targets alternative"
+        );
+
+        // Discriminates verbatim-candidate handling from an (incorrect)
+        // '='-stripping implementation: if the leading '=' were stripped,
+        // this token's candidate would become the bare `http://localhost`
+        // text, matching the except alternative and wrongly suppressing
+        // the rule (a block-to-allow regression). The verbatim candidate
+        // `=http://localhost` matches no `http://`-prefixed alternative,
+        // so the rule correctly still fires here.
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "-x=http://localhost"]))
+                .is_some(),
+            "the '=' must not be stripped from the candidate — an implementation that stripped \
+             it would wrongly suppress this rule via the except_targets prefix match"
         );
     }
 
