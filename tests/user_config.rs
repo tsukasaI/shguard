@@ -1227,3 +1227,80 @@ fn sed_in_place_equals_suffix_onto_resolved_config_path_is_blocked() {
     );
     assert_eq!(permission_decision(&output), "deny");
 }
+
+// #40: `command_prefix` matches on `starts_with`, so a prefix rule aimed at
+// `git` also catches an unrelated tool that happens to share the prefix,
+// like `gitleaks`. This is the documented footgun, not a bug -- the fix is
+// to prefer exact `command` (the next test) or the ask+allow recipe below.
+#[test]
+fn command_prefix_deny_also_catches_an_unrelated_prefix_sharing_tool() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[deny]]
+        id = "user-deny-git-prefix"
+        reason = "block all git invocations"
+        command_prefix = "git"
+    "#,
+    );
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+
+    let output = run_hook(&bash_command("gitleaks detect --source ."), &envs);
+    assert_eq!(permission_decision(&output), "deny");
+    assert!(permission_reason(&output).contains("user-deny-git-prefix"));
+}
+
+// Same scenario as above, but scoped with exact `command` instead of
+// `command_prefix` -- the recommended recipe from the README's "Keeping
+// secrets scanners runnable" section. The unrelated tool is unaffected.
+#[test]
+fn exact_command_deny_does_not_catch_an_unrelated_prefix_sharing_tool() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[deny]]
+        id = "user-deny-git-exact"
+        reason = "block all git invocations"
+        command = "git"
+    "#,
+    );
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+
+    let output = run_hook(&bash_command("gitleaks detect --source ."), &envs);
+    assert_eq!(permission_decision(&output), "allow");
+
+    let output = run_hook(&bash_command("git status"), &envs);
+    assert_eq!(permission_decision(&output), "deny");
+    assert!(permission_reason(&output).contains("user-deny-git-exact"));
+}
+
+// #40: the ask+allow recipe -- a broad `[[deny]]` with `decision = "ask"`
+// produces a structural Ask that a narrow `[[allow]]` naming the scanner
+// invocation exactly can downgrade back to Allow, letting the scanner run
+// without weakening the deny rule for anything else.
+#[test]
+fn ask_decision_deny_plus_narrow_allow_rescues_a_secrets_scanner_invocation() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[deny]]
+        id = "user-gate-trufflehog"
+        reason = "confirm every trufflehog invocation"
+        decision = "ask"
+        command_prefix = "trufflehog"
+
+        [[allow]]
+        id = "user-allow-trufflehog-filesystem"
+        reason = "scanning .env in the local filesystem is its normal job"
+        command = "trufflehog filesystem .env"
+    "#,
+    );
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+
+    let output = run_hook(&bash_command("trufflehog filesystem .env"), &envs);
+    assert_eq!(permission_decision(&output), "allow");
+
+    let output = run_hook(
+        &bash_command("trufflehog git https://example.com/evil"),
+        &envs,
+    );
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(permission_reason(&output).contains("user-gate-trufflehog"));
+}
