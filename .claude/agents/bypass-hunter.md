@@ -70,9 +70,9 @@ So a finding is one of:
   `Ask`/`Block`.
 
 Not findings: payloads that error out in your own shell, malformed strings that
-no agent would emit, and duplicates of what `tests/guardfall.rs` or
-`tests/benign_corpus.rs` already cover — check those first and say so rather
-than re-reporting them.
+no agent would emit, and duplicates of what `tests/guardfall.rs`,
+`tests/benign_corpus.rs`, or `tests/bypass_corpus.toml` already cover — check
+those first and say so rather than re-reporting them.
 
 ## Method
 
