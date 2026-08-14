@@ -1862,13 +1862,18 @@ fn target_candidate(token: &str) -> Option<&str> {
 ///
 /// Only the exact single-character-then-rest shape at the *leading*
 /// dash position is recognised: `-x` alone (nothing follows) is not this
-/// shape — an empty candidate would wrongly satisfy a `Prefix`
-/// except_targets alternative, so a bare declared flag yields no
-/// candidate at all, same as an undeclared one. A declared flag glued
-/// into a combined cluster (`-sxVALUE`, `x` not in the leading position)
-/// is likewise not recognised — shape-based matching can't tell which
-/// cluster position "owns" the trailing text, the same limitation
-/// [`ValueFlag::is_bare`] already discloses for clusters.
+/// shape, so a bare declared flag yields no candidate at all, same as an
+/// undeclared one — not because an empty candidate could wrongly satisfy
+/// an except_targets alternative (`convert_target` rejects an empty
+/// `exact`/`prefix` at load, so `""` can never match a loadable
+/// alternative either way), but because an un-exceptable `""` candidate
+/// would make the rule spuriously fire on `-x` alone, noise this
+/// function avoids by not manufacturing it in the first place. A
+/// declared flag glued into a combined cluster (`-sxVALUE`, `x` not in
+/// the leading position) is likewise not recognised — shape-based
+/// matching can't tell which cluster position "owns" the trailing text,
+/// the same limitation [`ValueFlag::is_bare`] already discloses for
+/// clusters.
 fn attached_value_candidate<'a>(token: &'a str, attached_value_flags: &[char]) -> Option<&'a str> {
     let mut chars = token.chars();
     if chars.next() != Some('-') {
@@ -6667,15 +6672,18 @@ mod tests {
                 ]))
                 .is_some(),
             "declared attached_value_flags entry should surface the glued proxy target as a \
-             candidate, defeating the vacuous all-excepted suppression"
+             candidate, defeating the wrongful all-excepted suppression"
         );
     }
 
     #[test]
     fn attached_value_flags_bare_declared_flag_yields_no_candidate() {
         // A bare `-x` (nothing glued after it) must not become an empty
-        // candidate — an empty string would wrongly satisfy any `Prefix`
-        // except_targets alternative, over-suppressing the rule.
+        // candidate. Not because `""` could wrongly satisfy an
+        // except_targets alternative (convert_target rejects an empty
+        // exact/prefix at load, so it never would) — an un-exceptable
+        // `""` candidate would instead make the rule spuriously fire on
+        // `-x` alone.
         let rules = Rules::parse(
             r#"
             [[command]]
@@ -6725,6 +6733,74 @@ mod tests {
                 ]))
                 .is_none(),
             "a declared flag glued into a non-leading cluster position stays an unrecognised gap"
+        );
+    }
+
+    #[test]
+    fn attached_value_flags_does_not_consume_a_separated_value() {
+        // `-x http://evil` (separated, no glue) is a different shape from
+        // `-xhttp://evil` (glued) — attached_value_flags only recognises
+        // the glued form, so the bare `-x` token itself yields no
+        // candidate (same as an undeclared flag) and the following token
+        // is untouched: it stays an ordinary positional candidate, caught
+        // by the pre-existing target_candidate path exactly as it already
+        // was before this field existed.
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "curl-non-localhost"
+            reason = "ask unless curl targets localhost"
+            decision = "ask"
+            command = "curl"
+            except_targets = [{ prefix = "http://localhost" }]
+            attached_value_flags = ["x"]
+        "#,
+        )
+        .unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "curl",
+                    "http://localhost",
+                    "-x",
+                    "http://evil.example.com"
+                ]))
+                .is_some(),
+            "a separated flag value must not be consumed by attached_value_flags — it stays a \
+             candidate and correctly fails the except_targets check"
+        );
+    }
+
+    #[test]
+    fn attached_value_flags_matches_shape_only_including_a_literal_equals_sign() {
+        // attached_value_candidate is shape-based only: it doesn't special
+        // -case '=' the way ValueFlag::attached_value_token does for long
+        // flags. `-x=http://evil` yields the verbatim candidate
+        // `=http://evil...` (leading '=' included), which fails every
+        // http://-prefixed except_targets alternative and so correctly
+        // fails closed (asks) rather than silently passing through.
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "curl-non-localhost"
+            reason = "ask unless curl targets localhost"
+            decision = "ask"
+            command = "curl"
+            except_targets = [{ prefix = "http://localhost" }]
+            attached_value_flags = ["x"]
+        "#,
+        )
+        .unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "curl",
+                    "http://localhost",
+                    "-x=http://evil.example.com"
+                ]))
+                .is_some(),
+            "a '-x=value' token's candidate is the verbatim '=value' text, which fails closed \
+             against a http://-prefixed except_targets alternative"
         );
     }
 

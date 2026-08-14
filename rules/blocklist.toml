@@ -181,13 +181,19 @@
 #                    NEW except_targets candidate instead — this can newly
 #                    suppress a match that would otherwise fire, the same
 #                    opt-in-loosening posture except_targets itself
-#                    already has. Same load-time-error rules as
-#                    value_flags (`targets` non-empty, or no
+#                    already has. Load-time-error rules similar to
+#                    value_flags but narrower — `targets` non-empty, or no
 #                    `except_targets` at all, means the field would
-#                    silently do nothing); a letter declared in both
-#                    `value_flags` and `attached_value_flags` is also a
-#                    load-time error (opposite candidacy effects for the
-#                    same flag). Only the exact leading `-<letter>` shape
+#                    silently do nothing, same as value_flags; unlike
+#                    value_flags, declaring `required_flags`/
+#                    `required_tokens` instead of `except_targets` does
+#                    NOT make it live, since this field only ever feeds
+#                    the except_targets candidate walk, never the
+#                    required_tokens floor value_flags also narrows. A
+#                    letter declared in both `value_flags` and
+#                    `attached_value_flags` is also a load-time error
+#                    (opposite candidacy effects for the same flag). Only
+#                    the exact leading `-<letter>` shape
 #                    is recognised — a declared flag glued into a
 #                    non-leading cluster position (`-sxVALUE`) is not
 #                    recognised, and a bare declared flag with nothing

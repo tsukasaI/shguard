@@ -200,8 +200,14 @@ leading `-<letter>` shape (a declared flag glued into a cluster like
 `required_flags`' own cluster handling), and only takes effect on a rule
 that also declares `except_targets` with no `targets` list — `shguard`
 rejects the field at load time otherwise, since it would silently do
-nothing. For a command using this idiom without declaring the flag here,
-guard it with `required_flags`/a separate `deny` entry instead of relying
+nothing. Declaring a flag here can also newly *suppress* a match that
+would otherwise fire, not just tighten one — e.g. `curl
+-xhttp://localhost:8080` alone (no other target) is suppressed once `x`
+is declared, since the glued value becomes the sole candidate and it
+matches the localhost except; treat each declared flag as a per-rule
+trust decision with the same weight as an `except_targets` entry itself.
+For a command using this idiom without declaring the flag here, guard it
+with `required_flags`/a separate `deny` entry instead of relying
 on `except_targets` alone.
 
 By default, every non-flag/`--flag=value`-value token in the command's tail
