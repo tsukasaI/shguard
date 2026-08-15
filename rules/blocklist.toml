@@ -698,6 +698,23 @@ reason = "writing to shguard's own config directory must never be scripted"
 command = "rsync"
 targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]
 
+# Parity with the write-capable *commands* above (issue #100): a path
+# unreachable via `tee`/`cp`/... must also be unreachable via bare shell
+# redirection (`>`/`>>`) — the write mechanism shouldn't change the
+# outcome. Identical target list to the command rules above, on purpose
+# (same protected path, not a new one). The bare-directory alternative
+# matters here too, not just for commands: `> ~/.config/shguard` (no
+# trailing slash) creates a regular *file* at that path if the directory
+# doesn't exist yet, preempting config-dir creation — a genuine
+# tampering vector, not a vestigial case. The complementary resolved-path
+# half is generated dynamically alongside the [[deny]] entries in
+# src/config.rs's `self_protection_toml`, same as the command rules'
+# resolved-path half above.
+[[redirect]]
+id = "self-protect-config-redirect-tilde"
+reason = "redirecting output to shguard's own config directory must never be scripted"
+targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]
+
 # Issue #101 audit: additional write/delete-capable primitives against the
 # same config-directory target list above. Each follows the existing
 # family's shape exactly — flagless for a tool whose normal invocation is

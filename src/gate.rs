@@ -1124,13 +1124,21 @@ fn evaluate_simple_command_core(
     // carries dangerous redirections that must not slip through rule 9.
     // This return precedes `leftover_floor`'s computation below (issue
     // #77) and is not floored by it — currently
-    // safe only because every `[[redirect]]` rule is `Decision::Block`
-    // (`rules/blocklist.toml`) and user config has no redirect-rule table
-    // to add an `Ask`-decision one through, so this return can only ever
-    // produce `Block`, which no floor could lift anyway. If a redirect
-    // rule with a weaker decision is ever added, this return needs the
-    // same `apply_leftover_substitution_floor` wrapping the rules 1/2/6a/
-    // stage-3 returns already get.
+    // safe only because every REACHABLE `[[redirect]]` rule is
+    // `Decision::Block`: every embedded rule is Block by construction
+    // (pinned by `rules::tests::embedded_redirect_rules_are_all_block_decision`),
+    // and issue #100's user-config `[[redirect]]` table (`UserConfig::parse`,
+    // `src/rules.rs`) load-time-rejects `decision = "ask"` specifically
+    // because this early return — and `Rules::match_redirect_target`'s own
+    // first-match-across-targets lookup — would otherwise let a weaker
+    // user rule win ahead of a stricter embedded Block matched on a
+    // different redirect target of the same command line (found by a
+    // fable security review of #204's PR). If a redirect rule with a
+    // weaker decision is ever allowed again, this return needs the same
+    // `apply_leftover_substitution_floor` wrapping the rules 1/2/6a/
+    // stage-3 returns already get, AND `match_redirect_target` needs
+    // worst-wins folding across every matching rule/target, not
+    // first-match — both are load-bearing, not just one.
     if let Some(rule) = check_redirect_targets(&command.redirections, rules) {
         let reason = Reason::new(format!(
             "redirect target matches rule {:?}: {}",

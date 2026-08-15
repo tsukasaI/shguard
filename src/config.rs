@@ -51,12 +51,15 @@
 //! `patch`, and `find` combined with `-exec`/`-execdir`/`-ok`/`-okdir`
 //! (the last as `decision = "ask"`, not `"block"` — the danger lives in
 //! what `find` invokes, only partially visible to a command-line-only
-//! analyzer). [`ancestor_rules_toml`] adds a second, `decision = "ask"`
-//! family covering `rm -r`/`mv`/`rsync --delete` against an ANCESTOR of
-//! the config directory (`~/.config`, `~`, and their resolved
-//! equivalents) — deleting or renaming an ancestor takes the config
-//! directory with it even though the ancestor path itself never appears
-//! in the direct-target list above —
+//! analyzer), plus one `[[redirect]]` rule (issue #100) for the same
+//! directory via bare shell redirection (`>`/`>>`) — parity with the
+//! write-capable commands, since a path unreachable via `tee` must also
+//! be unreachable via `>`. [`ancestor_rules_toml`] adds a second,
+//! `decision = "ask"` family covering `rm -r`/`mv`/`rsync --delete`
+//! against an ANCESTOR of the config directory (`~/.config`, `~`, and
+//! their resolved equivalents) — deleting or renaming an ancestor takes
+//! the config directory with it even though the ancestor path itself
+//! never appears in the direct-target list above —
 //! the one place this crate builds a rule's TOML text in code rather than
 //! reading it from a file, because the directory is only known once
 //! `$HOME`/`$XDG_CONFIG_HOME` are read for *this* invocation; the
@@ -488,6 +491,11 @@ reason = "writing to shguard's own config directory must never be scripted"
 command = "rsync"
 targets = [{{ normalized_prefix = {quoted_dir} }}]
 
+[[redirect]]
+id = "shguard-self-protect-config-redirect-{suffix}"
+reason = "redirecting output to shguard's own config directory must never be scripted"
+targets = [{{ normalized_prefix = {quoted_dir} }}]
+
 [[deny]]
 id = "shguard-self-protect-config-rmdir-{suffix}"
 reason = "deleting shguard's own config directory must never be scripted"
@@ -737,6 +745,29 @@ mod tests {
             "/home/user/.config/shguard/"
         ]));
         assert!(!matches(&["cp", "a.txt", "b.txt"]));
+    }
+
+    // issue #100: the generated [[redirect]] entry protects the RESOLVED
+    // config path the same way the [[deny]] command entries above already
+    // do — parity between `tee <path>` and `> <path>`.
+    #[test]
+    fn self_protection_redirect_rule_matches_resolved_config_path() {
+        let toml = self_protection_toml("/home/user/.config/shguard", "literal");
+        let user_config = UserConfig::parse(&toml).unwrap();
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let (rules, _) = merge_user_config(blocklist, allowlist, user_config).unwrap();
+
+        assert!(
+            rules
+                .match_redirect_target("/home/user/.config/shguard/config.toml")
+                .is_some()
+        );
+        assert!(
+            rules
+                .match_redirect_target("/home/user/other-file.txt")
+                .is_none()
+        );
     }
 
     // ==== issue #101 audit: additional primitives + ancestor coverage ====
