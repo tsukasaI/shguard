@@ -5987,6 +5987,29 @@ mod tests {
         assert_decision("exec -al foo rm -rf /", Decision::Allow);
     }
 
+    // Regression pin for a fable review finding: a first attempt at the
+    // cluster fix above tested `rest.ends_with('a')` (the TOKEN's last
+    // character) instead of "the FIRST `a`'s position is the cluster's
+    // last position" -- a glued value that itself ends in the letter `a`
+    // ("java", "cuda", a second "a") satisfies `ends_with('a')` too, even
+    // though that trailing `a` is part of the VALUE, not a second flag
+    // character, wrongly re-consuming the real wrapped command (`rm`) as
+    // if it were `-a`'s own separated value. `-ajava`/`-acuda` are
+    // ordinary argv0 renames (any process name ending in `a`); `-aa` is
+    // the trivial adversarial spelling.
+    #[test]
+    fn exec_dash_a_glued_value_ending_in_a_still_blocks() {
+        assert_decision("exec -ajava rm -rf /", Decision::Block);
+        assert_decision("exec -acuda rm -rf /", Decision::Block);
+        assert_decision("exec -aa rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn exec_boolean_cluster_prefix_with_glued_value_ending_in_a_still_blocks() {
+        assert_decision("exec -caa rm -rf /", Decision::Block);
+        assert_decision("exec -claa rm -rf /", Decision::Block);
+    }
+
     #[test]
     fn dangerous_target_position_substitution_asks_even_with_benign_inner() {
         // Issue #34: rule 3's Allow-transparency (`echo $(date)` semantics)

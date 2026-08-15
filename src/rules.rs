@@ -2711,17 +2711,31 @@ fn skip_wrapper_flags(wrapper: &str, argv: &[NormalizedWord]) -> usize {
         // wrapper), `exec`'s own option surface is tiny and fully known
         // (`c`/`l`/`a`, and `a` is its ONLY value-taker) — so a
         // conservative, exec-specific rule is both cheap and provably
-        // correct here, matching real getopt-cluster semantics: `a` MUST
-        // be the LAST character of the cluster for its value to come from
-        // the NEXT token at all — `-la foo` (a trailing) takes `foo`;
-        // `-afoo` (a leading, with more characters glued right after it in
-        // the SAME token) takes `foo` from within that same token, and
-        // must NOT also consume the next token (that would wrongly treat
-        // the real wrapped command as `a`'s value instead — a distinct
-        // over-blocking bug, not the under-blocking one this fix closes).
+        // correct here, matching real getopt-cluster semantics: once the
+        // FIRST `a` in the cluster is reached, everything remaining in
+        // that same token is `a`'s own glued value — so the value comes
+        // from the NEXT token only when nothing remains after that first
+        // `a`, i.e. the first `a` sits at the cluster's own last
+        // position. `-la foo` (first `a` trailing) takes `foo` from the
+        // next token; `-afoo` (first `a` leading, with `foo` glued right
+        // after it in the SAME token) takes `foo` from within that same
+        // token and must NOT also consume the next token.
+        //
+        // A fable review of an earlier version of this check
+        // (`rest.ends_with('a')`, testing the TOKEN's last character
+        // rather than the FIRST `a`'s position) caught a real regression
+        // this distinction guards against: `-ajava`/`-aa`/`-acuda` all
+        // end in the letter `a` too, but that trailing `a` is part of the
+        // GLUED VALUE ("java"/"a"/"cuda"), not a second flag character —
+        // `ends_with('a')` misidentified these as "value comes from the
+        // next token" and wrongly consumed the real wrapped command
+        // (`rm -rf /`'s own `rm`) as if it were `a`'s separated value,
+        // silently re-opening the exact under-blocking bypass this whole
+        // fix exists to close. `find('a') == len - 1` (the first `a`,
+        // not any `a`) is the getopt-correct test.
         let exec_trailing_a_cluster = wrapper == "exec"
             && token.strip_prefix('-').is_some_and(|rest| {
-                rest.len() > 1 && !rest.starts_with('-') && rest.ends_with('a')
+                rest.len() > 1 && !rest.starts_with('-') && rest.find('a') == Some(rest.len() - 1)
             });
         if value_flags.iter().any(|vf| vf.is_bare(token)) || exec_trailing_a_cluster {
             // The flag token itself is always consumed; its separated
