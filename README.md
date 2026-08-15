@@ -169,6 +169,49 @@ other token matches Y") — `targets` only ever ORs. No rule in the embedded
 blocklist needs that shape; if one arises, it's a scoped follow-up, not
 something to design speculatively ahead of a concrete need.
 
+### Declaring pipeline-shape rules
+
+`[[ask]]`/`[[deny]]`/`[[allow]]` each match one simple command. A separate
+`[[pipeline]]` array matches the *shape of a whole pipeline* instead — an
+earlier stage's command name against `sources`, the final stage's command
+name against `sinks` — the same mechanism backing the embedded blocklist's
+own `curl | sh`/`wget | sh` installer-pipe protection (`rules/
+blocklist.toml`'s `curl-wget-pipe-to-shell` rule; distinct from the
+regression table's row 6 decode-fed-pipe case, which is a separate,
+hardcoded structural-gate check, not a `[[pipeline]]` rule). Declaring your
+own lets you forbid additional pipeline shapes (e.g. a team that also
+wants to catch `curl ... | python3`) without a code change:
+
+```toml
+[[pipeline]]
+id = "user-forbid-curl-python"
+reason = "forbid piping a downloaded script into python3"
+decision = "block"
+sources = ["curl", "wget"]
+sinks = ["python3"]
+```
+
+`decision` is `"block"` (default) or `"ask"` — there is no `"allow"` value
+for a pipeline entry, unlike `command`/`command_prefix` rules. `sources`/
+`sinks` are exact command names (no `command_prefix`-style prefix
+matching): each pipeline stage is resolved to its own command name the
+same way a `command`-matched rule resolves argv[0] — basename, with any
+transparent wrapper (`env`, `nohup`, `timeout`, ...) skipped — so
+`/bin/sh` or `env sh` as a sink is caught exactly like a bare `sh` would
+be. The rule matches when *any* earlier stage's resolved name is in
+`sources` and the *final* stage's resolved name is in `sinks`.
+
+User-declared pipeline rules are purely additive. Within the `[[pipeline]]`
+mechanism itself, they're checked after every embedded pipeline rule
+(`rules/blocklist.toml`'s own `[[pipeline]]` entries), so a user rule can
+never shadow a built-in one even if it declares the exact same
+`sources`/`sinks` with a weaker `decision`. Against the structural gate's
+separate, hardcoded decode-fed-pipe detection (the regression table's row
+6), the guarantee comes from a different mechanism, not check order: the
+gate folds the *worst* verdict across every check it runs, so a weaker
+verdict from a user pipeline rule can never suppress a Block the
+decode-fed-pipe detection independently produces for the same command.
+
 ### Excepting specific targets
 
 `deny`/`ask` entries can also carry `except_targets`, the opposite of
