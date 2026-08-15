@@ -6010,6 +6010,135 @@ mod tests {
         assert_decision("exec -claa rm -rf /", Decision::Block);
     }
 
+    // ==== Issue #250: env's own value-taking flags mistaken for the
+    // wrapped command ====
+
+    #[test]
+    fn env_with_separated_unset_flag_no_longer_hides_wrapped_command() {
+        // `env` was in `TRANSPARENT_WRAPPERS` with no `wrapper_value_flags`
+        // entry for its own `-u name` flag (GNU/BSD: unsets environment
+        // variable `name` before running the wrapped command) -- the
+        // generic dash-prefix skip in `skip_wrapper_flags` consumed the
+        // bare `-u` token and mistook `FOO` (the flag's own value) for the
+        // wrapped command, so `env -u FOO rm -rf /` silently resolved to
+        // `FOO`, matching no rule, even though this genuinely unsets `FOO`
+        // and executes `rm -rf /` in a real shell. Was Allow before this
+        // fix.
+        assert_decision("env -u FOO rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn env_with_separated_long_unset_flag_still_blocks() {
+        assert_decision("env --unset FOO rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn env_with_attached_long_unset_flag_still_blocks() {
+        // `--unset=FOO` (attached form) needs no `wrapper_value_flags`
+        // entry to be handled correctly: the whole token starts with `-`,
+        // so the pre-existing generic dash-prefix skip already consumes
+        // just this one token, no separate value token to mistake for the
+        // command.
+        assert_decision("env --unset=FOO rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn env_with_glued_short_unset_flag_still_blocks() {
+        // `-uFOO` (glued short form) falls through to the same generic
+        // dash-prefix skip as the attached long form above -- `ValueFlag::
+        // is_bare` only matches `-u`'s standalone spelling, so this was
+        // never broken and stays that way.
+        assert_decision("env -uFOO rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn env_without_unset_flag_still_blocks() {
+        assert_decision("env rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn env_with_unset_flag_benign_command_still_allows() {
+        // No over-blocking regression: a benign wrapped command must stay
+        // Allow.
+        assert_decision("env -u FOO ls", Decision::Allow);
+    }
+
+    #[test]
+    fn env_with_separated_chdir_flag_no_longer_hides_wrapped_command() {
+        assert_decision("env -C /tmp rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn env_with_separated_split_string_flag_no_longer_hides_wrapped_command() {
+        assert_decision("env -S foo rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn env_with_separated_bsd_altpath_flag_no_longer_hides_wrapped_command() {
+        assert_decision("env -P /tmp rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn env_with_separated_gnu_argv0_flag_no_longer_hides_wrapped_command() {
+        // GNU coreutils' `env` has its own `-a`/`--argv0` flag, the same
+        // argv0-override shape `exec`'s `-a` has (issue #248) -- BSD/macOS
+        // `env` has no such flag, so this entry is harmlessly conservative
+        // there (consuming a value that would error at runtime anyway).
+        assert_decision("env -a evil rm -rf /", Decision::Block);
+        assert_decision("env --argv0 evil rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn env_block_signal_flag_still_blocks_without_a_value_flags_entry() {
+        // Pinned so nobody "completes" `wrapper_value_flags`'s `env` arm
+        // by adding GNU's signal flags to it — see that arm's own comment
+        // for why doing so would open a new bypass rather than close one.
+        assert_decision("env --block-signal rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn env_short_cluster_with_trailing_unset_is_a_disclosed_known_gap() {
+        // Not fixed here (pre-existing, disclosed, same class as `exec`'s
+        // own cluster-position limitation before issue #248's follow-up
+        // fix, and as `su`'s residual cluster-position gap): `env`'s
+        // boolean `-i` clustered ahead of value-taking `-u` (`-iu FOO`) is
+        // not recognised by `ValueFlag::is_bare`, which only matches `-u`'s
+        // standalone spelling, so this cluster falls through to the
+        // generic dash-prefix skip and `FOO` is still mistaken for the
+        // wrapped command. Confirmed present both before and after this
+        // fix -- pinned as a known-gap regression test, not silently left
+        // undocumented.
+        assert_decision("env -iu FOO rm -rf /", Decision::Allow);
+    }
+
+    #[test]
+    fn env_split_string_value_splicing_into_argv_is_a_disclosed_known_gap() {
+        // Not fixed here (pre-existing, disclosed, same shape as `su`'s
+        // own `-c`/`--command` gap, which needs `RECURSABLE_SLOTS`/
+        // `wrapper_shell_string_scripts` recursion to close, not a
+        // `wrapper_value_flags` entry alone): GNU/BSD `-S` splits its
+        // *string* argument into multiple new argv tokens passed to `env`
+        // itself, so `-S`'s value can splice a dangerous command directly
+        // into the executed argv. Adding `-S` to `wrapper_value_flags`
+        // only stops that value from being mistaken for the wrapped
+        // command name (see the passing `-S` test above) -- it does not,
+        // and cannot by itself, look inside the split string the way
+        // `su -c`'s dedicated recursion does. Confirmed present both
+        // before and after this fix.
+        assert_decision("env -S \"rm -rf /\" true", Decision::Allow);
+    }
+
+    #[test]
+    fn env_unset_missing_its_value_is_a_pinned_known_trade_off() {
+        // `-u` here has no variable name, so the entry consumes `rm` as
+        // its value and resolves `/` as the command -- Block before this
+        // fix, Allow after. Not a reachable weakening: real `env` rejects
+        // `-rf` as an invalid option and executes nothing. Pinned as the
+        // same accepted trade-off every `wrapper_value_flags` entry makes
+        // (`nice -n rm -rf /`).
+        assert_decision("env -u rm -rf /", Decision::Allow);
+    }
+
     #[test]
     fn dangerous_target_position_substitution_asks_even_with_benign_inner() {
         // Issue #34: rule 3's Allow-transparency (`echo $(date)` semantics)
