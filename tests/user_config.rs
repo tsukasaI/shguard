@@ -1276,3 +1276,37 @@ fn output_redirect_onto_an_ordinary_path_is_unaffected() {
     );
     assert_eq!(permission_decision(&output), "allow");
 }
+
+// Security regression pin (fable review of #204): a fable security review
+// found that an Ask-decision user [[redirect]] rule could downgrade a
+// stricter embedded Block verdict end-to-end -- evaluate_simple_command_core
+// (src/gate.rs) returns on the first matching redirect rule before stage
+// 3's argv blocklist match ever runs, so an Ask-decision redirect rule
+// matching an EARLIER redirect target on the same command line could win
+// ahead of an embedded Block matching a LATER one. Fixed by rejecting
+// decision = "ask" on a user [[redirect]] entry at config load time --
+// the whole config fails closed (every command asks) rather than loading
+// a config that could weaken existing protection.
+#[test]
+fn ask_decision_redirect_entry_fails_config_load_closed() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[redirect]]
+        id = "user-redirect-ask"
+        reason = "attempted downgrade"
+        decision = "ask"
+        targets = [{ prefix = "/tmp/" }]
+    "#,
+    );
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+
+    // The config itself fails to load, so shguard fails closed for every
+    // command -- including one that would otherwise have been a clean
+    // Allow, and (the actual exploit shape) one that redirects to an
+    // embedded-Block-protected target after an earlier /tmp/ redirect.
+    let output = run_hook(&bash_command("echo hi"), &envs);
+    assert_eq!(permission_decision(&output), "ask");
+
+    let output = run_hook(&bash_command("cat > /tmp/x > /etc/passwd"), &envs);
+    assert_eq!(permission_decision(&output), "ask");
+}

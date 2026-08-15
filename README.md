@@ -129,16 +129,22 @@ reason = "forbid redirecting into ~/secrets"
 targets = [{ normalized_prefix = "~/secrets/" }]
 ```
 
-`decision` is `"block"` (default) or `"ask"` — there is no `"allow"` value
-for a redirect entry, the same restriction `[[pipeline]]`-style rules
-have. `targets` is required and non-empty, using the same
-`{ exact = … }`/`{ prefix = … }`/`{ normalized = … }`/
-`{ normalized_prefix = … }` matcher shapes as a command rule's own
-`targets`/`except_targets`. User-declared redirect rules are purely
-additive: they're checked after every embedded redirect rule, so a user
-rule can only ever add new protected targets — it can never weaken or
-shadow a built-in one, even if it declares the exact same target with a
-weaker `decision`.
+`decision` must be `"block"` (the default — omit the field entirely for
+the common case). Unlike a command rule, a user-declared redirect entry
+cannot be `"ask"`: the redirect-target check runs first, before any other
+check on the command, and matches the first target it finds across every
+declared rule — an `Ask`-decision user rule could otherwise win that race
+ahead of a stricter embedded rule matching a *different* redirect target
+on the same command line, silently downgrading it. `decision = "ask"` is
+rejected at config load time (the whole config fails closed) rather than
+silently accepted and only sometimes honored. `targets` is required and
+non-empty, using the same `{ exact = … }`/`{ prefix = … }`/
+`{ normalized = … }`/`{ normalized_prefix = … }` matcher shapes as a
+command rule's own `targets`/`except_targets`. User-declared redirect
+rules are purely additive: they're checked after every embedded redirect
+rule, so a user rule can only ever add new protected targets — combined
+with the block-only restriction above, it can never weaken or shadow a
+built-in one.
 
 ### Excepting specific targets
 

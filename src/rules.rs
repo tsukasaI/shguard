@@ -3768,6 +3768,35 @@ impl UserConfig {
             }
         }
 
+        // A user-config `[[redirect]]` entry must be `decision = "block"`
+        // (the default) — `"ask"` is rejected here, even though
+        // `convert_redirect_rule`/`parse_decision` themselves allow it for
+        // the embedded blocklist. `evaluate_simple_command_core`'s redirect
+        // check (`src/gate.rs`) returns on the FIRST matching redirect rule
+        // before stage 3's argv blocklist match ever runs, and
+        // `Rules::match_redirect_target` is itself first-match across every
+        // rule's targets — both are only safe under the invariant that
+        // every reachable `[[redirect]]` rule is `Decision::Block`, which
+        // every embedded rule today upholds by construction (pinned by
+        // `embedded_redirect_rules_are_all_block_decision` below). Letting
+        // a user declare an `Ask`-decision redirect rule would let it win
+        // that first-match race ahead of a stricter embedded rule on the
+        // same command (or an unrelated stage-3 Block the early return
+        // preempts entirely) and silently downgrade it — the exact
+        // "weaken existing protection" outcome `merge_user_config`'s docs
+        // say a user redirect entry can never cause.
+        for entry in &redirect {
+            if entry.decision == Decision::Ask {
+                return Err(RulesError::invalid(
+                    entry.id.as_str(),
+                    "a `[[redirect]]` entry must use `decision = \"block\"` (the default) — \
+                     an `Ask`-decision redirect rule could downgrade a stricter embedded \
+                     redirect/blocklist rule matched on the same command, since the redirect \
+                     check runs first-match, before any other check",
+                ));
+            }
+        }
+
         Ok(Self {
             deny,
             ask,
@@ -3798,14 +3827,21 @@ impl UserConfig {
 /// (issue #100) are appended AFTER the embedded blocklist's own
 /// `redirect_rules`, never prepended: [`Rules::match_redirect_target`] is
 /// first-match-wins, so appending is what keeps a user-declared redirect
-/// rule from ever shadowing a built-in one covering the same path —
-/// combined with there being no `"allow"` decision for a redirect entry
-/// (`parse_decision` only accepts `"block"`/`"ask"`), user redirect rules
-/// are additive tightening only, never a way to loosen the embedded
-/// protection. `escalation_floor` folds via `max` rather than overwriting
-/// — see the inline comment at that line for why an overwrite would be
-/// wrong given how `src/config.rs`'s `Policy::load` calls this function
-/// more than once.
+/// rule from ever shadowing a built-in one covering the same path. Unlike
+/// the command-rule arrays, this alone isn't sufficient for "additive
+/// tightening only": `evaluate_simple_command_core`'s redirect check
+/// (`src/gate.rs`) returns on the first matching redirect rule across
+/// EVERY declared target, before any other check runs — so `UserConfig::parse`
+/// also rejects `decision = "ask"` on a user redirect entry (a fable
+/// security review of #204's PR found a weaker user `Ask` rule could win
+/// that race ahead of a stricter embedded `Block` matched on a different
+/// redirect target of the same command). With `"allow"` already impossible
+/// (`parse_decision` never produces it) and `"ask"` now rejected at load
+/// time, every reachable redirect rule is `Decision::Block`, which is what
+/// actually makes append-order-only sufficient here. `escalation_floor`
+/// folds via `max` rather than overwriting — see the inline comment at
+/// that line for why an overwrite would be wrong given how
+/// `src/config.rs`'s `Policy::load` calls this function more than once.
 ///
 /// # Errors
 ///
@@ -5417,6 +5453,28 @@ mod tests {
     fn embedded_blocklist_parses() {
         // rules/blocklist.toml must parse and validate
         Rules::embedded().unwrap();
+    }
+
+    // Protects the invariant `evaluate_simple_command_core`'s redirect
+    // check (src/gate.rs) relies on: every `[[redirect]]` rule reachable
+    // via `Rules::match_redirect_target` must be `Decision::Block`, since
+    // that check runs first-match, before stage 3's argv blocklist match,
+    // with no worst-wins folding across the match. A future embedded
+    // `[[redirect]]` entry declaring `decision = "ask"` would silently
+    // reintroduce the same downgrade class `UserConfig::parse` now rejects
+    // for user-declared redirect entries — this test is the embedded-side
+    // half of that same invariant.
+    #[test]
+    fn embedded_redirect_rules_are_all_block_decision() {
+        let rules = Rules::embedded().unwrap();
+        for rule in &rules.redirect_rules {
+            assert_eq!(
+                rule.decision,
+                Decision::Block,
+                "embedded redirect rule {:?} must be Decision::Block",
+                rule.id.as_str()
+            );
+        }
     }
 
     #[test]
@@ -7114,6 +7172,26 @@ mod tests {
         ));
     }
 
+    // Security regression pin (fable review of #204): an Ask-decision user
+    // [[redirect]] rule could downgrade a stricter embedded Block, since
+    // the redirect check runs first-match, before stage 3's argv blocklist
+    // match, with no worst-wins folding. `decision = "ask"` must be
+    // rejected at load time for a user redirect entry.
+    #[test]
+    fn user_config_rejects_ask_decision_redirect_entry() {
+        let toml = r#"
+            [[redirect]]
+            id = "user-redirect-ask"
+            reason = "should be rejected"
+            decision = "ask"
+            targets = [{ prefix = "/tmp/" }]
+        "#;
+        assert!(matches!(
+            UserConfig::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
     #[test]
     fn merge_user_config_redirect_entry_matches_a_new_target() {
         let blocklist = Rules::embedded().unwrap();
@@ -7139,19 +7217,22 @@ mod tests {
 
     #[test]
     fn merge_user_config_redirect_entry_never_shadows_a_builtin_redirect_rule() {
-        // A user rule sharing the embedded config-directory redirect rule's
-        // exact target, but with a weaker `ask` decision, must never win
-        // the match: Rules::match_redirect_target is first-match-wins, so
-        // merge_user_config appending (not prepending) user redirect rules
-        // after the embedded ones is load-bearing here.
+        // A user rule sharing the embedded config-directory redirect
+        // rule's exact target must never win the match ahead of the
+        // embedded one: Rules::match_redirect_target is first-match-wins,
+        // so merge_user_config appending (not prepending) user redirect
+        // rules after the embedded ones is load-bearing here — the
+        // reported rule id proves which one actually fired, not just that
+        // *a* Block resulted (decision alone can't distinguish them, since
+        // `decision = "ask"` on a user redirect entry is rejected at load
+        // time — see `user_config_rejects_ask_decision_redirect_entry`).
         let blocklist = Rules::embedded().unwrap();
         let allowlist = Allowlist::embedded().unwrap();
         let config = UserConfig::parse(
             r#"
             [[redirect]]
-            id = "user-weaker-config-redirect"
+            id = "user-config-redirect-same-target"
             reason = "shadow attempt"
-            decision = "ask"
             targets = [{ normalized_prefix = "~/.config/shguard/" }]
         "#,
         )
