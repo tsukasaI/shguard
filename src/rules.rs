@@ -6023,6 +6023,22 @@ mod tests {
         assert_eq!(rule.decision(), Decision::Ask);
     }
 
+    // Regression pin (fable review of #205): the ancestor rm rule's
+    // required_flags initially only recognized lowercase `-r`, missing
+    // the equally-standard uppercase `-R` recursive spelling GNU/BSD rm
+    // both accept (`rm -R ~/.config` resolved Allow before this fix).
+    #[test]
+    fn self_protect_ancestor_rm_capital_r_literal_tilde_asks() {
+        let rules = Rules::embedded().unwrap();
+        let rule = rules
+            .match_command(&argv(&["rm", "-R", "~/.config"]))
+            .unwrap();
+        assert_eq!(rule.decision(), Decision::Ask);
+
+        let rule = rules.match_command(&argv(&["rm", "-R", "~"])).unwrap();
+        assert_eq!(rule.decision(), Decision::Ask);
+    }
+
     #[test]
     fn self_protect_ancestor_mv_literal_tilde_asks() {
         let rules = Rules::embedded().unwrap();

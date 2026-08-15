@@ -560,7 +560,7 @@ id = "shguard-self-protect-config-ancestor-rm-{suffix}"
 decision = "ask"
 reason = "deleting an ancestor directory of shguard's own config directory must never be scripted"
 command = "rm"
-required_flags = ["r|--recursive"]
+required_flags = ["r|R|--recursive"]
 targets = [{targets}]
 
 [[deny]]

@@ -759,7 +759,7 @@ id = "self-protect-config-ancestor-rm-tilde"
 decision = "ask"
 reason = "deleting an ancestor directory of shguard's own config directory must never be scripted"
 command = "rm"
-required_flags = ["r|--recursive"]
+required_flags = ["r|R|--recursive"]
 targets = [{ normalized = "~/.config" }, { normalized = "~" }]
 
 [[command]]
