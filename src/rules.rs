@@ -2571,6 +2571,49 @@ pub(crate) fn effective_command(stage: &[NormalizedWord]) -> Option<(&str, &[Nor
 /// lockfile slot (making the real lockfile argument the resolved command).
 fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
     match wrapper {
+        // Issue #250: `env` is in `TRANSPARENT_WRAPPERS` but had no entry
+        // here, so its own value-taking flags were mistaken for the
+        // wrapped command by the generic dash-prefix skip -- `env -u FOO
+        // rm -rf /` silently resolved to `FOO`, matching no rule, even
+        // though this genuinely unsets `FOO` and executes `rm -rf /` in a
+        // real shell. Verified against `man env` on macOS/FreeBSD (`-u`,
+        // `-C`, `-P`, `-S` — no long spellings; STANDARDS section lists
+        // these plus `-0`/`-v` as the complete set of non-POSIX
+        // extensions, confirming `-0`/`-i`/`-v` are genuinely boolean and
+        // there is no BSD `-a` or `-L`) and the GNU coreutils manual
+        // (`-u`/`--unset`, `-C`/`--chdir`, `-S`/`--split-string`, and
+        // GNU's own `-a`/`--argv0` — the same argv0-override flag `exec`
+        // has, issue #248). `-P` (BSD-only) and `-a`/`--argv0` (GNU-only)
+        // are listed even though the other flavor lacks them: consuming a
+        // value that would error at runtime on the flavor that doesn't
+        // recognise the flag is the safe, over-blocking direction, the
+        // same posture `exec`'s entry already takes for dash/tcsh/csh.
+        // Deliberately NOT added: GNU's `--default-signal`/
+        // `--ignore-signal`/`--block-signal` take an OPTIONAL value in
+        // `--flag=sig` form only (never a separated token) — unlike every
+        // flag listed below, `env --block-signal rm -rf /` does NOT treat
+        // `rm` as the flag's value in a real shell, so adding an entry
+        // for these would make `skip_wrapper_flags` wrongly consume the
+        // real wrapped command (`rm`) as if it were the flag's separated
+        // value, over-blocking into a *new* bypass (`-rf` mistaken for
+        // the command) instead of closing one. `env`'s own short-flag
+        // clustering (e.g. `-iu FOO rm -rf /`) and `-S`'s value splicing
+        // into the executed argv (the `su -c`/`RECURSABLE_SLOTS` shell-
+        // string-recursion class) are both pre-existing, disclosed,
+        // narrower gaps of the same shape [`TRANSPARENT_WRAPPERS`]'s docs
+        // already carry for other wrappers, not introduced or widened by
+        // this entry — see the pinned known-gap tests below.
+        "env" => vec![
+            ValueFlag::Short('u'),
+            ValueFlag::Long("unset".to_string()),
+            ValueFlag::Short('C'),
+            ValueFlag::Long("chdir".to_string()),
+            ValueFlag::Short('S'),
+            ValueFlag::Long("split-string".to_string()),
+            ValueFlag::Short('P'),
+            ValueFlag::Short('a'),
+            ValueFlag::Long("argv0".to_string()),
+        ],
         // Issue #248: bash/zsh/ksh93's `exec -a <name> cmd...` sets the
         // exec'd process's own argv[0] to `<name>` — without this entry,
         // the generic dash-prefix skip in `skip_wrapper_flags` consumed
