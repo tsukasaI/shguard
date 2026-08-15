@@ -188,8 +188,14 @@ pub(crate) enum Command {
 /// the loop, not to `echo`).
 ///
 /// `BraceGroup` and `Subshell` get identical treatment everywhere shguard's
-/// gate evaluates them: the difference between "runs in a subshell" and
-/// "runs in the current shell" isn't meaningful to a static, non-executing
+/// gate evaluates them, with one exception (issue #103): a `BraceGroup`'s
+/// folded-cwd context (`crate::gate::CwdContext`) is threaded through by
+/// mutable reference, so a `cd` inside one persists into the enclosing
+/// scope, while a `Subshell`'s is a throwaway clone whose mutations never
+/// escape — this is the one place the difference between "runs in a
+/// subshell" and "runs in the current shell" IS meaningful, since a real
+/// `cd`'s effect on the working directory is exactly that distinction.
+/// Otherwise the difference isn't meaningful to a static, non-executing
 /// analyzer that already gives every recursed body its own fresh
 /// environment (see `crate::gate`'s module docs). `BraceGroup` exists as its
 /// own variant (rather than being folded into `Subshell`) only because
