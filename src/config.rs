@@ -47,7 +47,10 @@
 //! [`self_protection_toml`] generates `[[deny]]` rules, at load time,
 //! targeting the config directory for common write-capable commands
 //! (`tee`, `cp`, `mv`, `install`, `sed -i`, `dd`'s `of=<path>` shape,
-//! `rsync`) —
+//! `rsync`), plus one `[[redirect]]` rule (issue #100) for the same
+//! directory via bare shell redirection (`>`/`>>`) — parity with the
+//! write-capable commands, since a path unreachable via `tee` must also
+//! be unreachable via `>` —
 //! the one place this crate builds a rule's TOML text in code rather than
 //! reading it from a file, because the directory is only known once
 //! `$HOME`/`$XDG_CONFIG_HOME` are read for *this* invocation; the
@@ -477,6 +480,11 @@ id = "shguard-self-protect-config-rsync-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "rsync"
 targets = [{{ normalized_prefix = {quoted_dir} }}]
+
+[[redirect]]
+id = "shguard-self-protect-config-redirect-{suffix}"
+reason = "redirecting output to shguard's own config directory must never be scripted"
+targets = [{{ normalized_prefix = {quoted_dir} }}]
 "#
     )
 }
@@ -634,6 +642,29 @@ mod tests {
             "/home/user/.config/shguard/"
         ]));
         assert!(!matches(&["cp", "a.txt", "b.txt"]));
+    }
+
+    // issue #100: the generated [[redirect]] entry protects the RESOLVED
+    // config path the same way the [[deny]] command entries above already
+    // do — parity between `tee <path>` and `> <path>`.
+    #[test]
+    fn self_protection_redirect_rule_matches_resolved_config_path() {
+        let toml = self_protection_toml("/home/user/.config/shguard", "literal");
+        let user_config = UserConfig::parse(&toml).unwrap();
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let (rules, _) = merge_user_config(blocklist, allowlist, user_config).unwrap();
+
+        assert!(
+            rules
+                .match_redirect_target("/home/user/.config/shguard/config.toml")
+                .is_some()
+        );
+        assert!(
+            rules
+                .match_redirect_target("/home/user/other-file.txt")
+                .is_none()
+        );
     }
 
     #[test]

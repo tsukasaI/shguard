@@ -3687,6 +3687,8 @@ struct UserConfigFileDto {
     #[serde(default)]
     allow: Vec<CommandRuleDto>,
     #[serde(default)]
+    redirect: Vec<RedirectRuleDto>,
+    #[serde(default)]
     escalation_floor: Option<String>,
 }
 
@@ -3697,6 +3699,7 @@ pub(crate) struct UserConfig {
     deny: Vec<CommandRule>,
     ask: Vec<CommandRule>,
     allow: Vec<CommandRule>,
+    redirect: Vec<RedirectRule>,
     escalation_floor: Decision,
 }
 
@@ -3708,14 +3711,18 @@ impl UserConfig {
     ///
     /// Returns [`RulesError`] for invalid TOML syntax, a semantically
     /// invalid entry (same checks as [`Rules::parse`]/[`Allowlist::parse`]),
-    /// a duplicate id — checked across all three of `deny`/`ask`/`allow`
-    /// together, one shared id-space, so an id can't dodge the check by
-    /// moving arrays — an `allow` entry matching a shell interpreter or
-    /// transparent wrapper name (see [`matches_dangerous_allow_target`]) —
-    /// or an invalid `escalation_floor` value (see
-    /// [`parse_escalation_floor`]; only `"ask"`/`"deny"` are accepted,
-    /// `"allow"` is rejected here the same as it already is for `[[allow]]`
-    /// entries naming an escalation vector).
+    /// a duplicate id — checked across all four of `deny`/`ask`/`allow`/
+    /// `redirect` together, one shared id-space, so an id can't dodge the
+    /// check by moving arrays — an `allow` entry matching a shell
+    /// interpreter or transparent wrapper name (see
+    /// [`matches_dangerous_allow_target`]) — or an invalid
+    /// `escalation_floor` value (see [`parse_escalation_floor`]; only
+    /// `"ask"`/`"deny"` are accepted, `"allow"` is rejected here the same
+    /// as it already is for `[[allow]]` entries naming an escalation
+    /// vector). A `[[redirect]]` entry's `decision` is restricted to
+    /// `"block"`/`"ask"` by [`convert_redirect_rule`]/[`parse_decision`]
+    /// the same way an embedded-blocklist redirect entry's is — there is
+    /// no `"allow"` value to reject here, unlike the command-rule arrays.
     pub(crate) fn parse(toml: &str) -> Result<Self, RulesError> {
         let dto: UserConfigFileDto = toml::from_str(toml)?;
 
@@ -3734,13 +3741,19 @@ impl UserConfig {
             .into_iter()
             .map(convert_command_rule)
             .collect::<Result<Vec<_>, _>>()?;
+        let redirect = dto
+            .redirect
+            .into_iter()
+            .map(convert_redirect_rule)
+            .collect::<Result<Vec<_>, _>>()?;
         let escalation_floor = parse_escalation_floor(dto.escalation_floor.as_deref())?;
 
         reject_duplicate_ids(
             deny.iter()
                 .map(|r| r.id.as_str())
                 .chain(ask.iter().map(|r| r.id.as_str()))
-                .chain(allow.iter().map(|r| r.id.as_str())),
+                .chain(allow.iter().map(|r| r.id.as_str()))
+                .chain(redirect.iter().map(|r| r.id.as_str())),
         )?;
 
         for entry in &allow {
@@ -3759,20 +3772,21 @@ impl UserConfig {
             deny,
             ask,
             allow,
+            redirect,
             escalation_floor,
         })
     }
 }
 
-/// Merges a user config's `deny`/`ask`/`allow` onto the embedded blocklist
-/// plus allowlist, additively only, never replace-by-id (unlike the
-/// deleted `Rules::with_override`/`layer`).
+/// Merges a user config's `deny`/`ask`/`allow`/`redirect` onto the embedded
+/// blocklist plus allowlist, additively only, never replace-by-id (unlike
+/// the deleted `Rules::with_override`/`layer`).
 ///
-/// Every id the user config introduces, across all three arrays, must be
+/// Every id the user config introduces, across all four arrays, must be
 /// new versus `blocklist`'s command rule ids, `blocklist`'s pipeline rule
-/// ids, and `allowlist`'s entry ids — one shared id-space. A collision is a
-/// load-time [`RulesError::DuplicateId`], fail-closed, never a silent
-/// replace.
+/// ids, `blocklist`'s redirect rule ids, and `allowlist`'s entry ids — one
+/// shared id-space. A collision is a load-time [`RulesError::DuplicateId`],
+/// fail-closed, never a silent replace.
 ///
 /// `deny` entries land in the returned `Rules`' `command_rules`, the
 /// existing Block-matching path, so `evaluate_simple_command` needs no
@@ -3780,10 +3794,18 @@ impl UserConfig {
 /// [`Rules::match_ask`]). `allow` entries land in the returned
 /// `Allowlist`'s entries; the only path from a config `allow` entry to a
 /// permissive decision is [`apply_allowlist`], which is structurally
-/// Block-immune before it even consults its entries. `escalation_floor`
-/// folds via `max` rather than overwriting — see the inline comment at
-/// that line for why an overwrite would be wrong given how
-/// `src/config.rs`'s `Policy::load` calls this function more than once.
+/// Block-immune before it even consults its entries. `redirect` entries
+/// (issue #100) are appended AFTER the embedded blocklist's own
+/// `redirect_rules`, never prepended: [`Rules::match_redirect_target`] is
+/// first-match-wins, so appending is what keeps a user-declared redirect
+/// rule from ever shadowing a built-in one covering the same path —
+/// combined with there being no `"allow"` decision for a redirect entry
+/// (`parse_decision` only accepts `"block"`/`"ask"`), user redirect rules
+/// are additive tightening only, never a way to loosen the embedded
+/// protection. `escalation_floor` folds via `max` rather than overwriting
+/// — see the inline comment at that line for why an overwrite would be
+/// wrong given how `src/config.rs`'s `Policy::load` calls this function
+/// more than once.
 ///
 /// # Errors
 ///
@@ -3824,6 +3846,7 @@ pub(crate) fn merge_user_config(
         .map(|r| r.id.as_str())
         .chain(user_config.ask.iter().map(|r| r.id.as_str()))
         .chain(user_config.allow.iter().map(|r| r.id.as_str()))
+        .chain(user_config.redirect.iter().map(|r| r.id.as_str()))
     {
         if existing_ids.contains(id) {
             return Err(RulesError::DuplicateId(id.to_string()));
@@ -3850,11 +3873,18 @@ pub(crate) fn merge_user_config(
     let mut entries = allowlist.entries;
     entries.extend(user_config.allow);
 
+    // Append, never prepend: match_redirect_target is first-match-wins,
+    // so a user redirect rule must land after the embedded blocklist's own
+    // redirect rules to guarantee it can only ever add new protected
+    // targets, never shadow a built-in one.
+    let mut redirect_rules = blocklist.redirect_rules;
+    redirect_rules.extend(user_config.redirect);
+
     Ok((
         Rules {
             command_rules,
             pipeline_rules: blocklist.pipeline_rules,
-            redirect_rules: blocklist.redirect_rules,
+            redirect_rules,
             ask_rules,
             escalation_floor,
         },
@@ -7054,6 +7084,104 @@ mod tests {
         assert_eq!(config.deny.len(), 1);
         assert_eq!(config.ask.len(), 1);
         assert_eq!(config.allow.len(), 1);
+    }
+
+    // ==== issue #100: user-config `[[redirect]]` entries ====
+
+    #[test]
+    fn user_config_parses_redirect() {
+        let toml = r#"
+            [[redirect]]
+            id = "user-redirect-protected-dir"
+            reason = "forbid redirecting into this directory"
+            targets = [{ prefix = "/protected/" }]
+        "#;
+        let config = UserConfig::parse(toml).unwrap();
+        assert_eq!(config.redirect.len(), 1);
+    }
+
+    #[test]
+    fn user_config_redirect_requires_at_least_one_target() {
+        let toml = r#"
+            [[redirect]]
+            id = "user-redirect-empty"
+            reason = "invalid"
+            targets = []
+        "#;
+        assert!(matches!(
+            UserConfig::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn merge_user_config_redirect_entry_matches_a_new_target() {
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let config = UserConfig::parse(
+            r#"
+            [[redirect]]
+            id = "user-forbid-redirect-to-secrets"
+            reason = "forbid redirecting into ~/secrets"
+            targets = [{ normalized_prefix = "~/secrets/" }]
+        "#,
+        )
+        .unwrap();
+        let (merged, _) = merge_user_config(blocklist, allowlist, config).unwrap();
+
+        assert!(
+            merged
+                .match_redirect_target("~/secrets/api-key.txt")
+                .is_some()
+        );
+        assert!(merged.match_redirect_target("~/not-secrets/x").is_none());
+    }
+
+    #[test]
+    fn merge_user_config_redirect_entry_never_shadows_a_builtin_redirect_rule() {
+        // A user rule sharing the embedded config-directory redirect rule's
+        // exact target, but with a weaker `ask` decision, must never win
+        // the match: Rules::match_redirect_target is first-match-wins, so
+        // merge_user_config appending (not prepending) user redirect rules
+        // after the embedded ones is load-bearing here.
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let config = UserConfig::parse(
+            r#"
+            [[redirect]]
+            id = "user-weaker-config-redirect"
+            reason = "shadow attempt"
+            decision = "ask"
+            targets = [{ normalized_prefix = "~/.config/shguard/" }]
+        "#,
+        )
+        .unwrap();
+        let (merged, _) = merge_user_config(blocklist, allowlist, config).unwrap();
+
+        let rule = merged
+            .match_redirect_target("~/.config/shguard/config.toml")
+            .unwrap();
+        assert_eq!(rule.id().as_str(), "self-protect-config-redirect-tilde");
+        assert_eq!(rule.decision(), Decision::Block);
+    }
+
+    #[test]
+    fn merge_user_config_rejects_redirect_id_colliding_with_embedded_redirect_id() {
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let config = UserConfig::parse(
+            r#"
+            [[redirect]]
+            id = "self-protect-config-redirect-tilde"
+            reason = "totally different rule"
+            targets = [{ prefix = "/totally-different/" }]
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(
+            merge_user_config(blocklist, allowlist, config),
+            Err(RulesError::DuplicateId(id)) if id == "self-protect-config-redirect-tilde"
+        ));
     }
 
     #[test]

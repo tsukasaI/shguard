@@ -112,6 +112,34 @@ optionally narrowed further with `required_flags`/`targets`, the same
 matcher shape `rules/blocklist.toml` itself uses (see that file's own
 schema comments).
 
+### Protecting your own paths from bare redirection
+
+`[[ask]]`/`[[deny]]`/`[[allow]]` each match a *command*'s argv. A separate
+`[[redirect]]` array matches the *target* of a bare shell output/append
+redirection (`>`, `>>`) instead — the same mechanism backing the embedded
+blocklist's own device/`/etc/passwd`/`/etc/shadow` protection and the
+config-directory self-protection rules (issue #100: a path unreachable via
+a write-capable command must also be unreachable via `>`/`>>`, since the
+write mechanism shouldn't change the outcome):
+
+```toml
+[[redirect]]
+id = "user-forbid-redirect-to-secrets"
+reason = "forbid redirecting into ~/secrets"
+targets = [{ normalized_prefix = "~/secrets/" }]
+```
+
+`decision` is `"block"` (default) or `"ask"` — there is no `"allow"` value
+for a redirect entry, the same restriction `[[pipeline]]`-style rules
+have. `targets` is required and non-empty, using the same
+`{ exact = … }`/`{ prefix = … }`/`{ normalized = … }`/
+`{ normalized_prefix = … }` matcher shapes as a command rule's own
+`targets`/`except_targets`. User-declared redirect rules are purely
+additive: they're checked after every embedded redirect rule, so a user
+rule can only ever add new protected targets — it can never weaken or
+shadow a built-in one, even if it declares the exact same target with a
+weaker `decision`.
+
 ### Excepting specific targets
 
 `deny`/`ask` entries can also carry `except_targets`, the opposite of
@@ -385,19 +413,26 @@ eradicate shell-mediated destruction. Explicitly out of scope:
 4. **Multi-step attacks staged across Ask-approved commands.** Ask surfaces
    an unresolvable command to a human for a decision; a hurried human can
    still approve a staged payload one step at a time.
-5. **Redirection target paths, mostly.** Output/append redirection (`>`,
-   `>>`) targets are checked against a curated dangerous-path list (raw
-   block devices, `/etc/passwd`, `/etc/shadow`) — but that list doesn't
-   include shguard's own config path, so `cat > file <<EOF` is still Allow
-   when `file` is shguard's config file. The
-   [config-file self-protection](#protecting-the-config-file-itself) rules
-   only see write-capable *commands* (`tee`, `cp`, `dd`, …) in argv, not
-   bare redirection. A `$()`/backtick substitution sitting in a redirection
-   target, or in an unquoted-delimiter heredoc body, IS recursively checked
-   (issue #51) — `echo hi > $(curl ... | sh)` and a heredoc body's
-   `$(rm -rf /)` are both denied — but only the substitution's *inner
-   command*, never the resolved target *path* itself, which stays the
-   unchecked case above.
+5. **Redirection target paths, mostly, except when unresolved.** Output/
+   append redirection (`>`, `>>`) targets are checked against the same
+   protected-path list write-capable *commands* use (issue #100) — raw
+   block devices, `/etc/passwd`, `/etc/shadow`, and shguard's own config
+   path (both the literal `~/.config/shguard/…` spelling and the
+   resolved absolute path) all deny a redirect the same way the
+   equivalent `tee`/`cp`/`dd`/… invocation already would. What's still
+   unchecked: a redirect target whose value isn't statically resolvable
+   at all — `cat > $HOME/.config/shguard/config.toml` stays `Allow`,
+   since `$HOME` is never expanded and the raw target text doesn't match
+   any listed path. This is a different, narrower gap than "the config
+   path isn't in the list" (now closed) — it's "the target's *value*
+   can't be determined without an environment lookup", the same
+   `no environment lookups anywhere in parse/normalise, by design`
+   posture the rest of this project takes. A `$()`/backtick substitution
+   sitting in a redirection target, or in an unquoted-delimiter heredoc
+   body, IS recursively checked (issue #51) — `echo hi > $(curl ... | sh)`
+   and a heredoc body's `$(rm -rf /)` are both denied — but only the
+   substitution's *inner command*, never a resolved-but-unlisted or an
+   unresolvable target *path* itself.
 6. **Function definitions are evaluated, not tracked by name.** A `name() {
    ...; }` definition (issue #75) has its body evaluated eagerly and folded
    into the definition's own decision — a dangerous body denies the line

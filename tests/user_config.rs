@@ -1227,3 +1227,52 @@ fn sed_in_place_equals_suffix_onto_resolved_config_path_is_blocked() {
     );
     assert_eq!(permission_decision(&output), "deny");
 }
+
+// issue #100: redirection targets must resolve against the same
+// protected-path list write-capable commands already use — a path
+// unreachable via `tee`/`cp`/... must also be unreachable via `>`/`>>`.
+
+#[test]
+fn output_redirect_onto_literal_tilde_config_path_is_blocked() {
+    let home = tempdir().expect("tempdir should create");
+    let output = run_hook(
+        &bash_command("cat > ~/.config/shguard/config.toml"),
+        &[("HOME", home.path().to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+}
+
+#[test]
+fn append_redirect_onto_literal_tilde_config_path_is_blocked() {
+    let home = tempdir().expect("tempdir should create");
+    let output = run_hook(
+        &bash_command("cat >> ~/.config/shguard/config.toml"),
+        &[("HOME", home.path().to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+}
+
+#[test]
+fn output_redirect_onto_resolved_config_path_is_blocked() {
+    let (_dir, config_path) = write_config("");
+
+    let command = format!(
+        "cat > {}",
+        config_path.to_str().expect("path should be valid UTF-8")
+    );
+    let output = run_hook(
+        &bash_command(&command),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+}
+
+#[test]
+fn output_redirect_onto_an_ordinary_path_is_unaffected() {
+    let home = tempdir().expect("tempdir should create");
+    let output = run_hook(
+        &bash_command("echo hi > /tmp/ordinary-output.txt"),
+        &[("HOME", home.path().to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "allow");
+}
