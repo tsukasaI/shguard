@@ -293,9 +293,10 @@ fn guardfall_find_exec_bare_interpreter_cases() {
         (r"find . -ok sh \;", Decision::Block),
         (r"find . -okdir sh \;", Decision::Block),
         // The found file is passed as the interpreter's own positional
-        // script argument, not through `-c` -- still no statically
-        // resolvable script content, so this Blocks the same as bare `sh`.
-        (r"find . -exec sh {} \;", Decision::Block),
+        // script argument, not through `-c` -- an operand is present with
+        // no `-c`, so this floors to Ask (allowlist-launderable), not the
+        // unappealable Block reserved for the no-operand shape.
+        (r"find . -exec sh {} \;", Decision::Ask),
         // A non-shell interpreter (not in `SHELL_INTERPRETERS`) with no
         // `-c` stays out of this fix's scope -- unchanged Allow.
         (r"find . -exec python3 \;", Decision::Allow),
@@ -306,6 +307,32 @@ fn guardfall_find_exec_bare_interpreter_cases() {
         // A bare top-level `sh` invocation (no `find -exec` involved) is
         // unaffected -- this fix is scoped to `find`'s direct-argv payload.
         ("sh", Decision::Allow),
+        // Blocker 1 (over-block): `-n`/`-x` change what the shell does with
+        // the found file, not whether an operand is present -- both floor
+        // to Ask, not the old unappealable Block.
+        (r"find . -name '*.sh' -exec sh -n {} \;", Decision::Ask),
+        (r"find . -name '*.sh' -exec sh -x {} \;", Decision::Ask),
+        (r"find . -exec sh /fixed/path.sh \;", Decision::Ask),
+        // Blocker 2 (under-block): a real shell's option parser stops at
+        // the first operand, so `-c` (or any `c`-containing cluster) after
+        // `{}` is positional to the found script, not a flag to the
+        // interpreter -- must not silently reach Allow.
+        (r"find . -exec sh {} -c \;", Decision::Ask),
+        (r"find . -exec sh {} -c true \;", Decision::Ask),
+        (r"find . -exec bash {} -career \;", Decision::Ask),
+        // Finding 4: `fish` documents `--command` as `-c`'s long spelling
+        // -- must recurse through it like `-c`, not treat it as absent.
+        (r"find . -exec fish --command ls \;", Decision::Allow),
+        (
+            r#"find . -exec fish --command "rm -rf /" \;"#,
+            Decision::Block,
+        ),
+        // The flag position itself unresolvable must still fail closed via
+        // rule 6a's existing `Uncertain` handling, unaffected by this fix.
+        (
+            r#"find . -exec sh $(echo -c) "rm -rf /" \;"#,
+            Decision::Block,
+        ),
     ];
 
     for (command, expected) in cases {

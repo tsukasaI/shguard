@@ -2457,64 +2457,63 @@ fn evaluate_dash_c(
     cwd: &CwdContext,
 ) -> Option<Verdict> {
     let outer_argv = argv.to_vec();
-    let flag_index =
-        match scan_for_flag(rest_words, |s| s == "-c" || short_cluster_contains(s, 'c')) {
-            FlagScan::Found(i) => i,
-            FlagScan::Uncertain(i) => {
-                return Some(match rest_words.get(i + 1) {
-                    Some(script_word) => match script_word.resolution() {
-                        Resolution::Resolved(script) => {
-                            let inner =
-                                analyze_at_depth(script, depth + 1, rules, allowlist, cwd.clone());
-                            let reason = format!(
-                                "`{interpreter}`'s `-c` flag position could not be statically \
+    let flag_index = match scan_for_flag(rest_words, |s| is_dash_c_token(interpreter, s)) {
+        FlagScan::Found(i) => i,
+        FlagScan::Uncertain(i) => {
+            return Some(match rest_words.get(i + 1) {
+                Some(script_word) => match script_word.resolution() {
+                    Resolution::Resolved(script) => {
+                        let inner =
+                            analyze_at_depth(script, depth + 1, rules, allowlist, cwd.clone());
+                        let reason = format!(
+                            "`{interpreter}`'s `-c` flag position could not be statically \
                              resolved, but a trailing word recurses through the full pipeline; \
                              inner decision: {:?}{}",
-                                inner.decision(),
-                                inner
-                                    .reason()
-                                    .map(|r| format!(" ({})", r.as_str()))
-                                    .unwrap_or_default()
-                            );
-                            match inner.decision() {
-                                Decision::Block => Verdict::block(
-                                    Reason::new(reason),
-                                    outer_argv,
-                                    inner.matched_rule().cloned(),
-                                ),
-                                Decision::Ask => Verdict::ask(Reason::new(reason), outer_argv),
-                                // An inner Allow does not clear the outer
-                                // uncertainty — the flag position itself is
-                                // still unresolvable, so this floors to Ask
-                                // rather than propagating the inner Allow.
-                                Decision::Allow => Verdict::ask(
-                                    Reason::new(format!(
-                                        "`{interpreter}`'s `-c` flag position could not be \
+                            inner.decision(),
+                            inner
+                                .reason()
+                                .map(|r| format!(" ({})", r.as_str()))
+                                .unwrap_or_default()
+                        );
+                        match inner.decision() {
+                            Decision::Block => Verdict::block(
+                                Reason::new(reason),
+                                outer_argv,
+                                inner.matched_rule().cloned(),
+                            ),
+                            Decision::Ask => Verdict::ask(Reason::new(reason), outer_argv),
+                            // An inner Allow does not clear the outer
+                            // uncertainty — the flag position itself is
+                            // still unresolvable, so this floors to Ask
+                            // rather than propagating the inner Allow.
+                            Decision::Allow => Verdict::ask(
+                                Reason::new(format!(
+                                    "`{interpreter}`'s `-c` flag position could not be \
                                      statically resolved; a trailing word recursed to Allow, \
                                      but the flag position itself might still be `-c`"
-                                    )),
-                                    outer_argv,
-                                ),
-                            }
+                                )),
+                                outer_argv,
+                            ),
                         }
-                        Resolution::Unresolvable(_) => Verdict::ask(
-                            Reason::new(format!(
-                                "`{interpreter}`'s `-c` flag position could not be statically \
-                             resolved, and neither could its trailing argument"
-                            )),
-                            outer_argv,
-                        ),
-                    },
-                    None => Verdict::ask(
+                    }
+                    Resolution::Unresolvable(_) => Verdict::ask(
                         Reason::new(format!(
-                            "`{interpreter}`'s `-c` flag position could not be statically resolved"
+                            "`{interpreter}`'s `-c` flag position could not be statically \
+                             resolved, and neither could its trailing argument"
                         )),
                         outer_argv,
                     ),
-                });
-            }
-            FlagScan::Absent => return None,
-        };
+                },
+                None => Verdict::ask(
+                    Reason::new(format!(
+                        "`{interpreter}`'s `-c` flag position could not be statically resolved"
+                    )),
+                    outer_argv,
+                ),
+            });
+        }
+        FlagScan::Absent => return None,
+    };
     let script_word = rest_words.get(flag_index + 1)?;
 
     match script_word.resolution() {
@@ -3200,37 +3199,59 @@ fn scan_recursable_slots(
                             };
                             // Issue #196: a payload that directly execs a
                             // `SHELL_INTERPRETERS` member with no `-c`
-                            // (bare `sh`, `sh {}`, `/usr/bin/env sh`)
-                            // spawns an interactive/stdin-fed shell rather
-                            // than running a specific command — rule 6a's
-                            // own `evaluate_dash_c` returns `None` for
-                            // exactly this shape ("not this shape", not
-                            // "safe"), and nothing else below fills the
-                            // gap since the recursed payload alone
-                            // (`inner`, below) matches no blocklist rule
-                            // either. Scoped to `find`'s DirectArgv payload
-                            // only — a bare top-level `sh` invocation is
-                            // unaffected.
+                            // before its first operand spawns a shell that
+                            // either reads stdin (no operand) or runs the
+                            // operand as a script file (unverifiable
+                            // statically) — rule 6a's own `evaluate_dash_c`
+                            // returns `None` for exactly this shape ("not
+                            // this shape", not "safe"), and nothing else
+                            // below fills the gap since the recursed
+                            // payload alone (`inner`, below) matches no
+                            // blocklist rule either. The flag search is
+                            // position-aware — `sh {} -c` demotes `-c` to a
+                            // positional argument of the found file, the
+                            // same as a real shell's option parser — and
+                            // Block is reserved for the no-operand shape;
+                            // an operand present downgrades to Ask (an
+                            // allowlist-launderable posture, unlike Block)
+                            // since "run my found scripts" is a real,
+                            // opt-in workflow. Scoped to `find`'s DirectArgv
+                            // payload only — a bare top-level `sh`
+                            // invocation is unaffected.
                             let payload_argv = normalize::normalize_argv(&synthetic);
                             if let Some((name, rest_words)) =
                                 crate::rules::effective_command(&payload_argv)
                                 && SHELL_INTERPRETERS.contains(&name)
-                                && matches!(
-                                    scan_for_flag(rest_words, |s| s == "-c"
-                                        || short_cluster_contains(s, 'c')),
-                                    FlagScan::Absent
-                                )
                             {
-                                raise_expansion_floor(
-                                    &mut floor,
-                                    Decision::Block,
-                                    format!(
-                                        "`find`'s `-exec`/`-execdir`/`-ok`/`-okdir` payload \
-                                         invokes `{name}` directly with no `-c` script \
-                                         argument; this spawns an interactive or stdin-fed \
-                                         shell instead of running a specific command"
-                                    ),
-                                );
+                                match scan_for_dash_c_before_operand(rest_words, name) {
+                                    DashCPosition::FlagFound | DashCPosition::Uncertain => {}
+                                    DashCPosition::OperandNoFlag => {
+                                        raise_expansion_floor(
+                                            &mut floor,
+                                            Decision::Ask,
+                                            format!(
+                                                "`find`'s `-exec`/`-execdir`/`-ok`/`-okdir` \
+                                                 payload invokes `{name}` directly with an \
+                                                 operand but no `-c` script flag before it; the \
+                                                 shell runs that operand as a script, which is \
+                                                 not statically verifiable"
+                                            ),
+                                        );
+                                    }
+                                    DashCPosition::Absent => {
+                                        raise_expansion_floor(
+                                            &mut floor,
+                                            Decision::Block,
+                                            format!(
+                                                "`find`'s `-exec`/`-execdir`/`-ok`/`-okdir` \
+                                                 payload invokes `{name}` directly with no `-c` \
+                                                 script argument and no operand; this spawns an \
+                                                 interactive or stdin-fed shell per matched \
+                                                 file, which has no batch use"
+                                            ),
+                                        );
+                                    }
+                                }
                             }
                             let inner = evaluate_simple_command(
                                 &synthetic,
@@ -3925,6 +3946,18 @@ fn short_cluster_contains(token: &str, c: char) -> bool {
         .is_some_and(|rest| !rest.is_empty() && !rest.starts_with('-') && rest.contains(c))
 }
 
+/// Whether `token` is `interpreter`'s `-c` flag, in any spelling this
+/// module recognizes. Checked against each `SHELL_INTERPRETERS` member's
+/// own man page (issue #196 follow-up): only `fish` documents a long
+/// spelling (`--command`) for `-c`; `bash`, `zsh`, `dash`/`ash`, `ksh`, and
+/// `tcsh`/`csh` accept only the short form, so the long spelling is scoped
+/// to `fish` rather than accepted for every interpreter.
+fn is_dash_c_token(interpreter: &str, token: &str) -> bool {
+    token == "-c"
+        || short_cluster_contains(token, 'c')
+        || (interpreter == "fish" && token == "--command")
+}
+
 /// Result of scanning a word slice left-to-right for a flag token when some
 /// words may be [`Resolution::Unresolvable`]. The scan stops at the FIRST
 /// word that is either a resolved match or unresolvable — an unresolvable
@@ -3968,6 +4001,47 @@ pub(crate) fn scan_for_flag(words: &[NormalizedWord], matches: impl Fn(&str) -> 
         }
     }
     FlagScan::Absent
+}
+
+/// Result of [`scan_for_dash_c_before_operand`]: where an interpreter's
+/// `-c` flag falls relative to its first non-option operand. A real
+/// shell's option parser stops at the first operand, so `sh {} -c` runs
+/// `{}` as a script with `-c` as *its* positional argument, not as a flag
+/// to `sh` — unlike [`scan_for_flag`], position, not mere presence,
+/// decides the outcome (issue #196 follow-up).
+enum DashCPosition {
+    /// `-c` resolved before any operand; rule 6a's own recursion already
+    /// handles this shape.
+    FlagFound,
+    /// A word before the flag/operand position could not be statically
+    /// resolved — fail closed the same way [`FlagScan::Uncertain`] does;
+    /// rule 6a's own `Uncertain` handling covers this shape too.
+    Uncertain,
+    /// No `-c` before the first operand, and an operand exists — the shell
+    /// runs it as a script.
+    OperandNoFlag,
+    /// No `-c`, and no operand at all.
+    Absent,
+}
+
+/// Scans `words` left-to-right for `interpreter`'s `-c` flag
+/// ([`is_dash_c_token`]), stopping at the first token that is the flag, is
+/// unresolvable, or is a non-option operand (does not start with `-`) —
+/// whichever comes first.
+fn scan_for_dash_c_before_operand(words: &[NormalizedWord], interpreter: &str) -> DashCPosition {
+    for w in words {
+        match w.resolution() {
+            Resolution::Resolved(s) if is_dash_c_token(interpreter, s) => {
+                return DashCPosition::FlagFound;
+            }
+            Resolution::Resolved(s) if !s.starts_with('-') => {
+                return DashCPosition::OperandNoFlag;
+            }
+            Resolution::Resolved(_) => {}
+            Resolution::Unresolvable(_) => return DashCPosition::Uncertain,
+        }
+    }
+    DashCPosition::Absent
 }
 
 /// Rule 5b: whether `stage` is a decode/transform command in the sense
@@ -7594,11 +7668,12 @@ done"#,
     }
 
     #[test]
-    fn find_exec_bare_interpreter_with_placeholder_still_blocks() {
+    fn find_exec_bare_interpreter_with_placeholder_asks() {
         // `sh {}` runs the matched file as a script, not through `-c` --
-        // still no statically resolvable content, same posture as bare
-        // `sh`.
-        assert_decision(r"find /x -exec sh {} \;", Decision::Block);
+        // no statically resolvable content, but an operand is present, so
+        // this floors to Ask (allowlist-launderable), not the unappealable
+        // Block reserved for the no-operand shape. Issue #196 follow-up.
+        assert_decision(r"find /x -exec sh {} \;", Decision::Ask);
     }
 
     #[test]
@@ -7614,6 +7689,83 @@ done"#,
         // must still Allow a harmless script -- the new bare-interpreter
         // floor only fires on a confirmed `-c` absence.
         assert_decision(r#"find /x -exec sh -c "ls" \;"#, Decision::Allow);
+    }
+
+    #[test]
+    fn find_exec_dash_n_placeholder_asks_not_blocks() {
+        // Issue #196 follow-up (blocker 1, over-block): `-n` is parse-only
+        // -- the shell executes nothing -- but the floor is position-aware
+        // over flag *shape*, not semantics, so it still floors to Ask
+        // (operand present, no `-c`), not the old, unappealable Block.
+        assert_decision(r"find /x -name '*.sh' -exec sh -n {} \;", Decision::Ask);
+    }
+
+    #[test]
+    fn find_exec_dash_x_placeholder_asks_not_blocks() {
+        // Issue #196 follow-up (blocker 1): tracing a found script (`-x`)
+        // is a real workflow -- must not be unappealably blocked.
+        assert_decision(r"find /x -name '*.sh' -exec sh -x {} \;", Decision::Ask);
+    }
+
+    #[test]
+    fn find_exec_fixed_path_script_asks() {
+        // Issue #196 follow-up (blocker 1): a fixed script path (no `{}`)
+        // with no `-c` is still an operand the shell runs as a script --
+        // same Ask posture as the placeholder case.
+        assert_decision(r"find /x -exec sh /fixed/path.sh \;", Decision::Ask);
+    }
+
+    #[test]
+    fn find_exec_placeholder_then_dash_c_is_positional_not_a_flag() {
+        // Issue #196 follow-up (blocker 2, under-block): a real shell's
+        // option parser stops at the first operand, so `{}` becomes `$0`
+        // and the trailing `-c` is just `$1` to the found script, not a
+        // flag to `sh`. The old position-blind scan let this reach Allow.
+        assert_decision(r"find /x -exec sh {} -c \;", Decision::Ask);
+    }
+
+    #[test]
+    fn find_exec_placeholder_then_dash_c_true_is_positional_not_a_flag() {
+        assert_decision(r"find /x -exec sh {} -c true \;", Decision::Ask);
+    }
+
+    #[test]
+    fn find_exec_placeholder_then_short_cluster_c_suffix_is_positional() {
+        // `-career` contains the letter `c` in a short-cluster shape, but
+        // it comes after the `{}` operand, so it is a positional argument
+        // to the found file, not a `-c` flag to `bash`.
+        assert_decision(r"find /x -exec bash {} -career \;", Decision::Ask);
+    }
+
+    #[test]
+    fn find_exec_fish_dash_dash_command_benign_allows() {
+        // Issue #196 follow-up (finding 4): `fish` documents `--command`
+        // as `-c`'s long spelling. Recursing it must resolve a benign
+        // script to Allow, not the old accidental Block via the
+        // bare-interpreter branch (which didn't recognize `--command` at
+        // all).
+        assert_decision(r"find /x -exec fish --command ls \;", Decision::Allow);
+    }
+
+    #[test]
+    fn find_exec_fish_dash_dash_command_dangerous_blocks() {
+        // Same follow-up: the dangerous case must Block via proper
+        // recursion into the script content, not by accident.
+        assert_decision(
+            r#"find /x -exec fish --command "rm -rf /" \;"#,
+            Decision::Block,
+        );
+    }
+
+    #[test]
+    fn find_exec_dash_c_uncertain_position_still_blocks() {
+        // The position-aware rewrite must not weaken the existing
+        // fail-closed `Uncertain` handling: an unresolvable word at the
+        // flag position is left entirely to rule 6a's own `Uncertain` arm.
+        assert_decision(
+            r#"find /x -exec sh $(echo -c) "rm -rf /" \;"#,
+            Decision::Block,
+        );
     }
 
     #[test]
