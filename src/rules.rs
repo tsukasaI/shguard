@@ -5926,6 +5926,157 @@ mod tests {
         );
     }
 
+    // ==== issue #101 audit: additional primitives + ancestor coverage,
+    // literal-tilde side ====
+
+    #[test]
+    fn self_protect_rmdir_literal_tilde_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["rmdir", "~/.config/shguard"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn self_protect_perl_in_place_literal_tilde_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "perl",
+                    "-i",
+                    "-pe",
+                    "s/a/b/",
+                    "~/.config/shguard/config.toml"
+                ]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn self_protect_perl_without_in_place_does_not_match() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "perl",
+                    "-pe",
+                    "s/a/b/",
+                    "~/.config/shguard/config.toml"
+                ]))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn self_protect_patch_literal_tilde_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["patch", "~/.config/shguard/config.toml", "p.diff"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn self_protect_find_exec_literal_tilde_asks() {
+        let rules = Rules::embedded().unwrap();
+        let rule = rules
+            .match_command(&argv(&[
+                "find",
+                "~/.config/shguard",
+                "-exec",
+                "rm",
+                "{}",
+                ";",
+            ]))
+            .unwrap();
+        assert_eq!(rule.decision(), Decision::Ask);
+    }
+
+    #[test]
+    fn self_protect_find_without_exec_flag_does_not_match() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "find",
+                    "~/.config/shguard",
+                    "-name",
+                    "config.toml"
+                ]))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn self_protect_ancestor_rm_literal_tilde_asks() {
+        let rules = Rules::embedded().unwrap();
+        let rule = rules
+            .match_command(&argv(&["rm", "-r", "~/.config"]))
+            .unwrap();
+        assert_eq!(rule.decision(), Decision::Ask);
+
+        let rule = rules.match_command(&argv(&["rm", "-r", "~"])).unwrap();
+        assert_eq!(rule.decision(), Decision::Ask);
+    }
+
+    // Regression pin (fable review of #205): the ancestor rm rule's
+    // required_flags initially only recognized lowercase `-r`, missing
+    // the equally-standard uppercase `-R` recursive spelling GNU/BSD rm
+    // both accept (`rm -R ~/.config` resolved Allow before this fix).
+    #[test]
+    fn self_protect_ancestor_rm_capital_r_literal_tilde_asks() {
+        let rules = Rules::embedded().unwrap();
+        let rule = rules
+            .match_command(&argv(&["rm", "-R", "~/.config"]))
+            .unwrap();
+        assert_eq!(rule.decision(), Decision::Ask);
+
+        let rule = rules.match_command(&argv(&["rm", "-R", "~"])).unwrap();
+        assert_eq!(rule.decision(), Decision::Ask);
+    }
+
+    #[test]
+    fn self_protect_ancestor_mv_literal_tilde_asks() {
+        let rules = Rules::embedded().unwrap();
+        let rule = rules
+            .match_command(&argv(&["mv", "~/.config", "/tmp/x"]))
+            .unwrap();
+        assert_eq!(rule.decision(), Decision::Ask);
+    }
+
+    #[test]
+    fn self_protect_ancestor_rsync_delete_literal_tilde_asks() {
+        let rules = Rules::embedded().unwrap();
+        let rule = rules
+            .match_command(&argv(&["rsync", "-a", "--delete", "/tmp/x/", "~/.config/"]))
+            .unwrap();
+        assert_eq!(rule.decision(), Decision::Ask);
+    }
+
+    #[test]
+    fn self_protect_ancestor_rsync_without_delete_does_not_match() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["rsync", "-a", "./src/", "~/.config/other/"]))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn self_protect_ancestor_mv_unrelated_target_does_not_match() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["mv", "~/.config/other-app", "/tmp/backup"]))
+                .is_none()
+        );
+    }
+
     // ==== Pipeline rule: curl|sh matches, cat|bash does not ====
 
     #[test]

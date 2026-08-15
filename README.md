@@ -416,10 +416,32 @@ is not an error: that's the ordinary zero-config case.
 ### Protecting the config file itself
 
 shguard automatically denies `tee`/`cp`/`mv`/`install`/`sed -i`
-(or `--in-place`)/`dd of=`/`rm`/`unlink`/`ln`/`rsync` writes targeting its own
-resolved config path, and the literal `~/.config/shguard/` token for any
-user — an agent shouldn't be able to edit its own guardrails via a shell
-command. This is a partial mitigation, not a complete one:
+(or `--in-place`)/`dd of=`/`rm`/`unlink`/`ln`/`rsync`/`rmdir`/`perl -i`/
+`patch` writes targeting its own resolved config path, and the literal
+`~/.config/shguard/` token for any user — an agent shouldn't be able to
+edit its own guardrails via a shell command. `find` combined with
+`-exec`/`-execdir`/`-ok`/`-okdir` against the config path asks rather
+than denies, since what the invoked action actually does is only
+partially visible to a command-line-only analyzer. `truncate` and
+`shred` are covered too, but *globally* (any target, not just the config
+path) rather than via this config-specific list — stronger coverage,
+not a gap (issue #101). Every command in this list matches a file
+*under* the config directory and the bare directory path with no
+trailing slash alike (issue #22/#28 item 2).
+
+Separately, `rm -r`/`mv`/`rsync --delete` against an *ancestor* of the
+config directory (`~/.config`, `~`, and their resolved equivalents) asks
+— deleting or renaming an ancestor takes the config directory with it,
+even though the ancestor path never appears in the direct-target list
+above (issue #101). This is `ask`, not `deny`: unlike a direct hit on the
+config path itself, `targets` matching can't tell `mv src ~` (an
+ordinary, non-destructive destination) apart from `mv ~ /tmp` (the same
+shape, genuinely destructive) — only the recursively-destructive form of
+each command is covered (a flagless `rm ~` can't remove a non-empty
+directory at all; a flagless `rsync src ~` is additive, not
+destructive).
+
+This is a partial mitigation, not a complete one:
 
 - A redirection target that is itself a `$()`/backtick substitution has its
   *inner command* checked (issue #51) — but the target *path* it resolves to
@@ -429,14 +451,10 @@ command. This is a partial mitigation, not a complete one:
 - A relative path after `cd`-ing into the config directory (`cd
   ~/.config/shguard && cp evil.toml config.toml`) is not caught — shguard
   never resolves argv tokens against the process's working directory.
-- Other write-capable tools (`truncate`, `shred`, …) are not
-  enumerated in this list at all.
-- `cp`/`install`/`tee`/`dd`/`sed` match a file *under* the config
-  directory, but not the bare directory path with no trailing slash
-  (`rm`/`unlink`/`ln`/`mv` do cover this).
-- Deleting or moving a *parent* of the config directory (e.g. `rm -rf
-  ~/.config`) is not caught — self-protection rules only match
-  `~/.config/shguard` and paths under it, not any of its ancestors.
+- `patch < diff` (the target file named only inside the diff's own
+  header, not as an argv token) is not caught — the same argv-visibility
+  limit the curl `-xURL` short-proxy-flag gap documents elsewhere in this
+  README.
 
 ### What's not configurable (yet)
 
