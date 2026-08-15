@@ -499,6 +499,16 @@ enum TargetMatcher {
         strip: Option<String>,
         canon: String,
     },
+    /// Opt-in URL-aware host match (issue #102): the token is parsed as a
+    /// real URL via the `url` crate (docs/adr/0002-url-crate.md) and its
+    /// *host* component — not any string prefix of the token — is
+    /// compared against a pre-parsed host. Closes the userinfo-spoofing
+    /// gap plain `exact`/`prefix` string matching can't:
+    /// `http://localhost:pw@evil.example.com` shares a string prefix with
+    /// `http://localhost:` but its real host is `evil.example.com`, which
+    /// this variant correctly does NOT match. See [`Self::matches`] for
+    /// the fail-closed posture on an unparseable candidate.
+    UrlHost(url::Host<String>),
 }
 
 impl TargetMatcher {
@@ -550,6 +560,7 @@ impl TargetMatcher {
                 canonical_render(&lexical_normalize(remainder))
                     .is_some_and(|rendered| rendered.starts_with(canon.as_str()))
             }
+            Self::UrlHost(host) => parse_url_host(token).is_some_and(|parsed| parsed == *host),
         }
     }
 
@@ -614,7 +625,7 @@ impl TargetMatcher {
     fn ascent_descent_plausible(&self, token: &str) -> bool {
         let strip = match self {
             Self::NormalizedPrefix { strip, .. } | Self::NormalizedExact { strip, .. } => strip,
-            Self::Exact(_) | Self::Prefix(_) => return false,
+            Self::Exact(_) | Self::Prefix(_) | Self::UrlHost(_) => return false,
         };
         let Some(remainder) = strip_target(strip.as_deref(), token) else {
             return false;
@@ -643,7 +654,9 @@ impl TargetMatcher {
                 PathForm::Abs(target_comps) | PathForm::Home(target_comps)
                     if !target_comps.is_empty() && *target_comps == comps
             ),
-            Self::Exact(_) | Self::Prefix(_) => unreachable!("filtered out above"),
+            Self::Exact(_) | Self::Prefix(_) | Self::UrlHost(_) => {
+                unreachable!("filtered out above")
+            }
         }
     }
 }
@@ -708,7 +721,7 @@ impl TargetMatcher {
     fn dirstack_plausible(&self, token: &str) -> bool {
         let strip = match self {
             Self::NormalizedExact { strip, .. } | Self::NormalizedPrefix { strip, .. } => strip,
-            Self::Exact(_) | Self::Prefix(_) => return false,
+            Self::Exact(_) | Self::Prefix(_) | Self::UrlHost(_) => return false,
         };
         if strip.is_some() {
             return false;
@@ -726,6 +739,54 @@ fn strip_target<'a>(prefix: Option<&str>, token: &'a str) -> Option<&'a str> {
     match prefix {
         Some(p) => token.strip_prefix(p),
         None => Some(token),
+    }
+}
+
+/// Parses `token` as a URL and extracts its host (issue #102,
+/// docs/adr/0002-url-crate.md), fail-closed: `None` on any parse failure
+/// or a URL with no host component (e.g. `mailto:`/relative-path
+/// schemes) — never falls back to treating the token as a string to
+/// prefix-match, since that would silently reopen the exact bypass class
+/// [`TargetMatcher::UrlHost`] exists to close.
+///
+/// Rejects `token` outright — before ever calling [`url::Url::parse`] —
+/// if it contains a backslash or any [`char::is_control`] code point
+/// (stricter than just bytes below `0x20`: also catches DEL and the C1
+/// control range): the `url` crate implements the WHATWG URL Standard,
+/// which treats `\` as equivalent to `/` for "special" schemes
+/// (`http`/`https`/`ws`/`wss`/`ftp`/`file`) in some parsing states, a
+/// normalization other tools (`curl`, most resolvers) do not universally
+/// share. Since `except_targets` matching only ever *suppresses* a rule, a
+/// parser that reports a safer host than where the command actually
+/// connects is the dangerous direction — this check closes that specific
+/// known differential (docs/adr/0002-url-crate.md's residual-risk
+/// section), not every possible WHATWG/RFC-3986 divergence.
+fn parse_url_host(token: &str) -> Option<url::Host<String>> {
+    if token.contains('\\') || token.chars().any(|c| c.is_control()) {
+        return None;
+    }
+    url::Url::parse(token)
+        .ok()?
+        .host()
+        .map(|h| strip_trailing_dot(h.to_owned()))
+}
+
+/// Strips a single trailing `.` from a [`url::Host::Domain`] (issue #102
+/// review follow-up): `evil.example.com.` is the same address as
+/// `evil.example.com` to a resolver (the trailing dot denotes an explicit
+/// FQDN root, not a different host), but [`url::Host`]'s `PartialEq`
+/// treats them as distinct. Left unstripped, a `targets`-direction (block)
+/// `url_host` rule could be evaded by appending a trailing dot to the
+/// candidate; applied symmetrically to both the config-side host
+/// ([`convert_target`]) and the candidate-side host ([`parse_url_host`])
+/// so the comparison stays correct in both directions. `Ipv4`/`Ipv6` hosts
+/// have no such textual form and pass through unchanged.
+fn strip_trailing_dot(host: url::Host<String>) -> url::Host<String> {
+    match host {
+        url::Host::Domain(domain) => {
+            url::Host::Domain(domain.strip_suffix('.').unwrap_or(&domain).to_owned())
+        }
+        other => other,
     }
 }
 
@@ -2707,6 +2768,7 @@ struct TargetDto {
     prefix: Option<String>,
     normalized: Option<String>,
     normalized_prefix: Option<String>,
+    url_host: Option<String>,
     strip: Option<String>,
 }
 
@@ -3043,11 +3105,13 @@ fn convert_target(
     let set_count = usize::from(dto.exact.is_some())
         + usize::from(dto.prefix.is_some())
         + usize::from(dto.normalized.is_some())
-        + usize::from(dto.normalized_prefix.is_some());
+        + usize::from(dto.normalized_prefix.is_some())
+        + usize::from(dto.url_host.is_some());
     if set_count != 1 {
         return Err(RulesError::invalid(
             rule_id,
-            "target requires exactly one of `exact`/`prefix`/`normalized`/`normalized_prefix`",
+            "target requires exactly one of `exact`/`prefix`/`normalized`/`normalized_prefix`/\
+             `url_host`",
         ));
     }
     if is_except_target && (dto.normalized.is_some() || dto.normalized_prefix.is_some()) {
@@ -3071,10 +3135,16 @@ fn convert_target(
         ));
     }
 
-    // `set_count == 1` above guarantees exactly one of these four is
+    // `set_count == 1` above guarantees exactly one of these five is
     // `Some` — the wildcard arm is unreachable, not a fallback.
-    match (dto.exact, dto.prefix, dto.normalized, dto.normalized_prefix) {
-        (Some(exact), None, None, None) => {
+    match (
+        dto.exact,
+        dto.prefix,
+        dto.normalized,
+        dto.normalized_prefix,
+        dto.url_host,
+    ) {
+        (Some(exact), None, None, None, None) => {
             if exact.trim().is_empty() {
                 return Err(RulesError::invalid(
                     rule_id,
@@ -3083,7 +3153,7 @@ fn convert_target(
             }
             Ok(TargetMatcher::Exact(exact))
         }
-        (None, Some(prefix), None, None) => {
+        (None, Some(prefix), None, None, None) => {
             // An empty prefix produces a universal matcher
             // (`"".starts_with("")` is always true) — the same hazard
             // `convert_command_rule` already guards against for an empty
@@ -3096,7 +3166,7 @@ fn convert_target(
             }
             Ok(TargetMatcher::Prefix(prefix))
         }
-        (None, None, Some(normalized), None) => {
+        (None, None, Some(normalized), None, None) => {
             if normalized.trim().is_empty() {
                 return Err(RulesError::invalid(
                     rule_id,
@@ -3110,7 +3180,7 @@ fn convert_target(
                 target,
             })
         }
-        (None, None, None, Some(normalized_prefix)) => {
+        (None, None, None, Some(normalized_prefix), None) => {
             if normalized_prefix.trim().is_empty() {
                 return Err(RulesError::invalid(
                     rule_id,
@@ -3144,6 +3214,47 @@ fn convert_target(
                 strip: dto.strip,
                 canon,
             })
+        }
+        (None, None, None, None, Some(url_host)) => {
+            if url_host.trim().is_empty() {
+                return Err(RulesError::invalid(
+                    rule_id,
+                    "target's `url_host` must not be empty",
+                ));
+            }
+            // `*` is a forbidden host code point in the URL Standard, so no
+            // real URL's parsed host can ever contain one — a wildcard
+            // config value would load successfully but provably never
+            // match anything, silently giving a rule author zero of the
+            // subdomain-wildcard coverage they likely intended. Same
+            // "parse, don't validate" posture as the dead-config checks
+            // above: caught at load time rather than left as a silent no-op.
+            if url_host.contains('*') {
+                return Err(RulesError::invalid(
+                    rule_id,
+                    format!(
+                        "target's `url_host` {url_host:?} contains '*', which a real URL's host \
+                         can never contain and so can never match — wildcard host matching is not \
+                         supported"
+                    ),
+                ));
+            }
+            // Parsed via `url::Host::parse` — the config VALUE is a bare
+            // host, not a full URL, unlike the match-time candidate
+            // (`parse_url_host`, which extracts `.host()` from a parsed
+            // `url::Url`) — but both funnel through the same `url::Host`
+            // type and `PartialEq`, so "what counts as this host" is still
+            // defined consistently on both sides (docs/adr/0002-url-crate.md).
+            // `strip_trailing_dot` mirrors `parse_url_host`'s own call so an
+            // explicit-FQDN-root config value (`"evil.example.com."`) and
+            // candidate (`http://evil.example.com./`) compare equal.
+            let host = url::Host::parse(&url_host).map_err(|err| {
+                RulesError::invalid(
+                    rule_id,
+                    format!("target's `url_host` {url_host:?} is not a valid host: {err}"),
+                )
+            })?;
+            Ok(TargetMatcher::UrlHost(strip_trailing_dot(host)))
         }
         _ => unreachable!("set_count == 1 checked above: exactly one alternative is Some"),
     }
@@ -7527,6 +7638,261 @@ mod tests {
             targets = [{ normalized = "/" }]
         "#;
         assert!(Rules::parse(toml).is_ok());
+    }
+
+    // ==== issue #102: opt-in `url_host` except_targets matcher ====
+
+    fn curl_url_host_except_rule() -> &'static str {
+        r#"
+            [[command]]
+            id = "curl-non-localhost"
+            reason = "ask unless curl targets localhost"
+            decision = "ask"
+            command = "curl"
+            except_targets = [{ url_host = "localhost" }]
+        "#
+    }
+
+    #[test]
+    fn url_host_rejects_userinfo_spoofed_host() {
+        let rules = Rules::parse(curl_url_host_except_rule()).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "http://localhost:pw@evil.example.com"]))
+                .is_some(),
+            "url_host must not except a URL whose real host is evil.example.com just \
+             because the raw text starts with the userinfo-adjacent string \"localhost:\""
+        );
+    }
+
+    #[test]
+    fn url_host_excepts_a_genuine_localhost_target() {
+        let rules = Rules::parse(curl_url_host_except_rule()).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "http://localhost:8080/api"]))
+                .is_none()
+        );
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "http://localhost/x"]))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn url_host_does_not_except_a_different_real_host() {
+        let rules = Rules::parse(curl_url_host_except_rule()).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "https://evil.example.com"]))
+                .is_some()
+        );
+    }
+
+    // A candidate that doesn't parse as a URL at all (a bare flag value,
+    // a local path from some other command's own except_targets rule)
+    // must fail closed: never excepted, never treated as a match either
+    // way — the rule still fires rather than silently passing through.
+    #[test]
+    fn url_host_fails_closed_on_an_unparseable_candidate() {
+        let rules = Rules::parse(curl_url_host_except_rule()).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "not a url at all"]))
+                .is_some()
+        );
+    }
+
+    // IPv6 hosts must compare correctly through the real URL parser --
+    // pins the actual `url::Host` rendering this crate relies on rather
+    // than assuming a specific bracket/no-bracket string form from memory.
+    // `url::Host::parse` requires the bracketed form (`"[::1]"`) for a
+    // standalone IPv6 host string -- bare `"::1"` is rejected as an
+    // invalid domain name, confirmed empirically rather than assumed;
+    // documented in the README as a real thing rule authors must know.
+    #[test]
+    fn url_host_matches_ipv6_localhost() {
+        let toml = r#"
+            [[command]]
+            id = "curl-non-localhost"
+            reason = "ask unless curl targets localhost"
+            decision = "ask"
+            command = "curl"
+            except_targets = [{ url_host = "[::1]" }]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "http://[::1]:8080/"]))
+                .is_none(),
+            "http://[::1]:8080/ should be excepted by a url_host = \"::1\" rule"
+        );
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "http://[::2]:8080/"]))
+                .is_some(),
+            "a different IPv6 host must not be excepted"
+        );
+    }
+
+    // Fail-closed differential mitigation (docs/adr/0002-url-crate.md): a
+    // candidate containing a backslash must never be excepted, even if it
+    // superficially resembles the configured host, since the `url` crate's
+    // WHATWG parsing of `\` for special schemes can diverge from what
+    // other tools (curl, resolvers) actually do with the same text.
+    #[test]
+    fn url_host_never_excepts_a_candidate_containing_a_backslash() {
+        let rules = Rules::parse(curl_url_host_except_rule()).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "http:\\\\localhost@evil.example.com"]))
+                .is_some(),
+            "a backslash-containing candidate must fail closed, never be excepted"
+        );
+    }
+
+    #[test]
+    fn except_targets_url_host_empty_is_rejected() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "some reason"
+            command = "curl"
+            except_targets = [{ url_host = "" }]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn except_targets_url_host_invalid_host_is_rejected() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "some reason"
+            command = "curl"
+            except_targets = [{ url_host = "not a valid host" }]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn except_targets_url_host_and_exact_both_set_is_rejected() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "some reason"
+            command = "curl"
+            except_targets = [{ url_host = "localhost", exact = "http://localhost" }]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn except_targets_url_host_with_strip_is_rejected() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "some reason"
+            command = "curl"
+            except_targets = [{ url_host = "localhost", strip = "of=" }]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    // `url_host` is a `targets` matcher too, not except_targets-only --
+    // TargetMatcher is shared and nothing in convert_target restricts
+    // url_host by context the way normalized/normalized_prefix are
+    // restricted away from except_targets specifically.
+    #[test]
+    fn url_host_also_works_in_targets_not_just_except_targets() {
+        let toml = r#"
+            [[command]]
+            id = "curl-to-evil"
+            reason = "block curl straight to evil.example.com"
+            command = "curl"
+            targets = [{ url_host = "evil.example.com" }]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "http://evil.example.com/x"]))
+                .is_some()
+        );
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "http://localhost.example.com/x"]))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn url_host_targets_is_not_evaded_by_a_trailing_dot_candidate() {
+        let toml = r#"
+            [[command]]
+            id = "curl-to-evil"
+            reason = "block curl straight to evil.example.com"
+            command = "curl"
+            targets = [{ url_host = "evil.example.com" }]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "http://evil.example.com./x"]))
+                .is_some(),
+            "a trailing-dot FQDN is the same address a resolver would connect to and must \
+             still match the block rule"
+        );
+    }
+
+    #[test]
+    fn url_host_config_value_with_a_trailing_dot_still_excepts_the_bare_form() {
+        let toml = r#"
+            [[command]]
+            id = "curl-non-localhost"
+            reason = "ask unless curl targets localhost"
+            decision = "ask"
+            command = "curl"
+            except_targets = [{ url_host = "localhost." }]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "http://localhost/x"]))
+                .is_none(),
+            "a trailing-dot config value and a bare candidate host are the same address and \
+             must compare equal"
+        );
+    }
+
+    #[test]
+    fn except_targets_url_host_wildcard_is_rejected() {
+        let toml = r#"
+            [[command]]
+            id = "curl-non-localhost"
+            reason = "ask unless curl targets localhost"
+            decision = "ask"
+            command = "curl"
+            except_targets = [{ url_host = "*.example.com" }]
+        "#;
+        let err = Rules::parse(toml).unwrap_err();
+        assert!(
+            err.to_string().contains("wildcard"),
+            "a `*` in url_host can never match a real URL's host and should be rejected at \
+             load time, not silently loaded as a dead rule: {err}"
+        );
     }
 
     #[test]
