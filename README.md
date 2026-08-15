@@ -294,6 +294,34 @@ entry with `decision = "ask"`, for instance) — it can **never** downgrade a
 `Block`, from the embedded blocklist or from your own `deny` entries. This
 mirrors Claude Code's own `permissions.{deny,ask,allow}` model.
 
+### Keeping secrets scanners runnable
+
+Secrets-scanning tools (secretlint, detect-secrets, gitleaks, trufflehog)
+routinely read files that look like secrets as their normal job. A broad
+`[[deny]]` rule protecting those same paths has no allow-side rescue for
+them by design: per the precedence rule above, `[[ask]]`-table entries and
+block-decision `[[deny]]` entries can never be downgraded by an
+`[[allow]]` entry. The fix is to shape the deny rule itself, not to look
+for an escape hatch:
+
+- **Prefer an exact `command` (or the multi-word sugar) over
+  `command_prefix`.** `command_prefix` matches on `starts_with`, so
+  `command_prefix = "git"` also matches `gitleaks` — a broad prefix rule
+  meant for `git` silently swallows an unrelated tool that happens to
+  share the prefix.
+- **If the deny genuinely needs to be broad, set `decision = "ask"` on it
+  and add a narrow `[[allow]]` pinning the scanner's leading subcommand
+  words.** A `[[deny]]` entry with `decision = "ask"` produces a
+  structural `Ask`, which — unlike a block-decision deny — a matching
+  `[[allow]]` entry can downgrade back to `Allow`. This is the one
+  allow-side rescue the precedence model permits, and it's the correct
+  tool for this case. As with any multi-word `command` sugar (see above),
+  the allow matches the pinned leading words plus *any* trailing flags or
+  extra positionals — it is not an exact-invocation match, so keep it as
+  tight as the leading words allow.
+- For target-shaped carve-outs (e.g. exempting one path rather than one
+  command), see `except_targets` instead.
+
 ### Escalation floor
 
 Any command wrapped by `sudo`, `doas`, `su`, `pkexec`, or `run0` — anywhere
