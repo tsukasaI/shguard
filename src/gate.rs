@@ -3198,6 +3198,40 @@ fn scan_recursable_slots(
                                 words: command.words[span_start..span_end].to_vec(),
                                 redirections: Vec::new(),
                             };
+                            // Issue #196: a payload that directly execs a
+                            // `SHELL_INTERPRETERS` member with no `-c`
+                            // (bare `sh`, `sh {}`, `/usr/bin/env sh`)
+                            // spawns an interactive/stdin-fed shell rather
+                            // than running a specific command — rule 6a's
+                            // own `evaluate_dash_c` returns `None` for
+                            // exactly this shape ("not this shape", not
+                            // "safe"), and nothing else below fills the
+                            // gap since the recursed payload alone
+                            // (`inner`, below) matches no blocklist rule
+                            // either. Scoped to `find`'s DirectArgv payload
+                            // only — a bare top-level `sh` invocation is
+                            // unaffected.
+                            let payload_argv = normalize::normalize_argv(&synthetic);
+                            if let Some((name, rest_words)) =
+                                crate::rules::effective_command(&payload_argv)
+                                && SHELL_INTERPRETERS.contains(&name)
+                                && matches!(
+                                    scan_for_flag(rest_words, |s| s == "-c"
+                                        || short_cluster_contains(s, 'c')),
+                                    FlagScan::Absent
+                                )
+                            {
+                                raise_expansion_floor(
+                                    &mut floor,
+                                    Decision::Block,
+                                    format!(
+                                        "`find`'s `-exec`/`-execdir`/`-ok`/`-okdir` payload \
+                                         invokes `{name}` directly with no `-c` script \
+                                         argument; this spawns an interactive or stdin-fed \
+                                         shell instead of running a specific command"
+                                    ),
+                                );
+                            }
                             let inner = evaluate_simple_command(
                                 &synthetic,
                                 &Env::new(),
@@ -7536,6 +7570,50 @@ done"#,
         // first, so `find -exec` is still recognised when `find` itself is
         // invoked via `sudo`.
         assert_decision(r"sudo find /x -exec rm -rf {} \;", Decision::Block);
+    }
+
+    #[test]
+    fn find_exec_bare_interpreter_blocks() {
+        // Issue #196: the payload directly execs `sh`, with no `-c` for
+        // rule 6a to find -- the recursed payload alone (bare `sh`) also
+        // matches no blocklist rule, so without this floor it silently
+        // Allowed.
+        assert_decision(r"find /x -exec sh \;", Decision::Block);
+    }
+
+    #[test]
+    fn find_exec_bare_interpreter_absolute_path_and_plus_terminator_blocks() {
+        assert_decision(r"find /x -exec /bin/sh +", Decision::Block);
+    }
+
+    #[test]
+    fn find_exec_env_wrapped_bare_interpreter_blocks() {
+        // `effective_command` resolves through `env` the same way it does
+        // for the `-c` case rule 6a already covers.
+        assert_decision(r"find /x -exec /usr/bin/env sh \;", Decision::Block);
+    }
+
+    #[test]
+    fn find_exec_bare_interpreter_with_placeholder_still_blocks() {
+        // `sh {}` runs the matched file as a script, not through `-c` --
+        // still no statically resolvable content, same posture as bare
+        // `sh`.
+        assert_decision(r"find /x -exec sh {} \;", Decision::Block);
+    }
+
+    #[test]
+    fn find_exec_bare_non_shell_interpreter_stays_allow() {
+        // `python3` is not in `SHELL_INTERPRETERS` -- out of this fix's
+        // scope, unchanged Allow.
+        assert_decision(r"find /x -exec python3 \;", Decision::Allow);
+    }
+
+    #[test]
+    fn find_exec_dash_c_still_takes_priority_over_the_bare_interpreter_floor() {
+        // `-c` present: rule 6a's own recursion already handles this, and
+        // must still Allow a harmless script -- the new bare-interpreter
+        // floor only fires on a confirmed `-c` absence.
+        assert_decision(r#"find /x -exec sh -c "ls" \;"#, Decision::Allow);
     }
 
     #[test]

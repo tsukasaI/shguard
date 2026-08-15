@@ -269,6 +269,56 @@ fn guardfall_eval_cases() {
     }
 }
 
+/// Issue #196: `find`'s `-exec`/`-execdir`/`-ok`/`-okdir` payload already
+/// recursed a `sh -c '<string>'` target (issue #72's own machinery composed
+/// with rule 6a), but a payload that execs a shell interpreter directly,
+/// with no `-c`, fell through both mechanisms to a silent Allow -- rule 6a
+/// only fires on a `-c` flag it can find, and the recursed bare-interpreter
+/// payload alone matches no blocklist rule.
+#[test]
+fn guardfall_find_exec_bare_interpreter_cases() {
+    let cases: &[(&str, Decision)] = &[
+        // The issue's own repro.
+        (r"find . -exec /bin/sh \; -quit", Decision::Block),
+        // Bare interpreter name, no path.
+        (r"find . -exec sh \; -quit", Decision::Block),
+        (r"find . -exec bash \;", Decision::Block),
+        // `env`-wrapped and `+`-terminated variants must resolve the same
+        // way as the `\;`-terminated bare case.
+        (r"find . -exec /usr/bin/env sh \;", Decision::Block),
+        (r"find . -exec bash +", Decision::Block),
+        // `-execdir`/`-ok`/`-okdir` share the same `RECURSABLE_SLOTS` entry
+        // shape as `-exec` -- must Block identically.
+        (r"find . -execdir sh \;", Decision::Block),
+        (r"find . -ok sh \;", Decision::Block),
+        (r"find . -okdir sh \;", Decision::Block),
+        // The found file is passed as the interpreter's own positional
+        // script argument, not through `-c` -- still no statically
+        // resolvable script content, so this Blocks the same as bare `sh`.
+        (r"find . -exec sh {} \;", Decision::Block),
+        // A non-shell interpreter (not in `SHELL_INTERPRETERS`) with no
+        // `-c` stays out of this fix's scope -- unchanged Allow.
+        (r"find . -exec python3 \;", Decision::Allow),
+        // `-c` present: rule 6a's own recursion already handles this
+        // (pinned here as an over-block guard, not a new mechanism).
+        (r#"find . -exec sh -c "ls" \;"#, Decision::Allow),
+        (r#"find . -exec sh -c "rm -rf /" \;"#, Decision::Block),
+        // A bare top-level `sh` invocation (no `find -exec` involved) is
+        // unaffected -- this fix is scoped to `find`'s direct-argv payload.
+        ("sh", Decision::Allow),
+    ];
+
+    for (command, expected) in cases {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
 /// Issue #65: self-protection's `normalized_prefix`/`normalized` targets
 /// (the literal `~/.config/shguard/` half — `src/config.rs`'s dynamically
 /// generated resolved-path half is covered separately in
