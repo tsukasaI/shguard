@@ -3627,6 +3627,7 @@ fn is_opaque_unresolvable(kind: UnresolvableKind) -> bool {
     matches!(
         kind,
         UnresolvableKind::NonUtf8
+            | UnresolvableKind::EmbeddedNul
             | UnresolvableKind::ExpansionLimit
             | UnresolvableKind::UnsupportedStructure
             // Issue #75: both float to at least Ask wherever they appear in

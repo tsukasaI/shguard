@@ -104,6 +104,23 @@ pub enum UnresolvableKind {
     /// `Unresolvable` with this kind — fail-closed even on a path that
     /// should be structurally impossible.
     UnsupportedStructure,
+    /// A decoded ANSI-C escape (`$'...'`) produced an embedded NUL byte.
+    ///
+    /// NUL is valid single-byte UTF-8, so this can't be folded into
+    /// [`UnresolvableKind::NonUtf8`]'s check — it needs its own guard.
+    /// Real bash does not truncate the word at the NUL the way a C string
+    /// would suggest: it silently drops the NUL and concatenates the
+    /// surrounding text into one word (`rm$'\0'IGNOREDTAIL` decodes to
+    /// `rmIGNOREDTAIL`, confirmed against real bash argv capture, issue
+    /// #138) — the same "merge defeats exact-string matching" bypass shape
+    /// this repo has patched before, just produced by bash's own word
+    /// expansion this time rather than by shguard's folding. Reproducing
+    /// that merge would only recreate the bypass under a different string,
+    /// and guessing a truncated prefix instead would claim knowledge
+    /// shguard's static analysis doesn't have (plan.md's never-guess
+    /// rule), so the word becomes `Unresolvable` with this kind instead,
+    /// the same fail-closed treatment `NonUtf8` already gets.
+    EmbeddedNul,
 }
 
 /// The two states a normalised word can be in: its value was folded to a
@@ -937,6 +954,12 @@ fn read_hex_digits(
 ///   guessing a replacement would violate the never-guess rule.
 /// - `\cX` uses [`control_char`]; a non-ASCII target (or none at all) is
 ///   malformed and kept literal, per the first bullet.
+/// - A decoded byte sequence containing an embedded NUL byte (from octal
+///   `\0`, hex `\x00`, unicode `\u`/`\U` escaping code point zero, or
+///   `\c@`) becomes `Err(UnresolvableKind::EmbeddedNul)` rather than a
+///   literal NUL folded into the surrounding text — deliberately NOT
+///   bash-faithful; see [`UnresolvableKind::EmbeddedNul`]'s docs for why
+///   matching bash's real behaviour here would be the wrong choice.
 fn decode_ansi_c(raw: &str) -> Result<String, UnresolvableKind> {
     let mut bytes: Vec<u8> = Vec::new();
     let mut chars = raw.chars().peekable();
@@ -1082,6 +1105,11 @@ fn decode_ansi_c(raw: &str) -> Result<String, UnresolvableKind> {
         }
     }
 
+    if bytes.contains(&0) {
+        // issue #138: NUL is valid UTF-8, so this must be checked
+        // separately from the UTF-8 validation below.
+        return Err(UnresolvableKind::EmbeddedNul);
+    }
     String::from_utf8(bytes).map_err(|_| UnresolvableKind::NonUtf8)
 }
 
@@ -1216,6 +1244,18 @@ mod tests {
         assert_eq!(
             *words[0].resolution(),
             Resolution::Unresolvable(UnresolvableKind::NonUtf8)
+        );
+    }
+
+    // ---- ANSI-C: a decoded embedded NUL is Unresolvable(EmbeddedNul),
+    // never folded into a merged literal (issue #138) ----
+    #[test]
+    fn ansi_c_embedded_nul_is_unresolvable() {
+        let words = first_word_normalized("rm$'\\0'IGNOREDTAIL");
+        assert_eq!(words.len(), 1);
+        assert_eq!(
+            *words[0].resolution(),
+            Resolution::Unresolvable(UnresolvableKind::EmbeddedNul)
         );
     }
 
