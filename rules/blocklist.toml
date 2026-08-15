@@ -843,3 +843,402 @@ required_flags = [
     "--delete|--delete-before|--delete-during|--delete-after|--delete-excluded|--delete-delay",
 ]
 targets = [{ normalized = "~/.config" }, { normalized = "~" }]
+
+# =====================================================================
+# Shell-init / persistence-file protection (issue #198)
+# =====================================================================
+#
+# issue #198: the redirect/tee critical-file list above (raw devices,
+# /etc/passwd, /etc/shadow) and the self-protection family above that
+# (shguard's own config dir) both left a third class of path completely
+# unguarded: files a shell/cron/init system sources or runs automatically,
+# which is exactly what an attacker (or a runaway agent) plants a
+# persistence backdoor in. Deliberately a SEPARATE target list from the
+# critical-file one above, not an addition to it: that list's rules
+# default to `decision = "block"` (raw devices and /etc/passwd/shadow have
+# no legitimate write path at all), while `~/.bashrc`-class files are
+# edited directly and often for legitimate reasons — `decision = "ask"`
+# here, matching this project's posture that Block is reserved for
+# targets with no legitimate write use (see the ancestor-directory rules
+# above for the same reasoning).
+#
+# NOT covered: bare shell redirection (`>`/`>>`). Every embedded
+# `[[redirect]]` rule must be `Decision::Block` — `evaluate_simple_command_
+# core`'s redirect check (src/gate.rs) runs first-match across every
+# redirection on a command line with no worst-wins folding, so a weaker
+# `ask` redirect rule ordered before a stronger `block` one could
+# downgrade it on a DIFFERENT target of the same command line (the exact
+# regression a fable review of PR #204 found and this project now guards
+# with `rules::tests::embedded_redirect_rules_are_all_block_decision`).
+# Giving this list's redirect form `decision = "block"` would fix the
+# invariant but contradict the Ask-over-Block posture above for the
+# single most common legitimate write in this class (`echo ... >>
+# ~/.bashrc`, what most shell installers do); making the redirect check
+# support worst-wins folding is the real fix, but it's a cross-cutting
+# change to a security-reviewed invariant, not a rules-list addition —
+# left for a follow-up issue. `echo evil >> ~/.bashrc` therefore still
+# reads `Allow` after this change; every OTHER write mechanism below does
+# not.
+#
+# cp/mv/install can't tell a protected path used as the SOURCE (`cp
+# ~/.bashrc ~/.bashrc.bak`, an ordinary backup) from the same path used as
+# the DESTINATION (the actual attack) apart — `targets` matches ANY argv
+# token, not a specific position, the same limitation the ancestor rules
+# above already document. Accepted here for the same reason: `decision =
+# "ask"` bounds the cost to one extra confirmation, never a hard block, on
+# the false-positive path. `dd`'s `of=` vs `if=` prefix is the one
+# mechanism below that genuinely distinguishes destination from source —
+# `strip = "of="` only ever matches the write side.
+#
+# Not covered here (each a deliberate exclusion, not an oversight):
+# - chmod/chown: permission/ownership changes, not content writes — a
+#   different threat class (ACL tampering) than the persistence-via-write
+#   this issue is about.
+# - truncate: already blocked for ANY target by `truncate-zero` above
+#   (no `targets` constraint at all), so these paths are already covered.
+# - History files (~/.bash_history, ~/.zsh_history): never sourced/
+#   executed at shell startup, so writing to them isn't a persistence
+#   vector.
+# - Editor/multiplexer init files (~/.vimrc, ~/.tmux.conf, …), macOS
+#   launchd plists, /etc/rc.local, and git hooks (`.git/hooks/*`): real
+#   persistence vectors, but out of scope for this issue — git hooks in
+#   particular don't fit `normalized`/`normalized_prefix`, which only
+#   supports `/`- or `~`-rooted targets (a bare relative prefix has no
+#   canonical rendering to prefix-match against, per `canonical_render`),
+#   and matching it unnormalized (`{ prefix = ".git/hooks/" }`) would be
+#   trivially bypassed by `./`/`../`-respelling with no precedent
+#   elsewhere in this file for doing that safely.
+#
+# Known parity gaps (mechanisms and paths), disclosed not fixed — issue #198:
+# - Mechanisms: rsync, perl -i, patch, curl -o, wget -O against these
+#   targets; crontab <file> (installs a crontab without ever naming a
+#   protected path in argv).
+# - Paths: /etc/cron.hourly|daily|weekly|monthly/, /etc/bash.bashrc,
+#   /etc/zsh/*, ~/.ssh/rc, ~/.config/fish/conf.d/.
+#
+# These rules are appended at the END of this file so every earlier,
+# stricter `command = "tee"/"dd"/"rm"` rule (the device/critical-file and
+# self-protection families above) keeps first-match priority over the
+# weaker `ask` rules below on any overlapping target — e.g. `tee
+# /etc/passwd ~/.bashrc` must still Block via `tee-write-device-or-
+# critical-file`, not fall through to `shell-init-tee`'s `ask` (pinned by
+# `guardfall_shell_init_tee_does_not_shadow_critical_file_block` in
+# tests/guardfall.rs).
+
+[[command]]
+id = "shell-init-tee"
+decision = "ask"
+reason = "tee writing to a shell-init, cron, autostart, or persistence-critical file plants a backdoor that survives past the current session"
+command = "tee"
+targets = [
+    { normalized = "~/.bashrc" },
+    { normalized = "~/.bash_profile" },
+    { normalized = "~/.bash_login" },
+    { normalized = "~/.bash_logout" },
+    { normalized = "~/.zshrc" },
+    { normalized = "~/.zprofile" },
+    { normalized = "~/.zshenv" },
+    { normalized = "~/.zlogin" },
+    { normalized = "~/.zlogout" },
+    { normalized = "~/.profile" },
+    { normalized = "~/.config/fish/config.fish" },
+    { normalized = "/etc/profile" },
+    { normalized_prefix = "/etc/profile.d/" },
+    { normalized = "/etc/profile.d" },
+    { normalized = "/etc/crontab" },
+    { normalized_prefix = "/etc/cron.d/" },
+    { normalized = "/etc/cron.d" },
+    { normalized_prefix = "/var/spool/cron/" },
+    { normalized = "/var/spool/cron" },
+    { normalized_prefix = "~/.config/autostart/" },
+    { normalized = "~/.config/autostart" },
+    { normalized_prefix = "~/.config/systemd/user/" },
+    { normalized = "~/.config/systemd/user" },
+    { normalized = "~/.ssh/authorized_keys" },
+    { normalized = "~/.ssh/config" },
+    { normalized = "/etc/ld.so.preload" },
+]
+
+[[command]]
+id = "shell-init-cp"
+decision = "ask"
+reason = "cp writing to a shell-init, cron, autostart, or persistence-critical file plants a backdoor that survives past the current session"
+command = "cp"
+targets = [
+    { normalized = "~/.bashrc" },
+    { normalized = "~/.bash_profile" },
+    { normalized = "~/.bash_login" },
+    { normalized = "~/.bash_logout" },
+    { normalized = "~/.zshrc" },
+    { normalized = "~/.zprofile" },
+    { normalized = "~/.zshenv" },
+    { normalized = "~/.zlogin" },
+    { normalized = "~/.zlogout" },
+    { normalized = "~/.profile" },
+    { normalized = "~/.config/fish/config.fish" },
+    { normalized = "/etc/profile" },
+    { normalized_prefix = "/etc/profile.d/" },
+    { normalized = "/etc/profile.d" },
+    { normalized = "/etc/crontab" },
+    { normalized_prefix = "/etc/cron.d/" },
+    { normalized = "/etc/cron.d" },
+    { normalized_prefix = "/var/spool/cron/" },
+    { normalized = "/var/spool/cron" },
+    { normalized_prefix = "~/.config/autostart/" },
+    { normalized = "~/.config/autostart" },
+    { normalized_prefix = "~/.config/systemd/user/" },
+    { normalized = "~/.config/systemd/user" },
+    { normalized = "~/.ssh/authorized_keys" },
+    { normalized = "~/.ssh/config" },
+    { normalized = "/etc/ld.so.preload" },
+]
+
+[[command]]
+id = "shell-init-mv"
+decision = "ask"
+reason = "mv writing to a shell-init, cron, autostart, or persistence-critical file plants a backdoor that survives past the current session"
+command = "mv"
+targets = [
+    { normalized = "~/.bashrc" },
+    { normalized = "~/.bash_profile" },
+    { normalized = "~/.bash_login" },
+    { normalized = "~/.bash_logout" },
+    { normalized = "~/.zshrc" },
+    { normalized = "~/.zprofile" },
+    { normalized = "~/.zshenv" },
+    { normalized = "~/.zlogin" },
+    { normalized = "~/.zlogout" },
+    { normalized = "~/.profile" },
+    { normalized = "~/.config/fish/config.fish" },
+    { normalized = "/etc/profile" },
+    { normalized_prefix = "/etc/profile.d/" },
+    { normalized = "/etc/profile.d" },
+    { normalized = "/etc/crontab" },
+    { normalized_prefix = "/etc/cron.d/" },
+    { normalized = "/etc/cron.d" },
+    { normalized_prefix = "/var/spool/cron/" },
+    { normalized = "/var/spool/cron" },
+    { normalized_prefix = "~/.config/autostart/" },
+    { normalized = "~/.config/autostart" },
+    { normalized_prefix = "~/.config/systemd/user/" },
+    { normalized = "~/.config/systemd/user" },
+    { normalized = "~/.ssh/authorized_keys" },
+    { normalized = "~/.ssh/config" },
+    { normalized = "/etc/ld.so.preload" },
+]
+
+[[command]]
+id = "shell-init-install"
+decision = "ask"
+reason = "install writing to a shell-init, cron, autostart, or persistence-critical file plants a backdoor that survives past the current session"
+command = "install"
+targets = [
+    { normalized = "~/.bashrc" },
+    { normalized = "~/.bash_profile" },
+    { normalized = "~/.bash_login" },
+    { normalized = "~/.bash_logout" },
+    { normalized = "~/.zshrc" },
+    { normalized = "~/.zprofile" },
+    { normalized = "~/.zshenv" },
+    { normalized = "~/.zlogin" },
+    { normalized = "~/.zlogout" },
+    { normalized = "~/.profile" },
+    { normalized = "~/.config/fish/config.fish" },
+    { normalized = "/etc/profile" },
+    { normalized_prefix = "/etc/profile.d/" },
+    { normalized = "/etc/profile.d" },
+    { normalized = "/etc/crontab" },
+    { normalized_prefix = "/etc/cron.d/" },
+    { normalized = "/etc/cron.d" },
+    { normalized_prefix = "/var/spool/cron/" },
+    { normalized = "/var/spool/cron" },
+    { normalized_prefix = "~/.config/autostart/" },
+    { normalized = "~/.config/autostart" },
+    { normalized_prefix = "~/.config/systemd/user/" },
+    { normalized = "~/.config/systemd/user" },
+    { normalized = "~/.ssh/authorized_keys" },
+    { normalized = "~/.ssh/config" },
+    { normalized = "/etc/ld.so.preload" },
+]
+
+[[command]]
+id = "shell-init-sed"
+decision = "ask"
+reason = "sed -i writing to a shell-init, cron, autostart, or persistence-critical file plants a backdoor that survives past the current session"
+command = "sed"
+required_flags = ["i|--in-place"]
+targets = [
+    { normalized = "~/.bashrc" },
+    { normalized = "~/.bash_profile" },
+    { normalized = "~/.bash_login" },
+    { normalized = "~/.bash_logout" },
+    { normalized = "~/.zshrc" },
+    { normalized = "~/.zprofile" },
+    { normalized = "~/.zshenv" },
+    { normalized = "~/.zlogin" },
+    { normalized = "~/.zlogout" },
+    { normalized = "~/.profile" },
+    { normalized = "~/.config/fish/config.fish" },
+    { normalized = "/etc/profile" },
+    { normalized_prefix = "/etc/profile.d/" },
+    { normalized = "/etc/profile.d" },
+    { normalized = "/etc/crontab" },
+    { normalized_prefix = "/etc/cron.d/" },
+    { normalized = "/etc/cron.d" },
+    { normalized_prefix = "/var/spool/cron/" },
+    { normalized = "/var/spool/cron" },
+    { normalized_prefix = "~/.config/autostart/" },
+    { normalized = "~/.config/autostart" },
+    { normalized_prefix = "~/.config/systemd/user/" },
+    { normalized = "~/.config/systemd/user" },
+    { normalized = "~/.ssh/authorized_keys" },
+    { normalized = "~/.ssh/config" },
+    { normalized = "/etc/ld.so.preload" },
+]
+
+# dd's `of=` (output file) is the write side; `if=` (input file) is the
+# read side — `strip = "of="` matches only the former, so `dd
+# if=~/.bashrc of=/tmp/backup` (reading FROM a protected path) correctly
+# does not match, unlike the cp/mv/install rules above.
+[[command]]
+id = "shell-init-dd"
+decision = "ask"
+reason = "dd writing to a shell-init, cron, autostart, or persistence-critical file plants a backdoor that survives past the current session"
+command = "dd"
+targets = [
+    { strip = "of=", normalized = "~/.bashrc" },
+    { strip = "of=", normalized = "~/.bash_profile" },
+    { strip = "of=", normalized = "~/.bash_login" },
+    { strip = "of=", normalized = "~/.bash_logout" },
+    { strip = "of=", normalized = "~/.zshrc" },
+    { strip = "of=", normalized = "~/.zprofile" },
+    { strip = "of=", normalized = "~/.zshenv" },
+    { strip = "of=", normalized = "~/.zlogin" },
+    { strip = "of=", normalized = "~/.zlogout" },
+    { strip = "of=", normalized = "~/.profile" },
+    { strip = "of=", normalized = "~/.config/fish/config.fish" },
+    { strip = "of=", normalized = "/etc/profile" },
+    { strip = "of=", normalized_prefix = "/etc/profile.d/" },
+    { strip = "of=", normalized = "/etc/profile.d" },
+    { strip = "of=", normalized = "/etc/crontab" },
+    { strip = "of=", normalized_prefix = "/etc/cron.d/" },
+    { strip = "of=", normalized = "/etc/cron.d" },
+    { strip = "of=", normalized_prefix = "/var/spool/cron/" },
+    { strip = "of=", normalized = "/var/spool/cron" },
+    { strip = "of=", normalized_prefix = "~/.config/autostart/" },
+    { strip = "of=", normalized = "~/.config/autostart" },
+    { strip = "of=", normalized_prefix = "~/.config/systemd/user/" },
+    { strip = "of=", normalized = "~/.config/systemd/user" },
+    { strip = "of=", normalized = "~/.ssh/authorized_keys" },
+    { strip = "of=", normalized = "~/.ssh/config" },
+    { strip = "of=", normalized = "/etc/ld.so.preload" },
+]
+
+[[command]]
+id = "shell-init-rm"
+decision = "ask"
+reason = "deleting a shell-init, cron, autostart, or persistence-critical file removes a user's or system's startup configuration"
+command = "rm"
+targets = [
+    { normalized = "~/.bashrc" },
+    { normalized = "~/.bash_profile" },
+    { normalized = "~/.bash_login" },
+    { normalized = "~/.bash_logout" },
+    { normalized = "~/.zshrc" },
+    { normalized = "~/.zprofile" },
+    { normalized = "~/.zshenv" },
+    { normalized = "~/.zlogin" },
+    { normalized = "~/.zlogout" },
+    { normalized = "~/.profile" },
+    { normalized = "~/.config/fish/config.fish" },
+    { normalized = "/etc/profile" },
+    { normalized_prefix = "/etc/profile.d/" },
+    { normalized = "/etc/profile.d" },
+    { normalized = "/etc/crontab" },
+    { normalized_prefix = "/etc/cron.d/" },
+    { normalized = "/etc/cron.d" },
+    { normalized_prefix = "/var/spool/cron/" },
+    { normalized = "/var/spool/cron" },
+    { normalized_prefix = "~/.config/autostart/" },
+    { normalized = "~/.config/autostart" },
+    { normalized_prefix = "~/.config/systemd/user/" },
+    { normalized = "~/.config/systemd/user" },
+    { normalized = "~/.ssh/authorized_keys" },
+    { normalized = "~/.ssh/config" },
+    { normalized = "/etc/ld.so.preload" },
+]
+
+[[command]]
+id = "shell-init-unlink"
+decision = "ask"
+reason = "deleting a shell-init, cron, autostart, or persistence-critical file removes a user's or system's startup configuration"
+command = "unlink"
+targets = [
+    { normalized = "~/.bashrc" },
+    { normalized = "~/.bash_profile" },
+    { normalized = "~/.bash_login" },
+    { normalized = "~/.bash_logout" },
+    { normalized = "~/.zshrc" },
+    { normalized = "~/.zprofile" },
+    { normalized = "~/.zshenv" },
+    { normalized = "~/.zlogin" },
+    { normalized = "~/.zlogout" },
+    { normalized = "~/.profile" },
+    { normalized = "~/.config/fish/config.fish" },
+    { normalized = "/etc/profile" },
+    { normalized_prefix = "/etc/profile.d/" },
+    { normalized = "/etc/profile.d" },
+    { normalized = "/etc/crontab" },
+    { normalized_prefix = "/etc/cron.d/" },
+    { normalized = "/etc/cron.d" },
+    { normalized_prefix = "/var/spool/cron/" },
+    { normalized = "/var/spool/cron" },
+    { normalized_prefix = "~/.config/autostart/" },
+    { normalized = "~/.config/autostart" },
+    { normalized_prefix = "~/.config/systemd/user/" },
+    { normalized = "~/.config/systemd/user" },
+    { normalized = "~/.ssh/authorized_keys" },
+    { normalized = "~/.ssh/config" },
+    { normalized = "/etc/ld.so.preload" },
+]
+
+# ln replaces the target path's content just as effectively as a write
+# does — `ln -sf evil ~/.bashrc` retargets what gets sourced at shell
+# startup without ever opening the file for writing, so it needs the same
+# coverage as the write-mechanism rules above, not just the delete ones.
+# Same source/destination ambiguity as cp/mv/install above (`targets`
+# matches ANY argv token): `ln -sf ~/.bashrc /tmp/backup` (the existing
+# file as ln's source) also asks, accepted for the same reason.
+[[command]]
+id = "shell-init-ln"
+decision = "ask"
+reason = "ln replacing a shell-init, cron, autostart, or persistence-critical file plants a backdoor that survives past the current session"
+command = "ln"
+targets = [
+    { normalized = "~/.bashrc" },
+    { normalized = "~/.bash_profile" },
+    { normalized = "~/.bash_login" },
+    { normalized = "~/.bash_logout" },
+    { normalized = "~/.zshrc" },
+    { normalized = "~/.zprofile" },
+    { normalized = "~/.zshenv" },
+    { normalized = "~/.zlogin" },
+    { normalized = "~/.zlogout" },
+    { normalized = "~/.profile" },
+    { normalized = "~/.config/fish/config.fish" },
+    { normalized = "/etc/profile" },
+    { normalized_prefix = "/etc/profile.d/" },
+    { normalized = "/etc/profile.d" },
+    { normalized = "/etc/crontab" },
+    { normalized_prefix = "/etc/cron.d/" },
+    { normalized = "/etc/cron.d" },
+    { normalized_prefix = "/var/spool/cron/" },
+    { normalized = "/var/spool/cron" },
+    { normalized_prefix = "~/.config/autostart/" },
+    { normalized = "~/.config/autostart" },
+    { normalized_prefix = "~/.config/systemd/user/" },
+    { normalized = "~/.config/systemd/user" },
+    { normalized = "~/.ssh/authorized_keys" },
+    { normalized = "~/.ssh/config" },
+    { normalized = "/etc/ld.so.preload" },
+]
