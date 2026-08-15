@@ -243,7 +243,7 @@
 id = "rm-recursive-force-dangerous-target"
 reason = "rm with recursive+force flags against a root-level, home, device, or find-placeholder target"
 command = "rm"
-required_flags = ["r|--recursive", "f|--force"]
+required_flags = ["r|R|--recursive", "f|--force"]
 targets = [
     { normalized = "/" },
     { exact = "/*" },
