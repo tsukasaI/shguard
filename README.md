@@ -140,6 +140,14 @@ non-Allow verdict); declaring it on an `[[allow]]` entry, or an embedded
 allowlist `[[entry]]`, is a load-time error, the same "catch dead
 configuration early" posture other fields in this schema already take.
 
+**Known limitation (issue #202):** `deny_message` is only guaranteed to
+surface for a *definite* rule match. A handful of partial-match floors
+(the except-target floor, the directory-equals-tilde floor and its
+siblings) and a nested verdict re-wrap (`bash -c 'blocked-cmd'` recursing
+into the inner command) don't yet thread a matched rule's `deny_message`
+through to their own verdict — the rule's `reason` still surfaces
+correctly on those paths, only `deny_message` is currently silent there.
+
 ### Excepting specific targets
 
 `deny`/`ask` entries can also carry `except_targets`, the opposite of

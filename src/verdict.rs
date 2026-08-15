@@ -213,6 +213,23 @@ impl Verdict {
     /// unaffected — only the handful of rule-matched sites that have a
     /// [`crate::rules`] rule object to read a `deny_message` from need to
     /// call this.
+    ///
+    /// # Known limitation (issue #99 follow-up, not yet filed as its own
+    /// tracked issue at the time this landed)
+    ///
+    /// Only wired up for a *definite* rule match — the three sites in
+    /// `src/gate.rs` where a `CommandRule` is matched outright (the two
+    /// exact-blocklist-match sites, and the user-config ask-floor). A
+    /// *partial*-match floor (e.g. the except-target floor, the
+    /// directory-equals-tilde floor, and their siblings) reduces a matched
+    /// rule to a plain reason string before constructing its own `Verdict`
+    /// and does not thread `deny_message` through — a rule's `deny_message`
+    /// is silently absent from the output on that path even though the
+    /// rule matched. Likewise, a verdict re-wrap (`bash -c 'blocked-cmd'`
+    /// recursing into the inner command) preserves the inner verdict's
+    /// `matched_rule` but not its `deny_message`. Both are real gaps, not a
+    /// deliberate design choice — deferred rather than fixed inline because
+    /// each floor/re-wrap site needs its own data-flow audit.
     #[must_use]
     pub fn with_deny_message(mut self, deny_message: Option<DenyMessage>) -> Self {
         match &mut self.detail {
