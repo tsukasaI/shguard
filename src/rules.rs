@@ -51,7 +51,7 @@ use serde::Deserialize;
 
 use crate::gate::{FlagScan, scan_for_flag};
 use crate::normalize::{NormalizedWord, Resolution};
-use crate::verdict::{Decision, Reason, RuleId, Verdict};
+use crate::verdict::{Decision, DenyMessage, Reason, RuleId, Verdict};
 
 // ---------------------------------------------------------------------
 // Embedded defaults
@@ -499,6 +499,16 @@ enum TargetMatcher {
         strip: Option<String>,
         canon: String,
     },
+    /// Opt-in URL-aware host match (issue #102): the token is parsed as a
+    /// real URL via the `url` crate (docs/adr/0002-url-crate.md) and its
+    /// *host* component — not any string prefix of the token — is
+    /// compared against a pre-parsed host. Closes the userinfo-spoofing
+    /// gap plain `exact`/`prefix` string matching can't:
+    /// `http://localhost:pw@evil.example.com` shares a string prefix with
+    /// `http://localhost:` but its real host is `evil.example.com`, which
+    /// this variant correctly does NOT match. See [`Self::matches`] for
+    /// the fail-closed posture on an unparseable candidate.
+    UrlHost(url::Host<String>),
 }
 
 impl TargetMatcher {
@@ -550,6 +560,7 @@ impl TargetMatcher {
                 canonical_render(&lexical_normalize(remainder))
                     .is_some_and(|rendered| rendered.starts_with(canon.as_str()))
             }
+            Self::UrlHost(host) => parse_url_host(token).is_some_and(|parsed| parsed == *host),
         }
     }
 
@@ -614,7 +625,7 @@ impl TargetMatcher {
     fn ascent_descent_plausible(&self, token: &str) -> bool {
         let strip = match self {
             Self::NormalizedPrefix { strip, .. } | Self::NormalizedExact { strip, .. } => strip,
-            Self::Exact(_) | Self::Prefix(_) => return false,
+            Self::Exact(_) | Self::Prefix(_) | Self::UrlHost(_) => return false,
         };
         let Some(remainder) = strip_target(strip.as_deref(), token) else {
             return false;
@@ -643,7 +654,9 @@ impl TargetMatcher {
                 PathForm::Abs(target_comps) | PathForm::Home(target_comps)
                     if !target_comps.is_empty() && *target_comps == comps
             ),
-            Self::Exact(_) | Self::Prefix(_) => unreachable!("filtered out above"),
+            Self::Exact(_) | Self::Prefix(_) | Self::UrlHost(_) => {
+                unreachable!("filtered out above")
+            }
         }
     }
 }
@@ -708,7 +721,7 @@ impl TargetMatcher {
     fn dirstack_plausible(&self, token: &str) -> bool {
         let strip = match self {
             Self::NormalizedExact { strip, .. } | Self::NormalizedPrefix { strip, .. } => strip,
-            Self::Exact(_) | Self::Prefix(_) => return false,
+            Self::Exact(_) | Self::Prefix(_) | Self::UrlHost(_) => return false,
         };
         if strip.is_some() {
             return false;
@@ -726,6 +739,54 @@ fn strip_target<'a>(prefix: Option<&str>, token: &'a str) -> Option<&'a str> {
     match prefix {
         Some(p) => token.strip_prefix(p),
         None => Some(token),
+    }
+}
+
+/// Parses `token` as a URL and extracts its host (issue #102,
+/// docs/adr/0002-url-crate.md), fail-closed: `None` on any parse failure
+/// or a URL with no host component (e.g. `mailto:`/relative-path
+/// schemes) — never falls back to treating the token as a string to
+/// prefix-match, since that would silently reopen the exact bypass class
+/// [`TargetMatcher::UrlHost`] exists to close.
+///
+/// Rejects `token` outright — before ever calling [`url::Url::parse`] —
+/// if it contains a backslash or any [`char::is_control`] code point
+/// (stricter than just bytes below `0x20`: also catches DEL and the C1
+/// control range): the `url` crate implements the WHATWG URL Standard,
+/// which treats `\` as equivalent to `/` for "special" schemes
+/// (`http`/`https`/`ws`/`wss`/`ftp`/`file`) in some parsing states, a
+/// normalization other tools (`curl`, most resolvers) do not universally
+/// share. Since `except_targets` matching only ever *suppresses* a rule, a
+/// parser that reports a safer host than where the command actually
+/// connects is the dangerous direction — this check closes that specific
+/// known differential (docs/adr/0002-url-crate.md's residual-risk
+/// section), not every possible WHATWG/RFC-3986 divergence.
+fn parse_url_host(token: &str) -> Option<url::Host<String>> {
+    if token.contains('\\') || token.chars().any(|c| c.is_control()) {
+        return None;
+    }
+    url::Url::parse(token)
+        .ok()?
+        .host()
+        .map(|h| strip_trailing_dot(h.to_owned()))
+}
+
+/// Strips a single trailing `.` from a [`url::Host::Domain`] (issue #102
+/// review follow-up): `evil.example.com.` is the same address as
+/// `evil.example.com` to a resolver (the trailing dot denotes an explicit
+/// FQDN root, not a different host), but [`url::Host`]'s `PartialEq`
+/// treats them as distinct. Left unstripped, a `targets`-direction (block)
+/// `url_host` rule could be evaded by appending a trailing dot to the
+/// candidate; applied symmetrically to both the config-side host
+/// ([`convert_target`]) and the candidate-side host ([`parse_url_host`])
+/// so the comparison stays correct in both directions. `Ipv4`/`Ipv6` hosts
+/// have no such textual form and pass through unchanged.
+fn strip_trailing_dot(host: url::Host<String>) -> url::Host<String> {
+    match host {
+        url::Host::Domain(domain) => {
+            url::Host::Domain(domain.strip_suffix('.').unwrap_or(&domain).to_owned())
+        }
+        other => other,
     }
 }
 
@@ -996,6 +1057,7 @@ pub(crate) struct CommandRule {
     targets: Vec<TargetMatcher>,
     except_targets: Vec<TargetMatcher>,
     value_flags: Vec<ValueFlag>,
+    deny_message: Option<DenyMessage>,
 }
 
 impl CommandRule {
@@ -1012,6 +1074,16 @@ impl CommandRule {
     #[must_use]
     pub(crate) fn decision(&self) -> Decision {
         self.decision
+    }
+
+    /// Actionable guidance for the agent (issue #99), distinct from
+    /// [`Self::reason`] — `None` unless this rule declared `deny_message`.
+    /// Never set for an allowlist entry ([`convert_command_rule`] rejects
+    /// `deny_message` on any rule an allow-side caller converts; see
+    /// [`UserConfig::parse`]/[`Allowlist::parse`]).
+    #[must_use]
+    pub(crate) fn deny_message(&self) -> Option<&DenyMessage> {
+        self.deny_message.as_ref()
     }
 
     /// Whether `rest_words` (already resolved past this rule's command
@@ -2698,6 +2770,8 @@ struct CommandRuleDto {
     except_targets: Vec<TargetDto>,
     #[serde(default)]
     value_flags: Vec<String>,
+    #[serde(default)]
+    deny_message: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2707,6 +2781,7 @@ struct TargetDto {
     prefix: Option<String>,
     normalized: Option<String>,
     normalized_prefix: Option<String>,
+    url_host: Option<String>,
     strip: Option<String>,
 }
 
@@ -3013,6 +3088,25 @@ fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesErr
         ));
     }
 
+    // deny_message (issue #99): rejected empty the same way `reason` is —
+    // an empty string is never a meaningful value here and almost
+    // certainly a rule author's mistake. Whether this rule is even
+    // allowed to carry a deny_message (deny/ask rules may; an allow-side
+    // rule/allowlist entry may not, since it never produces a non-Allow
+    // verdict for the message to attach to) is the CALLER's job — this
+    // function converts a raw TOML entry for every caller uniformly, and
+    // has no way to know which array or file the entry came from.
+    let deny_message = match dto.deny_message {
+        Some(message) if message.trim().is_empty() => {
+            return Err(RulesError::invalid(
+                &dto.id,
+                "deny_message must not be empty",
+            ));
+        }
+        Some(message) => Some(DenyMessage::new(message)),
+        None => None,
+    };
+
     Ok(CommandRule {
         id: RuleId::new(dto.id),
         reason: Reason::new(dto.reason),
@@ -3023,6 +3117,7 @@ fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesErr
         targets,
         except_targets,
         value_flags,
+        deny_message,
     })
 }
 
@@ -3043,11 +3138,13 @@ fn convert_target(
     let set_count = usize::from(dto.exact.is_some())
         + usize::from(dto.prefix.is_some())
         + usize::from(dto.normalized.is_some())
-        + usize::from(dto.normalized_prefix.is_some());
+        + usize::from(dto.normalized_prefix.is_some())
+        + usize::from(dto.url_host.is_some());
     if set_count != 1 {
         return Err(RulesError::invalid(
             rule_id,
-            "target requires exactly one of `exact`/`prefix`/`normalized`/`normalized_prefix`",
+            "target requires exactly one of `exact`/`prefix`/`normalized`/`normalized_prefix`/\
+             `url_host`",
         ));
     }
     if is_except_target && (dto.normalized.is_some() || dto.normalized_prefix.is_some()) {
@@ -3071,10 +3168,16 @@ fn convert_target(
         ));
     }
 
-    // `set_count == 1` above guarantees exactly one of these four is
+    // `set_count == 1` above guarantees exactly one of these five is
     // `Some` — the wildcard arm is unreachable, not a fallback.
-    match (dto.exact, dto.prefix, dto.normalized, dto.normalized_prefix) {
-        (Some(exact), None, None, None) => {
+    match (
+        dto.exact,
+        dto.prefix,
+        dto.normalized,
+        dto.normalized_prefix,
+        dto.url_host,
+    ) {
+        (Some(exact), None, None, None, None) => {
             if exact.trim().is_empty() {
                 return Err(RulesError::invalid(
                     rule_id,
@@ -3083,7 +3186,7 @@ fn convert_target(
             }
             Ok(TargetMatcher::Exact(exact))
         }
-        (None, Some(prefix), None, None) => {
+        (None, Some(prefix), None, None, None) => {
             // An empty prefix produces a universal matcher
             // (`"".starts_with("")` is always true) — the same hazard
             // `convert_command_rule` already guards against for an empty
@@ -3096,7 +3199,7 @@ fn convert_target(
             }
             Ok(TargetMatcher::Prefix(prefix))
         }
-        (None, None, Some(normalized), None) => {
+        (None, None, Some(normalized), None, None) => {
             if normalized.trim().is_empty() {
                 return Err(RulesError::invalid(
                     rule_id,
@@ -3110,7 +3213,7 @@ fn convert_target(
                 target,
             })
         }
-        (None, None, None, Some(normalized_prefix)) => {
+        (None, None, None, Some(normalized_prefix), None) => {
             if normalized_prefix.trim().is_empty() {
                 return Err(RulesError::invalid(
                     rule_id,
@@ -3144,6 +3247,47 @@ fn convert_target(
                 strip: dto.strip,
                 canon,
             })
+        }
+        (None, None, None, None, Some(url_host)) => {
+            if url_host.trim().is_empty() {
+                return Err(RulesError::invalid(
+                    rule_id,
+                    "target's `url_host` must not be empty",
+                ));
+            }
+            // `*` is a forbidden host code point in the URL Standard, so no
+            // real URL's parsed host can ever contain one — a wildcard
+            // config value would load successfully but provably never
+            // match anything, silently giving a rule author zero of the
+            // subdomain-wildcard coverage they likely intended. Same
+            // "parse, don't validate" posture as the dead-config checks
+            // above: caught at load time rather than left as a silent no-op.
+            if url_host.contains('*') {
+                return Err(RulesError::invalid(
+                    rule_id,
+                    format!(
+                        "target's `url_host` {url_host:?} contains '*', which a real URL's host \
+                         can never contain and so can never match — wildcard host matching is not \
+                         supported"
+                    ),
+                ));
+            }
+            // Parsed via `url::Host::parse` — the config VALUE is a bare
+            // host, not a full URL, unlike the match-time candidate
+            // (`parse_url_host`, which extracts `.host()` from a parsed
+            // `url::Url`) — but both funnel through the same `url::Host`
+            // type and `PartialEq`, so "what counts as this host" is still
+            // defined consistently on both sides (docs/adr/0002-url-crate.md).
+            // `strip_trailing_dot` mirrors `parse_url_host`'s own call so an
+            // explicit-FQDN-root config value (`"evil.example.com."`) and
+            // candidate (`http://evil.example.com./`) compare equal.
+            let host = url::Host::parse(&url_host).map_err(|err| {
+                RulesError::invalid(
+                    rule_id,
+                    format!("target's `url_host` {url_host:?} is not a valid host: {err}"),
+                )
+            })?;
+            Ok(TargetMatcher::UrlHost(strip_trailing_dot(host)))
         }
         _ => unreachable!("set_count == 1 checked above: exactly one alternative is Some"),
     }
@@ -3582,6 +3726,22 @@ impl Allowlist {
             .map(convert_command_rule)
             .collect::<Result<Vec<_>, _>>()?;
         reject_duplicate_ids(entries.iter().map(|r| r.id.as_str()))?;
+
+        // deny_message (issue #99) has nothing to attach to on an allowlist
+        // entry: it never produces a non-Allow verdict, so a declared
+        // deny_message would load successfully but silently do nothing —
+        // the same "catch dead configuration at load time" posture
+        // value_flags' own dead-config checks already take.
+        for entry in &entries {
+            if entry.deny_message.is_some() {
+                return Err(RulesError::invalid(
+                    entry.id.as_str(),
+                    "deny_message has no effect on an allowlist entry — it never produces a \
+                     non-Allow verdict for the message to attach to",
+                ));
+            }
+        }
+
         Ok(Self { entries })
     }
 
@@ -3655,7 +3815,7 @@ pub(crate) fn apply_allowlist(verdict: &Verdict, allowlist: &Allowlist) -> Allow
 }
 
 // ---------------------------------------------------------------------
-// User config (deny/ask/allow) — plan.md §6 item 8
+// User config (deny/ask/allow/pipeline) — plan.md §6 item 8
 // ---------------------------------------------------------------------
 
 /// Whether `entry`'s matcher would match any known shell interpreter or
@@ -3689,6 +3849,8 @@ struct UserConfigFileDto {
     #[serde(default)]
     redirect: Vec<RedirectRuleDto>,
     #[serde(default)]
+    pipeline: Vec<PipelineRuleDto>,
+    #[serde(default)]
     escalation_floor: Option<String>,
 }
 
@@ -3700,6 +3862,7 @@ pub(crate) struct UserConfig {
     ask: Vec<CommandRule>,
     allow: Vec<CommandRule>,
     redirect: Vec<RedirectRule>,
+    pipeline: Vec<PipelineRule>,
     escalation_floor: Decision,
 }
 
@@ -3711,9 +3874,9 @@ impl UserConfig {
     ///
     /// Returns [`RulesError`] for invalid TOML syntax, a semantically
     /// invalid entry (same checks as [`Rules::parse`]/[`Allowlist::parse`]),
-    /// a duplicate id — checked across all four of `deny`/`ask`/`allow`/
-    /// `redirect` together, one shared id-space, so an id can't dodge the
-    /// check by moving arrays — an `allow` entry matching a shell
+    /// a duplicate id — checked across all five of `deny`/`ask`/`allow`/
+    /// `redirect`/`pipeline` together, one shared id-space, so an id can't
+    /// dodge the check by moving arrays — an `allow` entry matching a shell
     /// interpreter or transparent wrapper name (see
     /// [`matches_dangerous_allow_target`]) — or an invalid
     /// `escalation_floor` value (see [`parse_escalation_floor`]; only
@@ -3725,7 +3888,10 @@ impl UserConfig {
     /// redirect check runs first-match, before any other check, so an
     /// `Ask`-decision user rule could otherwise downgrade a stricter
     /// embedded rule matched on a different redirect target of the same
-    /// command.
+    /// command. A `[[pipeline]]` entry's `decision` is restricted to
+    /// `"block"`/`"ask"` by [`convert_pipeline_rule`]/[`parse_decision`]
+    /// the same way an embedded-blocklist pipeline entry's is — there is
+    /// no `"allow"` value to reject here, unlike the command-rule arrays.
     pub(crate) fn parse(toml: &str) -> Result<Self, RulesError> {
         let dto: UserConfigFileDto = toml::from_str(toml)?;
 
@@ -3749,6 +3915,11 @@ impl UserConfig {
             .into_iter()
             .map(convert_redirect_rule)
             .collect::<Result<Vec<_>, _>>()?;
+        let pipeline = dto
+            .pipeline
+            .into_iter()
+            .map(convert_pipeline_rule)
+            .collect::<Result<Vec<_>, _>>()?;
         let escalation_floor = parse_escalation_floor(dto.escalation_floor.as_deref())?;
 
         reject_duplicate_ids(
@@ -3756,7 +3927,8 @@ impl UserConfig {
                 .map(|r| r.id.as_str())
                 .chain(ask.iter().map(|r| r.id.as_str()))
                 .chain(allow.iter().map(|r| r.id.as_str()))
-                .chain(redirect.iter().map(|r| r.id.as_str())),
+                .chain(redirect.iter().map(|r| r.id.as_str()))
+                .chain(pipeline.iter().map(|r| r.id.as_str())),
         )?;
 
         for entry in &allow {
@@ -3767,6 +3939,16 @@ impl UserConfig {
                      wrapper name (bash, sh, env, xargs, ...) — this would suppress every \
                      recursion-derived Ask involving that name, including the substitution-\
                      depth-cap fail-closed guard's own Ask",
+                ));
+            }
+            // deny_message (issue #99) has nothing to attach to on an
+            // `allow` entry — same reasoning as Allowlist::parse's own
+            // rejection.
+            if entry.deny_message.is_some() {
+                return Err(RulesError::invalid(
+                    entry.id.as_str(),
+                    "deny_message has no effect on an `allow` entry — it never produces a \
+                     non-Allow verdict for the message to attach to",
                 ));
             }
         }
@@ -3805,16 +3987,17 @@ impl UserConfig {
             ask,
             allow,
             redirect,
+            pipeline,
             escalation_floor,
         })
     }
 }
 
-/// Merges a user config's `deny`/`ask`/`allow`/`redirect` onto the embedded
-/// blocklist plus allowlist, additively only, never replace-by-id (unlike
-/// the deleted `Rules::with_override`/`layer`).
+/// Merges a user config's `deny`/`ask`/`allow`/`redirect`/`pipeline` onto
+/// the embedded blocklist plus allowlist, additively only, never
+/// replace-by-id (unlike the deleted `Rules::with_override`/`layer`).
 ///
-/// Every id the user config introduces, across all four arrays, must be
+/// Every id the user config introduces, across all five arrays, must be
 /// new versus `blocklist`'s command rule ids, `blocklist`'s pipeline rule
 /// ids, `blocklist`'s redirect rule ids, and `allowlist`'s entry ids — one
 /// shared id-space. A collision is a load-time [`RulesError::DuplicateId`],
@@ -3841,10 +4024,17 @@ impl UserConfig {
 /// redirect target of the same command). With `"allow"` already impossible
 /// (`parse_decision` never produces it) and `"ask"` now rejected at load
 /// time, every reachable redirect rule is `Decision::Block`, which is what
-/// actually makes append-order-only sufficient here. `escalation_floor`
-/// folds via `max` rather than overwriting — see the inline comment at
-/// that line for why an overwrite would be wrong given how
-/// `src/config.rs`'s `Policy::load` calls this function more than once.
+/// actually makes append-order-only sufficient here. `pipeline` entries
+/// (issue #97) are appended AFTER the embedded blocklist's own
+/// `pipeline_rules`, never prepended: [`Rules::match_pipeline`] is
+/// first-match-wins, so appending is what keeps a user-declared pipeline
+/// rule from ever shadowing a built-in one sharing the same
+/// sources/sinks shape — a user `decision = "ask"` rule for
+/// `curl`→`sh` must never suppress the embedded `curl-wget-pipe-to-shell`
+/// Block. `escalation_floor` folds via `max` rather than overwriting —
+/// see the inline comment at that line for why an overwrite would be
+/// wrong given how `src/config.rs`'s `Policy::load` calls this function
+/// more than once.
 ///
 /// # Errors
 ///
@@ -3886,6 +4076,7 @@ pub(crate) fn merge_user_config(
         .chain(user_config.ask.iter().map(|r| r.id.as_str()))
         .chain(user_config.allow.iter().map(|r| r.id.as_str()))
         .chain(user_config.redirect.iter().map(|r| r.id.as_str()))
+        .chain(user_config.pipeline.iter().map(|r| r.id.as_str()))
     {
         if existing_ids.contains(id) {
             return Err(RulesError::DuplicateId(id.to_string()));
@@ -3919,10 +4110,17 @@ pub(crate) fn merge_user_config(
     let mut redirect_rules = blocklist.redirect_rules;
     redirect_rules.extend(user_config.redirect);
 
+    // Append, never prepend: `Rules::match_pipeline` is first-match-wins,
+    // so a user pipeline rule must land after the embedded blocklist's own
+    // pipeline rules to guarantee it can only ever add new pipeline shapes,
+    // never shadow a built-in one sharing the same sources/sinks.
+    let mut pipeline_rules = blocklist.pipeline_rules;
+    pipeline_rules.extend(user_config.pipeline);
+
     Ok((
         Rules {
             command_rules,
-            pipeline_rules: blocklist.pipeline_rules,
+            pipeline_rules,
             redirect_rules,
             ask_rules,
             escalation_floor,
@@ -6017,6 +6215,157 @@ mod tests {
         );
     }
 
+    // ==== issue #101 audit: additional primitives + ancestor coverage,
+    // literal-tilde side ====
+
+    #[test]
+    fn self_protect_rmdir_literal_tilde_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["rmdir", "~/.config/shguard"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn self_protect_perl_in_place_literal_tilde_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "perl",
+                    "-i",
+                    "-pe",
+                    "s/a/b/",
+                    "~/.config/shguard/config.toml"
+                ]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn self_protect_perl_without_in_place_does_not_match() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "perl",
+                    "-pe",
+                    "s/a/b/",
+                    "~/.config/shguard/config.toml"
+                ]))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn self_protect_patch_literal_tilde_matches() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["patch", "~/.config/shguard/config.toml", "p.diff"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn self_protect_find_exec_literal_tilde_asks() {
+        let rules = Rules::embedded().unwrap();
+        let rule = rules
+            .match_command(&argv(&[
+                "find",
+                "~/.config/shguard",
+                "-exec",
+                "rm",
+                "{}",
+                ";",
+            ]))
+            .unwrap();
+        assert_eq!(rule.decision(), Decision::Ask);
+    }
+
+    #[test]
+    fn self_protect_find_without_exec_flag_does_not_match() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "find",
+                    "~/.config/shguard",
+                    "-name",
+                    "config.toml"
+                ]))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn self_protect_ancestor_rm_literal_tilde_asks() {
+        let rules = Rules::embedded().unwrap();
+        let rule = rules
+            .match_command(&argv(&["rm", "-r", "~/.config"]))
+            .unwrap();
+        assert_eq!(rule.decision(), Decision::Ask);
+
+        let rule = rules.match_command(&argv(&["rm", "-r", "~"])).unwrap();
+        assert_eq!(rule.decision(), Decision::Ask);
+    }
+
+    // Regression pin (fable review of #205): the ancestor rm rule's
+    // required_flags initially only recognized lowercase `-r`, missing
+    // the equally-standard uppercase `-R` recursive spelling GNU/BSD rm
+    // both accept (`rm -R ~/.config` resolved Allow before this fix).
+    #[test]
+    fn self_protect_ancestor_rm_capital_r_literal_tilde_asks() {
+        let rules = Rules::embedded().unwrap();
+        let rule = rules
+            .match_command(&argv(&["rm", "-R", "~/.config"]))
+            .unwrap();
+        assert_eq!(rule.decision(), Decision::Ask);
+
+        let rule = rules.match_command(&argv(&["rm", "-R", "~"])).unwrap();
+        assert_eq!(rule.decision(), Decision::Ask);
+    }
+
+    #[test]
+    fn self_protect_ancestor_mv_literal_tilde_asks() {
+        let rules = Rules::embedded().unwrap();
+        let rule = rules
+            .match_command(&argv(&["mv", "~/.config", "/tmp/x"]))
+            .unwrap();
+        assert_eq!(rule.decision(), Decision::Ask);
+    }
+
+    #[test]
+    fn self_protect_ancestor_rsync_delete_literal_tilde_asks() {
+        let rules = Rules::embedded().unwrap();
+        let rule = rules
+            .match_command(&argv(&["rsync", "-a", "--delete", "/tmp/x/", "~/.config/"]))
+            .unwrap();
+        assert_eq!(rule.decision(), Decision::Ask);
+    }
+
+    #[test]
+    fn self_protect_ancestor_rsync_without_delete_does_not_match() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["rsync", "-a", "./src/", "~/.config/other/"]))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn self_protect_ancestor_mv_unrelated_target_does_not_match() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["mv", "~/.config/other-app", "/tmp/backup"]))
+                .is_none()
+        );
+    }
+
     // ==== Pipeline rule: curl|sh matches, cat|bash does not ====
 
     #[test]
@@ -7268,6 +7617,164 @@ mod tests {
         ));
     }
 
+    // ==== issue #99: deny_message ====
+
+    #[test]
+    fn user_config_deny_entry_parses_deny_message() {
+        let toml = r#"
+            [[deny]]
+            id = "user-deny-force-push"
+            reason = "git push --force overwrites remote history"
+            command = "git push"
+            required_flags = ["f|--force"]
+            deny_message = "use --force-with-lease instead"
+        "#;
+        let config = UserConfig::parse(toml).unwrap();
+        assert_eq!(
+            config.deny[0].deny_message().unwrap().as_str(),
+            "use --force-with-lease instead"
+        );
+    }
+
+    #[test]
+    fn user_config_ask_entry_parses_deny_message() {
+        let toml = r#"
+            [[ask]]
+            id = "user-ask-gh"
+            reason = "confirm every gh invocation"
+            command = "gh"
+            deny_message = "prefer a read-only gh subcommand"
+        "#;
+        let config = UserConfig::parse(toml).unwrap();
+        assert_eq!(
+            config.ask[0].deny_message().unwrap().as_str(),
+            "prefer a read-only gh subcommand"
+        );
+    }
+
+    #[test]
+    fn user_config_entry_without_deny_message_is_unaffected() {
+        let toml = r#"
+            [[deny]]
+            id = "user-deny-scary"
+            reason = "never run this"
+            command = "scary-tool"
+        "#;
+        let config = UserConfig::parse(toml).unwrap();
+        assert!(config.deny[0].deny_message().is_none());
+    }
+
+    #[test]
+    fn user_config_rejects_empty_deny_message() {
+        let toml = r#"
+            [[deny]]
+            id = "user-deny-scary"
+            reason = "never run this"
+            command = "scary-tool"
+            deny_message = ""
+        "#;
+        assert!(matches!(
+            UserConfig::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn user_config_rejects_deny_message_on_allow_entry() {
+        let toml = r#"
+            [[allow]]
+            id = "user-allow-ls"
+            reason = "read-only, always safe"
+            command = "ls"
+            deny_message = "no effect here"
+        "#;
+        assert!(matches!(
+            UserConfig::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn allowlist_rejects_deny_message_on_entry() {
+        let toml = r#"
+            [[entry]]
+            id = "allow-ls"
+            reason = "read-only, always safe"
+            command = "ls"
+            deny_message = "no effect here"
+        "#;
+        assert!(matches!(
+            Allowlist::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn matched_command_rule_surfaces_deny_message_in_the_verdict() {
+        let toml = r#"
+            [[command]]
+            id = "deny-force-push"
+            reason = "force push overwrites remote history"
+            command = "git push"
+            required_flags = ["f|--force"]
+            deny_message = "use --force-with-lease instead"
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        let rule = rules
+            .match_command(&argv(&["git", "push", "--force", "origin", "main"]))
+            .unwrap();
+        assert_eq!(
+            rule.deny_message().unwrap().as_str(),
+            "use --force-with-lease instead"
+        );
+    }
+
+    // ==== issue #98: "flag AND (target A OR target B)" composition is
+    // already expressible with the existing required_flags/targets fields
+    // — required_flags ANDs across entries (each entry itself an OR via
+    // "|"), targets ORs across every alternative — no new schema primitive
+    // needed. Pinned here at the isolated CommandRule level (not through
+    // the embedded blocklist/merge_user_config) because the embedded
+    // blocklist's own git-push-force rule already denies every `git push
+    // --force` regardless of branch, which would mask whether THIS rule's
+    // own flag/target composition is doing the work. ====
+
+    fn protected_branch_force_push_rule() -> CommandRule {
+        let toml = r#"
+            [[deny]]
+            id = "user-deny-protected-branch-force-push"
+            reason = "force push to a protected branch"
+            command = "git push"
+            required_flags = ["f|--force"]
+            targets = [{ exact = "main" }, { exact = "master" }]
+        "#;
+        UserConfig::parse(toml)
+            .unwrap()
+            .deny
+            .into_iter()
+            .next()
+            .unwrap()
+    }
+
+    #[test]
+    fn flag_and_target_composition_denies_force_push_to_either_protected_branch() {
+        let rule = protected_branch_force_push_rule();
+        assert!(rule.matches(&argv(&["git", "push", "--force", "origin", "main"])));
+        assert!(rule.matches(&argv(&["git", "push", "--force", "origin", "master"])));
+    }
+
+    #[test]
+    fn flag_and_target_composition_does_not_match_an_unprotected_branch() {
+        let rule = protected_branch_force_push_rule();
+        assert!(!rule.matches(&argv(&["git", "push", "--force", "origin", "feature"])));
+    }
+
+    #[test]
+    fn flag_and_target_composition_does_not_match_without_the_flag() {
+        let rule = protected_branch_force_push_rule();
+        assert!(!rule.matches(&argv(&["git", "push", "origin", "main"])));
+    }
+
     #[test]
     fn user_config_rejects_duplicate_id_across_arrays() {
         let toml = r#"
@@ -7544,6 +8051,261 @@ mod tests {
         assert!(Rules::parse(toml).is_ok());
     }
 
+    // ==== issue #102: opt-in `url_host` except_targets matcher ====
+
+    fn curl_url_host_except_rule() -> &'static str {
+        r#"
+            [[command]]
+            id = "curl-non-localhost"
+            reason = "ask unless curl targets localhost"
+            decision = "ask"
+            command = "curl"
+            except_targets = [{ url_host = "localhost" }]
+        "#
+    }
+
+    #[test]
+    fn url_host_rejects_userinfo_spoofed_host() {
+        let rules = Rules::parse(curl_url_host_except_rule()).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "http://localhost:pw@evil.example.com"]))
+                .is_some(),
+            "url_host must not except a URL whose real host is evil.example.com just \
+             because the raw text starts with the userinfo-adjacent string \"localhost:\""
+        );
+    }
+
+    #[test]
+    fn url_host_excepts_a_genuine_localhost_target() {
+        let rules = Rules::parse(curl_url_host_except_rule()).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "http://localhost:8080/api"]))
+                .is_none()
+        );
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "http://localhost/x"]))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn url_host_does_not_except_a_different_real_host() {
+        let rules = Rules::parse(curl_url_host_except_rule()).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "https://evil.example.com"]))
+                .is_some()
+        );
+    }
+
+    // A candidate that doesn't parse as a URL at all (a bare flag value,
+    // a local path from some other command's own except_targets rule)
+    // must fail closed: never excepted, never treated as a match either
+    // way — the rule still fires rather than silently passing through.
+    #[test]
+    fn url_host_fails_closed_on_an_unparseable_candidate() {
+        let rules = Rules::parse(curl_url_host_except_rule()).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "not a url at all"]))
+                .is_some()
+        );
+    }
+
+    // IPv6 hosts must compare correctly through the real URL parser --
+    // pins the actual `url::Host` rendering this crate relies on rather
+    // than assuming a specific bracket/no-bracket string form from memory.
+    // `url::Host::parse` requires the bracketed form (`"[::1]"`) for a
+    // standalone IPv6 host string -- bare `"::1"` is rejected as an
+    // invalid domain name, confirmed empirically rather than assumed;
+    // documented in the README as a real thing rule authors must know.
+    #[test]
+    fn url_host_matches_ipv6_localhost() {
+        let toml = r#"
+            [[command]]
+            id = "curl-non-localhost"
+            reason = "ask unless curl targets localhost"
+            decision = "ask"
+            command = "curl"
+            except_targets = [{ url_host = "[::1]" }]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "http://[::1]:8080/"]))
+                .is_none(),
+            "http://[::1]:8080/ should be excepted by a url_host = \"::1\" rule"
+        );
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "http://[::2]:8080/"]))
+                .is_some(),
+            "a different IPv6 host must not be excepted"
+        );
+    }
+
+    // Fail-closed differential mitigation (docs/adr/0002-url-crate.md): a
+    // candidate containing a backslash must never be excepted, even if it
+    // superficially resembles the configured host, since the `url` crate's
+    // WHATWG parsing of `\` for special schemes can diverge from what
+    // other tools (curl, resolvers) actually do with the same text.
+    #[test]
+    fn url_host_never_excepts_a_candidate_containing_a_backslash() {
+        let rules = Rules::parse(curl_url_host_except_rule()).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "http:\\\\localhost@evil.example.com"]))
+                .is_some(),
+            "a backslash-containing candidate must fail closed, never be excepted"
+        );
+    }
+
+    #[test]
+    fn except_targets_url_host_empty_is_rejected() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "some reason"
+            command = "curl"
+            except_targets = [{ url_host = "" }]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn except_targets_url_host_invalid_host_is_rejected() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "some reason"
+            command = "curl"
+            except_targets = [{ url_host = "not a valid host" }]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn except_targets_url_host_and_exact_both_set_is_rejected() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "some reason"
+            command = "curl"
+            except_targets = [{ url_host = "localhost", exact = "http://localhost" }]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn except_targets_url_host_with_strip_is_rejected() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "some reason"
+            command = "curl"
+            except_targets = [{ url_host = "localhost", strip = "of=" }]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    // `url_host` is a `targets` matcher too, not except_targets-only --
+    // TargetMatcher is shared and nothing in convert_target restricts
+    // url_host by context the way normalized/normalized_prefix are
+    // restricted away from except_targets specifically.
+    #[test]
+    fn url_host_also_works_in_targets_not_just_except_targets() {
+        let toml = r#"
+            [[command]]
+            id = "curl-to-evil"
+            reason = "block curl straight to evil.example.com"
+            command = "curl"
+            targets = [{ url_host = "evil.example.com" }]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "http://evil.example.com/x"]))
+                .is_some()
+        );
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "http://localhost.example.com/x"]))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn url_host_targets_is_not_evaded_by_a_trailing_dot_candidate() {
+        let toml = r#"
+            [[command]]
+            id = "curl-to-evil"
+            reason = "block curl straight to evil.example.com"
+            command = "curl"
+            targets = [{ url_host = "evil.example.com" }]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "http://evil.example.com./x"]))
+                .is_some(),
+            "a trailing-dot FQDN is the same address a resolver would connect to and must \
+             still match the block rule"
+        );
+    }
+
+    #[test]
+    fn url_host_config_value_with_a_trailing_dot_still_excepts_the_bare_form() {
+        let toml = r#"
+            [[command]]
+            id = "curl-non-localhost"
+            reason = "ask unless curl targets localhost"
+            decision = "ask"
+            command = "curl"
+            except_targets = [{ url_host = "localhost." }]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "http://localhost/x"]))
+                .is_none(),
+            "a trailing-dot config value and a bare candidate host are the same address and \
+             must compare equal"
+        );
+    }
+
+    #[test]
+    fn except_targets_url_host_wildcard_is_rejected() {
+        let toml = r#"
+            [[command]]
+            id = "curl-non-localhost"
+            reason = "ask unless curl targets localhost"
+            decision = "ask"
+            command = "curl"
+            except_targets = [{ url_host = "*.example.com" }]
+        "#;
+        let err = Rules::parse(toml).unwrap_err();
+        assert!(
+            err.to_string().contains("wildcard"),
+            "a `*` in url_host can never match a real URL's host and should be rejected at \
+             load time, not silently loaded as a dead rule: {err}"
+        );
+    }
+
     #[test]
     fn unknown_field_in_command_rule_is_rejected() {
         let toml = r#"
@@ -7575,6 +8337,97 @@ mod tests {
         assert!(merged.match_command(&argv(&["scary-tool"])).is_some());
         // builtin still present
         assert!(merged.match_command(&argv(&["rm", "-rf", "/"])).is_some());
+    }
+
+    // ==== issue #97: user-config `[[pipeline]]` entries ====
+
+    #[test]
+    fn merge_user_config_pipeline_entry_matches_a_new_shape() {
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let config = UserConfig::parse(
+            r#"
+            [[pipeline]]
+            id = "user-forbid-curl-python"
+            reason = "forbid piping a downloaded script into python3"
+            decision = "block"
+            sources = ["curl"]
+            sinks = ["python3"]
+        "#,
+        )
+        .unwrap();
+        let (merged, _) = merge_user_config(blocklist, allowlist, config).unwrap();
+
+        let stages = vec![argv(&["curl", "http://x/install.py"]), argv(&["python3"])];
+        let rule = merged.match_pipeline(&stages).unwrap();
+        assert_eq!(rule.id().as_str(), "user-forbid-curl-python");
+        assert_eq!(rule.decision(), Decision::Block);
+    }
+
+    #[test]
+    fn merge_user_config_pipeline_entry_never_shadows_a_builtin_pipeline_rule() {
+        // A user rule sharing the embedded curl-wget-pipe-to-shell rule's
+        // exact sources/sinks shape, but with a weaker `ask` decision, must
+        // never win the match: Rules::match_pipeline is first-match-wins,
+        // so merge_user_config appending (not prepending) user pipeline
+        // rules after the embedded ones is load-bearing here.
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let config = UserConfig::parse(
+            r#"
+            [[pipeline]]
+            id = "user-weaker-curl-sh"
+            reason = "shadow attempt"
+            decision = "ask"
+            sources = ["curl"]
+            sinks = ["sh"]
+        "#,
+        )
+        .unwrap();
+        let (merged, _) = merge_user_config(blocklist, allowlist, config).unwrap();
+
+        let stages = vec![argv(&["curl", "http://x/install.sh"]), argv(&["sh"])];
+        let rule = merged.match_pipeline(&stages).unwrap();
+        assert_eq!(rule.id().as_str(), "curl-wget-pipe-to-shell");
+        assert_eq!(rule.decision(), Decision::Block);
+    }
+
+    #[test]
+    fn merge_user_config_rejects_pipeline_id_colliding_with_embedded_pipeline_id() {
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let config = UserConfig::parse(
+            r#"
+            [[pipeline]]
+            id = "curl-wget-pipe-to-shell"
+            reason = "totally different rule"
+            decision = "block"
+            sources = ["totally-different"]
+            sinks = ["also-different"]
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(
+            merge_user_config(blocklist, allowlist, config),
+            Err(RulesError::DuplicateId(id)) if id == "curl-wget-pipe-to-shell"
+        ));
+    }
+
+    #[test]
+    fn user_config_pipeline_entry_with_allow_decision_is_rejected() {
+        assert!(matches!(
+            UserConfig::parse(
+                r#"
+                [[pipeline]]
+                id = "user-pipeline-allow"
+                reason = "invalid"
+                decision = "allow"
+                sources = ["curl"]
+                sinks = ["python3"]
+            "#,
+            ),
+            Err(RulesError::InvalidRule { .. })
+        ));
     }
 
     #[test]

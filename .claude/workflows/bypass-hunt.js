@@ -228,7 +228,7 @@ const VERIFY_SCHEMA = {
       type: 'string',
       enum: ['confirmed', 'refuted', 'inconclusive'],
       description:
-        'confirmed: you independently reproduced the exact mismatch and are confident this is a real, uncovered finding. refuted: positively debunked — does not reproduce, OR the exact payload is already covered by tests/guardfall.rs or tests/benign_corpus.rs, OR the claimed destructive intent does not actually hold. inconclusive: you cannot decide either way — hand it to a human rather than guessing.',
+        'confirmed: you independently reproduced the exact mismatch and are confident this is a real, uncovered finding. refuted: positively debunked — does not reproduce, OR the exact payload is already covered by tests/guardfall.rs, tests/benign_corpus.rs, or tests/bypass_corpus.toml, OR the claimed destructive intent does not actually hold. inconclusive: you cannot decide either way — hand it to a human rather than guessing.',
     },
     observed_decision: {
       type: 'string',
@@ -357,8 +357,9 @@ const huntStage = async (_prev, cls) => {
     const result = await agent(
       `You are hunting for GuardFall bypasses in class ${cls.id} (${cls.name}).
 
-First, read tests/guardfall.rs and tests/benign_corpus.rs in full so you do
-not re-report a case that is already covered there. ALSO run \`gh issue list
+First, read tests/guardfall.rs, tests/benign_corpus.rs, and
+tests/bypass_corpus.toml in full so you do not re-report a case that is
+already covered there. ALSO run \`gh issue list
 --repo tsukasaI/shguard --state open --limit 200\` and skim titles for
 anything that looks related to class ${cls.id}'s mechanism; read the body of
 any that do via \`gh issue view <N> --repo tsukasaI/shguard\`. Many findings
@@ -523,8 +524,8 @@ AGENT_PAYLOAD delimiter, excluding the delimiter lines themselves) via
 \`cargo run -q --example probe -- '<payload>'\` — never prefix it with
 \`bash\`/\`sh\`, and never execute it any other way. Multiple payloads can be
 passed as additional arguments in one invocation if you need to re-check more
-than one. Also check tests/guardfall.rs and tests/benign_corpus.rs yourself
-if you have not already.
+than one. Also check tests/guardfall.rs, tests/benign_corpus.rs, and
+tests/bypass_corpus.toml yourself if you have not already.
 
 QUOTING WARNING: if the payload contains a single quote, wrapping it in
 single quotes naively will make your own shell concatenate/mangle it before
@@ -538,8 +539,9 @@ about the wrong command.
 Report exactly one outcome:
   - outcome: "refuted" — ONLY when you have positively debunked the finding:
     it does not reproduce, OR the exact payload is already covered by
-    tests/guardfall.rs or tests/benign_corpus.rs, OR the claimed destructive
-    intent does not actually hold for this payload.
+    tests/guardfall.rs, tests/benign_corpus.rs, or tests/bypass_corpus.toml,
+    OR the claimed destructive intent does not actually hold for this
+    payload.
   - outcome: "confirmed" — ONLY when you independently reproduced the exact
     mismatch and are confident this is a real, uncovered finding.
   - outcome: "inconclusive" — when you cannot decide either way. Use this

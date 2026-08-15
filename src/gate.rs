@@ -926,7 +926,8 @@ fn apply_ask_floor(verdict: Verdict, ask_match: Option<&CommandRule>) -> Verdict
                 rule.reason().as_str()
             )),
             verdict.normalized_argv().to_vec(),
-        ),
+        )
+        .with_deny_message(rule.deny_message().cloned()),
         _ => verdict,
     }
 }
@@ -1431,7 +1432,8 @@ fn evaluate_simple_command_core(
             Decision::Block => Verdict::block(reason, argv, Some(rule.id().clone())),
             Decision::Ask => Verdict::ask(reason, argv),
             Decision::Allow => unreachable!("rules never carry Decision::Allow"),
-        };
+        }
+        .with_deny_message(rule.deny_message().cloned());
         return apply_leftover_substitution_floor(verdict, leftover_floor);
     }
 
@@ -2067,7 +2069,8 @@ fn evaluate_command_position_bare_var(
             )),
             substituted,
             Some(rule.id().clone()),
-        );
+        )
+        .with_deny_message(rule.deny_message().cloned());
     }
 
     Verdict::ask(
