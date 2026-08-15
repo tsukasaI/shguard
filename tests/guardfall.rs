@@ -150,9 +150,10 @@ fn guardfall_rm_dot_targets() {
         // issue #206: uppercase `-R` is an equally standard recursive
         // synonym in both GNU and BSD `rm` — the old `required_flags`
         // only recognized lowercase `r`, so `rm -Rf` fell through to
-        // Allow.
+        // Allow (`/`, `.`) or to the weaker ancestor-rule Ask (`~`).
         ("rm -Rf /", Decision::Block),
         ("rm -Rf ~", Decision::Block),
+        ("rm -Rf .", Decision::Block),
     ];
 
     for (command, expected) in cases {
