@@ -2377,6 +2377,17 @@ pub(crate) const SHELL_INTERPRETERS: &[&str] = &[
     "bash", "sh", "zsh", "dash", "fish", "ksh", "tcsh", "csh", "ash",
 ];
 
+/// The `eval` builtin (issue #120): same "interpret this string as a shell
+/// command" semantics as [`SHELL_INTERPRETERS`]'s own `-c` flag, but a
+/// different calling convention — every one of `eval`'s own arguments, not
+/// a single `-c VALUE` pair, is word-joined into the script
+/// (`crate::gate`'s `evaluate_eval`), so it gets its own recursion path
+/// rather than reusing `evaluate_dash_c`. Kept as its own single-entry list,
+/// next to [`SHELL_INTERPRETERS`], for the same reason that one lives here:
+/// so [`matches_dangerous_allow_target`] rejects an `allow` entry naming
+/// `eval` the same way it already rejects one naming `bash`/`sh`.
+pub(crate) const EVAL_BUILTIN: &[&str] = &["eval"];
+
 /// Non-shell interpreters a pipeline's final stage may additionally be
 /// (`crate::gate` rule 5b/5c), beyond every shell already named in
 /// [`SHELL_INTERPRETERS`]. Kept as a *separate* small list, rather than a
@@ -4231,20 +4242,22 @@ pub(crate) fn apply_allowlist(verdict: &Verdict, allowlist: &Allowlist) -> Allow
 // User config (deny/ask/allow/pipeline) — plan.md §6 item 8
 // ---------------------------------------------------------------------
 
-/// Whether `entry`'s matcher would match any known shell interpreter or
-/// transparent wrapper name (`SHELL_INTERPRETERS`/`EXTRA_PIPELINE_INTERPRETERS`/
-/// `TRANSPARENT_WRAPPERS`) — used to reject `allow` config entries that
-/// would suppress every recursion-derived `Ask` involving one of those
-/// names (`bash -c` recursion, a decode-fed pipeline sink, the
-/// substitution-depth-cap DoS guard's own fail-closed `Ask`), not just an
-/// entry that names one exactly: `entry.command`'s own `matches` is reused
-/// against every candidate name, so a `command_prefix = "b"` entry is
+/// Whether `entry`'s matcher would match any known shell interpreter,
+/// `eval`, or transparent wrapper name (`SHELL_INTERPRETERS`/
+/// `EVAL_BUILTIN`/`EXTRA_PIPELINE_INTERPRETERS`/`TRANSPARENT_WRAPPERS`) —
+/// used to reject `allow` config entries that would suppress every
+/// recursion-derived `Ask` involving one of those names (`bash -c`
+/// recursion, `eval`'s own recursion (issue #120), a decode-fed pipeline
+/// sink, the substitution-depth-cap DoS guard's own fail-closed `Ask`), not
+/// just an entry that names one exactly: `entry.command`'s own `matches` is
+/// reused against every candidate name, so a `command_prefix = "b"` entry is
 /// caught the same way an exact `command = "bash"` entry would be — a
 /// `Prefix` matcher this permissive is exactly as dangerous as an exact
 /// one.
 fn matches_dangerous_allow_target(entry: &CommandRule) -> bool {
     SHELL_INTERPRETERS
         .iter()
+        .chain(EVAL_BUILTIN.iter())
         .chain(EXTRA_PIPELINE_INTERPRETERS.iter())
         .chain(TRANSPARENT_WRAPPERS.iter())
         .any(|name| entry.command.matches(name))
@@ -8539,6 +8552,22 @@ mod tests {
             id = "user-allow-fish"
             reason = "trust me"
             command = "fish"
+        "#;
+        assert!(matches!(
+            UserConfig::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    // Issue #120: `eval` joined `EVAL_BUILTIN`, its own recursion-derived Ask
+    // must be just as unsuppressable as `bash -c`'s.
+    #[test]
+    fn user_config_rejects_allow_entry_matching_eval_exactly() {
+        let toml = r#"
+            [[allow]]
+            id = "user-allow-eval"
+            reason = "trust me"
+            command = "eval"
         "#;
         assert!(matches!(
             UserConfig::parse(toml),
