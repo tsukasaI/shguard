@@ -15,13 +15,10 @@
 //! dropped or approximated — never a panic, never a partial result.
 //! Concretely, this module maps to `Unsupported`:
 //!
-//! - `if`/`case` clauses, C-style arithmetic `for`, bare `((...))` arithmetic
-//!   commands, and coprocesses (issue #75: zero measured occurrences in real
-//!   traffic, unlike the compound commands below — see `crate::ast::CompoundCommand`'s
-//!   docs)
-//! - `[[ ... ]]` extended test commands
-//! - `&` background jobs (`SeparatorOperator::Async`)
-//! - pipeline negation (`!`)
+//! - `case` clauses, C-style arithmetic `for`, bare `((...))` arithmetic
+//!   commands, and coprocesses (issues #75/#191: zero measured occurrences
+//!   in real traffic, unlike the compound commands below — see
+//!   `crate::ast::CompoundCommand`'s docs)
 //! - here-strings (`<<<`) and `&>`/`&>>` combined stdout/stderr redirections
 //! - redirection kinds shguard's `FileRedirectionKind` has no variant for
 //!   (`<>` read-and-write, `>|` clobber) and fd-number (as opposed to a
@@ -49,6 +46,14 @@
 //! bare positional/special parameters (`$1`, `$?`, …),
 //! arithmetic expansion (`$((...))`), and process substitution
 //! (`<(...)`/`>(...)`).
+//!
+//! Issue #191 additionally supports, for the same reason (measured, common
+//! real traffic — see `crate::ast::CompoundCommand::IfClause`/
+//! `crate::ast::ExtendedTest`/`crate::ast::Separator::Async`'s own docs):
+//! `if`/`elif`/`else` clauses, `&` background jobs, `[[ ... ]]` extended
+//! test commands (operands only, not the boolean expression structure), and
+//! pipeline negation (`!`, which — like `time` above — changes no argv and
+//! is simply ignored rather than rejected).
 
 use std::io::Cursor;
 
@@ -56,9 +61,9 @@ use brush_parser::word::{self as bword};
 use brush_parser::{Parser as BrushParser, ParserOptions as BrushParserOptions, ast as bast};
 
 use crate::ast::{
-    Assignment, AssignmentValue, Command, CommandLine, CompoundCommand, FileRedirectionKind,
-    FunctionDefinition, MAX_BRACE_NESTING_DEPTH, MAX_KEYWORD_NESTING_COUNT, Pipeline,
-    ProcessSubstitutionDirection, Redirection, Separator, SimpleCommand, Word, WordPiece,
+    Assignment, AssignmentValue, Command, CommandLine, CompoundCommand, ElifClause, ExtendedTest,
+    FileRedirectionKind, FunctionDefinition, MAX_BRACE_NESTING_DEPTH, MAX_KEYWORD_NESTING_COUNT,
+    Pipeline, ProcessSubstitutionDirection, Redirection, Separator, SimpleCommand, Word, WordPiece,
 };
 
 /// Everything that can go wrong converting a raw command string into
@@ -243,7 +248,8 @@ pub(crate) fn parse(command: &str) -> Result<CommandLine, ParseError> {
     // agent commands are routinely multi-line (`cd x\ncargo test`). Rather
     // than special-case "one list" vs "many", every `CompoundListItem` from
     // every top-level list is concatenated into one logical sequence before
-    // folding, so a trailing `&` is rejected wherever it appears (including
+    // folding, so a trailing `&` (issue #191: now `Separator::Async`, not a
+    // parse rejection) is handled identically wherever it appears (including
     // at a list boundary) exactly like within a single list.
     let items = program
         .complete_commands
@@ -284,13 +290,13 @@ fn convert_compound_list<'a>(
     Ok(CommandLine { first, rest })
 }
 
-/// `SeparatorOperator::Async` (`&`) has no representation in shguard's
-/// `Separator` — background jobs are an explicitly unsupported construct
-/// (module docs).
+/// `SeparatorOperator::Async` (`&`, issue #191) maps onto
+/// [`Separator::Async`] — see that variant's docs for why backgrounding
+/// needs no special handling anywhere downstream.
 fn convert_separator(sep: &bast::SeparatorOperator) -> Result<Separator, ParseError> {
     match sep {
         bast::SeparatorOperator::Sequence => Ok(Separator::Sequence),
-        bast::SeparatorOperator::Async => Err(ParseError::unsupported("background job (&)")),
+        bast::SeparatorOperator::Async => Ok(Separator::Async),
     }
 }
 
@@ -302,13 +308,12 @@ fn convert_and_or(and_or: &bast::AndOr) -> Result<(Separator, Pipeline), ParseEr
 }
 
 fn convert_pipeline(pipeline: &bast::Pipeline) -> Result<Pipeline, ParseError> {
-    if pipeline.bang {
-        return Err(ParseError::unsupported("pipeline negation (!)"));
-    }
     // `time` (issue #75) only requests reporting the pipeline's execution
     // time — it changes no argv, no executed command, nothing the rule
     // engine cares about — so the flag is simply ignored rather than
-    // rejected.
+    // rejected. `!` (issue #191) negates the pipeline's exit status, not
+    // which commands run — the same reasoning, so `pipeline.bang` is
+    // likewise ignored rather than rejected.
 
     let mut commands = pipeline.seq.iter();
     let first = commands
@@ -329,15 +334,15 @@ fn convert_command(command: &bast::Command) -> Result<Command, ParseError> {
         bast::Command::Function(func) => Ok(Command::FunctionDefinition(
             convert_function_definition(func)?,
         )),
-        bast::Command::ExtendedTest(_, _) => {
-            Err(ParseError::unsupported("extended test command ([[ ]])"))
-        }
+        bast::Command::ExtendedTest(test, redirects) => Ok(Command::ExtendedTest(
+            convert_extended_test(test, redirects)?,
+        )),
     }
 }
 
 /// Converts the subset of `bast::CompoundCommand` shguard's AST can
-/// represent (module docs: brace group, subshell, `for`/`while`/`until`)
-/// into shguard's own [`CompoundCommand`], attaching `redirects` (the
+/// represent (module docs: brace group, subshell, `for`/`while`/`until`/
+/// `if`) into shguard's own [`CompoundCommand`], attaching `redirects` (the
 /// compound command's own redirect list, e.g. `for i in 1; do :; done >
 /// /dev/null`) uniformly across every variant. Every other variant is
 /// unsupported (module docs), via [`describe_compound`].
@@ -378,14 +383,67 @@ fn convert_compound_command(
             body: Box::new(convert_compound_list(until_clause.1.list.0.iter())?),
             redirections,
         }),
+        bast::CompoundCommand::IfClause(if_clause) => convert_if_clause(if_clause, redirections),
         bast::CompoundCommand::Arithmetic(_)
         | bast::CompoundCommand::ArithmeticForClause(_)
         | bast::CompoundCommand::CaseClause(_)
-        | bast::CompoundCommand::IfClause(_)
         | bast::CompoundCommand::Coprocess(_) => {
             Err(ParseError::unsupported(describe_compound(compound)))
         }
     }
+}
+
+/// Converts an `if`/`elif`/`else` chain (issue #191) into a
+/// [`CompoundCommand::IfClause`], attaching the already-converted
+/// `redirections` (matching every other [`convert_compound_command`] arm) —
+/// see that variant's own docs for how brush-parser's
+/// `elses: Option<Vec<bast::ElseClause>>` (each entry either a conditional
+/// `elif` — `condition: Some(_)` — or a trailing unconditional `else` —
+/// `condition: None`) maps onto shguard's own `elifs`/`else_body` split.
+///
+/// Fails closed (`Unsupported`) rather than silently dropping or merging a
+/// branch if that shape is ever violated: a `None`-condition (`else`) entry
+/// anywhere but the chain's last position would otherwise either lose every
+/// clause after it or get silently skipped — bash's own grammar never
+/// actually produces that shape (a bare `else` can only be the chain's
+/// final clause), but this function does not lean on that grammar guarantee
+/// holding forever; a dropped branch is a silent `Allow`, exactly the
+/// failure mode issue #191 is about closing, not reproducing in the new
+/// code that closes it.
+fn convert_if_clause(
+    if_clause: &bast::IfClauseCommand,
+    redirections: Vec<Redirection>,
+) -> Result<CompoundCommand, ParseError> {
+    let condition = Box::new(convert_compound_list(if_clause.condition.0.iter())?);
+    let then_body = Box::new(convert_compound_list(if_clause.then.0.iter())?);
+
+    let clauses = if_clause.elses.as_deref().unwrap_or_default();
+    let mut elifs = Vec::new();
+    let mut else_body = None;
+    for (index, clause) in clauses.iter().enumerate() {
+        match &clause.condition {
+            Some(condition) => elifs.push(ElifClause {
+                condition: Box::new(convert_compound_list(condition.0.iter())?),
+                body: Box::new(convert_compound_list(clause.body.0.iter())?),
+            }),
+            None if index == clauses.len() - 1 => {
+                else_body = Some(Box::new(convert_compound_list(clause.body.0.iter())?));
+            }
+            None => {
+                return Err(ParseError::unsupported(
+                    "else clause not in the final position of an if/elif chain",
+                ));
+            }
+        }
+    }
+
+    Ok(CompoundCommand::IfClause {
+        condition,
+        then_body,
+        elifs,
+        else_body,
+        redirections,
+    })
 }
 
 /// Converts a function definition (issue #75) by evaluating its body
@@ -411,6 +469,70 @@ fn convert_redirect_list(
         .flat_map(|list| list.0.iter())
         .map(convert_redirect)
         .collect()
+}
+
+/// Converts a `[[ ... ]]` extended test (issue #191) into
+/// [`crate::ast::ExtendedTest`] — see that type's own docs for why only the
+/// operand words are kept, not the expression's boolean structure.
+fn convert_extended_test(
+    test: &bast::ExtendedTestExprCommand,
+    redirects: &Option<bast::RedirectList>,
+) -> Result<ExtendedTest, ParseError> {
+    let mut words = Vec::new();
+    collect_extended_test_words(&test.expr, &mut words, 0)?;
+    Ok(ExtendedTest {
+        words,
+        redirections: convert_redirect_list(redirects)?,
+    })
+}
+
+/// Recursively collects every operand [`Word`] out of an
+/// `ExtendedTestExpr`'s boolean tree (`&&`/`||`/`!`/parens/unary/binary) —
+/// see [`ExtendedTest`]'s docs for why the boolean structure itself is
+/// discarded and only the operands survive.
+///
+/// `depth`, capped at [`MAX_BRACE_NESTING_DEPTH`]: `And`/`Or`/`Not`/
+/// `Parenthesized` is itself a boxed recursive tree brush-parser already
+/// fully materializes before this function ever runs (same as any other
+/// AST shape this module walks), and unlike `&&`/`||` between top-level
+/// pipelines (flat, not recursive — [`convert_compound_list`]), a long
+/// unparenthesized chain *inside* `[[ ... ]]` (`[[ a && a && a && ... ]]`,
+/// no parens at all) still builds a binary tree one level deeper per
+/// operand — [`reject_excessive_raw_nesting`]'s brace/paren/keyword
+/// pre-scan cannot catch this shape (no `{`/`(`/`if`/`while`/`until`/`for`/
+/// `case` byte appears), so this recursion needs its own depth cap the same
+/// way [`convert_brace_segment`]'s does. Reuses
+/// [`MAX_BRACE_NESTING_DEPTH`] rather than a new constant: both are cheap
+/// structural AST descent (not the analysis-recursion
+/// `gate::MAX_SUBSTITUTION_DEPTH` bounds), and 64 levels is already far
+/// beyond any realistic `[[ ]]` operand count.
+fn collect_extended_test_words(
+    expr: &bast::ExtendedTestExpr,
+    words: &mut Vec<Word>,
+    depth: usize,
+) -> Result<(), ParseError> {
+    if depth > MAX_BRACE_NESTING_DEPTH {
+        return Err(ParseError::unsupported(
+            "extended test expression nesting exceeds the depth cap",
+        ));
+    }
+    match expr {
+        bast::ExtendedTestExpr::And(left, right) | bast::ExtendedTestExpr::Or(left, right) => {
+            collect_extended_test_words(left, words, depth + 1)?;
+            collect_extended_test_words(right, words, depth + 1)?;
+        }
+        bast::ExtendedTestExpr::Not(inner) | bast::ExtendedTestExpr::Parenthesized(inner) => {
+            collect_extended_test_words(inner, words, depth + 1)?;
+        }
+        bast::ExtendedTestExpr::UnaryTest(_, operand) => {
+            words.push(convert_word(operand)?);
+        }
+        bast::ExtendedTestExpr::BinaryTest(_, left, right) => {
+            words.push(convert_word(left)?);
+            words.push(convert_word(right)?);
+        }
+    }
+    Ok(())
 }
 
 fn describe_compound(compound: &bast::CompoundCommand) -> &'static str {
@@ -1099,12 +1221,42 @@ mod tests {
     // ---- parseable-but-unsupported construct yields
     // Err(ParseError::Unsupported), not a silent drop ----
     #[test]
-    fn if_statement_is_unsupported() {
-        let result = parse("if true; then echo x; fi");
+    fn case_clause_is_unsupported() {
+        let result = parse("case x in x) echo hi;; esac");
         assert!(
             matches!(result, Err(ParseError::Unsupported { .. })),
             "expected an unsupported-construct error, got {result:?}"
         );
+    }
+
+    // ---- issue #191: `if`/`elif`/`else` now reaches the rule engine
+    // instead of an unconditional Unsupported/Ask ----
+    #[test]
+    fn if_statement_now_parses() {
+        let cmd = parse_ok("if true; then echo x; fi");
+        match &cmd.first.first {
+            Command::Compound(CompoundCommand::IfClause {
+                elifs, else_body, ..
+            }) => {
+                assert!(elifs.is_empty());
+                assert!(else_body.is_none());
+            }
+            other => panic!("expected an IfClause, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn if_elif_else_statement_now_parses() {
+        let cmd = parse_ok("if false; then echo a; elif false; then echo b; else echo c; fi");
+        match &cmd.first.first {
+            Command::Compound(CompoundCommand::IfClause {
+                elifs, else_body, ..
+            }) => {
+                assert_eq!(elifs.len(), 1);
+                assert!(else_body.is_some());
+            }
+            other => panic!("expected an IfClause, got {other:?}"),
+        }
     }
 
     // ---- newline separation folds into one CommandLine exactly like `;`
@@ -1135,18 +1287,23 @@ mod tests {
         );
     }
 
+    // ---- issue #191: `&` now reaches the rule engine instead of an
+    // unconditional Unsupported/Ask, on either line of a multiline command
+    // ----
     #[test]
-    fn background_job_on_either_line_of_a_multiline_command_is_unsupported() {
-        let result = parse("sleep 1 &\necho done");
-        assert!(
-            matches!(result, Err(ParseError::Unsupported { .. })),
-            "expected an unsupported-construct error, got {result:?}"
+    fn background_job_on_either_line_of_a_multiline_command_now_parses() {
+        let cmd = parse_ok("sleep 1 &\necho done");
+        assert_eq!(cmd.rest.len(), 1);
+        assert_eq!(
+            simple(&cmd.rest[0].1.first).words[0].0,
+            vec![WordPiece::Literal("echo".to_string())]
         );
 
-        let result = parse("echo start\nsleep 1 &");
-        assert!(
-            matches!(result, Err(ParseError::Unsupported { .. })),
-            "expected an unsupported-construct error, got {result:?}"
+        let cmd = parse_ok("echo start\nsleep 1 &");
+        assert_eq!(cmd.rest.len(), 1);
+        assert_eq!(
+            simple(&cmd.rest[0].1.first).words[0].0,
+            vec![WordPiece::Literal("sleep".to_string())]
         );
     }
 
@@ -1215,13 +1372,46 @@ mod tests {
         assert!(parse(&command).is_err());
     }
 
+    // ---- issue #191: collect_extended_test_words's own depth cap. Unlike
+    // `{`/`(`/keyword nesting, a long UNPARENTHESIZED `&&`/`||` chain inside
+    // `[[ ... ]]` (`[[ a && a && a && ... ]]`) still builds a binary tree
+    // one level deeper per operand, with no `{`/`(`/reserved-word byte for
+    // `reject_excessive_raw_nesting`'s raw pre-scan to catch — this cap is
+    // this recursion's only defense, so it is boundary-tested the same way
+    // the brace/paren caps above are. ----
+
+    #[test]
+    fn extended_test_and_chain_at_the_cap_still_parses() {
+        let mut command = "[[ ".to_string();
+        for _ in 0..MAX_BRACE_NESTING_DEPTH {
+            command.push_str("-f x && ");
+        }
+        command.push_str("-f x ]]");
+        assert!(parse(&command).is_ok());
+    }
+
+    #[test]
+    fn extended_test_and_chain_past_the_cap_is_rejected() {
+        let mut command = "[[ ".to_string();
+        for _ in 0..(MAX_BRACE_NESTING_DEPTH + 100) {
+            command.push_str("-f x && ");
+        }
+        command.push_str("-f x ]]");
+        let construct = unsupported_construct(&command);
+        assert!(
+            construct.contains("extended test expression nesting"),
+            "expected the extended-test depth-cap rejection, got: {construct}"
+        );
+    }
+
     // ---- issue #52 follow-up: reject_excessive_raw_nesting's keyword
-    // counter. shguard's AST does not model `if`/`while`/`for`/`case`
-    // compound commands at all, so parse() always rejects them as an
-    // unsupported construct regardless of nesting depth — these tests
-    // distinguish that pre-existing "unsupported construct" rejection from
-    // the new keyword-count rejection by asserting which error message
-    // comes back, not just that parse() errors. ----
+    // counter. shguard's AST does not model `case` compound commands at all
+    // (issue #191 added `if`; #75 added `while`/`for`/`until` — `case`
+    // alone remains unmodeled, module docs), so parse() always rejects a
+    // `case` clause as an unsupported construct regardless of nesting depth
+    // — these tests distinguish that pre-existing "unsupported construct"
+    // rejection from the new keyword-count rejection by asserting which
+    // error message comes back, not just that parse() errors. ----
 
     fn unsupported_construct(command: &str) -> String {
         match parse(command) {
@@ -1234,8 +1424,8 @@ mod tests {
     fn raw_keyword_nesting_at_the_cap_is_not_rejected_by_the_keyword_cap() {
         let command = format!(
             "{}a{}",
-            "if true; then ".repeat(MAX_KEYWORD_NESTING_COUNT),
-            "; fi".repeat(MAX_KEYWORD_NESTING_COUNT)
+            "case x in x) ".repeat(MAX_KEYWORD_NESTING_COUNT),
+            ";; esac".repeat(MAX_KEYWORD_NESTING_COUNT)
         );
         let construct = unsupported_construct(&command);
         assert!(

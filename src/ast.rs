@@ -109,6 +109,20 @@ pub(crate) const MAX_BRACE_NESTING_DEPTH: usize = 64;
 /// bounded by [`MAX_BRACE_NESTING_DEPTH`] and counting the keyword itself
 /// would only add false positives with no additional safety.
 ///
+/// # `if` is now modeled too (issue #191)
+///
+/// `if`/`elif` clauses are [`Command::Compound`] variants as of issue #191,
+/// the same way `for`/`while`/`until` became one under issue #75 — a single
+/// `if` no longer automatically resolves to `Unsupported`/`Ask` regardless
+/// of this cap either. This does not change the cap's own sizing rationale
+/// above (still measured against `case`'s 99-level 2MiB-stack abort floor,
+/// still a 6x margin): `case` — the tightest keyword — remains entirely
+/// unmodeled (zero measured occurrences per issue #75/#191's traffic
+/// samples), so it alone still keeps this cap's "no false-positive cost"
+/// premise from ever mattering for that specific keyword, and 16 was
+/// already sized with `if`/`while`/`until`/`for` all being real, evaluated
+/// constructs in mind.
+///
 /// # Why a total count, not a balanced depth like [`MAX_BRACE_NESTING_DEPTH`]
 ///
 /// A `{`/`}`/`(`/`)` depth counter that decrements on the closing character
@@ -137,6 +151,13 @@ pub(crate) enum Separator {
     And,
     /// `||`
     Or,
+    /// `&` (issue #191): backgrounds the pipeline to its left, but that
+    /// pipeline still runs — `crate::gate::evaluate_command_line` already
+    /// folds every separator identically (worst-wins across the whole
+    /// line, regardless of `;`/`&&`/`||`), so `Async` needs no special
+    /// handling there; it exists purely so `src/parser.rs` can stop
+    /// rejecting the syntax outright.
+    Async,
 }
 
 /// A full command line: one pipeline, optionally followed by more pipelines
@@ -162,22 +183,52 @@ pub(crate) struct Pipeline {
 }
 
 /// One command in a [`Pipeline`]: an ordinary simple command, a compound
-/// command (issue #75: `for`/`while`/`until`/subshell/brace group), or a
-/// function definition (issue #75).
+/// command (issue #75: `for`/`while`/`until`/subshell/brace group;
+/// issue #191 added `if`), a function definition (issue #75), or an
+/// extended test command (issue #191: `[[ ... ]]`).
 ///
 /// A sum type rather than folding compound commands and function
-/// definitions into `SimpleCommand` itself: the three have almost nothing in
+/// definitions into `SimpleCommand` itself: the four have almost nothing in
 /// common structurally (a compound command has a nested [`CommandLine`]
 /// body instead of `words`; a function definition has a name and a body but
-/// no argv at all), so a single struct with optional fields for all three
-/// shapes would make invalid combinations (a `SimpleCommand` with a `body`,
-/// a `ForClause` with `words: Vec<Word>` in the argv sense) representable
-/// when they should not be.
+/// no argv at all; an extended test has test operands that are not argv at
+/// all — see [`ExtendedTest`]'s own docs), so a single struct with optional
+/// fields for all four shapes would make invalid combinations (a
+/// `SimpleCommand` with a `body`, a `ForClause` with `words: Vec<Word>` in
+/// the argv sense) representable when they should not be.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Command {
     Simple(SimpleCommand),
     Compound(CompoundCommand),
     FunctionDefinition(FunctionDefinition),
+    ExtendedTest(ExtendedTest),
+}
+
+/// `[[ ... ]]` (issue #191): an extended test expression. shguard does not
+/// model the expression's own boolean structure (`&&`/`||`/`!`/parens
+/// inside the brackets, or which unary/binary predicate each operand pairs
+/// with) — none of that changes what actually executes. It only keeps every
+/// operand as a [`Word`] for `crate::gate`'s expansion-position scan
+/// (`scan_word_expansions`), exactly the treatment a `for` clause's `in`
+/// word list or an array assignment's elements already get (issue #75).
+///
+/// This is a deliberate choice, not an approximation of a fuller model:
+/// `[[ ]]`'s operands are never command words — bash performs no
+/// word-splitting or globbing on them (unlike a `SimpleCommand`'s `words`)
+/// — so treating them as an argv the way `SimpleCommand` does would be a
+/// false-positive risk with no safety benefit (`[[ -d /tmp/x ]]` is not the
+/// command `-d /tmp/x`, and matching it against blocklist rules that expect
+/// a real command name in position 0 would be nonsensical). But an operand
+/// CAN still hide a command substitution (`[[ -n $(rm -rf /) ]]`), which is
+/// exactly what the expansion scan catches; treating the whole construct as
+/// opaque (skip it entirely, the pre-#191 behavior) would silently miss
+/// that. brush-parser already hands operands over as structural [`Word`]s
+/// (`bast::ExtendedTestExpr::UnaryTest`/`BinaryTest`), not raw strings, so
+/// nothing is lost by extracting them this way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExtendedTest {
+    pub(crate) words: Vec<Word>,
+    pub(crate) redirections: Vec<Redirection>,
 }
 
 /// A compound command (issue #75): `for`/`while`/`until`, a subshell, or a
@@ -203,10 +254,12 @@ pub(crate) enum Command {
 /// function, and keeping the two syntactically distinct mirrors
 /// brush-parser's own `CompoundCommand` shape.
 ///
-/// Deliberately excludes `if`/`case` clauses, C-style arithmetic `for`, bare
+/// Deliberately excludes `case` clauses, C-style arithmetic `for`, bare
 /// `((...))` arithmetic commands, and coprocesses — none of these were
-/// measured in issue #75's traffic sample, so they stay exactly as
-/// unsupported (translate-error, `Ask`) as before this change.
+/// measured in issue #75's or #191's traffic samples, so they stay exactly
+/// as unsupported (translate-error, `Ask`) as before this change. `if`
+/// clauses (with `elif`/`else`) were added by issue #191, following the
+/// same "measured in real traffic" bar #75 set.
 ///
 /// `body`/`condition` are `Box<CommandLine>`, not a bare `CommandLine`:
 /// `CommandLine` -> `Pipeline` -> `Command` -> `CompoundCommand` ->
@@ -243,6 +296,35 @@ pub(crate) enum CompoundCommand {
         body: Box<CommandLine>,
         redirections: Vec<Redirection>,
     },
+    /// `if COND; then BODY [elif COND; then BODY]... [else BODY] fi` (issue
+    /// #191). `elifs`/`else_body` split brush-parser's own
+    /// `Option<Vec<ElseClause>>` shape (each entry either an `elif` with a
+    /// condition or a trailing plain `else` with none — see
+    /// `src/parser.rs::convert_if_clause`'s docs) into the two forms
+    /// shguard's own grammar actually has: zero or more conditional `elif`
+    /// arms, followed by at most one unconditional `else`.
+    ///
+    /// shguard cannot know statically which branch runs, so
+    /// `crate::gate::evaluate_compound_command` evaluates `condition`,
+    /// `then_body`, every `elifs` condition/body, and `else_body` (when
+    /// present) and folds all of them worst-wins — the same
+    /// evaluate-every-branch stance already used for `WhileClause`/
+    /// `UntilClause`'s condition-plus-body pair.
+    IfClause {
+        condition: Box<CommandLine>,
+        then_body: Box<CommandLine>,
+        elifs: Vec<ElifClause>,
+        else_body: Option<Box<CommandLine>>,
+        redirections: Vec<Redirection>,
+    },
+}
+
+/// One `elif COND; then BODY` arm of an [`CompoundCommand::IfClause`] (issue
+/// #191).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ElifClause {
+    pub(crate) condition: Box<CommandLine>,
+    pub(crate) body: Box<CommandLine>,
 }
 
 /// A function definition (issue #75): `name() { ...; }` (or the `function`
