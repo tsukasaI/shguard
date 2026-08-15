@@ -26,6 +26,9 @@ All notable changes to this project are documented in this file.
   loaded fine — this fails shguard closed for every command until the entry
   is removed or narrowed, the same load-time rejection `sudo`-matching
   `[[allow]]` entries already had.
+
+## [0.4.1] - 2026-08-15
+
 - **Compatibility note**: a `command` value containing whitespace (issue
   #96) used to be inert — `CommandMatch::Exact` compared it against one
   whole resolved argv token, which a `command` value containing any
@@ -99,5 +102,6 @@ Initial release.
 - Ships as a single binary for macOS (aarch64, x86_64) and Linux
   (x86_64, aarch64), published via GitHub Releases and crates.io.
 
+[0.4.1]: https://github.com/tsukasaI/shguard/releases/tag/v0.4.1
 [0.2.0]: https://github.com/tsukasaI/shguard/releases/tag/v0.2.0
 [0.1.0]: https://github.com/tsukasaI/shguard/releases/tag/v0.1.0
