@@ -241,6 +241,21 @@ fn guardfall_eval_cases() {
         // this stays Allow like any other no-op respelling.
         ("eval -- -- rm -rf /", Decision::Allow),
         ("eval --", Decision::Allow),
+        // The join reconstructs one script across quote boundaries, so a
+        // dangerous command split over several quoted words must still
+        // Block -- a distinct path from the space-separated form above.
+        ("eval 'rm' '-rf' '/'", Decision::Block),
+        ("eval \"rm -rf\" /", Decision::Block),
+        // The shell-init idiom, pinned so the Ask above is understood as a
+        // deliberate fail-closed posture on an unresolvable substitution,
+        // not an accident of the repro's particular shape.
+        ("eval \"$(ssh-agent -s)\"", Decision::Ask),
+        // The outer shell removes the quotes before `eval` sees them, so
+        // the joined script is `sh -c rm -rf /`: `rm` becomes `-c`'s value
+        // and `-rf`/`/` become $0/$1. Genuinely harmless -- pinned so a
+        // future nested-interpreter change doesn't flip it to Block on the
+        // assumption that the quotes survived.
+        ("eval sh -c \"rm -rf /\"", Decision::Allow),
     ];
 
     for (command, expected) in cases {
