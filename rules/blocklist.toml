@@ -183,6 +183,40 @@
 #                    flag appears bare, the next token is an unrelated
 #                    positional that would be wrongly consumed as if it
 #                    were the flag's value.
+#   attached_value_flags  optional list of single ASCII letters, each
+#                    WITHOUT its leading `-` (issue #47) — the opposite
+#                    direction from `value_flags` above: a declared short
+#                    flag's value glued directly onto it with no `=`
+#                    separator (curl's `-xVALUE` short proxy-flag syntax)
+#                    is by default invisible to except_targets entirely
+#                    (indistinguishable from an ordinary combined
+#                    short-flag cluster like `-sSL` by shape alone).
+#                    Declaring the letter here makes that glued value a
+#                    NEW except_targets candidate instead — this can newly
+#                    suppress a match that would otherwise fire, the same
+#                    opt-in-loosening posture except_targets itself
+#                    already has. Load-time-error rules similar to
+#                    value_flags but narrower — `targets` non-empty, or no
+#                    `except_targets` at all, means the field would
+#                    silently do nothing, same as value_flags; unlike
+#                    value_flags, declaring `required_flags`/
+#                    `required_tokens` instead of `except_targets` does
+#                    NOT make it live, since this field only ever feeds
+#                    the except_targets candidate walk, never the
+#                    required_tokens floor value_flags also narrows. A
+#                    letter declared in both `value_flags` and
+#                    `attached_value_flags` is also a load-time error
+#                    (opposite candidacy effects for the same flag). Only
+#                    the exact leading `-<letter>` shape
+#                    is recognised — a declared flag glued into a
+#                    non-leading cluster position (`-sxVALUE`) is not
+#                    recognised, and a bare declared flag with nothing
+#                    glued after it (`-x` alone) never becomes an empty
+#                    candidate. Example: `command = "curl"` with
+#                    `attached_value_flags = ["x"]` plus the
+#                    `except_targets` above makes `curl http://localhost
+#                    -xhttp://evil.example.com` correctly ask instead of
+#                    being wrongly excepted.
 #
 # [[pipeline]] — matches the shape of a whole pipeline (the ported
 # curl|wget → sh installer-pipe pattern only; the general decode-fed-pipe

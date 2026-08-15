@@ -398,7 +398,13 @@ fn tar_dashless_effective_tail<'a>(
 /// path (the cluster case just doesn't get the narrowing). A short
 /// flag's attached-value form with no `=` (`-oVALUE`) is likewise never
 /// recognised here, the same pre-existing gap [`target_candidate`]'s own
-/// docs disclose for `-xhttp://evil.example.com`.
+/// docs disclose for `-xhttp://evil.example.com` — a rule author who
+/// needs that specific glued short flag's value checked against
+/// `except_targets` declares it via `attached_value_flags` (issue #47)
+/// instead: unlike this type, which *excludes* a declared flag's value
+/// from candidacy, `attached_value_flags` *adds* the glued value as a
+/// new candidate, so declaring a flag there can newly suppress a match
+/// that would otherwise fire (see [`attached_value_candidate`]'s docs).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ValueFlag {
     /// A single short-option letter, e.g. `Short('o')` for `-o`.
@@ -1057,6 +1063,7 @@ pub(crate) struct CommandRule {
     targets: Vec<TargetMatcher>,
     except_targets: Vec<TargetMatcher>,
     value_flags: Vec<ValueFlag>,
+    attached_value_flags: Vec<char>,
     deny_message: Option<DenyMessage>,
 }
 
@@ -1198,7 +1205,13 @@ impl CommandRule {
     /// at all, so a value-taking flag's output path/format string/pattern
     /// can't wrongly stand in the way of "all candidates excepted" for the
     /// command's actual target. An undeclared flag's value is unaffected —
-    /// it keeps counting as a candidate, today's fail-closed default.
+    /// it keeps counting as a candidate, today's fail-closed default. A
+    /// rule's `attached_value_flags` (issue #47) does the opposite: it
+    /// *widens* the same candidate set by adding a declared short flag's
+    /// glued value (`-xVALUE`, otherwise invisible to
+    /// [`target_candidate`]) as a new candidate — this can newly suppress
+    /// a match that would otherwise fire, the same opt-in-loosening
+    /// posture `except_targets` itself already has, not an accident.
     #[must_use]
     fn matches(&self, argv: &[NormalizedWord]) -> bool {
         let Some(rest_words) = self.matching_rest(argv) else {
@@ -1226,7 +1239,7 @@ impl CommandRule {
         }
 
         let candidates: Vec<&str> = if self.targets.is_empty() {
-            value_flag_free_candidates(&rest, &self.value_flags)
+            value_flag_free_candidates(&rest, &self.value_flags, &self.attached_value_flags)
         } else {
             rest.iter()
                 .filter(|token| self.matches_targets(token))
@@ -1894,9 +1907,14 @@ fn resolved_strings(argv: &[NormalizedWord]) -> Vec<&str> {
 /// shape either), defeating the feature for exactly the common case it
 /// exists to serve. Not reachable by the `targets`-non-empty branch,
 /// which draws its candidates from `targets` matches instead of this
-/// function. Anyone gating a command with this attached-value flag idiom
-/// should additionally forbid the flag via `required_flags`/a separate
-/// `deny` entry rather than relying on `except_targets` alone.
+/// function. A rule author can opt a specific short flag into recognition
+/// via `attached_value_flags` (issue #47, [`attached_value_candidate`]) —
+/// still shape-based (leading `-<letter>` position only, a cluster like
+/// `-sxURL` is unaffected), but declared per rule rather than guessed.
+/// Absent that declaration, gating a command with this attached-value
+/// flag idiom should additionally forbid the flag via
+/// `required_flags`/a separate `deny` entry rather than relying on
+/// `except_targets` alone.
 fn target_candidate(token: &str) -> Option<&str> {
     if !token.starts_with('-') {
         return Some(token);
@@ -1907,32 +1925,79 @@ fn target_candidate(token: &str) -> Option<&str> {
         .map(|(_, value)| value)
 }
 
+/// Whether `token` is one of `attached_value_flags`' declared short flags
+/// glued directly onto a value with no `=` separator (`-xVALUE`) — the
+/// opt-in *inclusion* counterpart to [`ValueFlag`]'s *exclusion*
+/// semantics (issue #47): a declared flag's glued value becomes a NEW
+/// except_targets candidate, rather than staying invisible the way
+/// [`target_candidate`]'s "Known limitation" section discloses.
+///
+/// Only the exact single-character-then-rest shape at the *leading*
+/// dash position is recognised: `-x` alone (nothing follows) is not this
+/// shape, so a bare declared flag yields no candidate at all, same as an
+/// undeclared one — not because an empty candidate could wrongly satisfy
+/// an except_targets alternative (`convert_target` rejects an empty
+/// `exact`/`prefix` at load, so `""` can never match a loadable
+/// alternative either way), but because an un-exceptable `""` candidate
+/// would make the rule spuriously fire on `-x` alone, noise this
+/// function avoids by not manufacturing it in the first place. A
+/// declared flag glued into a combined cluster (`-sxVALUE`, `x` not in
+/// the leading position) is likewise not recognised — shape-based
+/// matching can't tell which cluster position "owns" the trailing text,
+/// the same limitation [`ValueFlag::is_bare`] already discloses for
+/// clusters.
+fn attached_value_candidate<'a>(token: &'a str, attached_value_flags: &[char]) -> Option<&'a str> {
+    let mut chars = token.chars();
+    if chars.next() != Some('-') {
+        return None;
+    }
+    let flag = chars.next()?;
+    if !attached_value_flags.contains(&flag) {
+        return None;
+    }
+    let value = chars.as_str();
+    if value.is_empty() {
+        return None;
+    }
+    Some(value)
+}
+
 /// The except_targets candidate set drawn from `rest` (already-resolved
 /// argv tail) with each declared `value_flags` entry's value consumed and
-/// excluded (issue #48) — a single left-to-right positional walk, only
-/// ever reached once the caller ([`CommandRule::matches`]) has already
-/// confirmed no token in the tail is unresolvable, so every token here is
-/// a known, concrete string. A token matching a declared flag's bare
-/// spelling (`-o`, `--exclude`) consumes the *next* token as that flag's
-/// separated value — neither token becomes a candidate. A token matching
-/// a declared long flag's `--name=value` attached form is excluded
-/// outright — its value never becomes a candidate either. Everything
-/// else falls through to [`target_candidate`], unchanged from before this
-/// field existed. An undeclared flag's value is untouched by any of this
-/// and keeps counting as a candidate — the existing fail-closed default.
+/// excluded (issue #48), and each declared `attached_value_flags` entry's
+/// glued value included (issue #47) — a single left-to-right positional
+/// walk, only ever reached once the caller ([`CommandRule::matches`]) has
+/// already confirmed no token in the tail is unresolvable, so every token
+/// here is a known, concrete string. A token matching a declared flag's
+/// bare spelling (`-o`, `--exclude`) consumes the *next* token as that
+/// flag's separated value — neither token becomes a candidate. A token
+/// matching a declared long flag's `--name=value` attached form is
+/// excluded outright — its value never becomes a candidate either. A
+/// token matching a declared `attached_value_flags` short flag's glued
+/// form (`-xVALUE`) contributes its value as a candidate instead of
+/// falling through to [`target_candidate`] (which would see no candidate
+/// at all for that shape). Everything else falls through to
+/// [`target_candidate`], unchanged from before either field existed. An
+/// undeclared flag's value is untouched by any of this and keeps
+/// counting as a candidate — the existing fail-closed default.
 ///
 /// A bare `--` token (the POSIX/GNU end-of-options terminator, not itself
 /// consumed as a preceding flag's separated value) permanently turns off
-/// `value_flags` matching for every token after it: everything from that
-/// point on is an ordinary positional argument by shell convention, so a
-/// value carrying the same text as a declared flag name (`rsync ./src/
-/// ./dst/ -- --exclude remote:evil`, where `--exclude`/`remote:evil` are
-/// literal filenames, not the `--exclude` flag) must not be mistaken for
-/// the flag and consumed — that would silently remove a genuine
-/// (non-excepted) target from the candidate set. Regression-tested by
+/// `value_flags`/`attached_value_flags` matching for every token after
+/// it: everything from that point on is an ordinary positional argument
+/// by shell convention, so a value carrying the same text as a declared
+/// flag name (`rsync ./src/ ./dst/ -- --exclude remote:evil`, where
+/// `--exclude`/`remote:evil` are literal filenames, not the `--exclude`
+/// flag) must not be mistaken for the flag and consumed — that would
+/// silently remove a genuine (non-excepted) target from the candidate
+/// set. Regression-tested by
 /// `value_flags_does_not_consume_positionals_after_end_of_options_terminator`
 /// below.
-fn value_flag_free_candidates<'a>(rest: &[&'a str], value_flags: &[ValueFlag]) -> Vec<&'a str> {
+fn value_flag_free_candidates<'a>(
+    rest: &[&'a str],
+    value_flags: &[ValueFlag],
+    attached_value_flags: &[char],
+) -> Vec<&'a str> {
     let mut candidates = Vec::new();
     let mut skip_next = false;
     let mut past_terminator = false;
@@ -1951,6 +2016,10 @@ fn value_flag_free_candidates<'a>(rest: &[&'a str], value_flags: &[ValueFlag]) -
                 continue;
             }
             if value_flags.iter().any(|vf| vf.attached_value_token(token)) {
+                continue;
+            }
+            if let Some(candidate) = attached_value_candidate(token, attached_value_flags) {
+                candidates.push(candidate);
                 continue;
             }
         }
@@ -2771,6 +2840,8 @@ struct CommandRuleDto {
     #[serde(default)]
     value_flags: Vec<String>,
     #[serde(default)]
+    attached_value_flags: Vec<String>,
+    #[serde(default)]
     deny_message: Option<String>,
 }
 
@@ -3031,6 +3102,53 @@ fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesErr
         .map(|spec| ValueFlag::parse(spec).map_err(|problem| RulesError::invalid(&dto.id, problem)))
         .collect::<Result<Vec<_>, _>>()?;
 
+    let attached_value_flags = dto
+        .attached_value_flags
+        .iter()
+        .map(|spec| {
+            parse_attached_value_flag(spec).map_err(|problem| RulesError::invalid(&dto.id, problem))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // A letter declared in both lists is contradictory: value_flags says
+    // "this flag's value is a separated/attached-by-'=' argument, exclude
+    // it from candidacy", attached_value_flags says "this flag's value is
+    // glued with no separator, include it as a candidate" — opposite
+    // effects on the same flag can never both be the rule author's intent.
+    if let Some(flag) = attached_value_flags
+        .iter()
+        .find(|&&flag| value_flags.contains(&ValueFlag::Short(flag)))
+    {
+        return Err(RulesError::invalid(
+            &dto.id,
+            format!(
+                "'{flag}' is declared in both value_flags and attached_value_flags — \
+                 these have opposite candidacy effects for the same flag, pick one"
+            ),
+        ));
+    }
+
+    // attached_value_flags only ever feeds value_flag_free_candidates
+    // (module docs), which CommandRule::matches only reaches from its
+    // `targets`-empty, `except_targets`-non-empty branch — unlike
+    // value_flags, it never touches value_flag_consumed's required_tokens
+    // floor. So its dead-configuration check is narrower than
+    // value_flags's: declaring it is only ever live when `targets` is
+    // empty and `except_targets` is non-empty, regardless of
+    // required_flags/required_tokens.
+    if !attached_value_flags.is_empty() && !targets.is_empty() {
+        return Err(RulesError::invalid(
+            &dto.id,
+            "attached_value_flags has no effect when `targets` is non-empty",
+        ));
+    }
+    if !attached_value_flags.is_empty() && except_targets.is_empty() {
+        return Err(RulesError::invalid(
+            &dto.id,
+            "attached_value_flags has no effect without `except_targets`",
+        ));
+    }
+
     // value_flags narrows two candidate walks, both reachable only when
     // `targets` is empty (module docs on both consumers): the except_targets
     // walk in CommandRule::matches's `targets`-empty branch, and (issue
@@ -3117,8 +3235,28 @@ fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesErr
         targets,
         except_targets,
         value_flags,
+        attached_value_flags,
         deny_message,
     })
+}
+
+/// Parses one `attached_value_flags` TOML entry: a single ASCII letter
+/// naming a short flag known to take a glued attached value with no `=`
+/// separator (`"x"` for curl's `-x`). No leading `-`, matching
+/// `value_flags`' own spec convention. Long-option names are rejected —
+/// GNU long flags already have a recognised `--name=value` attached form
+/// via [`ValueFlag::attached_value_token`], so a long entry here would be
+/// meaningless.
+fn parse_attached_value_flag(spec: &str) -> Result<char, String> {
+    let mut chars = spec.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) if c.is_ascii_alphabetic() => Ok(c),
+        _ => Err(format!(
+            "invalid attached_value_flags spec {spec:?}: expected a single ASCII letter (short \
+             flag) with no leading '-' — long flags already have a recognised `--name=value` \
+             attached form and don't need this field"
+        )),
+    }
 }
 
 /// Converts one `targets`/`except_targets` TOML entry into a
@@ -6941,6 +7079,314 @@ mod tests {
                 .is_none(),
             "known gap: a single-dash attached-value target is not recognised as a candidate"
         );
+    }
+
+    // ==== attached_value_flags (issue #47): opt-in closure of the gap
+    // documented immediately above ====
+
+    #[test]
+    fn attached_value_flags_recognises_a_declared_short_flags_glued_value_as_a_candidate() {
+        // Same command as the known-gap test above, but with `x` declared
+        // via attached_value_flags: the glued proxy target now becomes a
+        // candidate, so it's checked against except_targets and correctly
+        // fails to match (all-excepted no longer holds over the widened
+        // candidate set) — the rule fires instead of being wrongly
+        // suppressed.
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "curl-non-localhost"
+            reason = "ask unless curl targets localhost"
+            decision = "ask"
+            command = "curl"
+            except_targets = [{ prefix = "http://localhost" }]
+            attached_value_flags = ["x"]
+        "#,
+        )
+        .unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "curl",
+                    "http://localhost",
+                    "-xhttp://evil.example.com"
+                ]))
+                .is_some(),
+            "declared attached_value_flags entry should surface the glued proxy target as a \
+             candidate, defeating the wrongful all-excepted suppression"
+        );
+    }
+
+    // Fable review of this PR flagged this as a documented-but-untested
+    // behavior: declaring attached_value_flags is a per-rule trust
+    // decision (README's own wording) that can flip a genuine localhost
+    // target from excepted to unexcepted -- widening the candidate set
+    // widens what except_targets checks, which can loosen as well as
+    // tighten depending on the target's actual value. Pinned here so this
+    // direction is asserted, not just the tightening direction the other
+    // tests above cover.
+    #[test]
+    fn attached_value_flags_still_excepts_a_declared_flags_genuine_localhost_value() {
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "curl-non-localhost"
+            reason = "ask unless curl targets localhost"
+            decision = "ask"
+            command = "curl"
+            except_targets = [{ prefix = "http://localhost" }]
+            attached_value_flags = ["x"]
+        "#,
+        )
+        .unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "-xhttp://localhost:8080"]))
+                .is_none(),
+            "a declared attached_value_flags entry's glued value is checked against \
+             except_targets like any other candidate -- a genuine localhost value is still \
+             correctly excepted, not just a genuine evil one still correctly caught"
+        );
+    }
+
+    // Fable review of this PR flagged this as a documented-but-untested
+    // behavior: an ordinary combined short-flag cluster containing no
+    // declared attached_value_flags letter at all must not have any
+    // candidate extracted from it, the same way it wouldn't with the
+    // field entirely unset.
+    #[test]
+    fn attached_value_flags_does_not_false_positive_on_an_unrelated_cluster() {
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "curl-non-localhost"
+            reason = "ask unless curl targets localhost"
+            decision = "ask"
+            command = "curl"
+            except_targets = [{ prefix = "http://localhost" }]
+            attached_value_flags = ["x"]
+        "#,
+        )
+        .unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "-sSL", "http://localhost"]))
+                .is_none(),
+            "an ordinary combined short-flag cluster containing none of the declared \
+             attached_value_flags letters must not spuriously yield a candidate"
+        );
+    }
+
+    #[test]
+    fn attached_value_flags_bare_declared_flag_yields_no_candidate() {
+        // A bare `-x` (nothing glued after it) must not become an empty
+        // candidate. Not because `""` could wrongly satisfy an
+        // except_targets alternative (convert_target rejects an empty
+        // exact/prefix at load, so it never would) — an un-exceptable
+        // `""` candidate would instead make the rule spuriously fire on
+        // `-x` alone.
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "curl-non-localhost"
+            reason = "ask unless curl targets localhost"
+            decision = "ask"
+            command = "curl"
+            except_targets = [{ prefix = "http://localhost" }]
+            attached_value_flags = ["x"]
+        "#,
+        )
+        .unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "http://localhost", "-x"]))
+                .is_none(),
+            "a bare declared flag with nothing glued after it must not become a candidate"
+        );
+    }
+
+    #[test]
+    fn attached_value_flags_cluster_position_is_not_recognized() {
+        // Same known limitation ValueFlag::is_bare already discloses for
+        // clusters: a declared flag glued into a leading cluster (`s` then
+        // `x`, not `x` alone in the leading position) isn't recognised —
+        // shape-based matching can't tell which position "owns" the
+        // trailing text. This keeps the pre-existing known-gap behavior
+        // for the cluster form even after declaring `x`.
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "curl-non-localhost"
+            reason = "ask unless curl targets localhost"
+            decision = "ask"
+            command = "curl"
+            except_targets = [{ prefix = "http://localhost" }]
+            attached_value_flags = ["x"]
+        "#,
+        )
+        .unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "curl",
+                    "http://localhost",
+                    "-sxhttp://evil.example.com"
+                ]))
+                .is_none(),
+            "a declared flag glued into a non-leading cluster position stays an unrecognised gap"
+        );
+    }
+
+    #[test]
+    fn attached_value_flags_does_not_consume_a_separated_value() {
+        // `-x http://evil` (separated, no glue) is a different shape from
+        // `-xhttp://evil` (glued) — attached_value_flags only recognises
+        // the glued form, so the bare `-x` token itself yields no
+        // candidate (same as an undeclared flag) and the following token
+        // is untouched: it stays an ordinary positional candidate, caught
+        // by the pre-existing target_candidate path exactly as it already
+        // was before this field existed.
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "curl-non-localhost"
+            reason = "ask unless curl targets localhost"
+            decision = "ask"
+            command = "curl"
+            except_targets = [{ prefix = "http://localhost" }]
+            attached_value_flags = ["x"]
+        "#,
+        )
+        .unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "curl",
+                    "http://localhost",
+                    "-x",
+                    "http://evil.example.com"
+                ]))
+                .is_some(),
+            "a separated flag value must not be consumed by attached_value_flags — it stays a \
+             candidate and correctly fails the except_targets check"
+        );
+    }
+
+    #[test]
+    fn attached_value_flags_matches_shape_only_including_a_literal_equals_sign() {
+        // attached_value_candidate is shape-based only: it doesn't special
+        // -case '=' the way ValueFlag::attached_value_token does for long
+        // flags. `-x=http://evil` yields the verbatim candidate
+        // `=http://evil...` (leading '=' included), which fails every
+        // http://-prefixed except_targets alternative and so correctly
+        // fails closed (asks) rather than silently passing through.
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "curl-non-localhost"
+            reason = "ask unless curl targets localhost"
+            decision = "ask"
+            command = "curl"
+            except_targets = [{ prefix = "http://localhost" }]
+            attached_value_flags = ["x"]
+        "#,
+        )
+        .unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "curl",
+                    "http://localhost",
+                    "-x=http://evil.example.com"
+                ]))
+                .is_some(),
+            "a '-x=value' token's candidate is the verbatim '=value' text, which fails closed \
+             against a http://-prefixed except_targets alternative"
+        );
+
+        // Discriminates verbatim-candidate handling from an (incorrect)
+        // '='-stripping implementation: if the leading '=' were stripped,
+        // this token's candidate would become the bare `http://localhost`
+        // text, matching the except alternative and wrongly suppressing
+        // the rule (a block-to-allow regression). The verbatim candidate
+        // `=http://localhost` matches no `http://`-prefixed alternative,
+        // so the rule correctly still fires here.
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "-x=http://localhost"]))
+                .is_some(),
+            "the '=' must not be stripped from the candidate — an implementation that stripped \
+             it would wrongly suppress this rule via the except_targets prefix match"
+        );
+    }
+
+    #[test]
+    fn attached_value_flags_with_non_empty_targets_is_rejected_at_rule_load() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "some reason"
+            command = "curl"
+            attached_value_flags = ["x"]
+            targets = [{ prefix = "http://" }]
+            except_targets = [{ prefix = "http://localhost" }]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn attached_value_flags_without_except_targets_is_rejected_at_rule_load() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "some reason"
+            command = "curl"
+            attached_value_flags = ["x"]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn attached_value_flags_conflicting_with_value_flags_is_rejected_at_rule_load() {
+        // 'o' declared as both a separated/attached-by-'=' value to
+        // exclude (value_flags) and a glued value to include
+        // (attached_value_flags) is a contradiction, not a valid
+        // combination of two independent narrowings.
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "some reason"
+            command = "curl"
+            value_flags = ["o"]
+            attached_value_flags = ["o"]
+            except_targets = [{ prefix = "http://localhost" }]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn attached_value_flags_invalid_spec_is_rejected_at_rule_load() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "some reason"
+            command = "curl"
+            attached_value_flags = ["exclude"]
+            except_targets = [{ prefix = "http://localhost" }]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
     }
 
     #[test]
