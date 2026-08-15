@@ -909,6 +909,13 @@ targets = [{ normalized = "~/.config" }, { normalized = "~" }]
 #   trivially bypassed by `./`/`../`-respelling with no precedent
 #   elsewhere in this file for doing that safely.
 #
+# Known parity gaps (mechanisms and paths), disclosed not fixed — issue #198:
+# - Mechanisms: rsync, perl -i, patch, curl -o, wget -O against these
+#   targets; crontab <file> (installs a crontab without ever naming a
+#   protected path in argv).
+# - Paths: /etc/cron.hourly|daily|weekly|monthly/, /etc/bash.bashrc,
+#   /etc/zsh/*, ~/.ssh/rc, ~/.config/fish/conf.d/.
+#
 # These rules are appended at the END of this file so every earlier,
 # stricter `command = "tee"/"dd"/"rm"` rule (the device/critical-file and
 # self-protection families above) keeps first-match priority over the
@@ -937,11 +944,16 @@ targets = [
     { normalized = "~/.config/fish/config.fish" },
     { normalized = "/etc/profile" },
     { normalized_prefix = "/etc/profile.d/" },
+    { normalized = "/etc/profile.d" },
     { normalized = "/etc/crontab" },
     { normalized_prefix = "/etc/cron.d/" },
+    { normalized = "/etc/cron.d" },
     { normalized_prefix = "/var/spool/cron/" },
+    { normalized = "/var/spool/cron" },
     { normalized_prefix = "~/.config/autostart/" },
+    { normalized = "~/.config/autostart" },
     { normalized_prefix = "~/.config/systemd/user/" },
+    { normalized = "~/.config/systemd/user" },
     { normalized = "~/.ssh/authorized_keys" },
     { normalized = "~/.ssh/config" },
     { normalized = "/etc/ld.so.preload" },
@@ -966,11 +978,16 @@ targets = [
     { normalized = "~/.config/fish/config.fish" },
     { normalized = "/etc/profile" },
     { normalized_prefix = "/etc/profile.d/" },
+    { normalized = "/etc/profile.d" },
     { normalized = "/etc/crontab" },
     { normalized_prefix = "/etc/cron.d/" },
+    { normalized = "/etc/cron.d" },
     { normalized_prefix = "/var/spool/cron/" },
+    { normalized = "/var/spool/cron" },
     { normalized_prefix = "~/.config/autostart/" },
+    { normalized = "~/.config/autostart" },
     { normalized_prefix = "~/.config/systemd/user/" },
+    { normalized = "~/.config/systemd/user" },
     { normalized = "~/.ssh/authorized_keys" },
     { normalized = "~/.ssh/config" },
     { normalized = "/etc/ld.so.preload" },
@@ -995,11 +1012,16 @@ targets = [
     { normalized = "~/.config/fish/config.fish" },
     { normalized = "/etc/profile" },
     { normalized_prefix = "/etc/profile.d/" },
+    { normalized = "/etc/profile.d" },
     { normalized = "/etc/crontab" },
     { normalized_prefix = "/etc/cron.d/" },
+    { normalized = "/etc/cron.d" },
     { normalized_prefix = "/var/spool/cron/" },
+    { normalized = "/var/spool/cron" },
     { normalized_prefix = "~/.config/autostart/" },
+    { normalized = "~/.config/autostart" },
     { normalized_prefix = "~/.config/systemd/user/" },
+    { normalized = "~/.config/systemd/user" },
     { normalized = "~/.ssh/authorized_keys" },
     { normalized = "~/.ssh/config" },
     { normalized = "/etc/ld.so.preload" },
@@ -1024,11 +1046,16 @@ targets = [
     { normalized = "~/.config/fish/config.fish" },
     { normalized = "/etc/profile" },
     { normalized_prefix = "/etc/profile.d/" },
+    { normalized = "/etc/profile.d" },
     { normalized = "/etc/crontab" },
     { normalized_prefix = "/etc/cron.d/" },
+    { normalized = "/etc/cron.d" },
     { normalized_prefix = "/var/spool/cron/" },
+    { normalized = "/var/spool/cron" },
     { normalized_prefix = "~/.config/autostart/" },
+    { normalized = "~/.config/autostart" },
     { normalized_prefix = "~/.config/systemd/user/" },
+    { normalized = "~/.config/systemd/user" },
     { normalized = "~/.ssh/authorized_keys" },
     { normalized = "~/.ssh/config" },
     { normalized = "/etc/ld.so.preload" },
@@ -1054,11 +1081,16 @@ targets = [
     { normalized = "~/.config/fish/config.fish" },
     { normalized = "/etc/profile" },
     { normalized_prefix = "/etc/profile.d/" },
+    { normalized = "/etc/profile.d" },
     { normalized = "/etc/crontab" },
     { normalized_prefix = "/etc/cron.d/" },
+    { normalized = "/etc/cron.d" },
     { normalized_prefix = "/var/spool/cron/" },
+    { normalized = "/var/spool/cron" },
     { normalized_prefix = "~/.config/autostart/" },
+    { normalized = "~/.config/autostart" },
     { normalized_prefix = "~/.config/systemd/user/" },
+    { normalized = "~/.config/systemd/user" },
     { normalized = "~/.ssh/authorized_keys" },
     { normalized = "~/.ssh/config" },
     { normalized = "/etc/ld.so.preload" },
@@ -1087,11 +1119,16 @@ targets = [
     { strip = "of=", normalized = "~/.config/fish/config.fish" },
     { strip = "of=", normalized = "/etc/profile" },
     { strip = "of=", normalized_prefix = "/etc/profile.d/" },
+    { strip = "of=", normalized = "/etc/profile.d" },
     { strip = "of=", normalized = "/etc/crontab" },
     { strip = "of=", normalized_prefix = "/etc/cron.d/" },
+    { strip = "of=", normalized = "/etc/cron.d" },
     { strip = "of=", normalized_prefix = "/var/spool/cron/" },
+    { strip = "of=", normalized = "/var/spool/cron" },
     { strip = "of=", normalized_prefix = "~/.config/autostart/" },
+    { strip = "of=", normalized = "~/.config/autostart" },
     { strip = "of=", normalized_prefix = "~/.config/systemd/user/" },
+    { strip = "of=", normalized = "~/.config/systemd/user" },
     { strip = "of=", normalized = "~/.ssh/authorized_keys" },
     { strip = "of=", normalized = "~/.ssh/config" },
     { strip = "of=", normalized = "/etc/ld.so.preload" },
@@ -1116,11 +1153,91 @@ targets = [
     { normalized = "~/.config/fish/config.fish" },
     { normalized = "/etc/profile" },
     { normalized_prefix = "/etc/profile.d/" },
+    { normalized = "/etc/profile.d" },
     { normalized = "/etc/crontab" },
     { normalized_prefix = "/etc/cron.d/" },
+    { normalized = "/etc/cron.d" },
     { normalized_prefix = "/var/spool/cron/" },
+    { normalized = "/var/spool/cron" },
     { normalized_prefix = "~/.config/autostart/" },
+    { normalized = "~/.config/autostart" },
     { normalized_prefix = "~/.config/systemd/user/" },
+    { normalized = "~/.config/systemd/user" },
+    { normalized = "~/.ssh/authorized_keys" },
+    { normalized = "~/.ssh/config" },
+    { normalized = "/etc/ld.so.preload" },
+]
+
+[[command]]
+id = "shell-init-unlink"
+decision = "ask"
+reason = "deleting a shell-init, cron, autostart, or persistence-critical file removes a user's or system's startup configuration"
+command = "unlink"
+targets = [
+    { normalized = "~/.bashrc" },
+    { normalized = "~/.bash_profile" },
+    { normalized = "~/.bash_login" },
+    { normalized = "~/.bash_logout" },
+    { normalized = "~/.zshrc" },
+    { normalized = "~/.zprofile" },
+    { normalized = "~/.zshenv" },
+    { normalized = "~/.zlogin" },
+    { normalized = "~/.zlogout" },
+    { normalized = "~/.profile" },
+    { normalized = "~/.config/fish/config.fish" },
+    { normalized = "/etc/profile" },
+    { normalized_prefix = "/etc/profile.d/" },
+    { normalized = "/etc/profile.d" },
+    { normalized = "/etc/crontab" },
+    { normalized_prefix = "/etc/cron.d/" },
+    { normalized = "/etc/cron.d" },
+    { normalized_prefix = "/var/spool/cron/" },
+    { normalized = "/var/spool/cron" },
+    { normalized_prefix = "~/.config/autostart/" },
+    { normalized = "~/.config/autostart" },
+    { normalized_prefix = "~/.config/systemd/user/" },
+    { normalized = "~/.config/systemd/user" },
+    { normalized = "~/.ssh/authorized_keys" },
+    { normalized = "~/.ssh/config" },
+    { normalized = "/etc/ld.so.preload" },
+]
+
+# ln replaces the target path's content just as effectively as a write
+# does — `ln -sf evil ~/.bashrc` retargets what gets sourced at shell
+# startup without ever opening the file for writing, so it needs the same
+# coverage as the write-mechanism rules above, not just the delete ones.
+# Same source/destination ambiguity as cp/mv/install above (`targets`
+# matches ANY argv token): `ln -sf ~/.bashrc /tmp/backup` (the existing
+# file as ln's source) also asks, accepted for the same reason.
+[[command]]
+id = "shell-init-ln"
+decision = "ask"
+reason = "ln replacing a shell-init, cron, autostart, or persistence-critical file plants a backdoor that survives past the current session"
+command = "ln"
+targets = [
+    { normalized = "~/.bashrc" },
+    { normalized = "~/.bash_profile" },
+    { normalized = "~/.bash_login" },
+    { normalized = "~/.bash_logout" },
+    { normalized = "~/.zshrc" },
+    { normalized = "~/.zprofile" },
+    { normalized = "~/.zshenv" },
+    { normalized = "~/.zlogin" },
+    { normalized = "~/.zlogout" },
+    { normalized = "~/.profile" },
+    { normalized = "~/.config/fish/config.fish" },
+    { normalized = "/etc/profile" },
+    { normalized_prefix = "/etc/profile.d/" },
+    { normalized = "/etc/profile.d" },
+    { normalized = "/etc/crontab" },
+    { normalized_prefix = "/etc/cron.d/" },
+    { normalized = "/etc/cron.d" },
+    { normalized_prefix = "/var/spool/cron/" },
+    { normalized = "/var/spool/cron" },
+    { normalized_prefix = "~/.config/autostart/" },
+    { normalized = "~/.config/autostart" },
+    { normalized_prefix = "~/.config/systemd/user/" },
+    { normalized = "~/.config/systemd/user" },
     { normalized = "~/.ssh/authorized_keys" },
     { normalized = "~/.ssh/config" },
     { normalized = "/etc/ld.so.preload" },
