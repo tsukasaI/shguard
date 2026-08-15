@@ -2541,6 +2541,27 @@ fn is_env_assignment_shape(token: &str) -> bool {
 /// left (`env` alone).
 #[must_use]
 pub(crate) fn effective_command(stage: &[NormalizedWord]) -> Option<(&str, &[NormalizedWord])> {
+    effective_command_excluding(stage, &[])
+}
+
+/// Same walk as [`effective_command`], except every wrapper named in
+/// `excluded` is treated as though it were not in [`TRANSPARENT_WRAPPERS`]
+/// at all: the walk stops there and reports the wrapper itself as the
+/// effective command, rather than unwrapping through it. Scoped to the one
+/// caller that needs this (`crate::gate::resolve_static_substitution_output`,
+/// issue #130 follow-up), which excludes `xargs`: unlike every other
+/// `TRANSPARENT_WRAPPERS` member, `xargs`'s output is not statically
+/// determined — it appends stdin-derived operands the resolver cannot see
+/// (`xargs echo /dev/sda` may print more than `/dev/sda`). Every other
+/// caller (pipeline-interpreter/decode-stage detection, blocklist matching,
+/// the escalation floor) must keep resolving through `xargs` as normal —
+/// dropping it from `TRANSPARENT_WRAPPERS` itself would reopen the `xargs
+/// -0 sh` sink bypass a pinned test already closes.
+#[must_use]
+pub(crate) fn effective_command_excluding<'a>(
+    stage: &'a [NormalizedWord],
+    excluded: &[&str],
+) -> Option<(&'a str, &'a [NormalizedWord])> {
     let mut rest = stage;
     loop {
         let (first, tail) = rest.split_first()?;
@@ -2548,7 +2569,7 @@ pub(crate) fn effective_command(stage: &[NormalizedWord]) -> Option<(&str, &[Nor
             return None;
         };
         let base = basename(name);
-        if TRANSPARENT_WRAPPERS.contains(&base) {
+        if TRANSPARENT_WRAPPERS.contains(&base) && !excluded.contains(&base) {
             rest = skip_wrapper_arguments(base, tail);
         } else {
             return Some((base, tail));
