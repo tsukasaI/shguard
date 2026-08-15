@@ -2576,14 +2576,11 @@ fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
         // wrapped command by the generic dash-prefix skip -- `env -u FOO
         // rm -rf /` silently resolved to `FOO`, matching no rule, even
         // though this genuinely unsets `FOO` and executes `rm -rf /` in a
-        // real shell. Verified against `man env` on macOS/FreeBSD (`-u`,
-        // `-C`, `-P`, `-S` — no long spellings; STANDARDS section lists
-        // these plus `-0`/`-v` as the complete set of non-POSIX
-        // extensions, confirming `-0`/`-i`/`-v` are genuinely boolean and
-        // there is no BSD `-a` or `-L`) and the GNU coreutils manual
-        // (`-u`/`--unset`, `-C`/`--chdir`, `-S`/`--split-string`, and
-        // GNU's own `-a`/`--argv0` — the same argv0-override flag `exec`
-        // has, issue #248). `-P` (BSD-only) and `-a`/`--argv0` (GNU-only)
+        // real shell. The list below is the union of BSD's value-takers
+        // (`-u`, `-C`, `-P`, `-S`, no long spellings) and GNU's
+        // (`-u`/`--unset`, `-C`/`--chdir`, `-S`/`--split-string`,
+        // `-a`/`--argv0`); `-0`/`-i`/`-v` are boolean on both flavors.
+        // `-P` (BSD-only) and `-a`/`--argv0` (GNU-only)
         // are listed even though the other flavor lacks them: consuming a
         // value that would error at runtime on the flavor that doesn't
         // recognise the flag is the safe, over-blocking direction, the

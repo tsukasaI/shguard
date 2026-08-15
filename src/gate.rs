@@ -6090,14 +6090,9 @@ mod tests {
 
     #[test]
     fn env_block_signal_flag_still_blocks_without_a_value_flags_entry() {
-        // Deliberately NOT added to `wrapper_value_flags`: GNU's
-        // `--default-signal`/`--ignore-signal`/`--block-signal` take an
-        // OPTIONAL value in `--flag=sig` form only, never a separated
-        // token, so `rm` here is genuinely the wrapped command in a real
-        // shell, not `--block-signal`'s value. Pinned so this stays
-        // correctly Block and nobody "completes" the table by adding
-        // these as ordinary value flags, which would wrongly consume `rm`
-        // and mistake `-rf` for the command instead.
+        // Pinned so nobody "completes" `wrapper_value_flags`'s `env` arm
+        // by adding GNU's signal flags to it — see that arm's own comment
+        // for why doing so would open a new bypass rather than close one.
         assert_decision("env --block-signal rm -rf /", Decision::Block);
     }
 
@@ -6131,6 +6126,17 @@ mod tests {
         // `su -c`'s dedicated recursion does. Confirmed present both
         // before and after this fix.
         assert_decision("env -S \"rm -rf /\" true", Decision::Allow);
+    }
+
+    #[test]
+    fn env_unset_missing_its_value_is_a_pinned_known_trade_off() {
+        // `-u` here has no variable name, so the entry consumes `rm` as
+        // its value and resolves `/` as the command -- Block before this
+        // fix, Allow after. Not a reachable weakening: real `env` rejects
+        // `-rf` as an invalid option and executes nothing. Pinned as the
+        // same accepted trade-off every `wrapper_value_flags` entry makes
+        // (`nice -n rm -rf /`).
+        assert_decision("env -u rm -rf /", Decision::Allow);
     }
 
     #[test]
