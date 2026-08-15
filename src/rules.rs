@@ -2269,10 +2269,12 @@ fn value_flag_consumed(rest_words: &[NormalizedWord], value_flags: &[ValueFlag])
 /// form `su root -c 'sh'`.
 ///
 /// What remains open: a wrapper's flag that takes a separate value token
-/// but isn't in [`wrapper_value_flags`] (e.g. `nohup`, `exec`, `stdbuf`,
-/// `setsid`, `xargs`, `pkexec`, `run0` have no entries there) is still
-/// mistaken for the wrapped command, the same way every wrapper behaved
-/// before this table existed. `su` keeps a narrower residual gap of this
+/// but isn't in [`wrapper_value_flags`] (e.g. `nohup`, `stdbuf`, `setsid`,
+/// `xargs`, `pkexec`, `run0` have no entries there — `exec`'s own `-a
+/// <name>` argv0-override flag was this same gap until issue #248) is
+/// still mistaken for the wrapped command, the same way every wrapper
+/// behaved before this table existed. `su` keeps a narrower residual gap
+/// of this
 /// same shape even though its own `-c`/`--command` flag IS now in
 /// [`wrapper_value_flags`] (issues #64/#66): [`skip_wrapper_flags`] only
 /// recognises a value flag occurring *before*
@@ -2569,6 +2571,19 @@ pub(crate) fn effective_command(stage: &[NormalizedWord]) -> Option<(&str, &[Nor
 /// lockfile slot (making the real lockfile argument the resolved command).
 fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
     match wrapper {
+        // Issue #248: bash/zsh/ksh93's `exec -a <name> cmd...` sets the
+        // exec'd process's own argv[0] to `<name>` — without this entry,
+        // the generic dash-prefix skip in `skip_wrapper_flags` consumed
+        // the bare `-a` token and mistook `<name>` (the flag's own value)
+        // for the wrapped command, so `exec -a foo rm -rf /` silently
+        // resolved to `foo`, matching no rule (`rm -rf /` genuinely runs
+        // in a real shell). No long-form spelling exists in any of these
+        // shells. dash/tcsh/csh's own `exec` builtins are flagless, so
+        // this entry is either correct or harmlessly conservative there
+        // too (consuming a value that would error at runtime anyway is
+        // the safe, over-blocking direction — the same posture this
+        // file's `busybox`/`builtin` doc comments already take).
+        "exec" => vec![ValueFlag::Short('a')],
         "nice" => vec![
             ValueFlag::Short('n'),
             ValueFlag::Long("adjustment".to_string()),

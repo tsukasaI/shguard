@@ -5920,6 +5920,38 @@ mod tests {
     }
 
     #[test]
+    fn exec_with_separated_argv0_flag_no_longer_hides_wrapped_command() {
+        // Issue #248 closed this `TRANSPARENT_WRAPPERS` known limitation:
+        // `exec`'s `wrapper_value_flags` entry now skips `-a foo`'s
+        // separated value along with the flag itself, so `foo` is no
+        // longer mistaken for the wrapped command -- `exec -a foo rm -rf
+        // /` genuinely executes `rm -rf /` in a real bash/zsh/ksh93
+        // (argv[0] presented as `foo`), and was silently Allow before
+        // this fix.
+        assert_decision("exec -a foo rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn exec_with_glued_argv0_flag_still_blocks() {
+        assert_decision("exec -afoo rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn exec_argv0_flag_in_a_non_leading_cluster_position_is_a_known_gap() {
+        // Documents a known, disclosed limitation (same shape
+        // `attached_value_flags_cluster_position_is_not_recognized`
+        // already documents for except_targets): `ValueFlag::is_bare`
+        // matches only `-a`'s standalone spelling, not a glued CLUSTER
+        // like `-cla` where `-a` isn't the leading character -- shape-based
+        // matching can't tell which position "owns" the trailing value.
+        // Pinned here so it can't silently regress worse and so a future
+        // reader sees it's a deliberate, understood trade-off rather than
+        // an oversight, not something issue #248 introduced or was meant
+        // to close.
+        assert_decision("exec -cla foo rm -rf /", Decision::Allow);
+    }
+
+    #[test]
     fn dangerous_target_position_substitution_asks_even_with_benign_inner() {
         // Issue #34: rule 3's Allow-transparency (`echo $(date)` semantics)
         // is correct for an ordinary argument, but the substitution here
