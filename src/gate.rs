@@ -4267,6 +4267,22 @@ fn evaluate_composed_cwd_redirects(
             rule.id().as_str(),
             rule.reason().as_str()
         ));
+        // Deliberately `Vec::new()` for the argv, same as
+        // `evaluate_composed_cwd`'s own reasoning against carrying a
+        // composed argv — but this construction is safe from that
+        // function's own monotonicity bug only because a matched
+        // [`RedirectRule`] is NEVER `Decision::Ask`: `UserConfig::parse`
+        // rejects `decision = "ask"` on a `[[redirect]]` entry at load time,
+        // and `embedded_redirect_rules_are_all_block_decision` pins every
+        // embedded one as `Block` too. A matched redirect rule is therefore
+        // always the terminal-worst decision `fold_worst` can produce, so
+        // this verdict's empty argv winning over a stage's real one in
+        // `evaluate_pipeline`'s `stage_argvs` can never itself cause a
+        // decode-pipe stage to go undetected the way a composed *argv*
+        // could (the bug the sibling comment above documents) — there is no
+        // stricter decision left for the missing decode-detection to have
+        // downgraded FROM. If either of those two invariants is ever
+        // relaxed, this reasoning needs re-deriving.
         let verdict = match rule.decision() {
             Decision::Block => Verdict::block(reason, Vec::new(), Some(rule.id().clone())),
             Decision::Ask => Verdict::ask(reason, Vec::new()),
