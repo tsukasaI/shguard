@@ -51,7 +51,7 @@ use serde::Deserialize;
 
 use crate::gate::{FlagScan, scan_for_flag};
 use crate::normalize::{NormalizedWord, Resolution};
-use crate::verdict::{Decision, Reason, RuleId, Verdict};
+use crate::verdict::{Decision, DenyMessage, Reason, RuleId, Verdict};
 
 // ---------------------------------------------------------------------
 // Embedded defaults
@@ -1057,6 +1057,7 @@ pub(crate) struct CommandRule {
     targets: Vec<TargetMatcher>,
     except_targets: Vec<TargetMatcher>,
     value_flags: Vec<ValueFlag>,
+    deny_message: Option<DenyMessage>,
 }
 
 impl CommandRule {
@@ -1073,6 +1074,16 @@ impl CommandRule {
     #[must_use]
     pub(crate) fn decision(&self) -> Decision {
         self.decision
+    }
+
+    /// Actionable guidance for the agent (issue #99), distinct from
+    /// [`Self::reason`] — `None` unless this rule declared `deny_message`.
+    /// Never set for an allowlist entry ([`convert_command_rule`] rejects
+    /// `deny_message` on any rule an allow-side caller converts; see
+    /// [`UserConfig::parse`]/[`Allowlist::parse`]).
+    #[must_use]
+    pub(crate) fn deny_message(&self) -> Option<&DenyMessage> {
+        self.deny_message.as_ref()
     }
 
     /// Whether `rest_words` (already resolved past this rule's command
@@ -2759,6 +2770,8 @@ struct CommandRuleDto {
     except_targets: Vec<TargetDto>,
     #[serde(default)]
     value_flags: Vec<String>,
+    #[serde(default)]
+    deny_message: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3075,6 +3088,25 @@ fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesErr
         ));
     }
 
+    // deny_message (issue #99): rejected empty the same way `reason` is —
+    // an empty string is never a meaningful value here and almost
+    // certainly a rule author's mistake. Whether this rule is even
+    // allowed to carry a deny_message (deny/ask rules may; an allow-side
+    // rule/allowlist entry may not, since it never produces a non-Allow
+    // verdict for the message to attach to) is the CALLER's job — this
+    // function converts a raw TOML entry for every caller uniformly, and
+    // has no way to know which array or file the entry came from.
+    let deny_message = match dto.deny_message {
+        Some(message) if message.trim().is_empty() => {
+            return Err(RulesError::invalid(
+                &dto.id,
+                "deny_message must not be empty",
+            ));
+        }
+        Some(message) => Some(DenyMessage::new(message)),
+        None => None,
+    };
+
     Ok(CommandRule {
         id: RuleId::new(dto.id),
         reason: Reason::new(dto.reason),
@@ -3085,6 +3117,7 @@ fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesErr
         targets,
         except_targets,
         value_flags,
+        deny_message,
     })
 }
 
@@ -3693,6 +3726,22 @@ impl Allowlist {
             .map(convert_command_rule)
             .collect::<Result<Vec<_>, _>>()?;
         reject_duplicate_ids(entries.iter().map(|r| r.id.as_str()))?;
+
+        // deny_message (issue #99) has nothing to attach to on an allowlist
+        // entry: it never produces a non-Allow verdict, so a declared
+        // deny_message would load successfully but silently do nothing —
+        // the same "catch dead configuration at load time" posture
+        // value_flags' own dead-config checks already take.
+        for entry in &entries {
+            if entry.deny_message.is_some() {
+                return Err(RulesError::invalid(
+                    entry.id.as_str(),
+                    "deny_message has no effect on an allowlist entry — it never produces a \
+                     non-Allow verdict for the message to attach to",
+                ));
+            }
+        }
+
         Ok(Self { entries })
     }
 
@@ -3875,6 +3924,16 @@ impl UserConfig {
                      wrapper name (bash, sh, env, xargs, ...) — this would suppress every \
                      recursion-derived Ask involving that name, including the substitution-\
                      depth-cap fail-closed guard's own Ask",
+                ));
+            }
+            // deny_message (issue #99) has nothing to attach to on an
+            // `allow` entry — same reasoning as Allowlist::parse's own
+            // rejection.
+            if entry.deny_message.is_some() {
+                return Err(RulesError::invalid(
+                    entry.id.as_str(),
+                    "deny_message has no effect on an `allow` entry — it never produces a \
+                     non-Allow verdict for the message to attach to",
                 ));
             }
         }
@@ -7345,6 +7404,118 @@ mod tests {
         assert_eq!(config.deny.len(), 1);
         assert_eq!(config.ask.len(), 1);
         assert_eq!(config.allow.len(), 1);
+    }
+
+    // ==== issue #99: deny_message ====
+
+    #[test]
+    fn user_config_deny_entry_parses_deny_message() {
+        let toml = r#"
+            [[deny]]
+            id = "user-deny-force-push"
+            reason = "git push --force overwrites remote history"
+            command = "git push"
+            required_flags = ["f|--force"]
+            deny_message = "use --force-with-lease instead"
+        "#;
+        let config = UserConfig::parse(toml).unwrap();
+        assert_eq!(
+            config.deny[0].deny_message().unwrap().as_str(),
+            "use --force-with-lease instead"
+        );
+    }
+
+    #[test]
+    fn user_config_ask_entry_parses_deny_message() {
+        let toml = r#"
+            [[ask]]
+            id = "user-ask-gh"
+            reason = "confirm every gh invocation"
+            command = "gh"
+            deny_message = "prefer a read-only gh subcommand"
+        "#;
+        let config = UserConfig::parse(toml).unwrap();
+        assert_eq!(
+            config.ask[0].deny_message().unwrap().as_str(),
+            "prefer a read-only gh subcommand"
+        );
+    }
+
+    #[test]
+    fn user_config_entry_without_deny_message_is_unaffected() {
+        let toml = r#"
+            [[deny]]
+            id = "user-deny-scary"
+            reason = "never run this"
+            command = "scary-tool"
+        "#;
+        let config = UserConfig::parse(toml).unwrap();
+        assert!(config.deny[0].deny_message().is_none());
+    }
+
+    #[test]
+    fn user_config_rejects_empty_deny_message() {
+        let toml = r#"
+            [[deny]]
+            id = "user-deny-scary"
+            reason = "never run this"
+            command = "scary-tool"
+            deny_message = ""
+        "#;
+        assert!(matches!(
+            UserConfig::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn user_config_rejects_deny_message_on_allow_entry() {
+        let toml = r#"
+            [[allow]]
+            id = "user-allow-ls"
+            reason = "read-only, always safe"
+            command = "ls"
+            deny_message = "no effect here"
+        "#;
+        assert!(matches!(
+            UserConfig::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn allowlist_rejects_deny_message_on_entry() {
+        let toml = r#"
+            [[entry]]
+            id = "allow-ls"
+            reason = "read-only, always safe"
+            command = "ls"
+            deny_message = "no effect here"
+        "#;
+        assert!(matches!(
+            Allowlist::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn matched_command_rule_surfaces_deny_message_in_the_verdict() {
+        let toml = r#"
+            [[command]]
+            id = "deny-force-push"
+            reason = "force push overwrites remote history"
+            command = "git push"
+            required_flags = ["f|--force"]
+            deny_message = "use --force-with-lease instead"
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        let rule = rules
+            .match_command(&argv(&["git", "push", "--force", "origin", "main"]))
+            .unwrap();
+        assert_eq!(
+            rule.deny_message().unwrap().as_str(),
+            "use --force-with-lease instead"
+        );
     }
 
     // ==== issue #98: "flag AND (target A OR target B)" composition is

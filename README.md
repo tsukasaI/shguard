@@ -212,6 +212,42 @@ gate folds the *worst* verdict across every check it runs, so a weaker
 verdict from a user pipeline rule can never suppress a Block the
 decode-fed-pipe detection independently produces for the same command.
 
+### Actionable guidance with `deny_message`
+
+`reason` explains *why* a decision was made — for a human reading the
+audit trail. An optional `deny_message` on a `[[deny]]`/`[[ask]]` entry is
+for a different audience: the *agent* that issued the command, as
+actionable guidance on what to do instead of retrying the same command:
+
+```toml
+[[deny]]
+id = "user-deny-force-push"
+reason = "git push --force overwrites remote history"
+command = "git push"
+required_flags = ["f|--force"]
+deny_message = "use `git push --force-with-lease` instead"
+```
+
+The two fields travel separately: `reason` stays in
+`permissionDecisionReason` as before; `deny_message`, when a rule declares
+one, is additionally emitted as `hookSpecificOutput.additionalContext` —
+the field Claude Code's `PreToolUse` hook contract shows to the agent
+alongside the decision, distinct from the reason a human reads in logs. A
+rule with no `deny_message` behaves exactly as before — the field is
+entirely omitted from the output, not emitted empty. `deny_message` is
+only meaningful on `[[deny]]`/`[[ask]]` entries (which can produce a
+non-Allow verdict); declaring it on an `[[allow]]` entry, or an embedded
+allowlist `[[entry]]`, is a load-time error, the same "catch dead
+configuration early" posture other fields in this schema already take.
+
+**Known limitation (issue #202):** `deny_message` is only guaranteed to
+surface for a *definite* rule match. A handful of partial-match floors
+(the except-target floor, the directory-equals-tilde floor and its
+siblings) and a nested verdict re-wrap (`bash -c 'blocked-cmd'` recursing
+into the inner command) don't yet thread a matched rule's `deny_message`
+through to their own verdict — the rule's `reason` still surfaces
+correctly on those paths, only `deny_message` is currently silent there.
+
 ### Excepting specific targets
 
 `deny`/`ask` entries can also carry `except_targets`, the opposite of
