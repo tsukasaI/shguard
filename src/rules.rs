@@ -7117,6 +7117,66 @@ mod tests {
         );
     }
 
+    // Fable review of this PR flagged this as a documented-but-untested
+    // behavior: declaring attached_value_flags is a per-rule trust
+    // decision (README's own wording) that can flip a genuine localhost
+    // target from excepted to unexcepted -- widening the candidate set
+    // widens what except_targets checks, which can loosen as well as
+    // tighten depending on the target's actual value. Pinned here so this
+    // direction is asserted, not just the tightening direction the other
+    // tests above cover.
+    #[test]
+    fn attached_value_flags_still_excepts_a_declared_flags_genuine_localhost_value() {
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "curl-non-localhost"
+            reason = "ask unless curl targets localhost"
+            decision = "ask"
+            command = "curl"
+            except_targets = [{ prefix = "http://localhost" }]
+            attached_value_flags = ["x"]
+        "#,
+        )
+        .unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "-xhttp://localhost:8080"]))
+                .is_none(),
+            "a declared attached_value_flags entry's glued value is checked against \
+             except_targets like any other candidate -- a genuine localhost value is still \
+             correctly excepted, not just a genuine evil one still correctly caught"
+        );
+    }
+
+    // Fable review of this PR flagged this as a documented-but-untested
+    // behavior: an ordinary combined short-flag cluster containing no
+    // declared attached_value_flags letter at all must not have any
+    // candidate extracted from it, the same way it wouldn't with the
+    // field entirely unset.
+    #[test]
+    fn attached_value_flags_does_not_false_positive_on_an_unrelated_cluster() {
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "curl-non-localhost"
+            reason = "ask unless curl targets localhost"
+            decision = "ask"
+            command = "curl"
+            except_targets = [{ prefix = "http://localhost" }]
+            attached_value_flags = ["x"]
+        "#,
+        )
+        .unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "-sSL", "http://localhost"]))
+                .is_none(),
+            "an ordinary combined short-flag cluster containing none of the declared \
+             attached_value_flags letters must not spuriously yield a candidate"
+        );
+    }
+
     #[test]
     fn attached_value_flags_bare_declared_flag_yields_no_candidate() {
         // A bare `-x` (nothing glued after it) must not become an empty
