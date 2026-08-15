@@ -1248,10 +1248,17 @@ fn evaluate_simple_command(
     // ordinary deny/ask blocklist match and redirect-target rules — never
     // the allowlist (module docs' cwd-context section: an allow entry
     // matching only the *composed* path must not downgrade a decision the
-    // uncomposed evaluation above already reached). Folded in via ordinary
-    // worst-wins, strictly AFTER the allowlist-downgrade/ask-floor steps
-    // above, which is what enforces that exclusion — the composed pass
-    // never runs through either of them.
+    // uncomposed evaluation above already reached). This exclusion is
+    // enforced two ways: structurally, `evaluate_composed_cwd` never
+    // receives or references an `Allowlist` at all, so it categorically
+    // cannot consult one; AND by call-site ordering — this call is placed
+    // strictly AFTER the allowlist-downgrade/ask-floor steps above and
+    // folds in via ordinary worst-wins, so even if some future change gave
+    // the composed pass its own allowlist access, this call's position is
+    // what would keep it from downgrading a decision already reached
+    // above. `allowlist_cannot_downgrade_via_composition` (this file's
+    // test module) pins that ordering — if this call is ever moved earlier
+    // in the pipeline, that test is what would catch it.
     if let CwdContext::Known(anchor) = cwd
         && let Some(composed) = evaluate_composed_cwd(
             &normalize::normalize_argv(command),
@@ -2402,10 +2409,16 @@ fn evaluate_dash_c(
 /// ~/.config/shguard && bash -c 'cp evil.toml config.toml'` must compose
 /// exactly like the non-`-c` form does. Applied uniformly to every
 /// `recurse_shell_string` caller (rule 6a's `bash -c`/`sh -c`/`zsh -c`/
-/// `dash -c`, and issues #64/#66's `flock -c`/`su -c`): all three spawn a
-/// real `$SHELL -c`-style child process that inherits the parent's cwd the
-/// same way, so there is no reason to treat them differently here even
-/// though only the `bash -c` case is this issue's own acceptance criterion.
+/// `dash -c`, and issues #64/#66's `flock -c`/`su -c`): `bash -c`/`flock
+/// -c` both spawn a real `$SHELL -c`-style child that inherits the
+/// parent's cwd exactly. `su -c` is the one imperfect fit in this group —
+/// a login invocation (`su -l`/`su - user -c '...'`) resets the child's
+/// cwd to the target user's home instead, so seeding it with the parent's
+/// composed anchor is technically wrong for that specific spelling. Still
+/// the correct default here: the composed pass this seed feeds only ever
+/// *raises* a decision (`CwdContext`'s own docs), so an inapplicable
+/// anchor can only lead to over-asking on that one narrow `su -l -c`
+/// shape, never a bypass.
 fn recurse_shell_string(
     script: &str,
     outer_argv: Vec<NormalizedWord>,
@@ -3892,6 +3905,16 @@ fn cd_directive(rest: &[NormalizedWord], env: &Env, is_pushd: bool) -> CwdOutcom
     if raw == "-" {
         return CwdOutcome::Poison;
     }
+    // `pushd +N`/`pushd -N` (a fable review of this PR caught this: without
+    // the guard, `+1`/`-1`/etc. lexically classify as an ordinary `Rel`
+    // target and get treated as a real, composable relative anchor)
+    // rotates the directory stack to an entry this module doesn't model —
+    // no directory-stack tracking here, matching the bare-`pushd`/`popd`
+    // treatment above. Checked only for `pushd`: `cd +1` is not a special
+    // form at all, just an ordinary (if unusual) relative directory name.
+    if is_pushd && is_pushd_stack_index(raw) {
+        return CwdOutcome::Poison;
+    }
     match lexical_normalize(raw) {
         PathForm::Home(_) => {
             if env.was_assigned("HOME") {
@@ -3914,6 +3937,15 @@ fn cd_directive(rest: &[NormalizedWord], env: &Env, is_pushd: bool) -> CwdOutcom
         | PathForm::DirStack
         | PathForm::Opaque => CwdOutcome::Poison,
     }
+}
+
+/// Whether `raw` is `pushd`'s directory-stack-index form: `+`/`-` followed
+/// by one or more ASCII digits and nothing else (`+1`, `-0`, `+12`) — bash's
+/// own `pushd(1)` syntax for rotating to the Nth stack entry, distinct from
+/// an ordinary relative path that merely starts with `+`/`-`.
+fn is_pushd_stack_index(raw: &str) -> bool {
+    raw.strip_prefix(['+', '-'])
+        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Resolves a [`CwdOutcome`] against `current` into the next [`CwdContext`]
@@ -3952,14 +3984,40 @@ fn resolve_cwd_outcome(current: &CwdContext, outcome: CwdOutcome) -> CwdContext 
     }
 }
 
+/// [`crate::rules::effective_command`], preceded by stripping a single
+/// leading literal `builtin` word if present.
+///
+/// `builtin` is NOT currently a [`crate::rules::TRANSPARENT_WRAPPERS`]
+/// entry — a fable security review of this PR found that gap lets
+/// `builtin <cmd>` bypass every check routed through `effective_command`,
+/// including the ordinary argv blocklist match, not just this module's own
+/// cwd tracking (filed as a separate, general security issue rather than
+/// fixed here, since widening `TRANSPARENT_WRAPPERS` itself is out of this
+/// issue's own scope and needs its own dedicated review given how broadly
+/// that constant is threaded). This local, narrower skip closes the same
+/// hole specifically for `builtin cd`/`builtin pushd`/etc. so this
+/// feature's own headline scenario isn't shipped with a known gap while
+/// the general fix is pending — it does not attempt to handle `builtin`
+/// chained with another wrapper (`sudo builtin cd`), which the eventual
+/// `TRANSPARENT_WRAPPERS` fix will cover comprehensively.
+fn cwd_effective_command(argv: &[NormalizedWord]) -> Option<(&str, &[NormalizedWord])> {
+    match argv.split_first() {
+        Some((first, rest)) if matches!(first.resolution(), Resolution::Resolved(s) if s == "builtin") => {
+            crate::rules::effective_command(rest)
+        }
+        _ => crate::rules::effective_command(argv),
+    }
+}
+
 /// Applies one simple command's cwd-changing effect (issue #103) to `cwd`,
 /// mutating it in place. A no-op for an empty argv (assignments-only/
 /// redirection-only commands touch nothing — rule 9's own axiom) or an
 /// ordinary command with no cwd-changing shape. Routes through
-/// [`crate::rules::effective_command`] (the same `TRANSPARENT_WRAPPERS`
-/// resolution every rule match already uses) so `command cd ~/x`, `sudo
-/// pushd ~/x`, etc. are recognized exactly like a bare `cd`/`pushd` would
-/// be — otherwise the whole feature would be a day-one bypass through any
+/// [`cwd_effective_command`] (the same `TRANSPARENT_WRAPPERS` resolution
+/// every rule match already uses, plus a local `builtin` skip — see that
+/// function's own docs) so `command cd ~/x`, `sudo pushd ~/x`, `builtin cd
+/// ~/x`, etc. are recognized exactly like a bare `cd`/`pushd` would be —
+/// otherwise the whole feature would be a day-one bypass through any
 /// transparent wrapper.
 ///
 /// `popd`/`source`/`.`/`eval` always poison (no directory-stack tracking,
@@ -3977,7 +4035,7 @@ fn apply_cwd_effect(cwd: &mut CwdContext, argv: &[NormalizedWord], env: &Env) {
     if argv.is_empty() {
         return;
     }
-    let Some((name, rest)) = crate::rules::effective_command(argv) else {
+    let Some((name, rest)) = cwd_effective_command(argv) else {
         *cwd = CwdContext::Poisoned;
         return;
     };
@@ -4038,7 +4096,7 @@ fn command_may_change_cwd(command: &Command) -> bool {
             if argv.is_empty() {
                 return false;
             }
-            match crate::rules::effective_command(&argv) {
+            match cwd_effective_command(&argv) {
                 None => true,
                 Some((name, _)) => {
                     matches!(name, "cd" | "pushd" | "popd" | "source" | "eval" | ".")
@@ -4125,6 +4183,21 @@ fn compose_argv_against_cwd(argv: &[NormalizedWord], anchor: &str) -> Vec<Normal
 /// anything in this function itself, since it never touches an
 /// [`Allowlist`] at all). `None` when neither the composed argv nor any
 /// composed redirect target matches anything.
+///
+/// The returned [`Verdict`] carries `argv` — the ORIGINAL, uncomposed
+/// tokens — never `composed_argv`. A fable security review of this PR
+/// caught a real monotonicity violation from an earlier version that
+/// returned the composed argv: `evaluate_pipeline` folds a stage's
+/// `Verdict::normalized_argv()` into `stage_argvs`, which
+/// `evaluate_pipeline_shape`'s `is_decode_stage` scan also reads — a
+/// composed argv there rewrites a decode command's own subcommand word
+/// (`openssl enc` → `openssl anchor/enc`), which can make a genuinely
+/// decode-fed pipe stop being *recognized* as one, collapsing what should
+/// be a Block into a plain Ask. Composition only needs to happen for RULE
+/// MATCHING (which token the rule's own `targets` sees), never for what
+/// the surrounding pipeline/redirect machinery reports as "the command
+/// that ran" — reporting the real, uncomposed argv keeps this pass's
+/// only effect confined to the decision it returns.
 fn evaluate_composed_cwd(
     argv: &[NormalizedWord],
     redirections: &[Redirection],
@@ -4147,10 +4220,8 @@ fn evaluate_composed_cwd(
             rule.reason().as_str()
         ));
         raise(match rule.decision() {
-            Decision::Block => {
-                Verdict::block(reason, composed_argv.clone(), Some(rule.id().clone()))
-            }
-            Decision::Ask => Verdict::ask(reason, composed_argv.clone()),
+            Decision::Block => Verdict::block(reason, argv.to_vec(), Some(rule.id().clone())),
+            Decision::Ask => Verdict::ask(reason, argv.to_vec()),
             Decision::Allow => unreachable!("rules never carry Decision::Allow"),
         });
     }
@@ -4161,7 +4232,7 @@ fn evaluate_composed_cwd(
             rule.id().as_str(),
             rule.reason().as_str()
         ));
-        raise(Verdict::ask(reason, composed_argv.clone()));
+        raise(Verdict::ask(reason, argv.to_vec()));
     }
     if let Some(redirect_verdict) = evaluate_composed_cwd_redirects(redirections, anchor, rules) {
         raise(redirect_verdict);
@@ -7069,6 +7140,71 @@ mod tests {
         // within the line poisons instead (the new floor fires afterward,
         // same shape as the acceptance-criterion-2 test above).
         assert_decision("HOME=/attacker/dir cd && rm config.toml", Decision::Ask);
+    }
+
+    // Regression pin for a fable security review finding on this PR: an
+    // earlier version of `evaluate_composed_cwd` returned a `Verdict`
+    // carrying the COMPOSED argv (the anchor-rewritten tokens), not the
+    // original. `evaluate_pipeline` folds a stage's own
+    // `Verdict::normalized_argv()` into `stage_argvs`, which
+    // `evaluate_pipeline_shape`'s `is_decode_stage` scan also reads — a
+    // composed `openssl` stage's own subcommand word (`enc`) got rewritten
+    // to `anchor/enc`, which no longer matches `is_decode_stage`'s exact
+    // `"enc"` check, silently un-recognising a genuine decode stage and
+    // collapsing the decode-pipe Block down to a plain Ask. This is
+    // exactly the invariant `CwdContext`'s own docs claim absolutely ("can
+    // only push toward over-asking, never toward a silent bypass") — this
+    // test is what catches a regression of it. Needs a user rule matching
+    // the COMPOSED `openssl` target specifically (not the embedded
+    // blocklist, which has no `openssl`-targeting rule under an arbitrary
+    // anchor) so the composed pass actually WINS for the decode stage
+    // itself, which is what makes its verdict's argv the one that leaks.
+    #[test]
+    fn cd_composition_does_not_leak_into_pipeline_shape_decode_detection() {
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[ask]]
+            id = "user-ask-openssl-under-x"
+            reason = "confirm openssl invocations touching ~/x"
+            command = "openssl"
+            targets = [{ normalized_prefix = "~/x/" }]
+        "#,
+        );
+        let verdict =
+            analyze_with_policy("cd ~/x && openssl enc -d payload | sh", &rules, &allowlist);
+        assert_eq!(
+            verdict.decision(),
+            Decision::Block,
+            "a same-line cd composing a decode stage's own subcommand word must never cause \
+             the decode-pipe detection to miss it -- got {:?} (reason: {:?})",
+            verdict.decision(),
+            verdict.reason().map(crate::verdict::Reason::as_str)
+        );
+    }
+
+    // Regression pin for a fable security review finding on this PR:
+    // `builtin` was not recognised as a cwd-tracking passthrough, so
+    // `builtin cd ~/.config/shguard && cp evil.toml config.toml` silently
+    // stayed Allow -- the exact self-protection scenario acceptance
+    // criterion 1 exists to catch, just spelled with `builtin` instead of
+    // `command`.
+    #[test]
+    fn builtin_cd_still_composes_and_blocks() {
+        assert_decision(
+            "builtin cd ~/.config/shguard && cp evil.toml config.toml",
+            Decision::Block,
+        );
+    }
+
+    // Regression pin for a fable security review finding on this PR:
+    // `pushd +1`/`pushd -1` (bash's directory-stack-index rotation form,
+    // not an ordinary relative path) was lexically classified as a plain
+    // `Rel` target and treated as a real, composable anchor -- silently
+    // under-protecting, since this module doesn't model the directory
+    // stack's actual contents. Must poison, the same as a bare `pushd`.
+    #[test]
+    fn pushd_stack_index_form_poisons() {
+        assert_decision("pushd +1 && rm config.toml", Decision::Ask);
     }
 
     #[test]
