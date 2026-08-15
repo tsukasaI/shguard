@@ -68,11 +68,15 @@
 //!    code, so their presence is an unconditional Ask floor. `eval` ("rule
 //!    6c", issue #120) recurses the same way rule 6a does, but word-joins
 //!    every one of its own arguments into the script first, rather than
-//!    reading a single `-c VALUE` pair. Rules 5b, 6a, and 6b all locate a
-//!    flag by scanning argv positionally ([`scan_for_flag`]); per issues
-//!    #71/#53, an `Unresolvable` word at a scanned position is treated as
-//!    "might be the flag", never as "definitely not" — fail-closed, per
-//!    plan.md §4.
+//!    reading a single `-c VALUE` pair. `awk`/`gawk`/`mawk`/`nawk` ("rule
+//!    6d", issue #195) get the same unconditional-Ask, non-introspected
+//!    posture as rule 6b, but their script has no `-c`/`-e`-style flag at
+//!    all — it's the first bare positional operand unless `-f`/`--file`
+//!    supplies it from a file instead ([`scan_for_awk_script`]). Rules 5b,
+//!    6a, and 6b all locate a flag by scanning argv positionally
+//!    ([`scan_for_flag`]); per issues #71/#53, an `Unresolvable` word at a
+//!    scanned position is treated as "might be the flag", never as
+//!    "definitely not" — fail-closed, per plan.md §4.
 //! 7. `$IFS`-derived words ("rule 7") — normalise.rs already folds against
 //!    the *default* IFS; this module adds the untrusted floor: a blocklist
 //!    hit still Blocks, but a miss is Ask, never Allow, because a same-line
@@ -1675,10 +1679,40 @@ fn evaluate_simple_command_core(
     }
 
     // Rule 6b: `python -c`/`perl -e`/`node -e` — no introspection of
-    // non-shell code, unconditional Ask floor.
-    let interpreter_code_floor = effective.is_some_and(|(name, rest_words)| {
-        inline_code_flag(name)
-            .is_some_and(|flag| scan_for_flag(rest_words, |s| s == flag).possibly_found())
+    // non-shell code, unconditional Ask floor. Rule 6d (issue #195): awk's
+    // script has no `-c`/`-e`-style flag at all — it's the first bare
+    // positional operand unless `-f`/`--file` supplies it from a file
+    // instead, so it gets its own position-aware scan
+    // ([`scan_for_awk_script`]) rather than [`inline_code_flag`]'s
+    // presence-only check, but folds into the same floor since awk isn't a
+    // shell either: its script text is not parsed here, only recognized as
+    // present. Carries its own reason string (rather than a shared `bool`)
+    // since the two shapes need different wording.
+    let interpreter_code_floor: Option<String> = effective.and_then(|(name, rest_words)| {
+        if let Some(flag) = inline_code_flag(name) {
+            scan_for_flag(rest_words, |s| s == flag)
+                .possibly_found()
+                .then(|| {
+                    "an inline code argument (`-c`/`-e`) to a non-shell interpreter cannot be \
+                     introspected"
+                        .to_string()
+                })
+        } else if AWK_INTERPRETERS.contains(&name) {
+            match scan_for_awk_script(rest_words) {
+                AwkScriptPosition::InlineScript => Some(format!(
+                    "`{name}`'s script is a bare positional argument (no `-c`/`-e`-style flag) \
+                     and cannot be introspected"
+                )),
+                AwkScriptPosition::Uncertain => Some(format!(
+                    "`{name}`'s `-f`/`--file` flag position could not be statically resolved, \
+                     so whether its script comes from a file or an inline positional argument \
+                     is unknown"
+                )),
+                AwkScriptPosition::FileFlag | AwkScriptPosition::Absent => None,
+            }
+        } else {
+            None
+        }
     });
 
     // Rule 7: any `$IFS`-derived word floors to Ask on a blocklist miss.
@@ -2243,7 +2277,7 @@ struct ExceptFloors<'a> {
 /// configured to `deny`.
 fn fold_floors(
     argv: Vec<NormalizedWord>,
-    interpreter_code_floor: bool,
+    interpreter_code_floor: Option<String>,
     ifs_floor: bool,
     escalation_floor: Option<(Decision, String)>,
     opaque_kind: Option<UnresolvableKind>,
@@ -2253,13 +2287,9 @@ fn fold_floors(
     let mut decision = Decision::Allow;
     let mut reasons: Vec<String> = Vec::new();
 
-    if interpreter_code_floor {
+    if let Some(reason) = interpreter_code_floor {
         decision = decision.max(Decision::Ask);
-        reasons.push(
-            "an inline code argument (`-c`/`-e`) to a non-shell interpreter cannot be \
-             introspected"
-                .to_string(),
-        );
+        reasons.push(reason);
     }
     if ifs_floor {
         decision = decision.max(Decision::Ask);
@@ -3927,6 +3957,103 @@ fn inline_code_flag(name: &str) -> Option<&'static str> {
     }
 }
 
+/// The `awk` family (rule 6d, issue #195): every one of these names' script
+/// argument is a bare positional operand, not a value behind a `-c`/`-e`
+/// flag — see [`scan_for_awk_script`]. Deliberately NOT added to
+/// [`crate::rules::EXTRA_PIPELINE_INTERPRETERS`]/`is_pipeline_interpreter`
+/// (rule 5b/5c's decode-pipe-into-interpreter floor): that rule is about an
+/// interpreter whose *default, flagless* invocation reads piped stdin bytes
+/// as code (`sh`, a bare `python3`) — awk's program text always comes from
+/// argv (a positional operand or `-f`'s file), never from stdin, so piping
+/// data into `awk` feeds its *records*, not its script, and isn't the same
+/// risk class.
+const AWK_INTERPRETERS: &[&str] = &["awk", "gawk", "mawk", "nawk", "original-awk"];
+
+/// Result of [`scan_for_awk_script`]: where awk's script comes from,
+/// relative to its first non-option operand. Mirrors
+/// [`DashCPosition`]'s position-aware shape, but with the flag/operand
+/// roles reversed: awk has no inline-code flag, so finding `-f`/`--file`
+/// first means the script is NOT inline (the same unfloored posture this
+/// module already gives a non-shell interpreter's script *file* argument,
+/// e.g. `python3 script.py` — [`inline_code_flag`] returns `None` for that
+/// shape too), while finding a bare operand first means it IS inline code.
+enum AwkScriptPosition {
+    /// `-f`/`--file` resolved before any operand — the script lives in a
+    /// file.
+    FileFlag,
+    /// A word before the flag/operand position could not be statically
+    /// resolved — fail closed the same way [`DashCPosition::Uncertain`]
+    /// does.
+    Uncertain,
+    /// No `-f`/`--file` before the first operand, and an operand exists —
+    /// that operand is awk's program text.
+    InlineScript,
+    /// No `-f`/`--file`, and no operand either — a malformed invocation
+    /// (real awk exits with a usage error and runs nothing).
+    Absent,
+}
+
+/// Scans `words` left-to-right for awk's `-f`/`--file` flag
+/// ([`is_awk_file_flag`]), stopping at the first token that is the flag, is
+/// unresolvable, or is a non-option operand — whichever comes first.
+/// `-v`/`-F`/`--assign`/`--field-separator` (awk's other value-taking
+/// flags) are recognized in their bare, separated-value spelling and skip
+/// that following value too, so it is never mistaken for the script
+/// operand (`awk -v x=1 -f script.awk` must still resolve to `FileFlag`,
+/// not misread `x=1` as the script); every other dash-prefixed token,
+/// including these same flags' glued/attached-value spellings
+/// (`-vx=1`/`-F,`/`--assign=x=1`), is treated as a self-contained boolean
+/// token and skipped as-is — no separate value to consume.
+fn scan_for_awk_script(words: &[NormalizedWord]) -> AwkScriptPosition {
+    let mut i = 0;
+    while i < words.len() {
+        match words[i].resolution() {
+            Resolution::Resolved(s) if s == "--" => {
+                return match words.get(i + 1).map(NormalizedWord::resolution) {
+                    Some(Resolution::Resolved(_)) => AwkScriptPosition::InlineScript,
+                    Some(Resolution::Unresolvable(_)) => AwkScriptPosition::Uncertain,
+                    None => AwkScriptPosition::Absent,
+                };
+            }
+            Resolution::Resolved(s) if is_awk_file_flag(s) => return AwkScriptPosition::FileFlag,
+            Resolution::Resolved(s) if awk_value_flag_needs_separate_arg(s) => {
+                i += 2;
+                continue;
+            }
+            Resolution::Resolved(s) if !s.starts_with('-') => {
+                return AwkScriptPosition::InlineScript;
+            }
+            Resolution::Resolved(_) => {}
+            Resolution::Unresolvable(_) => return AwkScriptPosition::Uncertain,
+        }
+        i += 1;
+    }
+    AwkScriptPosition::Absent
+}
+
+/// Whether `token` is awk's `-f`/`--file` flag, in any spelling POSIX/gawk
+/// document: the bare short form, its glued-value form (`-fFILE`, valid
+/// getopt usage since `-f` takes a required argument), and the long form's
+/// bare and `--file=FILE` attached spellings.
+fn is_awk_file_flag(token: &str) -> bool {
+    token == "-f"
+        || token == "--file"
+        || token.strip_prefix("--file=").is_some()
+        || (token.starts_with("-f") && token.len() > 2)
+}
+
+/// Whether `token` is the *bare* spelling of one of awk's other
+/// value-taking flags (`-v`/`-F`/`--assign`/`--field-separator`) — a match
+/// means the *next* word is that flag's separated value, to be skipped
+/// rather than considered as a candidate script operand. A glued/attached
+/// spelling of the same flag (`-vx=1`, `-F,`, `--assign=x=1`) is NOT
+/// matched here — it carries its own value in the same token, so
+/// [`scan_for_awk_script`]'s generic dash-prefixed-token skip already
+/// handles it correctly with no separate value to consume.
+fn awk_value_flag_needs_separate_arg(token: &str) -> bool {
+    matches!(token, "-v" | "-F" | "--assign" | "--field-separator")
+}
+
 /// Rule 5: whether `stage` is an interpreter a pipeline may terminate in.
 /// Resolved through [`crate::rules::effective_command`] (basename +
 /// transparent-wrapper skip), so a path-qualified or wrapped sink
@@ -5338,6 +5465,63 @@ mod tests {
     #[test]
     fn node_dash_e_is_ask_floor() {
         assert_decision("node -e 'require(\"fs\").rmSync(\"/\")'", Decision::Ask);
+    }
+
+    // ---- rule 6d: awk's script is a bare positional operand, not a
+    // flag value (issue #195) ----
+
+    #[test]
+    fn awk_positional_script_is_ask_floor() {
+        for command in [
+            "awk 'BEGIN{system(\"rm -rf /\")}'",
+            "gawk 'BEGIN{system(\"rm -rf /\")}'",
+            "mawk 'BEGIN{system(\"rm -rf /\")}'",
+            "nawk 'BEGIN{system(\"rm -rf /\")}'",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+    }
+
+    #[test]
+    fn awk_script_from_a_file_is_not_an_inline_code_floor() {
+        // `-f`/`--file` means the program text is in a file, so no operand
+        // is inline code -- the same unfloored posture `python3 script.py`
+        // already gets. The other value-taking flags must not have their
+        // separated value mistaken for the script operand.
+        for command in [
+            "awk -f script.awk data.txt",
+            "awk --file=script.awk data.txt",
+            "awk -fscript.awk data.txt",
+            "awk -v x=1 -f script.awk",
+            "awk -F , -f script.awk",
+        ] {
+            assert_decision(command, Decision::Allow);
+        }
+    }
+
+    #[test]
+    fn awk_ordinary_one_liner_is_ask_floor_too() {
+        // Deliberate: shguard does not introspect awk's program text, so a
+        // benign one-liner is indistinguishable from a `system()` call --
+        // exactly the posture `python3 -c 'print(1)'` already gets.
+        assert_decision("awk '{print $1}' file.txt", Decision::Ask);
+        assert_decision("awk -F, '{print}' f.csv", Decision::Ask);
+    }
+
+    #[test]
+    fn awk_double_dash_still_finds_the_script_operand() {
+        assert_decision("awk -- 'BEGIN{system(\"rm -rf /\")}'", Decision::Ask);
+    }
+
+    #[test]
+    fn awk_with_no_script_at_all_has_no_floor() {
+        // Real awk exits with a usage error and runs nothing.
+        assert_decision("awk", Decision::Allow);
+    }
+
+    #[test]
+    fn awk_unresolvable_flag_position_fails_closed() {
+        assert_decision("awk $(echo -f) script.awk", Decision::Ask);
     }
 
     #[test]
