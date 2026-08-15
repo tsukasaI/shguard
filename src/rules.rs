@@ -2329,9 +2329,27 @@ fn value_flag_consumed(rest_words: &[NormalizedWord], value_flags: &[ValueFlag])
 /// direction), never swallow a real applet name. Not itself an
 /// [`ESCALATION_VECTORS`] entry — busybox is a dispatcher, not a
 /// privilege-escalation mechanism.
+///
+/// `builtin` (issue #245) runs the next word as the shell's own builtin,
+/// bypassing any function/alias shadowing it — bash/zsh/ksh only, not
+/// POSIX and not in `dash`. Before this entry, `effective_command` stopped
+/// at the literal string `"builtin"`, matching no rule at all: not just
+/// the headline `builtin rm -rf /` (which, since `rm` isn't itself a shell
+/// builtin, actually errors in a real shell rather than running — treating
+/// it as transparent anyway is a deliberate over-approximation, the safe
+/// direction, the same posture `busybox`'s own doc above takes for a
+/// global-flag invocation), but a chain to a word that IS a builtin —
+/// `builtin command rm -rf /`, `builtin cd`, `builtin eval '...'` — which
+/// *does* execute for real and was a genuine, silent full bypass of every
+/// argv-based check in this crate. Deliberately no
+/// [`wrapper_value_flags`]/[`wrapper_positional_args`] entry: `builtin`
+/// takes no options of its own, only the builtin's own name and arguments,
+/// so it falls through to the same flagless handling `nohup`/`exec` already
+/// get. Not an [`ESCALATION_VECTORS`] entry — no privilege change, only a
+/// function/alias-shadowing bypass.
 pub(crate) const TRANSPARENT_WRAPPERS: &[&str] = &[
     "env", "command", "nohup", "nice", "exec", "stdbuf", "setsid", "sudo", "xargs", "doas", "su",
-    "pkexec", "run0", "timeout", "ionice", "flock", "chrt", "taskset", "busybox",
+    "pkexec", "run0", "timeout", "ionice", "flock", "chrt", "taskset", "busybox", "builtin",
 ];
 
 /// The subset of [`TRANSPARENT_WRAPPERS`] that escalate privileges (issues
@@ -8472,6 +8490,24 @@ mod tests {
             id = "user-allow-busybox"
             reason = "trust me"
             command = "busybox"
+        "#;
+        assert!(matches!(
+            UserConfig::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn user_config_rejects_allow_entry_matching_builtin() {
+        // Issue #245: builtin joined TRANSPARENT_WRAPPERS, so an
+        // `[[allow]] command = "builtin"` entry must be rejected the same
+        // way busybox's/env's is above — otherwise it would launder every
+        // builtin-wrapped Ask/Block floor to Allow.
+        let toml = r#"
+            [[allow]]
+            id = "user-allow-builtin"
+            reason = "trust me"
+            command = "builtin"
         "#;
         assert!(matches!(
             UserConfig::parse(toml),
