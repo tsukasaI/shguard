@@ -267,6 +267,32 @@ targets = [
     { exact = "{}" },
 ]
 
+# `-r`/`-R` is unnecessary for `rm -f {}` (no `-type f` needed either) to
+# reach the dangerous property this rule targets — every matched FILE
+# unrecoverably deleted, the same file-deletion effect `find -delete` has:
+# `find`'s own `{}` placeholder resolves to one matched path at a time, so
+# a plain-file match is fully removed by `-f` alone, and a directory match
+# simply fails `rm` without `-r` (unlike `-rf {}`, which also removes a
+# matched directory and everything under it — a strictly worse class,
+# already covered by the sibling rule above). Ordered after
+# `rm-recursive-force-dangerous-target` (first-match-wins) so `rm -rf {}`
+# keeps reporting that rule's id.
+# Deliberately targets ONLY `{}`, not the sibling rule's `/`/`~`/`/dev/`
+# set above: without `-r`, `rm -f` can never remove a directory, so
+# `rm -f /` or `rm -f ~` alone isn't the same destructive class and would
+# be a false positive here. issue #140
+[[command]]
+id = "rm-force-find-placeholder-target"
+reason = "rm -f against find's own {} placeholder removes every matched file, unrecoverably, the same effect find -delete has"
+command = "rm"
+required_flags = ["f|--force"]
+# Known gap, shared with the `-rf` rule above: `exact` matches only a token
+# that IS `{}`, but find substitutes `{}` anywhere inside a word, so
+# `-exec rm -f ./{}` still deletes every match and still Allows. Closing it
+# needs a contains-style matcher on both rules; pinned in tests/guardfall.rs
+# so it has a regression anchor. issue #140
+targets = [{ exact = "{}" }]
+
 [[command]]
 id = "find-delete"
 reason = "find with -delete removes every matched file, unrecoverably"
