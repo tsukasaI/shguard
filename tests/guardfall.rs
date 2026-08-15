@@ -147,6 +147,12 @@ fn guardfall_rm_dot_targets() {
         // issue #65: `//` lexically normalizes to the same target `/`
         // does — the old byte-exact `exact = "/"` target missed it.
         ("rm -rf //", Decision::Block),
+        // issue #206: uppercase `-R` is an equally standard recursive
+        // synonym in both GNU and BSD `rm` — the old `required_flags`
+        // only recognized lowercase `r`, so `rm -Rf` fell through to
+        // Allow.
+        ("rm -Rf /", Decision::Block),
+        ("rm -Rf ~", Decision::Block),
     ];
 
     for (command, expected) in cases {
