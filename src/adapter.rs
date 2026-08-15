@@ -263,6 +263,17 @@ mod tests {
         assert_eq!(permission_decision(&output), "ask");
     }
 
+    /// issue #138: `tool_input.command` is a JSON string, and `\u0000` is
+    /// legal JSON that decodes to a raw NUL byte — never routed through
+    /// `decode_ansi_c` at all, so this is a distinct entry point from the
+    /// `$'\0'`-escape case `normalize.rs`'s own tests cover.
+    #[test]
+    fn bash_command_with_raw_json_nul_asks() {
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"rm\u0000MID -rf /"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "ask");
+    }
+
     #[test]
     fn non_bash_tool_allows() {
         let stdin = r#"{"tool_name":"Read","tool_input":{"file_path":"/etc/passwd"}}"#;
