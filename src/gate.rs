@@ -322,8 +322,7 @@ use crate::normalize::{self, NormalizedWord, Resolution, UnresolvableKind};
 use crate::parser;
 use crate::rules::{
     Allowlist, AllowlistOutcome, CommandRule, EVAL_BUILTIN, PathForm, Rules, SHELL_INTERPRETERS,
-    WrapperChainEscalation, effective_command, is_pipeline_interpreter, lexical_normalize,
-    render_cwd_anchor,
+    WrapperChainEscalation, is_pipeline_interpreter, lexical_normalize, render_cwd_anchor,
 };
 use crate::verdict::{Decision, Reason, Verdict};
 
@@ -996,11 +995,16 @@ fn evaluate_pipeline_shape(stages: &[Vec<NormalizedWord>]) -> Option<Verdict> {
 /// Checks output/append (and, issue #75, genuine-file-write duplication)
 /// redirect targets against redirect rules. Returns the first matching
 /// rule, or `None` if no redirect target hits a rule. Only
-/// statically-resolved targets are checked; unresolvable targets fall
-/// through (no new Ask floor — the MVP scope limit), EXCEPT the one shape
+/// statically-resolved targets are checked; a target shape this function
+/// cannot prove anything about is simply left to the other checks
+/// (rule 11's own recursion into a substitution's inner-command decision,
+/// the structural gate's Ask floor for an otherwise-unresolvable word,
+/// ...) and otherwise falls through to `None` here — i.e. this resolver's
+/// own contribution is Allow, NOT a hard Ask/Block floor of its own, for
+/// anything it can't statically pin down. The one shape it does pin down
 /// [`resolved_redirect_substitution_targets`] covers (issue #130): a target
 /// that is nothing but a single `$()`/backtick substitution whose inner
-/// command is a provably deterministic output producer still gets its
+/// command is a provably-resolvable output producer still gets its
 /// resolved output checked here too. Takes `redirections` directly (rather
 /// than `&SimpleCommand`) so `evaluate_compound_command` (issue #75) can
 /// reuse it for a compound command's own attached redirects.
@@ -1031,6 +1035,21 @@ fn check_redirect_targets<'a>(
 /// including the `DuplicateOutput` fd-vs-path check, applied to the
 /// RESOLVED string instead of a normalized literal) — the two differ only
 /// in where the candidate string comes from.
+///
+/// Known residual dodges (disclosed, not fixed — all currently Allow with
+/// no regression from this function's own scope): `$(echo -e
+/// '/dev/sda\c')` and `$(echo -e '/dev/sd\x61')` (escape decoding this
+/// module deliberately never implements, per the never-guess rule above);
+/// `$(printf '/dev/sda\n')` (a literal `\` in the format string always
+/// bails resolution); `$(echo /dev/sda | cat)` and `$(echo /dev/sda &&
+/// true)` (a pipeline or `;`/`&&`/`||`/`&`-joined inner command line is
+/// entirely out of scope, above); `$(FOO=1 echo /dev/sda)` (the inner
+/// command carries its own assignment, also out of scope); `$(echo -e
+/// "/dev/sda")$(echo)` (multiple substitution pieces concatenated in one
+/// word — [`single_command_substitution_text`] only ever considers a
+/// single bare substitution). Separately, a *preceding* heredoc on the same
+/// command masks this resolver's new Block with the heredoc's own Ask
+/// floor, since that floor is evaluated first.
 fn resolved_redirect_substitution_targets(redirections: &[Redirection]) -> Vec<String> {
     let mut targets = Vec::new();
     for redir in redirections {
@@ -1043,11 +1062,30 @@ fn resolved_redirect_substitution_targets(redirections: &[Redirection]) -> Vec<S
         ) {
             continue;
         }
-        let Some(inner) = single_command_substitution_text(target) else {
+        let Some((quoted, inner)) = single_command_substitution_text(target) else {
             continue;
         };
         let Some(resolved) = resolve_static_substitution_output(inner) else {
             continue;
+        };
+        // `$()`/backtick substitution always strips every trailing newline
+        // off the inner command's output, regardless of how the outer word
+        // is quoted — this is $()'s own documented semantic, not word
+        // splitting.
+        let resolved = resolved.trim_end_matches('\n');
+        // Only an UNQUOTED redirect word undergoes bash's redirect-word
+        // splitting (man bash, REDIRECTION), which trims leading/trailing
+        // IFS whitespace the same way ordinary word splitting does (a
+        // multi-word result is instead an "ambiguous redirect" error, out
+        // of scope here). A quoted target (`"$(echo " /dev/sda")"`) is not
+        // split at all — trimming it would turn a harmless literal path
+        // like `" /dev/sda"` into a false Block.
+        let resolved = if quoted {
+            resolved.to_string()
+        } else {
+            resolved
+                .trim_matches(|c: char| matches!(c, ' ' | '\t' | '\n'))
+                .to_string()
         };
         if matches!(kind, FileRedirectionKind::DuplicateOutput) && is_fd_or_close(&resolved) {
             continue;
@@ -1060,18 +1098,22 @@ fn resolved_redirect_substitution_targets(redirections: &[Redirection]) -> Vec<S
 /// Whether `word` is, structurally, nothing but a single `$()`/backtick
 /// substitution — optionally wrapped in exactly one layer of
 /// double-quoting (`"$(...)"`) — with no other literal text mixed in.
-/// `None` for every other shape (mixed text, multiple pieces, brace
-/// alternation, ...): [`resolved_redirect_substitution_targets`] must stay
-/// scoped exactly to the shape issue #130 describes, never guess at a
-/// partial substitution buried in a larger word.
-fn single_command_substitution_text(word: &Word) -> Option<&str> {
-    let pieces: &[WordPiece] = match word.0.as_slice() {
-        [WordPiece::DoubleQuoted(inner)] => inner.as_slice(),
-        pieces => pieces,
+/// Returns whether that one optional quoting layer was present, alongside
+/// the substitution's raw inner text — [`resolved_redirect_substitution_targets`]
+/// needs the distinction to know whether the resolved value undergoes
+/// bash's redirect-word (IFS) splitting, since an unquoted and a quoted
+/// `$()` are trimmed differently. `None` for every other shape (mixed text,
+/// multiple pieces, brace alternation, ...): this must stay scoped exactly
+/// to the shape issue #130 describes, never guess at a partial substitution
+/// buried in a larger word.
+fn single_command_substitution_text(word: &Word) -> Option<(bool, &str)> {
+    let (quoted, pieces): (bool, &[WordPiece]) = match word.0.as_slice() {
+        [WordPiece::DoubleQuoted(inner)] => (true, inner.as_slice()),
+        pieces => (false, pieces),
     };
     match pieces {
         [WordPiece::CommandSubstitution(inner) | WordPiece::BackquotedSubstitution(inner)] => {
-            Some(inner.as_str())
+            Some((quoted, inner.as_str()))
         }
         _ => None,
     }
@@ -1079,7 +1121,7 @@ fn single_command_substitution_text(word: &Word) -> Option<&str> {
 
 /// Issue #130: statically resolves what `inner` (a `$()`/backtick
 /// substitution's raw, unparsed command text) would print to stdout, when
-/// and only when that is PROVABLY deterministic — never a guessed string
+/// and only when this function can pin that down with no guessed string
 /// (`src/normalize.rs`'s never-guess rule, extended here to substitution
 /// resolution). `None` covers every case this cannot prove: a pipeline or
 /// a `;`/`&&`/`||`/`&`-joined command line (more than one command could
@@ -1092,6 +1134,21 @@ fn single_command_substitution_text(word: &Word) -> Option<&str> {
 /// nested substitution appearing in one of `echo`/`printf`'s own arguments
 /// (`$(echo $(echo /dev/sda))`) — such an argument normalizes to
 /// `Unresolvable`, which the two resolvers already fail closed on.
+///
+/// NOT literally "provably deterministic", despite the resolvers' own
+/// framing: this is a static over-approximation with known gaps.
+/// `$(echo /dev/sd*)` treats `*` as a literal argument character where real
+/// bash would glob-expand it first, so the resolved string can diverge from
+/// what bash actually prints — it happens not to regress today only
+/// because `redirect-overwrite-device-or-critical-file`'s own
+/// `/dev/sd`/`/dev/nvme` targets are `normalized_prefix` matches, so a
+/// literal `"/dev/sd*"` still matches the same rule a glob-expanded
+/// `"/dev/sda"` would (Block either way, or a harmless failed write when
+/// nothing on the host matches the glob) — an exact-match redirect rule
+/// would not have this safety net. `$(xargs echo /dev/sda)` is excluded
+/// from resolving at all (`effective_command_excluding`'s `xargs`
+/// exclusion, below) precisely because xargs's real output depends on
+/// stdin-derived operands this function cannot see.
 fn resolve_static_substitution_output(inner: &str) -> Option<String> {
     let command_line = parser::parse(inner).ok()?;
     if !command_line.rest.is_empty() || !command_line.first.rest.is_empty() {
@@ -1104,7 +1161,11 @@ fn resolve_static_substitution_output(inner: &str) -> Option<String> {
         return None;
     }
     let argv = normalize::normalize_argv(command);
-    let (name, rest) = effective_command(&argv)?;
+    // `xargs` is excluded from the wrapper-transparent walk here (but
+    // nowhere else — see `effective_command_excluding`'s docs): its output
+    // is not statically determined, unlike every other TRANSPARENT_WRAPPERS
+    // member.
+    let (name, rest) = crate::rules::effective_command_excluding(&argv, &["xargs"])?;
     match name {
         "echo" => resolve_echo_output(rest),
         "printf" => resolve_printf_output(rest),
@@ -1170,8 +1231,18 @@ fn resolve_echo_output(args: &[NormalizedWord]) -> Option<String> {
 /// printing it), and the literal format contains neither `%` (a conversion
 /// directive) nor `\` (an escape sequence `printf` always interprets in
 /// its format, unlike `echo` without `-e`) — either could change the
-/// resolved string in a way this function does not implement.
+/// resolved string in a way this function does not implement. Unlike
+/// bash's builtin `echo` (which genuinely does not honor `--`), `printf`
+/// DOES treat a leading `--` as end-of-options, so one is stripped before
+/// the sole-operand check (`printf -- /dev/sda` must resolve the same as
+/// `printf /dev/sda`).
 fn resolve_printf_output(args: &[NormalizedWord]) -> Option<String> {
+    let args = match args {
+        [first, rest @ ..] if matches!(first.resolution(), Resolution::Resolved(t) if t == "--") => {
+            rest
+        }
+        _ => args,
+    };
     let [format] = args else {
         return None;
     };
@@ -7802,6 +7873,62 @@ mod tests {
     #[test]
     fn redirect_target_benign_echo_substitution_stays_allow() {
         assert_decision("echo hi > $(echo /tmp/safe)", Decision::Allow);
+    }
+
+    // ==== Issue #130 follow-up: leading IFS whitespace on an UNQUOTED
+    // substitution target, and `printf --`. ====
+
+    #[test]
+    fn redirect_target_unquoted_substitution_leading_ifs_whitespace_blocks() {
+        // Bash word-splits an UNQUOTED redirect word, stripping leading IFS
+        // whitespace before the redirect target is used — a resolved value
+        // of " /dev/sda" still writes to /dev/sda for real (man bash,
+        // REDIRECTION).
+        assert_decision("echo hi > $(echo \" /dev/sda\")", Decision::Block);
+    }
+
+    #[test]
+    fn redirect_target_quoted_substitution_leading_whitespace_stays_allow() {
+        // False-Block guard: a QUOTED redirect word is never word-split, so
+        // `"$(echo " /dev/sda")"` writes a harmless relative path literally
+        // named `" /dev/sda"` — trimming it would be a false Block.
+        assert_decision("echo hi > \"$(echo \" /dev/sda\")\"", Decision::Allow);
+    }
+
+    #[test]
+    fn redirect_target_substitution_trailing_whitespace_still_blocks() {
+        assert_decision("echo hi > $(echo \"/dev/sda \")", Decision::Block);
+    }
+
+    #[test]
+    fn redirect_target_printf_dash_dash_blocks() {
+        // Unlike bash's builtin `echo`, `printf` DOES honor `--` as
+        // end-of-options, so `printf -- /dev/sda` really does print
+        // "/dev/sda".
+        assert_decision("echo hi > $(printf -- /dev/sda)", Decision::Block);
+    }
+
+    #[test]
+    fn redirect_target_printf_dash_dash_with_directive_stays_allow() {
+        // Stripping `--` must not defeat the existing `%`/`\` fail-closed
+        // checks on the remaining format.
+        assert_decision("echo hi > $(printf -- '%s' x)", Decision::Allow);
+    }
+
+    #[test]
+    fn redirect_target_xargs_substitution_stays_allow() {
+        // `xargs` is excluded from this resolver's wrapper-transparent walk
+        // (`effective_command_excluding`): its real output depends on
+        // stdin-derived operands this function can't see, so
+        // `$(xargs echo /dev/sda)` must not be treated as though it
+        // deterministically prints "/dev/sda". Rule 11's own recursion into
+        // the inner command's RUN decision still applies separately (harmless
+        // to run), so the overall decision stays Allow — this is a scope
+        // limit, not a regression (contrast
+        // `finding2_decode_pipe_into_xargs_wrapped_sink_blocks`, which pins
+        // that `xargs` stays wrapper-transparent for the unrelated
+        // pipeline-interpreter-sink question).
+        assert_decision("echo hi > $(xargs echo /dev/sda)", Decision::Allow);
     }
 
     #[test]
