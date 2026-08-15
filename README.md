@@ -229,6 +229,12 @@ things to know before reaching for it:
   residual risk" section for the full reasoning.
 - `url_host` also works in `targets` (not just `except_targets`), with
   the same real-host-comparison semantics.
+- **It's scheme-blind.** `url_host = "localhost"` excepts `http://`,
+  `https://`, `ws://`, `wss://`, and `ftp://` targets alike — any scheme
+  where the URL Standard puts a host in the authority component — not
+  just plain HTTP(S). A rule scoped to one specific scheme still needs an
+  additional check for that (e.g. a `required_tokens`/prefix constraint
+  on the scheme itself).
 
 `except_targets` also can't see a target glued directly onto a
 single-dash flag with no `=` separator — curl's `-xhttp://evil.example.com`

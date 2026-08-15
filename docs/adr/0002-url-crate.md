@@ -50,7 +50,7 @@ extends naturally to gate any future pin bump: the `url_host` matcher's
 own regression tests (userinfo spoof, IPv6, percent-encoding, scheme-less
 input) already double as that upgrade-compatibility gate — no separate
 spike harness is needed the way ADR 0001's parser selection required one,
-since this is a single, narrow extraction (`Url::host_str()`), not a
+since this is a single, narrow extraction (`Url::host()`), not a
 whole-grammar decomposition with multiple competing crates to compare.
 
 ## Known residual risk — WHATWG vs. what `curl`/the OS resolver actually does
