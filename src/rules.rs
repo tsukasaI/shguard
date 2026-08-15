@@ -3719,10 +3719,13 @@ impl UserConfig {
     /// `escalation_floor` value (see [`parse_escalation_floor`]; only
     /// `"ask"`/`"deny"` are accepted, `"allow"` is rejected here the same
     /// as it already is for `[[allow]]` entries naming an escalation
-    /// vector). A `[[redirect]]` entry's `decision` is restricted to
-    /// `"block"`/`"ask"` by [`convert_redirect_rule`]/[`parse_decision`]
-    /// the same way an embedded-blocklist redirect entry's is — there is
-    /// no `"allow"` value to reject here, unlike the command-rule arrays.
+    /// vector). A `[[redirect]]` entry's `decision` is further restricted
+    /// to `"block"` only (not `"ask"`, unlike an embedded-blocklist
+    /// redirect entry) — see the rejection loop below for why: the
+    /// redirect check runs first-match, before any other check, so an
+    /// `Ask`-decision user rule could otherwise downgrade a stricter
+    /// embedded rule matched on a different redirect target of the same
+    /// command.
     pub(crate) fn parse(toml: &str) -> Result<Self, RulesError> {
         let dto: UserConfigFileDto = toml::from_str(toml)?;
 
