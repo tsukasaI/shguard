@@ -183,7 +183,7 @@ pub(crate) struct Pipeline {
 }
 
 /// One command in a [`Pipeline`]: an ordinary simple command, a compound
-/// command (issue #75: `for`/`while`/`until`/subshell/brace group/`if`;
+/// command (issue #75: `for`/`while`/`until`/subshell/brace group;
 /// issue #191 added `if`), a function definition (issue #75), or an
 /// extended test command (issue #191: `[[ ... ]]`).
 ///
