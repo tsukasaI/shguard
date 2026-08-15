@@ -65,11 +65,14 @@
 //!    script string, if statically resolved, recurses through the full
 //!    pipeline exactly like a substitution. `python -c`/`perl -e`/`node -e`
 //!    ("rule 6b") are not shell — this module never introspects non-shell
-//!    code, so their presence is an unconditional Ask floor. Rules 5b, 6a,
-//!    and 6b all locate a flag by scanning argv positionally
-//!    ([`scan_for_flag`]); per issues #71/#53, an `Unresolvable` word at a
-//!    scanned position is treated as "might be the flag", never as
-//!    "definitely not" — fail-closed, per plan.md §4.
+//!    code, so their presence is an unconditional Ask floor. `eval` ("rule
+//!    6c", issue #120) recurses the same way rule 6a does, but word-joins
+//!    every one of its own arguments into the script first, rather than
+//!    reading a single `-c VALUE` pair. Rules 5b, 6a, and 6b all locate a
+//!    flag by scanning argv positionally ([`scan_for_flag`]); per issues
+//!    #71/#53, an `Unresolvable` word at a scanned position is treated as
+//!    "might be the flag", never as "definitely not" — fail-closed, per
+//!    plan.md §4.
 //! 7. `$IFS`-derived words ("rule 7") — normalise.rs already folds against
 //!    the *default* IFS; this module adds the untrusted floor: a blocklist
 //!    hit still Blocks, but a miss is Ask, never Allow, because a same-line
@@ -314,7 +317,7 @@ use crate::ast::{
 use crate::normalize::{self, NormalizedWord, Resolution, UnresolvableKind};
 use crate::parser;
 use crate::rules::{
-    Allowlist, AllowlistOutcome, CommandRule, PathForm, Rules, SHELL_INTERPRETERS,
+    Allowlist, AllowlistOutcome, CommandRule, EVAL_BUILTIN, PathForm, Rules, SHELL_INTERPRETERS,
     WrapperChainEscalation, is_pipeline_interpreter, lexical_normalize, render_cwd_anchor,
 };
 use crate::verdict::{Decision, Reason, Verdict};
@@ -1518,6 +1521,18 @@ fn evaluate_simple_command_core(
         );
     }
 
+    // Rule 6c (issue #120): `eval` word-joins its own arguments into a
+    // script and recurses it the same way rule 6a does.
+    if let Some((name, rest_words)) = effective
+        && EVAL_BUILTIN.contains(&name)
+        && let Some(outcome) = evaluate_eval(&argv, rest_words, rules, allowlist, depth, cwd)
+    {
+        return apply_leftover_substitution_floor(
+            apply_escalation_floor(outcome, escalation_floor),
+            leftover_floor,
+        );
+    }
+
     // Rule 6b: `python -c`/`perl -e`/`node -e` — no introspection of
     // non-shell code, unconditional Ask floor.
     let interpreter_code_floor = effective.is_some_and(|(name, rest_words)| {
@@ -2378,6 +2393,71 @@ fn evaluate_dash_c(
             outer_argv,
         )),
     }
+}
+
+/// Rule 6c (issue #120): `eval`'s calling convention differs from `bash
+/// -c`/`sh -c` — there is no single `-c VALUE` flag+value pair to locate;
+/// EVERY one of `eval`'s own arguments is word-joined with a single space
+/// (real `eval`'s own behaviour) and the result re-parsed as a brand-new
+/// command line. `rest_words` is `effective_command`'s tokens after the
+/// resolved `eval`, so this also fires uniformly through
+/// `builtin eval ...`/`command eval ...` the same way rule 6a already does
+/// for `bash -c`.
+///
+/// An empty `rest_words` is `eval`'s own real no-op (bare `eval` runs
+/// nothing) — returns `None`, the same "not this shape" signal
+/// [`evaluate_dash_c`]'s `Absent` arm gives. Any single unresolvable
+/// argument fails the whole join closed to Ask rather than silently
+/// dropping it — the same posture `evaluate_dash_c` already takes for `sh
+/// -c "$(...)"` (its own `Resolution::Unresolvable` arm above).
+///
+/// Real `eval` first calls `no_options`/consumes a leading `--` before
+/// joining (bash's `builtins/eval.def`: `list = loptend;`) — a single
+/// literal `--` word is skipped here for the same reason, before the join,
+/// rather than treated as script content: `eval -- rm -rf /` really
+/// executes `rm -rf /` in bash, so joining it as `-- rm -rf /` (a
+/// nonexistent `--` command) would silently Allow a one-token respelling of
+/// the exact payload this rule exists to close.
+fn evaluate_eval(
+    argv: &[NormalizedWord],
+    rest_words: &[NormalizedWord],
+    rules: &Rules,
+    allowlist: &Allowlist,
+    depth: usize,
+    cwd: &CwdContext,
+) -> Option<Verdict> {
+    let rest_words = match rest_words.split_first() {
+        Some((first, tail)) if matches!(first.resolution(), Resolution::Resolved(v) if v == "--") => {
+            tail
+        }
+        _ => rest_words,
+    };
+    if rest_words.is_empty() {
+        return None;
+    }
+    let outer_argv = argv.to_vec();
+    let mut parts = Vec::with_capacity(rest_words.len());
+    for word in rest_words {
+        match word.resolution() {
+            Resolution::Resolved(value) => parts.push(value.as_str()),
+            Resolution::Unresolvable(_) => {
+                return Some(Verdict::ask(
+                    Reason::new("`eval`'s argument could not be statically resolved".to_string()),
+                    outer_argv,
+                ));
+            }
+        }
+    }
+    let script = parts.join(" ");
+    Some(recurse_shell_string(
+        &script,
+        outer_argv,
+        "`eval`'s argument",
+        depth,
+        rules,
+        allowlist,
+        cwd,
+    ))
 }
 
 /// Recurses a statically-resolved shell-command string through the full
@@ -5236,13 +5316,10 @@ mod tests {
     }
 
     // `eval` is itself a shell builtin, so `builtin eval '...'` must
-    // resolve identically to bare `eval '...'` -- eval's own argument
-    // isn't currently routed through interpreter-code recursion at all
-    // (a separate, pre-existing, disclosed gap tracked as issue #120, not
-    // something #245 introduces or should fix), so both correctly stay
-    // Allow today; the invariant this test actually pins is consistency
-    // (`builtin` must not change eval's own decision either way), not
-    // that eval itself is covered.
+    // resolve identically to bare `eval '...'` -- both now correctly Block
+    // (issue #120's own fix); the invariant this test actually pins is
+    // consistency (`builtin` must not change eval's own decision either
+    // way), not that eval itself is covered (that's `guardfall.rs`'s job).
     #[test]
     fn builtin_eval_matches_bare_eval_decision() {
         assert_eq!(

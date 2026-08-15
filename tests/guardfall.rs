@@ -202,6 +202,58 @@ fn guardfall_transparent_wrapper_cases() {
     }
 }
 
+/// Issue #120: `eval` was never routed through interpreter-code recursion
+/// at all — absent from `SHELL_INTERPRETERS`/`EXTRA_PIPELINE_INTERPRETERS`,
+/// its argument fell through to the generic, transparent argument-position
+/// substitution path instead of being recognised as a shell string to
+/// re-parse and recurse.
+#[test]
+fn guardfall_eval_cases() {
+    let cases: &[(&str, Decision)] = &[
+        // The issue's own three repros.
+        ("eval rm -rf /", Decision::Block),
+        ("eval \"rm -rf /\"", Decision::Block),
+        // `eval`'s single argument is a command substitution -- fails
+        // closed to Ask, the same posture `bash -c "$(...)"` already takes
+        // (`evaluate_dash_c`'s own `Resolution::Unresolvable` arm) rather
+        // than a silent Allow.
+        ("eval $(echo rm -rf /)", Decision::Ask),
+        // Bare `eval` (no arguments) is a real no-op -- must stay Allow.
+        ("eval", Decision::Allow),
+        // An ordinary, safe eval'd command must not be over-blocked.
+        ("eval ls", Decision::Allow),
+        ("eval \"ls -la\"", Decision::Allow),
+        // `eval eval ...` -- nested eval must compose through the same
+        // recursion-depth guard as everything else, not a second mechanism.
+        ("eval eval rm -rf /", Decision::Block),
+        // `builtin`/`command` (issue #245's TRANSPARENT_WRAPPERS entries)
+        // must resolve through to `eval` and recurse identically.
+        ("builtin eval rm -rf /", Decision::Block),
+        ("command eval rm -rf /", Decision::Block),
+        // Real `eval` consumes a single leading `--` before joining its
+        // arguments (bash's `builtins/eval.def`), so this genuinely
+        // executes `rm -rf /` -- must Block, not fall through to a
+        // nonexistent `--` command.
+        ("eval -- rm -rf /", Decision::Block),
+        // Only ONE leading `--` is consumed (matches bash's own
+        // `no_options`/`loptend` semantics) -- a second `--` stays part of
+        // the joined script and resolves to a nonexistent `--` command, so
+        // this stays Allow like any other no-op respelling.
+        ("eval -- -- rm -rf /", Decision::Allow),
+        ("eval --", Decision::Allow),
+    ];
+
+    for (command, expected) in cases {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
 /// Issue #65: self-protection's `normalized_prefix`/`normalized` targets
 /// (the literal `~/.config/shguard/` half — `src/config.rs`'s dynamically
 /// generated resolved-path half is covered separately in
