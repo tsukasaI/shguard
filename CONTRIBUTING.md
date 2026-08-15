@@ -107,6 +107,46 @@ the old byte-exact `prefix = "of=/dev/"` target missed it").
   existing pins do, so a future reader can find the "why" without having
   to re-derive it from the diff alone.
 
+## Ingesting an externally-documented bypass class
+
+Everything above is about cases *this repo's own tooling* finds (the
+differential fuzzer, `.claude/workflows/bypass-hunt.js`'s hunt/verify
+agents). A distinct, second provenance channel exists for bypass techniques
+documented *outside* shguard's own tooling — a published bypass catalog, a
+comparable tool's writeup, a CVE against a similar command-gating control —
+where the source citation is itself part of the value, not just the payload.
+
+That channel is `tests/bypass_corpus.toml` (issue #94), not
+`tests/guardfall.rs`: internally-discovered cases (this file's own fuzzer
+findings, hunt-harness findings) go in `guardfall.rs`, each citing the
+issue/PR that motivated it; externally-documented cases go in the corpus,
+each citing its outside source. `tests/bypass_corpus.rs` asserts every
+corpus entry deterministically against `shguard::analyze`, and the
+bypass-hunt hunt/verify agents read the corpus alongside `guardfall.rs`/
+`benign_corpus.rs` so a corpus-covered payload is never re-reported as new.
+
+The ingestion rule, meant to be a standing contribution path rather than a
+one-time sweep: **found a publicly documented bypass technique not already
+covered by the GuardFall catalog or an existing case? Add one `[[case]]`
+entry to `tests/bypass_corpus.toml`, citing the source** (see that file's
+own header for the exact schema — `payload`/`expected`/`source` required,
+`note` optional). Two outcomes are both valid, matching the triage split
+above:
+
+- **The payload is already handled correctly.** Add it with its actual
+  decision as `expected` — a passing corpus entry documenting that shguard's
+  existing rules already cover a real, externally-attributed bypass shape
+  is a genuine deliverable, not a no-op.
+- **The payload exposes a real gap.** Don't silently add a case pinning the
+  wrong decision, and don't fold an `src/` fix into the same change that
+  adds the corpus entry — file a separate GitHub issue for the gap (the
+  same "fix upstream first, pin the regression after" split as the fuzzer
+  workflow above), and either leave the payload out of the corpus until the
+  fix lands, or note in the PR/issue why it was logged out of scope instead
+  (e.g. it relies on session/multi-command state shguard doesn't track —
+  see issue #104 — or falls outside shguard's stated destructive/
+  self-protection scope entirely rather than being a fixable gap).
+
 ### Known-open findings from this harness's own default run
 
 Two findings are already tracked directly in `tests/fuzz_differential.rs`

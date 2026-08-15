@@ -87,9 +87,23 @@
 #   except_targets   optional list of target alternatives, same
 #                    `{ exact = "…" }` / `{ prefix = "…" }` shapes as
 #                    `targets` (never `normalized`/`normalized_prefix` —
-#                    stays literal by policy, see above) — the opposite
-#                    direction (issue #30): the
-#                    rule matches normally unless every candidate target
+#                    stays literal by policy, see above), plus an opt-in
+#                    fifth shape `{ url_host = "…" }` (issue #102): parses
+#                    the candidate as a real URL via the `url` crate
+#                    (docs/adr/0002-url-crate.md) and compares its HOST
+#                    component, not a string prefix of the raw text —
+#                    closes the userinfo-spoofing gap `exact`/`prefix`
+#                    matching can't (`http://localhost:pw@evil.example.com`
+#                    shares a string prefix with `http://localhost:` but
+#                    its real host is `evil.example.com`). Fails closed on
+#                    an unparseable candidate (never excepted) — see the
+#                    README's "Excepting specific targets" section for the
+#                    full semantics, the IPv6-bracket requirement, and why
+#                    it must REPLACE, not sit alongside, an existing
+#                    `exact`/`prefix` entry for the same host to actually
+#                    close the gap. `except_targets` is the opposite
+#                    direction from `targets` (issue #30): the rule
+#                    matches normally unless every candidate target
 #                    token (the tokens `targets` matched, or every non-flag/
 #                    `--flag=value`-value token when `targets` is empty,
 #                    narrowed further by `value_flags` below) also matches
@@ -683,3 +697,115 @@ id = "self-protect-config-rsync-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "rsync"
 targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]
+
+# Parity with the write-capable *commands* above (issue #100): a path
+# unreachable via `tee`/`cp`/... must also be unreachable via bare shell
+# redirection (`>`/`>>`) — the write mechanism shouldn't change the
+# outcome. Identical target list to the command rules above, on purpose
+# (same protected path, not a new one). The bare-directory alternative
+# matters here too, not just for commands: `> ~/.config/shguard` (no
+# trailing slash) creates a regular *file* at that path if the directory
+# doesn't exist yet, preempting config-dir creation — a genuine
+# tampering vector, not a vestigial case. The complementary resolved-path
+# half is generated dynamically alongside the [[deny]] entries in
+# src/config.rs's `self_protection_toml`, same as the command rules'
+# resolved-path half above.
+[[redirect]]
+id = "self-protect-config-redirect-tilde"
+reason = "redirecting output to shguard's own config directory must never be scripted"
+targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]
+
+# Issue #101 audit: additional write/delete-capable primitives against the
+# same config-directory target list above. Each follows the existing
+# family's shape exactly — flagless for a tool whose normal invocation is
+# always destructive to its target, flag-gated for one with a legitimate
+# read-only mode (issue #85's reasoning).
+
+[[command]]
+id = "self-protect-config-rmdir-tilde"
+reason = "deleting shguard's own config directory must never be scripted"
+command = "rmdir"
+targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]
+
+[[command]]
+id = "self-protect-config-perl-tilde"
+reason = "writing to shguard's own config directory must never be scripted"
+command = "perl"
+required_flags = ["i"]
+targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]
+
+# patch always modifies its target file (that's what patch does) — a
+# flagless invocation naming the config path is destructive-by-mere-
+# invocation, the same tier `rm`/`unlink` above are in. Known gap, not
+# closed here: `patch < diff` (no target argv, the target comes from the
+# diff's own header) is argv-invisible, same disclosure posture as the
+# curl `-xURL` gap documented in the README.
+[[command]]
+id = "self-protect-config-patch-tilde"
+reason = "patching shguard's own config directory must never be scripted"
+command = "patch"
+targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]
+
+# find itself isn't destructive — decision = "ask" rather than "block",
+# the same `tar-absolute-names-ask` precedent above: the actual danger
+# lives in what -exec/-execdir/-ok/-okdir runs against each match, which
+# is only partially visible to a command-line-only analyzer (`find -exec
+# rm {} \;` against a NON-config target is separately caught via
+# `crate::gate::scan_recursable_slots`'s recursion into the
+# rm-recursive-force-dangerous-target rule's `{}` placeholder target —
+# this rule instead catches find itself being pointed AT the config
+# directory, regardless of what -exec/-execdir/-ok/-okdir then does).
+[[command]]
+id = "self-protect-config-find-exec-tilde"
+decision = "ask"
+reason = "find against shguard's own config directory combined with -exec/-execdir/-ok/-okdir must never be scripted"
+command = "find"
+required_flags = ["-exec|-execdir|-ok|-okdir"]
+targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]
+
+# Ancestor-directory coverage (issue #101's own headline scenario):
+# deleting/renaming/syncing-over an ANCESTOR of the config directory
+# (`~/.config`, `~`) takes the config directory with it, even though
+# neither ancestor path is itself "~/.config/shguard". Deliberately
+# `decision = "ask"`, not "block", for two reasons: (1) `targets`
+# matches ANY argv token against ANY alternative, so it can't tell `mv
+# src ~` (destination, ordinary) from `mv ~ /tmp` (source, destructive)
+# apart — a flat Block would false-positive the common case; (2) per
+# docs/threat-model.md's own enforcement matrix, Ask is sufficient to
+# stop a SCRIPTED self-disable (a human sees a real prompt in every
+# permission mode measured there), which is the property self-protection
+# actually needs. Scoped to the flags that make each command
+# recursively/destructively touch its target — a flagless `rm ~`
+# (no -r) can't remove a non-empty directory at all, and a flagless
+# `rsync src ~` is additive, not destructive.
+#
+# MUST stay ordered after `rm-recursive-force-dangerous-target` above
+# (first-match-wins within this file): that rule already Blocks
+# `rm -rf ~`/`rm -rf /` outright, and an ancestor Ask rule appearing
+# EARLIER in this file would downgrade it to Ask instead — regression-
+# tested by `guardfall_rm_dot_targets`-adjacent cases in
+# tests/guardfall.rs asserting `rm -rf ~` still Blocks.
+[[command]]
+id = "self-protect-config-ancestor-rm-tilde"
+decision = "ask"
+reason = "deleting an ancestor directory of shguard's own config directory must never be scripted"
+command = "rm"
+required_flags = ["r|R|--recursive"]
+targets = [{ normalized = "~/.config" }, { normalized = "~" }]
+
+[[command]]
+id = "self-protect-config-ancestor-mv-tilde"
+decision = "ask"
+reason = "renaming an ancestor directory of shguard's own config directory must never be scripted"
+command = "mv"
+targets = [{ normalized = "~/.config" }, { normalized = "~" }]
+
+[[command]]
+id = "self-protect-config-ancestor-rsync-tilde"
+decision = "ask"
+reason = "rsync --delete over an ancestor directory of shguard's own config directory must never be scripted"
+command = "rsync"
+required_flags = [
+    "--delete|--delete-before|--delete-during|--delete-after|--delete-excluded|--delete-delay",
+]
+targets = [{ normalized = "~/.config" }, { normalized = "~" }]
