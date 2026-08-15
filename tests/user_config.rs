@@ -1275,3 +1275,36 @@ fn user_config_rule_without_deny_message_omits_additional_context() {
             .is_none()
     );
 }
+
+// Regression pin (fable review of #201): a [[ask]] rule's deny_message was
+// silently dropped -- apply_ask_floor (src/gate.rs) is a THIRD
+// CommandRule-matched Verdict construction site, distinct from the two
+// exact-blocklist-match sites, and had no with_deny_message call. Per the
+// Claude Code hook doc, permissionDecisionReason is shown to the user but
+// NOT the agent for an "ask" decision -- additionalContext is the only
+// channel that reaches the agent on this path at all, so this silent drop
+// meant [[ask]] + deny_message delivered zero guidance despite loading
+// and documenting successfully.
+#[test]
+fn user_config_ask_rule_deny_message_surfaces_as_additional_context() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[ask]]
+        id = "user-ask-mytool"
+        reason = "confirm every mytool invocation"
+        command = "mytool"
+        deny_message = "prefer mytool --dry-run"
+    "#,
+    );
+    let output = run_hook(
+        &bash_command("mytool run"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "ask");
+    assert_eq!(
+        output["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap(),
+        "prefer mytool --dry-run"
+    );
+}

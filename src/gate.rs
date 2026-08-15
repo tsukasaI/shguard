@@ -926,7 +926,8 @@ fn apply_ask_floor(verdict: Verdict, ask_match: Option<&CommandRule>) -> Verdict
                 rule.reason().as_str()
             )),
             verdict.normalized_argv().to_vec(),
-        ),
+        )
+        .with_deny_message(rule.deny_message().cloned()),
         _ => verdict,
     }
 }
