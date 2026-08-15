@@ -346,6 +346,63 @@ fn guardfall_find_exec_bare_interpreter_cases() {
     }
 }
 
+/// Issue #140: `find -exec rm -f {}`/`... {} +` was recursed into
+/// `rm-recursive-force-dangerous-target`, but that rule requires BOTH
+/// `-r` and `-f`, so the `-r`-less shape slipped through even though it
+/// deletes every matched file just as unrecoverably as `find -delete`
+/// does (`-r` is never needed for `rm -f` against find's own `{}`
+/// placeholder: a plain-file match is removed by `-f` alone, and a
+/// directory match simply fails without `-r`). Covers the new
+/// `rm-force-find-placeholder-target` rule plus, deliberately, the
+/// everyday benign-looking idiom (`find . -name '*.tmp' -exec rm -f {}
+/// +`) Blocking too — that mirrors `find -delete`'s own long-standing,
+/// root-independent Block (pinned below), not a new false positive.
+#[test]
+fn guardfall_find_exec_rm_force_placeholder_cases() {
+    let cases: &[(&str, Decision)] = &[
+        // The issue's own repros.
+        (r"find /x -type f -exec rm -rf {} +", Decision::Block), // already covered pre-#140, control
+        (r"find /x -type f -exec rm -f {} +", Decision::Block),
+        (r"find /x -exec rm -f {} +", Decision::Block),
+        // Everyday benign-looking idiom, both terminator spellings —
+        // Block, matching `find -delete`'s existing precedent (pinned
+        // right below) for the same "delete every match, regardless of
+        // root" effect.
+        (r"find . -name '*.tmp' -exec rm -f {} +", Decision::Block),
+        (r"find . -name '*.tmp' -exec rm -f {} \;", Decision::Block),
+        (r"find . -name '*.tmp' -delete", Decision::Block), // the precedent itself, unaffected by this fix
+        // `-execdir`/`-ok`/`-okdir` share the same `RECURSABLE_SLOTS`
+        // shape as `-exec` — must Block identically.
+        (r"find /x -execdir rm -f {} +", Decision::Block),
+        (r"find /x -ok rm -f {} +", Decision::Block),
+        (r"find /x -okdir rm -f {} +", Decision::Block),
+        // `--force` long spelling.
+        (r"find /x -exec rm --force {} +", Decision::Block),
+        // Dangerous search roots still Block too (via the same `{}`-target
+        // match, independent of the root itself).
+        (r"find / -exec rm -f {} +", Decision::Block),
+        (r"find ~ -exec rm -f {} +", Decision::Block),
+        (r"find /dev -exec rm -f {} +", Decision::Block),
+        // Direct (non-`find`) `rm -f {}` also Blocks — consistent with the
+        // existing `{}`-target treatment in `rm-recursive-force-dangerous-target`.
+        ("rm -f {}", Decision::Block),
+        // Controls: out of this issue's scope, unchanged.
+        (r"find /x -exec rm -r {} +", Decision::Allow), // -r alone (no -f) matches neither rule, unaffected by this fix
+        ("find -delete", Decision::Block),              // unaffected by this fix
+        ("rm -f file", Decision::Allow),                // plain rm, no placeholder target
+    ];
+
+    for (command, expected) in cases {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
 /// Issue #65: self-protection's `normalized_prefix`/`normalized` targets
 /// (the literal `~/.config/shguard/` half — `src/config.rs`'s dynamically
 /// generated resolved-path half is covered separately in
