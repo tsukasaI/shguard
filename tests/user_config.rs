@@ -446,6 +446,80 @@ fn except_targets_boundary_anchoring_rejects_lookalike_hosts() {
     }
 }
 
+// issue #102: the opt-in `url_host` matcher parses the candidate as a
+// real URL and compares its HOST component, not a string prefix — the
+// userinfo-embedded-before-@ shape (`http://localhost:pw@evil.example.com`)
+// shares a string prefix with `http://localhost:` but its real host is
+// `evil.example.com`, which a string-prefix rule (the default,
+// non-opt-in matcher) can be fooled by while `url_host` correctly is not.
+fn curl_url_host_except_config() -> &'static str {
+    r#"
+        [[ask]]
+        id = "user-ask-curl-non-localhost"
+        reason = "confirm before curl makes an outbound request to a non-localhost target"
+        command = "curl"
+        except_targets = [{ url_host = "localhost" }]
+    "#
+}
+
+#[test]
+fn except_targets_url_host_rejects_userinfo_spoofed_host() {
+    let (_dir, config_path) = write_config(curl_url_host_except_config());
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+
+    let output = run_hook(
+        &bash_command("curl http://localhost:pw@evil.example.com"),
+        &envs,
+    );
+    assert_eq!(
+        permission_decision(&output),
+        "ask",
+        "url_host must reject the userinfo-spoofed target -- the real host is \
+         evil.example.com, not localhost"
+    );
+}
+
+#[test]
+fn except_targets_url_host_still_excepts_a_genuine_localhost_target() {
+    let (_dir, config_path) = write_config(curl_url_host_except_config());
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+
+    for local_url in ["http://localhost:8080/api", "http://localhost/x"] {
+        let output = run_hook(&bash_command(&format!("curl {local_url}")), &envs);
+        assert_eq!(
+            permission_decision(&output),
+            "allow",
+            "curl to {local_url} should be excepted -- its real host is localhost"
+        );
+    }
+
+    let output = run_hook(&bash_command("curl https://evil.example.com"), &envs);
+    assert_eq!(permission_decision(&output), "ask");
+}
+
+// Default (non-opt-in) exact/prefix except_targets behavior must be
+// completely unaffected by url_host's existence -- confirms adding the
+// new matcher variant didn't change any existing config's semantics.
+#[test]
+fn except_targets_default_string_matching_is_unaffected_by_url_host() {
+    let (_dir, config_path) = write_config(curl_localhost_except_config());
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+
+    let output = run_hook(&bash_command("curl http://localhost:8080/api"), &envs);
+    assert_eq!(permission_decision(&output), "allow");
+
+    // The pre-existing, disclosed limitation of the DEFAULT string-based
+    // matcher (not url_host) must still hold unchanged -- this config
+    // uses exact/prefix, not url_host, so the userinfo spoof still slips
+    // through here; that's the whole reason url_host exists as an
+    // opt-in alternative, not a change to the default.
+    let output = run_hook(
+        &bash_command("curl http://localhost:pw@evil.example.com"),
+        &envs,
+    );
+    assert_eq!(permission_decision(&output), "allow");
+}
+
 // Regression: a dangerous target passed as a `--flag=value` token's
 // attached value must still be checked against except_targets — an
 // earlier implementation filtered out every `-`-prefixed token wholesale
@@ -1251,4 +1325,82 @@ fn user_config_pipeline_rule_blocks_a_declared_shape() {
     // An unrelated pipeline shape must not be swept up by the new rule.
     let output = run_hook(&bash_command("curl http://x/data.json | jq ."), &envs);
     assert_eq!(permission_decision(&output), "allow");
+}
+
+// #40: `command_prefix` matches on `starts_with`, so a prefix rule aimed at
+// `git` also catches an unrelated tool that happens to share the prefix,
+// like `gitleaks`. This is the documented footgun, not a bug -- the fix is
+// to prefer exact `command` (the next test) or the ask+allow recipe below.
+#[test]
+fn command_prefix_deny_also_catches_an_unrelated_prefix_sharing_tool() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[deny]]
+        id = "user-deny-git-prefix"
+        reason = "block all git invocations"
+        command_prefix = "git"
+    "#,
+    );
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+
+    let output = run_hook(&bash_command("gitleaks detect --source ."), &envs);
+    assert_eq!(permission_decision(&output), "deny");
+    assert!(permission_reason(&output).contains("user-deny-git-prefix"));
+}
+
+// Same scenario as above, but scoped with exact `command` instead of
+// `command_prefix` -- the recommended recipe from the README's "Keeping
+// secrets scanners runnable" section. The unrelated tool is unaffected.
+#[test]
+fn exact_command_deny_does_not_catch_an_unrelated_prefix_sharing_tool() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[deny]]
+        id = "user-deny-git-exact"
+        reason = "block all git invocations"
+        command = "git"
+    "#,
+    );
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+
+    let output = run_hook(&bash_command("gitleaks detect --source ."), &envs);
+    assert_eq!(permission_decision(&output), "allow");
+
+    let output = run_hook(&bash_command("git status"), &envs);
+    assert_eq!(permission_decision(&output), "deny");
+    assert!(permission_reason(&output).contains("user-deny-git-exact"));
+}
+
+// #40: the ask+allow recipe -- a broad `[[deny]]` with `decision = "ask"`
+// produces a structural Ask that a narrow `[[allow]]` naming the scanner
+// invocation exactly can downgrade back to Allow, letting the scanner run
+// without weakening the deny rule for anything else.
+#[test]
+fn ask_decision_deny_plus_narrow_allow_rescues_a_secrets_scanner_invocation() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[deny]]
+        id = "user-gate-trufflehog"
+        reason = "confirm every trufflehog invocation"
+        decision = "ask"
+        command_prefix = "trufflehog"
+
+        [[allow]]
+        id = "user-allow-trufflehog-filesystem"
+        reason = "scanning .env in the local filesystem is its normal job"
+        command = "trufflehog filesystem .env"
+    "#,
+    );
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+
+    let output = run_hook(&bash_command("trufflehog filesystem .env"), &envs);
+    assert_eq!(permission_decision(&output), "allow");
+    assert!(permission_reason(&output).contains("user-allow-trufflehog-filesystem"));
+
+    let output = run_hook(
+        &bash_command("trufflehog git https://example.com/evil"),
+        &envs,
+    );
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(permission_reason(&output).contains("user-gate-trufflehog"));
 }

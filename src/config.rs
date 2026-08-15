@@ -45,9 +45,18 @@
 //! # Self-protecting the config file
 //!
 //! [`self_protection_toml`] generates `[[deny]]` rules, at load time,
-//! targeting the config directory for common write-capable commands
-//! (`tee`, `cp`, `mv`, `install`, `sed -i`, `dd`'s `of=<path>` shape,
-//! `rsync`) —
+//! targeting the config directory for the full audited set of write/
+//! delete-capable primitives (issue #101): `tee`, `cp`, `mv`, `install`,
+//! `sed -i`, `dd`'s `of=<path>` shape, `rsync`, `rmdir`, `perl -i`,
+//! `patch`, and `find` combined with `-exec`/`-execdir`/`-ok`/`-okdir`
+//! (the last as `decision = "ask"`, not `"block"` — the danger lives in
+//! what `find` invokes, only partially visible to a command-line-only
+//! analyzer). [`ancestor_rules_toml`] adds a second, `decision = "ask"`
+//! family covering `rm -r`/`mv`/`rsync --delete` against an ANCESTOR of
+//! the config directory (`~/.config`, `~`, and their resolved
+//! equivalents) — deleting or renaming an ancestor takes the config
+//! directory with it even though the ancestor path itself never appears
+//! in the direct-target list above —
 //! the one place this crate builds a rule's TOML text in code rather than
 //! reading it from a file, because the directory is only known once
 //! `$HOME`/`$XDG_CONFIG_HOME` are read for *this* invocation; the
@@ -415,6 +424,7 @@ fn self_protection_directories(path: &Path) -> Result<Vec<(String, PathBuf)>, Co
 /// into one rule set without an id collision.
 fn self_protection_toml(config_dir: &str, suffix: &str) -> String {
     let quoted_dir = toml_quote(config_dir);
+    let ancestor_rules = ancestor_rules_toml(config_dir, suffix);
     format!(
         r#"
 [[deny]]
@@ -477,6 +487,98 @@ id = "shguard-self-protect-config-rsync-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "rsync"
 targets = [{{ normalized_prefix = {quoted_dir} }}]
+
+[[deny]]
+id = "shguard-self-protect-config-rmdir-{suffix}"
+reason = "deleting shguard's own config directory must never be scripted"
+command = "rmdir"
+targets = [{{ normalized_prefix = {quoted_dir} }}]
+
+[[deny]]
+id = "shguard-self-protect-config-perl-{suffix}"
+reason = "writing to shguard's own config directory must never be scripted"
+command = "perl"
+required_flags = ["i"]
+targets = [{{ normalized_prefix = {quoted_dir} }}]
+
+[[deny]]
+id = "shguard-self-protect-config-patch-{suffix}"
+reason = "patching shguard's own config directory must never be scripted"
+command = "patch"
+targets = [{{ normalized_prefix = {quoted_dir} }}]
+
+[[deny]]
+id = "shguard-self-protect-config-find-exec-{suffix}"
+decision = "ask"
+reason = "find against shguard's own config directory combined with -exec/-execdir/-ok/-okdir must never be scripted"
+command = "find"
+required_flags = ["-exec|-execdir|-ok|-okdir"]
+targets = [{{ normalized_prefix = {quoted_dir} }}]
+{ancestor_rules}"#
+    )
+}
+
+/// The ancestor-directory rule blocks for `config_dir` (issue #101's
+/// ancestor-coverage half — see the sibling static rules in
+/// `rules/blocklist.toml` for the full reasoning: `decision = "ask"`
+/// because `targets` can't distinguish source/destination position, and
+/// flag-scoped to the recursively-destructive form of each command).
+/// Every proper ancestor of `config_dir` UP TO BUT EXCLUDING the
+/// filesystem root — `/Users/foo/.config/shguard` yields
+/// `/Users/foo/.config` and `/Users/foo` (and `/Users`, and so on up),
+/// never bare `/` (that's the existing global `rm-recursive-force-
+/// dangerous-target` rule's territory, and an over-broad target here
+/// would make every one of these ancestor rules fire on essentially any
+/// `rm -r`/`mv`/`rsync --delete` invocation touching the filesystem
+/// root). Returns an empty string — omitting the ancestor rules
+/// entirely for this `config_dir` — when there are no proper ancestors
+/// short of root (e.g. `SHGUARD_CONFIG=/foo/config.toml`): an ancestor
+/// rule with an EMPTY `targets` list would mean "no target constraint"
+/// per this crate's own schema (`rules/blocklist.toml`'s own schema
+/// comment), silently turning "ask near the config directory" into "ask
+/// on every matching command anywhere" — the opposite of this rule's
+/// intent.
+fn ancestor_rules_toml(config_dir: &str, suffix: &str) -> String {
+    let ancestors: Vec<String> = Path::new(config_dir)
+        .ancestors()
+        .skip(1)
+        .filter(|p| p.parent().is_some())
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    if ancestors.is_empty() {
+        return String::new();
+    }
+    let targets = ancestors
+        .iter()
+        .map(|a| format!("{{ normalized = {} }}", toml_quote(a)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        r#"
+[[deny]]
+id = "shguard-self-protect-config-ancestor-rm-{suffix}"
+decision = "ask"
+reason = "deleting an ancestor directory of shguard's own config directory must never be scripted"
+command = "rm"
+required_flags = ["r|R|--recursive"]
+targets = [{targets}]
+
+[[deny]]
+id = "shguard-self-protect-config-ancestor-mv-{suffix}"
+decision = "ask"
+reason = "renaming an ancestor directory of shguard's own config directory must never be scripted"
+command = "mv"
+targets = [{targets}]
+
+[[deny]]
+id = "shguard-self-protect-config-ancestor-rsync-{suffix}"
+decision = "ask"
+reason = "rsync --delete over an ancestor directory of shguard's own config directory must never be scripted"
+command = "rsync"
+required_flags = [
+    "--delete|--delete-before|--delete-during|--delete-after|--delete-excluded|--delete-delay",
+]
+targets = [{targets}]
 "#
     )
 }
@@ -494,6 +596,7 @@ fn toml_quote(value: &str) -> String {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::verdict::Decision;
     use tempfile::tempdir;
 
     #[test]
@@ -634,6 +737,163 @@ mod tests {
             "/home/user/.config/shguard/"
         ]));
         assert!(!matches(&["cp", "a.txt", "b.txt"]));
+    }
+
+    // ==== issue #101 audit: additional primitives + ancestor coverage ====
+
+    #[test]
+    fn self_protection_rules_match_newly_audited_write_commands_under_config_dir() {
+        use crate::normalize::NormalizedWord;
+
+        let toml = self_protection_toml("/home/user/.config/shguard", "literal");
+        let user_config = UserConfig::parse(&toml).unwrap();
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let (rules, _) = merge_user_config(blocklist, allowlist, user_config).unwrap();
+
+        let matches = |argv: &[&str]| {
+            let words: Vec<NormalizedWord> =
+                argv.iter().map(|w| NormalizedWord::resolved(*w)).collect();
+            rules.match_command(&words).is_some()
+        };
+
+        assert!(matches(&["rmdir", "/home/user/.config/shguard"]));
+        assert!(matches(&[
+            "perl",
+            "-i",
+            "-pe",
+            "s/a/b/",
+            "/home/user/.config/shguard/config.toml"
+        ]));
+        // perl without -i prints to stdout rather than writing in place.
+        assert!(!matches(&[
+            "perl",
+            "-pe",
+            "s/a/b/",
+            "/home/user/.config/shguard/config.toml"
+        ]));
+        assert!(matches(&[
+            "patch",
+            "/home/user/.config/shguard/config.toml",
+            "p.diff"
+        ]));
+        assert!(matches(&[
+            "find",
+            "/home/user/.config/shguard",
+            "-exec",
+            "rm",
+            "{}",
+            ";"
+        ]));
+        // find without -exec/-execdir/-ok/-okdir is a read, not a write.
+        assert!(!matches(&[
+            "find",
+            "/home/user/.config/shguard",
+            "-name",
+            "config.toml"
+        ]));
+    }
+
+    #[test]
+    fn self_protection_ancestor_rules_match_resolved_ancestors() {
+        use crate::normalize::NormalizedWord;
+
+        let toml = self_protection_toml("/home/user/.config/shguard", "literal");
+        let user_config = UserConfig::parse(&toml).unwrap();
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let (rules, _) = merge_user_config(blocklist, allowlist, user_config).unwrap();
+
+        let match_decision = |argv: &[&str]| {
+            let words: Vec<NormalizedWord> =
+                argv.iter().map(|w| NormalizedWord::resolved(*w)).collect();
+            rules
+                .match_command(&words)
+                .map(crate::rules::CommandRule::decision)
+        };
+
+        assert_eq!(
+            match_decision(&["rm", "-r", "/home/user/.config"]),
+            Some(Decision::Ask)
+        );
+        assert_eq!(
+            match_decision(&["rm", "-r", "/home/user"]),
+            Some(Decision::Ask)
+        );
+        assert_eq!(
+            match_decision(&["mv", "/home/user/.config", "/tmp/x"]),
+            Some(Decision::Ask)
+        );
+        assert_eq!(
+            match_decision(&["rsync", "-a", "--delete", "/tmp/x/", "/home/user/.config/"]),
+            Some(Decision::Ask)
+        );
+
+        // False-positive guards: an unrelated ancestor-shaped operation
+        // must stay untouched.
+        assert_eq!(match_decision(&["cp", "notes.txt", "/home/user"]), None);
+        assert_eq!(
+            match_decision(&["rsync", "-a", "./src/", "/home/user/.config/other/"]),
+            None
+        );
+        assert_eq!(
+            match_decision(&["mv", "/home/user/.config/other-app", "/tmp/backup"]),
+            None
+        );
+    }
+
+    // Guards issue #101's own ordering trap: an ancestor Ask rule must
+    // never precede (and thereby shadow) the global rm-recursive-force
+    // Block rule within rules/blocklist.toml -- first-match-wins within
+    // one file. `rm -rf ~`/`rm -rf /` must still Block, not downgrade to
+    // Ask, with the ancestor rules present.
+    #[test]
+    fn ancestor_rules_do_not_shadow_the_global_rm_recursive_force_block_rule() {
+        use crate::normalize::NormalizedWord;
+
+        let rules = Rules::embedded().unwrap();
+        let words: Vec<NormalizedWord> = ["rm", "-rf", "~"]
+            .iter()
+            .map(|w| NormalizedWord::resolved(*w))
+            .collect();
+        assert_eq!(
+            rules
+                .match_command(&words)
+                .map(crate::rules::CommandRule::decision),
+            Some(Decision::Block)
+        );
+    }
+
+    #[test]
+    fn self_protection_toml_omits_ancestor_rules_when_config_dir_has_no_proper_ancestor_short_of_root()
+     {
+        // SHGUARD_CONFIG=/foo/config.toml: config_dir = "/foo", whose only
+        // ancestor is "/" itself, filtered out (issue #101's own
+        // over-broad-empty-targets trap: an ancestor rule with an EMPTY
+        // targets list would mean "no target constraint" per this
+        // crate's schema, silently matching almost any rm -r/mv/rsync
+        // --delete invocation).
+        let toml = self_protection_toml("/foo", "literal");
+        assert!(
+            !toml.contains("ancestor"),
+            "no ancestor rules should be generated when config_dir has no proper ancestor \
+             short of root: {toml}"
+        );
+        // The generated TOML must still parse and merge cleanly -- this
+        // is the actual behavioral guarantee, not just the string check
+        // above.
+        let user_config = UserConfig::parse(&toml).unwrap();
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let (rules, _) = merge_user_config(blocklist, allowlist, user_config).unwrap();
+        // An unrelated mv/rsync --delete invocation must stay untouched --
+        // proof there's no accidental "no target constraint" rule lurking.
+        use crate::normalize::NormalizedWord;
+        let words: Vec<NormalizedWord> = ["mv", "/some/other/dir", "/tmp/x"]
+            .iter()
+            .map(|w| NormalizedWord::resolved(*w))
+            .collect();
+        assert!(rules.match_command(&words).is_none());
     }
 
     #[test]
