@@ -2269,10 +2269,12 @@ fn value_flag_consumed(rest_words: &[NormalizedWord], value_flags: &[ValueFlag])
 /// form `su root -c 'sh'`.
 ///
 /// What remains open: a wrapper's flag that takes a separate value token
-/// but isn't in [`wrapper_value_flags`] (e.g. `nohup`, `exec`, `stdbuf`,
-/// `setsid`, `xargs`, `pkexec`, `run0` have no entries there) is still
-/// mistaken for the wrapped command, the same way every wrapper behaved
-/// before this table existed. `su` keeps a narrower residual gap of this
+/// but isn't in [`wrapper_value_flags`] (e.g. `nohup`, `stdbuf`, `setsid`,
+/// `xargs`, `pkexec`, `run0` have no entries there — `exec`'s own `-a
+/// <name>` argv0-override flag was this same gap until issue #248) is
+/// still mistaken for the wrapped command, the same way every wrapper
+/// behaved before this table existed. `su` keeps a narrower residual gap
+/// of this
 /// same shape even though its own `-c`/`--command` flag IS now in
 /// [`wrapper_value_flags`] (issues #64/#66): [`skip_wrapper_flags`] only
 /// recognises a value flag occurring *before*
@@ -2569,6 +2571,19 @@ pub(crate) fn effective_command(stage: &[NormalizedWord]) -> Option<(&str, &[Nor
 /// lockfile slot (making the real lockfile argument the resolved command).
 fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
     match wrapper {
+        // Issue #248: bash/zsh/ksh93's `exec -a <name> cmd...` sets the
+        // exec'd process's own argv[0] to `<name>` — without this entry,
+        // the generic dash-prefix skip in `skip_wrapper_flags` consumed
+        // the bare `-a` token and mistook `<name>` (the flag's own value)
+        // for the wrapped command, so `exec -a foo rm -rf /` silently
+        // resolved to `foo`, matching no rule (`rm -rf /` genuinely runs
+        // in a real shell). No long-form spelling exists in any of these
+        // shells. dash/tcsh/csh's own `exec` builtins are flagless, so
+        // this entry is either correct or harmlessly conservative there
+        // too (consuming a value that would error at runtime anyway is
+        // the safe, over-blocking direction — the same posture this
+        // file's `busybox`/`builtin` doc comments already take).
+        "exec" => vec![ValueFlag::Short('a')],
         "nice" => vec![
             ValueFlag::Short('n'),
             ValueFlag::Long("adjustment".to_string()),
@@ -2679,7 +2694,50 @@ fn skip_wrapper_flags(wrapper: &str, argv: &[NormalizedWord]) -> usize {
         let Resolution::Resolved(token) = argv[idx].resolution() else {
             break;
         };
-        if value_flags.iter().any(|vf| vf.is_bare(token)) {
+        // Issue #248 follow-up (fable review of PR #249): `exec`'s own
+        // `-a <name>` value flag clusters trivially with its two boolean
+        // flags (`-c`, `-l`) — `exec -la foo cmd`/`exec -ca foo cmd`/`exec
+        // -cla foo cmd` are all ordinary, easily-typed spellings, not
+        // exotic ones, and each genuinely sets argv0 to `foo` and runs
+        // `cmd` in a real shell. `ValueFlag::is_bare` above only matches
+        // `-a`'s standalone spelling, so a cluster falls through to the
+        // generic dash-skip below, which skips only the cluster token
+        // itself and then wrongly resolves `foo` (the flag's own value)
+        // as the wrapped command — the same live-bypass shape the bare
+        // `-a` case had before this file's `wrapper_value_flags` entry
+        // for `exec` was added. Unlike the general cluster-position
+        // problem this file discloses elsewhere (which real getopt
+        // emulation would be needed to solve correctly for an arbitrary
+        // wrapper), `exec`'s own option surface is tiny and fully known
+        // (`c`/`l`/`a`, and `a` is its ONLY value-taker) — so a
+        // conservative, exec-specific rule is both cheap and provably
+        // correct here, matching real getopt-cluster semantics: once the
+        // FIRST `a` in the cluster is reached, everything remaining in
+        // that same token is `a`'s own glued value — so the value comes
+        // from the NEXT token only when nothing remains after that first
+        // `a`, i.e. the first `a` sits at the cluster's own last
+        // position. `-la foo` (first `a` trailing) takes `foo` from the
+        // next token; `-afoo` (first `a` leading, with `foo` glued right
+        // after it in the SAME token) takes `foo` from within that same
+        // token and must NOT also consume the next token.
+        //
+        // A fable review of an earlier version of this check
+        // (`rest.ends_with('a')`, testing the TOKEN's last character
+        // rather than the FIRST `a`'s position) caught a real regression
+        // this distinction guards against: `-ajava`/`-aa`/`-acuda` all
+        // end in the letter `a` too, but that trailing `a` is part of the
+        // GLUED VALUE ("java"/"a"/"cuda"), not a second flag character —
+        // `ends_with('a')` misidentified these as "value comes from the
+        // next token" and wrongly consumed the real wrapped command
+        // (`rm -rf /`'s own `rm`) as if it were `a`'s separated value,
+        // silently re-opening the exact under-blocking bypass this whole
+        // fix exists to close. `find('a') == len - 1` (the first `a`,
+        // not any `a`) is the getopt-correct test.
+        let exec_trailing_a_cluster = wrapper == "exec"
+            && token.strip_prefix('-').is_some_and(|rest| {
+                rest.len() > 1 && !rest.starts_with('-') && rest.find('a') == Some(rest.len() - 1)
+            });
+        if value_flags.iter().any(|vf| vf.is_bare(token)) || exec_trailing_a_cluster {
             // The flag token itself is always consumed; its separated
             // value is consumed too only when resolved: advancing past an
             // unresolvable value unconditionally would let `nice -n $X

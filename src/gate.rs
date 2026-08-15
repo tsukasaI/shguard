@@ -5920,6 +5920,97 @@ mod tests {
     }
 
     #[test]
+    fn exec_with_separated_argv0_flag_no_longer_hides_wrapped_command() {
+        // Issue #248 closed this `TRANSPARENT_WRAPPERS` known limitation:
+        // `exec`'s `wrapper_value_flags` entry now skips `-a foo`'s
+        // separated value along with the flag itself, so `foo` is no
+        // longer mistaken for the wrapped command -- `exec -a foo rm -rf
+        // /` genuinely executes `rm -rf /` in a real bash/zsh/ksh93
+        // (argv[0] presented as `foo`), and was silently Allow before
+        // this fix.
+        assert_decision("exec -a foo rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn exec_with_glued_argv0_flag_still_blocks() {
+        assert_decision("exec -afoo rm -rf /", Decision::Block);
+    }
+
+    // A fable review of PR #249 found these three cluster spellings are
+    // NOT exotic -- `exec`'s only other flags (`-c`/`-l`) are boolean and
+    // cluster naturally with `-a`, so `-la`/`-ca`/`-cla` are ordinary,
+    // easily-typed ways to spell "override argv0", each genuinely
+    // executing `rm -rf /` in a real shell before this fix. Unlike the
+    // general cluster-position limitation this file discloses elsewhere
+    // (e.g. `attached_value_flags_cluster_position_is_not_recognized` for
+    // except_targets, which needs real getopt emulation to close
+    // correctly for an arbitrary wrapper), `exec`'s entire option surface
+    // is tiny and fully known -- `a` is its only value-taking flag, full
+    // stop -- so `skip_wrapper_flags` treats ANY dash-cluster containing
+    // `a`, in any position, as consuming the next token too. This is
+    // exec-specific and does not generalize to other wrappers.
+    #[test]
+    fn exec_dash_la_cluster_still_blocks() {
+        assert_decision("exec -la foo rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn exec_dash_ca_cluster_still_blocks() {
+        assert_decision("exec -ca foo rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn exec_dash_cla_cluster_still_blocks() {
+        assert_decision("exec -cla foo rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn exec_dash_c_alone_without_a_still_resolves_normally() {
+        // No over-blocking regression: a cluster/flag that does NOT
+        // contain `a` must not trigger the new value-consuming behavior --
+        // `-c` alone is exec's boolean "clear environment" flag, no value
+        // to skip.
+        assert_decision("exec -c rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn exec_dash_al_glued_value_correctly_stays_allow() {
+        // `-al` (a NOT trailing, followed by more characters glued in the
+        // SAME token) sets argv0 to the glued remainder "l" -- real getopt
+        // cluster semantics: once `a` is reached, everything left in that
+        // token is its value, full stop. So the real wrapped command is
+        // the NEXT token, `foo` -- `rm`/`-rf`/`/` are just `foo`'s own
+        // arguments, never executed as a command at all. This must NOT
+        // trigger the new value-consuming skip (that would wrongly treat
+        // `foo`, the real wrapped command, as `a`'s value instead, over-
+        // blocking a case that doesn't run `rm -rf /` in any real shell).
+        assert_decision("exec -al foo rm -rf /", Decision::Allow);
+    }
+
+    // Regression pin for a fable review finding: a first attempt at the
+    // cluster fix above tested `rest.ends_with('a')` (the TOKEN's last
+    // character) instead of "the FIRST `a`'s position is the cluster's
+    // last position" -- a glued value that itself ends in the letter `a`
+    // ("java", "cuda", a second "a") satisfies `ends_with('a')` too, even
+    // though that trailing `a` is part of the VALUE, not a second flag
+    // character, wrongly re-consuming the real wrapped command (`rm`) as
+    // if it were `-a`'s own separated value. `-ajava`/`-acuda` are
+    // ordinary argv0 renames (any process name ending in `a`); `-aa` is
+    // the trivial adversarial spelling.
+    #[test]
+    fn exec_dash_a_glued_value_ending_in_a_still_blocks() {
+        assert_decision("exec -ajava rm -rf /", Decision::Block);
+        assert_decision("exec -acuda rm -rf /", Decision::Block);
+        assert_decision("exec -aa rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn exec_boolean_cluster_prefix_with_glued_value_ending_in_a_still_blocks() {
+        assert_decision("exec -caa rm -rf /", Decision::Block);
+        assert_decision("exec -claa rm -rf /", Decision::Block);
+    }
+
+    #[test]
     fn dangerous_target_position_substitution_asks_even_with_benign_inner() {
         // Issue #34: rule 3's Allow-transparency (`echo $(date)` semantics)
         // is correct for an ordinary argument, but the substitution here
