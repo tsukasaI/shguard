@@ -12,8 +12,11 @@
 //!
 //! # Verified stdin/stdout schema
 //!
-//! Re-verified against code.claude.com/docs/en/hooks on 2026-07-19 (plan.md
-//! §0.2's "adapter issue re-fetches the doc before implementation"):
+//! Re-verified against code.claude.com/docs/en/hooks on 2026-08-15 (plan.md
+//! §0.2's "adapter issue re-fetches the doc before implementation") —
+//! `PreToolUse`'s valid `permissionDecision` values are still
+//! `"allow"`/`"deny"`/`"ask"` as of this date, and `additionalContext` is a
+//! newly-added field (issue #99) this re-verification confirmed:
 //!
 //! - **stdin**: a JSON object. `tool_name: string`; when `tool_name ==
 //!   "Bash"`, `tool_input.command: string` holds the raw shell command
@@ -25,12 +28,17 @@
 //!     "hookSpecificOutput": {
 //!       "hookEventName": "PreToolUse",
 //!       "permissionDecision": "allow" | "deny" | "ask",
-//!       "permissionDecisionReason": "…"
+//!       "permissionDecisionReason": "…",
+//!       "additionalContext": "…"
 //!     }
 //!   }
 //!   ```
 //!   `permissionDecision` maps directly from [`crate::verdict::Decision`]:
 //!   `Allow` → `"allow"`, `Ask` → `"ask"`, `Block` → `"deny"`.
+//!   `additionalContext` is omitted entirely (not emitted as `null`/`""`)
+//!   unless the matched rule declared a `deny_message` (issue #99,
+//!   `crate::verdict::Verdict::deny_message`) — it carries guidance for the
+//!   *agent*, distinct from `permissionDecisionReason`'s "why" explanation.
 //!
 //! # Fail-closed posture
 //!
@@ -89,22 +97,38 @@ impl From<Decision> for PermissionDecision {
     }
 }
 
-fn output_json(decision: PermissionDecision, reason: &str) -> Value {
-    serde_json::json!({
+/// `additional_context`, when present, is guidance for the *agent* that
+/// issued the command (issue #99's `deny_message`) — a matched rule's own
+/// actionable suggestion, distinct from `reason`'s "why" (see
+/// [`crate::verdict::DenyMessage`]'s own docs). Emitted as
+/// `hookSpecificOutput.additionalContext`, a field Claude Code's
+/// `PreToolUse` hook contract shows to the agent alongside
+/// `permissionDecisionReason` (this module's verified-schema doc).
+fn output_json(
+    decision: PermissionDecision,
+    reason: &str,
+    additional_context: Option<&str>,
+) -> Value {
+    let mut output = serde_json::json!({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": decision.as_str(),
             "permissionDecisionReason": reason,
         }
-    })
+    });
+    if let Some(context) = additional_context {
+        output["hookSpecificOutput"]["additionalContext"] = Value::String(context.to_string());
+    }
+    output
 }
 
 /// The fail-closed `ask` output, for I/O failures the composition root
 /// encounters before it even has stdin text to hand to [`handle`] (e.g. a
-/// stdin read error).
+/// stdin read error). Never carries `additionalContext` — there is no
+/// matched rule to have declared one.
 #[must_use]
 pub fn fail_closed(reason: &str) -> Value {
-    output_json(PermissionDecision::Ask, reason)
+    output_json(PermissionDecision::Ask, reason, None)
 }
 
 /// Parses `stdin` and pulls out the Bash command to analyse, if any — the
@@ -152,6 +176,7 @@ fn respond(stdin: &str, analyze: impl FnOnce(&str) -> crate::verdict::Verdict) -
             return output_json(
                 PermissionDecision::Allow,
                 "shguard only analyses commands run through the Bash tool",
+                None,
             );
         }
         Err(fail_closed_output) => return fail_closed_output,
@@ -162,8 +187,11 @@ fn respond(stdin: &str, analyze: impl FnOnce(&str) -> crate::verdict::Verdict) -
     let reason = verdict
         .reason()
         .map_or("shguard: command cleared all checks", |r| r.as_str());
+    let additional_context = verdict
+        .deny_message()
+        .map(crate::verdict::DenyMessage::as_str);
 
-    output_json(decision, reason)
+    output_json(decision, reason, additional_context)
 }
 
 /// Reads and analyses one Claude Code PreToolUse stdin payload against the
@@ -317,5 +345,60 @@ mod tests {
         let stdin = r#"{"tool_name":"Read","tool_input":{"file_path":"/etc/passwd"}}"#;
         let output = handle_with_policy(stdin, &policy);
         assert_eq!(permission_decision(&output), "allow");
+    }
+
+    // ==== issue #99: additionalContext ====
+
+    #[test]
+    fn handle_with_policy_deny_message_surfaces_as_additional_context() {
+        let blocklist = crate::rules::Rules::embedded().unwrap();
+        let allowlist = crate::rules::Allowlist::embedded().unwrap();
+        // A command name with no embedded blocklist rule of its own -- the
+        // embedded blocklist's own git-push-force rule would otherwise
+        // match `git push --force` first (command_rules is appended-to,
+        // never prepended-to, same first-match-wins ordering issue #97's
+        // pipeline_rules append guarantees for pipelines) and shadow this
+        // user rule's deny_message before it's ever reached.
+        let user_config = crate::rules::UserConfig::parse(
+            r#"
+            [[deny]]
+            id = "user-deny-mytool-force"
+            reason = "mytool --force is destructive"
+            command = "mytool"
+            required_flags = ["f|--force"]
+            deny_message = "use --force-with-lease instead"
+        "#,
+        )
+        .unwrap();
+        let (rules, allowlist) =
+            crate::rules::merge_user_config(blocklist, allowlist, user_config).unwrap();
+        let policy = crate::config::Policy { rules, allowlist };
+
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"mytool --force"}}"#;
+        let output = handle_with_policy(stdin, &policy);
+        assert_eq!(permission_decision(&output), "deny");
+        assert_eq!(
+            output["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap(),
+            "use --force-with-lease instead"
+        );
+        // permissionDecisionReason is unaffected — the two fields stay distinct.
+        assert!(permission_reason(&output).contains("user-deny-mytool-force"));
+        assert_ne!(permission_reason(&output), "use --force-with-lease instead");
+    }
+
+    #[test]
+    fn bash_block_command_without_deny_message_omits_additional_context_entirely() {
+        // A matched rule with no deny_message must not emit
+        // additionalContext at all -- not as null, not as an empty string.
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"rm -rf /"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "deny");
+        assert!(
+            output["hookSpecificOutput"]
+                .get("additionalContext")
+                .is_none()
+        );
     }
 }
