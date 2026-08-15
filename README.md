@@ -112,6 +112,63 @@ optionally narrowed further with `required_flags`/`targets`, the same
 matcher shape `rules/blocklist.toml` itself uses (see that file's own
 schema comments).
 
+### Composing conditions: AND/OR without a separate syntax
+
+`required_flags`/`targets` already compose as a real boolean expression,
+not a bare AND across opaque fields — no separate `any_of`/`all_of`
+grouping syntax is needed for the common compound shapes:
+
+- **Within one `required_flags` entry, `|` is OR.** `"f|--force"` means
+  "the short spelling OR the long spelling", so a rule can't be dodged by
+  swapping one flag spelling for the other.
+- **Across `required_flags` entries, and against `required_tokens`, it's
+  AND.** Every entry in the list must be satisfied — `required_tokens`
+  specifically as an ordered leading-positional match, not mere presence
+  anywhere in argv, but still a conjunction with everything else.
+- **Across `targets` alternatives, it's OR.** The rule fires if *any* argv
+  token matches *any* one of the listed targets — so `required_flags`
+  (AND-of-ORs) combined with `targets` (OR) already expresses "flag AND
+  (target A OR target B)":
+
+  ```toml
+  [[deny]]
+  id = "user-deny-protected-branch-force-push"
+  reason = "force push to a protected branch"
+  command = "git push"
+  required_flags = ["f|--force"]
+  targets = [{ exact = "main" }, { exact = "master" }]
+  ```
+
+  `git push --force origin main` and `git push --force origin master` are
+  both denied; `git push --force origin feature` and a plain `git push
+  origin main` (no `--force`) are both untouched by this rule.
+- **Across separate `[[deny]]`/`[[ask]]`/`[[allow]]` entries, it's OR.**
+  The rule set as a whole is a disjunction — "any of N independent
+  condition-sets" is N separate entries, not a single rule needing its
+  own top-level OR primitive.
+
+Two caveats on the example above, not fixed by this section — narrowing
+the gap, not eliminating it, the same posture `except_targets`' own docs
+below take:
+
+- The embedded blocklist already denies **every** `git push --force`
+  regardless of branch (`rules/blocklist.toml`'s `git-push-force` rule) —
+  the example above illustrates the composition syntax, it is not itself
+  what protects `main`/`master` from a force push; that protection already
+  exists unconditionally.
+- `{ exact = "main" }` matches the branch name as a bare positional
+  argument; it does not parse a git refspec, so `git push --force origin
+  main:main`, `git push --force origin HEAD:main`, or `git push --force
+  origin refs/heads/main` are not recognised as targeting `main` by this
+  matcher shape. Widening this to cover refspec forms is a separate,
+  git-specific concern, not part of `targets`' general boolean composition.
+
+The one shape genuinely not expressible today is AND *between* two
+`targets` alternatives within a single rule ("some token matches X AND some
+other token matches Y") — `targets` only ever ORs. No rule in the embedded
+blocklist needs that shape; if one arises, it's a scoped follow-up, not
+something to design speculatively ahead of a concrete need.
+
 ### Actionable guidance with `deny_message`
 
 `reason` explains *why* a decision was made — for a human reading the
@@ -205,6 +262,72 @@ closes both; it's still not a full URL parse (a colon-anchored prefix
 still matches userinfo-with-password forms like
 `http://localhost:pw@evil.example.com`, and query strings aren't handled
 either), so treat this as narrowing the gap, not eliminating it.
+
+### Opt-in real URL parsing: `url_host`
+
+The gaps above are all instances of one root cause: `exact`/`prefix`
+compare raw string text, not a parsed URL's *host* component. For a rule
+author who wants that gap fully closed rather than narrowed, `targets`/
+`except_targets` accept a fifth, opt-in shape — `{ url_host = "…" }`
+(issue #102) — that parses the candidate as a real URL (via the
+[`url`](https://crates.io/crates/url) crate, the same WHATWG-standard
+parser browsers use — see `docs/adr/0002-url-crate.md`) and compares its
+actual host, not any string prefix of the raw text:
+
+```toml
+[[ask]]
+id = "curl-non-localhost"
+reason = "confirm before curl makes an outbound request to a non-localhost target"
+command = "curl"
+except_targets = [{ url_host = "localhost" }]
+```
+
+With this rule, `curl http://localhost:pw@evil.example.com` correctly
+**asks** — the real host is `evil.example.com`, not `localhost` — closing
+the userinfo-spoofing gap the string-prefix example above discloses as
+unclosed. `curl http://localhost:8080/api` still correctly **allows**.
+
+This is opt-in and stays that way — the default `exact`/`prefix` matching
+above is unchanged for any config that doesn't use `url_host`. A few
+things to know before reaching for it:
+
+- **It must REPLACE the `exact`/`prefix` entries for the same host, not
+  sit alongside them.** `except_targets` alternatives are OR'd — if a rule
+  keeps `{ prefix = "http://localhost:" }` *and* adds
+  `{ url_host = "localhost" }`, the userinfo-spoofed URL still matches the
+  retained prefix entry and the rule gains no protection at all. Migrating
+  to `url_host` means removing the string-based alternatives for that
+  host, not adding to them.
+- **An unparseable candidate fails closed**: if a candidate target token
+  doesn't parse as a URL at all, `url_host` never matches it — the
+  exception doesn't apply and the rule still fires. There is no fallback
+  to string matching for that token.
+- **A scheme-less token doesn't except.** `localhost:8080` (no `http://`)
+  parses with `localhost` as the *scheme*, not the host, so a
+  `url_host = "localhost"` rule doesn't except it — it asks, same as
+  today's default matching would for that shape. Resist the urge to
+  "fix" this with `{ prefix = "localhost:" }` alongside it: that
+  reopens the exact userinfo-spoof shape this feature exists to close
+  (`localhost:pw@evil.example.com` matches that prefix too).
+- **IPv6 hosts need brackets in the config value**: `{ url_host = "[::1]"
+  }`, not `{ url_host = "::1" }` — the bare form is rejected as an invalid
+  domain name at load time. This matches how the host appears inside a
+  URL's own authority component (`http://[::1]:8080/`).
+- **Known residual risk, narrowing not eliminating** (same posture as the
+  string-matching gaps above): the `url` crate's WHATWG parsing can
+  diverge from what `curl`/other tools actually do with the same text in
+  rare cases (backslash handling in particular) — a candidate containing
+  a backslash is rejected outright, before parsing, specifically to close
+  that known differential. See `docs/adr/0002-url-crate.md`'s "Known
+  residual risk" section for the full reasoning.
+- `url_host` also works in `targets` (not just `except_targets`), with
+  the same real-host-comparison semantics.
+- **It's scheme-blind.** `url_host = "localhost"` excepts `http://`,
+  `https://`, `ws://`, `wss://`, and `ftp://` targets alike — any scheme
+  where the URL Standard puts a host in the authority component — not
+  just plain HTTP(S). A rule scoped to one specific scheme still needs an
+  additional check for that (e.g. a `required_tokens`/prefix constraint
+  on the scheme itself).
 
 `except_targets` also can't see a target glued directly onto a
 single-dash flag with no `=` separator — curl's `-xhttp://evil.example.com`
@@ -330,6 +453,34 @@ entry with `decision = "ask"`, for instance) — it can **never** downgrade a
 `Block`, from the embedded blocklist or from your own `deny` entries. This
 mirrors Claude Code's own `permissions.{deny,ask,allow}` model.
 
+### Keeping secrets scanners runnable
+
+Secrets-scanning tools (secretlint, detect-secrets, gitleaks, trufflehog)
+routinely read files that look like secrets as their normal job. A broad
+`[[deny]]` rule protecting those same paths has no allow-side rescue for
+them by design: per the precedence rule above, `[[ask]]`-table entries and
+block-decision `[[deny]]` entries can never be downgraded by an
+`[[allow]]` entry. The fix is to shape the deny rule itself, not to look
+for an escape hatch:
+
+- **Prefer an exact `command` (or the multi-word sugar) over
+  `command_prefix`.** `command_prefix` matches on `starts_with`, so
+  `command_prefix = "git"` also matches `gitleaks` — a broad prefix rule
+  meant for `git` silently swallows an unrelated tool that happens to
+  share the prefix.
+- **If the deny genuinely needs to be broad, set `decision = "ask"` on it
+  and add a narrow `[[allow]]` pinning the scanner's leading subcommand
+  words.** A `[[deny]]` entry with `decision = "ask"` produces a
+  structural `Ask`, which — unlike a block-decision deny — a matching
+  `[[allow]]` entry can downgrade back to `Allow`. This is the one
+  allow-side rescue the precedence model permits, and it's the correct
+  tool for this case. As with any multi-word `command` sugar (see above),
+  the allow matches the pinned leading words plus *any* trailing flags or
+  extra positionals — it is not an exact-invocation match, so keep it as
+  tight as the leading words allow.
+- For target-shaped carve-outs (e.g. exempting one path rather than one
+  command), see `except_targets` instead.
+
 ### Escalation floor
 
 Any command wrapped by `sudo`, `doas`, `su`, `pkexec`, or `run0` — anywhere
@@ -367,10 +518,32 @@ is not an error: that's the ordinary zero-config case.
 ### Protecting the config file itself
 
 shguard automatically denies `tee`/`cp`/`mv`/`install`/`sed -i`
-(or `--in-place`)/`dd of=`/`rm`/`unlink`/`ln`/`rsync` writes targeting its own
-resolved config path, and the literal `~/.config/shguard/` token for any
-user — an agent shouldn't be able to edit its own guardrails via a shell
-command. This is a partial mitigation, not a complete one:
+(or `--in-place`)/`dd of=`/`rm`/`unlink`/`ln`/`rsync`/`rmdir`/`perl -i`/
+`patch` writes targeting its own resolved config path, and the literal
+`~/.config/shguard/` token for any user — an agent shouldn't be able to
+edit its own guardrails via a shell command. `find` combined with
+`-exec`/`-execdir`/`-ok`/`-okdir` against the config path asks rather
+than denies, since what the invoked action actually does is only
+partially visible to a command-line-only analyzer. `truncate` and
+`shred` are covered too, but *globally* (any target, not just the config
+path) rather than via this config-specific list — stronger coverage,
+not a gap (issue #101). Every command in this list matches a file
+*under* the config directory and the bare directory path with no
+trailing slash alike (issue #22/#28 item 2).
+
+Separately, `rm -r`/`mv`/`rsync --delete` against an *ancestor* of the
+config directory (`~/.config`, `~`, and their resolved equivalents) asks
+— deleting or renaming an ancestor takes the config directory with it,
+even though the ancestor path never appears in the direct-target list
+above (issue #101). This is `ask`, not `deny`: unlike a direct hit on the
+config path itself, `targets` matching can't tell `mv src ~` (an
+ordinary, non-destructive destination) apart from `mv ~ /tmp` (the same
+shape, genuinely destructive) — only the recursively-destructive form of
+each command is covered (a flagless `rm ~` can't remove a non-empty
+directory at all; a flagless `rsync src ~` is additive, not
+destructive).
+
+This is a partial mitigation, not a complete one:
 
 - A redirection target that is itself a `$()`/backtick substitution has its
   *inner command* checked (issue #51) — but the target *path* it resolves to
@@ -380,14 +553,10 @@ command. This is a partial mitigation, not a complete one:
 - A relative path after `cd`-ing into the config directory (`cd
   ~/.config/shguard && cp evil.toml config.toml`) is not caught — shguard
   never resolves argv tokens against the process's working directory.
-- Other write-capable tools (`truncate`, `shred`, …) are not
-  enumerated in this list at all.
-- `cp`/`install`/`tee`/`dd`/`sed` match a file *under* the config
-  directory, but not the bare directory path with no trailing slash
-  (`rm`/`unlink`/`ln`/`mv` do cover this).
-- Deleting or moving a *parent* of the config directory (e.g. `rm -rf
-  ~/.config`) is not caught — self-protection rules only match
-  `~/.config/shguard` and paths under it, not any of its ancestors.
+- `patch < diff` (the target file named only inside the diff's own
+  header, not as an argv token) is not caught — the same argv-visibility
+  limit the curl `-xURL` short-proxy-flag gap documents elsewhere in this
+  README.
 
 ### What's not configurable (yet)
 
