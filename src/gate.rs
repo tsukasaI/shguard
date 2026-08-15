@@ -5936,19 +5936,55 @@ mod tests {
         assert_decision("exec -afoo rm -rf /", Decision::Block);
     }
 
+    // A fable review of PR #249 found these three cluster spellings are
+    // NOT exotic -- `exec`'s only other flags (`-c`/`-l`) are boolean and
+    // cluster naturally with `-a`, so `-la`/`-ca`/`-cla` are ordinary,
+    // easily-typed ways to spell "override argv0", each genuinely
+    // executing `rm -rf /` in a real shell before this fix. Unlike the
+    // general cluster-position limitation this file discloses elsewhere
+    // (e.g. `attached_value_flags_cluster_position_is_not_recognized` for
+    // except_targets, which needs real getopt emulation to close
+    // correctly for an arbitrary wrapper), `exec`'s entire option surface
+    // is tiny and fully known -- `a` is its only value-taking flag, full
+    // stop -- so `skip_wrapper_flags` treats ANY dash-cluster containing
+    // `a`, in any position, as consuming the next token too. This is
+    // exec-specific and does not generalize to other wrappers.
     #[test]
-    fn exec_argv0_flag_in_a_non_leading_cluster_position_is_a_known_gap() {
-        // Documents a known, disclosed limitation (same shape
-        // `attached_value_flags_cluster_position_is_not_recognized`
-        // already documents for except_targets): `ValueFlag::is_bare`
-        // matches only `-a`'s standalone spelling, not a glued CLUSTER
-        // like `-cla` where `-a` isn't the leading character -- shape-based
-        // matching can't tell which position "owns" the trailing value.
-        // Pinned here so it can't silently regress worse and so a future
-        // reader sees it's a deliberate, understood trade-off rather than
-        // an oversight, not something issue #248 introduced or was meant
-        // to close.
-        assert_decision("exec -cla foo rm -rf /", Decision::Allow);
+    fn exec_dash_la_cluster_still_blocks() {
+        assert_decision("exec -la foo rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn exec_dash_ca_cluster_still_blocks() {
+        assert_decision("exec -ca foo rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn exec_dash_cla_cluster_still_blocks() {
+        assert_decision("exec -cla foo rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn exec_dash_c_alone_without_a_still_resolves_normally() {
+        // No over-blocking regression: a cluster/flag that does NOT
+        // contain `a` must not trigger the new value-consuming behavior --
+        // `-c` alone is exec's boolean "clear environment" flag, no value
+        // to skip.
+        assert_decision("exec -c rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn exec_dash_al_glued_value_correctly_stays_allow() {
+        // `-al` (a NOT trailing, followed by more characters glued in the
+        // SAME token) sets argv0 to the glued remainder "l" -- real getopt
+        // cluster semantics: once `a` is reached, everything left in that
+        // token is its value, full stop. So the real wrapped command is
+        // the NEXT token, `foo` -- `rm`/`-rf`/`/` are just `foo`'s own
+        // arguments, never executed as a command at all. This must NOT
+        // trigger the new value-consuming skip (that would wrongly treat
+        // `foo`, the real wrapped command, as `a`'s value instead, over-
+        // blocking a case that doesn't run `rm -rf /` in any real shell).
+        assert_decision("exec -al foo rm -rf /", Decision::Allow);
     }
 
     #[test]

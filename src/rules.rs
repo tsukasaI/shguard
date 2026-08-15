@@ -2694,7 +2694,36 @@ fn skip_wrapper_flags(wrapper: &str, argv: &[NormalizedWord]) -> usize {
         let Resolution::Resolved(token) = argv[idx].resolution() else {
             break;
         };
-        if value_flags.iter().any(|vf| vf.is_bare(token)) {
+        // Issue #248 follow-up (fable review of PR #249): `exec`'s own
+        // `-a <name>` value flag clusters trivially with its two boolean
+        // flags (`-c`, `-l`) — `exec -la foo cmd`/`exec -ca foo cmd`/`exec
+        // -cla foo cmd` are all ordinary, easily-typed spellings, not
+        // exotic ones, and each genuinely sets argv0 to `foo` and runs
+        // `cmd` in a real shell. `ValueFlag::is_bare` above only matches
+        // `-a`'s standalone spelling, so a cluster falls through to the
+        // generic dash-skip below, which skips only the cluster token
+        // itself and then wrongly resolves `foo` (the flag's own value)
+        // as the wrapped command — the same live-bypass shape the bare
+        // `-a` case had before this file's `wrapper_value_flags` entry
+        // for `exec` was added. Unlike the general cluster-position
+        // problem this file discloses elsewhere (which real getopt
+        // emulation would be needed to solve correctly for an arbitrary
+        // wrapper), `exec`'s own option surface is tiny and fully known
+        // (`c`/`l`/`a`, and `a` is its ONLY value-taker) — so a
+        // conservative, exec-specific rule is both cheap and provably
+        // correct here, matching real getopt-cluster semantics: `a` MUST
+        // be the LAST character of the cluster for its value to come from
+        // the NEXT token at all — `-la foo` (a trailing) takes `foo`;
+        // `-afoo` (a leading, with more characters glued right after it in
+        // the SAME token) takes `foo` from within that same token, and
+        // must NOT also consume the next token (that would wrongly treat
+        // the real wrapped command as `a`'s value instead — a distinct
+        // over-blocking bug, not the under-blocking one this fix closes).
+        let exec_trailing_a_cluster = wrapper == "exec"
+            && token.strip_prefix('-').is_some_and(|rest| {
+                rest.len() > 1 && !rest.starts_with('-') && rest.ends_with('a')
+            });
+        if value_flags.iter().any(|vf| vf.is_bare(token)) || exec_trailing_a_cluster {
             // The flag token itself is always consumed; its separated
             // value is consumed too only when resolved: advancing past an
             // unresolvable value unconditionally would let `nice -n $X
