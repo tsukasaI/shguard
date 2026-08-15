@@ -3815,7 +3815,7 @@ pub(crate) fn apply_allowlist(verdict: &Verdict, allowlist: &Allowlist) -> Allow
 }
 
 // ---------------------------------------------------------------------
-// User config (deny/ask/allow) — plan.md §6 item 8
+// User config (deny/ask/allow/pipeline) — plan.md §6 item 8
 // ---------------------------------------------------------------------
 
 /// Whether `entry`'s matcher would match any known shell interpreter or
@@ -3847,6 +3847,8 @@ struct UserConfigFileDto {
     #[serde(default)]
     allow: Vec<CommandRuleDto>,
     #[serde(default)]
+    pipeline: Vec<PipelineRuleDto>,
+    #[serde(default)]
     escalation_floor: Option<String>,
 }
 
@@ -3857,6 +3859,7 @@ pub(crate) struct UserConfig {
     deny: Vec<CommandRule>,
     ask: Vec<CommandRule>,
     allow: Vec<CommandRule>,
+    pipeline: Vec<PipelineRule>,
     escalation_floor: Decision,
 }
 
@@ -3868,14 +3871,18 @@ impl UserConfig {
     ///
     /// Returns [`RulesError`] for invalid TOML syntax, a semantically
     /// invalid entry (same checks as [`Rules::parse`]/[`Allowlist::parse`]),
-    /// a duplicate id — checked across all three of `deny`/`ask`/`allow`
-    /// together, one shared id-space, so an id can't dodge the check by
-    /// moving arrays — an `allow` entry matching a shell interpreter or
-    /// transparent wrapper name (see [`matches_dangerous_allow_target`]) —
-    /// or an invalid `escalation_floor` value (see
-    /// [`parse_escalation_floor`]; only `"ask"`/`"deny"` are accepted,
-    /// `"allow"` is rejected here the same as it already is for `[[allow]]`
-    /// entries naming an escalation vector).
+    /// a duplicate id — checked across all four of `deny`/`ask`/`allow`/
+    /// `pipeline` together, one shared id-space, so an id can't dodge the
+    /// check by moving arrays — an `allow` entry matching a shell
+    /// interpreter or transparent wrapper name (see
+    /// [`matches_dangerous_allow_target`]) — or an invalid
+    /// `escalation_floor` value (see [`parse_escalation_floor`]; only
+    /// `"ask"`/`"deny"` are accepted, `"allow"` is rejected here the same
+    /// as it already is for `[[allow]]` entries naming an escalation
+    /// vector). A `[[pipeline]]` entry's `decision` is restricted to
+    /// `"block"`/`"ask"` by [`convert_pipeline_rule`]/[`parse_decision`]
+    /// the same way an embedded-blocklist pipeline entry's is — there is
+    /// no `"allow"` value to reject here, unlike the command-rule arrays.
     pub(crate) fn parse(toml: &str) -> Result<Self, RulesError> {
         let dto: UserConfigFileDto = toml::from_str(toml)?;
 
@@ -3894,13 +3901,19 @@ impl UserConfig {
             .into_iter()
             .map(convert_command_rule)
             .collect::<Result<Vec<_>, _>>()?;
+        let pipeline = dto
+            .pipeline
+            .into_iter()
+            .map(convert_pipeline_rule)
+            .collect::<Result<Vec<_>, _>>()?;
         let escalation_floor = parse_escalation_floor(dto.escalation_floor.as_deref())?;
 
         reject_duplicate_ids(
             deny.iter()
                 .map(|r| r.id.as_str())
                 .chain(ask.iter().map(|r| r.id.as_str()))
-                .chain(allow.iter().map(|r| r.id.as_str())),
+                .chain(allow.iter().map(|r| r.id.as_str()))
+                .chain(pipeline.iter().map(|r| r.id.as_str())),
         )?;
 
         for entry in &allow {
@@ -3929,16 +3942,17 @@ impl UserConfig {
             deny,
             ask,
             allow,
+            pipeline,
             escalation_floor,
         })
     }
 }
 
-/// Merges a user config's `deny`/`ask`/`allow` onto the embedded blocklist
-/// plus allowlist, additively only, never replace-by-id (unlike the
-/// deleted `Rules::with_override`/`layer`).
+/// Merges a user config's `deny`/`ask`/`allow`/`pipeline` onto the embedded
+/// blocklist plus allowlist, additively only, never replace-by-id (unlike
+/// the deleted `Rules::with_override`/`layer`).
 ///
-/// Every id the user config introduces, across all three arrays, must be
+/// Every id the user config introduces, across all four arrays, must be
 /// new versus `blocklist`'s command rule ids, `blocklist`'s pipeline rule
 /// ids, and `allowlist`'s entry ids — one shared id-space. A collision is a
 /// load-time [`RulesError::DuplicateId`], fail-closed, never a silent
@@ -3950,10 +3964,17 @@ impl UserConfig {
 /// [`Rules::match_ask`]). `allow` entries land in the returned
 /// `Allowlist`'s entries; the only path from a config `allow` entry to a
 /// permissive decision is [`apply_allowlist`], which is structurally
-/// Block-immune before it even consults its entries. `escalation_floor`
-/// folds via `max` rather than overwriting — see the inline comment at
-/// that line for why an overwrite would be wrong given how
-/// `src/config.rs`'s `Policy::load` calls this function more than once.
+/// Block-immune before it even consults its entries. `pipeline` entries
+/// (issue #97) are appended AFTER the embedded blocklist's own
+/// `pipeline_rules`, never prepended: [`Rules::match_pipeline`] is
+/// first-match-wins, so appending is what keeps a user-declared pipeline
+/// rule from ever shadowing a built-in one sharing the same
+/// sources/sinks shape — a user `decision = "ask"` rule for
+/// `curl`→`sh` must never suppress the embedded `curl-wget-pipe-to-shell`
+/// Block. `escalation_floor` folds via `max` rather than overwriting —
+/// see the inline comment at that line for why an overwrite would be
+/// wrong given how `src/config.rs`'s `Policy::load` calls this function
+/// more than once.
 ///
 /// # Errors
 ///
@@ -3994,6 +4015,7 @@ pub(crate) fn merge_user_config(
         .map(|r| r.id.as_str())
         .chain(user_config.ask.iter().map(|r| r.id.as_str()))
         .chain(user_config.allow.iter().map(|r| r.id.as_str()))
+        .chain(user_config.pipeline.iter().map(|r| r.id.as_str()))
     {
         if existing_ids.contains(id) {
             return Err(RulesError::DuplicateId(id.to_string()));
@@ -4020,10 +4042,17 @@ pub(crate) fn merge_user_config(
     let mut entries = allowlist.entries;
     entries.extend(user_config.allow);
 
+    // Append, never prepend: `Rules::match_pipeline` is first-match-wins,
+    // so a user pipeline rule must land after the embedded blocklist's own
+    // pipeline rules to guarantee it can only ever add new pipeline shapes,
+    // never shadow a built-in one sharing the same sources/sinks.
+    let mut pipeline_rules = blocklist.pipeline_rules;
+    pipeline_rules.extend(user_config.pipeline);
+
     Ok((
         Rules {
             command_rules,
-            pipeline_rules: blocklist.pipeline_rules,
+            pipeline_rules,
             redirect_rules: blocklist.redirect_rules,
             ask_rules,
             escalation_floor,
@@ -8097,6 +8126,97 @@ mod tests {
         assert!(merged.match_command(&argv(&["scary-tool"])).is_some());
         // builtin still present
         assert!(merged.match_command(&argv(&["rm", "-rf", "/"])).is_some());
+    }
+
+    // ==== issue #97: user-config `[[pipeline]]` entries ====
+
+    #[test]
+    fn merge_user_config_pipeline_entry_matches_a_new_shape() {
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let config = UserConfig::parse(
+            r#"
+            [[pipeline]]
+            id = "user-forbid-curl-python"
+            reason = "forbid piping a downloaded script into python3"
+            decision = "block"
+            sources = ["curl"]
+            sinks = ["python3"]
+        "#,
+        )
+        .unwrap();
+        let (merged, _) = merge_user_config(blocklist, allowlist, config).unwrap();
+
+        let stages = vec![argv(&["curl", "http://x/install.py"]), argv(&["python3"])];
+        let rule = merged.match_pipeline(&stages).unwrap();
+        assert_eq!(rule.id().as_str(), "user-forbid-curl-python");
+        assert_eq!(rule.decision(), Decision::Block);
+    }
+
+    #[test]
+    fn merge_user_config_pipeline_entry_never_shadows_a_builtin_pipeline_rule() {
+        // A user rule sharing the embedded curl-wget-pipe-to-shell rule's
+        // exact sources/sinks shape, but with a weaker `ask` decision, must
+        // never win the match: Rules::match_pipeline is first-match-wins,
+        // so merge_user_config appending (not prepending) user pipeline
+        // rules after the embedded ones is load-bearing here.
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let config = UserConfig::parse(
+            r#"
+            [[pipeline]]
+            id = "user-weaker-curl-sh"
+            reason = "shadow attempt"
+            decision = "ask"
+            sources = ["curl"]
+            sinks = ["sh"]
+        "#,
+        )
+        .unwrap();
+        let (merged, _) = merge_user_config(blocklist, allowlist, config).unwrap();
+
+        let stages = vec![argv(&["curl", "http://x/install.sh"]), argv(&["sh"])];
+        let rule = merged.match_pipeline(&stages).unwrap();
+        assert_eq!(rule.id().as_str(), "curl-wget-pipe-to-shell");
+        assert_eq!(rule.decision(), Decision::Block);
+    }
+
+    #[test]
+    fn merge_user_config_rejects_pipeline_id_colliding_with_embedded_pipeline_id() {
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let config = UserConfig::parse(
+            r#"
+            [[pipeline]]
+            id = "curl-wget-pipe-to-shell"
+            reason = "totally different rule"
+            decision = "block"
+            sources = ["totally-different"]
+            sinks = ["also-different"]
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(
+            merge_user_config(blocklist, allowlist, config),
+            Err(RulesError::DuplicateId(id)) if id == "curl-wget-pipe-to-shell"
+        ));
+    }
+
+    #[test]
+    fn user_config_pipeline_entry_with_allow_decision_is_rejected() {
+        assert!(matches!(
+            UserConfig::parse(
+                r#"
+                [[pipeline]]
+                id = "user-pipeline-allow"
+                reason = "invalid"
+                decision = "allow"
+                sources = ["curl"]
+                sinks = ["python3"]
+            "#,
+            ),
+            Err(RulesError::InvalidRule { .. })
+        ));
     }
 
     #[test]
