@@ -658,9 +658,15 @@ This is a partial mitigation, not a complete one:
   is not checked against this list at all (see Limitations below), so
   `cat > path <<EOF` still is not caught this way, and a `SHGUARD_CONFIG`
   override set via a shell profile is outside shguard's visibility entirely.
-- A relative path after `cd`-ing into the config directory (`cd
-  ~/.config/shguard && cp evil.toml config.toml`) is not caught — shguard
-  never resolves argv tokens against the process's working directory.
+- A relative path after `cd`-ing into the config directory *within the same
+  command line* (`cd ~/.config/shguard && cp evil.toml config.toml`) IS
+  caught (issue #103): shguard statically resolves a same-line `cd`/`pushd`
+  target and composes later relative tokens against it, the same way
+  tilde/brace expansion are resolved without runtime info — never against a
+  real process working directory, and never across separate command
+  invocations (see Limitations below). An unresolvable same-line `cd`
+  target (`cd $(...)`) floors a plausible relative target to at least `Ask`
+  rather than being silently treated as a no-op.
 - `patch < diff` (the target file named only inside the diff's own
   header, not as an argv token) is not caught — the same argv-visibility
   limit the curl `-xURL` short-proxy-flag gap documents elsewhere in this

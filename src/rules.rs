@@ -734,6 +734,79 @@ impl TargetMatcher {
         }
         matches!(lexical_normalize(token), PathForm::DirStack)
     }
+
+    /// Issue #103's poisoned-cwd Ask floor: true when `token` normalizes to
+    /// a bare relative shape ([`PathForm::Rel`]) that COULD land inside
+    /// this matcher's own dangerous namespace if the (entirely unknown —
+    /// `crate::gate::CwdContext::Poisoned`) working directory happened to
+    /// be the right ancestor.
+    ///
+    /// - [`Self::NormalizedExact`]: the token's full component list must be
+    ///   a trailing suffix of the target's own components (`is_suffix_of`)
+    ///   — e.g. `token = "shguard"` against `target = ~/.config/shguard`
+    ///   (`comps = [".config", "shguard"]`) is plausible (an unknown cwd of
+    ///   `~/.config` would land exactly there); `token = "etc/shguard"`
+    ///   is not (no cwd makes `etc` a stand-in for `.config`).
+    /// - [`Self::NormalizedPrefix`]: only the token's components MINUS its
+    ///   own last (filename) component need to suffix-match the matcher's
+    ///   `canon` — a prefix target's whole point is that anything sits
+    ///   below it, so `token = "config.toml"` alone (no leading
+    ///   directories at all) is trivially plausible (an empty suffix always
+    ///   matches — the unknown cwd could just be the protected directory
+    ///   itself), while `token = "foo/config.toml"` is vetoed the same way
+    ///   the `NormalizedExact` case is: `foo` can never be a shorter
+    ///   spelling of this matcher's own trailing path component.
+    ///
+    /// Deliberately NOT folded into [`Self::matches`]: shguard has no cwd
+    /// (folded or otherwise, under `Poisoned`) to prove the token actually
+    /// resolves here, so this must only ever feed a `gate.rs` floor capped
+    /// at `Ask` (see `crate::gate::scan_unknown_cwd_floor`), never the
+    /// matched rule's own (often stricter) decision — the same posture as
+    /// [`Self::ascent_descent_plausible`].
+    fn unknown_cwd_plausible(&self, token: &str) -> bool {
+        match self {
+            Self::NormalizedExact { strip, target } => {
+                let target_comps = match target {
+                    PathForm::Abs(comps) | PathForm::Home(comps) => comps,
+                    _ => return false,
+                };
+                let Some(remainder) = strip_target(strip.as_deref(), token) else {
+                    return false;
+                };
+                let comps = match lexical_normalize(remainder) {
+                    PathForm::Rel { comps, .. } => comps,
+                    _ => return false,
+                };
+                !comps.is_empty() && is_suffix_of(&comps, target_comps)
+            }
+            Self::NormalizedPrefix { strip, canon } => {
+                let canon_comps = match lexical_normalize(canon) {
+                    PathForm::Abs(comps) | PathForm::Home(comps) => comps,
+                    _ => return false,
+                };
+                let Some(remainder) = strip_target(strip.as_deref(), token) else {
+                    return false;
+                };
+                let comps = match lexical_normalize(remainder) {
+                    PathForm::Rel { comps, .. } => comps,
+                    _ => return false,
+                };
+                if comps.is_empty() {
+                    return false;
+                }
+                is_suffix_of(&comps[..comps.len() - 1], &canon_comps)
+            }
+            Self::Exact(_) | Self::Prefix(_) | Self::UrlHost(_) => false,
+        }
+    }
+}
+
+/// Whether `needle` is a contiguous trailing suffix of `haystack` — the
+/// empty slice is always a suffix of anything, matching
+/// [`TargetMatcher::unknown_cwd_plausible`]'s "the unknown cwd could just
+/// be the protected directory itself" case for a `NormalizedPrefix` target.
+fn is_suffix_of(needle: &[String], haystack: &[String]) -> bool {
+    needle.len() <= haystack.len() && haystack[haystack.len() - needle.len()..] == *needle
 }
 
 /// Strips `prefix` (a [`TargetMatcher::NormalizedExact`]/
@@ -808,7 +881,7 @@ fn strip_trailing_dot(host: url::Host<String>) -> url::Host<String> {
 /// offline analysis (a target path may not exist yet, e.g. inside an
 /// unextracted tar archive) and never knows the invoking shell's cwd.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum PathForm {
+pub(crate) enum PathForm {
     /// Anchored at `/`: `Abs(comps)` renders as `/` + `comps.join("/")`;
     /// `Abs(vec![])` is `/` itself.
     Abs(Vec<String>),
@@ -901,7 +974,7 @@ fn is_dirstack_shape(prefix: &str) -> bool {
 /// (a bare relative token) it becomes one unit of unresolved ascent
 /// ([`PathForm::Rel`]'s `ascent`) — shguard has no cwd to resolve it
 /// against.
-fn lexical_normalize(token: &str) -> PathForm {
+pub(crate) fn lexical_normalize(token: &str) -> PathForm {
     if token.is_empty() {
         return PathForm::Opaque;
     }
@@ -1037,6 +1110,50 @@ fn canonical_render(form: &PathForm) -> Option<String> {
         // deliberately keeps it capped at.
         PathForm::EscapesHome(_) | PathForm::NamedUserHomeEscapes(_) => None,
         _ => None,
+    }
+}
+
+/// Renders a [`PathForm`] back into a token string usable as a folded `cd`
+/// working-directory anchor (issue #103, `crate::gate::CwdContext::Known`).
+///
+/// Unlike [`canonical_render`] — which deliberately stays `None` for an
+/// unresolved `Rel` ascent/tail, since that function gates a *provable*
+/// target match — this covers `Abs`/`Home`/`Rel` in full, including a
+/// relative anchor with no leading `..` at all (`"build"`) or with some
+/// (`"../x"`). A `cd` target that resolves to one of these three shapes is
+/// lexically CERTAIN within the one command line being analyzed: the
+/// relative path text itself is fully known, even though the ultimate
+/// directory it composes against at runtime is not (that residual
+/// uncertainty is what makes an anchor built from `Rel` still just an
+/// ordinary relative token to any LATER composition against it, not a
+/// resolved absolute path — see `crate::gate`'s module docs).
+///
+/// `None` for every other [`PathForm`] (`EscapesHome`/`NamedUserHome`/
+/// `NamedUserHomeEscapes`/`DirStack`/`Opaque`) — a `cd` to one of those
+/// shapes poisons `crate::gate`'s folded cwd context instead of producing
+/// an anchor; callers never render one.
+#[must_use]
+pub(crate) fn render_cwd_anchor(form: &PathForm) -> Option<String> {
+    match form {
+        PathForm::Abs(comps) if comps.is_empty() => Some("/".to_string()),
+        PathForm::Abs(comps) => Some(format!("/{}", comps.join("/"))),
+        PathForm::Home(comps) if comps.is_empty() => Some("~".to_string()),
+        PathForm::Home(comps) => Some(format!("~/{}", comps.join("/"))),
+        PathForm::Rel { ascent, comps } => {
+            let mut parts: Vec<&str> = Vec::with_capacity(*ascent as usize + comps.len());
+            parts.extend(std::iter::repeat_n("..", *ascent as usize));
+            parts.extend(comps.iter().map(String::as_str));
+            Some(if parts.is_empty() {
+                ".".to_string()
+            } else {
+                parts.join("/")
+            })
+        }
+        PathForm::EscapesHome(_)
+        | PathForm::NamedUserHome
+        | PathForm::NamedUserHomeEscapes(_)
+        | PathForm::DirStack
+        | PathForm::Opaque => None,
     }
 }
 
@@ -1607,6 +1724,31 @@ impl CommandRule {
         resolved_strings(&rest_words)
             .iter()
             .any(|token| self.targets.iter().any(|t| t.dirstack_plausible(token)))
+    }
+
+    /// Issue #103: true when this rule's command+flags match `argv` (via
+    /// [`Self::matching_rest`], the same full constraint check
+    /// [`Self::matches`] uses) and some resolved tail token is
+    /// [`TargetMatcher::unknown_cwd_plausible`] against one of this rule's
+    /// own targets — `crate::gate`'s poisoned-cwd floor
+    /// (`crate::gate::scan_unknown_cwd_floor`), fired only when the folded
+    /// cwd context for the command line being analyzed is entirely unknown
+    /// (`crate::gate::CwdContext::Poisoned`), never when it's merely
+    /// `Initial` (no `cd` seen at all — see that type's own docs on why the
+    /// two are not the same). Read-only probe, same shape as
+    /// [`Self::matches_ascent_descent_floor`] — never itself a match, only
+    /// a `gate.rs` floor's input.
+    #[must_use]
+    pub(crate) fn matches_unknown_cwd_floor(&self, argv: &[NormalizedWord]) -> bool {
+        if self.targets.is_empty() {
+            return false;
+        }
+        let Some(rest_words) = self.matching_rest(argv) else {
+            return false;
+        };
+        resolved_strings(&rest_words)
+            .iter()
+            .any(|token| self.targets.iter().any(|t| t.unknown_cwd_plausible(token)))
     }
 
     /// issue #115: true when this rule's command+flags match `argv` (via
@@ -3805,6 +3947,23 @@ impl Rules {
             .iter()
             .chain(self.ask_rules.iter())
             .find(|rule| rule.matches_dirstack_tilde_floor(argv))
+    }
+
+    /// The first [`CommandRule`] for which
+    /// [`CommandRule::matches_unknown_cwd_floor`] holds, if any — issue
+    /// #103's poisoned-cwd floor (`src/gate.rs`). Like
+    /// [`Self::match_command_dirstack_tilde`], scans both `command_rules`
+    /// and `ask_rules` and is a read-only probe: never mutates rule state,
+    /// never itself constitutes a match.
+    #[must_use]
+    pub(crate) fn match_command_unknown_cwd(
+        &self,
+        argv: &[NormalizedWord],
+    ) -> Option<&CommandRule> {
+        self.command_rules
+            .iter()
+            .chain(self.ask_rules.iter())
+            .find(|rule| rule.matches_unknown_cwd_floor(argv))
     }
 
     /// The first [`CommandRule`] for which
