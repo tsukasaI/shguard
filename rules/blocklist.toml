@@ -286,6 +286,11 @@ id = "rm-force-find-placeholder-target"
 reason = "rm -f against find's own {} placeholder removes every matched file, unrecoverably, the same effect find -delete has"
 command = "rm"
 required_flags = ["f|--force"]
+# Known gap, shared with the `-rf` rule above: `exact` matches only a token
+# that IS `{}`, but find substitutes `{}` anywhere inside a word, so
+# `-exec rm -f ./{}` still deletes every match and still Allows. Closing it
+# needs a contains-style matcher on both rules; pinned in tests/guardfall.rs
+# so it has a regression anchor. issue #140
 targets = [{ exact = "{}" }]
 
 [[command]]

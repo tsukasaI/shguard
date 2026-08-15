@@ -364,6 +364,14 @@ fn guardfall_find_exec_rm_force_placeholder_cases() {
         (r"find /x -type f -exec rm -rf {} +", Decision::Block), // already covered pre-#140, control
         (r"find /x -type f -exec rm -f {} +", Decision::Block),
         (r"find /x -exec rm -f {} +", Decision::Block),
+        // Known gap, pinned so a future contains-style matcher has a
+        // regression anchor: find substitutes `{}` anywhere inside a word,
+        // so this genuinely deletes every match, but `exact = "{}"` only
+        // matches a token that IS the placeholder. Shared with the `-rf`
+        // rule, which has the same gap.
+        (r"find . -exec rm -f ./{} \;", Decision::Allow),
+        // Quoting is stripped by the shell before shguard sees the token.
+        (r"find . -exec rm -f '{}' \;", Decision::Block),
         // Everyday benign-looking idiom, both terminator spellings —
         // Block, matching `find -delete`'s existing precedent (pinned
         // right below) for the same "delete every match, regardless of
