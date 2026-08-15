@@ -27,6 +27,14 @@ fn guardfall_headline_cases() {
         // 7. A quoted string that merely *contains* a dangerous-looking
         //    substring is not the same as executing it.
         ("git commit -m 'rm -rf /'", Decision::Allow),
+        // 8. issue #138: an ANSI-C-decoded NUL merges the command name with
+        //    trailing text ("rm" + trailing text), which used to produce a
+        //    `Resolved` string byte-distinct from "rm" that no exact-string
+        //    blocklist check matched.
+        ("rm$'\\0'IGNOREDTAIL -rf /", Decision::Ask),
+        // 9. issue #138: same bypass shape, but merging a flag instead of
+        //    the command name ("--force" + trailing text).
+        ("git push --force$'\\0'x origin main", Decision::Ask),
     ];
 
     for (command, expected) in cases {

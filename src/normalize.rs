@@ -104,6 +104,29 @@ pub enum UnresolvableKind {
     /// `Unresolvable` with this kind — fail-closed even on a path that
     /// should be structurally impossible.
     UnsupportedStructure,
+    /// A word's literal content contains an embedded NUL byte — whether
+    /// from raw source text (a NUL character can reach the parser directly,
+    /// e.g. via a JSON `\u0000` in `tool_input.command`) or from decoding
+    /// an ANSI-C escape (`$'\0'`, `$'\x00'`, …). Checked once, uniformly,
+    /// at [`chunks_to_words`] — every literal chunk converges there before
+    /// becoming a `Resolved` word, regardless of which `WordPiece` produced
+    /// it (issue #138).
+    ///
+    /// NUL is valid single-byte UTF-8, so this can't be folded into
+    /// [`UnresolvableKind::NonUtf8`]'s check — it needs its own guard.
+    /// Real bash does not truncate a word at an embedded NUL the way a C
+    /// string would suggest: it silently drops the NUL and concatenates
+    /// the surrounding text into one word (`rm$'\0'IGNOREDTAIL` decodes to
+    /// `rmIGNOREDTAIL`, confirmed against real bash argv capture, issue
+    /// #138) — the same "merge defeats exact-string matching" bypass shape
+    /// this repo has patched before, just produced by bash's own word
+    /// expansion this time rather than by shguard's folding. Reproducing
+    /// that merge would only recreate the bypass under a different string,
+    /// and guessing a truncated prefix instead would claim knowledge
+    /// shguard's static analysis doesn't have (plan.md's never-guess
+    /// rule), so the word becomes `Unresolvable` with this kind instead,
+    /// the same fail-closed treatment `NonUtf8` already gets.
+    EmbeddedNul,
 }
 
 /// The two states a normalised word can be in: its value was folded to a
@@ -806,7 +829,12 @@ fn resolve_piece(piece: &WordPiece, allow_split: bool) -> (Chunk, bool) {
 /// one `Result<String, (UnresolvableKind, bool)>` per segment: `Ok`
 /// accumulates every [`Chunk::Literal`] in the segment; a
 /// [`Chunk::Unresolvable`] anywhere in it poisons the whole segment to
-/// `Err` (the first kind found). The `bool` (issue #146/#149) is
+/// `Err` (the first kind found) — and a [`Chunk::Literal`] containing an
+/// embedded NUL byte is treated as an `Unresolvable(EmbeddedNul)` chunk the
+/// same way, checked right here rather than by each `Chunk::Literal`
+/// producer individually, since every literal source's text converges on
+/// this one accumulation loop before it can become a `Resolved` word
+/// (issue #138). The `bool` (issue #146/#149) is
 /// every `Chunk::Unresolvable`'s own single-word flag ANDed together across
 /// the WHOLE segment, not just the poisoning chunk's — a later splittable
 /// piece in an otherwise-quoted segment (`"$(a)"$(b)`) still makes the
@@ -833,6 +861,17 @@ fn chunks_to_words(chunks: Vec<Chunk>, ifs_derived: bool) -> Vec<NormalizedWord>
     let mut segments = Vec::new();
     let mut current: Result<String, (UnresolvableKind, bool)> = Ok(String::new());
     for chunk in chunks {
+        // issue #138: a literal chunk containing an embedded NUL byte is
+        // treated exactly like an `Unresolvable(EmbeddedNul)` chunk from
+        // here on — checked once, here, regardless of which `WordPiece`
+        // (raw source text, ANSI-C decoding, …) the byte came from, rather
+        // than at each producer individually.
+        let chunk = match chunk {
+            Chunk::Literal(text) if text.contains('\0') => {
+                Chunk::Unresolvable(UnresolvableKind::EmbeddedNul, false)
+            }
+            other => other,
+        };
         match chunk {
             Chunk::Literal(text) => {
                 if let Ok(buf) = &mut current {
@@ -937,6 +976,13 @@ fn read_hex_digits(
 ///   guessing a replacement would violate the never-guess rule.
 /// - `\cX` uses [`control_char`]; a non-ASCII target (or none at all) is
 ///   malformed and kept literal, per the first bullet.
+/// - A decoded byte sequence containing an embedded NUL byte (from octal
+///   `\0`, hex `\x00`, unicode `\u`/`\U` escaping code point zero, or
+///   `\c@`) decodes to an ordinary `Ok` string here — deliberately NOT
+///   rejected in this function. [`UnresolvableKind::EmbeddedNul`]'s docs
+///   cover why the NUL check instead lives downstream in
+///   [`chunks_to_words`], where every literal source is checked uniformly
+///   rather than only this one.
 fn decode_ansi_c(raw: &str) -> Result<String, UnresolvableKind> {
     let mut bytes: Vec<u8> = Vec::new();
     let mut chars = raw.chars().peekable();
@@ -1082,6 +1128,10 @@ fn decode_ansi_c(raw: &str) -> Result<String, UnresolvableKind> {
         }
     }
 
+    // An embedded NUL (e.g. from `\0`/`\x00`) is left in `bytes` uncaught
+    // here: it's valid UTF-8, and every literal this decodes into is
+    // checked uniformly downstream in `chunks_to_words`, alongside every
+    // other literal source, not just this one (issue #138).
     String::from_utf8(bytes).map_err(|_| UnresolvableKind::NonUtf8)
 }
 
@@ -1216,6 +1266,47 @@ mod tests {
         assert_eq!(
             *words[0].resolution(),
             Resolution::Unresolvable(UnresolvableKind::NonUtf8)
+        );
+    }
+
+    // ---- ANSI-C: a decoded embedded NUL is Unresolvable(EmbeddedNul),
+    // never folded into a merged literal (issue #138) ----
+    #[test]
+    fn ansi_c_embedded_nul_is_unresolvable() {
+        let words = first_word_normalized("rm$'\\0'IGNOREDTAIL");
+        assert_eq!(words.len(), 1);
+        assert_eq!(
+            *words[0].resolution(),
+            Resolution::Unresolvable(UnresolvableKind::EmbeddedNul)
+        );
+    }
+
+    // ---- ANSI-C: every escape form that can decode to a NUL byte hits the
+    // same guard (issue #138), not just the octal one exercised above ----
+    #[test]
+    fn ansi_c_every_nul_producing_escape_form_is_unresolvable() {
+        for command in ["$'\\00'", "$'\\x00'", "$'\\u0000'", "$'\\c@'"] {
+            let words = first_word_normalized(command);
+            assert_eq!(words.len(), 1, "command {command:?}");
+            assert_eq!(
+                *words[0].resolution(),
+                Resolution::Unresolvable(UnresolvableKind::EmbeddedNul),
+                "command {command:?}"
+            );
+        }
+    }
+
+    // ---- a raw NUL byte in the source text (never routed through
+    // decode_ansi_c at all, e.g. from a JSON `\u0000` in
+    // `tool_input.command`) hits the same guard as a decoded one, since
+    // both converge on chunks_to_words (issue #138) ----
+    #[test]
+    fn raw_literal_embedded_nul_is_unresolvable() {
+        let words = first_word_normalized("rm\0MID");
+        assert_eq!(words.len(), 1);
+        assert_eq!(
+            *words[0].resolution(),
+            Resolution::Unresolvable(UnresolvableKind::EmbeddedNul)
         );
     }
 
