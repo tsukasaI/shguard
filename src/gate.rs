@@ -1703,6 +1703,15 @@ fn evaluate_simple_command_core(
                     "`{name}`'s script is a bare positional argument (no `-c`/`-e`-style flag) \
                      and cannot be introspected"
                 )),
+                AwkScriptPosition::InlineScriptFlag(flag) => Some(format!(
+                    "`{name}`'s `{flag}` flag supplies inline script text directly and cannot \
+                     be introspected"
+                )),
+                AwkScriptPosition::FileFlagStdin => Some(format!(
+                    "`{name}`'s `-f`/`-E`/`-i`-style flag reads its program from stdin (`-`, \
+                     `/dev/stdin`, `/proc/self/fd/0`, or `/dev/fd/0`), which is \
+                     unintrospectable and attacker-controllable through the same pipe"
+                )),
                 AwkScriptPosition::Uncertain => Some(format!(
                     "`{name}`'s `-f`/`--file` flag position could not be statically resolved, \
                      so whether its script comes from a file or an inline positional argument \
@@ -3958,100 +3967,324 @@ fn inline_code_flag(name: &str) -> Option<&'static str> {
 }
 
 /// The `awk` family (rule 6d, issue #195): every one of these names' script
-/// argument is a bare positional operand, not a value behind a `-c`/`-e`
-/// flag — see [`scan_for_awk_script`]. Deliberately NOT added to
+/// either sits in a bare positional operand (no `-c`-style flag the way
+/// `python3`/`perl`/`node` have one) or, for gawk specifically, behind
+/// `-e`/`--source` — see [`scan_for_awk_script`]. Applied to every name
+/// here, not just literal `gawk`: `awk` itself is gawk on most Linux
+/// distributions, and this scan is name-based, not behavior-probed, so a
+/// `gawk`-only flag reaching a plain `awk` invocation must still be
+/// recognized. Deliberately NOT added to
 /// [`crate::rules::EXTRA_PIPELINE_INTERPRETERS`]/`is_pipeline_interpreter`
 /// (rule 5b/5c's decode-pipe-into-interpreter floor): that rule is about an
 /// interpreter whose *default, flagless* invocation reads piped stdin bytes
-/// as code (`sh`, a bare `python3`) — awk's program text always comes from
-/// argv (a positional operand or `-f`'s file), never from stdin, so piping
-/// data into `awk` feeds its *records*, not its script, and isn't the same
-/// risk class.
+/// as code (`sh`, a bare `python3`) — a flagless `awk` never does that,
+/// piped data feeds its *records*, not its script, so it isn't the same
+/// risk class. This is narrower than "awk's program never comes from
+/// stdin", though: `-f`/`-E`'s value can itself name stdin (`-`,
+/// `/dev/stdin`, `/proc/self/fd/0`), which `scan_for_awk_script`'s
+/// `FileFlagStdin` floors to Ask on its own, independent of this
+/// constant's pipeline-interpreter exclusion.
 const AWK_INTERPRETERS: &[&str] = &["awk", "gawk", "mawk", "nawk", "original-awk"];
 
 /// Result of [`scan_for_awk_script`]: where awk's script comes from,
 /// relative to its first non-option operand. Mirrors
 /// [`DashCPosition`]'s position-aware shape, but with the flag/operand
-/// roles reversed: awk has no inline-code flag, so finding `-f`/`--file`
+/// roles reversed for the `-f`-vs-operand case: finding `-f`/`-E`/`-i`
 /// first means the script is NOT inline (the same unfloored posture this
 /// module already gives a non-shell interpreter's script *file* argument,
 /// e.g. `python3 script.py` — [`inline_code_flag`] returns `None` for that
 /// shape too), while finding a bare operand first means it IS inline code.
+/// `-e`/`--source` is unlike either: gawk documents it as always supplying
+/// inline program text regardless of what else is on the line, so
+/// [`scan_for_awk_script`] returns [`Self::InlineScriptFlag`] the instant
+/// it finds one, before ever reaching the `-f`-vs-operand comparison. So is
+/// a `-f`/`-E`/`-i` whose value names stdin: it floors regardless of
+/// position too, since gawk concatenates every `-f`/`-E`/`-i`/`-e`/
+/// `--source` source into one program (a benign first `-f` doesn't excuse
+/// a stdin-sourced second one).
 enum AwkScriptPosition {
-    /// `-f`/`--file` resolved before any operand — the script lives in a
-    /// file.
+    /// `-f`/`-E`/`-i` (or their long forms) resolved before any
+    /// `-e`/`--source` or operand, with an ordinary file value — the
+    /// script lives in a file.
     FileFlag,
+    /// Like `FileFlag`, but the file value is stdin itself (`-`,
+    /// `/dev/stdin`, `/proc/self/fd/0`, or `/dev/fd/0`): the "file" awk
+    /// reads its program from is actually the same pipe an attacker can
+    /// write to, so this floors to Ask rather than `FileFlag`'s Allow.
+    FileFlagStdin,
+    /// `-e`/`--source` (bare, glued, or `--source=`), naming the flag
+    /// spelling found (`-e` or `--source`) for the floor's reason string —
+    /// gawk concatenates every `-e`/`--source` and `-f`/`-E`/`-i` source
+    /// into one program, so this flag supplies inline, unintrospectable
+    /// script text no matter where it falls relative to those or an
+    /// operand.
+    InlineScriptFlag(&'static str),
     /// A word before the flag/operand position could not be statically
     /// resolved — fail closed the same way [`DashCPosition::Uncertain`]
     /// does.
     Uncertain,
-    /// No `-f`/`--file` before the first operand, and an operand exists —
-    /// that operand is awk's program text.
+    /// No `-f`/`-E`/`-e`/`--source` before the first operand, and an
+    /// operand exists — that operand is awk's program text.
     InlineScript,
-    /// No `-f`/`--file`, and no operand either — a malformed invocation
-    /// (real awk exits with a usage error and runs nothing).
+    /// No `-f`/`-E`/`-e`/`--source`, and no operand either — a malformed
+    /// invocation (real awk exits with a usage error and runs nothing).
     Absent,
 }
 
-/// Scans `words` left-to-right for awk's `-f`/`--file` flag
-/// ([`is_awk_file_flag`]), stopping at the first token that is the flag, is
-/// unresolvable, or is a non-option operand — whichever comes first.
-/// `-v`/`-F`/`--assign`/`--field-separator` (awk's other value-taking
-/// flags) are recognized in their bare, separated-value spelling and skip
-/// that following value too, so it is never mistaken for the script
-/// operand (`awk -v x=1 -f script.awk` must still resolve to `FileFlag`,
-/// not misread `x=1` as the script); every other dash-prefixed token,
-/// including these same flags' glued/attached-value spellings
-/// (`-vx=1`/`-F,`/`--assign=x=1`), is treated as a self-contained boolean
-/// token and skipped as-is — no separate value to consume.
+/// Two-phase scan (issue #195 fable-review follow-up): [`scan_for_awk_inline_flag`]
+/// looks for anything that floors this invocation regardless of where it
+/// falls in `words` first — `-e`/`--source` anywhere, or any `-f`/`-E`/`-i`
+/// whose value names stdin anywhere — since gawk concatenates every one of
+/// those sources into one program regardless of order. A single
+/// left-to-right "first decisive token wins" pass (correct for `-f` vs. a
+/// bare operand, where a real option parser's left-to-right order is what
+/// decides the outcome) would miss either shape occurring *after* an
+/// earlier, ordinary `-f`/`-E`/`-i` or an operand, which are real bypass
+/// shapes and not just hypotheticals: `gawk -f real.awk -e
+/// 'BEGIN{system("id")}'` runs the inline text too, and `awk -f script.awk
+/// -f /dev/stdin` runs the stdin-sourced second file too. Only once that
+/// comes back empty does [`scan_for_awk_file_flag_or_operand`] run its
+/// position-aware walk for the `-f`/`-E`/`-i`-vs-operand question, which
+/// genuinely does depend on which one a real option parser reaches first.
 fn scan_for_awk_script(words: &[NormalizedWord]) -> AwkScriptPosition {
+    scan_for_awk_inline_flag(words).unwrap_or_else(|| scan_for_awk_file_flag_or_operand(words))
+}
+
+/// Phase 1: scans every word in `words` (not just up to the first `-f`/`-E`/
+/// `-i` or operand) for two position-independent floors — see
+/// [`scan_for_awk_script`]'s doc comment for why both need a full scan
+/// rather than a single left-to-right decisive-token walk:
+///
+/// - `-e`/`--source` ([`awk_inline_flag_name`]) anywhere.
+/// - any `-f`/`-E`/`-i` ([`is_awk_file_flag`]) whose value
+///   ([`awk_file_flag_glued_value`] if glued, else the following word) is
+///   a stdin alias ([`is_awk_stdin_path`]) anywhere. A `-f`/`-E`/`-i` whose
+///   value is an ordinary file does NOT return here — it's skipped, and
+///   the scan continues, since a later flag could still be `-e`/`--source`
+///   or a stdin-sourced one.
+///
+/// Skip-aware for awk's other value-taking flags throughout, so a
+/// `-v`/`-l`/etc. value is never misread as one of the above merely
+/// because it follows one of those flags. Returns `None` once `--` is
+/// reached (nothing past it is a flag, so there is nothing left to find
+/// here) or the words run out, deferring to
+/// [`scan_for_awk_file_flag_or_operand`] either way. Fails closed to
+/// `Some(Uncertain)` on the first unresolvable word not already known to
+/// be some other flag's skipped value, since a dynamic word could resolve
+/// to any of the above at runtime.
+fn scan_for_awk_inline_flag(words: &[NormalizedWord]) -> Option<AwkScriptPosition> {
     let mut i = 0;
     while i < words.len() {
-        match words[i].resolution() {
-            Resolution::Resolved(s) if s == "--" => {
-                return match words.get(i + 1).map(NormalizedWord::resolution) {
-                    Some(Resolution::Resolved(_)) => AwkScriptPosition::InlineScript,
-                    Some(Resolution::Unresolvable(_)) => AwkScriptPosition::Uncertain,
-                    None => AwkScriptPosition::Absent,
-                };
-            }
-            Resolution::Resolved(s) if is_awk_file_flag(s) => return AwkScriptPosition::FileFlag,
-            Resolution::Resolved(s) if awk_value_flag_needs_separate_arg(s) => {
-                i += 2;
+        let Resolution::Resolved(s) = words[i].resolution() else {
+            return Some(AwkScriptPosition::Uncertain);
+        };
+        if s == "--" {
+            return None;
+        }
+        if let Some(flag) = awk_inline_flag_name(s) {
+            return Some(AwkScriptPosition::InlineScriptFlag(flag));
+        }
+        if is_awk_file_flag(s) {
+            if let Some(glued) = awk_file_flag_glued_value(s) {
+                if is_awk_stdin_path(glued) {
+                    return Some(AwkScriptPosition::FileFlagStdin);
+                }
+                i += 1;
                 continue;
             }
-            Resolution::Resolved(s) if !s.starts_with('-') => {
-                return AwkScriptPosition::InlineScript;
+            match words.get(i + 1).map(NormalizedWord::resolution) {
+                Some(Resolution::Resolved(v)) if is_awk_stdin_path(v) => {
+                    return Some(AwkScriptPosition::FileFlagStdin);
+                }
+                Some(Resolution::Unresolvable(_)) => return Some(AwkScriptPosition::Uncertain),
+                _ => {}
             }
-            Resolution::Resolved(_) => {}
-            Resolution::Unresolvable(_) => return AwkScriptPosition::Uncertain,
+            i += 2;
+            continue;
+        }
+        if awk_value_flag_needs_separate_arg(s) {
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Phase 2: scans `words` left-to-right for awk's `-f`/`-E`/`-i` file flag
+/// ([`is_awk_file_flag`]), stopping at the first token that is one of
+/// those, is unresolvable, or is a non-option operand — whichever comes
+/// first. Only reached once [`scan_for_awk_inline_flag`] has confirmed no
+/// `-e`/`--source` and no stdin-sourced `-f`/`-E`/`-i` appears anywhere in
+/// `words`, so any `-f`/`-E`/`-i` reached here is already known to name an
+/// ordinary file. `-v`/`-F`/`--assign`/`--field-separator`/`-l`/`--load`
+/// (awk's other required-value flags — `-i`/`--include` moved to
+/// [`is_awk_file_flag`] since it reads awk source text the same way `-f`
+/// does, unlike these) are recognized in their bare, separated-value
+/// spelling and skip that following value too, so it is never mistaken for
+/// the script operand (`awk -v x=1 -f script.awk` must still resolve to
+/// `FileFlag`, not misread `x=1` as the script); every other dash-prefixed
+/// token, including these same flags' glued/attached-value spellings
+/// (`-vx=1`/`-F,`/`--assign=x=1`), is treated as a self-contained boolean
+/// token and skipped as-is — no separate value to consume. This also
+/// covers gawk's optional-value flags (`-d`/`--dump-variables[=file]`,
+/// `-D`/`--debug[=file]`, `-o`/`--pretty-print[=file]`, `-p`/
+/// `--profile[=file]`, `-L`/`--lint[=value]`): per gawk's manual, none of
+/// them allow a space before their value ("No space is allowed between the
+/// `-D` and file, if file is supplied"), so their bare short spelling is
+/// *always* self-contained — treating a bare `-D` as needing a separated
+/// next-word value, the way `env --block-signal` traps issue #250 into
+/// swallowing a real operand, would be wrong here precisely because gawk's
+/// own getopt table forbids that spelling. Leave them in the generic skip.
+/// `-l`/`--load` names a compiled extension (`dlopen`-style), not awk
+/// source text — a stdin-sourced value is a materially different risk this
+/// scan does not classify; see the `awk_dash_l_stdin_value_is_out_of_scope`
+/// test for why that's a deliberate, documented gap rather than an
+/// oversight.
+fn scan_for_awk_file_flag_or_operand(words: &[NormalizedWord]) -> AwkScriptPosition {
+    let mut i = 0;
+    while i < words.len() {
+        let Resolution::Resolved(s) = words[i].resolution() else {
+            return AwkScriptPosition::Uncertain;
+        };
+        if s == "--" {
+            return match words.get(i + 1).map(NormalizedWord::resolution) {
+                Some(Resolution::Resolved(_)) => AwkScriptPosition::InlineScript,
+                Some(Resolution::Unresolvable(_)) => AwkScriptPosition::Uncertain,
+                None => AwkScriptPosition::Absent,
+            };
+        }
+        if is_awk_file_flag(s) {
+            return classify_awk_file_value(s, words.get(i + 1));
+        }
+        if awk_value_flag_needs_separate_arg(s) {
+            i += 2;
+            continue;
+        }
+        if !s.starts_with('-') {
+            return AwkScriptPosition::InlineScript;
         }
         i += 1;
     }
     AwkScriptPosition::Absent
 }
 
-/// Whether `token` is awk's `-f`/`--file` flag, in any spelling POSIX/gawk
-/// document: the bare short form, its glued-value form (`-fFILE`, valid
-/// getopt usage since `-f` takes a required argument), and the long form's
-/// bare and `--file=FILE` attached spellings.
+/// Whether `token` is awk's `-f`/`--file`, gawk's `-E`/`--exec`, or gawk's
+/// `-i`/`--include` flag, in any spelling POSIX/gawk document: the bare
+/// short form, its glued-value form (`-fFILE`/`-EFILE`/`-iFILE`, valid
+/// getopt usage since all three take a required argument), and the long
+/// form's bare and `--file=FILE`/`--exec=FILE`/`--include=FILE` attached
+/// spellings. `-E` and `-i` are folded in here rather than given their own
+/// [`AwkScriptPosition`] variants: per the gawk manual, "\-E file ...
+/// Similar to \-f, read awk program text from file" (its only documented
+/// differences from `-f` — it terminates option processing and disallows
+/// `var=value` assignments after it — don't change where the *script*
+/// comes from) and "\-i source-file ... Read an `awk` source library from
+/// source-file" (concatenated into the program the same way `-f`'s
+/// contents are), which is all this scan classifies. `-l`/`--load`
+/// (loading a compiled extension, not awk source text) is deliberately NOT
+/// included here — see [`scan_for_awk_file_flag_or_operand`]'s doc comment.
 fn is_awk_file_flag(token: &str) -> bool {
     token == "-f"
         || token == "--file"
         || token.strip_prefix("--file=").is_some()
         || (token.starts_with("-f") && token.len() > 2)
+        || token == "-E"
+        || token == "--exec"
+        || token.strip_prefix("--exec=").is_some()
+        || (token.starts_with("-E") && token.len() > 2)
+        || token == "-i"
+        || token == "--include"
+        || token.strip_prefix("--include=").is_some()
+        || (token.starts_with("-i") && token.len() > 2)
+}
+
+/// The value a matched [`is_awk_file_flag`] token supplies as its program
+/// file, classified into [`AwkScriptPosition::FileFlag`] or
+/// [`AwkScriptPosition::FileFlagStdin`]: `flag_token`'s own glued value
+/// (`-fFILE`/`--file=FILE`/etc.) if it carries one, otherwise `next`, the
+/// following word — an unresolvable `next` fails closed to
+/// [`AwkScriptPosition::Uncertain`] the same way an unresolvable flag
+/// position does elsewhere in this scan, since a dynamic value could
+/// resolve to a stdin alias at runtime.
+fn classify_awk_file_value(flag_token: &str, next: Option<&NormalizedWord>) -> AwkScriptPosition {
+    if let Some(glued) = awk_file_flag_glued_value(flag_token) {
+        return if is_awk_stdin_path(glued) {
+            AwkScriptPosition::FileFlagStdin
+        } else {
+            AwkScriptPosition::FileFlag
+        };
+    }
+    match next.map(NormalizedWord::resolution) {
+        Some(Resolution::Resolved(v)) if is_awk_stdin_path(v) => AwkScriptPosition::FileFlagStdin,
+        Some(Resolution::Resolved(_)) | None => AwkScriptPosition::FileFlag,
+        Some(Resolution::Unresolvable(_)) => AwkScriptPosition::Uncertain,
+    }
+}
+
+/// `flag_token`'s glued file value (`-fFILE`/`-EFILE`/`-iFILE`/
+/// `--file=FILE`/`--exec=FILE`/`--include=FILE`), or `None` if `flag_token`
+/// is one of the bare spellings whose value is a separate following word.
+fn awk_file_flag_glued_value(flag_token: &str) -> Option<&str> {
+    flag_token
+        .strip_prefix("--file=")
+        .or_else(|| flag_token.strip_prefix("--exec="))
+        .or_else(|| flag_token.strip_prefix("--include="))
+        .or_else(|| {
+            (flag_token.starts_with("-f") && flag_token.len() > 2).then(|| &flag_token[2..])
+        })
+        .or_else(|| {
+            (flag_token.starts_with("-E") && flag_token.len() > 2).then(|| &flag_token[2..])
+        })
+        .or_else(|| {
+            (flag_token.starts_with("-i") && flag_token.len() > 2).then(|| &flag_token[2..])
+        })
+}
+
+/// Whether `path` is one of the well-known aliases for stdin that
+/// `-f`/`-E`/`-i` accept in place of a real file: `-` (the POSIX
+/// convention most utilities honor), `/dev/stdin`, `/proc/self/fd/0`, and
+/// `/dev/fd/0` (Linux symlinks `/dev/fd` to `/proc/self/fd`; BSD/macOS give
+/// `/dev/fd/0` its own device node — either way it's stdin). A value here
+/// means awk's program text comes from the same pipe its *records* would
+/// otherwise come from — unintrospectable and attacker-controllable
+/// through it (issue #195 fable-review follow-up, "Blocker B").
+fn is_awk_stdin_path(path: &str) -> bool {
+    matches!(path, "-" | "/dev/stdin" | "/proc/self/fd/0" | "/dev/fd/0")
+}
+
+/// Whether `token` is awk's `-e`/`--source` inline-script flag, in any
+/// spelling gawk documents: the bare short form, its glued-value form
+/// (`-ePROG`, valid getopt usage since `-e` takes a required argument), and
+/// the long form's bare and `--source=PROG` attached spellings. Returns the
+/// canonical flag spelling (`-e` or `--source`) found, for
+/// [`AwkScriptPosition::InlineScriptFlag`]'s reason string.
+fn awk_inline_flag_name(token: &str) -> Option<&'static str> {
+    if token == "-e" || (token.starts_with("-e") && token.len() > 2) {
+        Some("-e")
+    } else if token == "--source" || token.strip_prefix("--source=").is_some() {
+        Some("--source")
+    } else {
+        None
+    }
 }
 
 /// Whether `token` is the *bare* spelling of one of awk's other
-/// value-taking flags (`-v`/`-F`/`--assign`/`--field-separator`) — a match
-/// means the *next* word is that flag's separated value, to be skipped
-/// rather than considered as a candidate script operand. A glued/attached
-/// spelling of the same flag (`-vx=1`, `-F,`, `--assign=x=1`) is NOT
-/// matched here — it carries its own value in the same token, so
-/// [`scan_for_awk_script`]'s generic dash-prefixed-token skip already
-/// handles it correctly with no separate value to consume.
+/// required-value flags (`-v`/`-F`/`--assign`/`--field-separator`/`-l`/
+/// `--load`) — a match means the *next* word is that flag's separated
+/// value, to be skipped rather than considered as a candidate script
+/// operand. `-i`/`--include` is NOT here despite also being required-value
+/// — it's handled by [`is_awk_file_flag`] instead, since (unlike these
+/// four) its value is awk source text, not inert data. A glued/attached
+/// spelling of the flags that ARE here (`-vx=1`, `-F,`, `--assign=x=1`,
+/// `-lext`) is NOT matched here either — it carries its own value in the
+/// same token, so [`scan_for_awk_script`]'s generic dash-prefixed-token
+/// skip already handles it correctly with no separate value to consume.
 fn awk_value_flag_needs_separate_arg(token: &str) -> bool {
-    matches!(token, "-v" | "-F" | "--assign" | "--field-separator")
+    matches!(
+        token,
+        "-v" | "-F" | "--assign" | "--field-separator" | "-l" | "--load"
+    )
 }
 
 /// Rule 5: whether `stage` is an interpreter a pipeline may terminate in.
@@ -5522,6 +5755,167 @@ mod tests {
     #[test]
     fn awk_unresolvable_flag_position_fails_closed() {
         assert_decision("awk $(echo -f) script.awk", Decision::Ask);
+    }
+
+    // ---- rule 6d fable-review follow-up ("Blocker A", issue #195):
+    // gawk's `-e`/`--source` supply inline program text directly, without
+    // `-f` — every spelling must floor to Ask, regardless of where it
+    // falls relative to `-f`/`-E` or an operand, since gawk concatenates
+    // every `-e`/`--source`/`-f`/`-E` source into one program. ----
+
+    #[test]
+    fn awk_dash_e_glued_is_ask_floor() {
+        for command in [
+            "gawk -e'BEGIN{system(\"rm -rf /\")}'",
+            "awk -e'BEGIN{system(\"rm -rf /\")}'",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+    }
+
+    #[test]
+    fn awk_dash_e_bare_separated_is_ask_floor_with_correct_reason() {
+        // Before the fix, this shape accidentally landed on Ask too, but
+        // only because the separated program word was misread as a bare
+        // positional operand -- the reason string claimed "no -c/-e-style
+        // flag", which was false. It must now name the flag that was
+        // actually found.
+        let verdict = decide("gawk -e 'BEGIN{system(\"id\")}'");
+        assert_eq!(verdict.decision(), Decision::Ask);
+        let reason = verdict.reason().unwrap().as_str();
+        assert!(reason.contains("-e"), "{reason}");
+        assert!(!reason.contains("bare positional"), "{reason}");
+    }
+
+    #[test]
+    fn awk_dash_dash_source_glued_and_attached_are_ask_floor() {
+        for command in [
+            "gawk --source='BEGIN{system(\"rm -rf /\")}'",
+            "gawk --source 'BEGIN{system(\"id\")}'",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+    }
+
+    #[test]
+    fn awk_dash_e_or_source_combined_with_dash_f_is_still_ask_floor() {
+        // gawk runs BOTH sources -- `-f`'s file AND the inline text -- so
+        // the combination must never resolve to `-f`'s unfloored Allow, in
+        // either order.
+        for command in [
+            "gawk --source='BEGIN{system(\"id\")}' -f /dev/null",
+            "gawk -e'BEGIN{system(\"id\")}' -f /dev/null",
+            "gawk -f /dev/null -e'BEGIN{system(\"id\")}'",
+            "gawk -f /dev/null --source='BEGIN{system(\"id\")}'",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+    }
+
+    // ---- rule 6d fable-review follow-up ("Blocker B", issue #195): `-f`
+    // pointed at stdin itself reads awk's program from the same pipe an
+    // attacker controls, not a real file. ----
+
+    #[test]
+    fn awk_dash_f_stdin_alias_is_ask_floor() {
+        for command in [
+            "awk -f -",
+            "awk -f /dev/stdin",
+            "awk -f /proc/self/fd/0",
+            "awk -f /dev/fd/0",
+            "awk -f- data.txt",
+            "awk --file=- data.txt",
+            "awk -f/dev/stdin",
+            "gawk -E /dev/stdin",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+    }
+
+    #[test]
+    fn awk_dash_e_flag_file_is_not_an_inline_code_floor() {
+        // `-E` reads the program from a real file, exactly like `-f` --
+        // only pointing it at stdin (above) is the floor-worthy shape.
+        assert_decision("gawk -E script.awk", Decision::Allow);
+    }
+
+    #[test]
+    fn awk_dash_i_include_stdin_alias_is_ask_floor() {
+        // `-i`/`--include` reads an awk *source library* from its value --
+        // concatenated into the program the same way `-f`'s contents are
+        // -- so pointing it at stdin is the same Blocker-B shape as `-f`,
+        // in every spelling and regardless of whether an ordinary `-f`
+        // also appears (bypass-hunt finding against an earlier version of
+        // this fix: `-i`'s value was skipped without ever being checked).
+        for command in [
+            "gawk -i /dev/stdin",
+            "gawk -i /dev/stdin -f script.awk",
+            "gawk --include /dev/stdin -f script.awk",
+            "gawk -i/dev/stdin -f script.awk",
+            "gawk --include=/dev/stdin -f script.awk",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+    }
+
+    #[test]
+    fn awk_second_dash_f_pointed_at_stdin_is_still_ask_floor() {
+        // gawk concatenates the contents of every `-f`/`-E`/`-i` it's
+        // given into one program, so a benign first `-f` must not excuse a
+        // stdin-sourced second one (bypass-hunt finding against an earlier
+        // version of this fix, which only classified the first `-f`/`-E`
+        // token it found and returned immediately).
+        for command in [
+            "awk -f script.awk -f /dev/stdin data.txt",
+            "gawk -f script.awk -f /dev/stdin",
+            "gawk -f script.awk -f -",
+            "gawk -fa.awk -f/dev/stdin",
+            "gawk --file=script.awk --file=/dev/stdin",
+            "gawk -f script.awk -E /dev/stdin",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+    }
+
+    // ---- awk's other required-value flags (`-i`/`--include`,
+    // `-l`/`--load`) must skip their separated value the same way
+    // `-v`/`-F` already do, so it is never mistaken for the script
+    // operand. ----
+
+    #[test]
+    fn awk_dash_i_and_dash_l_separated_values_are_not_mistaken_for_the_script() {
+        for command in ["awk -i lib.awk -f script.awk", "awk -l ext -f script.awk"] {
+            assert_decision(command, Decision::Allow);
+        }
+    }
+
+    #[test]
+    fn awk_dash_l_stdin_value_is_out_of_scope() {
+        // `-l`/`--load` names a compiled extension for `dlopen`, not awk
+        // source text -- a materially different risk (arbitrary native
+        // code loading) than the script-introspection floor this module
+        // implements, and not obviously even exploitable through a pipe
+        // alias (dlopen needs an mmap-able file; a plain pipe typically
+        // isn't). Deliberately NOT floored, unlike `-f`/`-E`/`-i` above --
+        // documented here so a future reader sees this was a decision, not
+        // an oversight, per the bypass-hunt finding that first surfaced it
+        // (issue #195 fable-review follow-up).
+        assert_decision("gawk -l /dev/stdin -f script.awk", Decision::Allow);
+    }
+
+    // ---- Non-finding, kept intentional: `awk -v`/`-F`/`--assign`'s
+    // separated value is consumed as that flag's value, not run as code,
+    // even when it looks like an awk program -- correctly Allow. ----
+
+    #[test]
+    fn awk_dash_v_or_f_or_assign_swallow_a_payload_looking_value_and_stay_allow() {
+        for command in [
+            "awk -v 'BEGIN{system(\"id\")}'",
+            "awk -F 'BEGIN{system(\"id\")}'",
+            "awk --assign 'BEGIN{system(\"id\")}'",
+        ] {
+            assert_decision(command, Decision::Allow);
+        }
     }
 
     #[test]
