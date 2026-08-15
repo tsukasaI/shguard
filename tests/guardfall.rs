@@ -668,3 +668,110 @@ fn guardfall_redirect_and_tee_cases() {
         );
     }
 }
+
+/// Issue #198: the protected-path list omitted shell-init/persistence
+/// files (`~/.bashrc`, `/etc/crontab`, ...) for `tee`/`cp`/`mv`/`install`/
+/// `sed -i`/`dd of=`/`rm`. One representative path per class, crossed with
+/// every write-capable mechanism the new `shell-init-*` rules cover, plus
+/// benign controls that must stay `Allow` (reading FROM a protected path
+/// rather than writing to it, `dd`'s `if=` vs `of=` distinction, and a path
+/// that merely shares a prefix with a protected one).
+///
+/// Bare shell redirection (`>`/`>>`) is deliberately NOT covered — see the
+/// "NOT covered" note on this rule family in `rules/blocklist.toml` for
+/// why: every embedded `[[redirect]]` rule must stay `Decision::Block`
+/// (first-match, no worst-wins folding across a command line's
+/// redirections — `rules::tests::embedded_redirect_rules_are_all_block_
+/// decision`), so `echo evil >> ~/.bashrc` still reads `Allow` here, on
+/// purpose, pending a follow-up issue.
+#[test]
+fn guardfall_shell_init_persistence_cases() {
+    let cases: &[(&str, Decision)] = &[
+        // ---- one path per class, one mechanism each ----
+        ("tee -a ~/.bashrc evil", Decision::Ask),
+        ("tee -a ~/.zshrc evil", Decision::Ask),
+        ("cp evil ~/.bash_profile", Decision::Ask),
+        ("mv evil ~/.profile", Decision::Ask),
+        (
+            "install -m 644 evil ~/.config/fish/config.fish",
+            Decision::Ask,
+        ),
+        ("sed -i 's/x/y/' /etc/crontab", Decision::Ask),
+        ("dd of=/etc/cron.d/x if=evil", Decision::Ask),
+        ("rm ~/.zshenv", Decision::Ask),
+        // ---- the rest of the class, one mechanism (tee) each ----
+        ("tee -a /etc/profile evil", Decision::Ask),
+        ("tee -a /etc/profile.d/x.sh evil", Decision::Ask),
+        ("tee -a /var/spool/cron/root evil", Decision::Ask),
+        ("tee -a ~/.config/autostart/x.desktop evil", Decision::Ask),
+        (
+            "tee -a ~/.config/systemd/user/x.service evil",
+            Decision::Ask,
+        ),
+        ("tee -a ~/.ssh/authorized_keys evil", Decision::Ask),
+        ("tee -a ~/.ssh/config evil", Decision::Ask),
+        ("tee -a /etc/ld.so.preload evil", Decision::Ask),
+        // ---- benign controls: must NOT regress ----
+        ("echo x > /tmp/f", Decision::Allow),
+        ("cat ~/.bashrc", Decision::Allow),
+        // Known open gap (documented above): redirection into a protected
+        // path is not yet covered by any rule.
+        ("echo evil >> ~/.bashrc", Decision::Allow),
+        // dd's `of=`/`if=` split genuinely distinguishes write from read —
+        // reading FROM a protected path is not a write TO it.
+        ("dd if=~/.bashrc of=/tmp/backup", Decision::Allow),
+        // A path that merely shares a prefix with a protected file is not
+        // the file itself.
+        ("tee -a ~/.bashrc.bak evil", Decision::Allow),
+        ("cp evil ~/.bash_history", Decision::Allow),
+    ];
+
+    for (command, expected) in cases {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
+/// Issue #198 follow-up: `cp`/`mv`/`install` can't tell a protected path
+/// used as the read SOURCE from the same path used as the write
+/// DESTINATION apart (`targets` matches ANY argv token, not a specific
+/// position — the same limitation the self-protection ancestor rules
+/// already document). This is a disclosed, accepted cost of `decision =
+/// "ask"`, not a bug: an ordinary backup command now asks for confirmation
+/// instead of running silently.
+#[test]
+fn guardfall_shell_init_source_destination_ambiguity_cases() {
+    let cases: &[(&str, Decision)] = &[
+        ("cp ~/.bashrc ~/.bashrc.bak", Decision::Ask),
+        ("cp ~/.bashrc /tmp/backup", Decision::Ask),
+    ];
+
+    for (command, expected) in cases {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
+/// Issue #198: `shell-init-tee`'s new `ask` targets must never shadow the
+/// earlier, stricter `tee-write-device-or-critical-file` `block` rule —
+/// `Rules::match_command` is first-match over `rules/blocklist.toml`'s
+/// declared order, so the new rules being appended at the END of the file
+/// is load-bearing, not incidental (see the comment on this rule family in
+/// `rules/blocklist.toml`).
+#[test]
+fn guardfall_shell_init_tee_does_not_shadow_critical_file_block() {
+    assert_eq!(
+        shguard::analyze("tee /etc/passwd ~/.bashrc").decision(),
+        Decision::Block
+    );
+}
