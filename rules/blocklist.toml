@@ -87,9 +87,23 @@
 #   except_targets   optional list of target alternatives, same
 #                    `{ exact = "…" }` / `{ prefix = "…" }` shapes as
 #                    `targets` (never `normalized`/`normalized_prefix` —
-#                    stays literal by policy, see above) — the opposite
-#                    direction (issue #30): the
-#                    rule matches normally unless every candidate target
+#                    stays literal by policy, see above), plus an opt-in
+#                    fifth shape `{ url_host = "…" }` (issue #102): parses
+#                    the candidate as a real URL via the `url` crate
+#                    (docs/adr/0002-url-crate.md) and compares its HOST
+#                    component, not a string prefix of the raw text —
+#                    closes the userinfo-spoofing gap `exact`/`prefix`
+#                    matching can't (`http://localhost:pw@evil.example.com`
+#                    shares a string prefix with `http://localhost:` but
+#                    its real host is `evil.example.com`). Fails closed on
+#                    an unparseable candidate (never excepted) — see the
+#                    README's "Excepting specific targets" section for the
+#                    full semantics, the IPv6-bracket requirement, and why
+#                    it must REPLACE, not sit alongside, an existing
+#                    `exact`/`prefix` entry for the same host to actually
+#                    close the gap. `except_targets` is the opposite
+#                    direction from `targets` (issue #30): the rule
+#                    matches normally unless every candidate target
 #                    token (the tokens `targets` matched, or every non-flag/
 #                    `--flag=value`-value token when `targets` is empty,
 #                    narrowed further by `value_flags` below) also matches

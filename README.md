@@ -170,6 +170,66 @@ still matches userinfo-with-password forms like
 `http://localhost:pw@evil.example.com`, and query strings aren't handled
 either), so treat this as narrowing the gap, not eliminating it.
 
+### Opt-in real URL parsing: `url_host`
+
+The gaps above are all instances of one root cause: `exact`/`prefix`
+compare raw string text, not a parsed URL's *host* component. For a rule
+author who wants that gap fully closed rather than narrowed, `targets`/
+`except_targets` accept a fifth, opt-in shape — `{ url_host = "…" }`
+(issue #102) — that parses the candidate as a real URL (via the
+[`url`](https://crates.io/crates/url) crate, the same WHATWG-standard
+parser browsers use — see `docs/adr/0002-url-crate.md`) and compares its
+actual host, not any string prefix of the raw text:
+
+```toml
+[[ask]]
+id = "curl-non-localhost"
+reason = "confirm before curl makes an outbound request to a non-localhost target"
+command = "curl"
+except_targets = [{ url_host = "localhost" }]
+```
+
+With this rule, `curl http://localhost:pw@evil.example.com` correctly
+**asks** — the real host is `evil.example.com`, not `localhost` — closing
+the userinfo-spoofing gap the string-prefix example above discloses as
+unclosed. `curl http://localhost:8080/api` still correctly **allows**.
+
+This is opt-in and stays that way — the default `exact`/`prefix` matching
+above is unchanged for any config that doesn't use `url_host`. A few
+things to know before reaching for it:
+
+- **It must REPLACE the `exact`/`prefix` entries for the same host, not
+  sit alongside them.** `except_targets` alternatives are OR'd — if a rule
+  keeps `{ prefix = "http://localhost:" }` *and* adds
+  `{ url_host = "localhost" }`, the userinfo-spoofed URL still matches the
+  retained prefix entry and the rule gains no protection at all. Migrating
+  to `url_host` means removing the string-based alternatives for that
+  host, not adding to them.
+- **An unparseable candidate fails closed**: if a candidate target token
+  doesn't parse as a URL at all, `url_host` never matches it — the
+  exception doesn't apply and the rule still fires. There is no fallback
+  to string matching for that token.
+- **A scheme-less token doesn't except.** `localhost:8080` (no `http://`)
+  parses with `localhost` as the *scheme*, not the host, so a
+  `url_host = "localhost"` rule doesn't except it — it asks, same as
+  today's default matching would for that shape. Resist the urge to
+  "fix" this with `{ prefix = "localhost:" }` alongside it: that
+  reopens the exact userinfo-spoof shape this feature exists to close
+  (`localhost:pw@evil.example.com` matches that prefix too).
+- **IPv6 hosts need brackets in the config value**: `{ url_host = "[::1]"
+  }`, not `{ url_host = "::1" }` — the bare form is rejected as an invalid
+  domain name at load time. This matches how the host appears inside a
+  URL's own authority component (`http://[::1]:8080/`).
+- **Known residual risk, narrowing not eliminating** (same posture as the
+  string-matching gaps above): the `url` crate's WHATWG parsing can
+  diverge from what `curl`/other tools actually do with the same text in
+  rare cases (backslash handling in particular) — a candidate containing
+  a backslash is rejected outright, before parsing, specifically to close
+  that known differential. See `docs/adr/0002-url-crate.md`'s "Known
+  residual risk" section for the full reasoning.
+- `url_host` also works in `targets` (not just `except_targets`), with
+  the same real-host-comparison semantics.
+
 `except_targets` also can't see a target glued directly onto a
 single-dash flag with no `=` separator — curl's `-xhttp://evil.example.com`
 short proxy-flag syntax, for instance. That shape is indistinguishable
