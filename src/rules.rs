@@ -2577,30 +2577,6 @@ pub(crate) fn effective_command_excluding<'a>(
     }
 }
 
-/// Per-wrapper flags that take a *separate* value token (`-n 19`, `-u
-/// root`) — consulted by [`skip_wrapper_arguments`] so that value token
-/// isn't mistaken for the wrapped command (issue #54). `sudo`/`doas` share
-/// the gap `nice` originally exposed; `timeout`/`ionice` are new wrappers
-/// added by the same issue. Consumption follows the same [`ValueFlag`]
-/// semantics [`value_flag_free_candidates`] already uses for
-/// `except_targets` candidates: [`ValueFlag::is_bare`] matches only the
-/// flag's standalone spelling (`-n`), never a glued form (`-n19`), so a
-/// glued short flag still falls through to the ordinary dash-prefix skip
-/// below — it consumes only itself, not a following token, exactly like
-/// before this table existed. A wrapper absent from this table, or one
-/// whose flag isn't listed here, keeps that pre-existing dash-prefix-only
-/// behaviour; see [`TRANSPARENT_WRAPPERS`]'s doc for what stays open.
-///
-/// Each wrapper's short *and* long spelling is listed for every value flag
-/// (e.g. `timeout`'s `-s`/`--signal`): a long-only entry left out here
-/// would let its separated form (`--signal KILL 5 rm -rf /`) mistake the
-/// value for the wrapped command exactly as the pre-#54 short-flag gap
-/// did — [`ValueFlag::is_bare`] already treats `--signal` and `-s` as
-/// distinct spellings that must each be listed to be recognised. `flock`
-/// gained its own entry here for the same reason `nice`/`sudo` did: its
-/// `-w`/`--timeout` and `-E`/`--conflict-exit-code` flags take a separated
-/// value that would otherwise land in [`wrapper_positional_args`]'s
-/// lockfile slot (making the real lockfile argument the resolved command).
 /// A wrapper's boolean (no-value) short-option letters, for the
 /// getopt-cluster recognition in [`skip_wrapper_flags`] (issue #265). The
 /// value-taking letters are NOT repeated here — they are derived from
@@ -2671,6 +2647,30 @@ fn cluster_takes_separated_value(wrapper: &str, token: &str) -> bool {
     false
 }
 
+/// Per-wrapper flags that take a *separate* value token (`-n 19`, `-u
+/// root`) — consulted by [`skip_wrapper_arguments`] so that value token
+/// isn't mistaken for the wrapped command (issue #54). `sudo`/`doas` share
+/// the gap `nice` originally exposed; `timeout`/`ionice` are new wrappers
+/// added by the same issue. Consumption follows the same [`ValueFlag`]
+/// semantics [`value_flag_free_candidates`] already uses for
+/// `except_targets` candidates: [`ValueFlag::is_bare`] matches only the
+/// flag's standalone spelling (`-n`), never a glued form (`-n19`), so a
+/// glued short flag still falls through to the ordinary dash-prefix skip
+/// below — it consumes only itself, not a following token, exactly like
+/// before this table existed. A wrapper absent from this table, or one
+/// whose flag isn't listed here, keeps that pre-existing dash-prefix-only
+/// behaviour; see [`TRANSPARENT_WRAPPERS`]'s doc for what stays open.
+///
+/// Each wrapper's short *and* long spelling is listed for every value flag
+/// (e.g. `timeout`'s `-s`/`--signal`): a long-only entry left out here
+/// would let its separated form (`--signal KILL 5 rm -rf /`) mistake the
+/// value for the wrapped command exactly as the pre-#54 short-flag gap
+/// did — [`ValueFlag::is_bare`] already treats `--signal` and `-s` as
+/// distinct spellings that must each be listed to be recognised. `flock`
+/// gained its own entry here for the same reason `nice`/`sudo` did: its
+/// `-w`/`--timeout` and `-E`/`--conflict-exit-code` flags take a separated
+/// value that would otherwise land in [`wrapper_positional_args`]'s
+/// lockfile slot (making the real lockfile argument the resolved command).
 fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
     match wrapper {
         // Issue #250: `env` is in `TRANSPARENT_WRAPPERS` but had no entry

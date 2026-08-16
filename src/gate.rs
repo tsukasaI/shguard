@@ -7308,6 +7308,14 @@ mod tests {
     }
 
     #[test]
+    fn env_cluster_with_unresolvable_value_fails_closed() {
+        // The cluster is recognised, but its value cannot be read, so the
+        // scan stops there rather than resolving a later token as the
+        // command.
+        assert_decision("env -iu $X rm -rf /", Decision::Ask);
+    }
+
+    #[test]
     fn env_boolean_cluster_before_benign_command_still_allows() {
         assert_decision("env -iu FOO ls", Decision::Allow);
         assert_decision("env -iv ls", Decision::Allow);
@@ -7317,8 +7325,12 @@ mod tests {
     fn env_cluster_with_unmodeled_letter_falls_through_to_generic_skip() {
         // `L` is in neither table, so the cluster is not recognised and
         // only the cluster token is consumed, leaving `FOO` as the
-        // resolved command. Real `env` rejects `-L` and executes nothing,
-        // so there is no execution this fails to guard.
+        // resolved command. macOS and GNU `env` both reject `-L` and
+        // execute nothing, so there is no execution this fails to guard.
+        // FreeBSD >= 13's `env` does have `-L user[/class]` as a value
+        // flag, where this would genuinely run the trailing command --
+        // out of scope while shguard targets macOS and Linux, and the
+        // fix would be a FreeBSD row in the two tables.
         assert_decision("env -iL FOO rm -rf /", Decision::Allow);
     }
 
