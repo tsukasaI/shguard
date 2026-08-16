@@ -2859,7 +2859,36 @@ fn evaluate_fish(
         })
         .reduce(fold_worst);
 
-    if scan.uncertain {
+    if let Some(index) = scan.uncertain {
+        // Mirrors `evaluate_dash_c`'s own `FlagScan::Uncertain` arm: the
+        // unreadable word might be `-c`, so the word after it might be
+        // the script — recursing it keeps `fish $FOO 'rm -rf /'` at Block
+        // instead of demoting the whole shape to the bare Ask floor.
+        let trailing = match rest_words.get(index + 1).map(NormalizedWord::resolution) {
+            Some(Resolution::Resolved(script)) => {
+                let inner = analyze_at_depth(script, depth + 1, rules, allowlist, cwd.clone());
+                let reason = format!(
+                    "`fish`'s option list could not be statically resolved, but a trailing word \
+                     recurses through the full pipeline; inner decision: {:?}{}",
+                    inner.decision(),
+                    inner
+                        .reason()
+                        .map(|r| format!(" ({})", r.as_str()))
+                        .unwrap_or_default()
+                );
+                match inner.decision() {
+                    Decision::Block => Some(Verdict::block(
+                        Reason::new(reason),
+                        outer_argv.clone(),
+                        inner.matched_rule().cloned(),
+                    )),
+                    Decision::Ask => Some(Verdict::ask(Reason::new(reason), outer_argv.clone())),
+                    // An inner Allow does not clear the outer uncertainty.
+                    Decision::Allow => None,
+                }
+            }
+            _ => None,
+        };
         let uncertain = Verdict::ask(
             Reason::new(
                 "`fish`'s option list could not be statically resolved, so whether it runs \
@@ -2868,10 +2897,12 @@ fn evaluate_fish(
             ),
             outer_argv,
         );
-        return Some(match code_fold {
-            Some(code) => fold_worst(uncertain, code),
-            None => uncertain,
-        });
+        return Some(
+            [trailing, code_fold]
+                .into_iter()
+                .flatten()
+                .fold(uncertain, fold_worst),
+        );
     }
 
     if scan.unreadable_code_value {
@@ -4721,9 +4752,9 @@ struct FishScan {
     has_operand: bool,
     /// A code-carrying flag's value exists but could not be read.
     unreadable_code_value: bool,
-    /// A word in flag position could not be read, so what follows cannot
-    /// be attributed to a flag or an operand.
-    uncertain: bool,
+    /// Index of the first word in flag position that could not be read,
+    /// so nothing after it can be attributed to a flag or an operand.
+    uncertain: Option<usize>,
 }
 
 /// Resolves the `FishOptKind` of a long option name, by exact match or
@@ -4754,7 +4785,7 @@ fn scan_fish_invocation(words: &[NormalizedWord]) -> FishScan {
     let mut idx = 0;
     while idx < words.len() {
         let Resolution::Resolved(token) = words[idx].resolution() else {
-            scan.uncertain = true;
+            scan.uncertain = Some(idx);
             return scan;
         };
         if token == "--" {
@@ -4767,13 +4798,13 @@ fn scan_fish_invocation(words: &[NormalizedWord]) -> FishScan {
                 None => (long, None),
             };
             let Some(kind) = fish_long_opt(name) else {
-                scan.uncertain = true;
+                scan.uncertain = Some(idx);
                 return scan;
             };
             if kind == FishOptKind::Boolean {
                 if attached.is_some() {
                     // Real fish rejects a value on a boolean.
-                    scan.uncertain = true;
+                    scan.uncertain = Some(idx);
                     return scan;
                 }
                 idx += 1;
@@ -4795,7 +4826,7 @@ fn scan_fish_invocation(words: &[NormalizedWord]) -> FishScan {
                         break;
                     }
                     None => {
-                        scan.uncertain = true;
+                        scan.uncertain = Some(idx);
                         return scan;
                     }
                 }
@@ -4938,7 +4969,7 @@ fn scan_for_dash_c_before_operand(words: &[NormalizedWord], interpreter: &str) -
         // script) — which is what `fish -C ls` still does after its init
         // command finishes.
         let scan = scan_fish_invocation(words);
-        return if scan.uncertain {
+        return if scan.uncertain.is_some() {
             DashCPosition::Uncertain
         } else if scan.has_command_flag {
             DashCPosition::FlagFound
@@ -9251,6 +9282,50 @@ done"#,
     #[test]
     fn fish_unresolvable_code_argument_floors_to_ask() {
         assert_decision(r#"fish -C "$(cat x)""#, Decision::Ask);
+    }
+
+    #[test]
+    fn fish_unresolvable_flag_position_still_blocks_a_dangerous_trailing_word() {
+        // The unreadable word might be `-c`, so the word after it might be
+        // the script -- the same reasoning `evaluate_dash_c`'s own
+        // `Uncertain` arm applies for POSIX shells.
+        assert_decision("fish $FOO 'rm -rf /'", Decision::Block);
+        assert_decision(r"find . -exec fish $FOO 'rm -rf /' \;", Decision::Block);
+        assert_decision("fish $FOO ls", Decision::Ask);
+    }
+
+    #[test]
+    fn fish_value_on_a_boolean_option_floors_to_ask() {
+        // Real fish rejects it and exits 1 without executing.
+        assert_decision("fish --interactive=x", Decision::Ask);
+    }
+
+    #[test]
+    fn fish_code_flag_without_a_value_allows() {
+        // Nothing names code to run; real fish errors out instead.
+        assert_decision("fish -c", Decision::Allow);
+        assert_decision("fish --command", Decision::Allow);
+    }
+
+    #[test]
+    fn fish_non_ascii_cluster_letter_is_unreadable_and_fails_closed() {
+        // No table letter is non-ASCII, so the cluster is unrecognized and
+        // the scan stops -- which then recurses the trailing word, the
+        // same fail-closed handling an unresolvable word gets.
+        assert_decision("fish -éc 'rm -rf /'", Decision::Block);
+        assert_decision("fish -éc ls", Decision::Ask);
+    }
+
+    #[test]
+    fn fish_code_value_that_looks_like_a_flag_is_still_the_code() {
+        // wgetopt takes a long option's value from the next word
+        // unconditionally, so this really runs the code string `-c`.
+        assert_decision("fish --command -c", Decision::Allow);
+    }
+
+    #[test]
+    fn fish_attached_init_command_cluster_allows_benign_code() {
+        assert_decision("fish -Cls", Decision::Allow);
     }
 
     #[test]
