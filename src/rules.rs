@@ -3214,11 +3214,28 @@ fn collect_env_split_string_slots(tail: &[NormalizedWord], slots: &mut Vec<Scrip
         let Resolution::Resolved(token) = tail[idx].resolution() else {
             continue;
         };
-        // Where `-S`'s value lives: glued into this token, or the next one.
-        let attached = if token == "-S" || token == "--split-string" {
+        // Where `-S`'s value lives: glued into this token, or the next
+        // one. Long spellings resolve by unambiguous prefix (issue #266),
+        // because `env --split 'rm -rf /'` really splices on GNU and
+        // `skip_wrapper_flags` already consumes the abbreviated token —
+        // matching only the full name here would swallow the splice
+        // without ever recursing it.
+        let long_is_split_string = |name: &str| {
+            ValueFlag::unambiguous_long_prefix(&wrapper_value_flags("env"), name)
+                == Some("split-string")
+        };
+        let attached = if token == "-S"
+            || token.strip_prefix("--").is_some_and(|rest| {
+                !rest.is_empty() && !rest.contains('=') && long_is_split_string(rest)
+            }) {
             None
-        } else if let Some(value) = token.strip_prefix("--split-string=") {
-            Some(value.to_string())
+        } else if let Some(value) = token
+            .strip_prefix("--")
+            .and_then(|rest| rest.split_once('='))
+            .filter(|(name, _)| long_is_split_string(name))
+            .map(|(_, value)| value.to_string())
+        {
+            Some(value)
         } else if let Some(cluster) = token
             .strip_prefix('-')
             .filter(|rest| !rest.is_empty() && !rest.starts_with('-'))
@@ -3334,11 +3351,12 @@ pub(crate) fn wrapper_shell_string_scripts(stage: &[NormalizedWord]) -> Vec<Scri
             .iter()
             .filter(|slot| slot.command == base && matches!(slot.mode, RecurseMode::ShellString))
         {
-            // The abbreviation rule of issue #266 applies here too: `flock
-            // /tmp/l --com "rm -rf /"` really runs the string on GNU, and
-            // an exact flag-name match never sees it. Over-matching here
-            // only costs an extra recursion, because this function
-            // produces a raise-only floor.
+            // The abbreviation rule of issue #266 applies here too, so
+            // `su --com "rm -rf /"` reaches its own recursion instead of
+            // only the escalation floor. Over-matching costs nothing:
+            // this function produces a raise-only floor, and util-linux's
+            // `flock` (which rejects `--com` outright) simply never runs
+            // the string shguard recursed.
             match scan_for_flag(tail, |s| {
                 s == slot.flag
                     || match (slot.flag.strip_prefix("--"), s.strip_prefix("--")) {

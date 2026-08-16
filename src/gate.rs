@@ -7627,6 +7627,17 @@ mod tests {
     }
 
     #[test]
+    fn abbreviated_split_string_splice_is_still_recursed() {
+        // The abbreviated flag is consumed by `skip_wrapper_flags`, so
+        // without the same prefix rule in the splice detector the payload
+        // would be swallowed and never recursed.
+        assert_decision(r#"env --split "rm -rf /""#, Decision::Block);
+        assert_decision(r#"env --s "rm -rf /""#, Decision::Block);
+        assert_decision(r#"env --spli="rm -rf /""#, Decision::Block);
+        assert_decision(r#"env --s "echo hello""#, Decision::Allow);
+    }
+
+    #[test]
     fn ambiguous_long_prefix_is_not_treated_as_a_value_flag() {
         // Real getopt errors on an ambiguous prefix and executes nothing,
         // so declining to match cannot miss a real execution. `--d` is
@@ -9569,8 +9580,11 @@ done"#,
     #[test]
     fn abbreviated_command_flag_still_recurses_the_shell_string() {
         // Issue #266: the recursion path matched the slot's flag name
-        // exactly, so `--com` reached neither `flock`'s recursion nor
-        // (for `flock`, which has no escalation floor) any other check.
+        // exactly, so `su --com` reached only the escalation floor (Ask)
+        // rather than its own recursion. `flock` is the over-blocking
+        // side of the same rule -- util-linux rejects `--com` outright,
+        // so nothing runs there and Block costs only a false positive on
+        // a command that errors out anyway.
         assert_decision(r#"flock /tmp/l --com "rm -rf /""#, Decision::Block);
         assert_decision(r#"su --com "rm -rf /""#, Decision::Block);
     }
