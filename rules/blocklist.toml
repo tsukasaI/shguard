@@ -264,7 +264,30 @@ targets = [
     # `{}` text straight into this same rule rather than trying to
     # special-case it, so this target entry is what makes that recursion
     # actually catch the canonical "delete everything found" pattern.
-    { exact = "{}" },
+    # `normalized` (not `exact`, issue #267): `find` substitutes `{}`
+    # anywhere inside a word, so `./{}`/`{}/`/`x/../{}` all still
+    # resolve to the matched path and must Block too. `normalized`
+    # matches any token that lexically collapses to the single component
+    # `{}`, while still leaving a token that resolves to a genuinely
+    # different path (`{}.`, `{}.bak`, `x{}`, `/tmp/{}`) unmatched.
+    { normalized = "{}" },
+    # The absolute re-root of the same evasion: when `find`'s search root
+    # is absolute, matches are absolute too, so `/{}` substitutes to
+    # `//x/foo` — the matched path itself — and deletes every match. That
+    # token collapses to `Abs(["{}"])`, which `normalized = "{}"`
+    # (`Rel{ascent:0, comps:["{}"]}`) cannot see, so it needs its own
+    # entry; `//{}`/`/./{}`/`/../{}` collapse here too. With a relative
+    # search root this spelling instead deletes `/<match>` at the
+    # filesystem root, which is no safer.
+    { normalized = "/{}" },
+    # `~/{}` collapses to `Home(["{}"])`, a third anchor the two entries
+    # above cannot reach. It deletes every match whenever the cwd is
+    # `$HOME` and the search root is relative (`~/{}` substitutes to
+    # `$HOME/./foo`). Unlike `/{}`, that precondition is invisible in the
+    # command text, so this entry is fail-closed rather than exact — the
+    # only thing it costs is a literal `$HOME/{}` file, which does not
+    # occur in practice.
+    { normalized = "~/{}" },
 ]
 
 # `-r`/`-R` is unnecessary for `rm -f {}` (no `-type f` needed either) to
@@ -286,12 +309,14 @@ id = "rm-force-find-placeholder-target"
 reason = "rm -f against find's own {} placeholder removes every matched file, unrecoverably, the same effect find -delete has"
 command = "rm"
 required_flags = ["f|--force"]
-# Known gap, shared with the `-rf` rule above: `exact` matches only a token
-# that IS `{}`, but find substitutes `{}` anywhere inside a word, so
-# `-exec rm -f ./{}` still deletes every match and still Allows. Closing it
-# needs a contains-style matcher on both rules; pinned in tests/guardfall.rs
-# so it has a regression anchor. issue #140
-targets = [{ exact = "{}" }]
+# `normalized`, not `exact` (issue #267), plus the `/{}` and `~/{}`
+# re-roots: see the sibling rule above for the collapse semantics all
+# three entries share.
+targets = [
+    { normalized = "{}" },
+    { normalized = "/{}" },
+    { normalized = "~/{}" },
+]
 
 [[command]]
 id = "find-delete"
