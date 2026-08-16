@@ -949,23 +949,13 @@ targets = [{ normalized = "~/.config" }, { normalized = "~" }]
 # targets with no legitimate write use (see the ancestor-directory rules
 # above for the same reasoning).
 #
-# NOT covered: bare shell redirection (`>`/`>>`). Every embedded
-# `[[redirect]]` rule must be `Decision::Block` — `evaluate_simple_command_
-# core`'s redirect check (src/gate.rs) runs first-match across every
-# redirection on a command line with no worst-wins folding, so a weaker
-# `ask` redirect rule ordered before a stronger `block` one could
-# downgrade it on a DIFFERENT target of the same command line (the exact
-# regression a fable review of PR #204 found and this project now guards
-# with `rules::tests::embedded_redirect_rules_are_all_block_decision`).
-# Giving this list's redirect form `decision = "block"` would fix the
-# invariant but contradict the Ask-over-Block posture above for the
-# single most common legitimate write in this class (`echo ... >>
-# ~/.bashrc`, what most shell installers do); making the redirect check
-# support worst-wins folding is the real fix, but it's a cross-cutting
-# change to a security-reviewed invariant, not a rules-list addition —
-# left for a follow-up issue. `echo evil >> ~/.bashrc` therefore still
-# reads `Allow` after this change; every OTHER write mechanism below does
-# not.
+# Bare shell redirection (`>`/`>>`) is covered too, by the
+# `shell-init-redirect` rule at the end of this file (issue #261). It
+# needed the redirect check to fold worst-wins first: while that check
+# was first-match across every redirection on a command line, an `ask`
+# redirect rule could downgrade a stricter `block` matched on a DIFFERENT
+# target of the same command (the regression a fable review of PR #204
+# found).
 #
 # cp/mv/install can't tell a protected path used as the SOURCE (`cp
 # ~/.bashrc ~/.bashrc.bak`, an ordinary backup) from the same path used as
@@ -1417,6 +1407,68 @@ id = "shell-init-ln"
 decision = "ask"
 reason = "ln replacing a shell-init, cron, autostart, or persistence-critical file plants a backdoor that survives past the current session"
 command = "ln"
+targets = [
+    { normalized = "~/.bashrc" },
+    { normalized = "~/.bash_profile" },
+    { normalized = "~/.bash_login" },
+    { normalized = "~/.bash_logout" },
+    { normalized = "~/.zshrc" },
+    { normalized = "~/.zprofile" },
+    { normalized = "~/.zshenv" },
+    { normalized = "~/.zlogin" },
+    { normalized = "~/.zlogout" },
+    { normalized = "~/.profile" },
+    { normalized = "~/.config/fish/config.fish" },
+    { normalized_prefix = "~/.config/fish/conf.d/" },
+    { normalized = "~/.config/fish/conf.d" },
+    { normalized = "/etc/profile" },
+    { normalized_prefix = "/etc/profile.d/" },
+    { normalized = "/etc/profile.d" },
+    { normalized = "/etc/bash.bashrc" },
+    { normalized_prefix = "/etc/zsh/" },
+    { normalized = "/etc/zsh" },
+    { normalized = "/etc/crontab" },
+    { normalized_prefix = "/etc/cron.d/" },
+    { normalized = "/etc/cron.d" },
+    { normalized_prefix = "/etc/cron.hourly/" },
+    { normalized = "/etc/cron.hourly" },
+    { normalized_prefix = "/etc/cron.daily/" },
+    { normalized = "/etc/cron.daily" },
+    { normalized_prefix = "/etc/cron.weekly/" },
+    { normalized = "/etc/cron.weekly" },
+    { normalized_prefix = "/etc/cron.monthly/" },
+    { normalized = "/etc/cron.monthly" },
+    { normalized_prefix = "/var/spool/cron/" },
+    { normalized = "/var/spool/cron" },
+    { normalized_prefix = "~/.config/autostart/" },
+    { normalized = "~/.config/autostart" },
+    { normalized_prefix = "~/.config/systemd/user/" },
+    { normalized = "~/.config/systemd/user" },
+    { normalized = "~/.ssh/authorized_keys" },
+    { normalized = "~/.ssh/config" },
+    { normalized = "~/.ssh/rc" },
+    { normalized = "/etc/ld.so.preload" },
+]
+
+# The redirect form of the shell-init/persistence family above (issue
+# #261). `echo ... >> ~/.zshrc` is what most shell installers do, so this
+# is the same `ask` tier every other mechanism in the family carries — a
+# `block` here would make the single most common legitimate write in this
+# class unappealable.
+#
+# `>` truncation gets the same tier as `>>`, deliberately: `tee`, `cp`,
+# and `dd of=` all overwrite these paths too and all Ask, so singling out
+# bare redirection would make it strictly harsher than every
+# equal-powered mechanism for the same target.
+#
+# The target list is duplicated verbatim from `shell-init-tee`, a tenth
+# copy of the same 40 entries — pinned by
+# `rules::tests::shell_init_target_lists_are_in_sync`, which is what makes
+# the duplication safe to maintain.
+[[redirect]]
+id = "shell-init-redirect"
+decision = "ask"
+reason = "redirecting output into a shell-init, cron, autostart, or persistence-critical file plants a backdoor that survives past the current session"
 targets = [
     { normalized = "~/.bashrc" },
     { normalized = "~/.bash_profile" },

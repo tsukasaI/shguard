@@ -6574,26 +6574,92 @@ mod tests {
         Rules::embedded().unwrap();
     }
 
-    // Protects the invariant `evaluate_simple_command_core`'s redirect
-    // check (src/gate.rs) relies on: every `[[redirect]]` rule reachable
-    // via `Rules::match_redirect_target` must be `Decision::Block`, since
-    // that check runs first-match, before stage 3's argv blocklist match,
-    // with no worst-wins folding across the match. A future embedded
-    // `[[redirect]]` entry declaring `decision = "ask"` would silently
-    // reintroduce the same downgrade class `UserConfig::parse` now rejects
-    // for user-declared redirect entries — this test is the embedded-side
-    // half of that same invariant.
+    // Every embedded `[[redirect]]` rule's decision level, as an exact
+    // map: adding one is a deliberate choice between Block (a target with
+    // no legitimate write path) and Ask (issue #261's shell-init family,
+    // which every other write mechanism also Asks about), not something
+    // that should happen by copying a neighbouring entry.
     #[test]
-    fn embedded_redirect_rules_are_all_block_decision() {
+    fn embedded_redirect_rule_decision_levels() {
         let rules = Rules::embedded().unwrap();
         for rule in &rules.redirect_rules {
+            let expected = if rule.id.as_str() == "shell-init-redirect" {
+                Decision::Ask
+            } else {
+                Decision::Block
+            };
             assert_eq!(
                 rule.decision,
-                Decision::Block,
-                "embedded redirect rule {:?} must be Decision::Block",
+                expected,
+                "embedded redirect rule {:?} carries an unexpected decision",
                 rule.id.as_str()
             );
         }
+        assert!(
+            rules
+                .redirect_rules
+                .iter()
+                .any(|rule| rule.id.as_str() == "shell-init-redirect"),
+            "the shell-init redirect rule must exist for the Ask arm above to mean anything"
+        );
+    }
+
+    // The shell-init/persistence path list is duplicated across nine
+    // `[[command]]` rules and one `[[redirect]]` rule (issue #261's own
+    // tenth copy). Nothing in the schema ties them together, so this test
+    // is what keeps a path added to one mechanism from silently missing
+    // from the others.
+    #[test]
+    fn shell_init_target_lists_are_in_sync() {
+        let doc: toml::Value = toml::from_str(EMBEDDED_BLOCKLIST).unwrap();
+        let targets_of = |table: &toml::Value| -> Vec<(String, String)> {
+            table["targets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| {
+                    let table = entry.as_table().unwrap();
+                    // `strip` is per-mechanism (`shell-init-dd` carries
+                    // `of=`), so only the matcher kind and value are
+                    // compared.
+                    let (kind, value) = table
+                        .iter()
+                        .find(|(key, _)| key.as_str() != "strip")
+                        .unwrap();
+                    (kind.clone(), value.as_str().unwrap().to_string())
+                })
+                .collect()
+        };
+
+        let expected = doc["command"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("shell-init-tee"))
+            .map(targets_of)
+            .unwrap();
+
+        let mut checked = 0;
+        for rule in doc["command"].as_array().unwrap() {
+            let id = rule["id"].as_str().unwrap();
+            if !id.starts_with("shell-init-") {
+                continue;
+            }
+            assert_eq!(targets_of(rule), expected, "rule {id:?} drifted");
+            checked += 1;
+        }
+        for rule in doc["redirect"].as_array().unwrap() {
+            let id = rule["id"].as_str().unwrap();
+            if !id.starts_with("shell-init-") {
+                continue;
+            }
+            assert_eq!(targets_of(rule), expected, "rule {id:?} drifted");
+            checked += 1;
+        }
+        assert_eq!(
+            checked, 10,
+            "expected ten shell-init rules, found {checked}"
+        );
     }
 
     #[test]

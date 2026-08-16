@@ -131,13 +131,12 @@ targets = [{ normalized_prefix = "~/secrets/" }]
 
 `decision` must be `"block"` (the default — omit the field entirely for
 the common case). Unlike a command rule, a user-declared redirect entry
-cannot be `"ask"`: the redirect-target check runs first, before any other
-check on the command, and matches the first target it finds across every
-declared rule — an `Ask`-decision user rule could otherwise win that race
-ahead of a stricter embedded rule matching a *different* redirect target
-on the same command line, silently downgrading it. `decision = "ask"` is
-rejected at config load time (the whole config fails closed) rather than
-silently accepted and only sometimes honored. `targets` is required and
+cannot be `"ask"`; `decision = "ask"` is rejected at config load time (the
+whole config fails closed) rather than silently accepted and only
+sometimes honored. This began as a guard against a downgrade race — the
+redirect check used to run first-match and short-circuit every other check
+— and remains as a conservative posture now that the check folds
+worst-wins across rules, targets, and both target-resolution channels. `targets` is required and
 non-empty, using the same `{ exact = … }`/`{ prefix = … }`/
 `{ normalized = … }`/`{ normalized_prefix = … }` matcher shapes as a
 command rule's own `targets`/`except_targets`. User-declared redirect
