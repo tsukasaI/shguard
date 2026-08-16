@@ -1873,6 +1873,10 @@ pub(crate) struct PipelineRule {
     decision: Decision,
     sources: Vec<String>,
     sinks: Vec<String>,
+    /// Constrains the resolved sink's own flags, so a rule can separate
+    /// `xargs rm -f` from `xargs rm` without also naming every benign
+    /// sink invocation (issue #268). Empty = unconstrained.
+    sink_required_flags: Vec<FlagMatcher>,
 }
 
 impl PipelineRule {
@@ -1905,10 +1909,22 @@ impl PipelineRule {
         if source_stages.is_empty() {
             return false;
         }
-        let Some((sink_name, _)) = effective_command(sink_stage) else {
+        let Some((sink_name, sink_tail)) = effective_command(sink_stage) else {
             return false;
         };
         if !self.sinks.iter().any(|sink| sink == sink_name) {
+            return false;
+        }
+        // Membership semantics (no `--` end-of-flags awareness, an
+        // unresolvable word skipped rather than stopping the scan) are
+        // inherited from [`CommandRule::constraints_match`] deliberately:
+        // the sink is the same argv shape those rules match on.
+        let sink_args = resolved_strings(sink_tail);
+        if !self
+            .sink_required_flags
+            .iter()
+            .all(|flag| flag.satisfied(&sink_args))
+        {
             return false;
         }
         source_stages.iter().any(|stage| {
@@ -3417,6 +3433,12 @@ struct PipelineRuleDto {
     decision: Option<String>,
     sources: Vec<String>,
     sinks: Vec<String>,
+    /// `deny_unknown_fields` means a config using this field fails to load
+    /// on an shguard built before issue #268 — fail-closed, so a rule
+    /// author cannot get a silently unconstrained sink out of a version
+    /// mismatch.
+    #[serde(default)]
+    sink_required_flags: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4035,12 +4057,21 @@ fn convert_pipeline_rule(dto: PipelineRuleDto) -> Result<PipelineRule, RulesErro
 
     let decision = parse_decision(&dto.id, dto.decision.as_deref())?;
 
+    let sink_required_flags = dto
+        .sink_required_flags
+        .iter()
+        .map(|spec| {
+            FlagMatcher::parse(spec).map_err(|problem| RulesError::invalid(&dto.id, problem))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
     Ok(PipelineRule {
         id: RuleId::new(dto.id),
         reason: Reason::new(dto.reason),
         decision,
         sources: dto.sources,
         sinks: dto.sinks,
+        sink_required_flags,
     })
 }
 
@@ -6273,6 +6304,46 @@ mod tests {
             Rules::parse(toml),
             Err(RulesError::InvalidRule { .. })
         ));
+    }
+
+    #[test]
+    fn pipeline_rule_sink_required_flags_invalid_spec_is_err() {
+        let toml = r#"
+            [[pipeline]]
+            id = "x"
+            reason = "some reason"
+            sources = ["find"]
+            sinks = ["rm"]
+            sink_required_flags = ["f|"]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn pipeline_rule_sink_required_flags_matches_cluster_and_long_spellings() {
+        let rules = Rules::embedded().unwrap();
+        let find = argv(&["find", "."]);
+        for sink in [
+            argv(&["xargs", "rm", "-f"]),
+            argv(&["xargs", "-n", "1", "rm", "-rf"]),
+            argv(&["xargs", "rm", "--force"]),
+        ] {
+            assert!(
+                rules
+                    .match_pipeline(&[find.clone(), sink.clone()])
+                    .is_some_and(|rule| rule.id().as_str() == "find-pipe-rm-force"),
+                "sink {sink:?} should satisfy the rule's sink_required_flags"
+            );
+        }
+        assert!(
+            rules
+                .match_pipeline(&[find, argv(&["xargs", "rm"])])
+                .is_none(),
+            "a flagless rm sink must not satisfy the rule"
+        );
     }
 
     // ==== DoD 4: allowlist Block-immunity + Ask downgrade with audit trail ====
