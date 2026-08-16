@@ -803,13 +803,9 @@ fn guardfall_redirect_and_tee_cases() {
 /// rather than writing to it, `dd`'s `if=` vs `of=` distinction, and a path
 /// that merely shares a prefix with a protected one).
 ///
-/// Bare shell redirection (`>`/`>>`) is deliberately NOT covered — see the
-/// "NOT covered" note on this rule family in `rules/blocklist.toml` for
-/// why: every embedded `[[redirect]]` rule must stay `Decision::Block`
-/// (first-match, no worst-wins folding across a command line's
-/// redirections — `rules::tests::embedded_redirect_rules_are_all_block_
-/// decision`), so `echo evil >> ~/.bashrc` still reads `Allow` here, on
-/// purpose, pending a follow-up issue.
+/// Bare shell redirection (`>`/`>>`) joined the family in issue #261, once
+/// the redirect check folded worst-wins; its own cases live in
+/// `guardfall_shell_init_redirect_cases`.
 #[test]
 fn guardfall_shell_init_persistence_cases() {
     let cases: &[(&str, Decision)] = &[
@@ -851,9 +847,7 @@ fn guardfall_shell_init_persistence_cases() {
         // ---- benign controls: must NOT regress ----
         ("echo x > /tmp/f", Decision::Allow),
         ("cat ~/.bashrc", Decision::Allow),
-        // Known open gap (documented above): redirection into a protected
-        // path is not yet covered by any rule.
-        ("echo evil >> ~/.bashrc", Decision::Allow),
+        ("echo evil >> ~/.bashrc", Decision::Ask),
         // dd's `of=`/`if=` split genuinely distinguishes write from read —
         // reading FROM a protected path is not a write TO it.
         ("dd if=~/.bashrc of=/tmp/backup", Decision::Allow),
@@ -1160,6 +1154,64 @@ fn guardfall_find_pipe_xargs_rm_force_cases() {
         // A compound final stage pushes an empty stage argv that no
         // pipeline rule can match; the compound-sink floor catches it.
         ("find . | { xargs rm -f; }", Decision::Ask),
+    ];
+
+    for (command, expected) in cases {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
+/// Issue #261: the redirect form of the shell-init/persistence family.
+/// `echo ... >> ~/.zshrc` is the standard installer idiom, so this Asks
+/// like every other mechanism in the family rather than Blocking — but it
+/// must not be able to downgrade a stricter decision reached on the same
+/// command line.
+#[test]
+fn guardfall_shell_init_redirect_cases() {
+    let cases: &[(&str, Decision)] = &[
+        ("echo evil >> ~/.bashrc", Decision::Ask),
+        ("echo x >> /etc/crontab", Decision::Ask),
+        // Truncation gets the same tier as append: `tee`/`cp`/`dd of=`
+        // overwrite these paths too and all Ask.
+        ("echo x > ~/.zshrc", Decision::Ask),
+        ("echo x >> ~/.ssh/authorized_keys", Decision::Ask),
+        ("cat > /etc/cron.d/job", Decision::Ask),
+        // Redirection-only command: empty argv, so this only Asks because
+        // the redirect decision survives rule 9's Allow.
+        ("> ~/.config/fish/config.fish", Decision::Ask),
+        ("echo x 2>> ~/.zshrc", Decision::Ask),
+        ("{ echo x; } >> ~/.zshrc", Decision::Ask),
+        ("cd /etc && echo x >> crontab", Decision::Ask),
+        ("echo x >> $(echo /etc/crontab)", Decision::Ask),
+        // ---- worst-wins guards: an Ask here must not downgrade a Block ----
+        ("echo hi >> ~/.zshrc > /dev/sda", Decision::Block),
+        ("echo x > /etc/passwd >> ~/.bashrc", Decision::Block),
+        ("rm -rf / >> ~/.bashrc", Decision::Block),
+        ("echo x > ~/.config/shguard/config.toml", Decision::Block),
+        // ---- benign controls: must NOT regress ----
+        ("echo x > /tmp/f", Decision::Allow),
+        // Reading from a protected path is not writing to it.
+        ("cat < ~/.zshrc", Decision::Allow),
+        ("echo x >> ~/.bashrc.bak", Decision::Allow),
+        // History files are deliberately outside this family.
+        ("echo x >> ~/.bash_history", Decision::Allow),
+        // Disclosed residual: an unresolvable target has no floor of its
+        // own here (issue #203).
+        ("echo x >> $HOME/.zshrc", Decision::Allow),
+        // Disclosed residual, pre-existing and not introduced here: an
+        // unresolvable same-line `cd` leaves a literal relative redirect
+        // target unfloored, while the command side of the family raises
+        // its unknown-cwd floor for the same shape (`cd $X && tee .zshrc`
+        // Asks). Applies to Block-level redirect targets too
+        // (`cd $X && echo x > passwd`), so it is a redirect-vs-command
+        // parity gap, not something this rule introduced.
+        ("cd $X && echo x >> .zshrc", Decision::Allow),
     ];
 
     for (command, expected) in cases {
