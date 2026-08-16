@@ -2601,6 +2601,76 @@ pub(crate) fn effective_command_excluding<'a>(
 /// `-w`/`--timeout` and `-E`/`--conflict-exit-code` flags take a separated
 /// value that would otherwise land in [`wrapper_positional_args`]'s
 /// lockfile slot (making the real lockfile argument the resolved command).
+/// A wrapper's boolean (no-value) short-option letters, for the
+/// getopt-cluster recognition in [`skip_wrapper_flags`] (issue #265). The
+/// value-taking letters are NOT repeated here — they are derived from
+/// [`wrapper_value_flags`]'s `ValueFlag::Short` entries at the call site,
+/// so the two tables cannot drift apart.
+///
+/// A wrapper is listed only when its complete short-option surface is
+/// documented and small enough to enumerate across every flavor shguard
+/// has to assume, because an unlisted letter makes the whole cluster
+/// unrecognized (see [`cluster_takes_separated_value`]). A wrapper absent
+/// here keeps the generic dash-skip, which consumes the cluster token and
+/// nothing else.
+fn wrapper_cluster_booleans(wrapper: &str) -> Option<&'static [char]> {
+    match wrapper {
+        // bash/zsh/ksh93 all accept exactly `-c`, `-l`, `-a <name>`.
+        "exec" => Some(&['c', 'l']),
+        // BSD `env(1)` SYNOPSIS is `-0iv`, GNU's booleans are
+        // `-i`/`-0`/`-v`; the value-takers of both flavors are exactly the
+        // `Short` entries in `wrapper_value_flags("env")`.
+        "env" => Some(&['0', 'i', 'v']),
+        _ => None,
+    }
+}
+
+/// Whether `token` is a getopt short-flag cluster whose value comes from
+/// the NEXT token (issue #265) — i.e. every letter is one of `wrapper`'s
+/// modeled booleans up to the first value-taker, and that value-taker sits
+/// at the cluster's last position (`env -iu FOO`, `exec -la foo`).
+///
+/// Returns false — leaving the caller's generic dash-skip to consume the
+/// cluster token alone — in the two cases where that is already
+/// getopt-correct:
+///
+/// * the first value-taker is NOT last (`env -ui FOO`): real getopt glues
+///   the rest of the token as its value, so the next token is the command;
+/// * an unmodeled letter appears (`env -iL FOO`): both `env` and `exec`
+///   error out on an unknown option and execute nothing, so there is no
+///   execution to guard and never consuming an extra token cannot hide a
+///   real command word.
+fn cluster_takes_separated_value(wrapper: &str, token: &str) -> bool {
+    let Some(booleans) = wrapper_cluster_booleans(wrapper) else {
+        return false;
+    };
+    let value_takers: Vec<char> = wrapper_value_flags(wrapper)
+        .iter()
+        .filter_map(|flag| match flag {
+            ValueFlag::Short(letter) => Some(*letter),
+            ValueFlag::Long(_) => None,
+        })
+        .collect();
+    let Some(rest) = token.strip_prefix('-') else {
+        return false;
+    };
+    if rest.chars().count() < 2 || rest.starts_with('-') {
+        return false;
+    }
+    let last = rest.chars().count() - 1;
+    for (position, letter) in rest.chars().enumerate() {
+        if value_takers.contains(&letter) {
+            return position == last;
+        }
+        if !booleans.contains(&letter) {
+            return false;
+        }
+    }
+    // An all-boolean cluster consumes only itself, which the generic
+    // dash-skip already does.
+    false
+}
+
 fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
     match wrapper {
         // Issue #250: `env` is in `TRANSPARENT_WRAPPERS` but had no entry
@@ -2625,13 +2695,13 @@ fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
         // for these would make `skip_wrapper_flags` wrongly consume the
         // real wrapped command (`rm`) as if it were the flag's separated
         // value, over-blocking into a *new* bypass (`-rf` mistaken for
-        // the command) instead of closing one. `env`'s own short-flag
-        // clustering (e.g. `-iu FOO rm -rf /`) and `-S`'s value splicing
-        // into the executed argv (the `su -c`/`RECURSABLE_SLOTS` shell-
-        // string-recursion class) are both pre-existing, disclosed,
-        // narrower gaps of the same shape [`TRANSPARENT_WRAPPERS`]'s docs
-        // already carry for other wrappers, not introduced or widened by
-        // this entry — see the pinned known-gap tests below.
+        // the command) instead of closing one. `env`'s short-flag
+        // clustering (`-iu FOO rm -rf /`) is handled by
+        // [`cluster_takes_separated_value`] (issue #265); `-S`'s value
+        // splicing into the executed argv (the `su -c`/`RECURSABLE_SLOTS`
+        // shell-string-recursion class) remains a disclosed gap of the
+        // shape [`TRANSPARENT_WRAPPERS`]'s docs already carry for other
+        // wrappers — see the pinned known-gap test below.
         "env" => vec![
             ValueFlag::Short('u'),
             ValueFlag::Long("unset".to_string()),
@@ -2831,50 +2901,28 @@ fn skip_wrapper_flags(wrapper: &str, argv: &[NormalizedWord]) -> usize {
         let Resolution::Resolved(token) = argv[idx].resolution() else {
             break;
         };
-        // Issue #248 follow-up (fable review of PR #249): `exec`'s own
-        // `-a <name>` value flag clusters trivially with its two boolean
-        // flags (`-c`, `-l`) — `exec -la foo cmd`/`exec -ca foo cmd`/`exec
-        // -cla foo cmd` are all ordinary, easily-typed spellings, not
-        // exotic ones, and each genuinely sets argv0 to `foo` and runs
-        // `cmd` in a real shell. `ValueFlag::is_bare` above only matches
-        // `-a`'s standalone spelling, so a cluster falls through to the
-        // generic dash-skip below, which skips only the cluster token
-        // itself and then wrongly resolves `foo` (the flag's own value)
-        // as the wrapped command — the same live-bypass shape the bare
-        // `-a` case had before this file's `wrapper_value_flags` entry
-        // for `exec` was added. Unlike the general cluster-position
-        // problem this file discloses elsewhere (which real getopt
-        // emulation would be needed to solve correctly for an arbitrary
-        // wrapper), `exec`'s own option surface is tiny and fully known
-        // (`c`/`l`/`a`, and `a` is its ONLY value-taker) — so a
-        // conservative, exec-specific rule is both cheap and provably
-        // correct here, matching real getopt-cluster semantics: once the
-        // FIRST `a` in the cluster is reached, everything remaining in
-        // that same token is `a`'s own glued value — so the value comes
-        // from the NEXT token only when nothing remains after that first
-        // `a`, i.e. the first `a` sits at the cluster's own last
-        // position. `-la foo` (first `a` trailing) takes `foo` from the
-        // next token; `-afoo` (first `a` leading, with `foo` glued right
-        // after it in the SAME token) takes `foo` from within that same
-        // token and must NOT also consume the next token.
+        // Issue #248 follow-up (fable review of PR #249), generalized to
+        // `env` by issue #265: a value flag clusters trivially with its
+        // wrapper's boolean flags — `exec -la foo cmd` and `env -iu FOO
+        // rm -rf /` are ordinary, easily-typed spellings, and each
+        // genuinely runs the trailing command in a real shell.
+        // `ValueFlag::is_bare` above only matches a flag's standalone
+        // spelling, so a cluster falls through to the generic dash-skip
+        // below, which skips the cluster token alone and then wrongly
+        // resolves the flag's own value (`foo`, `FOO`) as the wrapped
+        // command — the same live-bypass shape the bare spellings had
+        // before their `wrapper_value_flags` entries existed.
         //
-        // A fable review of an earlier version of this check
-        // (`rest.ends_with('a')`, testing the TOKEN's last character
-        // rather than the FIRST `a`'s position) caught a real regression
-        // this distinction guards against: `-ajava`/`-aa`/`-acuda` all
-        // end in the letter `a` too, but that trailing `a` is part of the
-        // GLUED VALUE ("java"/"a"/"cuda"), not a second flag character —
-        // `ends_with('a')` misidentified these as "value comes from the
-        // next token" and wrongly consumed the real wrapped command
-        // (`rm -rf /`'s own `rm`) as if it were `a`'s separated value,
-        // silently re-opening the exact under-blocking bypass this whole
-        // fix exists to close. `find('a') == len - 1` (the first `a`,
-        // not any `a`) is the getopt-correct test.
-        let exec_trailing_a_cluster = wrapper == "exec"
-            && token.strip_prefix('-').is_some_and(|rest| {
-                rest.len() > 1 && !rest.starts_with('-') && rest.find('a') == Some(rest.len() - 1)
-            });
-        if value_flags.iter().any(|vf| vf.is_bare(token)) || exec_trailing_a_cluster {
+        // The getopt-correct test is the FIRST value-taker's position,
+        // not the token's last character: `-ajava`/`-aa`/`-acuda` end in
+        // `a` too, but that `a` belongs to the GLUED VALUE, and reading
+        // them as "value comes from the next token" consumed the real
+        // wrapped command (`rm`) as if it were the flag's value — a fable
+        // review caught exactly that regression in an earlier
+        // `ends_with('a')` version of this check.
+        if value_flags.iter().any(|vf| vf.is_bare(token))
+            || cluster_takes_separated_value(wrapper, token)
+        {
             // The flag token itself is always consumed; its separated
             // value is consumed too only when resolved: advancing past an
             // unresolvable value unconditionally would let `nice -n $X
