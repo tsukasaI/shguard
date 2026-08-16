@@ -4803,20 +4803,16 @@ impl UserConfig {
         // A user-config `[[redirect]]` entry must be `decision = "block"`
         // (the default) — `"ask"` is rejected here, even though
         // `convert_redirect_rule`/`parse_decision` themselves allow it for
-        // the embedded blocklist. `evaluate_simple_command_core`'s redirect
-        // check (`src/gate.rs`) returns on the FIRST matching redirect rule
-        // before stage 3's argv blocklist match ever runs, and
-        // `Rules::match_redirect_target` is itself first-match across every
-        // rule's targets — both are only safe under the invariant that
-        // every reachable `[[redirect]]` rule is `Decision::Block`, which
-        // every embedded rule today upholds by construction (pinned by
-        // `embedded_redirect_rules_are_all_block_decision` below). Letting
-        // a user declare an `Ask`-decision redirect rule would let it win
-        // that first-match race ahead of a stricter embedded rule on the
-        // same command (or an unrelated stage-3 Block the early return
-        // preempts entirely) and silently downgrade it — the exact
-        // "weaken existing protection" outcome `merge_user_config`'s docs
-        // say a user redirect entry can never cause.
+        // the embedded blocklist, which now ships one Ask-level rule
+        // (`shell-init-redirect`, pinned by
+        // `embedded_redirect_rule_decision_levels` below). The downgrade
+        // race that originally motivated this rejection is closed: issue
+        // #261 made `Rules::match_redirect_target` and
+        // `check_redirect_targets` (`src/gate.rs`) fold worst-wins across
+        // rules, targets and both resolution channels, and left only a
+        // Block short-circuiting the other checks. The restriction stays
+        // as a conservative posture pending issue #100's own review of
+        // what a user-declared Ask redirect rule should mean.
         for entry in &redirect {
             if entry.decision == Decision::Ask {
                 return Err(RulesError::invalid(
@@ -4947,10 +4943,11 @@ pub(crate) fn merge_user_config(
     let mut entries = allowlist.entries;
     entries.extend(user_config.allow);
 
-    // Append, never prepend: match_redirect_target is first-match-wins,
-    // so a user redirect rule must land after the embedded blocklist's own
-    // redirect rules to guarantee it can only ever add new protected
-    // targets, never shadow a built-in one.
+    // Append, never prepend: `match_redirect_target` folds worst-wins and
+    // keeps the first-declared rule on a tie (issue #261), so appending is
+    // what makes a user rule report second rather than shadowing the
+    // built-in one it ties with. Combined with the Block-only restriction
+    // above, a user redirect entry can only ever add protected targets.
     let mut redirect_rules = blocklist.redirect_rules;
     redirect_rules.extend(user_config.redirect);
 

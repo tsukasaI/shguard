@@ -1204,6 +1204,14 @@ fn guardfall_shell_init_redirect_cases() {
         // Disclosed residual: an unresolvable target has no floor of its
         // own here (issue #203).
         ("echo x >> $HOME/.zshrc", Decision::Allow),
+        // Disclosed residual, pre-existing and not introduced here: an
+        // unresolvable same-line `cd` leaves a literal relative redirect
+        // target unfloored, while the command side of the family raises
+        // its unknown-cwd floor for the same shape (`cd $X && tee .zshrc`
+        // Asks). Applies to Block-level redirect targets too
+        // (`cd $X && echo x > passwd`), so it is a redirect-vs-command
+        // parity gap, not something this rule introduced.
+        ("cd $X && echo x >> .zshrc", Decision::Allow),
     ];
 
     for (command, expected) in cases {
