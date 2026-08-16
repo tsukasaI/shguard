@@ -458,6 +458,19 @@ fn guardfall_self_protection_normalization_cases() {
         ("tee ~/.config//shguard/config.toml", Decision::Block), // double slash
         ("tee ~/.config/./shguard/config.toml", Decision::Block), // dot-padded
         ("tee ~/.config/other/config.toml", Decision::Allow),   // must not over-match
+        // Issue #263: BSD/macOS `sed -I` is an equally-standard in-place
+        // synonym for GNU `-i`, omitted from `required_flags` on all three
+        // sed rule sites. Pinned alongside the existing `-i` case's own
+        // rule (`self-protect-config-sed-tilde`) so a future spec edit that
+        // drops `-I` again regresses visibly here.
+        (
+            "sed -i 's/x/y/' ~/.config/shguard/config.toml",
+            Decision::Block,
+        ),
+        (
+            "sed -I '' 's/x/y/' ~/.config/shguard/config.toml",
+            Decision::Block,
+        ),
     ];
 
     for (command, expected) in cases {
@@ -796,6 +809,12 @@ fn guardfall_shell_init_persistence_cases() {
             Decision::Ask,
         ),
         ("sed -i 's/x/y/' /etc/crontab", Decision::Ask),
+        // Issue #263: BSD/macOS `-I` must be recognized the same way `-i`
+        // is (`shell-init-sed`'s own `required_flags` site), including the
+        // clustered and suffix-attached spellings.
+        ("sed -I '' 's/x/y/' ~/.bashrc", Decision::Ask),
+        ("sed -nI '' 's/x/y/' ~/.bashrc", Decision::Ask),
+        ("sed -I.bak 's/x/y/' ~/.bashrc", Decision::Ask),
         ("dd of=/etc/cron.d/x if=evil", Decision::Ask),
         ("rm ~/.zshenv", Decision::Ask),
         ("unlink ~/.bashrc", Decision::Ask),
