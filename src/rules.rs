@@ -2709,6 +2709,71 @@ fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
             ValueFlag::Long("sched-period".to_string()),
             ValueFlag::Long("sched-deadline".to_string()),
         ],
+        // Issue #264: `stdbuf` is in `TRANSPARENT_WRAPPERS` but had no
+        // entry here, so its own value-taking flags were mistaken for the
+        // wrapped command by the generic dash-prefix skip -- `stdbuf -o L
+        // rm -rf /` silently resolved to `L`, matching no rule, even
+        // though this genuinely line-buffers stdout and executes `rm -rf
+        // /` in a real shell. `man stdbuf` on this machine (BSD/macOS) and
+        // GNU coreutils' `stdbuf` (verified via `man` after installing
+        // coreutils locally) agree: `-i`/`--input`, `-o`/`--output`,
+        // `-e`/`--error` are the only options besides `--help`/`--version`,
+        // and all three take a value that is always mandatory and always a
+        // separated token on both flavors -- unlike `env`'s signal flags or
+        // `xargs`'s `-e`/`-i`/`-l` synonyms below, there is no
+        // optional-value form to avoid here. BSD has no long spellings;
+        // listing them anyway is harmlessly conservative (the same posture
+        // `env`'s entry already takes for flavor-specific flags).
+        "stdbuf" => vec![
+            ValueFlag::Short('i'),
+            ValueFlag::Long("input".to_string()),
+            ValueFlag::Short('o'),
+            ValueFlag::Long("output".to_string()),
+            ValueFlag::Short('e'),
+            ValueFlag::Long("error".to_string()),
+        ],
+        // Issue #264: `xargs` is in `TRANSPARENT_WRAPPERS` but had no entry
+        // here, so its own value-taking flags were mistaken for the wrapped
+        // command the same way `stdbuf`'s were above -- `xargs -n 1 rm -rf
+        // /` silently resolved to `1`, matching no rule, even though this
+        // genuinely executes `rm -rf /` (once per input line) in a real
+        // shell. The list below is the union of BSD/macOS `xargs`'s
+        // mandatory-value flags (`man xargs` on this machine: `-E`, `-I`,
+        // `-J`, `-L`, `-n`/`--max-args`, `-P`/`--max-procs`, `-R`, `-S`,
+        // `-s`/`--max-chars`) and GNU findutils' (verified via `man xargs`
+        // after installing findutils locally: `-a`/`--arg-file`,
+        // `-d`/`--delimiter`, `-E`, `-I`, `-L`, `-n`/`--max-args`,
+        // `-P`/`--max-procs`, `-s`/`--max-chars`,
+        // `--process-slot-var`). `-0`/`-o`/`-p`/`-r`/`-t`/`-x` are boolean
+        // on both flavors. Deliberately NOT added -- the same trap
+        // `env`'s entry avoids for `--block-signal`: GNU's `-e`/`--eof`,
+        // `-i`/`--replace` and `-l`/`--max-lines` are documented synonyms
+        // for `-E`/`-I`/`-L` respectively, but each takes an OPTIONAL value
+        // in *attached* form only (`-e[eof-str]`, `--replace[=replace-
+        // str]`, `-l[max-lines]`); `xargs -i rm -rf /` does NOT treat `rm`
+        // as `-i`'s value in a real shell (it defaults to `{}`), so
+        // listing these would make `skip_wrapper_flags` wrongly consume
+        // the real wrapped command as if it were a separated value,
+        // over-blocking into a new bypass instead of closing one.
+        "xargs" => vec![
+            ValueFlag::Short('E'),
+            ValueFlag::Short('I'),
+            ValueFlag::Short('J'),
+            ValueFlag::Short('L'),
+            ValueFlag::Short('n'),
+            ValueFlag::Long("max-args".to_string()),
+            ValueFlag::Short('P'),
+            ValueFlag::Long("max-procs".to_string()),
+            ValueFlag::Short('R'),
+            ValueFlag::Short('S'),
+            ValueFlag::Short('s'),
+            ValueFlag::Long("max-chars".to_string()),
+            ValueFlag::Short('a'),
+            ValueFlag::Long("arg-file".to_string()),
+            ValueFlag::Short('d'),
+            ValueFlag::Long("delimiter".to_string()),
+            ValueFlag::Long("process-slot-var".to_string()),
+        ],
         _ => vec![],
     }
 }

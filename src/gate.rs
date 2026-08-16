@@ -7320,6 +7320,109 @@ mod tests {
         assert_decision("env -u rm -rf /", Decision::Allow);
     }
 
+    // ==== Issue #264: stdbuf's and xargs's own value-taking flags
+    // mistaken for the wrapped command (same gap class as #250's `env`) ====
+
+    #[test]
+    fn stdbuf_with_separated_output_flag_no_longer_hides_wrapped_command() {
+        // `stdbuf` was in `TRANSPARENT_WRAPPERS` with no
+        // `wrapper_value_flags` entry for its own `-o bufdef` flag -- the
+        // generic dash-prefix skip in `skip_wrapper_flags` consumed the
+        // bare `-o` token and mistook `L` (the flag's own value) for the
+        // wrapped command, so `stdbuf -o L rm -rf /` silently resolved to
+        // `L`, matching no rule, even though this genuinely line-buffers
+        // stdout and executes `rm -rf /` in a real shell. Was Allow before
+        // this fix.
+        assert_decision("stdbuf -o L rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn stdbuf_with_separated_long_output_flag_still_blocks() {
+        assert_decision("stdbuf --output L rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn stdbuf_with_separated_input_and_error_flags_no_longer_hide_wrapped_command() {
+        assert_decision("stdbuf -i 0 rm -rf /", Decision::Block);
+        assert_decision("stdbuf -e L rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn stdbuf_without_value_flag_still_blocks() {
+        assert_decision("stdbuf rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn stdbuf_with_output_flag_benign_command_still_allows() {
+        // No over-blocking regression: a benign wrapped command must stay
+        // Allow.
+        assert_decision("stdbuf -o L ls", Decision::Allow);
+    }
+
+    #[test]
+    fn xargs_with_separated_max_args_flag_no_longer_hides_wrapped_command() {
+        // `xargs` was in `TRANSPARENT_WRAPPERS` with no
+        // `wrapper_value_flags` entry for its own `-n number` flag -- the
+        // generic dash-prefix skip consumed the bare `-n` token and
+        // mistook `1` (the flag's own value) for the wrapped command, so
+        // `xargs -n 1 rm -rf /` silently resolved to `1`, matching no
+        // rule, even though this genuinely executes `rm -rf /` once per
+        // input line in a real shell. Was Allow before this fix.
+        assert_decision("xargs -n 1 rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn xargs_with_separated_long_max_args_flag_still_blocks() {
+        assert_decision("xargs --max-args 1 rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn xargs_with_separated_max_procs_and_replace_flags_no_longer_hide_wrapped_command() {
+        assert_decision("xargs -P 4 rm -rf /", Decision::Block);
+        // `{}` is `-I`'s replacement string here, not a target passed to
+        // `rm` -- this is a genuine regression test for this fix, not an
+        // instance of the pre-existing `rm-force-find-placeholder-target`
+        // overlap the issue calls out for the *glued* `-I{}` form.
+        assert_decision("xargs -I {} rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn xargs_with_separated_delimiter_and_arg_file_flags_no_longer_hide_wrapped_command() {
+        assert_decision("xargs -d , rm -rf /", Decision::Block);
+        assert_decision("xargs -a list.txt rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn xargs_without_value_flag_still_blocks() {
+        assert_decision("xargs rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn xargs_with_max_args_flag_benign_command_still_allows() {
+        // No over-blocking regression: a benign wrapped command must stay
+        // Allow.
+        assert_decision("xargs -n 1 ls", Decision::Allow);
+    }
+
+    #[test]
+    fn xargs_boolean_null_flag_is_still_handled() {
+        // `-0` takes no value at all (boolean) -- confirms the pre-existing
+        // generic dash-prefix skip still consumes only the flag itself,
+        // not a following token, exactly as it did before this fix.
+        assert_decision("xargs -0 rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn xargs_short_replace_flag_without_attached_value_still_correctly_resolves_wrapped_command() {
+        // Pinned so nobody "completes" the `xargs` arm by adding GNU's
+        // `-e`/`--eof`, `-i`/`--replace`, `-l`/`--max-lines` to it -- see
+        // that arm's own comment for why doing so would open a new bypass
+        // rather than close one. `-i` here takes no separated value (it
+        // is optional and defaults to `{}` when absent), so `rm` is
+        // already, correctly, the wrapped command with no entry at all.
+        assert_decision("xargs -i rm -rf /", Decision::Block);
+    }
+
     #[test]
     fn dangerous_target_position_substitution_asks_even_with_benign_inner() {
         // Issue #34: rule 3's Allow-transparency (`echo $(date)` semantics)
