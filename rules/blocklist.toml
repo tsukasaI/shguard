@@ -938,7 +938,13 @@ targets = [{ normalized = "~/.config" }, { normalized = "~" }]
 # Known parity gaps (mechanisms), disclosed not fixed — issue #198:
 # - Mechanisms: rsync, perl -i, patch, curl -o, wget -O against these
 #   targets; crontab <file> (installs a crontab without ever naming a
-#   protected path in argv).
+#   protected path in argv); rmdir (enumerated by the self-protection
+#   family above, but not here); tar -C <protected dir> (extraction
+#   writes into the directory).
+# - Single-token destination flags: `cp -t /etc/cron.d evil` Asks because
+#   `-t`'s value is its own argv token, but `cp --target-directory=/etc/
+#   cron.d evil` Allows — the path never appears as a standalone token,
+#   so the any-argv-token matching below cannot see it.
 #
 # These rules are appended at the END of this file so every earlier,
 # stricter `command = "tee"/"dd"/"rm"` rule (the device/critical-file and
