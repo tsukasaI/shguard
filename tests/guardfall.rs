@@ -327,6 +327,20 @@ fn guardfall_find_exec_bare_interpreter_cases() {
             r#"find . -exec fish --command "rm -rf /" \;"#,
             Decision::Block,
         ),
+        // Issue #269: the attached and init-command spellings this scan
+        // could not see before -- `-C` runs its argument too, and
+        // `--command=` is the same flag as `--command`.
+        (r"find . -exec fish -C 'rm -rf /' \;", Decision::Block),
+        (r"find . -exec fish --command=ls \;", Decision::Allow),
+        (
+            r"find . -exec fish --command='rm -rf /' \;",
+            Decision::Block,
+        ),
+        // Benign `-C` keeps the continuation posture: fish runs on after
+        // its init command, so this is still a stdin-fed shell per found
+        // file (no operand) or the found file as a script (`{}`).
+        (r"find . -exec fish -C ls \;", Decision::Block),
+        (r"find . -exec fish -C ls {} \;", Decision::Ask),
         // The flag position itself unresolvable must still fail closed via
         // rule 6a's existing `Uncertain` handling, unaffected by this fix.
         (
@@ -1033,6 +1047,50 @@ fn guardfall_shell_init_path_parity_198_cases() {
         // the file itself.
         ("tee -a /etc/bash.bashrc.bak evil", Decision::Allow),
         ("cp evil ~/.ssh/rce", Decision::Allow),
+    ];
+
+    for (command, expected) in cases {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
+/// Issue #269: `fish`'s option surface is not POSIX `sh`'s. It carries a
+/// second code-running flag (`-C`/`--init-command`), accepts attached
+/// values (`--command=CODE`, `-cCODE`), resolves long options by unique
+/// prefix, and stops option parsing at the first operand. Every one of
+/// those spellings reached Allow standalone before this fix.
+#[test]
+fn guardfall_fish_option_surface_cases() {
+    let cases: &[(&str, Decision)] = &[
+        ("fish -C 'rm -rf /'", Decision::Block),
+        ("fish --command='rm -rf /'", Decision::Block),
+        ("fish -c'rm -rf /'", Decision::Block),
+        ("fish -ic'rm -rf /'", Decision::Block),
+        ("fish -c ls -c 'rm -rf /'", Decision::Block),
+        ("fish --com='rm -rf /'", Decision::Block),
+        ("fish --ini='rm -rf /'", Decision::Block),
+        // Ambiguous prefix and unknown option: real fish exits 1 without
+        // executing, so Ask rather than a decision drawn from code it
+        // would never run.
+        ("fish --in='rm -rf /'", Decision::Ask),
+        ("fish --frobnicate", Decision::Ask),
+        // ---- benign controls: must NOT regress ----
+        ("fish", Decision::Allow),
+        ("fish -i", Decision::Allow),
+        ("fish --version", Decision::Allow),
+        ("fish -c ls", Decision::Allow),
+        ("fish --command=ls", Decision::Allow),
+        ("fish -C 'set -x PATH /opt/bin'", Decision::Allow),
+        ("fish -n script.fish", Decision::Allow),
+        // The `+` in fish's own SHORT_OPTS disables permutation, so
+        // everything after the script operand is `$argv` data.
+        ("fish script.fish -c 'rm -rf /'", Decision::Allow),
     ];
 
     for (command, expected) in cases {

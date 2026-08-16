@@ -2742,8 +2742,11 @@ fn evaluate_dash_c(
     depth: usize,
     cwd: &CwdContext,
 ) -> Option<Verdict> {
+    if interpreter == "fish" {
+        return evaluate_fish(argv, rest_words, rules, allowlist, depth, cwd);
+    }
     let outer_argv = argv.to_vec();
-    let flag_index = match scan_for_flag(rest_words, |s| is_dash_c_token(interpreter, s)) {
+    let flag_index = match scan_for_flag(rest_words, is_dash_c_token) {
         FlagScan::Found(i) => i,
         FlagScan::Uncertain(i) => {
             return Some(match rest_words.get(i + 1) {
@@ -2818,6 +2821,111 @@ fn evaluate_dash_c(
             )),
             outer_argv,
         )),
+    }
+}
+
+/// Rule 6a for `fish` (issue #269). `fish` carries two code-running
+/// options, not one: `-c`/`--command` runs its value and exits, while
+/// `-C`/`--init-command` runs its value and then CONTINUES with the rest
+/// of the invocation. Both are folded worst-wins here; the continuation
+/// posture for a benign `-C` is left to
+/// [`scan_for_dash_c_before_operand`]'s floor, which already encodes
+/// "bare interpreter in a `find -exec` slot" from issue #257.
+fn evaluate_fish(
+    argv: &[NormalizedWord],
+    rest_words: &[NormalizedWord],
+    rules: &Rules,
+    allowlist: &Allowlist,
+    depth: usize,
+    cwd: &CwdContext,
+) -> Option<Verdict> {
+    let outer_argv = argv.to_vec();
+    let scan = scan_fish_invocation(rest_words);
+
+    let code_fold = scan
+        .command_values
+        .iter()
+        .chain(scan.init_values.iter())
+        .map(|code| {
+            recurse_shell_string(
+                code,
+                outer_argv.clone(),
+                "`fish -c`/`-C` argument",
+                depth,
+                rules,
+                allowlist,
+                cwd,
+            )
+        })
+        .reduce(fold_worst);
+
+    if let Some(index) = scan.uncertain {
+        // Mirrors `evaluate_dash_c`'s own `FlagScan::Uncertain` arm: the
+        // unreadable word might be `-c`, so the word after it might be
+        // the script — recursing it keeps `fish $FOO 'rm -rf /'` at Block
+        // instead of demoting the whole shape to the bare Ask floor.
+        let trailing = match rest_words.get(index + 1).map(NormalizedWord::resolution) {
+            Some(Resolution::Resolved(script)) => {
+                let inner = analyze_at_depth(script, depth + 1, rules, allowlist, cwd.clone());
+                let reason = format!(
+                    "`fish`'s option list could not be statically resolved, but a trailing word \
+                     recurses through the full pipeline; inner decision: {:?}{}",
+                    inner.decision(),
+                    inner
+                        .reason()
+                        .map(|r| format!(" ({})", r.as_str()))
+                        .unwrap_or_default()
+                );
+                match inner.decision() {
+                    Decision::Block => Some(Verdict::block(
+                        Reason::new(reason),
+                        outer_argv.clone(),
+                        inner.matched_rule().cloned(),
+                    )),
+                    Decision::Ask => Some(Verdict::ask(Reason::new(reason), outer_argv.clone())),
+                    // An inner Allow does not clear the outer uncertainty.
+                    Decision::Allow => None,
+                }
+            }
+            _ => None,
+        };
+        let uncertain = Verdict::ask(
+            Reason::new(
+                "`fish`'s option list could not be statically resolved, so whether it runs \
+                 inline code is unknown"
+                    .to_string(),
+            ),
+            outer_argv,
+        );
+        return Some(
+            [trailing, code_fold]
+                .into_iter()
+                .flatten()
+                .fold(uncertain, fold_worst),
+        );
+    }
+
+    if scan.unreadable_code_value {
+        let unreadable = Verdict::ask(
+            Reason::new("a `fish` `-c`/`-C` argument could not be statically resolved".to_string()),
+            outer_argv,
+        );
+        return Some(match code_fold {
+            Some(code) => fold_worst(unreadable, code),
+            None => unreadable,
+        });
+    }
+
+    // With `-c`, fish runs the code and exits — any operand is `$argv`
+    // data, so the code's own verdict is the whole story. With only `-C`,
+    // fish continues afterwards, so a benign init command must fall
+    // through to the caller's own floor rather than end the evaluation at
+    // Allow.
+    match code_fold {
+        Some(verdict) if scan.has_command_flag || verdict.decision() != Decision::Allow => {
+            Some(verdict)
+        }
+        _ => None,
     }
 }
 
@@ -4553,16 +4661,233 @@ fn short_cluster_contains(token: &str, c: char) -> bool {
         .is_some_and(|rest| !rest.is_empty() && !rest.starts_with('-') && rest.contains(c))
 }
 
-/// Whether `token` is `interpreter`'s `-c` flag, in any spelling this
-/// module recognizes. Checked against each `SHELL_INTERPRETERS` member's
-/// own man page (issue #196 follow-up): only `fish` documents a long
-/// spelling (`--command`) for `-c`; `bash`, `zsh`, `dash`/`ash`, `ksh`, and
-/// `tcsh`/`csh` accept only the short form, so the long spelling is scoped
-/// to `fish` rather than accepted for every interpreter.
-fn is_dash_c_token(interpreter: &str, token: &str) -> bool {
-    token == "-c"
-        || short_cluster_contains(token, 'c')
-        || (interpreter == "fish" && token == "--command")
+/// Whether `token` is a POSIX-shell interpreter's `-c` flag. `fish` never
+/// reaches this: its option surface takes values in spellings this
+/// presence-only check cannot model (`-C`, `--command=`, unique-prefix
+/// abbreviations), so it is routed through [`scan_fish_invocation`]
+/// instead (issue #269). `bash`, `zsh`, `dash`/`ash`, `ksh`, and
+/// `tcsh`/`csh` accept only the short form.
+fn is_dash_c_token(token: &str) -> bool {
+    token == "-c" || short_cluster_contains(token, 'c')
+}
+
+/// What one of `fish`'s own options does with the word after it — the
+/// distinction that decides whether a token is a flag, a flag's value, or
+/// the script operand.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FishOptKind {
+    /// Takes no value.
+    Boolean,
+    /// Takes a value that is not code (`-d`, `--features`).
+    TakesValue,
+    /// `-c`/`--command`: fish runs the value and exits.
+    InlineCode,
+    /// `-C`/`--init-command`: fish runs the value at startup and then
+    /// CONTINUES with whatever the rest of the invocation says.
+    InitCode,
+}
+
+/// `fish`'s short options, from its own `SHORT_OPTS` string
+/// (`+hPilNnvc:C:p:d:f:D:o:` in `src/bin/fish.rs`). The leading `+`
+/// disables permutation, which is why [`scan_fish_invocation`] stops at
+/// the first operand.
+///
+/// Deliberately fish-only (issue #269): POSIX shells keep the
+/// presence-only scan in [`is_dash_c_token`], because misreading one of
+/// their value flags lands on Ask or Block — never on an Allow — while
+/// fish's `-C`/`--command=`/abbreviation spellings each produced a real
+/// Allow-level bypass. `-o`/`--debug-output=FILE` is a minor file-write
+/// primitive, observed and out of scope.
+const FISH_SHORT_OPTS: &[(char, FishOptKind)] = &[
+    ('c', FishOptKind::InlineCode),
+    ('C', FishOptKind::InitCode),
+    ('p', FishOptKind::TakesValue),
+    ('d', FishOptKind::TakesValue),
+    ('f', FishOptKind::TakesValue),
+    ('D', FishOptKind::TakesValue),
+    ('o', FishOptKind::TakesValue),
+    ('h', FishOptKind::Boolean),
+    ('P', FishOptKind::Boolean),
+    ('i', FishOptKind::Boolean),
+    ('l', FishOptKind::Boolean),
+    ('N', FishOptKind::Boolean),
+    ('n', FishOptKind::Boolean),
+    ('v', FishOptKind::Boolean),
+];
+
+/// `fish`'s long options. Resolved by unique prefix, matching its own
+/// `wgetopt` implementation — an ambiguous or unknown prefix makes real
+/// fish exit 1 without executing anything, which [`scan_fish_invocation`]
+/// treats as uncertainty rather than absence.
+const FISH_LONG_OPTS: &[(&str, FishOptKind)] = &[
+    ("command", FishOptKind::InlineCode),
+    ("init-command", FishOptKind::InitCode),
+    ("features", FishOptKind::TakesValue),
+    ("debug", FishOptKind::TakesValue),
+    ("debug-output", FishOptKind::TakesValue),
+    ("debug-stack-frames", FishOptKind::TakesValue),
+    ("profile", FishOptKind::TakesValue),
+    ("profile-startup", FishOptKind::TakesValue),
+    ("interactive", FishOptKind::Boolean),
+    ("login", FishOptKind::Boolean),
+    ("no-config", FishOptKind::Boolean),
+    ("no-execute", FishOptKind::Boolean),
+    ("print-rusage-self", FishOptKind::Boolean),
+    ("print-debug-categories", FishOptKind::Boolean),
+    ("private", FishOptKind::Boolean),
+    ("help", FishOptKind::Boolean),
+    ("version", FishOptKind::Boolean),
+];
+
+/// What [`scan_fish_invocation`] found in a `fish` invocation's words.
+#[derive(Default)]
+struct FishScan {
+    /// Resolved `-c`/`--command` values, in order.
+    command_values: Vec<String>,
+    /// Resolved `-C`/`--init-command` values, in order.
+    init_values: Vec<String>,
+    /// A `-c` flag was present, even if its value was missing or unreadable.
+    has_command_flag: bool,
+    /// A non-option operand (script file) was seen.
+    has_operand: bool,
+    /// A code-carrying flag's value exists but could not be read.
+    unreadable_code_value: bool,
+    /// Index of the first word in flag position that could not be read,
+    /// so nothing after it can be attributed to a flag or an operand.
+    uncertain: Option<usize>,
+}
+
+/// Resolves the `FishOptKind` of a long option name, by exact match or
+/// unique prefix. `None` covers both "unknown" and "ambiguous", which real
+/// fish treats identically: print an error, exit 1, execute nothing.
+fn fish_long_opt(name: &str) -> Option<FishOptKind> {
+    if let Some((_, kind)) = FISH_LONG_OPTS.iter().find(|(long, _)| *long == name) {
+        return Some(*kind);
+    }
+    let mut hit = None;
+    for (long, kind) in FISH_LONG_OPTS {
+        if long.starts_with(name) {
+            if hit.is_some() {
+                return None;
+            }
+            hit = Some(*kind);
+        }
+    }
+    hit
+}
+
+/// Reads a `fish` invocation's words the way fish's own option parser
+/// does (issue #269), so `-C`, `--command=CODE`, attached short values,
+/// repeated flags, and unique-prefix abbreviations are each seen as what
+/// they are rather than as an unrecognized dash-token.
+fn scan_fish_invocation(words: &[NormalizedWord]) -> FishScan {
+    let mut scan = FishScan::default();
+    let mut idx = 0;
+    while idx < words.len() {
+        let Resolution::Resolved(token) = words[idx].resolution() else {
+            scan.uncertain = Some(idx);
+            return scan;
+        };
+        if token == "--" {
+            scan.has_operand = idx + 1 < words.len();
+            return scan;
+        }
+        let (kind, attached) = if let Some(long) = token.strip_prefix("--") {
+            let (name, attached) = match long.split_once('=') {
+                Some((name, value)) => (name, Some(value.to_string())),
+                None => (long, None),
+            };
+            let Some(kind) = fish_long_opt(name) else {
+                scan.uncertain = Some(idx);
+                return scan;
+            };
+            if kind == FishOptKind::Boolean {
+                if attached.is_some() {
+                    // Real fish rejects a value on a boolean.
+                    scan.uncertain = Some(idx);
+                    return scan;
+                }
+                idx += 1;
+                continue;
+            }
+            (kind, attached)
+        } else if let Some(cluster) = token.strip_prefix('-').filter(|rest| !rest.is_empty()) {
+            let mut found = None;
+            for (offset, letter) in cluster.char_indices() {
+                match FISH_SHORT_OPTS
+                    .iter()
+                    .find(|(short, _)| *short == letter)
+                    .map(|(_, kind)| *kind)
+                {
+                    Some(FishOptKind::Boolean) => {}
+                    Some(kind) => {
+                        let rest = &cluster[offset + letter.len_utf8()..];
+                        found = Some((kind, (!rest.is_empty()).then(|| rest.to_string())));
+                        break;
+                    }
+                    None => {
+                        scan.uncertain = Some(idx);
+                        return scan;
+                    }
+                }
+            }
+            match found {
+                Some(pair) => pair,
+                None => {
+                    idx += 1;
+                    continue;
+                }
+            }
+        } else {
+            // `-` alone, or anything not starting with `-`: fish's `+`
+            // no-permutation parsing makes this the script operand, and
+            // everything after it is `$argv` data.
+            scan.has_operand = true;
+            return scan;
+        };
+
+        // The value is the attached part, or else the next word — taken
+        // unconditionally, even when it looks like another flag: `fish
+        // --command -c` really runs the code string `-c`.
+        let value = match attached {
+            Some(value) => {
+                idx += 1;
+                Some(value)
+            }
+            None => match words.get(idx + 1) {
+                Some(next) => {
+                    idx += 2;
+                    match next.resolution() {
+                        Resolution::Resolved(value) => Some(value.to_string()),
+                        Resolution::Unresolvable(_) => None,
+                    }
+                }
+                // Flag at the end of argv with no value: real fish errors.
+                None => {
+                    idx += 1;
+                    if kind == FishOptKind::InlineCode {
+                        scan.has_command_flag = true;
+                    }
+                    continue;
+                }
+            },
+        };
+        match kind {
+            FishOptKind::InlineCode => {
+                scan.has_command_flag = true;
+                match value {
+                    Some(code) => scan.command_values.push(code),
+                    None => scan.unreadable_code_value = true,
+                }
+            }
+            FishOptKind::InitCode => match value {
+                Some(code) => scan.init_values.push(code),
+                None => scan.unreadable_code_value = true,
+            },
+            FishOptKind::TakesValue | FishOptKind::Boolean => {}
+        }
+    }
+    scan
 }
 
 /// Result of scanning a word slice left-to-right for a flag token when some
@@ -4636,9 +4961,27 @@ enum DashCPosition {
 /// unresolvable, or is a non-option operand (does not start with `-`) —
 /// whichever comes first.
 fn scan_for_dash_c_before_operand(words: &[NormalizedWord], interpreter: &str) -> DashCPosition {
+    if interpreter == "fish" {
+        // `-C`/`--init-command` is deliberately transparent here: its
+        // payload verdict arrives through `evaluate_fish`'s own recursion,
+        // and what this floor decides is the CONTINUATION posture (a
+        // stdin-fed shell per found file, or the found file run as a
+        // script) — which is what `fish -C ls` still does after its init
+        // command finishes.
+        let scan = scan_fish_invocation(words);
+        return if scan.uncertain.is_some() {
+            DashCPosition::Uncertain
+        } else if scan.has_command_flag {
+            DashCPosition::FlagFound
+        } else if scan.has_operand {
+            DashCPosition::OperandNoFlag
+        } else {
+            DashCPosition::Absent
+        };
+    }
     for w in words {
         match w.resolution() {
-            Resolution::Resolved(s) if is_dash_c_token(interpreter, s) => {
+            Resolution::Resolved(s) if is_dash_c_token(s) => {
                 return DashCPosition::FlagFound;
             }
             Resolution::Resolved(s) if !s.starts_with('-') => {
@@ -8926,6 +9269,156 @@ done"#,
             r#"find /x -exec fish --command "rm -rf /" \;"#,
             Decision::Block,
         );
+    }
+
+    // ==== Issue #269: fish's real option surface (-c/-C/--command=) ====
+
+    #[test]
+    fn fish_init_command_runs_its_argument_so_dangerous_code_blocks() {
+        // `-C`/`--init-command` evaluates its argument at startup, so the
+        // code runs exactly as `-c`'s does.
+        assert_decision("fish -C 'rm -rf /'", Decision::Block);
+        assert_decision("fish --init-command='rm -rf /'", Decision::Block);
+    }
+
+    #[test]
+    fn fish_init_command_with_benign_code_still_allows() {
+        // The canonical interactive-startup use: fish continues after the
+        // init command, and a bare top-level `fish` is Allow.
+        assert_decision("fish -C 'set -x PATH /opt/bin'", Decision::Allow);
+    }
+
+    #[test]
+    fn fish_attached_command_spellings_recurse_into_the_code() {
+        assert_decision("fish --command='rm -rf /'", Decision::Block);
+        assert_decision("fish --command=ls", Decision::Allow);
+        assert_decision("fish -c'rm -rf /'", Decision::Block);
+        assert_decision("fish -ic'rm -rf /'", Decision::Block);
+    }
+
+    #[test]
+    fn fish_repeated_command_flags_fold_worst_wins() {
+        // fish pushes every `-c` onto a list and runs them all.
+        assert_decision("fish -c ls -c 'rm -rf /'", Decision::Block);
+    }
+
+    #[test]
+    fn fish_long_option_abbreviations_resolve_like_wgetopt() {
+        // Unique prefix resolves; an ambiguous one (`--in` matches both
+        // `--init-command` and `--interactive`) makes real fish exit 1
+        // without executing, which floors to Ask rather than Allow.
+        assert_decision("fish --com='rm -rf /'", Decision::Block);
+        assert_decision("fish --ini='rm -rf /'", Decision::Block);
+        assert_decision("fish --in='rm -rf /'", Decision::Ask);
+    }
+
+    #[test]
+    fn fish_unknown_option_floors_to_ask() {
+        assert_decision("fish --frobnicate", Decision::Ask);
+    }
+
+    #[test]
+    fn fish_boolean_options_and_version_still_allow() {
+        assert_decision("fish", Decision::Allow);
+        assert_decision("fish -i", Decision::Allow);
+        assert_decision("fish --version", Decision::Allow);
+        assert_decision("fish -n script.fish", Decision::Allow);
+    }
+
+    #[test]
+    fn fish_operand_stops_option_parsing() {
+        // Deliberate flip (was Block): fish's `SHORT_OPTS` starts with
+        // `+`, which disables permutation, so `-c 'rm -rf /'` after the
+        // script operand is `$argv` DATA passed to the script, not a flag.
+        assert_decision("fish script.fish -c 'rm -rf /'", Decision::Allow);
+    }
+
+    #[test]
+    fn fish_unresolvable_code_argument_floors_to_ask() {
+        assert_decision(r#"fish -C "$(cat x)""#, Decision::Ask);
+    }
+
+    #[test]
+    fn fish_unresolvable_flag_position_still_blocks_a_dangerous_trailing_word() {
+        // The unreadable word might be `-c`, so the word after it might be
+        // the script -- the same reasoning `evaluate_dash_c`'s own
+        // `Uncertain` arm applies for POSIX shells.
+        assert_decision("fish $FOO 'rm -rf /'", Decision::Block);
+        assert_decision(r"find . -exec fish $FOO 'rm -rf /' \;", Decision::Block);
+        assert_decision("fish $FOO ls", Decision::Ask);
+    }
+
+    #[test]
+    fn fish_value_on_a_boolean_option_floors_to_ask() {
+        // Real fish rejects it and exits 1 without executing.
+        assert_decision("fish --interactive=x", Decision::Ask);
+    }
+
+    #[test]
+    fn fish_code_flag_without_a_value_allows() {
+        // Nothing names code to run; real fish errors out instead.
+        assert_decision("fish -c", Decision::Allow);
+        assert_decision("fish --command", Decision::Allow);
+    }
+
+    #[test]
+    fn fish_non_ascii_cluster_letter_is_unreadable_and_fails_closed() {
+        // No table letter is non-ASCII, so the cluster is unrecognized and
+        // the scan stops -- which then recurses the trailing word, the
+        // same fail-closed handling an unresolvable word gets.
+        assert_decision("fish -éc 'rm -rf /'", Decision::Block);
+        assert_decision("fish -éc ls", Decision::Ask);
+    }
+
+    #[test]
+    fn fish_code_value_that_looks_like_a_flag_is_still_the_code() {
+        // wgetopt takes a long option's value from the next word
+        // unconditionally, so this really runs the code string `-c`.
+        assert_decision("fish --command -c", Decision::Allow);
+    }
+
+    #[test]
+    fn fish_attached_init_command_cluster_allows_benign_code() {
+        assert_decision("fish -Cls", Decision::Allow);
+    }
+
+    #[test]
+    fn find_exec_fish_init_command_dangerous_blocks() {
+        // The issue's first repro: regressed to Ask when #257 added the
+        // bare-interpreter handling, because `-C` was neither a `-c` flag
+        // nor an operand.
+        assert_decision(r"find /x -exec fish -C 'rm -rf /' \;", Decision::Block);
+    }
+
+    #[test]
+    fn find_exec_fish_init_command_benign_keeps_the_continuation_posture() {
+        // After a benign init command fish continues — with no operand it
+        // is a stdin-fed shell per found file (Block, issue #257), with
+        // the placeholder it runs the found file as a script (Ask).
+        assert_decision(r"find /x -exec fish -C ls \;", Decision::Block);
+        assert_decision(r"find /x -exec fish -C ls {} \;", Decision::Ask);
+    }
+
+    #[test]
+    fn find_exec_fish_attached_command_is_analyzed_not_blanket_blocked() {
+        // The issue's second repro: `--command=ls` Blocked unappealably
+        // because the attached spelling was unrecognized. It now recurses
+        // like the separated form.
+        assert_decision(r"find /x -exec fish --command=ls \;", Decision::Allow);
+        assert_decision(
+            r#"find /x -exec fish --command='rm -rf /' \;"#,
+            Decision::Block,
+        );
+    }
+
+    #[test]
+    fn find_exec_fish_placeholder_before_dash_c_demotes_to_ask() {
+        // Deliberate flip (was Block), the same demotion issue #257
+        // argued for `sh {} -c`: the operand comes first, so `-c` is the
+        // found script's own argument. Asymmetry with POSIX shells, which
+        // keep the presence-only scan and still Block here, is disclosed
+        // at `FISH_SHORT_OPTS`.
+        assert_decision(r"find /x -exec fish {} -c 'rm -rf /' \;", Decision::Ask);
     }
 
     #[test]
