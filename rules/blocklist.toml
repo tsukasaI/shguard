@@ -1090,7 +1090,7 @@ targets = [
 [[command]]
 id = "shell-init-sed"
 decision = "ask"
-reason = "sed -i writing to a shell-init, cron, autostart, or persistence-critical file plants a backdoor that survives past the current session"
+reason = "sed -i/-I writing to a shell-init, cron, autostart, or persistence-critical file plants a backdoor that survives past the current session"
 command = "sed"
 required_flags = ["i|I|--in-place"]
 targets = [

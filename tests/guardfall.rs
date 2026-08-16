@@ -776,8 +776,11 @@ fn guardfall_shell_init_persistence_cases() {
         ),
         ("sed -i 's/x/y/' /etc/crontab", Decision::Ask),
         // Issue #263: BSD/macOS `-I` must be recognized the same way `-i`
-        // is (`shell-init-sed`'s own `required_flags` site).
+        // is (`shell-init-sed`'s own `required_flags` site), including the
+        // clustered and suffix-attached spellings.
         ("sed -I '' 's/x/y/' ~/.bashrc", Decision::Ask),
+        ("sed -nI '' 's/x/y/' ~/.bashrc", Decision::Ask),
+        ("sed -I.bak 's/x/y/' ~/.bashrc", Decision::Ask),
         ("dd of=/etc/cron.d/x if=evil", Decision::Ask),
         ("rm ~/.zshenv", Decision::Ask),
         ("unlink ~/.bashrc", Decision::Ask),

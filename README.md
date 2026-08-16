@@ -625,7 +625,7 @@ is not an error: that's the ordinary zero-config case.
 
 ### Protecting the config file itself
 
-shguard automatically denies `tee`/`cp`/`mv`/`install`/`sed -i`
+shguard automatically denies `tee`/`cp`/`mv`/`install`/`sed -i`/`-I`
 (or `--in-place`)/`dd of=`/`rm`/`unlink`/`ln`/`rsync`/`rmdir`/`perl -i`/
 `patch` writes targeting its own resolved config path, and the literal
 `~/.config/shguard/` token for any user — an agent shouldn't be able to
