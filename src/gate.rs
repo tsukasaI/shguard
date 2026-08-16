@@ -863,7 +863,8 @@ fn apply_attached_word_and_redirect_checks(
     // — a redirect target is resolved once, at invocation time, not
     // affected by a `cd` the body itself performs).
     if let CwdContext::Known(anchor) = redirect_anchor
-        && let Some(composed) = evaluate_composed_cwd_redirects(redirections, anchor, rules)
+        && let Some(composed) =
+            evaluate_composed_cwd_redirects(worst.normalized_argv(), redirections, anchor, rules)
     {
         worst = fold_worst(worst, composed);
     }
@@ -1012,14 +1013,23 @@ fn check_redirect_targets<'a>(
     redirections: &[Redirection],
     rules: &'a Rules,
 ) -> Option<&'a crate::rules::RedirectRule> {
-    resolved_redirect_write_targets(redirections)
+    // Worst-wins across BOTH target channels (issue #261): with the
+    // literal channel checked first and `or_else`-chained, an Ask matched
+    // on a literal target would preempt a Block matched on a
+    // substitution-resolved one, and an Ask on the first of two literal
+    // targets would preempt a Block on the second.
+    let mut ask = None;
+    for target in resolved_redirect_write_targets(redirections)
         .iter()
-        .find_map(|target| rules.match_redirect_target(target))
-        .or_else(|| {
-            resolved_redirect_substitution_targets(redirections)
-                .iter()
-                .find_map(|target| rules.match_redirect_target(target))
-        })
+        .chain(resolved_redirect_substitution_targets(redirections).iter())
+    {
+        match rules.match_redirect_target(target) {
+            Some(rule) if rule.decision() == Decision::Block => return Some(rule),
+            Some(rule) if ask.is_none() => ask = Some(rule),
+            _ => {}
+        }
+    }
+    ask
 }
 
 /// Issue #130: every applicable redirect target's statically-resolved
@@ -1524,6 +1534,23 @@ fn evaluate_simple_command(
     // hard match on the *unwidened* target set, so it doesn't see this).
     let redirect_ascent_descent_floor =
         scan_redirect_ascent_descent_floor(&command.redirections, rules);
+    // Issue #261: an Ask-level redirect-rule match. `core` returns early
+    // only for a Block (see its own comment), so this is where an Ask
+    // arrives — computed here for the same reason every floor above is:
+    // it must survive `core`'s early returns, including rule 9's Allow
+    // for a redirection-only command (`>> ~/.zshrc` has empty argv).
+    let redirect_rule_ask_floor = check_redirect_targets(&command.redirections, rules)
+        .filter(|rule| rule.decision() == Decision::Ask)
+        .map(|rule| {
+            (
+                Decision::Ask,
+                format!(
+                    "redirect target matches rule {:?}: {}",
+                    rule.id().as_str(),
+                    rule.reason().as_str()
+                ),
+            )
+        });
     // Issue #80: a `~username` token that would hit one of a matched
     // rule's own bare-`~` targets if it expanded. Computed here for the
     // same reason `tar_dashless_floor` is: this floor must survive
@@ -1564,6 +1591,7 @@ fn evaluate_simple_command(
     let tar_dashless_floor_present = tar_dashless_floor.is_some();
     let ascent_descent_floor_present = ascent_descent_floor.is_some();
     let redirect_ascent_descent_floor_present = redirect_ascent_descent_floor.is_some();
+    let redirect_rule_ask_floor_present = redirect_rule_ask_floor.is_some();
     let named_user_home_floor_present = named_user_home_floor.is_some();
     let dirstack_tilde_floor_present = dirstack_tilde_floor.is_some();
     let directory_equals_tilde_floor_present = directory_equals_tilde_floor.is_some();
@@ -1573,6 +1601,7 @@ fn evaluate_simple_command(
     let verdict = apply_tar_dashless_floor(verdict, tar_dashless_floor);
     let verdict = apply_ascent_descent_floor(verdict, ascent_descent_floor);
     let verdict = apply_ascent_descent_floor(verdict, redirect_ascent_descent_floor);
+    let verdict = apply_ascent_descent_floor(verdict, redirect_rule_ask_floor);
     let verdict = apply_named_user_home_floor(verdict, named_user_home_floor);
     let verdict = apply_dirstack_tilde_floor(verdict, dirstack_tilde_floor);
     let verdict = apply_directory_equals_tilde_floor(verdict, directory_equals_tilde_floor);
@@ -1613,6 +1642,10 @@ fn evaluate_simple_command(
     // shaped token that would hit that same rule's bare-`~` target under
     // zsh's `magic_equal_subst` option — shguard cannot know whether the
     // invoking shell has that (off-by-default) option set.
+    // `redirect_rule_ask_floor_present` (issue #261) extends it once
+    // more: an allow entry for `echo`/`cat` is not consent to redirecting
+    // that command's output into a protected shell-init path — the entry
+    // was written about the command, not about where its output lands.
     // `unknown_cwd_floor_present` (issue #103) extends it once more, for
     // the same reason the ascent-descent family does: an allow entry for
     // `rm`/`tar`/etc. is not consent to a token that might land in that
@@ -1626,6 +1659,7 @@ fn evaluate_simple_command(
         || tar_dashless_floor_present
         || ascent_descent_floor_present
         || redirect_ascent_descent_floor_present
+        || redirect_rule_ask_floor_present
         || named_user_home_floor_present
         || dirstack_tilde_floor_present
         || directory_equals_tilde_floor_present
@@ -1702,33 +1736,23 @@ fn evaluate_simple_command_core(
     // a redirection-only command (`> /dev/sda`) has empty argv but still
     // carries dangerous redirections that must not slip through rule 9.
     // This return precedes `leftover_floor`'s computation below (issue
-    // #77) and is not floored by it — currently
-    // safe only because every REACHABLE `[[redirect]]` rule is
-    // `Decision::Block`: every embedded rule is Block by construction
-    // (pinned by `rules::tests::embedded_redirect_rules_are_all_block_decision`),
-    // and issue #100's user-config `[[redirect]]` table (`UserConfig::parse`,
-    // `src/rules.rs`) load-time-rejects `decision = "ask"` specifically
-    // because this early return — and `Rules::match_redirect_target`'s own
-    // first-match-across-targets lookup — would otherwise let a weaker
-    // user rule win ahead of a stricter embedded Block matched on a
-    // different redirect target of the same command line (found by a
-    // fable security review of #204's PR). If a redirect rule with a
-    // weaker decision is ever allowed again, this return needs the same
-    // `apply_leftover_substitution_floor` wrapping the rules 1/2/6a/
-    // stage-3 returns already get, AND `match_redirect_target` needs
-    // worst-wins folding across every matching rule/target, not
-    // first-match — both are load-bearing, not just one.
-    if let Some(rule) = check_redirect_targets(&command.redirections, rules) {
+    // #77) and is not floored by it, which is why ONLY a Block returns
+    // here: `check_redirect_targets` now folds worst-wins across rules,
+    // targets, and both resolution channels (issue #261), so "the fold is
+    // Block" means no stricter redirect decision exists to lose, while an
+    // Ask-level match must not short-circuit the command-rule matching
+    // below (`rm -rf / >> ~/.bashrc` is still a Block). An Ask-level
+    // redirect match instead arrives as `redirect_rule_ask_floor` in
+    // [`evaluate_simple_command`], which survives every early return here.
+    if let Some(rule) = check_redirect_targets(&command.redirections, rules)
+        && rule.decision() == Decision::Block
+    {
         let reason = Reason::new(format!(
             "redirect target matches rule {:?}: {}",
             rule.id().as_str(),
             rule.reason().as_str()
         ));
-        return match rule.decision() {
-            Decision::Block => Verdict::block(reason, argv, Some(rule.id().clone())),
-            Decision::Ask => Verdict::ask(reason, argv),
-            Decision::Allow => unreachable!("rules never carry Decision::Allow"),
-        };
+        return Verdict::block(reason, argv, Some(rule.id().clone()));
     }
 
     // Rule 9: assignments-only / empty / redirection-only commands do
@@ -5172,7 +5196,9 @@ fn evaluate_composed_cwd(
         ));
         raise(Verdict::ask(reason, argv.to_vec()));
     }
-    if let Some(redirect_verdict) = evaluate_composed_cwd_redirects(redirections, anchor, rules) {
+    if let Some(redirect_verdict) =
+        evaluate_composed_cwd_redirects(argv, redirections, anchor, rules)
+    {
         raise(redirect_verdict);
     }
 
@@ -5186,6 +5212,7 @@ fn evaluate_composed_cwd(
 /// [`resolved_redirect_write_targets`] — the same genuine-filesystem-write
 /// target set [`check_redirect_targets`] already checks.
 fn evaluate_composed_cwd_redirects(
+    argv: &[NormalizedWord],
     redirections: &[Redirection],
     anchor: &str,
     rules: &Rules,
@@ -5205,25 +5232,18 @@ fn evaluate_composed_cwd_redirects(
             rule.id().as_str(),
             rule.reason().as_str()
         ));
-        // Deliberately `Vec::new()` for the argv, same as
-        // `evaluate_composed_cwd`'s own reasoning against carrying a
-        // composed argv — but this construction is safe from that
-        // function's own monotonicity bug only because a matched
-        // [`RedirectRule`] is NEVER `Decision::Ask`: `UserConfig::parse`
-        // rejects `decision = "ask"` on a `[[redirect]]` entry at load time,
-        // and `embedded_redirect_rules_are_all_block_decision` pins every
-        // embedded one as `Block` too. A matched redirect rule is therefore
-        // always the terminal-worst decision `fold_worst` can produce, so
-        // this verdict's empty argv winning over a stage's real one in
-        // `evaluate_pipeline`'s `stage_argvs` can never itself cause a
-        // decode-pipe stage to go undetected the way a composed *argv*
-        // could (the bug the sibling comment above documents) — there is no
-        // stricter decision left for the missing decode-detection to have
-        // downgraded FROM. If either of those two invariants is ever
-        // relaxed, this reasoning needs re-deriving.
+        // Carries the caller's UNCOMPOSED argv, the same monotonicity fix
+        // `evaluate_composed_cwd` applies to its own verdicts: an empty
+        // argv here was safe only while every matched [`RedirectRule`] was
+        // `Decision::Block` (the terminal-worst decision, with nothing left
+        // to downgrade FROM). Issue #261 makes an Ask-level redirect rule
+        // reachable, and an empty-argv Ask winning `fold_worst` over a
+        // pipeline stage's real argv would erase that stage from
+        // `evaluate_pipeline`'s `stage_argvs`, which can make a decode-fed
+        // pipe unrecognizable.
         let verdict = match rule.decision() {
-            Decision::Block => Verdict::block(reason, Vec::new(), Some(rule.id().clone())),
-            Decision::Ask => Verdict::ask(reason, Vec::new()),
+            Decision::Block => Verdict::block(reason, argv.to_vec(), Some(rule.id().clone())),
+            Decision::Ask => Verdict::ask(reason, argv.to_vec()),
             Decision::Allow => unreachable!("rules never carry Decision::Allow"),
         };
         worst = Some(match worst {
@@ -9320,5 +9340,91 @@ done"#,
         assert_never_lowers("cd $HOME");
         assert_never_lowers("IFS=,; rm$IFS-rf$IFS/");
         assert_never_lowers("cp ~/.config/shguard/evil.toml ~/.config/shguard/config.toml");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod redirect_worst_wins_tests {
+    use super::*;
+    use crate::verdict::Decision;
+
+    /// An embedded-shaped rule set carrying one Ask-level redirect rule,
+    /// which `rules/blocklist.toml` itself does not have yet (issue #261
+    /// ships the fold first, the rule second). `Rules::parse` accepts
+    /// `decision = "ask"` on a `[[redirect]]` entry; only `UserConfig`
+    /// rejects it.
+    fn rules_with_ask_redirect() -> Rules {
+        let mut toml = String::from(include_str!("../rules/blocklist.toml"));
+        toml.push_str(
+            r#"
+[[redirect]]
+id = "test-ask-redirect"
+decision = "ask"
+reason = "test-only Ask-level redirect rule"
+targets = [{ normalized = "~/.testrc" }]
+"#,
+        );
+        Rules::parse(&toml).expect("test rule set should parse")
+    }
+
+    fn decide(command: &str) -> Verdict {
+        analyze_with_policy(
+            command,
+            &rules_with_ask_redirect(),
+            &Allowlist::embedded().unwrap(),
+        )
+    }
+
+    #[test]
+    fn redirect_ask_alone_reaches_ask() {
+        assert_eq!(decide("echo x >> ~/.testrc").decision(), Decision::Ask);
+    }
+
+    #[test]
+    fn redirect_ask_survives_the_redirection_only_command_allow() {
+        // Rule 9 returns Allow for an empty argv, so this only works
+        // because the Ask arrives as a wrapper-layer floor.
+        assert_eq!(decide(">> ~/.testrc").decision(), Decision::Ask);
+    }
+
+    #[test]
+    fn redirect_ask_on_one_target_does_not_downgrade_a_block_on_another() {
+        assert_eq!(
+            decide("echo hi >> ~/.testrc > /dev/sda").decision(),
+            Decision::Block
+        );
+        assert_eq!(
+            decide("echo hi > /dev/sda >> ~/.testrc").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn redirect_ask_does_not_preempt_a_command_rule_block() {
+        let verdict = decide("rm -rf / >> ~/.testrc");
+        assert_eq!(verdict.decision(), Decision::Block);
+        assert!(
+            verdict
+                .reason()
+                .is_some_and(|r| r.as_str().contains("rm-recursive-force-dangerous-target")),
+            "expected the rm rule's own reason, got {:?}",
+            verdict.reason().map(super::Reason::as_str)
+        );
+    }
+
+    #[test]
+    fn redirect_ask_in_the_literal_channel_does_not_mask_a_substitution_block() {
+        assert_eq!(
+            decide("echo hi >> ~/.testrc > $(echo /dev/sda)").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn allowlist_cannot_downgrade_the_redirect_ask_floor() {
+        // `echo` is an allowlisted command; an allow entry for it is not
+        // consent to where its output lands.
+        assert_eq!(decide("echo x > ~/.testrc").decision(), Decision::Ask);
     }
 }

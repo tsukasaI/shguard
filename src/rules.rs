@@ -4070,7 +4070,22 @@ impl Rules {
     /// The first [`RedirectRule`] whose target list matches `target`, if any.
     #[must_use]
     pub(crate) fn match_redirect_target(&self, target: &str) -> Option<&RedirectRule> {
-        self.redirect_rules.iter().find(|rule| rule.matches(target))
+        // Worst-wins, not first-match (issue #261): a Block anywhere in
+        // the list must outrank an Ask that happens to be declared
+        // earlier, otherwise adding the first Ask-level redirect rule
+        // would silently downgrade an existing Block on the same target.
+        let mut ask = None;
+        for rule in &self.redirect_rules {
+            if !rule.matches(target) {
+                continue;
+            }
+            match rule.decision() {
+                Decision::Block => return Some(rule),
+                _ if ask.is_none() => ask = Some(rule),
+                _ => {}
+            }
+        }
+        ask
     }
 
     /// The first [`RedirectRule`] for which
@@ -4518,9 +4533,11 @@ impl UserConfig {
                 return Err(RulesError::invalid(
                     entry.id.as_str(),
                     "a `[[redirect]]` entry must use `decision = \"block\"` (the default) — \
-                     an `Ask`-decision redirect rule could downgrade a stricter embedded \
-                     redirect/blocklist rule matched on the same command, since the redirect \
-                     check runs first-match, before any other check",
+                     user-declared redirect rules stay Block-only pending issue #100's own \
+                     review, even though the downgrade race that first motivated this \
+                     rejection is closed (issue #261 made the redirect check fold worst-wins \
+                     across rules, targets and resolution channels, and left only a Block \
+                     short-circuiting the other checks)",
                 ));
             }
         }
@@ -4554,20 +4571,15 @@ impl UserConfig {
 /// permissive decision is [`apply_allowlist`], which is structurally
 /// Block-immune before it even consults its entries. `redirect` entries
 /// (issue #100) are appended AFTER the embedded blocklist's own
-/// `redirect_rules`, never prepended: [`Rules::match_redirect_target`] is
-/// first-match-wins, so appending is what keeps a user-declared redirect
-/// rule from ever shadowing a built-in one covering the same path. Unlike
-/// the command-rule arrays, this alone isn't sufficient for "additive
-/// tightening only": `evaluate_simple_command_core`'s redirect check
-/// (`src/gate.rs`) returns on the first matching redirect rule across
-/// EVERY declared target, before any other check runs — so `UserConfig::parse`
-/// also rejects `decision = "ask"` on a user redirect entry (a fable
-/// security review of #204's PR found a weaker user `Ask` rule could win
-/// that race ahead of a stricter embedded `Block` matched on a different
-/// redirect target of the same command). With `"allow"` already impossible
-/// (`parse_decision` never produces it) and `"ask"` now rejected at load
-/// time, every reachable redirect rule is `Decision::Block`, which is what
-/// actually makes append-order-only sufficient here. `pipeline` entries
+/// `redirect_rules`, never prepended, so a user-declared redirect rule
+/// reports second when two rules match the same target at the same
+/// decision level. Ordering no longer decides the DECISION itself:
+/// [`Rules::match_redirect_target`] folds worst-wins across rules, and
+/// `check_redirect_targets` (`src/gate.rs`) folds across targets and both
+/// resolution channels (issue #261). `UserConfig::parse` nonetheless still
+/// rejects `decision = "ask"` on a user redirect entry — a conservative
+/// posture pending issue #100's own review, not the downgrade race that
+/// first motivated it. `pipeline` entries
 /// (issue #97) are appended AFTER the embedded blocklist's own
 /// `pipeline_rules`, never prepended: [`Rules::match_pipeline`] is
 /// first-match-wins, so appending is what keeps a user-declared pipeline
@@ -8420,6 +8432,26 @@ mod tests {
     // the redirect check runs first-match, before stage 3's argv blocklist
     // match, with no worst-wins folding. `decision = "ask"` must be
     // rejected at load time for a user redirect entry.
+    #[test]
+    fn match_redirect_target_prefers_block_over_an_earlier_ask() {
+        // issue #261: declaration order must not decide the decision.
+        let toml = r#"
+            [[redirect]]
+            id = "ask-first"
+            decision = "ask"
+            reason = "declared first"
+            targets = [{ exact = "/tmp/x" }]
+
+            [[redirect]]
+            id = "block-second"
+            reason = "declared second"
+            targets = [{ exact = "/tmp/x" }]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        let rule = rules.match_redirect_target("/tmp/x").unwrap();
+        assert_eq!(rule.id().as_str(), "block-second");
+    }
+
     #[test]
     fn user_config_rejects_ask_decision_redirect_entry() {
         let toml = r#"
