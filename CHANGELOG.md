@@ -27,6 +27,70 @@ All notable changes to this project are documented in this file.
   is removed or narrowed, the same load-time rejection `sudo`-matching
   `[[allow]]` entries already had.
 
+## [0.5.0] - 2026-08-17
+
+### Added
+
+- Shell-init and persistence paths (`~/.bashrc`, `~/.zshrc`,
+  `~/.config/fish/config.fish`, `/etc/cron.*`, LaunchAgents, systemd user
+  units, `~/.ssh/authorized_keys`, `/etc/ld.so.preload`, and 30+ more) are
+  protected across every write mechanism — `tee`, `cp`, `mv`, `install`,
+  `sed -i`, `dd of=`, `ln`, `rm`, `unlink`, and now bare shell redirection
+  (`>`/`>>`) — all at `ask` (#259, #198, #261).
+- `find`'s own `{}` placeholder is recognized wherever `find` substitutes
+  it, not only as a standalone token: `rm -f ./{}`, `{}/`, `x/../{}`, `/{}`
+  and `~/{}` now block alongside the bare spelling (#140, #267).
+- `find … | xargs rm -f` blocks, matching `find -exec rm -f {}` and
+  `find -delete` — the piped form has the same delete-every-match effect
+  (#268).
+- New optional `sink_required_flags` on `[[pipeline]]` rules, constraining
+  the resolved sink's own flags (#268).
+- `eval` and `awk`'s bare-positional script route through interpreter-code
+  recursion the way `sh -c` does (#255, #258).
+- The parser handles `if`, background jobs (`&`), `[[ ]]`, and pipeline
+  negation (#256).
+- A redirect target's statically-known substitution output is checked
+  against the redirect rules (`> $(echo /dev/sda)`), not only the literal
+  target (#130).
+
+### Fixed
+
+- Wrapper flag handling no longer mistakes a flag's value for the wrapped
+  command: `env`'s own value flags (#250), `stdbuf`/`xargs` (#264),
+  getopt-style short-flag clusters (`env -iu FOO rm -rf /`, #265), GNU
+  unambiguous long-option abbreviations (`env --uns`, `xargs --max-a`,
+  `stdbuf --out`, #266), and `env -S`'s argv splicing, which is now
+  reconstructed and recursed (#265).
+- `fish` is modelled on its own option surface rather than POSIX `sh`'s:
+  `-C`/`--init-command`, attached values (`--command=CODE`, `-cCODE`),
+  repeated `-c`, and unique-prefix long options are each read as what they
+  are (#269).
+- `find -exec` spawning a bare shell interpreter with no `-c` no longer
+  slips through (#196 follow-up, #257).
+- BSD/macOS `sed -I` counts as an in-place flag everywhere `-i` does,
+  including shguard's own config self-protection (#263).
+- `rm -R` (uppercase) counts as recursive (#206), and an ANSI-C-decoded
+  embedded NUL is treated as unresolvable rather than silently merging
+  tokens (#138).
+- Redirect-target decisions fold worst-wins across rules, targets, and both
+  target-resolution channels, instead of taking the first match and
+  short-circuiting the remaining checks (#261).
+
+### Compatibility notes
+
+- **`echo ... >> ~/.zshrc` now asks.** Appending to a shell-init or
+  persistence path is the standard installer idiom, so it asks rather than
+  blocks — but it is no longer silently allowed. `>` truncation of the same
+  paths asks too, matching every other write mechanism for those targets.
+- A config using `[[pipeline]]`'s new `sink_required_flags` field fails to
+  load on an older shguard (unknown fields are rejected), which fails
+  closed for every command until the field is removed.
+- Two decisions deliberately relaxed where the previous behavior did not
+  match the real tool: `fish script.fish -c '...'` allows (fish stops
+  option parsing at the script operand, so `-c` is data), and
+  `find -exec fish {} -c '...'` asks rather than blocks, the same demotion
+  `find -exec sh {} -c` already had.
+
 ## [0.4.1] - 2026-08-15
 
 - **Compatibility note**: a `command` value containing whitespace (issue
