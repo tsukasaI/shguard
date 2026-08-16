@@ -375,6 +375,14 @@ fn guardfall_find_exec_rm_force_placeholder_cases() {
         (r"find /x -exec rm -f {}/ \;", Decision::Block),
         (r"find . -exec rm -f x/../{} \;", Decision::Block),
         ("rm -f ./{}", Decision::Block),
+        // The absolute re-root of the same evasion: with an absolute
+        // search root the matches are absolute, so `/{}` substitutes to
+        // `//x/foo` — the matched path itself. Collapses to `Abs(["{}"])`,
+        // which needs its own target entry alongside the relative one.
+        (r"find /x -type f -exec rm -f /{} \;", Decision::Block),
+        (r"find /x -exec rm -rf //{} \;", Decision::Block),
+        (r"find /x -exec rm -f /./{} \;", Decision::Block),
+        (r"find /x -exec rm -f /../{} \;", Decision::Block),
         // Boundary pins: a suffixed or re-rooted token resolves to a
         // genuinely different path than the one find matched, so nothing
         // find enumerated is deleted — these must NOT Block.

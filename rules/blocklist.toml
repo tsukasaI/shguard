@@ -268,10 +268,18 @@ targets = [
     # anywhere inside a word, so `./{}`/`{}/`/`x/../{}` all still
     # resolve to the matched path and must Block too. `normalized`
     # matches any token that lexically collapses to the single component
-    # `{}` — exactly that set — while still leaving a token that
-    # resolves to a genuinely different path (`{}.`, `{}.bak`, `x{}`,
-    # `/tmp/{}`) unmatched.
+    # `{}`, while still leaving a token that resolves to a genuinely
+    # different path (`{}.`, `{}.bak`, `x{}`, `/tmp/{}`) unmatched.
     { normalized = "{}" },
+    # The absolute re-root of the same evasion: when `find`'s search root
+    # is absolute, matches are absolute too, so `/{}` substitutes to
+    # `//x/foo` — the matched path itself — and deletes every match. That
+    # token collapses to `Abs(["{}"])`, which `normalized = "{}"`
+    # (`Rel{ascent:0, comps:["{}"]}`) cannot see, so it needs its own
+    # entry; `//{}`/`/./{}`/`/../{}` collapse here too. With a relative
+    # search root this spelling instead deletes `/<match>` at the
+    # filesystem root, which is no safer.
+    { normalized = "/{}" },
 ]
 
 # `-r`/`-R` is unnecessary for `rm -f {}` (no `-type f` needed either) to
@@ -293,9 +301,10 @@ id = "rm-force-find-placeholder-target"
 reason = "rm -f against find's own {} placeholder removes every matched file, unrecoverably, the same effect find -delete has"
 command = "rm"
 required_flags = ["f|--force"]
-# `normalized`, not `exact` (issue #267): see the sibling rule above for
-# the collapse semantics this shares.
-targets = [{ normalized = "{}" }]
+# `normalized`, not `exact` (issue #267), plus the absolute re-root
+# `/{}`: see the sibling rule above for the collapse semantics both
+# entries share.
+targets = [{ normalized = "{}" }, { normalized = "/{}" }]
 
 [[command]]
 id = "find-delete"
