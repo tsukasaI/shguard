@@ -1430,6 +1430,59 @@ fn user_config_pipeline_rule_blocks_a_declared_shape() {
     assert_eq!(permission_decision(&output), "allow");
 }
 
+// issue #268: sink_required_flags narrows a pipeline rule to a sink
+// invocation carrying a specific flag, so the flagless spelling of the
+// same source/sink pair stays untouched.
+#[test]
+fn user_config_pipeline_rule_sink_required_flags_constrains_the_sink() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[pipeline]]
+        id = "user-forbid-tar-gzip-max"
+        reason = "forbid piping tar into a maximum-compression gzip"
+        decision = "block"
+        sources = ["tar"]
+        sinks = ["gzip"]
+        sink_required_flags = ["--best"]
+    "#,
+    );
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+
+    let output = run_hook(
+        &bash_command("tar cf - /src | gzip --best > out.tgz"),
+        &envs,
+    );
+    assert_eq!(permission_decision(&output), "deny");
+    assert!(permission_reason(&output).contains("user-forbid-tar-gzip-max"));
+
+    let output = run_hook(&bash_command("tar cf - /src | gzip > out.tgz"), &envs);
+    assert_eq!(permission_decision(&output), "allow");
+}
+
+// issue #268: a malformed sink_required_flags spec is a load-time error,
+// which fails shguard closed for every command rather than silently
+// leaving the sink unconstrained.
+#[test]
+fn user_config_pipeline_rule_invalid_sink_flag_spec_fails_closed() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[pipeline]]
+        id = "user-broken-sink-flags"
+        reason = "malformed flag spec"
+        sources = ["find"]
+        sinks = ["rm"]
+        sink_required_flags = ["f|"]
+    "#,
+    );
+
+    let output = run_hook(
+        &bash_command("echo hi"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(!permission_reason(&output).is_empty());
+}
+
 // issue #99: a rule's deny_message surfaces to the agent as
 // hookSpecificOutput.additionalContext, distinct from permissionDecisionReason.
 #[test]
