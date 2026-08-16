@@ -812,7 +812,7 @@ fn guardfall_shell_init_persistence_cases() {
 /// itself (`/etc/cron.d`, with or without a trailing slash) never matched,
 /// so dropping a file straight INTO a protected directory
 /// (`cp backdoor /etc/cron.d/`, the canonical cron-persistence attack) sailed
-/// through as `Allow`. Each of the five prefix-style targets now carries a
+/// through as `Allow`. Each prefix-style target now carries a
 /// bare `{ normalized = "..." }` alternative alongside its
 /// `normalized_prefix`, mirroring the self-protect-config family's
 /// bare-directory precedent (`rules/blocklist.toml`, issue #22/#28). Pinned
@@ -829,6 +829,14 @@ fn guardfall_shell_init_directory_token_cases() {
         "/var/spool/cron",
         "~/.config/autostart",
         "~/.config/systemd/user",
+        // Issue #198 path-parity additions (rules/blocklist.toml's
+        // disclosed-gap comment) get the same bare-directory-token coverage.
+        "/etc/cron.hourly",
+        "/etc/cron.daily",
+        "/etc/cron.weekly",
+        "/etc/cron.monthly",
+        "/etc/zsh",
+        "~/.config/fish/conf.d",
     ];
 
     for dir in dirs {
@@ -923,6 +931,64 @@ fn guardfall_shell_init_does_not_shadow_stricter_block_rules() {
         assert!(
             reason.is_some_and(|r| r.contains(expected_rule)),
             "command {command:?}: expected reason to mention {expected_rule:?}, got {reason:?}"
+        );
+    }
+}
+
+/// Issue #198: closes the PATH half of the parity gap disclosed in
+/// `rules/blocklist.toml`'s "Known parity gaps" comment on the
+/// `shell-init-*` family — `/etc/cron.{hourly,daily,weekly,monthly}/`,
+/// `/etc/bash.bashrc`, `/etc/zsh/`, `~/.ssh/rc`, and
+/// `~/.config/fish/conf.d/` are now `targets` in every `shell-init-*` rule,
+/// the same way `/etc/cron.d/` already was. One path per new family,
+/// crossed with at least two mechanisms each (mirroring
+/// `guardfall_shell_init_persistence_cases`'s shape), plus benign controls
+/// that must stay `Allow`. The MECHANISM half of the gap (rsync, perl -i,
+/// patch, curl -o, wget -O, crontab <file>) stays open and is deliberately
+/// not exercised here.
+#[test]
+fn guardfall_shell_init_path_parity_198_cases() {
+    let cases: &[(&str, Decision)] = &[
+        // ---- /etc/cron.{hourly,daily,weekly,monthly}/ ----
+        ("tee -a /etc/cron.daily/x evil", Decision::Ask),
+        ("cp evil /etc/cron.hourly/x", Decision::Ask),
+        ("mv evil /etc/cron.weekly/x", Decision::Ask),
+        ("rm /etc/cron.monthly/x", Decision::Ask),
+        // ---- /etc/bash.bashrc ----
+        ("cp evil /etc/bash.bashrc", Decision::Ask),
+        ("tee -a /etc/bash.bashrc evil", Decision::Ask),
+        ("unlink /etc/bash.bashrc", Decision::Ask),
+        // ---- /etc/zsh/ ----
+        ("tee -a /etc/zsh/zshrc evil", Decision::Ask),
+        ("mv evil /etc/zsh/zprofile", Decision::Ask),
+        ("dd of=/etc/zsh/zshrc if=evil", Decision::Ask),
+        // ---- ~/.ssh/rc ----
+        ("tee -a ~/.ssh/rc evil", Decision::Ask),
+        ("rm ~/.ssh/rc", Decision::Ask),
+        ("ln -sf evil ~/.ssh/rc", Decision::Ask),
+        // ---- ~/.config/fish/conf.d/ ----
+        ("cp evil ~/.config/fish/conf.d/x.fish", Decision::Ask),
+        (
+            "install -m 644 evil ~/.config/fish/conf.d/x.fish",
+            Decision::Ask,
+        ),
+        // ---- benign controls: must NOT regress ----
+        ("cat /etc/bash.bashrc", Decision::Allow),
+        // dd's `of=`/`if=` split genuinely distinguishes write from read.
+        ("dd if=/etc/zsh/zshrc of=/tmp/backup", Decision::Allow),
+        // A path that merely shares a prefix with a protected file is not
+        // the file itself.
+        ("tee -a /etc/bash.bashrc.bak evil", Decision::Allow),
+        ("cp evil ~/.ssh/rce", Decision::Allow),
+    ];
+
+    for (command, expected) in cases {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
         );
     }
 }
