@@ -1073,6 +1073,8 @@ fn guardfall_find_pipe_xargs_rm_force_cases() {
         ),
         // The sink resolves through the whole wrapper chain.
         ("find . | sudo xargs rm -f", Decision::Block),
+        // Homebrew installs GNU findutils as `gfind` on macOS.
+        ("gfind . -print0 | xargs -0 rm -f", Decision::Block),
         // Control: already Blocked before this rule, via the `{}`
         // placeholder target — `-I`'s replace-string puts the placeholder
         // back into argv where a target matcher can see it.

@@ -727,7 +727,9 @@ sinks = ["sh", "bash", "zsh", "fish", "ksh", "tcsh", "csh", "ash"]
 [[pipeline]]
 id = "find-pipe-rm-force"
 reason = "piping find's matches into rm -f (typically via xargs) deletes every matched file, unrecoverably, the same effect find -delete has"
-sources = ["find"]
+# `gfind` is how Homebrew's GNU findutils installs on macOS — the same
+# enumeration under a different basename, so it belongs in scope.
+sources = ["find", "gfind"]
 sinks = ["rm"]
 sink_required_flags = ["f|--force"]
 
