@@ -7278,18 +7278,72 @@ mod tests {
     }
 
     #[test]
-    fn env_short_cluster_with_trailing_unset_is_a_disclosed_known_gap() {
-        // Not fixed here (pre-existing, disclosed, same class as `exec`'s
-        // own cluster-position limitation before issue #248's follow-up
-        // fix, and as `su`'s residual cluster-position gap): `env`'s
-        // boolean `-i` clustered ahead of value-taking `-u` (`-iu FOO`) is
-        // not recognised by `ValueFlag::is_bare`, which only matches `-u`'s
-        // standalone spelling, so this cluster falls through to the
-        // generic dash-prefix skip and `FOO` is still mistaken for the
-        // wrapped command. Confirmed present both before and after this
-        // fix -- pinned as a known-gap regression test, not silently left
-        // undocumented.
-        assert_decision("env -iu FOO rm -rf /", Decision::Allow);
+    fn env_short_cluster_with_trailing_value_taker_no_longer_hides_wrapped_command() {
+        // Issue #265, was the pinned known gap of issue #250: `env`'s
+        // boolean `-i` clustered ahead of value-taking `-u` puts `FOO` in
+        // the flag's own value slot, so the generic dash-prefix skip
+        // mistook it for the wrapped command.
+        assert_decision("env -iu FOO rm -rf /", Decision::Block);
+        assert_decision("env -ivu FOO rm -rf /", Decision::Block);
+        assert_decision("env -iC /tmp rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn env_cluster_with_mid_cluster_value_taker_keeps_glued_value_semantics() {
+        // Real getopt glues the cluster's remainder onto the first
+        // value-taker (`-ui FOO` unsets `i`, `-uiFOO` unsets `iFOO`), so
+        // the NEXT token is the command either way -- consuming only the
+        // cluster token is already correct here.
+        assert_decision("env -ui rm -rf /", Decision::Block);
+        assert_decision("env -uiFOO rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn env_cluster_value_taker_missing_its_value_is_a_pinned_known_trade_off() {
+        // `-u` has no variable name, so the cluster consumes `rm` as its
+        // value and `/` resolves as the command. Not a reachable
+        // weakening: real `env` then rejects `-rf` and executes nothing --
+        // the same trade-off the bare `env -u rm -rf /` spelling pins.
+        assert_decision("env -iu rm -rf /", Decision::Allow);
+    }
+
+    #[test]
+    fn env_cluster_with_unresolvable_value_fails_closed() {
+        // The cluster is recognised, but its value cannot be read, so the
+        // scan stops there rather than resolving a later token as the
+        // command.
+        assert_decision("env -iu $X rm -rf /", Decision::Ask);
+    }
+
+    #[test]
+    fn env_boolean_cluster_before_benign_command_still_allows() {
+        assert_decision("env -iu FOO ls", Decision::Allow);
+        assert_decision("env -iv ls", Decision::Allow);
+    }
+
+    #[test]
+    fn env_cluster_with_unmodeled_letter_falls_through_to_generic_skip() {
+        // `L` is in neither table, so the cluster is not recognised and
+        // only the cluster token is consumed, leaving `FOO` as the
+        // resolved command. macOS and GNU `env` both reject `-L` and
+        // execute nothing, so there is no execution this fails to guard.
+        // FreeBSD >= 13's `env` does have `-L user[/class]` as a value
+        // flag, where this would genuinely run the trailing command --
+        // out of scope while shguard targets macOS and Linux, and the
+        // fix would be a FreeBSD row in the two tables.
+        assert_decision("env -iL FOO rm -rf /", Decision::Allow);
+    }
+
+    #[test]
+    fn exec_cluster_with_unmodeled_letter_is_a_pinned_narrowing() {
+        // Deliberate narrowing from the exec-specific predecessor of
+        // `cluster_takes_separated_value`, which tested only the first
+        // `a`'s position and ignored the letters before it: `-xa` Blocked
+        // by consuming `foo` and resolving `rm`. Real shells reject an
+        // invalid `exec` option and run nothing -- verified in zsh
+        // (`unknown exec flag -x`, exit 1); bash documents the same
+        // rejection.
+        assert_decision("exec -xa foo rm -rf /", Decision::Allow);
     }
 
     #[test]
