@@ -451,6 +451,38 @@ impl ValueFlag {
         }
     }
 
+    /// The one long name in `flags` that `prefix` (no leading `--`)
+    /// abbreviates, per GNU `getopt_long`'s unambiguous-prefix rule
+    /// (issue #266). `None` for zero matches and for two or more: an
+    /// ambiguous prefix makes the real tool print "option is ambiguous"
+    /// and exit without executing anything.
+    ///
+    /// Ambiguity is judged against shguard's own per-wrapper value-flag
+    /// subset, not the tool's full option surface — deliberately, because
+    /// the subset can only ever err toward over-blocking. A prefix that is
+    /// unique here but ambiguous in reality makes shguard skip a value for
+    /// a command that never runs; a prefix ambiguous here is ambiguous in
+    /// the real tool too (the subset is a subset), so the tool runs
+    /// nothing either way. The one shape this cannot see is a BOOLEAN flag
+    /// whose exact name strictly prefixes a listed value flag, which real
+    /// getopt resolves to the boolean: no such collision exists in
+    /// [`wrapper_value_flags`] today, and adding a `Long` entry means
+    /// checking that tool's full `--help` for one.
+    fn unambiguous_long_prefix<'a>(flags: &'a [ValueFlag], prefix: &str) -> Option<&'a str> {
+        let mut hit = None;
+        for flag in flags {
+            if let ValueFlag::Long(name) = flag
+                && name.starts_with(prefix)
+            {
+                if hit.is_some() {
+                    return None;
+                }
+                hit = Some(name.as_str());
+            }
+        }
+        hit
+    }
+
     /// Whether `token` is this flag's `--name=value` attached form (long
     /// flags only — short flags have no recognised attached-value shape,
     /// see the type docs) — a match means the whole token is excluded
@@ -2577,6 +2609,30 @@ pub(crate) fn effective_command_excluding<'a>(
     }
 }
 
+/// Whether `token` is a bare spelling of one of `flags` on the wrapper
+/// effective-command path: an exact short or long match, or an
+/// unambiguous long-option abbreviation (`--uns` for `--unset`, issue
+/// #266). A token carrying `=` never abbreviates — the attached form is
+/// already handled by the generic dash-skip.
+///
+/// Deliberately NOT used on the [`CommandRule`] targets path
+/// ([`value_flag_free_candidates`], [`value_flag_consumed`]): there, a
+/// flag match REMOVES the next token from target candidacy, so
+/// over-matching drops a real target — under-blocking. Exact-only is the
+/// fail-closed direction there, and this asymmetry is why the two paths
+/// do not share a matcher.
+fn value_flag_bare_match(flags: &[ValueFlag], token: &str) -> bool {
+    if flags.iter().any(|flag| flag.is_bare(token)) {
+        return true;
+    }
+    match token.strip_prefix("--") {
+        Some(prefix) if !prefix.is_empty() && !prefix.contains('=') => {
+            ValueFlag::unambiguous_long_prefix(flags, prefix).is_some()
+        }
+        _ => false,
+    }
+}
+
 /// A wrapper's boolean (no-value) short-option letters, for the
 /// getopt-cluster recognition in [`skip_wrapper_flags`] (issue #265). The
 /// value-taking letters are NOT repeated here — they are derived from
@@ -2919,7 +2975,7 @@ fn skip_wrapper_flags(wrapper: &str, argv: &[NormalizedWord]) -> usize {
         // wrapped command (`rm`) as if it were the flag's value — a fable
         // review caught exactly that regression in an earlier
         // `ends_with('a')` version of this check.
-        if value_flags.iter().any(|vf| vf.is_bare(token))
+        if value_flag_bare_match(&value_flags, token)
             || cluster_takes_separated_value(wrapper, token)
         {
             // The flag token itself is always consumed; its separated
@@ -3257,11 +3313,27 @@ pub(crate) fn wrapper_shell_string_scripts(stage: &[NormalizedWord]) -> Vec<Scri
         if base == "env" {
             collect_env_split_string_slots(tail, &mut slots);
         }
+        let value_flags = wrapper_value_flags(base);
         for slot in RECURSABLE_SLOTS
             .iter()
             .filter(|slot| slot.command == base && matches!(slot.mode, RecurseMode::ShellString))
         {
-            match scan_for_flag(tail, |s| s == slot.flag) {
+            // The abbreviation rule of issue #266 applies here too: `flock
+            // /tmp/l --com "rm -rf /"` really runs the string on GNU, and
+            // an exact flag-name match never sees it. Over-matching here
+            // only costs an extra recursion, because this function
+            // produces a raise-only floor.
+            match scan_for_flag(tail, |s| {
+                s == slot.flag
+                    || match (slot.flag.strip_prefix("--"), s.strip_prefix("--")) {
+                        (Some(target), Some(prefix))
+                            if !prefix.is_empty() && !prefix.contains('=') =>
+                        {
+                            ValueFlag::unambiguous_long_prefix(&value_flags, prefix) == Some(target)
+                        }
+                        _ => false,
+                    }
+            }) {
                 FlagScan::Found(i) => match tail.get(i + 1).map(NormalizedWord::resolution) {
                     Some(Resolution::Resolved(script)) => {
                         slots.push(ScriptSlot::Resolved(script.clone()));
@@ -4937,6 +5009,40 @@ mod tests {
                 .match_command(&argv(&["rm", "--recursive", "/"]))
                 .is_none()
         );
+    }
+
+    // ---- issue #266: unambiguous long-option abbreviation ----
+    #[test]
+    fn value_flag_bare_match_accepts_exact_and_unambiguous_prefix() {
+        let flags = vec![
+            ValueFlag::Short('u'),
+            ValueFlag::Long("unset".to_string()),
+            ValueFlag::Long("chdir".to_string()),
+        ];
+        assert!(value_flag_bare_match(&flags, "--unset"));
+        assert!(value_flag_bare_match(&flags, "--uns"));
+        assert!(value_flag_bare_match(&flags, "-u"));
+        // The attached form is the generic dash-skip's job.
+        assert!(!value_flag_bare_match(&flags, "--uns=x"));
+    }
+
+    #[test]
+    fn value_flag_bare_match_rejects_the_end_of_flags_marker() {
+        // Without the empty-prefix guard `--` would abbreviate the only
+        // long flag and swallow the following command.
+        let flags = vec![ValueFlag::Long("adjustment".to_string())];
+        assert!(!value_flag_bare_match(&flags, "--"));
+    }
+
+    #[test]
+    fn value_flag_bare_match_rejects_an_ambiguous_prefix() {
+        let flags = vec![
+            ValueFlag::Long("debug".to_string()),
+            ValueFlag::Long("default-signal".to_string()),
+        ];
+        assert!(!value_flag_bare_match(&flags, "--d"));
+        assert!(!value_flag_bare_match(&flags, "--de"));
+        assert!(value_flag_bare_match(&flags, "--deb"));
     }
 
     // ---- FlagMatcher::Token also accepts a GNU "=value" suffix ----

@@ -7270,6 +7270,58 @@ mod tests {
     }
 
     #[test]
+    fn abbreviated_long_value_flags_no_longer_hide_the_wrapped_command() {
+        // Issue #266: GNU getopt_long accepts any unambiguous prefix, so
+        // each of these really unsets/sets the flag and runs the trailing
+        // command -- verified against real GNU coreutils in a container.
+        assert_decision("env --uns PATH rm -rf /", Decision::Block);
+        assert_decision("env --u FOO rm -rf /", Decision::Block);
+        assert_decision("env --split FOO rm -rf /", Decision::Block);
+        assert_decision("stdbuf --out L rm -rf /", Decision::Block);
+        assert_decision("xargs --max-a 1 rm -rf /", Decision::Block);
+        assert_decision("timeout --sig KILL 5 rm -rf /", Decision::Block);
+        assert_decision("nice --adj 5 rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn ambiguous_long_prefix_is_not_treated_as_a_value_flag() {
+        // Real getopt errors on an ambiguous prefix and executes nothing,
+        // so declining to match cannot miss a real execution. `--d` is
+        // ambiguous for env, `--max` for xargs.
+        assert_decision("env --d FOO ls", Decision::Allow);
+        assert_decision("xargs --max 1 rm -rf /", Decision::Allow);
+    }
+
+    #[test]
+    fn end_of_flags_marker_is_not_an_abbreviation_of_every_long_flag() {
+        // The empty-prefix guard: without it, `--` would match any wrapper
+        // with exactly one long value flag and swallow the real command.
+        assert_decision("nice -- rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn abbreviated_attached_long_flag_keeps_the_generic_dash_skip() {
+        assert_decision("env --uns=PATH rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn timeout_kill_after_prefix_consumes_its_value() {
+        // Deliberate flip: `--kill` abbreviates `--kill-after`, which
+        // takes `5` as its value -- real timeout then fails on `rm` as its
+        // duration and runs nothing. With a duration present, the trailing
+        // command is real and still Blocks.
+        assert_decision("timeout --kill 5 rm -rf /", Decision::Allow);
+        assert_decision("timeout --kill 2 5 rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn abbreviated_flags_before_a_benign_command_still_allow() {
+        assert_decision("env --uns FOO ls", Decision::Allow);
+        assert_decision("nice --adj 5 ls", Decision::Allow);
+        assert_decision("xargs --max-a 1 echo", Decision::Allow);
+    }
+
+    #[test]
     fn env_block_signal_flag_still_blocks_without_a_value_flags_entry() {
         // Pinned so nobody "completes" `wrapper_value_flags`'s `env` arm
         // by adding GNU's signal flags to it — see that arm's own comment
@@ -9019,6 +9071,15 @@ done"#,
     #[test]
     fn flock_long_command_flag_blocks() {
         assert_decision(r#"flock /tmp/l --command "rm -rf /""#, Decision::Block);
+    }
+
+    #[test]
+    fn abbreviated_command_flag_still_recurses_the_shell_string() {
+        // Issue #266: the recursion path matched the slot's flag name
+        // exactly, so `--com` reached neither `flock`'s recursion nor
+        // (for `flock`, which has no escalation floor) any other check.
+        assert_decision(r#"flock /tmp/l --com "rm -rf /""#, Decision::Block);
+        assert_decision(r#"su --com "rm -rf /""#, Decision::Block);
     }
 
     #[test]
