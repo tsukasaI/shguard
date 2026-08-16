@@ -2697,11 +2697,10 @@ fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
         // value, over-blocking into a *new* bypass (`-rf` mistaken for
         // the command) instead of closing one. `env`'s short-flag
         // clustering (`-iu FOO rm -rf /`) is handled by
-        // [`cluster_takes_separated_value`] (issue #265); `-S`'s value
-        // splicing into the executed argv (the `su -c`/`RECURSABLE_SLOTS`
-        // shell-string-recursion class) remains a disclosed gap of the
-        // shape [`TRANSPARENT_WRAPPERS`]'s docs already carry for other
-        // wrappers — see the pinned known-gap test below.
+        // [`cluster_takes_separated_value`], and `-S`'s value splicing
+        // into the executed argv by [`collect_env_split_string_slots`]
+        // (both issue #265) — this entry alone stops the value from being
+        // read as the command name, and never looks inside it.
         "env" => vec![
             ValueFlag::Short('u'),
             ValueFlag::Long("unset".to_string()),
@@ -3076,9 +3075,156 @@ pub(crate) enum ScriptSlot {
     Unresolvable,
 }
 
+/// Whether a shell reparse of `s` can stand in for what `env -S` itself
+/// would splice into argv (issue #265).
+///
+/// `-S` is not shell tokenization: it splits on spaces and tabs only, and
+/// its own machinery — `\` escapes (including `\_`, which is a SEPARATOR),
+/// `'`/`"` quoting, `#` truncating the rest of the string, and `${VAR}`
+/// expansion — differs between BSD and GNU in documented corners. Refusing
+/// every string carrying that machinery keeps the reconstruction provably
+/// equivalent on both flavors, at the cost of an Ask for the rest.
+///
+/// The characters left in (shell operators, globs, `~`, braces) are ones a
+/// shell reparse gives MORE structure to than `env -S` does, so divergence
+/// there is over-blocking only.
+fn env_split_string_reconstructable(s: &str) -> bool {
+    !s.chars()
+        .any(|c| matches!(c, '\\' | '\'' | '"' | '#' | '$' | '`') || (c.is_control() && c != '\t'))
+}
+
+/// Whether `word` is plain enough to append to a reconstructed `-S`
+/// command line without quoting (issue #265).
+///
+/// Two shapes make an unquoted join actively wrong rather than merely
+/// imprecise, so the allowlist is deliberately not a refuse-list:
+/// whitespace flattens (`env -S 'sh -c' 'rm -rf /'` would reconstruct to
+/// `env sh -c rm -rf /`, whose `-c` script is just `rm`), and a `#` word
+/// comments out everything after it, hiding the real arguments.
+fn env_split_string_plain_word(word: &str) -> bool {
+    !word.is_empty()
+        && word.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(
+                    c,
+                    '_' | '.' | ',' | '/' | ':' | '=' | '+' | '@' | '%' | '^' | '-'
+                )
+        })
+}
+
+/// The `-S`/`--split-string` values in one `env` hop's tail, as script
+/// slots (issue #265).
+///
+/// `-S` splits its string into new argv words that `env` then executes —
+/// and those words re-enter `env`'s own option processing, which is why
+/// each reconstruction is prefixed with `env` rather than recursed bare.
+/// The words after the value are appended too, because real `env` splices
+/// the split words AHEAD of the remaining argv (`env -S 'rm -rf' /` runs
+/// `rm -rf /`).
+///
+/// Listing `-S` in [`wrapper_value_flags`] only stops its value from being
+/// mistaken for the wrapped command; it cannot look inside the string.
+/// This is the `su -c` shell-string recursion applied to a flag whose
+/// value is spliced rather than passed on, so it needs its own detector
+/// for `-S`'s glued, clustered, and `=`-joined spellings.
+fn collect_env_split_string_slots(tail: &[NormalizedWord], slots: &mut Vec<ScriptSlot>) {
+    let boundary = skip_wrapper_flags("env", tail);
+    let value_takers: Vec<char> = wrapper_value_flags("env")
+        .iter()
+        .filter_map(|flag| match flag {
+            ValueFlag::Short(letter) => Some(*letter),
+            ValueFlag::Long(_) => None,
+        })
+        .collect();
+    let booleans = wrapper_cluster_booleans("env").unwrap_or(&[]);
+
+    for idx in 0..boundary {
+        let Resolution::Resolved(token) = tail[idx].resolution() else {
+            continue;
+        };
+        // Where `-S`'s value lives: glued into this token, or the next one.
+        let attached = if token == "-S" || token == "--split-string" {
+            None
+        } else if let Some(value) = token.strip_prefix("--split-string=") {
+            Some(value.to_string())
+        } else if let Some(cluster) = token
+            .strip_prefix('-')
+            .filter(|rest| !rest.is_empty() && !rest.starts_with('-'))
+        {
+            let mut glued = None;
+            let mut reached_s = false;
+            for (offset, letter) in cluster.char_indices() {
+                if letter == 'S' {
+                    reached_s = true;
+                    let rest = &cluster[offset + letter.len_utf8()..];
+                    glued = (!rest.is_empty()).then(|| rest.to_string());
+                    break;
+                }
+                // Any other value-taker swallows the cluster remainder as
+                // its own value, so no `-S` occurs in this token.
+                if value_takers.contains(&letter) || !booleans.contains(&letter) {
+                    break;
+                }
+            }
+            if !reached_s {
+                continue;
+            }
+            glued
+        } else {
+            continue;
+        };
+
+        let (script, after) = match attached {
+            Some(script) => (script, &tail[idx + 1..]),
+            None => match tail.get(idx + 1).map(NormalizedWord::resolution) {
+                Some(Resolution::Resolved(script)) => (script.clone(), &tail[idx + 2..]),
+                Some(Resolution::Unresolvable(_)) => {
+                    slots.push(ScriptSlot::Unresolvable);
+                    continue;
+                }
+                // `-S` with nothing after it: real `env` errors out.
+                None => continue,
+            },
+        };
+
+        if !env_split_string_reconstructable(&script) {
+            slots.push(ScriptSlot::Unresolvable);
+            continue;
+        }
+
+        let plain_after: Option<Vec<&str>> = after
+            .iter()
+            .map(|word| match word.resolution() {
+                Resolution::Resolved(w) if env_split_string_plain_word(w) => Some(w.as_str()),
+                _ => None,
+            })
+            .collect();
+        match plain_after {
+            Some(words) => {
+                let mut reconstructed = format!("env {script}");
+                for word in words {
+                    reconstructed.push(' ');
+                    reconstructed.push_str(word);
+                }
+                slots.push(ScriptSlot::Resolved(reconstructed));
+            }
+            // The tail cannot be represented, so recurse the split string
+            // alone AND floor on the part that was dropped.
+            None => {
+                slots.push(ScriptSlot::Resolved(format!("env {script}")));
+                slots.push(ScriptSlot::Unresolvable);
+            }
+        }
+    }
+}
+
 /// Finds every [`RecurseMode::ShellString`] [`RecursableSlot`]'s script
 /// value along `stage`'s transparent-wrapper chain (today: `flock`/`su`'s
-/// `-c`/`--command`, issues #64/#66). Mirrors the same wrapper-unwrap walk
+/// `-c`/`--command`, issues #64/#66), plus `env`'s `-S` splices, which
+/// need their own detector ([`collect_env_split_string_slots`], issue
+/// #265) because their value is spliced into argv rather than passed on
+/// and arrives in glued, clustered, and `=`-joined spellings a
+/// [`RecursableSlot`] flag name cannot express. Mirrors the same wrapper-unwrap walk
 /// [`effective_command`]/[`wrapper_chain_escalation`] perform, but — unlike
 /// both of those — does not stop at the first hop and does not rely on
 /// [`skip_wrapper_flags`]'s own flag-then-positional ordering to find the
@@ -3107,6 +3253,9 @@ pub(crate) fn wrapper_shell_string_scripts(stage: &[NormalizedWord]) -> Vec<Scri
         let base = basename(name);
         if !TRANSPARENT_WRAPPERS.contains(&base) {
             break;
+        }
+        if base == "env" {
+            collect_env_split_string_slots(tail, &mut slots);
         }
         for slot in RECURSABLE_SLOTS
             .iter()
