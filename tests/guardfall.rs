@@ -383,6 +383,14 @@ fn guardfall_find_exec_rm_force_placeholder_cases() {
         (r"find /x -exec rm -rf //{} \;", Decision::Block),
         (r"find /x -exec rm -f /./{} \;", Decision::Block),
         (r"find /x -exec rm -f /../{} \;", Decision::Block),
+        // `~/{}` is the third anchor: with the cwd at `$HOME` and a
+        // relative search root it substitutes to `$HOME/./foo`, the
+        // matched path. That precondition is invisible in the command
+        // text, so this Blocks fail-closed.
+        (r"find . -exec rm -f ~/{} \;", Decision::Block),
+        (r"find . -exec rm -rf ~/{} \;", Decision::Block),
+        // Still a genuinely different path, so still Allow.
+        (r"find . -exec rm -f ~/x/{} \;", Decision::Allow),
         // Boundary pins: a suffixed or re-rooted token resolves to a
         // genuinely different path than the one find matched, so nothing
         // find enumerated is deleted — these must NOT Block.

@@ -280,6 +280,14 @@ targets = [
     # search root this spelling instead deletes `/<match>` at the
     # filesystem root, which is no safer.
     { normalized = "/{}" },
+    # `~/{}` collapses to `Home(["{}"])`, a third anchor the two entries
+    # above cannot reach. It deletes every match whenever the cwd is
+    # `$HOME` and the search root is relative (`~/{}` substitutes to
+    # `$HOME/./foo`). Unlike `/{}`, that precondition is invisible in the
+    # command text, so this entry is fail-closed rather than exact — the
+    # only thing it costs is a literal `$HOME/{}` file, which does not
+    # occur in practice.
+    { normalized = "~/{}" },
 ]
 
 # `-r`/`-R` is unnecessary for `rm -f {}` (no `-type f` needed either) to
@@ -301,10 +309,14 @@ id = "rm-force-find-placeholder-target"
 reason = "rm -f against find's own {} placeholder removes every matched file, unrecoverably, the same effect find -delete has"
 command = "rm"
 required_flags = ["f|--force"]
-# `normalized`, not `exact` (issue #267), plus the absolute re-root
-# `/{}`: see the sibling rule above for the collapse semantics both
-# entries share.
-targets = [{ normalized = "{}" }, { normalized = "/{}" }]
+# `normalized`, not `exact` (issue #267), plus the `/{}` and `~/{}`
+# re-roots: see the sibling rule above for the collapse semantics all
+# three entries share.
+targets = [
+    { normalized = "{}" },
+    { normalized = "/{}" },
+    { normalized = "~/{}" },
+]
 
 [[command]]
 id = "find-delete"
