@@ -3493,8 +3493,8 @@ fn scan_recursable_slots(
             crate::rules::ScriptSlot::Unresolvable => raise_expansion_floor(
                 &mut floor,
                 Decision::Ask,
-                "a transparent wrapper's `-c`/`--command` flag (`flock -c`/`su -c`) or its \
-                 value could not be statically resolved; the shell-command string it would run \
+                "a transparent wrapper's shell-string flag (`flock -c`/`su -c`/`env -S`) or \
+                 its value could not be statically resolved; the command string it would run \
                  is unknown"
                     .to_string(),
             ),
@@ -3502,7 +3502,7 @@ fn scan_recursable_slots(
                 let inner = recurse_shell_string(
                     &script,
                     argv.to_vec(),
-                    "a transparent wrapper's `-c`/`--command` shell-string argument",
+                    "a transparent wrapper's shell-string argument (`-c`/`--command`/`-S`)",
                     depth,
                     rules,
                     allowlist,
@@ -7690,20 +7690,75 @@ mod tests {
     }
 
     #[test]
-    fn env_split_string_value_splicing_into_argv_is_a_disclosed_known_gap() {
-        // Not fixed here (pre-existing, disclosed, same shape as `su`'s
-        // own `-c`/`--command` gap, which needs `RECURSABLE_SLOTS`/
-        // `wrapper_shell_string_scripts` recursion to close, not a
-        // `wrapper_value_flags` entry alone): GNU/BSD `-S` splits its
-        // *string* argument into multiple new argv tokens passed to `env`
-        // itself, so `-S`'s value can splice a dangerous command directly
-        // into the executed argv. Adding `-S` to `wrapper_value_flags`
-        // only stops that value from being mistaken for the wrapped
-        // command name (see the passing `-S` test above) -- it does not,
-        // and cannot by itself, look inside the split string the way
-        // `su -c`'s dedicated recursion does. Confirmed present both
-        // before and after this fix.
-        assert_decision("env -S \"rm -rf /\" true", Decision::Allow);
+    fn env_split_string_splice_recurses_and_blocks() {
+        // Issue #265, was the pinned known gap of issue #250: `-S` splits
+        // its string into new argv words that `env` itself executes, so
+        // listing `-S` in `wrapper_value_flags` stopped the value from
+        // being read as the command name but could not look inside it.
+        assert_decision("env -S \"rm -rf /\" true", Decision::Block);
+    }
+
+    #[test]
+    fn env_split_string_glued_and_long_spellings_recurse() {
+        assert_decision("env -S'rm -rf /'", Decision::Block);
+        assert_decision("env -Srm -rf /", Decision::Block);
+        assert_decision("env --split-string='rm -rf /'", Decision::Block);
+        assert_decision("env --split-string 'rm -rf /'", Decision::Block);
+    }
+
+    #[test]
+    fn env_split_string_cluster_spellings_recurse() {
+        assert_decision("env -iS 'rm -rf /'", Decision::Block);
+        assert_decision("env -iSrm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn env_split_string_splices_ahead_of_the_remaining_argv() {
+        // Real `env` puts the split words BEFORE the rest of argv, so the
+        // trailing `/` is `rm -rf`'s target.
+        assert_decision("env -S 'rm -rf' /", Decision::Block);
+        assert_decision("env -S rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn env_split_string_reenters_env_option_processing() {
+        // The split words are processed by `env` itself, which is why the
+        // reconstruction keeps an `env` prefix.
+        assert_decision("env -S '-i rm -rf /'", Decision::Block);
+    }
+
+    #[test]
+    fn env_split_string_with_its_own_escape_machinery_floors_to_ask() {
+        // `\_` is one of `-S`'s own separators and `${VAR}` is expanded by
+        // `-S` itself, neither of which a shell reparse reproduces -- so
+        // the splice is unknowable rather than benign.
+        assert_decision(r#"env -S "rm\_-rf\_/""#, Decision::Ask);
+        assert_decision(r#"env -S 'rm${IFS}-rf /'"#, Decision::Ask);
+    }
+
+    #[test]
+    fn env_split_string_unresolvable_value_floors_to_ask() {
+        assert_decision("env -S \"$X\" true", Decision::Ask);
+    }
+
+    #[test]
+    fn env_split_string_with_unplain_trailing_argument_floors_to_ask() {
+        // Appending a whitespace-carrying word unquoted would flatten it:
+        // `env sh -c rm -rf /` has `rm` as its whole `-c` script, which
+        // would read as harmless.
+        assert_decision("env -S 'sh -c' 'rm -rf /'", Decision::Ask);
+    }
+
+    #[test]
+    fn env_split_string_benign_still_allows() {
+        assert_decision("env -S 'echo hello'", Decision::Allow);
+        assert_decision("env -S 'grep -r foo' .", Decision::Allow);
+    }
+
+    #[test]
+    fn env_mid_cluster_s_is_another_flags_glued_value() {
+        // `-uS` unsets the variable `S`; there is no `-S` here.
+        assert_decision("env -uS rm ls", Decision::Allow);
     }
 
     #[test]
