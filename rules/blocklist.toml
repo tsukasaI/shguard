@@ -711,7 +711,7 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.conf
 id = "self-protect-config-sed-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "sed"
-required_flags = ["i|--in-place"]
+required_flags = ["i|I|--in-place"]
 targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]
 
 [[command]]
@@ -1092,7 +1092,7 @@ id = "shell-init-sed"
 decision = "ask"
 reason = "sed -i writing to a shell-init, cron, autostart, or persistence-critical file plants a backdoor that survives past the current session"
 command = "sed"
-required_flags = ["i|--in-place"]
+required_flags = ["i|I|--in-place"]
 targets = [
     { normalized = "~/.bashrc" },
     { normalized = "~/.bash_profile" },

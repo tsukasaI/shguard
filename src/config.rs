@@ -458,7 +458,7 @@ targets = [{{ normalized_prefix = {quoted_dir} }}]
 id = "shguard-self-protect-config-sed-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "sed"
-required_flags = ["i|--in-place"]
+required_flags = ["i|I|--in-place"]
 targets = [{{ normalized_prefix = {quoted_dir} }}]
 
 [[deny]]
