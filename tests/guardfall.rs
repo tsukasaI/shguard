@@ -364,12 +364,30 @@ fn guardfall_find_exec_rm_force_placeholder_cases() {
         (r"find /x -type f -exec rm -rf {} +", Decision::Block), // already covered pre-#140, control
         (r"find /x -type f -exec rm -f {} +", Decision::Block),
         (r"find /x -exec rm -f {} +", Decision::Block),
-        // Known gap, pinned so a future contains-style matcher has a
-        // regression anchor: find substitutes `{}` anywhere inside a word,
-        // so this genuinely deletes every match, but `exact = "{}"` only
-        // matches a token that IS the placeholder. Shared with the `-rf`
-        // rule, which has the same gap.
-        (r"find . -exec rm -f ./{} \;", Decision::Allow),
+        // Issue #267: find substitutes `{}` anywhere inside a word, so
+        // this genuinely deletes every match. `normalized = "{}"` catches
+        // it because `./{}` lexically collapses to the same single
+        // component `{}` as the bare placeholder. Shared with the `-rf`
+        // rule below, which had the same gap.
+        (r"find . -exec rm -f ./{} \;", Decision::Block),
+        (r"find . -exec rm -rf ./{} \;", Decision::Block),
+        (r"find . -exec rm -f ././{} \;", Decision::Block),
+        (r"find /x -exec rm -f {}/ \;", Decision::Block),
+        (r"find . -exec rm -f x/../{} \;", Decision::Block),
+        ("rm -f ./{}", Decision::Block),
+        // Boundary pins: a suffixed or re-rooted token resolves to a
+        // genuinely different path than the one find matched, so nothing
+        // find enumerated is deleted — these must NOT Block.
+        (r"find . -exec rm -f {}. \;", Decision::Allow),
+        (r"find . -exec rm -f {}.bak \;", Decision::Allow),
+        (r"find . -exec rm -f /tmp/{} \;", Decision::Allow),
+        // Known residual gap, NOT a benign case: `{}/sub` deletes
+        // `<match>/sub` for every match — a per-match mass delete of a
+        // fixed subpath. Whole-component `normalized` matching cannot
+        // see it; closing it needs `normalized_prefix = "{}/"`, which
+        // would also Block legitimate `-exec rm -rf {}/cache`-style
+        // cleanups. Pinned so that separate decision has an anchor.
+        (r"find . -exec rm -rf {}/sub \;", Decision::Allow),
         // Quoting is stripped by the shell before shguard sees the token.
         (r"find . -exec rm -f '{}' \;", Decision::Block),
         // Everyday benign-looking idiom, both terminator spellings —

@@ -264,7 +264,14 @@ targets = [
     # `{}` text straight into this same rule rather than trying to
     # special-case it, so this target entry is what makes that recursion
     # actually catch the canonical "delete everything found" pattern.
-    { exact = "{}" },
+    # `normalized` (not `exact`, issue #267): `find` substitutes `{}`
+    # anywhere inside a word, so `./{}`/`{}/`/`x/../{}` all still
+    # resolve to the matched path and must Block too. `normalized`
+    # matches any token that lexically collapses to the single component
+    # `{}` — exactly that set — while still leaving a token that
+    # resolves to a genuinely different path (`{}.`, `{}.bak`, `x{}`,
+    # `/tmp/{}`) unmatched.
+    { normalized = "{}" },
 ]
 
 # `-r`/`-R` is unnecessary for `rm -f {}` (no `-type f` needed either) to
@@ -286,12 +293,9 @@ id = "rm-force-find-placeholder-target"
 reason = "rm -f against find's own {} placeholder removes every matched file, unrecoverably, the same effect find -delete has"
 command = "rm"
 required_flags = ["f|--force"]
-# Known gap, shared with the `-rf` rule above: `exact` matches only a token
-# that IS `{}`, but find substitutes `{}` anywhere inside a word, so
-# `-exec rm -f ./{}` still deletes every match and still Allows. Closing it
-# needs a contains-style matcher on both rules; pinned in tests/guardfall.rs
-# so it has a regression anchor. issue #140
-targets = [{ exact = "{}" }]
+# `normalized`, not `exact` (issue #267): see the sibling rule above for
+# the collapse semantics this shares.
+targets = [{ normalized = "{}" }]
 
 [[command]]
 id = "find-delete"
