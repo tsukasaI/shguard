@@ -1045,3 +1045,70 @@ fn guardfall_shell_init_path_parity_198_cases() {
         );
     }
 }
+
+/// Issue #268: `find … | xargs rm -f` has the same delete-every-match
+/// effect as `find -exec rm -f {}` and `find -delete`, both of which
+/// Block, but with `xargs` the matched paths arrive on stdin and never
+/// appear in argv — no target matcher can see them, so the pipeline shape
+/// is the only thing left to key on.
+#[test]
+fn guardfall_find_pipe_xargs_rm_force_cases() {
+    let cases: &[(&str, Decision)] = &[
+        // The issue's own repros, plus the spellings xargs's declared
+        // value flags (issue #264) have to be skipped past for the sink
+        // to resolve to `rm` at all.
+        ("find . -name '*.tmp' | xargs rm -f", Decision::Block),
+        ("find . -print0 | xargs -0 rm -f", Decision::Block),
+        (
+            "find . -name '*.log' -print0 | xargs -0 rm -rf",
+            Decision::Block,
+        ),
+        ("find /tmp/x | xargs rm --force", Decision::Block),
+        ("find . | xargs -n 1 rm -rf", Decision::Block),
+        ("find . | xargs -P 4 rm -f", Decision::Block),
+        // `find` need not be the stage immediately before the sink.
+        (
+            "find . -name '*.tmp' | grep -v keep | xargs rm -f",
+            Decision::Block,
+        ),
+        // The sink resolves through the whole wrapper chain.
+        ("find . | sudo xargs rm -f", Decision::Block),
+        // Control: already Blocked before this rule, via the `{}`
+        // placeholder target — `-I`'s replace-string puts the placeholder
+        // back into argv where a target matcher can see it.
+        ("find . | xargs -I {} rm -f {}", Decision::Block),
+        // Deliberate over-block: the pipe is inert (rm ignores stdin), so
+        // this is a typo for the xargs form or nonsense either way.
+        ("find . | rm -f foo.txt", Decision::Block),
+        // ---- boundaries: must NOT Block ----
+        // Parity with the `find -exec rm {} +` boundary issue #140 drew:
+        // without a force flag this is a different class.
+        ("find . | xargs rm", Decision::Allow),
+        ("find . -name '*.o' | xargs ls", Decision::Allow),
+        (
+            "find . -name '*.tmp' | xargs -0 grep -l foo",
+            Decision::Allow,
+        ),
+        ("git ls-files | xargs wc -l", Decision::Allow),
+        // Producer scope is `find` only — deliberate, not a safe shape:
+        // deleting a curated list is a different class from deleting an
+        // unreviewed filesystem enumeration.
+        ("ls | xargs rm -f", Decision::Allow),
+        ("cat list.txt | xargs rm -f", Decision::Allow),
+        // Static argument, equivalent to `rm -f tmp.txt`.
+        ("echo tmp.txt | xargs rm -f", Decision::Allow),
+        // A compound final stage pushes an empty stage argv that no
+        // pipeline rule can match; the compound-sink floor catches it.
+        ("find . | { xargs rm -f; }", Decision::Ask),
+    ];
+
+    for (command, expected) in cases {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}

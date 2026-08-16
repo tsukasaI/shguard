@@ -227,6 +227,12 @@
 #                    name must be one of these.
 #   sinks            command names; the pipeline's final stage's command
 #                    name must be one of these.
+#   sink_required_flags
+#                    optional flag specs (same syntax as [[command]]'s
+#                    required_flags: a bare short letter matched inside a
+#                    cluster, a "-"-prefixed token, "|" alternation);
+#                    every entry must be satisfied by the resolved sink's
+#                    own arguments. Absent or empty = no flag constraint.
 #
 # [[redirect]] — matches the target of an output/append redirection:
 #   id, reason       same as above.
@@ -685,7 +691,7 @@ targets = [
 ]
 
 # =====================================================================
-# Pipeline — installer pipe
+# Pipeline shapes
 # =====================================================================
 
 [[pipeline]]
@@ -696,6 +702,34 @@ sources = ["curl", "wget"]
 # issue #55 added fish/ksh/tcsh/csh/ash there but this list drifted (a real
 # bypass: `curl ... | ksh` reached Allow until this was fixed).
 sinks = ["sh", "bash", "zsh", "fish", "ksh", "tcsh", "csh", "ash"]
+
+# The piped spelling of the same "delete every match" effect the two `{}`
+# placeholder rules and `find-delete` already Block: with `xargs` the
+# matched paths arrive on stdin and never appear in argv, so no target
+# matcher can see them — the pipeline shape is the only thing left to key
+# on. `xargs` is a transparent wrapper with declared value flags (issue
+# #264), so the sink resolves through it to `rm` for every spelling
+# (`xargs -0`, `-n 1`, `-P 4`, `sudo xargs`).
+#
+# `sink_required_flags` is what keeps this off the flagless
+# `find . | xargs rm`, which stays Allow for parity with the
+# `find -exec rm {} +` boundary issue #140 deliberately drew.
+#
+# Deliberate over-block: `find . | rm -f foo.txt` also matches, though the
+# pipe is inert (rm ignores stdin) — the shape is either a typo for the
+# xargs form or nonsense, so failing closed costs nothing real.
+#
+# Producer scope is `find` only. `ls | xargs rm -f` and
+# `cat list | xargs rm -f` stay Allow: the Block tier here is anchored to
+# deleting an unreviewed filesystem enumeration, and a curated list is a
+# different class (`rm -f $(cat list)` gets an Ask floor, never Block).
+# issue #268
+[[pipeline]]
+id = "find-pipe-rm-force"
+reason = "piping find's matches into rm -f (typically via xargs) deletes every matched file, unrecoverably, the same effect find -delete has"
+sources = ["find"]
+sinks = ["rm"]
+sink_required_flags = ["f|--force"]
 
 # Self-protection: the literal "~/.config/shguard/" token (plan.md §6 item 8).
 # `~` is never resolved to an actual filesystem path by normalize.rs (no
