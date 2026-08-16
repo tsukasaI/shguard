@@ -4067,7 +4067,9 @@ impl Rules {
         self.pipeline_rules.iter().find(|rule| rule.matches(stages))
     }
 
-    /// The first [`RedirectRule`] whose target list matches `target`, if any.
+    /// The worst-decision [`RedirectRule`] whose target list matches
+    /// `target`, if any — Block outranks Ask regardless of declaration
+    /// order (issue #261); ties keep the first-declared rule.
     #[must_use]
     pub(crate) fn match_redirect_target(&self, target: &str) -> Option<&RedirectRule> {
         // Worst-wins, not first-match (issue #261): a Block anywhere in
@@ -8427,11 +8429,6 @@ mod tests {
         ));
     }
 
-    // Security regression pin (fable review of #204): an Ask-decision user
-    // [[redirect]] rule could downgrade a stricter embedded Block, since
-    // the redirect check runs first-match, before stage 3's argv blocklist
-    // match, with no worst-wins folding. `decision = "ask"` must be
-    // rejected at load time for a user redirect entry.
     #[test]
     fn match_redirect_target_prefers_block_over_an_earlier_ask() {
         // issue #261: declaration order must not decide the decision.
@@ -8452,6 +8449,10 @@ mod tests {
         assert_eq!(rule.id().as_str(), "block-second");
     }
 
+    // The downgrade race a fable review of #204 found is closed (issue
+    // #261 made the redirect path fold worst-wins), but user redirect
+    // entries stay Block-only as a conservative posture pending issue
+    // #100's own review.
     #[test]
     fn user_config_rejects_ask_decision_redirect_entry() {
         let toml = r#"
