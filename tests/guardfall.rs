@@ -1224,3 +1224,46 @@ fn guardfall_shell_init_redirect_cases() {
         );
     }
 }
+
+/// `-c` only marks a POSIX-style shell as "wants a pending command
+/// string" — it does not itself consume the very next token as that
+/// string. The shell's own option parser keeps scanning further options
+/// (`-x`, `--norc`, `-o pipefail`, `--`) between `-c` and the operand, so
+/// treating `flag_index + 1` as the script unconditionally let any option
+/// token there hide the real payload from recursion.
+#[test]
+fn guardfall_dash_c_operand_scan_cases() {
+    let cases: &[(&str, Decision)] = &[
+        // Control: the ordinary, glued spelling was never broken.
+        ("bash -c \"rm -rf /\"", Decision::Block),
+        // `--` end-of-options before the operand.
+        ("bash -c -- \"rm -rf /\"", Decision::Block),
+        ("sh -c -- \"rm -rf /\"", Decision::Block),
+        ("dash -c -- \"rm -rf /\"", Decision::Block),
+        // A boolean option between `-c` and the operand.
+        ("bash -c -x \"rm -rf /\"", Decision::Block),
+        ("bash -c --norc \"rm -rf /\"", Decision::Block),
+        ("zsh -c -x \"rm -rf /\"", Decision::Block),
+        // A value-taking option (`-o VALUE`) between `-c` and the operand.
+        ("bash -c -o pipefail \"rm -rf /\"", Decision::Block),
+        // Propagates through a wrapper that recurses into `bash -c`.
+        (r#"find / -exec bash -c -- "rm -rf /" \;"#, Decision::Block),
+        ("xargs -0 sh -c -- \"rm -rf /\"", Decision::Block),
+        // `csh`/`tcsh` take `-c`'s argument literally — must be unaffected.
+        ("csh -c \"rm -rf /\"", Decision::Block),
+        ("tcsh -c \"rm -rf /\"", Decision::Block),
+        // Benign controls: an option-only invocation has no operand at all.
+        ("bash -c -o pipefail", Decision::Allow),
+        ("bash -c echo hi", Decision::Allow),
+    ];
+
+    for (command, expected) in cases {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}

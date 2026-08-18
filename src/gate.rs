@@ -2827,7 +2827,24 @@ fn evaluate_dash_c(
         }
         FlagScan::Absent => return None,
     };
-    let script_word = rest_words.get(flag_index + 1)?;
+    let script_index = if DASH_C_PERMUTES_OPTIONS.contains(&interpreter) {
+        match scan_dash_c_operand(rest_words, flag_index + 1) {
+            DashCOperand::Found(i) => i,
+            DashCOperand::Uncertain => {
+                return Some(Verdict::ask(
+                    Reason::new(format!(
+                        "`{interpreter}`'s `-c` script operand could not be statically \
+                         resolved (an option between `-c` and the operand was unresolvable)"
+                    )),
+                    outer_argv,
+                ));
+            }
+            DashCOperand::Absent => return None,
+        }
+    } else {
+        flag_index + 1
+    };
+    let script_word = rest_words.get(script_index)?;
 
     match script_word.resolution() {
         Resolution::Resolved(script) => Some(recurse_shell_string(
@@ -4957,6 +4974,72 @@ pub(crate) fn scan_for_flag(words: &[NormalizedWord], matches: impl Fn(&str) -> 
         }
     }
     FlagScan::Absent
+}
+
+/// Shells whose own option parser keeps scanning further options AFTER
+/// `-c`, rather than treating the very next token as `-c`'s value.
+/// `-c` only sets "a pending command string is wanted" internally; the
+/// shell's normal option loop then continues over any further `-`/`+`
+/// tokens (`bash -c -x '…'`, `bash -c --norc '…'`, `bash -c -o pipefail
+/// '…'`, `bash -c -- '…'`), and the first non-option word after that is
+/// the script — bash(1): "-c string ... If there are arguments after the
+/// string, they are assigned to the positional parameters"; "A --
+/// signals the end of options". `csh`/`tcsh` are deliberately excluded:
+/// they take `-c`'s argument literally as the very next word, with no
+/// option permutation past it. `fish` never reaches here (routed through
+/// [`evaluate_fish`] earlier in [`evaluate_dash_c`]).
+const DASH_C_PERMUTES_OPTIONS: &[&str] = &["bash", "sh", "zsh", "dash", "ksh", "ash"];
+
+/// Long/short options that consume a separated value of their own, on top
+/// of `-c` itself. Exhaustive for bash(1)'s own option list — every other
+/// bash option is boolean — and reused unchanged for sh/zsh/dash/ksh/ash,
+/// whose invocation option surfaces are the same shape.
+const DASH_C_VALUE_TAKING_OPTIONS: &[&str] = &["-o", "+o", "-O", "+O", "--rcfile", "--init-file"];
+
+/// Result of [`scan_dash_c_operand`]: where an interpreter's `-c` script
+/// string actually falls once any further options between `-c` and the
+/// operand have been scanned past (see [`DASH_C_PERMUTES_OPTIONS`]).
+enum DashCOperand {
+    /// The script word, at this index into the scanned slice.
+    Found(usize),
+    /// A word in the option span could not be statically resolved — fails
+    /// closed the same way [`FlagScan::Uncertain`] does.
+    Uncertain,
+    /// No operand exists past `-c`'s own further options.
+    Absent,
+}
+
+/// Scans `words[start..]` for `-c`'s actual script operand, skipping past
+/// any further options a POSIX-style shell's own parser would still
+/// consume before its first non-option argument (see
+/// [`DASH_C_PERMUTES_OPTIONS`]). A `--` token itself is not the operand;
+/// the word immediately after it is.
+fn scan_dash_c_operand(words: &[NormalizedWord], start: usize) -> DashCOperand {
+    let mut i = start;
+    while i < words.len() {
+        match words[i].resolution() {
+            Resolution::Unresolvable(_) => return DashCOperand::Uncertain,
+            Resolution::Resolved(s) if s == "--" => {
+                return match words.get(i + 1) {
+                    Some(_) => DashCOperand::Found(i + 1),
+                    None => DashCOperand::Absent,
+                };
+            }
+            Resolution::Resolved(s) if DASH_C_VALUE_TAKING_OPTIONS.contains(&s.as_str()) => {
+                // The following word is consumed as this option's own
+                // value, not scanned as a flag or treated as the operand.
+                match words.get(i + 1) {
+                    Some(_) => i += 2,
+                    None => return DashCOperand::Absent,
+                }
+            }
+            Resolution::Resolved(s) if s.starts_with('-') || s.starts_with('+') => {
+                i += 1;
+            }
+            Resolution::Resolved(_) => return DashCOperand::Found(i),
+        }
+    }
+    DashCOperand::Absent
 }
 
 /// Result of [`scan_for_dash_c_before_operand`]: where an interpreter's
