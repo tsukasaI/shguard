@@ -224,3 +224,22 @@ fn injected_panic_fails_closed_to_ask() {
     assert_eq!(permission_decision(&output), "ask");
     assert!(!permission_reason(&output).is_empty());
 }
+
+// ==== Evaluation watchdog ====
+
+/// Before the fix: a heredoc operator (`<<`) with no delimiter word,
+/// appearing inside a `$(` command substitution that is never closed,
+/// drove brush-parser's tokenizer into an unbounded allocating loop —
+/// neither a panic (`catch_unwind` above cannot help) nor a return
+/// (`reject_excessive_raw_nesting`'s depth cap cannot help either, since
+/// this input never exceeds it), so no decision was ever emitted and the
+/// process ran until the OS killed it for memory exhaustion. Pins that the
+/// real binary now exits 0 with a well-formed `ask` decision instead,
+/// within the `EVALUATION_TIMEOUT` budget (`src/bin/shguard.rs`) — this
+/// test takes a couple of seconds to run for exactly that reason.
+#[test]
+fn heredoc_inside_unterminated_command_substitution_fails_closed_to_ask() {
+    let output = run_hook(&bash_command("<<$( |] "));
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(permission_reason(&output).contains("time budget"));
+}
