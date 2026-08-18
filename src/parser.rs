@@ -104,6 +104,27 @@ fn parser_options() -> BrushParserOptions {
     BrushParserOptions::default()
 }
 
+/// Runs a brush-parser entry point and converts an internal panic (a
+/// pinned dependency's own unchecked `unwrap()` — brush-parser 0.4.0 has
+/// three known instances in its tilde/brace-sequence/io-number number
+/// parsing, each an `Err(ParseIntError { kind: PosOverflow })` reached
+/// through an ordinary, if extreme, input) into a `ParseError::Syntax`, so
+/// it folds into this pipeline's documented fail-closed contract (`ask`)
+/// instead of unwinding out of the public `shguard::analyze`/
+/// `analyze_with_policy` API — `src/lib.rs` documents both as folding
+/// every failure into a `Verdict`, which an uncaught panic here would
+/// silently break for any library consumer.
+///
+/// `AssertUnwindSafe`: every call site either closes over an immutable
+/// `&str`, or a freshly constructed, call-local parser that is never
+/// observed again after a panic (it is dropped immediately on both the
+/// `Ok` and caught-panic paths) — there is no shared mutable state a
+/// caught panic could leave inconsistent for a later caller to observe.
+fn catch_parser_panic<T>(f: impl FnOnce() -> T) -> Result<T, ParseError> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+        .map_err(|_| ParseError::syntax("parser panicked"))
+}
+
 /// Reserved words that introduce a compound command brush-parser recurses
 /// into, counted (never decremented) by [`reject_excessive_raw_nesting`] —
 /// see [`MAX_KEYWORD_NESTING_COUNT`]'s docs for why a total count, and why
@@ -237,8 +258,7 @@ pub(crate) fn parse(command: &str) -> Result<CommandLine, ParseError> {
     reject_excessive_raw_nesting(command)?;
 
     let mut parser = BrushParser::new(Cursor::new(command.as_bytes()), &parser_options());
-    let program = parser
-        .parse_program()
+    let program = catch_parser_panic(|| parser.parse_program())?
         .map_err(|err| ParseError::syntax(err.to_string()))?;
 
     // brush-parser gives each newline-separated top-level command its own
@@ -769,8 +789,10 @@ fn convert_word(word: &bast::Word) -> Result<Word, ParseError> {
     if !raw.contains('{') {
         return Ok(Word(convert_word_text(raw)?));
     }
-    let brace_segments = bword::parse_brace_expansions(raw, &parser_options())
-        .map_err(|err| ParseError::syntax(format!("brace-expansion parse of {raw:?}: {err}")))?;
+    let brace_segments =
+        catch_parser_panic(|| bword::parse_brace_expansions(raw, &parser_options()))?.map_err(
+            |err| ParseError::syntax(format!("brace-expansion parse of {raw:?}: {err}")),
+        )?;
 
     let has_brace_expr = brace_segments
         .as_ref()
@@ -854,10 +876,40 @@ fn convert_brace_members(
         .collect()
 }
 
+/// When `text` starts with a `~` directly followed by a decimal digit run
+/// that overflows `u64`, returns the `(tilde_run, remainder)` split at the
+/// end of that digit run. This is the exact shape that panics
+/// brush-parser 0.4.0's tilde-expression parser (`word.rs:909`,
+/// `parse::<u64>().unwrap()` on the digit run) — bash itself treats
+/// `~<unknown-uid>` as a literal word (no user has a UID this large), so
+/// [`convert_word_text`] pre-empts the parse for just this leading run
+/// instead of letting the pinned dependency's internal overflow panic
+/// take down the whole word (and, with it, any sibling word in the same
+/// command sharing this call's fate — e.g. a `rm -rf /` in the same argv).
+fn split_overflowing_leading_tilde(text: &str) -> Option<(&str, &str)> {
+    let rest = text.strip_prefix('~')?;
+    let digit_len = rest.bytes().take_while(u8::is_ascii_digit).count();
+    if digit_len == 0 {
+        return None;
+    }
+    let (digits, remainder) = rest.split_at(digit_len);
+    digits
+        .parse::<u64>()
+        .is_err()
+        .then(|| (&text[..1 + digit_len], remainder))
+}
+
 /// Runs the ordinary (non-brace) word parse over a fragment of source text
 /// and converts each resulting piece.
 fn convert_word_text(text: &str) -> Result<Vec<WordPiece>, ParseError> {
-    let pieces = bword::parse(text, &parser_options())
+    if let Some((tilde_run, remainder)) = split_overflowing_leading_tilde(text) {
+        let mut pieces = vec![WordPiece::Literal(tilde_run.to_string())];
+        if !remainder.is_empty() {
+            pieces.extend(convert_word_text(remainder)?);
+        }
+        return Ok(pieces);
+    }
+    let pieces = catch_parser_panic(|| bword::parse(text, &parser_options()))?
         .map_err(|err| ParseError::syntax(format!("word parse of {text:?}: {err}")))?;
     pieces
         .into_iter()
@@ -1151,6 +1203,56 @@ mod tests {
                 WordPiece::Literal("/x".to_string())
             ]
         );
+    }
+
+    // crash-fuzzer finding: brush-parser 0.4.0 panics converting an
+    // out-of-range `~<uid>` digit run to `u64` (`word.rs:909`,
+    // `parse::<u64>().unwrap()`). Bash treats an unknown-uid tilde as a
+    // literal word, so asserting the parse still *succeeds* (not merely
+    // that it doesn't panic) is what keeps a sibling word's blocklist
+    // match (e.g. `rm -rf /`) from downgrading to `ask`.
+    #[test]
+    fn tilde_expression_with_overflowing_uid_is_kept_literal_not_panicked() {
+        let cmd = parse_ok("rm -rf / ~41353561361542343807");
+        let word = &simple(&cmd.first.first).words[3];
+        assert_eq!(
+            word.0,
+            vec![WordPiece::Literal("~41353561361542343807".to_string())]
+        );
+    }
+
+    // Same shape, with more text after the overflowing digit run: the
+    // remainder must still parse normally rather than being swallowed by
+    // the tilde special-case.
+    #[test]
+    fn tilde_expression_with_overflowing_uid_still_parses_its_remainder() {
+        let cmd = parse_ok("echo ~41353561361542343807/x");
+        let word = &simple(&cmd.first.first).words[1];
+        assert_eq!(
+            word.0,
+            vec![
+                WordPiece::Literal("~41353561361542343807".to_string()),
+                WordPiece::Literal("/x".to_string()),
+            ]
+        );
+    }
+
+    // crash-fuzzer finding: brush-parser 0.4.0 panics on a `{`-adjacent
+    // digit run past `i64::MAX` (`word.rs:708`,
+    // `parse::<i64>().unwrap()`). Verdict impact is limited to the panic
+    // itself (a brace-range expansion is already `Unsupported`/`ask`
+    // regardless), so this only asserts the panic is contained.
+    #[test]
+    fn brace_sequence_number_overflow_is_a_parse_error_not_a_panic() {
+        assert!(parse("echo a{9223372036854775808b").is_err());
+    }
+
+    // crash-fuzzer finding: brush-parser 0.4.0 panics on a redirection
+    // io-number past `i32::MAX` (`parser/peg.rs:695`,
+    // `parse::<i32>().unwrap()`).
+    #[test]
+    fn redirection_io_number_overflow_is_a_parse_error_not_a_panic() {
+        assert!(parse("echo 2147483648>f").is_err());
     }
 
     // ---- 15. brace expansion ----
