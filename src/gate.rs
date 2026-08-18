@@ -2897,11 +2897,13 @@ const POSIX_STYLE_DASH_C_INTERPRETERS: &[&str] = &["bash", "sh", "zsh", "dash", 
 ///
 /// A flag-shaped token (starting with `-`/`+`) is skipped as a boolean
 /// option, except: `--`, which ends option processing (the following
-/// token, if any, is the script); and the small set of options known to
-/// take a separated value (`-o`/`+o`/`-O`/`+O`/`--rcfile`/`--init-file`),
-/// whose value token is skipped alongside the flag itself without being
-/// inspected — it cannot be the script, so its own content (even if it
-/// too looks like a flag) never matters.
+/// token, if any, is the script); the long options known to take a
+/// separated value (`--rcfile`/`--init-file`); and any short-option
+/// cluster containing a value-taking short option (`o` for `set -o`, `O`
+/// for `shopt -O`), which consumes the following word as its value even
+/// when clustered behind other flags (`-xo pipefail`). The skipped value
+/// token is not inspected — it cannot be the script, so its own content
+/// (even if it too looks like a flag) never matters.
 ///
 /// Returns `Ok(None)` when the scan runs out of `rest_words` before
 /// finding an operand. Returns `Err(())` — the caller floors to `Ask` —
@@ -2921,13 +2923,26 @@ fn find_posix_dash_c_script(
         if text == "--" {
             return Ok(rest_words.get(i + 1).map(|_| i + 1));
         }
-        if matches!(
-            text.as_str(),
-            "-o" | "+o" | "-O" | "+O" | "--rcfile" | "--init-file"
-        ) {
+        // Long options that take a separated value.
+        if matches!(text.as_str(), "--rcfile" | "--init-file") {
             i += 2;
             continue;
         }
+        // Short-option cluster (a single leading `-`/`+`, not `--`). A
+        // value-taking short option (`o` = `set -o`, `O` = `shopt -O`)
+        // consumes the following word as its value even when clustered
+        // behind other flags, so `-xo pipefail` puts the real script one
+        // token further along than a naive `+1` skip would land — the
+        // exact shape that let `bash -c -xo pipefail 'rm -rf /'` allow.
+        if (text.starts_with('-') || text.starts_with('+')) && !text.starts_with("--") {
+            if text[1..].contains(['o', 'O']) {
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        // Any other flag-shaped token (an unmodeled long option): boolean.
         if text.starts_with('-') || text.starts_with('+') {
             i += 1;
             continue;
@@ -5961,6 +5976,16 @@ mod tests {
     #[test]
     fn dash_c_separated_value_flag_before_script_still_recurses_and_blocks() {
         assert_decision(r#"bash -c -o pipefail "rm -rf /""#, Decision::Block);
+    }
+
+    #[test]
+    fn dash_c_clustered_value_flag_before_script_still_recurses_and_blocks() {
+        // `-o` consumes the next word as its value even when clustered
+        // behind another short flag, so the real script sits one token
+        // past `pipefail`. A cluster-blind scan would recurse into the
+        // harmless value word `pipefail` and let `rm -rf /` through.
+        assert_decision(r#"bash -c -xo pipefail "rm -rf /""#, Decision::Block);
+        assert_decision(r#"bash -c -vo pipefail "rm -rf /""#, Decision::Block);
     }
 
     #[test]
