@@ -252,7 +252,7 @@ command = "rm"
 required_flags = ["r|R|--recursive", "f|--force"]
 targets = [
     { normalized = "/" },
-    { exact = "/*" },
+    { normalized = "/*" },
     { normalized = "~" },
     { normalized = "." },
     # ".."/"../" (previously separate `exact` entries) are subsumed by

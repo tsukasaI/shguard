@@ -1224,3 +1224,32 @@ fn guardfall_shell_init_redirect_cases() {
         );
     }
 }
+
+/// `rm-recursive-force-dangerous-target`'s `/*` target used `exact`, so any
+/// path-normalization-equivalent spelling of the same root-level glob
+/// (double slash, `.`-segment, `..`-ascent, trailing slash, or a same-line
+/// `cd /` composing it) missed the rule entirely, unlike every sibling
+/// target in the same rule, which is `normalized`/`normalized_prefix`.
+#[test]
+fn guardfall_rm_rf_root_glob_normalized_spellings() {
+    let cases: &[(&str, Decision)] = &[
+        ("rm -rf /*", Decision::Block), // control: already matched via `exact`
+        ("rm -rf //*", Decision::Block),
+        ("rm -rf /./*", Decision::Block),
+        ("rm -rf /tmp/../*", Decision::Block),
+        ("rm -rf /*/", Decision::Block),
+        ("cd /; rm -rf *", Decision::Block),
+        // Control: a genuinely different, non-root-level glob must not Block.
+        ("rm -rf /tmp/*", Decision::Allow),
+    ];
+
+    for (command, expected) in cases {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
