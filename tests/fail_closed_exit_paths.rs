@@ -235,14 +235,20 @@ fn injected_panic_fails_closed_to_ask() {
 /// this input never exceeds it), so no decision was ever emitted and the
 /// process ran until the OS killed it for memory exhaustion. Pins that the
 /// real binary now exits 0 with a well-formed `ask` decision instead,
-/// within the `EVALUATION_TIMEOUT` budget (`src/bin/shguard.rs`) — this
-/// test takes a couple of seconds to run for exactly that reason.
+/// within the `EVALUATION_TIMEOUT`/`MEMORY_LIMIT_BYTES` budget
+/// (`src/bin/shguard.rs`). Which of the two trips first for this repro is
+/// allocation-rate-dependent — live-confirmed to be the memory bound in
+/// both a debug build (well under a second) and a release build (~0.5s,
+/// well under `EVALUATION_TIMEOUT`) on this machine, but that could differ
+/// on a slower or more memory-constrained host, so this only asserts
+/// fail-closed `ask` with *a* watchdog reason, not which one.
 ///
-/// Inlines `run_hook` to add a child-process timeout: if the watchdog
-/// regresses, this input reverts to an unbounded multi-GB/s allocating
-/// hang, and without a bound the test would thrash and wait for the OS to
-/// OOM-kill something rather than fail cleanly. 30s is ~15x the 2s
-/// `EVALUATION_TIMEOUT`, so it can never fire on the passing path.
+/// Inlines `run_hook` to add a child-process timeout: if *both* watchdog
+/// bounds regress, this input reverts to an unbounded multi-GB/s
+/// allocating hang, and without a bound the test would thrash and wait
+/// for the OS to OOM-kill something rather than fail cleanly. 30s is
+/// ~15x the 2s `EVALUATION_TIMEOUT`, so it can never fire on the passing
+/// path.
 #[test]
 fn heredoc_inside_unterminated_command_substitution_fails_closed_to_ask() {
     let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
@@ -257,5 +263,39 @@ fn heredoc_inside_unterminated_command_substitution_fails_closed_to_ask() {
     let output: Value =
         serde_json::from_slice(&assert.get_output().stdout).expect("stdout should be valid JSON");
     assert_eq!(permission_decision(&output), "ask");
-    assert!(permission_reason(&output).contains("time budget"));
+    let reason = permission_reason(&output);
+    assert!(
+        reason.contains("time budget") || reason.contains("memory budget"),
+        "expected a watchdog fail-closed reason, got: {reason}"
+    );
+}
+
+/// Dedicated regression pin for the memory-bound watchdog itself (follow-up
+/// to the wall-clock-only watchdog above: a host or container with less
+/// free memory than the runaway allocation can consume within
+/// `EVALUATION_TIMEOUT` gets SIGKILLed before the wall-clock bound alone
+/// ever fires). Uses `SHGUARD_TEST_MEM_LIMIT_MB` (debug-only, mirrors
+/// `SHGUARD_TEST_PANIC`'s pattern) set to `1` MB — comfortably below any
+/// process's baseline RSS — against an ordinary, otherwise-`allow`able
+/// command, so the memory arm trips on the very first poll without this
+/// test itself needing to allocate hundreds of MB to exercise it.
+#[cfg_attr(
+    not(debug_assertions),
+    ignore = "SHGUARD_TEST_MEM_LIMIT_MB injection point is compiled out in release builds"
+)]
+#[test]
+fn memory_budget_trip_fails_closed_to_ask() {
+    let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
+    let assert = cmd
+        .env_remove("SHGUARD_CONFIG")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("HOME")
+        .env("SHGUARD_TEST_MEM_LIMIT_MB", "1")
+        .write_stdin(bash_command("echo hi"))
+        .assert()
+        .success();
+    let output: Value =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout should be valid JSON");
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(permission_reason(&output).contains("memory budget"));
 }
