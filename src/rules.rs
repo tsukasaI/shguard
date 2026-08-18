@@ -476,11 +476,8 @@ fn git_strip_global_flags(base: &str, tail: &[NormalizedWord]) -> Option<Vec<Nor
         return None;
     }
     let mut consumed = 0;
-    loop {
-        let Some(Resolution::Resolved(text)) = tail.get(consumed).map(NormalizedWord::resolution)
-        else {
-            break;
-        };
+    while let Some(Resolution::Resolved(text)) = tail.get(consumed).map(NormalizedWord::resolution)
+    {
         if GIT_GLOBAL_VALUE_FLAGS.contains(&text.as_str()) {
             if tail.get(consumed + 1).is_none() {
                 break;
