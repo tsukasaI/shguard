@@ -373,6 +373,74 @@ fn tar_dashless_effective_tail<'a>(
     }
 }
 
+/// `git`'s own global options that take a value and can appear before the
+/// subcommand: `-C <path>`, `-c <name>=<value>`, `--git-dir`,
+/// `--work-tree`, `--namespace`, `--exec-path`, `--config-env`,
+/// `--super-prefix`. Only the *separated*-value spelling needs special
+/// handling here — the attached spelling (`--git-dir=value`) is already
+/// one dash-prefixed token, which [`Positionals`] already excludes from
+/// positional counting on its own.
+const GIT_GLOBAL_VALUE_FLAGS: &[&str] = &[
+    "-C",
+    "-c",
+    "--git-dir",
+    "--work-tree",
+    "--namespace",
+    "--exec-path",
+    "--config-env",
+    "--super-prefix",
+];
+
+/// Strips a leading run of `git`'s own global value-taking options (and
+/// their separated values) from `tail`. Returns `None` — no rewrite
+/// needed — for every non-`git` command, and for a `git` invocation with
+/// no leading global flag.
+///
+/// `git -C <path> push` previously left the non-dash token `<path>` in
+/// front of `push`, defeating every git rule's `required_tokens`
+/// alignment ([`Positionals`] saw `<path>` as the first positional
+/// instead of the real subcommand, so `push`, `reset`, `clean`, … never
+/// lined up with slot 0 and no git rule could match at all).
+///
+/// Once a token resolves to one of [`GIT_GLOBAL_VALUE_FLAGS`]'s bare
+/// spellings, the *following* token is skipped unconditionally,
+/// regardless of whether it itself resolves — git's own argument parser
+/// consumes exactly one token here no matter its content, so there is
+/// nothing to gain by waiting to see whether that content is readable.
+fn git_strip_global_flags(base: &str, tail: &[NormalizedWord]) -> Option<Vec<NormalizedWord>> {
+    if base != "git" {
+        return None;
+    }
+    let mut consumed = 0;
+    loop {
+        let Some(Resolution::Resolved(text)) = tail.get(consumed).map(NormalizedWord::resolution)
+        else {
+            break;
+        };
+        if !GIT_GLOBAL_VALUE_FLAGS.contains(&text.as_str()) || tail.get(consumed + 1).is_none() {
+            break;
+        }
+        consumed += 2;
+    }
+    (consumed > 0).then(|| tail[consumed..].to_vec())
+}
+
+/// Composes every per-command calling-convention rewrite this module
+/// applies to one wrapper-chain hop's tail before a rule's flag/target
+/// checks ever see it: [`tar_dashless_effective_tail`] for `tar`'s
+/// dash-less cluster, then [`git_strip_global_flags`] for `git`'s own
+/// leading global options. Shared by [`CommandRule::matching_rest`] and
+/// [`CommandRule::matching_rest_by_name`] so the two walkers can't
+/// silently diverge on this point — the same discipline issue #86
+/// already established for the `tar` rewrite alone.
+fn effective_tail<'a>(base: &str, tail: &'a [NormalizedWord]) -> Cow<'a, [NormalizedWord]> {
+    let tail = tar_dashless_effective_tail(base, tail);
+    match git_strip_global_flags(base, &tail) {
+        Some(stripped) => Cow::Owned(stripped),
+        None => tail,
+    }
+}
+
 /// A flag declared (via a rule's `value_flags`, issue #48) to take a
 /// value that is never itself an except_targets candidate — narrows
 /// [`CommandRule::matches`]'s candidate collection so a value-taking
@@ -1257,8 +1325,11 @@ impl CommandRule {
     /// except one this rule's own `value_flags` declares as a flag's
     /// value (e.g. `-m`'s argument) rather than a positional.
     ///
-    /// Known gap: `git -C <path> push` places a non-dash token (`<path>`)
-    /// before the subcommand; the rule won't match in that case.
+    /// `rest_words` has already had `git -C <path>`/`-c <name>=<value>`/
+    /// `--git-dir <path>`/etc. stripped by [`effective_tail`] before this
+    /// runs (issue's own former "Known gap" here: those global options'
+    /// separated values are non-dash tokens that would otherwise occupy
+    /// the subcommand's positional slot).
     #[must_use]
     fn constraints_match(&self, rest_words: &[NormalizedWord]) -> bool {
         let rest = resolved_strings(rest_words);
@@ -1317,7 +1388,7 @@ impl CommandRule {
             };
             let base = basename(name);
             if self.command.matches(base) {
-                let effective = tar_dashless_effective_tail(base, tail);
+                let effective = effective_tail(base, tail);
                 if self.constraints_match(&effective) {
                     return Some(effective);
                 }
@@ -1581,7 +1652,7 @@ impl CommandRule {
             };
             let base = basename(name);
             if self.command.matches(base) {
-                return Some(tar_dashless_effective_tail(base, tail));
+                return Some(effective_tail(base, tail));
             }
             if !TRANSPARENT_WRAPPERS.contains(&base) {
                 return None;
@@ -6928,6 +6999,69 @@ mod tests {
         let matched = rules.match_command(&cmd).unwrap();
         assert_eq!(matched.id().as_str(), "tar-absolute-names-ask");
         assert!(rules.match_command_except_flags(&cmd).is_none());
+    }
+
+    // ==== logic-bugfixer finding: `git -C <path>`/`-c <name>=<value>`
+    // shifts the subcommand out of positional slot 0. Before the fix,
+    // `git -C /tmp push --force` left `/tmp` occupying the slot
+    // `required_tokens = ["push"]` expected `push` in, so no git rule
+    // could match at all. ====
+
+    #[test]
+    fn git_dash_capital_c_before_subcommand_still_matches_push_force() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&["git", "-C", "/tmp", "push", "--force"]))
+            .unwrap();
+        assert_eq!(matched.id().as_str(), "git-push-force");
+    }
+
+    #[test]
+    fn git_lowercase_c_before_subcommand_still_matches_push_force() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&["git", "-c", "a=b", "push", "--force"]))
+            .unwrap();
+        assert_eq!(matched.id().as_str(), "git-push-force");
+    }
+
+    #[test]
+    fn git_git_dir_separated_value_before_subcommand_still_matches_push_force() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&["git", "--git-dir", "/x", "push", "--force"]))
+            .unwrap();
+        assert_eq!(matched.id().as_str(), "git-push-force");
+    }
+
+    #[test]
+    fn git_multiple_global_flags_before_subcommand_still_matches_push_force() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&[
+                "git", "-C", "/tmp", "-c", "a=b", "push", "--force",
+            ]))
+            .unwrap();
+        assert_eq!(matched.id().as_str(), "git-push-force");
+    }
+
+    #[test]
+    fn git_dash_capital_c_before_a_benign_subcommand_stays_unmatched() {
+        // False-positive pin: `-C <path>` stripping must not turn `status`
+        // into anything it shouldn't match.
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["git", "-C", "/tmp", "status"]))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn git_dash_capital_c_with_no_value_does_not_strip_anything() {
+        // A trailing `-C` with nothing after it: git_strip_global_flags
+        // must not consume past the end of the tail.
+        assert_eq!(git_strip_global_flags("git", &argv(&["-C"])), None);
     }
 
     // ==== issue #68: tar -P/--absolute-names bypasses -C entirely ====
