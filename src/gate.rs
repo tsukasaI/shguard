@@ -9872,6 +9872,16 @@ done"#,
     }
 
     #[test]
+    fn rm_rf_star_composes_to_root_glob_at_the_filesystem_root() {
+        // `cd /` anchors to `"/"`, and composing `*` against it via plain
+        // string-join (`compose_argv_against_cwd`) produces the literal
+        // `//*` — the same double-slash shape `rm-recursive-force-dangerous-target`'s
+        // own comment calls out, which only the `{ normalized = "/*" }`
+        // target (not `exact`) collapses and catches.
+        assert_decision("cd / && rm -rf *", Decision::Block);
+    }
+
+    #[test]
     fn cd_dash_poisons() {
         // Issue #88 precedent: `~-` is already treated as unresolvable
         // (`$OLDPWD`) — `cd -` gets the same treatment, verified via the
