@@ -5,16 +5,55 @@
 //! `hookSpecificOutput` JSON to stdout. All decision logic lives in the
 //! library crate; this file only wires config -> stdin -> adapter -> stdout.
 //!
-//! Never panics *observably*: every fallible step (config load, stdin read,
-//! JSON serialisation) is matched explicitly and falls back to the
-//! adapter's fail-closed `ask` output rather than unwinding, and [`main`]
-//! additionally wraps the whole composition, including writing the
-//! decision to stdout ([`run_and_emit`]), in [`std::panic::catch_unwind`]
-//! as a last-resort net for a panic reached through a path this file did
-//! not anticipate (e.g. inside a dependency). A panic here would otherwise
-//! fail *open* — Claude Code proceeds unguarded when the hook produces no
-//! decision at all — so an uncaught unwind is exactly as bad as never
+//! Never fails *silently* open: every fallible step (config load, stdin
+//! read, JSON serialisation) is matched explicitly and falls back to the
+//! adapter's fail-closed `ask` output rather than unwinding, [`main`] runs
+//! the whole composition on a worker thread wrapped in
+//! [`std::panic::catch_unwind`] as a last-resort net for a panic reached
+//! through a path this file did not anticipate (e.g. inside a dependency),
+//! and [`main`] additionally bounds that worker's wall-clock time *and*
+//! its memory use (see "The evaluation watchdog" below) so a pathological
+//! input that makes the parser spin forever — instead of panicking or
+//! returning — still produces a decision. A panic or a hang here would
+//! otherwise fail *open* — Claude Code proceeds unguarded when the hook
+//! produces no decision at all — so either is exactly as bad as never
 //! checking in the first place.
+//!
+//! # The evaluation watchdog
+//!
+//! [`run`] executes on a dedicated worker thread ([`main`]) that sends its
+//! result back over a channel; [`main`] waits on that channel in a polling
+//! loop ([`emit_first_result`]), each iteration bounded by
+//! [`MEMORY_POLL_INTERVAL`] (or whatever's left of [`EVALUATION_TIMEOUT`],
+//! if shorter) so it can check the worker's actual memory use between
+//! polls without giving up wall-clock bounding. A trip on *either* bound —
+//! [`EVALUATION_TIMEOUT`] elapses, or RSS crosses [`MEMORY_LIMIT_BYTES`] —
+//! makes `main` emit the fail-closed decision itself and call
+//! [`std::process::exit`] — the runaway worker cannot be interrupted (Rust
+//! has no safe thread-cancel primitive) and may still be spinning and
+//! allocating, so exiting the whole process is the only way to actually
+//! stop it; leaving it running detached would still eventually be reaped
+//! by the OS, but only after however much memory or CPU it manages to
+//! consume in the meantime, which is exactly the failure this defense
+//! exists to bound. The memory bound exists because the wall-clock bound
+//! alone is not sufficient: a host or container with less free memory
+//! than the runaway worker can allocate within [`EVALUATION_TIMEOUT`] gets
+//! SIGKILLed by the OS before `recv_timeout` ever returns — empty stdout,
+//! the exact fail-open condition this whole watchdog exists to close.
+//! `main` is the *only* place that writes to stdout for exactly this
+//! reason: if the worker happened to finish and try to emit its own
+//! decision at, say, t=2.1s — just after `main`'s 2s timeout already
+//! fired — two JSON decisions on stdout would corrupt Claude Code's hook
+//! protocol, which expects exactly one. Splitting `run` (compute) from
+//! `emit` (the only writer) makes that structurally impossible: the
+//! worker only ever sends a value over the channel, it never touches
+//! stdout itself, and `main` calls `emit` (via [`std::process::exit`], on
+//! a timeout or memory-trip path, or after `recv_timeout` returns `Ok`)
+//! exactly once no matter which path is taken.
+//!
+//! [`EVALUATION_TIMEOUT`]'s value and the measurements behind it, and
+//! [`MEMORY_LIMIT_BYTES`]'s value and the measurements behind it, live on
+//! the respective constants themselves.
 //!
 //! # `catch_unwind` is not a stack-overflow guard
 //!
@@ -23,15 +62,16 @@
 //! process immediately (`SIGABRT` / illegal instruction), bypassing unwind
 //! machinery entirely. Issue #52's original abort (deeply nested
 //! `{`/`(` input driving brush-parser's recursive-descent grammar past the
-//! OS stack) is that failure mode, and [`run`]'s `catch_unwind` boundary
-//! below does **not** defend against it — the fix for that is
+//! OS stack) is that failure mode, and [`main`]'s `catch_unwind` boundary
+//! does **not** defend against it — the fix for that is
 //! `src/parser.rs`'s raw nesting pre-scan (`reject_excessive_raw_nesting`),
 //! which runs *before* the recursive parser and rejects oversized input
 //! outright. The two are complementary, not redundant: the pre-scan cannot
 //! catch an ordinary panic from unrelated code (a dependency's `unwrap()`,
 //! an arithmetic overflow in a debug build, …), and `catch_unwind` cannot
 //! catch a stack overflow — both defenses are required, neither backs up
-//! the other.
+//! the other. Nor is the watchdog a substitute for either: a stack
+//! overflow aborts before the timeout could ever fire.
 //!
 //! # `panic = "abort"` MUST NOT be added to `Cargo.toml`
 //!
@@ -42,6 +82,8 @@
 //! now or in the future, without re-deriving this whole section.
 
 use std::io::{self, Read, Write};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::time::{Duration, Instant};
 
 /// The fail-closed output written when even producing JSON fails — a
 /// hand-written literal, not `serde_json`, so it cannot itself fail to
@@ -61,6 +103,52 @@ const SERIALIZATION_FAILURE_OUTPUT: &str = concat!(
 /// memory/CPU cost, which scales with bytes read regardless of encoding.
 const MAX_STDIN_BYTES: u64 = 10 * 1024 * 1024;
 
+/// Wall-clock budget given to one [`run`] before [`main`] gives up on it
+/// and fails closed (crash-fuzzer finding: a heredoc operator whose
+/// delimiter-word parsing recurses into an unterminated `$(...)` drives
+/// brush-parser's tokenizer into an unbounded allocating loop — no panic,
+/// no return, ~4 GB/s sustained (measured release build) until the OS
+/// kills the process). 2s is ~8x the measured p100 of every
+/// non-pathological input tried against this pipeline (20k-stage
+/// pipelines, 200KB words, 20k heredocs all resolved in <=0.25s), so it
+/// costs nothing on real hook traffic while still bounding a hang to a
+/// small, fixed delay instead of unbounded memory growth. Re-measure the
+/// p100 figure above before lowering this.
+///
+/// This bound alone is not sufficient on a memory-constrained host: at
+/// ~4 GB/s, a container or box with less than ~8 GB free can be
+/// SIGKILLed by the OS before this timeout ever fires — see
+/// [`MEMORY_LIMIT_BYTES`] for the complementary bound that closes that
+/// gap.
+const EVALUATION_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How often [`emit_first_result`]'s watchdog polls the worker's actual
+/// memory use (via [`current_rss_bytes`]) while waiting on the result
+/// channel, instead of blocking on a single [`EVALUATION_TIMEOUT`]-long
+/// `recv_timeout` the way the wall-clock-only watchdog used to. Short
+/// enough that the runaway-allocation repro (~4 GB/s, see
+/// [`EVALUATION_TIMEOUT`]) overshoots [`MEMORY_LIMIT_BYTES`] by at most
+/// ~200 MB (rate * interval) before a poll catches it; long enough that
+/// polling `getrusage` costs nothing against real hook traffic, which
+/// resolves in well under one interval to begin with.
+const MEMORY_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Hard RSS budget for the whole process, polled by [`emit_first_result`]
+/// independently of [`EVALUATION_TIMEOUT`] (follow-up to the wall-clock
+/// watchdog above: the same unbounded-allocating-loop input peaks at
+/// several GB RSS well within the 2s wall-clock budget, so a host or
+/// container with less free memory than that gets SIGKILLed by the OS
+/// before `recv_timeout` ever fires — empty stdout, the exact fail-open
+/// condition the wall-clock watchdog alone does not close). 256 MiB is
+/// ~10x the largest peak RSS measured for a legitimate, non-pathological
+/// fixture against this pipeline (24 MB, a 20k-stage/200KB-word command),
+/// and even with [`MEMORY_POLL_INTERVAL`]'s worst-case ~200 MB overshoot
+/// stays comfortably under what a small container typically allots a
+/// single process. There is no other documented memory budget for this
+/// project to anchor against (checked README.md and docs/ before picking
+/// this number). Re-measure both figures above before changing this.
+const MEMORY_LIMIT_BYTES: u64 = 256 * 1024 * 1024;
+
 fn main() {
     let mut args = std::env::args();
     let _binary_name = args.next();
@@ -71,12 +159,149 @@ fn main() {
 
     install_panic_hook();
 
-    if std::panic::catch_unwind(run_and_emit).is_err() {
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::Builder::new()
+        .name("shguard-eval".to_string())
+        .spawn(move || {
+            let output = std::panic::catch_unwind(run).unwrap_or_else(|_| {
+                shguard::adapter::fail_closed(
+                    "shguard: internal panic while evaluating the command; refusing to \
+                     evaluate (fail-closed)",
+                )
+            });
+            // A closed receiver means `main` already timed out and moved
+            // on (see below) — nothing left to send to.
+            let _ = result_tx.send(output);
+        });
+
+    let Ok(worker) = worker else {
+        // Thread spawn failure (e.g. the OS is out of resources) is itself
+        // a reason to fail closed, not to fall through and evaluate on the
+        // main thread — that would silently drop the watchdog this whole
+        // boundary exists to provide.
         emit(shguard::adapter::fail_closed(
-            "shguard: internal panic while evaluating the command; refusing to evaluate \
-             (fail-closed)",
+            "shguard: could not start command evaluation; refusing to evaluate (fail-closed)",
         ));
+        return;
+    };
+
+    emit_first_result(&result_rx);
+    // The worker already sent (or the process is about to exit on a
+    // watchdog-trip path — time, memory, or disconnect — in which case
+    // this line is never reached) — join to avoid leaving a detached
+    // thread dangling off a still-running `main`.
+    let _ = worker.join();
+}
+
+/// Waits up to [`EVALUATION_TIMEOUT`] for `rx` to produce a result,
+/// polling the worker's RSS against [`MEMORY_LIMIT_BYTES`] every
+/// [`MEMORY_POLL_INTERVAL`] while it waits, and emits whichever happens
+/// first: the worker's real result, a wall-clock trip, or a memory trip.
+/// The RSS check runs at the *start* of each loop iteration — including
+/// the very first, before ever waiting on `rx` — so a worker that has
+/// already blown the memory budget by the time `main` gets here (rather
+/// than only sometime while `main` is waiting) is still caught
+/// immediately rather than after an extra poll interval. On either trip
+/// (or if the worker disconnects without sending — the channel's sender
+/// was dropped, meaning the worker thread ended without producing a
+/// result), emits the fail-closed decision itself and exits the process
+/// immediately — see the module docs' "evaluation watchdog" section for
+/// why exiting, not merely returning, is required.
+fn emit_first_result(rx: &Receiver<serde_json::Value>) {
+    let deadline = Instant::now() + EVALUATION_TIMEOUT;
+    let memory_limit = memory_limit_bytes();
+    loop {
+        if let Some(rss) = current_rss_bytes()
+            && rss > memory_limit
+        {
+            emit(shguard::adapter::fail_closed(&format!(
+                "shguard: evaluation exceeded its memory budget ({rss} bytes RSS); \
+                 refusing to evaluate (fail-closed)"
+            )));
+            std::process::exit(0);
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            emit(shguard::adapter::fail_closed(
+                "shguard: evaluation exceeded its time budget; refusing to evaluate \
+                 (fail-closed)",
+            ));
+            std::process::exit(0);
+        }
+
+        match rx.recv_timeout(remaining.min(MEMORY_POLL_INTERVAL)) {
+            Ok(output) => {
+                emit(output);
+                return;
+            }
+            // Not yet past `deadline` (checked above) — loop around to
+            // re-sample RSS before waiting again.
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                emit(shguard::adapter::fail_closed(
+                    "shguard: evaluation worker stopped without producing a result; \
+                     refusing to evaluate (fail-closed)",
+                ));
+                std::process::exit(0);
+            }
+        }
     }
+}
+
+/// Effective RSS budget used by [`emit_first_result`] — [`MEMORY_LIMIT_BYTES`]
+/// in release builds. Debug builds additionally honour
+/// `SHGUARD_TEST_MEM_LIMIT_MB`, mirroring `run`'s `SHGUARD_TEST_PANIC`
+/// injection pattern, so `tests/fail_closed_exit_paths.rs` can pin the
+/// memory-trip path against the test process's own baseline RSS instead
+/// of actually allocating hundreds of MB just to exercise it.
+fn memory_limit_bytes() -> u64 {
+    #[cfg(debug_assertions)]
+    if let Some(value) = std::env::var_os("SHGUARD_TEST_MEM_LIMIT_MB")
+        && let Ok(mb) = value.to_string_lossy().parse::<u64>()
+    {
+        return mb.saturating_mul(1024 * 1024);
+    }
+    MEMORY_LIMIT_BYTES
+}
+
+/// Current process RSS in bytes via `getrusage(RUSAGE_SELF, ...)`, or
+/// `None` if the call fails or this platform doesn't support it — in
+/// either case [`emit_first_result`] simply skips the memory-trip check
+/// for that poll; [`EVALUATION_TIMEOUT`]'s wall-clock bound still applies
+/// regardless. `ru_maxrss` reports *peak* RSS, not current — exactly what
+/// a one-shot process whose memory only grows in the pathological case
+/// wants to bound. Units differ by platform: bytes on macOS, kilobytes
+/// everywhere else `getrusage` is available (Linux, other BSDs) — the
+/// `cfg` below converts the latter to bytes so callers never see the
+/// platform difference.
+#[cfg(unix)]
+fn current_rss_bytes() -> Option<u64> {
+    // SAFETY: `usage` is a valid, zero-initialised `libc::rusage`, and its
+    // address is the sole out-pointer `getrusage` writes through;
+    // `RUSAGE_SELF` targets the calling process, which is always valid to
+    // query.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } != 0 {
+        return None;
+    }
+    let raw = u64::try_from(usage.ru_maxrss).ok()?;
+    #[cfg(target_os = "macos")]
+    {
+        Some(raw)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Some(raw.saturating_mul(1024))
+    }
+}
+
+/// Non-Unix fallback: no `getrusage`, so the memory-trip check is simply
+/// unavailable and [`emit_first_result`] relies on [`EVALUATION_TIMEOUT`]
+/// alone, same as before this watchdog existed.
+#[cfg(not(unix))]
+fn current_rss_bytes() -> Option<u64> {
+    None
 }
 
 /// Installs a one-line panic hook in place of the Rust default (which
@@ -137,11 +362,14 @@ fn backtrace_requested() -> bool {
 /// fn item holds no state at all, so it satisfies `UnwindSafe` on its own
 /// and no such escape hatch is needed.
 ///
-/// The `catch_unwind` boundary in `main` (via [`run_and_emit`]) covers
-/// everything in here, including [`shguard::config::Policy::load`] — a
-/// panic inside TOML parsing is exactly as fail-open as one anywhere else
-/// in this function. The `--version` branch in `main` is deliberately
-/// outside the boundary: it never touches config, stdin, or command
+/// The `catch_unwind` boundary in `main` covers everything in here,
+/// including [`shguard::config::Policy::load`] — a panic inside TOML
+/// parsing is exactly as fail-open as one anywhere else in this function.
+/// So does the watchdog timeout: `run` executes entirely on the worker
+/// thread `main` spawns, so a hang anywhere in here (stdin read, config
+/// load, or command evaluation) is bounded by [`EVALUATION_TIMEOUT`] the
+/// same way. The `--version` branch in `main` is deliberately outside
+/// both boundaries: it never touches config, stdin, or command
 /// evaluation, so there is nothing there for the fail-closed guarantee to
 /// protect.
 fn run() -> serde_json::Value {
@@ -196,17 +424,6 @@ fn run() -> serde_json::Value {
         // read error.
         Err(err) => shguard::adapter::fail_closed(&format!("shguard: could not read stdin: {err}")),
     }
-}
-
-/// `run` followed by `emit`, as one capture-free fn item so
-/// [`std::panic::catch_unwind`] in `main` covers the write to stdout as
-/// well as the decision logic — `emit` is written to never panic today,
-/// but the boundary should not depend on that staying true. A panic
-/// mid-write here (or anywhere in `run`) leaves nothing on stdout, exactly
-/// like an unhandled panic anywhere else in this fail-closed composition;
-/// `main` catches it and emits the fail-closed fallback itself.
-fn run_and_emit() {
-    emit(run());
 }
 
 /// Serialises `output` and writes it to stdout, falling back to the

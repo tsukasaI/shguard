@@ -822,6 +822,7 @@ version = "0.5.0"
 dependencies = [
  "assert_cmd",
  "brush-parser",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",
