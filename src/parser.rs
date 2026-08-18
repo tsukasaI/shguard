@@ -63,7 +63,8 @@ use brush_parser::{Parser as BrushParser, ParserOptions as BrushParserOptions, a
 use crate::ast::{
     Assignment, AssignmentValue, Command, CommandLine, CompoundCommand, ElifClause, ExtendedTest,
     FileRedirectionKind, FunctionDefinition, MAX_BRACE_NESTING_DEPTH, MAX_KEYWORD_NESTING_COUNT,
-    Pipeline, ProcessSubstitutionDirection, Redirection, Separator, SimpleCommand, Word, WordPiece,
+    MAX_RAW_BRACE_NESTING_DEPTH, Pipeline, ProcessSubstitutionDirection, Redirection, Separator,
+    SimpleCommand, Word, WordPiece,
 };
 
 /// Everything that can go wrong converting a raw command string into
@@ -126,9 +127,10 @@ fn is_token_boundary(byte: u8) -> bool {
     )
 }
 
-/// Rejects `command` if its `{`/`}` nesting depth, its `(`/`)` nesting
-/// depth, or its total count of [`NESTING_KEYWORDS`] occurrences exceeds
-/// [`MAX_BRACE_NESTING_DEPTH`] / [`MAX_KEYWORD_NESTING_COUNT`], *before* any
+/// Rejects `command` if its `{`/`}` nesting depth exceeds
+/// [`MAX_RAW_BRACE_NESTING_DEPTH`], its `(`/`)` nesting depth exceeds
+/// [`MAX_BRACE_NESTING_DEPTH`], or its total count of [`NESTING_KEYWORDS`]
+/// occurrences exceeds [`MAX_KEYWORD_NESTING_COUNT`], *before* any
 /// recursive-descent parser (brush-parser's PEG grammar, or this module's
 /// own brace/word conversion) ever sees the text.
 ///
@@ -150,7 +152,11 @@ fn is_token_boundary(byte: u8) -> bool {
 /// all, and neither bracket alone catches a keyword-only attack like nested
 /// `if`/`then`/`fi` with no braces or parens at all) — see
 /// [`MAX_BRACE_NESTING_DEPTH`]'s and [`MAX_KEYWORD_NESTING_COUNT`]'s docs
-/// for the chosen cap values and their trade-offs.
+/// for the chosen cap values and their trade-offs. The `{`/`}` cap is
+/// [`MAX_RAW_BRACE_NESTING_DEPTH`], not [`MAX_BRACE_NESTING_DEPTH`] — see
+/// its own docs for why brace nesting alone needs a much tighter cap than
+/// stack-overflow-driven parenthesis/keyword nesting does (a PEG
+/// catastrophic-backtracking cost, not a stack-depth one).
 ///
 /// Scans bytes, not `char`s: every byte this function compares against
 /// (`{`, `}`, `(`, `)`, and every [`is_token_boundary`] delimiter) is
@@ -169,7 +175,7 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
         match byte {
             b'{' => {
                 brace_depth += 1;
-                if brace_depth > MAX_BRACE_NESTING_DEPTH {
+                if brace_depth > MAX_RAW_BRACE_NESTING_DEPTH {
                     return Err(ParseError::unsupported(
                         "brace nesting exceeds the raw depth cap",
                     ));
@@ -227,9 +233,9 @@ fn check_keyword_token(token: &str, keyword_count: &mut usize) -> Result<(), Par
 /// Returns [`ParseError::Syntax`] if `command` is not valid shell syntax, or
 /// [`ParseError::Unsupported`] if it parses but contains a construct
 /// shguard's AST cannot represent (see the module docs), including raw
-/// `{`/`}`/`(`/`)` nesting past [`MAX_BRACE_NESTING_DEPTH`] or
-/// [`NESTING_KEYWORDS`] nesting past [`MAX_KEYWORD_NESTING_COUNT`]
-/// ([`reject_excessive_raw_nesting`]).
+/// `{`/`}` nesting past [`MAX_RAW_BRACE_NESTING_DEPTH`], `(`/`)` nesting
+/// past [`MAX_BRACE_NESTING_DEPTH`], or [`NESTING_KEYWORDS`] nesting past
+/// [`MAX_KEYWORD_NESTING_COUNT`] ([`reject_excessive_raw_nesting`]).
 ///
 /// `analyze()` (`src/lib.rs`) calls this via `src/gate.rs` — stage 1 of the
 /// pipeline (plan.md §1.1).
@@ -1346,17 +1352,44 @@ mod tests {
     // just far-exceeding values (the existing integration tests in
     // tests/fail_closed_exit_paths.rs use 4000-8000x nesting, which proves
     // the defense works but not that the cap sits exactly where
-    // MAX_BRACE_NESTING_DEPTH's docs claim) ----
+    // MAX_BRACE_NESTING_DEPTH's/MAX_RAW_BRACE_NESTING_DEPTH's docs claim)
+    // ----
 
+    // Uses a real, comma-containing brace alternation at every level (not
+    // the comma-less `{{{x}}}` shape MAX_RAW_BRACE_NESTING_DEPTH's docs
+    // measure) — parses in ~0.004s regardless of depth, per that constant's
+    // own docs, so this boundary test itself stays fast.
     #[test]
     fn raw_brace_nesting_at_the_cap_still_parses() {
-        let command = format!("echo {}a{}", "{a,".repeat(64), "}".repeat(64));
+        let command = format!(
+            "echo {}a{}",
+            "{a,".repeat(MAX_RAW_BRACE_NESTING_DEPTH),
+            "}".repeat(MAX_RAW_BRACE_NESTING_DEPTH)
+        );
         assert!(parse(&command).is_ok());
     }
 
     #[test]
     fn raw_brace_nesting_one_past_the_cap_is_rejected() {
-        let command = format!("echo {}a{}", "{a,".repeat(65), "}".repeat(65));
+        let command = format!(
+            "echo {}a{}",
+            "{a,".repeat(MAX_RAW_BRACE_NESTING_DEPTH + 1),
+            "}".repeat(MAX_RAW_BRACE_NESTING_DEPTH + 1)
+        );
+        assert!(parse(&command).is_err());
+    }
+
+    // crash-fuzzer finding: a *comma-less* nested brace group (`{{{x}}}`,
+    // no `,` at any level) makes brush-parser's PEG grammar backtrack
+    // catastrophically — ~6.5x cost growth per two levels, ~7.3s at depth
+    // 18, ~47s extrapolated at this test's depth 20. This asserts the raw
+    // pre-scan rejects a depth the exponential path would otherwise burn
+    // the better part of a minute on, proving the cap is what stops it,
+    // not luck.
+    #[test]
+    fn raw_comma_less_brace_nesting_past_the_new_cap_is_rejected_before_the_exponential_path() {
+        let depth = 20;
+        let command = format!("echo {}x{}", "{".repeat(depth), "}".repeat(depth));
         assert!(parse(&command).is_err());
     }
 
