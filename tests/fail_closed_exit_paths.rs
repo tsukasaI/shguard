@@ -237,9 +237,25 @@ fn injected_panic_fails_closed_to_ask() {
 /// real binary now exits 0 with a well-formed `ask` decision instead,
 /// within the `EVALUATION_TIMEOUT` budget (`src/bin/shguard.rs`) — this
 /// test takes a couple of seconds to run for exactly that reason.
+///
+/// Inlines `run_hook` to add a child-process timeout: if the watchdog
+/// regresses, this input reverts to an unbounded multi-GB/s allocating
+/// hang, and without a bound the test would thrash and wait for the OS to
+/// OOM-kill something rather than fail cleanly. 30s is ~15x the 2s
+/// `EVALUATION_TIMEOUT`, so it can never fire on the passing path.
 #[test]
 fn heredoc_inside_unterminated_command_substitution_fails_closed_to_ask() {
-    let output = run_hook(&bash_command("<<$( |] "));
+    let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
+    let assert = cmd
+        .env_remove("SHGUARD_CONFIG")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("HOME")
+        .timeout(std::time::Duration::from_secs(30))
+        .write_stdin(bash_command("<<$( |] "))
+        .assert()
+        .success();
+    let output: Value =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout should be valid JSON");
     assert_eq!(permission_decision(&output), "ask");
     assert!(permission_reason(&output).contains("time budget"));
 }
