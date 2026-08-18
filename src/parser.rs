@@ -163,6 +163,7 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
     let mut paren_depth: usize = 0;
     let mut keyword_count: usize = 0;
     let mut token_start: Option<usize> = None;
+    let mut saw_heredoc_operator = false;
 
     let bytes = command.as_bytes();
     for (i, &byte) in bytes.iter().enumerate() {
@@ -185,6 +186,7 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
                 }
             }
             b')' => paren_depth = paren_depth.saturating_sub(1),
+            b'<' if bytes.get(i + 1) == Some(&b'<') => saw_heredoc_operator = true,
             _ => {}
         }
 
@@ -198,6 +200,26 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
     }
     if let Some(start) = token_start {
         check_keyword_token(&command[start..], &mut keyword_count)?;
+    }
+
+    // brush-parser's tokenizer loops forever, allocating on every
+    // iteration, when a `<<`/`<<-` heredoc operator's delimiter word
+    // involves a command/process substitution that is never closed
+    // (`next_token_until` -> `consume_nested_construct` -> `next_token_
+    // until` -> `remove_here_end_tag`, 0.4.0) — confirmed for both orders,
+    // the heredoc operator preceding the unterminated `(`/`$(` as its own
+    // delimiter word (`<<$( |] `) and the heredoc appearing after one is
+    // already open (`$(<< (n `). `paren_depth > 0` at end-of-input is
+    // this raw scan's only signal for "unterminated `(`/`$(`" — bash
+    // itself rejects an unterminated command substitution as a syntax
+    // error regardless, so no legitimate command is lost by fail-closing
+    // to Ask here instead of reaching the tokenizer at all. `catch_unwind`
+    // cannot help (nothing panics — the thread simply never returns), so
+    // this pre-scan is the only defense that runs ahead of the hang.
+    if saw_heredoc_operator && paren_depth > 0 {
+        return Err(ParseError::unsupported(
+            "heredoc operator combined with an unterminated command/process substitution",
+        ));
     }
 
     Ok(())
@@ -1370,6 +1392,51 @@ mod tests {
     fn raw_paren_nesting_one_past_the_cap_is_rejected() {
         let command = format!("{}echo hi{}", "$(".repeat(65), ")".repeat(65));
         assert!(parse(&command).is_err());
+    }
+
+    // ---- crash-fuzzer finding: a `<<`/`<<-` heredoc operator combined
+    // with an unterminated `(`/`$(` hangs brush-parser's tokenizer
+    // (`next_token_until` -> `consume_nested_construct` -> `next_token_
+    // until` -> `remove_here_end_tag`, 0.4.0) forever, allocating on every
+    // iteration. `reject_excessive_raw_nesting` rejects any input with a
+    // heredoc operator that also ends with `paren_depth > 0` — every
+    // repro below is one of the minimal inputs the fuzzer found, in both
+    // token orders (heredoc-then-paren and paren-then-heredoc). None of
+    // these would ever have run as valid shell (bash itself rejects an
+    // unterminated command substitution as a syntax error), so rejecting
+    // them here costs nothing. ----
+
+    #[test]
+    fn heredoc_operator_before_unterminated_command_substitution_is_rejected() {
+        assert!(parse("<<$( |] ").is_err());
+    }
+
+    #[test]
+    fn heredoc_operator_after_unterminated_paren_is_rejected() {
+        assert!(parse("$(<< (n ").is_err());
+        assert!(parse("$( << ( n ").is_err());
+        assert!(parse("echo $(<< (n ").is_err());
+        assert!(parse("x; $(<< (n ").is_err());
+    }
+
+    #[test]
+    fn heredoc_dash_variant_after_unterminated_paren_is_rejected() {
+        assert!(parse("$(<<- (n ").is_err());
+    }
+
+    #[test]
+    fn fd_prefixed_heredoc_operator_after_unterminated_paren_is_rejected() {
+        assert!(parse("$(2<< (n ").is_err());
+    }
+
+    #[test]
+    fn heredoc_with_terminated_command_substitution_still_parses() {
+        assert!(parse("cat <<EOF\nhello $(echo world)\nEOF").is_ok());
+    }
+
+    #[test]
+    fn heredoc_operator_without_any_paren_still_parses() {
+        assert!(parse("cat <<EOF\nhello\nEOF").is_ok());
     }
 
     // ---- issue #191: collect_extended_test_words's own depth cap. Unlike
