@@ -5,16 +5,45 @@
 //! `hookSpecificOutput` JSON to stdout. All decision logic lives in the
 //! library crate; this file only wires config -> stdin -> adapter -> stdout.
 //!
-//! Never panics *observably*: every fallible step (config load, stdin read,
-//! JSON serialisation) is matched explicitly and falls back to the
-//! adapter's fail-closed `ask` output rather than unwinding, and [`main`]
-//! additionally wraps the whole composition, including writing the
-//! decision to stdout ([`run_and_emit`]), in [`std::panic::catch_unwind`]
-//! as a last-resort net for a panic reached through a path this file did
-//! not anticipate (e.g. inside a dependency). A panic here would otherwise
-//! fail *open* — Claude Code proceeds unguarded when the hook produces no
-//! decision at all — so an uncaught unwind is exactly as bad as never
-//! checking in the first place.
+//! Never fails *silently* open: every fallible step (config load, stdin
+//! read, JSON serialisation) is matched explicitly and falls back to the
+//! adapter's fail-closed `ask` output rather than unwinding, [`main`] runs
+//! the whole composition on a worker thread wrapped in
+//! [`std::panic::catch_unwind`] as a last-resort net for a panic reached
+//! through a path this file did not anticipate (e.g. inside a dependency),
+//! and [`main`] additionally bounds that worker's wall-clock time (see
+//! "The evaluation watchdog" below) so a pathological input that makes the
+//! parser spin forever — instead of panicking or returning — still
+//! produces a decision. A panic or a hang here would otherwise fail
+//! *open* — Claude Code proceeds unguarded when the hook produces no
+//! decision at all — so either is exactly as bad as never checking in the
+//! first place.
+//!
+//! # The evaluation watchdog
+//!
+//! [`run`] executes on a dedicated worker thread ([`main`]) that sends its
+//! result back over a channel; [`main`] blocks on that channel with a
+//! bounded [`Receiver::recv_timeout`]. On timeout, `main` emits the
+//! fail-closed decision itself and calls [`std::process::exit`] — the
+//! runaway worker cannot be interrupted (Rust has no safe thread-cancel
+//! primitive) and may still be spinning and allocating, so exiting the
+//! whole process is the only way to actually stop it; leaving it running
+//! detached would still eventually be reaped by the OS, but only after
+//! however much memory or CPU it manages to consume in the meantime,
+//! which is exactly the failure this defense exists to bound. `main` is
+//! the *only* place that writes to stdout for exactly this reason: if the
+//! worker happened to finish and try to emit its own decision at, say,
+//! t=2.1s — just after `main`'s 2s timeout already fired — two JSON
+//! decisions on stdout would corrupt Claude Code's hook protocol, which
+//! expects exactly one. Splitting `run` (compute) from `emit` (the only
+//! writer) makes that structurally impossible: the worker only ever sends
+//! a value over the channel, it never touches stdout itself, and `main`
+//! calls `emit` (via [`std::process::exit`], on the timeout path, or
+//! after `recv_timeout` returns `Ok`) exactly once no matter which path
+//! is taken.
+//!
+//! [`EVALUATION_TIMEOUT`]'s value and the measurements behind it live on
+//! the constant itself.
 //!
 //! # `catch_unwind` is not a stack-overflow guard
 //!
@@ -23,15 +52,16 @@
 //! process immediately (`SIGABRT` / illegal instruction), bypassing unwind
 //! machinery entirely. Issue #52's original abort (deeply nested
 //! `{`/`(` input driving brush-parser's recursive-descent grammar past the
-//! OS stack) is that failure mode, and [`run`]'s `catch_unwind` boundary
-//! below does **not** defend against it — the fix for that is
+//! OS stack) is that failure mode, and [`main`]'s `catch_unwind` boundary
+//! does **not** defend against it — the fix for that is
 //! `src/parser.rs`'s raw nesting pre-scan (`reject_excessive_raw_nesting`),
 //! which runs *before* the recursive parser and rejects oversized input
 //! outright. The two are complementary, not redundant: the pre-scan cannot
 //! catch an ordinary panic from unrelated code (a dependency's `unwrap()`,
 //! an arithmetic overflow in a debug build, …), and `catch_unwind` cannot
 //! catch a stack overflow — both defenses are required, neither backs up
-//! the other.
+//! the other. Nor is the watchdog a substitute for either: a stack
+//! overflow aborts before the timeout could ever fire.
 //!
 //! # `panic = "abort"` MUST NOT be added to `Cargo.toml`
 //!
@@ -42,6 +72,8 @@
 //! now or in the future, without re-deriving this whole section.
 
 use std::io::{self, Read, Write};
+use std::sync::mpsc::Receiver;
+use std::time::Duration;
 
 /// The fail-closed output written when even producing JSON fails — a
 /// hand-written literal, not `serde_json`, so it cannot itself fail to
@@ -61,6 +93,18 @@ const SERIALIZATION_FAILURE_OUTPUT: &str = concat!(
 /// memory/CPU cost, which scales with bytes read regardless of encoding.
 const MAX_STDIN_BYTES: u64 = 10 * 1024 * 1024;
 
+/// Wall-clock budget given to one [`run`] before [`main`] gives up on it
+/// and fails closed (crash-fuzzer finding: a heredoc operator whose
+/// delimiter-word parsing recurses into an unterminated `$(...)` drives
+/// brush-parser's tokenizer into an unbounded allocating loop — no panic,
+/// no return, ~670 MB/s until the OS kills the process). 2s is ~200x the
+/// measured p100 of every non-pathological input tried against this
+/// pipeline (20k-stage pipelines, 200KB words, 20k heredocs all resolved
+/// in <=0.25s), so it costs nothing on real hook traffic while still
+/// bounding a hang to a small, fixed delay instead of unbounded memory
+/// growth. Re-measure the p100 figure above before lowering this.
+const EVALUATION_TIMEOUT: Duration = Duration::from_secs(2);
+
 fn main() {
     let mut args = std::env::args();
     let _binary_name = args.next();
@@ -71,11 +115,53 @@ fn main() {
 
     install_panic_hook();
 
-    if std::panic::catch_unwind(run_and_emit).is_err() {
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::Builder::new()
+        .name("shguard-eval".to_string())
+        .spawn(move || {
+            let output = std::panic::catch_unwind(run).unwrap_or_else(|_| {
+                shguard::adapter::fail_closed(
+                    "shguard: internal panic while evaluating the command; refusing to \
+                     evaluate (fail-closed)",
+                )
+            });
+            // A closed receiver means `main` already timed out and moved
+            // on (see below) — nothing left to send to.
+            let _ = result_tx.send(output);
+        });
+
+    let Ok(worker) = worker else {
+        // Thread spawn failure (e.g. the OS is out of resources) is itself
+        // a reason to fail closed, not to fall through and evaluate on the
+        // main thread — that would silently drop the watchdog this whole
+        // boundary exists to provide.
         emit(shguard::adapter::fail_closed(
-            "shguard: internal panic while evaluating the command; refusing to evaluate \
-             (fail-closed)",
+            "shguard: could not start command evaluation; refusing to evaluate (fail-closed)",
         ));
+        return;
+    };
+
+    emit_first_result(&result_rx);
+    // The worker already sent (or the process is about to exit on the
+    // timeout path, in which case this line is never reached) — join to
+    // avoid leaving a detached thread dangling off a still-running `main`.
+    let _ = worker.join();
+}
+
+/// Waits up to [`EVALUATION_TIMEOUT`] for `rx` to produce a result and
+/// emits it. On timeout, emits the fail-closed decision itself and exits
+/// the process immediately — see the module docs' "evaluation watchdog"
+/// section for why exiting, not merely returning, is required.
+fn emit_first_result(rx: &Receiver<serde_json::Value>) {
+    match rx.recv_timeout(EVALUATION_TIMEOUT) {
+        Ok(output) => emit(output),
+        Err(_) => {
+            emit(shguard::adapter::fail_closed(
+                "shguard: evaluation exceeded its time budget; refusing to evaluate \
+                 (fail-closed)",
+            ));
+            std::process::exit(0);
+        }
     }
 }
 
@@ -137,11 +223,14 @@ fn backtrace_requested() -> bool {
 /// fn item holds no state at all, so it satisfies `UnwindSafe` on its own
 /// and no such escape hatch is needed.
 ///
-/// The `catch_unwind` boundary in `main` (via [`run_and_emit`]) covers
-/// everything in here, including [`shguard::config::Policy::load`] — a
-/// panic inside TOML parsing is exactly as fail-open as one anywhere else
-/// in this function. The `--version` branch in `main` is deliberately
-/// outside the boundary: it never touches config, stdin, or command
+/// The `catch_unwind` boundary in `main` covers everything in here,
+/// including [`shguard::config::Policy::load`] — a panic inside TOML
+/// parsing is exactly as fail-open as one anywhere else in this function.
+/// So does the watchdog timeout: `run` executes entirely on the worker
+/// thread `main` spawns, so a hang anywhere in here (stdin read, config
+/// load, or command evaluation) is bounded by [`EVALUATION_TIMEOUT`] the
+/// same way. The `--version` branch in `main` is deliberately outside
+/// both boundaries: it never touches config, stdin, or command
 /// evaluation, so there is nothing there for the fail-closed guarantee to
 /// protect.
 fn run() -> serde_json::Value {
@@ -196,17 +285,6 @@ fn run() -> serde_json::Value {
         // read error.
         Err(err) => shguard::adapter::fail_closed(&format!("shguard: could not read stdin: {err}")),
     }
-}
-
-/// `run` followed by `emit`, as one capture-free fn item so
-/// [`std::panic::catch_unwind`] in `main` covers the write to stdout as
-/// well as the decision logic — `emit` is written to never panic today,
-/// but the boundary should not depend on that staying true. A panic
-/// mid-write here (or anywhere in `run`) leaves nothing on stdout, exactly
-/// like an unhandled panic anywhere else in this fail-closed composition;
-/// `main` catches it and emits the fail-closed fallback itself.
-fn run_and_emit() {
-    emit(run());
 }
 
 /// Serialises `output` and writes it to stdout, falling back to the
