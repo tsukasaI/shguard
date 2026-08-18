@@ -5029,6 +5029,36 @@ mod tests {
         assert!(rules.match_command(&argv(&["rm", "-rf", "/*"])).is_some());
     }
 
+    // logic-bugfixer finding: `/*`'s target entry used to be `{ exact =
+    // "/*" }`, a byte-exact matcher, unlike every sibling entry in the
+    // same rule — `//*`/`/./*`/`/tmp/../*`/`/*/` all lexically collapse
+    // to the same `Abs(["*"])` value `/*` does and must match too,
+    // exactly like `/dev/sda`'s own `//dev/sda`/`/./dev/sda`/
+    // `/tmp/../dev/sda` spellings already do via `normalized_prefix`.
+    #[test]
+    fn rm_rf_glob_root_respelled_via_lexical_ascent_still_matches() {
+        let rules = Rules::embedded().unwrap();
+        for target in ["//*", "/./*", "/tmp/../*", "/*/"] {
+            assert!(
+                rules.match_command(&argv(&["rm", "-rf", target])).is_some(),
+                "expected {target:?} to match rm-recursive-force-dangerous-target"
+            );
+        }
+    }
+
+    // False-positive pin: a glob under an ordinary directory must stay
+    // unmatched — only a glob whose parent lexically collapses to the
+    // filesystem root is in scope.
+    #[test]
+    fn rm_rf_glob_under_an_ordinary_directory_does_not_match() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["rm", "-rf", "/tmp/*"]))
+                .is_none()
+        );
+    }
+
     // ---- rm -rf on a non-dangerous target stays clean ----
     #[test]
     fn rm_rf_build_dir_does_not_match() {

@@ -252,7 +252,14 @@ command = "rm"
 required_flags = ["r|R|--recursive", "f|--force"]
 targets = [
     { normalized = "/" },
-    { exact = "/*" },
+    # `normalized` (not `exact`, matching the same exact->normalized
+    # migration issue #267 already applied to the `{}` placeholder entries
+    # below): `//*`, `/./*`, `/tmp/../*`, and `/*/` all lexically collapse
+    # to the same single component `*` at the filesystem root and must
+    # Block too, exactly like `/dev/sda` and its `//dev/sda`/`/./dev/sda`/
+    # `/tmp/../dev/sda` spellings already do below. `/tmp/*` collapses to
+    # `Abs(["tmp","*"])`, a different value, and correctly stays unmatched.
+    { normalized = "/*" },
     { normalized = "~" },
     { normalized = "." },
     # ".."/"../" (previously separate `exact` entries) are subsumed by
