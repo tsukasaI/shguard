@@ -902,19 +902,28 @@ fn split_overflowing_leading_tilde(text: &str) -> Option<(&str, &str)> {
 /// Runs the ordinary (non-brace) word parse over a fragment of source text
 /// and converts each resulting piece.
 fn convert_word_text(text: &str) -> Result<Vec<WordPiece>, ParseError> {
-    if let Some((tilde_run, remainder)) = split_overflowing_leading_tilde(text) {
-        let mut pieces = vec![WordPiece::Literal(tilde_run.to_string())];
-        if !remainder.is_empty() {
-            pieces.extend(convert_word_text(remainder)?);
-        }
-        return Ok(pieces);
+    // Iterative, not recursive, over consecutive overflowing-tilde runs: a
+    // word that is nothing but repeated runs (`~<20 digits>~<20 digits>…`)
+    // would otherwise recurse once per run, and ~2 MiB of that shape — far
+    // under the binary's 10 MiB stdin cap — overflows the stack, which
+    // aborts (`catch_unwind` cannot intercept it, see
+    // `src/bin/shguard.rs`'s module docs) and therefore fails OPEN in the
+    // hook. Same threat model as `reject_excessive_raw_nesting`.
+    let mut converted = Vec::new();
+    let mut rest = text;
+    while let Some((tilde_run, remainder)) = split_overflowing_leading_tilde(rest) {
+        converted.push(WordPiece::Literal(tilde_run.to_string()));
+        rest = remainder;
     }
-    let pieces = catch_parser_panic(|| bword::parse(text, &parser_options()))?
-        .map_err(|err| ParseError::syntax(format!("word parse of {text:?}: {err}")))?;
-    pieces
-        .into_iter()
-        .map(|piece| convert_word_piece(piece.piece))
-        .collect()
+    if !converted.is_empty() && rest.is_empty() {
+        return Ok(converted);
+    }
+    let pieces = catch_parser_panic(|| bword::parse(rest, &parser_options()))?
+        .map_err(|err| ParseError::syntax(format!("word parse of {rest:?}: {err}")))?;
+    for piece in pieces {
+        converted.push(convert_word_piece(piece.piece)?);
+    }
+    Ok(converted)
 }
 
 fn convert_word_piece(piece: bword::WordPiece) -> Result<WordPiece, ParseError> {

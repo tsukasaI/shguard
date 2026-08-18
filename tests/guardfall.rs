@@ -1224,3 +1224,45 @@ fn guardfall_shell_init_redirect_cases() {
         );
     }
 }
+
+/// PR #314 (crash-fuzzer findings): brush-parser 0.4.0's internal
+/// `parse::<uN>().unwrap()` overflow panics, pinned through the public
+/// [`shguard::analyze`] API. The tilde case is the security-critical one —
+/// the uncontained panic used to take down the whole parse, downgrading the
+/// sibling `rm -rf /` word's blocklist `Block` to the outer fail-closed
+/// `Ask`.
+#[test]
+fn guardfall_brush_parser_overflow_panic_cases() {
+    let cases: &[(&str, Decision)] = &[
+        // Tilde UID past u64::MAX: must stay Block (sibling word matches
+        // the blocklist), not fold to Ask via panic containment.
+        ("rm -rf / ~41353561361542343807", Decision::Block),
+        // Brace-sequence number past i64::MAX: contained panic folds to
+        // the parse-error Ask, never Allow.
+        ("echo a{9223372036854775808b", Decision::Ask),
+        // Redirection io-number past i32::MAX: same containment fold.
+        ("echo 2147483648>f", Decision::Ask),
+    ];
+
+    for (command, expected) in cases {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
+/// A word made of nothing but repeated overflowing-tilde runs: the
+/// per-run remainder recursion this PR first shipped in
+/// `convert_word_text` overflowed the stack at ~2 MiB of input (well
+/// under the 10 MiB stdin cap), and a stack overflow aborts — no verdict
+/// on stdout, which fails OPEN in the hook. Pins the iterative rewrite.
+#[test]
+fn guardfall_repeated_overflowing_tilde_runs_do_not_overflow_the_stack() {
+    let word = "~41353561361542343807".repeat(100_000);
+    let verdict = shguard::analyze(&format!("echo {word}"));
+    assert_eq!(verdict.decision(), Decision::Allow);
+}
