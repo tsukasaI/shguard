@@ -57,6 +57,45 @@
 /// stack-overflow defense).
 pub(crate) const MAX_BRACE_NESTING_DEPTH: usize = 64;
 
+/// Cap on `{`/`}` nesting depth specifically for `src/parser.rs`'s raw
+/// pre-scan (`reject_excessive_raw_nesting`) — separate from
+/// [`MAX_BRACE_NESTING_DEPTH`], which the same scan still uses for its
+/// `(`/`)` check, and which every AST-level brace-depth cap
+/// (`src/parser.rs`'s `convert_brace_segment`/`convert_brace_members`,
+/// `src/normalize.rs`'s `expand_braces`) keeps using unchanged.
+///
+/// # Why a separate, much smaller cap
+///
+/// Unlike `(`/`)` nesting (linear-cost stack recursion, [`MAX_BRACE_
+/// NESTING_DEPTH`]'s own docs), a *comma-less* nested brace group
+/// (`{{{x}}}`, no `,` inside any level) makes brush-parser's PEG grammar
+/// backtrack catastrophically — no memoization, ~6.5x cost growth per
+/// nesting level (crash-fuzzer measurement, release build):
+///
+/// | depth | time |
+/// |---|---|
+/// | 12 | 0.026s |
+/// | 14 | 0.158s |
+/// | 16 | 1.064s |
+/// | 18 | 7.278s |
+///
+/// `MAX_BRACE_NESTING_DEPTH`'s own 64-level cap is far above the usable
+/// limit here: depth 24 already extrapolates to hours, so a raw brace
+/// count sitting *below* 64 sails through unrejected while still taking
+/// unbounded wall-clock time. A real brace expansion containing at least
+/// one `,` at every level (`{a,{a,{a,x}}}`) does not backtrack this way —
+/// confirmed flat at ~0.004s regardless of depth — so this cap only ever
+/// costs a false `Ask` on the specific comma-less shape, never on
+/// ordinary brace-alternation use.
+///
+/// 12 sits at the last depth still comfortably sub-30ms in the table
+/// above. Re-measure the same comma-less-nesting timing curve before
+/// raising this on any `brush-parser` version bump — unlike stack-depth
+/// caps, this one is not just "still safe", it can silently become
+/// "usable again" or "unusably slow one level earlier" depending on
+/// whether a new grammar version added memoization.
+pub(crate) const MAX_RAW_BRACE_NESTING_DEPTH: usize = 12;
+
 /// Cap on the total count of reserved-word compound-command openers (`if`,
 /// `while`, `until`, `for`, `case`) `src/parser.rs`'s raw pre-scan tolerates
 /// in one command, enforced by [`crate::parser::reject_excessive_raw_nesting`]
