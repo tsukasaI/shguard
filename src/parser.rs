@@ -127,12 +127,12 @@ fn is_token_boundary(byte: u8) -> bool {
     )
 }
 
-/// Rejects `command` if its `{`/`}` nesting depth exceeds [`MAX_RAW_BRACE_
-/// NESTING_DEPTH`], its `(`/`)` nesting depth exceeds [`MAX_BRACE_NESTING_
-/// DEPTH`], or its total count of [`NESTING_KEYWORDS`] occurrences exceeds
-/// [`MAX_KEYWORD_NESTING_COUNT`], *before* any recursive-descent parser
-/// (brush-parser's PEG grammar, or this module's own brace/word
-/// conversion) ever sees the text.
+/// Rejects `command` if its `{`/`}` nesting depth exceeds
+/// [`MAX_RAW_BRACE_NESTING_DEPTH`], its `(`/`)` nesting depth exceeds
+/// [`MAX_BRACE_NESTING_DEPTH`], or its total count of [`NESTING_KEYWORDS`]
+/// occurrences exceeds [`MAX_KEYWORD_NESTING_COUNT`], *before* any
+/// recursive-descent parser (brush-parser's PEG grammar, or this module's
+/// own brace/word conversion) ever sees the text.
 ///
 /// This is the primary defense against issue #52's abort: deeply nested
 /// `{`/`(` input (e.g. `{a,` repeated thousands of times, or `$(` repeated
@@ -1381,11 +1381,11 @@ mod tests {
 
     // crash-fuzzer finding: a *comma-less* nested brace group (`{{{x}}}`,
     // no `,` at any level) makes brush-parser's PEG grammar backtrack
-    // catastrophically — ~6.5x cost growth per level, ~7.3s at depth 18,
-    // depth 24 extrapolating to hours. This asserts the raw pre-scan
-    // rejects a depth the exponential path would otherwise never return
-    // from within this test's own lifetime, proving the cap is what stops
-    // it, not luck.
+    // catastrophically — ~6.5x cost growth per two levels, ~7.3s at depth
+    // 18, ~47s extrapolated at this test's depth 20. This asserts the raw
+    // pre-scan rejects a depth the exponential path would otherwise burn
+    // the better part of a minute on, proving the cap is what stops it,
+    // not luck.
     #[test]
     fn raw_comma_less_brace_nesting_past_the_new_cap_is_rejected_before_the_exponential_path() {
         let depth = 20;
