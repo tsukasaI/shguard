@@ -1224,3 +1224,56 @@ fn guardfall_shell_init_redirect_cases() {
         );
     }
 }
+
+/// `git -C <dir>`/`-c k=v`/`--git-dir=…` (real global options, always
+/// positioned before the subcommand in `git`'s own syntax) shifted the
+/// subcommand out of `required_tokens`' positional slot 0, silently
+/// missing every git-* rule.
+#[test]
+fn guardfall_git_global_options_positional_shift_cases() {
+    let cases: &[(&str, Decision)] = &[
+        // The reported repros: a separated-argument global option's value
+        // used to be miscounted as the subcommand's own positional slot.
+        ("git -C /tmp push --force", Decision::Block),
+        ("git -c a=b push --force", Decision::Block),
+        ("git -C /tmp -c a=b push --force", Decision::Block),
+        ("git -C /tmp reset --hard HEAD~1", Decision::Block),
+        ("git -C /tmp clean -fd", Decision::Block),
+        ("git -C /tmp commit --amend", Decision::Block),
+        ("git -C /tmp branch -D feature/old", Decision::Block),
+        // `--git-dir=<path>` is a single dash-prefixed token (no separate
+        // value word) — already unaffected before this fix, pinned here
+        // alongside the separated-argument forms above.
+        (
+            "git --git-dir=/x --work-tree=/y push --force",
+            Decision::Block,
+        ),
+        // A boolean global option must not be treated as a value-taking
+        // one (`-p`'s value would otherwise wrongly swallow the
+        // subcommand).
+        ("git -p push --force", Decision::Block),
+        ("git --no-pager push --force", Decision::Block),
+        // Benign controls: a real global option ahead of a non-dangerous
+        // subcommand must stay Allow.
+        ("git -C /tmp status", Decision::Allow),
+        ("git -C /tmp log", Decision::Allow),
+        // Regression guard (issue #146/#148's own pin): a subcommand's own
+        // flag (`-m`, not one of git's global options) positioned before
+        // the subcommand must NOT be treated as global-option-shaped —
+        // stripping it would silently hide it from required_flags/
+        // value_flags matching. `git -m ... commit` is not valid git
+        // syntax in the first place (`-m` is commit-specific), so this
+        // staying unmatched costs nothing.
+        ("git -m hello commit --no-verify", Decision::Allow),
+    ];
+
+    for (command, expected) in cases {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}

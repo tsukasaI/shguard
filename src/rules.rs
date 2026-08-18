@@ -355,19 +355,101 @@ fn tar_dashless_rewrite(tail: &[NormalizedWord]) -> Option<Vec<NormalizedWord>> 
     }
 }
 
+/// `git(1)`'s own global options that take a separated value (its
+/// OPTIONS section): `-C <path>`, `-c <name>=<value>`, `--git-dir=<path>`,
+/// `--work-tree=<path>`, `--namespace=<name>`, `--exec-path[=<path>]`,
+/// `--config-env=<name>=<envvar>`, `--super-prefix=<path>`. Consulted only
+/// by [`strip_git_global_options`] — unlike [`ValueFlag`]'s usual role
+/// (a per-rule TOML declaration), this is a fixed, code-level fact about
+/// `git` itself, true for every `git` rule alike.
+fn git_global_value_flags() -> Vec<ValueFlag> {
+    vec![
+        ValueFlag::Short('C'),
+        ValueFlag::Short('c'),
+        ValueFlag::Long("git-dir".to_string()),
+        ValueFlag::Long("work-tree".to_string()),
+        ValueFlag::Long("namespace".to_string()),
+        ValueFlag::Long("exec-path".to_string()),
+        ValueFlag::Long("config-env".to_string()),
+        ValueFlag::Long("super-prefix".to_string()),
+    ]
+}
+
+/// `git(1)`'s own global options that take NO value — the boolean
+/// counterpart to [`git_global_value_flags`]. Deliberately an exhaustive,
+/// fixed list rather than "any dash-prefixed token": a subcommand's OWN
+/// flag (`git -m "$X" commit`'s `-m`, `git commit`'s message flag) must
+/// never be silently dropped by [`strip_git_global_options`] just because
+/// it happens to precede an unresolved word — only a token *known* to be
+/// one of git's own global options is safe to skip past.
+fn is_git_global_boolean_flag(token: &str) -> bool {
+    matches!(
+        token,
+        "-p" | "--paginate"
+            | "-P"
+            | "--no-pager"
+            | "--no-replace-objects"
+            | "--no-optional-locks"
+            | "--bare"
+            | "--literal-pathspecs"
+            | "--glob-pathspecs"
+            | "--noglob-pathspecs"
+            | "--icase-pathspecs"
+    )
+}
+
+/// Strips `git`'s own leading global options from the front of a `git`
+/// invocation's tail, so `git -C <dir> push --force` matches the same way
+/// `git push --force` does: real git syntax always places global options
+/// before the subcommand, so the first token that is not one of git's own
+/// global options ([`git_global_value_flags`]/[`is_git_global_boolean_flag`])
+/// IS the subcommand.
+///
+/// A global option's `--flag=value` attached form needs no special
+/// handling here: it's a single dash-prefixed token, already invisible to
+/// [`Positionals`]' positional counting without this function's help.
+/// Only a *separated* value-taking global option's value needs removing —
+/// left in place, it is a non-dash token indistinguishable from the
+/// subcommand itself (`git -C /tmp push`'s `/tmp`).
+///
+/// Stops (without consuming it) at any token that is neither a known
+/// global option nor that option's own value: this is deliberately
+/// conservative — a subcommand-specific flag that merely looks
+/// global-shaped (`-m`), or an unresolvable word that might be one, is
+/// left untouched rather than guessed at, so `strip_git_global_options`
+/// can only ever narrow *which* leading tokens are skipped, never drop a
+/// token the rest of the pipeline still needs to see.
+fn strip_git_global_options(tail: &[NormalizedWord]) -> Cow<'_, [NormalizedWord]> {
+    let value_flags = git_global_value_flags();
+    let mut i = 0;
+    while let Some(word) = tail.get(i) {
+        match word.resolution() {
+            Resolution::Resolved(s) if value_flags.iter().any(|flag| flag.is_bare(s)) => {
+                i += if tail.get(i + 1).is_some() { 2 } else { 1 };
+            }
+            Resolution::Resolved(s) if is_git_global_boolean_flag(s) => i += 1,
+            _ => break,
+        }
+    }
+    if i == 0 {
+        Cow::Borrowed(tail)
+    } else {
+        Cow::Owned(tail[i..].to_vec())
+    }
+}
+
 /// The tail a rule's flag/target checks should actually see for one
 /// wrapper-chain hop: `tail` rewritten via [`tar_dashless_rewrite`] when
-/// `base` is `tar`, unchanged otherwise. Shared by
-/// [`CommandRule::matching_rest`] and [`CommandRule::matching_rest_by_name`]
-/// (issue #86) so the two walkers can't silently diverge on this point —
-/// each previously duplicated this same `if base == "tar" { ... }` block
-/// verbatim.
-fn tar_dashless_effective_tail<'a>(
-    base: &str,
-    tail: &'a [NormalizedWord],
-) -> Cow<'a, [NormalizedWord]> {
+/// `base` is `tar`, via [`strip_git_global_options`] when `base` is
+/// `git`, unchanged otherwise. Shared by [`CommandRule::matching_rest`]
+/// and [`CommandRule::matching_rest_by_name`] (issue #86) so the walkers
+/// can't silently diverge on this point — each previously duplicated the
+/// `tar` case's `if base == "tar" { ... }` block verbatim.
+fn command_effective_tail<'a>(base: &str, tail: &'a [NormalizedWord]) -> Cow<'a, [NormalizedWord]> {
     if base == "tar" {
         tar_dashless_rewrite(tail).map_or(Cow::Borrowed(tail), Cow::Owned)
+    } else if base == "git" {
+        strip_git_global_options(tail)
     } else {
         Cow::Borrowed(tail)
     }
@@ -1257,8 +1339,11 @@ impl CommandRule {
     /// except one this rule's own `value_flags` declares as a flag's
     /// value (e.g. `-m`'s argument) rather than a positional.
     ///
-    /// Known gap: `git -C <path> push` places a non-dash token (`<path>`)
-    /// before the subcommand; the rule won't match in that case.
+    /// `git -C <path> push` would place a non-dash token (`<path>`)
+    /// before the subcommand if `rest_words` still carried it — it
+    /// doesn't, because [`Self::matching_rest`]/[`Self::matching_rest_by_name`]
+    /// already strip `git`'s own leading global options (see
+    /// [`command_effective_tail`]) before this method ever sees the tail.
     #[must_use]
     fn constraints_match(&self, rest_words: &[NormalizedWord]) -> bool {
         let rest = resolved_strings(rest_words);
@@ -1280,7 +1365,7 @@ impl CommandRule {
     /// [`Self::matches`] (which also checks targets). PR #84 switched
     /// [`Self::matches_except_target`] to [`Self::matching_rest_by_name`]
     /// instead — that function now shares this tar-dashless-rewrite step
-    /// via [`tar_dashless_effective_tail`] (issue #86), so the two helpers
+    /// via [`command_effective_tail`] (issue #86), so the two helpers
     /// can't diverge on this point.
     ///
     /// Unlike a single [`effective_command`] resolution, this checks the
@@ -1298,15 +1383,18 @@ impl CommandRule {
     /// `command = "rm"`/`command = "git"` rule.
     ///
     /// When the resolved hop's own basename is `tar`, the tail is passed
-    /// through [`tar_dashless_effective_tail`]/[`tar_dashless_rewrite`]
-    /// first (issue #67): tar's own calling convention allows a fully
-    /// dash-less leading option cluster (`tar xfC a.tar /`), which the
-    /// generic flag matching below can't see at all (`short_cluster_chars`
-    /// returns an empty set for a dash-less token). The rewrite is a no-op
-    /// `Cow::Borrowed` for every other command, and for any `tar`
-    /// invocation that isn't the specific dash-less `x`+`C` cluster shape
-    /// the rewrite targets — see that function's docs for exactly when it
-    /// fires.
+    /// through [`command_effective_tail`]/[`tar_dashless_rewrite`] first
+    /// (issue #67): tar's own calling convention allows a fully dash-less
+    /// leading option cluster (`tar xfC a.tar /`), which the generic flag
+    /// matching below can't see at all (`short_cluster_chars` returns an
+    /// empty set for a dash-less token). When the basename is `git`, the
+    /// same helper strips `git`'s own leading global options
+    /// (`strip_git_global_options`, e.g. `-C <dir>`), so `git -C <dir>
+    /// push --force` finds `push` at position 0 the same way `git push
+    /// --force` does. The rewrite is a no-op `Cow::Borrowed` for every
+    /// other command, and for a `tar`/`git` invocation the respective
+    /// rewrite doesn't recognise — see each function's docs for exactly
+    /// when it fires.
     #[must_use]
     fn matching_rest<'a>(&self, argv: &'a [NormalizedWord]) -> Option<Cow<'a, [NormalizedWord]>> {
         let mut rest = argv;
@@ -1317,7 +1405,7 @@ impl CommandRule {
             };
             let base = basename(name);
             if self.command.matches(base) {
-                let effective = tar_dashless_effective_tail(base, tail);
+                let effective = command_effective_tail(base, tail);
                 if self.constraints_match(&effective) {
                     return Some(effective);
                 }
@@ -1533,7 +1621,7 @@ impl CommandRule {
     /// satisfied, unlike [`Self::matching_rest`], which only ever returns a
     /// hop once both the name and the constraints already hold.
     ///
-    /// Applies [`tar_dashless_effective_tail`] to the returned tail — the
+    /// Applies [`command_effective_tail`] to the returned tail — the
     /// same helper [`Self::matching_rest`] uses (issue #86), so the two
     /// walkers can't diverge on this point. Without it, a dash-less
     /// leading option cluster (`tar xfC a.tar /`) is invisible to
@@ -1581,7 +1669,7 @@ impl CommandRule {
             };
             let base = basename(name);
             if self.command.matches(base) {
-                return Some(tar_dashless_effective_tail(base, tail));
+                return Some(command_effective_tail(base, tail));
             }
             if !TRANSPARENT_WRAPPERS.contains(&base) {
                 return None;
