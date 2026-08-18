@@ -2827,7 +2827,35 @@ fn evaluate_dash_c(
         }
         FlagScan::Absent => return None,
     };
-    let script_word = rest_words.get(flag_index + 1)?;
+
+    let script_index = if POSIX_STYLE_DASH_C_INTERPRETERS.contains(&interpreter) {
+        match find_posix_dash_c_script(rest_words, flag_index + 1) {
+            Ok(Some(index)) => index,
+            // Ran out of `rest_words` without finding an operand (e.g. a
+            // bare trailing `-c`, or `-c` followed only by other options)
+            // — matches the pre-existing "no script at all" behavior of
+            // the plain index lookup this replaces: not this shape.
+            Ok(None) => return None,
+            // An option between `-c` and the script did not resolve to a
+            // concrete value, so its text — and therefore whether it
+            // consumes a following word as its own value — cannot be
+            // determined. Guessing either way could walk past the real
+            // script; fail closed instead.
+            Err(()) => {
+                return Some(Verdict::ask(
+                    Reason::new(format!(
+                        "`{interpreter} -c`'s script operand could not be statically located: \
+                         an option between `-c` and the script did not resolve to a concrete \
+                         value"
+                    )),
+                    outer_argv,
+                ));
+            }
+        }
+    } else {
+        flag_index + 1
+    };
+    let script_word = rest_words.get(script_index)?;
 
     match script_word.resolution() {
         Resolution::Resolved(script) => Some(recurse_shell_string(
@@ -2846,6 +2874,67 @@ fn evaluate_dash_c(
             outer_argv,
         )),
     }
+}
+
+/// Shells whose `-c` accepts other options before the script operand
+/// (`bash -c -x '...'`, `bash -c -- '...'`) because they use ordinary
+/// getopt-style argument parsing — every [`SHELL_INTERPRETERS`] member
+/// [`evaluate_dash_c`] reaches except `tcsh`/`csh`, whose `-c` takes the
+/// literal next token with no interleaved-option support known to model,
+/// so their existing `flag_index + 1` lookup is left unchanged rather
+/// than guessed at. `fish` never reaches this: [`evaluate_dash_c`] routes
+/// it to [`evaluate_fish`] before this list is ever consulted.
+const POSIX_STYLE_DASH_C_INTERPRETERS: &[&str] = &["bash", "sh", "zsh", "dash", "ash", "ksh"];
+
+/// Finds a POSIX-style shell's `-c` script operand in `rest_words`,
+/// scanning forward from `start` (the position right after the matched
+/// `-c` flag). Real getopt-style shells accept other options before the
+/// script — the naive "the very next token is the script" lookup this
+/// replaces assumed the opposite, which is exactly what let
+/// `bash -c -- 'rm -rf /'` through as `Allow`: the word recursed into was
+/// the harmless literal `--`, while the real script sailed through
+/// unchecked.
+///
+/// A flag-shaped token (starting with `-`/`+`) is skipped as a boolean
+/// option, except: `--`, which ends option processing (the following
+/// token, if any, is the script); and the small set of options known to
+/// take a separated value (`-o`/`+o`/`-O`/`+O`/`--rcfile`/`--init-file`),
+/// whose value token is skipped alongside the flag itself without being
+/// inspected — it cannot be the script, so its own content (even if it
+/// too looks like a flag) never matters.
+///
+/// Returns `Ok(None)` when the scan runs out of `rest_words` before
+/// finding an operand. Returns `Err(())` — the caller floors to `Ask` —
+/// the moment a token in this span is [`Resolution::Unresolvable`]:
+/// whether that token is itself a flag (and if so, whether it consumes a
+/// following word as its own value) cannot be determined, so guessing
+/// either way risks walking past the real script.
+fn find_posix_dash_c_script(
+    rest_words: &[NormalizedWord],
+    start: usize,
+) -> Result<Option<usize>, ()> {
+    let mut i = start;
+    while let Some(word) = rest_words.get(i) {
+        let Resolution::Resolved(text) = word.resolution() else {
+            return Err(());
+        };
+        if text == "--" {
+            return Ok(rest_words.get(i + 1).map(|_| i + 1));
+        }
+        if matches!(
+            text.as_str(),
+            "-o" | "+o" | "-O" | "+O" | "--rcfile" | "--init-file"
+        ) {
+            i += 2;
+            continue;
+        }
+        if text.starts_with('-') || text.starts_with('+') {
+            i += 1;
+            continue;
+        }
+        return Ok(Some(i));
+    }
+    Ok(None)
 }
 
 /// Rule 6a for `fish` (issue #269). `fish` carries two code-running
@@ -5846,6 +5935,55 @@ mod tests {
     #[test]
     fn sh_clustered_dash_uc_recurses_and_blocks() {
         assert_decision("sh -uc 'rm -rf /'", Decision::Block);
+    }
+
+    // ==== crash-fuzzer/logic-bugfixer finding: `-c`'s script operand is
+    // whatever the first non-option token after `-c` is, not necessarily
+    // the literal next token — a real getopt-style shell accepts other
+    // options first (`bash -c -x '...'`, `bash -c -- '...'`). Before the
+    // fix, `find_posix_dash_c_script` did not exist and `evaluate_dash_c`
+    // always recursed into `rest_words[flag_index + 1]` literally, so
+    // `bash -c -- 'rm -rf /'` recursed into the harmless literal `--`
+    // while the real script sailed through unchecked, resolving to Allow.
+    // ====
+
+    #[test]
+    fn dash_c_double_dash_before_script_still_recurses_and_blocks() {
+        assert_decision(r#"bash -c -- "rm -rf /""#, Decision::Block);
+    }
+
+    #[test]
+    fn dash_c_boolean_flag_before_script_still_recurses_and_blocks() {
+        assert_decision(r#"bash -c -x "rm -rf /""#, Decision::Block);
+        assert_decision(r#"bash -c --norc "rm -rf /""#, Decision::Block);
+    }
+
+    #[test]
+    fn dash_c_separated_value_flag_before_script_still_recurses_and_blocks() {
+        assert_decision(r#"bash -c -o pipefail "rm -rf /""#, Decision::Block);
+    }
+
+    #[test]
+    fn dash_c_options_before_script_still_allows_a_benign_script() {
+        assert_decision(r#"bash -c -- "echo hi""#, Decision::Allow);
+    }
+
+    #[test]
+    fn dash_c_unresolvable_option_before_script_asks() {
+        assert_decision(r#"bash -c "$(echo -x)" "rm -rf /""#, Decision::Ask);
+    }
+
+    #[test]
+    fn dash_c_forwarded_through_find_exec_still_recurses_and_blocks() {
+        assert_decision(r#"find / -exec bash -c -- "rm -rf /" \;"#, Decision::Block);
+    }
+
+    #[test]
+    fn tcsh_dash_c_lookup_stays_literal_next_token() {
+        // `tcsh`/`csh` are deliberately excluded from the forward-scanning
+        // fix (no interleaved-option support known to model for them), so
+        // their `-c` still takes the literal next token.
+        assert_decision(r#"tcsh -c "rm -rf /""#, Decision::Block);
     }
 
     // ==== Issues #71/#53: an unresolvable word at a scanned flag position
