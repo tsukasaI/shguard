@@ -1113,8 +1113,9 @@ enum RootCause {
     /// Matches [`known_gap_ifs_glued_directly_to_brace_group`]'s tracked
     /// finding -- still logged and reported, but excluded from the main
     /// sweep's pass/fail assertion UNLESS the divergence's `decision` is
-    /// [`Decision::Allow`] (see [`DivergenceReport::decision`]'s own
-    /// module-doc cross-reference).
+    /// [`Decision::Allow`] (see the module doc's "Known-open findings"
+    /// section for why that direction always fails loud regardless of
+    /// `RootCause`).
     IfsGluedBraceDup,
     /// Doesn't match any recognized shape -- always fails the main sweep.
     Novel,
@@ -1188,9 +1189,30 @@ fn classify_root_cause(
     RootCause::Novel
 }
 
-/// `true` if some non-empty word appears strictly more times in `shguard_argv`
-/// than in `bash_argv` -- a periodic/duplicated word, not necessarily
-/// adjacent (so a plain windowed substring scan wouldn't catch it).
+/// `true` if some non-empty word appears strictly more times in
+/// `shguard_argv` than in `bash_argv` -- not necessarily adjacent (so a
+/// plain windowed substring scan wouldn't catch it), and not necessarily
+/// an already-repeated word: a 1-vs-0 "shguard produced one occurrence of a
+/// word bash never produced" case counts too.
+///
+/// A fable review of an earlier version of this PR proposed requiring
+/// `count >= 2` (i.e. only accepting an already-repeated word's count going
+/// UP, never a brand-new 1-vs-0 word) on the theory that a lone extra word
+/// is a weaker, more easily-coincidental signal than genuine duplication.
+/// Verified empirically against real mutator output before accepting that
+/// change (`SHGUARD_FUZZ_ITERATIONS=5000`, 3 different seeds) and reverted
+/// it: the `IfsGluedBraceDup` family's actual shape varies by WHICH word
+/// ends up over-counted depending on where the empty brace member sits --
+/// `echo$IFS{hello,}` produces shguard argv `["echo","hello","echo"]` vs
+/// bash's `["echo","echo"]`, where `"echo"` is already at parity (2-vs-2)
+/// and `"hello"` is the sole excess word at 1-vs-0. Requiring `count >= 2`
+/// misclassified the majority of real family instances as `Novel` in that
+/// verification run (turning the nightly sweep red again -- the exact
+/// failure mode this classifier exists to fix), so a lone extra word IS a
+/// legitimate signal for this family, not just a coincidental false
+/// positive risk. The actual backstop against silently absorbing an
+/// unrelated bug remains [`Decision::Allow`] always failing loud regardless
+/// of `RootCause` (see the main sweep's assertion) -- not this predicate.
 fn has_excess_word_multiplicity(shguard_argv: &[String], bash_argv: &[String]) -> bool {
     let mut bash_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for w in bash_argv {
@@ -1211,39 +1233,149 @@ fn has_excess_word_multiplicity(shguard_argv: &[String], bash_argv: &[String]) -
 }
 
 /// A canonicalized fingerprint of an argv diff's SHAPE: maps each distinct
-/// word seen (across both `shguard_argv` and `bash_argv`, in first-
-/// appearance order) to a symbol, then serializes both sequences as symbol
-/// strings. Two candidates with the same repetition/emptiness pattern but
-/// different literal words (`{echo,}$IFS{X,}` vs `{ls,}$IFS{Y,}`) collapse
-/// to the same signature -- this is what actually stops a templated
-/// mutator from refiling the same underlying gap under a new nightly CI
-/// issue for every literal-word variant it happens to generate (issue #93's
-/// motivating failure mode). Generalizes to whatever the next undiagnosed
-/// family turns out to be, not just the two named [`RootCause`] variants.
+/// NON-EMPTY word seen (across both `shguard_argv` and `bash_argv`, in
+/// first-appearance order) to a small integer id, then serializes both
+/// sequences as comma-joined id lists -- with the empty string always
+/// mapped to the fixed token `E` rather than consuming an id, so emptiness
+/// is always distinguishable from "some other word" regardless of how many
+/// distinct non-empty words appear (fable-review follow-up: an earlier
+/// version symbolized `""` like any other word, so `["a",""]` vs `["a"]`
+/// and `["a","x"]` vs `["a"]` produced the SAME signature -- silently
+/// folding a regression of the fixed empty-word-elision family, #324, into
+/// an unrelated extra-word divergence's tracked issue). Ids are unbounded
+/// (not a fixed single-character alphabet), so a candidate with more than a
+/// couple dozen distinct words can't overflow into symbol collisions.
+///
+/// Two candidates with the same repetition/emptiness pattern but different
+/// literal words (`{echo,}$IFS{X,}` vs `{ls,}$IFS{Y,}`) collapse to the
+/// same signature -- this is what actually stops a templated mutator from
+/// refiling the same underlying gap under a new nightly CI issue for every
+/// literal-word variant it happens to generate (issue #93's motivating
+/// finding). Generalizes to whatever the next undiagnosed family turns out
+/// to be, not just the two named [`RootCause`] variants.
 fn diff_signature(shguard_argv: &[String], bash_argv: &[String]) -> String {
-    let mut symbols: std::collections::HashMap<&str, char> = std::collections::HashMap::new();
-    let mut next = b'A';
-    let s: String = shguard_argv
-        .iter()
-        .map(|w| symbolize_word(w, &mut symbols, &mut next))
-        .collect();
-    let b: String = bash_argv
-        .iter()
-        .map(|w| symbolize_word(w, &mut symbols, &mut next))
-        .collect();
+    let mut symbols: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let s = symbolize_sequence(shguard_argv, &mut symbols);
+    let b = symbolize_sequence(bash_argv, &mut symbols);
     format!("s={s};b={b}")
+}
+
+fn symbolize_sequence<'a>(
+    argv: &'a [String],
+    symbols: &mut std::collections::HashMap<&'a str, usize>,
+) -> String {
+    argv.iter()
+        .map(|w| symbolize_word(w, symbols))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn symbolize_word<'a>(
     word: &'a str,
-    symbols: &mut std::collections::HashMap<&'a str, char>,
-    next: &mut u8,
-) -> char {
-    *symbols.entry(word).or_insert_with(|| {
-        let c = char::from(*next);
-        *next += 1;
-        c
-    })
+    symbols: &mut std::collections::HashMap<&'a str, usize>,
+) -> String {
+    if word.is_empty() {
+        return "E".to_string();
+    }
+    let next_id = symbols.len();
+    let id = *symbols.entry(word).or_insert(next_id);
+    id.to_string()
+}
+
+// ---- direct pins for classify_root_cause / has_excess_word_multiplicity /
+// diff_signature: correctness of the fuzzer's OWN classification logic
+// must not rest entirely on seed-dependent sweep runs (fable review of
+// #327) ----
+
+fn strings(words: &[&str]) -> Vec<String> {
+    words.iter().map(|s| (*s).to_string()).collect()
+}
+
+#[test]
+fn classify_root_cause_recognizes_the_pinned_ifs_glued_brace_dup_reproducer() {
+    let shguard_argv = strings(&["echo", "cm0gLXJmIC8=", "echo", "cm0gLXJmIC8="]);
+    let bash_argv = strings(&["echo=", "echo", "="]);
+    assert_eq!(
+        classify_root_cause("{echo,}$IFS{cm0gLXJmIC8=,}", &shguard_argv, &bash_argv),
+        RootCause::IfsGluedBraceDup
+    );
+}
+
+#[test]
+fn classify_root_cause_is_novel_without_the_textual_gate() {
+    // Same argv shapes as the pinned reproducer, but no `$IFS{`/`}$IFS`
+    // adjacency in the source text -- must not classify as
+    // IfsGluedBraceDup on argv shape alone.
+    let shguard_argv = strings(&["echo", "x", "echo", "x"]);
+    let bash_argv = strings(&["echo", "echo"]);
+    assert_eq!(
+        classify_root_cause("echo x echo x", &shguard_argv, &bash_argv),
+        RootCause::Novel
+    );
+}
+
+#[test]
+fn classify_root_cause_recognizes_a_lone_extra_word_variant_of_the_same_family() {
+    // Grounded in an actual mutator-generated candidate (SHGUARD_FUZZ_SEED=1
+    // and =42 both produce it): "echo$IFS{hello,}" resolves shguard argv to
+    // ["echo","hello","echo"] vs bash's ["echo","echo"] -- "echo" is
+    // already at parity (2-vs-2 in both), and the SOLE excess word is
+    // "hello" at 1-vs-0. This is the same IfsGluedBraceDup family as the
+    // pinned reproducer, just with the empty brace member in a different
+    // slot -- must classify the same way, not fall through to Novel.
+    let shguard_argv = strings(&["echo", "hello", "echo"]);
+    let bash_argv = strings(&["echo", "echo"]);
+    assert_eq!(
+        classify_root_cause("echo$IFS{hello,}", &shguard_argv, &bash_argv),
+        RootCause::IfsGluedBraceDup
+    );
+}
+
+#[test]
+fn has_excess_word_multiplicity_counts_a_lone_extra_word_not_just_repeated_ones() {
+    assert!(has_excess_word_multiplicity(
+        &strings(&["echo", "echo"]),
+        &strings(&["echo"])
+    ));
+    // A word appearing once in shguard's argv and never in bash's is still
+    // an excess -- see classify_root_cause_recognizes_a_lone_extra_word_
+    // variant_of_the_same_family's doc for why this must count for the
+    // IfsGluedBraceDup family specifically (verified empirically, not
+    // assumed: an earlier version of this predicate required `count >= 2`
+    // and misclassified this real shape as Novel).
+    assert!(has_excess_word_multiplicity(
+        &strings(&["echo", "hello", "echo"]),
+        &strings(&["echo", "echo"])
+    ));
+}
+
+#[test]
+fn diff_signature_distinguishes_an_empty_word_from_an_extra_word() {
+    // Regression guard (fable review of #327): an earlier version
+    // symbolized "" like any other word, so a #324-family divergence
+    // (a stray empty word) and an unrelated extra-word divergence produced
+    // the SAME signature -- which would fold a regression of the fixed
+    // empty-word-elision family into an unrelated tracked issue.
+    let empty_word_diff = diff_signature(&strings(&["a", ""]), &strings(&["a"]));
+    let extra_word_diff = diff_signature(&strings(&["a", "x"]), &strings(&["a"]));
+    assert_ne!(empty_word_diff, extra_word_diff);
+}
+
+#[test]
+fn diff_signature_collapses_same_shape_different_literal_words() {
+    let echo_shape = diff_signature(
+        &strings(&["echo", "X", "echo", "X"]),
+        &strings(&["echo", "echo"]),
+    );
+    let ls_shape = diff_signature(&strings(&["ls", "Y", "ls", "Y"]), &strings(&["ls", "ls"]));
+    assert_eq!(echo_shape, ls_shape);
+}
+
+#[test]
+fn diff_signature_distinguishes_a_different_shape() {
+    let duplication_shape = diff_signature(&strings(&["a", "a"]), &strings(&["a"]));
+    let extra_word_shape = diff_signature(&strings(&["a", "b"]), &strings(&["a"]));
+    assert_ne!(duplication_shape, extra_word_shape);
 }
 
 fn shguard_argv_contains_unexpanded_tilde(argv: &[String]) -> bool {
