@@ -359,11 +359,12 @@ pub(crate) fn normalize_argv(command: &SimpleCommand) -> Vec<NormalizedWord> {
 /// original `{`/`,`/`}` characters once [`WordPiece::BraceAlternation`] has
 /// replaced them. If a `BraceAlternation` piece ever does reach an
 /// assignment value, this function folds it the same cartesian way
-/// [`normalize_word`] would (returning more than one element, or — since
-/// [`chunks_to_words`]'s elision fix — exactly one if every other
-/// alternative resolves empty and unquoted) rather than guessing at the
-/// lost literal text — a narrow, acknowledged divergence from bash,
-/// recorded here rather than silently worked around.
+/// [`normalize_word`] would, one element per alternative — including an
+/// empty, unquoted alternative, since [`chunks_to_words`]'s elision is
+/// scoped to splitting contexts (`allow_split = true`) and never fires for
+/// an assignment's RHS — rather than guessing at the lost literal text: a
+/// narrow, acknowledged divergence from bash, recorded here rather than
+/// silently worked around.
 ///
 /// Called from `src/gate.rs` to resolve same-command-line variable
 /// assignments (plan.md §4's rule 2).
