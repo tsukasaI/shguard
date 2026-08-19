@@ -40,6 +40,19 @@ fn guardfall_headline_cases() {
         //     ahead of the real command — previously resolved argv[0] to
         //     "" (no blocklist match) and Allowed instead of Blocking.
         ("{,rm} -rf /", Decision::Block),
+        // 11. fable-review regression guard on the #10 fix: an assignment's
+        //     empty RHS (`X=`) must still resolve to the literal empty
+        //     string, not vanish the assignment — an earlier version of the
+        //     elision fix wrongly elided it too, dropping the `X -> ""`
+        //     mapping and downgrading this from Block to Ask.
+        ("X=; $X rm -rf /", Decision::Block),
+        // 12. fable-review hardening: a quoted-empty word immediately before
+        //     an $IFS split at command position must not let a later word
+        //     in the same $IFS-delimited run win argv[0] resolution — bash
+        //     would exec the empty-string command (which fails), never the
+        //     word after it, so this stays Ask (fail-closed), never Block
+        //     or Allow.
+        ("''${IFS}rm -rf /", Decision::Ask),
     ];
 
     for (command, expected) in cases {

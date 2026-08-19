@@ -432,7 +432,7 @@ fn fold_word(pieces: &[WordPiece], allow_split: bool) -> Vec<NormalizedWord> {
     let mut out = Vec::new();
     for alternative in alternatives {
         let (chunks, ifs_derived) = resolve_pieces(&alternative, allow_split);
-        out.extend(chunks_to_words(chunks, ifs_derived));
+        out.extend(chunks_to_words(chunks, ifs_derived, allow_split));
     }
     out
 }
@@ -466,6 +466,13 @@ fn fold_word(pieces: &[WordPiece], allow_split: bool) -> Vec<NormalizedWord> {
 /// members directly with no expansion needed, so any substitution the word
 /// contains is still found and recursed rather than silently dropped along
 /// with the abandoned brace expansion.
+///
+/// `winning` can also come back `None` after a *successful* expansion whose
+/// every alternative elides to zero words (e.g. `{,}` — both members are
+/// unquoted and empty): every alternative lands in `leftover` instead, none
+/// having produced a word. Callers must not reach this function with a word
+/// `crate::gate`'s own `first_non_vanishing_word_idx` has already skipped as
+/// vanishing — both current call sites already guard on that.
 #[must_use]
 pub(crate) fn split_command_position(word: &Word) -> (Option<Vec<WordPiece>>, Vec<Vec<WordPiece>>) {
     let Ok(alternatives) = expand_braces(&word.0, 0) else {
@@ -479,7 +486,7 @@ pub(crate) fn split_command_position(word: &Word) -> (Option<Vec<WordPiece>>, Ve
         // re-resolve once `winning` is already set.
         let produces_word = winning.is_none() && {
             let (chunks, ifs_derived) = resolve_pieces(&alternative, true);
-            !chunks_to_words(chunks, ifs_derived).is_empty()
+            !chunks_to_words(chunks, ifs_derived, true).is_empty()
         };
         if produces_word {
             winning = Some(alternative);
@@ -656,6 +663,11 @@ fn resolve_piece(piece: &WordPiece, allow_split: bool) -> (Chunk, bool) {
     match piece {
         WordPiece::Literal(text) => (Chunk::Literal(text.clone(), false), false),
         WordPiece::SingleQuoted(text) => (Chunk::Literal(text.clone(), true), false),
+        // `quoted = false`: a backslash escape is never empty text (`ch` is
+        // always exactly one character), so the elision-relevant flag is
+        // never actually consulted for it — `false` documents that this
+        // piece is not itself an elision-blocking quote pair, should a
+        // future change ever let it contribute empty text.
         WordPiece::EscapeSequence(ch) => (Chunk::Literal(ch.to_string(), false), false),
         WordPiece::AnsiCQuoted(raw) => match decode_ansi_c(raw) {
             Ok(decoded) => (Chunk::Literal(decoded, true), false),
@@ -867,17 +879,22 @@ fn resolve_piece(piece: &WordPiece, allow_split: bool) -> (Chunk, bool) {
 ///   exactly one opaque word, not zero).
 /// - `Ok((text, quoted))` becomes [`NormalizedWord::resolved`] (or
 ///   [`NormalizedWord::resolved_ifs_derived`] if `ifs_derived`) UNLESS it is
-///   empty AND `quoted` is `false` — bash elides any fully-unquoted empty
-///   result regardless of which mechanism produced the emptiness (a real
-///   `$IFS` split, or an empty brace-alternation member resolved on its own
-///   in [`fold_word`]'s per-alternative loop), but always keeps an empty
-///   *quoted* one: an empty quoted word like `''` is `Resolved("")` and
-///   must not vanish (plan.md §1.1 rule 7). This replaced an earlier
-///   segment-count-based proxy for "was this quoted" (issue #93 fuzzer
-///   finding: the proxy wrongly kept an empty, unquoted brace member as
-///   `Resolved("")`, which could win command-position resolution ahead of
-///   a real command — e.g. `{,rm} -rf /` resolving to `Allow`).
-fn chunks_to_words(chunks: Vec<Chunk>, ifs_derived: bool) -> Vec<NormalizedWord> {
+///   empty AND `quoted` is `false` AND `allow_split` is `true`. Bash elides
+///   an empty result only where word-splitting itself applies (an ordinary
+///   unquoted top-level word) — regardless of which mechanism produced the
+///   emptiness there (a real `$IFS` split, or an empty brace-alternation
+///   member resolved on its own in [`fold_word`]'s per-alternative loop) —
+///   but never in a non-splitting context: `allow_split = false` only ever
+///   reaches this function via [`normalize_assignment_value`]'s top-level
+///   [`fold_word`] call, and bash assigns `X=` the literal empty string
+///   rather than vanishing the assignment. An empty *quoted* result (`''`,
+///   `""`, `$''`) is kept unconditionally either way: it is `Resolved("")`
+///   and must not vanish (plan.md §1.1 rule 7).
+fn chunks_to_words(
+    chunks: Vec<Chunk>,
+    ifs_derived: bool,
+    allow_split: bool,
+) -> Vec<NormalizedWord> {
     let mut segments = Vec::new();
     let mut current: Result<(String, bool), (UnresolvableKind, bool)> = Ok((String::new(), false));
     for chunk in chunks {
@@ -922,11 +939,13 @@ fn chunks_to_words(chunks: Vec<Chunk>, ifs_derived: bool) -> Vec<NormalizedWord>
         .filter_map(|segment| match segment {
             Err((kind, true)) => Some(NormalizedWord::unresolvable_single_word(kind)),
             Err((kind, false)) => Some(NormalizedWord::unresolvable(kind)),
-            Ok((text, quoted)) if quoted || !text.is_empty() => Some(if ifs_derived {
-                NormalizedWord::resolved_ifs_derived(text)
-            } else {
-                NormalizedWord::resolved(text)
-            }),
+            Ok((text, quoted)) if quoted || !text.is_empty() || !allow_split => {
+                Some(if ifs_derived {
+                    NormalizedWord::resolved_ifs_derived(text)
+                } else {
+                    NormalizedWord::resolved(text)
+                })
+            }
             Ok(_) => None,
         })
         .collect()
@@ -1547,6 +1566,22 @@ mod tests {
         assert_eq!(resolved_strings(&words), vec!["rm"]);
     }
 
+    // ---- normalize_assignment_value: an empty RHS (`X=`) resolves to
+    // exactly one Resolved(""), never zero words — bash assigns X the
+    // literal empty string, it does not vanish the assignment the way an
+    // unquoted empty word elides in a splitting context. Regression guard
+    // for the fable-review finding on the elision fix above: an earlier
+    // version of the `chunks_to_words` fix elided this too, which made
+    // `apply_one` drop the `X -> ""` mapping and downgraded `X=; $X rm -rf
+    // /` from Block to Ask. ----
+    #[test]
+    fn assignment_value_empty_rhs_resolves_to_one_empty_word() {
+        let cmd = parse_ok("X=");
+        let words = normalize_assignment_value(&simple(&cmd.first.first).assignments[0]);
+        assert_eq!(words.len(), 1);
+        assert_eq!(*words[0].resolution(), Resolution::Resolved(String::new()));
+    }
+
     // ---- normalize_assignment_value: $IFS never splits an assignment's RHS,
     // even though it would split an ordinary unquoted word ----
     #[test]
@@ -1623,7 +1658,7 @@ mod tests {
     /// together, mirroring what `fold_word` does for one alternative.
     fn fold_pieces(pieces: &[WordPiece]) -> Vec<NormalizedWord> {
         let (chunks, ifs_derived) = resolve_pieces(pieces, true);
-        chunks_to_words(chunks, ifs_derived)
+        chunks_to_words(chunks, ifs_derived, true)
     }
 
     fn contains_unresolvable(words: &[NormalizedWord]) -> bool {
