@@ -35,6 +35,11 @@ fn guardfall_headline_cases() {
         // 9. issue #138: same bypass shape, but merging a flag instead of
         //    the command name ("--force" + trailing text).
         ("git push --force$'\\0'x origin main", Decision::Ask),
+        // 10. issue #93 fuzzer finding: an unquoted, empty brace-alternation
+        //     member at command position must not win argv[0] resolution
+        //     ahead of the real command — previously resolved argv[0] to
+        //     "" (no blocklist match) and Allowed instead of Blocking.
+        ("{,rm} -rf /", Decision::Block),
     ];
 
     for (command, expected) in cases {

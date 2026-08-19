@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Security
+
+- Fixed a normalization bug where an unquoted, empty brace-alternation
+  member (e.g. `{,rm} -rf /`) could win `argv[0]` resolution ahead of the
+  real command, resolving to `""` and bypassing every blocklist rule
+  entirely (`Allow` instead of `Block`) — found by the nightly differential
+  fuzzer (issue #93). `chunks_to_words` now elides an empty resolved
+  segment based on whether it was genuinely quoted, not on whether an
+  `$IFS` split happened to produce multiple segments; a quoted empty word
+  (`''`, `""`, `$''`) still always survives.
+
 - The sudo floor (rule 10, #32) generalises to a unified escalation posture
   covering `doas`, `su`, `pkexec`, and `run0` alongside `sudo` (#35, #36):
   each is now a transparent wrapper, and a command wrapped by any of the

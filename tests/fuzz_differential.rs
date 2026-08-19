@@ -1256,58 +1256,10 @@ fn env_u64(name: &str, default: u64) -> u64 {
 /// without pinning it as a passing case.
 const KNOWN_OPEN_FINDINGS: &[&str] = &["{echo,}$IFS{cm0gLXJmIC8=,}"];
 
-/// Pinned reproducer for a real, confirmed `src/normalize.rs` gap this
-/// fuzzer found at default settings: an unquoted brace-alternation member
-/// that resolves to the empty string (`{a,}`, `{,x}`, and any nesting
-/// thereof) is kept in shguard's normalized argv as a real `Resolved("")`
-/// word, but real bash elides a fully-unquoted empty word from argv
-/// regardless of which expansion produced the emptiness. Confirmed
-/// independent of this harness's own capture/comparison code via a direct
-/// `bash -c 'set -- {a,}; echo "$#"'` check (prints `1`, not `2`).
-///
-/// `src/normalize.rs`'s `chunks_to_words` doc scopes its "an empty resolved
-/// segment vanishes" rule to an `$IFS`-SPLIT boundary specifically (the
-/// `!single_segment` condition) -- a brace alternative always resolves
-/// through its own, separate `fold_word` loop iteration, so `single_segment`
-/// is `true` for it and the empty result is kept unconditionally.
-///
-/// Out of scope to fix here (issue #93 is the fuzzer harness, not a
-/// `src/normalize.rs` change) -- flagged to the maintainer as a followup
-/// issue candidate. `#[ignore]`d rather than silently excluded so
-/// `cargo test -- --ignored` keeps it discoverable; if `src/normalize.rs`
-/// is ever fixed to match bash here, this assertion will itself start
-/// failing (a signal to update/remove it, not a silent bit-rot risk).
-#[test]
-#[ignore = "known src/normalize.rs gap (issue #93 fuzzer finding, not yet its own tracked issue): \
-            an unquoted empty brace-alternation member is not elided from argv the way bash elides it"]
-fn known_gap_unquoted_empty_brace_member_is_not_elided() {
-    let sandbox = Sandbox::new();
-    let candidate = "echo {a,}";
-
-    let verdict = shguard::analyze(candidate);
-    let shguard_argv: Vec<String> = verdict
-        .normalized_argv()
-        .iter()
-        .map(|w| match w.resolution() {
-            Resolution::Resolved(s) => s.clone(),
-            Resolution::Unresolvable(kind) => panic!("expected fully resolved, got {kind:?}"),
-        })
-        .collect();
-    let bash_argv = sandbox
-        .capture_argv(candidate)
-        .expect("capture should succeed for a plain candidate with no substitutions");
-
-    assert_eq!(shguard_argv, vec!["echo", "a", ""]);
-    assert_eq!(bash_argv, vec!["echo", "a"]);
-    assert_ne!(
-        shguard_argv, bash_argv,
-        "if this now passes, src/normalize.rs has been fixed -- remove #[ignore] \
-         and fold this case into tests/guardfall.rs instead"
-    );
-}
-
-/// Second pinned reproducer, structurally unrelated to the brace-elision
-/// gap above: an unquoted `$IFS` reference sitting DIRECTLY adjacent to a
+/// Pinned reproducer for a shguard-vs-bash argv-count disagreement,
+/// structurally unrelated to the now-fixed unquoted-empty-brace-member
+/// elision gap (`src/normalize.rs`'s `chunks_to_words`, issue #93): an
+/// unquoted `$IFS` reference sitting DIRECTLY adjacent to a
 /// brace group (no literal text or whitespace between them, e.g.
 /// `echo$IFS{Y,}`) makes real bash produce a WORD COUNT that a careful
 /// manual trace of the documented expansion order (brace expansion, then
