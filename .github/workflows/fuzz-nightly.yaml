@@ -6,13 +6,15 @@
 # divergence's decision is Allow, even a known-shape one (see
 # tests/fuzz_differential.rs's `RootCause`/`classify_root_cause` and the
 # main sweep's assertions). Issues are deduped by a hash of the divergence's
-# shape SIGNATURE (tests/fuzz_differential.rs's `diff_signature`), not the
-# raw candidate string, so templated variants of the same underlying gap
-# collapse to one tracked issue instead of each looking like a fresh
-# finding (issue #93's own history: 62 issues filed over 7 nights for what
-# turned out to be one meta-family). See CONTRIBUTING.md's "Triaging a
-# fuzzer-found divergence" section for what happens after an issue lands
-# here.
+# shape SIGNATURE plus its decision (tests/fuzz_differential.rs's
+# `diff_signature`; decision is folded in too, so an Allow-direction
+# instance of an otherwise-already-tracked shape still gets its own issue),
+# not the raw candidate string, so templated variants of the same
+# underlying gap collapse to one tracked issue instead of each looking like
+# a fresh finding (issue #93's own history: 62 issues filed over 7 nights
+# for what turned out to be one meta-family). See CONTRIBUTING.md's
+# "Triaging a fuzzer-found divergence" section for what happens after an
+# issue lands here.
 
 name: Fuzz nightly
 
@@ -73,6 +75,17 @@ jobs:
           # main sweep assertions), should ever reach this report file in
           # the first place -- the fuzz test itself only fails on those --
           # but filter defensively rather than trust that invariant blindly.
+          #
+          # Materialized to a file rather than piped straight into the
+          # `while` loop via process substitution: `set -e` does not see a
+          # process substitution's exit status (fable review follow-up), so
+          # a malformed JSONL line would otherwise make `jq` fail silently
+          # mid-stream, truncating issue filing with no error at all --
+          # this checking tool's worst failure mode. Materializing first
+          # means a `jq` failure here fails the step loudly instead.
+          FILTERED=$(mktemp)
+          jq -c 'select(.root_cause == "Novel" or .decision == "Allow")' "$REPORT" > "$FILTERED"
+
           filed_any=0
           declare -A seen_sig
           while IFS= read -r line; do
@@ -113,7 +126,7 @@ jobs:
             # practice under the old candidate-string hash, filing 3 pairs
             # of byte-identical duplicate issues in one run).
             if [[ -n "${seen_sig[$dedup_hash]:-}" ]]; then
-              echo "Skipping duplicate for candidate (same signature+decision already filed this run, in #${seen_sig[$dedup_hash]}): $candidate"
+              echo "Skipping duplicate for candidate (already tracked in #${seen_sig[$dedup_hash]}, seen earlier in this run or a prior one): $candidate"
               continue
             fi
 
@@ -160,8 +173,8 @@ jobs:
 
             issue_url=$(gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --label fuzz-divergence --body "$body")
             seen_sig[$dedup_hash]="${issue_url##*/}"
-          done < <(jq -c 'select(.root_cause == "Novel" or .decision == "Allow")' "$REPORT")
+          done < "$FILTERED"
 
           if [[ "$filed_any" -eq 0 ]]; then
-            echo "Report file was non-empty but contained no Novel/Allow-direction entries -- nothing to file."
+            echo "Report file was non-empty but contained no Novel/Allow-direction entries -- either every entry was a known-shape, non-Allow divergence (nothing to file), or the job failed on a harness assertion (e.g. generator desync) with an unrelated, empty-of-matches report; check the fuzz step log above to tell which."
           fi
