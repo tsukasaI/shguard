@@ -67,33 +67,40 @@
 //!
 //! # Known-open findings
 //!
-//! Two shapes of "this isn't a fresh divergence" are recognized WITHOUT
-//! narrowing the mutator's own mechanism pool (issue #93 review point 4):
+//! [`shguard_argv_contains_unexpanded_tilde`]: a fully intentional,
+//! `src/normalize.rs`-documented design choice (tilde never resolves to a
+//! real path), not a bug -- skipped from comparison entirely, never logged
+//! as a divergence at all.
 //!
-//! - [`shguard_argv_contains_unexpanded_tilde`]: a fully intentional,
-//!   `src/normalize.rs`-documented design choice (tilde never resolves to a
-//!   real path), not a bug -- skipped from comparison entirely, never
-//!   logged as a divergence at all.
-//! - [`is_known_empty_brace_elision_gap`]: a real, confirmed
-//!   `src/normalize.rs` bug (an unquoted empty brace-alternation member
-//!   should be elided from argv the way bash elides it, but isn't) --
-//!   recognized by SHAPE (not a fixed candidate-string list), logged and
-//!   reported on every run, but excluded from the main sweep's pass/fail
-//!   assertion. `known_gap_unquoted_empty_brace_member_is_not_elided`
-//!   below pins ONE concrete reproducer as an `#[ignore]`d test
-//!   (`cargo test -- --ignored` surfaces it) so the finding stays
-//!   discoverable rather than silently narrowed away; see that test's doc
-//!   for the followup-issue writeup.
+//! Every divergence that DOES get compared is classified by [`RootCause`]
+//! ([`classify_root_cause`]), not by an exact-candidate-string allowlist: a
+//! [`diff_signature`] canonicalizes the argv diff's *shape* (which words
+//! repeat, in what pattern, independent of their literal text), so
+//! templated variants of the same underlying gap collapse to one tracked
+//! signature instead of each filing its own nightly CI issue (issue #93's
+//! own motivating failure mode -- the mutator's small template pool
+//! produced 62 textually-distinct "new" divergences for what were, on
+//! inspection, two known root causes). `RootCause::IfsGluedBraceDup`
+//! recognizes the one remaining known-open shape (see
+//! `known_gap_ifs_glued_directly_to_brace_group` below); everything else is
+//! `RootCause::Novel`. A `RootCause::IfsGluedBraceDup` divergence is still
+//! logged and reported on every run, but excluded from the main sweep's
+//! pass/fail assertion -- UNLESS its `decision` is [`Decision::Allow`],
+//! which always fails the sweep loudly regardless of root cause, since an
+//! `Allow`-direction divergence is the one shape that can be a genuine
+//! security bypass rather than an argv-shape cosmetic gap (issue #93's own
+//! triage found exactly this: a divergence classified "known, safe" by an
+//! earlier, narrower shape check had actually silently absorbed a real
+//! `Allow`-direction bug -- see #324).
 //!
-//! [`KNOWN_OPEN_FINDINGS`] is the same kind of escape hatch by exact
-//! candidate string, for a finding that isn't (yet) cleanly
-//! shape-characterizable -- currently holds one entry: an unquoted `$IFS`
-//! reference glued directly against a brace group produces a word count
-//! real bash's documented expansion order doesn't predict (confirmed
-//! independent of this harness's own capture code; the underlying bash
-//! mechanism itself isn't diagnosed). See
-//! `known_gap_ifs_glued_directly_to_brace_group` below for the full
-//! reproducer and reasoning.
+//! An earlier version of this harness also tracked the unquoted-empty-
+//! brace-member elision gap the same way (`is_known_empty_brace_elision_gap`)
+//! and, before that, one exact-string entry in a `KNOWN_OPEN_FINDINGS` list.
+//! Both are gone: the elision gap was fixed in `src/normalize.rs` (#324) and
+//! is now a permanent regression pin in `tests/guardfall.rs` instead of a
+//! tracked-open finding, and the exact-string list is superseded by
+//! [`RootCause::IfsGluedBraceDup`]'s shape-based recognition of the one
+//! finding it used to hold.
 //!
 //! # Bash version
 //!
@@ -1098,17 +1105,40 @@ fn pipeline_stage_count_is_consistent(rendered_stages: &[String]) -> bool {
 // against bash's ground truth.
 // =====================================================================
 
+/// Which known finding (if any) a divergence's shape matches. See the
+/// module doc's "Known-open findings" section for the rationale behind
+/// classifying by shape rather than by exact candidate string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootCause {
+    /// Matches [`known_gap_ifs_glued_directly_to_brace_group`]'s tracked
+    /// finding -- still logged and reported, but excluded from the main
+    /// sweep's pass/fail assertion UNLESS the divergence's `decision` is
+    /// [`Decision::Allow`] (see the module doc's "Known-open findings"
+    /// section for why that direction always fails loud regardless of
+    /// `RootCause`).
+    IfsGluedBraceDup,
+    /// Doesn't match any recognized shape -- always fails the main sweep.
+    Novel,
+}
+
 struct DivergenceReport {
     candidate: String,
     decision: Decision,
     shguard_argv: Vec<String>,
     bash_argv: Vec<String>,
-    /// `true` for a divergence already confirmed (manually, against real
-    /// bash) to be [`is_known_empty_brace_elision_gap`]'s tracked finding --
-    /// still logged and reported, but excluded from the main sweep's
-    /// pass/fail assertion (see that function's doc and the `#[ignore]`d
-    /// reproducer test below for the followup-issue writeup).
-    known_open: bool,
+    root_cause: RootCause,
+    /// A canonicalized fingerprint of the argv diff's shape (see
+    /// [`diff_signature`]) -- collapses templated variants of the same
+    /// underlying gap (different literal words, same repetition/emptiness
+    /// pattern) to one value, used by the nightly CI workflow to dedup
+    /// issue filing by shape instead of by raw candidate text.
+    signature: String,
+}
+
+impl DivergenceReport {
+    fn known_open(&self) -> bool {
+        self.root_cause != RootCause::Novel
+    }
 }
 
 enum SkipReason {
@@ -1127,40 +1157,227 @@ enum SkipReason {
     CaptureFailed,
 }
 
-/// A divergence already manually confirmed (via a direct, harness-
-/// independent `bash -c 'set -- ...; echo "$#"'` check, not just this
-/// harness's own capture technique) to be ONE specific, narrow shguard gap:
-/// `src/normalize.rs`'s `chunks_to_words` keeps an unquoted brace-
-/// alternation member that resolves to the empty string as a real
-/// `Resolved("")` word (its own doc scopes the "an empty resolved segment
-/// vanishes" rule to an *`$IFS`-split* boundary specifically, never to a
-/// brace-alternative boundary) -- but real bash elides a fully-unquoted
-/// empty word from argv regardless of which earlier expansion produced the
-/// emptiness. `{a,}` therefore resolves to `["a", ""]` in shguard's argv
-/// but only `["a"]` in bash's. This is a real, reproducible bug (not a
-/// harness artifact -- verified independent of this harness's own
-/// capture/comparison code), but fixing `src/normalize.rs` is out of scope
-/// for issue #93 (see this file's own module docs and the `#[ignore]`d
-/// `known_gap_unquoted_empty_brace_member_is_not_elided` test below for the
-/// full reproducer). Recognized by SHAPE, gated on the stage text actually
-/// containing an unquoted empty brace member (`{,`/`,}`, exactly what
-/// [`brace_wrap`] generates) -- fable-review follow-up: an earlier version
-/// matched on the argv shape alone ("shguard's argv, with every empty word
-/// stripped, equals bash's argv"), which is broader than this root cause
-/// and would have silently absorbed ANY future `src/normalize.rs`
-/// regression that spuriously injects an unrelated empty `Resolved("")`
-/// word into the same bucket. Requiring the brace-member marker in the
-/// source text keeps the bucket scoped to the one diagnosed mechanism.
-fn is_known_empty_brace_elision_gap(
+/// Classifies a divergence's ROOT CAUSE by shape, not by exact candidate
+/// text -- see the module doc's "Known-open findings" section for why.
+///
+/// [`RootCause::IfsGluedBraceDup`] recognizes
+/// `known_gap_ifs_glued_directly_to_brace_group`'s tracked finding: an
+/// unquoted `$IFS` reference sitting textually adjacent to a brace group
+/// (no literal text or whitespace between them -- `$IFS{`/`}$IFS`, exactly
+/// what pairing [`Mechanism::IfsJoin`] with [`Mechanism::BraceWrap`]
+/// produces) makes shguard's argv come out LONGER than bash's, with at
+/// least one non-empty word appearing MORE TIMES in shguard's argv than in
+/// bash's -- a spurious duplication, not a missing/extra empty word (that
+/// was the now-fixed unquoted-empty-brace-elision gap, #324). Gated on both
+/// the source-text marker AND the multiset-duplication shape (not just
+/// "shguard's argv is longer"), so an unrelated future divergence that
+/// happens to lengthen argv for a different reason isn't silently absorbed
+/// into this bucket -- mirroring the same fable-review-driven scoping
+/// discipline the empty-brace-elision classifier this replaces used.
+fn classify_root_cause(
     stage_text: &str,
     shguard_argv: &[String],
     bash_argv: &[String],
-) -> bool {
-    if !stage_text.contains(",}") && !stage_text.contains("{,") {
-        return false;
+) -> RootCause {
+    let ifs_glued_to_brace = stage_text.contains("$IFS{") || stage_text.contains("}$IFS");
+    if ifs_glued_to_brace
+        && shguard_argv.len() > bash_argv.len()
+        && has_excess_word_multiplicity(shguard_argv, bash_argv)
+    {
+        return RootCause::IfsGluedBraceDup;
     }
-    let without_empties: Vec<&String> = shguard_argv.iter().filter(|s| !s.is_empty()).collect();
-    without_empties.len() == bash_argv.len() && without_empties.into_iter().eq(bash_argv.iter())
+    RootCause::Novel
+}
+
+/// `true` if some non-empty word appears strictly more times in
+/// `shguard_argv` than in `bash_argv` -- not necessarily adjacent (so a
+/// plain windowed substring scan wouldn't catch it), and not necessarily
+/// an already-repeated word: a 1-vs-0 "shguard produced one occurrence of a
+/// word bash never produced" case counts too.
+///
+/// A fable review of an earlier version of this PR proposed requiring
+/// `count >= 2` (i.e. only accepting an already-repeated word's count going
+/// UP, never a brand-new 1-vs-0 word) on the theory that a lone extra word
+/// is a weaker, more easily-coincidental signal than genuine duplication.
+/// Verified empirically against real mutator output before accepting that
+/// change (`SHGUARD_FUZZ_ITERATIONS=5000`, 3 different seeds) and reverted
+/// it: the `IfsGluedBraceDup` family's actual shape varies by WHICH word
+/// ends up over-counted depending on where the empty brace member sits --
+/// `echo$IFS{hello,}` produces shguard argv `["echo","hello","echo"]` vs
+/// bash's `["echo","echo"]`, where `"echo"` is already at parity (2-vs-2)
+/// and `"hello"` is the sole excess word at 1-vs-0. Requiring `count >= 2`
+/// misclassified a substantial fraction of real family instances as
+/// `Novel` in that verification run (9 of 37 divergences on one seed,
+/// spanning half the distinct signatures -- turning the nightly sweep red
+/// again, the exact failure mode this classifier exists to fix), so a lone
+/// extra word IS a legitimate signal for this family, not just a
+/// coincidental false positive risk. The actual backstop against silently
+/// absorbing an
+/// unrelated bug remains [`Decision::Allow`] always failing loud regardless
+/// of `RootCause` (see the main sweep's assertion) -- not this predicate.
+fn has_excess_word_multiplicity(shguard_argv: &[String], bash_argv: &[String]) -> bool {
+    let mut bash_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for w in bash_argv {
+        if !w.is_empty() {
+            *bash_counts.entry(w.as_str()).or_insert(0) += 1;
+        }
+    }
+    let mut shguard_counts: std::collections::HashMap<&str, usize> =
+        std::collections::HashMap::new();
+    for w in shguard_argv {
+        if !w.is_empty() {
+            *shguard_counts.entry(w.as_str()).or_insert(0) += 1;
+        }
+    }
+    shguard_counts
+        .iter()
+        .any(|(word, count)| *count > bash_counts.get(word).copied().unwrap_or(0))
+}
+
+/// A canonicalized fingerprint of an argv diff's SHAPE: maps each distinct
+/// NON-EMPTY word seen (across both `shguard_argv` and `bash_argv`, in
+/// first-appearance order) to a small integer id, then serializes both
+/// sequences as comma-joined id lists -- with the empty string always
+/// mapped to the fixed token `E` rather than consuming an id, so emptiness
+/// is always distinguishable from "some other word" regardless of how many
+/// distinct non-empty words appear (fable-review follow-up: an earlier
+/// version symbolized `""` like any other word, so `["a",""]` vs `["a"]`
+/// and `["a","x"]` vs `["a"]` produced the SAME signature -- silently
+/// folding a regression of the fixed empty-word-elision family, #324, into
+/// an unrelated extra-word divergence's tracked issue). Ids are unbounded
+/// (not a fixed single-character alphabet), so a candidate with more than a
+/// couple dozen distinct words can't overflow into symbol collisions.
+///
+/// Two candidates with the same repetition/emptiness pattern but different
+/// literal words (`{echo,}$IFS{X,}` vs `{ls,}$IFS{Y,}`) collapse to the
+/// same signature -- this is what actually stops a templated mutator from
+/// refiling the same underlying gap under a new nightly CI issue for every
+/// literal-word variant it happens to generate (issue #93's motivating
+/// finding). Generalizes to whatever the next undiagnosed family turns out
+/// to be, not just the two named [`RootCause`] variants.
+fn diff_signature(shguard_argv: &[String], bash_argv: &[String]) -> String {
+    let mut symbols: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let s = symbolize_sequence(shguard_argv, &mut symbols);
+    let b = symbolize_sequence(bash_argv, &mut symbols);
+    format!("s={s};b={b}")
+}
+
+fn symbolize_sequence<'a>(
+    argv: &'a [String],
+    symbols: &mut std::collections::HashMap<&'a str, usize>,
+) -> String {
+    argv.iter()
+        .map(|w| symbolize_word(w, symbols))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn symbolize_word<'a>(
+    word: &'a str,
+    symbols: &mut std::collections::HashMap<&'a str, usize>,
+) -> String {
+    if word.is_empty() {
+        return "E".to_string();
+    }
+    let next_id = symbols.len();
+    let id = *symbols.entry(word).or_insert(next_id);
+    id.to_string()
+}
+
+// ---- direct pins for classify_root_cause / has_excess_word_multiplicity /
+// diff_signature: correctness of the fuzzer's OWN classification logic
+// must not rest entirely on seed-dependent sweep runs (fable review of
+// #327) ----
+
+fn strings(words: &[&str]) -> Vec<String> {
+    words.iter().map(|s| (*s).to_string()).collect()
+}
+
+#[test]
+fn classify_root_cause_recognizes_the_pinned_ifs_glued_brace_dup_reproducer() {
+    let shguard_argv = strings(&["echo", "cm0gLXJmIC8=", "echo", "cm0gLXJmIC8="]);
+    let bash_argv = strings(&["echo=", "echo", "="]);
+    assert_eq!(
+        classify_root_cause("{echo,}$IFS{cm0gLXJmIC8=,}", &shguard_argv, &bash_argv),
+        RootCause::IfsGluedBraceDup
+    );
+}
+
+#[test]
+fn classify_root_cause_is_novel_without_the_textual_gate() {
+    // Same argv shapes as the pinned reproducer, but no `$IFS{`/`}$IFS`
+    // adjacency in the source text -- must not classify as
+    // IfsGluedBraceDup on argv shape alone.
+    let shguard_argv = strings(&["echo", "x", "echo", "x"]);
+    let bash_argv = strings(&["echo", "echo"]);
+    assert_eq!(
+        classify_root_cause("echo x echo x", &shguard_argv, &bash_argv),
+        RootCause::Novel
+    );
+}
+
+#[test]
+fn classify_root_cause_recognizes_a_lone_extra_word_variant_of_the_same_family() {
+    // Grounded in an actual mutator-generated candidate (SHGUARD_FUZZ_SEED=1
+    // and =42 both produce it): "echo$IFS{hello,}" resolves shguard argv to
+    // ["echo","hello","echo"] vs bash's ["echo","echo"] -- "echo" is
+    // already at parity (2-vs-2 in both), and the SOLE excess word is
+    // "hello" at 1-vs-0. This is the same IfsGluedBraceDup family as the
+    // pinned reproducer, just with the empty brace member in a different
+    // slot -- must classify the same way, not fall through to Novel.
+    let shguard_argv = strings(&["echo", "hello", "echo"]);
+    let bash_argv = strings(&["echo", "echo"]);
+    assert_eq!(
+        classify_root_cause("echo$IFS{hello,}", &shguard_argv, &bash_argv),
+        RootCause::IfsGluedBraceDup
+    );
+}
+
+#[test]
+fn has_excess_word_multiplicity_counts_a_lone_extra_word_not_just_repeated_ones() {
+    assert!(has_excess_word_multiplicity(
+        &strings(&["echo", "echo"]),
+        &strings(&["echo"])
+    ));
+    // A word appearing once in shguard's argv and never in bash's is still
+    // an excess -- see classify_root_cause_recognizes_a_lone_extra_word_
+    // variant_of_the_same_family's doc for why this must count for the
+    // IfsGluedBraceDup family specifically (verified empirically, not
+    // assumed: an earlier version of this predicate required `count >= 2`
+    // and misclassified this real shape as Novel).
+    assert!(has_excess_word_multiplicity(
+        &strings(&["echo", "hello", "echo"]),
+        &strings(&["echo", "echo"])
+    ));
+}
+
+#[test]
+fn diff_signature_distinguishes_an_empty_word_from_an_extra_word() {
+    // Regression guard (fable review of #327): an earlier version
+    // symbolized "" like any other word, so a #324-family divergence
+    // (a stray empty word) and an unrelated extra-word divergence produced
+    // the SAME signature -- which would fold a regression of the fixed
+    // empty-word-elision family into an unrelated tracked issue.
+    let empty_word_diff = diff_signature(&strings(&["a", ""]), &strings(&["a"]));
+    let extra_word_diff = diff_signature(&strings(&["a", "x"]), &strings(&["a"]));
+    assert_ne!(empty_word_diff, extra_word_diff);
+}
+
+#[test]
+fn diff_signature_collapses_same_shape_different_literal_words() {
+    let echo_shape = diff_signature(
+        &strings(&["echo", "X", "echo", "X"]),
+        &strings(&["echo", "echo"]),
+    );
+    let ls_shape = diff_signature(&strings(&["ls", "Y", "ls", "Y"]), &strings(&["ls", "ls"]));
+    assert_eq!(echo_shape, ls_shape);
+}
+
+#[test]
+fn diff_signature_distinguishes_a_different_shape() {
+    let duplication_shape = diff_signature(&strings(&["a", "a"]), &strings(&["a"]));
+    let extra_word_shape = diff_signature(&strings(&["a", "b"]), &strings(&["a"]));
+    assert_ne!(duplication_shape, extra_word_shape);
 }
 
 fn shguard_argv_contains_unexpanded_tilde(argv: &[String]) -> bool {
@@ -1188,12 +1405,15 @@ fn compare_stage(
     if resolved == bash_argv {
         Ok(None)
     } else {
+        let root_cause = classify_root_cause(stage_text, &resolved, &bash_argv);
+        let signature = diff_signature(&resolved, &bash_argv);
         Ok(Some(DivergenceReport {
             candidate: stage_text.to_string(),
             decision: verdict.decision(),
-            known_open: is_known_empty_brace_elision_gap(stage_text, &resolved, &bash_argv),
             shguard_argv: resolved,
             bash_argv,
+            root_cause,
+            signature,
         }))
     }
 }
@@ -1212,7 +1432,12 @@ fn report_divergences(divergences: &[DivergenceReport], bash_version: &str) {
                 "shguard_argv": d.shguard_argv,
                 "bash_argv": d.bash_argv,
                 "bash_version": bash_version,
-                "known_open": d.known_open,
+                "root_cause": format!("{:?}", d.root_cause),
+                "signature": d.signature,
+                // Derived from root_cause -- kept alongside it (rather than
+                // dropped outright) so a not-yet-updated consumer of this
+                // report file has a zero-breakage transition window.
+                "known_open": d.known_open(),
             });
             writeln!(file, "{line}")
                 .unwrap_or_else(|e| panic!("failed to write divergence report line: {e}"));
@@ -1220,8 +1445,8 @@ fn report_divergences(divergences: &[DivergenceReport], bash_version: &str) {
     }
     for d in divergences {
         eprintln!(
-            "DIVERGENCE candidate={:?} decision={:?} known_open={}\n  shguard_argv={:?}\n  bash_argv={:?}",
-            d.candidate, d.decision, d.known_open, d.shguard_argv, d.bash_argv
+            "DIVERGENCE candidate={:?} decision={:?} root_cause={:?} signature={:?}\n  shguard_argv={:?}\n  bash_argv={:?}",
+            d.candidate, d.decision, d.root_cause, d.signature, d.shguard_argv, d.bash_argv
         );
     }
 }
@@ -1244,18 +1469,6 @@ fn env_u64(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-/// Exact candidate strings the fuzzer has already shown, by manual
-/// verification against real bash, to genuinely diverge from shguard's
-/// static resolution -- see the `#[ignore]`d reproducer test(s) immediately
-/// below this constant for the specific argv diff and reasoning. Excluded
-/// from the main randomized sweep's pass/fail assertion (so `cargo test`
-/// stays green) but never silently dropped from the corpus: each entry
-/// here is also its own always-generated, always-`#[ignore]`d test, so
-/// `cargo test -- --ignored` surfaces it, mirroring how
-/// `tests/guardfall.rs`'s own issue #117 comment documents a known-open gap
-/// without pinning it as a passing case.
-const KNOWN_OPEN_FINDINGS: &[&str] = &["{echo,}$IFS{cm0gLXJmIC8=,}"];
-
 /// Pinned reproducer for a shguard-vs-bash argv-count disagreement,
 /// structurally unrelated to the now-fixed unquoted-empty-brace-member
 /// elision gap (`src/normalize.rs`'s `chunks_to_words`, issue #93): an
@@ -1270,17 +1483,14 @@ const KNOWN_OPEN_FINDINGS: &[&str] = &["{echo,}$IFS{cm0gLXJmIC8=,}"];
 /// `set -- echo$IFS{Y=,}` goes further and produces `echo=`/`echo`, with a
 /// `=` character that has no origin in that model at all).
 ///
-/// Unlike the brace-elision gap, this file does not have a settled
-/// explanation for the underlying bash mechanism -- only an empirical,
-/// independently-reproduced confirmation that shguard's model (which
-/// mirrors the "brace first, then split" textbook order) and bash's actual
-/// behavior disagree for this specific adjacency. Tracked via
-/// [`KNOWN_OPEN_FINDINGS`] (an exact-string match, not a shape-based
-/// filter, precisely because the mechanism isn't understood well enough
-/// yet to characterize by shape without risking masking a DIFFERENT bug
-/// under too broad a net) rather than fixed here -- flagged to the
-/// maintainer as a second followup-issue candidate, distinct from the
-/// brace-elision one.
+/// Unlike the (now-fixed, #324) brace-elision gap, this file does not have
+/// a settled explanation for the underlying bash mechanism -- only an
+/// empirical, independently-reproduced confirmation that shguard's model
+/// (which mirrors the "brace first, then split" textbook order) and bash's
+/// actual behavior disagree for this specific adjacency. Tracked via
+/// [`RootCause::IfsGluedBraceDup`] (`classify_root_cause`) rather than
+/// fixed here; a real fix requires diagnosing bash's actual mechanism
+/// first, tracked as issue #326.
 #[test]
 #[ignore = "known shguard-vs-bash argv-count disagreement for $IFS glued directly \
             against a brace group (issue #93 fuzzer finding, mechanism not yet \
@@ -1319,8 +1529,10 @@ fn known_gap_ifs_glued_directly_to_brace_group() {
 /// `SHGUARD_FUZZ_ITERATIONS`) mutated candidates from [`generate_candidate`]
 /// plus every [`LITERAL_SEEDS`] entry, classifies and (where eligible)
 /// captures+compares each resulting stage, and fails loudly -- printing the
-/// exact candidate and both argvs -- on any divergence not already tracked
-/// in [`KNOWN_OPEN_FINDINGS`].
+/// exact candidate and both argvs -- on any divergence whose [`RootCause`]
+/// is [`RootCause::Novel`], or whose `decision` is [`Decision::Allow`]
+/// regardless of `RootCause` (see the module doc's "Known-open findings"
+/// section for why the `Allow` case always fails loud).
 ///
 /// # Replaying one specific candidate (CONTRIBUTING.md triage step 1)
 ///
@@ -1377,7 +1589,7 @@ fn differential_fuzz_shguard_vs_bash_argv() {
         };
         for (start, end) in ranges {
             let stage_text = full_text[start..end].trim();
-            if stage_text.is_empty() || KNOWN_OPEN_FINDINGS.contains(&stage_text) {
+            if stage_text.is_empty() {
                 continue;
             }
             match compare_stage(&sandbox, stage_text) {
@@ -1393,8 +1605,9 @@ fn differential_fuzz_shguard_vs_bash_argv() {
         }
     }
 
-    let (known_open, new_divergences): (Vec<_>, Vec<_>) =
-        divergences.into_iter().partition(|d| d.known_open);
+    let (known_open, new_divergences): (Vec<_>, Vec<_>) = divergences
+        .into_iter()
+        .partition(DivergenceReport::known_open);
 
     eprintln!(
         "fuzz summary: generated={generated} compared={compared} \
@@ -1423,11 +1636,30 @@ fn differential_fuzz_shguard_vs_bash_argv() {
         "harness compared zero candidates -- check the generator/classifier \
          wiring before trusting this test's green result"
     );
+    // Always fails loud, regardless of RootCause: an Allow-direction
+    // divergence is the one shape that can be a genuine security bypass
+    // (shguard resolved an argv shape bash doesn't actually produce, AND
+    // decided the resulting command is safe) rather than an argv-shape
+    // cosmetic gap. #324 found exactly this hiding inside what an earlier,
+    // narrower "known, safe" classifier had absorbed -- never let a known
+    // RootCause silently mask this direction again.
+    let allow_direction: Vec<&str> = known_open
+        .iter()
+        .filter(|d| d.decision == Decision::Allow)
+        .map(|d| d.candidate.as_str())
+        .collect();
+    assert!(
+        allow_direction.is_empty(),
+        "found {} known-shape divergence(s) whose decision is Allow -- a \
+         known RootCause never excuses an Allow-direction divergence from \
+         failing loud, since that's the one shape that can be a genuine \
+         bypass rather than an argv-shape cosmetic gap: {allow_direction:?}",
+        allow_direction.len()
+    );
     assert!(
         new_divergences.is_empty(),
-        "found {} NEW shguard-vs-bash argv divergence(s) not already tracked \
-         via is_known_empty_brace_elision_gap; see stderr for the exact \
-         candidate and both argvs",
+        "found {} NEW shguard-vs-bash argv divergence(s) whose RootCause is \
+         Novel; see stderr for the exact candidate and both argvs",
         new_divergences.len()
     );
 }
