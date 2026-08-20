@@ -1,10 +1,20 @@
 # Nightly sweep of the differential fuzzer (tests/fuzz_differential.rs,
 # issue #93): runs with a much larger iteration count and a run-specific
 # seed than the always-on `cargo test` default, and auto-files a GitHub
-# issue when it finds a genuinely new shguard-vs-bash argv divergence (one
-# `KNOWN_OPEN_FINDINGS`/`is_known_empty_brace_elision_gap` doesn't already
-# track). See CONTRIBUTING.md's "Triaging a fuzzer-found divergence"
-# section for what happens after an issue lands here.
+# issue when the sweep fails -- which it does whenever a divergence's
+# RootCause is Novel (an unrecognized argv-shape gap), or whenever ANY
+# divergence's decision is Allow, even a known-shape one (see
+# tests/fuzz_differential.rs's `RootCause`/`classify_root_cause` and the
+# main sweep's assertions). Issues are deduped by a hash of the divergence's
+# shape SIGNATURE plus its decision (tests/fuzz_differential.rs's
+# `diff_signature`; decision is folded in too, so an Allow-direction
+# instance of an otherwise-already-tracked shape still gets its own issue),
+# not the raw candidate string, so templated variants of the same
+# underlying gap collapse to one tracked issue instead of each looking like
+# a fresh finding (issue #93's own history: 62 issues filed over 7 nights
+# for what turned out to be one meta-family). See CONTRIBUTING.md's
+# "Triaging a fuzzer-found divergence" section for what happens after an
+# issue lands here.
 
 name: Fuzz nightly
 
@@ -58,34 +68,73 @@ jobs:
             --description "Auto-filed by the nightly differential fuzzer (issue #93)" \
             --force
 
-          # Only a genuinely NEW divergence (not one is_known_empty_brace_elision_gap
-          # or KNOWN_OPEN_FINDINGS already tracks) should ever reach this report file
-          # in the first place -- the fuzz test itself only fails on those -- but
-          # filter defensively rather than trust that invariant blindly.
+          # Only a genuinely NEW-shape divergence (RootCause::Novel), or ANY
+          # divergence whose decision is Allow (even a known-shape one --
+          # the one direction that can be a real bypass, never silently
+          # excused by a known RootCause; see tests/fuzz_differential.rs's
+          # main sweep assertions), should ever reach this report file in
+          # the first place -- the fuzz test itself only fails on those --
+          # but filter defensively rather than trust that invariant blindly.
+          #
+          # Materialized to a file rather than piped straight into the
+          # `while` loop via process substitution: `set -e` does not see a
+          # process substitution's exit status (fable review follow-up), so
+          # a malformed JSONL line would otherwise make `jq` fail silently
+          # mid-stream, truncating issue filing with no error at all --
+          # this checking tool's worst failure mode. Materializing first
+          # means a `jq` failure here fails the step loudly instead.
+          FILTERED=$(mktemp)
+          jq -c 'select(.root_cause == "Novel" or .decision == "Allow")' "$REPORT" > "$FILTERED"
+
           filed_any=0
+          declare -A seen_sig
           while IFS= read -r line; do
             filed_any=1
             candidate=$(jq -r '.candidate' <<<"$line")
             decision=$(jq -r '.decision' <<<"$line")
+            root_cause=$(jq -r '.root_cause' <<<"$line")
+            signature=$(jq -r '.signature' <<<"$line")
             shguard_argv=$(jq -r '.shguard_argv | @json' <<<"$line")
             bash_argv=$(jq -r '.bash_argv | @json' <<<"$line")
             bash_version=$(jq -r '.bash_version' <<<"$line")
 
-            # A short hash of the candidate, embedded in the title, is the
-            # dedup key -- fable review follow-up: searching GitHub's issue
-            # search on the raw candidate text is fragile, since candidates
-            # routinely contain `"` (the quote-split mechanism) and other
-            # search-significant characters that unbalance the search
-            # phrase and can make an existing issue invisible to the lookup,
-            # filing a duplicate every night. A hash has none of those
-            # characters and is stable across runs for the same candidate.
-            candidate_hash=$(printf '%s' "$candidate" | sha256sum | cut -c1-12)
-            title="fuzz: shguard/bash argv divergence (${candidate_hash})"
+            # A short hash of the SHAPE signature (not the raw candidate),
+            # embedded in the title, is the dedup key -- fable review
+            # follow-up (originally on the raw-candidate-string hash, issue
+            # #93): searching GitHub's issue search on raw candidate text is
+            # fragile (candidates routinely contain `"` and other search-
+            # significant characters that unbalance the search phrase), and
+            # a templated mutator produces textually-distinct candidates for
+            # the SAME underlying gap every night, so hashing the candidate
+            # string filed a fresh issue per template variant (62 issues
+            # over 7 nights for one meta-family). Hashing `signature`
+            # instead collapses those variants to one tracked issue. The
+            # `decision` is folded into the hash too, so an Allow-direction
+            # instance of an otherwise-already-tracked shape still gets its
+            # own distinct issue rather than silently deduping against a
+            # previously-filed Ask/Block-direction instance of the same
+            # shape -- the one direction that must never look "already
+            # handled" just because its shape isn't new.
+            dedup_hash=$(printf '%s|%s' "$signature" "$decision" | sha256sum | cut -c1-12)
+            title="fuzz: shguard/bash argv divergence (${dedup_hash})"
+
+            # In-loop guard against a same-run race: two divergences with
+            # the same dedup_hash in the SAME report file would otherwise
+            # both do "search -> not found -> create" before either's
+            # `gh issue create` is visible to the other's `gh issue list
+            # --search` (fable review follow-up: this raced 3 times in
+            # practice under the old candidate-string hash, filing 3 pairs
+            # of byte-identical duplicate issues in one run).
+            if [[ -n "${seen_sig[$dedup_hash]:-}" ]]; then
+              echo "Skipping duplicate for candidate (already tracked in #${seen_sig[$dedup_hash]}, seen earlier in this run or a prior one): $candidate"
+              continue
+            fi
 
             existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --label fuzz-divergence --state open \
-              --search "in:title \"${candidate_hash}\"" --json number --jq '.[0].number // empty')
+              --search "in:title \"${dedup_hash}\"" --json number --jq '.[0].number // empty')
             if [[ -n "$existing" ]]; then
               echo "Skipping duplicate for candidate (already tracked in #$existing): $candidate"
+              seen_sig[$dedup_hash]=$existing
               continue
             fi
 
@@ -106,6 +155,8 @@ jobs:
               ""
               "**shguard decision:** $decision"
               ""
+              "**root cause:** $root_cause"
+              ""
               "**shguard normalized argv:**"
               "\`\`\`json"
               "$shguard_argv"
@@ -120,9 +171,10 @@ jobs:
             )
             body=$(printf '%s\n' "${lines[@]}")
 
-            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --label fuzz-divergence --body "$body"
-          done < <(jq -c 'select(.known_open == false)' "$REPORT")
+            issue_url=$(gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --label fuzz-divergence --body "$body")
+            seen_sig[$dedup_hash]="${issue_url##*/}"
+          done < "$FILTERED"
 
           if [[ "$filed_any" -eq 0 ]]; then
-            echo "Report file was non-empty but contained no known_open==false entries -- nothing to file."
+            echo "Report file was non-empty but contained no Novel/Allow-direction entries -- either every entry was a known-shape, non-Allow divergence (nothing to file), or the job failed on a harness assertion (e.g. generator desync) with an unrelated, empty-of-matches report; check the fuzz step log above to tell which."
           fi
