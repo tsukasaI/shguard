@@ -1206,11 +1206,13 @@ fn classify_root_cause(
 /// `echo$IFS{hello,}` produces shguard argv `["echo","hello","echo"]` vs
 /// bash's `["echo","echo"]`, where `"echo"` is already at parity (2-vs-2)
 /// and `"hello"` is the sole excess word at 1-vs-0. Requiring `count >= 2`
-/// misclassified the majority of real family instances as `Novel` in that
-/// verification run (turning the nightly sweep red again -- the exact
-/// failure mode this classifier exists to fix), so a lone extra word IS a
-/// legitimate signal for this family, not just a coincidental false
-/// positive risk. The actual backstop against silently absorbing an
+/// misclassified a substantial fraction of real family instances as
+/// `Novel` in that verification run (9 of 37 divergences on one seed,
+/// spanning half the distinct signatures -- turning the nightly sweep red
+/// again, the exact failure mode this classifier exists to fix), so a lone
+/// extra word IS a legitimate signal for this family, not just a
+/// coincidental false positive risk. The actual backstop against silently
+/// absorbing an
 /// unrelated bug remains [`Decision::Allow`] always failing loud regardless
 /// of `RootCause` (see the main sweep's assertion) -- not this predicate.
 fn has_excess_word_multiplicity(shguard_argv: &[String], bash_argv: &[String]) -> bool {
