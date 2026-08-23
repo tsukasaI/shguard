@@ -155,6 +155,15 @@ fn guardfall_class_e_cases() {
         ("rsync -a src/ /", Decision::Allow), // no --delete, no danger
         ("rsync -a --delete src/ host:/", Decision::Allow), // remote target, out of scope for a local guard
         ("truncate -s 0 /important", Decision::Block),
+        // Issue #131: -r/--reference sets the target's size to match a
+        // reference file's size, unconditionally overwriting its contents
+        // — the same destructive effect as -s, regardless of what the
+        // reference file actually is (no special-casing needed).
+        ("truncate --reference=/dev/null /important", Decision::Block),
+        ("truncate -r /dev/null /important", Decision::Block),
+        ("truncate --reference /dev/null /important", Decision::Block),
+        ("truncate --reference=somefile /important", Decision::Block),
+        ("truncate /important", Decision::Allow), // no -s/-r at all, not destructive
         ("tar -C / -x", Decision::Block),
         ("tar -xf evil.tar -C /", Decision::Block),
         ("tar --extract --directory=/ -f evil.tar", Decision::Block),

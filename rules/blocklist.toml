@@ -358,6 +358,20 @@ reason = "truncate -s zeroes/truncates the target file's contents in place"
 command = "truncate"
 required_flags = ["s|--size"]
 
+# Issue #131: -r/--reference=RFILE sets the target's size to match RFILE's
+# size instead of an explicit number — the target unconditionally takes on
+# a size it didn't choose (shrunk and data-truncated, or grown and
+# NUL-padded), the same unrecoverable content-destruction effect as -s,
+# regardless of what RFILE actually is (a separate rule, not merged into
+# truncate-zero above, mirrors how rm-recursive-force-dangerous-target and
+# rm-force-find-placeholder-target stay two rules for one command rather
+# than one rule with an OR'd reason that fits neither flag family well).
+[[command]]
+id = "truncate-reference"
+reason = "truncate -r/--reference sets the target's size to match a reference file's size, unconditionally overwriting its contents in place"
+command = "truncate"
+required_flags = ["r|--reference"]
+
 [[command]]
 id = "shred"
 reason = "shred overwrites and unlinks its target, defeating recovery"
