@@ -343,6 +343,38 @@ reason = "dd writing directly to a /dev/ device overwrites raw disk contents"
 command = "dd"
 targets = [{ strip = "of=", normalized_prefix = "/dev/" }]
 
+# dcfldd is a drop-in dd variant (forensic imaging tool) with identical
+# if=/of= semantics — same strip="of=" precision as dd-write-device above,
+# so no cp-style source/dest ambiguity here.
+[[command]]
+id = "dcfldd-write-device"
+reason = "dcfldd writing directly to a /dev/ device overwrites raw disk contents"
+command = "dcfldd"
+targets = [{ strip = "of=", normalized_prefix = "/dev/" }]
+
+# cp has no if=/of= flags to disambiguate source from destination, and
+# target matching is membership-based (any resolved token), not positional
+# — so unlike dd/dcfldd's precise strip="of=" targeting, this can't tell
+# `cp /dev/sda backup.img` (reading a device, benign) from `cp file
+# /dev/sda` (writing to one, destructive) apart from checking both
+# candidate tokens against `/dev/`. decision="ask" (not the default Block)
+# accounts for that ambiguity; except_targets carves out device nodes that
+# are harmless in EITHER role (safe to read from AND to write to), so the
+# everyday `cp /dev/urandom key.bin` idiom stays Allow while any other
+# /dev/ target (source or destination) still asks.
+[[command]]
+id = "cp-write-device"
+decision = "ask"
+reason = "cp writing to (or reading an unlisted) /dev/ device may overwrite raw disk contents"
+command = "cp"
+targets = [{ normalized_prefix = "/dev/" }]
+except_targets = [
+    { exact = "/dev/null" },
+    { exact = "/dev/zero" },
+    { exact = "/dev/urandom" },
+    { exact = "/dev/random" },
+]
+
 [[command]]
 id = "truncate-zero"
 reason = "truncate -s zeroes/truncates the target file's contents in place"
@@ -378,6 +410,25 @@ command = "mkntfs"
 id = "mkswap-any-device"
 reason = "mkswap overwrites the target device's/partition's signature to initialize it as swap space, destroying any existing filesystem or data"
 command = "mkswap"
+
+# wipefs's default (no flags) is informational — it only lists existing
+# signatures without modifying anything. -a/--all and -o/--offset are the
+# two ways to actually erase one, so (unlike mkswap-any-device above,
+# always destructive) this is flag-gated rather than a bare command block;
+# same shape as truncate-zero's required_flags below.
+[[command]]
+id = "wipefs-any-device"
+reason = "wipefs -a/-o erases a device's/partition's filesystem or partition-table signature, destroying any existing filesystem or data"
+command = "wipefs"
+required_flags = ["a|--all|o|--offset"]
+
+# blkdiscard has no informational default mode: bare `blkdiscard <device>`
+# discards the whole device immediately, same "any bare target is
+# dangerous" shape as shred above.
+[[command]]
+id = "blkdiscard-any-device"
+reason = "blkdiscard discards (TRIMs) the target device's contents, destroying any existing filesystem or data"
+command = "blkdiscard"
 
 [[command]]
 id = "mkfs-dispatcher-any-filesystem"
@@ -786,6 +837,15 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.conf
 id = "self-protect-config-dd-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "dd"
+targets = [
+    { strip = "of=", normalized_prefix = "~/.config/shguard/" },
+    { strip = "of=", normalized = "~/.config/shguard" },
+]
+
+[[command]]
+id = "self-protect-config-dcfldd-tilde"
+reason = "writing to shguard's own config directory must never be scripted"
+command = "dcfldd"
 targets = [
     { strip = "of=", normalized_prefix = "~/.config/shguard/" },
     { strip = "of=", normalized = "~/.config/shguard" },

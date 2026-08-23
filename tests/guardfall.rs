@@ -78,6 +78,30 @@ fn guardfall_class_e_cases() {
         // the old byte-exact `prefix = "of=/dev/"` target missed it.
         ("dd if=/dev/zero of=//dev/sda", Decision::Block),
         ("shred /dev/sda", Decision::Block),
+        // Issue #123: device-destroying command family also omitted cp,
+        // dcfldd (a drop-in dd variant), wipefs, and blkdiscard.
+        ("dcfldd if=/dev/zero of=/dev/sda", Decision::Block),
+        (
+            "dcfldd of=~/.config/shguard/config.toml if=payload",
+            Decision::Block,
+        ),
+        ("wipefs -a /dev/sda", Decision::Block),
+        ("wipefs -o 512 /dev/sda", Decision::Block),
+        ("blkdiscard /dev/sda", Decision::Block),
+        // wipefs's default (no -a/-o) is informational — lists signatures
+        // without erasing anything, so this must stay Allow.
+        ("wipefs /dev/sda", Decision::Allow),
+        // cp has no if=/of= flags to disambiguate source from destination
+        // (unlike dd/dcfldd above), so this asks rather than blocks — see
+        // the cp-write-device rule's comment in rules/blocklist.toml.
+        ("cp /dev/zero /dev/sda", Decision::Ask),
+        ("cp /dev/sda backup.img", Decision::Ask),
+        // The everyday /dev/{null,zero,urandom,random} idiom, harmless in
+        // either role (source or destination), stays Allow via
+        // except_targets.
+        ("cp /dev/urandom key.bin", Decision::Allow),
+        ("cp key.bin /dev/null", Decision::Allow),
+        ("cp src dst", Decision::Allow),
         ("truncate -s 0 /important", Decision::Block),
         ("tar -C / -x", Decision::Block),
         ("tar -xf evil.tar -C /", Decision::Block),
