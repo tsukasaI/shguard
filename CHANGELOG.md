@@ -63,6 +63,33 @@ All notable changes to this project are documented in this file.
   `truncate-zero`'s own `-s`/`--size` matching has the identical gap,
   pre-existing).
 
+- `rsync`/`mv`/`install` writing a regular file's bytes onto a `/dev/`
+  device special file had zero coverage, the same destructive effect as
+  the already-blocked `dd`/`tee`/redirect shapes (#136). Unlike
+  `cp-write-device` (#123, `ask`): no common daily idiom reads FROM a
+  device as the SOURCE for these three, so `mv-write-device`,
+  `install-write-device`, and `rsync-write-device` block outright.
+  `/dev/shm` (tmpfs scratch space — a real idiom, e.g. `mv build.tar
+  /dev/shm/`) is carved out via `except_targets`. `mv`/`install` also
+  cover `-t`/`--target-directory=`, mirroring `cp-write-device`'s full
+  target list; `install` additionally excepts `/dev/stdin` (a common
+  `curl ... | install /dev/stdin dest` idiom, never a disk device node
+  even in the write role).
+
+- Fixed a bypass of `except_targets` suppression affecting every rule
+  that declares it (not specific to #136's new rules, though that's what
+  surfaced it): `except_targets` is deliberately never normalized
+  (matched against the raw resolved token — see this file's own
+  `except_targets` docs for why), but `targets` itself IS normalized, so
+  a `..`-path-ascent respelling of an excepted candidate
+  (`/dev/shm/../sda`) could textually start with an excepted prefix
+  (`/dev/shm/`) while actually resolving to a target the exception was
+  never meant to cover (`/dev/sda`). `CommandRule::matches` now refuses
+  to treat any
+  `/`- or `~`-rooted candidate containing a literal `..` path segment as
+  excepted, regardless of what `except_targets` says — the same
+  fail-closed posture already applied to unresolvable words.
+
 ## [0.6.0] - 2026-08-19
 
 ### Security

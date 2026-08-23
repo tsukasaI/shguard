@@ -88,6 +88,45 @@ fn guardfall_class_e_cases() {
         ("wipefs -a /dev/sda", Decision::Block),
         ("wipefs -o 512 /dev/sda", Decision::Block),
         ("blkdiscard /dev/sda", Decision::Block),
+        // Issue #136: rsync/mv/install writing a regular file's bytes onto
+        // a /dev/ device special file has the same destructive effect as
+        // dd/tee/redirect, but had zero coverage. Unlike cp-write-device
+        // (#123, ask): no common daily idiom reads FROM a device as the
+        // SOURCE for these three, so they Block outright.
+        ("rsync -a src/ /dev/sda", Decision::Block),
+        ("mv payload.bin /dev/sda", Decision::Block),
+        ("install payload.bin /dev/sda", Decision::Block),
+        ("mv /dev/sda backup", Decision::Block), // source-role membership trade-off, accepted (see cp-write-device precedent)
+        // -t/--target-directory= (mv/install only, mirroring cp-write-
+        // device's coverage of the same flags from #330's review).
+        ("mv -t/dev/sda file", Decision::Block),
+        ("install -t /dev sda", Decision::Block),
+        // /dev/shm is tmpfs scratch space — a real daily idiom, carved out
+        // via except_targets so this doesn't repeat cp-write-device's
+        // original over-broad-/dev/ mistake.
+        ("mv file /dev/shm", Decision::Allow),
+        ("rsync -a src/ /dev/shm/scratch", Decision::Allow),
+        ("install bin /dev/shm/test/", Decision::Allow),
+        ("mv /dev/shm/a /dev/shm/b", Decision::Allow),
+        ("rsync -a /dev/shm/src/ /dev/sda", Decision::Block), // one candidate excepted, one not — still Block
+        ("mv $SRC /dev/shm/x", Decision::Block), // unresolvable candidate disables suppression, fail-closed
+        // A `..` path-ascent respelling of an excepted candidate must
+        // never be treated as excepted: except_targets compares the RAW
+        // token, but targets compares the normalized one, so
+        // `/dev/shm/../sda` textually starts with the excepted
+        // `/dev/shm/` prefix while actually resolving to `/dev/sda`.
+        ("mv payload.bin /dev/shm/../sda", Decision::Block),
+        ("mv payload.bin /dev/shm/..", Decision::Block),
+        ("install payload.bin /dev/shm/../sda", Decision::Block),
+        ("rsync -a src/ /dev/shm/../sda", Decision::Block),
+        // /dev/stdin never touches a disk device node even in the write
+        // role — the common `curl ... | install -m755 /dev/stdin dest`
+        // idiom stays Allow.
+        (
+            "install -m755 /dev/stdin /usr/local/bin/tool",
+            Decision::Allow,
+        ),
+        ("mv src dst", Decision::Allow),
         // wipefs's default (no -a/-o) is informational — lists signatures
         // without erasing anything, so this must stay Allow.
         ("wipefs /dev/sda", Decision::Allow),
