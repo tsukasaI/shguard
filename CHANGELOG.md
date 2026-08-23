@@ -90,6 +90,14 @@ All notable changes to this project are documented in this file.
   excepted, regardless of what `except_targets` says — the same
   fail-closed posture already applied to unresolvable words.
 
+- `dd`'s `of=` target only covered `/dev/*`, unlike
+  `tee-write-device-or-critical-file`/`redirect-overwrite-device-or-
+  critical-file`, which also cover `/etc/passwd`/`/etc/shadow` (#141):
+  `dd if=/dev/zero of=/etc/passwd` was exactly as destructive as the
+  already-blocked `tee`/redirect equivalent but fell through every rule.
+  `dd-write-device`/`dcfldd-write-device` now also target
+  `/etc/passwd`/`/etc/shadow`.
+
 ## [0.6.0] - 2026-08-19
 
 ### Security
