@@ -1605,11 +1605,12 @@ impl CommandRule {
     /// flag/token constraint, with no separate check needed for that here.
     /// Requiring the WHOLE tail to be opaque, not just `has_unresolvable`
     /// (already required above), is deliberate: a resolved token elsewhere
-    /// in the tail is not proof the rule's own danger is absent (see the
-    /// residual gap below), but at least one rule shape — sed, whose first
-    /// non-option operand is its edit script, not a target — has resolved
-    /// content that's part of neither the flag nor the target and must not
-    /// by itself defeat this relaxation.
+    /// in the tail is not proof the rule's own danger is absent, but at
+    /// least one rule shape — sed, whose first non-option operand is its
+    /// edit script, not a target — has resolved content that's part of
+    /// neither the flag nor the target and must not by itself defeat this
+    /// relaxation. For `sed` specifically this is now handled by the fourth
+    /// case below rather than left as a residual gap.
     ///
     /// Blast radius beyond the motivating example (mirrors
     /// [`Self::matches_except_flags`]'s own documented trade-off for
@@ -1623,17 +1624,37 @@ impl CommandRule {
     /// Ask-only, never Block, same as every relaxation in this function —
     /// an accepted, intentional trade-off, not an oversight.
     ///
-    /// Known residual gap (not fixed here): a decoy resolved token can
-    /// still defeat this branch even when the danger is real and
-    /// exploitable. GNU `sed`
-    /// permutes options after operands (POSIX getopt-style), so `sed
-    /// 's/a/b/' $(echo -i ~/.config/shguard/config.toml)` still performs
-    /// the in-place edit at runtime — but its tail has ONE resolved token
-    /// (`'s/a/b/'`), so this branch stays silent for it. Closing this fully
-    /// needs sed-specific positional semantics (which operand is the
-    /// script vs. a file), not a generic flag/target check — tracked as
-    /// issue #117 rather than folded into this fix, which stays a
-    /// command-agnostic relaxation like its two siblings above.
+    /// # A fourth case, `sed`-only: exactly one resolved operand survives (issue #117)
+    ///
+    /// GNU `sed` permutes options after operands (POSIX getopt-style), so a
+    /// single resolved token surviving in an otherwise-opaque tail does not
+    /// rule out a hidden flag+target elsewhere: `sed 's/a/b/'
+    /// $(echo -i ~/.config/shguard/config.toml)` performs the in-place edit
+    /// at runtime, but the all-opaque check above stays silent for it (the
+    /// tail has one resolved token, `'s/a/b/'`). `sed`'s own calling
+    /// convention explains that survivor away: absent `-e`/`-f`, it always
+    /// takes exactly one script operand, so this branch tolerates at most
+    /// one non-flag-shaped resolved token in the tail — `sed`-scoped only,
+    /// via [`sed_tail_has_at_most_one_resolved_operand`] and keyed off
+    /// [`CommandMatch::matches`] on this rule's own `command` (so a future
+    /// `command_prefix` rule that happens to prefix-match `"sed"` would
+    /// silently inherit this too — no such rule exists today). Same
+    /// accepted trade-off as the all-opaque case, but with a more common
+    /// blast radius: `sed 's/x/y/' "$file"` — an everyday pattern, not just
+    /// an edge case like `$(cat unrelated-script)` — now also floors to
+    /// `Ask` regardless of `$file`'s actual value, once `$file` itself is
+    /// unresolvable.
+    ///
+    /// Residual gap (not fixed here): a SECOND resolved, non-flag-shaped
+    /// operand still defeats this branch, e.g. `sed -f a.sed file $(evil)`
+    /// or `sed -e a -e b $(evil)`. This is forced, not an oversight — the
+    /// pinned must-not-fire case just below
+    /// (`except_target_does_not_fire_when_a_resolved_token_survives_in_the_tail`,
+    /// `sed 's/x/y/' /some/normal/file $(compute-suffix)`) is token-shape-
+    /// indistinguishable from those two: closing it would need to model
+    /// which flags consume how many script/file operands (full `-e`/`-f`
+    /// positional semantics), which issue #117 explicitly deferred rather
+    /// than fold into this narrower fix.
     #[must_use]
     pub(crate) fn matches_except_target(&self, argv: &[NormalizedWord]) -> bool {
         if self.targets.is_empty() {
@@ -1657,9 +1678,13 @@ impl CommandRule {
         {
             return true;
         }
-        rest_words
+        if rest_words
             .iter()
             .all(|w| matches!(w.resolution(), Resolution::Unresolvable(_)))
+        {
+            return true;
+        }
+        self.command.matches("sed") && sed_tail_has_at_most_one_resolved_operand(&rest_words)
     }
 
     /// Same wrapper-unwrap walk as [`Self::matching_rest`], but stopping at
@@ -2195,6 +2220,22 @@ fn resolved_strings(argv: &[NormalizedWord]) -> Vec<&str> {
             Resolution::Unresolvable(_) => None,
         })
         .collect()
+}
+
+/// [`CommandRule::matches_except_target`]'s `sed`-only fourth relaxation
+/// (issue #117): whether `rest_words` has at most one resolved, non-flag-
+/// shaped token — GNU `sed` always takes exactly one script operand absent
+/// `-e`/`-f`, so tolerating one such survivor (presumed to be that script)
+/// still lets a hidden flag+target hide among the rest. A resolved token
+/// starting with `-` is excluded from the count: it's a flag candidate, not
+/// a script/file operand, and already governed by
+/// [`CommandRule::constraints_match`]'s own handling.
+fn sed_tail_has_at_most_one_resolved_operand(rest_words: &[NormalizedWord]) -> bool {
+    resolved_strings(rest_words)
+        .iter()
+        .filter(|s| !s.starts_with('-'))
+        .count()
+        <= 1
 }
 
 /// The candidate target value `token` carries, if any — used by
@@ -7807,6 +7848,47 @@ mod tests {
         ));
         assert!(rules.match_command_except_target(&cmd).is_none());
     }
+
+    // ==== Issue #117: matches_except_target's fourth relaxation — sed's
+    // decoy script token no longer defeats the flag+target-hidden check ====
+
+    #[test]
+    fn except_target_fires_for_sed_with_one_resolved_script_and_an_opaque_tail() {
+        // sed 's/a/b/' $(echo -i ~/.config/shguard/config.toml) — GNU sed
+        // permutes options after operands, so the hidden substitution still
+        // performs the in-place edit at runtime even though the tail has
+        // one resolved token (the script).
+        let rules = Rules::embedded().unwrap();
+        let mut cmd = argv(&["sed", "s/a/b/"]);
+        cmd.push(NormalizedWord::unresolvable(
+            crate::normalize::UnresolvableKind::CommandSubstitution,
+        ));
+        assert!(rules.match_command(&cmd).is_none());
+        let rule = rules.match_command_except_target(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "self-protect-config-sed-tilde");
+    }
+
+    #[test]
+    fn except_target_fires_for_sed_with_a_resolved_flag_plus_script_and_an_opaque_tail() {
+        // sed -n 's/a/b/' $(echo -i ~/.config/shguard/config.toml) — the
+        // resolved "-n" must not count toward the one-operand allowance
+        // (it's a flag candidate, not a script/file operand), so this must
+        // still fire.
+        let rules = Rules::embedded().unwrap();
+        let mut cmd = argv(&["sed", "-n", "s/a/b/"]);
+        cmd.push(NormalizedWord::unresolvable(
+            crate::normalize::UnresolvableKind::CommandSubstitution,
+        ));
+        assert!(rules.match_command(&cmd).is_none());
+        let rule = rules.match_command_except_target(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "self-protect-config-sed-tilde");
+    }
+
+    // The two-resolved-operand must-not-fire case (sed's own residual gap
+    // under the new relaxation, same shape as the pinned #85 case) is
+    // already covered above by
+    // `except_target_does_not_fire_when_a_resolved_token_survives_in_the_tail`
+    // — no separate test needed here.
 
     #[test]
     fn except_target_third_relaxation_requires_a_required_flag_or_token() {

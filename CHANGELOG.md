@@ -4,6 +4,15 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Security
+
+- Fixed a bypass of `self-protect-config-sed-tilde`: GNU `sed` permutes
+  options after operands, so `sed 's/a/b/' $(echo -i ~/.config/shguard/config.toml)`
+  performed an in-place edit of shguard's own config at runtime while
+  `matches_except_target`'s existing all-opaque-tail relaxation stayed
+  silent (one resolved token — the script — survived in the tail). Closes
+  #117.
+
 ## [0.6.0] - 2026-08-19
 
 ### Security

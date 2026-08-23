@@ -751,21 +751,27 @@ fn guardfall_issue_77_brace_command_position_cases() {
             "sed $(printf -- \"-i /home/user/.config/shguard/config.toml\")",
             Decision::Ask,
         ),
+        // Issue #117 (fable-review finding against issue #85's fix): a
+        // decoy RESOLVED token elsewhere in the tail used to defeat the
+        // relaxation above even when the danger was real and exploitable.
+        // GNU sed permutes options after operands (POSIX getopt-style), so
+        // `sed 's/a/b/' $(echo -i ~/.config/shguard/config.toml)` performs
+        // the in-place edit at runtime despite the tail having one resolved
+        // token (`'s/a/b/'`, sed's own edit script). Fixed via a sed-only
+        // fourth relaxation tolerating at most one resolved, non-flag-
+        // shaped operand (sed always takes exactly one script operand
+        // absent `-e`/`-f`) — see `sed_tail_has_at_most_one_resolved_operand`
+        // in src/rules.rs. A SECOND resolved non-flag operand (`sed -f
+        // a.sed file $(evil)`) remains a residual, undesigned gap — see the
+        // `except_target_does_not_fire_when_a_resolved_token_survives_in_the_tail`
+        // unit test in src/rules.rs for why that shape can't be
+        // distinguished from a legitimate two-operand invocation without
+        // full `-e`/`-f` positional modeling.
+        (
+            "sed 's/a/b/' $(echo -i ~/.config/shguard/config.toml)",
+            Decision::Ask,
+        ),
     ];
-    // Known residual gap (fable-review finding against issue #85's fix,
-    // NOT closed here — tracked as issue #117, not pinned as a passing
-    // case since a genuine bypass should not read as an accepted, green
-    // regression pin): a decoy RESOLVED token elsewhere in the tail
-    // still defeats the new relaxation above, even when the danger is real
-    // and exploitable. GNU sed permutes options after operands (POSIX
-    // getopt-style), so `sed 's/a/b/' $(echo -i ~/.config/shguard/config.toml)`
-    // still performs the in-place edit at runtime, but its tail has one
-    // resolved token (`'s/a/b/'`, sed's own edit script) alongside the
-    // hidden flag+target substitution — the new relaxation only fires when
-    // the WHOLE tail is unresolvable, so a single resolved decoy is enough
-    // to keep it silent. Closing this fully needs sed-specific positional
-    // semantics (which operand is the script vs. a target file), not a
-    // generic flag/target check.
 
     for (command, expected) in cases {
         let verdict = shguard::analyze(command);
