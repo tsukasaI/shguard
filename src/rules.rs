@@ -1605,11 +1605,12 @@ impl CommandRule {
     /// flag/token constraint, with no separate check needed for that here.
     /// Requiring the WHOLE tail to be opaque, not just `has_unresolvable`
     /// (already required above), is deliberate: a resolved token elsewhere
-    /// in the tail is not proof the rule's own danger is absent (see the
-    /// residual gap below), but at least one rule shape — sed, whose first
-    /// non-option operand is its edit script, not a target — has resolved
-    /// content that's part of neither the flag nor the target and must not
-    /// by itself defeat this relaxation.
+    /// in the tail is not proof the rule's own danger is absent, but at
+    /// least one rule shape — sed, whose first non-option operand is its
+    /// edit script, not a target — has resolved content that's part of
+    /// neither the flag nor the target and must not by itself defeat this
+    /// relaxation. For `sed` specifically this is now handled by the fourth
+    /// case below rather than left as a residual gap.
     ///
     /// Blast radius beyond the motivating example (mirrors
     /// [`Self::matches_except_flags`]'s own documented trade-off for
@@ -1634,11 +1635,15 @@ impl CommandRule {
     /// convention explains that survivor away: absent `-e`/`-f`, it always
     /// takes exactly one script operand, so this branch tolerates at most
     /// one non-flag-shaped resolved token in the tail — `sed`-scoped only,
-    /// via [`sed_tail_has_at_most_one_resolved_operand`] — rather than
-    /// widening the command-agnostic all-opaque relaxation above for every
-    /// rule. Same accepted trade-off as the all-opaque case: `sed 's/x/y/'
-    /// $(cat unrelated-script)` now also floors to `Ask` regardless of
-    /// `unrelated-script`'s actual output.
+    /// via [`sed_tail_has_at_most_one_resolved_operand`] and keyed off
+    /// [`CommandMatch::matches`] on this rule's own `command` (so a future
+    /// `command_prefix` rule that happens to prefix-match `"sed"` would
+    /// silently inherit this too — no such rule exists today). Same
+    /// accepted trade-off as the all-opaque case, but with a more common
+    /// blast radius: `sed 's/x/y/' "$file"` — an everyday pattern, not just
+    /// an edge case like `$(cat unrelated-script)` — now also floors to
+    /// `Ask` regardless of `$file`'s actual value, once `$file` itself is
+    /// unresolvable.
     ///
     /// Residual gap (not fixed here): a SECOND resolved, non-flag-shaped
     /// operand still defeats this branch, e.g. `sed -f a.sed file $(evil)`
@@ -7879,19 +7884,11 @@ mod tests {
         assert_eq!(rule.id().as_str(), "self-protect-config-sed-tilde");
     }
 
-    #[test]
-    fn except_target_still_does_not_fire_for_sed_with_two_resolved_operands() {
-        // sed 's/x/y/' /some/normal/file $(compute-suffix) — the pinned
-        // #85 must-not-fire case: TWO resolved non-flag operands survive,
-        // so the sed-only relaxation's one-operand allowance does not
-        // apply and this stays Allow, same as before issue #117.
-        let rules = Rules::embedded().unwrap();
-        let mut cmd = argv(&["sed", "s/x/y/", "/some/normal/file"]);
-        cmd.push(NormalizedWord::unresolvable(
-            crate::normalize::UnresolvableKind::CommandSubstitution,
-        ));
-        assert!(rules.match_command_except_target(&cmd).is_none());
-    }
+    // The two-resolved-operand must-not-fire case (sed's own residual gap
+    // under the new relaxation, same shape as the pinned #85 case) is
+    // already covered above by
+    // `except_target_does_not_fire_when_a_resolved_token_survives_in_the_tail`
+    // — no separate test needed here.
 
     #[test]
     fn except_target_third_relaxation_requires_a_required_flag_or_token() {
