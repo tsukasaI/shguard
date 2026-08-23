@@ -81,10 +81,11 @@ All notable changes to this project are documented in this file.
   surfaced it): `except_targets` is deliberately never normalized
   (matched against the raw resolved token — see this file's own
   `except_targets` docs for why), but `targets` itself IS normalized, so
-  a `..`-path-ascent respelling of an excepted candidate (`/dev/shm/../
-  sda`) could textually start with an excepted prefix (`/dev/shm/`)
-  while actually resolving to a target the exception was never meant to
-  cover (`/dev/sda`). `CommandRule::matches` now refuses to treat any
+  a `..`-path-ascent respelling of an excepted candidate
+  (`/dev/shm/../sda`) could textually start with an excepted prefix
+  (`/dev/shm/`) while actually resolving to a target the exception was
+  never meant to cover (`/dev/sda`). `CommandRule::matches` now refuses
+  to treat any
   `/`- or `~`-rooted candidate containing a literal `..` path segment as
   excepted, regardless of what `except_targets` says — the same
   fail-closed posture already applied to unresolvable words.

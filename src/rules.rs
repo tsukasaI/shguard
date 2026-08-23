@@ -2254,7 +2254,12 @@ fn sed_tail_has_at_most_one_resolved_operand(rest_words: &[NormalizedWord]) -> b
 /// [`CommandRule::matches`]'s except-suppression fail-closed guard (issue
 /// #136): whether `candidate` is a `/`- or `~`-rooted path containing a
 /// literal `..` path segment — see that function's doc comment for why
-/// such a candidate must never be treated as excepted.
+/// such a candidate must never be treated as excepted. Scoped to rooted
+/// candidates only: every shipped `except_targets` entry (`exact`/
+/// `prefix`) is itself `/`- or `~`-rooted, so only a rooted candidate can
+/// ever raw-match one — widening this to unrooted candidates would false-
+/// positive a `url_host` except's non-path candidates (e.g. a `..`
+/// appearing in a URL path segment) for no matching benefit.
 fn candidate_has_unresolved_ascent(candidate: &str) -> bool {
     (candidate.starts_with('/') || candidate.starts_with('~'))
         && candidate.split('/').any(|segment| segment == "..")
@@ -4056,9 +4061,9 @@ fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesErr
     if targets.is_empty()
         && !except_targets.is_empty()
         && value_flags.is_empty()
-        && let Some(unexcepted) = required_tokens
-            .iter()
-            .find(|t| !except_targets.iter().any(|e| e.matches(t)))
+        && let Some(unexcepted) = required_tokens.iter().find(|t| {
+            candidate_has_unresolved_ascent(t) || !except_targets.iter().any(|e| e.matches(t))
+        })
     {
         return Err(RulesError::invalid(
             &dto.id,

@@ -384,11 +384,14 @@ targets = [{ strip = "of=", normalized_prefix = "/dev/" }]
 # abbreviation (`--target-dir=/dev/sda`) both bypass the -t/--target-
 # directory= coverage above (issue #214's class). Separately, the
 # except_targets carve-out below only ever sees the RAW candidate token —
-# it doesn't know about `strip`, so `-t /dev/shm` (separated) and
-# `--target-directory=/dev/shm` still Block despite the except existing
-# for the plain-positional spelling; over-strict, not a security hole,
-# left as a usability gap rather than widening except_targets' own
-# raw-literal-only contract (see this file's own except_targets docs
+# it doesn't know about `strip`, so the ATTACHED `--target-directory=
+# /dev/shm` and GLUED `-t/dev/shm` forms still Block despite the except
+# existing for the plain-positional spelling (the SEPARATED `-t /dev/shm`
+# form does Allow: its value is its own token, matched and excepted like
+# any other candidate, `strip` never enters into it there). Over-strict,
+# not a security hole, left as a usability gap rather than widening
+# except_targets' own raw-literal-only contract (see this file's own
+# except_targets docs
 # near the top) to understand `strip`.
 [[command]]
 id = "mv-write-device"
