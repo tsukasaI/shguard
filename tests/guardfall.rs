@@ -77,6 +77,15 @@ fn guardfall_class_e_cases() {
         // issue #65: `//dev/sda` lexically normalizes to `/dev/sda` —
         // the old byte-exact `prefix = "of=/dev/"` target missed it.
         ("dd if=/dev/zero of=//dev/sda", Decision::Block),
+        // Issue #141: dd's of= target only covered /dev/*, unlike
+        // tee/redirect's equivalent rules, which also cover /etc/passwd
+        // and /etc/shadow — the identical destructive effect (e.g.
+        // zeroing from /dev/zero) fell through every blocklist rule.
+        ("dd if=/dev/zero of=/etc/passwd", Decision::Block),
+        ("dd if=/dev/zero of=/etc/shadow", Decision::Block),
+        ("dcfldd if=/dev/zero of=/etc/passwd", Decision::Block),
+        ("dd if=/etc/passwd of=/tmp/backup", Decision::Allow), // reading, not writing
+        ("dd if=/dev/zero of=/etc/passwd.bak", Decision::Allow), // different file, must not over-match
         ("shred /dev/sda", Decision::Block),
         // Issue #123: device-destroying command family also omitted cp,
         // dcfldd (a drop-in dd variant), wipefs, and blkdiscard.

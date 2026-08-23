@@ -337,20 +337,38 @@ reason = "find with -delete removes every matched file, unrecoverably"
 command = "find"
 required_flags = ["-delete"]
 
+# Issue #141: dd's of= target only covered /dev/*, unlike
+# redirect-overwrite-device-or-critical-file/tee-write-device-or-
+# critical-file above, which also cover /etc/passwd and /etc/shadow — dd
+# writing the same destructive content (e.g. zero bytes from /dev/zero)
+# to a critical file outside /dev/ is exactly as destructive, same tool
+# family, but fell through every blocklist rule. Only /etc/passwd/
+# /etc/shadow are added here (not the redirect/tee list's specific
+# per-vendor /dev/ prefixes) since dd-write-device's existing blanket
+# `normalized_prefix = "/dev/"` already covers ALL of /dev/, strictly
+# broader than that per-vendor list.
 [[command]]
 id = "dd-write-device"
-reason = "dd writing directly to a /dev/ device overwrites raw disk contents"
+reason = "dd writing directly to a raw block device or critical system file destroys data"
 command = "dd"
-targets = [{ strip = "of=", normalized_prefix = "/dev/" }]
+targets = [
+    { strip = "of=", normalized_prefix = "/dev/" },
+    { strip = "of=", normalized = "/etc/passwd" },
+    { strip = "of=", normalized = "/etc/shadow" },
+]
 
 # dcfldd is a drop-in dd variant (forensic imaging tool) with identical
-# if=/of= semantics — same strip="of=" precision as dd-write-device above,
-# so no cp-style source/dest ambiguity here.
+# if=/of= semantics — same strip="of=" precision and critical-file parity
+# as dd-write-device above, so no cp-style source/dest ambiguity here.
 [[command]]
 id = "dcfldd-write-device"
-reason = "dcfldd writing directly to a /dev/ device overwrites raw disk contents"
+reason = "dcfldd writing directly to a raw block device or critical system file destroys data"
 command = "dcfldd"
-targets = [{ strip = "of=", normalized_prefix = "/dev/" }]
+targets = [
+    { strip = "of=", normalized_prefix = "/dev/" },
+    { strip = "of=", normalized = "/etc/passwd" },
+    { strip = "of=", normalized = "/etc/shadow" },
+]
 
 # Issue #136: rsync/mv/install writing a regular file's bytes onto a /dev/
 # device special file is the same destructive effect as the already-Block
