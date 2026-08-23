@@ -25,7 +25,12 @@ All notable changes to this project are documented in this file.
   distinguish `cp /dev/sda backup.img` (reading a device) from `cp file
   /dev/sda` (writing to one) beyond checking both positions; the everyday
   `/dev/{null,zero,urandom,random}` idiom (harmless in either role) is
-  carved out via `except_targets` to stay `Allow`.
+  carved out via `except_targets` to stay `Allow`. `dcfldd` also mirrors
+  `shell-init-dd`'s persistence-path coverage, and the `cp` rule's target
+  list covers `-t`/`--target-directory=` (glued, separated, and the
+  bare-directory-with-no-trailing-slash form) and `--remove-destination`
+  (which replaces a device node outright, not covered by the
+  harmless-in-either-role carve-out).
 
 ## [0.6.0] - 2026-08-19
 

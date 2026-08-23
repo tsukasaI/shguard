@@ -6863,8 +6863,8 @@ mod tests {
             checked += 1;
         }
         assert_eq!(
-            checked, 10,
-            "expected ten shell-init rules, found {checked}"
+            checked, 11,
+            "expected eleven shell-init rules, found {checked}"
         );
     }
 

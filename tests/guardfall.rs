@@ -102,6 +102,27 @@ fn guardfall_class_e_cases() {
         ("cp /dev/urandom key.bin", Decision::Allow),
         ("cp key.bin /dev/null", Decision::Allow),
         ("cp src dst", Decision::Allow),
+        // cp-write-device must never shadow the stricter
+        // self-protect-config-cp-tilde Block — same shadowing discipline
+        // as guardfall_shell_init_tee_does_not_shadow_critical_file_block,
+        // enforced here by rule ordering (cp-write-device is appended near
+        // the end of rules/blocklist.toml, after self-protect-config-*).
+        ("cp /dev/sda ~/.config/shguard/config.toml", Decision::Block),
+        // -t/--target-directory= glued or separated, including the
+        // bare-directory form with no trailing slash — the value never
+        // appears as a plain "/dev/..."-prefixed token, so this only
+        // passes via the rule's dedicated strip/bare-"/dev" targets.
+        ("cp --target-directory=/dev/sda payload", Decision::Ask),
+        ("cp -t/dev/sda payload", Decision::Ask),
+        ("cp -t /dev sda", Decision::Ask),
+        // --remove-destination unlinks the destination node itself before
+        // copying — for a device node this replaces it entirely, so it's
+        // dangerous even against a node cp-write-device's except_targets
+        // treats as harmless to write into normally.
+        ("cp --remove-destination payload /dev/null", Decision::Ask),
+        // Fail-closed edge cases the except_targets carve-out relies on.
+        ("cp $SRC /dev/null", Decision::Ask), // unresolvable candidate disables suppression
+        ("cp key.bin /dev//null", Decision::Ask), // respelling matches the target (normalized_prefix) but not the except (exact)
         ("truncate -s 0 /important", Decision::Block),
         ("tar -C / -x", Decision::Block),
         ("tar -xf evil.tar -C /", Decision::Block),
