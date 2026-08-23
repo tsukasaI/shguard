@@ -352,6 +352,76 @@ reason = "dcfldd writing directly to a /dev/ device overwrites raw disk contents
 command = "dcfldd"
 targets = [{ strip = "of=", normalized_prefix = "/dev/" }]
 
+# Issue #136: rsync/mv/install writing a regular file's bytes onto a /dev/
+# device special file is the same destructive effect as the already-Block
+# dd/tee/redirect shapes, but none of these three had ANY /dev/* coverage.
+# Unlike cp-write-device (#123, decision="ask"): that rule's source-role
+# false-positive is common daily usage (`cp /dev/urandom key.bin`) for
+# which no comparable idiom exists here — nobody routinely reads FROM
+# `/dev/sda`/`/dev/null`/etc. as an rsync/mv/install SOURCE — so these
+# three Block outright, same posture as dd/dcfldd above. The one real
+# common idiom is `/dev/shm` (tmpfs scratch space: `mv build.tar
+# /dev/shm/`, `rsync -a src/ /dev/shm/scratch/`), carved out via
+# except_targets (both the bare-directory and prefixed spellings) exactly
+# so that daily-usage break doesn't recur here.
+#
+# Reason wording deliberately avoids dd's "overwrites raw disk contents":
+# mv/rsync's default same-filesystem behavior REPLACES the device node
+# itself (rename, mknod-recoverable) rather than opening and streaming
+# bytes into it the way dd/cp do — but losing the node out from under a
+# running system is just as severe either way, and the issue's own
+# framing puts this in the dd/tee severity class regardless of mechanism.
+# (cp-remove-destination-device, #123, has the identical node-replacement
+# effect but inherits cp's ask-tier posture from the rest of that rule
+# family; these three have no such common-idiom pressure holding them to
+# ask.)
+#
+# mv/install support cp's own -t/--target-directory= flags (rsync does
+# not) — mirrors cp-write-device's full six-entry target list, same gap
+# class fable found there (#330).
+[[command]]
+id = "mv-write-device"
+reason = "mv replacing a /dev/ device node (or overwriting into it) has the same destructive effect as dd/tee/redirect writing to a device"
+command = "mv"
+targets = [
+    { normalized_prefix = "/dev/" },
+    { normalized = "/dev" },
+    { strip = "--target-directory=", normalized_prefix = "/dev/" },
+    { strip = "--target-directory=", normalized = "/dev" },
+    { strip = "-t", normalized_prefix = "/dev/" },
+    { strip = "-t", normalized = "/dev" },
+]
+except_targets = [{ exact = "/dev/shm" }, { prefix = "/dev/shm/" }]
+
+[[command]]
+id = "install-write-device"
+reason = "install replacing a /dev/ device node (or overwriting into it) has the same destructive effect as dd/tee/redirect writing to a device"
+command = "install"
+targets = [
+    { normalized_prefix = "/dev/" },
+    { normalized = "/dev" },
+    { strip = "--target-directory=", normalized_prefix = "/dev/" },
+    { strip = "--target-directory=", normalized = "/dev" },
+    { strip = "-t", normalized_prefix = "/dev/" },
+    { strip = "-t", normalized = "/dev" },
+]
+except_targets = [{ exact = "/dev/shm" }, { prefix = "/dev/shm/" }]
+
+# rsync has no -t/--target-directory= flag (unlike mv/install above) —
+# plain prefix targeting only. Bare "/dev" (no trailing slash, e.g. `rsync
+# -a src/ /dev`) is a disclosed, undesigned residual, same as
+# rsync-delete-root-or-device and rm-recursive-force-dangerous-target near
+# the end of this file — not fixed here. Overlaps decision-identically
+# (Block) with rsync-delete-root-or-device on `rsync --delete src/
+# /dev/sda`; only the reported reason differs depending on which rule
+# happens to match first.
+[[command]]
+id = "rsync-write-device"
+reason = "rsync replacing a /dev/ device node (or overwriting into it) has the same destructive effect as dd/tee/redirect writing to a device"
+command = "rsync"
+targets = [{ normalized_prefix = "/dev/" }]
+except_targets = [{ exact = "/dev/shm" }, { prefix = "/dev/shm/" }]
+
 [[command]]
 id = "truncate-zero"
 reason = "truncate -s zeroes/truncates the target file's contents in place"

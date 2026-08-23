@@ -63,6 +63,17 @@ All notable changes to this project are documented in this file.
   `truncate-zero`'s own `-s`/`--size` matching has the identical gap,
   pre-existing).
 
+- `rsync`/`mv`/`install` writing a regular file's bytes onto a `/dev/`
+  device special file had zero coverage, the same destructive effect as
+  the already-blocked `dd`/`tee`/redirect shapes (#136). Unlike
+  `cp-write-device` (#123, `ask`): no common daily idiom reads FROM a
+  device as the SOURCE for these three, so `mv-write-device`,
+  `install-write-device`, and `rsync-write-device` block outright.
+  `/dev/shm` (tmpfs scratch space — a real idiom, e.g. `mv build.tar
+  /dev/shm/`) is carved out via `except_targets`. `mv`/`install` also
+  cover `-t`/`--target-directory=`, mirroring `cp-write-device`'s full
+  target list.
+
 ## [0.6.0] - 2026-08-19
 
 ### Security
