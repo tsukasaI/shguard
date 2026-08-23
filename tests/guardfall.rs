@@ -84,6 +84,9 @@ fn guardfall_class_e_cases() {
         ("dd if=/dev/zero of=/etc/passwd", Decision::Block),
         ("dd if=/dev/zero of=/etc/shadow", Decision::Block),
         ("dcfldd if=/dev/zero of=/etc/passwd", Decision::Block),
+        ("dcfldd if=/dev/zero of=/etc/shadow", Decision::Block),
+        ("dd of=/etc/passwd if=/dev/zero", Decision::Block), // flag order must not matter
+        ("dd if=/dev/zero of=//etc/passwd", Decision::Block), // double-slash normalization, same as the //dev/sda pin above
         ("dd if=/etc/passwd of=/tmp/backup", Decision::Allow), // reading, not writing
         ("dd if=/dev/zero of=/etc/passwd.bak", Decision::Allow), // different file, must not over-match
         ("shred /dev/sda", Decision::Block),
