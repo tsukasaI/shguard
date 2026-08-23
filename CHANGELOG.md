@@ -32,6 +32,26 @@ All notable changes to this project are documented in this file.
   (which replaces a device node outright, not covered by the
   harmless-in-either-role carve-out).
 
+- `rsync --delete` syncing into a dangerous local target is functionally a
+  recursive wipe of the destination, the same severity class already
+  blocked for `rm -rf` against one, but had no blocklist coverage (#127).
+  Like `cp-write-device` above, `rsync` has no flag marking which argv
+  position is the destination, so target matching can't tell `rsync
+  --delete src/ /` (wiping `/`) from `rsync --delete / backup/` (reading
+  `/`, a real full-system-backup idiom) apart from checking both
+  positions. Split into two new rules by anchor rather than one flat rule:
+  `/`, `/*`, `/dev/*`, and `find`'s own `{}` placeholder now block (rare
+  and alarming in either role); `~` and `.` ask (common as a source, e.g.
+  "sync my home to backup" — blocking there would over-fire on daily
+  usage). Recognized spellings: `--delete`, `--delete-before/-during/
+  -delay/-after/-excluded/-missing-args`, and the `--del` alias (also
+  added to the pre-existing `self-protect-config-ancestor-rsync-tilde`,
+  which was missing it too). Known gap: some rsync implementations (e.g.
+  macOS's default openrsync) accept unambiguous long-option prefixes
+  (`--delete-a` alone can trigger deletion), which no finite flag list can
+  enumerate — same class as the GNU long-option-abbreviation gap already
+  noted on `cp-write-device` above.
+
 ## [0.6.0] - 2026-08-19
 
 ### Security
