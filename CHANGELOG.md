@@ -6,15 +6,6 @@ All notable changes to this project are documented in this file.
 
 ### Security
 
-- `truncate -r`/`--reference=RFILE` sets the target's size to match
-  RFILE's size instead of an explicit number — the same unrecoverable
-  content-destruction effect as `truncate -s`, but `truncate-zero` only
-  checked for `-s`/`--size` (#131). New `truncate-reference` rule blocks
-  on `-r`/`--reference` presence alone, regardless of what RFILE actually
-  is (shrinking truncates data, growing pads with NUL — both destructive).
-
-### Security
-
 - Fixed a bypass of `self-protect-config-sed-tilde`: GNU `sed` permutes
   options after operands, so `sed 's/a/b/' $(echo -i ~/.config/shguard/config.toml)`
   performed an in-place edit of shguard's own config at runtime while
@@ -60,6 +51,17 @@ All notable changes to this project are documented in this file.
   (`--delete-a` alone can trigger deletion), which no finite flag list can
   enumerate — same class as the GNU long-option-abbreviation gap already
   noted on `cp-write-device` above.
+
+- `truncate -r`/`--reference=RFILE` sets the target's size to match
+  RFILE's size instead of an explicit number — the same unrecoverable
+  content-destruction effect as `truncate -s`, but `truncate-zero` only
+  checked for `-s`/`--size` (#131). New `truncate-reference` rule blocks
+  on `-r`/`--reference` presence alone, regardless of what RFILE actually
+  is (shrinking truncates data, growing pads with NUL — both destructive).
+  Known gap, same class as the two above: GNU's unambiguous long-option
+  prefixes (`--ref`) aren't enumerable and bypass this rule (and
+  `truncate-zero`'s own `-s`/`--size` matching has the identical gap,
+  pre-existing).
 
 ## [0.6.0] - 2026-08-19
 

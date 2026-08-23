@@ -366,6 +366,10 @@ required_flags = ["s|--size"]
 # truncate-zero above, mirrors how rm-recursive-force-dangerous-target and
 # rm-force-find-placeholder-target stay two rules for one command rather
 # than one rule with an OR'd reason that fits neither flag family well).
+# Known gap, same as truncate-zero above: GNU's unambiguous long-option
+# prefix matching (`--ref` alone works against real GNU truncate) isn't
+# enumerable by a finite required_flags list — see rsync-delete-root-
+# or-device's comment near the end of this file for the same class.
 [[command]]
 id = "truncate-reference"
 reason = "truncate -r/--reference sets the target's size to match a reference file's size, unconditionally overwriting its contents in place"

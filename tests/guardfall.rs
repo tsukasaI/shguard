@@ -163,6 +163,9 @@ fn guardfall_class_e_cases() {
         ("truncate -r /dev/null /important", Decision::Block),
         ("truncate --reference /dev/null /important", Decision::Block),
         ("truncate --reference=somefile /important", Decision::Block),
+        ("truncate -cr /dev/null /important", Decision::Block), // short-flag clustering
+        ("truncate -r/dev/null /important", Decision::Block),   // attached-value form of -r
+        ("truncate -s 0 -r /dev/null /important", Decision::Block), // both flags; truncate-zero wins first-match
         ("truncate /important", Decision::Allow), // no -s/-r at all, not destructive
         ("tar -C / -x", Decision::Block),
         ("tar -xf evil.tar -C /", Decision::Block),
