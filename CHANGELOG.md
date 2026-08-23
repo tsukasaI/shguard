@@ -72,7 +72,22 @@ All notable changes to this project are documented in this file.
   `/dev/shm` (tmpfs scratch space — a real idiom, e.g. `mv build.tar
   /dev/shm/`) is carved out via `except_targets`. `mv`/`install` also
   cover `-t`/`--target-directory=`, mirroring `cp-write-device`'s full
-  target list.
+  target list; `install` additionally excepts `/dev/stdin` (a common
+  `curl ... | install /dev/stdin dest` idiom, never a disk device node
+  even in the write role).
+
+- Fixed a bypass of `except_targets` suppression affecting every rule
+  that declares it (not specific to #136's new rules, though that's what
+  surfaced it): `except_targets` is deliberately never normalized
+  (matched against the raw resolved token — see this file's own
+  `except_targets` docs for why), but `targets` itself IS normalized, so
+  a `..`-path-ascent respelling of an excepted candidate (`/dev/shm/../
+  sda`) could textually start with an excepted prefix (`/dev/shm/`)
+  while actually resolving to a target the exception was never meant to
+  cover (`/dev/sda`). `CommandRule::matches` now refuses to treat any
+  `/`- or `~`-rooted candidate containing a literal `..` path segment as
+  excepted, regardless of what `except_targets` says — the same
+  fail-closed posture already applied to unresolvable words.
 
 ## [0.6.0] - 2026-08-19
 

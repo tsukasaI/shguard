@@ -1485,8 +1485,18 @@ impl CommandRule {
     /// even though another token is exactly what the rule guards against.
     /// Suppression never triggers when `argv`'s tail contains an
     /// [`Resolution::Unresolvable`] word — fail-closed: if a token's value
-    /// can't be statically known, it's never assumed to be excepted. A
-    /// rule's `value_flags` (issue #48) further narrows the `targets`-
+    /// can't be statically known, it's never assumed to be excepted.
+    /// Suppression also never triggers when a candidate's raw text
+    /// contains a literal `..` path segment (issue #136): `except_targets`
+    /// is deliberately never normalized (`exact`/`prefix` only, matched
+    /// against the raw resolved token — see this module's own docs on
+    /// why), but `targets` itself IS normalized, so a candidate like
+    /// `/dev/shm/../sda` can textually start with an excepted `prefix =
+    /// "/dev/shm/"` while lexically resolving to `/dev/sda` — a target the
+    /// except was never meant to cover. Scoped to `/`- or `~`-rooted
+    /// candidates only, so a `url_host` except (which never deals in `..`
+    /// path segments at all) is untouched.
+    /// A rule's `value_flags` (issue #48) further narrows the `targets`-
     /// empty candidate set: a declared flag's own value (separated or
     /// `--flag=value` attached) is consumed and never becomes a candidate
     /// at all, so a value-taking flag's output path/format string/pattern
@@ -1534,6 +1544,9 @@ impl CommandRule {
                 .collect()
         };
         let all_excepted = !candidates.is_empty()
+            && !candidates
+                .iter()
+                .any(|c| candidate_has_unresolved_ascent(c))
             && candidates
                 .iter()
                 .all(|token| self.except_targets.iter().any(|e| e.matches(token)));
@@ -2236,6 +2249,15 @@ fn sed_tail_has_at_most_one_resolved_operand(rest_words: &[NormalizedWord]) -> b
         .filter(|s| !s.starts_with('-'))
         .count()
         <= 1
+}
+
+/// [`CommandRule::matches`]'s except-suppression fail-closed guard (issue
+/// #136): whether `candidate` is a `/`- or `~`-rooted path containing a
+/// literal `..` path segment — see that function's doc comment for why
+/// such a candidate must never be treated as excepted.
+fn candidate_has_unresolved_ascent(candidate: &str) -> bool {
+    (candidate.starts_with('/') || candidate.starts_with('~'))
+        && candidate.split('/').any(|segment| segment == "..")
 }
 
 /// The candidate target value `token` carries, if any — used by

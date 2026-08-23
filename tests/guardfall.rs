@@ -110,6 +110,22 @@ fn guardfall_class_e_cases() {
         ("mv /dev/shm/a /dev/shm/b", Decision::Allow),
         ("rsync -a /dev/shm/src/ /dev/sda", Decision::Block), // one candidate excepted, one not — still Block
         ("mv $SRC /dev/shm/x", Decision::Block), // unresolvable candidate disables suppression, fail-closed
+        // A `..` path-ascent respelling of an excepted candidate must
+        // never be treated as excepted: except_targets compares the RAW
+        // token, but targets compares the normalized one, so
+        // `/dev/shm/../sda` textually starts with the excepted
+        // `/dev/shm/` prefix while actually resolving to `/dev/sda`.
+        ("mv payload.bin /dev/shm/../sda", Decision::Block),
+        ("mv payload.bin /dev/shm/..", Decision::Block),
+        ("install payload.bin /dev/shm/../sda", Decision::Block),
+        ("rsync -a src/ /dev/shm/../sda", Decision::Block),
+        // /dev/stdin never touches a disk device node even in the write
+        // role — the common `curl ... | install -m755 /dev/stdin dest`
+        // idiom stays Allow.
+        (
+            "install -m755 /dev/stdin /usr/local/bin/tool",
+            Decision::Allow,
+        ),
         ("mv src dst", Decision::Allow),
         // wipefs's default (no -a/-o) is informational — lists signatures
         // without erasing anything, so this must stay Allow.
