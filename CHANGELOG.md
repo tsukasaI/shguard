@@ -13,6 +13,25 @@ All notable changes to this project are documented in this file.
   silent (one resolved token — the script — survived in the tail). Closes
   #117.
 
+- The device-destroying command family (`dd`, `shred`, `mkswap`, `mkfs.*`,
+  redirect-to-`/dev/`, `tee`-to-`/dev/`) omitted several tools with the
+  same destructive effect (#123): `dcfldd` (a drop-in `dd` variant, same
+  `if=`/`of=` semantics) now mirrors `dd-write-device` and
+  `self-protect-config-dd-tilde`; `wipefs -a`/`-o` (erases a
+  filesystem/partition-table signature) and bare `blkdiscard` (always
+  discards its target, no confirmation) are now blocked. `cp` writing to a
+  `/dev/` target now asks — `cp` has no `if=`/`of=` flags to disambiguate
+  source from destination the way `dd`/`dcfldd` do, so this can't
+  distinguish `cp /dev/sda backup.img` (reading a device) from `cp file
+  /dev/sda` (writing to one) beyond checking both positions; the everyday
+  `/dev/{null,zero,urandom,random}` idiom (harmless in either role) is
+  carved out via `except_targets` to stay `Allow`. `dcfldd` also mirrors
+  `shell-init-dd`'s persistence-path coverage, and the `cp` rule's target
+  list covers `-t`/`--target-directory=` (glued, separated, and the
+  bare-directory-with-no-trailing-slash form) and `--remove-destination`
+  (which replaces a device node outright, not covered by the
+  harmless-in-either-role carve-out).
+
 ## [0.6.0] - 2026-08-19
 
 ### Security

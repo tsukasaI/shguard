@@ -343,6 +343,15 @@ reason = "dd writing directly to a /dev/ device overwrites raw disk contents"
 command = "dd"
 targets = [{ strip = "of=", normalized_prefix = "/dev/" }]
 
+# dcfldd is a drop-in dd variant (forensic imaging tool) with identical
+# if=/of= semantics — same strip="of=" precision as dd-write-device above,
+# so no cp-style source/dest ambiguity here.
+[[command]]
+id = "dcfldd-write-device"
+reason = "dcfldd writing directly to a /dev/ device overwrites raw disk contents"
+command = "dcfldd"
+targets = [{ strip = "of=", normalized_prefix = "/dev/" }]
+
 [[command]]
 id = "truncate-zero"
 reason = "truncate -s zeroes/truncates the target file's contents in place"
@@ -378,6 +387,25 @@ command = "mkntfs"
 id = "mkswap-any-device"
 reason = "mkswap overwrites the target device's/partition's signature to initialize it as swap space, destroying any existing filesystem or data"
 command = "mkswap"
+
+# wipefs's default (no flags) is informational — it only lists existing
+# signatures without modifying anything. -a/--all and -o/--offset are the
+# two ways to actually erase one, so (unlike mkswap-any-device above,
+# always destructive) this is flag-gated rather than a bare command block;
+# same shape as truncate-zero's required_flags above.
+[[command]]
+id = "wipefs-any-device"
+reason = "wipefs -a/-o erases a device's/partition's filesystem or partition-table signature, destroying any existing filesystem or data"
+command = "wipefs"
+required_flags = ["a|--all|o|--offset"]
+
+# blkdiscard has no informational default mode: bare `blkdiscard <device>`
+# discards the whole device immediately, same "any bare target is
+# dangerous" shape as shred above.
+[[command]]
+id = "blkdiscard-any-device"
+reason = "blkdiscard discards (TRIMs) the target device's contents, destroying any existing filesystem or data"
+command = "blkdiscard"
 
 [[command]]
 id = "mkfs-dispatcher-any-filesystem"
@@ -786,6 +814,15 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.conf
 id = "self-protect-config-dd-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "dd"
+targets = [
+    { strip = "of=", normalized_prefix = "~/.config/shguard/" },
+    { strip = "of=", normalized = "~/.config/shguard" },
+]
+
+[[command]]
+id = "self-protect-config-dcfldd-tilde"
+reason = "writing to shguard's own config directory must never be scripted"
+command = "dcfldd"
 targets = [
     { strip = "of=", normalized_prefix = "~/.config/shguard/" },
     { strip = "of=", normalized = "~/.config/shguard" },
@@ -1306,6 +1343,56 @@ targets = [
     { strip = "of=", normalized = "/etc/ld.so.preload" },
 ]
 
+# dcfldd is a drop-in dd variant (identical if=/of= semantics) — same
+# target list as shell-init-dd above, verbatim.
+[[command]]
+id = "shell-init-dcfldd"
+decision = "ask"
+reason = "dcfldd writing to a shell-init, cron, autostart, or persistence-critical file plants a backdoor that survives past the current session"
+command = "dcfldd"
+targets = [
+    { strip = "of=", normalized = "~/.bashrc" },
+    { strip = "of=", normalized = "~/.bash_profile" },
+    { strip = "of=", normalized = "~/.bash_login" },
+    { strip = "of=", normalized = "~/.bash_logout" },
+    { strip = "of=", normalized = "~/.zshrc" },
+    { strip = "of=", normalized = "~/.zprofile" },
+    { strip = "of=", normalized = "~/.zshenv" },
+    { strip = "of=", normalized = "~/.zlogin" },
+    { strip = "of=", normalized = "~/.zlogout" },
+    { strip = "of=", normalized = "~/.profile" },
+    { strip = "of=", normalized = "~/.config/fish/config.fish" },
+    { strip = "of=", normalized_prefix = "~/.config/fish/conf.d/" },
+    { strip = "of=", normalized = "~/.config/fish/conf.d" },
+    { strip = "of=", normalized = "/etc/profile" },
+    { strip = "of=", normalized_prefix = "/etc/profile.d/" },
+    { strip = "of=", normalized = "/etc/profile.d" },
+    { strip = "of=", normalized = "/etc/bash.bashrc" },
+    { strip = "of=", normalized_prefix = "/etc/zsh/" },
+    { strip = "of=", normalized = "/etc/zsh" },
+    { strip = "of=", normalized = "/etc/crontab" },
+    { strip = "of=", normalized_prefix = "/etc/cron.d/" },
+    { strip = "of=", normalized = "/etc/cron.d" },
+    { strip = "of=", normalized_prefix = "/etc/cron.hourly/" },
+    { strip = "of=", normalized = "/etc/cron.hourly" },
+    { strip = "of=", normalized_prefix = "/etc/cron.daily/" },
+    { strip = "of=", normalized = "/etc/cron.daily" },
+    { strip = "of=", normalized_prefix = "/etc/cron.weekly/" },
+    { strip = "of=", normalized = "/etc/cron.weekly" },
+    { strip = "of=", normalized_prefix = "/etc/cron.monthly/" },
+    { strip = "of=", normalized = "/etc/cron.monthly" },
+    { strip = "of=", normalized_prefix = "/var/spool/cron/" },
+    { strip = "of=", normalized = "/var/spool/cron" },
+    { strip = "of=", normalized_prefix = "~/.config/autostart/" },
+    { strip = "of=", normalized = "~/.config/autostart" },
+    { strip = "of=", normalized_prefix = "~/.config/systemd/user/" },
+    { strip = "of=", normalized = "~/.config/systemd/user" },
+    { strip = "of=", normalized = "~/.ssh/authorized_keys" },
+    { strip = "of=", normalized = "~/.ssh/config" },
+    { strip = "of=", normalized = "~/.ssh/rc" },
+    { strip = "of=", normalized = "/etc/ld.so.preload" },
+]
+
 [[command]]
 id = "shell-init-rm"
 decision = "ask"
@@ -1517,4 +1604,60 @@ targets = [
     { normalized = "~/.ssh/config" },
     { normalized = "~/.ssh/rc" },
     { normalized = "/etc/ld.so.preload" },
+]
+
+# --remove-destination unlinks the destination node itself before copying
+# — for a device node this deletes and replaces it (e.g. root's
+# `/dev/null` becomes a regular file capturing everything subsequently
+# "discarded" to it), so cp-write-device's except_targets below ("harmless
+# in either role") doesn't hold here. Precedes cp-write-device so this
+# narrower, more specific reason wins first-match on any overlap (both
+# decide "ask", so this only affects which reason string surfaces).
+[[command]]
+id = "cp-remove-destination-device"
+decision = "ask"
+reason = "cp --remove-destination replaces the /dev/ node itself rather than writing into it"
+command = "cp"
+required_flags = ["--remove-destination"]
+targets = [{ normalized_prefix = "/dev/" }]
+
+# cp has no if=/of= flags to disambiguate source from destination, and
+# target matching is membership-based (any resolved token), not positional
+# — so unlike dd/dcfldd's precise strip="of=" targeting, this can't tell
+# `cp /dev/sda backup.img` (reading a device, benign) from `cp file
+# /dev/sda` (writing to one, destructive) apart from checking both
+# candidate tokens against `/dev/`. decision="ask" (not the default Block)
+# accounts for that ambiguity; except_targets carves out device nodes that
+# are harmless in EITHER role (safe to read from AND to write to), so the
+# everyday `cp /dev/urandom key.bin` idiom stays Allow while any other
+# /dev/ target (source or destination) still asks. `-t`/`--target-
+# directory=` are covered via `strip` (same precedent as tar's `strip =
+# "-C"` above), unlike the shell-init-* family's plain target lists, which
+# disclose that same gap as unfixed (#198, above) — this rule closes it
+# instead since it has only one target to cover, not ~40. Appended here,
+# not near dd-write-device, for the same first-match-priority reason as
+# the shell-init-* family: it must never shadow the stricter
+# self-protect-config-cp-tilde Block above it.
+[[command]]
+id = "cp-write-device"
+decision = "ask"
+reason = "cp writing to (or reading an unlisted) /dev/ device may overwrite raw disk contents"
+command = "cp"
+targets = [
+    { normalized_prefix = "/dev/" },
+    # Bare "/dev" (no trailing slash) as its own token — the separated
+    # `-t /dev sda`/`--target-directory /dev sda` form, where the value is
+    # a standalone token `strip` can't reach (strip only matches a prefix
+    # WITHIN one token, e.g. the glued `-t/dev` form below).
+    { normalized = "/dev" },
+    { strip = "--target-directory=", normalized_prefix = "/dev/" },
+    { strip = "--target-directory=", normalized = "/dev" },
+    { strip = "-t", normalized_prefix = "/dev/" },
+    { strip = "-t", normalized = "/dev" },
+]
+except_targets = [
+    { exact = "/dev/null" },
+    { exact = "/dev/zero" },
+    { exact = "/dev/urandom" },
+    { exact = "/dev/random" },
 ]

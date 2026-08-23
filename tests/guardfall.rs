@@ -78,6 +78,51 @@ fn guardfall_class_e_cases() {
         // the old byte-exact `prefix = "of=/dev/"` target missed it.
         ("dd if=/dev/zero of=//dev/sda", Decision::Block),
         ("shred /dev/sda", Decision::Block),
+        // Issue #123: device-destroying command family also omitted cp,
+        // dcfldd (a drop-in dd variant), wipefs, and blkdiscard.
+        ("dcfldd if=/dev/zero of=/dev/sda", Decision::Block),
+        (
+            "dcfldd of=~/.config/shguard/config.toml if=payload",
+            Decision::Block,
+        ),
+        ("wipefs -a /dev/sda", Decision::Block),
+        ("wipefs -o 512 /dev/sda", Decision::Block),
+        ("blkdiscard /dev/sda", Decision::Block),
+        // wipefs's default (no -a/-o) is informational — lists signatures
+        // without erasing anything, so this must stay Allow.
+        ("wipefs /dev/sda", Decision::Allow),
+        // cp has no if=/of= flags to disambiguate source from destination
+        // (unlike dd/dcfldd above), so this asks rather than blocks — see
+        // the cp-write-device rule's comment in rules/blocklist.toml.
+        ("cp /dev/zero /dev/sda", Decision::Ask),
+        ("cp /dev/sda backup.img", Decision::Ask),
+        // The everyday /dev/{null,zero,urandom,random} idiom, harmless in
+        // either role (source or destination), stays Allow via
+        // except_targets.
+        ("cp /dev/urandom key.bin", Decision::Allow),
+        ("cp key.bin /dev/null", Decision::Allow),
+        ("cp src dst", Decision::Allow),
+        // cp-write-device must never shadow the stricter
+        // self-protect-config-cp-tilde Block — same shadowing discipline
+        // as guardfall_shell_init_tee_does_not_shadow_critical_file_block,
+        // enforced here by rule ordering (cp-write-device is appended near
+        // the end of rules/blocklist.toml, after self-protect-config-*).
+        ("cp /dev/sda ~/.config/shguard/config.toml", Decision::Block),
+        // -t/--target-directory= glued or separated, including the
+        // bare-directory form with no trailing slash — the value never
+        // appears as a plain "/dev/..."-prefixed token, so this only
+        // passes via the rule's dedicated strip/bare-"/dev" targets.
+        ("cp --target-directory=/dev/sda payload", Decision::Ask),
+        ("cp -t/dev/sda payload", Decision::Ask),
+        ("cp -t /dev sda", Decision::Ask),
+        // --remove-destination unlinks the destination node itself before
+        // copying — for a device node this replaces it entirely, so it's
+        // dangerous even against a node cp-write-device's except_targets
+        // treats as harmless to write into normally.
+        ("cp --remove-destination payload /dev/null", Decision::Ask),
+        // Fail-closed edge cases the except_targets carve-out relies on.
+        ("cp $SRC /dev/null", Decision::Ask), // unresolvable candidate disables suppression
+        ("cp key.bin /dev//null", Decision::Ask), // respelling matches the target (normalized_prefix) but not the except (exact)
         ("truncate -s 0 /important", Decision::Block),
         ("tar -C / -x", Decision::Block),
         ("tar -xf evil.tar -C /", Decision::Block),
