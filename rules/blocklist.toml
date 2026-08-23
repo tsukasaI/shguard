@@ -975,6 +975,44 @@ required_flags = [
 ]
 targets = [{ normalized = "~/.config" }, { normalized = "~" }]
 
+# Issue #127: `rsync --delete <src> <dst>` removes every file at `<dst>`
+# not present in `<src>` — the same severity class as `rm -rf` against a
+# dangerous target. Like cp-write-device (#123, near the end of this
+# file), target matching here is membership-based (any resolved token),
+# not positional — rsync has no flag marking which argv position is the
+# destination, so this can't tell `rsync --delete src/ /` (wiping `/`)
+# from `rsync --delete / backup/` (reading `/`, a real full-system-backup
+# idiom) apart from checking both positions. Split into two rules by
+# anchor, not one flat rule, because the false-positive cost differs by
+# anchor: `/`/`/dev/*` as either role are rare and alarming (Block, same
+# severity the issue calls for), but `~`/`.` as a SOURCE are common daily
+# usage ("sync my home to backup") — Block there would over-fire on that,
+# so those two anchors stay Ask. Ordered after
+# self-protect-config-ancestor-rsync-tilde so its narrower, more specific
+# reason keeps first-match priority on the `~` target they share.
+[[command]]
+id = "rsync-delete-root-or-device"
+reason = "rsync --delete syncing a root-level or device target removes every extraneous file there, recursively and unrecoverably"
+command = "rsync"
+required_flags = [
+    "--delete|--delete-before|--delete-during|--delete-after|--delete-excluded|--delete-delay",
+]
+targets = [
+    { normalized = "/" },
+    { normalized = "/*" },
+    { normalized_prefix = "/dev/" },
+]
+
+[[command]]
+id = "rsync-delete-dangerous-target"
+decision = "ask"
+reason = "rsync --delete syncing home or the current directory removes every extraneous file there, recursively and unrecoverably"
+command = "rsync"
+required_flags = [
+    "--delete|--delete-before|--delete-during|--delete-after|--delete-excluded|--delete-delay",
+]
+targets = [{ normalized = "~" }, { normalized = "." }]
+
 # =====================================================================
 # Shell-init / persistence-file protection (issue #198)
 # =====================================================================

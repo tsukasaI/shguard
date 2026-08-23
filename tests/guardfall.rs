@@ -123,6 +123,20 @@ fn guardfall_class_e_cases() {
         // Fail-closed edge cases the except_targets carve-out relies on.
         ("cp $SRC /dev/null", Decision::Ask), // unresolvable candidate disables suppression
         ("cp key.bin /dev//null", Decision::Ask), // respelling matches the target (normalized_prefix) but not the except (exact)
+        // Issue #127: rsync --delete syncing into a dangerous local target
+        // is functionally a recursive wipe, the same severity class as
+        // `rm -rf` against one. Split by anchor (see the TOML comment):
+        // root/device anchors Block, home/cwd anchors Ask (common as a
+        // rsync SOURCE, e.g. "sync my home to backup").
+        ("rsync -a --delete src/ /", Decision::Block),
+        ("rsync -a --delete / backup/", Decision::Block), // membership match on the source token too — the known trade-off
+        ("rsync -a --delete src/ /dev/sda1", Decision::Block),
+        ("rsync -a --delete-after src/ /", Decision::Block), // --delete-before/-during/-delay/-after/-excluded all count
+        ("rsync -a --delete src/ ~", Decision::Ask), // self-protect-config-ancestor-rsync-tilde's reason wins first-match
+        ("rsync -a --delete src/ ./", Decision::Ask),
+        ("rsync -a --delete src/ /tmp/staging", Decision::Allow),
+        ("rsync -a src/ /", Decision::Allow), // no --delete, no danger
+        ("rsync -a --delete src/ host:/", Decision::Allow), // remote target, out of scope for a local guard
         ("truncate -s 0 /important", Decision::Block),
         ("tar -C / -x", Decision::Block),
         ("tar -xf evil.tar -C /", Decision::Block),

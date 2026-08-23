@@ -32,6 +32,19 @@ All notable changes to this project are documented in this file.
   (which replaces a device node outright, not covered by the
   harmless-in-either-role carve-out).
 
+- `rsync --delete` syncing into a dangerous local target is functionally a
+  recursive wipe of the destination, the same severity class already
+  blocked for `rm -rf` against one, but had no blocklist coverage (#127).
+  Like `cp-write-device` above, `rsync` has no flag marking which argv
+  position is the destination, so target matching can't tell `rsync
+  --delete src/ /` (wiping `/`) from `rsync --delete / backup/` (reading
+  `/`, a real full-system-backup idiom) apart from checking both
+  positions. Split into two new rules by anchor rather than one flat rule:
+  `/`, `/*`, and `/dev/*` now block (rare and alarming in either role);
+  `~` and `.` ask (common as a source, e.g. "sync my home to backup" —
+  blocking there would over-fire on daily usage). All `--delete*` variants
+  (`--delete-before`/`-during`/`-delay`/`-after`/`-excluded`) are covered.
+
 ## [0.6.0] - 2026-08-19
 
 ### Security
