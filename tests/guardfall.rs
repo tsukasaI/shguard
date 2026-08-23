@@ -132,7 +132,24 @@ fn guardfall_class_e_cases() {
         ("rsync -a --delete / backup/", Decision::Block), // membership match on the source token too — the known trade-off
         ("rsync -a --delete src/ /dev/sda1", Decision::Block),
         ("rsync -a --delete-after src/ /", Decision::Block), // --delete-before/-during/-delay/-after/-excluded all count
+        ("rsync -a --del src/ /", Decision::Block), // --del is a real rsync alias for --delete-during
+        ("rsync -a --delete-missing-args src/ /", Decision::Block),
+        ("rsync -a --delete src/ '/*'", Decision::Block),
+        // find -exec's own {} placeholder (see rm-recursive-force-
+        // dangerous-target's identical entries) — rsync --delete over
+        // every matched directory empties it, the same "delete everything
+        // found" shape find -delete/rm -rf {} already cover.
+        (
+            r"find /data -type d -exec rsync -a --delete empty/ {} \;",
+            Decision::Block,
+        ),
+        // rsync-delete-root-or-device must Block even when a `~` anchor
+        // rides along, not fall through to the ancestor rule's weaker Ask
+        // — this is the regression the file's own MUST-stay-ordered-before
+        // comment guards against.
+        ("rsync -a --delete ~ /", Decision::Block),
         ("rsync -a --delete src/ ~", Decision::Ask), // self-protect-config-ancestor-rsync-tilde's reason wins first-match
+        ("rsync -a --del src/ ~", Decision::Ask),
         ("rsync -a --delete src/ ./", Decision::Ask),
         ("rsync -a --delete src/ /tmp/staging", Decision::Allow),
         ("rsync -a src/ /", Decision::Allow), // no --delete, no danger

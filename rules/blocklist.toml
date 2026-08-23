@@ -965,16 +965,6 @@ reason = "renaming an ancestor directory of shguard's own config directory must 
 command = "mv"
 targets = [{ normalized = "~/.config" }, { normalized = "~" }]
 
-[[command]]
-id = "self-protect-config-ancestor-rsync-tilde"
-decision = "ask"
-reason = "rsync --delete over an ancestor directory of shguard's own config directory must never be scripted"
-command = "rsync"
-required_flags = [
-    "--delete|--delete-before|--delete-during|--delete-after|--delete-excluded|--delete-delay",
-]
-targets = [{ normalized = "~/.config" }, { normalized = "~" }]
-
 # Issue #127: `rsync --delete <src> <dst>` removes every file at `<dst>`
 # not present in `<src>` — the same severity class as `rm -rf` against a
 # dangerous target. Like cp-write-device (#123, near the end of this
@@ -982,36 +972,71 @@ targets = [{ normalized = "~/.config" }, { normalized = "~" }]
 # not positional — rsync has no flag marking which argv position is the
 # destination, so this can't tell `rsync --delete src/ /` (wiping `/`)
 # from `rsync --delete / backup/` (reading `/`, a real full-system-backup
-# idiom) apart from checking both positions. Split into two rules by
-# anchor, not one flat rule, because the false-positive cost differs by
-# anchor: `/`/`/dev/*` as either role are rare and alarming (Block, same
-# severity the issue calls for), but `~`/`.` as a SOURCE are common daily
-# usage ("sync my home to backup") — Block there would over-fire on that,
-# so those two anchors stay Ask. Ordered after
-# self-protect-config-ancestor-rsync-tilde so its narrower, more specific
-# reason keeps first-match priority on the `~` target they share.
+# idiom) apart from checking both positions; the latter is an accepted
+# trade-off, same as `-n`/`--dry-run` also matching (this rule has no way
+# to see that a rehearsal wouldn't actually touch anything). `{}`/`/{}`/
+# `~/{}` mirror `rm-recursive-force-dangerous-target`'s own find-placeholder
+# entries above, for the same reason: `find ... -exec rsync -a --delete
+# empty/ {} \;` empties every matched directory, the same
+# "delete everything found" shape.
+#
+# MUST stay ordered BEFORE `self-protect-config-ancestor-rsync-tilde`
+# below (first-match-wins): its targets (`/`, `/*`, `/dev/`) are disjoint
+# from that rule's (`~/.config`, `~`), so a pure-`~` command still gets
+# the self-protect reason, but a MIXED command naming both anchors (e.g.
+# `rsync -a --delete ~ /`) must Block via this rule, not fall through to
+# the ancestor rule's weaker Ask — regression-tested in tests/guardfall.rs.
 [[command]]
 id = "rsync-delete-root-or-device"
-reason = "rsync --delete syncing a root-level or device target removes every extraneous file there, recursively and unrecoverably"
+reason = "rsync --delete syncing a root-level, device, or find-placeholder target removes every extraneous file there, recursively and unrecoverably"
 command = "rsync"
 required_flags = [
-    "--delete|--delete-before|--delete-during|--delete-after|--delete-excluded|--delete-delay",
+    "--delete|--delete-before|--delete-during|--delete-after|--delete-excluded|--delete-delay|--del|--delete-missing-args",
 ]
 targets = [
     { normalized = "/" },
     { normalized = "/*" },
     { normalized_prefix = "/dev/" },
+    { normalized = "{}" },
+    { normalized = "/{}" },
+    { normalized = "~/{}" },
 ]
 
+[[command]]
+id = "self-protect-config-ancestor-rsync-tilde"
+decision = "ask"
+reason = "rsync --delete over an ancestor directory of shguard's own config directory must never be scripted"
+command = "rsync"
+required_flags = [
+    "--delete|--delete-before|--delete-during|--delete-after|--delete-excluded|--delete-delay|--del|--delete-missing-args",
+]
+targets = [{ normalized = "~/.config" }, { normalized = "~" }]
+
+# Ordered after self-protect-config-ancestor-rsync-tilde above so its
+# narrower, more specific reason keeps first-match priority on the `~`
+# target they share (both already `ask`, so only the reported reason
+# differs) — same split-by-anchor rationale as rsync-delete-root-or-device
+# above: `~`/`.` as a SOURCE are common daily usage ("sync my home to
+# backup"), so this stays Ask rather than Block to avoid over-firing on
+# that.
 [[command]]
 id = "rsync-delete-dangerous-target"
 decision = "ask"
 reason = "rsync --delete syncing home or the current directory removes every extraneous file there, recursively and unrecoverably"
 command = "rsync"
 required_flags = [
-    "--delete|--delete-before|--delete-during|--delete-after|--delete-excluded|--delete-delay",
+    "--delete|--delete-before|--delete-during|--delete-after|--delete-excluded|--delete-delay|--del|--delete-missing-args",
 ]
 targets = [{ normalized = "~" }, { normalized = "." }]
+
+# Known gap (not fixed here): some rsync implementations (e.g. macOS's
+# default openrsync) accept unambiguous long-option PREFIXES, so
+# `--delete-a` alone can trigger deletion the same way `--delete-after`
+# does. `FlagMatcher::Token` only matches an exact token (or its `=value`
+# form), not a prefix, and no finite required_flags list can enumerate
+# every accepted abbreviation — same class of gap as issue #214
+# (attached_value_flags cluster scan) and the GNU long-option-abbreviation
+# gap noted on cp-write-device (#123), not specific to rsync.
 
 # =====================================================================
 # Shell-init / persistence-file protection (issue #198)
