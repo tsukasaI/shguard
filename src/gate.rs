@@ -414,7 +414,7 @@ fn analyze_at_depth(
 
     match parser::parse(command) {
         Ok(command_line) => {
-            let mut cwd = cwd_seed;
+            let mut cwd = CwdState::seed(cwd_seed);
             evaluate_command_line(&command_line, rules, allowlist, depth, &mut cwd)
         }
         Err(err) => Verdict::ask(
@@ -450,7 +450,7 @@ fn evaluate_command_line(
     rules: &Rules,
     allowlist: &Allowlist,
     depth: usize,
-    cwd: &mut CwdContext,
+    cwd: &mut CwdState,
 ) -> Verdict {
     let mut env = Env::new();
     let mut worst = evaluate_pipeline(&command_line.first, &mut env, rules, allowlist, depth, cwd);
@@ -482,7 +482,7 @@ fn evaluate_pipeline(
     rules: &Rules,
     allowlist: &Allowlist,
     depth: usize,
-    cwd: &mut CwdContext,
+    cwd: &mut CwdState,
 ) -> Verdict {
     let mut stages = Vec::with_capacity(1 + pipeline.rest.len());
     stages.push(&pipeline.first);
@@ -532,7 +532,8 @@ fn evaluate_pipeline(
         let verdict = match command {
             Command::Simple(simple) => {
                 env.apply_assignments(simple);
-                let verdict = evaluate_simple_command(simple, env, rules, allowlist, depth, cwd);
+                let verdict =
+                    evaluate_simple_command(simple, env, rules, allowlist, depth, &cwd.current);
                 stage_argvs.push(verdict.normalized_argv().to_vec());
                 // Issue #103: only a single-stage pipeline's own `cd`/
                 // `pushd`/etc. is allowed to mutate `cwd` for whatever
@@ -576,7 +577,7 @@ fn evaluate_pipeline(
                 // docs), so unlike `Compound`/`FunctionDefinition` above it
                 // never needs an isolated `cwd` clone even in a multi-stage
                 // pipeline: nothing here can mutate `cwd` regardless.
-                evaluate_extended_test(test, rules, allowlist, depth, &*cwd)
+                evaluate_extended_test(test, rules, allowlist, depth, &cwd.current)
             }
         };
         worst = if have_worst {
@@ -670,9 +671,9 @@ fn evaluate_compound_command(
     rules: &Rules,
     allowlist: &Allowlist,
     depth: usize,
-    cwd: &mut CwdContext,
+    cwd: &mut CwdState,
 ) -> Verdict {
-    let redirect_anchor = cwd.clone();
+    let redirect_anchor = cwd.current.clone();
     let (worst, redirections, extra_words): (Verdict, &[Redirection], &[Word]) = match compound {
         CompoundCommand::BraceGroup { body, redirections } => {
             let verdict = evaluate_command_line(body, rules, allowlist, depth, cwd);
@@ -692,7 +693,7 @@ fn evaluate_compound_command(
             let mut isolated = cwd.clone();
             let verdict = evaluate_command_line(body, rules, allowlist, depth, &mut isolated);
             if command_line_may_change_cwd(body) {
-                *cwd = CwdContext::Poisoned;
+                cwd.poison();
             }
             (
                 verdict,
@@ -715,7 +716,7 @@ fn evaluate_compound_command(
                 evaluate_command_line(condition, rules, allowlist, depth, &mut isolated);
             let body_verdict = evaluate_command_line(body, rules, allowlist, depth, &mut isolated);
             if command_line_may_change_cwd(condition) || command_line_may_change_cwd(body) {
-                *cwd = CwdContext::Poisoned;
+                cwd.poison();
             }
             (
                 fold_worst(cond_verdict, body_verdict),
@@ -760,7 +761,7 @@ fn evaluate_compound_command(
                 may_change_cwd = may_change_cwd || command_line_may_change_cwd(else_body);
             }
             if may_change_cwd {
-                *cwd = CwdContext::Poisoned;
+                cwd.poison();
             }
             (worst, redirections.as_slice(), [].as_slice())
         }
@@ -962,12 +963,12 @@ fn evaluate_function_definition(
     rules: &Rules,
     allowlist: &Allowlist,
     depth: usize,
-    cwd: &mut CwdContext,
+    cwd: &mut CwdState,
 ) -> Verdict {
     let mut isolated = cwd.clone();
     let verdict = evaluate_compound_command(&func.body, rules, allowlist, depth, &mut isolated);
     if compound_command_may_change_cwd(&func.body) {
-        *cwd = CwdContext::Poisoned;
+        cwd.poison();
     }
     verdict
 }
@@ -2965,7 +2966,7 @@ fn evaluate_command_position_substitution(
         }
     }
     for inner in inner_process_substitutions {
-        let mut isolated = cwd.clone();
+        let mut isolated = CwdState::seed(cwd.clone());
         if evaluate_command_line(inner, rules, allowlist, depth, &mut isolated).decision()
             == Decision::Block
         {
@@ -3538,7 +3539,7 @@ fn evaluate_argument_substitutions(
         // `evaluate_command_position_substitution`'s docs on this
         // distinction).
         for inner in collect_process_substitutions(word) {
-            let mut isolated = cwd.clone();
+            let mut isolated = CwdState::seed(cwd.clone());
             raise(evaluate_command_line(inner, rules, allowlist, depth, &mut isolated).decision());
         }
     }
@@ -3655,7 +3656,7 @@ fn evaluate_leftover_alternative_substitutions(
             raise(analyze_at_depth(inner, depth + 1, rules, allowlist, cwd.clone()).decision());
         }
         for inner in proc_subs {
-            let mut isolated = cwd.clone();
+            let mut isolated = CwdState::seed(cwd.clone());
             raise(evaluate_command_line(inner, rules, allowlist, depth, &mut isolated).decision());
         }
     }
@@ -3861,7 +3862,7 @@ fn scan_word_expansions(
         *accum.has_any = true;
         // Structural, not raw text — same-depth recursion (see
         // `evaluate_command_position_substitution`'s docs).
-        let mut isolated = cwd.clone();
+        let mut isolated = CwdState::seed(cwd.clone());
         let decision =
             evaluate_command_line(inner, rules, allowlist, depth, &mut isolated).decision();
         raise_expansion_floor(
@@ -5606,6 +5607,71 @@ enum CwdContext {
     Poisoned,
 }
 
+/// Cap on how many frames issue #210's directory-stack tracking
+/// ([`CwdState::stack`]) may hold before this module gives up modeling it
+/// precisely and poisons instead — the same fail-closed-on-overflow stance
+/// [`MAX_SUBSTITUTION_DEPTH`] takes, guarding against an adversarial
+/// `pushd d && pushd d && ...` chain growing the tracked stack unboundedly
+/// within one command line.
+const MAX_CWD_STACK_DEPTH: usize = 64;
+
+/// Issue #210: [`CwdContext`]'s current-directory tracking, paired with a
+/// linear stack of earlier frames pushed by `pushd`/popped by `popd` —
+/// modeling bash's own directory stack precisely enough to resolve
+/// `pushd ~/.config/shguard && pushd /tmp && popd && rm config.toml` back to
+/// the real, dangerous `~/.config/shguard` anchor instead of flooring
+/// straight to `Ask` the way collapsing every stack operation to
+/// [`CwdContext::Poisoned`] (this mechanism's pre-#210 behavior, and still
+/// its fallback for any shape it doesn't model — see [`apply_pushd`]/
+/// [`apply_popd`]'s own docs) would.
+///
+/// Deliberately NOT threaded across a recursion boundary
+/// ([`analyze_at_depth`]'s `cwd_seed: CwdContext` parameter is unchanged by
+/// this issue — only [`CwdContext`], never [`CwdState`]): a `$()`/backtick
+/// payload, a resolved `bash -c` script, etc. always starts its own local
+/// [`CwdState`] with an EMPTY stack, even though a real subshell/process
+/// actually inherits the parent's full stack via fork. This is still sound,
+/// not merely convenient: [`apply_popd`]/[`apply_pushd`]'s bare-swap form
+/// both poison (never silently no-op past) a `popd`/bare-`pushd` against an
+/// empty stack whenever poisoning is the only way to stay honest about
+/// "stack contents unknown" — see those functions' own docs for exactly
+/// when an empty stack is instead a safe, precise no-op (matching a real
+/// shell's own "no other directory" no-op error) versus a poison. A
+/// substitution recursion's own cwd mutations are independently
+/// read-or-discarded per [`CwdContext`]'s "Recursion" section above and
+/// never write back to the caller's stack either way, so resetting the
+/// stack at this boundary only ever affects how precisely THAT recursed
+/// scope's own internal `pushd`/`popd` sequence resolves — never the
+/// caller's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CwdState {
+    current: CwdContext,
+    stack: Vec<CwdContext>,
+}
+
+impl CwdState {
+    /// Seeds a fresh state from a recursion site's [`CwdContext`] (issue
+    /// #103's `cwd_seed`) with an empty stack — see [`CwdState`]'s own docs
+    /// for why the stack is deliberately not carried across this boundary.
+    fn seed(current: CwdContext) -> Self {
+        Self {
+            current,
+            stack: Vec::new(),
+        }
+    }
+
+    /// Poisons the current directory AND discards the tracked stack —
+    /// issue #210's stack is only ever meaningful alongside a `current` we
+    /// can still compose against; once `current` itself becomes unknown,
+    /// nothing later could safely pop back to a stack frame recorded before
+    /// the point uncertainty began, so keeping them would be false
+    /// precision, not caution.
+    fn poison(&mut self) {
+        self.current = CwdContext::Poisoned;
+        self.stack.clear();
+    }
+}
+
 /// One `cd`/`pushd` invocation's own target, classified by [`cd_directive`]
 /// — either a raw (unnormalized) target string still needing composition
 /// against whatever [`CwdContext`] was already live ([`resolve_cwd_outcome`]),
@@ -5615,55 +5681,85 @@ enum CwdOutcome {
     Poison,
 }
 
-/// Classifies a `cd`/`pushd` invocation's own argv tail (`rest` —
-/// `effective_command`'s tokens after the resolved `cd`/`pushd` name
-/// itself) into a [`CwdOutcome`]. Only `-P`/`-L`/`--` are recognized as
-/// pass-through flags before the target; any other dash-prefixed word, two
-/// or more non-flag words, or an unresolvable target word all fail closed
-/// to [`CwdOutcome::Poison`] rather than guessing.
-///
-/// - No non-flag argument at all: `cd` alone resolves to `$HOME` (`"~"`),
-///   UNLESS this same line has assigned `HOME` (`Env::was_assigned`,
-///   resolved or not — `HOME` becomes attacker-controlled within the line
-///   either way), which poisons instead. `pushd` alone is the stack-swap
-///   form (no directory-stack tracking here — that's an explicit v2
-///   follow-up) and always poisons.
-/// - Exactly one non-flag argument: `"-"` (issue #88 precedent: `~-` is
-///   already treated this way) always poisons. Otherwise the target is
-///   lexically classified (`lexical_normalize`): `Home`/`Abs`/`Rel` resolve
-///   (with the same same-line-`HOME=` guard applied to an explicit `~`
-///   target, and a same-line `CDPATH=` assignment poisoning only a `Rel`
-///   target — `CDPATH` can redirect a relative `cd` arbitrarily but never
-///   affects an absolute one); every other shape (`Opaque`/`EscapesHome`/
-///   `DirStack`/`NamedUserHome`/`NamedUserHomeEscapes`) poisons.
-fn cd_directive(rest: &[NormalizedWord], env: &Env, is_pushd: bool) -> CwdOutcome {
+/// Extracts a `cd`/`pushd`/`popd` invocation's own single positional target
+/// from its argv tail (`rest` — `effective_command`'s tokens after the
+/// resolved directive name itself). Only `-P`/`-L`/`--` are recognized as
+/// pass-through flags before the target; any other dash-prefixed word, or
+/// two or more non-flag words, is `Err(())` — an unrecognized shape the
+/// caller must fail closed on rather than guess at. `Ok(None)` means no
+/// positional target was given at all (bare `cd`/`pushd`/`popd`);
+/// `Ok(Some(word))` is the one recognized target word, still unresolved.
+fn extract_single_target(rest: &[NormalizedWord]) -> Result<Option<&NormalizedWord>, ()> {
     let mut target: Option<&NormalizedWord> = None;
-    let mut unrecognized = false;
     for word in rest {
         match word.resolution() {
             Resolution::Resolved(s) if s == "-P" || s == "-L" || s == "--" => {}
-            Resolution::Resolved(s) if s != "-" && s.starts_with('-') => {
-                unrecognized = true;
-            }
+            Resolution::Resolved(s) if s != "-" && s.starts_with('-') => return Err(()),
             _ => {
                 if target.is_some() {
-                    unrecognized = true;
-                } else {
-                    target = Some(word);
+                    return Err(());
                 }
+                target = Some(word);
             }
         }
     }
-    if unrecognized {
-        return CwdOutcome::Poison;
+    Ok(target)
+}
+
+/// Classifies ONE already-extracted, already-resolved `cd`/`pushd` target
+/// string into a [`CwdOutcome`] — shared by [`cd_directive`] (a bare `cd
+/// X`'s target) and [`apply_pushd`] (issue #210's `pushd X`'s target: the
+/// same lexical classification and same-line `HOME=`/`CDPATH=` poisoning
+/// guards apply identically to both directives' targets). `"-"` (issue #88
+/// precedent: `~-` is already treated this way) always poisons before this
+/// is even reached by either caller. `Home`/`Abs`/`Rel` resolve (with the
+/// same-line-`HOME=` guard applied to an explicit `~` target, and a
+/// same-line `CDPATH=` assignment poisoning only a `Rel` target — `CDPATH`
+/// can redirect a relative `cd` arbitrarily but never affects an absolute
+/// one); every other shape (`Opaque`/`EscapesHome`/`DirStack`/
+/// `NamedUserHome`/`NamedUserHomeEscapes`) poisons.
+fn classify_cd_target(raw: &str, env: &Env) -> CwdOutcome {
+    match lexical_normalize(raw) {
+        PathForm::Home(_) => {
+            if env.was_assigned("HOME") {
+                CwdOutcome::Poison
+            } else {
+                CwdOutcome::Resolve(raw.to_string())
+            }
+        }
+        PathForm::Abs(_) => CwdOutcome::Resolve(raw.to_string()),
+        PathForm::Rel { .. } => {
+            if env.was_assigned("CDPATH") {
+                CwdOutcome::Poison
+            } else {
+                CwdOutcome::Resolve(raw.to_string())
+            }
+        }
+        PathForm::EscapesHome(_)
+        | PathForm::NamedUserHome
+        | PathForm::NamedUserHomeEscapes(_)
+        | PathForm::DirStack(_)
+        | PathForm::DirStackEscapesEmpty
+        | PathForm::Opaque => CwdOutcome::Poison,
     }
+}
+
+/// Classifies a bare `cd` invocation's own argv tail (`rest`) into a
+/// [`CwdOutcome`] via [`extract_single_target`]/[`classify_cd_target`]. No
+/// target at all resolves to `$HOME` (`"~"`), UNLESS this same line has
+/// assigned `HOME` (`Env::was_assigned`, resolved or not — `HOME` becomes
+/// attacker-controlled within the line either way), which poisons instead.
+/// `pushd`'s own targeted/bare/stack-index forms are issue #210's separate
+/// [`apply_pushd`] — this function is `cd`-only as of that issue (it used
+/// to also serve `pushd X`, sharing the same target classification, which
+/// [`apply_pushd`] still does via [`classify_cd_target`] directly).
+fn cd_directive(rest: &[NormalizedWord], env: &Env) -> CwdOutcome {
+    let target = match extract_single_target(rest) {
+        Err(()) => return CwdOutcome::Poison,
+        Ok(target) => target,
+    };
     let Some(target) = target else {
-        // `pushd` alone is the stack-swap form (always poisons); bare `cd`
-        // resolves to `$HOME` UNLESS this line already assigned `HOME`
-        // (attacker-controlled within the line either way) — both poisoning
-        // conditions collapse to the same `Poison` outcome, so they're
-        // combined into one `||` rather than two identical branches.
-        return if is_pushd || env.was_assigned("HOME") {
+        return if env.was_assigned("HOME") {
             CwdOutcome::Poison
         } else {
             CwdOutcome::Resolve("~".to_string())
@@ -5675,39 +5771,7 @@ fn cd_directive(rest: &[NormalizedWord], env: &Env, is_pushd: bool) -> CwdOutcom
     if raw == "-" {
         return CwdOutcome::Poison;
     }
-    // `pushd +N`/`pushd -N` (a fable review of this PR caught this: without
-    // the guard, `+1`/`-1`/etc. lexically classify as an ordinary `Rel`
-    // target and get treated as a real, composable relative anchor)
-    // rotates the directory stack to an entry this module doesn't model —
-    // no directory-stack tracking here, matching the bare-`pushd`/`popd`
-    // treatment above. Checked only for `pushd`: `cd +1` is not a special
-    // form at all, just an ordinary (if unusual) relative directory name.
-    if is_pushd && is_pushd_stack_index(raw) {
-        return CwdOutcome::Poison;
-    }
-    match lexical_normalize(raw) {
-        PathForm::Home(_) => {
-            if env.was_assigned("HOME") {
-                CwdOutcome::Poison
-            } else {
-                CwdOutcome::Resolve(raw.clone())
-            }
-        }
-        PathForm::Abs(_) => CwdOutcome::Resolve(raw.clone()),
-        PathForm::Rel { .. } => {
-            if env.was_assigned("CDPATH") {
-                CwdOutcome::Poison
-            } else {
-                CwdOutcome::Resolve(raw.clone())
-            }
-        }
-        PathForm::EscapesHome(_)
-        | PathForm::NamedUserHome
-        | PathForm::NamedUserHomeEscapes(_)
-        | PathForm::DirStack(_)
-        | PathForm::DirStackEscapesEmpty
-        | PathForm::Opaque => CwdOutcome::Poison,
-    }
+    classify_cd_target(raw, env)
 }
 
 /// Whether `raw` is `pushd`'s directory-stack-index form: `+`/`-` followed
@@ -5755,44 +5819,155 @@ fn resolve_cwd_outcome(current: &CwdContext, outcome: CwdOutcome) -> CwdContext 
     }
 }
 
-/// Applies one simple command's cwd-changing effect (issue #103) to `cwd`,
-/// mutating it in place. A no-op for an empty argv (assignments-only/
-/// redirection-only commands touch nothing — rule 9's own axiom) or an
-/// ordinary command with no cwd-changing shape. Routes through
-/// [`crate::rules::effective_command`] (the same `TRANSPARENT_WRAPPERS`
-/// resolution every rule match already uses — including `builtin` as of
-/// issue #245) so `command cd ~/x`, `sudo pushd ~/x`, `builtin cd ~/x`,
-/// etc. are recognized exactly like a bare `cd`/`pushd` would be —
-/// otherwise the whole feature would be a day-one bypass through any
-/// transparent wrapper.
+/// Applies one simple command's cwd-changing effect (issue #103, extended
+/// by issue #210's real `pushd`/`popd` stack tracking) to `cwd`, mutating it
+/// in place. A no-op for an empty argv (assignments-only/redirection-only
+/// commands touch nothing — rule 9's own axiom) or an ordinary command with
+/// no cwd-changing shape. Routes through [`crate::rules::effective_command`]
+/// (the same `TRANSPARENT_WRAPPERS` resolution every rule match already
+/// uses — including `builtin` as of issue #245) so `command cd ~/x`,
+/// `sudo pushd ~/x`, `builtin cd ~/x`, etc. are recognized exactly like a
+/// bare `cd`/`pushd`/`popd` would be — otherwise the whole feature would be
+/// a day-one bypass through any transparent wrapper.
 ///
-/// `popd`/`source`/`.`/`eval` always poison (no directory-stack tracking,
-/// and a sourced/evaled body could `cd` — fail closed rather than modeling
-/// either). `dirs` (list-only) never touches cwd. An unresolvable effective
-/// command (`effective_command` returning `None` for a non-empty argv)
-/// poisons too: the wrapped command could itself be `cd` and this module
-/// has no way to rule that out (the same fail-closed reasoning rule 10's
-/// own `Unresolved` arm already uses for escalation vectors).
+/// `source`/`.`/`eval` always poison (a sourced/evaled body could `cd` —
+/// fail closed rather than modeling it). `dirs` (list-only) never touches
+/// cwd. An unresolvable effective command (`effective_command` returning
+/// `None` for a non-empty argv) poisons too: the wrapped command could
+/// itself be `cd`/`pushd`/`popd` and this module has no way to rule that
+/// out (the same fail-closed reasoning rule 10's own `Unresolved` arm
+/// already uses for escalation vectors).
 ///
 /// `env` must already have this same command's own prefix assignments
 /// merged in by the caller — [`cd_directive`]'s `HOME`/`CDPATH` guards need
 /// to see e.g. `HOME=/attacker/dir cd`'s own prefix assignment.
-fn apply_cwd_effect(cwd: &mut CwdContext, argv: &[NormalizedWord], env: &Env) {
+fn apply_cwd_effect(cwd: &mut CwdState, argv: &[NormalizedWord], env: &Env) {
     if argv.is_empty() {
         return;
     }
     let Some((name, rest)) = crate::rules::effective_command(argv) else {
-        *cwd = CwdContext::Poisoned;
+        cwd.poison();
         return;
     };
-    let outcome = match name {
-        "cd" => cd_directive(rest, env, false),
-        "pushd" => cd_directive(rest, env, true),
-        "popd" | "source" | "eval" | "." => CwdOutcome::Poison,
-        "dirs" => return,
-        _ => return,
+    match name {
+        "cd" => cwd.current = resolve_cwd_outcome(&cwd.current, cd_directive(rest, env)),
+        "pushd" => apply_pushd(cwd, rest, env),
+        "popd" => apply_popd(cwd, rest),
+        "source" | "eval" | "." => cwd.poison(),
+        // "dirs" (list-only) and every ordinary command fall through here —
+        // neither touches cwd.
+        _ => {}
+    }
+}
+
+/// Issue #210's `pushd` handling: pushes `cwd.current` onto `cwd.stack` and
+/// sets `cwd.current` to the resolved target, or — for the bare (no
+/// target) stack-swap form — swaps `cwd.current` with the top of the
+/// stack directly (no push, matching bash's own `pushd` with no argument).
+///
+/// A target is classified the same way [`cd_directive`]'s target is
+/// ([`classify_cd_target`]), with two `pushd`-specific poisoning shapes
+/// [`cd_directive`] doesn't need: `"-"` (issue #88 precedent: `~-` is
+/// already treated this way, and `pushd -` is not itself a meaningful bash
+/// form) and `pushd +N`/`pushd -N` (bash's own directory-stack-index
+/// rotation syntax — a fable review of the pre-#210 version of this module
+/// caught that without this guard, `+1`/`-1`/etc. lexically classify as an
+/// ordinary `Rel` target and get treated as a real, composable relative
+/// anchor). Both poison the WHOLE state ([`CwdState::poison`]), not just
+/// `current`: a rotation this module doesn't linearly model can reorder or
+/// consume stack entries in a way a simple push/pop wouldn't, so the
+/// stack's own shape — not merely its top — becomes unknowable.
+///
+/// A target that resolves to [`CwdOutcome::Poison`] for an ordinary reason
+/// (an unresolvable word, `HOME=`/`CDPATH=` poisoning, an unmodeled
+/// [`PathForm`]) still pushes the OLD `current` before poisoning: a real
+/// `pushd` always pushes before attempting the `cd` half, even when this
+/// module can't statically resolve where that `cd` lands, so keeping that
+/// half of the model precise (a later `popd` can still recover the known
+/// frame beneath the poisoned one) costs nothing and is strictly more
+/// useful than discarding it. [`MAX_CWD_STACK_DEPTH`] bounds this push the
+/// same way an ordinary resolved push is bounded.
+fn apply_pushd(cwd: &mut CwdState, rest: &[NormalizedWord], env: &Env) {
+    let target = match extract_single_target(rest) {
+        Err(()) => {
+            cwd.poison();
+            return;
+        }
+        Ok(target) => target,
     };
-    *cwd = resolve_cwd_outcome(cwd, outcome);
+    let Some(target) = target else {
+        apply_pushd_swap(cwd);
+        return;
+    };
+    let Resolution::Resolved(raw) = target.resolution() else {
+        push_current_then_poison(cwd);
+        return;
+    };
+    if raw == "-" || is_pushd_stack_index(raw) {
+        cwd.poison();
+        return;
+    }
+    match classify_cd_target(raw, env) {
+        CwdOutcome::Poison => push_current_then_poison(cwd),
+        outcome @ CwdOutcome::Resolve(_) => {
+            if cwd.stack.len() >= MAX_CWD_STACK_DEPTH {
+                cwd.poison();
+                return;
+            }
+            let new_current = resolve_cwd_outcome(&cwd.current, outcome);
+            cwd.stack
+                .push(std::mem::replace(&mut cwd.current, new_current));
+        }
+    }
+}
+
+/// The bare-`pushd` (no target) stack-swap form: pops the top of the
+/// stack and swaps it with `cwd.current` (bash: `pushd` with no argument
+/// exchanges the current directory with the top of the stack, WITHOUT
+/// growing the stack — distinct from `pushd X`, which pushes and grows
+/// it). On an EMPTY stack, this is a safe, precise no-op, not a poison:
+/// real bash errors ("no other directory") and changes nothing, and since
+/// nothing here reads or writes a frame this module doesn't actually have,
+/// no false precision is being claimed either way.
+fn apply_pushd_swap(cwd: &mut CwdState) {
+    if let Some(top) = cwd.stack.pop() {
+        let old_current = std::mem::replace(&mut cwd.current, top);
+        cwd.stack.push(old_current);
+    }
+}
+
+/// Pushes `cwd.current` onto the stack (bounded by [`MAX_CWD_STACK_DEPTH`],
+/// poisoning instead if it would overflow) and poisons `cwd.current` —
+/// [`apply_pushd`]'s shared tail for every `pushd X` shape whose target
+/// resolves to [`CwdOutcome::Poison`]; see that function's own docs for why
+/// the push still happens even though the new `current` doesn't.
+fn push_current_then_poison(cwd: &mut CwdState) {
+    if cwd.stack.len() >= MAX_CWD_STACK_DEPTH {
+        cwd.poison();
+        return;
+    }
+    let old_current = std::mem::replace(&mut cwd.current, CwdContext::Poisoned);
+    cwd.stack.push(old_current);
+}
+
+/// Issue #210's `popd`: pops the top of the stack into `cwd.current`. Any
+/// argument at all (`popd +N`/`popd -N`/`popd -n`/anything else) poisons
+/// the whole state rather than guessing — this module doesn't track which
+/// popd flags are display-only (`-n`) versus which change WHICH frame gets
+/// popped (`+N`/`-N`, a rotation-without-necessarily-changing-`current`
+/// shape a linear pop can't represent), so any argument is fail-closed
+/// territory the same way an unrecognized `cd_directive` flag is. On an
+/// EMPTY stack with no argument, this is a safe, precise no-op: real bash
+/// errors ("directory stack empty") and changes nothing, and nothing about
+/// `cwd`'s own tracked state becomes less certain by leaving it alone.
+fn apply_popd(cwd: &mut CwdState, rest: &[NormalizedWord]) {
+    if !rest.is_empty() {
+        cwd.poison();
+        return;
+    }
+    if let Some(top) = cwd.stack.pop() {
+        cwd.current = top;
+    }
 }
 
 /// Whether `command_line` contains, anywhere a mutation could actually
@@ -10661,6 +10836,139 @@ done"#,
             "pushd ~/.config/shguard && cp evil.toml config.toml",
             Decision::Block,
         );
+    }
+
+    // ==== Issue #210: in-line pushd/popd directory-stack tracking ====
+    //
+    // Pre-#210, any `pushd`/`popd` beyond a single `pushd X` collapsed
+    // straight to `Poisoned` rather than modeling the stack's actual
+    // contents — fail-closed, but weaker than it needed to be. See
+    // `CwdState`'s own docs for the full push/pop/swap model and why
+    // resetting the stack at a recursion boundary stays sound.
+
+    #[test]
+    fn pushd_pushd_popd_resolves_back_to_the_first_dangerous_anchor() {
+        // The issue's own motivating example: a real shell resolves this
+        // back to `~/.config/shguard` after the `popd`, and pre-#210 this
+        // wrongly floored to `Ask` (poisoned) instead of inheriting the
+        // matched rule's own `Block`.
+        assert_decision(
+            "pushd ~/.config/shguard && pushd /tmp && popd && cp evil.toml config.toml",
+            Decision::Block,
+        );
+    }
+
+    #[test]
+    fn pushd_then_popd_round_trip_returns_to_initial() {
+        // A single push+pop must return exactly to the pre-pushd state
+        // (`Initial`, not merely "some known dir") — the same
+        // uncomposed, no-cd baseline `acceptance_3_bare_relative_target_
+        // with_no_cd_at_all_still_allows` pins.
+        assert_decision(
+            "pushd ~/.config/shguard && popd && rm config.toml",
+            Decision::Allow,
+        );
+    }
+
+    #[test]
+    fn nested_pushd_pushd_pushd_popd_popd_composes_against_the_middle_frame() {
+        // Three pushes, two pops: proves the stack holds and recovers
+        // MULTIPLE frames in order, not just a single last-pushed slot.
+        assert_decision(
+            "pushd ~/.config/shguard && pushd /tmp && pushd /var \
+             && popd && popd && cp evil.toml config.toml",
+            Decision::Block,
+        );
+    }
+
+    #[test]
+    fn bare_pushd_swaps_with_the_stack_top_not_just_undoing_the_last_push() {
+        // Bare `pushd` (no target) swaps `current` with the STACK'S TOP,
+        // which after two pushes is the FIRST-pushed frame
+        // (`~/.config/shguard`), not the most recently pushed `/tmp`.
+        assert_decision(
+            "pushd ~/.config/shguard && pushd /tmp && pushd && cp evil.toml config.toml",
+            Decision::Block,
+        );
+    }
+
+    #[test]
+    fn bare_pushd_on_an_empty_stack_is_a_safe_no_op_not_a_poison() {
+        // Real bash errors ("no other directory") and changes nothing;
+        // modeled the same way here — must stay `Allow`, not float to
+        // `Ask` the way an actual poison would.
+        assert_decision("pushd && rm config.toml", Decision::Allow);
+    }
+
+    #[test]
+    fn popd_on_an_empty_stack_is_a_safe_no_op_not_a_poison() {
+        assert_decision("popd && rm config.toml", Decision::Allow);
+    }
+
+    #[test]
+    fn pushd_with_unresolvable_target_pushes_the_old_anchor_then_poisons() {
+        assert_decision(
+            "pushd $(some_substitution) && rm config.toml",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn popd_with_any_argument_poisons_rather_than_guessing_which_frame() {
+        // `popd +N`/`-N`/`-n`/anything else rotates or silences in a shape
+        // this module doesn't linearly model — poisons instead of
+        // guessing which frame (if any) `current` should become.
+        assert_decision(
+            "pushd /tmp && popd -n && cp evil.toml config.toml",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn pushd_stack_index_form_after_real_pushes_poisons_the_whole_stack() {
+        // `pushd +1` (an unmodeled rotation form, `pushd_stack_index_form_
+        // poisons` already pins the bare case) must poison the STACK too,
+        // not just `current` — proven here by a subsequent `popd` finding
+        // an EMPTY stack (a no-op, leaving `current` `Poisoned`) rather
+        // than wrongly recovering the earlier known `~/.config/shguard`
+        // frame that was pushed before the rotation.
+        assert_decision(
+            "pushd ~/.config/shguard && pushd +1 && popd && cp evil.toml config.toml",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn pushd_stack_depth_beyond_the_cap_poisons_instead_of_growing_unbounded() {
+        // Adversarial `pushd d && pushd d && ...` chain: once the tracked
+        // stack would exceed `MAX_CWD_STACK_DEPTH`, this module gives up
+        // modeling it precisely and poisons — a bound against unbounded
+        // growth within one command line, mirroring
+        // `MAX_SUBSTITUTION_DEPTH`'s own fail-closed-on-overflow stance.
+        //
+        // Deliberately RELATIVE targets (`pushd tmp`, not an absolute
+        // `pushd /tmp`): an absolute target's own resolution never even
+        // looks at `current`'s poison state (`resolve_cwd_outcome`'s
+        // `Abs`/`Home` arm overrides unconditionally, by design — the
+        // whole point of an absolute `cd`/`pushd` being able to RECOVER
+        // from `Poisoned`), so it would self-heal back to `Known` on the
+        // very next push and this test would prove nothing. A relative
+        // target composed against an already-`Poisoned` current stays
+        // `Poisoned` (`resolve_cwd_outcome`'s `Rel` arm), so once the cap
+        // trips, every further push keeps the whole chain poisoned —
+        // `rm config.toml` at the end floors to `Ask` via
+        // `scan_unknown_cwd_floor` the same way
+        // `acceptance_2_unresolvable_cd_target_poisons_and_floors_relative_rm`
+        // does, which would NOT happen (`Allow`, per
+        // `acceptance_3_ordinary_relative_cd_then_unrelated_target_still_
+        // allows`) if every push had instead resolved to an ordinary
+        // `Known` anchor all the way through.
+        let mut command = String::from("pushd tmp");
+        for _ in 0..100 {
+            command.push_str(" && pushd tmp");
+        }
+        command.push_str(" && rm config.toml");
+        assert_decision(&command, Decision::Ask);
     }
 
     #[test]
