@@ -888,6 +888,25 @@ fn apply_attached_word_and_redirect_checks(
         worst = fold_worst(worst, floored);
     }
 
+    // Issue #203: the same `$HOME`-vs-`~` correlation floor
+    // `evaluate_simple_command` applies to a command's own redirects,
+    // extended to a compound command's/function definition's/extended
+    // test's own attached redirects (`{ ...; } >> $HOME/.zshrc`) — without
+    // this, wrapping an otherwise-caught redirect in a brace group,
+    // subshell, loop, or function definition would silently regain the
+    // Allow this whole floor exists to close.
+    if let Some((floor_decision, floor_reason)) = scan_redirect_home_env_floor(redirections, rules)
+    {
+        let argv = worst.normalized_argv().to_vec();
+        let floored = match floor_decision {
+            Decision::Ask => Verdict::ask(Reason::new(floor_reason), argv),
+            Decision::Block | Decision::Allow => {
+                unreachable!("scan_redirect_home_env_floor only ever produces Ask")
+            }
+        };
+        worst = fold_worst(worst, floored);
+    }
+
     worst
 }
 
@@ -1278,30 +1297,7 @@ fn resolved_redirect_write_targets(redirections: &[Redirection]) -> Vec<String> 
             continue;
         };
         let normalized = normalize::normalize_word(target);
-        let is_path_check_applicable = match kind {
-            FileRedirectionKind::Output | FileRedirectionKind::Append => true,
-            // `<&` never writes its target the way `>&`/`>`/`>>` can — the
-            // redirect rules this checks against are specifically about
-            // overwriting a dangerous path, so a read-only duplication
-            // (`cat <&/dev/sda`) gets the same free pass an ordinary `<`
-            // already does; excluding it here doesn't skip checking any
-            // write, since every genuine write path is covered by the other
-            // arms.
-            FileRedirectionKind::Input | FileRedirectionKind::DuplicateInput => false,
-            // A duplication output target (`2>&1` vs. `>&/dev/sda`) is only
-            // a genuine filesystem write — and so only worth a path check —
-            // when its resolved value is NOT a bare fd number or `-`.
-            // brush-parser doesn't distinguish the two structurally
-            // (`crate::ast::FileRedirectionKind::DuplicateOutput`'s docs),
-            // so the distinction is made here, after resolution. An
-            // unresolved target is treated as potentially a path (fails
-            // closed towards checking, even though nothing below can
-            // actually match an unresolved word).
-            FileRedirectionKind::DuplicateOutput => !normalized.iter().all(
-                |word| matches!(word.resolution(), Resolution::Resolved(s) if is_fd_or_close(s)),
-            ),
-        };
-        if !is_path_check_applicable {
+        if !is_redirect_write_applicable(kind, &normalized) {
             continue;
         }
         for word in &normalized {
@@ -1311,6 +1307,36 @@ fn resolved_redirect_write_targets(redirections: &[Redirection]) -> Vec<String> 
         }
     }
     targets
+}
+
+/// Whether `kind`'s target is a genuine filesystem write worth a path
+/// check at all — shared by [`resolved_redirect_write_targets`] and
+/// [`scan_redirect_home_env_floor`] (issue #203) so the two can never
+/// diverge on which redirect kinds count as a write.
+fn is_redirect_write_applicable(kind: &FileRedirectionKind, normalized: &[NormalizedWord]) -> bool {
+    match kind {
+        FileRedirectionKind::Output | FileRedirectionKind::Append => true,
+        // `<&` never writes its target the way `>&`/`>`/`>>` can — the
+        // redirect rules this checks against are specifically about
+        // overwriting a dangerous path, so a read-only duplication
+        // (`cat <&/dev/sda`) gets the same free pass an ordinary `<`
+        // already does; excluding it here doesn't skip checking any
+        // write, since every genuine write path is covered by the other
+        // arms.
+        FileRedirectionKind::Input | FileRedirectionKind::DuplicateInput => false,
+        // A duplication output target (`2>&1` vs. `>&/dev/sda`) is only
+        // a genuine filesystem write — and so only worth a path check —
+        // when its resolved value is NOT a bare fd number or `-`.
+        // brush-parser doesn't distinguish the two structurally
+        // (`crate::ast::FileRedirectionKind::DuplicateOutput`'s docs),
+        // so the distinction is made here, after resolution. An
+        // unresolved target is treated as potentially a path (fails
+        // closed towards checking, even though nothing below can
+        // actually match an unresolved word).
+        FileRedirectionKind::DuplicateOutput => !normalized
+            .iter()
+            .all(|word| matches!(word.resolution(), Resolution::Resolved(s) if is_fd_or_close(s))),
+    }
 }
 
 /// Issue #78: `Some(Ask, reason)` when any resolved redirect-write target
@@ -1348,6 +1374,103 @@ fn scan_redirect_ascent_descent_floor(
 /// genuine filesystem path — see [`check_redirect_targets`]'s docs.
 fn is_fd_or_close(s: &str) -> bool {
     s == "-" || (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Issue #203: `Some((Ask, reason))` when a redirect-write target begins
+/// with `$HOME`/`${HOME}` (bare or inside one enclosing pair of double
+/// quotes) and substituting the literal text `~` for that piece — the same
+/// runtime value, since bash's own `~` expansion reads `$HOME` — resolves
+/// to a string one of `rules`' redirect rules matches.
+///
+/// shguard performs no environment lookups (module docs), so `$HOME/...`
+/// itself normalizes to `Unresolvable` and
+/// [`resolved_redirect_write_targets`] silently contributes nothing for
+/// it — this floor is the only signal such a target gets. Capped to `Ask`
+/// regardless of the matched rule's own decision (never silently upgrades
+/// to that rule's own `Block`, mirroring [`scan_redirect_ascent_descent_floor`]
+/// just above): this can't be proven the way `~/...` itself can, only
+/// flagged.
+///
+/// Known residual (disclosed, not fixed, same MVP-scope posture as
+/// [`resolved_redirect_substitution_targets`]'s own disclosed dodges):
+/// only a *leading* `$HOME`/`${HOME}` piece is recognised — `$XDG_CONFIG_HOME/
+/// shguard/config.toml`, `${HOME}${HOME}/x`, and any variable other than
+/// `HOME` carrying the same practical risk are unaffected.
+fn scan_redirect_home_env_floor(
+    redirections: &[Redirection],
+    rules: &Rules,
+) -> Option<(Decision, String)> {
+    for redir in redirections {
+        let Redirection::File { kind, target } = redir else {
+            continue;
+        };
+        let normalized = normalize::normalize_word(target);
+        if !is_redirect_write_applicable(kind, &normalized) {
+            continue;
+        }
+        let Some(substituted) = home_env_word_with_tilde_substituted(target) else {
+            continue;
+        };
+        for word in normalize::normalize_word(&substituted) {
+            let Resolution::Resolved(candidate) = word.resolution() else {
+                continue;
+            };
+            if let Some(rule) = rules.match_redirect_target(candidate) {
+                return Some((
+                    Decision::Ask,
+                    format!(
+                        "redirect target begins with `$HOME`, which expands to the same value \
+                         as `~`; substituting `~` would match redirect rule {:?} ({}) — this \
+                         can't be proven without an environment lookup shguard never performs, \
+                         so it's flagged, not blocked",
+                        rule.id().as_str(),
+                        rule.reason().as_str(),
+                    ),
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// Piece-level substitution behind [`scan_redirect_home_env_floor`]: a
+/// leading `$HOME`/`${HOME}` piece (bare, or as the first piece inside a
+/// leading double-quoted sequence — `$HOME` and `"$HOME"` expand to the
+/// identical value) replaced with the literal text `~`, every other piece
+/// untouched; `None` when `word` doesn't start with `$HOME` in either
+/// shape. The double-quoted case only requires the quotes to wrap the
+/// LEADING piece, not the whole word — `"$HOME"/.zshrc` quotes only the
+/// expansion (a common style), leaving `/.zshrc` as ordinary trailing
+/// pieces after it, and must substitute exactly like the bare `$HOME/.zshrc`
+/// case does. Plain textual substitution, not real tilde expansion
+/// (`crate::normalize`'s own `WordPiece::Tilde` handling is never invoked)
+/// — `~` is used here only because it's the same comparison spelling
+/// `rules/blocklist.toml`'s own `self-protect-config-*-tilde` targets
+/// already use, so folding the suffix through the ordinary literal path
+/// lands on a directly comparable string.
+fn home_env_word_with_tilde_substituted(word: &Word) -> Option<Word> {
+    fn substitute(pieces: &[WordPiece]) -> Option<Vec<WordPiece>> {
+        match pieces.split_first() {
+            Some((WordPiece::ParameterExpansion(name), rest)) if name == "HOME" => {
+                let mut out = vec![WordPiece::Literal("~".to_string())];
+                out.extend_from_slice(rest);
+                Some(out)
+            }
+            _ => None,
+        }
+    }
+
+    if let Some(pieces) = substitute(&word.0) {
+        return Some(Word(pieces));
+    }
+    if let Some((WordPiece::DoubleQuoted(inner), rest)) = word.0.split_first()
+        && let Some(inner) = substitute(inner)
+    {
+        let mut out = vec![WordPiece::DoubleQuoted(inner)];
+        out.extend_from_slice(rest);
+        return Some(Word(out));
+    }
+    None
 }
 
 /// Whether any word in `argument_words` contains a command/backquote
@@ -1534,6 +1657,14 @@ fn evaluate_simple_command(
     // hard match on the *unwidened* target set, so it doesn't see this).
     let redirect_ascent_descent_floor =
         scan_redirect_ascent_descent_floor(&command.redirections, rules);
+    // Issue #203: a redirect-write target beginning with `$HOME`/`${HOME}`
+    // that would match a redirect rule if `~` (the same runtime value)
+    // stood in its place. shguard performs no environment lookups, so
+    // `$HOME/...` normalizes to `Unresolvable` and `core`'s own
+    // `check_redirect_targets` call sees nothing for it at all — computed
+    // here for the same reason every floor in this function is: it's the
+    // only signal such a target ever gets.
+    let redirect_home_env_floor = scan_redirect_home_env_floor(&command.redirections, rules);
     // Issue #261: an Ask-level redirect-rule match. `core` returns early
     // only for a Block (see its own comment), so this is where an Ask
     // arrives — computed here for the same reason every floor above is:
@@ -1591,6 +1722,7 @@ fn evaluate_simple_command(
     let tar_dashless_floor_present = tar_dashless_floor.is_some();
     let ascent_descent_floor_present = ascent_descent_floor.is_some();
     let redirect_ascent_descent_floor_present = redirect_ascent_descent_floor.is_some();
+    let redirect_home_env_floor_present = redirect_home_env_floor.is_some();
     let redirect_rule_ask_floor_present = redirect_rule_ask_floor.is_some();
     let named_user_home_floor_present = named_user_home_floor.is_some();
     let dirstack_tilde_floor_present = dirstack_tilde_floor.is_some();
@@ -1601,6 +1733,7 @@ fn evaluate_simple_command(
     let verdict = apply_tar_dashless_floor(verdict, tar_dashless_floor);
     let verdict = apply_ascent_descent_floor(verdict, ascent_descent_floor);
     let verdict = apply_ascent_descent_floor(verdict, redirect_ascent_descent_floor);
+    let verdict = apply_ascent_descent_floor(verdict, redirect_home_env_floor);
     let verdict = apply_ascent_descent_floor(verdict, redirect_rule_ask_floor);
     let verdict = apply_named_user_home_floor(verdict, named_user_home_floor);
     let verdict = apply_dirstack_tilde_floor(verdict, dirstack_tilde_floor);
@@ -1642,6 +1775,11 @@ fn evaluate_simple_command(
     // shaped token that would hit that same rule's bare-`~` target under
     // zsh's `magic_equal_subst` option — shguard cannot know whether the
     // invoking shell has that (off-by-default) option set.
+    // `redirect_home_env_floor_present` (issue #203) extends it once
+    // more, for the same reason `redirect_rule_ask_floor_present` below
+    // does: an allow entry for `echo`/`cat` is not consent to a `$HOME`-
+    // prefixed redirect target that would land in that same rule's
+    // namespace once substituted with its `~` equivalent.
     // `redirect_rule_ask_floor_present` (issue #261) extends it once
     // more: an allow entry for `echo`/`cat` is not consent to redirecting
     // that command's output into a protected shell-init path — the entry
@@ -1659,6 +1797,7 @@ fn evaluate_simple_command(
         || tar_dashless_floor_present
         || ascent_descent_floor_present
         || redirect_ascent_descent_floor_present
+        || redirect_home_env_floor_present
         || redirect_rule_ask_floor_present
         || named_user_home_floor_present
         || dirstack_tilde_floor_present
