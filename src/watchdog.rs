@@ -163,6 +163,15 @@ fn bounded_with_memory_limit(
 
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
+            // Same race as the memory-trip branch above: the worker may
+            // have already sent its real result in the gap between the
+            // last `recv_timeout` timing out and this check (which itself
+            // does an RSS read) finding the deadline passed. Prefer that
+            // real result over discarding it.
+            if let Ok(verdict) = result_rx.try_recv() {
+                let _ = worker.join();
+                return verdict;
+            }
             return fail_closed(
                 "shguard: evaluation exceeded its time budget; refusing to evaluate \
                  (fail-closed)",
@@ -286,7 +295,6 @@ mod platform {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -321,17 +329,37 @@ mod tests {
     /// repro, which may trip on time instead — see
     /// `tests/fail_closed_exit_paths.rs`'s
     /// `library_analyze_fails_closed_to_ask_on_the_same_heredoc_hang`).
-    /// The pipeline allocates and touches 1 MiB — comfortably over the
-    /// 64 KiB budget this test sets — then sleeps briefly before sending,
-    /// giving the poll loop several 50ms iterations to observe the
-    /// inflated delta before the pipeline would otherwise complete and
-    /// race the memory check via the channel.
+    ///
+    /// The pipeline doesn't just allocate a fixed amount and hope it shows
+    /// up as RSS growth against `current_rss_bytes()` — under a large
+    /// parallel test suite, a fixed allocation can be served from already-
+    /// resident freed pages elsewhere in the process, leaving the true
+    /// delta under budget and this test flaky. Instead it checks its own
+    /// growth against the same `current_rss_bytes()` the watchdog polls,
+    /// in 1 MiB steps, until *that* shows the budget exceeded — capped at
+    /// 256 MiB so a broken watchdog (or a platform with no
+    /// `current_rss_bytes()` implementation, where this loop can never
+    /// observe growth) fails this test's decision/reason asserts below
+    /// instead of growing this test's own memory unboundedly. Each 1 MiB
+    /// chunk is filled with a non-zero byte so the allocator actually
+    /// writes every page rather than mapping a shared zero page.
     #[test]
     fn memory_budget_trip_fails_closed_to_ask() {
-        let verdict = bounded_with_memory_limit(64 * 1024, || {
-            let touched = vec![1u8; 1024 * 1024];
+        let memory_limit_bytes = 64 * 1024;
+        let verdict = bounded_with_memory_limit(memory_limit_bytes, move || {
+            let baseline = current_rss_bytes();
+            let mut held = Vec::new();
+            while held.len() < 256 {
+                held.push(vec![0xAAu8; 1024 * 1024]);
+                let tripped = baseline
+                    .zip(current_rss_bytes())
+                    .is_some_and(|(base, now)| now.saturating_sub(base) > memory_limit_bytes);
+                if tripped {
+                    break;
+                }
+            }
             std::thread::sleep(Duration::from_millis(300));
-            std::hint::black_box(&touched);
+            std::hint::black_box(&held);
             Verdict::allow(Vec::new())
         });
         assert_eq!(verdict.decision(), crate::verdict::Decision::Ask);
