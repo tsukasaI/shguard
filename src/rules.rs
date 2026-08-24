@@ -3347,6 +3347,19 @@ fn wrapper_cluster_booleans(wrapper: &str) -> Option<&'static [char]> {
         // `-i`/`-0`/`-v`; the value-takers of both flavors are exactly the
         // `Short` entries in `wrapper_value_flags("env")`.
         "env" => Some(&['0', 'i', 'v']),
+        // GNU Make 3.81's `man make` (issue #209 round 3): every short
+        // flag not listed in `wrapper_value_flags("make")` is boolean.
+        "make" => Some(&[
+            'b', 'm', 'B', 'd', 'e', 'i', 'k', 'L', 'n', 'p', 'q', 'r', 'R', 's', 'S', 't', 'v',
+            'w',
+        ]),
+        // bsdtar 3.5.3's `man tar` (issue #209 round 3): mode selectors
+        // (`c r t u x`) plus every other short flag not listed in
+        // `wrapper_value_flags("tar")` is boolean.
+        "tar" => Some(&[
+            'a', 'B', 'c', 'H', 'h', 'J', 'j', 'k', 'L', 'l', 'm', 'n', 'O', 'o', 'P', 'p', 'q',
+            'r', 'S', 't', 'U', 'u', 'v', 'w', 'x', 'y', 'Z', 'z',
+        ]),
         _ => None,
     }
 }
@@ -3657,6 +3670,58 @@ fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
             ValueFlag::Short('d'),
             ValueFlag::Long("delimiter".to_string()),
             ValueFlag::Long("process-slot-var".to_string()),
+        ],
+        // Issue #209's round-3 fable review: `make`/`tar` aren't
+        // `TRANSPARENT_WRAPPERS` (they don't exec an arbitrary wrapped
+        // command), so these two entries are never reached by
+        // `skip_wrapper_flags`/`skip_wrapper_arguments` — they exist
+        // solely so `crate::gate::chain_dash_c_targets`/
+        // `resolve_tar_dash_c` can call `locate_cluster_value` for these
+        // tools' own `-C` getopt-cluster recognition, sharing this same
+        // table so a future edit can't drift the two apart again the way
+        // `env`'s handling once did. GNU Make 3.81's `man make` classifies
+        // every short flag: `-C`/`-f`/`-I`/`-j`/`-l`/`-o`/`-W` take a
+        // value (verified live: `make -jC dir`/`make -lC dir` both treat
+        // `C` as `-j`/`-l`'s own glued value and never chdir, matching
+        // `-j`'s/`-l`'s real optional-value semantics — this table only
+        // needs "does this letter consume the rest of the cluster",
+        // which holds regardless of the value being optional or
+        // mandatory); every other short letter (`b m B d e i k L n p q r
+        // R s S t v w`) is boolean (verified: `make -kwC dir` chdirs,
+        // `make -Ckw` treats `kw` as `-C`'s own value).
+        "make" => vec![
+            ValueFlag::Short('C'),
+            ValueFlag::Long("directory".to_string()),
+            ValueFlag::Short('f'),
+            ValueFlag::Short('I'),
+            ValueFlag::Short('j'),
+            ValueFlag::Short('l'),
+            ValueFlag::Short('o'),
+            ValueFlag::Short('W'),
+        ],
+        // `man tar` (bsdtar 3.5.3, this machine): `-b`/`-C`/`-f`/`-I`/`-s`/
+        // `-T`/`-X` take a value (verified live: `tar -sC dir ...` errors
+        // "Invalid replacement string" because `-s` swallows `C` as its
+        // own glued replacement pattern, never chdir'ing; `-IC dir`
+        // likewise glues `C` as `-I`'s own filename value). Every other
+        // short letter (mode selectors `c r t u x`, and `a B H h J j k L
+        // l m n O o P p q S U v w y Z z`) is boolean (verified: `tar -vcC
+        // dir -f out.tar f.txt` chdirs with `-v`/`-c` as leading
+        // booleans). GNU tar's short-flag surface overlaps this set
+        // closely enough (`-C`/`-f` identical; GNU has no `-s`/`-I`
+        // pattern-rename/include-file letters at all) that this bsdtar
+        // table is the safe default here too — an unmodeled letter simply
+        // falls back to [`locate_cluster_value`]'s own "unmodeled letter,
+        // real tar errors out, nothing to guard" case.
+        "tar" => vec![
+            ValueFlag::Short('b'),
+            ValueFlag::Short('C'),
+            ValueFlag::Long("directory".to_string()),
+            ValueFlag::Short('f'),
+            ValueFlag::Short('I'),
+            ValueFlag::Short('s'),
+            ValueFlag::Short('T'),
+            ValueFlag::Short('X'),
         ],
         _ => vec![],
     }

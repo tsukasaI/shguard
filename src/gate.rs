@@ -6453,20 +6453,31 @@ fn evaluate_composed_cwd_redirects(
 /// letting `env -C~/.config/shguard cp evil.toml config.toml` bypass the
 /// composition this function exists to feed.
 ///
-/// `cluster_wrapper` (`Some("env")`; `None` for git/make/tar, which have
-/// no boolean short-flag surface of their own to cluster with `-C`)
+/// `cluster_wrapper` (`Some("env")`/`Some("make")`; `None` for git,
+/// which — unlike env AND make — has no boolean short-flag surface of
+/// its own to cluster with `-C` at all, confirmed live: `git -pC /tmp`
+/// errors "unknown option: -pC" rather than clustering `-p` with `-C`)
 /// recognizes `-C` glued into a getopt short-flag cluster with OTHER
-/// boolean flags ahead of it (`env -iC dir`, `env -iCdir`) via
-/// [`crate::rules::locate_cluster_value`] — the same
+/// boolean flags ahead of it (`env -iC dir`, `env -iCdir`, `make -kC
+/// dir`) via [`crate::rules::locate_cluster_value`] — the same
 /// [`crate::rules::wrapper_cluster_booleans`]/
 /// [`crate::rules::wrapper_value_flags`] tables `effective_command`'s own
 /// wrapped-command walk already uses, so the two can't drift apart. A
 /// round-2 fable review caught this function's `-C`-only matching (the
-/// branches above) missing every cluster form entirely — `env -iC
-/// ~/.config/shguard cp evil.toml config.toml` (and its glued spelling,
-/// and reached through a leading wrapper like `nice`) silently found no
-/// anchor and bypassed composition exactly like the round-1 glued-form
-/// gap did.
+/// branches above) missing every cluster form entirely for `env` — `env
+/// -iC ~/.config/shguard cp evil.toml config.toml` (and its glued
+/// spelling, and reached through a leading wrapper like `nice`) silently
+/// found no anchor and bypassed composition exactly like the round-1
+/// glued-form gap did. A round-3 fable review then found the SAME class
+/// still open for `make` (this function's `git`/`make` caller had
+/// hard-coded `cluster_wrapper: None` for both, on the unverified
+/// assumption neither tool clusters — true for git, empirically false
+/// for make: `man make` documents `-C`/`-f`/`-I`/`-j`/`-l`/`-o`/`-W` as
+/// value-taking and everything else as boolean, and `make -kC dir`
+/// genuinely chdirs) — closed by giving `make` its own
+/// `wrapper_cluster_booleans("make")`/`wrapper_value_flags("make")`
+/// entries and passing `Some("make")` here too, rather than adding a
+/// third hand-rolled parser.
 ///
 /// `None` when `rest` has no such flag at all (composition doesn't
 /// apply — the ordinary uncomposed evaluation is unaffected, per
@@ -6554,6 +6565,19 @@ fn chain_dash_c_targets(
 /// also returns `None` rather than risk attributing the wrong anchor to
 /// the wrong operand range — tracked as a deliberate scope cut, not
 /// silently accepted (issue #354).
+///
+/// A round-3 fable review of issue #209 found this function's short-form
+/// matching (originally `s == "-C"` only) missing tar's cluster and
+/// glued forms entirely, the same bypass class already found and closed
+/// for `env`/`make` — bsdtar clusters `-C` with other boolean short
+/// flags (`tar -vcC dir -f out.tar file` chdirs, verified live) and
+/// accepts a glued value with no cluster prefix at all (`tar -C/tmp -cf
+/// out.tar file` also chdirs). Both are now recognized via
+/// [`crate::rules::locate_cluster_value`] with `wrapper = "tar"` — the
+/// same shared table mechanism `env`'s/`make`'s handling already uses —
+/// rather than a fourth bespoke parser; a bare `-C` (no glued suffix)
+/// correctly still falls out of the same call as
+/// [`crate::rules::ClusterValue::NextToken`].
 fn resolve_tar_dash_c<'a>(
     rest: &'a [NormalizedWord],
     env: &Env,
@@ -6566,7 +6590,7 @@ fn resolve_tar_dash_c<'a>(
             index += 1;
             continue;
         };
-        let (raw, after): (Option<String>, usize) = if s == "-C" || s == "--directory" {
+        let (raw, after): (Option<String>, usize) = if s == "--directory" {
             match rest.get(index + 1).map(NormalizedWord::resolution) {
                 Some(Resolution::Resolved(value)) => (Some(value.clone()), index + 2),
                 Some(Resolution::Unresolvable(_)) => (None, index + 2),
@@ -6574,6 +6598,17 @@ fn resolve_tar_dash_c<'a>(
             }
         } else if let Some(attached) = s.strip_prefix("--directory=") {
             (Some(attached.to_string()), index + 1)
+        } else if let Some(location) = crate::rules::locate_cluster_value("tar", s, 'C') {
+            match location {
+                crate::rules::ClusterValue::Glued(value) => (Some(value.to_string()), index + 1),
+                crate::rules::ClusterValue::NextToken => {
+                    match rest.get(index + 1).map(NormalizedWord::resolution) {
+                        Some(Resolution::Resolved(value)) => (Some(value.clone()), index + 2),
+                        Some(Resolution::Unresolvable(_)) => (None, index + 2),
+                        None => (None, index + 1),
+                    }
+                }
+            }
         } else {
             index += 1;
             continue;
@@ -6731,7 +6766,15 @@ fn evaluate_dash_c_override(argv: &[NormalizedWord], env: &Env, rules: &Rules) -
             } else {
                 rest
             };
-            let anchor = chain_dash_c_targets(scan_region, &[], short_can_attach, None, env)?;
+            // Issue #209 round 3: git genuinely has no boolean short-flag
+            // surface to cluster `-C` with (`git -pC /tmp` errors
+            // "unknown option: -pC"), but make DOES (`make -kC dir`
+            // chdirs) — a round-3 fable review caught this branch's
+            // `cluster_wrapper: None` silently dropping every make
+            // cluster form the way env's own cluster gap once did.
+            let cluster_wrapper = if name == "make" { Some("make") } else { None };
+            let anchor =
+                chain_dash_c_targets(scan_region, &[], short_can_attach, cluster_wrapper, env)?;
             let composed_argv = compose_argv_against_cwd(argv, &anchor);
             evaluate_composed_argv_match(&composed_argv, argv, "this invocation's own `-C`", rules)
         }
@@ -12350,6 +12393,113 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
         // guard either.
         assert_eq!(
             decide("env -iL ~/.config/shguard cp evil.toml config.toml").decision(),
+            Decision::Allow
+        );
+    }
+
+    // A round-3 fable review found the SAME bypass class still open for
+    // `make`/`tar`: the round-2 fix built `crate::rules::locate_cluster_value`
+    // as a shared source of truth but wired it up for `env` only, on the
+    // unverified assumption that git/make/tar "have no boolean short-flag
+    // surface of their own to cluster with `-C`" — true for git (`git
+    // -pC /tmp` errors "unknown option: -pC", confirmed live), empirically
+    // FALSE for make (`make -kC dir` chdirs) and tar (`tar -cC dir -f
+    // out.tar file` chdirs, `tar -C/path -cf ...` glues with no cluster
+    // prefix at all). Closed by giving `make`/`tar` their own
+    // `wrapper_cluster_booleans`/`wrapper_value_flags` entries and routing
+    // both through the same `locate_cluster_value` mechanism `env` already
+    // uses, rather than adding two more one-off parsers.
+
+    #[test]
+    fn make_dash_c_cluster_with_leading_boolean_composes() {
+        assert_eq!(
+            decide_dash_c("make -kC ~/.config/shguard config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn make_dash_c_cluster_with_two_leading_booleans_composes() {
+        assert_eq!(
+            decide_dash_c("make -kwC ~/.config/shguard config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn make_dash_c_cluster_glued_value_composes() {
+        assert_eq!(
+            decide_dash_c("make -kC~/.config/shguard config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn make_dash_c_cluster_through_a_leading_wrapper_composes() {
+        assert_eq!(
+            decide_dash_c("nice make -kC ~/.config/shguard config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn make_dash_c_value_taker_before_c_is_not_modeled() {
+        // `make -jC dir`: confirmed against a live make binary that `-j`
+        // (an optional-value flag) greedily consumes `C` as its own
+        // attempted value ("the `-j' option requires a positive integral
+        // argument") and make refuses to run anything — no anchor to
+        // extract, and no execution to guard either, the same reasoning
+        // `env_dash_c_cluster_with_an_unmodeled_letter_is_not_modeled`
+        // gives for an unmodeled letter.
+        assert_eq!(
+            decide_dash_c("make -jC ~/.config/shguard config.toml").decision(),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn tar_dash_c_cluster_with_leading_boolean_composes() {
+        assert_eq!(
+            decide_dash_c("tar -cC ~/.config/shguard -f out.tar config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn tar_dash_c_cluster_with_two_leading_booleans_composes() {
+        assert_eq!(
+            decide_dash_c("tar -vcC ~/.config/shguard -f out.tar config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn tar_dash_c_glued_with_no_cluster_prefix_composes() {
+        // Unlike git, bsdtar accepts a glued `-C<dir>` even with no
+        // boolean cluster ahead of it — confirmed live: `tar -C/path -cf
+        // out.tar file` chdirs.
+        assert_eq!(
+            decide_dash_c("tar -C~/.config/shguard -cf out.tar config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn tar_dash_c_cluster_glued_value_composes() {
+        assert_eq!(
+            decide_dash_c("tar -cC~/.config/shguard -f out.tar config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn tar_dash_c_value_taker_before_c_is_not_modeled() {
+        // `tar -sC dir`: confirmed against a live bsdtar binary that `-s`
+        // glues `C` as its own replacement-pattern value ("Invalid
+        // replacement string") and tar exits before archiving anything —
+        // no anchor to extract, and no execution to guard.
+        assert_eq!(
+            decide_dash_c("tar -sC ~/.config/shguard -cf out.tar config.toml").decision(),
             Decision::Allow
         );
     }
