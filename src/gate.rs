@@ -5904,15 +5904,30 @@ fn compound_command_may_change_cwd(compound: &CompoundCommand) -> bool {
     }
 }
 
-/// Composes every `Rel`-shaped resolved token in `argv` (never `argv[0]`
-/// itself — module docs' cwd-context section: composing the command name
-/// is a known, deliberate v1 gap, e.g. `cd /tmp && ./script.sh`) against
-/// `anchor` by plain string-join (`anchor + "/" + token`). Nothing here
-/// pre-normalizes the join: the composed argv is checked by the ordinary
-/// rule-matching machinery exactly like a raw command string would be,
-/// which already re-derives `.`/`..`/`~`-normalization from scratch
-/// (`lexical_normalize`, called again inside [`crate::rules::Rules::match_command`]'s
-/// own target matching).
+/// Composes every `Rel`-shaped resolved token in `argv`, including
+/// `argv[0]` itself (issue #211 — a prior version deliberately skipped
+/// `argv[0]`, e.g. leaving `cd /tmp && ./script.sh` uncomposed, as a v1
+/// scope cut), against `anchor` by plain string-join (`anchor + "/" +
+/// token`). Nothing here pre-normalizes the join: the composed argv is
+/// checked by the ordinary rule-matching machinery exactly like a raw
+/// command string would be, which already re-derives `.`/`..`/
+/// `~`-normalization from scratch (`lexical_normalize`, called again
+/// inside [`crate::rules::Rules::match_command`]'s own target matching).
+///
+/// Composing `argv[0]` provably cannot change any `command`/
+/// `command_prefix` match: every command-name comparison in this crate
+/// (`crate::rules::CommandRule::matching_rest`, the sole path a command
+/// name reaches [`crate::rules::CommandMatch::matches`] through) resolves
+/// against `crate::rules::basename`, never the raw token — and basename
+/// extraction (splitting on the last `/`) is invariant under prepending
+/// any directory prefix: `basename(anchor + "/" + rel) == basename(rel)`
+/// for every `anchor`/`rel`, since prepending more leading path segments
+/// never touches the final one. Composing `argv[0]` here anyway (rather
+/// than leaving the special case in) closes issue #211 as a genuine no-op
+/// for every rule that exists today, and keeps this pass uniform — no
+/// hidden index-0 exception a future path-aware matcher would need to
+/// remember to also update — should command matching ever stop being
+/// basename-only.
 ///
 /// A token starting with `-` is left UNCOMPOSED even when it's lexically
 /// `Rel`-shaped (`-rf`, `-i`): folding a flag into a path would silently
@@ -5926,20 +5941,13 @@ fn compound_command_may_change_cwd(compound: &CompoundCommand) -> bool {
 /// `CwdContext`'s own docs).
 fn compose_argv_against_cwd(argv: &[NormalizedWord], anchor: &str) -> Vec<NormalizedWord> {
     argv.iter()
-        .enumerate()
-        .map(|(index, word)| {
-            if index == 0 {
-                return word.clone();
+        .map(|word| match word.resolution() {
+            Resolution::Resolved(s)
+                if !s.starts_with('-') && matches!(lexical_normalize(s), PathForm::Rel { .. }) =>
+            {
+                NormalizedWord::resolved(format!("{anchor}/{s}"))
             }
-            match word.resolution() {
-                Resolution::Resolved(s)
-                    if !s.starts_with('-')
-                        && matches!(lexical_normalize(s), PathForm::Rel { .. }) =>
-                {
-                    NormalizedWord::resolved(format!("{anchor}/{s}"))
-                }
-                _ => word.clone(),
-            }
+            _ => word.clone(),
         })
         .collect()
 }
@@ -10933,6 +10941,68 @@ done"#,
         assert_never_lowers("cd $HOME");
         assert_never_lowers("IFS=,; rm$IFS-rf$IFS/");
         assert_never_lowers("cp ~/.config/shguard/evil.toml ~/.config/shguard/config.toml");
+    }
+
+    // ==== Issue #211: compose argv[0] against the folded cwd too ====
+    //
+    // A prior version of `compose_argv_against_cwd` special-cased index 0,
+    // leaving `argv[0]` uncomposed as a deliberate v1 scope cut. This
+    // section closes that: `argv[0]` is now composed like any other
+    // `Rel`-shaped token, and it's proven — not just asserted — that this
+    // is a no-op for every existing rule's decision, since command-name
+    // matching is basename-only everywhere in this crate.
+
+    #[test]
+    fn compose_argv_against_cwd_now_rewrites_argv_0_too() {
+        // Direct unit check that the string content actually changes —
+        // the decision-parity tests below only prove the composition is
+        // *safe*, not that it *happened*.
+        let argv = vec![
+            NormalizedWord::resolved("./script.sh"),
+            NormalizedWord::resolved("arg"),
+        ];
+        let composed = compose_argv_against_cwd(&argv, "/tmp");
+        assert_eq!(
+            composed[0].resolution(),
+            &Resolution::Resolved("/tmp/./script.sh".to_string()),
+            "argv[0] must now be composed against the folded cwd anchor"
+        );
+    }
+
+    #[test]
+    fn folded_cwd_relative_script_invocation_matches_the_same_command_prefix_rule_as_bare() {
+        // The concrete gap the issue's own example describes: a
+        // `command_prefix` rule targeting a script-shaped name must fire
+        // identically whether the script is invoked bare or via a
+        // same-line `cd` — proving basename-only matching already made
+        // this work, and that composing argv[0] doesn't change it.
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[ask]]
+            id = "user-ask-deploy-script"
+            reason = "confirm deploy script invocations"
+            command_prefix = "deploy"
+        "#,
+        );
+        let bare = analyze_with_policy("deploy.sh --prod", &rules, &allowlist);
+        let via_folded_cwd =
+            analyze_with_policy("cd /tmp && ./deploy.sh --prod", &rules, &allowlist);
+        assert_eq!(bare.decision(), Decision::Ask);
+        assert_eq!(
+            via_folded_cwd.decision(),
+            bare.decision(),
+            "a command_prefix rule must match a folded-cwd relative script invocation exactly \
+             as it matches the bare invocation — composing argv[0] must change nothing here"
+        );
+    }
+
+    #[test]
+    fn folded_cwd_relative_script_invocation_does_not_gain_a_new_match() {
+        // The other direction: composing argv[0] must not manufacture a
+        // NEW match that wasn't already there — an ordinary script
+        // invocation under an unrelated folded cwd must stay Allow, same
+        // as the bare invocation.
+        assert_decision("cd /tmp && ./deploy.sh --prod", Decision::Allow);
     }
 }
 
