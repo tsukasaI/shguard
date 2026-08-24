@@ -318,6 +318,18 @@ impl Policy {
     /// crate otherwise has none of. `shguard --check-config`
     /// (`src/bin/shguard.rs`) is the intended caller — a human- or
     /// CI-triggered, one-shot lint pass.
+    ///
+    /// Scans the embedded blocklist/allowlist too, not just what a user
+    /// config contributed — deliberately: no embedded rule uses `url_host`
+    /// today (checked `rules/*.toml`), but if a future shipped rule ever
+    /// did mix the two shapes, this repo's own CI running
+    /// `shguard --check-config` against a zero-config invocation is
+    /// exactly what should catch that regression before it ships. A rule
+    /// id flagged this way isn't one a caller can act on themselves the
+    /// way `--check-config`'s own "replace the old entry" remediation text
+    /// assumes (a user can't edit or override an embedded rule — a
+    /// same-id user rule fails closed at load time), but that's a defect
+    /// in the embedded rule itself, not a false positive from this method.
     #[must_use]
     pub fn rules_with_mixed_except_targets(&self) -> Vec<crate::verdict::RuleId> {
         let mut ids = self.rules.ids_with_mixed_except_targets();

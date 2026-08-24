@@ -684,7 +684,35 @@ enum TargetMatcher {
     UrlHost(url::Host<String>),
 }
 
+/// Issue #208's three-way classification of a compiled
+/// [`TargetMatcher`] for [`CommandRule::mixes_url_host_with_string_except_target`]'s
+/// purposes. `UrlHost` and `StringLiteral` are split out because that
+/// split *is* the trap the check exists to catch — a rule migrating to
+/// `url_host` but leaving the old `exact`/`prefix` entry in place.
+/// `Other` covers every remaining variant (`NormalizedExact`/
+/// `NormalizedPrefix`, currently rejected from `except_targets` at parse
+/// time by `convert_target`'s `is_except_target` branch, so this arm is
+/// unreachable there today) — kept as its own arm on an exhaustive match,
+/// rather than folded into `StringLiteral` or left off via a wildcard, so
+/// a future `TargetMatcher` variant forces a decision at this call site
+/// instead of silently going unclassified.
+enum ExceptTargetShape {
+    UrlHost,
+    StringLiteral,
+    Other,
+}
+
 impl TargetMatcher {
+    fn except_target_shape(&self) -> ExceptTargetShape {
+        match self {
+            Self::UrlHost(_) => ExceptTargetShape::UrlHost,
+            Self::Exact(_) | Self::Prefix(_) => ExceptTargetShape::StringLiteral,
+            Self::NormalizedExact { .. } | Self::NormalizedPrefix { .. } => {
+                ExceptTargetShape::Other
+            }
+        }
+    }
+
     fn matches(&self, token: &str) -> bool {
         match self {
             Self::Exact(exact) => token == exact,
@@ -1398,11 +1426,11 @@ impl CommandRule {
         let has_url_host = self
             .except_targets
             .iter()
-            .any(|t| matches!(t, TargetMatcher::UrlHost(_)));
+            .any(|t| matches!(t.except_target_shape(), ExceptTargetShape::UrlHost));
         let has_string_entry = self
             .except_targets
             .iter()
-            .any(|t| matches!(t, TargetMatcher::Exact(_) | TargetMatcher::Prefix(_)));
+            .any(|t| matches!(t.except_target_shape(), ExceptTargetShape::StringLiteral));
         has_url_host && has_string_entry
     }
 

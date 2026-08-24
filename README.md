@@ -376,9 +376,10 @@ things to know before reaching for it:
   host, not adding to them. Run `shguard --check-config` after editing
   `except_targets` — it flags any rule whose `except_targets` mixes a
   `url_host` entry with an `exact`/`prefix` entry (exits `1` if it finds
-  one, `0` if clean) without needing to prove the two entries target the
-  same host; the PreToolUse hook itself can't safely warn about this on
-  its own, since it re-parses config on every single command.
+  one, `0` if clean, `2` if the config itself fails to load) without
+  needing to prove the two entries target the same host; the PreToolUse
+  hook itself can't safely warn about this on its own, since it re-parses
+  config on every single command.
 - **An unparseable candidate fails closed**: if a candidate target token
   doesn't parse as a URL at all, `url_host` never matches it — the
   exception doesn't apply and the rule still fires. There is no fallback

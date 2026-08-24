@@ -90,6 +90,31 @@ fn exact_and_prefix_together_without_url_host_reports_clean_and_exits_zero() {
     assert!(stdout.contains("no issues found"));
 }
 
+// The check is per-rule, not per-config: a `url_host` entry on one rule
+// and a `prefix` entry on an unrelated rule must not be flagged just
+// because both appear somewhere in the same config file.
+#[test]
+fn url_host_and_prefix_in_separate_rules_reports_clean_and_exits_zero() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[deny]]
+        id = "user-deny-curl-external"
+        reason = "block external curl calls"
+        command = "curl"
+        except_targets = [{ url_host = "localhost" }]
+
+        [[ask]]
+        id = "user-ask-wget-external"
+        reason = "confirm external wget calls"
+        command = "wget"
+        except_targets = [{ prefix = "http://127.0.0.1" }]
+    "#,
+    );
+    let assert = run_check_config(&[("SHGUARD_CONFIG", config_path.to_str().unwrap())]).success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(stdout.contains("no issues found"));
+}
+
 // The exact repro from the issue: a rule keeps a string-based
 // except_targets entry *and* adds a url_host entry alongside it (rather
 // than replacing the old entry), which flags on this mechanical
