@@ -841,7 +841,17 @@ impl TargetMatcher {
             // anchor, known descent" shape as the two arms above — see
             // `PathForm::DirStack`'s own docs for the full reasoning,
             // including why a leading `..` doesn't need separate handling
-            // here the way `EscapesHome`/`NamedUserHomeEscapes` do.
+            // here the way `EscapesHome`/`NamedUserHomeEscapes` do. Unlike
+            // `dirstack_plausible` just below, this floor does NOT exclude
+            // a `strip: Some(..)` target (an attached slot like dd's
+            // `of=`) — `dirstack_plausible`'s exclusion rests on `of=~+`
+            // not tilde-expanding as a *whole-token* shorthand in the
+            // first place (issue #134), but says nothing about whether
+            // `of=~-/dev/sda` is a dangerous literal string in its own
+            // right; treating it the same as `of=~/../dev/sda` (which
+            // already floors via `EscapesHome` above, strip or not) keeps
+            // this fail-closed rather than opening a strip-shaped gap the
+            // #134 exclusion was never meant to create.
             | PathForm::DirStack(comps) => comps,
             _ => return false,
         };
@@ -1179,13 +1189,34 @@ pub(crate) enum PathForm {
     /// match a rule's own bare-`~` target the way `~+` itself correctly
     /// does ([`TargetMatcher::dirstack_plausible`]'s `tail.is_empty()`
     /// check). [`lexical_normalize`] routes that one case to
-    /// [`PathForm::Opaque`] instead — it has no more specific shape to
-    /// report either, since an empty tail is never itself plausible via
-    /// [`TargetMatcher::ascent_descent_plausible`].
+    /// [`PathForm::Opaque`] instead ([`ascent_descent_plausible`] has
+    /// nothing to check there either — an empty tail is never itself
+    /// plausible against a target).
+    ///
+    /// # Known residual gap (pre-existing, not introduced or closed by
+    /// issue #133)
+    ///
+    /// `~+/..`/`~-/..`/`~N/..` (an escaped-to-empty-tail token) still
+    /// falls through *every* mechanism here to plain `Opaque` — no rule
+    /// can hard-match it via [`TargetMatcher::matches`]'s own pure-ascent
+    /// widening either, even though `PathForm::Rel { ascent: 1, comps:
+    /// vec![] }` (plain `..`) DOES hard-match a bare-`/` target through
+    /// that exact widening (`self.rs`'s `matches` impl, the
+    /// `(Abs(comps), Rel{ascent>=1, comps: []})` arm) — meaning `rm -rf
+    /// ..` Blocks but the semantically equivalent `rm -rf ~+/..` (`$PWD/..`
+    /// is `..`, lexically) Allows. Closing this would mean widening that
+    /// same arm to also recognize an escaped-to-empty `DirStack`, which
+    /// `Opaque` (unlike `Rel`) carries no `escaped`/anchor-kind
+    /// information to do — a real gap, left open here the same way issue
+    /// #134 (dirstack tokens glued to an `=`-terminated flag) is: flagged,
+    /// not silently assumed closed.
     DirStack(Vec<String>),
-    /// Matches nothing: the empty string, or a `~username/subdir` token
-    /// (see [`PathForm::NamedUserHome`]'s docs) — [`PathForm::DirStack`]
-    /// no longer routes any of its shapes here as of issue #133.
+    /// Matches nothing: the empty string, a `~username/subdir` token (see
+    /// [`PathForm::NamedUserHome`]'s docs), or a dirstack-shaped tilde
+    /// token whose `..` escapes to an empty tail (`~+/..`, see
+    /// [`PathForm::DirStack`]'s "Known residual gap" — issue #133 routes
+    /// every OTHER dirstack shape away from here, but that one specific
+    /// case still lands here).
     Opaque,
 }
 
@@ -1263,22 +1294,8 @@ pub(crate) fn lexical_normalize(token: &str) -> PathForm {
         // classification below — sharing the same accumulation loop above
         // so `~+/.`/`~+//` still collapse to an empty-tail `DirStack` the
         // same way `~/.`/`~username/.` collapse to their own bare forms.
-        // Issue #133: `escaped` is NOT threaded into a distinct variant
-        // the way `NamedUserHomeEscapes` does below — a NON-EMPTY `stack`
-        // is the right `DirStack` tail regardless of `escaped`, since a
-        // leading `..` with nothing to cancel is absorbed into `escaped`
-        // without altering later pushes onto `stack` (see `PathForm::DirStack`'s
-        // own docs). But an EMPTY `stack` still needs `escaped` to tell
-        // "exactly the anchor" (`~+`, `escaped == false`) apart from "one
-        // level *above* the anchor" (`~+/..`, `escaped == true`) — those
-        // are different, unequal locations, so folding the latter into
-        // `DirStack(vec![])` would wrongly make `~+/..` match a rule's
-        // own bare-`~` target the same way `~+` itself correctly does
-        // (`TargetMatcher::dirstack_plausible`'s `tail.is_empty()` check).
-        // `~+/..` has no more specific shape to report either (there is
-        // nothing to check `ascent_descent_plausible` against — an empty
-        // tail is never plausible there), so it stays `Opaque`, same as
-        // before this issue.
+        // Issue #133: see `PathForm::DirStack`'s own docs for why `escaped`
+        // only matters when `stack` ends up empty, not otherwise.
         if dirstack {
             return if escaped && stack.is_empty() {
                 PathForm::Opaque
@@ -5694,6 +5711,22 @@ mod tests {
         let rules = Rules::embedded().unwrap();
         let rule = rules
             .match_redirect_target_ascent_descent("~/../../etc/passwd")
+            .unwrap();
+        assert_eq!(
+            rule.id().as_str(),
+            "redirect-overwrite-device-or-critical-file"
+        );
+    }
+
+    #[test]
+    fn ascent_descent_redirect_dirstack_tilde_descent_floors() {
+        // Issue #133: RedirectRule::ascent_descent_plausible delegates to
+        // the same TargetMatcher::ascent_descent_plausible the CommandRule
+        // channel above does, so a dirstack-anchored descent floors via
+        // shell redirect syntax too — not just argv (`dd of=...`).
+        let rules = Rules::embedded().unwrap();
+        let rule = rules
+            .match_redirect_target_ascent_descent("~-/dev/sda")
             .unwrap();
         assert_eq!(
             rule.id().as_str(),

@@ -1359,10 +1359,11 @@ fn scan_redirect_ascent_descent_floor(
     Some((
         Decision::Ask,
         format!(
-            "a redirect target ascends via `..` past an unknown number of directories, then \
-             descends into a shape that would match redirect rule {:?} ({}) if the ascent \
-             bottomed out there; shguard has no cwd to resolve the ascent against, so this \
-             can't be proven, only flagged",
+            "a redirect target starts at an unknown anchor — an unresolved `..` ascent, or a \
+             `~+`/`~-`/`~N` directory-stack tilde shorthand (issue #133) — then descends into a \
+             shape that would match redirect rule {:?} ({}) if the anchor bottomed out there; \
+             shguard has no cwd or directory stack to resolve the anchor against, so this can't \
+             be proven, only flagged",
             rule.id().as_str(),
             rule.reason().as_str(),
         ),
@@ -2435,9 +2436,10 @@ fn scan_ascent_descent_floor(
     Some((
         Decision::Ask,
         format!(
-            "a target token ascends via `..` past an unknown number of directories, then \
-             descends into a shape that would match rule {:?} ({}) if the ascent bottomed out \
-             there; shguard has no cwd to resolve the ascent against, so this can't be proven, \
+            "a target token starts at an unknown anchor — an unresolved `..` ascent, or a \
+             `~+`/`~-`/`~N` directory-stack tilde shorthand (issue #133) — then descends into a \
+             shape that would match rule {:?} ({}) if the anchor bottomed out there; shguard has \
+             no cwd or directory stack to resolve the anchor against, so this can't be proven, \
              only flagged",
             rule.id().as_str(),
             rule.reason().as_str(),
@@ -7335,21 +7337,18 @@ mod tests {
     }
 
     #[test]
-    fn rm_rf_dirstack_tilde_bare_anchor_still_asks_via_the_bare_floor() {
-        // Unaffected by #133 — still floors via the pre-existing
-        // bare-anchor mechanism (issue #88), not the new descent one.
-        // Uses `rm`, not `dd`: `dd`'s own target requires an attached
-        // `of=` prefix (`strip: Some("of=")`), which `dirstack_plausible`
-        // deliberately excludes (issue #134, unrelated to #133) — `rm`'s
-        // bare-`~` target has no such prefix.
-        assert_decision("rm -rf ~-", Decision::Ask);
-    }
-
-    #[test]
     fn dd_dirstack_tilde_escape_to_empty_tail_stays_allow() {
         // `~-/..` is one level *above* the unknown anchor, not the anchor
         // itself — must not be conflated with the bare-anchor case above.
         assert_decision("dd of=~-/..", Decision::Allow);
+    }
+
+    #[test]
+    fn redirect_dirstack_tilde_descent_to_dev_asks() {
+        // The same shape via shell redirect syntax (`>`), not just argv —
+        // RedirectRule shares TargetMatcher::ascent_descent_plausible
+        // underneath (see rules.rs's ascent_descent_redirect_dirstack_tilde_descent_floors).
+        assert_decision("echo hi > ~-/dev/sda", Decision::Ask);
     }
 
     #[test]
@@ -7555,6 +7554,13 @@ mod tests {
 
     #[test]
     fn rm_rf_dirstack_tilde_minus_asks() {
+        // Uses `rm`, not `dd`: `dd`'s own target requires an attached
+        // `of=` prefix (`strip: Some("of=")`), which `dirstack_plausible`
+        // (the bare-anchor floor this exercises) deliberately excludes
+        // (issue #134, unrelated to #133) — `rm`'s bare-`~` target has no
+        // such prefix. Unaffected by #133: still floors via this
+        // pre-existing bare-anchor mechanism (issue #88), not the new
+        // descent one (see `dd_dirstack_tilde_descent_to_dev_asks` above).
         assert_decision("rm -rf ~-", Decision::Ask);
     }
 
@@ -7565,8 +7571,16 @@ mod tests {
 
     #[test]
     fn rm_rf_dirstack_tilde_subdir_tail_still_allows() {
-        // Issue #133 (not fixed here): a real subdirectory tail after a
-        // dirstack anchor stays out of #88's scope.
+        // Issue #133 fixed a real subdirectory tail after a dirstack
+        // anchor floating through `ascent_descent_plausible` — but this
+        // specific tail still Allows, because `/etc/passwd` was never one
+        // of `rm-recursive-force-dangerous-target`'s own declared targets
+        // (only `/`, `~`, `/dev/*`) to begin with. Exact parity with plain
+        // `../../etc/passwd`, equally unmatched for the identical reason
+        // — a target-coverage gap the sibling plain-ascent floor already
+        // has too, not a residual #133 gap. See `dd_dirstack_tilde_descent_to_dev_asks`
+        // above (issue #133's own test group) for the same shape actually
+        // hitting a declared target (`/dev/*`) and correctly Asking.
         assert_decision("rm -rf ~-/etc/passwd", Decision::Allow);
     }
 
