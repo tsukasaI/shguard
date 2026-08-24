@@ -330,6 +330,15 @@ impl Policy {
     /// assumes (a user can't edit or override an embedded rule — a
     /// same-id user rule fails closed at load time), but that's a defect
     /// in the embedded rule itself, not a false positive from this method.
+    ///
+    /// Scoped to `except_targets` only, per issue #208's own title —
+    /// deliberately doesn't scan an allowlist entry's own `targets` for
+    /// the same mixed shape (`targets = [{ prefix = "http://localhost" },
+    /// { url_host = "localhost" }]`), even though the identical trap
+    /// exists there too (`targets` are OR'd the same way, in the
+    /// allow-widening rather than block-narrowing direction). Not
+    /// implemented here; a legitimate follow-up if it turns out to matter
+    /// in practice.
     #[must_use]
     pub fn rules_with_mixed_except_targets(&self) -> Vec<crate::verdict::RuleId> {
         let mut ids = self.rules.ids_with_mixed_except_targets();

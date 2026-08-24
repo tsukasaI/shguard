@@ -150,31 +150,40 @@ const MEMORY_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const MEMORY_LIMIT_BYTES: u64 = 256 * 1024 * 1024;
 
 fn main() {
-    let mut args = std::env::args();
+    // `args_os`, not `args`: the latter panics outright on a non-UTF-8
+    // argument, which would turn a malformed-but-harmless human typo (this
+    // whole block only ever runs for a human invocation — see below) into
+    // an uncaught panic before `install_panic_hook`/`catch_unwind` are even
+    // reachable. `to_str()` below folds a non-UTF-8 first argument to
+    // `None`, which the catch-all arm treats the same as any other
+    // unrecognized argument.
+    let mut args = std::env::args_os();
     let _binary_name = args.next();
     let first_arg = args.next();
     let extra_arg = args.next();
-    match first_arg.as_deref() {
+    match first_arg.as_deref().and_then(std::ffi::OsStr::to_str) {
         Some("--version") if extra_arg.is_none() => {
-            println!("shguard {}", env!("CARGO_PKG_VERSION"));
+            let _ = writeln!(io::stdout(), "shguard {}", env!("CARGO_PKG_VERSION"));
             return;
         }
         Some("--check-config") if extra_arg.is_none() => {
             std::process::exit(check_config());
         }
         // The PreToolUse hook contract never passes shguard any arguments
-        // (Claude Code invokes it bare, feeding the payload via stdin), so
-        // rejecting an unrecognized flag or trailing argument here can
-        // never reject real hook traffic — only a human's mistake (a
-        // typo'd flag, or extra text after a recognized one), which would
-        // otherwise silently fall through to hook mode below and block on
-        // stdin instead of reporting the mistake. An invalid flag/argument
-        // is an error, never a silent no-op — the worst failure mode a
-        // checking tool can have is a typo that skips the check and exits
-        // 0 anyway.
-        Some(arg) if arg.starts_with('-') || extra_arg.is_some() => {
-            let rest: Vec<String> = std::env::args().skip(1).collect();
-            eprintln!(
+        // at all (Claude Code invokes it bare, feeding the payload via
+        // stdin) — `first_arg` is `None` on every real hook invocation, so
+        // this arm (guarded on `first_arg.is_some()`) can never reject real
+        // hook traffic, only a human's mistake: an unrecognized flag, a
+        // non-flag positional, a trailing argument after a recognized
+        // flag, or a non-UTF-8 argument, all of which would otherwise
+        // silently fall through to hook mode below and block on stdin
+        // instead of reporting the mistake. An invalid flag/argument is an
+        // error, never a silent no-op — the worst failure mode a checking
+        // tool can have is a typo that skips the check and exits 0 anyway.
+        _ if first_arg.is_some() => {
+            let rest: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+            let _ = writeln!(
+                io::stderr(),
                 "shguard: unrecognized arguments {rest:?} (known flags: --version, \
                  --check-config, neither taking further arguments)"
             );

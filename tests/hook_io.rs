@@ -117,6 +117,20 @@ fn unrecognized_flag_exits_with_error_instead_of_falling_through_to_hook_mode() 
         .code(2);
 }
 
+// A bare positional argument (no leading `-` at all) must be rejected the
+// same way — the catch-all guard is `first_arg.is_some()`, not
+// `starts_with('-')`, specifically so a typo like `check-config` (missing
+// dashes) doesn't silently fall through to hook mode either.
+#[test]
+fn non_flag_positional_argument_exits_with_error_instead_of_falling_through_to_hook_mode() {
+    Command::cargo_bin("shguard")
+        .expect("shguard binary should build")
+        .arg("check-config")
+        .assert()
+        .failure()
+        .code(2);
+}
+
 #[test]
 fn version_flag_with_trailing_argument_exits_with_error() {
     Command::cargo_bin("shguard")
