@@ -1372,6 +1372,25 @@ fn guardfall_shell_init_redirect_cases() {
         // path — the floor's piece-level substitution doesn't care which.
         ("cat > ${HOME}/.config/shguard/config.toml", Decision::Ask),
         ("cat > \"$HOME/.config/shguard/config.toml\"", Decision::Ask),
+        // fable-review regression guard: quoting only the expansion, not
+        // the whole target (`"$HOME"/.zshrc` — arguably the more idiomatic
+        // shell style than quoting the whole word) must substitute exactly
+        // like the bare and whole-word-quoted forms above; an earlier
+        // version of this fix only recognised a `DoubleQuoted` piece that
+        // was the ENTIRE word and silently fell through to Allow here.
+        ("cat > \"$HOME\"/.config/shguard/config.toml", Decision::Ask),
+        // fable-review regression guard: this floor is wired into both
+        // `evaluate_simple_command` (a bare command's own redirects) and
+        // `apply_attached_word_and_redirect_checks` (a compound command's
+        // attached redirects) — an earlier version only had the former,
+        // so wrapping the exact same redirect in a brace group silently
+        // regained the pre-#203 Allow.
+        ("{ echo x; } >> $HOME/.zshrc", Decision::Ask),
+        ("f() { :; } >> $HOME/.zshrc", Decision::Ask),
+        // Other applicable redirect kinds reach the same floor: a bare fd
+        // number/`>&` still resolves through `is_redirect_write_applicable`
+        // exactly like the plain `>`/`>>` cases above.
+        ("echo x 2> $HOME/.zshrc", Decision::Ask),
         // Controls that motivate the design: an unrelated env var, or a
         // `$HOME`-prefixed target that doesn't land in any redirect rule's
         // namespace, must stay Allow — the floor is `$HOME`-specific

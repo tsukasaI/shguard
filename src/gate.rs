@@ -888,6 +888,25 @@ fn apply_attached_word_and_redirect_checks(
         worst = fold_worst(worst, floored);
     }
 
+    // Issue #203: the same `$HOME`-vs-`~` correlation floor
+    // `evaluate_simple_command` applies to a command's own redirects,
+    // extended to a compound command's/function definition's/extended
+    // test's own attached redirects (`{ ...; } >> $HOME/.zshrc`) — without
+    // this, wrapping an otherwise-caught redirect in a brace group,
+    // subshell, loop, or function definition would silently regain the
+    // Allow this whole floor exists to close.
+    if let Some((floor_decision, floor_reason)) = scan_redirect_home_env_floor(redirections, rules)
+    {
+        let argv = worst.normalized_argv().to_vec();
+        let floored = match floor_decision {
+            Decision::Ask => Verdict::ask(Reason::new(floor_reason), argv),
+            Decision::Block | Decision::Allow => {
+                unreachable!("scan_redirect_home_env_floor only ever produces Ask")
+            }
+        };
+        worst = fold_worst(worst, floored);
+    }
+
     worst
 }
 
@@ -1416,10 +1435,14 @@ fn scan_redirect_home_env_floor(
 
 /// Piece-level substitution behind [`scan_redirect_home_env_floor`]: a
 /// leading `$HOME`/`${HOME}` piece (bare, or as the first piece inside a
-/// single enclosing double-quoted sequence — `$HOME` and `"$HOME"` expand
-/// to the identical value) replaced with the literal text `~`, every other
-/// piece untouched; `None` when `word` doesn't start with `$HOME` in either
-/// shape. Plain textual substitution, not real tilde expansion
+/// leading double-quoted sequence — `$HOME` and `"$HOME"` expand to the
+/// identical value) replaced with the literal text `~`, every other piece
+/// untouched; `None` when `word` doesn't start with `$HOME` in either
+/// shape. The double-quoted case only requires the quotes to wrap the
+/// LEADING piece, not the whole word — `"$HOME"/.zshrc` quotes only the
+/// expansion (a common style), leaving `/.zshrc` as ordinary trailing
+/// pieces after it, and must substitute exactly like the bare `$HOME/.zshrc`
+/// case does. Plain textual substitution, not real tilde expansion
 /// (`crate::normalize`'s own `WordPiece::Tilde` handling is never invoked)
 /// — `~` is used here only because it's the same comparison spelling
 /// `rules/blocklist.toml`'s own `self-protect-config-*-tilde` targets
@@ -1440,10 +1463,12 @@ fn home_env_word_with_tilde_substituted(word: &Word) -> Option<Word> {
     if let Some(pieces) = substitute(&word.0) {
         return Some(Word(pieces));
     }
-    if let [WordPiece::DoubleQuoted(inner)] = word.0.as_slice()
+    if let Some((WordPiece::DoubleQuoted(inner), rest)) = word.0.split_first()
         && let Some(inner) = substitute(inner)
     {
-        return Some(Word(vec![WordPiece::DoubleQuoted(inner)]));
+        let mut out = vec![WordPiece::DoubleQuoted(inner)];
+        out.extend_from_slice(rest);
+        return Some(Word(out));
     }
     None
 }
