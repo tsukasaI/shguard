@@ -139,8 +139,8 @@ impl From<crate::rules::RulesError> for ConfigError {
 /// A fully loaded, merged policy: the embedded blocklist/allowlist, plus
 /// whatever a user config contributed, plus this invocation's
 /// self-protection rules. Opaque to callers outside this crate — the only
-/// public operations are [`Policy::load`] and passing a `&Policy` to
-/// [`crate::analyze_with_policy`].
+/// public operations are [`Policy::load`], [`Policy::rules_with_mixed_except_targets`],
+/// and passing a `&Policy` to [`crate::analyze_with_policy`].
 ///
 /// `Clone` exists primarily so [`crate::analyze_with_policy`] can hand an
 /// owned copy into the bounded-evaluation worker thread `src/watchdog.rs`
@@ -298,6 +298,31 @@ impl Policy {
             rules: std::sync::Arc::new(rules),
             allowlist: std::sync::Arc::new(allowlist),
         })
+    }
+
+    /// Ids of every deny/ask/allow rule in this policy whose
+    /// `except_targets` mixes a `url_host` entry with an `exact`/`prefix`
+    /// entry (issue #208) — a real, consequential trap (the string entry
+    /// still matches whatever `url_host` was added to reject, so the rule
+    /// gains no protection from adding it *alongside* rather than in
+    /// place of the old entry), but not itself a config-load error
+    /// (array-level "these two entries target the same host" isn't
+    /// mechanically decidable without false-positive risk on a
+    /// legitimate config).
+    ///
+    /// Not consulted by [`crate::analyze`]/[`crate::analyze_with_policy`]
+    /// or the `shguard` hook at all: a per-invocation hook binary that
+    /// re-loads its config on every single command has no way to warn on
+    /// this once, at config-change time, without either spamming stderr
+    /// on every matching command or introducing persistent state this
+    /// crate otherwise has none of. `shguard --check-config`
+    /// (`src/bin/shguard.rs`) is the intended caller — a human- or
+    /// CI-triggered, one-shot lint pass.
+    #[must_use]
+    pub fn rules_with_mixed_except_targets(&self) -> Vec<crate::verdict::RuleId> {
+        let mut ids = self.rules.ids_with_mixed_except_targets();
+        ids.extend(self.allowlist.ids_with_mixed_except_targets());
+        ids
     }
 }
 

@@ -1377,6 +1377,35 @@ impl CommandRule {
         self.deny_message.as_ref()
     }
 
+    /// Issue #208: true when `except_targets` contains both an opt-in
+    /// [`TargetMatcher::UrlHost`] entry and a string-based
+    /// [`TargetMatcher::Exact`]/[`TargetMatcher::Prefix`] entry. Since
+    /// `except_targets` alternatives are OR'd ([`Self::matches`]), the
+    /// retained string entry still matches whatever the `url_host` entry
+    /// was added to reject — a userinfo-spoofed candidate
+    /// (`http://localhost:pw@evil.example.com`), for one — so the rule
+    /// gains no additional protection from adding `url_host` *alongside*
+    /// the old entry rather than in its place. Not itself a config-load
+    /// error: array-level "these two entries target the same host" isn't
+    /// mechanically decidable without heuristics that could false-positive
+    /// on a legitimate config declaring two genuinely different hosts one
+    /// as `url_host` and the other as `exact`/`prefix` — flagging any
+    /// co-occurrence in one rule's `except_targets`, without trying to
+    /// prove same-host intent, is what `shguard --check-config`
+    /// (`src/bin/shguard.rs`) surfaces this for instead.
+    #[must_use]
+    pub(crate) fn mixes_url_host_with_string_except_target(&self) -> bool {
+        let has_url_host = self
+            .except_targets
+            .iter()
+            .any(|t| matches!(t, TargetMatcher::UrlHost(_)));
+        let has_string_entry = self
+            .except_targets
+            .iter()
+            .any(|t| matches!(t, TargetMatcher::Exact(_) | TargetMatcher::Prefix(_)));
+        has_url_host && has_string_entry
+    }
+
     /// Whether `rest_words` (already resolved past this rule's command
     /// name) satisfies this rule's required flags and required tokens —
     /// the constraint half of matching, factored out of
@@ -4747,6 +4776,20 @@ impl Rules {
     pub(crate) fn escalation_floor(&self) -> Decision {
         self.escalation_floor
     }
+
+    /// Issue #208: ids of every `command_rules`/`ask_rules` entry whose
+    /// `except_targets` mixes a `url_host` entry with an `exact`/`prefix`
+    /// entry — see [`CommandRule::mixes_url_host_with_string_except_target`]
+    /// for why this is a warning-worthy trap, not a config-load error.
+    #[must_use]
+    pub(crate) fn ids_with_mixed_except_targets(&self) -> Vec<RuleId> {
+        self.command_rules
+            .iter()
+            .chain(self.ask_rules.iter())
+            .filter(|rule| rule.mixes_url_host_with_string_except_target())
+            .map(|rule| rule.id().clone())
+            .collect()
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -4810,6 +4853,21 @@ impl Allowlist {
     /// The first allowlist entry that matches `argv`, if any.
     fn first_match(&self, argv: &[NormalizedWord]) -> Option<&CommandRule> {
         self.entries.iter().find(|entry| entry.matches(argv))
+    }
+
+    /// Issue #208: ids of every allowlist entry whose `except_targets`
+    /// mixes a `url_host` entry with an `exact`/`prefix` entry — an
+    /// allowlist entry shares [`CommandRule::matches`], `except_targets`
+    /// included ([`Self::first_match`]), so the same trap
+    /// [`Rules::ids_with_mixed_except_targets`] flags for deny/ask rules
+    /// applies here too.
+    #[must_use]
+    pub(crate) fn ids_with_mixed_except_targets(&self) -> Vec<RuleId> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.mixes_url_host_with_string_except_target())
+            .map(|entry| entry.id().clone())
+            .collect()
     }
 }
 

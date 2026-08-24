@@ -152,9 +152,15 @@ const MEMORY_LIMIT_BYTES: u64 = 256 * 1024 * 1024;
 fn main() {
     let mut args = std::env::args();
     let _binary_name = args.next();
-    if args.next().as_deref() == Some("--version") {
-        println!("shguard {}", env!("CARGO_PKG_VERSION"));
-        return;
+    match args.next().as_deref() {
+        Some("--version") => {
+            println!("shguard {}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
+        Some("--check-config") => {
+            std::process::exit(check_config());
+        }
+        _ => {}
     }
 
     install_panic_hook();
@@ -368,10 +374,55 @@ fn backtrace_requested() -> bool {
 /// So does the watchdog timeout: `run` executes entirely on the worker
 /// thread `main` spawns, so a hang anywhere in here (stdin read, config
 /// load, or command evaluation) is bounded by [`EVALUATION_TIMEOUT`] the
-/// same way. The `--version` branch in `main` is deliberately outside
-/// both boundaries: it never touches config, stdin, or command
-/// evaluation, so there is nothing there for the fail-closed guarantee to
-/// protect.
+/// same way. The `--version`/`--check-config` branches in `main` are
+/// deliberately outside both boundaries: `--version` never touches config,
+/// stdin, or command evaluation, so there is nothing there for the
+/// fail-closed guarantee to protect; `--check-config` ([`check_config`])
+/// does load config, but as a human- or CI-triggered, one-shot diagnostic
+/// run outside the PreToolUse hook contract entirely — it has none of
+/// `run`'s "never hang, always emit exactly one decision" obligations, so
+/// it needs neither the panic boundary nor the watchdog.
+/// `shguard --check-config`: a one-shot, human- or CI-triggered lint pass
+/// over the resolved user config, distinct from the PreToolUse hook path
+/// (`run`) this binary otherwise only ever runs. Exists because the hook
+/// path can't safely surface issue #208's warning itself: it re-loads
+/// config fresh on every single command invocation with no persistent
+/// process or "config changed" signal, so a naive `eprintln!` at load time
+/// would repeat on every matching command for the lifetime of a Claude
+/// Code session, not once when the config actually changes — see
+/// `Policy::rules_with_mixed_except_targets`'s docs for the full
+/// reasoning. Follows this repo's error-handling convention for a
+/// check/lint mode (`~/dotfiles/claude-code/rules/error-handling.md`):
+/// `0` clean, `1` findings (a real problem to fix, not a runtime failure),
+/// `2` couldn't even load the config to check it.
+fn check_config() -> i32 {
+    let policy = match shguard::config::Policy::load() {
+        Ok(policy) => policy,
+        Err(err) => {
+            eprintln!("shguard --check-config: failed to load config: {err}");
+            return 2;
+        }
+    };
+
+    let mixed = policy.rules_with_mixed_except_targets();
+    if mixed.is_empty() {
+        println!("shguard --check-config: no issues found");
+        return 0;
+    }
+
+    for id in &mixed {
+        eprintln!(
+            "shguard --check-config: rule {:?} mixes a `url_host` except_targets entry with an \
+             `exact`/`prefix` entry — the string-based entry still matches whatever the \
+             `url_host` entry was added to reject (e.g. a userinfo-spoofed candidate), so the \
+             rule gains no additional protection from adding `url_host` alongside it; replace \
+             the old entry, don't add `url_host` next to it",
+            id.as_str()
+        );
+    }
+    1
+}
+
 fn run() -> serde_json::Value {
     // Test-only panic injection (issue #52): there is no currently-known
     // reachable panic in this binary to regression-test the `catch_unwind`
