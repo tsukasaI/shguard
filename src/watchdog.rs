@@ -120,6 +120,11 @@ fn bounded_with_memory_limit(
     // next happens to return, tripping on every call in any host process
     // whose baseline already exceeds `memory_limit_bytes`.
     let baseline_rss = current_rss_bytes();
+    // Computed before `spawn`, not after: like the binary's own deadline
+    // (started before stdin is even read), the budget covers everything
+    // this call does, including thread-spawn latency — not just the time
+    // from "the worker exists" onward.
+    let deadline = Instant::now() + EVALUATION_TIMEOUT;
     let (result_tx, result_rx) = std::sync::mpsc::channel();
     let spawned = std::thread::Builder::new()
         .name("shguard-eval".to_string())
@@ -133,7 +138,6 @@ fn bounded_with_memory_limit(
         );
     };
 
-    let deadline = Instant::now() + EVALUATION_TIMEOUT;
     loop {
         if let Some(baseline) = baseline_rss
             && let Some(rss) = current_rss_bytes()
@@ -329,6 +333,10 @@ mod tests {
     /// repro, which may trip on time instead — see
     /// `tests/fail_closed_exit_paths.rs`'s
     /// `library_analyze_fails_closed_to_ask_on_the_same_heredoc_hang`).
+    /// `cfg`-gated to the two platforms with a real `current_rss_bytes()`
+    /// implementation above — on any other platform this would
+    /// deterministically fail (there is nothing for the worker to top up
+    /// against), which is a statement about the platform, not this test.
     ///
     /// The pipeline doesn't just allocate a fixed amount once and hope it
     /// shows up as RSS growth against `current_rss_bytes()` — under a
@@ -344,15 +352,28 @@ mod tests {
     /// than mapping a shared zero page) for a several-hundred-ms window,
     /// re-checking its own growth against the same `current_rss_bytes()`
     /// the watchdog polls every 20ms and topping up whenever the delta has
-    /// fallen back under budget — keeping the over-budget condition
-    /// continuously true for long enough that at least one of the
-    /// watchdog's own polls is guaranteed to observe it, rather than
-    /// relying on one instant lining up with one of the watchdog's polls.
-    /// Capped at 256 MiB total so a broken watchdog (or a platform with no
-    /// `current_rss_bytes()` implementation, where this loop can never
-    /// observe its own growth and so never tops up) fails this test's
-    /// decision/reason asserts below instead of growing this test's own
-    /// memory unboundedly.
+    /// fallen back under `memory_limit_bytes` plus
+    /// [`BASELINE_DIVERGENCE_MARGIN_BYTES`] of headroom — keeping the
+    /// over-budget condition continuously true, with margin to spare, for
+    /// long enough that at least one of the watchdog's own polls is
+    /// guaranteed to observe it, rather than relying on one instant lining
+    /// up with one of the watchdog's polls. The 400ms window (not the
+    /// 256-chunk/256 MiB cap — unreachable at one push per 20ms iteration,
+    /// ~20 pushes over the window) is what bounds this test's own memory
+    /// use; the cap is a backstop against a future edit that removes or
+    /// lengthens the per-iteration sleep.
+    ///
+    /// The margin exists because the worker's own baseline (sampled here,
+    /// after the watchdog has already spawned this thread) and the
+    /// watchdog's baseline (sampled in [`bounded_with_memory_limit`],
+    /// before spawning) are two different instants — if sibling test
+    /// threads free memory in that gap, the watchdog's baseline sits lower
+    /// than the worker's, so the watchdog's delta is *larger* than the
+    /// worker's own delta by that gap. Maintaining extra headroom past
+    /// `memory_limit_bytes` on the worker's side absorbs a gap up to
+    /// [`BASELINE_DIVERGENCE_MARGIN_BYTES`] without needing to know its
+    /// exact size (unmeasurable from in here — the watchdog's baseline
+    /// sample isn't visible to this closure).
     ///
     /// A trip confirmed by this test isn't proof the watchdog observed
     /// *this worker's own* allocation specifically, as opposed to
@@ -360,18 +381,21 @@ mod tests {
     /// (deliberately tiny) budget first — but either way the memory-trip
     /// branch itself is genuinely exercised end to end, which is what this
     /// test pins.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn memory_budget_trip_fails_closed_to_ask() {
+        const BASELINE_DIVERGENCE_MARGIN_BYTES: u64 = 2 * 1024 * 1024;
         let memory_limit_bytes = 64 * 1024;
+        let worker_floor_bytes = memory_limit_bytes + BASELINE_DIVERGENCE_MARGIN_BYTES;
         let verdict = bounded_with_memory_limit(memory_limit_bytes, move || {
             let baseline = current_rss_bytes();
             let mut held: Vec<Vec<u8>> = Vec::new();
             let hold_until = Instant::now() + Duration::from_millis(400);
             while Instant::now() < hold_until && held.len() < 256 {
-                let over_budget = baseline
+                let over_worker_floor = baseline
                     .zip(current_rss_bytes())
-                    .is_some_and(|(base, now)| now.saturating_sub(base) > memory_limit_bytes);
-                if !over_budget {
+                    .is_some_and(|(base, now)| now.saturating_sub(base) > worker_floor_bytes);
+                if !over_worker_floor {
                     held.push(vec![0xAAu8; 1024 * 1024]);
                 }
                 std::thread::sleep(Duration::from_millis(20));
