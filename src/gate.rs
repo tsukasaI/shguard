@@ -2572,7 +2572,9 @@ fn apply_named_user_home_floor(
 /// a user-config `[[ask]]` entry (`Rules::match_command_dirstack_tilde`
 /// scans both `command_rules` and `ask_rules`) — and some resolved tail
 /// token is a directory-stack tilde shorthand (`~+`/`~-`/`~N`/`~+N`/`~-N`)
-/// that could plausibly occupy one of that rule's own `targets`' slots
+/// or escapes one level above it (`~+/..`, issue #133's
+/// `PathForm::DirStackEscapesEmpty`) that could plausibly occupy one of
+/// that rule's own `targets`' slots
 /// (`crate::rules::CommandRule::matches_dirstack_tilde_floor`, correlated
 /// the same way the #80/#115 floors below are — see that function's own
 /// docs for what "plausibly occupy" means here) — `None` otherwise.
@@ -2597,9 +2599,10 @@ fn scan_dirstack_tilde_floor(
     Some((
         Decision::Ask,
         format!(
-            "a target token is a directory-stack tilde shorthand (`~+`/`~-`/`~N`) that would \
-             match rule {:?} ({}) if it expanded to the directory it denotes ($PWD/$OLDPWD/a \
-             pushd-stack entry); shguard has no cwd or directory stack to resolve it against",
+            "a target token is a directory-stack tilde shorthand (`~+`/`~-`/`~N`) or a `..` step \
+             above one (`~+/..`) that would sit at or above the directory it denotes \
+             ($PWD/$OLDPWD/a pushd-stack entry) if it expanded, matching rule {:?} ({}); shguard \
+             has no cwd or directory stack to resolve it against",
             rule.id().as_str(),
             rule.reason().as_str(),
         ),

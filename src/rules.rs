@@ -954,10 +954,11 @@ impl TargetMatcher {
         // now floors (issue #133): a rule's bare-`~` target slot is what
         // this probe is checking eligibility for, and `~-/etc/passwd` is
         // not plausibly *that* slot the way bare `~-`/`~-/..` are.
-        matches!(
-            lexical_normalize(token),
-            PathForm::DirStack(tail) if tail.is_empty()
-        ) || matches!(lexical_normalize(token), PathForm::DirStackEscapesEmpty)
+        match lexical_normalize(token) {
+            PathForm::DirStack(tail) => tail.is_empty(),
+            PathForm::DirStackEscapesEmpty => true,
+            _ => false,
+        }
     }
 
     /// Issue #103's poisoned-cwd Ask floor: true when `token` normalizes to
@@ -2035,8 +2036,10 @@ impl CommandRule {
     /// [`Self::matching_rest`], the same full constraint check
     /// [`Self::matches`] uses) and some resolved tail token is a
     /// directory-stack tilde shorthand (`~+`/`~-`/`~N`/`~+N`/`~-N`,
-    /// [`PathForm::DirStack`]) that could plausibly occupy one of this
-    /// rule's own `targets`' slots ([`TargetMatcher::dirstack_plausible`]).
+    /// [`PathForm::DirStack`]) or a `..` step above one
+    /// ([`PathForm::DirStackEscapesEmpty`]) that could plausibly occupy one
+    /// of this rule's own `targets`' slots
+    /// ([`TargetMatcher::dirstack_plausible`]).
     /// Read-only probe, same shape as
     /// [`Self::matches_except_target`]/[`Self::matches_except_flags`] —
     /// never itself a match, only a `gate.rs` floor's input (see
