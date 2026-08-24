@@ -617,9 +617,15 @@ required_flags = ["t|--type"]
 # (often `Block`) decision the way a certain match would. Issue #134 pairs
 # the same magic_equal_subst uncertainty with `~+`/`~-`/`~N` directory-
 # stack tilde forms attached the same way (`--directory=~+`) — floored by
-# `CommandRule::matches_dirstack_equal_subst_floor`. Both floors match on
-# the literal `--directory=` strip string, so they share the same disclosed
-# GNU long-option-abbreviation gap as #214 (`--direct=~+` bypasses both).
+# `CommandRule::matches_dirstack_equal_subst_floor`. Issue #128 closes the
+# GNU long-option-abbreviation gap both floors previously shared with
+# #214 (`--dir=~+` now canonicalizes to `--directory=~+` before either
+# floor's own `--directory=` strip-string match ever runs, via
+# `rules::tar_long_option_abbrev_rewrite` — see that function's own docs).
+# `directory`/`extract`/`get` are the only long options these two tar
+# rules match on, so no abbreviation gap remains for `tar` itself; the
+# disclosed #214-class gap remains for `mv`/`install`/`cp`'s
+# `--target-directory=` below, untouched by #128.
 [[command]]
 id = "tar-extract-over-root-or-home"
 reason = "tar extraction with -C/--directory into / or ~ overwrites arbitrary system/home paths with archive contents"
