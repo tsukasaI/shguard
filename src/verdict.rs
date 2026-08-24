@@ -214,14 +214,35 @@ impl Verdict {
     /// [`crate::rules`] rule object to read a `deny_message` from need to
     /// call this.
     ///
-    /// Wired up at every `src/gate.rs` site that reads a matched
-    /// `CommandRule` while constructing a `Verdict` (issue #202) — the two
-    /// exact-blocklist-match sites, the user-config ask-floor, every
-    /// partial-match floor (the except-target/except-flags floor, the
-    /// ascent-descent/named-user-home/dirstack-tilde/directory-equals-tilde
-    /// floors), and every verdict re-wrap (`bash -c`/`fish -c`/`-C`
-    /// recursing into an inner command) — not only the handful of
-    /// *definite*-match sites this once covered.
+    /// Wired up (issue #202) at every `src/gate.rs` site that reads a
+    /// matched `CommandRule` *directly* while constructing a `Verdict` —
+    /// the exact-blocklist-match sites (including the same-line-`cd`
+    /// composed-cwd site, `evaluate_composed_cwd`), the user-config
+    /// ask-floor, every partial-match floor (the except-target/
+    /// except-flags floor, the ascent-descent/named-user-home/
+    /// dirstack-tilde/directory-equals-tilde/unknown-cwd floors), and the
+    /// `bash -c`/`fish -c`/`-C` verdict re-wrap (`recurse_shell_string`,
+    /// plus `evaluate_dash_c`/`evaluate_fish`'s own uncertain-flag-position
+    /// arms, which recurse independently rather than through it) — not
+    /// only the handful of *definite*-match sites this once covered.
+    ///
+    /// # Known remaining gap
+    ///
+    /// Every site above reads a `CommandRule` (or an inner `Verdict`)
+    /// directly. A few sites instead flatten a recursed inner `Verdict`
+    /// down to a bare `Decision` or a `(Decision, String)` floor tuple
+    /// *before* any outer `Verdict` is built — `flock`/`su -c`'s and
+    /// `find -exec`'s shell-string floor (`scan_recursable_slots`),
+    /// argument-position substitution recursion
+    /// (`evaluate_argument_substitutions`'s `substitution_result`), and
+    /// expansion-position recursion (`scan_expansion_positions`) — so an
+    /// inner verdict's `deny_message` is discarded one frame up on those
+    /// paths even though `recurse_shell_string` (which these do *not* go
+    /// through) now preserves it. Not fixed here: unlike every site listed
+    /// above, closing this would mean threading `Option<DenyMessage>`
+    /// through several more floor tuples this crate already treats as
+    /// plain `(Decision, String)` pairs everywhere else, a wider change
+    /// than #202's own scope.
     #[must_use]
     pub fn with_deny_message(mut self, deny_message: Option<DenyMessage>) -> Self {
         match &mut self.detail {

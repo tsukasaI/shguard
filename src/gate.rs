@@ -2541,7 +2541,7 @@ fn scan_named_user_home_floor(
 /// Applies [`scan_named_user_home_floor`]'s floor to `verdict` (see
 /// [`apply_expansion_floor`]'s docs for the shared max-lift mechanics and
 /// why each floor gets its own function; see
-/// [`apply_ascent_descent_floor`]'s docs for why the floor's own
+/// [`apply_command_ascent_descent_floor`]'s docs for why the floor's own
 /// `deny_message` — issue #202 — is unconditionally attached).
 fn apply_named_user_home_floor(
     verdict: Verdict,
@@ -2608,7 +2608,7 @@ fn scan_dirstack_tilde_floor(
 /// Applies [`scan_dirstack_tilde_floor`]'s floor to `verdict` (see
 /// [`apply_expansion_floor`]'s docs for the shared max-lift mechanics and
 /// why each floor gets its own function; see
-/// [`apply_ascent_descent_floor`]'s docs for why the floor's own
+/// [`apply_command_ascent_descent_floor`]'s docs for why the floor's own
 /// `deny_message` — issue #202 — is unconditionally attached).
 fn apply_dirstack_tilde_floor(
     verdict: Verdict,
@@ -2670,7 +2670,7 @@ fn scan_directory_equals_tilde_floor(
 /// Applies [`scan_directory_equals_tilde_floor`]'s floor to `verdict` (see
 /// [`apply_expansion_floor`]'s docs for the shared max-lift mechanics and
 /// why each floor gets its own function; see
-/// [`apply_ascent_descent_floor`]'s docs for why the floor's own
+/// [`apply_command_ascent_descent_floor`]'s docs for why the floor's own
 /// `deny_message` — issue #202 — is unconditionally attached).
 fn apply_directory_equals_tilde_floor(
     verdict: Verdict,
@@ -5862,11 +5862,14 @@ fn evaluate_composed_cwd(
             rule.id().as_str(),
             rule.reason().as_str()
         ));
-        raise(match rule.decision() {
-            Decision::Block => Verdict::block(reason, argv.to_vec(), Some(rule.id().clone())),
-            Decision::Ask => Verdict::ask(reason, argv.to_vec()),
-            Decision::Allow => unreachable!("rules never carry Decision::Allow"),
-        });
+        raise(
+            match rule.decision() {
+                Decision::Block => Verdict::block(reason, argv.to_vec(), Some(rule.id().clone())),
+                Decision::Ask => Verdict::ask(reason, argv.to_vec()),
+                Decision::Allow => unreachable!("rules never carry Decision::Allow"),
+            }
+            .with_deny_message(rule.deny_message().cloned()),
+        );
     }
     if let Some(rule) = rules.match_ask(&composed_argv) {
         let reason = Reason::new(format!(
@@ -5875,7 +5878,7 @@ fn evaluate_composed_cwd(
             rule.id().as_str(),
             rule.reason().as_str()
         ));
-        raise(Verdict::ask(reason, argv.to_vec()));
+        raise(Verdict::ask(reason, argv.to_vec()).with_deny_message(rule.deny_message().cloned()));
     }
     if let Some(redirect_verdict) =
         evaluate_composed_cwd_redirects(argv, redirections, anchor, rules)
@@ -5950,7 +5953,7 @@ fn scan_unknown_cwd_floor(
     argv: &[NormalizedWord],
     rules: &Rules,
     cwd: &CwdContext,
-) -> Option<(Decision, String)> {
+) -> Option<(Decision, String, Option<DenyMessage>)> {
     if !matches!(cwd, CwdContext::Poisoned) {
         return None;
     }
@@ -5965,14 +5968,20 @@ fn scan_unknown_cwd_floor(
             rule.id().as_str(),
             rule.reason().as_str(),
         ),
+        rule.deny_message().cloned(),
     ))
 }
 
 /// Applies [`scan_unknown_cwd_floor`]'s floor to `verdict` (see
 /// [`apply_expansion_floor`]'s docs for the shared max-lift mechanics and
-/// why each floor gets its own function).
-fn apply_unknown_cwd_floor(verdict: Verdict, floor: Option<(Decision, String)>) -> Verdict {
-    let Some((floor_decision, floor_reason)) = floor else {
+/// why each floor gets its own function; see
+/// [`apply_command_ascent_descent_floor`]'s docs for why the floor's own
+/// `deny_message` — issue #202 — is unconditionally attached).
+fn apply_unknown_cwd_floor(
+    verdict: Verdict,
+    floor: Option<(Decision, String, Option<DenyMessage>)>,
+) -> Verdict {
+    let Some((floor_decision, floor_reason, deny_message)) = floor else {
         return verdict;
     };
     if verdict.decision() >= floor_decision {
@@ -5987,6 +5996,7 @@ fn apply_unknown_cwd_floor(verdict: Verdict, floor: Option<(Decision, String)>) 
         Decision::Block => Verdict::block(Reason::new(reason), argv, None),
         Decision::Ask | Decision::Allow => Verdict::ask(Reason::new(reason), argv),
     }
+    .with_deny_message(deny_message)
 }
 
 // ---------------------------------------------------------------------
