@@ -5580,7 +5580,7 @@ fn cd_directive(rest: &[NormalizedWord], env: &Env, is_pushd: bool) -> CwdOutcom
         PathForm::EscapesHome(_)
         | PathForm::NamedUserHome
         | PathForm::NamedUserHomeEscapes(_)
-        | PathForm::DirStack
+        | PathForm::DirStack(_)
         | PathForm::Opaque => CwdOutcome::Poison,
     }
 }
@@ -7317,6 +7317,39 @@ mod tests {
     #[test]
     fn dd_ascent_descent_to_dev_asks() {
         assert_decision("dd of=../../../../dev/sda", Decision::Ask);
+    }
+
+    // ==== Issue #133: a dirstack anchor (`~+`/`~-`/`~N`) plus a real
+    // descended-into tail is the same "unknown anchor, known descent"
+    // shape as plain ascent — end to end through the full pipeline, not
+    // just src/rules.rs's own unit tests above. ====
+
+    #[test]
+    fn dd_dirstack_tilde_descent_to_dev_asks() {
+        assert_decision("dd of=~-/dev/sda", Decision::Ask);
+    }
+
+    #[test]
+    fn dd_dirstack_tilde_numbered_descent_to_dev_asks() {
+        assert_decision("dd of=~2/dev/sda", Decision::Ask);
+    }
+
+    #[test]
+    fn rm_rf_dirstack_tilde_bare_anchor_still_asks_via_the_bare_floor() {
+        // Unaffected by #133 — still floors via the pre-existing
+        // bare-anchor mechanism (issue #88), not the new descent one.
+        // Uses `rm`, not `dd`: `dd`'s own target requires an attached
+        // `of=` prefix (`strip: Some("of=")`), which `dirstack_plausible`
+        // deliberately excludes (issue #134, unrelated to #133) — `rm`'s
+        // bare-`~` target has no such prefix.
+        assert_decision("rm -rf ~-", Decision::Ask);
+    }
+
+    #[test]
+    fn dd_dirstack_tilde_escape_to_empty_tail_stays_allow() {
+        // `~-/..` is one level *above* the unknown anchor, not the anchor
+        // itself — must not be conflated with the bare-anchor case above.
+        assert_decision("dd of=~-/..", Decision::Allow);
     }
 
     #[test]
