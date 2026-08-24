@@ -1856,15 +1856,30 @@ fn evaluate_simple_command(
     // above. `allowlist_cannot_downgrade_via_composition` (this file's
     // test module) pins that ordering — if this call is ever moved earlier
     // in the pipeline, that test is what would catch it.
-    if let CwdContext::Known(anchor) = cwd
+    let verdict = if let CwdContext::Known(anchor) = cwd
         && let Some(composed) = evaluate_composed_cwd(
             &normalize::normalize_argv(command),
             &command.redirections,
             anchor,
             rules,
-        )
-    {
+        ) {
         fold_worst(verdict, composed)
+    } else {
+        verdict
+    };
+
+    // Issue #209's own single-invocation cwd-override composition (`env
+    // -C`/`git -C`/`make -C`/`tar -C`|`--directory`) — deliberately
+    // independent of the #103 pass above: it never reads `cwd`, and
+    // resolves its own anchor fresh from `CwdContext::Initial` every
+    // time (`evaluate_dash_c_override`'s own docs). Same allowlist
+    // exclusion as the #103 pass, for the same reason: structurally,
+    // `evaluate_dash_c_override`/`evaluate_composed_argv_match` never
+    // receive or reference an `Allowlist`, and this call sits after the
+    // allowlist-downgrade/ask-floor steps above.
+    if let Some(dash_c) = evaluate_dash_c_override(&normalize::normalize_argv(command), env, rules)
+    {
+        fold_worst(verdict, dash_c)
     } else {
         verdict
     }
@@ -6288,6 +6303,43 @@ fn evaluate_composed_cwd(
     rules: &Rules,
 ) -> Option<Verdict> {
     let composed_argv = compose_argv_against_cwd(argv, anchor);
+    let mut worst =
+        evaluate_composed_argv_match(&composed_argv, argv, "a same-line folded `cd`", rules);
+    if let Some(redirect_verdict) =
+        evaluate_composed_cwd_redirects(argv, redirections, anchor, rules)
+    {
+        worst = Some(match worst.take() {
+            Some(current) => fold_worst(current, redirect_verdict),
+            None => redirect_verdict,
+        });
+    }
+    worst
+}
+
+/// The argv-target half of [`evaluate_composed_cwd`], factored out so
+/// issue #209's own single-invocation `-C`/`--directory`/`--chdir`
+/// composition ([`evaluate_dash_c_override`]) can reuse the same
+/// ordinary-blocklist/ask-rule match against an already-composed argv
+/// WITHOUT also composing redirect targets the way
+/// [`evaluate_composed_cwd`] does — a `-C dir`-shaped flag only changes
+/// how the INVOKED PROCESS (git/tar/make, or `env`'s wrapped command)
+/// interprets its own argv-derived relative paths; it has no effect on
+/// how the INVOKING SHELL resolves a `>`/`>>` redirect target, which the
+/// shell itself opens using its own cwd before the child process ever
+/// runs. Composing redirects against a `-C` anchor would therefore be
+/// outright wrong, not merely imprecise — unlike a same-line `cd`, which
+/// really does change the shell's own cwd and correctly affects both.
+///
+/// `describe` names what composed this argv in each verdict's reason
+/// string ("a same-line folded `cd`" vs. issue #209's own per-caller
+/// description) so the two callers' users never see a `cd`-attributed
+/// reason for something a `-C` flag actually caused, or vice versa.
+fn evaluate_composed_argv_match(
+    composed_argv: &[NormalizedWord],
+    original_argv: &[NormalizedWord],
+    describe: &str,
+    rules: &Rules,
+) -> Option<Verdict> {
     let mut worst: Option<Verdict> = None;
     let mut raise = |verdict: Verdict| {
         worst = Some(match worst.take() {
@@ -6296,34 +6348,33 @@ fn evaluate_composed_cwd(
         });
     };
 
-    if let Some(rule) = rules.match_command(&composed_argv) {
+    if let Some(rule) = rules.match_command(composed_argv) {
         let reason = Reason::new(format!(
-            "a same-line folded `cd` composes a relative target, matching blocklist rule {:?}: {}",
+            "{describe} composes a relative target, matching blocklist rule {:?}: {}",
             rule.id().as_str(),
             rule.reason().as_str()
         ));
         raise(
             match rule.decision() {
-                Decision::Block => Verdict::block(reason, argv.to_vec(), Some(rule.id().clone())),
-                Decision::Ask => Verdict::ask(reason, argv.to_vec()),
+                Decision::Block => {
+                    Verdict::block(reason, original_argv.to_vec(), Some(rule.id().clone()))
+                }
+                Decision::Ask => Verdict::ask(reason, original_argv.to_vec()),
                 Decision::Allow => unreachable!("rules never carry Decision::Allow"),
             }
             .with_deny_message(rule.deny_message().cloned()),
         );
     }
-    if let Some(rule) = rules.match_ask(&composed_argv) {
+    if let Some(rule) = rules.match_ask(composed_argv) {
         let reason = Reason::new(format!(
-            "a same-line folded `cd` composes a relative target, matching user-configured ask \
-             rule {:?}: {}",
+            "{describe} composes a relative target, matching user-configured ask rule {:?}: {}",
             rule.id().as_str(),
             rule.reason().as_str()
         ));
-        raise(Verdict::ask(reason, argv.to_vec()).with_deny_message(rule.deny_message().cloned()));
-    }
-    if let Some(redirect_verdict) =
-        evaluate_composed_cwd_redirects(argv, redirections, anchor, rules)
-    {
-        raise(redirect_verdict);
+        raise(
+            Verdict::ask(reason, original_argv.to_vec())
+                .with_deny_message(rule.deny_message().cloned()),
+        );
     }
 
     worst
@@ -6376,6 +6427,218 @@ fn evaluate_composed_cwd_redirects(
         });
     }
     worst
+}
+
+/// Issue #209: folds every `-C <dir>`/`--name <dir>`/`--name=<dir>`
+/// occurrence of a cwd-override flag in `rest` (a tool's own argv tail)
+/// into a single anchor, chained sequentially from
+/// [`CwdContext::Initial`] the same way [`apply_cwd_effect`]'s own
+/// `cd`/`pushd` chain composes multiple same-line directives — GNU
+/// git(1)/make(1) both document repeated `-C` as cumulative, each later
+/// occurrence interpreted relative to the one before it. `long_names`
+/// lists this tool's accepted long spellings (`env`'s `--chdir`; empty
+/// for git/make, which have no long form for `-C`); the short spelling is
+/// always `-C`, this mechanism's only spelling shared by all four tools
+/// issue #209 covers.
+///
+/// `None` when `rest` has no such flag at all (composition doesn't
+/// apply — the ordinary uncomposed evaluation is unaffected, per
+/// [`CwdContext`]'s additive-only design) OR when any occurrence is
+/// malformed/unresolvable (a trailing bare flag with nothing after it, or
+/// an unresolvable value) OR when the fully-chained result isn't
+/// [`CwdContext::Known`] (e.g. a same-line `HOME=`/`CDPATH=` assignment
+/// poisoning one occurrence's target the same way [`classify_cd_target`]
+/// already poisons a `cd`'s). Issue #209's own scope note ("no cross-
+/// command-line state needed, unlike `cd`") is why this always starts
+/// from `Initial` rather than composing against any OUTER same-line
+/// `cd`'s own [`CwdContext`] — a lower-priority compounding of two
+/// already-narrow mechanisms this function deliberately doesn't attempt.
+fn chain_dash_c_targets(rest: &[NormalizedWord], long_names: &[&str], env: &Env) -> Option<String> {
+    let mut current = CwdContext::Initial;
+    let mut found = false;
+    let mut words = rest.iter();
+    while let Some(word) = words.next() {
+        let Resolution::Resolved(s) = word.resolution() else {
+            continue;
+        };
+        let raw: Option<String> = if s == "-C" || long_names.contains(&s.as_str()) {
+            match words.next().map(NormalizedWord::resolution) {
+                Some(Resolution::Resolved(value)) => Some(value.clone()),
+                Some(Resolution::Unresolvable(_)) | None => None,
+            }
+        } else if let Some(attached) = long_names
+            .iter()
+            .find_map(|name| s.strip_prefix(&format!("{name}=")))
+        {
+            Some(attached.to_string())
+        } else {
+            continue;
+        };
+        found = true;
+        let raw = raw?;
+        current = resolve_cwd_outcome(&current, classify_cd_target(&raw, env));
+    }
+    if !found {
+        return None;
+    }
+    match current {
+        CwdContext::Known(anchor) => Some(anchor),
+        CwdContext::Initial | CwdContext::Poisoned => None,
+    }
+}
+
+/// Issue #209's `tar`-specific `-C`/`--directory` handling: unlike
+/// git/make's own cumulative chain ([`chain_dash_c_targets`]), tar's flag
+/// is positional — GNU tar(1) applies it only to OPERANDS APPEARING
+/// AFTER it, and (unlike git/make) a later occurrence does not compose
+/// relative to an earlier one; each independently redirects tar's own
+/// cwd from that point in the argument list onward. Precisely modeling
+/// every possible occurrence's operand range is the "can of worms" issue
+/// #209's own scope note warns against, so this function takes the
+/// conservative model the issue itself suggests: EXACTLY ONE `-C`/
+/// `--directory` occurrence is resolved (from [`CwdContext::Initial`],
+/// same as the first flag in any chain) and paired with the slice of
+/// `rest` strictly AFTER it — composing only the tokens tar's own `-C`
+/// would actually apply to for the single-occurrence case. Zero
+/// occurrences returns `None` (composition doesn't apply); two or more
+/// also returns `None` rather than risk attributing the wrong anchor to
+/// the wrong operand range — tracked as a deliberate scope cut, not
+/// silently accepted (issue #354).
+fn resolve_tar_dash_c<'a>(
+    rest: &'a [NormalizedWord],
+    env: &Env,
+) -> Option<(String, &'a [NormalizedWord])> {
+    let mut occurrence: Option<(String, usize)> = None;
+    let mut occurrence_count = 0usize;
+    let mut index = 0;
+    while index < rest.len() {
+        let Resolution::Resolved(s) = rest[index].resolution() else {
+            index += 1;
+            continue;
+        };
+        let (raw, after): (Option<String>, usize) = if s == "-C" || s == "--directory" {
+            match rest.get(index + 1).map(NormalizedWord::resolution) {
+                Some(Resolution::Resolved(value)) => (Some(value.clone()), index + 2),
+                Some(Resolution::Unresolvable(_)) => (None, index + 2),
+                None => (None, index + 1),
+            }
+        } else if let Some(attached) = s.strip_prefix("--directory=") {
+            (Some(attached.to_string()), index + 1)
+        } else {
+            index += 1;
+            continue;
+        };
+        occurrence_count += 1;
+        occurrence = Some((raw?, after));
+        index = after;
+    }
+    if occurrence_count != 1 {
+        return None;
+    }
+    let (raw, after) = occurrence?;
+    match resolve_cwd_outcome(&CwdContext::Initial, classify_cd_target(&raw, env)) {
+        CwdContext::Known(anchor) => Some((anchor, &rest[after..])),
+        CwdContext::Initial | CwdContext::Poisoned => None,
+    }
+}
+
+/// Issue #209's `env -C dir cmd args...` handling: `env` is already
+/// unwrapped through [`crate::rules::effective_command`] before its own
+/// `-C`/`--chdir` value is otherwise visible to any other floor in this
+/// module (`crate::rules::wrapper_value_flags`'s issue #250 entry already
+/// treats it as a value-taking flag so it isn't mistaken for the wrapped
+/// command), so this function scans `argv`'s own `env`-owned prefix
+/// directly rather than through that unwrap. `None` when `argv[0]` isn't
+/// `env` itself, or [`crate::rules::effective_command`] can't identify a
+/// wrapped command at all (`env` alone, or an unresolvable wrapped
+/// command name — both already fail closed elsewhere), or
+/// [`chain_dash_c_targets`] finds no resolvable `-C`/`--chdir` in that
+/// prefix.
+fn evaluate_env_dash_c_override(
+    argv: &[NormalizedWord],
+    env: &Env,
+    rules: &Rules,
+) -> Option<Verdict> {
+    let (first, _) = argv.split_first()?;
+    let Resolution::Resolved(first_name) = first.resolution() else {
+        return None;
+    };
+    if crate::rules::basename(first_name) != "env" {
+        return None;
+    }
+    let (_, wrapped_tail) = crate::rules::effective_command(argv)?;
+    let env_prefix_end = argv.len() - wrapped_tail.len();
+    let env_prefix = &argv[1..env_prefix_end];
+    let anchor = chain_dash_c_targets(env_prefix, &["--chdir"], env)?;
+    let mut composed_argv = argv[..env_prefix_end].to_vec();
+    composed_argv.extend(compose_argv_against_cwd(wrapped_tail, &anchor));
+    evaluate_composed_argv_match(
+        &composed_argv,
+        argv,
+        "this invocation's own `env -C`/`--chdir`",
+        rules,
+    )
+}
+
+/// Issue #209: a narrower, single-invocation version of issue #103's
+/// same-line `cd`/`pushd` composition, for the handful of tools that
+/// accept a `-C <dir>`-shaped flag changing THEIR OWN working directory
+/// for just that one invocation — `git -C`/`make -C` (cumulative,
+/// [`chain_dash_c_targets`]), `tar -C`/`--directory` (positional,
+/// [`resolve_tar_dash_c`]), and `env -C`/`--chdir dir cmd args...`
+/// (shifts the wrapped command too, [`evaluate_env_dash_c_override`]).
+/// Unlike [`evaluate_composed_cwd`], this NEVER composes redirect
+/// targets ([`evaluate_composed_argv_match`]'s own docs explain why: a
+/// `-C` flag only changes what the invoked PROCESS sees, never how the
+/// invoking shell resolves its own `>`/`>>` targets) and NEVER reads or
+/// writes any cross-command-line [`CwdState`]/[`CwdContext`] — every
+/// anchor here is resolved fresh, per invocation, from
+/// [`CwdContext::Initial`].
+///
+/// `None` when the effective command isn't one of these four tools, or
+/// none of the tool-specific resolvers above found a composable anchor
+/// — the ordinary uncomposed evaluation is unaffected either way, this
+/// pass only ever ADDS detection on top of it (module docs' additive-
+/// only design).
+///
+/// **Known limitation, disclosed rather than silently accepted**:
+/// [`compose_argv_against_cwd`] composes ANY bare non-dash `Rel`-shaped
+/// word, including a git/make SUBCOMMAND or TARGET-NAME word (`status`,
+/// `clean`) that is not actually a filesystem path — a `targets` rule
+/// keyed off a bare-word shape could spuriously match once such a word
+/// is composed into `anchor/status`. Fail-closed direction only (more
+/// candidates means more likely to ask/block, never less — the same
+/// posture issue #214's own "widened false-Ask surface" disclosure
+/// accepts), and no rule in the embedded blocklist matches a bare
+/// git/make subcommand/target-name shape today, so this has no live
+/// effect — but a future rule author declaring `targets` for `git`/`make`
+/// should expect this composition to reach subcommand words too, not
+/// just genuine path arguments.
+fn evaluate_dash_c_override(argv: &[NormalizedWord], env: &Env, rules: &Rules) -> Option<Verdict> {
+    if let Some(verdict) = evaluate_env_dash_c_override(argv, env, rules) {
+        return Some(verdict);
+    }
+    let (name, rest) = crate::rules::effective_command(argv)?;
+    match name {
+        "git" | "make" => {
+            let anchor = chain_dash_c_targets(rest, &[], env)?;
+            let composed_argv = compose_argv_against_cwd(argv, &anchor);
+            evaluate_composed_argv_match(&composed_argv, argv, "this invocation's own `-C`", rules)
+        }
+        "tar" => {
+            let (anchor, tail) = resolve_tar_dash_c(rest, env)?;
+            let prefix_len = argv.len() - tail.len();
+            let mut composed_argv = argv[..prefix_len].to_vec();
+            composed_argv.extend(compose_argv_against_cwd(tail, &anchor));
+            evaluate_composed_argv_match(
+                &composed_argv,
+                argv,
+                "this invocation's own `-C`/`--directory`",
+                rules,
+            )
+        }
+        _ => None,
+    }
 }
 
 /// Issue #103's poisoned-cwd floor: `Some(Ask, reason)` when `cwd` is
@@ -11636,5 +11899,186 @@ targets = [{ normalized = "~/.testrc" }]
         // `echo` is an allowlisted command; an allow entry for it is not
         // consent to where its output lands.
         assert_eq!(decide("echo x > ~/.testrc").decision(), Decision::Ask);
+    }
+
+    // ==== Issue #209: env -C/git -C/make -C/tar -C|--directory cwd
+    // overrides ====
+    //
+    // A single-invocation, narrower version of issue #103's `cd`/`pushd`
+    // folding: none of these four tools' embedded rules currently declare
+    // `targets` of their own (git/make/tar have no `targets`-based rule
+    // today; `env` is a transparent wrapper whose WRAPPED command's own
+    // targets are what benefits), so most of these tests extend the
+    // embedded blocklist with a test-only `targets` rule to exercise the
+    // composition mechanism directly, the same way
+    // `rules_with_ask_redirect` above extends it for issue #261's
+    // Ask-level redirect rule.
+
+    fn rules_with_dash_c_test_rules() -> Rules {
+        let mut toml = String::from(include_str!("../rules/blocklist.toml"));
+        toml.push_str(
+            r#"
+[[command]]
+id = "test-209-git-config-target"
+reason = "test-only git targets rule"
+command = "git"
+targets = [{ normalized_prefix = "~/.config/shguard/" }]
+
+[[command]]
+id = "test-209-make-config-target"
+reason = "test-only make targets rule"
+command = "make"
+targets = [{ normalized_prefix = "~/.config/shguard/" }]
+
+[[command]]
+id = "test-209-tar-config-target"
+reason = "test-only tar targets rule"
+command = "tar"
+targets = [{ normalized_prefix = "~/.config/shguard/" }]
+"#,
+        );
+        Rules::parse(&toml).expect("test rule set should parse")
+    }
+
+    fn decide_dash_c(command: &str) -> Verdict {
+        analyze_with_policy(
+            command,
+            &rules_with_dash_c_test_rules(),
+            &Allowlist::embedded().unwrap(),
+        )
+    }
+
+    #[test]
+    fn env_dash_c_composes_the_wrapped_commands_own_relative_target() {
+        // Real gap this issue exists to close: `env`'s own `-C` shifts
+        // the wrapped command's effective cwd, but pre-#209 nothing
+        // composed the wrapped `cp`'s own relative target against it —
+        // this used the EMBEDDED `self-protect-config-cp-tilde` rule
+        // directly (no test-only rule needed).
+        assert_eq!(
+            decide("env -C ~/.config/shguard cp evil.toml config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn env_dash_c_chdir_long_flag_form_also_composes() {
+        assert_eq!(
+            decide("env --chdir=~/.config/shguard cp evil.toml config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn env_without_dash_c_is_unaffected() {
+        assert_eq!(
+            decide("env cp evil.toml config.toml").decision(),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn git_dash_c_composes_a_relative_target() {
+        assert_eq!(
+            decide_dash_c("git -C ~/.config/shguard add config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn git_without_dash_c_is_unaffected() {
+        assert_eq!(
+            decide_dash_c("git add config.toml").decision(),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn git_dash_c_chains_a_later_relative_occurrence_against_the_earlier_one() {
+        // GNU git(1): repeated `-C` is cumulative, each interpreted
+        // relative to the one before it — `-C ~/.config -C shguard` must
+        // resolve the same as a single `-C ~/.config/shguard`.
+        assert_eq!(
+            decide_dash_c("git -C ~/.config -C shguard add config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn git_dash_c_with_an_unresolvable_target_is_not_modeled() {
+        // Composition simply doesn't apply here (issue #209's own
+        // additive-only design) rather than poisoning/flooring — the
+        // ordinary uncomposed evaluation is unaffected either way.
+        assert_eq!(
+            decide_dash_c("git -C $(echo x) add config.toml").decision(),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn make_dash_c_composes_a_relative_target() {
+        assert_eq!(
+            decide_dash_c("make -C ~/.config/shguard config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn tar_dash_c_composes_only_operands_strictly_after_the_flag() {
+        assert_eq!(
+            decide_dash_c("tar -C ~/.config/shguard -xf config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn tar_directory_long_flag_attached_form_also_composes() {
+        assert_eq!(
+            decide_dash_c("tar --directory=~/.config/shguard -xf config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn tar_without_dash_c_is_unaffected() {
+        assert_eq!(
+            decide_dash_c("tar -xf config.toml").decision(),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn tar_with_two_dash_c_occurrences_is_a_deliberate_scope_cut_not_modeled() {
+        // Tar's own `-C` is positional (unlike git/make's cumulative
+        // chain) — modeling every possible occurrence's operand range
+        // precisely is the "can of worms" issue #209's own scope note
+        // warns against, so two-or-more occurrences are deliberately not
+        // modeled at all (tracked, not silently accepted — issue #354),
+        // rather than risk attributing the wrong anchor to the wrong
+        // operand range.
+        assert_eq!(
+            decide_dash_c("tar -C /tmp -C ~/.config/shguard -xf config.toml").decision(),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn dash_c_override_never_composes_a_redirect_target() {
+        // Correctness fix over #103's own `evaluate_composed_cwd`: a `-C`
+        // flag only changes what the INVOKED PROCESS sees, never how the
+        // invoking shell resolves its own `>`/`>>` target — composing a
+        // redirect against a `-C` anchor would be outright wrong, not
+        // merely imprecise. `--version` has no operand of its own to
+        // compose (a bare subcommand WORD like `status`/`clean` would
+        // itself get composed and could spuriously match a `targets`
+        // rule keyed off a subcommand-shaped bare word — an accepted,
+        // fail-closed-direction side effect of this composition, not
+        // what this test is isolating), so `config.toml` here must NOT
+        // be treated as landing inside `~/.config/shguard` just because
+        // `tar`'s own `-C` flag is present on the same line.
+        assert_eq!(
+            decide_dash_c("tar -C ~/.config/shguard --version > config.toml").decision(),
+            Decision::Allow
+        );
     }
 }

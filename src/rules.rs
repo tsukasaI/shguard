@@ -3235,7 +3235,7 @@ pub(crate) const RECURSABLE_SLOTS: &[RecursableSlot] = &[
 /// bare `sh` unchanged. A pure string operation on the already-normalised
 /// token — never a filesystem lookup or symlink resolution (this crate
 /// never touches the filesystem, module docs).
-fn basename(token: &str) -> &str {
+pub(crate) fn basename(token: &str) -> &str {
     token.rsplit('/').next().unwrap_or(token)
 }
 
