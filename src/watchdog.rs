@@ -354,10 +354,12 @@ mod tests {
     /// the watchdog polls every 20ms and topping up whenever the delta has
     /// fallen back under `memory_limit_bytes` plus
     /// [`BASELINE_DIVERGENCE_MARGIN_BYTES`] of headroom — keeping the
-    /// over-budget condition continuously true, with margin to spare, for
-    /// long enough that at least one of the watchdog's own polls is
-    /// guaranteed to observe it, rather than relying on one instant lining
-    /// up with one of the watchdog's polls. The 400ms window (not the
+    /// over-budget condition continuously true from the watchdog's own
+    /// point of view (not just the worker's — see "the margin exists
+    /// because" below) for long enough that at least one of the
+    /// watchdog's own polls will observe it, for any baseline divergence
+    /// up to the margin, rather than relying on one instant lining up
+    /// with one of the watchdog's polls. The 400ms window (not the
     /// 256-chunk/256 MiB cap — unreachable at one push per 20ms iteration,
     /// ~20 pushes over the window) is what bounds this test's own memory
     /// use; the cap is a backstop against a future edit that removes or
