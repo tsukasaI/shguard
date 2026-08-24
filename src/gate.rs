@@ -5915,10 +5915,11 @@ fn compound_command_may_change_cwd(compound: &CompoundCommand) -> bool {
 /// inside [`crate::rules::Rules::match_command`]'s own target matching).
 ///
 /// Composing `argv[0]` provably cannot change any `command`/
-/// `command_prefix` match: every command-name comparison in this crate
-/// (`crate::rules::CommandRule::matching_rest`, the sole path a command
-/// name reaches [`crate::rules::CommandMatch::matches`] through) resolves
-/// against `crate::rules::basename`, never the raw token — and basename
+/// `command_prefix` match: every path a command name reaches
+/// [`crate::rules::CommandMatch::matches`] through in this crate
+/// (`crate::rules::CommandRule::matching_rest` and
+/// `crate::rules::CommandRule::matching_rest_by_name`) resolves against
+/// `crate::rules::basename`, never the raw token — and basename
 /// extraction (splitting on the last `/`) is invariant under prepending
 /// any directory prefix: `basename(anchor + "/" + rel) == basename(rel)`
 /// for every `anchor`/`rel`, since prepending more leading path segments
