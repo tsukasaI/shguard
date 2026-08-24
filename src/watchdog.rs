@@ -369,10 +369,11 @@ mod tests {
     /// after the watchdog has already spawned this thread) and the
     /// watchdog's baseline (sampled in [`bounded_with_memory_limit`],
     /// before spawning) are two different instants — if sibling test
-    /// threads free memory in that gap, the watchdog's baseline sits lower
-    /// than the worker's, so the watchdog's delta is *larger* than the
-    /// worker's own delta by that gap. Maintaining extra headroom past
-    /// `memory_limit_bytes` on the worker's side absorbs a gap up to
+    /// threads free memory in that gap, the watchdog's baseline (sampled
+    /// earlier, before those frees) sits *higher* than the worker's, so
+    /// the watchdog's own delta is *smaller* than the worker's own delta
+    /// by that gap. Maintaining extra headroom past `memory_limit_bytes`
+    /// on the worker's side absorbs a gap up to
     /// [`BASELINE_DIVERGENCE_MARGIN_BYTES`] without needing to know its
     /// exact size (unmeasurable from in here — the watchdog's baseline
     /// sample isn't visible to this closure).

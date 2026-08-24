@@ -49,9 +49,11 @@ use verdict::Verdict;
 ///
 /// # Bounded evaluation (issue #319)
 ///
-/// Runs on its own thread, bounded by wall-clock time and memory growth
-/// (`src/watchdog.rs`) — a pathological input that would otherwise hang or
-/// grow memory unboundedly (crash-fuzzer finding #315) instead makes this
+/// Runs on its own thread, bounded by wall-clock time everywhere and, on
+/// Linux/macOS, memory growth too (`src/watchdog.rs`; other platforms have
+/// no RSS-reading implementation there yet and rely on the wall-clock
+/// bound alone) — a pathological input that would otherwise hang or grow
+/// memory unboundedly (crash-fuzzer finding #315) instead makes this
 /// call itself return a fail-closed `Ask` within a couple of seconds. This
 /// is a real, documented limitation, not a full guarantee: a trip leaves
 /// the runaway worker thread detached rather than terminating it (Rust has
