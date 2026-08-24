@@ -973,10 +973,10 @@ fn evaluate_function_definition(
 }
 
 /// Rule 5b/5c: a pipeline whose final stage is an interpreter. A decode or
-/// transform stage anywhere upstream (`base64 -d`, `base32 -d`, `xxd -r`,
-/// `openssl enc -d`, `gunzip`, `zcat`, `uudecode`, `rev`, `tr`) blocks — the
-/// payload is deliberately hidden from static analysis and there is no
-/// routine agent workflow that pipes decoded data into an interpreter.
+/// transform stage anywhere upstream ([`is_decode_stage`] holds the
+/// recognized set) blocks — the payload is deliberately hidden from static
+/// analysis and there is no routine agent workflow that pipes decoded data
+/// into an interpreter.
 /// Without a decode stage, the content is merely unknowable, not
 /// deliberately hidden, so it asks instead.
 ///
