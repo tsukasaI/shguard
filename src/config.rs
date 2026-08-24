@@ -142,13 +142,14 @@ impl From<crate::rules::RulesError> for ConfigError {
 /// public operations are [`Policy::load`] and passing a `&Policy` to
 /// [`crate::analyze_with_policy`].
 ///
-/// `Clone` exists so [`crate::analyze_with_policy`] can hand an owned copy
-/// into the bounded-evaluation worker thread `src/watchdog.rs` spawns
-/// (`'static` closures can't borrow the caller's `&Policy` across that
-/// boundary) — not for callers outside this crate to rely on. The fields
-/// are `Arc`-wrapped so that clone is a refcount bump, not a deep copy of
-/// the whole ruleset, on every single `analyze_with_policy` call a host
-/// process makes.
+/// `Clone` exists primarily so [`crate::analyze_with_policy`] can hand an
+/// owned copy into the bounded-evaluation worker thread `src/watchdog.rs`
+/// spawns (`'static` closures can't borrow the caller's `&Policy` across
+/// that boundary) on every call — deriving it on a `pub` type does make it
+/// part of this type's public API regardless of that original motivation,
+/// so it's fine for a caller to rely on too. It's cheap either way: the
+/// fields are `Arc`-wrapped, so clone is a refcount bump, not a deep copy
+/// of the whole ruleset.
 #[derive(Clone)]
 pub struct Policy {
     pub(crate) rules: std::sync::Arc<Rules>,

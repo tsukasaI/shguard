@@ -330,35 +330,52 @@ mod tests {
     /// `tests/fail_closed_exit_paths.rs`'s
     /// `library_analyze_fails_closed_to_ask_on_the_same_heredoc_hang`).
     ///
-    /// The pipeline doesn't just allocate a fixed amount and hope it shows
-    /// up as RSS growth against `current_rss_bytes()` — under a large
-    /// parallel test suite, a fixed allocation can be served from already-
-    /// resident freed pages elsewhere in the process, leaving the true
-    /// delta under budget and this test flaky. Instead it checks its own
-    /// growth against the same `current_rss_bytes()` the watchdog polls,
-    /// in 1 MiB steps, until *that* shows the budget exceeded — capped at
-    /// 256 MiB so a broken watchdog (or a platform with no
+    /// The pipeline doesn't just allocate a fixed amount once and hope it
+    /// shows up as RSS growth against `current_rss_bytes()` — under a
+    /// large parallel test suite, RSS is process-wide and noisy in both
+    /// directions: a one-shot allocation can land in already-resident
+    /// freed pages (delta never crosses budget), or sibling threads can
+    /// free enough in the background that a delta which crossed budget a
+    /// moment ago dips back under it before the watchdog's next poll sees
+    /// it. A single point-in-time check of either condition isn't enough
+    /// to reliably line up with the watchdog's own 50ms polling. Instead
+    /// this holds a growing set of 1 MiB chunks (each filled with a
+    /// non-zero byte, so the allocator actually writes every page rather
+    /// than mapping a shared zero page) for a several-hundred-ms window,
+    /// re-checking its own growth against the same `current_rss_bytes()`
+    /// the watchdog polls every 20ms and topping up whenever the delta has
+    /// fallen back under budget — keeping the over-budget condition
+    /// continuously true for long enough that at least one of the
+    /// watchdog's own polls is guaranteed to observe it, rather than
+    /// relying on one instant lining up with one of the watchdog's polls.
+    /// Capped at 256 MiB total so a broken watchdog (or a platform with no
     /// `current_rss_bytes()` implementation, where this loop can never
-    /// observe growth) fails this test's decision/reason asserts below
-    /// instead of growing this test's own memory unboundedly. Each 1 MiB
-    /// chunk is filled with a non-zero byte so the allocator actually
-    /// writes every page rather than mapping a shared zero page.
+    /// observe its own growth and so never tops up) fails this test's
+    /// decision/reason asserts below instead of growing this test's own
+    /// memory unboundedly.
+    ///
+    /// A trip confirmed by this test isn't proof the watchdog observed
+    /// *this worker's own* allocation specifically, as opposed to
+    /// extrinsic growth elsewhere in the suite that happened to cross the
+    /// (deliberately tiny) budget first — but either way the memory-trip
+    /// branch itself is genuinely exercised end to end, which is what this
+    /// test pins.
     #[test]
     fn memory_budget_trip_fails_closed_to_ask() {
         let memory_limit_bytes = 64 * 1024;
         let verdict = bounded_with_memory_limit(memory_limit_bytes, move || {
             let baseline = current_rss_bytes();
-            let mut held = Vec::new();
-            while held.len() < 256 {
-                held.push(vec![0xAAu8; 1024 * 1024]);
-                let tripped = baseline
+            let mut held: Vec<Vec<u8>> = Vec::new();
+            let hold_until = Instant::now() + Duration::from_millis(400);
+            while Instant::now() < hold_until && held.len() < 256 {
+                let over_budget = baseline
                     .zip(current_rss_bytes())
                     .is_some_and(|(base, now)| now.saturating_sub(base) > memory_limit_bytes);
-                if tripped {
-                    break;
+                if !over_budget {
+                    held.push(vec![0xAAu8; 1024 * 1024]);
                 }
+                std::thread::sleep(Duration::from_millis(20));
             }
-            std::thread::sleep(Duration::from_millis(300));
             std::hint::black_box(&held);
             Verdict::allow(Vec::new())
         });
