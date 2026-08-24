@@ -993,10 +993,10 @@ fn evaluate_pipeline_shape(stages: &[Vec<NormalizedWord>]) -> Option<Verdict> {
     if earlier.iter().any(|stage| is_decode_stage(stage)) {
         Some(Verdict::block(
             Reason::new(
-                "pipeline decodes/transforms data upstream (base64/base32/xxd/openssl/gunzip/zcat/\
-                 uudecode/rev/tr) and pipes the result into an interpreter — the payload is \
-                 deliberately hidden from static analysis and no routine agent workflow needs \
-                 this shape",
+                "pipeline decodes/transforms data upstream (base64/base32/basenc/xxd/openssl/\
+                 gzip/xz/bzip2/zstd/uudecode/rev/tr) and pipes the result into an interpreter \
+                 — the payload is deliberately hidden from static analysis and no routine \
+                 agent workflow needs this shape",
             ),
             last.clone(),
             None,
@@ -5442,13 +5442,15 @@ fn scan_for_dash_c_before_operand(words: &[NormalizedWord], interpreter: &str) -
 }
 
 /// Rule 5b: whether `stage` is a decode/transform command in the sense
-/// this module cares about (`base64`/`base32` `-d`/`--decode`, `xxd -r`,
-/// `openssl enc -d`, `gunzip`, `zcat`, `uudecode`, `rev`, `tr`) — the fixed,
-/// code-level policy set named in the gate rules (not user-editable via
-/// `rules/blocklist.toml`, unlike stage 3's rules — this is structural
-/// policy about pipeline *shape*, not an exact-argv match). Also resolved
-/// through [`crate::rules::effective_command`], so `env base64 -d` still
-/// reaches the same `-d` flag check as a bare `base64 -d`.
+/// this module cares about (`base64`/`base32`/`basenc` `-d`/`--decode`,
+/// `xxd -r`, `openssl enc -d`/`openssl base64 -d`, `gzip`/`xz`/`bzip2`/
+/// `zstd -d`, `gunzip`/`zcat`/`unxz`/`xzcat`/`bunzip2`/`bzcat`/`unzstd`/
+/// `zstdcat`, `uudecode`, `rev`, `tr`) — the fixed, code-level policy set
+/// named in the gate rules (not user-editable via `rules/blocklist.toml`,
+/// unlike stage 3's rules — this is structural policy about pipeline
+/// *shape*, not an exact-argv match). Also resolved through
+/// [`crate::rules::effective_command`], so `env base64 -d` still reaches
+/// the same `-d` flag check as a bare `base64 -d`.
 ///
 /// Every flag check below uses [`scan_for_flag`] rather than filtering
 /// `rest_words` down to only its resolved strings first — issue #53 C-1:
@@ -5457,17 +5459,24 @@ fn scan_for_dash_c_before_operand(words: &[NormalizedWord], interpreter: &str) -
 /// word anywhere a flag could be counts as "possibly a decode stage",
 /// closing toward Block per plan.md §4's fail-closed principle. The
 /// `openssl` subcommand check applies the same reasoning to its first
-/// word: an unresolvable first word might be `enc`, so it counts too.
+/// word: an unresolvable first word might be `enc`/`base64`, so it counts
+/// too (issue #121: `openssl base64 -d` is a real, documented OpenSSL
+/// subcommand functionally identical to `openssl enc -base64 -d`, missed
+/// by the original `enc`-only check).
 ///
-/// `gunzip`, `zcat`, and `uudecode` (issue #53 C-2) join `rev`/`tr` as
-/// unconditional matches — decompression/decoding is these commands' only
-/// purpose, with no flag that turns it off. `gzip` itself is NOT
-/// unconditional like `gunzip` — bare `gzip file` compresses, so it only
-/// counts as a decode stage when a decompress flag (`-d`/`--decompress`/
-/// `--uncompress`, including short-cluster combos like `-dc`) is present
-/// (bypass-hunt finding against this branch: `gzip -d` is the fully
-/// standard way to decompress with the `gzip` binary itself, `gunzip`
-/// being just a convenience alias for it).
+/// `gunzip`/`zcat`/`uudecode` (issue #53 C-2), and `unxz`/`xzcat`/
+/// `bunzip2`/`bzcat`/`unzstd`/`zstdcat` (issue #121, the same
+/// decompress-only-binary shape for `xz`/`bzip2`/`zstd`), join `rev`/`tr`
+/// as unconditional matches — decompression/decoding is these commands'
+/// only purpose, with no flag that turns it off. `gzip`/`xz`/`bzip2`/
+/// `zstd` themselves are NOT unconditional like their `un*`/`*cat`
+/// siblings — bare `gzip file` (and the same for `xz`/`bzip2`/`zstd`)
+/// compresses, so each only counts as a decode stage when its own
+/// decompress flag is present (bypass-hunt finding against this branch,
+/// for `gzip`: `gzip -d` is the fully standard way to decompress with the
+/// `gzip` binary itself, `gunzip` being just a convenience alias for it —
+/// the same relationship holds for `xz -d`/`unxz`, `bzip2 -d`/`bunzip2`,
+/// and `zstd -d`/`unzstd`).
 fn is_decode_stage(stage: &[NormalizedWord]) -> bool {
     let Some((name, rest_words)) = crate::rules::effective_command(stage) else {
         return false;
@@ -5483,19 +5492,40 @@ fn is_decode_stage(stage: &[NormalizedWord]) -> bool {
             s == "--decode" || short_cluster_contains(s, 'd') || short_cluster_contains(s, 'D')
         })
         .possibly_found(),
+        // `basenc` (issue #121) is coreutils-only — GNU `-d`/`--decode`
+        // only, no BSD `-D` variant to account for.
+        "basenc" => scan_for_flag(rest_words, |s| {
+            s == "--decode" || short_cluster_contains(s, 'd')
+        })
+        .possibly_found(),
         "xxd" => scan_for_flag(rest_words, |s| s == "-r").possibly_found(),
         "openssl" => {
-            let first_could_be_enc = rest_words.first().is_some_and(|w| match w.resolution() {
-                Resolution::Resolved(s) => s == "enc",
-                Resolution::Unresolvable(_) => true,
-            });
-            first_could_be_enc && scan_for_flag(rest_words, |s| s == "-d").possibly_found()
+            let first_could_be_decode_subcommand =
+                rest_words.first().is_some_and(|w| match w.resolution() {
+                    Resolution::Resolved(s) => s == "enc" || s == "base64",
+                    Resolution::Unresolvable(_) => true,
+                });
+            first_could_be_decode_subcommand
+                && scan_for_flag(rest_words, |s| s == "-d").possibly_found()
         }
         "gzip" => scan_for_flag(rest_words, |s| {
             s == "--decompress" || s == "--uncompress" || short_cluster_contains(s, 'd')
         })
         .possibly_found(),
-        "rev" | "tr" | "gunzip" | "zcat" | "uudecode" => true,
+        "xz" => scan_for_flag(rest_words, |s| {
+            s == "--decompress" || s == "--uncompress" || short_cluster_contains(s, 'd')
+        })
+        .possibly_found(),
+        "bzip2" => scan_for_flag(rest_words, |s| {
+            s == "--decompress" || short_cluster_contains(s, 'd')
+        })
+        .possibly_found(),
+        "zstd" => scan_for_flag(rest_words, |s| {
+            s == "--decompress" || short_cluster_contains(s, 'd')
+        })
+        .possibly_found(),
+        "rev" | "tr" | "gunzip" | "zcat" | "uudecode" | "unxz" | "xzcat" | "bunzip2" | "bzcat"
+        | "unzstd" | "zstdcat" => true,
         _ => false,
     }
 }
@@ -6578,6 +6608,101 @@ mod tests {
         // must fall through to the plain "unknown piped content" Ask, not
         // the decode-stage Block.
         assert_decision("gzip -c file.txt | sh", Decision::Ask);
+    }
+
+    // ==== Issue #121: is_decode_stage's fixed enumeration missed the
+    // openssl base64 subcommand, basenc, and xz/bzip2/zstd. ====
+
+    #[test]
+    fn openssl_base64_subcommand_fed_interpreter_pipe_blocks() {
+        // `openssl base64 -d` is a real, documented OpenSSL subcommand
+        // functionally identical to `openssl enc -base64 -d`, but the
+        // original check only recognized a first argument of `enc`.
+        assert_decision(
+            "echo cm0gLXJmIC8= | openssl base64 -d | sh",
+            Decision::Block,
+        );
+    }
+
+    #[test]
+    fn openssl_enc_subcommand_still_blocks() {
+        assert_decision(
+            "echo cm0gLXJmIC8= | openssl enc -base64 -d | sh",
+            Decision::Block,
+        );
+    }
+
+    #[test]
+    fn basenc_decode_fed_interpreter_pipe_blocks() {
+        assert_decision(
+            "echo cm0gLXJmIC8= | basenc --base64 -d | sh",
+            Decision::Block,
+        );
+    }
+
+    #[test]
+    fn basenc_bare_encode_is_not_a_decode_stage() {
+        assert_decision("basenc --base64 file.txt | sh", Decision::Ask);
+    }
+
+    #[test]
+    fn xz_decompress_flag_fed_interpreter_pipe_blocks() {
+        assert_decision("cat payload.xz | xz -d | sh", Decision::Block);
+    }
+
+    #[test]
+    fn xz_bare_compress_is_not_a_decode_stage() {
+        assert_decision("xz -c file.txt | wc -c", Decision::Allow);
+    }
+
+    #[test]
+    fn unxz_fed_interpreter_pipe_blocks() {
+        assert_decision("cat payload.xz | unxz | sh", Decision::Block);
+    }
+
+    #[test]
+    fn xzcat_fed_interpreter_pipe_blocks() {
+        assert_decision("cat payload.xz | xzcat | sh", Decision::Block);
+    }
+
+    #[test]
+    fn bzip2_decompress_flag_fed_interpreter_pipe_blocks() {
+        assert_decision("cat payload.bz2 | bzip2 -d | sh", Decision::Block);
+    }
+
+    #[test]
+    fn bzip2_bare_compress_is_not_a_decode_stage() {
+        assert_decision("bzip2 -c file.txt | wc -c", Decision::Allow);
+    }
+
+    #[test]
+    fn bunzip2_fed_interpreter_pipe_blocks() {
+        assert_decision("cat payload.bz2 | bunzip2 | sh", Decision::Block);
+    }
+
+    #[test]
+    fn bzcat_fed_interpreter_pipe_blocks() {
+        assert_decision("cat payload.bz2 | bzcat | sh", Decision::Block);
+    }
+
+    #[test]
+    fn zstd_decompress_flag_fed_interpreter_pipe_blocks() {
+        assert_decision("cat payload.zst | zstd -d | sh", Decision::Block);
+    }
+
+    #[test]
+    fn zstd_bare_compress_is_not_a_decode_stage() {
+        assert_decision("zstd -c file.txt | wc -c", Decision::Allow);
+    }
+
+    #[test]
+    fn unzstd_fed_interpreter_pipe_blocks() {
+        assert_decision("cat payload.zst | unzstd | sh", Decision::Block);
+    }
+
+    #[test]
+    fn zstdcat_fed_interpreter_pipe_blocks() {
+        assert_decision("cat payload.zst | zstdcat | sh", Decision::Block);
     }
 
     // ==== Rule 6a/6b dispatch must resolve the
