@@ -3047,15 +3047,19 @@ pub(crate) const EVAL_BUILTIN: &[&str] = &["eval"];
 /// this file's own former `PIPELINE_INTERPRETERS` literal silently kept
 /// missing them, letting `base64 -d payload | ksh` reach `Allow`. See
 /// [`is_pipeline_interpreter`], the single place both lists are consulted
-/// together.
+/// together for pipeline-sink classification
+/// ([`matches_dangerous_allow_target`] separately chains both lists too,
+/// for a different purpose — rejecting a dangerous `allow` config entry).
 ///
-/// `ruby`/`lua`/`php`/`tclsh` (issue #125) share the same "reads and
-/// executes a script from stdin when given no file argument" property
-/// `python`/`node`/`perl` already have here — the exact sink shape rule
-/// 5b/5c exists to catch — so `base64 -d payload | ruby` was Allow the
-/// same way `| ksh` was before issue #55.
+/// `ruby`/`lua`/`php`/`tclsh`/`python2` (issue #125) share the same
+/// "reads and executes a script from stdin when given no file argument"
+/// property `python`/`node`/`perl` already have here — the exact sink
+/// shape rule 5b/5c exists to catch — so `base64 -d payload | ruby` was
+/// Allow the same way `| ksh` was before issue #55. `python2` specifically
+/// closes the same-issue asymmetry of listing `python3` but not the
+/// still-occasionally-present `python2`.
 const EXTRA_PIPELINE_INTERPRETERS: &[&str] = &[
-    "python", "python3", "node", "perl", "ruby", "lua", "php", "tclsh",
+    "python", "python2", "python3", "node", "perl", "ruby", "lua", "php", "tclsh",
 ];
 
 /// Whether `name` is an interpreter a pipeline's final stage may be
@@ -5439,10 +5443,11 @@ impl UserConfig {
             if matches_dangerous_allow_target(entry) {
                 return Err(RulesError::invalid(
                     entry.id.as_str(),
-                    "an `allow` entry must not match a shell interpreter or transparent \
-                     wrapper name (bash, sh, env, xargs, ...) — this would suppress every \
-                     recursion-derived Ask involving that name, including the substitution-\
-                     depth-cap fail-closed guard's own Ask",
+                    "an `allow` entry must not match a shell interpreter, interpreter \
+                     pipeline sink, or transparent wrapper name (bash, sh, python, ruby, \
+                     env, xargs, ...) — this would suppress every recursion-derived Ask \
+                     involving that name, including the substitution-depth-cap fail-closed \
+                     guard's own Ask",
                 ));
             }
             // deny_message (issue #99) has nothing to attach to on an
