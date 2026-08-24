@@ -3397,6 +3397,71 @@ fn cluster_takes_separated_value(wrapper: &str, token: &str) -> bool {
     false
 }
 
+/// Where a getopt short-flag cluster's `letter` value lives, for a caller
+/// that needs the value ITSELF rather than [`cluster_takes_separated_value`]'s
+/// stop-here-or-next-token classification for the wrapped-command walk.
+/// Shares [`wrapper_cluster_booleans`]/[`wrapper_value_flags`] with that
+/// function so the two classifications of "where does this wrapper's
+/// value-taking letter's value live" cannot drift apart — issue #209's
+/// fable review found `crate::gate::chain_dash_c_targets` had grown its
+/// own, incomplete, from-scratch parsing of env's `-C` position that only
+/// recognized a BARE `-C` token, missing every cluster form (`-iC`,
+/// `-iC<dir>`) `effective_command`'s wrapped-command walk already handles
+/// correctly via this module — reopening the very `env -C` bypass this
+/// mechanism exists to close.
+pub(crate) enum ClusterValue<'a> {
+    /// `letter` is the cluster's last character; its value is the WHOLE
+    /// next token (`env -iC dir`).
+    NextToken,
+    /// `letter` is followed by more characters within this same token;
+    /// those characters (never empty) are its value (`env -iCdir`).
+    Glued(&'a str),
+}
+
+pub(crate) fn locate_cluster_value<'a>(
+    wrapper: &str,
+    token: &'a str,
+    letter: char,
+) -> Option<ClusterValue<'a>> {
+    let booleans = wrapper_cluster_booleans(wrapper)?;
+    let value_takers: Vec<char> = wrapper_value_flags(wrapper)
+        .iter()
+        .filter_map(|flag| match flag {
+            ValueFlag::Short(c) => Some(*c),
+            ValueFlag::Long(_) => None,
+        })
+        .collect();
+    let rest = token.strip_prefix('-')?;
+    if rest.is_empty() || rest.starts_with('-') {
+        return None;
+    }
+    for (index, c) in rest.char_indices() {
+        if c == letter {
+            let glued = &rest[index + c.len_utf8()..];
+            return Some(if glued.is_empty() {
+                ClusterValue::NextToken
+            } else {
+                ClusterValue::Glued(glued)
+            });
+        }
+        if value_takers.contains(&c) {
+            // A DIFFERENT value-taking letter appears before `letter` —
+            // it, not `letter`, owns everything after it in this token,
+            // so `letter` never actually appears as its own flag here.
+            return None;
+        }
+        if !booleans.contains(&c) {
+            // An unmodeled letter: getopt errors out on this cluster at
+            // runtime, so there is no execution (and no `letter` value)
+            // to guard here either — the same reasoning
+            // `cluster_takes_separated_value`'s doc gives for its own
+            // unmodeled-letter case.
+            return None;
+        }
+    }
+    None
+}
+
 /// Per-wrapper flags that take a *separate* value token (`-n 19`, `-u
 /// root`) — consulted by [`skip_wrapper_arguments`] so that value token
 /// isn't mistaken for the wrapped command (issue #54). `sudo`/`doas` share

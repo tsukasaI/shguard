@@ -6453,6 +6453,21 @@ fn evaluate_composed_cwd_redirects(
 /// letting `env -C~/.config/shguard cp evil.toml config.toml` bypass the
 /// composition this function exists to feed.
 ///
+/// `cluster_wrapper` (`Some("env")`; `None` for git/make/tar, which have
+/// no boolean short-flag surface of their own to cluster with `-C`)
+/// recognizes `-C` glued into a getopt short-flag cluster with OTHER
+/// boolean flags ahead of it (`env -iC dir`, `env -iCdir`) via
+/// [`crate::rules::locate_cluster_value`] — the same
+/// [`crate::rules::wrapper_cluster_booleans`]/
+/// [`crate::rules::wrapper_value_flags`] tables `effective_command`'s own
+/// wrapped-command walk already uses, so the two can't drift apart. A
+/// round-2 fable review caught this function's `-C`-only matching (the
+/// branches above) missing every cluster form entirely — `env -iC
+/// ~/.config/shguard cp evil.toml config.toml` (and its glued spelling,
+/// and reached through a leading wrapper like `nice`) silently found no
+/// anchor and bypassed composition exactly like the round-1 glued-form
+/// gap did.
+///
 /// `None` when `rest` has no such flag at all (composition doesn't
 /// apply — the ordinary uncomposed evaluation is unaffected, per
 /// [`CwdContext`]'s additive-only design) OR when any occurrence is
@@ -6469,6 +6484,7 @@ fn chain_dash_c_targets(
     rest: &[NormalizedWord],
     long_names: &[&str],
     short_can_attach: bool,
+    cluster_wrapper: Option<&str>,
     env: &Env,
 ) -> Option<String> {
     let mut current = CwdContext::Initial;
@@ -6493,6 +6509,18 @@ fn chain_dash_c_targets(
             && !attached.is_empty()
         {
             Some(attached.to_string())
+        } else if let Some(wrapper) = cluster_wrapper
+            && let Some(location) = crate::rules::locate_cluster_value(wrapper, s, 'C')
+        {
+            match location {
+                crate::rules::ClusterValue::Glued(value) => Some(value.to_string()),
+                crate::rules::ClusterValue::NextToken => {
+                    match words.next().map(NormalizedWord::resolution) {
+                        Some(Resolution::Resolved(value)) => Some(value.clone()),
+                        Some(Resolution::Unresolvable(_)) | None => None,
+                    }
+                }
+            }
         } else {
             continue;
         };
@@ -6603,7 +6631,7 @@ fn evaluate_env_dash_c_override(
     let env_prefix_start = argv.len() - env_and_rest.len();
     let env_prefix_end = argv.len() - wrapped_tail.len();
     let env_prefix = &argv[env_prefix_start..env_prefix_end];
-    let anchor = chain_dash_c_targets(env_prefix, &["--chdir"], true, env)?;
+    let anchor = chain_dash_c_targets(env_prefix, &["--chdir"], true, Some("env"), env)?;
     let mut composed_argv = argv[..env_prefix_end].to_vec();
     composed_argv.extend(compose_argv_against_cwd(wrapped_tail, &anchor));
     evaluate_composed_argv_match(
@@ -6703,7 +6731,7 @@ fn evaluate_dash_c_override(argv: &[NormalizedWord], env: &Env, rules: &Rules) -
             } else {
                 rest
             };
-            let anchor = chain_dash_c_targets(scan_region, &[], short_can_attach, env)?;
+            let anchor = chain_dash_c_targets(scan_region, &[], short_can_attach, None, env)?;
             let composed_argv = compose_argv_against_cwd(argv, &anchor);
             evaluate_composed_argv_match(&composed_argv, argv, "this invocation's own `-C`", rules)
         }
@@ -12247,6 +12275,82 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
         assert_eq!(
             decide_dash_c("make -C~/.config/shguard config.toml").decision(),
             Decision::Block
+        );
+    }
+
+    // A round-2 fable review caught a THIRD gap in `env -C` composition:
+    // `chain_dash_c_targets` only recognized a bare `-C` token (or `-C`
+    // glued directly to its value) — it missed every getopt short-flag
+    // CLUSTER form (`-iC dir`, `-iC<dir>`) that real `env` also accepts,
+    // even though `effective_command`'s own wrapped-command walk already
+    // handles these clusters correctly via
+    // `crate::rules::wrapper_cluster_booleans`/`wrapper_value_flags`. The
+    // anchor-extraction parser here and the wrapped-command-locating
+    // parser had silently diverged. Fixed by
+    // `crate::rules::locate_cluster_value`, which shares those same
+    // tables so the two classifications cannot drift apart again.
+
+    #[test]
+    fn env_dash_c_cluster_with_leading_boolean_composes() {
+        assert_eq!(
+            decide("env -iC ~/.config/shguard cp evil.toml config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn env_dash_c_cluster_with_a_different_leading_boolean_composes() {
+        assert_eq!(
+            decide("env -vC ~/.config/shguard cp evil.toml config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn env_dash_c_cluster_with_numeric_boolean_composes() {
+        assert_eq!(
+            decide("env -0C ~/.config/shguard cp evil.toml config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn env_dash_c_cluster_with_two_leading_booleans_composes() {
+        assert_eq!(
+            decide("env -ivC ~/.config/shguard cp evil.toml config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn env_dash_c_cluster_glued_value_composes() {
+        // `env -iC~/.config/shguard cp ...`: the cluster's value-taking
+        // letter `C` is followed by more characters WITHIN the same
+        // token — confirmed against a live env binary that this glues
+        // the remainder as `C`'s value, not a separate token.
+        assert_eq!(
+            decide("env -iC~/.config/shguard cp evil.toml config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn env_dash_c_cluster_through_a_leading_wrapper_composes() {
+        assert_eq!(
+            decide("nice env -iC ~/.config/shguard cp evil.toml config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn env_dash_c_cluster_with_an_unmodeled_letter_is_not_modeled() {
+        // `env -iL dir cp ...`: `L` is not one of env's modeled booleans
+        // or value-takers, so real env errors out on this cluster and
+        // executes nothing — no anchor to extract, and no execution to
+        // guard either.
+        assert_eq!(
+            decide("env -iL ~/.config/shguard cp evil.toml config.toml").decision(),
+            Decision::Allow
         );
     }
 }
