@@ -141,6 +141,12 @@ impl From<crate::rules::RulesError> for ConfigError {
 /// self-protection rules. Opaque to callers outside this crate — the only
 /// public operations are [`Policy::load`] and passing a `&Policy` to
 /// [`crate::analyze_with_policy`].
+///
+/// `Clone` exists so [`crate::analyze_with_policy`] can hand an owned copy
+/// into the bounded-evaluation worker thread `src/watchdog.rs` spawns
+/// (`'static` closures can't borrow the caller's `&Policy` across that
+/// boundary) — not for callers outside this crate to rely on.
+#[derive(Clone)]
 pub struct Policy {
     pub(crate) rules: Rules,
     pub(crate) allowlist: Allowlist,

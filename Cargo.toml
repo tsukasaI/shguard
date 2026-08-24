@@ -19,8 +19,8 @@ path = "src/bin/shguard.rs"
 # src/parser.rs is the upgrade-compatibility gate for any version bump.
 brush-parser = "=0.4.0"
 # rust-lang-maintained raw libc bindings — used only for
-# `getrusage(RUSAGE_SELF, ...)` in src/bin/shguard.rs's memory watchdog.
-# Not exact-pinned: unlike brush-parser/url above there is no
+# `getrusage(RUSAGE_SELF, ...)` in src/bin/shguard.rs's and src/watchdog.rs's
+# memory watchdogs. Not exact-pinned: unlike brush-parser/url above there is no
 # upgrade-compatibility gate this crate's version bumps could break (it is
 # a thin, stable FFI surface, not a parser whose behavior shguard depends
 # on matching exactly).

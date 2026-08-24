@@ -299,3 +299,29 @@ fn memory_budget_trip_fails_closed_to_ask() {
     assert_eq!(permission_decision(&output), "ask");
     assert!(permission_reason(&output).contains("memory budget"));
 }
+
+// ==== Library API watchdog (issue #319) ====
+
+/// Before the fix: `shguard::analyze` — the public library entry point,
+/// documented on crates.io — had no watchdog of its own. A consumer
+/// calling it directly, bypassing the `shguard` binary and the watchdog
+/// above entirely, hit the same unbounded-allocating hang the test above
+/// pins for the binary; confirmed live pre-fix via
+/// `examples/probe '<<$( |] '`, which hung until SIGKILLed. `src/watchdog.rs`
+/// closes this for both `analyze` and `analyze_with_policy`.
+///
+/// Runs `shguard::analyze` on its own thread with an outer 30s bound, same
+/// margin as the binary test above: if `src/watchdog.rs`'s own bound
+/// regresses, this fails on the `recv_timeout` below instead of hanging
+/// the test suite forever.
+#[test]
+fn library_analyze_fails_closed_to_ask_on_the_same_heredoc_hang() {
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = result_tx.send(shguard::analyze("<<$( |] "));
+    });
+    let verdict = result_rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("shguard::analyze should resolve within its own watchdog bound");
+    assert_eq!(verdict.decision(), shguard::verdict::Decision::Ask);
+}
