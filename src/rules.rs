@@ -5443,11 +5443,11 @@ impl UserConfig {
             if matches_dangerous_allow_target(entry) {
                 return Err(RulesError::invalid(
                     entry.id.as_str(),
-                    "an `allow` entry must not match a shell interpreter, interpreter \
-                     pipeline sink, or transparent wrapper name (bash, sh, python, ruby, \
-                     env, xargs, ...) — this would suppress every recursion-derived Ask \
-                     involving that name, including the substitution-depth-cap fail-closed \
-                     guard's own Ask",
+                    "an `allow` entry must not match a shell interpreter, `eval`, \
+                     interpreter pipeline sink, or transparent wrapper name (bash, sh, \
+                     eval, python, ruby, env, xargs, ...) — this would suppress every \
+                     recursion-derived Ask involving that name, including the \
+                     substitution-depth-cap fail-closed guard's own Ask",
                 ));
             }
             // deny_message (issue #99) has nothing to attach to on an

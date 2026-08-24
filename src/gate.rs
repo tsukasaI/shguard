@@ -6420,10 +6420,9 @@ mod tests {
         assert_decision("echo x | base64 -d | tclsh", Decision::Block);
     }
 
-    // Round-1 fable review finding: the list already named `python3` but
-    // not `python2`, an asymmetry within the same issue's own scope —
-    // still occasionally present on older systems, same stdin-execute
-    // property as every other entry here.
+    // The list already named `python3` but not `python2` — still
+    // occasionally present on older systems, same stdin-execute property
+    // as every other entry here.
     #[test]
     fn decode_fed_python2_pipe_blocks() {
         assert_decision("echo x | base64 -d | python2", Decision::Block);
