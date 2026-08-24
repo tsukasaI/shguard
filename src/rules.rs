@@ -833,7 +833,26 @@ impl TargetMatcher {
         };
         let comps = match lexical_normalize(remainder) {
             PathForm::Rel { ascent, comps } if ascent >= 1 => comps,
-            PathForm::EscapesHome(comps) | PathForm::NamedUserHomeEscapes(comps) => comps,
+            PathForm::EscapesHome(comps)
+            | PathForm::NamedUserHomeEscapes(comps)
+            // Issue #133: a dirstack anchor (`~+`/`~-`/`~N`) is just as
+            // unknown as an unresolved ascent's own starting cwd, so a
+            // descended-into tail (`~-/etc/passwd`) is the same "unknown
+            // anchor, known descent" shape as the two arms above — see
+            // `PathForm::DirStack`'s own docs for the full reasoning,
+            // including why a leading `..` doesn't need separate handling
+            // here the way `EscapesHome`/`NamedUserHomeEscapes` do. Unlike
+            // `dirstack_plausible` just below, this floor does NOT exclude
+            // a `strip: Some(..)` target (an attached slot like dd's
+            // `of=`) — `dirstack_plausible`'s exclusion rests on `of=~+`
+            // not tilde-expanding as a *whole-token* shorthand in the
+            // first place (issue #134), but says nothing about whether
+            // `of=~-/dev/sda` is a dangerous literal string in its own
+            // right; treating it the same as `of=~/../dev/sda` (which
+            // already floors via `EscapesHome` above, strip or not) keeps
+            // this fail-closed rather than opening a strip-shaped gap the
+            // #134 exclusion was never meant to create.
+            | PathForm::DirStack(comps) => comps,
             _ => return false,
         };
         if comps.is_empty() {
@@ -906,9 +925,12 @@ impl TargetMatcher {
 
     /// issue #88's Ask-only floor check: true when this matcher declares
     /// no `strip` prefix and `token` itself normalizes to
-    /// [`PathForm::DirStack`]. `~+`/`~-`/`~N` expand against
-    /// `$PWD`/`$OLDPWD`/a pushd-stack entry — an anchor no [`PathForm`] a
-    /// target can declare represents, so unlike
+    /// [`PathForm::DirStack`] with an empty tail (exactly the anchor,
+    /// `~+`) or to [`PathForm::DirStackEscapesEmpty`] (one level *above*
+    /// the anchor, `~+/..`) — both reduce to "some real but statically
+    /// unknown directory," so both get the same floor eligibility. `~+`/
+    /// `~-`/`~N` expand against `$PWD`/`$OLDPWD`/a pushd-stack entry — an
+    /// anchor no [`PathForm`] a target can declare represents, so unlike
     /// [`Self::named_user_home_plausible`]/[`Self::ascent_descent_plausible`]
     /// there is no target *value* to compare against (the anchor is
     /// unbounded by construction). The correlation available here is the
@@ -927,7 +949,16 @@ impl TargetMatcher {
         if strip.is_some() {
             return false;
         }
-        matches!(lexical_normalize(token), PathForm::DirStack)
+        // Bare anchor or escaped-to-empty-anchor only — a non-empty tail
+        // is a distinct, more specific shape `ascent_descent_plausible`
+        // now floors (issue #133): a rule's bare-`~` target slot is what
+        // this probe is checking eligibility for, and `~-/etc/passwd` is
+        // not plausibly *that* slot the way bare `~-`/`~-/..` are.
+        match lexical_normalize(token) {
+            PathForm::DirStack(tail) => tail.is_empty(),
+            PathForm::DirStackEscapesEmpty => true,
+            _ => false,
+        }
     }
 
     /// Issue #103's poisoned-cwd Ask floor: true when `token` normalizes to
@@ -1113,15 +1144,18 @@ pub(crate) enum PathForm {
     /// rather than the invoker's own `$HOME`). Carries the post-escape
     /// tail the same way `EscapesHome` does (issue #90).
     NamedUserHomeEscapes(Vec<String>),
-    /// A bare `~+`/`~-`/`~N`/`~+N`/`~-N` directory-stack shorthand (`N` one
-    /// or more ASCII digits) — either exactly that, or `.`/`.`-padded
-    /// equivalents (`~+/.`, `~+//`) that collapse to no remaining
-    /// components, the same way `~/.`/`~username/.` collapse to their own
-    /// bare forms. A real shell expands `~+`/`~-` to `$PWD`/`$OLDPWD` and
-    /// `~N`-shaped forms to a numbered `pushd`/`popd` directory-stack
-    /// entry (issue #88) — an arbitrary, unbounded directory shguard has
-    /// no cwd or directory stack to resolve against, so this only ever
-    /// feeds a `gate.rs` floor capped at `Ask`
+    /// A `~+`/`~-`/`~N`/`~+N`/`~-N` directory-stack shorthand (`N` one or
+    /// more ASCII digits), carrying the tail of components after it —
+    /// empty for exactly that token, or `.`/`.`-padded equivalents
+    /// (`~+/.`, `~+//`) that collapse to no remaining components, the same
+    /// way `~/.`/`~username/.` collapse to their own bare forms;
+    /// non-empty for a real subdirectory tail (`~-/etc/passwd` is
+    /// `DirStack(["etc", "passwd"])`, issue #133). A real shell expands
+    /// `~+`/`~-` to `$PWD`/`$OLDPWD` and `~N`-shaped forms to a numbered
+    /// `pushd`/`popd` directory-stack entry (issue #88) — an arbitrary,
+    /// unbounded directory shguard has no cwd or directory stack to
+    /// resolve against, so the bare (empty-tail) case only ever feeds a
+    /// `gate.rs` floor capped at `Ask`
     /// (`crate::gate::scan_dirstack_tilde_floor`), the same floor a bare,
     /// literal `$PWD`/`$OLDPWD` reference already gets via the
     /// unresolved-`$VAR` floor (rule 4) — never a rule's own (often
@@ -1129,16 +1163,56 @@ pub(crate) enum PathForm {
     /// identically, whether `~+`/`~-`/`~N` denote a *specific* dangerous
     /// target can't be known statically.
     ///
-    /// A subdirectory tail that does NOT collapse away (`~-/etc/passwd`,
-    /// `~2/dev/sda`), or a `..` that pops past the (unknown) anchor, stays
-    /// [`PathForm::Opaque`] instead — deliberately out of scope for issue
-    /// #88, mirroring [`PathForm::NamedUserHome`]'s own "bare anchor only,
-    /// not an arbitrary subdirectory" boundary; tracked as issue #133.
-    DirStack,
-    /// Matches nothing: the empty string, a `~username/subdir` token (see
-    /// [`PathForm::NamedUserHome`]'s docs), or a dirstack-shaped tilde
-    /// token with a non-collapsing subdirectory tail or an escaping `..`
-    /// (see [`PathForm::DirStack`]'s docs — issue #133).
+    /// A non-empty tail is structurally the same "unknown anchor, known
+    /// descent" shape [`PathForm::EscapesHome`]/[`PathForm::NamedUserHomeEscapes`]
+    /// already are, and floors through the same mechanism
+    /// ([`TargetMatcher::ascent_descent_plausible`]) rather than
+    /// `dirstack_plausible`'s own bare-anchor-only check: unlike
+    /// `NamedUserHome` (whose anchor is a specific, if unresolvable, real
+    /// account home directory — genuinely out of scope for an arbitrary
+    /// subdirectory the same way an ordinary unresolvable path is),
+    /// `~-`/`~N`'s anchor could be ANY absolute directory including `/`,
+    /// `/etc`, or a device mount point, making a descended-into tail just
+    /// as namespace-relevant as one following a plain unresolved ascent
+    /// (`../../etc/passwd`).
+    ///
+    /// Whether a leading `..` in the source token popped past the
+    /// (already-unknown) anchor before real components resumed does NOT
+    /// change a NON-EMPTY resulting tail: with no real anchor to cancel
+    /// against in the first place, an un-cancelable leading `..` and no
+    /// leading `..` at all produce the identical resulting tail (verified:
+    /// `~-/etc/passwd` and `~-/../etc/passwd` both normalize to
+    /// `DirStack(["etc", "passwd"])`) — exactly mirroring how
+    /// [`PathForm::Rel`]'s own `ascent`-then-`comps` shape already feeds
+    /// [`TargetMatcher::ascent_descent_plausible`] purely by tail content,
+    /// independent of how many leading `..`s produced it, since the real
+    /// cwd is equally unknown there too.
+    ///
+    /// An EMPTY resulting tail is the one place `..`-popping still
+    /// matters: `~+` (`escaped == false`, exactly the anchor) and `~+/..`
+    /// (`escaped == true`, one level *above* the anchor) are different,
+    /// unequal locations that both reduce to an empty `stack` — collapsing
+    /// them into the same `DirStack(vec![])` would wrongly make `~+/..`
+    /// match a rule's own bare-`~` target the way `~+` itself correctly
+    /// does ([`TargetMatcher::dirstack_plausible`]'s `tail.is_empty()`
+    /// check). [`lexical_normalize`] routes that one case to
+    /// [`PathForm::DirStackEscapesEmpty`] instead.
+    DirStack(Vec<String>),
+    /// `~+/..`/`~-/..`/`~N/..`: a dirstack anchor whose `..` popped past it
+    /// with nothing left over — provably one level *above* an unknown-but-
+    /// real anchor ($PWD/$OLDPWD/a pushd-stack entry), the same shape
+    /// `PathForm::Rel { ascent: 1, comps: vec![] }` (plain `..`) is for an
+    /// unknown cwd. Unlike `Rel`'s pure-ascent case, this does NOT hard-
+    /// match `TargetMatcher::matches`'s bare-`/` widening (the anchor
+    /// isn't provably real filesystem state the way an actual cwd is) —
+    /// it only feeds `TargetMatcher::dirstack_plausible`'s existing
+    /// Ask-only floor, alongside the exact-anchor (`~+`) case, since both
+    /// share the same "anchor's real identity is unknown, so any strip:
+    /// None-slot target through it deserves at least Ask" reasoning
+    /// (issue #133 review follow-up).
+    DirStackEscapesEmpty,
+    /// Matches nothing: the empty string, or a `~username/subdir` token
+    /// (see [`PathForm::NamedUserHome`]'s docs).
     Opaque,
 }
 
@@ -1214,14 +1288,15 @@ pub(crate) fn lexical_normalize(token: &str) -> PathForm {
         // never a real account name, so it takes this separate branch
         // rather than falling into the `NamedUserHome`/`NamedUserHomeEscapes`
         // classification below — sharing the same accumulation loop above
-        // so `~+/.`/`~+//` still collapse to bare `DirStack` the same way
-        // `~/.`/`~username/.` collapse to their own bare forms. A
-        // non-collapsing tail or an escape stays `Opaque` (issue #133).
+        // so `~+/.`/`~+//` still collapse to an empty-tail `DirStack` the
+        // same way `~/.`/`~username/.` collapse to their own bare forms.
+        // Issue #133: see `PathForm::DirStack`'s own docs for why `escaped`
+        // only matters when `stack` ends up empty, not otherwise.
         if dirstack {
-            return if !escaped && stack.is_empty() {
-                PathForm::DirStack
+            return if escaped && stack.is_empty() {
+                PathForm::DirStackEscapesEmpty
             } else {
-                PathForm::Opaque
+                PathForm::DirStack(stack)
             };
         }
         return if escaped {
@@ -1324,9 +1399,9 @@ fn canonical_render(form: &PathForm) -> Option<String> {
 /// resolved absolute path — see `crate::gate`'s module docs).
 ///
 /// `None` for every other [`PathForm`] (`EscapesHome`/`NamedUserHome`/
-/// `NamedUserHomeEscapes`/`DirStack`/`Opaque`) — a `cd` to one of those
-/// shapes poisons `crate::gate`'s folded cwd context instead of producing
-/// an anchor; callers never render one.
+/// `NamedUserHomeEscapes`/`DirStack`/`DirStackEscapesEmpty`/`Opaque`) — a
+/// `cd` to one of those shapes poisons `crate::gate`'s folded cwd context
+/// instead of producing an anchor; callers never render one.
 #[must_use]
 pub(crate) fn render_cwd_anchor(form: &PathForm) -> Option<String> {
     match form {
@@ -1347,7 +1422,8 @@ pub(crate) fn render_cwd_anchor(form: &PathForm) -> Option<String> {
         PathForm::EscapesHome(_)
         | PathForm::NamedUserHome
         | PathForm::NamedUserHomeEscapes(_)
-        | PathForm::DirStack
+        | PathForm::DirStack(_)
+        | PathForm::DirStackEscapesEmpty
         | PathForm::Opaque => None,
     }
 }
@@ -1960,8 +2036,10 @@ impl CommandRule {
     /// [`Self::matching_rest`], the same full constraint check
     /// [`Self::matches`] uses) and some resolved tail token is a
     /// directory-stack tilde shorthand (`~+`/`~-`/`~N`/`~+N`/`~-N`,
-    /// [`PathForm::DirStack`]) that could plausibly occupy one of this
-    /// rule's own `targets`' slots ([`TargetMatcher::dirstack_plausible`]).
+    /// [`PathForm::DirStack`]) or a `..` step above one
+    /// ([`PathForm::DirStackEscapesEmpty`]) that could plausibly occupy one
+    /// of this rule's own `targets`' slots
+    /// ([`TargetMatcher::dirstack_plausible`]).
     /// Read-only probe, same shape as
     /// [`Self::matches_except_target`]/[`Self::matches_except_flags`] —
     /// never itself a match, only a `gate.rs` floor's input (see
@@ -4378,7 +4456,8 @@ fn reject_degenerate_normalized_target(
         | PathForm::Opaque
         | PathForm::NamedUserHome
         | PathForm::NamedUserHomeEscapes(_)
-        | PathForm::DirStack => true,
+        | PathForm::DirStack(_)
+        | PathForm::DirStackEscapesEmpty => true,
         PathForm::Abs(_) | PathForm::Home(_) => false,
     };
     if degenerate {
@@ -5640,6 +5719,22 @@ mod tests {
     }
 
     #[test]
+    fn ascent_descent_redirect_dirstack_tilde_descent_floors() {
+        // Issue #133: RedirectRule::ascent_descent_plausible delegates to
+        // the same TargetMatcher::ascent_descent_plausible the CommandRule
+        // channel above does, so a dirstack-anchored descent floors via
+        // shell redirect syntax too — not just argv (`dd of=...`).
+        let rules = Rules::embedded().unwrap();
+        let rule = rules
+            .match_redirect_target_ascent_descent("~-/dev/sda")
+            .unwrap();
+        assert_eq!(
+            rule.id().as_str(),
+            "redirect-overwrite-device-or-critical-file"
+        );
+    }
+
+    #[test]
     fn ascent_descent_home_escape_tail_cancels_correctly() {
         // `..` after the escape point must still cancel the nearest
         // *post-escape* component (same cancel-nearest semantics as
@@ -5883,11 +5978,18 @@ mod tests {
     }
 
     #[test]
-    fn dirstack_tilde_subdir_tail_stays_out_of_scope() {
-        // A real subdirectory tail (`~-/etc/passwd`, an anchor that is
-        // NOT cwd-relative like `~+` is) is deliberately out of #88's
-        // scope, mirroring `~username/subdir`'s own boundary — tracked as
-        // issue #133, not fixed here.
+    fn dirstack_tilde_subdir_tail_does_not_reach_the_bare_anchor_floor() {
+        // A real subdirectory tail (`~-/etc/passwd`) is not the bare
+        // anchor `TargetMatcher::dirstack_plausible`/`match_command_dirstack_tilde`
+        // check for — it's a distinct, more specific shape that floors via
+        // `ascent_descent_plausible`/`match_command_ascent_descent`
+        // instead (issue #133; see the `ascent_descent_*` tests below).
+        // `~+/foo` isn't matched by either mechanism: `dd`'s own targets
+        // don't include a bare-relative `foo` in the first place, matching
+        // how plain `../../foo` (no dirstack at all) is equally unmatched
+        // by `ascent_descent_plausible` when `foo` isn't a declared
+        // target — this pins the *bare-anchor* floor's own boundary, not
+        // a residual #133 gap.
         let rules = Rules::embedded().unwrap();
         for cmd in [
             argv(&["rm", "-rf", "~+/foo"]),
@@ -5903,10 +6005,64 @@ mod tests {
     }
 
     #[test]
-    fn dirstack_tilde_escape_stays_out_of_scope() {
+    fn dirstack_tilde_escape_to_empty_tail_floors_via_dirstack_not_ascent_descent() {
+        // `~+/..` ascends one level *above* the (unknown) anchor — a
+        // different, unequal location from `~+` itself, but (fable review
+        // of PR #340) equally unknown, so it now shares `~+`'s own
+        // `dirstack_plausible` floor eligibility via
+        // `PathForm::DirStackEscapesEmpty` rather than falling through to
+        // plain `Opaque` unmatched. It still does NOT reach
+        // `ascent_descent_plausible`: that mechanism only ever sees a
+        // non-empty descended-into tail (`PathForm::DirStack`'s own
+        // `comps`), which an escaped-to-empty token has none of.
         let rules = Rules::embedded().unwrap();
         let cmd = argv(&["rm", "-rf", "~+/.."]);
-        assert!(rules.match_command_dirstack_tilde(&cmd).is_none());
+        assert!(rules.match_command_dirstack_tilde(&cmd).is_some());
+        assert!(rules.match_command_ascent_descent(&cmd).is_none());
+    }
+
+    // ==== Issue #133: a dirstack anchor + a real descended-into tail
+    // (`~-/dev/sda`) is the same "unknown anchor, known descent" shape
+    // plain ascent (`../../dev/sda`) already floors via
+    // `ascent_descent_plausible` — these pin that `PathForm::DirStack`'s
+    // tail now reaches that mechanism too, not just plain `Rel`/
+    // `EscapesHome`/`NamedUserHomeEscapes`. ====
+
+    #[test]
+    fn dirstack_tilde_subdir_tail_matching_a_rule_target_floors_via_ascent_descent() {
+        let rules = Rules::embedded().unwrap();
+        for cmd in [
+            argv(&["dd", "of=~-/dev/sda"]),
+            argv(&["dd", "of=~2/dev/sda"]),
+            // A leading `..` that fails to cancel (nothing in `stack` yet)
+            // must reach the identical tail as no leading `..` at all —
+            // see `PathForm::DirStack`'s own docs for why that's sound
+            // when the anchor is unknown either way.
+            argv(&["dd", "of=~-/../dev/sda"]),
+        ] {
+            assert!(
+                rules.match_command_ascent_descent(&cmd).is_some(),
+                "{cmd:?}"
+            );
+            // Never the rule's own (Block) decision — always capped at
+            // Ask via the floor, same posture as every other #78-family
+            // ascent-descent case.
+            assert!(rules.match_command(&cmd).is_none(), "{cmd:?}");
+        }
+    }
+
+    #[test]
+    fn dirstack_tilde_subdir_tail_not_matching_any_target_stays_unmatched() {
+        // `/etc/passwd` isn't one of `rm-recursive-force-dangerous-target`'s
+        // own targets (see `rules/blocklist.toml`) — exact parity with
+        // plain ascent (`../../etc/passwd`, also unmatched for the same
+        // reason): #133 closes the *mechanism* gap, not a target-coverage
+        // gap the sibling plain-ascent floor doesn't already have either.
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["rm", "-rf", "~-/etc/passwd"]);
+        assert!(rules.match_command_ascent_descent(&cmd).is_none());
+        let plain = argv(&["rm", "-rf", "../../etc/passwd"]);
+        assert!(rules.match_command_ascent_descent(&plain).is_none());
     }
 
     #[test]
