@@ -381,21 +381,28 @@ fn tar_dashless_effective_tail<'a>(
 /// (`-C`/`--directory`), the extract-mode aliases `extract`/`get`, and
 /// `absolute-names` (`-P`/`--absolute-names`, `tar-absolute-names-ask`).
 ///
-/// Verified against GNU tar's own long-option table (GNU tar manual,
-/// "All tar Options"): every other GNU-tar long option starting with `d`
-/// (delay-directory-restore, dereference, diff, delete) or `e` (exclude,
-/// exclude-backups, exclude-caches[-all/-under], exclude-ignore[-recursive],
-/// exclude-tag[-all/-under], exclude-vcs[-ignores], extract) or `g` (get,
-/// group, group-map, gunzip, gzip) or `a` (acls, atime-preserve,
-/// auto-compress, absolute-names — the a-namespace is the most crowded of
-/// the four, so a short `--a`/`--ab` prefix is genuinely ambiguous in real
-/// GNU tar) either isn't a prefix of `directory`/`extract`/`get`/
-/// `absolute-names` at all, or — where a SHORT prefix is genuinely
-/// ambiguous between multiple real options — real GNU tar itself refuses
-/// to run with "ambiguous option", so shguard resolving that same short
-/// prefix to the dangerous option is harmless over-matching: no real
-/// invocation exists where that prefix actually runs AND means something
-/// other than what shguard assumes here. Matching ANY non-empty prefix
+/// Checked against GNU tar's own long-option table (GNU tar manual, "All
+/// tar Options") for every other GNU-tar long option starting with `d`
+/// (delay-directory-restore, dereference, diff, delete), `e` (exclude,
+/// exclude-backups, exclude-caches[-all/-under], exclude-from,
+/// exclude-ignore[-recursive], exclude-tag[-all/-under],
+/// exclude-vcs[-ignores], extract), `g` (get, group, group-map, gunzip,
+/// gzip), or `a` (this crate's own d/e/g enumeration above is not
+/// necessarily exhaustive — GNU tar's option surface is large and grows —
+/// but that's fine: the argument below holds for ANY sibling option, not
+/// just the ones listed): each either isn't a prefix of `directory`/
+/// `extract`/`get`/`absolute-names` at all, or — where a SHORT prefix is
+/// genuinely ambiguous between multiple real options (the `a`-namespace
+/// in particular is the most crowded of the four, so a short `--a`/`--ab`
+/// prefix is ambiguous there even among just the options this crate
+/// happens to know about) — real GNU tar itself refuses to run with
+/// "ambiguous option", so shguard resolving that same short prefix to the
+/// dangerous option is harmless over-matching: no real invocation exists
+/// where that prefix actually runs AND means something other than what
+/// shguard assumes here. This argument doesn't depend on the enumeration
+/// being complete — an unlisted sibling option only ever makes MORE
+/// prefixes ambiguous in reality, never fewer, which only ever makes
+/// over-matching MORE harmless, never less. Matching ANY non-empty prefix
 /// (not just a verified-unambiguous one) is therefore safe and
 /// deliberately not narrowed further.
 ///
@@ -406,11 +413,14 @@ fn tar_dashless_effective_tail<'a>(
 /// into the given directory; `--ex` errors as ambiguous, since bsdtar
 /// also has `--exclude-vcs`). It has no `--get` alias at all (harmless —
 /// this rewrite over-matching a name bsdtar itself rejects is still
-/// covered by the general argument above) and no long form of
-/// `--absolute-names` (same). It additionally has a `--cd` alias for
-/// `-C`/`--directory` that GNU tar doesn't — [`TAR_BSDTAR_DIRECTORY_ALIAS`]
-/// closes that gap explicitly, since it isn't a *prefix* of `directory`
-/// the general argument above would otherwise cover.
+/// covered by the general argument above). It spells `-P` differently
+/// from GNU tar, though: bsdtar's own long form is `--absolute-paths`
+/// (`man tar`, bsdtar 3.5.3, line 515), not `--absolute-names` —
+/// [`TAR_BSDTAR_ABSOLUTE_PATHS_ALIAS`] closes that gap explicitly, the
+/// same way [`TAR_BSDTAR_DIRECTORY_ALIAS`] closes bsdtar's `--cd` alias
+/// for `-C`/`--directory` that GNU tar doesn't have either — neither is a
+/// *prefix* of the GNU spelling the general argument above would
+/// otherwise cover.
 const TAR_LONG_OPTION_DIRECTORY: &str = "directory";
 const TAR_LONG_OPTION_EXTRACT_ALIASES: &[&str] = &["extract", "get"];
 const TAR_LONG_OPTION_ABSOLUTE_NAMES: &str = "absolute-names";
@@ -422,6 +432,18 @@ const TAR_LONG_OPTION_ABSOLUTE_NAMES: &str = "absolute-names";
 /// bsdtar options) — matched by exact name only, unlike the prefix-based
 /// names above.
 const TAR_BSDTAR_DIRECTORY_ALIAS: &str = "cd";
+/// bsdtar's own long spelling of `-P` (`man tar` on bsdtar 3.5.3, line
+/// 515: "`-P, --absolute-paths`") — GNU tar's `-P` is `--absolute-names`
+/// instead, a *different* string, so it needs its own prefix family
+/// rather than falling under [`TAR_LONG_OPTION_ABSOLUTE_NAMES`]'s
+/// `starts_with` check (round-2 review finding: `tar -x --absolute-paths
+/// -f a.tar` and its abbreviation `--absolute-p` both stayed Allow on
+/// bsdtar, degrading `tar-absolute-names-ask`'s Ask). Prefix-matched the
+/// same way `TAR_LONG_OPTION_ABSOLUTE_NAMES` is (`--absolute-` is a
+/// shared, harmlessly-ambiguous prefix of both spellings — GNU tar has no
+/// option starting with `absolute-p` at all, so over-matching there is
+/// still covered by the general argument above).
+const TAR_BSDTAR_ABSOLUTE_PATHS_ALIAS: &str = "absolute-paths";
 
 /// Rewrites a GNU-tar long-option abbreviation of `--directory` (attached
 /// `--dir=/` or separated `--dir /`), the bsdtar `--cd` alias for the
@@ -458,8 +480,9 @@ fn tar_long_option_abbrev_rewrite(tail: &[NormalizedWord]) -> Option<Vec<Normali
             || (TAR_LONG_OPTION_DIRECTORY.starts_with(name) && name != TAR_LONG_OPTION_DIRECTORY)
         {
             TAR_LONG_OPTION_DIRECTORY
-        } else if TAR_LONG_OPTION_ABSOLUTE_NAMES.starts_with(name)
-            && name != TAR_LONG_OPTION_ABSOLUTE_NAMES
+        } else if (TAR_LONG_OPTION_ABSOLUTE_NAMES.starts_with(name)
+            && name != TAR_LONG_OPTION_ABSOLUTE_NAMES)
+            || TAR_BSDTAR_ABSOLUTE_PATHS_ALIAS.starts_with(name)
         {
             TAR_LONG_OPTION_ABSOLUTE_NAMES
         } else if TAR_LONG_OPTION_EXTRACT_ALIASES
@@ -7841,6 +7864,33 @@ mod tests {
         let rules = Rules::embedded().unwrap();
         let matched = rules
             .match_command(&argv(&["tar", "-x", "--absolute-names", "-f", "a.tar"]))
+            .unwrap();
+        assert_eq!(matched.decision(), Decision::Ask);
+        assert_eq!(matched.id().as_str(), "tar-absolute-names-ask");
+    }
+
+    // Round-2 fable review finding: bsdtar 3.5.3 (macOS default) spells
+    // `-P` as `--absolute-paths`, not GNU tar's `--absolute-names` — a
+    // different string this crate's own prefix family doesn't cover
+    // without its own exact/prefix alias, unlike --cd's relationship to
+    // --directory.
+    #[test]
+    fn tar_bsdtar_absolute_paths_alias_matches_ask() {
+        let rules = Rules::embedded().unwrap();
+        for cluster in ["--absolute-paths", "--absolute-p"] {
+            let matched = rules
+                .match_command(&argv(&["tar", "-x", cluster, "-f", "a.tar"]))
+                .unwrap_or_else(|| panic!("expected {cluster:?} to match a rule"));
+            assert_eq!(matched.decision(), Decision::Ask, "{cluster:?}");
+            assert_eq!(matched.id().as_str(), "tar-absolute-names-ask");
+        }
+    }
+
+    #[test]
+    fn tar_bsdtar_absolute_paths_alias_with_attached_value_matches_like_absolute_names() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&["tar", "-x", "--absolute-paths=x", "-f", "a.tar"]))
             .unwrap();
         assert_eq!(matched.decision(), Decision::Ask);
         assert_eq!(matched.id().as_str(), "tar-absolute-names-ask");
