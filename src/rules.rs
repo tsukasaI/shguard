@@ -373,6 +373,153 @@ fn tar_dashless_effective_tail<'a>(
     }
 }
 
+/// GNU tar long options [`tar_long_option_abbrev_rewrite`] recognizes an
+/// abbreviation of (issue #128) — GNU tar's own documented "unique
+/// abbreviation" feature (`--cre` for `--create`, since no other long
+/// option starts with `cre`). Scoped to exactly the option names
+/// `rules/blocklist.toml`'s tar rules key off: `directory`
+/// (`-C`/`--directory`), the extract-mode aliases `extract`/`get`, and
+/// `absolute-names` (`-P`/`--absolute-names`, `tar-absolute-names-ask`).
+///
+/// Checked against GNU tar's own long-option table (GNU tar manual, "All
+/// tar Options") for every other GNU-tar long option starting with `d`
+/// (delay-directory-restore, dereference, diff, delete), `e` (exclude,
+/// exclude-backups, exclude-caches[-all/-under], exclude-from,
+/// exclude-ignore[-recursive], exclude-tag[-all/-under],
+/// exclude-vcs[-ignores], extract), `g` (get, group, group-map, gunzip,
+/// gzip), or `a` (this crate's own d/e/g enumeration above is not
+/// necessarily exhaustive — GNU tar's option surface is large and grows —
+/// but that's fine: the argument below holds for ANY sibling option, not
+/// just the ones listed): each either isn't a prefix of `directory`/
+/// `extract`/`get`/`absolute-names` at all, or — where a SHORT prefix is
+/// genuinely ambiguous between multiple real options (the `a`-namespace
+/// in particular is the most crowded of the four, so a short `--a`/`--ab`
+/// prefix is ambiguous there even among just the options this crate
+/// happens to know about) — real GNU tar itself refuses to run with
+/// "ambiguous option", so shguard resolving that same short prefix to the
+/// dangerous option is harmless over-matching: no real invocation exists
+/// where that prefix actually runs AND means something other than what
+/// shguard assumes here. This argument doesn't depend on the enumeration
+/// being complete — an unlisted sibling option only ever makes MORE
+/// prefixes ambiguous in reality, never fewer, which only ever makes
+/// over-matching MORE harmless, never less. Matching ANY non-empty prefix
+/// (not just a verified-unambiguous one) is therefore safe and
+/// deliberately not narrowed further.
+///
+/// bsdtar (macOS default) is NOT abbreviation-blind the way an earlier
+/// version of this comment claimed — measured directly against bsdtar
+/// 3.5.3: it DOES support `--directory`/`--extract` as long options, with
+/// the same GNU-style unique-abbreviation resolution (`--dir` extracts
+/// into the given directory; `--ex` errors as ambiguous, since bsdtar
+/// also has `--exclude-vcs`). It has no `--get` alias at all (harmless —
+/// this rewrite over-matching a name bsdtar itself rejects is still
+/// covered by the general argument above). It spells `-P` differently
+/// from GNU tar, though: bsdtar's own long form is `--absolute-paths`
+/// (`man tar`, bsdtar 3.5.3, line 515), not `--absolute-names` —
+/// [`TAR_BSDTAR_ABSOLUTE_PATHS_ALIAS`] closes that gap explicitly, the
+/// same way [`TAR_BSDTAR_DIRECTORY_ALIAS`] closes bsdtar's `--cd` alias
+/// for `-C`/`--directory` that GNU tar doesn't have either — neither is a
+/// *prefix* of the GNU spelling the general argument above would
+/// otherwise cover.
+const TAR_LONG_OPTION_DIRECTORY: &str = "directory";
+const TAR_LONG_OPTION_EXTRACT_ALIASES: &[&str] = &["extract", "get"];
+const TAR_LONG_OPTION_ABSOLUTE_NAMES: &str = "absolute-names";
+/// bsdtar-only exact alias for `-C`/`--directory` (issue #128 review
+/// finding: `tar -x --cd / -f a.tar` extracts over `/` on bsdtar 3.5.3,
+/// same as `-C /`, but wasn't recognized before this). Not a GNU tar
+/// option at all (harmless to over-match there too), and not itself
+/// treated as further abbreviable (`--c` collides with several other real
+/// bsdtar options) — matched by exact name only, unlike the prefix-based
+/// names above.
+const TAR_BSDTAR_DIRECTORY_ALIAS: &str = "cd";
+/// bsdtar's own long spelling of `-P` (`man tar` on bsdtar 3.5.3, line
+/// 515: "`-P, --absolute-paths`") — GNU tar's `-P` is `--absolute-names`
+/// instead, a *different* string, so it needs its own prefix family
+/// rather than falling under [`TAR_LONG_OPTION_ABSOLUTE_NAMES`]'s
+/// `starts_with` check (round-2 review finding: `tar -x --absolute-paths
+/// -f a.tar` and its abbreviation `--absolute-p` both stayed Allow on
+/// bsdtar, degrading `tar-absolute-names-ask`'s Ask). Prefix-matched the
+/// same way `TAR_LONG_OPTION_ABSOLUTE_NAMES` is (`--absolute-` is a
+/// shared, harmlessly-ambiguous prefix of both spellings — GNU tar has no
+/// option starting with `absolute-p` at all, so over-matching there is
+/// still covered by the general argument above).
+const TAR_BSDTAR_ABSOLUTE_PATHS_ALIAS: &str = "absolute-paths";
+
+/// Rewrites a GNU-tar long-option abbreviation of `--directory` (attached
+/// `--dir=/` or separated `--dir /`), the bsdtar `--cd` alias for the
+/// same option, `--extract`/`--get`, `--absolute-names`, or the bsdtar
+/// `--absolute-paths` alias for `--absolute-names`, to its canonical
+/// spelling — see [`TAR_LONG_OPTION_DIRECTORY`]'s own docs for
+/// why matching any non-empty prefix is safe. `None` — no rewrite needed
+/// — when nothing in `tail` is a recognized abbreviation. An
+/// already-canonical spelling is left untouched, not "rewritten to
+/// itself". A real, invalid `=value` attached to a value-less option
+/// (`--ex=x`, `--absolute-names=x` — GNU tar rejects both) is rewritten
+/// through anyway rather than left unrecognized: the resulting canonical
+/// token (`--extract=x`) is exactly as invalid to `FlagMatcher`'s own
+/// pre-existing lenient `=value` acceptance as the literal
+/// `--extract=x` spelling already is, so this keeps abbreviated and
+/// canonical spellings deciding identically instead of the abbreviated
+/// form being stricter than the spelling it stands in for.
+fn tar_long_option_abbrev_rewrite(tail: &[NormalizedWord]) -> Option<Vec<NormalizedWord>> {
+    let mut rewritten: Option<Vec<NormalizedWord>> = None;
+    for (i, word) in tail.iter().enumerate() {
+        let Resolution::Resolved(text) = word.resolution() else {
+            continue;
+        };
+        let Some(rest) = text.strip_prefix("--") else {
+            continue;
+        };
+        let (name, value) = match rest.split_once('=') {
+            Some((name, value)) => (name, Some(value)),
+            None => (rest, None),
+        };
+        if name.is_empty() {
+            continue;
+        }
+        let canonical_name = if name == TAR_BSDTAR_DIRECTORY_ALIAS
+            || (TAR_LONG_OPTION_DIRECTORY.starts_with(name) && name != TAR_LONG_OPTION_DIRECTORY)
+        {
+            TAR_LONG_OPTION_DIRECTORY
+        } else if (TAR_LONG_OPTION_ABSOLUTE_NAMES.starts_with(name)
+            && name != TAR_LONG_OPTION_ABSOLUTE_NAMES)
+            || TAR_BSDTAR_ABSOLUTE_PATHS_ALIAS.starts_with(name)
+        {
+            TAR_LONG_OPTION_ABSOLUTE_NAMES
+        } else if TAR_LONG_OPTION_EXTRACT_ALIASES
+            .iter()
+            .any(|opt| opt.starts_with(name) && name != *opt)
+        {
+            "extract"
+        } else {
+            continue;
+        };
+        let canonical = match value {
+            Some(value) => format!("--{canonical_name}={value}"),
+            None => format!("--{canonical_name}"),
+        };
+        rewritten.get_or_insert_with(|| tail.to_vec())[i] = NormalizedWord::resolved(canonical);
+    }
+    rewritten
+}
+
+/// The tail a rule's flag/target checks should actually see for one
+/// wrapper-chain hop, extending [`tar_dashless_effective_tail`] with
+/// [`tar_long_option_abbrev_rewrite`] (issue #128) — both `tar`-scoped,
+/// composed here so [`effective_tail`] only needs one `tar`-guarded call
+/// site instead of two.
+fn tar_effective_tail<'a>(base: &str, tail: &'a [NormalizedWord]) -> Cow<'a, [NormalizedWord]> {
+    let tail = tar_dashless_effective_tail(base, tail);
+    if base == "tar" {
+        match tar_long_option_abbrev_rewrite(&tail) {
+            Some(rewritten) => Cow::Owned(rewritten),
+            None => tail,
+        }
+    } else {
+        tail
+    }
+}
+
 /// `git`'s own global options that consume a *separated* value token and
 /// can appear before the subcommand: `-C <path>`, `-c <name>=<value>`,
 /// `--git-dir <path>`, `--work-tree <path>`, `--namespace <ns>`,
@@ -494,14 +641,15 @@ fn git_strip_global_flags(base: &str, tail: &[NormalizedWord]) -> Option<Vec<Nor
 
 /// Composes every per-command calling-convention rewrite this module
 /// applies to one wrapper-chain hop's tail before a rule's flag/target
-/// checks ever see it: [`tar_dashless_effective_tail`] for `tar`'s
-/// dash-less cluster, then [`git_strip_global_flags`] for `git`'s own
-/// leading global options. Shared by [`CommandRule::matching_rest`] and
+/// checks ever see it: [`tar_effective_tail`] for `tar`'s dash-less
+/// cluster (issue #67) and long-option abbreviations (issue #128), then
+/// [`git_strip_global_flags`] for `git`'s own leading global options.
+/// Shared by [`CommandRule::matching_rest`] and
 /// [`CommandRule::matching_rest_by_name`] so the two walkers can't
 /// silently diverge on this point — the same discipline issue #86
 /// already established for the `tar` rewrite alone.
 fn effective_tail<'a>(base: &str, tail: &'a [NormalizedWord]) -> Cow<'a, [NormalizedWord]> {
-    let tail = tar_dashless_effective_tail(base, tail);
+    let tail = tar_effective_tail(base, tail);
     match git_strip_global_flags(base, &tail) {
         Some(stripped) => Cow::Owned(stripped),
         None => tail,
@@ -1551,9 +1699,9 @@ impl CommandRule {
     /// `None` if no hop matches at all — the shared building block behind
     /// [`Self::matches`] (which also checks targets). PR #84 switched
     /// [`Self::matches_except_target`] to [`Self::matching_rest_by_name`]
-    /// instead — that function now shares this tar-dashless-rewrite step
-    /// via [`tar_dashless_effective_tail`] (issue #86), so the two helpers
-    /// can't diverge on this point.
+    /// instead — that function now shares this tar rewrite step via
+    /// [`effective_tail`] (issue #86), so the two helpers can't diverge on
+    /// this point.
     ///
     /// Unlike a single [`effective_command`] resolution, this checks the
     /// rule at *every* hop of the chain, not just the terminal one: a rule
@@ -1570,15 +1718,18 @@ impl CommandRule {
     /// `command = "rm"`/`command = "git"` rule.
     ///
     /// When the resolved hop's own basename is `tar`, the tail is passed
-    /// through [`tar_dashless_effective_tail`]/[`tar_dashless_rewrite`]
-    /// first (issue #67): tar's own calling convention allows a fully
+    /// through [`tar_effective_tail`] first: [`tar_dashless_rewrite`]
+    /// (issue #67) — tar's own calling convention allows a fully
     /// dash-less leading option cluster (`tar xfC a.tar /`), which the
     /// generic flag matching below can't see at all (`short_cluster_chars`
-    /// returns an empty set for a dash-less token). The rewrite is a no-op
-    /// `Cow::Borrowed` for every other command, and for any `tar`
-    /// invocation that isn't the specific dash-less `x`+`C` cluster shape
-    /// the rewrite targets — see that function's docs for exactly when it
-    /// fires.
+    /// returns an empty set for a dash-less token) — then
+    /// [`tar_long_option_abbrev_rewrite`] (issue #128) — GNU tar accepts
+    /// an unambiguous abbreviation of a long option (`--dir=` for
+    /// `--directory=`), which the generic exact-token matching below
+    /// can't see either. Both rewrites are a no-op `Cow::Borrowed` for
+    /// every other command, and for any `tar` invocation that isn't the
+    /// specific shape each one targets — see their own docs for exactly
+    /// when each fires.
     #[must_use]
     fn matching_rest<'a>(&self, argv: &'a [NormalizedWord]) -> Option<Cow<'a, [NormalizedWord]>> {
         let mut rest = argv;
@@ -1843,10 +1994,10 @@ impl CommandRule {
     /// satisfied, unlike [`Self::matching_rest`], which only ever returns a
     /// hop once both the name and the constraints already hold.
     ///
-    /// Applies [`tar_dashless_effective_tail`] to the returned tail — the
-    /// same helper [`Self::matching_rest`] uses (issue #86), so the two
-    /// walkers can't diverge on this point. Without it, a dash-less
-    /// leading option cluster (`tar xfC a.tar /`) is invisible to
+    /// Applies [`effective_tail`] to the returned tail — the same helper
+    /// [`Self::matching_rest`] uses (issue #86), so the two walkers can't
+    /// diverge on this point. Without it, a dash-less leading option
+    /// cluster (`tar xfC a.tar /`) is invisible to
     /// [`Self::matches_except_target`]/[`Self::matches_except_flags`]'s own
     /// flag/token checks, even though the ordinary [`Self::matches`] path
     /// (via [`Self::matching_rest`]) already sees it — for
@@ -7562,6 +7713,205 @@ mod tests {
             .unwrap();
         assert_eq!(matched.decision(), Decision::Ask);
         assert_eq!(matched.id().as_str(), "tar-absolute-names-ask");
+    }
+
+    // ==== issue #128: GNU tar long-option abbreviations (`--dir=` for
+    // `--directory=`, `--ex`/`--extrac` for `--extract`, `--g` for `--get`)
+    // must not slip past the rules that key off the canonical spellings.
+    // tar_long_option_abbrev_rewrite canonicalizes these before any
+    // FlagMatcher/TargetMatcher check ever runs. ====
+
+    #[test]
+    fn tar_directory_abbreviation_attached_matches_block() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&["tar", "-x", "--dir=/", "-f", "a.tar"]))
+            .unwrap();
+        assert_eq!(matched.decision(), Decision::Block);
+        assert_eq!(matched.id().as_str(), "tar-extract-over-root-or-home");
+    }
+
+    #[test]
+    fn tar_directory_abbreviation_separated_matches_block() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&["tar", "-x", "--dir", "/", "-f", "a.tar"]))
+            .unwrap();
+        assert_eq!(matched.decision(), Decision::Block);
+        assert_eq!(matched.id().as_str(), "tar-extract-over-root-or-home");
+    }
+
+    #[test]
+    fn tar_extract_abbreviations_restore_the_strict_block_rule() {
+        // Before this fix, an abbreviated extract-mode flag left
+        // required_flags "x|--extract|--get" unsatisfied, so only the
+        // weaker tar-directory-root-or-home (Ask, no extract-mode
+        // requirement) rule fired — silently degrading Block to Ask.
+        let rules = Rules::embedded().unwrap();
+        for cluster in ["--extrac", "--ex", "--g"] {
+            let matched = rules
+                .match_command(&argv(&["tar", cluster, "-f", "a.tar", "-C", "/"]))
+                .unwrap_or_else(|| panic!("expected {cluster:?} to match a rule"));
+            assert_eq!(matched.decision(), Decision::Block, "{cluster:?}");
+            assert_eq!(matched.id().as_str(), "tar-extract-over-root-or-home");
+        }
+    }
+
+    #[test]
+    fn tar_directory_abbreviation_negative_exclude_does_not_match() {
+        // "exclude" shares no prefix with "directory" at all.
+        let rules = Rules::embedded().unwrap();
+        let matched = rules.match_command(&argv(&["tar", "-x", "--exclude=/", "-f", "a.tar"]));
+        assert!(matched.is_none());
+    }
+
+    #[test]
+    fn tar_directory_abbreviation_negative_longer_token_does_not_match() {
+        // "directoryx" is not a PREFIX of "directory" — it's longer.
+        let rules = Rules::embedded().unwrap();
+        let matched = rules.match_command(&argv(&["tar", "-x", "--directoryx=/", "-f", "a.tar"]));
+        assert!(matched.is_none());
+    }
+
+    #[test]
+    fn tar_bare_double_dash_does_not_panic_or_match() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules.match_command(&argv(&["tar", "-x", "--", "-f", "a.tar"]));
+        assert!(matched.is_none());
+    }
+
+    #[test]
+    fn tar_directory_already_canonical_spelling_unaffected() {
+        // Regression guard: the rewrite must be a no-op for the spelling
+        // that was already correct, not double-process it.
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&["tar", "-x", "--directory=/", "-f", "a.tar"]))
+            .unwrap();
+        assert_eq!(matched.decision(), Decision::Block);
+        assert_eq!(matched.id().as_str(), "tar-extract-over-root-or-home");
+    }
+
+    #[test]
+    fn mv_target_dir_abbreviation_out_of_scope_stays_unmatched() {
+        // Scope boundary: this rewrite is tar-only. mv's own
+        // --target-directory= abbreviation gap is issue #214's territory,
+        // untouched here.
+        let rules = Rules::embedded().unwrap();
+        let matched = rules.match_command(&argv(&["mv", "--target-dir=/dev/sda", "x"]));
+        assert!(matched.is_none());
+    }
+
+    #[test]
+    fn tar_directory_abbreviation_reaches_the_directory_equals_tilde_floor() {
+        // Issue #115's floor keys off the rule's own literal "--directory="
+        // strip string; the abbreviation rewrite runs first, so the floor
+        // sees the canonicalized token exactly like the unabbreviated form.
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["tar", "-x", "--dir=~", "-f", "a.tar"]);
+        assert!(rules.match_command(&cmd).is_none());
+        assert!(rules.match_command_directory_equals_tilde(&cmd).is_some());
+    }
+
+    #[test]
+    fn tar_directory_abbreviation_reaches_the_dirstack_equal_subst_floor() {
+        // Same as above, for issue #134's dirstack-tilde attach floor.
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["tar", "-x", "--dir=~+", "-f", "a.tar"]);
+        assert!(rules.match_command(&cmd).is_none());
+        assert!(rules.match_command_dirstack_equal_subst(&cmd).is_some());
+    }
+
+    // Round-1 fable review finding: bsdtar 3.5.3 (macOS default) has a
+    // `--cd` alias for `-C`/`--directory` that GNU tar doesn't — not a
+    // prefix of "directory", so it needs its own exact-name recognition.
+    #[test]
+    fn tar_bsdtar_cd_alias_attached_matches_block() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&["tar", "-x", "--cd=/", "-f", "a.tar"]))
+            .unwrap();
+        assert_eq!(matched.decision(), Decision::Block);
+        assert_eq!(matched.id().as_str(), "tar-extract-over-root-or-home");
+    }
+
+    #[test]
+    fn tar_bsdtar_cd_alias_separated_matches_block() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&["tar", "-x", "--cd", "/", "-f", "a.tar"]))
+            .unwrap();
+        assert_eq!(matched.decision(), Decision::Block);
+        assert_eq!(matched.id().as_str(), "tar-extract-over-root-or-home");
+    }
+
+    // Round-1 fable review finding: tar-absolute-names-ask keys on the
+    // long option `--absolute-names`, which needs the same abbreviation
+    // treatment as `--directory`/`--extract`.
+    #[test]
+    fn tar_absolute_names_abbreviation_matches_ask() {
+        let rules = Rules::embedded().unwrap();
+        for cluster in ["--abs", "--a"] {
+            let matched = rules
+                .match_command(&argv(&["tar", "-x", cluster, "-f", "a.tar"]))
+                .unwrap_or_else(|| panic!("expected {cluster:?} to match a rule"));
+            assert_eq!(matched.decision(), Decision::Ask, "{cluster:?}");
+            assert_eq!(matched.id().as_str(), "tar-absolute-names-ask");
+        }
+    }
+
+    #[test]
+    fn tar_absolute_names_already_canonical_spelling_unaffected() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&["tar", "-x", "--absolute-names", "-f", "a.tar"]))
+            .unwrap();
+        assert_eq!(matched.decision(), Decision::Ask);
+        assert_eq!(matched.id().as_str(), "tar-absolute-names-ask");
+    }
+
+    // Round-2 fable review finding: bsdtar 3.5.3 (macOS default) spells
+    // `-P` as `--absolute-paths`, not GNU tar's `--absolute-names` — a
+    // different string this crate's own prefix family doesn't cover
+    // without its own exact/prefix alias, unlike --cd's relationship to
+    // --directory.
+    #[test]
+    fn tar_bsdtar_absolute_paths_alias_matches_ask() {
+        let rules = Rules::embedded().unwrap();
+        for cluster in ["--absolute-paths", "--absolute-p"] {
+            let matched = rules
+                .match_command(&argv(&["tar", "-x", cluster, "-f", "a.tar"]))
+                .unwrap_or_else(|| panic!("expected {cluster:?} to match a rule"));
+            assert_eq!(matched.decision(), Decision::Ask, "{cluster:?}");
+            assert_eq!(matched.id().as_str(), "tar-absolute-names-ask");
+        }
+    }
+
+    #[test]
+    fn tar_bsdtar_absolute_paths_alias_with_attached_value_matches_like_absolute_names() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&["tar", "-x", "--absolute-paths=x", "-f", "a.tar"]))
+            .unwrap();
+        assert_eq!(matched.decision(), Decision::Ask);
+        assert_eq!(matched.id().as_str(), "tar-absolute-names-ask");
+    }
+
+    // Round-1 fable review finding: an abbreviated extract-mode flag with
+    // an attached (real-tar-invalid) `=value` must decide identically to
+    // the canonical spelling with the same invalid `=value`, not more
+    // leniently.
+    #[test]
+    fn tar_extract_abbreviation_with_attached_value_matches_like_the_canonical_spelling() {
+        let rules = Rules::embedded().unwrap();
+        let abbreviated = rules
+            .match_command(&argv(&["tar", "--ex=x", "-f", "a.tar", "-C", "/"]))
+            .unwrap();
+        let canonical = rules
+            .match_command(&argv(&["tar", "--extract=x", "-f", "a.tar", "-C", "/"]))
+            .unwrap();
+        assert_eq!(abbreviated.decision(), Decision::Block);
+        assert_eq!(abbreviated.id(), canonical.id());
     }
 
     // ==== issue #86: matching_rest_by_name gained the same tar-dashless

@@ -7819,6 +7819,64 @@ mod tests {
         assert_eq!(verdict.decision(), Decision::Ask);
     }
 
+    // ==== Issue #128: GNU tar long-option abbreviations (`--dir=` for
+    // `--directory=`, `--ex`/`--extrac` for `--extract`, `--g` for
+    // `--get`) must not slip past the rules keyed off the canonical
+    // spelling — the same end-to-end decisions the unabbreviated forms
+    // already get. ====
+
+    #[test]
+    fn tar_directory_abbreviation_attached_blocks() {
+        assert_decision("tar -x --dir=/ -f a.tar", Decision::Block);
+    }
+
+    #[test]
+    fn tar_directory_abbreviation_separated_blocks() {
+        assert_decision("tar -x --dir / -f a.tar", Decision::Block);
+    }
+
+    #[test]
+    fn tar_extract_abbreviation_restores_block() {
+        assert_decision("tar --ex -f a.tar -C /", Decision::Block);
+    }
+
+    #[test]
+    fn tar_get_abbreviation_restores_block() {
+        assert_decision("tar --g -f a.tar -C /", Decision::Block);
+    }
+
+    #[test]
+    fn tar_directory_abbreviation_ordinary_path_is_unaffected() {
+        assert_decision("tar -x --dir=/some/path -f a.tar", Decision::Allow);
+    }
+
+    #[test]
+    fn tar_exclude_is_not_treated_as_a_directory_abbreviation() {
+        assert_decision("tar -x --exclude=/ -f a.tar", Decision::Allow);
+    }
+
+    #[test]
+    fn mv_target_dir_abbreviation_stays_out_of_scope() {
+        assert_decision("mv --target-dir=/dev/sda x", Decision::Allow);
+    }
+
+    #[test]
+    fn allowlisted_tar_extract_abbreviation_still_blocks() {
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[allow]]
+            id = "user-allow-tar"
+            reason = "trust me"
+            command = "tar"
+        "#,
+        );
+        // A Block verdict never downgrades via the allowlist (plan.md
+        // §6 item 8) — same invariant as the unabbreviated form, now
+        // exercised through the abbreviation rewrite too.
+        let verdict = analyze_with_policy("tar -x --dir=/ -f a.tar", &rules, &allowlist);
+        assert_eq!(verdict.decision(), Decision::Block);
+    }
+
     // ==== User config precedence: deny > ask > allow (plan.md §6 item 8) ====
 
     /// Merges `user_toml`'s `[[deny]]`/`[[ask]]`/`[[allow]]` onto the
