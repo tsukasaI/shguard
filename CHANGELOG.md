@@ -98,6 +98,23 @@ All notable changes to this project are documented in this file.
   `dd-write-device`/`dcfldd-write-device` now also target
   `/etc/passwd`/`/etc/shadow`.
 
+- A redirect target beginning with `$HOME`/`${HOME}` (e.g. `cat >
+  $HOME/.config/shguard/config.toml`) had no floor at all: shguard
+  performs no environment lookups, so `$HOME/...` normalizes to
+  `Unresolvable` and was silently dropped before ever reaching the
+  redirect-rule check, while the identical target spelled `~/...` was
+  already correctly Blocked (#203). Since `$HOME` and `~` expand to the
+  same runtime value, a redirect-write target shaped `$HOME<suffix>`
+  (bare, `${HOME}`, or double-quoted) now floors to `Ask` whenever
+  substituting `~` for `$HOME` would match a redirect rule — capped at
+  `Ask` rather than inheriting that rule's own decision, since this is a
+  correlation, not a proof. Deliberately narrow by design: an unrelated
+  variable (`$TMPDIR/scratch`) or a `$HOME`-prefixed target outside any
+  redirect rule's namespace (`$HOME/notes.txt`) stays `Allow`, and only a
+  *leading* `$HOME`/`${HOME}` piece is recognised — other variables
+  carrying the same practical risk (`$XDG_CONFIG_HOME/...`) remain a
+  disclosed residual.
+
 ## [0.6.0] - 2026-08-19
 
 ### Security

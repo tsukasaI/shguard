@@ -1364,9 +1364,22 @@ fn guardfall_shell_init_redirect_cases() {
         ("echo x >> ~/.bashrc.bak", Decision::Allow),
         // History files are deliberately outside this family.
         ("echo x >> ~/.bash_history", Decision::Allow),
-        // Disclosed residual: an unresolvable target has no floor of its
-        // own here (issue #203).
-        ("echo x >> $HOME/.zshrc", Decision::Allow),
+        // Issue #203: `$HOME` expands to the same value as `~`, so a
+        // `$HOME`-prefixed target now floors to Ask via
+        // `scan_redirect_home_env_floor` — no longer a disclosed residual.
+        ("echo x >> $HOME/.zshrc", Decision::Ask),
+        // `${HOME}` spelling and a double-quoted form both take the same
+        // path — the floor's piece-level substitution doesn't care which.
+        ("cat > ${HOME}/.config/shguard/config.toml", Decision::Ask),
+        ("cat > \"$HOME/.config/shguard/config.toml\"", Decision::Ask),
+        // Controls that motivate the design: an unrelated env var, or a
+        // `$HOME`-prefixed target that doesn't land in any redirect rule's
+        // namespace, must stay Allow — the floor is `$HOME`-specific
+        // correlation, not "any unresolvable redirect target Asks".
+        ("echo hi > $TMPDIR/scratch", Decision::Allow),
+        ("echo hi > $HOME/notes.txt", Decision::Allow),
+        // Reading, not writing — same kind filter as the `~` cases above.
+        ("cat < $HOME/.config/shguard/config.toml", Decision::Allow),
         // Disclosed residual, pre-existing and not introduced here: an
         // unresolvable same-line `cd` leaves a literal relative redirect
         // target unfloored, while the command side of the family raises
