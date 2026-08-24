@@ -447,8 +447,9 @@ const TAR_BSDTAR_ABSOLUTE_PATHS_ALIAS: &str = "absolute-paths";
 
 /// Rewrites a GNU-tar long-option abbreviation of `--directory` (attached
 /// `--dir=/` or separated `--dir /`), the bsdtar `--cd` alias for the
-/// same option, `--extract`/`--get`, or `--absolute-names` to its
-/// canonical spelling — see [`TAR_LONG_OPTION_DIRECTORY`]'s own docs for
+/// same option, `--extract`/`--get`, `--absolute-names`, or the bsdtar
+/// `--absolute-paths` alias for `--absolute-names`, to its canonical
+/// spelling — see [`TAR_LONG_OPTION_DIRECTORY`]'s own docs for
 /// why matching any non-empty prefix is safe. `None` — no rewrite needed
 /// — when nothing in `tail` is a recognized abbreviation. An
 /// already-canonical spelling is left untouched, not "rewritten to
