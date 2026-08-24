@@ -5727,7 +5727,8 @@ struct CwdState {
 
 impl CwdState {
     /// Seeds a fresh state from a recursion site's [`CwdContext`] (issue
-    /// #103's `cwd_seed`) with a genuinely EMPTY stack — only correct for a
+    /// #103's cwd-seeding mechanism) with a genuinely EMPTY stack — only
+    /// correct for a
     /// boundary that spawns a real, fresh interpreter process with its own
     /// empty `DIRSTACK` (`bash -c`/`sh -c`/`zsh -c`/`dash -c`/`fish -c`/
     /// `flock -c`/`su -c`/`env -S`, and the two true top-level entry
