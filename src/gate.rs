@@ -5583,6 +5583,7 @@ fn cd_directive(rest: &[NormalizedWord], env: &Env, is_pushd: bool) -> CwdOutcom
         | PathForm::NamedUserHome
         | PathForm::NamedUserHomeEscapes(_)
         | PathForm::DirStack(_)
+        | PathForm::DirStackEscapesEmpty
         | PathForm::Opaque => CwdOutcome::Poison,
     }
 }
@@ -7339,8 +7340,35 @@ mod tests {
     #[test]
     fn dd_dirstack_tilde_escape_to_empty_tail_stays_allow() {
         // `~-/..` is one level *above* the unknown anchor, not the anchor
-        // itself — must not be conflated with the bare-anchor case above.
+        // itself, but stays Allow here regardless: `of=` is a `strip:
+        // Some(..)` target slot, excluded from `dirstack_plausible`'s
+        // floor the same way the bare-anchor case is (issue #134's
+        // attached-flag exclusion) — contrast the unattached `rm -rf
+        // ~+/..` case just below, which floors to Ask.
         assert_decision("dd of=~-/..", Decision::Allow);
+    }
+
+    #[test]
+    fn rm_rf_dirstack_tilde_escape_to_empty_tail_asks() {
+        // Fable review of PR #340: `~+/..` is `$PWD/..` lexically — the
+        // same "one level above an unknown-but-real anchor" shape plain
+        // `..` is for an unresolved cwd — and must not silently Allow
+        // just because `DirStackEscapesEmpty` carries no anchor value to
+        // check against `rm`'s bare-`~` target the way `~+` itself would.
+        assert_decision("rm -rf ~+/..", Decision::Ask);
+        assert_decision("rm -rf ~-/..", Decision::Ask);
+        assert_decision("rm -rf ~2/..", Decision::Ask);
+    }
+
+    #[test]
+    fn rm_rf_dirstack_tilde_non_escaping_descent_stays_allow() {
+        // Regression guard: a real (non-escaping) subdirectory tail must
+        // not be swept into the escape-to-empty floor above just because
+        // it shares a dirstack anchor — `subdir`/`foo` don't land in any
+        // of rm's dangerous targets, so these stay Allow exactly as
+        // before this fix.
+        assert_decision("rm -rf ~+/subdir", Decision::Allow);
+        assert_decision("rm -rf ~-3/foo", Decision::Allow);
     }
 
     #[test]
@@ -7575,7 +7603,7 @@ mod tests {
         // anchor floating through `ascent_descent_plausible` — but this
         // specific tail still Allows, because `/etc/passwd` was never one
         // of `rm-recursive-force-dangerous-target`'s own declared targets
-        // (only `/`, `~`, `/dev/*`) to begin with. Exact parity with plain
+        // to begin with (see `rules/blocklist.toml`). Exact parity with plain
         // `../../etc/passwd`, equally unmatched for the identical reason
         // — a target-coverage gap the sibling plain-ascent floor already
         // has too, not a residual #133 gap. See `dd_dirstack_tilde_descent_to_dev_asks`
