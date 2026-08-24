@@ -459,8 +459,10 @@ becomes the sole candidate and it matches the localhost except; treat
 each declared flag as a per-rule trust decision with the same weight as
 an `except_targets` entry itself, and expect a higher false-ask rate too
 — a declared letter appearing incidentally inside an unrelated token's
-text also yields a (harmless, fail-closed-direction) junk candidate. For
-a command using this idiom without declaring the flag here, guard it
+text also yields a junk candidate, which is fail-closed-direction once
+the candidate set would otherwise already be non-empty, but is the same
+suppression risk as above if the set would otherwise have been empty.
+For a command using this idiom without declaring the flag here, guard it
 with `required_flags`/a separate `deny` entry instead of relying
 on `except_targets` alone.
 

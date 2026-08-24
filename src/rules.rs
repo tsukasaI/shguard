@@ -2731,9 +2731,10 @@ fn target_candidate(token: &str) -> Option<&str> {
 /// `-x VALUE`: once a cluster reaches a flag that takes a value,
 /// everything after it IS that value, not more flag letters). Every
 /// character before the matched letter is just an independent boolean
-/// flag in getopt's model and is skipped without being checked against
-/// `attached_value_flags` itself — this function only ever needs to
-/// find where the glued value starts, not validate the flags before it.
+/// flag in getopt's model and is skipped without being validated as a
+/// real, declared flag for the wrapper being called — this function only
+/// ever needs to find where the glued value starts, not validate the
+/// flags before it.
 ///
 /// Only the exact single-character-then-rest shape is recognised: `-x`
 /// alone (nothing follows) is not this shape, so a bare declared flag at
@@ -2749,12 +2750,15 @@ fn target_candidate(token: &str) -> Option<&str> {
 /// anywhere in a dash-prefixed token, not just a genuine flag position,
 /// a declared letter appearing incidentally inside an unrelated token's
 /// text (e.g. `x` declared, token `-yhttp://evil.example.com` containing
-/// "example") yields a junk tail candidate too. Fail-closed direction
-/// only (more candidates means a rule is less likely to be wrongly
-/// all-excepted, i.e. more likely to ask/block, never less) — a rule
-/// author declaring `attached_value_flags` should expect a higher false-Ask
-/// rate on tokens that happen to contain the letter, not just on the
-/// flag shapes they intended to catch.
+/// "example") yields a junk tail candidate too. Fail-closed only once the
+/// candidate set would otherwise already be non-empty (more candidates
+/// there means more likely to ask/block, never less) — a rule author
+/// declaring `attached_value_flags` should expect a higher false-Ask rate
+/// on tokens that happen to contain the letter, not just on the flag
+/// shapes they intended to catch. When the candidate set would otherwise
+/// be empty, though, this is the same mechanism as the suppression case
+/// disclosed below: an incidental junk candidate that happens to match an
+/// except is indistinguishable, at this point, from a mis-split one.
 ///
 /// Because the scan has no notion of which earlier characters are
 /// themselves value-taking, it can find a declared letter that's really
@@ -2769,12 +2773,14 @@ fn target_candidate(token: &str) -> Option<&str> {
 /// the two shapes apart from the token's text alone.
 ///
 /// **Known limitation, disclosed rather than silently accepted**: unlike
-/// [`target_candidate`]'s gap (which can only ever add a candidate where
-/// none existed before, never remove one), a mis-split truncated
-/// candidate here CAN newly suppress a rule that used to fire. If the
-/// truncated tail happens to match an `except_targets` alternative, it
-/// can turn a previously non-empty, non-all-excepted candidate set into
-/// one that vacuously satisfies "all candidates excepted" — e.g. rule
+/// [`target_candidate`]'s gap (a *missing* candidate — the proxy target
+/// stays invisible, but the candidate set's existing members are
+/// unaffected), a mis-split truncated candidate here CAN newly suppress a
+/// rule that used to fire, because the scan only ever adds candidates,
+/// never removes them: if the truncated tail happens to match an
+/// `except_targets` alternative, it can turn a previously EMPTY candidate
+/// set (which fails "all candidates excepted" and so lets the rule fire)
+/// into a non-empty, all-excepted one — e.g. rule
 /// `except_targets = [{ prefix = "http://localhost" }]`,
 /// `attached_value_flags = ["x"]`, argv
 /// `curl -yhttp://evil.test -oAxhttp://localhost`: undeclared `-o`'s true
@@ -9591,7 +9597,26 @@ mod tests {
     // covered by value_flags too.
     #[test]
     fn attached_value_flags_mis_split_can_suppress_an_undeclared_flags_value() {
-        let rules = Rules::parse(
+        let argv_words = argv(&["curl", "-yhttp://evil.test", "-oAxhttp://localhost"]);
+
+        let baseline = Rules::parse(
+            r#"
+            [[command]]
+            id = "curl-non-localhost"
+            reason = "ask unless curl targets localhost"
+            decision = "ask"
+            command = "curl"
+            except_targets = [{ prefix = "http://localhost" }]
+        "#,
+        )
+        .unwrap();
+        assert!(
+            baseline.match_command(&argv_words).is_some(),
+            "baseline (no attached_value_flags declared): the rule correctly fires since \
+             http://evil.test is not excepted"
+        );
+
+        let with_attached_value_flags = Rules::parse(
             r#"
             [[command]]
             id = "curl-non-localhost"
@@ -9604,12 +9629,8 @@ mod tests {
         )
         .unwrap();
         assert!(
-            rules
-                .match_command(&argv(&[
-                    "curl",
-                    "-yhttp://evil.test",
-                    "-oAxhttp://localhost"
-                ]))
+            with_attached_value_flags
+                .match_command(&argv_words)
                 .is_none(),
             "disclosed limitation: an undeclared earlier flag's glued value can be mis-split at \
              a later attached_value_flags letter, manufacturing a candidate that matches \
