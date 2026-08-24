@@ -150,11 +150,46 @@ const MEMORY_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const MEMORY_LIMIT_BYTES: u64 = 256 * 1024 * 1024;
 
 fn main() {
-    let mut args = std::env::args();
+    // `args_os`, not `args`: the latter panics outright on a non-UTF-8
+    // argument, which would turn a malformed-but-harmless human typo (this
+    // whole block only ever runs for a human invocation — see below) into
+    // an uncaught panic before `install_panic_hook`/`catch_unwind` are even
+    // reachable. `to_str()` below folds a non-UTF-8 first argument to
+    // `None`, which the catch-all arm treats the same as any other
+    // unrecognized argument.
+    let mut args = std::env::args_os();
     let _binary_name = args.next();
-    if args.next().as_deref() == Some("--version") {
-        println!("shguard {}", env!("CARGO_PKG_VERSION"));
-        return;
+    let first_arg = args.next();
+    let extra_arg = args.next();
+    match first_arg.as_deref().and_then(std::ffi::OsStr::to_str) {
+        Some("--version") if extra_arg.is_none() => {
+            let _ = writeln!(io::stdout(), "shguard {}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
+        Some("--check-config") if extra_arg.is_none() => {
+            std::process::exit(check_config());
+        }
+        // The PreToolUse hook contract never passes shguard any arguments
+        // at all (Claude Code invokes it bare, feeding the payload via
+        // stdin) — `first_arg` is `None` on every real hook invocation, so
+        // this arm (guarded on `first_arg.is_some()`) can never reject real
+        // hook traffic, only a human's mistake: an unrecognized flag, a
+        // non-flag positional, a trailing argument after a recognized
+        // flag, or a non-UTF-8 argument, all of which would otherwise
+        // silently fall through to hook mode below and block on stdin
+        // instead of reporting the mistake. An invalid flag/argument is an
+        // error, never a silent no-op — the worst failure mode a checking
+        // tool can have is a typo that skips the check and exits 0 anyway.
+        _ if first_arg.is_some() => {
+            let rest: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+            let _ = writeln!(
+                io::stderr(),
+                "shguard: unrecognized arguments {rest:?} (known flags: --version, \
+                 --check-config, neither taking further arguments)"
+            );
+            std::process::exit(2);
+        }
+        _ => {}
     }
 
     install_panic_hook();
@@ -353,6 +388,61 @@ fn backtrace_requested() -> bool {
     }
 }
 
+/// `shguard --check-config`: a one-shot, human- or CI-triggered lint pass
+/// over the resolved user config, distinct from the PreToolUse hook path
+/// ([`run`]) this binary otherwise only ever runs. Exists because the hook
+/// path can't safely surface issue #208's warning itself: it re-loads
+/// config fresh on every single command invocation with no persistent
+/// process or "config changed" signal, so a naive `eprintln!` at load time
+/// would repeat on every matching command for the lifetime of a Claude
+/// Code session, not once when the config actually changes — see
+/// `Policy::rules_with_mixed_except_targets`'s docs for the full
+/// reasoning. Exit codes follow this repo's check/lint convention: `0`
+/// clean, `1` findings (a real problem to fix, not a runtime failure), `2`
+/// couldn't even load the config to check it. Deliberately outside
+/// `main`'s `catch_unwind`/watchdog boundary — see [`run`]'s own docs for
+/// why that boundary exists; `check_config` needs neither, since it runs
+/// outside the PreToolUse hook contract entirely and has none of `run`'s
+/// "never hang, always emit exactly one decision" obligations.
+///
+/// Writes via `writeln!` (discarding the write error), not
+/// `println!`/`eprintln!` (which panic on a write failure): a human piping
+/// this into `head` or another pager that closes the pipe early (`EPIPE`)
+/// must not turn a clean or a findings run into a panic exit code, the
+/// same reasoning [`install_panic_hook`]'s own docs give for using
+/// `writeln!` there.
+fn check_config() -> i32 {
+    let policy = match shguard::config::Policy::load() {
+        Ok(policy) => policy,
+        Err(err) => {
+            let _ = writeln!(
+                io::stderr(),
+                "shguard --check-config: failed to load config: {err}"
+            );
+            return 2;
+        }
+    };
+
+    let mixed = policy.rules_with_mixed_except_targets();
+    if mixed.is_empty() {
+        let _ = writeln!(io::stdout(), "shguard --check-config: no issues found");
+        return 0;
+    }
+
+    for id in &mixed {
+        let _ = writeln!(
+            io::stderr(),
+            "shguard --check-config: rule {:?} mixes a `url_host` except_targets entry with an \
+             `exact`/`prefix` entry — the string-based entry still matches whatever the \
+             `url_host` entry was added to reject (e.g. a userinfo-spoofed candidate), so the \
+             rule gains no additional protection from adding `url_host` alongside it; replace \
+             the old entry, don't add `url_host` next to it",
+            id.as_str()
+        );
+    }
+    1
+}
+
 /// The composition root's actual work — config load, stdin read, hand-off
 /// to the adapter — as a plain fn item, not a closure passed to
 /// [`std::panic::catch_unwind`] in [`main`]. A closure that captures
@@ -368,10 +458,14 @@ fn backtrace_requested() -> bool {
 /// So does the watchdog timeout: `run` executes entirely on the worker
 /// thread `main` spawns, so a hang anywhere in here (stdin read, config
 /// load, or command evaluation) is bounded by [`EVALUATION_TIMEOUT`] the
-/// same way. The `--version` branch in `main` is deliberately outside
-/// both boundaries: it never touches config, stdin, or command
-/// evaluation, so there is nothing there for the fail-closed guarantee to
-/// protect.
+/// same way. The `--version`/`--check-config` branches in `main` are
+/// deliberately outside both boundaries: `--version` never touches config,
+/// stdin, or command evaluation, so there is nothing there for the
+/// fail-closed guarantee to protect; `--check-config` ([`check_config`])
+/// does load config, but as a human- or CI-triggered, one-shot diagnostic
+/// run outside the PreToolUse hook contract entirely — it has none of
+/// `run`'s "never hang, always emit exactly one decision" obligations, so
+/// it needs neither the panic boundary nor the watchdog.
 fn run() -> serde_json::Value {
     // Test-only panic injection (issue #52): there is no currently-known
     // reachable panic in this binary to regression-test the `catch_unwind`

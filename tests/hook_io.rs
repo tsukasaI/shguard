@@ -100,3 +100,53 @@ fn version_flag_prints_version() {
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
     assert!(stdout.contains(env!("CARGO_PKG_VERSION")));
 }
+
+// issue #208 follow-up: an unrecognized or malformed flag must be reported
+// as an error (exit 2), not silently fall through to hook mode — the
+// PreToolUse hook contract never passes shguard any arguments, so
+// rejecting a flag-shaped argument here can never reject real hook
+// traffic, only a human's typo.
+
+#[test]
+fn unrecognized_flag_exits_with_error_instead_of_falling_through_to_hook_mode() {
+    Command::cargo_bin("shguard")
+        .expect("shguard binary should build")
+        .arg("--check-confg")
+        .assert()
+        .failure()
+        .code(2);
+}
+
+// A bare positional argument (no leading `-` at all) must be rejected the
+// same way — the catch-all guard is `first_arg.is_some()`, not
+// `starts_with('-')`, specifically so a typo like `check-config` (missing
+// dashes) doesn't silently fall through to hook mode either.
+#[test]
+fn non_flag_positional_argument_exits_with_error_instead_of_falling_through_to_hook_mode() {
+    Command::cargo_bin("shguard")
+        .expect("shguard binary should build")
+        .arg("check-config")
+        .assert()
+        .failure()
+        .code(2);
+}
+
+#[test]
+fn version_flag_with_trailing_argument_exits_with_error() {
+    Command::cargo_bin("shguard")
+        .expect("shguard binary should build")
+        .args(["--version", "extra"])
+        .assert()
+        .failure()
+        .code(2);
+}
+
+#[test]
+fn check_config_flag_with_trailing_argument_exits_with_error() {
+    Command::cargo_bin("shguard")
+        .expect("shguard binary should build")
+        .args(["--check-config", "extra"])
+        .assert()
+        .failure()
+        .code(2);
+}

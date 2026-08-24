@@ -139,8 +139,8 @@ impl From<crate::rules::RulesError> for ConfigError {
 /// A fully loaded, merged policy: the embedded blocklist/allowlist, plus
 /// whatever a user config contributed, plus this invocation's
 /// self-protection rules. Opaque to callers outside this crate — the only
-/// public operations are [`Policy::load`] and passing a `&Policy` to
-/// [`crate::analyze_with_policy`].
+/// public operations are [`Policy::load`], [`Policy::rules_with_mixed_except_targets`],
+/// and passing a `&Policy` to [`crate::analyze_with_policy`].
 ///
 /// `Clone` exists primarily so [`crate::analyze_with_policy`] can hand an
 /// owned copy into the bounded-evaluation worker thread `src/watchdog.rs`
@@ -298,6 +298,52 @@ impl Policy {
             rules: std::sync::Arc::new(rules),
             allowlist: std::sync::Arc::new(allowlist),
         })
+    }
+
+    /// Ids of every deny/ask/allow rule in this policy whose
+    /// `except_targets` mixes a `url_host` entry with an `exact`/`prefix`
+    /// entry (issue #208) — a real, consequential trap (the string entry
+    /// still matches whatever `url_host` was added to reject, so the rule
+    /// gains no protection from adding it *alongside* rather than in
+    /// place of the old entry), but not itself a config-load error
+    /// (array-level "these two entries target the same host" isn't
+    /// mechanically decidable without false-positive risk on a
+    /// legitimate config).
+    ///
+    /// Not consulted by [`crate::analyze`]/[`crate::analyze_with_policy`]
+    /// or the `shguard` hook at all: a per-invocation hook binary that
+    /// re-loads its config on every single command has no way to warn on
+    /// this once, at config-change time, without either spamming stderr
+    /// on every matching command or introducing persistent state this
+    /// crate otherwise has none of. `shguard --check-config`
+    /// (`src/bin/shguard.rs`) is the intended caller — a human- or
+    /// CI-triggered, one-shot lint pass.
+    ///
+    /// Scans the embedded blocklist/allowlist too, not just what a user
+    /// config contributed — deliberately: no embedded rule uses `url_host`
+    /// today (checked `rules/*.toml`), but if a future shipped rule ever
+    /// did mix the two shapes, this repo's own CI running
+    /// `shguard --check-config` against a zero-config invocation is
+    /// exactly what should catch that regression before it ships. A rule
+    /// id flagged this way isn't one a caller can act on themselves the
+    /// way `--check-config`'s own "replace the old entry" remediation text
+    /// assumes (a user can't edit or override an embedded rule — a
+    /// same-id user rule fails closed at load time), but that's a defect
+    /// in the embedded rule itself, not a false positive from this method.
+    ///
+    /// Scoped to `except_targets` only, per issue #208's own title —
+    /// deliberately doesn't scan an allowlist entry's own `targets` for
+    /// the same mixed shape (`targets = [{ prefix = "http://localhost" },
+    /// { url_host = "localhost" }]`), even though the identical trap
+    /// exists there too (`targets` are OR'd the same way, in the
+    /// allow-widening rather than block-narrowing direction). Not
+    /// implemented here; a legitimate follow-up if it turns out to matter
+    /// in practice.
+    #[must_use]
+    pub fn rules_with_mixed_except_targets(&self) -> Vec<crate::verdict::RuleId> {
+        let mut ids = self.rules.ids_with_mixed_except_targets();
+        ids.extend(self.allowlist.ids_with_mixed_except_targets());
+        ids
     }
 }
 
