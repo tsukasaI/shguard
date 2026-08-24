@@ -2724,30 +2724,51 @@ fn target_candidate(token: &str) -> Option<&str> {
 /// except_targets candidate, rather than staying invisible the way
 /// [`target_candidate`]'s "Known limitation" section discloses.
 ///
-/// Only the exact single-character-then-rest shape at the *leading*
-/// dash position is recognised: `-x` alone (nothing follows) is not this
-/// shape, so a bare declared flag yields no candidate at all, same as an
+/// Issue #214: a declared letter is recognised anywhere in the cluster,
+/// not just the leading position — a real left-to-right scan matching
+/// getopt's own short-cluster parsing (`-sxVALUE` is `-s` plus
+/// `-x VALUE`: once a cluster reaches a flag that takes a value,
+/// everything after it IS that value, not more flag letters). Every
+/// character before the matched letter is just an independent boolean
+/// flag in getopt's model and is skipped without being checked against
+/// `attached_value_flags` itself — this function only ever needs to
+/// find where the glued value starts, not validate the flags before it.
+///
+/// Only the exact single-character-then-rest shape is recognised: `-x`
+/// alone (nothing follows) is not this shape, so a bare declared flag at
+/// the end of a cluster yields no candidate at all, same as an
 /// undeclared one — not because an empty candidate could wrongly satisfy
 /// an except_targets alternative (`convert_target` rejects an empty
 /// `exact`/`prefix` at load, so `""` can never match a loadable
 /// alternative either way), but because an un-exceptable `""` candidate
-/// would make the rule spuriously fire on `-x` alone, noise this
-/// function avoids by not manufacturing it in the first place. A
-/// declared flag glued into a combined cluster (`-sxVALUE`, `x` not in
-/// the leading position) is likewise not recognised — shape-based
-/// matching can't tell which cluster position "owns" the trailing text,
-/// the same limitation [`ValueFlag::is_bare`] already discloses for
-/// clusters.
+/// would make the rule spuriously fire on a bare cluster, noise this
+/// function avoids by not manufacturing it in the first place.
+///
+/// Because the scan has no notion of which earlier characters are
+/// themselves value-taking, it can find a declared letter that's really
+/// part of an EARLIER (undeclared) flag's own glued value rather than a
+/// genuine flag position — e.g. `-oxyz` with `x` declared but `o`
+/// actually the value-taking flag would split at `x`, yielding `"yz"`
+/// instead of `"xyz"` as `o`'s true value. This can't loosen an
+/// except_targets check below what an undeclared token already gets
+/// (the caller only ever reaches here for a dash-prefixed token
+/// [`target_candidate`] would otherwise skip entirely, so this always
+/// adds a candidate where there was none — and adding an *additional*
+/// excepted candidate can never flip an already-non-excepted candidate
+/// elsewhere in the same call back to all-excepted, since
+/// `Iterator::all` only turns false-to-true by removing a false item,
+/// never by adding a true one). Worst case it under- or over-shoots the
+/// true value, same shape-based trade-off `attached_value_flags`
+/// already represents for the leading-position case.
 fn attached_value_candidate<'a>(token: &'a str, attached_value_flags: &[char]) -> Option<&'a str> {
-    let mut chars = token.chars();
-    if chars.next() != Some('-') {
+    let rest = token.strip_prefix('-')?;
+    if rest.starts_with('-') {
         return None;
     }
-    let flag = chars.next()?;
-    if !attached_value_flags.contains(&flag) {
-        return None;
-    }
-    let value = chars.as_str();
+    let (flag_index, flag) = rest
+        .char_indices()
+        .find(|(_, c)| attached_value_flags.contains(c))?;
+    let value = &rest[flag_index + flag.len_utf8()..];
     if value.is_empty() {
         return None;
     }
@@ -9303,14 +9324,15 @@ mod tests {
         );
     }
 
+    // Issue #214: a declared flag glued into a non-leading cluster
+    // position (`-sxVALUE`, `s` then `x`) is now recognised via a
+    // left-to-right scan of the cluster, matching real getopt short-flag
+    // parsing (once a cluster reaches a value-taking flag, everything
+    // after it is that flag's value). This used to be a disclosed known
+    // gap (see the removed `attached_value_flags_cluster_position_is_not
+    // _recognized` test this replaces).
     #[test]
-    fn attached_value_flags_cluster_position_is_not_recognized() {
-        // Same known limitation ValueFlag::is_bare already discloses for
-        // clusters: a declared flag glued into a leading cluster (`s` then
-        // `x`, not `x` alone in the leading position) isn't recognised —
-        // shape-based matching can't tell which position "owns" the
-        // trailing text. This keeps the pre-existing known-gap behavior
-        // for the cluster form even after declaring `x`.
+    fn attached_value_flags_recognises_a_non_leading_cluster_position() {
         let rules = Rules::parse(
             r#"
             [[command]]
@@ -9330,8 +9352,158 @@ mod tests {
                     "http://localhost",
                     "-sxhttp://evil.example.com"
                 ]))
+                .is_some(),
+            "a declared flag glued into a non-leading cluster position is now recognised, \
+             surfacing the glued value as a candidate that fails except_targets"
+        );
+    }
+
+    // The leading-position case (already covered by
+    // `attached_value_flags_recognises_a_declared_short_flags_glued_value_as_a_candidate`
+    // above) must keep working unchanged after the #214 cluster-scan
+    // widening — a single-character cluster of just the declared flag is
+    // the degenerate case of the same code path.
+    #[test]
+    fn attached_value_flags_leading_position_still_recognised_after_cluster_scan() {
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "curl-non-localhost"
+            reason = "ask unless curl targets localhost"
+            decision = "ask"
+            command = "curl"
+            except_targets = [{ prefix = "http://localhost" }]
+            attached_value_flags = ["x"]
+        "#,
+        )
+        .unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "curl",
+                    "http://localhost",
+                    "-xhttp://evil.example.com"
+                ]))
+                .is_some(),
+            "the leading-position shape must still be recognised exactly as before"
+        );
+    }
+
+    // Every character before the matched declared letter is treated as an
+    // independent boolean flag and skipped without validation — the scan
+    // only looks for WHERE the declared letter is, not whether the
+    // characters before it are themselves meaningful flags for the
+    // wrapper in question.
+    #[test]
+    fn attached_value_flags_skips_unrelated_leading_characters_in_cluster() {
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "curl-non-localhost"
+            reason = "ask unless curl targets localhost"
+            decision = "ask"
+            command = "curl"
+            except_targets = [{ prefix = "http://localhost" }]
+            attached_value_flags = ["x"]
+        "#,
+        )
+        .unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "curl",
+                    "http://localhost",
+                    "-SLxhttp://evil.example.com"
+                ]))
+                .is_some(),
+            "multiple unrelated leading characters before the declared letter must not prevent \
+             recognition of its glued value"
+        );
+    }
+
+    // A declared letter that never appears anywhere in the cluster still
+    // yields no candidate at all — the scan doesn't manufacture a
+    // candidate out of thin air just because SOME character in the
+    // cluster happens to be dash-prefixed.
+    #[test]
+    fn attached_value_flags_no_candidate_when_declared_letter_absent_from_cluster() {
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "curl-non-localhost"
+            reason = "ask unless curl targets localhost"
+            decision = "ask"
+            command = "curl"
+            except_targets = [{ prefix = "http://localhost" }]
+            attached_value_flags = ["x"]
+        "#,
+        )
+        .unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "curl",
+                    "http://localhost",
+                    "-sLhttp://evil.invalid"
+                ]))
                 .is_none(),
-            "a declared flag glued into a non-leading cluster position stays an unrecognised gap"
+            "a cluster containing none of the declared attached_value_flags letters must not \
+             spuriously yield a candidate, even with trailing dash-shaped text"
+        );
+    }
+
+    // A bare cluster ending in the declared letter with nothing glued
+    // after it (`-sx`) must not become an empty candidate, the same as
+    // the already-tested leading-position bare case.
+    #[test]
+    fn attached_value_flags_bare_declared_flag_at_end_of_cluster_yields_no_candidate() {
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "curl-non-localhost"
+            reason = "ask unless curl targets localhost"
+            decision = "ask"
+            command = "curl"
+            except_targets = [{ prefix = "http://localhost" }]
+            attached_value_flags = ["x"]
+        "#,
+        )
+        .unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "http://localhost", "-sx"]))
+                .is_none(),
+            "a declared flag at the end of a cluster with nothing glued after it must not \
+             become a candidate"
+        );
+    }
+
+    // A declared flag glued after a long-option-shaped token (`--x...`)
+    // must not be treated as a short cluster — that shape belongs to
+    // ValueFlag::attached_value_token's `--name=value` handling instead.
+    #[test]
+    fn attached_value_flags_does_not_treat_long_option_as_a_cluster() {
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "curl-non-localhost"
+            reason = "ask unless curl targets localhost"
+            decision = "ask"
+            command = "curl"
+            except_targets = [{ prefix = "http://localhost" }]
+            attached_value_flags = ["x"]
+        "#,
+        )
+        .unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "curl",
+                    "http://localhost",
+                    "--xhttp://evil.example.com"
+                ]))
+                .is_none(),
+            "a `--`-prefixed token must never be scanned as a short-flag cluster"
         );
     }
 
