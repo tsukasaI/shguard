@@ -364,7 +364,13 @@ pub(crate) fn analyze(command: &str) -> Verdict {
             );
         }
     };
-    analyze_at_depth(command, 0, &rules, &allowlist, CwdContext::Initial)
+    analyze_at_depth(
+        command,
+        0,
+        &rules,
+        &allowlist,
+        CwdState::seed(CwdContext::Initial),
+    )
 }
 
 /// Config-aware sibling of [`analyze`]: same pipeline, but `rules`/
@@ -374,7 +380,13 @@ pub(crate) fn analyze(command: &str) -> Verdict {
 /// `Allowlist::embedded()` itself, never this function's arguments.
 #[must_use]
 pub(crate) fn analyze_with_policy(command: &str, rules: &Rules, allowlist: &Allowlist) -> Verdict {
-    analyze_at_depth(command, 0, rules, allowlist, CwdContext::Initial)
+    analyze_at_depth(
+        command,
+        0,
+        rules,
+        allowlist,
+        CwdState::seed(CwdContext::Initial),
+    )
 }
 
 /// The recursive core of [`analyze`]/[`analyze_with_policy`]: `depth`
@@ -383,24 +395,26 @@ pub(crate) fn analyze_with_policy(command: &str, rules: &Rules, allowlist: &Allo
 /// recursive call so a deeply-nested command line never re-parses the
 /// blocklist TOML per level.
 ///
-/// `cwd_seed` (issue #103) is the folded cwd context this recursed command
-/// string starts from — [`CwdContext::Initial`] for the two top-level entry
-/// points ([`analyze`]/[`analyze_with_policy`]), and a CLONE of whatever
-/// context was live at the recursion site for every other caller (a
-/// `$()`/backtick payload, a resolved `bash -c` script, a heredoc body, …):
-/// every one of those constructs starts a genuinely separate subshell or
-/// process that inherits the CURRENT working directory, never a fresh one
-/// (see `CwdContext`'s own docs' "Recursion" section for why this is never
-/// `Initial` at those call sites). Owned, not borrowed: this recursion
-/// starts its own fresh [`Env`] too (`evaluate_command_line`'s docs) and
-/// gets its own independent, mutable cwd context that can never write back
-/// to the caller's — the caller's own local variable is what got cloned.
+/// `cwd` (issue #103, extended by #210) is the already-seeded [`CwdState`]
+/// this recursed command string starts from — the CALLER builds it via
+/// [`CwdState::seed`] (a genuinely fresh process boundary: `bash -c`
+/// family/`fish -c`/`flock -c`/`su -c`/`env -S`, or the two top-level entry
+/// points, always seeded with [`CwdContext::Initial`] there) or
+/// [`CwdState::seed_unknown_stack`] (a same-process boundary that really
+/// does inherit the live directory stack via fork: `$()`/backtick, a
+/// process substitution, a heredoc body substitution, `eval`'s joined
+/// script), never `Initial` at any non-top-level call site (see
+/// `CwdContext`'s own docs' "Recursion" section, and [`CwdState`]'s own
+/// docs for the seed-choice rationale). Owned, not borrowed: this
+/// recursion starts its own fresh [`Env`] too (`evaluate_command_line`'s
+/// docs) and gets its own independent, mutable cwd state that can never
+/// write back to the caller's.
 fn analyze_at_depth(
     command: &str,
     depth: usize,
     rules: &Rules,
     allowlist: &Allowlist,
-    cwd_seed: CwdContext,
+    mut cwd: CwdState,
 ) -> Verdict {
     if depth > MAX_SUBSTITUTION_DEPTH {
         return Verdict::ask(
@@ -413,10 +427,7 @@ fn analyze_at_depth(
     }
 
     match parser::parse(command) {
-        Ok(command_line) => {
-            let mut cwd = CwdState::seed(cwd_seed);
-            evaluate_command_line(&command_line, rules, allowlist, depth, &mut cwd)
-        }
+        Ok(command_line) => evaluate_command_line(&command_line, rules, allowlist, depth, &mut cwd),
         Err(err) => Verdict::ask(
             Reason::new(format!("could not parse command: {err}")),
             Vec::new(),
@@ -2959,14 +2970,21 @@ fn evaluate_command_position_substitution(
 ) -> Verdict {
     let mut blocked = false;
     for inner in inner_commands {
-        if analyze_at_depth(inner, depth + 1, rules, allowlist, cwd.clone()).decision()
+        if analyze_at_depth(
+            inner,
+            depth + 1,
+            rules,
+            allowlist,
+            CwdState::seed_unknown_stack(cwd.clone()),
+        )
+        .decision()
             == Decision::Block
         {
             blocked = true;
         }
     }
     for inner in inner_process_substitutions {
-        let mut isolated = CwdState::seed(cwd.clone());
+        let mut isolated = CwdState::seed_unknown_stack(cwd.clone());
         if evaluate_command_line(inner, rules, allowlist, depth, &mut isolated).decision()
             == Decision::Block
         {
@@ -3086,8 +3104,13 @@ fn evaluate_dash_c(
             return Some(match rest_words.get(i + 1) {
                 Some(script_word) => match script_word.resolution() {
                     Resolution::Resolved(script) => {
-                        let inner =
-                            analyze_at_depth(script, depth + 1, rules, allowlist, cwd.clone());
+                        let inner = analyze_at_depth(
+                            script,
+                            depth + 1,
+                            rules,
+                            allowlist,
+                            CwdState::seed(cwd.clone()),
+                        );
                         let reason = format!(
                             "`{interpreter}`'s `-c` flag position could not be statically \
                              resolved, but a trailing word recurses through the full pipeline; \
@@ -3177,7 +3200,7 @@ fn evaluate_dash_c(
             depth,
             rules,
             allowlist,
-            cwd,
+            CwdState::seed(cwd.clone()),
         )),
         Resolution::Unresolvable(_) => Some(Verdict::ask(
             Reason::new(format!(
@@ -3294,7 +3317,7 @@ fn evaluate_fish(
                 depth,
                 rules,
                 allowlist,
-                cwd,
+                CwdState::seed(cwd.clone()),
             )
         })
         .reduce(fold_worst);
@@ -3306,7 +3329,13 @@ fn evaluate_fish(
         // instead of demoting the whole shape to the bare Ask floor.
         let trailing = match rest_words.get(index + 1).map(NormalizedWord::resolution) {
             Some(Resolution::Resolved(script)) => {
-                let inner = analyze_at_depth(script, depth + 1, rules, allowlist, cwd.clone());
+                let inner = analyze_at_depth(
+                    script,
+                    depth + 1,
+                    rules,
+                    allowlist,
+                    CwdState::seed(cwd.clone()),
+                );
                 let reason = format!(
                     "`fish`'s option list could not be statically resolved, but a trailing word \
                      recurses through the full pipeline; inner decision: {:?}{}",
@@ -3436,7 +3465,7 @@ fn evaluate_eval(
         depth,
         rules,
         allowlist,
-        cwd,
+        CwdState::seed_unknown_stack(cwd.clone()),
     ))
 }
 
@@ -3462,23 +3491,33 @@ fn evaluate_eval(
 /// before this function is ever called), so there is nothing left
 /// uncertain for an inner Allow to hide.
 ///
-/// `cwd` (issue #103) is cloned and passed as the recursed call's seed, not
-/// [`CwdContext::Initial`]: a `-c` script's interpreter is a genuinely
-/// separate process, but (unlike a `$(...)`/backtick subshell fork) it
-/// still starts in the SAME working directory as its parent — `cd
-/// ~/.config/shguard && bash -c 'cp evil.toml config.toml'` must compose
-/// exactly like the non-`-c` form does. Applied uniformly to every
-/// `recurse_shell_string` caller (rule 6a's `bash -c`/`sh -c`/`zsh -c`/
-/// `dash -c`, and issues #64/#66's `flock -c`/`su -c`): `bash -c`/`flock
-/// -c` both spawn a real `$SHELL -c`-style child that inherits the
-/// parent's cwd exactly. `su -c` is the one imperfect fit in this group —
-/// a login invocation (`su -l`/`su - user -c '...'`) resets the child's
-/// cwd to the target user's home instead, so seeding it with the parent's
-/// composed anchor is technically wrong for that specific spelling. Still
-/// the correct default here: the composed pass this seed feeds only ever
-/// *raises* a decision (`CwdContext`'s own docs), so an inapplicable
-/// anchor can only lead to over-asking on that one narrow `su -l -c`
-/// shape, never a bypass.
+/// `seed` (issue #103, revised by #210) is the recursed call's starting
+/// [`CwdState`], built by the caller rather than a bare `cwd: &CwdContext`
+/// here — the choice of [`CwdState::seed`] vs. [`CwdState::seed_unknown_stack`]
+/// depends on whether the callee is a genuinely fresh interpreter process or
+/// shares the live one, which only the caller knows. `bash -c`/`sh -c`/
+/// `zsh -c`/`dash -c` ([`evaluate_dash_c`]), `fish -c`/`-C`
+/// ([`evaluate_fish`]), and `flock -c`/`su -c`/`env -S`
+/// ([`scan_recursable_slots`]) all spawn a real `$SHELL -c`-style child: a
+/// genuinely separate process with an empty `DIRSTACK`, but (unlike a
+/// `$(...)`/backtick subshell fork) one that still starts in the SAME
+/// working directory as its parent — `cd ~/.config/shguard && bash -c 'cp
+/// evil.toml config.toml'` must compose exactly like the non-`-c` form
+/// does — so these callers pass `CwdState::seed(cwd.clone())`. `su -c` is
+/// the one imperfect fit in this group — a login invocation (`su -l`/`su -
+/// user -c '...'`) resets the child's cwd to the target user's home
+/// instead, so seeding it with the parent's composed anchor is technically
+/// wrong for that specific spelling. Still the correct default here: the
+/// composed pass this seed feeds only ever *raises* a decision
+/// (`CwdContext`'s own docs), so an inapplicable anchor can only lead to
+/// over-asking on that one narrow `su -l -c` shape, never a bypass.
+///
+/// [`evaluate_eval`] is the one caller that passes
+/// `CwdState::seed_unknown_stack(cwd.clone())` instead: `eval` runs in the
+/// CURRENT shell process and really does inherit the live directory stack,
+/// so it needs the poisoned-stack seed rather than the fresh-empty one (see
+/// [`CwdState`]'s own docs for why conflating the two was a confirmed
+/// Ask/Block→Allow bypass).
 fn recurse_shell_string(
     script: &str,
     outer_argv: Vec<NormalizedWord>,
@@ -3486,9 +3525,9 @@ fn recurse_shell_string(
     depth: usize,
     rules: &Rules,
     allowlist: &Allowlist,
-    cwd: &CwdContext,
+    seed: CwdState,
 ) -> Verdict {
-    let inner = analyze_at_depth(script, depth + 1, rules, allowlist, cwd.clone());
+    let inner = analyze_at_depth(script, depth + 1, rules, allowlist, seed);
     let reason = format!(
         "{label} recurses through the full pipeline; inner decision: {:?}{}",
         inner.decision(),
@@ -3533,13 +3572,22 @@ fn evaluate_argument_substitutions(
     };
     for word in argument_words {
         for inner in collect_substitutions(word) {
-            raise(analyze_at_depth(inner, depth + 1, rules, allowlist, cwd.clone()).decision());
+            raise(
+                analyze_at_depth(
+                    inner,
+                    depth + 1,
+                    rules,
+                    allowlist,
+                    CwdState::seed_unknown_stack(cwd.clone()),
+                )
+                .decision(),
+            );
         }
         // Structural, not raw text — recurses at the SAME depth (see
         // `evaluate_command_position_substitution`'s docs on this
         // distinction).
         for inner in collect_process_substitutions(word) {
-            let mut isolated = CwdState::seed(cwd.clone());
+            let mut isolated = CwdState::seed_unknown_stack(cwd.clone());
             raise(evaluate_command_line(inner, rules, allowlist, depth, &mut isolated).decision());
         }
     }
@@ -3653,10 +3701,19 @@ fn evaluate_leftover_alternative_substitutions(
         }
 
         for inner in subs {
-            raise(analyze_at_depth(inner, depth + 1, rules, allowlist, cwd.clone()).decision());
+            raise(
+                analyze_at_depth(
+                    inner,
+                    depth + 1,
+                    rules,
+                    allowlist,
+                    CwdState::seed_unknown_stack(cwd.clone()),
+                )
+                .decision(),
+            );
         }
         for inner in proc_subs {
-            let mut isolated = CwdState::seed(cwd.clone());
+            let mut isolated = CwdState::seed_unknown_stack(cwd.clone());
             raise(evaluate_command_line(inner, rules, allowlist, depth, &mut isolated).decision());
         }
     }
@@ -3812,9 +3869,14 @@ fn scan_redirection_expansions(
                 }
                 for inner in &scan.substitutions {
                     *accum.has_any = true;
-                    let decision =
-                        analyze_at_depth(inner, depth + 1, rules, allowlist, cwd.clone())
-                            .decision();
+                    let decision = analyze_at_depth(
+                        inner,
+                        depth + 1,
+                        rules,
+                        allowlist,
+                        CwdState::seed_unknown_stack(cwd.clone()),
+                    )
+                    .decision();
                     raise_expansion_floor(
                         accum.floor,
                         decision,
@@ -3848,7 +3910,14 @@ fn scan_word_expansions(
 ) {
     for inner in collect_substitutions(word) {
         *accum.has_any = true;
-        let decision = analyze_at_depth(inner, depth + 1, rules, allowlist, cwd.clone()).decision();
+        let decision = analyze_at_depth(
+            inner,
+            depth + 1,
+            rules,
+            allowlist,
+            CwdState::seed_unknown_stack(cwd.clone()),
+        )
+        .decision();
         raise_expansion_floor(
             accum.floor,
             decision,
@@ -3862,7 +3931,7 @@ fn scan_word_expansions(
         *accum.has_any = true;
         // Structural, not raw text — same-depth recursion (see
         // `evaluate_command_position_substitution`'s docs).
-        let mut isolated = CwdState::seed(cwd.clone());
+        let mut isolated = CwdState::seed_unknown_stack(cwd.clone());
         let decision =
             evaluate_command_line(inner, rules, allowlist, depth, &mut isolated).decision();
         raise_expansion_floor(
@@ -3954,7 +4023,7 @@ fn scan_recursable_slots(
                     depth,
                     rules,
                     allowlist,
-                    cwd,
+                    CwdState::seed(cwd.clone()),
                 );
                 raise_expansion_floor(
                     &mut floor,
@@ -5625,24 +5694,31 @@ const MAX_CWD_STACK_DEPTH: usize = 64;
 /// its fallback for any shape it doesn't model — see [`apply_pushd`]/
 /// [`apply_popd`]'s own docs) would.
 ///
-/// Deliberately NOT threaded across a recursion boundary
-/// ([`analyze_at_depth`]'s `cwd_seed: CwdContext` parameter is unchanged by
-/// this issue — only [`CwdContext`], never [`CwdState`]): a `$()`/backtick
-/// payload, a resolved `bash -c` script, etc. always starts its own local
-/// [`CwdState`] with an EMPTY stack, even though a real subshell/process
-/// actually inherits the parent's full stack via fork. This is still sound,
-/// not merely convenient: [`apply_popd`]/[`apply_pushd`]'s bare-swap form
-/// both poison (never silently no-op past) a `popd`/bare-`pushd` against an
-/// empty stack whenever poisoning is the only way to stay honest about
-/// "stack contents unknown" — see those functions' own docs for exactly
-/// when an empty stack is instead a safe, precise no-op (matching a real
-/// shell's own "no other directory" no-op error) versus a poison. A
-/// substitution recursion's own cwd mutations are independently
-/// read-or-discarded per [`CwdContext`]'s "Recursion" section above and
-/// never write back to the caller's stack either way, so resetting the
-/// stack at this boundary only ever affects how precisely THAT recursed
-/// scope's own internal `pushd`/`popd` sequence resolves — never the
-/// caller's.
+/// The ACTUAL stack contents are never threaded across a recursion
+/// boundary — every recursion starts its own local [`CwdState`], seeded
+/// via [`CwdState::seed`] or [`CwdState::seed_unknown_stack`] depending on
+/// what kind of boundary it is (a substitution recursion's own cwd
+/// mutations are independently read-or-discarded per [`CwdContext`]'s
+/// "Recursion" section above and never write back to the caller's stack
+/// either way, regardless of which seed is used). The two seeds differ in
+/// whether the STACK ITSELF is honestly modeled as possibly non-empty:
+/// - [`CwdState::seed`] (empty stack): correct only for a boundary that
+///   spawns a genuinely fresh interpreter process with its own empty
+///   `DIRSTACK` — `bash -c`/`sh -c`/`zsh -c`/`dash -c`/`fish -c`/
+///   `flock -c`/`su -c`/`env -S`, and the two top-level entry points.
+/// - [`CwdState::seed_unknown_stack`] (one [`CwdContext::Poisoned`]
+///   sentinel frame): required for a `$()`/backtick payload, a process
+///   substitution, a heredoc body substitution, or `eval`'s joined
+///   script — every one of these forks or evaluates in the CURRENT shell
+///   and really does inherit the parent's live stack via fork, so an
+///   inner `popd`/bare-`pushd` reaching past what the recursed scope
+///   itself pushed must poison forward rather than silently no-op past a
+///   frame that, in the real shell, actually exists. Using [`Self::seed`]
+///   at one of these boundaries was a confirmed Ask/Block→Allow bypass
+///   (a fable review of the initial #210 landing found it): `pushd
+///   ~/.config/shguard && pushd /tmp && cat $(popd && cp evil.toml
+///   config.toml)` composed the inner `cp` against `/tmp` instead of the
+///   real, inherited `~/.config/shguard`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CwdState {
     current: CwdContext,
@@ -5651,12 +5727,43 @@ struct CwdState {
 
 impl CwdState {
     /// Seeds a fresh state from a recursion site's [`CwdContext`] (issue
-    /// #103's `cwd_seed`) with an empty stack — see [`CwdState`]'s own docs
-    /// for why the stack is deliberately not carried across this boundary.
+    /// #103's `cwd_seed`) with a genuinely EMPTY stack — only correct for a
+    /// boundary that spawns a real, fresh interpreter process with its own
+    /// empty `DIRSTACK` (`bash -c`/`sh -c`/`zsh -c`/`dash -c`/`fish -c`/
+    /// `flock -c`/`su -c`/`env -S`, and the two true top-level entry
+    /// points). See [`Self::seed_unknown_stack`] for the same-process
+    /// (`$()`/backtick/process-substitution/`eval`) counterpart, and
+    /// [`CwdState`]'s own docs for why the two are NOT interchangeable.
     fn seed(current: CwdContext) -> Self {
         Self {
             current,
             stack: Vec::new(),
+        }
+    }
+
+    /// Seeds a fresh state for a SAME-process recursion boundary — a
+    /// `$()`/backtick payload, a process substitution, a heredoc body's own
+    /// substitution, or `eval`'s joined script — every one of which forks
+    /// or evaluates in the CURRENT shell and therefore really does inherit
+    /// the live directory stack, unlike [`Self::seed`]'s fresh-process
+    /// case. Seeding with a genuinely empty `stack` there would make an
+    /// inner `popd`/bare-`pushd` a silent, precise no-op (per
+    /// [`apply_popd`]/[`apply_pushd_swap`]'s own "empty stack is a safe
+    /// no-op" reasoning) even though a real, unmodeled frame is actually
+    /// there to pop back to — a confirmed Ask/Block→Allow regression a
+    /// fable review of the initial #210 landing caught. Seeding with one
+    /// [`CwdContext::Poisoned`] sentinel frame instead keeps every
+    /// operation this recursed scope can itself statically account for
+    /// (a balanced `pushd X ... popd` pair fully inside the recursion)
+    /// exactly as precise as [`Self::seed`] would, while any `popd`/bare-
+    /// `pushd` that reaches PAST what this scope itself pushed correctly
+    /// pops the sentinel and poisons forward — honest about "one or more
+    /// real frames exist here, contents unknown" instead of silently
+    /// claiming there are none.
+    fn seed_unknown_stack(current: CwdContext) -> Self {
+        Self {
+            current,
+            stack: vec![CwdContext::Poisoned],
         }
     }
 
@@ -5883,10 +5990,29 @@ fn apply_cwd_effect(cwd: &mut CwdState, argv: &[NormalizedWord], env: &Env) {
 /// [`PathForm`]) still pushes the OLD `current` before poisoning: a real
 /// `pushd` always pushes before attempting the `cd` half, even when this
 /// module can't statically resolve where that `cd` lands, so keeping that
-/// half of the model precise (a later `popd` can still recover the known
-/// frame beneath the poisoned one) costs nothing and is strictly more
-/// useful than discarding it. [`MAX_CWD_STACK_DEPTH`] bounds this push the
-/// same way an ordinary resolved push is bounded.
+/// half of the model precise costs nothing and is strictly more useful
+/// than discarding it — a later `popd` CAN recover the frame beneath the
+/// poisoned one, though only as reliably as [`CwdOutcome::Resolve`]'s own
+/// known limitation below lets it (this push is exactly as
+/// assume-success-shaped as an ordinary resolved one).
+/// [`MAX_CWD_STACK_DEPTH`] bounds this push the same way an ordinary
+/// resolved push is bounded.
+///
+/// **Known limitation, disclosed rather than silently accepted (issue
+/// #353)**: a `CwdOutcome::Resolve` target (an absolute or `~`-anchored
+/// path this module can lexically resolve) is ALWAYS assumed to actually
+/// exist and actually `cd` successfully — this module never touches the
+/// filesystem, the same limitation [`cd_directive`] already has and
+/// discloses for a bare `cd` (issue #103). For a single `cd`, a wrong
+/// assumption only miscomposes targets within that same command line's
+/// remaining scope. For `pushd`, a wrong assumption is more consequential:
+/// if `X` doesn't really exist, a real `pushd X` fails outright (no push,
+/// no `cd`), so this module's stack ends up ONE FRAME DEEPER than reality
+/// — a later `popd` then recovers the frame that's actually two pushes
+/// back in reality, not one, silently exposing a shallower (potentially
+/// more dangerous) directory than the real shell would have. Not fixable
+/// without adding filesystem access this module deliberately never has;
+/// tracked rather than silently accepted.
 fn apply_pushd(cwd: &mut CwdState, rest: &[NormalizedWord], env: &Env) {
     let target = match extract_single_target(rest) {
         Err(()) => {
@@ -10969,6 +11095,88 @@ done"#,
         }
         command.push_str(" && rm config.toml");
         assert_decision(&command, Decision::Ask);
+    }
+
+    // A fable review of the above caught a confirmed Ask/Block->Allow
+    // bypass: recursion boundaries that fork/share the CURRENT shell
+    // process ($()/backtick/eval) were resetting the stack to empty
+    // instead of inheriting it, and an empty-stack `popd`/bare-`pushd`
+    // silently no-ops rather than poisoning -- so an inner `popd` could
+    // walk straight past an outer, real stack frame undetected. Fixed by
+    // giving `recurse_shell_string` a `CwdState` seed built by the
+    // caller: `CwdState::seed` (empty-but-safe, for a genuinely fresh
+    // interpreter process) for `bash -c`/`fish -c`/`flock -c`/`su -c`/
+    // `env -S`, `CwdState::seed_unknown_stack` (poisoned stack) for
+    // `eval`, which shares the live process and its real directory
+    // stack. See `CwdState`'s own docs for the full reasoning.
+
+    #[test]
+    fn popd_inside_a_command_substitution_does_not_walk_past_the_outer_stack() {
+        assert_decision(
+            "pushd ~/.config/shguard && pushd /tmp && \
+             cat $(popd && cp evil.toml config.toml)",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn popd_inside_eval_does_not_walk_past_the_outer_stack() {
+        assert_decision(
+            "pushd ~/.config/shguard && pushd /tmp && \
+             eval 'popd && cp evil.toml config.toml'",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn bare_pushd_inside_a_command_substitution_does_not_swap_the_outer_stack() {
+        assert_decision(
+            "pushd ~/.config/shguard && pushd /tmp && \
+             cat $(pushd && cp evil.toml config.toml)",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn popd_inside_a_bash_dash_c_child_process_is_still_a_safe_no_op() {
+        // Contrast with the two tests above: `bash -c` spawns a genuinely
+        // fresh interpreter with an empty `DIRSTACK`, so `CwdState::seed`
+        // (not `seed_unknown_stack`) is correct here -- the inner `popd`
+        // really does have nothing to pop and stays a safe no-op, exactly
+        // like a top-level `popd` on an empty stack does.
+        assert_decision(
+            "pushd ~/.config/shguard && pushd /tmp && \
+             bash -c 'popd && cp evil.toml config.toml'",
+            Decision::Allow,
+        );
+    }
+
+    // Issue #353 (disclosed, not silently accepted): `apply_pushd` can
+    // never verify a `pushd` target actually exists (this module never
+    // touches the filesystem). A `pushd` to a lexically-valid but
+    // nonexistent absolute path pushes a frame this module believes is
+    // real; a real shell's `pushd` to that same nonexistent path FAILS
+    // outright (no push, no cd), so shguard's stack ends up one frame
+    // deeper than reality once such a target is involved. A later `popd`
+    // then recovers a frame that's actually one push further back in
+    // reality, exposing a shallower directory than the real shell would.
+    // Requires `;` (not `&&`, which would short-circuit on the real
+    // failed pushd in a genuine shell). Not fixable without adding
+    // filesystem access this module deliberately never has.
+    #[test]
+    fn pushd_to_a_nonexistent_absolute_path_can_desync_a_later_popds_recovered_frame() {
+        let verdict = decide(
+            "pushd ~/.config/shguard; pushd /tmp; pushd /nonexistent-zz-353; \
+             popd; cp evil.toml config.toml",
+        );
+        assert_ne!(
+            verdict.decision(),
+            Decision::Block,
+            "disclosed limitation (issue #353): a pushd to an unverifiable nonexistent \
+             absolute path can desync the modeled stack depth from reality, so a later popd \
+             recovers a shallower frame than a real shell would -- tracked, not silently \
+             accepted"
+        );
     }
 
     #[test]
