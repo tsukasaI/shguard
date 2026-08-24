@@ -3048,7 +3048,15 @@ pub(crate) const EVAL_BUILTIN: &[&str] = &["eval"];
 /// missing them, letting `base64 -d payload | ksh` reach `Allow`. See
 /// [`is_pipeline_interpreter`], the single place both lists are consulted
 /// together.
-const EXTRA_PIPELINE_INTERPRETERS: &[&str] = &["python", "python3", "node", "perl"];
+///
+/// `ruby`/`lua`/`php`/`tclsh` (issue #125) share the same "reads and
+/// executes a script from stdin when given no file argument" property
+/// `python`/`node`/`perl` already have here — the exact sink shape rule
+/// 5b/5c exists to catch — so `base64 -d payload | ruby` was Allow the
+/// same way `| ksh` was before issue #55.
+const EXTRA_PIPELINE_INTERPRETERS: &[&str] = &[
+    "python", "python3", "node", "perl", "ruby", "lua", "php", "tclsh",
+];
 
 /// Whether `name` is an interpreter a pipeline's final stage may be
 /// (`crate::gate` rule 5b/5c) — every [`SHELL_INTERPRETERS`] entry, plus

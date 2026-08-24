@@ -6396,6 +6396,30 @@ mod tests {
         assert_decision("echo x | base64 -d | ash", Decision::Block);
     }
 
+    // ==== Issue #125: EXTRA_PIPELINE_INTERPRETERS' fixed list missed
+    // ruby (and lua/php/tclsh) — the same decode-then-execute pipeline
+    // shape rule 5b/5c already blocks for python/node/perl. ====
+
+    #[test]
+    fn decode_fed_ruby_pipe_blocks() {
+        assert_decision("echo x | base64 -d | ruby", Decision::Block);
+    }
+
+    #[test]
+    fn decode_fed_lua_pipe_blocks() {
+        assert_decision("echo x | base64 -d | lua", Decision::Block);
+    }
+
+    #[test]
+    fn decode_fed_php_pipe_blocks() {
+        assert_decision("echo x | base64 -d | php", Decision::Block);
+    }
+
+    #[test]
+    fn decode_fed_tclsh_pipe_blocks() {
+        assert_decision("echo x | base64 -d | tclsh", Decision::Block);
+    }
+
     // ==== Issue #57: mke2fs is the implementation behind mkfs.ext4 and
     // wasn't matched by the `mkfs.` command_prefix rule. ====
 
