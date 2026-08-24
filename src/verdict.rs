@@ -214,9 +214,8 @@ impl Verdict {
     /// [`crate::rules`] rule object to read a `deny_message` from need to
     /// call this.
     ///
-    /// Wired up (issue #202) at every `src/gate.rs` site that reads a
-    /// matched `CommandRule` *directly* while constructing a `Verdict` —
-    /// the exact-blocklist-match sites (including the same-line-`cd`
+    /// Wired up (issue #202) at these `src/gate.rs` sites: the
+    /// exact-blocklist-match sites (including the same-line-`cd`
     /// composed-cwd site, `evaluate_composed_cwd`), the user-config
     /// ask-floor, every partial-match floor (the except-target/
     /// except-flags floor, the ascent-descent/named-user-home/
@@ -226,23 +225,52 @@ impl Verdict {
     /// arms, which recurse independently rather than through it) — not
     /// only the handful of *definite*-match sites this once covered.
     ///
-    /// # Known remaining gap
+    /// # Known remaining gaps
     ///
-    /// Every site above reads a `CommandRule` (or an inner `Verdict`)
-    /// directly. A few sites instead flatten a recursed inner `Verdict`
-    /// down to a bare `Decision` or a `(Decision, String)` floor tuple
-    /// *before* any outer `Verdict` is built — `flock`/`su -c`'s and
-    /// `find -exec`'s shell-string floor (`scan_recursable_slots`),
-    /// argument-position substitution recursion
-    /// (`evaluate_argument_substitutions`'s `substitution_result`), and
-    /// expansion-position recursion (`scan_expansion_positions`) — so an
-    /// inner verdict's `deny_message` is discarded one frame up on those
-    /// paths even though `recurse_shell_string` (which these do *not* go
-    /// through) now preserves it. Not fixed here: unlike every site listed
-    /// above, closing this would mean threading `Option<DenyMessage>`
-    /// through several more floor tuples this crate already treats as
-    /// plain `(Decision, String)` pairs everywhere else, a wider change
-    /// than #202's own scope.
+    /// Two shapes of site still lose a `deny_message` that genuinely
+    /// exists on a matched rule or a recursed inner verdict. Not fixed
+    /// here: closing either would mean threading `Option<DenyMessage>`
+    /// through several more floor tuples this crate treats as plain
+    /// `Decision`/`(Decision, String)` pairs everywhere else — a wider
+    /// change than #202's own scope, disclosed explicitly instead per the
+    /// issue's own "document the limitation" acceptance criterion.
+    ///
+    /// - **A matched `CommandRule` flattened to a floor tuple before this
+    ///   `Verdict` is built.** The su-username shadow floor
+    ///   (`su_username_matches_blocklisted_command`'s match feeds
+    ///   `escalation_floor_contribution`/`apply_escalation_floor` as a bare
+    ///   `(Decision, String)`, `src/gate.rs`) is a `CommandRule`-direct site
+    ///   just like every one wired up above, but reaches its `Verdict`
+    ///   through the escalation floor's shared tuple rather than
+    ///   constructing one itself, so it wasn't in scope for the same
+    ///   mechanical fix.
+    /// - **A recursed inner `Verdict` flattened to a bare `Decision` or
+    ///   `(Decision, String)` before an outer `Verdict` is built** —
+    ///   `recurse_shell_string` is the one recursion site that preserves
+    ///   `deny_message` across this kind of boundary; these do not go
+    ///   through it: command-position substitution recursion
+    ///   (`evaluate_command_position_substitution`, rule 1), the
+    ///   leftover-alternative substitution floor
+    ///   (`evaluate_leftover_alternative_substitutions`, applied both via
+    ///   `fold_floors`'s `substitution_result` and independently via
+    ///   `apply_leftover_substitution_floor` at several early-return
+    ///   sites), argument-position substitution recursion
+    ///   (`evaluate_argument_substitutions`'s `substitution_result`),
+    ///   `flock`/`su -c` and `find -exec`'s shared shell-string floor
+    ///   (`scan_recursable_slots`), and expansion-position recursion
+    ///   (`scan_word_expansions`/`scan_redirection_expansions`, the latter
+    ///   also reached from `apply_attached_word_and_redirect_checks`'s
+    ///   compound-command attached-redirect path).
+    ///
+    /// A related, narrower case: several `(Decision, String)`-floor
+    /// appliers (`apply_escalation_floor`, `apply_expansion_floor`,
+    /// `apply_recursable_floor`) replace a lower verdict with a fresh
+    /// `Verdict::block`/`Verdict::ask` when their floor decision outranks
+    /// it, discarding whatever `deny_message` the replaced verdict already
+    /// carried (e.g. an exact `decision = "ask"` rule match that also
+    /// declared `deny_message`, later raised to `Block` by one of these
+    /// floors) — same underlying tuple-shape limitation, not a
+    /// verdict-re-wrap or floor-scan gap of its own.
     #[must_use]
     pub fn with_deny_message(mut self, deny_message: Option<DenyMessage>) -> Self {
         match &mut self.detail {

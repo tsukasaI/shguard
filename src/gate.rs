@@ -2768,16 +2768,20 @@ fn fold_floors(
     let mut decision = Decision::Allow;
     let mut reasons: Vec<String> = Vec::new();
     // Issue #202: the except-target/except-flags floors are the only two
-    // of this function's inputs that carry a matched `CommandRule` (every
-    // other floor here is structural, not rule-matched, and has no
-    // `deny_message` to lose in the first place) — captured here and
-    // attached to whichever verdict this function returns, target taking
-    // priority if somehow both matched different rules with different
-    // messages. Attached unconditionally, like the reason text above it
-    // already is, rather than only when this floor was the sole/decisive
-    // contributor: `fold_floors` never tries to keep floors' reasons
-    // separately attributable either, so a `deny_message` present here
-    // gets the same "always folded in" treatment.
+    // of this function's inputs that carry a matched `CommandRule` directly
+    // (every other floor here is structural, not rule-matched — the
+    // escalation floor's `(Decision, String)` can itself originate from a
+    // matched rule, the su-username shadow floor, but by the time it
+    // reaches this function it's already flattened to a plain string, same
+    // as this crate's other floor tuples; see `Verdict::with_deny_message`'s
+    // "Known remaining gaps" doc) — captured here and attached to whichever
+    // verdict this function returns, target taking priority if somehow both
+    // matched different rules with different messages. Attached
+    // unconditionally, like the reason text above it already is, rather
+    // than only when this floor was the sole/decisive contributor:
+    // `fold_floors` never tries to keep floors' reasons separately
+    // attributable either, so a `deny_message` present here gets the same
+    // "always folded in" treatment.
     let deny_message = except_floors
         .target
         .and_then(crate::rules::CommandRule::deny_message)

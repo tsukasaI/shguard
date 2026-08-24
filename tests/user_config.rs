@@ -1695,6 +1695,65 @@ fn deny_message_surfaces_through_the_dirstack_tilde_floor() {
     );
 }
 
+// issue #103's composed-cwd pass (`evaluate_composed_cwd`, src/gate.rs) is
+// a fourth exact-blocklist/ask-match site distinct from the three original
+// #99 sites -- a same-line `cd` to a literal absolute directory composes a
+// later relative target against it before the ordinary rule match runs.
+#[test]
+fn deny_message_surfaces_through_the_composed_cwd_match() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[deny]]
+        id = "user-deny-mytool-prod"
+        reason = "block writes into prod"
+        command = "mytool"
+        targets = [{ exact = "/prod/config.toml" }]
+        deny_message = "writes into prod need a reviewed PR"
+    "#,
+    );
+    let output = run_hook(
+        &bash_command("cd /prod && mytool config.toml"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+    assert_eq!(
+        output["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap(),
+        "writes into prod need a reviewed PR"
+    );
+}
+
+// The unknown-cwd floor (`scan_unknown_cwd_floor`/`apply_unknown_cwd_floor`,
+// src/gate.rs) is a sixth partial-match floor of the same class the other
+// five in this file already pin -- a same-line `cd` to an unresolvable
+// target poisons the working directory, and a later relative token that
+// could plausibly land inside a matched rule's namespace floors to Ask.
+#[test]
+fn deny_message_surfaces_through_the_unknown_cwd_floor() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[deny]]
+        id = "user-deny-mytool-unknown-cwd"
+        reason = "block mytool near prod"
+        command = "mytool"
+        targets = [{ normalized = "~/prod/config.toml" }]
+        deny_message = "resolve the working directory before running mytool"
+    "#,
+    );
+    let output = run_hook(
+        &bash_command("cd $(some_substitution) && mytool config.toml"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "ask");
+    assert_eq!(
+        output["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap(),
+        "resolve the working directory before running mytool"
+    );
+}
+
 // A `bash -c` verdict re-wrap preserves the inner verdict's `matched_rule`
 // (`recurse_shell_string`, src/gate.rs) — this pins that it now preserves
 // `deny_message` too, not just the rule id.
