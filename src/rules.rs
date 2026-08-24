@@ -3353,13 +3353,17 @@ fn wrapper_cluster_booleans(wrapper: &str) -> Option<&'static [char]> {
             'b', 'm', 'B', 'd', 'e', 'i', 'k', 'L', 'n', 'p', 'q', 'r', 'R', 's', 'S', 't', 'v',
             'w',
         ]),
-        // bsdtar 3.5.3's `man tar` (issue #209 round 3): mode selectors
-        // (`c r t u x`) plus every other short flag not listed in
-        // `wrapper_value_flags("tar")` is boolean.
-        "tar" => Some(&[
-            'a', 'B', 'c', 'H', 'h', 'J', 'j', 'k', 'L', 'l', 'm', 'n', 'O', 'o', 'P', 'p', 'q',
-            'r', 'S', 't', 'U', 'u', 'v', 'w', 'x', 'y', 'Z', 'z',
-        ]),
+        // No `"tar"` entry: a round-4 fable review of issue #209 found
+        // that tar's short-flag arity genuinely differs across flavors
+        // for letters that matter (bsdtar's `-s` takes a value; GNU
+        // tar's `-s`/`--same-order` is boolean), so a table built from
+        // either flavor silently swallows `-C` in a cluster the OTHER
+        // flavor's real tar would not — the same "unverified assumption
+        // about a tool's flag surface" bug class this table exists to
+        // prevent, just at the per-letter level instead of per-tool.
+        // `crate::gate::find_dash_c_in_cluster` deliberately does not use
+        // this table for tar at all; see that function's doc for the
+        // fail-closed alternative.
         _ => None,
     }
 }
@@ -3699,30 +3703,12 @@ fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
             ValueFlag::Short('o'),
             ValueFlag::Short('W'),
         ],
-        // `man tar` (bsdtar 3.5.3, this machine): `-b`/`-C`/`-f`/`-I`/`-s`/
-        // `-T`/`-X` take a value (verified live: `tar -sC dir ...` errors
-        // "Invalid replacement string" because `-s` swallows `C` as its
-        // own glued replacement pattern, never chdir'ing; `-IC dir`
-        // likewise glues `C` as `-I`'s own filename value). Every other
-        // short letter (mode selectors `c r t u x`, and `a B H h J j k L
-        // l m n O o P p q S U v w y Z z`) is boolean (verified: `tar -vcC
-        // dir -f out.tar f.txt` chdirs with `-v`/`-c` as leading
-        // booleans). GNU tar's short-flag surface overlaps this set
-        // closely enough (`-C`/`-f` identical; GNU has no `-s`/`-I`
-        // pattern-rename/include-file letters at all) that this bsdtar
-        // table is the safe default here too — an unmodeled letter simply
-        // falls back to [`locate_cluster_value`]'s own "unmodeled letter,
-        // real tar errors out, nothing to guard" case.
-        "tar" => vec![
-            ValueFlag::Short('b'),
-            ValueFlag::Short('C'),
-            ValueFlag::Long("directory".to_string()),
-            ValueFlag::Short('f'),
-            ValueFlag::Short('I'),
-            ValueFlag::Short('s'),
-            ValueFlag::Short('T'),
-            ValueFlag::Short('X'),
-        ],
+        // No `"tar"` entry: see `wrapper_cluster_booleans`'s doc for why
+        // a round-4 fable review of issue #209 removed the bsdtar-only
+        // table this used to have (its `-s` classification was wrong for
+        // GNU tar's `-s`/`--same-order`, silently dropping `-C`
+        // composition on that flavor). `crate::gate::find_dash_c_in_cluster`
+        // does not consult this table for tar.
         _ => vec![],
     }
 }

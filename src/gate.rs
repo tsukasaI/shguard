@@ -6572,12 +6572,41 @@ fn chain_dash_c_targets(
 /// for `env`/`make` — bsdtar clusters `-C` with other boolean short
 /// flags (`tar -vcC dir -f out.tar file` chdirs, verified live) and
 /// accepts a glued value with no cluster prefix at all (`tar -C/tmp -cf
-/// out.tar file` also chdirs). Both are now recognized via
-/// [`crate::rules::locate_cluster_value`] with `wrapper = "tar"` — the
-/// same shared table mechanism `env`'s/`make`'s handling already uses —
-/// rather than a fourth bespoke parser; a bare `-C` (no glued suffix)
-/// correctly still falls out of the same call as
-/// [`crate::rules::ClusterValue::NextToken`].
+/// out.tar file` also chdirs). A round-4 fable review then found that
+/// routing this through [`crate::rules::locate_cluster_value`]'s
+/// swallow-if-an-earlier-letter-takes-a-value logic (the same mechanism
+/// `env`/`make` correctly use) is unsound for `tar` SPECIFICALLY: that
+/// logic depends on correctly knowing every letter's arity, but tar's
+/// short-flag alphabet genuinely differs by flavor for the exact letters
+/// that matter — bsdtar's `-s` takes a value (a rename pattern) while
+/// GNU tar's `-s` (`--same-order`) is boolean, so a table built from one
+/// flavor swallows `-C` in a cluster the OTHER flavor's real tar would
+/// not, silently dropping composition on whichever flavor wasn't
+/// modeled. Rather than chase a per-flavor or unioned table (the same
+/// kind of unverified-assumption trap that produced three straight
+/// rounds of bypasses here), [`find_dash_c_in_cluster`] below
+/// deliberately does NOT model tar's other flags at all: it just finds
+/// `C` anywhere in a dash-prefixed token and treats whatever follows as
+/// its value. This can occasionally compose against a token where some
+/// OTHER tar flavor's real getopt would have glued an earlier flag's own
+/// value instead (over-composition) — fail-closed and harmless, since
+/// [`evaluate_composed_argv_match`]'s fold only ever escalates a
+/// decision, never lowers one — but can never UNDER-compose, closing the
+/// whole bypass class structurally instead of one flavor at a time.
+fn find_dash_c_in_cluster(token: &str) -> Option<crate::rules::ClusterValue<'_>> {
+    let rest = token.strip_prefix('-')?;
+    if rest.is_empty() || rest.starts_with('-') {
+        return None;
+    }
+    let index = rest.find('C')?;
+    let glued = &rest[index + 'C'.len_utf8()..];
+    Some(if glued.is_empty() {
+        crate::rules::ClusterValue::NextToken
+    } else {
+        crate::rules::ClusterValue::Glued(glued)
+    })
+}
+
 fn resolve_tar_dash_c<'a>(
     rest: &'a [NormalizedWord],
     env: &Env,
@@ -6598,7 +6627,7 @@ fn resolve_tar_dash_c<'a>(
             }
         } else if let Some(attached) = s.strip_prefix("--directory=") {
             (Some(attached.to_string()), index + 1)
-        } else if let Some(location) = crate::rules::locate_cluster_value("tar", s, 'C') {
+        } else if let Some(location) = find_dash_c_in_cluster(s) {
             match location {
                 crate::rules::ClusterValue::Glued(value) => (Some(value.to_string()), index + 1),
                 crate::rules::ClusterValue::NextToken => {
@@ -12493,14 +12522,28 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
     }
 
     #[test]
-    fn tar_dash_c_value_taker_before_c_is_not_modeled() {
-        // `tar -sC dir`: confirmed against a live bsdtar binary that `-s`
-        // glues `C` as its own replacement-pattern value ("Invalid
-        // replacement string") and tar exits before archiving anything —
-        // no anchor to extract, and no execution to guard.
+    fn tar_dash_c_composes_with_a_gnu_only_boolean_leading_the_cluster() {
+        // `-W` (`--verify`) is a GNU-tar-only boolean absent from bsdtar
+        // entirely — `find_dash_c_in_cluster` doesn't need to know that
+        // to still find `C` and compose against it.
+        assert_eq!(
+            decide_dash_c("tar -WC ~/.config/shguard -cf out.tar config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn tar_dash_c_composes_even_when_a_prior_letter_could_be_a_flavor_specific_value_taker() {
+        // `tar -sC dir`: on bsdtar `-s` glues `C` as its own
+        // replacement-pattern value and tar refuses to run — but on GNU
+        // tar, `-s`/`--same-order` is boolean, so `-C` is a REAL flag
+        // here and genuinely chdirs. `find_dash_c_in_cluster` (unlike the
+        // `env`/`make` handling) deliberately does not try to resolve
+        // this per-flavor ambiguity — it composes regardless, the
+        // fail-closed direction, per its own doc comment.
         assert_eq!(
             decide_dash_c("tar -sC ~/.config/shguard -cf out.tar config.toml").decision(),
-            Decision::Allow
+            Decision::Block
         );
     }
 }
