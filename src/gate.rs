@@ -5465,18 +5465,22 @@ fn scan_for_dash_c_before_operand(words: &[NormalizedWord], interpreter: &str) -
 /// by the original `enc`-only check).
 ///
 /// `gunzip`/`zcat`/`uudecode` (issue #53 C-2), and `unxz`/`xzcat`/
-/// `bunzip2`/`bzcat`/`unzstd`/`zstdcat` (issue #121, the same
-/// decompress-only-binary shape for `xz`/`bzip2`/`zstd`), join `rev`/`tr`
-/// as unconditional matches — decompression/decoding is these commands'
-/// only purpose, with no flag that turns it off. `gzip`/`xz`/`bzip2`/
-/// `zstd` themselves are NOT unconditional like their `un*`/`*cat`
-/// siblings — bare `gzip file` (and the same for `xz`/`bzip2`/`zstd`)
+/// `bunzip2`/`bzcat`/`unzstd`/`zstdcat`/`unlzma`/`lzcat`/`xzdec`/
+/// `lzmadec` (issue #121, the same decompress-only-binary shape for
+/// `xz`/`bzip2`/`zstd`/`lzma`), join `rev`/`tr` as unconditional matches —
+/// decompression/decoding is these commands' only purpose, with no flag
+/// that turns it off. `gzip`/`xz`/`bzip2`/`zstd`/`lzma`/`zstdmt`
+/// themselves are NOT unconditional like their `un*`/`*cat` siblings —
+/// bare `gzip file` (and the same for `xz`/`bzip2`/`zstd`/`lzma`)
 /// compresses, so each only counts as a decode stage when its own
 /// decompress flag is present (bypass-hunt finding against this branch,
 /// for `gzip`: `gzip -d` is the fully standard way to decompress with the
 /// `gzip` binary itself, `gunzip` being just a convenience alias for it —
 /// the same relationship holds for `xz -d`/`unxz`, `bzip2 -d`/`bunzip2`,
-/// and `zstd -d`/`unzstd`).
+/// and `zstd -d`/`unzstd`). issue #349 tracks remaining gaps: sibling
+/// alias binaries not yet covered here (`gzcat`, `pzstd`, `pigz -d`,
+/// `pbzip2 -d`), OpenSSL's cipher-name-as-subcommand shape, and GNU
+/// long-option abbreviation matching.
 fn is_decode_stage(stage: &[NormalizedWord]) -> bool {
     let Some((name, rest_words)) = crate::rules::effective_command(stage) else {
         return false;
@@ -5499,6 +5503,13 @@ fn is_decode_stage(stage: &[NormalizedWord]) -> bool {
         })
         .possibly_found(),
         "xxd" => scan_for_flag(rest_words, |s| s == "-r").possibly_found(),
+        // issue #349: `openssl <cipher-name> -d` (e.g. `openssl aes-256-cbc
+        // -d`) is functionally identical to `openssl enc -<cipher-name> -d`
+        // but isn't recognized here — the first word is the cipher name,
+        // not `enc`/`base64`. Recognizing it would mean enumerating (or
+        // pattern-matching) OpenSSL's cipher-name list, which risks false
+        // positives against unrelated first words; tracked rather than
+        // fixed here.
         "openssl" => {
             let first_could_be_decode_subcommand =
                 rest_words.first().is_some_and(|w| match w.resolution() {
@@ -5508,11 +5519,16 @@ fn is_decode_stage(stage: &[NormalizedWord]) -> bool {
             first_could_be_decode_subcommand
                 && scan_for_flag(rest_words, |s| s == "-d").possibly_found()
         }
-        "gzip" => scan_for_flag(rest_words, |s| {
-            s == "--decompress" || s == "--uncompress" || short_cluster_contains(s, 'd')
-        })
-        .possibly_found(),
-        "xz" => scan_for_flag(rest_words, |s| {
+        // gzip/xz/zstd (and zstd's `zstdmt` multithread alias, and xz's
+        // `lzma` legacy-format sibling, which shares xz's `-d`/
+        // `--decompress`/`--uncompress` flag surface) all compress by
+        // default and only decompress with an explicit flag — unlike their
+        // `un*`/`*cat` siblings below. issue #349: none of these flag
+        // checks recognize unambiguous GNU long-option abbreviations
+        // (`--dec`, `--decomp`) the way `getopt_long` itself does; tracked
+        // rather than fixed here, since a safe abbreviation matcher would
+        // touch every long-flag check in this file, not just these arms.
+        "gzip" | "xz" | "zstd" | "lzma" | "zstdmt" => scan_for_flag(rest_words, |s| {
             s == "--decompress" || s == "--uncompress" || short_cluster_contains(s, 'd')
         })
         .possibly_found(),
@@ -5520,12 +5536,8 @@ fn is_decode_stage(stage: &[NormalizedWord]) -> bool {
             s == "--decompress" || short_cluster_contains(s, 'd')
         })
         .possibly_found(),
-        "zstd" => scan_for_flag(rest_words, |s| {
-            s == "--decompress" || short_cluster_contains(s, 'd')
-        })
-        .possibly_found(),
         "rev" | "tr" | "gunzip" | "zcat" | "uudecode" | "unxz" | "xzcat" | "bunzip2" | "bzcat"
-        | "unzstd" | "zstdcat" => true,
+        | "unzstd" | "zstdcat" | "unlzma" | "lzcat" | "xzdec" | "lzmadec" => true,
         _ => false,
     }
 }
@@ -6633,6 +6645,13 @@ mod tests {
     }
 
     #[test]
+    fn openssl_base64_encode_direction_only_asks() {
+        // No `-d`: this ENCODES, so it must fall through to the plain
+        // "unknown piped content" Ask, not the decode-stage Block.
+        assert_decision("echo hi | openssl base64 | sh", Decision::Ask);
+    }
+
+    #[test]
     fn basenc_decode_fed_interpreter_pipe_blocks() {
         assert_decision(
             "echo cm0gLXJmIC8= | basenc --base64 -d | sh",
@@ -6652,7 +6671,13 @@ mod tests {
 
     #[test]
     fn xz_bare_compress_is_not_a_decode_stage() {
-        assert_decision("xz -c file.txt | wc -c", Decision::Allow);
+        // `-c` (write to stdout) is not a decompress flag — this must fall
+        // through to the plain "unknown piped content" Ask, not the
+        // decode-stage Block. (A non-interpreter sink like `wc -c` would
+        // Allow regardless of is_decode_stage, since evaluate_pipeline_shape
+        // never consults it there — piping into `sh` is what actually
+        // exercises the compress-vs-decompress distinction.)
+        assert_decision("xz -c file.txt | sh", Decision::Ask);
     }
 
     #[test]
@@ -6672,7 +6697,7 @@ mod tests {
 
     #[test]
     fn bzip2_bare_compress_is_not_a_decode_stage() {
-        assert_decision("bzip2 -c file.txt | wc -c", Decision::Allow);
+        assert_decision("bzip2 -c file.txt | sh", Decision::Ask);
     }
 
     #[test]
@@ -6692,7 +6717,7 @@ mod tests {
 
     #[test]
     fn zstd_bare_compress_is_not_a_decode_stage() {
-        assert_decision("zstd -c file.txt | wc -c", Decision::Allow);
+        assert_decision("zstd -c file.txt | sh", Decision::Ask);
     }
 
     #[test]
@@ -6703,6 +6728,48 @@ mod tests {
     #[test]
     fn zstdcat_fed_interpreter_pipe_blocks() {
         assert_decision("cat payload.zst | zstdcat | sh", Decision::Block);
+    }
+
+    #[test]
+    fn zstd_uncompress_long_flag_fed_interpreter_pipe_blocks() {
+        // `--uncompress` is a real zstd decompress alias alongside
+        // `--decompress`/`-d`, missed by the original PR #348 arm.
+        assert_decision("cat payload.zst | zstd --uncompress | sh", Decision::Block);
+    }
+
+    #[test]
+    fn zstdmt_fed_interpreter_pipe_blocks() {
+        assert_decision("cat payload.zst | zstdmt -d | sh", Decision::Block);
+    }
+
+    #[test]
+    fn lzma_decompress_flag_fed_interpreter_pipe_blocks() {
+        assert_decision("cat payload.lzma | lzma -d | sh", Decision::Block);
+    }
+
+    #[test]
+    fn lzma_bare_compress_is_not_a_decode_stage() {
+        assert_decision("lzma -c file.txt | sh", Decision::Ask);
+    }
+
+    #[test]
+    fn unlzma_fed_interpreter_pipe_blocks() {
+        assert_decision("cat payload.lzma | unlzma | sh", Decision::Block);
+    }
+
+    #[test]
+    fn lzcat_fed_interpreter_pipe_blocks() {
+        assert_decision("cat payload.lzma | lzcat | sh", Decision::Block);
+    }
+
+    #[test]
+    fn xzdec_fed_interpreter_pipe_blocks() {
+        assert_decision("cat payload.xz | xzdec | sh", Decision::Block);
+    }
+
+    #[test]
+    fn lzmadec_fed_interpreter_pipe_blocks() {
+        assert_decision("cat payload.lzma | lzmadec | sh", Decision::Block);
     }
 
     // ==== Rule 6a/6b dispatch must resolve the
