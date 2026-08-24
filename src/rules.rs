@@ -2194,10 +2194,15 @@ impl CommandRule {
     /// there either, for the same reason). This is a slot-eligibility
     /// proxy, not an actual directory-vs-file check — nothing here parses
     /// what kind of path a target denotes — but for every rule currently
-    /// shaped this way in the embedded blocklist, a bare unattached target
-    /// alongside an `=`-terminated attach target happens to always be a
-    /// directory (`rm`'s bare `~`/`/`, `mv`'s bare `/dev/*`), which is
-    /// exactly why the proxy works: a rule whose ONLY targets are
+    /// eligible in the embedded blocklist (the tar rules' bare `/`/`~`;
+    /// `mv`/`install`/`cp-write-device`'s bare `/dev`/`/dev/*`), the
+    /// `=`-terminated slot itself expects a directory (`--directory=`,
+    /// `--target-directory=`) and the rule also declares at least one bare
+    /// directory target (`/`, `~`, or the exact `/dev` entry — the bare
+    /// `/dev/` *prefix* additionally matches non-directory device nodes,
+    /// which is fine: a directory-shaped dirstack token can still land
+    /// under `/dev/` too), which is exactly why the proxy works: a rule
+    /// whose ONLY targets are
     /// attach-only file/device sinks (`dd`'s `of=/dev/*`, `of=/etc/passwd`)
     /// never gets a false Ask-floor here — `dd of=~-/..` always resolves to
     /// a directory, and `of=<directory>` fails EISDIR regardless of tilde
