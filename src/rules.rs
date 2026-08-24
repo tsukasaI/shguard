@@ -936,11 +936,12 @@ impl TargetMatcher {
     /// unbounded by construction). The correlation available here is the
     /// *slot* instead: a `strip: Some(..)` target (e.g. `dd`'s `of=`)
     /// expects an ATTACHED token (`of=/dev/sda`), and a bare
-    /// `~+`/`~-`/`~N` glued after that same flag (`of=~+`) doesn't
-    /// tilde-expand in the first place — a separate zsh-`magic_equal_subst`
-    /// question, tracked as issue #134 — so `strip: Some(..)` targets are
-    /// excluded here the same way they're excluded from ever actually
-    /// matching an unattached dirstack token.
+    /// `~+`/`~-`/`~N` glued after that same flag (`of=~+`) is a separate
+    /// zsh-`magic_equal_subst` question, handled by
+    /// [`CommandRule::matches_dirstack_equal_subst_floor`] (issue #134) —
+    /// which has its own corroborating-slot gate — so `strip: Some(..)`
+    /// targets are excluded here the same way they're excluded from ever
+    /// actually matching an unattached dirstack token.
     fn dirstack_plausible(&self, token: &str) -> bool {
         let strip = match self {
             Self::NormalizedExact { strip, .. } | Self::NormalizedPrefix { strip, .. } => strip,
@@ -2186,18 +2187,25 @@ impl CommandRule {
     /// check. But #115's `has_bare_tilde_target` gate is replaced here with
     /// a broader corroborating-slot requirement rather than dropped
     /// outright: this rule must ALSO declare at least one bare, unattached
-    /// target (`strip: None`) — the same "target's slot could even receive
-    /// a bare path" gate [`TargetMatcher::dirstack_plausible`] already
-    /// requires for the unattached floor. A bare-anchor/escape-to-empty
-    /// dirstack token always denotes a *directory*
-    /// (`$PWD`/`$OLDPWD`/a pushd-stack entry, or one level above), so this
-    /// only floors rules whose namespace plausibly includes an unknown
-    /// directory at all (`rm`'s bare `~`/`/`, `mv`'s bare `/dev/*`) — a
-    /// rule whose ONLY targets are attach-only file/device sinks (`dd`'s
-    /// `of=/dev/*`, `of=/etc/passwd`) never gets a false Ask-floor here:
-    /// `dd of=~-/..` always resolves to a directory, and `of=<directory>`
-    /// fails EISDIR regardless of tilde expansion, so it stays Allow
-    /// (pinned by `gate::tests::dd_dirstack_tilde_escape_to_empty_tail_stays_allow`).
+    /// `NormalizedExact`/`NormalizedPrefix` target (`strip: None`) — the
+    /// same "target's slot could even receive a bare path" proxy
+    /// [`TargetMatcher::dirstack_plausible`] already uses to gate the
+    /// unattached floor (a raw `Exact`/`Prefix` target doesn't count
+    /// there either, for the same reason). This is a slot-eligibility
+    /// proxy, not an actual directory-vs-file check — nothing here parses
+    /// what kind of path a target denotes — but for every rule currently
+    /// shaped this way in the embedded blocklist, a bare unattached target
+    /// alongside an `=`-terminated attach target happens to always be a
+    /// directory (`rm`'s bare `~`/`/`, `mv`'s bare `/dev/*`), which is
+    /// exactly why the proxy works: a rule whose ONLY targets are
+    /// attach-only file/device sinks (`dd`'s `of=/dev/*`, `of=/etc/passwd`)
+    /// never gets a false Ask-floor here — `dd of=~-/..` always resolves to
+    /// a directory, and `of=<directory>` fails EISDIR regardless of tilde
+    /// expansion, so it stays Allow (pinned by
+    /// `gate::tests::dd_dirstack_tilde_escape_to_empty_tail_stays_allow`).
+    /// A user-config rule that pairs an unrelated bare *file* target with
+    /// an `=`-terminated attach target would still float here, an
+    /// FP-noise-only edge (Ask, never a bypass) inherent to the proxy.
     /// Read-only probe, never itself a match, only a `gate.rs`
     /// floor's input (see `crate::gate::scan_dirstack_equal_subst_floor`).
     #[must_use]
