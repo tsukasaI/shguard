@@ -324,7 +324,7 @@ use crate::rules::{
     Allowlist, AllowlistOutcome, CommandRule, EVAL_BUILTIN, PathForm, Rules, SHELL_INTERPRETERS,
     WrapperChainEscalation, is_pipeline_interpreter, lexical_normalize, render_cwd_anchor,
 };
-use crate::verdict::{Decision, Reason, Verdict};
+use crate::verdict::{Decision, DenyMessage, Reason, Verdict};
 
 /// Cap on how many levels deep a command/backquote substitution (or a
 /// resolved `bash -c` script) may recurse before this module fails closed —
@@ -1731,7 +1731,7 @@ fn evaluate_simple_command(
     let verdict = apply_expansion_floor(verdict, expansion.floor);
     let verdict = apply_recursable_floor(verdict, recursable.floor);
     let verdict = apply_tar_dashless_floor(verdict, tar_dashless_floor);
-    let verdict = apply_ascent_descent_floor(verdict, ascent_descent_floor);
+    let verdict = apply_command_ascent_descent_floor(verdict, ascent_descent_floor);
     let verdict = apply_ascent_descent_floor(verdict, redirect_ascent_descent_floor);
     let verdict = apply_ascent_descent_floor(verdict, redirect_home_env_floor);
     let verdict = apply_ascent_descent_floor(verdict, redirect_rule_ask_floor);
@@ -2427,7 +2427,10 @@ fn apply_tar_dashless_floor(verdict: Verdict, floor: Option<(Decision, String)>)
 /// reason [`scan_tar_dashless_unmodeled_floor`] is: a per-token match has
 /// no way to say "this specific token can only ever be Ask" while the
 /// same rule's other targets stay at its own fixed decision.
-fn scan_ascent_descent_floor(argv: &[NormalizedWord], rules: &Rules) -> Option<(Decision, String)> {
+fn scan_ascent_descent_floor(
+    argv: &[NormalizedWord],
+    rules: &Rules,
+) -> Option<(Decision, String, Option<DenyMessage>)> {
     let rule = rules.match_command_ascent_descent(argv)?;
     Some((
         Decision::Ask,
@@ -2439,12 +2442,50 @@ fn scan_ascent_descent_floor(argv: &[NormalizedWord], rules: &Rules) -> Option<(
             rule.id().as_str(),
             rule.reason().as_str(),
         ),
+        rule.deny_message().cloned(),
     ))
 }
 
-/// Applies [`scan_ascent_descent_floor`]'s floor to `verdict` (see
-/// [`apply_expansion_floor`]'s docs for the shared max-lift mechanics and
-/// why each floor gets its own function).
+/// Applies [`scan_ascent_descent_floor`]'s floor to `verdict` — same
+/// max-lift mechanics as [`apply_expansion_floor`], but a distinct
+/// function from [`apply_ascent_descent_floor`] (which three sibling,
+/// `RedirectRule`-based floors also happen to share, since `RedirectRule`
+/// has no `deny_message` of its own to carry): [`scan_ascent_descent_floor`]
+/// matches a `CommandRule`, which does, so this attaches it (issue #202) to
+/// the replacement verdict — a fresh `Verdict::ask`/`Verdict::block` here
+/// always discards whatever `deny_message` `verdict` had anyway, so there
+/// is no existing message to weigh this one against.
+fn apply_command_ascent_descent_floor(
+    verdict: Verdict,
+    floor: Option<(Decision, String, Option<DenyMessage>)>,
+) -> Verdict {
+    let Some((floor_decision, floor_reason, deny_message)) = floor else {
+        return verdict;
+    };
+    if verdict.decision() >= floor_decision {
+        return verdict;
+    }
+    let argv = verdict.normalized_argv().to_vec();
+    let reason = match verdict.reason() {
+        Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
+        None => floor_reason,
+    };
+    match floor_decision {
+        Decision::Block => Verdict::block(Reason::new(reason), argv, None),
+        Decision::Ask | Decision::Allow => Verdict::ask(Reason::new(reason), argv),
+    }
+    .with_deny_message(deny_message)
+}
+
+/// Applies a `(Decision, reason)` floor to `verdict` — shared by
+/// [`scan_redirect_ascent_descent_floor`], [`scan_redirect_home_env_floor`],
+/// and the redirect-rule ask-floor derived from [`check_redirect_targets`],
+/// all three of which match a [`crate::rules::RedirectRule`] rather than a
+/// `CommandRule` (see [`apply_command_ascent_descent_floor`]'s docs for the
+/// sibling that carries a `CommandRule`'s `deny_message` instead) —
+/// `RedirectRule` has no `deny_message` field, so there is nothing to
+/// attach here. See [`apply_expansion_floor`]'s docs for the shared
+/// max-lift mechanics.
 fn apply_ascent_descent_floor(verdict: Verdict, floor: Option<(Decision, String)>) -> Verdict {
     let Some((floor_decision, floor_reason)) = floor else {
         return verdict;
@@ -2482,7 +2523,7 @@ fn apply_ascent_descent_floor(verdict: Verdict, floor: Option<(Decision, String)
 fn scan_named_user_home_floor(
     argv: &[NormalizedWord],
     rules: &Rules,
-) -> Option<(Decision, String)> {
+) -> Option<(Decision, String, Option<DenyMessage>)> {
     let rule = rules.match_command_named_user_home(argv)?;
     Some((
         Decision::Ask,
@@ -2493,14 +2534,20 @@ fn scan_named_user_home_floor(
             rule.id().as_str(),
             rule.reason().as_str(),
         ),
+        rule.deny_message().cloned(),
     ))
 }
 
 /// Applies [`scan_named_user_home_floor`]'s floor to `verdict` (see
 /// [`apply_expansion_floor`]'s docs for the shared max-lift mechanics and
-/// why each floor gets its own function).
-fn apply_named_user_home_floor(verdict: Verdict, floor: Option<(Decision, String)>) -> Verdict {
-    let Some((floor_decision, floor_reason)) = floor else {
+/// why each floor gets its own function; see
+/// [`apply_ascent_descent_floor`]'s docs for why the floor's own
+/// `deny_message` — issue #202 — is unconditionally attached).
+fn apply_named_user_home_floor(
+    verdict: Verdict,
+    floor: Option<(Decision, String, Option<DenyMessage>)>,
+) -> Verdict {
+    let Some((floor_decision, floor_reason, deny_message)) = floor else {
         return verdict;
     };
     if verdict.decision() >= floor_decision {
@@ -2515,6 +2562,7 @@ fn apply_named_user_home_floor(verdict: Verdict, floor: Option<(Decision, String
         Decision::Block => Verdict::block(Reason::new(reason), argv, None),
         Decision::Ask | Decision::Allow => Verdict::ask(Reason::new(reason), argv),
     }
+    .with_deny_message(deny_message)
 }
 
 /// Issue #88: `Some(Ask, reason)` when `argv` matches a rule's command+
@@ -2539,7 +2587,10 @@ fn apply_named_user_home_floor(verdict: Verdict, floor: Option<(Decision, String
 /// reason [`scan_named_user_home_floor`] is: a per-token match has no way
 /// to say "this specific token can only ever be Ask" while the same
 /// rule's other targets stay at its own fixed decision.
-fn scan_dirstack_tilde_floor(argv: &[NormalizedWord], rules: &Rules) -> Option<(Decision, String)> {
+fn scan_dirstack_tilde_floor(
+    argv: &[NormalizedWord],
+    rules: &Rules,
+) -> Option<(Decision, String, Option<DenyMessage>)> {
     let rule = rules.match_command_dirstack_tilde(argv)?;
     Some((
         Decision::Ask,
@@ -2550,14 +2601,20 @@ fn scan_dirstack_tilde_floor(argv: &[NormalizedWord], rules: &Rules) -> Option<(
             rule.id().as_str(),
             rule.reason().as_str(),
         ),
+        rule.deny_message().cloned(),
     ))
 }
 
 /// Applies [`scan_dirstack_tilde_floor`]'s floor to `verdict` (see
 /// [`apply_expansion_floor`]'s docs for the shared max-lift mechanics and
-/// why each floor gets its own function).
-fn apply_dirstack_tilde_floor(verdict: Verdict, floor: Option<(Decision, String)>) -> Verdict {
-    let Some((floor_decision, floor_reason)) = floor else {
+/// why each floor gets its own function; see
+/// [`apply_ascent_descent_floor`]'s docs for why the floor's own
+/// `deny_message` — issue #202 — is unconditionally attached).
+fn apply_dirstack_tilde_floor(
+    verdict: Verdict,
+    floor: Option<(Decision, String, Option<DenyMessage>)>,
+) -> Verdict {
+    let Some((floor_decision, floor_reason, deny_message)) = floor else {
         return verdict;
     };
     if verdict.decision() >= floor_decision {
@@ -2572,6 +2629,7 @@ fn apply_dirstack_tilde_floor(verdict: Verdict, floor: Option<(Decision, String)
         Decision::Block => Verdict::block(Reason::new(reason), argv, None),
         Decision::Ask | Decision::Allow => Verdict::ask(Reason::new(reason), argv),
     }
+    .with_deny_message(deny_message)
 }
 
 /// Issue #115: `Some(Ask, reason)` when `argv` matches a rule's command+
@@ -2594,7 +2652,7 @@ fn apply_dirstack_tilde_floor(verdict: Verdict, floor: Option<(Decision, String)
 fn scan_directory_equals_tilde_floor(
     argv: &[NormalizedWord],
     rules: &Rules,
-) -> Option<(Decision, String)> {
+) -> Option<(Decision, String, Option<DenyMessage>)> {
     let rule = rules.match_command_directory_equals_tilde(argv)?;
     Some((
         Decision::Ask,
@@ -2605,17 +2663,20 @@ fn scan_directory_equals_tilde_floor(
             rule.id().as_str(),
             rule.reason().as_str(),
         ),
+        rule.deny_message().cloned(),
     ))
 }
 
 /// Applies [`scan_directory_equals_tilde_floor`]'s floor to `verdict` (see
 /// [`apply_expansion_floor`]'s docs for the shared max-lift mechanics and
-/// why each floor gets its own function).
+/// why each floor gets its own function; see
+/// [`apply_ascent_descent_floor`]'s docs for why the floor's own
+/// `deny_message` — issue #202 — is unconditionally attached).
 fn apply_directory_equals_tilde_floor(
     verdict: Verdict,
-    floor: Option<(Decision, String)>,
+    floor: Option<(Decision, String, Option<DenyMessage>)>,
 ) -> Verdict {
-    let Some((floor_decision, floor_reason)) = floor else {
+    let Some((floor_decision, floor_reason, deny_message)) = floor else {
         return verdict;
     };
     if verdict.decision() >= floor_decision {
@@ -2630,6 +2691,7 @@ fn apply_directory_equals_tilde_floor(
         Decision::Block => Verdict::block(Reason::new(reason), argv, None),
         Decision::Ask | Decision::Allow => Verdict::ask(Reason::new(reason), argv),
     }
+    .with_deny_message(deny_message)
 }
 
 /// Applies issue #77's leftover-alternative substitution floor
@@ -2705,6 +2767,26 @@ fn fold_floors(
 ) -> Verdict {
     let mut decision = Decision::Allow;
     let mut reasons: Vec<String> = Vec::new();
+    // Issue #202: the except-target/except-flags floors are the only two
+    // of this function's inputs that carry a matched `CommandRule` (every
+    // other floor here is structural, not rule-matched, and has no
+    // `deny_message` to lose in the first place) — captured here and
+    // attached to whichever verdict this function returns, target taking
+    // priority if somehow both matched different rules with different
+    // messages. Attached unconditionally, like the reason text above it
+    // already is, rather than only when this floor was the sole/decisive
+    // contributor: `fold_floors` never tries to keep floors' reasons
+    // separately attributable either, so a `deny_message` present here
+    // gets the same "always folded in" treatment.
+    let deny_message = except_floors
+        .target
+        .and_then(crate::rules::CommandRule::deny_message)
+        .or_else(|| {
+            except_floors
+                .flags
+                .and_then(crate::rules::CommandRule::deny_message)
+        })
+        .cloned();
 
     if let Some(reason) = interpreter_code_floor {
         decision = decision.max(Decision::Ask);
@@ -2764,8 +2846,11 @@ fn fold_floors(
 
     match decision {
         Decision::Allow => Verdict::allow(argv),
-        Decision::Ask => Verdict::ask(Reason::new(reasons.join("; ")), argv),
-        Decision::Block => Verdict::block(Reason::new(reasons.join("; ")), argv, None),
+        Decision::Ask => {
+            Verdict::ask(Reason::new(reasons.join("; ")), argv).with_deny_message(deny_message)
+        }
+        Decision::Block => Verdict::block(Reason::new(reasons.join("; ")), argv, None)
+            .with_deny_message(deny_message),
     }
 }
 
@@ -2932,8 +3017,10 @@ fn evaluate_dash_c(
                                 Reason::new(reason),
                                 outer_argv,
                                 inner.matched_rule().cloned(),
-                            ),
-                            Decision::Ask => Verdict::ask(Reason::new(reason), outer_argv),
+                            )
+                            .with_deny_message(inner.deny_message().cloned()),
+                            Decision::Ask => Verdict::ask(Reason::new(reason), outer_argv)
+                                .with_deny_message(inner.deny_message().cloned()),
                             // An inner Allow does not clear the outer
                             // uncertainty — the flag position itself is
                             // still unresolvable, so this floors to Ask
@@ -3144,12 +3231,18 @@ fn evaluate_fish(
                         .unwrap_or_default()
                 );
                 match inner.decision() {
-                    Decision::Block => Some(Verdict::block(
-                        Reason::new(reason),
-                        outer_argv.clone(),
-                        inner.matched_rule().cloned(),
-                    )),
-                    Decision::Ask => Some(Verdict::ask(Reason::new(reason), outer_argv.clone())),
+                    Decision::Block => Some(
+                        Verdict::block(
+                            Reason::new(reason),
+                            outer_argv.clone(),
+                            inner.matched_rule().cloned(),
+                        )
+                        .with_deny_message(inner.deny_message().cloned()),
+                    ),
+                    Decision::Ask => Some(
+                        Verdict::ask(Reason::new(reason), outer_argv.clone())
+                            .with_deny_message(inner.deny_message().cloned()),
+                    ),
                     // An inner Allow does not clear the outer uncertainty.
                     Decision::Allow => None,
                 }
@@ -3323,8 +3416,10 @@ fn recurse_shell_string(
             Reason::new(reason),
             outer_argv,
             inner.matched_rule().cloned(),
-        ),
-        Decision::Ask => Verdict::ask(Reason::new(reason), outer_argv),
+        )
+        .with_deny_message(inner.deny_message().cloned()),
+        Decision::Ask => Verdict::ask(Reason::new(reason), outer_argv)
+            .with_deny_message(inner.deny_message().cloned()),
         Decision::Allow => Verdict::allow(outer_argv),
     }
 }

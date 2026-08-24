@@ -1564,6 +1564,164 @@ fn user_config_ask_rule_deny_message_surfaces_as_additional_context() {
     );
 }
 
+// ==== issue #202: deny_message propagates through partial-match floors
+// and verdict re-wraps, not just a definite rule match ====
+
+#[test]
+fn deny_message_surfaces_through_the_except_target_floor() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[deny]]
+        id = "user-deny-mytool"
+        reason = "block mytool writes"
+        command = "mytool"
+        targets = [{ normalized = "~" }]
+        deny_message = "use mytool --safe instead"
+    "#,
+    );
+    let output = run_hook(
+        &bash_command("mytool $FOO"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "ask");
+    assert_eq!(
+        output["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap(),
+        "use mytool --safe instead"
+    );
+}
+
+#[test]
+fn deny_message_surfaces_through_the_directory_equals_tilde_floor() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[ask]]
+        id = "user-ask-mytool-directory-tilde"
+        reason = "confirm mytool with a home-directory target"
+        command = "mytool"
+        targets = [
+            { strip = "--directory=", normalized = "/" },
+            { normalized = "~" },
+        ]
+        deny_message = "pass an explicit path instead of ~"
+    "#,
+    );
+    let output = run_hook(
+        &bash_command("mytool --directory=~"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "ask");
+    assert_eq!(
+        output["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap(),
+        "pass an explicit path instead of ~"
+    );
+}
+
+#[test]
+fn deny_message_surfaces_through_the_ascent_descent_floor() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[ask]]
+        id = "user-ask-cmd-prod"
+        reason = "confirm writes into prod"
+        command = "cmd"
+        targets = [{ normalized_prefix = "~/prod/" }]
+        deny_message = "writes into prod need a reviewed PR"
+    "#,
+    );
+    let output = run_hook(
+        &bash_command("cmd x ../../prod/y"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "ask");
+    assert_eq!(
+        output["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap(),
+        "writes into prod need a reviewed PR"
+    );
+}
+
+#[test]
+fn deny_message_surfaces_through_the_named_user_home_floor() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[ask]]
+        id = "user-ask-cp-tilde"
+        reason = "confirm cp into a home directory"
+        command = "cp"
+        targets = [{ normalized = "~" }]
+        deny_message = "confirm the target account before copying"
+    "#,
+    );
+    let output = run_hook(
+        &bash_command("cp -r x ~someuser"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "ask");
+    assert_eq!(
+        output["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap(),
+        "confirm the target account before copying"
+    );
+}
+
+#[test]
+fn deny_message_surfaces_through_the_dirstack_tilde_floor() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[ask]]
+        id = "user-ask-cmd-dirstack"
+        reason = "confirm writes via a directory-stack shorthand"
+        command = "cmd"
+        targets = [{ normalized = "~" }]
+        deny_message = "resolve ~+/~- to a literal path first"
+    "#,
+    );
+    let output = run_hook(
+        &bash_command("cmd x ~+"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "ask");
+    assert_eq!(
+        output["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap(),
+        "resolve ~+/~- to a literal path first"
+    );
+}
+
+// A `bash -c` verdict re-wrap preserves the inner verdict's `matched_rule`
+// (`recurse_shell_string`, src/gate.rs) — this pins that it now preserves
+// `deny_message` too, not just the rule id.
+#[test]
+fn deny_message_survives_a_bash_dash_c_verdict_rewrap() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[deny]]
+        id = "user-deny-scary-tool"
+        reason = "never run this"
+        command = "scary-tool"
+        deny_message = "use safe-tool instead"
+    "#,
+    );
+    let output = run_hook(
+        &bash_command("bash -c 'scary-tool --run'"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+    assert_eq!(
+        output["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap(),
+        "use safe-tool instead"
+    );
+}
+
 // #40: `command_prefix` matches on `starts_with`, so a prefix rule aimed at
 // `git` also catches an unrelated tool that happens to share the prefix,
 // like `gitleaks`. This is the documented footgun, not a bug -- the fix is
