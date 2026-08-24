@@ -936,11 +936,12 @@ impl TargetMatcher {
     /// unbounded by construction). The correlation available here is the
     /// *slot* instead: a `strip: Some(..)` target (e.g. `dd`'s `of=`)
     /// expects an ATTACHED token (`of=/dev/sda`), and a bare
-    /// `~+`/`~-`/`~N` glued after that same flag (`of=~+`) doesn't
-    /// tilde-expand in the first place — a separate zsh-`magic_equal_subst`
-    /// question, tracked as issue #134 — so `strip: Some(..)` targets are
-    /// excluded here the same way they're excluded from ever actually
-    /// matching an unattached dirstack token.
+    /// `~+`/`~-`/`~N` glued after that same flag (`of=~+`) is a separate
+    /// zsh-`magic_equal_subst` question, handled by
+    /// [`CommandRule::matches_dirstack_equal_subst_floor`] (issue #134) —
+    /// which has its own corroborating-slot gate — so `strip: Some(..)`
+    /// targets are excluded here the same way they're excluded from ever
+    /// actually matching an unattached dirstack token.
     fn dirstack_plausible(&self, token: &str) -> bool {
         let strip = match self {
             Self::NormalizedExact { strip, .. } | Self::NormalizedPrefix { strip, .. } => strip,
@@ -2168,6 +2169,92 @@ impl CommandRule {
             })
         })
     }
+
+    /// Issue #134: true when this rule's command+flags match `argv` (via
+    /// [`Self::matching_rest`], the same full constraint check
+    /// [`Self::matches`] uses) and some resolved tail token attaches a
+    /// directory-stack tilde shorthand (`~+`/`~-`/`~N`/`~+N`/`~-N`) or a
+    /// `..` step above one (`~+/..`) directly after an `=`-terminated
+    /// `strip` prefix this same rule declares (e.g. `--directory=~+`).
+    ///
+    /// Same attach-detection shape as
+    /// [`Self::matches_directory_equals_tilde_floor`] (issue #115), and
+    /// same target-*value*-free reasoning as
+    /// [`Self::matches_dirstack_tilde_floor`] (issue #88) for the
+    /// unattached case: `~+`/`~-`/`~N` expand against
+    /// `$PWD`/`$OLDPWD`/a pushd-stack entry, an anchor no rule target can
+    /// declare, so there is nothing about a specific target's own value to
+    /// check. But #115's `has_bare_tilde_target` gate is replaced here with
+    /// a broader corroborating-slot requirement rather than dropped
+    /// outright: this rule must ALSO declare at least one bare, unattached
+    /// `NormalizedExact`/`NormalizedPrefix` target (`strip: None`) — the
+    /// same "target's slot could even receive a bare path" proxy
+    /// [`TargetMatcher::dirstack_plausible`] already uses to gate the
+    /// unattached floor (a raw `Exact`/`Prefix` target doesn't count
+    /// there either, for the same reason). This is a slot-eligibility
+    /// proxy, not an actual directory-vs-file check — nothing here parses
+    /// what kind of path a target denotes — but for every rule currently
+    /// eligible in the embedded blocklist (the tar rules' bare `/`/`~`;
+    /// `mv`/`install`/`cp-write-device`'s bare `/dev`/`/dev/*`), the
+    /// `=`-terminated slot itself expects a directory (`--directory=`,
+    /// `--target-directory=`) and the rule also declares at least one bare
+    /// directory target (`/`, `~`, or the exact `/dev` entry — the bare
+    /// `/dev/` *prefix* additionally matches non-directory device nodes,
+    /// which is fine: a directory-shaped dirstack token can still land
+    /// under `/dev/` too), which is exactly why the proxy works: a rule
+    /// whose ONLY targets are
+    /// attach-only file/device sinks (`dd`'s `of=/dev/*`, `of=/etc/passwd`)
+    /// never gets a false Ask-floor here — `dd of=~-/..` always resolves to
+    /// a directory, and `of=<directory>` fails EISDIR regardless of tilde
+    /// expansion, so it stays Allow (pinned by
+    /// `gate::tests::dd_dirstack_tilde_escape_to_empty_tail_stays_allow`).
+    /// A user-config rule that pairs an unrelated bare *file* target with
+    /// an `=`-terminated attach target would still float here, an
+    /// FP-noise-only edge (Ask, never a bypass) inherent to the proxy.
+    /// Read-only probe, never itself a match, only a `gate.rs`
+    /// floor's input (see `crate::gate::scan_dirstack_equal_subst_floor`).
+    #[must_use]
+    pub(crate) fn matches_dirstack_equal_subst_floor(&self, argv: &[NormalizedWord]) -> bool {
+        if self.targets.is_empty() {
+            return false;
+        }
+        let has_unattached_target = self.targets.iter().any(|t| {
+            matches!(
+                t,
+                TargetMatcher::NormalizedExact { strip: None, .. }
+                    | TargetMatcher::NormalizedPrefix { strip: None, .. }
+            )
+        });
+        if !has_unattached_target {
+            return false;
+        }
+        let attach_prefixes: Vec<&str> = self
+            .targets
+            .iter()
+            .filter_map(|t| match t {
+                TargetMatcher::NormalizedExact {
+                    strip: Some(strip), ..
+                }
+                | TargetMatcher::NormalizedPrefix {
+                    strip: Some(strip), ..
+                } if strip.ends_with('=') => Some(strip.as_str()),
+                _ => None,
+            })
+            .collect();
+        if attach_prefixes.is_empty() {
+            return false;
+        }
+        let Some(rest_words) = self.matching_rest(argv) else {
+            return false;
+        };
+        resolved_strings(&rest_words).iter().any(|token| {
+            attach_prefixes.iter().any(|prefix| {
+                token
+                    .strip_prefix(*prefix)
+                    .is_some_and(dirstack_reachable_via_magic_equal_subst)
+            })
+        })
+    }
 }
 
 /// Whether `remainder` (a token's content after stripping an `=`-
@@ -2185,21 +2272,44 @@ impl CommandRule {
 /// option-dependent, never provable) — this function only answers "what
 /// would it expand to if it did."
 ///
-/// Deliberately does NOT recognize [`PathForm::DirStack`] (issue #88, e.g.
-/// `--directory=~+`): unlike `NamedUserHome`/`EscapesHome`, which expand
-/// against the SAME anchor (`$HOME`) this function's caller already
-/// requires the rule to have a bare-`~` target for, `~+`/`~-`/`~N` expand
-/// to `$PWD`/`$OLDPWD`/a dirstack entry — a fundamentally different,
-/// unrelated anchor. Folding it in here would produce a floor whose
-/// reported reason ("would hit this rule's bare-`~` target") is not
-/// actually true for a `$PWD`/`$OLDPWD`-anchored token. Tracked as a
-/// follow-up (issue #134) rather than a same-shape widening here.
+/// Deliberately does NOT recognize [`PathForm::DirStack`]/
+/// [`PathForm::DirStackEscapesEmpty`] (issue #88, e.g. `--directory=~+`):
+/// unlike `NamedUserHome`/`EscapesHome`, which expand against the SAME
+/// anchor (`$HOME`) this function's caller already requires the rule to
+/// have a bare-`~` target for, `~+`/`~-`/`~N` expand to `$PWD`/`$OLDPWD`/a
+/// dirstack entry — a fundamentally different, unrelated anchor. Folding
+/// it in here would produce a floor whose reported reason ("would hit this
+/// rule's bare-`~` target") is not actually true for a `$PWD`/`$OLDPWD`-
+/// anchored token. That case is instead
+/// [`CommandRule::matches_dirstack_equal_subst_floor`]'s own job (issue
+/// #134): a separate floor with no bare-`~`-target gate, since a dirstack
+/// token has no single anchor to compare against in the first place.
 fn tilde_reachable_via_magic_equal_subst(remainder: &str) -> bool {
     match lexical_normalize(remainder) {
         PathForm::Home(comps) => comps.is_empty(),
         PathForm::EscapesHome(_) | PathForm::NamedUserHome | PathForm::NamedUserHomeEscapes(_) => {
             true
         }
+        _ => false,
+    }
+}
+
+/// Whether `remainder` (a token's content after stripping an `=`-
+/// terminated flag prefix, e.g. `--directory=`) is a shape that would hit
+/// SOME rule target if zsh's `magic_equal_subst` option expanded it (issue
+/// #134): a directory-stack tilde shorthand at its bare anchor
+/// ([`PathForm::DirStack`] with an empty tail, `~+`) or one `..` step above
+/// it ([`PathForm::DirStackEscapesEmpty`], `~+/..`) — the same two shapes
+/// [`TargetMatcher::dirstack_plausible`] floors for the unattached case.
+/// Unlike [`tilde_reachable_via_magic_equal_subst`], there is no specific
+/// target *value* being compared: `~+`/`~-`/`~N` expand to
+/// `$PWD`/`$OLDPWD`/a pushd-stack entry, an anchor no [`PathForm`] a target
+/// can declare represents, so this only answers "what would it expand to
+/// if it did," same as that sibling function's own doc says.
+fn dirstack_reachable_via_magic_equal_subst(remainder: &str) -> bool {
+    match lexical_normalize(remainder) {
+        PathForm::DirStack(tail) => tail.is_empty(),
+        PathForm::DirStackEscapesEmpty => true,
         _ => false,
     }
 }
@@ -4875,6 +4985,23 @@ impl Rules {
             .find(|rule| rule.matches_directory_equals_tilde_floor(argv))
     }
 
+    /// The first [`CommandRule`] for which
+    /// [`CommandRule::matches_dirstack_equal_subst_floor`] holds, if any —
+    /// issue #134's attached-dirstack-tilde `magic_equal_subst` floor
+    /// (`src/gate.rs`). Like [`Self::match_command_directory_equals_tilde`],
+    /// scans both `command_rules` and `ask_rules` and is a read-only probe:
+    /// never mutates rule state, never itself constitutes a match.
+    #[must_use]
+    pub(crate) fn match_command_dirstack_equal_subst(
+        &self,
+        argv: &[NormalizedWord],
+    ) -> Option<&CommandRule> {
+        self.command_rules
+            .iter()
+            .chain(self.ask_rules.iter())
+            .find(|rule| rule.matches_dirstack_equal_subst_floor(argv))
+    }
+
     /// The configured escalation floor (issues #35/#36, `crate::gate` rule
     /// 10): `Decision::Ask` unless a user config set `escalation_floor =
     /// "deny"` (see the struct docs and [`merge_user_config`]). Never
@@ -6204,6 +6331,129 @@ mod tests {
         let rules = Rules::embedded().unwrap();
         let cmd = argv(&["rm", "-rf", "--totally-unrelated-flag=~"]);
         assert!(rules.match_command_directory_equals_tilde(&cmd).is_none());
+    }
+
+    // ==== Issue #134: a directory-stack tilde shorthand attached directly
+    // after an `=`-terminated flag (`--directory=~+`, `--directory=~-`,
+    // `--directory=~N`) or one `..` step above it (`--directory=~+/..`)
+    // floors to Ask via Rules::match_command_dirstack_equal_subst — the
+    // attached-token counterpart to issue #88/#133's unattached dirstack
+    // floor, gated on magic_equal_subst the same way issue #115's bare-`~`
+    // attach floor is. ====
+
+    #[test]
+    fn dirstack_equal_subst_bare_anchor_floors_but_does_not_hard_match() {
+        let rules = Rules::embedded().unwrap();
+        for cmd in [
+            argv(&["tar", "-x", "--directory=~+", "-f", "a.tar"]),
+            argv(&["tar", "-x", "--directory=~-", "-f", "a.tar"]),
+            argv(&["tar", "-x", "--directory=~5", "-f", "a.tar"]),
+            argv(&["tar", "-x", "--directory=~+3", "-f", "a.tar"]),
+            argv(&["tar", "-x", "--directory=~-3", "-f", "a.tar"]),
+        ] {
+            assert!(rules.match_command(&cmd).is_none(), "{cmd:?}");
+            let rule = rules
+                .match_command_dirstack_equal_subst(&cmd)
+                .unwrap_or_else(|| {
+                    panic!("expected {cmd:?} to floor via match_command_dirstack_equal_subst")
+                });
+            assert_eq!(rule.id().as_str(), "tar-extract-over-root-or-home");
+        }
+    }
+
+    #[test]
+    fn dirstack_equal_subst_escape_to_empty_floors() {
+        // `--directory=~+/..` collapses to one level above the (unknown)
+        // anchor — issue #133's PathForm::DirStackEscapesEmpty, same shape
+        // as the unattached ~+/.. case, now recognized attached too.
+        let rules = Rules::embedded().unwrap();
+        for cmd in [
+            argv(&["tar", "-x", "--directory=~+/..", "-f", "a.tar"]),
+            argv(&["tar", "-x", "--directory=~-/..", "-f", "a.tar"]),
+        ] {
+            assert!(
+                rules.match_command_dirstack_equal_subst(&cmd).is_some(),
+                "{cmd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dirstack_equal_subst_subdir_does_not_floor() {
+        // `--directory=~+/subdir` is a non-escaping descent under an
+        // unknown anchor — not the bare-anchor or escape-to-empty shape
+        // this floor covers; the separated-word equivalent is already
+        // Allow (issue #133), so the attached form must not become
+        // stricter than the form it's no more dangerous than.
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["tar", "-x", "--directory=~+/subdir", "-f", "a.tar"]);
+        assert!(rules.match_command_dirstack_equal_subst(&cmd).is_none());
+    }
+
+    #[test]
+    fn dirstack_equal_subst_ordinary_path_does_not_floor() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["tar", "-x", "--directory=/some/path", "-f", "a.tar"]);
+        assert!(rules.match_command_dirstack_equal_subst(&cmd).is_none());
+    }
+
+    #[test]
+    fn dirstack_equal_subst_dash_c_short_flag_does_not_floor() {
+        // magic_equal_subst only ever matches an `=`-shaped word; `-C~+`
+        // has no `=`, so it's unaffected and stays out of scope.
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["tar", "-x", "-C~+", "-f", "a.tar"]);
+        assert!(rules.match_command(&cmd).is_none());
+        assert!(rules.match_command_dirstack_equal_subst(&cmd).is_none());
+    }
+
+    #[test]
+    fn dirstack_equal_subst_requires_a_corroborating_unattached_target_on_the_rule() {
+        // `dd-write-device`'s ONLY targets are attach-only file/device
+        // sinks (`of=/dev/*`, `of=/etc/passwd`, `of=/etc/shadow`) — no
+        // bare, unattached target at all. A bare-anchor/escape-to-empty
+        // dirstack token always denotes a directory, and `of=<directory>`
+        // always fails EISDIR regardless of tilde expansion, so this must
+        // NOT floor — same posture as the pinned
+        // `gate::tests::dd_dirstack_tilde_escape_to_empty_tail_stays_allow`.
+        let rules = Rules::embedded().unwrap();
+        for cmd in [argv(&["dd", "of=~+"]), argv(&["dd", "of=~-/.."])] {
+            assert!(
+                rules.match_command_dirstack_equal_subst(&cmd).is_none(),
+                "{cmd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dirstack_equal_subst_separated_form_floors_via_the_unattached_mechanism_instead() {
+        // The space-separated equivalent (`tar -x --directory ~+ ...`) is
+        // issue #88/#133's territory (match_command_dirstack_tilde), not
+        // this attached-only floor — each mechanism owns its own shape,
+        // with no double-floor and no gap between them.
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["tar", "-x", "--directory", "~+", "-f", "a.tar"]);
+        assert!(rules.match_command_dirstack_equal_subst(&cmd).is_none());
+        assert!(rules.match_command_dirstack_tilde(&cmd).is_some());
+    }
+
+    #[test]
+    fn dirstack_equal_subst_floor_reachable_through_env_wrapper() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["env", "tar", "-x", "--directory=~+", "-f", "a.tar"]);
+        assert!(rules.match_command_dirstack_equal_subst(&cmd).is_some());
+    }
+
+    #[test]
+    fn dirstack_equal_subst_requires_an_equals_terminated_strip_on_the_rule() {
+        // `rm-recursive-force-dangerous-target` has no `=`-terminated
+        // `strip` entry anywhere in its own targets — magic_equal_subst's
+        // mechanism has nothing to do with rm's flags at all, so a rule
+        // shaped like this must never floor on an arbitrary
+        // `--flag=~+token`, no matter what the flag is called.
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["rm", "-rf", "--totally-unrelated-flag=~+"]);
+        assert!(rules.match_command_dirstack_equal_subst(&cmd).is_none());
     }
 
     // ==== CommandRule matching resolves basename + skips transparent

@@ -614,7 +614,12 @@ required_flags = ["t|--type"]
 # Ask-only floor (`CommandRule::matches_directory_equals_tilde_floor` /
 # `crate::gate::scan_directory_equals_tilde_floor`) rather than a `targets`
 # entry, specifically so it floors without ever inheriting this rule's own
-# (often `Block`) decision the way a certain match would.
+# (often `Block`) decision the way a certain match would. Issue #134 pairs
+# the same magic_equal_subst uncertainty with `~+`/`~-`/`~N` directory-
+# stack tilde forms attached the same way (`--directory=~+`) — floored by
+# `CommandRule::matches_dirstack_equal_subst_floor`. Both floors match on
+# the literal `--directory=` strip string, so they share the same disclosed
+# GNU long-option-abbreviation gap as #214 (`--direct=~+` bypasses both).
 [[command]]
 id = "tar-extract-over-root-or-home"
 reason = "tar extraction with -C/--directory into / or ~ overwrites arbitrary system/home paths with archive contents"

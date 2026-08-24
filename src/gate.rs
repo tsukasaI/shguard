@@ -1699,6 +1699,13 @@ fn evaluate_simple_command(
     // expanded it. Computed here for the same reason the other floors
     // above are: this floor must survive `core`'s early returns too.
     let directory_equals_tilde_floor = scan_directory_equals_tilde_floor(&argv, rules);
+    // Issue #134: a `~+`/`~-`/`~N` directory-stack tilde token (or a `..`
+    // step above one, `~+/..`) attached directly after an `=`-terminated
+    // flag that would hit a matched rule's own target if zsh's
+    // `magic_equal_subst` option expanded it. Computed here for the same
+    // reason the other floors above are: this floor must survive `core`'s
+    // early returns too.
+    let dirstack_equal_subst_floor = scan_dirstack_equal_subst_floor(&argv, rules);
     // Issue #103: the folded cwd is entirely unknown for this command line
     // (a same-line `cd` target that couldn't be statically resolved) — a
     // resolved tail token that plausibly lands inside a matched rule's own
@@ -1728,6 +1735,7 @@ fn evaluate_simple_command(
     let named_user_home_floor_present = named_user_home_floor.is_some();
     let dirstack_tilde_floor_present = dirstack_tilde_floor.is_some();
     let directory_equals_tilde_floor_present = directory_equals_tilde_floor.is_some();
+    let dirstack_equal_subst_floor_present = dirstack_equal_subst_floor.is_some();
     let unknown_cwd_floor_present = unknown_cwd_floor.is_some();
     let verdict = apply_expansion_floor(verdict, expansion.floor);
     let verdict = apply_recursable_floor(verdict, recursable.floor);
@@ -1739,6 +1747,7 @@ fn evaluate_simple_command(
     let verdict = apply_named_user_home_floor(verdict, named_user_home_floor);
     let verdict = apply_dirstack_tilde_floor(verdict, dirstack_tilde_floor);
     let verdict = apply_directory_equals_tilde_floor(verdict, directory_equals_tilde_floor);
+    let verdict = apply_dirstack_equal_subst_floor(verdict, dirstack_equal_subst_floor);
     let verdict = apply_unknown_cwd_floor(verdict, unknown_cwd_floor);
 
     // Rule 11's allowlist guard: the same presence-based reasoning as
@@ -1776,6 +1785,12 @@ fn evaluate_simple_command(
     // shaped token that would hit that same rule's bare-`~` target under
     // zsh's `magic_equal_subst` option — shguard cannot know whether the
     // invoking shell has that (off-by-default) option set.
+    // `dirstack_equal_subst_floor_present` (issue #134) extends it once
+    // more, pairing the previous two: an allow entry for `tar` is not
+    // consent to a `--directory=~+`-shaped token either, under the same
+    // `magic_equal_subst` uncertainty, for the same `$PWD`/`$OLDPWD`/
+    // pushd-stack anchor `dirstack_tilde_floor_present` already covers for
+    // the unattached case.
     // `redirect_home_env_floor_present` (issue #203) extends it once
     // more, for the same reason `redirect_rule_ask_floor_present` below
     // does: an allow entry for `echo`/`cat` is not consent to a `$HOME`-
@@ -1803,6 +1818,7 @@ fn evaluate_simple_command(
         || named_user_home_floor_present
         || dirstack_tilde_floor_present
         || directory_equals_tilde_floor_present
+        || dirstack_equal_subst_floor_present
         || unknown_cwd_floor_present
     {
         verdict
@@ -2678,6 +2694,66 @@ fn scan_directory_equals_tilde_floor(
 /// [`apply_command_ascent_descent_floor`]'s docs for why the floor's own
 /// `deny_message` — issue #202 — is unconditionally attached).
 fn apply_directory_equals_tilde_floor(
+    verdict: Verdict,
+    floor: Option<(Decision, String, Option<DenyMessage>)>,
+) -> Verdict {
+    let Some((floor_decision, floor_reason, deny_message)) = floor else {
+        return verdict;
+    };
+    if verdict.decision() >= floor_decision {
+        return verdict;
+    }
+    let argv = verdict.normalized_argv().to_vec();
+    let reason = match verdict.reason() {
+        Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
+        None => floor_reason,
+    };
+    match floor_decision {
+        Decision::Block => Verdict::block(Reason::new(reason), argv, None),
+        Decision::Ask | Decision::Allow => Verdict::ask(Reason::new(reason), argv),
+    }
+    .with_deny_message(deny_message)
+}
+
+/// Issue #134: `Some(Ask, reason)` when `argv` matches a rule's command+
+/// flags — an embedded blocklist rule, a user-config `[[deny]]` entry, or
+/// a user-config `[[ask]]` entry (`Rules::match_command_dirstack_equal_subst`
+/// scans both `command_rules` and `ask_rules`) — and some resolved tail
+/// token attaches a directory-stack tilde shorthand (`~+`/`~-`/`~N`) or a
+/// `..` step above one (`~+/..`) directly after an `=`-terminated flag
+/// prefix the same rule declares
+/// (`crate::rules::CommandRule::matches_dirstack_equal_subst_floor`) —
+/// `None` otherwise. Always capped at `Ask`, for both reasons
+/// [`scan_dirstack_tilde_floor`] and [`scan_directory_equals_tilde_floor`]
+/// are: shguard has no cwd/directory stack to resolve `~+`/`~-`/`~N`
+/// against, AND whether an attached token even expands at all depends on
+/// the invoking shell's (off-by-default) `magic_equal_subst` option.
+fn scan_dirstack_equal_subst_floor(
+    argv: &[NormalizedWord],
+    rules: &Rules,
+) -> Option<(Decision, String, Option<DenyMessage>)> {
+    let rule = rules.match_command_dirstack_equal_subst(argv)?;
+    Some((
+        Decision::Ask,
+        format!(
+            "a target token attaches a directory-stack tilde shorthand (`~+`/`~-`/`~N`) or a \
+             `..` step above one (`~+/..`) directly after an `=`-terminated flag, which would \
+             match rule {:?} ({}) if the invoking shell's zsh `magic_equal_subst` option (off by \
+             default) expanded it; shguard cannot observe the invoking shell's options and has \
+             no cwd or directory stack to resolve it against",
+            rule.id().as_str(),
+            rule.reason().as_str(),
+        ),
+        rule.deny_message().cloned(),
+    ))
+}
+
+/// Applies [`scan_dirstack_equal_subst_floor`]'s floor to `verdict` (see
+/// [`apply_expansion_floor`]'s docs for the shared max-lift mechanics and
+/// why each floor gets its own function; see
+/// [`apply_command_ascent_descent_floor`]'s docs for why the floor's own
+/// `deny_message` — issue #202 — is unconditionally attached).
+fn apply_dirstack_equal_subst_floor(
     verdict: Verdict,
     floor: Option<(Decision, String, Option<DenyMessage>)>,
 ) -> Verdict {
@@ -7682,6 +7758,65 @@ mod tests {
         // itself doesn't hit dd-write-device's `/dev/` target either, so
         // this now Allows.
         assert_decision("dd of=/tmp/safe-file ~+", Decision::Allow);
+    }
+
+    // ==== Issue #134: `~+`/`~-`/`~N` directory-stack tilde forms attached
+    // directly after an `=`-terminated flag (`--directory=~+`) float to Ask
+    // via scan_dirstack_equal_subst_floor — the attached counterpart to
+    // #88/#133's space-separated floor, gated on the invoking shell's
+    // (off-by-default) magic_equal_subst option the same way #115's bare-`~`
+    // attach floor is. ====
+
+    #[test]
+    fn tar_directory_equals_dirstack_tilde_plus_asks() {
+        assert_decision("tar -x --directory=~+ -f a.tar", Decision::Ask);
+    }
+
+    #[test]
+    fn tar_directory_equals_dirstack_tilde_minus_asks() {
+        assert_decision("tar -x --directory=~- -f a.tar", Decision::Ask);
+    }
+
+    #[test]
+    fn tar_directory_equals_dirstack_tilde_numbered_asks() {
+        assert_decision("tar -x --directory=~5 -f a.tar", Decision::Ask);
+    }
+
+    #[test]
+    fn tar_directory_equals_dirstack_tilde_escape_to_empty_asks() {
+        // `--directory=~+/..` — issue #133's escape-to-empty shape, attached
+        // after `=` instead of space-separated.
+        assert_decision("tar -x --directory=~+/.. -f a.tar", Decision::Ask);
+    }
+
+    #[test]
+    fn tar_directory_equals_dirstack_tilde_subdir_tail_still_allows() {
+        // A real subdirectory tail under the unknown anchor is no more
+        // dangerous attached than space-separated (issue #133 parity).
+        assert_decision("tar -x --directory=~+/subdir -f a.tar", Decision::Allow);
+    }
+
+    #[test]
+    fn tar_directory_equals_ordinary_path_is_unaffected() {
+        assert_decision("tar -x --directory=/some/path -f a.tar", Decision::Allow);
+    }
+
+    #[test]
+    fn allowlisted_tar_still_asks_on_dirstack_equal_subst() {
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[allow]]
+            id = "user-allow-tar"
+            reason = "trust me"
+            command = "tar"
+        "#,
+        );
+        // An allow entry for `tar` is consent to `tar` in general, not to a
+        // `--directory=~+`-shaped token that would hit the same rule's
+        // target under magic_equal_subst — the floor must survive the
+        // allowlist downgrade.
+        let verdict = analyze_with_policy("tar -x --directory=~+ -f a.tar", &rules, &allowlist);
+        assert_eq!(verdict.decision(), Decision::Ask);
     }
 
     // ==== User config precedence: deny > ask > allow (plan.md §6 item 8) ====
