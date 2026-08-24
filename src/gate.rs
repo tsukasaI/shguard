@@ -994,9 +994,9 @@ fn evaluate_pipeline_shape(stages: &[Vec<NormalizedWord>]) -> Option<Verdict> {
         Some(Verdict::block(
             Reason::new(
                 "pipeline decodes/transforms data upstream (base64/base32/basenc/xxd/openssl/\
-                 gzip/xz/bzip2/zstd/uudecode/rev/tr) and pipes the result into an interpreter \
-                 — the payload is deliberately hidden from static analysis and no routine \
-                 agent workflow needs this shape",
+                 gzip/xz/lzma/bzip2/zstd/uudecode/rev/tr) and pipes the result into an \
+                 interpreter — the payload is deliberately hidden from static analysis and no \
+                 routine agent workflow needs this shape",
             ),
             last.clone(),
             None,
@@ -5444,8 +5444,9 @@ fn scan_for_dash_c_before_operand(words: &[NormalizedWord], interpreter: &str) -
 /// Rule 5b: whether `stage` is a decode/transform command in the sense
 /// this module cares about (`base64`/`base32`/`basenc` `-d`/`--decode`,
 /// `xxd -r`, `openssl enc -d`/`openssl base64 -d`, `gzip`/`xz`/`bzip2`/
-/// `zstd -d`, `gunzip`/`zcat`/`unxz`/`xzcat`/`bunzip2`/`bzcat`/`unzstd`/
-/// `zstdcat`, `uudecode`, `rev`, `tr`) — the fixed, code-level policy set
+/// `zstd`/`lzma`/`zstdmt -d`, `gunzip`/`zcat`/`unxz`/`xzcat`/`bunzip2`/
+/// `bzcat`/`unzstd`/`zstdcat`/`unlzma`/`lzcat`/`xzdec`/`lzmadec`,
+/// `uudecode`, `rev`, `tr`) — the fixed, code-level policy set
 /// named in the gate rules (not user-editable via `rules/blocklist.toml`,
 /// unlike stage 3's rules — this is structural policy about pipeline
 /// *shape*, not an exact-argv match). Also resolved through
