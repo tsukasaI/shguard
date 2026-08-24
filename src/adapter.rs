@@ -299,8 +299,8 @@ mod tests {
 
     fn embedded_only_policy() -> crate::config::Policy {
         crate::config::Policy {
-            rules: crate::rules::Rules::embedded().unwrap(),
-            allowlist: crate::rules::Allowlist::embedded().unwrap(),
+            rules: std::sync::Arc::new(crate::rules::Rules::embedded().unwrap()),
+            allowlist: std::sync::Arc::new(crate::rules::Allowlist::embedded().unwrap()),
         }
     }
 
@@ -335,7 +335,10 @@ mod tests {
         .unwrap();
         let (rules, allowlist) =
             crate::rules::merge_user_config(blocklist, allowlist, user_config).unwrap();
-        let policy = crate::config::Policy { rules, allowlist };
+        let policy = crate::config::Policy {
+            rules: std::sync::Arc::new(rules),
+            allowlist: std::sync::Arc::new(allowlist),
+        };
 
         let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"gh pr view"}}"#;
         let output = handle_with_policy(stdin, &policy);
@@ -383,7 +386,10 @@ mod tests {
         .unwrap();
         let (rules, allowlist) =
             crate::rules::merge_user_config(blocklist, allowlist, user_config).unwrap();
-        let policy = crate::config::Policy { rules, allowlist };
+        let policy = crate::config::Policy {
+            rules: std::sync::Arc::new(rules),
+            allowlist: std::sync::Arc::new(allowlist),
+        };
 
         let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"mytool --force"}}"#;
         let output = handle_with_policy(stdin, &policy);

@@ -141,9 +141,19 @@ impl From<crate::rules::RulesError> for ConfigError {
 /// self-protection rules. Opaque to callers outside this crate — the only
 /// public operations are [`Policy::load`] and passing a `&Policy` to
 /// [`crate::analyze_with_policy`].
+///
+/// `Clone` exists primarily so [`crate::analyze_with_policy`] can hand an
+/// owned copy into the bounded-evaluation worker thread `src/watchdog.rs`
+/// spawns (`'static` closures can't borrow the caller's `&Policy` across
+/// that boundary) on every call — deriving it on a `pub` type does make it
+/// part of this type's public API regardless of that original motivation,
+/// so it's fine for a caller to rely on too. It's cheap either way: the
+/// fields are `Arc`-wrapped, so clone is a refcount bump, not a deep copy
+/// of the whole ruleset.
+#[derive(Clone)]
 pub struct Policy {
-    pub(crate) rules: Rules,
-    pub(crate) allowlist: Allowlist,
+    pub(crate) rules: std::sync::Arc<Rules>,
+    pub(crate) allowlist: std::sync::Arc<Allowlist>,
 }
 
 impl Policy {
@@ -284,7 +294,10 @@ impl Policy {
             None => (rules, allowlist),
         };
 
-        Ok(Self { rules, allowlist })
+        Ok(Self {
+            rules: std::sync::Arc::new(rules),
+            allowlist: std::sync::Arc::new(allowlist),
+        })
     }
 }
 

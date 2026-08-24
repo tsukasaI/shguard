@@ -12,6 +12,7 @@ pub mod normalize;
 mod parser;
 mod rules;
 pub mod verdict;
+mod watchdog;
 
 use verdict::Verdict;
 
@@ -45,18 +46,41 @@ use verdict::Verdict;
 /// (`src/gate.rs`) → worst-decision-wins fold — is composed in
 /// [`gate::analyze`]; see that module's docs for the full Block/Ask/Allow
 /// rule set.
+///
+/// # Bounded evaluation (issue #319)
+///
+/// Runs on its own thread, bounded by wall-clock time everywhere and, on
+/// Linux/macOS, memory growth too (`src/watchdog.rs`; other platforms have
+/// no RSS-reading implementation there yet and rely on the wall-clock
+/// bound alone) — a pathological input that would otherwise hang or grow
+/// memory unboundedly (crash-fuzzer finding #315) instead makes this
+/// call itself return a fail-closed `Ask` within a couple of seconds. This
+/// is a real, documented limitation, not a full guarantee: a trip leaves
+/// the runaway worker thread detached rather than terminating it (Rust has
+/// no safe thread-cancel primitive), so for a non-terminating input like
+/// #315's, that thread keeps allocating in the background afterward and
+/// the host process can still run out of memory eventually — just later,
+/// and outside this call, rather than during it. See `src/watchdog.rs`'s
+/// module docs for the full reasoning. A caller evaluating untrusted or
+/// adversarial input, where the difference between "delayed" and
+/// "prevented" matters, should run this behind a subprocess instead, so
+/// the runaway dies with it.
 #[must_use]
 pub fn analyze(command: &str) -> Verdict {
-    gate::analyze(command)
+    let command = command.to_string();
+    watchdog::bounded(move || gate::analyze(&command))
 }
 
-/// Config-aware sibling of [`analyze`]: same pipeline and the same
-/// error/fail-closed posture, but `policy` (loaded once at the
-/// composition root via [`config::Policy::load`]) supplies the rules and
-/// allowlist instead of the embedded defaults alone. [`analyze`]'s own
-/// behavior and signature are untouched — this is an additional entry
+/// Config-aware sibling of [`analyze`]: same pipeline, the same
+/// error/fail-closed posture, and the same bounded-evaluation guarantee
+/// (see [`analyze`]'s "Bounded evaluation" section), but `policy` (loaded
+/// once at the composition root via [`config::Policy::load`]) supplies the
+/// rules and allowlist instead of the embedded defaults alone. [`analyze`]'s
+/// own behavior and signature are untouched — this is an additional entry
 /// point, not a replacement.
 #[must_use]
 pub fn analyze_with_policy(command: &str, policy: &config::Policy) -> Verdict {
-    gate::analyze_with_policy(command, &policy.rules, &policy.allowlist)
+    let command = command.to_string();
+    let policy = policy.clone();
+    watchdog::bounded(move || gate::analyze_with_policy(&command, &policy.rules, &policy.allowlist))
 }
