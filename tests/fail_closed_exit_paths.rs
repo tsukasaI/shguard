@@ -302,6 +302,10 @@ fn memory_budget_trip_fails_closed_to_ask() {
 
 // ==== Library API watchdog (issue #319) ====
 
+/// Env var gate for `library_analyze_fails_closed_to_ask_on_the_same_heredoc_hang`'s
+/// self-reexec below — set only on that test's own child invocation.
+const LIBRARY_WATCHDOG_CHILD_ENV: &str = "SHGUARD_TEST_LIBRARY_WATCHDOG_CHILD";
+
 /// Before the fix: `shguard::analyze` — the public library entry point,
 /// documented on crates.io — had no watchdog of its own. A consumer
 /// calling it directly, bypassing the `shguard` binary and the watchdog
@@ -310,18 +314,50 @@ fn memory_budget_trip_fails_closed_to_ask() {
 /// `examples/probe '<<$( |] '`, which hung until SIGKILLed. `src/watchdog.rs`
 /// closes this for both `analyze` and `analyze_with_policy`.
 ///
-/// Runs `shguard::analyze` on its own thread with an outer 30s bound, same
-/// margin as the binary test above: if `src/watchdog.rs`'s own bound
-/// regresses, this fails on the `recv_timeout` below instead of hanging
-/// the test suite forever.
+/// The #315 repro is a genuine unbounded allocator: `src/watchdog.rs`'s
+/// bound stops the *call* from hanging, but — by design, see that
+/// module's docs — leaves the runaway worker thread detached, still
+/// allocating in the background afterward. Running the repro directly in
+/// this test binary's own long-lived process would leak that runaway into
+/// every test that runs after it, risking a nondeterministic OOM on a
+/// memory-constrained CI runner. Instead this test re-execs itself
+/// (`std::env::current_exe()`) with `--exact` targeting only this
+/// function, so the repro — and its detached runaway thread — lives and
+/// dies with a short-lived child process, the same isolation the binary
+/// test above gets for free by driving a separate `shguard` process.
+/// `.timeout(30s)`, same margin as the binary test above: if
+/// `src/watchdog.rs`'s own bound regresses, the child hangs and this
+/// fails on the timeout instead of hanging the whole suite.
 #[test]
 fn library_analyze_fails_closed_to_ask_on_the_same_heredoc_hang() {
-    let (result_tx, result_rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = result_tx.send(shguard::analyze("<<$( |] "));
-    });
-    let verdict = result_rx
-        .recv_timeout(std::time::Duration::from_secs(30))
-        .expect("shguard::analyze should resolve within its own watchdog bound");
-    assert_eq!(verdict.decision(), shguard::verdict::Decision::Ask);
+    if std::env::var_os(LIBRARY_WATCHDOG_CHILD_ENV).is_some() {
+        let verdict = shguard::analyze("<<$( |] ");
+        println!(
+            "decision={:?} reason={:?}",
+            verdict.decision(),
+            verdict.reason().map(|r| r.as_str())
+        );
+        return;
+    }
+
+    let exe = std::env::current_exe().expect("test binary's own path should be available");
+    let assert = Command::new(&exe)
+        .args([
+            "--exact",
+            "library_analyze_fails_closed_to_ask_on_the_same_heredoc_hang",
+            "--nocapture",
+        ])
+        .env(LIBRARY_WATCHDOG_CHILD_ENV, "1")
+        .timeout(std::time::Duration::from_secs(30))
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(
+        stdout.contains("decision=Ask"),
+        "expected the child process to report decision=Ask, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("budget"),
+        "expected a watchdog fail-closed reason, got: {stdout}"
+    );
 }

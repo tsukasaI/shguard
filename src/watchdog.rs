@@ -21,13 +21,16 @@
 //!   grossly out of proportion to "one command didn't parse in time." A
 //!   trip here returns a fail-closed [`Verdict::ask`] instead and leaves
 //!   the runaway worker thread detached: Rust has no safe thread-cancel
-//!   primitive (`src/bin/shguard.rs`'s module docs cover this in full), so
-//!   the thread may keep running and allocating in the background until it
-//!   finishes on its own or the host process exits. That is a known,
-//!   accepted limitation of bounding *cooperative* Rust code this way, not
-//!   a gap this module can close from inside itself — a caller that needs
-//!   hard termination on an untrusted or adversarial input source should
-//!   run evaluation in a subprocess instead.
+//!   primitive (`src/bin/shguard.rs`'s module docs cover this in full).
+//!   For a non-terminating input like #315's, that thread never finishes
+//!   on its own either — it keeps allocating in the background, and the
+//!   host process still runs out of memory eventually, just later than an
+//!   in-call hang would have. This module only buys the caller two
+//!   things: the call itself returns instead of hanging, and the OOM is
+//!   deferred out of the request path — it does **not** prevent the OOM.
+//!   A caller evaluating untrusted or adversarial input, where that
+//!   distinction matters, should run evaluation in a subprocess instead,
+//!   so the runaway dies with it.
 //! - **RSS delta, not absolute.** The binary's watchdog compares current
 //!   RSS against an absolute cap, which is sound only because the
 //!   process's own baseline footprint at that point is negligible. A
@@ -38,7 +41,24 @@
 //!   baseline sits far below it. Measuring the *increase* in RSS from just
 //!   before the worker thread is spawned isolates the memory this one
 //!   evaluation is responsible for, independent of whatever else the host
-//!   process is doing.
+//!   process is doing — which in turn requires *current*, not *peak*, RSS
+//!   as the underlying measurement (see [`current_rss_bytes`]'s docs for
+//!   why the binary's own `getrusage`-peak approach doesn't carry over).
+//!
+//! # Nesting when called through the `shguard` binary
+//!
+//! `src/adapter.rs` calls the public `analyze`/`analyze_with_policy`
+//! functions this module wraps, so a normal hook invocation runs this
+//! watchdog *inside* the binary's own — two `shguard-eval` threads, one
+//! nested in the other. This is deliberate, not an oversight: the two
+//! bound different scopes (this one only the evaluation pipeline; the
+//! binary's also config load and stdin read) and the binary's bound is
+//! always at least as strict — its wall-clock deadline starts earlier
+//! (before stdin is even read) and its absolute memory cap is always `<=`
+//! this module's `baseline + `[`MEMORY_LIMIT_BYTES`]` (`baseline` cannot be
+//! negative) — so the binary's watchdog trips first, or the evaluation
+//! finishes before either does. The extra thread-spawn is a small,
+//! accepted cost, not a correctness gap.
 
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
@@ -67,19 +87,39 @@ const MEMORY_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const MEMORY_LIMIT_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Runs `pipeline` to completion on its own thread, bounded by
-/// [`EVALUATION_TIMEOUT`] and [`MEMORY_LIMIT_BYTES`]; returns whatever
-/// `pipeline` produces on success, or a fail-closed [`Verdict::ask`] if
-/// either bound trips, the worker thread cannot be spawned, or it is lost
-/// (panics — an unwind mid-closure drops the sender, which surfaces here
-/// as [`RecvTimeoutError::Disconnected`] with no separate `catch_unwind`
-/// needed).
+/// [`EVALUATION_TIMEOUT`] and [`MEMORY_LIMIT_BYTES`] — see
+/// [`bounded_with_memory_limit`] for the full behavior; this is the fixed-
+/// budget entry point every real caller uses.
 ///
 /// `pipeline` must be `'static` (own everything it touches) because it
 /// crosses the thread boundary — see the two call sites in `src/lib.rs`
 /// for why `command`/`policy` are cloned before this is called rather than
 /// borrowed.
 pub(crate) fn bounded(pipeline: impl FnOnce() -> Verdict + Send + 'static) -> Verdict {
-    let baseline_rss = current_rss_bytes().unwrap_or(0);
+    bounded_with_memory_limit(MEMORY_LIMIT_BYTES, pipeline)
+}
+
+/// Same as [`bounded`], with the memory budget as a parameter — split out
+/// so `tests` can pin the memory-trip branch deterministically with a
+/// tiny limit and a small, finite allocation, instead of only reaching it
+/// incidentally through a real unbounded-allocating repro (mirrors
+/// `src/bin/shguard.rs`'s `SHGUARD_TEST_MEM_LIMIT_MB` injection point,
+/// which exists for the same reason). Returns whatever `pipeline`
+/// produces on success, or a fail-closed [`Verdict::ask`] if either bound
+/// trips, the worker thread cannot be spawned, or it is lost (panics — an
+/// unwind mid-closure drops the sender, which surfaces here as
+/// [`RecvTimeoutError::Disconnected`] with no separate `catch_unwind`
+/// needed).
+fn bounded_with_memory_limit(
+    memory_limit_bytes: u64,
+    pipeline: impl FnOnce() -> Verdict + Send + 'static,
+) -> Verdict {
+    // `None` (rather than defaulting to `0`) when the platform/call can't
+    // measure RSS at all — a `0` fallback would silently turn the delta
+    // check into an absolute one against whatever `current_rss_bytes()`
+    // next happens to return, tripping on every call in any host process
+    // whose baseline already exceeds `memory_limit_bytes`.
+    let baseline_rss = current_rss_bytes();
     let (result_tx, result_rx) = std::sync::mpsc::channel();
     let spawned = std::thread::Builder::new()
         .name("shguard-eval".to_string())
@@ -95,9 +135,21 @@ pub(crate) fn bounded(pipeline: impl FnOnce() -> Verdict + Send + 'static) -> Ve
 
     let deadline = Instant::now() + EVALUATION_TIMEOUT;
     loop {
-        if let Some(rss) = current_rss_bytes() {
-            let delta = rss.saturating_sub(baseline_rss);
-            if delta > MEMORY_LIMIT_BYTES {
+        if let Some(baseline) = baseline_rss
+            && let Some(rss) = current_rss_bytes()
+        {
+            let delta = rss.saturating_sub(baseline);
+            if delta > memory_limit_bytes {
+                // The worker may have already sent its real result in the
+                // gap between the last `recv_timeout` returning and this
+                // check tripping (e.g. unrelated growth elsewhere in the
+                // host process pushed the delta over budget just as the
+                // worker finished) — prefer that over discarding a
+                // verdict the pipeline already computed, `Block` included.
+                if let Ok(verdict) = result_rx.try_recv() {
+                    let _ = worker.join();
+                    return verdict;
+                }
                 // `worker` is dropped here without joining — deliberately:
                 // joining would block on the exact hang this function
                 // exists to bound. See the module docs' "No
@@ -139,49 +191,98 @@ fn fail_closed(reason: &str) -> Verdict {
     Verdict::ask(Reason::new(reason), Vec::new())
 }
 
-/// Current process RSS in bytes via `getrusage(RUSAGE_SELF, ...)`, or
-/// `None` if the call fails or this platform doesn't support it — either
-/// way [`bounded`] simply skips the memory-trip check for that poll;
-/// [`EVALUATION_TIMEOUT`]'s wall-clock bound still applies regardless.
-/// `ru_maxrss` reports *peak*, not current, RSS for the whole process —
-/// exactly what makes the delta in [`bounded`] meaningful: it is a
-/// monotonically non-decreasing high-water mark, so `rss - baseline_rss`
-/// measures how much that high-water mark has grown since the worker
-/// thread was spawned. Units differ by platform: bytes on macOS,
-/// kilobytes everywhere else `getrusage` is available (Linux, other
-/// BSDs) — the `cfg` below converts the latter to bytes so callers never
-/// see the platform difference. Duplicated from
-/// `src/bin/shguard.rs::current_rss_bytes` rather than shared: the two
-/// live in different crates within this workspace (bin vs. lib) with no
-/// existing shared internal module to place a common helper in, and the
-/// function itself is a five-line FFI call with nothing to drift.
-#[cfg(unix)]
+/// Current (not peak) process RSS in bytes, or `None` if the underlying
+/// call fails or this platform has no implementation here — either way
+/// [`bounded_with_memory_limit`] simply skips the memory-trip check for
+/// that poll; [`EVALUATION_TIMEOUT`]'s wall-clock bound still applies
+/// regardless.
+///
+/// Deliberately *not* `src/bin/shguard.rs::current_rss_bytes`'s
+/// `getrusage`/`ru_maxrss` approach, despite both living in this package
+/// (bin and lib targets, not separate workspace crates) and wanting the
+/// same thing: `ru_maxrss` is a *peak*, a monotonically non-decreasing
+/// high-water mark for the whole process. The binary can get away with
+/// that because it never takes a delta — it compares peak directly
+/// against an absolute cap once, in a process that started at ~zero. This
+/// module *does* take a delta (`rss - baseline_rss` in
+/// [`bounded_with_memory_limit`]), and a delta of two peaks is not the
+/// same thing as the memory this one call is responsible for: once
+/// *anything* in the host process pushes the peak up — including a prior
+/// trip of this very watchdog leaving a runaway thread allocating in the
+/// background — every later call's `baseline_rss` starts at that inflated
+/// peak too, so a call whose own footprint is trivial can still show a
+/// large "delta" if the peak grew *between* `baseline_rss` being sampled
+/// and the next poll (e.g. an unrelated host thread allocating
+/// concurrently), and conversely a genuinely runaway call can show a
+/// `delta` of zero if the host's historical peak already sits above
+/// wherever RSS is by the time this call's polls run. Reading *current*
+/// resident size instead avoids both: it only ever reflects what is
+/// resident right now, so the delta is bounded by what actually happened
+/// during this call's own polling window.
 fn current_rss_bytes() -> Option<u64> {
-    // SAFETY: `usage` is a valid, zero-initialised `libc::rusage`, and its
-    // address is the sole out-pointer `getrusage` writes through;
-    // `RUSAGE_SELF` targets the calling process, which is always valid to
-    // query.
-    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
-    if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } != 0 {
-        return None;
-    }
-    let raw = u64::try_from(usage.ru_maxrss).ok()?;
-    #[cfg(target_os = "macos")]
-    {
-        Some(raw)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Some(raw.saturating_mul(1024))
+    platform::current_rss_bytes()
+}
+
+#[cfg(target_os = "linux")]
+mod platform {
+    /// Current RSS via `/proc/self/statm`'s second field (resident pages)
+    /// times the page size — the standard way to read a process's own
+    /// current (not peak) resident set size on Linux; there is no
+    /// dedicated syscall for it. `None` on any parse/read failure or if
+    /// `sysconf` can't report a page size.
+    pub(super) fn current_rss_bytes() -> Option<u64> {
+        let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+        let resident_pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
+        // SAFETY: `sysconf` with a valid `name` argument (`_SC_PAGESIZE`
+        // is always a recognised name on Linux) has no preconditions and
+        // never fails destructively — a negative return means "not
+        // supported", handled below via `u64::try_from`.
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        let page_size = u64::try_from(page_size).ok()?;
+        Some(resident_pages.saturating_mul(page_size))
     }
 }
 
-/// Non-Unix fallback: no `getrusage`, so the memory-trip check is simply
-/// unavailable and [`bounded`] relies on [`EVALUATION_TIMEOUT`] alone,
-/// same as `src/bin/shguard.rs::current_rss_bytes`'s non-Unix fallback.
-#[cfg(not(unix))]
-fn current_rss_bytes() -> Option<u64> {
-    None
+#[cfg(target_os = "macos")]
+mod platform {
+    /// Current RSS via `proc_pidinfo(PROC_PIDTASKINFO, ...)`'s
+    /// `pti_resident_size` field — macOS's per-process current (not peak)
+    /// resident size, queried for the calling process by its own pid.
+    /// `None` on any call failure or short read.
+    pub(super) fn current_rss_bytes() -> Option<u64> {
+        // SAFETY: `info` is a valid, zero-initialised `libc::proc_taskinfo`
+        // out-buffer of exactly the size `proc_pidinfo` is told it is;
+        // `libc::getpid()` always returns a valid pid for the calling
+        // process.
+        let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+        let size = i32::try_from(std::mem::size_of::<libc::proc_taskinfo>()).ok()?;
+        let written = unsafe {
+            libc::proc_pidinfo(
+                libc::getpid(),
+                libc::PROC_PIDTASKINFO,
+                0,
+                std::ptr::from_mut(&mut info).cast::<libc::c_void>(),
+                size,
+            )
+        };
+        if written != size {
+            return None;
+        }
+        Some(info.pti_resident_size)
+    }
+}
+
+/// Fallback for any platform without a dedicated current-RSS
+/// implementation above (any non-Linux, non-macOS target, `unix` or
+/// otherwise): the memory-trip check is simply unavailable here and
+/// [`bounded_with_memory_limit`] relies on [`EVALUATION_TIMEOUT`] alone,
+/// same posture as `src/bin/shguard.rs::current_rss_bytes`'s own
+/// non-Unix fallback.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+mod platform {
+    pub(super) fn current_rss_bytes() -> Option<u64> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -213,5 +314,33 @@ mod tests {
     fn panicking_pipeline_fails_closed_to_ask() {
         let verdict = bounded(|| panic!("watchdog test: injected panic"));
         assert_eq!(verdict.decision(), crate::verdict::Decision::Ask);
+    }
+
+    /// Deterministic pin for the memory-trip branch itself (as opposed to
+    /// only reaching it incidentally through a real unbounded-allocating
+    /// repro, which may trip on time instead — see
+    /// `tests/fail_closed_exit_paths.rs`'s
+    /// `library_analyze_fails_closed_to_ask_on_the_same_heredoc_hang`).
+    /// The pipeline allocates and touches 1 MiB — comfortably over the
+    /// 64 KiB budget this test sets — then sleeps briefly before sending,
+    /// giving the poll loop several 50ms iterations to observe the
+    /// inflated delta before the pipeline would otherwise complete and
+    /// race the memory check via the channel.
+    #[test]
+    fn memory_budget_trip_fails_closed_to_ask() {
+        let verdict = bounded_with_memory_limit(64 * 1024, || {
+            let touched = vec![1u8; 1024 * 1024];
+            std::thread::sleep(Duration::from_millis(300));
+            std::hint::black_box(&touched);
+            Verdict::allow(Vec::new())
+        });
+        assert_eq!(verdict.decision(), crate::verdict::Decision::Ask);
+        assert!(
+            verdict
+                .reason()
+                .is_some_and(|r| r.as_str().contains("memory budget")),
+            "expected a memory-budget fail-closed reason, got: {:?}",
+            verdict.reason()
+        );
     }
 }

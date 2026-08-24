@@ -145,11 +145,14 @@ impl From<crate::rules::RulesError> for ConfigError {
 /// `Clone` exists so [`crate::analyze_with_policy`] can hand an owned copy
 /// into the bounded-evaluation worker thread `src/watchdog.rs` spawns
 /// (`'static` closures can't borrow the caller's `&Policy` across that
-/// boundary) — not for callers outside this crate to rely on.
+/// boundary) — not for callers outside this crate to rely on. The fields
+/// are `Arc`-wrapped so that clone is a refcount bump, not a deep copy of
+/// the whole ruleset, on every single `analyze_with_policy` call a host
+/// process makes.
 #[derive(Clone)]
 pub struct Policy {
-    pub(crate) rules: Rules,
-    pub(crate) allowlist: Allowlist,
+    pub(crate) rules: std::sync::Arc<Rules>,
+    pub(crate) allowlist: std::sync::Arc<Allowlist>,
 }
 
 impl Policy {
@@ -290,7 +293,10 @@ impl Policy {
             None => (rules, allowlist),
         };
 
-        Ok(Self { rules, allowlist })
+        Ok(Self {
+            rules: std::sync::Arc::new(rules),
+            allowlist: std::sync::Arc::new(allowlist),
+        })
     }
 }
 

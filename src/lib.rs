@@ -51,14 +51,18 @@ use verdict::Verdict;
 ///
 /// Runs on its own thread, bounded by wall-clock time and memory growth
 /// (`src/watchdog.rs`) — a pathological input that would otherwise hang or
-/// grow memory unboundedly (crash-fuzzer finding #315) instead resolves to
-/// a fail-closed `Ask` within a couple of seconds. This is a real,
-/// documented limitation, not a full guarantee: a trip leaves the runaway
-/// worker thread detached rather than terminating it (Rust has no safe
-/// thread-cancel primitive), so it may keep running and allocating in the
-/// background afterward — see `src/watchdog.rs`'s module docs for the full
-/// reasoning. A caller that needs hard termination against an untrusted or
-/// adversarial input source should run this behind a subprocess instead.
+/// grow memory unboundedly (crash-fuzzer finding #315) instead makes this
+/// call itself return a fail-closed `Ask` within a couple of seconds. This
+/// is a real, documented limitation, not a full guarantee: a trip leaves
+/// the runaway worker thread detached rather than terminating it (Rust has
+/// no safe thread-cancel primitive), so for a non-terminating input like
+/// #315's, that thread keeps allocating in the background afterward and
+/// the host process can still run out of memory eventually — just later,
+/// and outside this call, rather than during it. See `src/watchdog.rs`'s
+/// module docs for the full reasoning. A caller evaluating untrusted or
+/// adversarial input, where the difference between "delayed" and
+/// "prevented" matters, should run this behind a subprocess instead, so
+/// the runaway dies with it.
 #[must_use]
 pub fn analyze(command: &str) -> Verdict {
     let command = command.to_string();
