@@ -2701,8 +2701,9 @@ fn candidate_has_unresolved_ascent(candidate: &str) -> bool {
 /// which draws its candidates from `targets` matches instead of this
 /// function. A rule author can opt a specific short flag into recognition
 /// via `attached_value_flags` (issue #47, [`attached_value_candidate`]) —
-/// still shape-based (leading `-<letter>` position only, a cluster like
-/// `-sxURL` is unaffected), but declared per rule rather than guessed.
+/// still shape-based (a left-to-right cluster scan as of issue #214; see
+/// that function's doc for its known truncation/suppression caveat), but
+/// declared per rule rather than guessed.
 /// Absent that declaration, gating a command with this attached-value
 /// flag idiom should additionally forbid the flag via
 /// `required_flags`/a separate `deny` entry rather than relying on
@@ -2744,35 +2745,69 @@ fn target_candidate(token: &str) -> Option<&str> {
 /// would make the rule spuriously fire on a bare cluster, noise this
 /// function avoids by not manufacturing it in the first place.
 ///
+/// Widened false-Ask surface: since the scan matches the declared letter
+/// anywhere in a dash-prefixed token, not just a genuine flag position,
+/// a declared letter appearing incidentally inside an unrelated token's
+/// text (e.g. `x` declared, token `-yhttp://evil.example.com` containing
+/// "example") yields a junk tail candidate too. Fail-closed direction
+/// only (more candidates means a rule is less likely to be wrongly
+/// all-excepted, i.e. more likely to ask/block, never less) — a rule
+/// author declaring `attached_value_flags` should expect a higher false-Ask
+/// rate on tokens that happen to contain the letter, not just on the
+/// flag shapes they intended to catch.
+///
 /// Because the scan has no notion of which earlier characters are
 /// themselves value-taking, it can find a declared letter that's really
-/// part of an EARLIER (undeclared) flag's own glued value rather than a
-/// genuine flag position — e.g. `-oxyz` with `x` declared but `o`
-/// actually the value-taking flag would split at `x`, yielding `"yz"`
-/// instead of `"xyz"` as `o`'s true value. This can't loosen an
-/// except_targets check below what an undeclared token already gets
-/// (the caller only ever reaches here for a dash-prefixed token
-/// [`target_candidate`] would otherwise skip entirely, so this always
-/// adds a candidate where there was none — and adding an *additional*
-/// excepted candidate can never flip an already-non-excepted candidate
-/// elsewhere in the same call back to all-excepted, since
-/// `Iterator::all` only turns false-to-true by removing a false item,
-/// never by adding a true one). Worst case it under- or over-shoots the
-/// true value, same shape-based trade-off `attached_value_flags`
-/// already represents for the leading-position case.
-fn attached_value_candidate<'a>(token: &'a str, attached_value_flags: &[char]) -> Option<&'a str> {
+/// part of an EARLIER flag's own glued value rather than a genuine flag
+/// position — e.g. `-oxyz` with `x` declared but `o` actually the
+/// value-taking flag would split at `x`, yielding `"yz"` instead of
+/// `"xyz"` as `o`'s true value. When `o` is itself declared in this
+/// rule's `value_flags`, the scan stops at `o` instead and yields no
+/// candidate at all (below), restoring getopt-correct behavior for any
+/// flag this rule already knows takes a value. For a flag this rule has
+/// no declared knowledge of, shape-based matching genuinely can't tell
+/// the two shapes apart from the token's text alone.
+///
+/// **Known limitation, disclosed rather than silently accepted**: unlike
+/// [`target_candidate`]'s gap (which can only ever add a candidate where
+/// none existed before, never remove one), a mis-split truncated
+/// candidate here CAN newly suppress a rule that used to fire. If the
+/// truncated tail happens to match an `except_targets` alternative, it
+/// can turn a previously non-empty, non-all-excepted candidate set into
+/// one that vacuously satisfies "all candidates excepted" — e.g. rule
+/// `except_targets = [{ prefix = "http://localhost" }]`,
+/// `attached_value_flags = ["x"]`, argv
+/// `curl -yhttp://evil.test -oAxhttp://localhost`: undeclared `-o`'s true
+/// value is `Axhttp://localhost`, but the scan finds `x` inside it and
+/// manufactures the excepted-looking candidate `http://localhost`,
+/// masking the untouched `evil.test` target behind `-y`. This is the
+/// accepted opt-in trade-off of declaring `attached_value_flags` for a
+/// rule whose other flags aren't all covered by `value_flags` too — not
+/// a silent invariant of the mechanism. Regression-tested (disclosed, not
+/// silently accepted) by
+/// `attached_value_flags_mis_split_can_suppress_an_undeclared_flags_value`.
+fn attached_value_candidate<'a>(
+    token: &'a str,
+    attached_value_flags: &[char],
+    value_flags: &[ValueFlag],
+) -> Option<&'a str> {
     let rest = token.strip_prefix('-')?;
     if rest.starts_with('-') {
         return None;
     }
-    let (flag_index, flag) = rest
-        .char_indices()
-        .find(|(_, c)| attached_value_flags.contains(c))?;
-    let value = &rest[flag_index + flag.len_utf8()..];
-    if value.is_empty() {
-        return None;
+    for (index, c) in rest.char_indices() {
+        if attached_value_flags.contains(&c) {
+            let value = &rest[index + c.len_utf8()..];
+            return if value.is_empty() { None } else { Some(value) };
+        }
+        if value_flags.contains(&ValueFlag::Short(c)) {
+            // `c` is a flag this rule already declares takes a value —
+            // everything after it in the cluster is THAT flag's value
+            // per getopt, not more flag letters to scan through.
+            return None;
+        }
     }
-    Some(value)
+    None
 }
 
 /// The except_targets candidate set drawn from `rest` (already-resolved
@@ -2831,7 +2866,9 @@ fn value_flag_free_candidates<'a>(
             if value_flags.iter().any(|vf| vf.attached_value_token(token)) {
                 continue;
             }
-            if let Some(candidate) = attached_value_candidate(token, attached_value_flags) {
+            if let Some(candidate) =
+                attached_value_candidate(token, attached_value_flags, value_flags)
+            {
                 candidates.push(candidate);
                 continue;
             }
@@ -9504,6 +9541,107 @@ mod tests {
                 ]))
                 .is_none(),
             "a `--`-prefixed token must never be scanned as a short-flag cluster"
+        );
+    }
+
+    // Round-2 fable review of #350 (issue #214): the cluster scan's
+    // left-to-right search has no notion of which earlier characters are
+    // themselves value-taking, so it can split inside an EARLIER flag's
+    // own glued value rather than a genuine flag position. Declaring that
+    // earlier flag in this rule's `value_flags` closes the gap: the scan
+    // stops at the first `value_flags`-declared letter it meets, the same
+    // way getopt would treat everything after it as that flag's value.
+    #[test]
+    fn attached_value_flags_stops_at_a_declared_value_flags_letter_earlier_in_the_cluster() {
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "curl-non-localhost"
+            reason = "ask unless curl targets localhost"
+            decision = "ask"
+            command = "curl"
+            except_targets = [{ prefix = "http://localhost" }]
+            attached_value_flags = ["x"]
+            value_flags = ["o"]
+        "#,
+        )
+        .unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "curl",
+                    "http://localhost",
+                    "-oxhttp://evil.example.com"
+                ]))
+                .is_none(),
+            "when the earlier flag is declared in value_flags, the scan must stop at it \
+             instead of mis-splitting at a later attached_value_flags letter inside its value"
+        );
+    }
+
+    // Round-2 fable review of #350: disclosed limitation, not a silent
+    // invariant — the cluster scan CAN newly suppress a rule that used to
+    // fire, when a mis-split truncated candidate (from an UNDECLARED
+    // earlier flag's glued value) happens to match an except_targets
+    // alternative. `-o`'s true value is `Axhttp://localhost`, but the
+    // scan finds `x` inside it and manufactures the excepted-looking
+    // candidate `http://localhost`, masking the untouched evil target
+    // behind `-y`. This is the accepted opt-in trade-off of declaring
+    // attached_value_flags for a rule whose other flags aren't all
+    // covered by value_flags too.
+    #[test]
+    fn attached_value_flags_mis_split_can_suppress_an_undeclared_flags_value() {
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "curl-non-localhost"
+            reason = "ask unless curl targets localhost"
+            decision = "ask"
+            command = "curl"
+            except_targets = [{ prefix = "http://localhost" }]
+            attached_value_flags = ["x"]
+        "#,
+        )
+        .unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&[
+                    "curl",
+                    "-yhttp://evil.test",
+                    "-oAxhttp://localhost"
+                ]))
+                .is_none(),
+            "disclosed limitation: an undeclared earlier flag's glued value can be mis-split at \
+             a later attached_value_flags letter, manufacturing a candidate that matches \
+             except_targets and wrongly suppressing the rule despite the untouched evil target"
+        );
+    }
+
+    // The cluster-position analog of
+    // `attached_value_flags_still_excepts_a_declared_flags_genuine_localhost_value`:
+    // a genuine localhost value glued into a non-leading cluster position
+    // is still correctly excepted, not just a genuine evil one still
+    // correctly caught there.
+    #[test]
+    fn attached_value_flags_cluster_position_still_excepts_a_genuine_localhost_value() {
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "curl-non-localhost"
+            reason = "ask unless curl targets localhost"
+            decision = "ask"
+            command = "curl"
+            except_targets = [{ prefix = "http://localhost" }]
+            attached_value_flags = ["x"]
+        "#,
+        )
+        .unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["curl", "-sxhttp://localhost"]))
+                .is_none(),
+            "a declared flag's genuine value glued into a non-leading cluster position is \
+             still correctly excepted, matching the leading-position case"
         );
     }
 
