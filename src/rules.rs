@@ -376,41 +376,68 @@ fn tar_dashless_effective_tail<'a>(
 /// GNU tar long options [`tar_long_option_abbrev_rewrite`] recognizes an
 /// abbreviation of (issue #128) — GNU tar's own documented "unique
 /// abbreviation" feature (`--cre` for `--create`, since no other long
-/// option starts with `cre`). Scoped to exactly the two option names
+/// option starts with `cre`). Scoped to exactly the option names
 /// `rules/blocklist.toml`'s tar rules key off: `directory`
-/// (`-C`/`--directory`) and the extract-mode aliases `extract`/`get`.
+/// (`-C`/`--directory`), the extract-mode aliases `extract`/`get`, and
+/// `absolute-names` (`-P`/`--absolute-names`, `tar-absolute-names-ask`).
 ///
 /// Verified against GNU tar's own long-option table (GNU tar manual,
 /// "All tar Options"): every other GNU-tar long option starting with `d`
 /// (delay-directory-restore, dereference, diff, delete) or `e` (exclude,
 /// exclude-backups, exclude-caches[-all/-under], exclude-ignore[-recursive],
 /// exclude-tag[-all/-under], exclude-vcs[-ignores], extract) or `g` (get,
-/// group, group-map, gunzip) either isn't a prefix of `directory`/
-/// `extract`/`get` at all, or — where a SHORT prefix is genuinely
-/// ambiguous between multiple real options (`--d`, `--di`, `--e`, `--g`
-/// each match more than one real long option) — real GNU tar itself
-/// refuses to run with "ambiguous option", so shguard resolving that same
-/// short prefix to the dangerous option is harmless over-matching: no
-/// real invocation exists where that prefix actually runs AND means
-/// something other than what shguard assumes here. Matching ANY non-empty
-/// prefix (not just a verified-unambiguous one) is therefore safe and
-/// deliberately not narrowed further. bsdtar (macOS default, `man tar`
-/// checked directly) has neither `--directory` nor `--extract`/`--get` as
-/// long options at all — this rewrite only ever recognizes forms bsdtar
-/// itself would reject as unrecognized, so it can never affect a real
-/// bsdtar invocation's behavior either.
+/// group, group-map, gunzip, gzip) or `a` (acls, atime-preserve,
+/// auto-compress, absolute-names — the a-namespace is the most crowded of
+/// the four, so a short `--a`/`--ab` prefix is genuinely ambiguous in real
+/// GNU tar) either isn't a prefix of `directory`/`extract`/`get`/
+/// `absolute-names` at all, or — where a SHORT prefix is genuinely
+/// ambiguous between multiple real options — real GNU tar itself refuses
+/// to run with "ambiguous option", so shguard resolving that same short
+/// prefix to the dangerous option is harmless over-matching: no real
+/// invocation exists where that prefix actually runs AND means something
+/// other than what shguard assumes here. Matching ANY non-empty prefix
+/// (not just a verified-unambiguous one) is therefore safe and
+/// deliberately not narrowed further.
+///
+/// bsdtar (macOS default) is NOT abbreviation-blind the way an earlier
+/// version of this comment claimed — measured directly against bsdtar
+/// 3.5.3: it DOES support `--directory`/`--extract` as long options, with
+/// the same GNU-style unique-abbreviation resolution (`--dir` extracts
+/// into the given directory; `--ex` errors as ambiguous, since bsdtar
+/// also has `--exclude-vcs`). It has no `--get` alias at all (harmless —
+/// this rewrite over-matching a name bsdtar itself rejects is still
+/// covered by the general argument above) and no long form of
+/// `--absolute-names` (same). It additionally has a `--cd` alias for
+/// `-C`/`--directory` that GNU tar doesn't — [`TAR_BSDTAR_DIRECTORY_ALIAS`]
+/// closes that gap explicitly, since it isn't a *prefix* of `directory`
+/// the general argument above would otherwise cover.
 const TAR_LONG_OPTION_DIRECTORY: &str = "directory";
 const TAR_LONG_OPTION_EXTRACT_ALIASES: &[&str] = &["extract", "get"];
+const TAR_LONG_OPTION_ABSOLUTE_NAMES: &str = "absolute-names";
+/// bsdtar-only exact alias for `-C`/`--directory` (issue #128 review
+/// finding: `tar -x --cd / -f a.tar` extracts over `/` on bsdtar 3.5.3,
+/// same as `-C /`, but wasn't recognized before this). Not a GNU tar
+/// option at all (harmless to over-match there too), and not itself
+/// treated as further abbreviable (`--c` collides with several other real
+/// bsdtar options) — matched by exact name only, unlike the prefix-based
+/// names above.
+const TAR_BSDTAR_DIRECTORY_ALIAS: &str = "cd";
 
 /// Rewrites a GNU-tar long-option abbreviation of `--directory` (attached
-/// `--dir=/` or separated `--dir /`) or `--extract`/`--get` (value-less;
-/// GNU tar itself rejects an attached `=value` on these, so only the bare
-/// separated spelling is recognized) to its canonical spelling — see
-/// [`TAR_LONG_OPTION_DIRECTORY`]'s own docs for why matching any
-/// non-empty prefix is safe. `None` — no rewrite needed — when nothing in
-/// `tail` is an abbreviation of either. An already-canonical spelling
-/// (`--directory`, `--extract`, `--get`) is left untouched, not
-/// "rewritten to itself".
+/// `--dir=/` or separated `--dir /`), the bsdtar `--cd` alias for the
+/// same option, `--extract`/`--get`, or `--absolute-names` to its
+/// canonical spelling — see [`TAR_LONG_OPTION_DIRECTORY`]'s own docs for
+/// why matching any non-empty prefix is safe. `None` — no rewrite needed
+/// — when nothing in `tail` is a recognized abbreviation. An
+/// already-canonical spelling is left untouched, not "rewritten to
+/// itself". A real, invalid `=value` attached to a value-less option
+/// (`--ex=x`, `--absolute-names=x` — GNU tar rejects both) is rewritten
+/// through anyway rather than left unrecognized: the resulting canonical
+/// token (`--extract=x`) is exactly as invalid to `FlagMatcher`'s own
+/// pre-existing lenient `=value` acceptance as the literal
+/// `--extract=x` spelling already is, so this keeps abbreviated and
+/// canonical spellings deciding identically instead of the abbreviated
+/// form being stricter than the spelling it stands in for.
 fn tar_long_option_abbrev_rewrite(tail: &[NormalizedWord]) -> Option<Vec<NormalizedWord>> {
     let mut rewritten: Option<Vec<NormalizedWord>> = None;
     for (i, word) in tail.iter().enumerate() {
@@ -427,21 +454,26 @@ fn tar_long_option_abbrev_rewrite(tail: &[NormalizedWord]) -> Option<Vec<Normali
         if name.is_empty() {
             continue;
         }
-        let canonical =
-            if TAR_LONG_OPTION_DIRECTORY.starts_with(name) && name != TAR_LONG_OPTION_DIRECTORY {
-                match value {
-                    Some(value) => format!("--directory={value}"),
-                    None => "--directory".to_string(),
-                }
-            } else if value.is_none()
-                && TAR_LONG_OPTION_EXTRACT_ALIASES
-                    .iter()
-                    .any(|opt| opt.starts_with(name) && name != *opt)
-            {
-                "--extract".to_string()
-            } else {
-                continue;
-            };
+        let canonical_name = if name == TAR_BSDTAR_DIRECTORY_ALIAS
+            || (TAR_LONG_OPTION_DIRECTORY.starts_with(name) && name != TAR_LONG_OPTION_DIRECTORY)
+        {
+            TAR_LONG_OPTION_DIRECTORY
+        } else if TAR_LONG_OPTION_ABSOLUTE_NAMES.starts_with(name)
+            && name != TAR_LONG_OPTION_ABSOLUTE_NAMES
+        {
+            TAR_LONG_OPTION_ABSOLUTE_NAMES
+        } else if TAR_LONG_OPTION_EXTRACT_ALIASES
+            .iter()
+            .any(|opt| opt.starts_with(name) && name != *opt)
+        {
+            "extract"
+        } else {
+            continue;
+        };
+        let canonical = match value {
+            Some(value) => format!("--{canonical_name}={value}"),
+            None => format!("--{canonical_name}"),
+        };
         rewritten.get_or_insert_with(|| tail.to_vec())[i] = NormalizedWord::resolved(canonical);
     }
     rewritten
@@ -7764,6 +7796,71 @@ mod tests {
         let cmd = argv(&["tar", "-x", "--dir=~+", "-f", "a.tar"]);
         assert!(rules.match_command(&cmd).is_none());
         assert!(rules.match_command_dirstack_equal_subst(&cmd).is_some());
+    }
+
+    // Round-1 fable review finding: bsdtar 3.5.3 (macOS default) has a
+    // `--cd` alias for `-C`/`--directory` that GNU tar doesn't — not a
+    // prefix of "directory", so it needs its own exact-name recognition.
+    #[test]
+    fn tar_bsdtar_cd_alias_attached_matches_block() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&["tar", "-x", "--cd=/", "-f", "a.tar"]))
+            .unwrap();
+        assert_eq!(matched.decision(), Decision::Block);
+        assert_eq!(matched.id().as_str(), "tar-extract-over-root-or-home");
+    }
+
+    #[test]
+    fn tar_bsdtar_cd_alias_separated_matches_block() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&["tar", "-x", "--cd", "/", "-f", "a.tar"]))
+            .unwrap();
+        assert_eq!(matched.decision(), Decision::Block);
+        assert_eq!(matched.id().as_str(), "tar-extract-over-root-or-home");
+    }
+
+    // Round-1 fable review finding: tar-absolute-names-ask keys on the
+    // long option `--absolute-names`, which needs the same abbreviation
+    // treatment as `--directory`/`--extract`.
+    #[test]
+    fn tar_absolute_names_abbreviation_matches_ask() {
+        let rules = Rules::embedded().unwrap();
+        for cluster in ["--abs", "--a"] {
+            let matched = rules
+                .match_command(&argv(&["tar", "-x", cluster, "-f", "a.tar"]))
+                .unwrap_or_else(|| panic!("expected {cluster:?} to match a rule"));
+            assert_eq!(matched.decision(), Decision::Ask, "{cluster:?}");
+            assert_eq!(matched.id().as_str(), "tar-absolute-names-ask");
+        }
+    }
+
+    #[test]
+    fn tar_absolute_names_already_canonical_spelling_unaffected() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&["tar", "-x", "--absolute-names", "-f", "a.tar"]))
+            .unwrap();
+        assert_eq!(matched.decision(), Decision::Ask);
+        assert_eq!(matched.id().as_str(), "tar-absolute-names-ask");
+    }
+
+    // Round-1 fable review finding: an abbreviated extract-mode flag with
+    // an attached (real-tar-invalid) `=value` must decide identically to
+    // the canonical spelling with the same invalid `=value`, not more
+    // leniently.
+    #[test]
+    fn tar_extract_abbreviation_with_attached_value_matches_like_the_canonical_spelling() {
+        let rules = Rules::embedded().unwrap();
+        let abbreviated = rules
+            .match_command(&argv(&["tar", "--ex=x", "-f", "a.tar", "-C", "/"]))
+            .unwrap();
+        let canonical = rules
+            .match_command(&argv(&["tar", "--extract=x", "-f", "a.tar", "-C", "/"]))
+            .unwrap();
+        assert_eq!(abbreviated.decision(), Decision::Block);
+        assert_eq!(abbreviated.id(), canonical.id());
     }
 
     // ==== issue #86: matching_rest_by_name gained the same tar-dashless

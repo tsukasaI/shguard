@@ -622,9 +622,11 @@ required_flags = ["t|--type"]
 # #214 (`--dir=~+` now canonicalizes to `--directory=~+` before either
 # floor's own `--directory=` strip-string match ever runs, via
 # `rules::tar_long_option_abbrev_rewrite` — see that function's own docs).
-# `directory`/`extract`/`get` are the only long options these two tar
-# rules match on, so no abbreviation gap remains for `tar` itself; the
-# disclosed #214-class gap remains for `mv`/`install`/`cp`'s
+# `directory`/`extract`/`get` are the only long options these two
+# directory rules match on (the sibling `tar-absolute-names-ask` rule's
+# own `--absolute-names` gets the same rewrite too — see
+# `tar_long_option_abbrev_rewrite`'s own docs for the full option list);
+# the disclosed #214-class gap remains for `mv`/`install`/`cp`'s
 # `--target-directory=` below, untouched by #128.
 [[command]]
 id = "tar-extract-over-root-or-home"
