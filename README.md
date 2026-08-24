@@ -435,18 +435,33 @@ except_targets = [
 With `x` declared, `-xhttp://evil.example.com`'s glued value becomes a
 candidate too, so it's checked against `except_targets` like any other
 target — the rule above now correctly asks instead of being wrongly
-suppressed. This is opt-in and per-flag: it only recognises the exact
-leading `-<letter>` shape (a declared flag glued into a cluster like
-`-sxURL` is still not recognised — same shape-based limitation as
-`required_flags`' own cluster handling), and only takes effect on a rule
-that also declares `except_targets` with no `targets` list — `shguard`
-rejects the field at load time otherwise, since it would silently do
-nothing. Declaring a flag here can also newly *suppress* a match that
-would otherwise fire, not just tighten one — e.g. `curl
--xhttp://localhost:8080` alone (no other target) is suppressed once `x`
-is declared, since the glued value becomes the sole candidate and it
-matches the localhost except; treat each declared flag as a per-rule
-trust decision with the same weight as an `except_targets` entry itself.
+suppressed. This is opt-in and per-flag: the declared letter is
+recognised anywhere in a short-flag cluster via a left-to-right scan
+matching getopt's own parsing (`-sxURL` is `-s` plus `-x URL`, so `x`'s
+glued value is still found even though it isn't the cluster's leading
+character), and only takes effect on a rule that also declares
+`except_targets` with no `targets` list — `shguard` rejects the field at
+load time otherwise, since it would silently do nothing. Because the
+scan has no notion of which earlier characters are themselves
+value-taking, it can occasionally split inside an EARLIER flag's own
+glued value instead of a genuine flag position (`-oxyz` with `x`
+declared but `o` actually the value-taking flag yields `"yz"`, not
+`"xyz"`) — declaring the earlier flag too, in this same rule's
+`value_flags`, closes that specific case, but for a flag this rule has
+no declared knowledge of, the mis-split can occasionally manufacture a
+candidate that happens to match an `except_targets` alternative and
+newly *suppress* a rule that would otherwise fire, even though the
+actual dangerous target elsewhere in the same command is untouched.
+Declaring a flag here can also newly suppress a match more directly, not
+just via a mis-split — e.g. `curl -xhttp://localhost:8080` alone (no
+other target) is suppressed once `x` is declared, since the glued value
+becomes the sole candidate and it matches the localhost except; treat
+each declared flag as a per-rule trust decision with the same weight as
+an `except_targets` entry itself, and expect a higher false-ask rate too
+— a declared letter appearing incidentally inside an unrelated token's
+text also yields a junk candidate, which is fail-closed-direction once
+the candidate set would otherwise already be non-empty, but is the same
+suppression risk as above if the set would otherwise have been empty.
 For a command using this idiom without declaring the flag here, guard it
 with `required_flags`/a separate `deny` entry instead of relying
 on `except_targets` alone.

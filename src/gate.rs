@@ -8391,15 +8391,14 @@ mod tests {
     // NOT exotic -- `exec`'s only other flags (`-c`/`-l`) are boolean and
     // cluster naturally with `-a`, so `-la`/`-ca`/`-cla` are ordinary,
     // easily-typed ways to spell "override argv0", each genuinely
-    // executing `rm -rf /` in a real shell before this fix. Unlike the
-    // general cluster-position limitation this file discloses elsewhere
-    // (e.g. `attached_value_flags_cluster_position_is_not_recognized` for
-    // except_targets, which needs real getopt emulation to close
-    // correctly for an arbitrary wrapper), `exec`'s entire option surface
-    // is tiny and fully known -- `a` is its only value-taking flag, full
-    // stop -- so `skip_wrapper_flags` treats ANY dash-cluster containing
-    // `a`, in any position, as consuming the next token too. This is
-    // exec-specific and does not generalize to other wrappers.
+    // executing `rm -rf /` in a real shell before this fix. `exec`'s
+    // entire option surface is tiny and fully known -- `a` is its only
+    // value-taking flag, full stop -- so `skip_wrapper_flags` treats ANY
+    // dash-cluster containing `a`, in any position, as consuming the next
+    // token too. This is exec-specific and does not generalize to other
+    // wrappers, which is why `attached_value_flags`
+    // (`rules::attached_value_candidate`, issue #214) needs an explicit
+    // per-flag declaration rather than a fixed known set like this one.
     #[test]
     fn exec_dash_la_cluster_still_blocks() {
         assert_decision("exec -la foo rm -rf /", Decision::Block);
