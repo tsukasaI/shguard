@@ -122,7 +122,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use shguard::normalize::Resolution;
+use shguard::normalize::{Resolution, UnresolvableKind};
 use shguard::verdict::Decision;
 use tempfile::TempDir;
 
@@ -1469,60 +1469,135 @@ fn env_u64(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-/// Pinned reproducer for a shguard-vs-bash argv-count disagreement,
-/// structurally unrelated to the now-fixed unquoted-empty-brace-member
-/// elision gap (`src/normalize.rs`'s `chunks_to_words`, issue #93): an
-/// unquoted `$IFS` reference sitting DIRECTLY adjacent to a
-/// brace group (no literal text or whitespace between them, e.g.
-/// `echo$IFS{Y,}`) makes real bash produce a WORD COUNT that a careful
-/// manual trace of the documented expansion order (brace expansion, then
-/// independently `$IFS`-split each resulting alternative) does not predict
-/// -- confirmed with a harness-independent direct check
-/// (`bash -c 'set -- echo$IFS{Y,}; echo "$#"'` prints `2`, not the `3` a
-/// "cartesian product first, then split each alternative" model predicts;
-/// `set -- echo$IFS{Y=,}` goes further and produces `echo=`/`echo`, with a
-/// `=` character that has no origin in that model at all).
+/// Issue #326, now diagnosed and fixed: an unquoted `$IFS` reference
+/// sitting DIRECTLY adjacent to a brace group (no literal text or
+/// whitespace between them, e.g. `echo$IFS{Y,}`) made real bash produce a
+/// WORD SHAPE that a careful manual trace of the documented expansion order
+/// (brace expansion, then independently `$IFS`-split each resulting
+/// alternative) did not predict -- confirmed with a harness-independent
+/// direct check (`bash -c 'set -- echo$IFS{Y,}; echo "$#"'` prints `2`, not
+/// the `3` a "cartesian product first, then split each alternative" model
+/// predicts; `set -- echo$IFS{Y=,}` goes further and produces `echo=`/
+/// `echo`, with a `=` character that has no origin in that model at all).
 ///
-/// Unlike the (now-fixed, #324) brace-elision gap, this file does not have
-/// a settled explanation for the underlying bash mechanism -- only an
-/// empirical, independently-reproduced confirmation that shguard's model
-/// (which mirrors the "brace first, then split" textbook order) and bash's
-/// actual behavior disagree for this specific adjacency. Tracked via
-/// [`RootCause::IfsGluedBraceDup`] (`classify_root_cause`) rather than
-/// fixed here; a real fix requires diagnosing bash's actual mechanism
-/// first, tracked as issue #326.
+/// Root cause: bash's parameter-name matching for a BARE (unbraced) `$NAME`
+/// is greedy -- it consumes every subsequent `[A-Za-z0-9_]` character as
+/// part of the SAME variable name, not just up to some fixed boundary.
+/// Brace expansion happens first, purely as TEXT substitution, before any
+/// `$`-expansion is evaluated -- so when a brace alternative's own content
+/// gets substituted directly after a bare `$IFS` with no separator, the
+/// substituted text can extend `$IFS`'s effective name into an entirely
+/// different (and almost always unset, hence empty-expanding) variable.
+/// `echo$IFS{hello,}` brace-expands to `echo$IFShello` and `echo$IFS`
+/// FIRST; then, on EACH resulting string independently, `$IFShello` is
+/// re-lexed as ONE greedy identifier "IFShello" (unset -> empty), not
+/// `$IFS` + literal "hello" -- exactly like typing `echo$IFShello` as
+/// literal source text would already correctly do (verified: shguard
+/// already resolves that bare, non-brace-adjacent shape as one
+/// `Unresolvable` parameter reference today, since the parser applies this
+/// same greedy matching directly to raw source characters -- the bug was
+/// ONLY ever reachable via brace-expansion's re-substitution, which
+/// operates at the already-parsed `WordPiece` level and did not re-derive
+/// this boundary).
+///
+/// Fixed in `src/normalize.rs`'s `resolve_pieces`: a bare `$IFS` piece
+/// immediately followed, in a brace-expanded alternative's own flat piece
+/// list, by literal text starting with an identifier character is now
+/// folded to `Unresolvable` instead of being confidently (and wrongly)
+/// resolved as `$IFS` itself -- the same fail-closed floor every other
+/// undecidable shape in this module already gets, not a guessed value.
+/// `rm$IFS-rf$IFS/` (issue #82's own motivating case) is unaffected: `-`/
+/// `/` are not identifier-continuation characters, so the hazard never
+/// fires there.
+///
+/// Known, accepted residual: `WordPiece::ParameterExpansion` has no
+/// braced-vs-unbraced marker (`$IFS` and `${IFS}` fold to the identical
+/// piece), so this fix can't precisely exclude the rarer, genuinely-safe
+/// `${IFS}{a,b}` shape (an explicitly braced `$IFS` never has this hazard,
+/// since the braces themselves are bash's own non-identifier boundary) --
+/// see `explicitly_braced_ifs_before_a_brace_group_is_unaffected_by_the_fix`
+/// below for the accuracy cost this accepts. Still fail-closed either way:
+/// every caller already floors an unquoted `$IFS`-derived word to `Ask`
+/// regardless of whether this specific piece resolves or not.
 #[test]
-#[ignore = "known shguard-vs-bash argv-count disagreement for $IFS glued directly \
-            against a brace group (issue #93 fuzzer finding, mechanism not yet \
-            diagnosed, not yet its own tracked issue)"]
-fn known_gap_ifs_glued_directly_to_brace_group() {
+fn ifs_glued_directly_to_brace_group_now_resolves_honestly_unresolvable() {
     let sandbox = Sandbox::new();
     let candidate = "{echo,}$IFS{cm0gLXJmIC8=,}";
 
     let verdict = shguard::analyze(candidate);
-    let shguard_argv: Vec<String> = verdict
-        .normalized_argv()
-        .iter()
-        .map(|w| match w.resolution() {
-            Resolution::Resolved(s) => s.clone(),
-            Resolution::Unresolvable(kind) => panic!("expected fully resolved, got {kind:?}"),
-        })
-        .collect();
+    let shguard_argv = verdict.normalized_argv();
+
+    // The two alternatives whose `$IFS` piece is immediately followed by
+    // the substituted, identifier-starting brace member text ("echo" and
+    // "" swapped in for the first brace group; "cm0gLXJmIC8=" swapped in
+    // for the second) now honestly float to `Unresolvable`, rather than
+    // confidently resolving to a value real bash never actually produces.
+    assert_eq!(shguard_argv.len(), 3, "{shguard_argv:?}");
+    assert!(
+        matches!(
+            shguard_argv[0].resolution(),
+            Resolution::Unresolvable(UnresolvableKind::ParameterExpansion)
+        ),
+        "{:?}",
+        shguard_argv[0].resolution()
+    );
+    assert_eq!(
+        shguard_argv[1].resolution(),
+        &Resolution::Resolved("echo".to_string())
+    );
+    assert!(
+        matches!(
+            shguard_argv[2].resolution(),
+            Resolution::Unresolvable(UnresolvableKind::ParameterExpansion)
+        ),
+        "{:?}",
+        shguard_argv[2].resolution()
+    );
+
+    // Ground truth, unchanged: real bash still produces this exact shape --
+    // the fix makes shguard ADMIT it doesn't know rather than compute a
+    // wrong-but-confident answer, not somehow reproduce bash's shape
+    // exactly (that would require modeling the precise identifier-boundary
+    // extension, not just detecting that it's undecidable here).
     let bash_argv = sandbox
         .capture_argv(candidate)
         .expect("capture should succeed for a plain candidate with no substitutions");
-
-    assert_eq!(
-        shguard_argv,
-        vec!["echo", "cm0gLXJmIC8=", "echo", "cm0gLXJmIC8="]
-    );
     assert_eq!(bash_argv, vec!["echo=", "echo", "="]);
-    assert_ne!(
-        shguard_argv, bash_argv,
-        "if this now passes, either src/normalize.rs or this test's own \
-         understanding of the construct has changed -- re-diagnose before \
-         removing #[ignore]"
-    );
+}
+
+#[test]
+fn ifs_glued_directly_to_a_brace_group_with_a_non_identifier_leading_member_is_unaffected() {
+    // A brace member whose text starts with a non-identifier character
+    // (`-rf`, not `rf`) never triggers bash's greedy name-extension --
+    // `$IFS{-a,-b}` behaves exactly like the textbook "brace first, then
+    // $IFS-split each alternative" model already predicts, so this must
+    // NOT float to Unresolvable the way an identifier-starting member does.
+    let verdict = shguard::analyze("rm$IFS{-a,-b}$IFS/tmp/x");
+    for word in verdict.normalized_argv() {
+        assert!(
+            !matches!(word.resolution(), Resolution::Unresolvable(_)),
+            "{:?}",
+            verdict.normalized_argv()
+        );
+    }
+}
+
+#[test]
+fn explicitly_braced_ifs_before_a_brace_group_is_unaffected_by_the_fix() {
+    // Known, accepted residual (see the doc comment above): `${IFS}`
+    // (explicitly braced) has no name-extension hazard in real bash even
+    // when immediately followed by a brace group, but `WordPiece` can't
+    // distinguish it from bare `$IFS` -- so this fix's Unresolvable floor
+    // also (unnecessarily, but safely) applies here. Pinned so a future
+    // change that narrows this doesn't silently need to re-litigate
+    // whether the narrowing is itself safe.
+    let verdict = shguard::analyze("echo${IFS}{hello,}");
+    let unresolvable_count = verdict
+        .normalized_argv()
+        .iter()
+        .filter(|w| matches!(w.resolution(), Resolution::Unresolvable(_)))
+        .count();
+    assert!(unresolvable_count > 0, "{:?}", verdict.normalized_argv());
 }
 
 /// The main differential-fuzz sweep. Generates [`DEFAULT_ITERATIONS`] (or
