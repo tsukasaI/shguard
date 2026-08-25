@@ -8414,6 +8414,46 @@ mod tests {
         assert_decision("`echo hi`", Decision::Ask);
     }
 
+    // ==== Issue #124: a syntactically empty (no command content at all)
+    // command-position `$()`/backtick body is a deterministic, not
+    // runtime-dependent, empty-string expansion — the same
+    // `first_non_vanishing_word_idx` skip issue #83 already gives an
+    // unquoted `$IFS`-only word now also applies here, so the trailing
+    // literal tokens become the real, resolvable command. ====
+
+    #[test]
+    fn empty_command_substitution_command_position_resolves_to_the_trailing_command() {
+        // The issue's own repro: a real shell dispatches plain `rm -rf /`.
+        assert_decision("$() rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn empty_backquoted_command_position_resolves_to_the_trailing_command() {
+        assert_decision("`` rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn whitespace_only_command_substitution_command_position_resolves_to_the_trailing_command() {
+        assert_decision("$(   ) rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn quoted_empty_command_substitution_command_position_still_asks() {
+        // Parity control: quoting prevents the empty expansion from
+        // vanishing — `"$()"` is a literal empty-string argv[0] in real
+        // bash (a "command not found" shape, nothing like `rm -rf /`), so
+        // this must NOT regress to also resolving through to the trailing
+        // command.
+        assert_decision(r#""$()" rm -rf /"#, Decision::Ask);
+    }
+
+    #[test]
+    fn command_substitution_with_real_content_command_position_still_asks() {
+        // Parity control: a body with actual content (even a harmless
+        // no-op) is not "provably empty" and keeps the ordinary floor.
+        assert_decision("$(true) rm -rf /", Decision::Ask);
+    }
+
     // ==== Issue #82: an `$IFS`-packed command-position word's trailing
     // segment (after the last `$IFS` split point) is no longer swept into
     // one opaque `argv[0]` blob along with the resolved leading segments —

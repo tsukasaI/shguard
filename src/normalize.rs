@@ -786,6 +786,26 @@ fn resolve_piece(piece: &WordPiece, allow_split: bool) -> (Chunk, bool) {
         // quoted-vs-unquoted reasoning as `ParameterExpansion` above — this
         // is the exact case issue #146/#149 motivated (`git commit -m
         // "$(...)"` is single-word-safe; `git commit -m $(...)` is not).
+        //
+        // Issue #124: a SYNTACTICALLY empty body (`$()`, `$( )`, `` `` ``,
+        // `` `  ` `` — the parser's raw inner text is empty or whitespace
+        // only, checked here rather than re-deriving "empty" from a parsed
+        // command list, since the AST already hands this piece the raw
+        // string) is a deterministic, not runtime-dependent, empty-string
+        // expansion — resolved the same way any other provably-empty piece
+        // is (`Chunk::Literal(String::new(), !allow_split)`), which
+        // `chunks_to_words`'s own elision rule (see its docs) then vanishes
+        // when unquoted/splittable and keeps as a lone empty field when
+        // quoted, exactly matching real bash's `$()` vs. `"$()"` split.
+        // A body with ANY actual content — even a no-op like `:`/`true` —
+        // is NOT "provably empty" in this sense (evaluating whether a real
+        // command has side effects is a different, much harder problem,
+        // out of scope here) and keeps the ordinary `Unresolvable` floor.
+        WordPiece::CommandSubstitution(text) | WordPiece::BackquotedSubstitution(text)
+            if text.trim().is_empty() =>
+        {
+            (Chunk::Literal(String::new(), !allow_split), false)
+        }
         WordPiece::CommandSubstitution(_) | WordPiece::BackquotedSubstitution(_) => (
             Chunk::Unresolvable(UnresolvableKind::CommandSubstitution, !allow_split),
             false,
@@ -1403,6 +1423,72 @@ mod tests {
     fn ifs_only_word_vanishes() {
         let words = first_word_normalized("$IFS");
         assert!(words.is_empty(), "expected zero words, got {words:?}");
+    }
+
+    // ==== issue #124: a syntactically empty (no command content at all)
+    // $()/backtick body is a deterministic, not runtime-dependent,
+    // empty-string expansion — vanishes unquoted (zero output words, same
+    // elision as an unquoted $IFS-only word above), stays as one empty
+    // field when quoted, exactly matching real bash's $() vs. "$()". ====
+
+    #[test]
+    fn unquoted_empty_command_substitution_vanishes() {
+        let words = first_word_normalized("$()");
+        assert!(words.is_empty(), "expected zero words, got {words:?}");
+    }
+
+    #[test]
+    fn unquoted_empty_backquoted_substitution_vanishes() {
+        let words = first_word_normalized("``");
+        assert!(words.is_empty(), "expected zero words, got {words:?}");
+    }
+
+    #[test]
+    fn unquoted_whitespace_only_command_substitution_vanishes() {
+        let words = first_word_normalized("$(   )");
+        assert!(words.is_empty(), "expected zero words, got {words:?}");
+    }
+
+    #[test]
+    fn quoted_empty_command_substitution_stays_one_empty_field() {
+        // Parity control: quoting prevents word-splitting, so an empty
+        // "$()" must survive as a single Resolved("") word, NOT vanish —
+        // this is the exact distinction that makes `"$()" rm -rf /` an
+        // empty-string argv[0] in real bash (command not found), utterly
+        // different from unquoted `$() rm -rf /` (which really does
+        // dispatch plain `rm -rf /`).
+        let words = first_word_normalized(r#""$()""#);
+        assert_eq!(words.len(), 1);
+        assert_eq!(*words[0].resolution(), Resolution::Resolved(String::new()));
+    }
+
+    #[test]
+    fn command_substitution_with_real_content_stays_unresolvable() {
+        // Parity control: a body with ANY actual command content — even a
+        // no-op like `:`/`true` — is not "provably empty" in this sense;
+        // evaluating whether a real command has side effects is a
+        // different, out-of-scope problem.
+        let words = first_word_normalized("$(true)");
+        assert_eq!(words.len(), 1);
+        assert_eq!(
+            *words[0].resolution(),
+            Resolution::Unresolvable(UnresolvableKind::CommandSubstitution)
+        );
+    }
+
+    #[test]
+    fn nested_empty_command_substitution_stays_unresolvable() {
+        // A substitution whose own raw (unparsed) inner text is `$()` —
+        // not itself empty/whitespace-only as a raw string — stays
+        // conservatively Unresolvable rather than recursively detecting
+        // emptiness one level deeper; only the AST's own literal "nothing
+        // inside" shape is treated as provably empty.
+        let words = first_word_normalized("$($())");
+        assert_eq!(words.len(), 1);
+        assert_eq!(
+            *words[0].resolution(),
+            Resolution::Unresolvable(UnresolvableKind::CommandSubstitution)
+        );
     }
 
     // ---- non-IFS $VAR -> Unresolvable(ParameterExpansion) ----
