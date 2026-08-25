@@ -801,6 +801,20 @@ fn resolve_piece(piece: &WordPiece, allow_split: bool) -> (Chunk, bool) {
         // is NOT "provably empty" in this sense (evaluating whether a real
         // command has side effects is a different, much harder problem,
         // out of scope here) and keeps the ordinary `Unresolvable` floor.
+        //
+        // `str::trim()` strips Rust's full Unicode `White_Space` set (e.g.
+        // U+00A0 NBSP), which is broader than what bash's own tokenizer
+        // treats as blank — bash would try to run a command literally
+        // NAMED by such bytes rather than treating the body as empty. In
+        // the overwhelmingly common case this is harmless either way (no
+        // such command exists, so bash's `$()` also produces empty stdout
+        // and the two agree). The one theoretical divergence — an attacker
+        // who already controls `$PATH` well enough to place an executable
+        // there literally named by Unicode-whitespace bytes — requires
+        // filesystem/PATH control that would already grant far simpler
+        // bypasses, so this is not treated as a live gap; recorded here so
+        // the choice is deliberate rather than an accident of `trim()`'s
+        // default character class.
         WordPiece::CommandSubstitution(text) | WordPiece::BackquotedSubstitution(text)
             if text.trim().is_empty() =>
         {
