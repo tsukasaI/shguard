@@ -3056,6 +3056,14 @@ fn evaluate_command_position_substitution(
 /// `$VAR`'s own expansion. Trying every candidate and Blocking on the
 /// first match keeps this purely additive, matching this codebase's floor
 /// convention everywhere else (widen coverage, never narrow it).
+///
+/// Round 6: when no candidate matches, the returned Ask verdict's argv is
+/// specifically the DEFAULT-IFS split, never a non-default candidate's —
+/// that argv feeds pipeline-shape/decode-stage matching downstream
+/// (`stage_argvs`, in [`evaluate_pipeline`]), so an Ask-level non-default
+/// split could otherwise
+/// desync it from what a real, unprefixed invocation of `$name` actually
+/// produces and mask a genuine pipeline Block.
 fn evaluate_command_position_bare_var(
     first_word_ast: &Word,
     argv: Vec<NormalizedWord>,
@@ -3123,7 +3131,18 @@ fn evaluate_command_position_bare_var(
             )
             .with_deny_message(rule.deny_message().cloned());
         }
-        primary_substituted.get_or_insert(substituted);
+        // The default-IFS split (`ifs.is_none()`, always the last
+        // candidate above) is what the returned Ask verdict's argv must
+        // carry: that argv feeds `stage_argvs` for pipeline-shape/decode
+        // matching downstream, and a non-default candidate's split can
+        // desync that scan (round 6 fable review — capturing whichever
+        // candidate happened to run FIRST, via `get_or_insert`, let a
+        // same-line-but-different-command's `IFS=` prefix assignment that
+        // doesn't even persist to `$name`'s own invocation feed a
+        // mis-split argv downstream and mask a real pipeline Block).
+        if ifs.is_none() {
+            primary_substituted = Some(substituted);
+        }
     }
 
     Verdict::ask(
@@ -7159,25 +7178,32 @@ impl Env {
         let resolved = match normalize::normalize_assignment_value(assignment).as_slice() {
             [one] => match one.resolution() {
                 // `NAME+=value` (issue #139, round 4) appends to `NAME`'s
-                // own current value — only representable when that current
-                // value is itself statically known; when it isn't, the true
-                // appended result is unknowable and must not be modeled as
-                // resolved (same "stale/partial is worse than unresolved"
-                // principle this function already applies below).
+                // own current value. When that current value is itself
+                // statically known, the appended result is exact. When it
+                // isn't — no same-line prior assignment at all — bash's own
+                // semantics treat an unset/unassigned variable's `+=` as
+                // starting from an empty string, so `Some(rhs.clone())` is
+                // exactly as valid an assumption as plain `NAME=value`
+                // already makes below (main-parity, not a new claim: round
+                // 6 found this arm returning `None` here regressed rule 2's
+                // coverage below what main had before this PR ever touched
+                // `+=`, e.g. `X+='rm -rf /'; $X` wrongly Asked instead of
+                // Blocking).
                 Resolution::Resolved(rhs) if assignment.append => {
                     match self.map.get(&assignment.name) {
                         Some(prior) => Some(format!("{prior}{rhs}")),
                         None => {
-                            // `IFS+=value` with no same-line prior could be
-                            // appending onto the shell's inherited default
-                            // (`" \t\n"`) — plausible enough to try as one
-                            // more floor candidate (see `ifs_history`'s own
-                            // docs), but not confident enough to claim as
-                            // this line's definitive current IFS value.
+                            // `IFS+=value` with no same-line prior could
+                            // ALSO be appending onto the shell's inherited
+                            // default (`" \t\n"`) rather than onto an empty
+                            // string — plausible enough to try as one more
+                            // floor candidate (see `ifs_history`'s own
+                            // docs) alongside the `Some(rhs.clone())` claim
+                            // below, not instead of it.
                             if is_ifs {
                                 self.ifs_history.push(format!(" \t\n{rhs}"));
                             }
-                            None
+                            Some(rhs.clone())
                         }
                     }
                 }
@@ -7527,6 +7553,36 @@ mod tests {
         // exactly `:,` — a plain, fully-known concatenation, not merely a
         // floor guess.
         assert_decision("IFS=:; IFS+=,; X='rm,-rf:/'; $X", Decision::Block);
+    }
+
+    #[test]
+    fn issue_139_general_variable_append_with_no_prior_still_resolves() {
+        // Round 6 fable review: `apply_one`'s append arm used to fall back
+        // to `None` (unresolvable) for a NON-`IFS` variable with no
+        // same-line prior, regressing rule 2 below what main had before
+        // this branch ever modeled `+=` — main ignored the append bit
+        // entirely and read `X+=v` as plain `X=v`. Bash's own semantics
+        // for `+=` onto an unset/never-assigned variable already start
+        // from an empty string, so `Some(rhs.clone())` here is exactly
+        // that same main-parity assumption, not a new claim.
+        assert_decision("X+='rm -rf /'; $X", Decision::Block);
+    }
+
+    #[test]
+    fn issue_139_ask_verdict_argv_uses_the_default_split_for_downstream_pipeline_matching() {
+        // Round 6 fable review: the Ask verdict's argv used to be
+        // whichever IFS candidate happened to be tried FIRST (the
+        // current-IFS split), not the default split — but `IFS=,` here is
+        // a prefix assignment scoped only to `true`, so real bash resets
+        // `$IFS` back to default before `$X` ever expands, and `$X` splits
+        // as `base64 -d` piped into `python3`, which the embedded
+        // decode-pipe rule blocks. A non-default Ask argv (the single
+        // unsplit token `"base64 -d"`) would desync `stage_argvs` and mask
+        // that Block.
+        assert_decision(
+            "IFS=, true; X='base64 -d'; cat f | $X | python3",
+            Decision::Block,
+        );
     }
 
     #[test]
