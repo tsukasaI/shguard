@@ -3047,9 +3047,7 @@ fn evaluate_command_position_substitution(
 /// can't distinguish a persisting standalone `IFS=` assignment from one
 /// scoped only to a DIFFERENT command's own prefix (`IFS=, true; X='rm
 /// -rf /'; $X` — real bash resets `$IFS` back to default the moment
-/// `true` exits, so `$X` still splits on whitespace) — a fable review
-/// caught this making the IFS-informed split alone regress a case the
-/// default split already caught before this fix. Trying both and
+/// `true` exits, so `$X` still splits on whitespace). Trying both and
 /// Blocking on either match keeps this purely additive, matching this
 /// codebase's floor convention everywhere else (widen coverage, never
 /// narrow it).
@@ -3081,10 +3079,15 @@ fn evaluate_command_position_bare_var(
     let ifs = env.get("IFS");
     let substituted = substitute_command_name(&argv, value, ifs);
     if let Some(rule) = rules.match_command(&substituted) {
+        let splitting_note = if ifs.is_some() {
+            " under the same-line `IFS` reassignment"
+        } else {
+            ""
+        };
         return Verdict::block(
             Reason::new(format!(
                 "`${name}` resolves to {value:?} on this command line, which matches blocklist \
-                 rule {:?}: {}",
+                 rule {:?}{splitting_note}: {}",
                 rule.id().as_str(),
                 rule.reason().as_str()
             )),
@@ -4856,25 +4859,17 @@ fn split_default_ifs(value: &str) -> Vec<String> {
 /// POSIX field splitting distinguishes IFS-whitespace characters (space,
 /// tab, newline — sequences of these collapse together and never produce
 /// an empty field, matching [`split_default_ifs`]'s own behaviour) from
-/// every OTHER `IFS` character, each occurrence of which is its own
-/// delimiter and DOES produce an empty field when adjacent to another
-/// (`IFS=,; X=a,,b` → `a`, ``, `b`) — but a fable review of this issue's
-/// first attempt (which treated every `ifs` character as independently
-/// delimiting, with no interaction between them) found real,
-/// bash-verified counterexamples where that produces FEWER fields than a
-/// real shell, not more: leading/trailing IFS-whitespace immediately
-/// bordering a non-whitespace delimiter is absorbed into that SAME
-/// delimiter rather than contributing its own separate (often empty)
-/// field, so e.g. `IFS=", "; X=" rm -rf /"` splits to exactly
-/// `rm`/`-rf`/`/` in a real shell — no leading empty field displacing
-/// `rm` out of argv position 0 the way naive independent-character
-/// splitting produced. This function walks the value left to right,
-/// absorbing IFS-whitespace immediately around each delimiter (both a
-/// pure-whitespace run and a non-whitespace character's own bordering
-/// whitespace) into that one delimiter event, and produces no field
-/// after a trailing delimiter (any kind) or before a leading one — the
-/// same trimming [`split_default_ifs`] already does for the all-default
-/// case, generalized here to whatever `ifs` configures.
+/// every OTHER `IFS` character. A non-whitespace delimiter, TOGETHER with
+/// any IFS-whitespace immediately bordering it on either side, is a
+/// SINGLE delimiter event (`IFS=", "; X="a , b"` → `a`, `b`, not `a`, ``,
+/// `b`) — this function walks the value left to right, closing a field
+/// at each such combined event, so adjacent non-whitespace delimiters
+/// with no separating whitespace still produce an empty field between
+/// them (`IFS=,; X=a,,b` → `a`, ``, `b`), and no field is produced after
+/// a trailing delimiter (matching [`split_default_ifs`]'s own trailing
+/// trim) — except a LEADING non-whitespace delimiter, which does still
+/// yield an empty first field (`IFS=,; X=,a` → ``, `a`, matching real
+/// bash): only whitespace is stripped for free at the very start.
 ///
 /// `ifs == ""` (an explicit `IFS=` with nothing after the `=`, not merely
 /// unset) disables field splitting entirely per POSIX — the whole
@@ -4905,11 +4900,14 @@ fn split_with_ifs(value: &str, ifs: &str) -> Vec<String> {
     while i < n {
         if is_ifs_char(chars[i]) {
             fields.push(chars[field_start..i].iter().collect::<String>());
-            if is_other(chars[i]) {
-                i += 1;
-            }
             while i < n && is_ws(chars[i]) {
                 i += 1;
+            }
+            if i < n && is_other(chars[i]) {
+                i += 1;
+                while i < n && is_ws(chars[i]) {
+                    i += 1;
+                }
             }
             field_start = i;
         } else {
@@ -7338,6 +7336,33 @@ mod tests {
             split_with_ifs("a,b,", ","),
             vec!["a".to_string(), "b".to_string()]
         );
+    }
+
+    #[test]
+    fn issue_139_split_with_ifs_leading_whitespace_before_a_delimiter_does_not_add_an_empty_field()
+    {
+        // `a`'s closing whitespace and the following comma are ONE
+        // combined delimiter event, not two separate ones — a naive
+        // per-character scan would close a field at the space, then
+        // treat the comma as a second delimiter, inserting a spurious
+        // empty field between `a` and `b`.
+        assert_eq!(
+            split_with_ifs("a , b", ", "),
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn issue_139_split_with_ifs_whitespace_delimiter_before_a_leading_non_whitespace_run() {
+        assert_eq!(
+            split_with_ifs("a, ,b", ", "),
+            vec!["a".to_string(), String::new(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn issue_139_git_push_force_with_comma_space_ifs_blocks() {
+        assert_decision(r#"IFS=", "; X="git , push , --force"; $X"#, Decision::Block);
     }
 
     #[test]
