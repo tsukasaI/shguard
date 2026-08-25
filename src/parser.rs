@@ -716,7 +716,11 @@ fn convert_assignment(assignment: &bast::Assignment) -> Result<Assignment, Parse
             AssignmentValue::Array(words)
         }
     };
-    Ok(Assignment { name, value })
+    Ok(Assignment {
+        name,
+        value,
+        append: assignment.append,
+    })
 }
 
 fn convert_redirect(redirect: &bast::IoRedirect) -> Result<Redirection, ParseError> {

@@ -415,6 +415,11 @@ pub(crate) struct SimpleCommand {
 pub(crate) struct Assignment {
     pub(crate) name: String,
     pub(crate) value: AssignmentValue,
+    /// `NAME+=value` (append to the name's current value) rather than plain
+    /// `NAME=value` (replace it) — issue #139: dropping this bit made
+    /// `IFS+=,` indistinguishable from `IFS=,`, silently discarding the
+    /// preexisting `IFS` value the append form actually preserves.
+    pub(crate) append: bool,
 }
 
 /// The right-hand side of an [`Assignment`]: an ordinary scalar value, or
