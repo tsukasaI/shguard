@@ -3103,8 +3103,9 @@ fn evaluate_command_position_bare_var(
         if Some(historical.as_str()) != current_ifs {
             candidates.push((
                 Some(historical.as_str()),
-                " under an earlier same-line `IFS` reassignment that a later assignment or \
-                 removal shadowed",
+                " under another `IFS` value this line could have held at expansion time \
+                 (an earlier same-line reassignment a later one shadowed, an inherited-default \
+                 floor for an `IFS+=` with no statically-known prior, or similar)",
             ));
         }
     }
