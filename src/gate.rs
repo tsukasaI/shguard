@@ -8414,6 +8414,70 @@ mod tests {
         assert_decision("`echo hi`", Decision::Ask);
     }
 
+    // ==== Issue #124: a syntactically empty (no command content at all)
+    // command-position `$()`/backtick body is a deterministic, not
+    // runtime-dependent, empty-string expansion — the same
+    // `first_non_vanishing_word_idx` skip issue #83 already gives an
+    // unquoted `$IFS`-only word now also applies here, so the trailing
+    // literal tokens become the real, resolvable command. ====
+
+    #[test]
+    fn empty_command_substitution_command_position_resolves_to_the_trailing_command() {
+        // The issue's own repro: a real shell dispatches plain `rm -rf /`.
+        assert_decision("$() rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn empty_backquoted_command_position_resolves_to_the_trailing_command() {
+        assert_decision("`` rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn whitespace_only_command_substitution_command_position_resolves_to_the_trailing_command() {
+        assert_decision("$(   ) rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn quoted_empty_command_substitution_command_position_still_asks() {
+        // Parity control: quoting prevents the empty expansion from
+        // vanishing — `"$()"` is a literal empty-string argv[0] in real
+        // bash (a "command not found" shape, nothing like `rm -rf /`), so
+        // this must NOT regress to also resolving through to the trailing
+        // command.
+        assert_decision(r#""$()" rm -rf /"#, Decision::Ask);
+    }
+
+    #[test]
+    fn command_substitution_with_real_content_command_position_still_asks() {
+        // Parity control: a body with actual content (even a harmless
+        // no-op) is not "provably empty" and keeps the ordinary floor.
+        assert_decision("$(true) rm -rf /", Decision::Ask);
+    }
+
+    #[test]
+    fn empty_command_substitution_command_position_downgrades_a_harmless_command_to_allow() {
+        // The one direction where a misfire in this fix WOULD be a real
+        // bypass (Ask -> Allow, not just Ask -> Block): a vanished empty
+        // substitution ahead of an ordinary, harmless command must resolve
+        // all the way through to Allow, exactly as a real shell's
+        // `$() ls`/plain `ls` does — not just Ask -> Block, which every
+        // other test above already covers.
+        assert_decision("$() ls", Decision::Allow);
+    }
+
+    #[test]
+    fn command_substitution_fused_into_a_larger_word_stays_unresolvable() {
+        // Issue #361 (deliberately deferred, not this issue's scope): Rule
+        // 1's command-position scan detects a substitution fused into a
+        // LARGER word (`r$()m`, not a standalone empty-substitution word on
+        // its own) via the raw AST pieces directly
+        // (`collect_substitutions_into`), independent of this fix's
+        // normalization-level vanishing — so this shape must stay
+        // Unresolvable/Ask, not silently start resolving through to
+        // Allow/Block just because the underlying `$()` body is empty.
+        assert_decision("r$()m -rf /", Decision::Ask);
+    }
+
     // ==== Issue #82: an `$IFS`-packed command-position word's trailing
     // segment (after the last `$IFS` split point) is no longer swept into
     // one opaque `argv[0]` blob along with the resolved leading segments —
