@@ -9363,6 +9363,15 @@ mod tests {
     }
 
     #[test]
+    fn enable_loadable_builtin_flag_clustering_still_blocks() {
+        // The rule's `required_flags = ["f"]` matches `f` anywhere in a
+        // short-flag cluster or attached directly to the flag, not just a
+        // standalone `-f` token -- confirm both shapes are caught.
+        assert_decision("enable -af /tmp/e.so x", Decision::Block);
+        assert_decision("enable -f/tmp/e.so x", Decision::Block);
+    }
+
+    #[test]
     fn enable_without_dash_f_stays_allow() {
         // enable -n cd (disabling a builtin) and bare `enable` (listing
         // builtins) never dispatch a trailing word as a command the way
@@ -9382,7 +9391,7 @@ mod tests {
     // as issue #365 rather than shipped with that false-positive.
     #[test]
     fn ordinary_builtin_dispatch_is_unaffected_by_the_enable_loadable_builtin_rule() {
-        // Regression guard: issue #246's new rules must not shadow or
+        // Regression guard: issue #246's new rule must not shadow or
         // change issue #245's own `builtin name args...` dispatch
         // decisions, including a wrapped command's own `-f`/`-rf` flags.
         assert_decision("builtin cd /tmp", Decision::Allow);

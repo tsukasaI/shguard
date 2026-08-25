@@ -1888,6 +1888,11 @@ except_targets = [
 # enable builtins literally named `rm`/`-rf`/`/`, none of which exist —
 # nothing executes), so it deliberately does not belong in
 # `TRANSPARENT_WRAPPERS` and this rule is scoped to the `-f` form only.
+# This asymmetry — no live dispatch to over-match into — is also exactly
+# why a plain `required_flags`-style rule is safe here but was rejected
+# for `builtin`'s own `-f` form (issue #365): every shape this rule
+# over-matches (e.g. `enable rm -rf /`) is already a no-op/error in a
+# real shell, so over-blocking it costs nothing.
 [[command]]
 id = "enable-loadable-builtin"
 reason = "enable -f dlopen()s an arbitrary shared object and runs its exported code as a new shell builtin"
