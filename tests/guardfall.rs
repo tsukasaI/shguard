@@ -440,10 +440,16 @@ fn guardfall_find_exec_bare_interpreter_cases() {
         // Bare interpreter name, no path.
         (r"find . -exec sh \; -quit", Decision::Block),
         (r"find . -exec bash \;", Decision::Block),
-        // `env`-wrapped and `+`-terminated variants must resolve the same
-        // way as the `\;`-terminated bare case.
+        // `env`-wrapped variant must resolve the same way as the
+        // `\;`-terminated bare case.
         (r"find . -exec /usr/bin/env sh \;", Decision::Block),
-        (r"find . -exec bash +", Decision::Block),
+        // `+` here follows `bash`, not a `{}` argument, so per POSIX it is
+        // NOT the clause terminator (only a `+` immediately after `{}`
+        // is) -- it's an ordinary operand recursed as part of the payload,
+        // giving `bash +`: an operand present with no `-c` floors to Ask,
+        // the same as the `sh {} \;` case below (see the #122 fix for the
+        // full "bare + mid-payload" fail-closed rationale).
+        (r"find . -exec bash +", Decision::Ask),
         // `-execdir`/`-ok`/`-okdir` share the same `RECURSABLE_SLOTS` entry
         // shape as `-exec` -- must Block identically.
         (r"find . -execdir sh \;", Decision::Block),

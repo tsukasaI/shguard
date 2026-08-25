@@ -4146,9 +4146,36 @@ fn scan_recursable_slots(
                 FindExecFlagKind::Yes(terminators) => {
                     has_any = true;
                     let span_start = i + 1;
+                    // POSIX (XCU `find`): a bare `+` only terminates the
+                    // clause when it immediately follows an argument
+                    // containing exactly `{}` — any other `+` is an
+                    // ordinary payload argument (e.g. GNU `rm`'s option
+                    // permutation, `-exec rm + -rf /`). `is_find_exec_
+                    // terminator` alone can't tell the two apart, so `+`
+                    // candidates here get an extra check against the
+                    // immediately preceding word.
                     let span_end = command.words[span_start..]
                         .iter()
-                        .position(|word| is_find_exec_terminator(word, terminators))
+                        .enumerate()
+                        .position(|(offset, word)| {
+                            if !is_find_exec_terminator(word, terminators) {
+                                return false;
+                            }
+                            let is_bare_plus = matches!(
+                                normalize::normalize_word(word).as_slice(),
+                                [nw] if matches!(nw.resolution(), Resolution::Resolved(s) if s == "+")
+                            );
+                            if !is_bare_plus {
+                                return true;
+                            }
+                            let candidate_index = span_start + offset;
+                            candidate_index > 0
+                                && matches!(
+                                    normalize::normalize_word(&command.words[candidate_index - 1])
+                                        .as_slice(),
+                                    [nw] if matches!(nw.resolution(), Resolution::Resolved(s) if s == "{}")
+                                )
+                        })
                         .map_or(command.words.len(), |offset| span_start + offset);
 
                     if span_start < span_end {
@@ -4289,11 +4316,28 @@ fn scan_recursable_slots(
                     has_any = true;
                     let normalized = normalize::normalize_word(&command.words[i]);
                     let after_flag = &normalized[flag_index + 1..];
-                    let terminator_offset = after_flag.iter().position(|nw| {
-                        matches!(
-                            nw.resolution(),
-                            Resolution::Resolved(s) if terminators.contains(&s.as_str())
-                        )
+                    // POSIX (XCU `find`): "Only a <plus-sign> that
+                    // immediately follows an argument containing only the
+                    // two characters `{}` shall punctuate the end of the
+                    // primary expression. Other uses of the <plus-sign>
+                    // shall not be treated as special." A bare `+` split
+                    // position that ISN'T immediately preceded by a
+                    // resolved `{}` is an ordinary payload argument, not a
+                    // terminator — accepting it unconditionally truncates
+                    // the payload and can silently drop a dangerous
+                    // trailing argument (e.g. `-exec rm + -rf /`, where GNU
+                    // `rm` permutes options after `+`).
+                    let terminator_offset = after_flag.iter().enumerate().position(|(off, nw)| {
+                        match nw.resolution() {
+                            Resolution::Resolved(s) if terminators.contains(&s.as_str()) => {
+                                s != "+"
+                                    || matches!(
+                                        off.checked_sub(1).map(|prev| after_flag[prev].resolution()),
+                                        Some(Resolution::Resolved(prev)) if prev == "{}"
+                                    )
+                            }
+                            _ => false,
+                        }
                     });
                     // `find_exec_flag_kind` fires `YesFused` for ANY AST
                     // word that normalizes to multiple `NormalizedWord`s —
@@ -4322,7 +4366,6 @@ fn scan_recursable_slots(
                     // is certain, but its true payload span is not.
                     let is_last_word = i + 1 == command.words.len();
                     if terminator_offset.is_none() && !is_last_word {
-                        has_any = true;
                         raise_expansion_floor(
                             &mut floor,
                             Decision::Ask,
@@ -4446,9 +4489,10 @@ fn scan_recursable_slots(
                                 &mut floor,
                                 inner.decision(),
                                 format!(
-                                    "`find`'s `-exec`/`-execdir`/`-ok`/`-okdir` payload ($IFS \
-                                     splitting fused the whole clause into one word) recurses \
-                                     through the full pipeline; inner decision: {:?}{}",
+                                    "`find`'s `-exec`/`-execdir`/`-ok`/`-okdir` payload (the \
+                                     whole clause fused into one word by $IFS splitting or \
+                                     brace alternation) recurses through the full pipeline; \
+                                     inner decision: {:?}{}",
                                     inner.decision(),
                                     inner
                                         .reason()
@@ -8582,6 +8626,55 @@ mod tests {
         assert_decision("find${IFS}/x${IFS}-exec rm -rf / \\;", Decision::Ask);
     }
 
+    // A round-2 fable review of the fix above caught a fourth variant of the
+    // same class, this time INSIDE the fused word rather than beyond it:
+    // POSIX only treats a bare `+` as the clause terminator when it
+    // immediately follows a literal `{}` argument — any other `+` is an
+    // ordinary payload argument (e.g. GNU `rm`'s option permutation,
+    // `-exec rm + -rf /`). Accepting any `+` unconditionally as a
+    // terminator truncated the payload and dropped its dangerous tail,
+    // wrongly resolving to `Allow` where main correctly Asks. Fixed in both
+    // `FindExecFlagKind::YesFused`'s in-word terminator search and the
+    // sibling non-fused `Yes` arm's span search, so a `+` only counts as a
+    // terminator when the word/split-position immediately before it
+    // resolves to exactly `{}`.
+
+    #[test]
+    fn find_exec_fused_bare_plus_mid_payload_is_not_a_terminator_still_asks() {
+        // `+` here follows `rm`, not `{}` — not a terminator, so the true
+        // payload/terminator span extends past this fused word (a
+        // different word carries the real `\;`), matching the same
+        // partial-fusion floor as the flag-only-fused cases above.
+        assert_decision("find /x {-exec,rm,+,-rf,/} \\;", Decision::Ask);
+    }
+
+    #[test]
+    fn find_exec_fused_bare_plus_mid_payload_with_real_terminator_in_word_blocks() {
+        // Same non-terminating `+`, but the real `;` terminator is ALSO
+        // fused into this word — `rm + -rf /` is exactly the payload real
+        // `find`/`rm` would run, and it must Block.
+        assert_decision(r"find /x {-exec,rm,+,-rf,/,\;}", Decision::Block);
+    }
+
+    #[test]
+    fn find_exec_non_fused_bare_plus_mid_payload_is_not_a_terminator_blocks() {
+        // The sibling non-fused `Yes` arm's version of the same bug:
+        // ordinary literal-whitespace `find -exec rm + -rf / \;` must
+        // recurse the FULL payload (`rm + -rf /`), not truncate at the
+        // non-terminating `+` and lose the dangerous `-rf /` tail.
+        assert_decision(r"find /x -exec rm + -rf / \;", Decision::Block);
+    }
+
+    #[test]
+    fn find_exec_plus_immediately_after_placeholder_is_still_a_valid_terminator() {
+        // Parity control: `{}` immediately before `+` is exactly the
+        // POSIX-valid batching form and must still terminate the clause
+        // (unaffected by the fix — this is the shape issue #122's own
+        // repro already covers via `-execdir`, pinned again here for the
+        // plain `-exec` non-fused path specifically).
+        assert_decision("find /x -exec rm -rf {} +", Decision::Block);
+    }
+
     #[test]
     fn ifs_packed_trailing_substitution_with_transparent_command_still_asks() {
         // The leftover floor (`evaluate_leftover_alternative_substitutions`)
@@ -11838,8 +11931,18 @@ done"#,
     }
 
     #[test]
-    fn find_exec_bare_interpreter_absolute_path_and_plus_terminator_blocks() {
-        assert_decision(r"find /x -exec /bin/sh +", Decision::Block);
+    fn find_exec_bare_interpreter_absolute_path_with_a_non_terminating_plus_asks() {
+        // POSIX (XCU `find`): a bare `+` only terminates the clause when it
+        // immediately follows a `{}` argument; `/bin/sh +` has no `{}`
+        // before it, so `+` is an ordinary payload argument here, not a
+        // terminator (a real `find`, missing a valid `{} +`/`;`
+        // termination, would error and run nothing at all — but per issue
+        // #72's fail-closed precedent, an ambiguous/unterminated clause
+        // recurses its full remainder as payload rather than assuming
+        // nothing happens). The recursed payload `/bin/sh +` is `sh` with
+        // an operand and no `-c` flag, which floors to `Ask` (issue #196),
+        // not `Block` — `+` was never a terminator to begin with here.
+        assert_decision(r"find /x -exec /bin/sh +", Decision::Ask);
     }
 
     #[test]
