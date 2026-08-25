@@ -450,8 +450,9 @@ fn guardfall_find_exec_bare_interpreter_cases() {
         // the same as the `sh {} \;` case below (see the #122 fix for the
         // full "bare + mid-payload" fail-closed rationale).
         (r"find . -exec bash +", Decision::Ask),
-        // `-execdir`/`-ok`/`-okdir` share the same `RECURSABLE_SLOTS` entry
-        // shape as `-exec` -- must Block identically.
+        // `-execdir`/`-ok`/`-okdir` share the same `DirectArgv` mode as
+        // `-exec` (terminator sets differ per issue #360) -- with a `;`
+        // terminator, all four must Block identically.
         (r"find . -execdir sh \;", Decision::Block),
         (r"find . -ok sh \;", Decision::Block),
         (r"find . -okdir sh \;", Decision::Block),

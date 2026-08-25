@@ -4592,10 +4592,11 @@ fn direct_argv_terminators_for(command: &str, flag: &str) -> Option<&'static [&'
 /// rather than [`NormalizedWord`]s — [`scan_recursable_slots`] needs the
 /// real `Word` nodes past a `Yes` flag to build the recursed synthetic
 /// command, not just resolved strings. `Yes` carries the matched slot's
-/// own [`crate::rules::RecurseMode::DirectArgv`] terminator list (`;`/`+`
-/// for every entry today, but read from [`crate::rules::RECURSABLE_SLOTS`]
-/// rather than hard-coded here, so a future slot with a different
-/// terminator set is honoured automatically).
+/// own [`crate::rules::RecurseMode::DirectArgv`] terminator list — `;`/`+`
+/// for `-exec`/`-execdir`, `;`-only for `-ok`/`-okdir` (issue #360: neither
+/// prompts per matched file compatibly with `+` batching) — read from
+/// [`crate::rules::RECURSABLE_SLOTS`] rather than hard-coded here, so a
+/// future slot with a different terminator set is honoured automatically.
 ///
 /// `YesFused` (issue #122) is `Yes`'s counterpart for the one AST word that
 /// `$IFS` splitting multiplied into several [`NormalizedWord`]s (`Yes`
