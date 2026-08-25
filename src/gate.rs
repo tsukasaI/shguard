@@ -4295,13 +4295,47 @@ fn scan_recursable_slots(
                             Resolution::Resolved(s) if terminators.contains(&s.as_str())
                         )
                     });
-                    // Fail-closed (design note, issue #72, mirrored here for
-                    // issue #122): no terminator within this word's own
-                    // remaining split means the payload runs to the end of
-                    // that split, recursed in full rather than silently
-                    // dropped. There is nothing past this one AST word to
-                    // keep scanning either way — the whole clause, flag
-                    // through terminator, is `$IFS`-fused into it.
+                    // `find_exec_flag_kind` fires `YesFused` for ANY AST
+                    // word that normalizes to multiple `NormalizedWord`s —
+                    // brace alternation (issue #77) as well as `$IFS`
+                    // splitting — but only `$IFS` splitting can fuse the
+                    // clause's flag AND its whole payload AND its
+                    // terminator into that single AST word; a brace
+                    // alternative like `{-exec,rm}` fuses only the flag
+                    // with the payload's first token, leaving the rest of
+                    // the payload and the terminator in FOLLOWING AST
+                    // words this arm never scans. Recursing only the
+                    // in-word remainder there would silently drop the real
+                    // payload and can resolve a genuinely dangerous clause
+                    // to Allow (confirmed fable-review finding: `find /x
+                    // {-exec,rm} -rf / \;` — main correctly Asks via the
+                    // `Unresolvable` arm; recursing only `rm` in isolation
+                    // wrongly Allows). Only take the in-word recursion when
+                    // the terminator was actually found within this word's
+                    // own split (issue #72's fail-closed precedent, mirrored
+                    // here for issue #122: no terminator, but the payload
+                    // still ends at THIS word's boundary because there's
+                    // nothing after it) OR this is the last AST word
+                    // (nothing to have fused with in the first place).
+                    // Otherwise fail closed to the same `Ask` floor the
+                    // `Unresolvable` arm already uses — the flag's presence
+                    // is certain, but its true payload span is not.
+                    let is_last_word = i + 1 == command.words.len();
+                    if terminator_offset.is_none() && !is_last_word {
+                        has_any = true;
+                        raise_expansion_floor(
+                            &mut floor,
+                            Decision::Ask,
+                            "`find`'s `-exec`/`-execdir`/`-ok`/`-okdir` flag is fused with only \
+                             part of its payload into one word (brace alternation or partial \
+                             $IFS splitting); the clause's true payload span, ending at its \
+                             terminator, extends into a later word this scan cannot safely \
+                             reconstruct"
+                                .to_string(),
+                        );
+                        i += 1;
+                        continue;
+                    }
                     let payload_words = match terminator_offset {
                         Some(offset) => &after_flag[..offset],
                         None => after_flag,
@@ -4356,8 +4390,18 @@ fn scan_recursable_slots(
                             // Issue #196, same floor as the non-fused `Yes`
                             // arm above (kept in sync deliberately — see
                             // that arm's own doc for the full rationale).
+                            // Checked against `normalize_argv(&synthetic)`,
+                            // not `payload_words` directly, for the same
+                            // reason the `Yes` arm does this: an unquoted
+                            // empty-string split position normalizes away
+                            // during `synthetic`'s own re-normalization
+                            // (`chunks_to_words` drops an empty unsplit
+                            // segment), so the two could otherwise disagree
+                            // on which token is `effective_command`'s first
+                            // word.
+                            let payload_argv = normalize::normalize_argv(&synthetic);
                             if let Some((name, rest_words)) =
-                                crate::rules::effective_command(payload_words)
+                                crate::rules::effective_command(&payload_argv)
                                 && SHELL_INTERPRETERS.contains(&name)
                             {
                                 match scan_for_dash_c_before_operand(rest_words, name) {
@@ -4439,18 +4483,22 @@ fn find_exec_flag_kind(word: &Word) -> FindExecFlagKind {
         // which issue #82 established can fuse `find` with a later flag via
         // `$IFS` (`find$IFS-exec$IFS...`). When every split-out position is
         // resolved and exactly one of them literally spells one of `find`'s
-        // `DirectArgv` flags, the payload IS reconstructable — as literal
-        // [`WordPiece`]s synthesised from these already-resolved strings,
-        // never by re-parsing joined text as fresh shell syntax (that would
-        // let a literal `;`/`|`/`&&` embedded in one resolved argument be
-        // mistaken for real shell structure, which real `find -exec` never
-        // does: its payload is exec'd directly, argv-for-argv, with no
-        // shell re-invocation) — see [`FindExecFlagKind::YesFused`] and its
-        // caller in [`scan_recursable_slots`]. Any unresolvable position, or
-        // more than one literal flag spelling in the same fused word (which
-        // flag owns which payload span becomes ambiguous), still fails
-        // closed to `Unresolvable` (an `Ask` floor) rather than attempting a
-        // guess.
+        // `DirectArgv` flags, the payload MAY be reconstructable — as
+        // literal [`WordPiece`]s synthesised from these already-resolved
+        // strings, never by re-parsing joined text as fresh shell syntax
+        // (that would let a literal `;`/`|`/`&&` embedded in one resolved
+        // argument be mistaken for real shell structure, which real `find
+        // -exec` never does: its payload is exec'd directly, argv-for-argv,
+        // with no shell re-invocation) — see [`FindExecFlagKind::YesFused`]
+        // and its caller in [`scan_recursable_slots`], which additionally
+        // floors to `Ask` (not silently missing the payload) when the
+        // clause's true span extends past this one AST word — a brace
+        // alternative like `{-exec,rm}` fuses only the flag with the
+        // payload's first token, not the whole clause the way `$IFS`
+        // splitting can. Any unresolvable position, or more than one
+        // literal flag spelling in the same fused word (which flag owns
+        // which payload span becomes ambiguous), still fails closed to
+        // `Unresolvable` (an `Ask` floor) rather than attempting a guess.
         multiple => {
             let any_unresolvable = multiple
                 .iter()
@@ -8495,6 +8543,43 @@ mod tests {
             "find${IFS}/x${IFS}-exec${IFS}rm${IFS}-rf${IFS}{}",
             Decision::Block,
         );
+    }
+
+    // A fable review of the fused-word fix above caught a CRITICAL fail-open:
+    // `find_exec_flag_kind`'s `multiple` arm fires `YesFused` for ANY
+    // multi-`NormalizedWord` split, not just a full `$IFS` fusion of the
+    // whole clause — brace alternation (issue #77) can fuse the flag with
+    // only PART of its payload, leaving the rest (and the terminator) in
+    // FOLLOWING AST words this arm never scans. Recursing only the in-word
+    // remainder there silently drops the real payload, and a `find /x
+    // {-exec,rm} -rf / \;`-shaped command wrongly resolved to `Allow` where
+    // main correctly Asks (fail-closed) via the `Unresolvable` arm. Fixed by
+    // only taking the in-word recursion when the terminator was actually
+    // found within the fused word's own split, or the fused word is the
+    // last AST word — otherwise flooring to `Ask`, matching main.
+
+    #[test]
+    fn find_exec_flag_fused_with_only_part_of_its_payload_via_braces_still_asks_not_allows() {
+        assert_decision("find /x {-exec,rm} -rf / \\;", Decision::Ask);
+    }
+
+    #[test]
+    fn find_exec_flag_fused_with_only_part_of_its_payload_via_braces_and_placeholder_still_asks() {
+        assert_decision("find /x {-exec,rm} -rf {} \\;", Decision::Ask);
+    }
+
+    #[test]
+    fn find_exec_flag_fused_with_only_part_of_its_ifs_split_payload_still_asks() {
+        // Same underlying gap via partial `$IFS` splitting: the flag is
+        // fused with `$IFS` but its payload keeps ordinary literal
+        // whitespace, so the true payload/terminator span extends past the
+        // fused word.
+        assert_decision("find /x -exec${IFS}rm -rf / \\;", Decision::Ask);
+    }
+
+    #[test]
+    fn find_exec_flag_last_in_its_fused_word_with_payload_in_a_following_word_still_asks() {
+        assert_decision("find${IFS}/x${IFS}-exec rm -rf / \\;", Decision::Ask);
     }
 
     #[test]
