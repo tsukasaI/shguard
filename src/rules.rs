@@ -3235,7 +3235,7 @@ pub(crate) const RECURSABLE_SLOTS: &[RecursableSlot] = &[
 /// bare `sh` unchanged. A pure string operation on the already-normalised
 /// token — never a filesystem lookup or symlink resolution (this crate
 /// never touches the filesystem, module docs).
-fn basename(token: &str) -> &str {
+pub(crate) fn basename(token: &str) -> &str {
     token.rsplit('/').next().unwrap_or(token)
 }
 
@@ -3347,6 +3347,23 @@ fn wrapper_cluster_booleans(wrapper: &str) -> Option<&'static [char]> {
         // `-i`/`-0`/`-v`; the value-takers of both flavors are exactly the
         // `Short` entries in `wrapper_value_flags("env")`.
         "env" => Some(&['0', 'i', 'v']),
+        // GNU Make 3.81's `man make` (issue #209 round 3): every short
+        // flag not listed in `wrapper_value_flags("make")` is boolean.
+        "make" => Some(&[
+            'b', 'm', 'B', 'd', 'e', 'i', 'k', 'L', 'n', 'p', 'q', 'r', 'R', 's', 'S', 't', 'v',
+            'w',
+        ]),
+        // No `"tar"` entry: a round-4 fable review of issue #209 found
+        // that tar's short-flag arity genuinely differs across flavors
+        // for letters that matter (bsdtar's `-s` takes a value; GNU
+        // tar's `-s`/`--same-order` is boolean), so a table built from
+        // either flavor silently swallows `-C` in a cluster the OTHER
+        // flavor's real tar would not — the same "unverified assumption
+        // about a tool's flag surface" bug class this table exists to
+        // prevent, just at the per-letter level instead of per-tool.
+        // `crate::gate::find_dash_c_in_cluster` deliberately does not use
+        // this table for tar at all; see that function's doc for the
+        // fail-closed alternative.
         _ => None,
     }
 }
@@ -3395,6 +3412,71 @@ fn cluster_takes_separated_value(wrapper: &str, token: &str) -> bool {
     // An all-boolean cluster consumes only itself, which the generic
     // dash-skip already does.
     false
+}
+
+/// Where a getopt short-flag cluster's `letter` value lives, for a caller
+/// that needs the value ITSELF rather than [`cluster_takes_separated_value`]'s
+/// stop-here-or-next-token classification for the wrapped-command walk.
+/// Shares [`wrapper_cluster_booleans`]/[`wrapper_value_flags`] with that
+/// function so the two classifications of "where does this wrapper's
+/// value-taking letter's value live" cannot drift apart — issue #209's
+/// fable review found `crate::gate::chain_dash_c_targets` had grown its
+/// own, incomplete, from-scratch parsing of env's `-C` position that only
+/// recognized a BARE `-C` token, missing every cluster form (`-iC`,
+/// `-iC<dir>`) `effective_command`'s wrapped-command walk already handles
+/// correctly via this module — reopening the very `env -C` bypass this
+/// mechanism exists to close.
+pub(crate) enum ClusterValue<'a> {
+    /// `letter` is the cluster's last character; its value is the WHOLE
+    /// next token (`env -iC dir`).
+    NextToken,
+    /// `letter` is followed by more characters within this same token;
+    /// those characters (never empty) are its value (`env -iCdir`).
+    Glued(&'a str),
+}
+
+pub(crate) fn locate_cluster_value<'a>(
+    wrapper: &str,
+    token: &'a str,
+    letter: char,
+) -> Option<ClusterValue<'a>> {
+    let booleans = wrapper_cluster_booleans(wrapper)?;
+    let value_takers: Vec<char> = wrapper_value_flags(wrapper)
+        .iter()
+        .filter_map(|flag| match flag {
+            ValueFlag::Short(c) => Some(*c),
+            ValueFlag::Long(_) => None,
+        })
+        .collect();
+    let rest = token.strip_prefix('-')?;
+    if rest.is_empty() || rest.starts_with('-') {
+        return None;
+    }
+    for (index, c) in rest.char_indices() {
+        if c == letter {
+            let glued = &rest[index + c.len_utf8()..];
+            return Some(if glued.is_empty() {
+                ClusterValue::NextToken
+            } else {
+                ClusterValue::Glued(glued)
+            });
+        }
+        if value_takers.contains(&c) {
+            // A DIFFERENT value-taking letter appears before `letter` —
+            // it, not `letter`, owns everything after it in this token,
+            // so `letter` never actually appears as its own flag here.
+            return None;
+        }
+        if !booleans.contains(&c) {
+            // An unmodeled letter: getopt errors out on this cluster at
+            // runtime, so there is no execution (and no `letter` value)
+            // to guard here either — the same reasoning
+            // `cluster_takes_separated_value`'s doc gives for its own
+            // unmodeled-letter case.
+            return None;
+        }
+    }
+    None
 }
 
 /// Per-wrapper flags that take a *separate* value token (`-n 19`, `-u
@@ -3593,6 +3675,40 @@ fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
             ValueFlag::Long("delimiter".to_string()),
             ValueFlag::Long("process-slot-var".to_string()),
         ],
+        // Issue #209's round-3 fable review: `make`/`tar` aren't
+        // `TRANSPARENT_WRAPPERS` (they don't exec an arbitrary wrapped
+        // command), so these two entries are never reached by
+        // `skip_wrapper_flags`/`skip_wrapper_arguments` — they exist
+        // solely so `crate::gate::chain_dash_c_targets`/
+        // `resolve_tar_dash_c` can call `locate_cluster_value` for these
+        // tools' own `-C` getopt-cluster recognition, sharing this same
+        // table so a future edit can't drift the two apart again the way
+        // `env`'s handling once did. GNU Make 3.81's `man make` classifies
+        // every short flag: `-C`/`-f`/`-I`/`-j`/`-l`/`-o`/`-W` take a
+        // value (verified live: `make -jC dir`/`make -lC dir` both treat
+        // `C` as `-j`/`-l`'s own glued value and never chdir, matching
+        // `-j`'s/`-l`'s real optional-value semantics — this table only
+        // needs "does this letter consume the rest of the cluster",
+        // which holds regardless of the value being optional or
+        // mandatory); every other short letter (`b m B d e i k L n p q r
+        // R s S t v w`) is boolean (verified: `make -kwC dir` chdirs,
+        // `make -Ckw` treats `kw` as `-C`'s own value).
+        "make" => vec![
+            ValueFlag::Short('C'),
+            ValueFlag::Long("directory".to_string()),
+            ValueFlag::Short('f'),
+            ValueFlag::Short('I'),
+            ValueFlag::Short('j'),
+            ValueFlag::Short('l'),
+            ValueFlag::Short('o'),
+            ValueFlag::Short('W'),
+        ],
+        // No `"tar"` entry: see `wrapper_cluster_booleans`'s doc for why
+        // a round-4 fable review of issue #209 removed the bsdtar-only
+        // table this used to have (its `-s` classification was wrong for
+        // GNU tar's `-s`/`--same-order`, silently dropping `-C`
+        // composition on that flavor). `crate::gate::find_dash_c_in_cluster`
+        // does not consult this table for tar.
         _ => vec![],
     }
 }
