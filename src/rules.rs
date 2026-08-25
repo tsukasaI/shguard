@@ -951,12 +951,13 @@ impl TargetMatcher {
     /// same fail-closed, can't-prove-it-so-Ask-not-Block posture as the
     /// `Rel` case, not a new false-positive class.
     ///
-    /// Issue #118 (closed): the tail's own FIRST component is additionally
-    /// tried as if it collapsed back to a bare `~` — i.e. `~/<rest of the
-    /// tail>` — whenever a `~`-anchored `canon`/`target` is in play and the
-    /// tail has at least one component after that first one. This closes
-    /// the gap `ascent_descent_plausible` used to have with the escaped-
-    /// past anchor's own basename reappearing mid-tail: `~alice/../bob/
+    /// Issue #118 (narrowed, not fully closed — see "Known gaps" below):
+    /// the tail's own FIRST component is additionally tried as if it
+    /// collapsed back to a bare `~` — i.e. `~/<rest of the tail>` — whenever
+    /// a `~`-anchored `canon`/`target` is in play and the tail has at least
+    /// one component after that first one. This narrows the gap
+    /// `ascent_descent_plausible` used to have with the escaped-past
+    /// anchor's own basename reappearing mid-tail: `~alice/../bob/
     /// .config/shguard/x` renders `bob` as `comps[0]`, which the ORIGINAL
     /// (non-re-anchored) candidate keeps in front of `.config`, never
     /// prefix-matching a `~/.config/shguard` canon — but shguard cannot
@@ -965,11 +966,19 @@ impl TargetMatcher {
     /// `~/.config/shguard/x`. Trying `~/<comps[1..]>` as one more candidate
     /// catches exactly that case, the same "can't prove it, so widen
     /// rather than silently miss it" posture the rest of this function
-    /// already uses. Requiring at least 2 components (the reappearing name
-    /// plus something after it) keeps a bare `~alice/../bob` (nothing to
-    /// re-descend into) from uselessly flooring on `bob` alone — a lone
-    /// name can't reach a specific dangerous sub-path either way, matching
-    /// this same function's `comps.is_empty()` early return just below.
+    /// already uses. The `comps.len() >= 2` guard is defense-in-depth, not
+    /// load-bearing — see the two call sites' own comments for why a
+    /// 1-component tail could never match a non-degenerate canon here
+    /// regardless.
+    ///
+    /// Applies uniformly across every source shape above (`Rel`,
+    /// `EscapesHome`/`NamedUserHomeEscapes`, `DirStack`), not only the two
+    /// named-user-escape shapes the motivating example uses: an unresolved
+    /// `Rel` ascent's own landing directory is exactly as unknown as a
+    /// named user's home, so a reappearing name mid-tail is exactly as
+    /// plausibly the invoker's own `$HOME` there too (`cp e
+    /// ../bob/.config/shguard/x` floors the same way `~alice/../bob/
+    /// .config/shguard/x` does) — deliberate, not an oversight.
     ///
     /// Known gaps (not yet fixed):
     /// - This check doesn't consult a rule's `except_targets`. No
@@ -983,6 +992,16 @@ impl TargetMatcher {
     ///   one) would blanket-floor every ascent-then-descent token — the
     ///   same latent shape `TargetMatcher::matches`'s existing
     ///   `NormalizedPrefix` already has.
+    /// - Issue #364: only the tail's very FIRST component is tried as the
+    ///   reappearing name. A tail that spells the home container
+    ///   explicitly before that name (`~alice/../home/bob/.config/
+    ///   shguard/x`) strips `home`, not `bob`, and the resulting `~/bob/
+    ///   .config/shguard/x` candidate matches nothing — the same threat,
+    ///   reachable one component further in. Not fixed here: this
+    ///   codebase has no existing canonical list/heuristic for
+    ///   recognizing `/home/<user>`-shaped paths, and hardcoding one
+    ///   (`"home"`, `"Users"`, ...) would be new, platform-specific
+    ///   speculation this function's design otherwise avoids.
     fn ascent_descent_plausible(&self, token: &str) -> bool {
         let strip = match self {
             Self::NormalizedPrefix { strip, .. } | Self::NormalizedExact { strip, .. } => strip,
@@ -1034,8 +1053,14 @@ impl TargetMatcher {
                 // `~`, tried whenever `canon` is itself `~`-anchored and
                 // there's a component past it to descend into — see this
                 // function's own doc for the full "escaped anchor's
-                // basename reappearing mid-tail" rationale and why
-                // `comps.len() < 2` isn't worth widening on.
+                // basename reappearing mid-tail" rationale. `comps.len() >=
+                // 2` is defense-in-depth, not what prevents over-firing on
+                // a lone name: with exactly 1 component the widened
+                // candidate is `"~/"`, which can't `starts_with` any
+                // non-degenerate `~`-anchored canon (the minimum matchable
+                // shape is `~/x`), so a bare `~alice/../bob` can never
+                // reach a dangerous namespace here regardless of this
+                // guard's presence.
                 canon.starts_with('~')
                     && comps.len() >= 2
                     && format!("~/{}", comps[1..].join("/")).starts_with(canon.as_str())
@@ -1051,7 +1076,11 @@ impl TargetMatcher {
                     // Issue #118: same re-anchoring as the prefix arm above,
                     // but only against a `~`-anchored target (an `Abs`
                     // target has no anchor a reappearing name could
-                    // collapse back into).
+                    // collapse back into). `comps.len() >= 2` is
+                    // defense-in-depth here too — with exactly 1 component,
+                    // `comps[1..]` is empty and `target_comps` is guaranteed
+                    // non-empty (checked just above), so the equality can
+                    // never hold regardless of this guard.
                     || (matches!(target, PathForm::Home(_))
                         && comps.len() >= 2
                         && comps[1..] == *target_comps)
@@ -6283,8 +6312,9 @@ mod tests {
 
     // ==== Issue #118: the escaped-past anchor's own basename reappearing
     // mid-tail (`~alice/../bob/...`, where `bob` could be the invoking
-    // user's own account) is now also tried re-anchored as `~` — closing
-    // the residual gap issue #90 documented but didn't fix. ====
+    // user's own account) is now also tried re-anchored as `~` — narrowing
+    // the residual gap issue #90 documented but didn't fix (a further,
+    // deeper-nested variant is tracked separately as issue #364). ====
 
     #[test]
     fn ascent_descent_escaped_anchor_basename_reanchors_into_self_protect_prefix() {
@@ -6331,6 +6361,32 @@ mod tests {
         let rules = Rules::embedded().unwrap();
         let cmd = argv(&["cp", "x", "~alice/../bob/shared/file"]);
         assert!(rules.match_command_ascent_descent(&cmd).is_none());
+    }
+
+    #[test]
+    fn ascent_descent_reanchoring_applies_to_a_plain_relative_ascent_too() {
+        // Issue #118's widening is deliberately not restricted to the
+        // named-user-escape source shapes — an unresolved `Rel` ascent's
+        // own landing directory is exactly as unknown as a named user's
+        // home, so `bob` reappearing mid-tail is exactly as plausibly the
+        // invoker's own `$HOME` here too.
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["cp", "evil.toml", "../bob/.config/shguard/config.toml"]);
+        assert!(rules.match_command(&cmd).is_none());
+        let rule = rules.match_command_ascent_descent(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "self-protect-config-cp-tilde");
+    }
+
+    #[test]
+    fn ascent_descent_reanchoring_applies_to_a_dirstack_anchor_too() {
+        // Same widening for issue #133's dirstack-anchor shape (`~-/...`) —
+        // an unknown dirstack entry's landing directory is just as unknown
+        // as a plain relative ascent's or a named user's home.
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["cp", "evil.toml", "~-/bob/.config/shguard/config.toml"]);
+        assert!(rules.match_command(&cmd).is_none());
+        let rule = rules.match_command_ascent_descent(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "self-protect-config-cp-tilde");
     }
 
     // ==== Issue #80: `~username` (another user's home) floors to Ask via
