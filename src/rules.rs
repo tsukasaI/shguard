@@ -951,13 +951,25 @@ impl TargetMatcher {
     /// same fail-closed, can't-prove-it-so-Ask-not-Block posture as the
     /// `Rel` case, not a new false-positive class.
     ///
-    /// Known residual gap: this check is purely forward — it can prefix-
-    /// match a tail against a rule's dangerous namespace, but can't
-    /// reason about the escaped-past anchor's own *basename* reappearing
-    /// mid-tail (e.g. `~alice/../bob/.config/shguard/x`, where `bob`
-    /// happens to be the invoking user, would need to re-descend through
-    /// a name this check has no way to know). Tracked as issue #118, not
-    /// fixed here.
+    /// Issue #118 (closed): the tail's own FIRST component is additionally
+    /// tried as if it collapsed back to a bare `~` — i.e. `~/<rest of the
+    /// tail>` — whenever a `~`-anchored `canon`/`target` is in play and the
+    /// tail has at least one component after that first one. This closes
+    /// the gap `ascent_descent_plausible` used to have with the escaped-
+    /// past anchor's own basename reappearing mid-tail: `~alice/../bob/
+    /// .config/shguard/x` renders `bob` as `comps[0]`, which the ORIGINAL
+    /// (non-re-anchored) candidate keeps in front of `.config`, never
+    /// prefix-matching a `~/.config/shguard` canon — but shguard cannot
+    /// rule out that `bob` IS the invoking user's own account, in which
+    /// case a real shell collapses `bob/.config/shguard/x` right back to
+    /// `~/.config/shguard/x`. Trying `~/<comps[1..]>` as one more candidate
+    /// catches exactly that case, the same "can't prove it, so widen
+    /// rather than silently miss it" posture the rest of this function
+    /// already uses. Requiring at least 2 components (the reappearing name
+    /// plus something after it) keeps a bare `~alice/../bob` (nothing to
+    /// re-descend into) from uselessly flooring on `bob` alone — a lone
+    /// name can't reach a specific dangerous sub-path either way, matching
+    /// this same function's `comps.is_empty()` early return just below.
     ///
     /// Known gaps (not yet fixed):
     /// - This check doesn't consult a rule's `except_targets`. No
@@ -1015,13 +1027,35 @@ impl TargetMatcher {
                 } else {
                     return false; // degenerate canon (e.g. "."), never plausible
                 };
-                candidate.starts_with(canon.as_str())
+                if candidate.starts_with(canon.as_str()) {
+                    return true;
+                }
+                // Issue #118: the tail's own first component re-anchored as
+                // `~`, tried whenever `canon` is itself `~`-anchored and
+                // there's a component past it to descend into — see this
+                // function's own doc for the full "escaped anchor's
+                // basename reappearing mid-tail" rationale and why
+                // `comps.len() < 2` isn't worth widening on.
+                canon.starts_with('~')
+                    && comps.len() >= 2
+                    && format!("~/{}", comps[1..].join("/")).starts_with(canon.as_str())
             }
-            Self::NormalizedExact { target, .. } => matches!(
-                target,
-                PathForm::Abs(target_comps) | PathForm::Home(target_comps)
-                    if !target_comps.is_empty() && *target_comps == comps
-            ),
+            Self::NormalizedExact { target, .. } => {
+                let (PathForm::Abs(target_comps) | PathForm::Home(target_comps)) = target else {
+                    return false;
+                };
+                if target_comps.is_empty() {
+                    return false;
+                }
+                *target_comps == comps
+                    // Issue #118: same re-anchoring as the prefix arm above,
+                    // but only against a `~`-anchored target (an `Abs`
+                    // target has no anchor a reappearing name could
+                    // collapse back into).
+                    || (matches!(target, PathForm::Home(_))
+                        && comps.len() >= 2
+                        && comps[1..] == *target_comps)
+            }
             Self::Exact(_) | Self::Prefix(_) | Self::UrlHost(_) => {
                 unreachable!("filtered out above")
             }
@@ -6244,6 +6278,58 @@ mod tests {
     fn ascent_descent_home_escape_partial_prefix_does_not_floor() {
         let rules = Rules::embedded().unwrap();
         let cmd = argv(&["dd", "of=~/../../dev"]);
+        assert!(rules.match_command_ascent_descent(&cmd).is_none());
+    }
+
+    // ==== Issue #118: the escaped-past anchor's own basename reappearing
+    // mid-tail (`~alice/../bob/...`, where `bob` could be the invoking
+    // user's own account) is now also tried re-anchored as `~` — closing
+    // the residual gap issue #90 documented but didn't fix. ====
+
+    #[test]
+    fn ascent_descent_escaped_anchor_basename_reanchors_into_self_protect_prefix() {
+        // The issue's own repro shape: `bob` sits in front of `.config` in
+        // the raw tail, but shguard can't rule out `bob` IS the invoker's
+        // own account, in which case a real shell collapses this right
+        // back to `~/.config/shguard/config.toml`.
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&[
+            "cp",
+            "evil.toml",
+            "~alice/../bob/.config/shguard/config.toml",
+        ]);
+        assert!(rules.match_command(&cmd).is_none());
+        let rule = rules.match_command_ascent_descent(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "self-protect-config-cp-tilde");
+    }
+
+    #[test]
+    fn ascent_descent_escaped_anchor_basename_reanchors_into_self_protect_exact() {
+        // Same re-anchoring, but against a `normalized` (exact) target
+        // rather than a `normalized_prefix` one.
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["rm", "-rf", "~alice/../bob/.config/shguard"]);
+        let rule = rules.match_command_ascent_descent(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "self-protect-config-rm-tilde");
+    }
+
+    #[test]
+    fn ascent_descent_escaped_anchor_bare_basename_with_nothing_after_does_not_floor() {
+        // A lone reappearing name with nothing past it to descend into
+        // can't reach a specific dangerous sub-path either way — must not
+        // over-fire into a useless blanket floor on every two-component
+        // ascent-then-descent tail.
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["cp", "evil.toml", "~alice/../bob"]);
+        assert!(rules.match_command_ascent_descent(&cmd).is_none());
+    }
+
+    #[test]
+    fn ascent_descent_escaped_anchor_basename_reanchoring_into_an_ordinary_path_does_not_floor() {
+        // Parity with the pre-#118 noise guards: re-anchoring into a path
+        // that isn't inside any rule's dangerous namespace must stay Allow.
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["cp", "x", "~alice/../bob/shared/file"]);
         assert!(rules.match_command_ascent_descent(&cmd).is_none());
     }
 
