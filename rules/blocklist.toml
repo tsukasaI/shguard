@@ -1874,3 +1874,38 @@ except_targets = [
     { exact = "/dev/urandom" },
     { exact = "/dev/random" },
 ]
+
+# Issue #246: bash's `enable -f <sofile> [name]` dlopen()s an arbitrary
+# shared object and registers its exported symbols as new shell builtins —
+# native code loading via a file path, a fundamentally different shape from
+# anything `TRANSPARENT_WRAPPERS`/`effective_command` models (those are all
+# "run the next argv word as a command"; this is "load and execute this
+# file's machine code directly"). No `targets` needed: unlike dd/cp, the
+# danger here is the mere PRESENCE of `-f` with any value at all, not which
+# path it names — there is no safe/harmless sofile to except. `enable`
+# WITHOUT `-f` never dispatches a trailing word as a command the way
+# `builtin name args...` does (`enable rm -rf /` just fails trying to
+# enable builtins literally named `rm`/`-rf`/`/`, none of which exist —
+# nothing executes), so it deliberately does not belong in
+# `TRANSPARENT_WRAPPERS` and this rule is scoped to the `-f` form only.
+[[command]]
+id = "enable-loadable-builtin"
+reason = "enable -f dlopen()s an arbitrary shared object and runs its exported code as a new shell builtin"
+command = "enable"
+required_flags = ["f"]
+
+# ksh93's `builtin` command shares this exact `-f <libname>` loadable-
+# builtins shape (documented in ksh93's own manual: `builtin [-d|-f
+# libname] name...`) — a real, verified second entry point to the same
+# native-code-loading danger. NOT covered by a rule here: unlike
+# `enable`, `builtin` is ALSO a `TRANSPARENT_WRAPPERS` dispatcher (issue
+# #245) — `builtin name args...` runs the shell builtin `name` with the
+# REST of argv as `name`'s own arguments, not `builtin`'s own flags. A
+# `required_flags = ["f"]` rule here false-matches any wrapped command
+# that happens to use `-f`/`-rf`/etc. (confirmed: `builtin $CMD -rf /`
+# wrongly matched during development of this rule, since `required_flags`
+# scans the whole argv for the letter at ANY position, not specifically
+# builtin's own leading flag). Closing this needs either a schema
+# extension (a position-constrained flag field) or code-level detection
+# distinguishing "builtin's own -f" from "the wrapped command's -f" —
+# tracked as issue #365 rather than shipping a false-positive-prone check.
