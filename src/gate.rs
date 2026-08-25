@@ -6437,10 +6437,10 @@ fn evaluate_composed_cwd_redirects(
 /// `cd`/`pushd` chain composes multiple same-line directives — GNU
 /// git(1)/make(1) both document repeated `-C` as cumulative, each later
 /// occurrence interpreted relative to the one before it. `long_names`
-/// lists this tool's accepted long spellings (`env`'s `--chdir`; empty
-/// for git/make, which have no long form for `-C`); the short spelling is
-/// always `-C`, this mechanism's only spelling shared by all four tools
-/// issue #209 covers.
+/// lists this tool's accepted long spellings (`env`'s `--chdir`, make's
+/// `--directory`; empty for git, which has no long form for `-C` at
+/// all); the short spelling is always `-C`, this mechanism's only
+/// spelling shared by all four tools issue #209 covers.
 ///
 /// `short_can_attach` gates the glued short form (`-Cdir`, no space):
 /// confirmed locally that GNU `env`/GNU `make` both accept it (`env
@@ -6591,8 +6591,28 @@ fn chain_dash_c_targets(
 /// OTHER tar flavor's real getopt would have glued an earlier flag's own
 /// value instead (over-composition) — fail-closed and harmless, since
 /// [`evaluate_composed_argv_match`]'s fold only ever escalates a
-/// decision, never lowers one — but can never UNDER-compose, closing the
-/// whole bypass class structurally instead of one flavor at a time.
+/// decision, never lowers one — but never under-composes for THIS one
+/// bypass shape (a dash-prefixed getopt cluster with unknown arity).
+///
+/// **Known limitation, disclosed rather than silently accepted (issue
+/// #356)**: this closes the getopt-cluster-arity shape specifically, not
+/// every possible spelling of tar's `-C`/`--directory`. A round-5 fable
+/// review found three more real, unmodeled spellings that under-compose
+/// exactly like every gap this issue's prior rounds closed: tar's
+/// "old-style" dashless leading option cluster (`tar cCf dir archive`,
+/// confirmed live to chdir on bsdtar), and an unambiguous prefix of
+/// `--directory` (`--dir`, `--direc`, …, confirmed live on both bsdtar
+/// and GNU Make's `--directory`) for tar AND make. Each individually is
+/// no more dangerous than issue #209 not existing at all — every one of
+/// these commands composed nothing before this PR, exactly like they
+/// still do today — so none of them is a regression, but the mechanism
+/// isn't the exhaustive "closes the whole bypass class" fix earlier
+/// rounds' commit messages claimed. Not chased further here: every round
+/// so far has found the NEXT unmodeled spelling rather than the last
+/// one, and each individual gap is unreachable without an attacker who
+/// already knows this specific detection mechanism's remaining blind
+/// spots — tracked in issue #356 rather than extending this PR
+/// indefinitely.
 fn find_dash_c_in_cluster(token: &str) -> Option<crate::rules::ClusterValue<'_>> {
     let rest = token.strip_prefix('-')?;
     if rest.is_empty() || rest.starts_with('-') {
@@ -6802,8 +6822,23 @@ fn evaluate_dash_c_override(argv: &[NormalizedWord], env: &Env, rules: &Rules) -
             // `cluster_wrapper: None` silently dropping every make
             // cluster form the way env's own cluster gap once did.
             let cluster_wrapper = if name == "make" { Some("make") } else { None };
-            let anchor =
-                chain_dash_c_targets(scan_region, &[], short_can_attach, cluster_wrapper, env)?;
+            // Issue #209 round 5: git has no long spelling for `-C` at
+            // all, but make DOES (`--directory`, confirmed live: `make
+            // --directory sub` chdirs) — a round-5 fable review caught
+            // this call site's blanket `&[]` silently dropping it for
+            // make the same way earlier rounds dropped other spellings.
+            let long_names: &[&str] = if name == "make" {
+                &["--directory"]
+            } else {
+                &[]
+            };
+            let anchor = chain_dash_c_targets(
+                scan_region,
+                long_names,
+                short_can_attach,
+                cluster_wrapper,
+                env,
+            )?;
             let composed_argv = compose_argv_against_cwd(argv, &anchor);
             evaluate_composed_argv_match(&composed_argv, argv, "this invocation's own `-C`", rules)
         }
@@ -12201,6 +12236,27 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
     fn make_dash_c_composes_a_relative_target() {
         assert_eq!(
             decide_dash_c("make -C ~/.config/shguard config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn make_dash_dash_directory_long_form_also_composes() {
+        // A round-5 fable review found make's `--directory` long form
+        // (confirmed live: `make --directory sub` chdirs) entirely
+        // unmodeled — this call site's `long_names` was hard-coded to
+        // `&[]` on the false assumption that only git and make share
+        // `-C`'s "no long form" property; git alone has no long form.
+        assert_eq!(
+            decide_dash_c("make --directory ~/.config/shguard config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn make_dash_dash_directory_equals_long_form_also_composes() {
+        assert_eq!(
+            decide_dash_c("make --directory=~/.config/shguard config.toml").decision(),
             Decision::Block
         );
     }
