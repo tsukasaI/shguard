@@ -3218,15 +3218,22 @@ pub(crate) const RECURSABLE_SLOTS: &[RecursableSlot] = &[
     RecursableSlot {
         command: "find",
         flag: "-ok",
+        // Issue #360: unlike `-exec`/`-execdir`, POSIX/GNU/BSD `find` never
+        // give `-ok`/`-okdir` a `{} +` batching form (they prompt per
+        // matched file, which is incompatible with batching) — `;` is the
+        // only real terminator. A bare `+` here is an ordinary payload
+        // argument, same as anywhere else it doesn't immediately follow a
+        // literal `{}`.
         mode: RecurseMode::DirectArgv {
-            terminators: &[";", "+"],
+            terminators: &[";"],
         },
     },
     RecursableSlot {
         command: "find",
         flag: "-okdir",
+        // Issue #360, same rationale as `-ok` above.
         mode: RecurseMode::DirectArgv {
-            terminators: &[";", "+"],
+            terminators: &[";"],
         },
     },
 ];

@@ -8554,6 +8554,14 @@ mod tests {
 
     #[test]
     fn find_okdir_fused_by_ifs_still_recurses_and_blocks() {
+        // Issue #360: unlike `-exec`/`-execdir`, `-okdir` has no `+`
+        // terminator at all (`RECURSABLE_SLOTS`' `-okdir` entry is `;`-only
+        // — `-ok`/`-okdir` prompt per matched file, incompatible with `+`
+        // batching), so this trailing `+` is never recognized as a
+        // terminator. This still Blocks via the fail-closed no-terminator
+        // path (issue #72's precedent): the whole remainder, `rm -rf {} +`,
+        // recurses as the payload and matches
+        // `rm-recursive-force-dangerous-target` on the `{}` placeholder.
         assert_decision(
             "find${IFS}/${IFS}-okdir${IFS}rm${IFS}-rf${IFS}{}${IFS}+",
             Decision::Block,
@@ -8673,6 +8681,27 @@ mod tests {
         // repro already covers via `-execdir`, pinned again here for the
         // plain `-exec` non-fused path specifically).
         assert_decision("find /x -exec rm -rf {} +", Decision::Block);
+    }
+
+    // A round-3 fable review of the fix above, hunting for a fifth variant
+    // of the same "clause model" bug class, found one: `-ok`/`-okdir` had
+    // the SAME `[";", "+"]` terminator set as `-exec`/`-execdir` in
+    // `RECURSABLE_SLOTS`, but POSIX/GNU/BSD `find` never give `-ok`/`-okdir`
+    // a `+` batching form at all (they prompt per matched file, which is
+    // incompatible with batching) — the only real terminator is `;`. A bare
+    // `+` there was wrongly honored as a terminator, truncating the payload
+    // and dropping its dangerous tail. Pre-existing on main (not introduced
+    // by this branch); fixed alongside since it's the same file/mechanism
+    // and the fix is a two-line data change (issue #360).
+
+    #[test]
+    fn find_ok_plus_is_not_a_terminator_at_all_blocks_on_full_payload() {
+        assert_decision(r"find /x -ok rm {} + -rf / \;", Decision::Block);
+    }
+
+    #[test]
+    fn find_okdir_plus_is_not_a_terminator_at_all_blocks_on_full_payload() {
+        assert_decision(r"find /x -okdir rm {} + -rf / \;", Decision::Block);
     }
 
     #[test]
