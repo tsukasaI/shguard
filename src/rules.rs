@@ -951,8 +951,9 @@ impl TargetMatcher {
     /// same fail-closed, can't-prove-it-so-Ask-not-Block posture as the
     /// `Rel` case, not a new false-positive class.
     ///
-    /// Issue #118 (narrowed, not fully closed — see "Known gaps" below):
-    /// the tail's own FIRST component is additionally tried as if it
+    /// Issue #118 (the first-component case fixed here; a deeper variant
+    /// is tracked separately as issue #364 — see "Known gaps" below): the
+    /// tail's own FIRST component is additionally tried as if it
     /// collapsed back to a bare `~` — i.e. `~/<rest of the tail>` — whenever
     /// a `~`-anchored `canon`/`target` is in play and the tail has at least
     /// one component after that first one. This narrows the gap
@@ -973,7 +974,7 @@ impl TargetMatcher {
     ///
     /// Applies uniformly across every source shape above (`Rel`,
     /// `EscapesHome`/`NamedUserHomeEscapes`, `DirStack`), not only the two
-    /// named-user-escape shapes the motivating example uses: an unresolved
+    /// tilde-escape shapes the motivating example uses: an unresolved
     /// `Rel` ascent's own landing directory is exactly as unknown as a
     /// named user's home, so a reappearing name mid-tail is exactly as
     /// plausibly the invoker's own `$HOME` there too (`cp e
