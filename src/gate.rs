@@ -4146,9 +4146,36 @@ fn scan_recursable_slots(
                 FindExecFlagKind::Yes(terminators) => {
                     has_any = true;
                     let span_start = i + 1;
+                    // POSIX (XCU `find`): a bare `+` only terminates the
+                    // clause when it immediately follows an argument
+                    // containing exactly `{}` — any other `+` is an
+                    // ordinary payload argument (e.g. GNU `rm`'s option
+                    // permutation, `-exec rm + -rf /`). `is_find_exec_
+                    // terminator` alone can't tell the two apart, so `+`
+                    // candidates here get an extra check against the
+                    // immediately preceding word.
                     let span_end = command.words[span_start..]
                         .iter()
-                        .position(|word| is_find_exec_terminator(word, terminators))
+                        .enumerate()
+                        .position(|(offset, word)| {
+                            if !is_find_exec_terminator(word, terminators) {
+                                return false;
+                            }
+                            let is_bare_plus = matches!(
+                                normalize::normalize_word(word).as_slice(),
+                                [nw] if matches!(nw.resolution(), Resolution::Resolved(s) if s == "+")
+                            );
+                            if !is_bare_plus {
+                                return true;
+                            }
+                            let candidate_index = span_start + offset;
+                            candidate_index > 0
+                                && matches!(
+                                    normalize::normalize_word(&command.words[candidate_index - 1])
+                                        .as_slice(),
+                                    [nw] if matches!(nw.resolution(), Resolution::Resolved(s) if s == "{}")
+                                )
+                        })
                         .map_or(command.words.len(), |offset| span_start + offset);
 
                     if span_start < span_end {
@@ -4282,6 +4309,201 @@ fn scan_recursable_slots(
                     // dropping a trailing, unterminated `-exec` payload.
                     i = span_end + 1;
                 }
+                FindExecFlagKind::YesFused {
+                    terminators,
+                    flag_index,
+                } => {
+                    has_any = true;
+                    let normalized = normalize::normalize_word(&command.words[i]);
+                    let after_flag = &normalized[flag_index + 1..];
+                    // POSIX (XCU `find`): "Only a <plus-sign> that
+                    // immediately follows an argument containing only the
+                    // two characters `{}` shall punctuate the end of the
+                    // primary expression. Other uses of the <plus-sign>
+                    // shall not be treated as special." A bare `+` split
+                    // position that ISN'T immediately preceded by a
+                    // resolved `{}` is an ordinary payload argument, not a
+                    // terminator — accepting it unconditionally truncates
+                    // the payload and can silently drop a dangerous
+                    // trailing argument (e.g. `-exec rm + -rf /`, where GNU
+                    // `rm` permutes options after `+`).
+                    let terminator_offset = after_flag.iter().enumerate().position(|(off, nw)| {
+                        match nw.resolution() {
+                            Resolution::Resolved(s) if terminators.contains(&s.as_str()) => {
+                                s != "+"
+                                    || matches!(
+                                        off.checked_sub(1).map(|prev| after_flag[prev].resolution()),
+                                        Some(Resolution::Resolved(prev)) if prev == "{}"
+                                    )
+                            }
+                            _ => false,
+                        }
+                    });
+                    // `find_exec_flag_kind` fires `YesFused` for ANY AST
+                    // word that normalizes to multiple `NormalizedWord`s —
+                    // brace alternation (issue #77) as well as `$IFS`
+                    // splitting — but only `$IFS` splitting can fuse the
+                    // clause's flag AND its whole payload AND its
+                    // terminator into that single AST word; a brace
+                    // alternative like `{-exec,rm}` fuses only the flag
+                    // with the payload's first token, leaving the rest of
+                    // the payload and the terminator in FOLLOWING AST
+                    // words this arm never scans. Recursing only the
+                    // in-word remainder there would silently drop the real
+                    // payload and can resolve a genuinely dangerous clause
+                    // to Allow (confirmed fable-review finding: `find /x
+                    // {-exec,rm} -rf / \;` — main correctly Asks via the
+                    // `Unresolvable` arm; recursing only `rm` in isolation
+                    // wrongly Allows). Only take the in-word recursion when
+                    // the terminator was actually found within this word's
+                    // own split (issue #72's fail-closed precedent, mirrored
+                    // here for issue #122: no terminator, but the payload
+                    // still ends at THIS word's boundary because there's
+                    // nothing after it) OR this is the last AST word
+                    // (nothing to have fused with in the first place).
+                    // Otherwise fail closed to the same `Ask` floor the
+                    // `Unresolvable` arm already uses — the flag's presence
+                    // is certain, but its true payload span is not.
+                    let is_last_word = i + 1 == command.words.len();
+                    if terminator_offset.is_none() && !is_last_word {
+                        raise_expansion_floor(
+                            &mut floor,
+                            Decision::Ask,
+                            "`find`'s `-exec`/`-execdir`/`-ok`/`-okdir` flag is fused with only \
+                             part of its payload into one word (brace alternation or partial \
+                             $IFS splitting); the clause's true payload span, ending at its \
+                             terminator, extends into a later word this scan cannot safely \
+                             reconstruct"
+                                .to_string(),
+                        );
+                        i += 1;
+                        continue;
+                    }
+                    let payload_words = match terminator_offset {
+                        Some(offset) => &after_flag[..offset],
+                        None => after_flag,
+                    };
+
+                    if !payload_words.is_empty() {
+                        // Same depth-cap rationale as the `Yes` arm above:
+                        // this also calls `evaluate_simple_command` directly
+                        // rather than `analyze_at_depth`, so nothing else on
+                        // this path checks `depth` against
+                        // `MAX_SUBSTITUTION_DEPTH`.
+                        if depth >= MAX_SUBSTITUTION_DEPTH {
+                            raise_expansion_floor(
+                                &mut floor,
+                                Decision::Ask,
+                                format!(
+                                    "`find`'s `-exec`/`-execdir`/`-ok`/`-okdir` payload nesting \
+                                     exceeds the recursion depth cap ({MAX_SUBSTITUTION_DEPTH}); \
+                                     refusing to keep recursing (fail-closed denial-of-service \
+                                     guard, see gate.rs module docs)"
+                                ),
+                            );
+                        } else {
+                            // Every position here is `Resolved` —
+                            // `FindExecFlagKind::YesFused` only ever fires
+                            // when `find_exec_flag_kind` confirmed no
+                            // unresolvable split position exists anywhere in
+                            // this AST word. Rebuilt as literal `WordPiece`s
+                            // (never by re-parsing joined text as fresh
+                            // shell syntax) so a literal `;`/`|`/`&&` inside
+                            // one resolved argument can't be mistaken for
+                            // real shell structure — matching how a real
+                            // `find -exec` execs its payload argv-for-argv
+                            // with no shell re-invocation.
+                            let synthetic_words: Vec<Word> = payload_words
+                                .iter()
+                                .map(|nw| match nw.resolution() {
+                                    Resolution::Resolved(s) => {
+                                        Word(vec![WordPiece::Literal(s.clone())])
+                                    }
+                                    Resolution::Unresolvable(_) => unreachable!(
+                                        "YesFused guarantees every split position in this AST \
+                                         word is resolved"
+                                    ),
+                                })
+                                .collect();
+                            let synthetic = SimpleCommand {
+                                assignments: Vec::new(),
+                                words: synthetic_words,
+                                redirections: Vec::new(),
+                            };
+                            // Issue #196, same floor as the non-fused `Yes`
+                            // arm above (kept in sync deliberately — see
+                            // that arm's own doc for the full rationale).
+                            // Checked against `normalize_argv(&synthetic)`,
+                            // not `payload_words` directly, for the same
+                            // reason the `Yes` arm does this: an unquoted
+                            // empty-string split position normalizes away
+                            // during `synthetic`'s own re-normalization
+                            // (`chunks_to_words` drops an empty unsplit
+                            // segment), so the two could otherwise disagree
+                            // on which token is `effective_command`'s first
+                            // word.
+                            let payload_argv = normalize::normalize_argv(&synthetic);
+                            if let Some((name, rest_words)) =
+                                crate::rules::effective_command(&payload_argv)
+                                && SHELL_INTERPRETERS.contains(&name)
+                            {
+                                match scan_for_dash_c_before_operand(rest_words, name) {
+                                    DashCPosition::FlagFound | DashCPosition::Uncertain => {}
+                                    DashCPosition::OperandNoFlag => {
+                                        raise_expansion_floor(
+                                            &mut floor,
+                                            Decision::Ask,
+                                            format!(
+                                                "`find`'s `-exec`/`-execdir`/`-ok`/`-okdir` \
+                                                 payload invokes `{name}` directly with an \
+                                                 operand but no `-c` script flag before it; the \
+                                                 shell runs that operand as a script, which is \
+                                                 not statically verifiable"
+                                            ),
+                                        );
+                                    }
+                                    DashCPosition::Absent => {
+                                        raise_expansion_floor(
+                                            &mut floor,
+                                            Decision::Block,
+                                            format!(
+                                                "`find`'s `-exec`/`-execdir`/`-ok`/`-okdir` \
+                                                 payload invokes `{name}` directly with no `-c` \
+                                                 script argument and no operand; this spawns an \
+                                                 interactive or stdin-fed shell per matched \
+                                                 file, which has no batch use"
+                                            ),
+                                        );
+                                    }
+                                }
+                            }
+                            let inner = evaluate_simple_command(
+                                &synthetic,
+                                &Env::new(),
+                                rules,
+                                allowlist,
+                                depth + 1,
+                                cwd,
+                            );
+                            raise_expansion_floor(
+                                &mut floor,
+                                inner.decision(),
+                                format!(
+                                    "`find`'s `-exec`/`-execdir`/`-ok`/`-okdir` payload (the \
+                                     whole clause fused into one word by $IFS splitting or \
+                                     brace alternation) recurses through the full pipeline; \
+                                     inner decision: {:?}{}",
+                                    inner.decision(),
+                                    inner
+                                        .reason()
+                                        .map(|r| format!(" ({})", r.as_str()))
+                                        .unwrap_or_default()
+                                ),
+                            );
+                        }
+                    }
+                    i += 1;
+                }
             }
         }
     }
@@ -4299,31 +4521,48 @@ fn find_exec_flag_kind(word: &Word) -> FindExecFlagKind {
                 .map_or(FindExecFlagKind::No, FindExecFlagKind::Yes),
             Resolution::Unresolvable(_) => FindExecFlagKind::Unresolvable,
         },
-        // Issue #82 fallout: `$IFS` splitting (or brace alternation) can
-        // multiply a SINGLE AST word into several logical argv positions —
-        // including `command.words[0]` itself, which issue #82 established
-        // can fuse `find` with a later flag via `$IFS`
-        // (`find$IFS-exec$IFS...`). Pre-#82 this always collapsed to one
-        // opaque `Unresolvable` word, which the arm above already floors;
-        // now that a mixed word can partially resolve, a plain "multiple
-        // words is never a flag spelling" fallback would silently miss both
-        // an unresolvable position that might be `-exec`-adjacent AND a
-        // fully literal `-exec` fused this way — this scan cannot safely
-        // recurse a payload fused into the same AST word (unlike the
-        // ordinary case, its trailing command isn't its own
-        // `command.words` entries `scan_recursable_slots` could slice), so
-        // fail closed to `Unresolvable` (an `Ask` floor, never silently
-        // `No`) whenever any split-out position is itself unresolvable or
-        // literally spells one of `find`'s `DirectArgv` flags.
+        // Issue #82 fallout, closed by issue #122: `$IFS` splitting (or
+        // brace alternation) can multiply a SINGLE AST word into several
+        // logical argv positions — including `command.words[0]` itself,
+        // which issue #82 established can fuse `find` with a later flag via
+        // `$IFS` (`find$IFS-exec$IFS...`). When every split-out position is
+        // resolved and exactly one of them literally spells one of `find`'s
+        // `DirectArgv` flags, the payload MAY be reconstructable — as
+        // literal [`WordPiece`]s synthesised from these already-resolved
+        // strings, never by re-parsing joined text as fresh shell syntax
+        // (that would let a literal `;`/`|`/`&&` embedded in one resolved
+        // argument be mistaken for real shell structure, which real `find
+        // -exec` never does: its payload is exec'd directly, argv-for-argv,
+        // with no shell re-invocation) — see [`FindExecFlagKind::YesFused`]
+        // and its caller in [`scan_recursable_slots`], which additionally
+        // floors to `Ask` (not silently missing the payload) when the
+        // clause's true span extends past this one AST word — a brace
+        // alternative like `{-exec,rm}` fuses only the flag with the
+        // payload's first token, not the whole clause the way `$IFS`
+        // splitting can. Any unresolvable position, or more than one
+        // literal flag spelling in the same fused word (which flag owns
+        // which payload span becomes ambiguous), still fails closed to
+        // `Unresolvable` (an `Ask` floor) rather than attempting a guess.
         multiple => {
-            let ambiguous = multiple.iter().any(|nw| match nw.resolution() {
-                Resolution::Unresolvable(_) => true,
-                Resolution::Resolved(s) => direct_argv_terminators_for("find", s).is_some(),
-            });
-            if ambiguous {
-                FindExecFlagKind::Unresolvable
-            } else {
-                FindExecFlagKind::No
+            let any_unresolvable = multiple
+                .iter()
+                .any(|nw| matches!(nw.resolution(), Resolution::Unresolvable(_)));
+            let mut flag_matches =
+                multiple
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, nw)| match nw.resolution() {
+                        Resolution::Resolved(s) => direct_argv_terminators_for("find", s)
+                            .map(|terminators| (idx, terminators)),
+                        Resolution::Unresolvable(_) => None,
+                    });
+            match (any_unresolvable, flag_matches.next(), flag_matches.next()) {
+                (false, Some((flag_index, terminators)), None) => FindExecFlagKind::YesFused {
+                    terminators,
+                    flag_index,
+                },
+                (false, None, _) => FindExecFlagKind::No,
+                _ => FindExecFlagKind::Unresolvable,
             }
         }
     }
@@ -4347,18 +4586,33 @@ fn direct_argv_terminators_for(command: &str, flag: &str) -> Option<&'static [&'
         })
 }
 
-/// The three outcomes [`find_exec_flag_kind`] can report for one AST word,
+/// The four outcomes [`find_exec_flag_kind`] can report for one AST word,
 /// mirroring [`FlagScan`]'s fail-closed shape (an unresolvable word "might
 /// be the flag", never "definitely not") but over AST [`Word`]s directly
 /// rather than [`NormalizedWord`]s — [`scan_recursable_slots`] needs the
 /// real `Word` nodes past a `Yes` flag to build the recursed synthetic
 /// command, not just resolved strings. `Yes` carries the matched slot's
-/// own [`crate::rules::RecurseMode::DirectArgv`] terminator list (`;`/`+`
-/// for every entry today, but read from [`crate::rules::RECURSABLE_SLOTS`]
-/// rather than hard-coded here, so a future slot with a different
-/// terminator set is honoured automatically).
+/// own [`crate::rules::RecurseMode::DirectArgv`] terminator list — `;`/`+`
+/// for `-exec`/`-execdir`, `;`-only for `-ok`/`-okdir` (issue #360: neither
+/// prompts per matched file compatibly with `+` batching) — read from
+/// [`crate::rules::RECURSABLE_SLOTS`] rather than hard-coded here, so a
+/// future slot with a different terminator set is honoured automatically.
+///
+/// `YesFused` (issue #122) is `Yes`'s counterpart for the one AST word that
+/// `$IFS` splitting multiplied into several [`NormalizedWord`]s (`Yes`
+/// never fires there — see [`find_exec_flag_kind`]'s `multiple` arm): the
+/// matched flag has no real `Word` nodes after it to slice, only resolved
+/// STRINGS at further split positions, so it carries `flag_index` (the
+/// matched flag's own position in that split) instead of already-sliced
+/// AST words. [`scan_recursable_slots`] re-derives the same split and
+/// builds literal [`WordPiece`]s from the resolved strings after
+/// `flag_index`, rather than re-parsing joined text as fresh shell syntax.
 enum FindExecFlagKind {
     Yes(&'static [&'static str]),
+    YesFused {
+        terminators: &'static [&'static str],
+        flag_index: usize,
+    },
     Unresolvable,
     No,
 }
@@ -8256,6 +8510,201 @@ mod tests {
         assert_eq!(verdict.decision(), Decision::Allow);
     }
 
+    // Issue #122: `find_exec_flag_kind`'s `multiple` arm floored an
+    // `$IFS`-fused `-exec`/`-execdir`/`-ok`/`-okdir` clause to `Unresolvable`
+    // (an `Ask` floor) rather than recursing its payload, on the mistaken
+    // assumption that this shape is "never realistically written" — it's
+    // exactly `${IFS}` standing in for every literal space, fusing the
+    // whole invocation into one AST word. `FindExecFlagKind::YesFused` now
+    // reconstructs and recurses the payload the same way the ordinary
+    // (real-whitespace) `Yes` arm already does.
+
+    #[test]
+    fn find_exec_fused_by_ifs_still_recurses_and_blocks() {
+        // The issue's own first repro, no user config at all (embedded
+        // rules only) — the plain-whitespace form already Blocks via
+        // `rm-recursive-force-dangerous-target`; this must match.
+        assert_decision(
+            "find${IFS}/x${IFS}-exec${IFS}rm${IFS}-rf${IFS}{}${IFS}\\;",
+            Decision::Block,
+        );
+    }
+
+    #[test]
+    fn find_execdir_plus_terminator_fused_by_ifs_still_recurses_and_blocks() {
+        // The issue's second repro: `-execdir` with the `+` terminator
+        // (batches all matches into one payload invocation) instead of
+        // `\;` (one payload invocation per match) — both terminator forms
+        // must be recognized when fused into the same `$IFS`-packed word.
+        assert_decision(
+            "find${IFS}/${IFS}-execdir${IFS}rm${IFS}-rf${IFS}{}${IFS}+",
+            Decision::Block,
+        );
+    }
+
+    #[test]
+    fn find_ok_fused_by_ifs_still_recurses_and_blocks() {
+        // `-ok`/`-okdir` (the confirmation-prompting siblings of
+        // `-exec`/`-execdir`) share the same `DirectArgv` recognition and
+        // must get the same fused-word treatment.
+        assert_decision(
+            "find${IFS}/x${IFS}-ok${IFS}rm${IFS}-rf${IFS}{}${IFS}\\;",
+            Decision::Block,
+        );
+    }
+
+    #[test]
+    fn find_okdir_fused_by_ifs_still_recurses_and_blocks() {
+        // Issue #360: unlike `-exec`/`-execdir`, `-okdir` has no `+`
+        // terminator at all (`RECURSABLE_SLOTS`' `-okdir` entry is `;`-only
+        // — `-ok`/`-okdir` prompt per matched file, incompatible with `+`
+        // batching), so this trailing `+` is never recognized as a
+        // terminator. This still Blocks via the fail-closed no-terminator
+        // path (issue #72's precedent): the whole remainder, `rm -rf {} +`,
+        // recurses as the payload and matches
+        // `rm-recursive-force-dangerous-target` on the `{}` placeholder.
+        assert_decision(
+            "find${IFS}/${IFS}-okdir${IFS}rm${IFS}-rf${IFS}{}${IFS}+",
+            Decision::Block,
+        );
+    }
+
+    #[test]
+    fn find_exec_fused_by_ifs_with_a_harmless_payload_stays_at_the_ifs_floor_not_block() {
+        // Parity control: a fused `-exec` clause whose payload command
+        // doesn't match any blocklist rule must resolve through the
+        // recursion to (at most) `Ask`, not `Block` — the rule 7
+        // `ifs_floor` unconditionally floors any `$IFS`-derived command to
+        // `Ask` regardless of the recursed payload's own decision, so this
+        // is `Ask`, not `Allow`; the point of this test is that the fused
+        // path doesn't ALSO force a `Block` for a harmless payload.
+        assert_decision(
+            "find${IFS}.${IFS}-exec${IFS}echo${IFS}{}${IFS}\\;",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn find_exec_fused_by_ifs_with_no_terminator_still_recurses_the_whole_remainder() {
+        // Fail-closed per issue #72's precedent (mirrored here for #122):
+        // if the fused word's own remaining split has no resolvable
+        // terminator token, the payload is recursed to the end of that
+        // split rather than silently dropped — this could only happen with
+        // a missing `\;`/`+`, which real `find` itself rejects, but shguard
+        // still must not treat the dangling payload as absent.
+        assert_decision(
+            "find${IFS}/x${IFS}-exec${IFS}rm${IFS}-rf${IFS}{}",
+            Decision::Block,
+        );
+    }
+
+    // A fable review of the fused-word fix above caught a CRITICAL fail-open:
+    // `find_exec_flag_kind`'s `multiple` arm fires `YesFused` for ANY
+    // multi-`NormalizedWord` split, not just a full `$IFS` fusion of the
+    // whole clause — brace alternation (issue #77) can fuse the flag with
+    // only PART of its payload, leaving the rest (and the terminator) in
+    // FOLLOWING AST words this arm never scans. Recursing only the in-word
+    // remainder there silently drops the real payload, and a `find /x
+    // {-exec,rm} -rf / \;`-shaped command wrongly resolved to `Allow` where
+    // main correctly Asks (fail-closed) via the `Unresolvable` arm. Fixed by
+    // only taking the in-word recursion when the terminator was actually
+    // found within the fused word's own split, or the fused word is the
+    // last AST word — otherwise flooring to `Ask`, matching main.
+
+    #[test]
+    fn find_exec_flag_fused_with_only_part_of_its_payload_via_braces_still_asks_not_allows() {
+        assert_decision("find /x {-exec,rm} -rf / \\;", Decision::Ask);
+    }
+
+    #[test]
+    fn find_exec_flag_fused_with_only_part_of_its_payload_via_braces_and_placeholder_still_asks() {
+        assert_decision("find /x {-exec,rm} -rf {} \\;", Decision::Ask);
+    }
+
+    #[test]
+    fn find_exec_flag_fused_with_only_part_of_its_ifs_split_payload_still_asks() {
+        // Same underlying gap via partial `$IFS` splitting: the flag is
+        // fused with `$IFS` but its payload keeps ordinary literal
+        // whitespace, so the true payload/terminator span extends past the
+        // fused word.
+        assert_decision("find /x -exec${IFS}rm -rf / \\;", Decision::Ask);
+    }
+
+    #[test]
+    fn find_exec_flag_last_in_its_fused_word_with_payload_in_a_following_word_still_asks() {
+        assert_decision("find${IFS}/x${IFS}-exec rm -rf / \\;", Decision::Ask);
+    }
+
+    // A round-2 fable review of the fix above caught a fourth variant of the
+    // same class, this time INSIDE the fused word rather than beyond it:
+    // POSIX only treats a bare `+` as the clause terminator when it
+    // immediately follows a literal `{}` argument — any other `+` is an
+    // ordinary payload argument (e.g. GNU `rm`'s option permutation,
+    // `-exec rm + -rf /`). Accepting any `+` unconditionally as a
+    // terminator truncated the payload and dropped its dangerous tail,
+    // wrongly resolving to `Allow` where main correctly Asks. Fixed in both
+    // `FindExecFlagKind::YesFused`'s in-word terminator search and the
+    // sibling non-fused `Yes` arm's span search, so a `+` only counts as a
+    // terminator when the word/split-position immediately before it
+    // resolves to exactly `{}`.
+
+    #[test]
+    fn find_exec_fused_bare_plus_mid_payload_is_not_a_terminator_still_asks() {
+        // `+` here follows `rm`, not `{}` — not a terminator, so the true
+        // payload/terminator span extends past this fused word (a
+        // different word carries the real `\;`), matching the same
+        // partial-fusion floor as the flag-only-fused cases above.
+        assert_decision("find /x {-exec,rm,+,-rf,/} \\;", Decision::Ask);
+    }
+
+    #[test]
+    fn find_exec_fused_bare_plus_mid_payload_with_real_terminator_in_word_blocks() {
+        // Same non-terminating `+`, but the real `;` terminator is ALSO
+        // fused into this word — `rm + -rf /` is exactly the payload real
+        // `find`/`rm` would run, and it must Block.
+        assert_decision(r"find /x {-exec,rm,+,-rf,/,\;}", Decision::Block);
+    }
+
+    #[test]
+    fn find_exec_non_fused_bare_plus_mid_payload_is_not_a_terminator_blocks() {
+        // The sibling non-fused `Yes` arm's version of the same bug:
+        // ordinary literal-whitespace `find -exec rm + -rf / \;` must
+        // recurse the FULL payload (`rm + -rf /`), not truncate at the
+        // non-terminating `+` and lose the dangerous `-rf /` tail.
+        assert_decision(r"find /x -exec rm + -rf / \;", Decision::Block);
+    }
+
+    #[test]
+    fn find_exec_plus_immediately_after_placeholder_is_still_a_valid_terminator() {
+        // Parity control: `{}` immediately before `+` is exactly the
+        // POSIX-valid batching form and must still terminate the clause
+        // (unaffected by the fix — this is the shape issue #122's own
+        // repro already covers via `-execdir`, pinned again here for the
+        // plain `-exec` non-fused path specifically).
+        assert_decision("find /x -exec rm -rf {} +", Decision::Block);
+    }
+
+    // A round-3 fable review of the fix above, hunting for a fifth variant
+    // of the same "clause model" bug class, found one: `-ok`/`-okdir` had
+    // the SAME `[";", "+"]` terminator set as `-exec`/`-execdir` in
+    // `RECURSABLE_SLOTS`, but POSIX/GNU/BSD `find` never give `-ok`/`-okdir`
+    // a `+` batching form at all (they prompt per matched file, which is
+    // incompatible with batching) — the only real terminator is `;`. A bare
+    // `+` there was wrongly honored as a terminator, truncating the payload
+    // and dropping its dangerous tail. Pre-existing on main (not introduced
+    // by this branch); fixed alongside since it's the same file/mechanism
+    // and the fix is a two-line data change (issue #360).
+
+    #[test]
+    fn find_ok_plus_is_not_a_terminator_at_all_blocks_on_full_payload() {
+        assert_decision(r"find /x -ok rm {} + -rf / \;", Decision::Block);
+    }
+
+    #[test]
+    fn find_okdir_plus_is_not_a_terminator_at_all_blocks_on_full_payload() {
+        assert_decision(r"find /x -okdir rm {} + -rf / \;", Decision::Block);
+    }
+
     #[test]
     fn ifs_packed_trailing_substitution_with_transparent_command_still_asks() {
         // The leftover floor (`evaluate_leftover_alternative_substitutions`)
@@ -11512,8 +11961,18 @@ done"#,
     }
 
     #[test]
-    fn find_exec_bare_interpreter_absolute_path_and_plus_terminator_blocks() {
-        assert_decision(r"find /x -exec /bin/sh +", Decision::Block);
+    fn find_exec_bare_interpreter_absolute_path_with_a_non_terminating_plus_asks() {
+        // POSIX (XCU `find`): a bare `+` only terminates the clause when it
+        // immediately follows a `{}` argument; `/bin/sh +` has no `{}`
+        // before it, so `+` is an ordinary payload argument here, not a
+        // terminator (a real `find`, missing a valid `{} +`/`;`
+        // termination, would error and run nothing at all — but per issue
+        // #72's fail-closed precedent, an ambiguous/unterminated clause
+        // recurses its full remainder as payload rather than assuming
+        // nothing happens). The recursed payload `/bin/sh +` is `sh` with
+        // an operand and no `-c` flag, which floors to `Ask` (issue #196),
+        // not `Block` — `+` was never a terminator to begin with here.
+        assert_decision(r"find /x -exec /bin/sh +", Decision::Ask);
     }
 
     #[test]
