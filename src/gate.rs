@@ -3039,18 +3039,23 @@ fn evaluate_command_position_substitution(
 ///
 /// Issue #139: the substitution's own field-splitting (`$X` really does
 /// re-split its value at runtime, just like any other unquoted expansion)
-/// consults `env`'s resolved same-line `IFS` value, not always the
+/// consults `env`'s resolved same-line `IFS` value(s), not always the
 /// default whitespace — see [`substitute_command_name`]/[`split_with_ifs`].
-/// Also tries the plain default-whitespace split as a floor whenever an
-/// `IFS`-informed split doesn't itself match: `Env`'s map (its own docs)
-/// is deliberately line-scoped rather than per-command, so `env.get`
-/// can't distinguish a persisting standalone `IFS=` assignment from one
-/// scoped only to a DIFFERENT command's own prefix (`IFS=, true; X='rm
-/// -rf /'; $X` — real bash resets `$IFS` back to default the moment
-/// `true` exits, so `$X` still splits on whitespace). Trying both and
-/// Blocking on either match keeps this purely additive, matching this
-/// codebase's floor convention everywhere else (widen coverage, never
-/// narrow it).
+/// Also tries the plain default-whitespace split as a floor whenever no
+/// `IFS`-informed split matches: `Env`'s map (its own docs) is deliberately
+/// line-scoped rather than per-command, so `env.get("IFS")` alone can't
+/// distinguish a persisting standalone `IFS=` assignment from one scoped
+/// only to a DIFFERENT command's own prefix (`IFS=, true; X='rm -rf /';
+/// $X` — real bash resets `$IFS` back to whatever it was before the
+/// instant `true` exits, so `$X` still splits under that earlier value,
+/// not `,`). Round 4 (see [`Env::ifs_history`]'s own docs) additionally
+/// tries every value `IFS` was EVER resolved to on this line, not just its
+/// current one, for the same reason: a later reassignment or an
+/// unresolvable overwrite can shadow-or-remove `IFS` from `env.get`'s view
+/// without that necessarily reflecting what the real shell's `$IFS` was at
+/// `$VAR`'s own expansion. Trying every candidate and Blocking on the
+/// first match keeps this purely additive, matching this codebase's floor
+/// convention everywhere else (widen coverage, never narrow it).
 fn evaluate_command_position_bare_var(
     first_word_ast: &Word,
     argv: Vec<NormalizedWord>,
@@ -3076,41 +3081,49 @@ fn evaluate_command_position_bare_var(
         );
     };
 
-    let ifs = env.get("IFS");
-    let substituted = substitute_command_name(&argv, value, ifs);
-    if let Some(rule) = rules.match_command(&substituted) {
-        let splitting_note = if ifs.is_some() {
-            " under the same-line `IFS` reassignment"
-        } else {
-            ""
-        };
-        return Verdict::block(
-            Reason::new(format!(
-                "`${name}` resolves to {value:?} on this command line, which matches blocklist \
-                 rule {:?}{splitting_note}: {}",
-                rule.id().as_str(),
-                rule.reason().as_str()
-            )),
-            substituted,
-            Some(rule.id().clone()),
-        )
-        .with_deny_message(rule.deny_message().cloned());
+    // Every distinct IFS interpretation worth trying, most-specific first:
+    // the current resolved value, then every earlier value a later
+    // assignment/removal shadowed, then the plain default split — a
+    // shared candidate list rather than duplicated match-and-Block arms
+    // for "current" vs. "default" (round 4 fable review, finding 5).
+    let current_ifs = env.get("IFS");
+    let mut candidates: Vec<(Option<&str>, &'static str)> = Vec::new();
+    if let Some(current) = current_ifs {
+        candidates.push((Some(current), " under the same-line `IFS` reassignment"));
     }
-    if ifs.is_some() {
-        let default_substituted = substitute_command_name(&argv, value, None);
-        if let Some(rule) = rules.match_command(&default_substituted) {
+    for historical in env.ifs_history() {
+        if Some(historical.as_str()) != current_ifs {
+            candidates.push((
+                Some(historical.as_str()),
+                " under an earlier same-line `IFS` reassignment that a later assignment or \
+                 removal shadowed",
+            ));
+        }
+    }
+    let default_note = if candidates.is_empty() {
+        ""
+    } else {
+        " under default word-splitting"
+    };
+    candidates.push((None, default_note));
+
+    let mut primary_substituted = None;
+    for (ifs, splitting_note) in candidates {
+        let substituted = substitute_command_name(&argv, value, ifs);
+        if let Some(rule) = rules.match_command(&substituted) {
             return Verdict::block(
                 Reason::new(format!(
                     "`${name}` resolves to {value:?} on this command line, which matches \
-                     blocklist rule {:?} under default word-splitting: {}",
+                     blocklist rule {:?}{splitting_note}: {}",
                     rule.id().as_str(),
                     rule.reason().as_str()
                 )),
-                default_substituted,
+                substituted,
                 Some(rule.id().clone()),
             )
             .with_deny_message(rule.deny_message().cloned());
         }
+        primary_substituted.get_or_insert(substituted);
     }
 
     Verdict::ask(
@@ -3118,7 +3131,7 @@ fn evaluate_command_position_bare_var(
             "`${name}` resolves to {value:?} on this command line, but the resulting command \
              matches no blocklist rule — session state could still differ at runtime"
         )),
-        substituted,
+        primary_substituted.unwrap_or(argv),
     )
 }
 
@@ -4876,6 +4889,14 @@ fn split_default_ifs(value: &str) -> Vec<String> {
 /// (non-empty) value becomes exactly one field, matching real bash. An
 /// empty `value` always yields zero fields regardless of `ifs` — POSIX
 /// splits an empty expansion into nothing, not one empty field.
+///
+/// C-locale whitespace model: `is_ws` below hardcodes space/tab/newline as
+/// the IFS-whitespace class. bash actually classifies IFS-whitespace by
+/// the current locale's space character class, which in a non-C locale can
+/// also include `\r`/`\v`/`\f`. Reaching that divergence needs a literal
+/// control byte in a statically-resolvable assignment, and the failure
+/// direction is Ask (this function would treat such a byte as an ordinary
+/// non-whitespace delimiter instead of absorbing it), never Allow.
 fn split_with_ifs(value: &str, ifs: &str) -> Vec<String> {
     if value.is_empty() {
         return Vec::new();
@@ -7065,9 +7086,25 @@ fn apply_unknown_cwd_floor(
 /// invisible to `crate::gate`'s `cd`-poisoning checks — exactly the
 /// attacker-controlled-`HOME` case those checks exist to catch, not a case
 /// they may fail open on.
+///
+/// `ifs_history` (issue #139, round 4) separately accumulates every value
+/// ever statically resolved for `IFS` on this line, in order, and — unlike
+/// `map` — a later reassignment or removal never shrinks it. `map.get("IFS")`
+/// alone answers "what does `IFS` resolve to right now", but rule 2's
+/// bare-`$VAR` substitution needs "what could `IFS` have been at the moment
+/// `$VAR` was actually expanded", which can differ: a same-line `IFS=, true`
+/// is a prefix assignment scoped to `true` alone and never persists past it
+/// (bash resets `$IFS` back to whatever it was before the instant `true`
+/// exits), and a later `IFS=$(evil)` that fails to resolve simply removes
+/// `IFS` from `map` even though the shell's real `$IFS` is still whatever it
+/// last persistently held. `evaluate_command_position_bare_var` tries every
+/// entry in `ifs_history` (plus the default split) as a floor, so a
+/// shadowed-or-reverted-but-still-possible split is never silently missed —
+/// purely additive, matching every other floor in this file.
 struct Env {
     map: HashMap<String, String>,
     assigned: std::collections::HashSet<String>,
+    ifs_history: Vec<String>,
 }
 
 impl Env {
@@ -7075,11 +7112,19 @@ impl Env {
         Self {
             map: HashMap::new(),
             assigned: std::collections::HashSet::new(),
+            ifs_history: Vec::new(),
         }
     }
 
     fn get(&self, name: &str) -> Option<&str> {
         self.map.get(name).map(String::as_str)
+    }
+
+    /// Every value `IFS` has ever statically resolved to on this line so
+    /// far, in assignment order — see this struct's own docs for why this
+    /// must survive a later shadow/removal that `map.get("IFS")` would not.
+    fn ifs_history(&self) -> &[String] {
+        &self.ifs_history
     }
 
     /// Whether `name` was assigned anywhere on this command line so far
@@ -7110,16 +7155,45 @@ impl Env {
 
     fn apply_one(&mut self, assignment: &Assignment) {
         self.assigned.insert(assignment.name.clone());
-        match normalize::normalize_assignment_value(assignment).as_slice() {
+        let is_ifs = assignment.name == "IFS";
+        let resolved = match normalize::normalize_assignment_value(assignment).as_slice() {
             [one] => match one.resolution() {
-                Resolution::Resolved(value) => {
-                    self.map.insert(assignment.name.clone(), value.clone());
+                // `NAME+=value` (issue #139, round 4) appends to `NAME`'s
+                // own current value — only representable when that current
+                // value is itself statically known; when it isn't, the true
+                // appended result is unknowable and must not be modeled as
+                // resolved (same "stale/partial is worse than unresolved"
+                // principle this function already applies below).
+                Resolution::Resolved(rhs) if assignment.append => {
+                    match self.map.get(&assignment.name) {
+                        Some(prior) => Some(format!("{prior}{rhs}")),
+                        None => {
+                            // `IFS+=value` with no same-line prior could be
+                            // appending onto the shell's inherited default
+                            // (`" \t\n"`) — plausible enough to try as one
+                            // more floor candidate (see `ifs_history`'s own
+                            // docs), but not confident enough to claim as
+                            // this line's definitive current IFS value.
+                            if is_ifs {
+                                self.ifs_history.push(format!(" \t\n{rhs}"));
+                            }
+                            None
+                        }
+                    }
                 }
-                Resolution::Unresolvable(_) => {
-                    self.map.remove(&assignment.name);
-                }
+                Resolution::Resolved(rhs) => Some(rhs.clone()),
+                Resolution::Unresolvable(_) => None,
             },
-            _ => {
+            _ => None,
+        };
+        match resolved {
+            Some(value) => {
+                if is_ifs {
+                    self.ifs_history.push(value.clone());
+                }
+                self.map.insert(assignment.name.clone(), value);
+            }
+            None => {
                 self.map.remove(&assignment.name);
             }
         }
@@ -7283,6 +7357,14 @@ mod tests {
         assert_eq!(split_with_ifs("", ""), Vec::<String>::new());
     }
 
+    #[test]
+    fn issue_139_explicit_empty_ifs_end_to_end_still_blocks_via_the_default_floor() {
+        // `IFS=` disables splitting entirely for the IFS-informed attempt
+        // (one single-token field, no match), but the default-split floor
+        // still tries the space-joined form and catches it.
+        assert_decision("IFS=; X='rm -rf /'; $X", Decision::Block);
+    }
+
     // A fable review of the first attempt at issue #139 found three
     // confirmed Block->Ask regressions relative to main, all caused by
     // treating this fix's own widening (an IFS-informed split) as a
@@ -7326,6 +7408,38 @@ mod tests {
     }
 
     #[test]
+    fn issue_139_split_with_ifs_leading_non_whitespace_delimiter_yields_an_empty_field() {
+        // Unlike IFS-whitespace, a leading non-whitespace delimiter is NOT
+        // absorbed — it produces a genuine empty leading field, the same
+        // asymmetry `attached_value_candidate`-style docs elsewhere in this
+        // codebase call out between the two IFS character classes.
+        assert_eq!(
+            split_with_ifs(",a", ","),
+            vec![String::new(), "a".to_string()]
+        );
+    }
+
+    #[test]
+    fn issue_139_split_with_ifs_all_delimiter_value_under_non_whitespace_ifs() {
+        assert_eq!(
+            split_with_ifs(":::", ":"),
+            vec![String::new(), String::new(), String::new()]
+        );
+    }
+
+    #[test]
+    fn issue_139_split_with_ifs_all_delimiter_value_under_whitespace_ifs() {
+        assert_eq!(split_with_ifs("   ", " "), Vec::<String>::new());
+    }
+
+    #[test]
+    fn issue_139_split_with_ifs_default_whitespace_not_in_ifs_is_not_a_delimiter() {
+        // A tab is only IFS-whitespace when it's actually a member of
+        // `ifs` — `is_ws` requires both, not just the character class.
+        assert_eq!(split_with_ifs("a\tb", ","), vec!["a\tb".to_string()]);
+    }
+
+    #[test]
     fn issue_139_split_with_ifs_empty_value_yields_zero_fields_under_any_ifs() {
         assert_eq!(split_with_ifs("", ","), Vec::<String>::new());
     }
@@ -7363,6 +7477,56 @@ mod tests {
     #[test]
     fn issue_139_git_push_force_with_comma_space_ifs_blocks() {
         assert_decision(r#"IFS=", "; X="git , push , --force"; $X"#, Decision::Block);
+    }
+
+    // ==== Issue #139, round 4: a shadowed/reverted-but-still-real IFS
+    // value must not be lost just because `Env`'s flat map only remembers
+    // the LAST value resolved for a name — see `Env::ifs_history`'s own
+    // docs for why `env.get("IFS")` alone can't answer "what could `$IFS`
+    // have been at the moment `$X` was actually expanded". ====
+
+    #[test]
+    fn issue_139_earlier_persisting_ifs_survives_a_same_commands_prefix_shadow() {
+        // `IFS=. $X` is a PREFIX assignment scoped to `$X`'s own exec
+        // environment — like any prefix assignment, it can't affect how
+        // `$X` ITSELF is word-split on this same command line, since
+        // splitting happens under the CURRENTLY PERSISTING `$IFS` (still
+        // `:` here) before the prefix assignment is even applied. `Env`'s
+        // flat map still overwrites `IFS` to `.` before this command
+        // evaluates, though (`apply_assignments`' own doc), so
+        // `env.get("IFS")` alone would try the wrong value — `ifs_history`
+        // must still offer the earlier `:` as a candidate.
+        assert_decision("IFS=:; X=rm:-rf:/; IFS=. $X", Decision::Block);
+    }
+
+    #[test]
+    fn issue_139_earlier_persisting_ifs_survives_a_later_unresolvable_overwrite() {
+        // A later `IFS=$(...)` that fails to resolve REMOVES `IFS` from
+        // `env`'s map (`apply_one`'s existing Unresolvable arm) even though
+        // the real shell's `$IFS` is still whatever it last persistently
+        // held — `ifs_history` must still offer that earlier value.
+        assert_decision(
+            "IFS=:; X=rm:-rf:/; IFS=$(some_substitution); $X",
+            Decision::Block,
+        );
+    }
+
+    #[test]
+    fn issue_139_ifs_append_with_no_same_line_prior_tries_default_plus_appended() {
+        // `IFS+=,` with no earlier same-line `IFS` assignment could be
+        // appending onto the shell's inherited default (`" \t\n"`) — a
+        // plausible floor candidate (`apply_one`'s own docs), even though
+        // it's not confident enough to become this line's definitive
+        // current `IFS` value.
+        assert_decision("IFS+=,; X='rm -rf,/'; $X", Decision::Block);
+    }
+
+    #[test]
+    fn issue_139_ifs_append_with_a_known_prior_combines_both() {
+        // `IFS+=,` on top of a statically-known prior `IFS=:` resolves to
+        // exactly `:,` — a plain, fully-known concatenation, not merely a
+        // floor guess.
+        assert_decision("IFS=:; IFS+=,; X='rm,-rf:/'; $X", Decision::Block);
     }
 
     #[test]
