@@ -4445,14 +4445,14 @@ fn parse_escalation_floor(raw: Option<&str>) -> Result<Decision, RulesError> {
 /// treated as either "disabled" or a literal empty path — the same
 /// "explicit but wrong" distinction [`crate::config::Policy::load`] already
 /// draws for `SHGUARD_CONFIG=""`.
-fn parse_decision_log_path(raw: Option<String>) -> Result<Option<String>, RulesError> {
+fn parse_decision_log_path(raw: Option<&str>) -> Result<Option<String>, RulesError> {
     match raw {
         None => Ok(None),
-        Some(path) if path.is_empty() => Err(RulesError::invalid(
+        Some("") => Err(RulesError::invalid(
             "decision_log_path",
             "decision_log_path must not be empty",
         )),
-        Some(path) => Ok(Some(path)),
+        Some(path) => Ok(Some(path.to_string())),
     }
 }
 
@@ -5700,7 +5700,7 @@ impl UserConfig {
             .map(convert_pipeline_rule)
             .collect::<Result<Vec<_>, _>>()?;
         let escalation_floor = parse_escalation_floor(dto.escalation_floor.as_deref())?;
-        let decision_log_path = parse_decision_log_path(dto.decision_log_path)?;
+        let decision_log_path = parse_decision_log_path(dto.decision_log_path.as_deref())?;
 
         reject_duplicate_ids(
             deny.iter()

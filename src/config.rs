@@ -310,6 +310,21 @@ impl Policy {
             None => (rules, allowlist),
         };
 
+        // Caught here rather than left to `decision_log::append`'s own
+        // fail-open-on-write-failure posture (issue #108): an
+        // already-existing directory at this path would otherwise mean
+        // "logging is silently, permanently broken, with no error anywhere
+        // ever" -- the same "typo'd path defeats the whole feature
+        // invisibly" trap this module already refuses for `SHGUARD_CONFIG`
+        // itself (see the module docs' fail-closed policy).
+        if let Some(log_path) = &decision_log_path
+            && log_path.is_dir()
+        {
+            return Err(ConfigError::InvalidConfig(format!(
+                "decision_log_path {log_path:?} is a directory, not a file"
+            )));
+        }
+
         Ok(Self {
             rules: std::sync::Arc::new(rules),
             allowlist: std::sync::Arc::new(allowlist),

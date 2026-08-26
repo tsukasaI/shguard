@@ -151,6 +151,43 @@ fn hook_path_and_check_cli_produce_equivalent_log_content_for_the_same_command()
     }
 }
 
+/// A watchdog-trip verdict (`tests/fail_closed_exit_paths.rs`'s
+/// `heredoc_inside_unterminated_command_substitution_fails_closed_to_ask`
+/// repro, same payload) must still produce a logged line — this is the
+/// exact case a round-1 review found missing when `decision_log::append`
+/// lived *inside* `watchdog::bounded`'s closure: a detached, still-running
+/// worker was the only thing that could have logged, so a trip logged
+/// nothing at all. `src/lib.rs`'s `analyze_with_policy` now calls `append`
+/// on the value `watchdog::bounded` actually returns, closing that gap.
+#[test]
+fn watchdog_trip_verdict_is_still_logged() {
+    let log_dir = tempfile::tempdir().expect("tempdir should create");
+    let log_path = log_dir.path().join("decisions.jsonl");
+    let (_config_dir, config_path) = write_config(&format!(
+        r#"
+        decision_log_path = {:?}
+        "#,
+        log_path.to_string_lossy()
+    ));
+
+    isolated_command(&config_path)
+        .timeout(std::time::Duration::from_secs(30))
+        .args(["check", "<<$( |] "])
+        .assert()
+        .success();
+
+    let lines = read_jsonl_lines(&log_path);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["decision"], "Ask");
+    let reason = lines[0]["reason"]
+        .as_str()
+        .expect("reason should be a string");
+    assert!(
+        reason.contains("time budget") || reason.contains("memory budget"),
+        "expected a watchdog fail-closed reason to be logged, got: {reason}"
+    );
+}
+
 #[test]
 fn allow_decision_logs_a_null_matched_rule_id() {
     let log_dir = tempfile::tempdir().expect("tempdir should create");

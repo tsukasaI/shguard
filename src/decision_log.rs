@@ -54,17 +54,38 @@ pub(crate) fn append(path: &Path, command: &str, verdict: &Verdict) {
         "normalized_argv": normalized_argv,
     });
 
-    let Ok(serialized) = serde_json::to_string(&line) else {
+    let Ok(mut serialized) = serde_json::to_string(&line) else {
         return;
     };
-    let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    else {
+    // One `write_all` call for the whole line plus its newline, not
+    // `writeln!` (which would emit the body and `"\n"` as two separate
+    // `write(2)` calls on an O_APPEND fd) — two concurrent shguard
+    // invocations logging to the same path could otherwise interleave
+    // their writes and produce a corrupted, unparseable line.
+    serialized.push('\n');
+
+    let Ok(mut file) = open_log_file(path) else {
         return;
     };
-    let _ = writeln!(file, "{serialized}");
+    let _ = file.write_all(serialized.as_bytes());
+}
+
+/// Opens `path` for appending, creating it if absent with permissions
+/// restricted to the owner (`0600`, unix only) rather than the
+/// `OpenOptions` default of `0666 & !umask` (typically world-readable):
+/// the log records every evaluated command verbatim, which routinely
+/// contains inline secrets (`export TOKEN=...`, `curl -H "Authorization:
+/// ..."`). `.mode()` only applies at creation time, so it never fights an
+/// existing file's own permissions.
+fn open_log_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
 }
 
 /// Renders one normalised word for the log line: its resolved text, or a
@@ -149,6 +170,50 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .starts_with("<unresolvable:")
+        );
+    }
+
+    // `word_to_string`'s placeholder text is derived from `UnresolvableKind`'s
+    // `Debug` output, which is not a stability contract -- a future rename
+    // of a variant would silently change the persisted log format with
+    // nothing else here to catch it. Pinning the exact strings for a few
+    // representative variants makes such a rename a visible test failure.
+    #[test]
+    fn unresolvable_placeholder_text_is_pinned_for_representative_kinds() {
+        assert_eq!(
+            word_to_string(&NormalizedWord::unresolvable(
+                UnresolvableKind::ParameterExpansion
+            )),
+            "<unresolvable:ParameterExpansion>"
+        );
+        assert_eq!(
+            word_to_string(&NormalizedWord::unresolvable(
+                UnresolvableKind::CommandSubstitution
+            )),
+            "<unresolvable:CommandSubstitution>"
+        );
+        assert_eq!(
+            word_to_string(&NormalizedWord::unresolvable(UnresolvableKind::NonUtf8)),
+            "<unresolvable:NonUtf8>"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn creates_the_log_file_with_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let log_path = dir.path().join("decisions.jsonl");
+        append(&log_path, "echo hi", &Verdict::allow(Vec::new()));
+
+        let mode = std::fs::metadata(&log_path).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "the log file must be created owner-only (it records commands verbatim, \
+             which routinely include inline secrets), got {:o}",
+            mode & 0o777
         );
     }
 

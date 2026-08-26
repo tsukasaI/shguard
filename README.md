@@ -671,25 +671,39 @@ key to append one JSONL line per evaluated command to a file:
 decision_log_path = "/home/user/.local/state/shguard/decisions.jsonl"
 ```
 
-Each line is a JSON object:
+Each line is a JSON object (keys serialize alphabetically, matching
+`shguard check --json`'s own key order from #109) — captured verbatim
+against the built binary:
 
 ```json
-{"command":"rm -rf /","decision":"Block","reason":"matches blocklist rule \"rm-recursive-force-dangerous-target\": ...","matched_rule_id":"rm-recursive-force-dangerous-target","deny_message":null,"normalized_argv":["rm","-rf","/"]}
+{"command":"rm -rf /","decision":"Block","deny_message":null,"matched_rule_id":"rm-recursive-force-dangerous-target","normalized_argv":["rm","-rf","/"],"reason":"matches blocklist rule \"rm-recursive-force-dangerous-target\": rm with recursive+force flags against a root-level, home, device, or find-placeholder target"}
 ```
 
 `matched_rule_id` is `null` for an `Allow`, an `Ask`/`Block` decided
 structurally rather than by an exact rule match, or an `Allow` reached by
 an allowlist downgrade. The file is opened in append mode (created if
-missing, never truncated) and a write failure — an unwritable path, a
-missing parent directory, a full disk — is silently dropped rather than
-affecting the returned decision: logging is a best-effort observability
-side channel, not part of the decision contract. Both the real
-PreToolUse hook and `shguard check` write through the same code path, so
-a logged line never disagrees with what either caller actually saw.
+missing with `0600` permissions — it records every evaluated command
+verbatim, which routinely contains inline secrets — never truncated), and
+a write failure — a missing parent directory, a full disk — is silently
+dropped rather than affecting the returned decision: logging is a
+best-effort observability side channel, not part of the decision
+contract. Both the real PreToolUse hook and `shguard check` write through
+the same code path, so a logged line never disagrees with what either
+caller actually saw, including on a fail-closed `Ask` from the bounded-
+evaluation watchdog.
 
-An empty `decision_log_path` (`decision_log_path = ""`) fails config load
-closed, the same as any other invalid config value — it is not treated as
-"disabled".
+The log write itself happens *outside* that watchdog's wall-clock bound
+(a blocking write inside it would risk corrupting an already-computed
+decision into a spurious `Ask` — see `src/lib.rs`'s doc comment), so
+`decision_log_path` must name a regular, locally-writable file — never a
+FIFO, character device, or a path on a filesystem that can hang (e.g. a
+stale NFS mount). A relative path resolves against the invoking process's
+current working directory, which varies per hook invocation — use an
+absolute path.
+
+An empty `decision_log_path` (`decision_log_path = ""`), or one naming an
+existing directory, fails config load closed, the same as any other
+invalid config value — neither is treated as "disabled".
 
 ### Discovery
 

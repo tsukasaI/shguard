@@ -88,17 +88,33 @@ pub fn analyze(command: &str) -> Verdict {
 /// Logging happens here, inside the one function both the real hook
 /// (`src/adapter.rs`) and the `shguard check` CLI (`src/bin/shguard.rs`,
 /// issue #109) call, so a logged line can never diverge from what either
-/// caller actually saw. A broken log target degrades to "no log line
-/// written" and never affects the returned `Verdict`.
+/// caller actually saw, and it logs the verdict [`watchdog::bounded`]
+/// actually returned — including its own fail-closed `Ask` on a timeout —
+/// never a verdict a detached, still-running worker computed after the
+/// fact.
+///
+/// The write happens AFTER [`watchdog::bounded`] returns, deliberately
+/// outside its wall-clock bound: logging inside the bounded closure was
+/// tried first and rejected — a log target that blocks (a FIFO with no
+/// reader, a hung network mount) would trip the watchdog's timeout and
+/// silently replace an already-computed, correct `Allow`/`Ask`/`Block`
+/// with a fail-closed `Ask`, corrupting the real decision to paper over a
+/// logging-only problem. The trade-off this accepts instead: the log write
+/// itself is unbounded, so `decision_log_path` must name a regular,
+/// locally-writable file — never a FIFO, character device, or a path on a
+/// filesystem that can hang (e.g. a stale NFS mount) — see the README's
+/// "Structured decision-output logging" section. An ordinary local file
+/// write essentially never blocks meaningfully in practice, unlike the
+/// pathological targets above.
 #[must_use]
 pub fn analyze_with_policy(command: &str, policy: &config::Policy) -> Verdict {
-    let command = command.to_string();
-    let policy = policy.clone();
-    watchdog::bounded(move || {
-        let verdict = gate::analyze_with_policy(&command, &policy.rules, &policy.allowlist);
-        if let Some(path) = &policy.decision_log_path {
-            decision_log::append(path, &command, &verdict);
-        }
-        verdict
-    })
+    let command_owned = command.to_string();
+    let policy_owned = policy.clone();
+    let verdict = watchdog::bounded(move || {
+        gate::analyze_with_policy(&command_owned, &policy_owned.rules, &policy_owned.allowlist)
+    });
+    if let Some(path) = &policy.decision_log_path {
+        decision_log::append(path, command, &verdict);
+    }
+    verdict
 }
