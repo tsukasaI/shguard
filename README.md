@@ -660,6 +660,81 @@ the floor off entirely, only to tighten it. A `[[deny]]`/`[[ask]]` entry
 naming one of the five commands directly (`command = "doas"`) is also
 reachable, independent of `escalation_floor`, the same as any other rule.
 
+### Structured decision-output logging
+
+Off by default. shguard's own decision output today is only the hook
+response JSON on stdout (or `shguard check`'s printed/`--json` output) —
+nothing persists across invocations. Set the top-level `decision_log_path`
+key to append one JSONL line per evaluated command to a file:
+
+```toml
+decision_log_path = "/home/user/.local/state/shguard/decisions.jsonl"
+```
+
+Each line is a JSON object (keys serialize alphabetically, matching
+`shguard check --json`'s own key order from #109) — captured verbatim
+against the built binary:
+
+```json
+{"command":"rm -rf /","decision":"Block","deny_message":null,"matched_rule_id":"rm-recursive-force-dangerous-target","normalized_argv":["rm","-rf","/"],"reason":"matches blocklist rule \"rm-recursive-force-dangerous-target\": rm with recursive+force flags against a root-level, home, device, or find-placeholder target"}
+```
+
+`matched_rule_id` is `null` for an `Allow`, an `Ask`/`Block` decided
+structurally rather than by an exact rule match, or an `Allow` reached by
+an allowlist downgrade. The file is opened in append mode (created if
+missing with `0600` permissions — it records every evaluated command
+verbatim, which routinely contains inline secrets — never truncated), and
+a write failure — a missing parent directory, a full disk — is silently
+dropped rather than affecting the returned decision: logging is a
+best-effort observability side channel, not part of the decision
+contract. Both the real PreToolUse hook and `shguard check` write through
+the same code path, so a logged line never disagrees with what either
+caller actually saw — for `shguard check` and a direct library caller,
+this includes a fail-closed `Ask` from `analyze_with_policy`'s own
+bounded-evaluation watchdog.
+
+The log write itself happens *outside* that watchdog's wall-clock bound
+(a blocking write inside it would risk corrupting an already-computed
+decision into a spurious `Ask` — see `src/lib.rs`'s doc comment), so
+`decision_log_path` must name a regular, locally-writable file — never a
+FIFO, character device, or a path on a filesystem that can hang (e.g. a
+stale NFS mount). Config loading rejects a `decision_log_path` that
+already names a directory, FIFO, device, or socket, closing the case this
+crate can detect up front; a target that only starts hanging later (a
+network mount that goes stale mid-session) remains undetectable at load
+time. A relative path resolves against the invoking process's current
+working directory, which varies per hook invocation — use an absolute
+path.
+
+**Outer-watchdog caveat:** both the real hook (`shguard`'s stdin contract)
+and `shguard check` (issue #109) additionally wrap their *entire*
+invocation — decision plus log write — in a second, outer watchdog of
+their own (`src/bin/shguard.rs`'s `EVALUATION_TIMEOUT`), since neither may
+hang regardless of the cause. A log target that starts blocking only after
+config load can trip that outer watchdog instead, still replacing an
+already-computed, correct decision with a fail-closed `Ask` (`check`
+reports this as a distinct exit-2 runtime error rather than printing a
+`Decision: Ask` line, so it isn't mistaken for a real decision) — and, in
+that specific case, the trip is not logged either, since the log write
+never got the chance to run. A direct library caller has no such outer
+watchdog and is not subject to this caveat; for one, `analyze_with_policy`'s
+own internal bound (mentioned above) is the whole story.
+
+An empty `decision_log_path` (`decision_log_path = ""`), or one naming an
+existing directory/FIFO/device/socket, fails config load closed, the same
+as any other invalid config value — none of these are treated as
+"disabled".
+
+The log file is never rotated or capped: it grows by one line per
+evaluated command for as long as `decision_log_path` stays configured.
+Rotation and pruning are the user's responsibility (e.g. `logrotate`).
+`0600` permissions are applied only when shguard itself creates the file —
+if `decision_log_path` names a file that already exists, its permissions
+are left exactly as they are, so a pre-existing world- or group-readable
+file keeps receiving command lines (which routinely contain inline
+secrets) at whatever permissions it already had. Ensure the file either
+doesn't exist yet or is already `chmod 600`.
+
 ### Discovery
 
 `SHGUARD_CONFIG` (an explicit path) > `$XDG_CONFIG_HOME/shguard/config.toml`

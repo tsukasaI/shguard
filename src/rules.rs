@@ -4439,6 +4439,23 @@ fn parse_escalation_floor(raw: Option<&str>) -> Result<Decision, RulesError> {
     }
 }
 
+/// Validates the optional top-level `decision_log_path` user-config key
+/// (issue #108): absent means "logging disabled" (the required off-by-
+/// default posture), and an empty string is rejected rather than silently
+/// treated as either "disabled" or a literal empty path — the same
+/// "explicit but wrong" distinction [`crate::config::Policy::load`] already
+/// draws for `SHGUARD_CONFIG=""`.
+fn parse_decision_log_path(raw: Option<&str>) -> Result<Option<String>, RulesError> {
+    match raw {
+        None => Ok(None),
+        Some("") => Err(RulesError::invalid(
+            "decision_log_path",
+            "decision_log_path must not be empty",
+        )),
+        Some(path) => Ok(Some(path.to_string())),
+    }
+}
+
 /// Rejects a `-`-prefixed word as flag-looking — shared predicate for both
 /// the multi-word `command` sugar and `required_tokens` entries, each of
 /// which supplies its own message so the error always names the field the
@@ -5611,6 +5628,8 @@ struct UserConfigFileDto {
     pipeline: Vec<PipelineRuleDto>,
     #[serde(default)]
     escalation_floor: Option<String>,
+    #[serde(default)]
+    decision_log_path: Option<String>,
 }
 
 /// A user-supplied policy config, parsed and validated but not yet merged
@@ -5623,6 +5642,7 @@ pub(crate) struct UserConfig {
     redirect: Vec<RedirectRule>,
     pipeline: Vec<PipelineRule>,
     escalation_floor: Decision,
+    decision_log_path: Option<String>,
 }
 
 impl UserConfig {
@@ -5680,6 +5700,7 @@ impl UserConfig {
             .map(convert_pipeline_rule)
             .collect::<Result<Vec<_>, _>>()?;
         let escalation_floor = parse_escalation_floor(dto.escalation_floor.as_deref())?;
+        let decision_log_path = parse_decision_log_path(dto.decision_log_path.as_deref())?;
 
         reject_duplicate_ids(
             deny.iter()
@@ -5747,7 +5768,20 @@ impl UserConfig {
             redirect,
             pipeline,
             escalation_floor,
+            decision_log_path,
         })
+    }
+
+    /// The optional top-level `decision_log_path` user-config key (issue
+    /// #108) — `None` unless the user's own config set it (never set by
+    /// the internally-generated self-protection TOML this same parser
+    /// also processes, since that text never contains this key), so
+    /// [`crate::config::Policy::load`] only needs to read this off the
+    /// real config-file parse, not fold it across every self-protection
+    /// merge the way `escalation_floor` folds via `max`.
+    #[must_use]
+    pub(crate) fn decision_log_path(&self) -> Option<&str> {
+        self.decision_log_path.as_deref()
     }
 }
 

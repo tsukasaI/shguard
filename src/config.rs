@@ -154,6 +154,13 @@ impl From<crate::rules::RulesError> for ConfigError {
 pub struct Policy {
     pub(crate) rules: std::sync::Arc<Rules>,
     pub(crate) allowlist: std::sync::Arc<Allowlist>,
+    /// Structured decision-output logging target (issue #108) — `None`
+    /// (the default) unless the user's own config set `decision_log_path`.
+    /// Never populated by the self-protection-only merge path below (that
+    /// synthetic config text has no such key), so this is read off the
+    /// real config-file parse alone, before it's moved into
+    /// [`merge_user_config`].
+    pub(crate) decision_log_path: Option<PathBuf>,
 }
 
 impl Policy {
@@ -241,6 +248,7 @@ impl Policy {
         let blocklist = Rules::embedded()?;
         let allowlist = Allowlist::embedded()?;
 
+        let mut decision_log_path: Option<PathBuf> = None;
         let (rules, allowlist) = match &path {
             Some(path) => {
                 // `symlink_metadata` (`lstat`), not `read_to_string`'s own
@@ -266,6 +274,14 @@ impl Policy {
                     match std::fs::read_to_string(path) {
                         Ok(contents) => {
                             let user_config = UserConfig::parse(&contents)?;
+                            // Read off the real config-file parse alone,
+                            // before `user_config` moves into
+                            // `merge_user_config` below — the
+                            // self-protection-only merges further down
+                            // never set this key, so there is nothing to
+                            // fold across multiple merges the way
+                            // `escalation_floor` needs `.max()` for.
+                            decision_log_path = user_config.decision_log_path().map(PathBuf::from);
                             merge_user_config(blocklist, allowlist, user_config)?
                         }
                         Err(err) => {
@@ -294,10 +310,79 @@ impl Policy {
             None => (rules, allowlist),
         };
 
+        // Caught here rather than left to `decision_log::append`'s own
+        // fail-open-on-write-failure posture (issue #108): an
+        // already-existing directory would otherwise mean "logging is
+        // silently, permanently broken, with no error anywhere ever" --
+        // the same "typo'd path defeats the whole feature invisibly" trap
+        // this module already refuses for `SHGUARD_CONFIG` itself (see the
+        // module docs' fail-closed policy). A FIFO, character device, or
+        // socket is rejected for a sharper reason: `decision_log::append`
+        // now writes outside `analyze_with_policy`'s own bounded-evaluation
+        // watchdog (`src/lib.rs`), and the PreToolUse hook path additionally
+        // runs the whole call inside this binary's own outer
+        // `EVALUATION_TIMEOUT` watchdog (`src/bin/shguard.rs`) -- a write
+        // that blocks on a target with no reader (or one that never
+        // finishes) trips that outer watchdog instead, still silently
+        // replacing an already-computed, correct decision with a
+        // fail-closed `Ask`. Rejecting every already-existing non-regular
+        // target at load time closes the case this crate can actually
+        // detect; a target that hangs for a reason `metadata` can't see up
+        // front (a stale network mount backing an ordinary regular file)
+        // remains a disclosed, undetectable-at-load-time residual risk --
+        // see the README's "Structured decision-output logging" section.
+        // `std::fs::metadata` follows symlinks, so a symlink to a regular
+        // file is unaffected and a symlink to a directory/FIFO/device is
+        // caught the same as a direct one.
+        //
+        // A `NotFound` error is expected and accepted -- `decision_log`
+        // creates the file on first append. Any OTHER metadata error (e.g.
+        // `PermissionDenied` on the path or a parent component) is rejected
+        // here too, not silently ignored: letting the config load anyway
+        // would mean every subsequent `append` fails the same way, forever,
+        // with logging permanently and invisibly broken -- exactly the
+        // "typo'd/unreachable path defeats the feature invisibly" trap this
+        // whole check exists to close.
+        if let Some(log_path) = &decision_log_path {
+            match std::fs::metadata(log_path) {
+                Ok(meta) if !meta.is_file() => {
+                    return Err(ConfigError::InvalidConfig(format!(
+                        "decision_log_path {log_path:?} exists and is not a regular file"
+                    )));
+                }
+                Ok(_) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    return Err(ConfigError::InvalidConfig(format!(
+                        "decision_log_path {log_path:?} could not be checked: {err}"
+                    )));
+                }
+            }
+        }
+
         Ok(Self {
             rules: std::sync::Arc::new(rules),
             allowlist: std::sync::Arc::new(allowlist),
+            decision_log_path,
         })
+    }
+
+    /// Test-only constructor for exercising `decision_log_path` targets
+    /// [`Policy::load`] would reject at config-load time (a pre-existing
+    /// FIFO, in particular) — used by `src/decision_log.rs`'s
+    /// `a_blocked_log_target_does_not_corrupt_the_verdict` regression test,
+    /// which needs a genuinely blocking write to prove a slow log target
+    /// can't corrupt the verdict `analyze_with_policy` returns.
+    #[cfg(test)]
+    #[allow(clippy::expect_used)]
+    pub(crate) fn for_test_with_decision_log_path(decision_log_path: PathBuf) -> Self {
+        Self {
+            rules: std::sync::Arc::new(Rules::embedded().expect("embedded rules should parse")),
+            allowlist: std::sync::Arc::new(
+                Allowlist::embedded().expect("embedded allowlist should parse"),
+            ),
+            decision_log_path: Some(decision_log_path),
+        }
     }
 
     /// Ids of every deny/ask/allow rule in this policy whose
