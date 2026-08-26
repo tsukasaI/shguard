@@ -476,6 +476,12 @@ fn check_config() -> i32 {
 /// printed), `1` the command Blocks (a real problem, not a runtime
 /// failure — useful for a CI step to fail on), `2` a usage error (missing/
 /// extra arguments, non-UTF-8 command) or the config itself couldn't load.
+/// A config-load failure under `--json` still emits `{"error": "..."}` on
+/// stdout (parsed `json` is already known at that point); a usage error
+/// that occurs before argument parsing has even determined `--json` was
+/// requested (missing/extra arguments) has no such flag to consult yet and
+/// stays human-readable-only on stderr with empty stdout — a caller relying
+/// on `--json` output should check the exit code first regardless.
 /// Deliberately outside `main`'s `catch_unwind`/watchdog boundary, exactly
 /// like [`check_config`]: this is a human- or CI-triggered, one-shot
 /// invocation outside the PreToolUse hook contract entirely, with none of
@@ -490,17 +496,22 @@ fn run_check(args: &[std::ffi::OsString]) -> i32 {
     let mut json = false;
     let mut command: Option<&std::ffi::OsString> = None;
     for arg in args {
-        match arg.to_str() {
-            Some("--json") => json = true,
-            Some(_) if command.is_none() => command = Some(arg),
-            _ => {
-                let _ = writeln!(
-                    io::stderr(),
-                    "shguard check: unexpected argument {arg:?} (usage: shguard check \
-                     <command> [--json])"
-                );
-                return 2;
-            }
+        // Compared against `&str` directly (not through `arg.to_str()`
+        // first) so a non-UTF-8 first positional is still captured as
+        // `command` below rather than silently misdiagnosed by this loop
+        // as "unexpected argument" — its own UTF-8 check further down is
+        // then reachable and gives the precise reason.
+        if arg == "--json" {
+            json = true;
+        } else if command.is_none() {
+            command = Some(arg);
+        } else {
+            let _ = writeln!(
+                io::stderr(),
+                "shguard check: unexpected argument {arg:?} (usage: shguard check \
+                 <command> [--json])"
+            );
+            return 2;
         }
     }
     let Some(command) = command else {
@@ -518,7 +529,19 @@ fn run_check(args: &[std::ffi::OsString]) -> i32 {
     let policy = match shguard::config::Policy::load() {
         Ok(policy) => policy,
         Err(err) => {
-            let _ = writeln!(io::stderr(), "shguard check: failed to load config: {err}");
+            // `json` is already known at this point (parsed above, before
+            // any analysis runs) — a `--json`-requesting caller gets valid
+            // JSON here too, not empty stdout it can't parse.
+            if json {
+                let value = serde_json::json!({ "error": err.to_string() });
+                let _ = writeln!(
+                    io::stdout(),
+                    "{}",
+                    serde_json::to_string(&value).unwrap_or_else(|_| value.to_string())
+                );
+            } else {
+                let _ = writeln!(io::stderr(), "shguard check: failed to load config: {err}");
+            }
             return 2;
         }
     };

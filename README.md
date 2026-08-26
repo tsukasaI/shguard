@@ -90,8 +90,8 @@ run it directly:
 ```console
 $ shguard check 'rm -rf /'
 Decision: Block
-Reason: recursive delete rooted at /
-Matched rule: embedded-rm-rf-root
+Reason: matches blocklist rule "rm-recursive-force-dangerous-target": rm with recursive+force flags against a root-level, home, device, or find-placeholder target
+Matched rule: rm-recursive-force-dangerous-target
 $ echo $?
 1
 ```
@@ -100,13 +100,20 @@ $ echo $?
 path (`analyze_with_policy`) a real PreToolUse hook invocation uses,
 including any `~/.config/shguard/config.toml` policy, so its output always
 matches what the hook itself would decide. It exits `1` on Block (useful
-for a CI step asserting a command is rejected) and `0` on Allow or Ask.
-Add `--json` for machine-readable output:
+for a CI step asserting a command is rejected), `0` on Allow or Ask, and
+`2` on a usage error (missing/extra arguments, a non-UTF-8 command) or if
+the config itself fails to load. Add `--json` for machine-readable output
+(keys always present, `null` where a field doesn't apply — never omitted):
 
 ```console
 $ shguard check 'echo hello' --json
-{"command":"echo hello","decision":"Allow","reason":null,"matched_rule_id":null,"deny_message":null}
+{"command":"echo hello","decision":"Allow","deny_message":null,"matched_rule_id":null,"reason":null}
 ```
+
+A config-load failure under `--json` still emits `{"error": "..."}` on
+stdout; a usage error (missing/extra arguments) occurs before `--json` is
+even parsed and stays human-readable-only on stderr — check the exit code
+first if you're scripting against this.
 
 ## Configuration
 

@@ -5,8 +5,11 @@
 
 #![allow(clippy::expect_used)]
 
+use std::fs;
+
 use assert_cmd::Command;
 use serde_json::Value;
+use tempfile::tempdir;
 
 fn run_hook(stdin: &str) -> Value {
     let assert = Command::cargo_bin("shguard")
@@ -151,18 +154,42 @@ fn check_config_flag_with_trailing_argument_exits_with_error() {
         .code(2);
 }
 
-// Issue #109: `shguard check <command>` dry-run mode. Each case below
-// mirrors an existing hook-path test above for the same command
+// Issue #109: `shguard check <command>` dry-run mode. The embedded-rule
+// cases below mirror an existing hook-path test above for the same command
 // (`block_triggering_command_denies_with_reason`, `ask_case_asks`,
-// `allow_case_allows`) so the two entry points are asserted to agree,
-// demonstrating `check` reuses `analyze_with_policy` rather than a
-// reimplemented decision path.
+// `allow_case_allows`) — that mirroring demonstrates `check` and the real
+// hook path AGREE on these particular embedded-rule-only commands, but
+// does NOT by itself prove `check` reuses `analyze_with_policy` (any of
+// these commands would decide the same way even through the config-blind
+// `shguard::analyze`, since none of them depend on a user config). The
+// dedicated `check_respects_user_config_*` tests below close that gap by
+// using a command a user config denies that the embedded blocklist alone
+// would allow — that's what actually pins config-loading, not the mirrors.
+//
+// Every test that touches config loading (i.e. everything except the pure
+// usage-error cases) isolates the environment the same way
+// `tests/user_config.rs` does, so a host machine's own `SHGUARD_CONFIG`/
+// config file can't make these spuriously fail or pass.
+
+fn isolated_check(args: &[&str]) -> Command {
+    let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
+    cmd.env_remove("SHGUARD_CONFIG")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("HOME")
+        .args(args);
+    cmd
+}
+
+fn write_config(contents: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempdir().expect("tempdir should create");
+    let path = dir.path().join("config.toml");
+    fs::write(&path, contents).expect("config file should write");
+    (dir, path)
+}
 
 #[test]
 fn check_block_command_exits_nonzero_and_prints_decision() {
-    let assert = Command::cargo_bin("shguard")
-        .expect("shguard binary should build")
-        .args(["check", "rm -rf /"])
+    let assert = isolated_check(&["check", "rm -rf /"])
         .assert()
         .failure()
         .code(1);
@@ -172,20 +199,14 @@ fn check_block_command_exits_nonzero_and_prints_decision() {
 
 #[test]
 fn check_allow_command_exits_zero() {
-    let assert = Command::cargo_bin("shguard")
-        .expect("shguard binary should build")
-        .args(["check", "echo hello"])
-        .assert()
-        .success();
+    let assert = isolated_check(&["check", "echo hello"]).assert().success();
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
     assert!(stdout.contains("Decision: Allow"));
 }
 
 #[test]
 fn check_ask_command_exits_zero() {
-    let assert = Command::cargo_bin("shguard")
-        .expect("shguard binary should build")
-        .args(["check", "$(which python3)"])
+    let assert = isolated_check(&["check", "$(which python3)"])
         .assert()
         .success();
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
@@ -194,9 +215,7 @@ fn check_ask_command_exits_zero() {
 
 #[test]
 fn check_json_flag_emits_expected_schema() {
-    let assert = Command::cargo_bin("shguard")
-        .expect("shguard binary should build")
-        .args(["check", "rm -rf /", "--json"])
+    let assert = isolated_check(&["check", "rm -rf /", "--json"])
         .assert()
         .failure()
         .code(1);
@@ -205,37 +224,79 @@ fn check_json_flag_emits_expected_schema() {
     assert_eq!(value["command"], "rm -rf /");
     assert_eq!(value["decision"], "Block");
     assert!(value["reason"].is_string());
-    assert!(value.get("matched_rule_id").is_some());
+    // `.get(..).is_some()` alone would also pass for a present `null` —
+    // confirm `matched_rule_id` is actually a non-null string on a Block
+    // that matched an embedded rule, not just present-as-something.
+    assert!(value.get("matched_rule_id").is_some_and(Value::is_string));
     assert!(value.get("deny_message").is_some());
 }
 
 #[test]
 fn check_json_flag_before_command_is_also_accepted() {
-    let assert = Command::cargo_bin("shguard")
-        .expect("shguard binary should build")
-        .args(["check", "--json", "echo hello"])
+    let assert = isolated_check(&["check", "--json", "echo hello"])
         .assert()
         .success();
     let stdout = assert.get_output().stdout.clone();
     let value: Value = serde_json::from_slice(&stdout).expect("stdout should be valid JSON");
     assert_eq!(value["decision"], "Allow");
+    // The documented schema keeps `reason`/`matched_rule_id`/`deny_message`
+    // present as `null` on Allow, never omitted — indexing a MISSING key
+    // also yields `Value::Null`, so `contains_key` first is what actually
+    // distinguishes "present and null" from "absent" here.
+    let object = value
+        .as_object()
+        .expect("check --json should emit an object");
+    for key in ["reason", "matched_rule_id", "deny_message"] {
+        assert!(object.contains_key(key), "missing key {key:?}: {value}");
+        assert!(value[key].is_null(), "expected {key:?} to be null: {value}");
+    }
 }
 
 #[test]
 fn check_missing_command_exits_with_usage_error() {
-    Command::cargo_bin("shguard")
-        .expect("shguard binary should build")
-        .args(["check"])
+    isolated_check(&["check"]).assert().failure().code(2);
+}
+
+#[test]
+fn check_too_many_positional_arguments_exits_with_usage_error() {
+    isolated_check(&["check", "echo hello", "echo world"])
         .assert()
         .failure()
         .code(2);
 }
 
 #[test]
-fn check_too_many_positional_arguments_exits_with_usage_error() {
-    Command::cargo_bin("shguard")
-        .expect("shguard binary should build")
-        .args(["check", "echo hello", "echo world"])
+fn check_respects_user_config_deny_rule_not_visible_to_embedded_rules_alone() {
+    // The actual regression guard for "check reuses analyze_with_policy,
+    // not a config-blind analyze()": `scary-tool` matches no embedded
+    // rule, so this can ONLY deny if `check` genuinely loaded and applied
+    // the user config — a config-blind decision path would Allow here.
+    let (_dir, config_path) = write_config(
+        r#"
+        [[deny]]
+        id = "user-deny-scary-tool"
+        reason = "never run this"
+        command = "scary-tool"
+    "#,
+    );
+    let assert = isolated_check(&["check", "scary-tool --run", "--json"])
+        .env("SHGUARD_CONFIG", &config_path)
+        .assert()
+        .failure()
+        .code(1);
+    let stdout = assert.get_output().stdout.clone();
+    let value: Value = serde_json::from_slice(&stdout).expect("stdout should be valid JSON");
+    assert_eq!(value["decision"], "Block");
+    assert_eq!(value["matched_rule_id"], "user-deny-scary-tool");
+}
+
+#[test]
+fn check_nonexistent_config_path_exits_with_usage_error() {
+    isolated_check(&["check", "echo hello"])
+        .env(
+            "SHGUARD_CONFIG",
+            "/nonexistent/shguard-config-for-test.toml",
+        )
         .assert()
         .failure()
         .code(2);
