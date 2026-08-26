@@ -8817,6 +8817,26 @@ mod tests {
     }
 
     #[test]
+    fn command_position_non_winning_brace_alternative_is_a_disclosed_limitation_not_a_bypass() {
+        // Issue #368 (disclosed, not silently accepted): command-position
+        // brace alternation only checks the "winning" alternative against
+        // the blocklist; every other alternative is checked only for
+        // whether it contains a substitution, never independently
+        // re-evaluated as its own candidate command. Both brace
+        // alternatives here fold to `rm -rf /` in real bash ("a" reduces
+        // via an unset variable to empty; the empty member does too), but
+        // the FIRST ("a") now correctly floats to Unresolvable via
+        // `defuse_ifs_glued_to_identifier_start`'s own floor, "winning"
+        // the command-position slot and hiding the sibling alternative
+        // that would have matched `rm-recursive-force-dangerous-target`.
+        // Still fail-closed (Ask, never Allow) -- a guardrail-weakening
+        // accuracy gap, not a bypass -- and member-order-dependent:
+        // flipping the members (`{-rf,a}`, not pinned here) lets the
+        // dangerous member win instead and correctly Blocks.
+        assert_decision("rm$IFS{a,}$IFS-rf$IFS/", Decision::Ask);
+    }
+
+    #[test]
     fn quoted_ifs_before_substitution_still_fires_rule_1() {
         // A `$IFS` reference INSIDE double quotes never actually splits at
         // runtime (bash never splits inside double quotes) — `resolve_piece`

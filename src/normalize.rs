@@ -515,6 +515,21 @@ fn fold_word(pieces: &[WordPiece], allow_split: bool) -> Vec<NormalizedWord> {
 /// having produced a word. Callers must not reach this function with a word
 /// `crate::gate`'s own `first_non_vanishing_word_idx` has already skipped as
 /// vanishing — both current call sites already guard on that.
+///
+/// **Known limitation, disclosed rather than silently accepted (issue
+/// #368)**: only `winning` is ever checked against
+/// `crate::rules::Rules::match_command`/`match_ask` — every `leftover`
+/// alternative is checked ONLY for whether it contains a substitution
+/// (rule 3's job), never independently re-evaluated as its own candidate
+/// command. A `leftover` alternative that folds cleanly to a resolvable,
+/// dangerous command is invisible to the blocklist whenever `winning`
+/// itself resolves to something else (commonly `Unresolvable`, e.g. via
+/// [`defuse_ifs_glued_to_identifier_start`]'s own floor) — member ORDER
+/// then decides which of several equally-live interpretations gets
+/// checked. Still fail-closed in direction (this can only ever produce
+/// `Ask`, never `Allow`, since an unresolvable `winning` always floors to
+/// at least `Ask`), so it's a guardrail-weakening accuracy gap, not a
+/// bypass — but real and attacker-selectable via brace-member order.
 #[must_use]
 pub(crate) fn split_command_position(word: &Word) -> (Option<Vec<WordPiece>>, Vec<Vec<WordPiece>>) {
     let Ok(alternatives) = expand_braces(&word.0, 0) else {
@@ -762,16 +777,20 @@ fn expand_braces(
 /// escape as hazardous here would be an accuracy regression relative to
 /// main for a shape main already handles correctly (`echo$IFS{\a,}`).
 ///
-/// Known, accepted residual: an explicitly `${IFS}`-braced reference
-/// immediately before a brace group (`${IFS}{a,b}`) never actually has
-/// this hazard in real bash (its own closing `}` is the non-identifier
-/// boundary), but gets floated to `Unresolvable` here anyway for the same
-/// carries-no-braced-marker reason above — a narrow, fail-closed-direction
-/// accuracy cost (never a security regression: every caller already floors
-/// an unquoted `$IFS`-derived word to `Ask` regardless — see
-/// [`chunks_to_words`]'s `ifs_derived` threading through the `Unresolvable`
-/// branch too, not only the resolved-text one), unlike the broad
-/// regression checking post-expansion would have caused.
+/// Known, accepted residual, both directions: an explicitly `${IFS}`-braced
+/// reference immediately before a brace group (`${IFS}{a,b}`), OR a brace
+/// MEMBER's own trailing reference immediately before static text that
+/// happens to itself be explicitly `${IFS}`-braced (`x{a,b}${IFS}y` — the
+/// mirror check has the identical blind spot, since it inspects the same
+/// `WordPiece::ParameterExpansion(name)` with no braced/unbraced marker),
+/// never actually has this hazard in real bash (`${IFS}`'s own closing `}`
+/// is the non-identifier boundary), but gets floated to `Unresolvable` here
+/// anyway for the same carries-no-braced-marker reason above — a narrow,
+/// fail-closed-direction accuracy cost (never a security regression: every
+/// caller already floors an unquoted `$IFS`-derived word to `Ask`
+/// regardless — see [`chunks_to_words`]'s `ifs_derived` threading through
+/// the `Unresolvable` branch too, not only the resolved-text one), unlike
+/// the broad regression checking post-expansion would have caused.
 fn defuse_ifs_glued_to_identifier_start(accumulated: &mut [WordPiece], next: Option<&WordPiece>) {
     let Some(WordPiece::ParameterExpansion(name)) = accumulated.last_mut() else {
         return;
