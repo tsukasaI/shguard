@@ -334,13 +334,30 @@ impl Policy {
         // `std::fs::metadata` follows symlinks, so a symlink to a regular
         // file is unaffected and a symlink to a directory/FIFO/device is
         // caught the same as a direct one.
-        if let Some(log_path) = &decision_log_path
-            && let Ok(meta) = std::fs::metadata(log_path)
-            && !meta.is_file()
-        {
-            return Err(ConfigError::InvalidConfig(format!(
-                "decision_log_path {log_path:?} exists and is not a regular file"
-            )));
+        //
+        // A `NotFound` error is expected and accepted -- `decision_log`
+        // creates the file on first append. Any OTHER metadata error (e.g.
+        // `PermissionDenied` on the path or a parent component) is rejected
+        // here too, not silently ignored: letting the config load anyway
+        // would mean every subsequent `append` fails the same way, forever,
+        // with logging permanently and invisibly broken -- exactly the
+        // "typo'd/unreachable path defeats the feature invisibly" trap this
+        // whole check exists to close.
+        if let Some(log_path) = &decision_log_path {
+            match std::fs::metadata(log_path) {
+                Ok(meta) if !meta.is_file() => {
+                    return Err(ConfigError::InvalidConfig(format!(
+                        "decision_log_path {log_path:?} exists and is not a regular file"
+                    )));
+                }
+                Ok(_) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    return Err(ConfigError::InvalidConfig(format!(
+                        "decision_log_path {log_path:?} could not be checked: {err}"
+                    )));
+                }
+            }
         }
 
         Ok(Self {

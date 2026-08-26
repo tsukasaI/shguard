@@ -212,12 +212,18 @@ fn hook_path_and_check_cli_produce_equivalent_log_content_for_the_same_command()
 /// nothing at all. `src/lib.rs`'s `analyze_with_policy` now calls `append`
 /// on the value `watchdog::bounded` actually returns, closing that gap.
 ///
-/// Exercised via `shguard check`, not the PreToolUse hook path: `check`
-/// has no watchdog of its own besides `analyze_with_policy`'s
-/// (`src/bin/shguard.rs`'s doc comment), so this pins the module-level
-/// guarantee precisely. The hook path sits behind a SECOND, outer
-/// watchdog (`src/lib.rs`'s doc comment, README's "PreToolUse hook path
-/// caveat") that this test does not and cannot exercise from here.
+/// Exercised via `shguard check`, not the PreToolUse hook path. `check` now
+/// also has its own outer watchdog (`evaluate_with_timeout`,
+/// `src/bin/shguard.rs`), bounding `analyze_with_policy` to
+/// `EVALUATION_TIMEOUT` plus a grace margin so an internal trip like this
+/// one has time to surface as `analyze_with_policy`'s own returned verdict
+/// rather than losing the race to `check`'s outer bound — this test relies
+/// on that: the repro below trips the fast memory-budget branch (~0.45s),
+/// well inside both bounds, so it still pins the module-level "the value
+/// `watchdog::bounded` actually returns gets logged" guarantee precisely.
+/// The hook path sits behind its own outer watchdog too (`src/lib.rs`'s doc
+/// comment, README's "PreToolUse hook path caveat") that this test does not
+/// and cannot exercise from here.
 #[test]
 fn watchdog_trip_verdict_is_still_logged() {
     let log_dir = tempfile::tempdir().expect("tempdir should create");
