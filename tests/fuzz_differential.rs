@@ -1500,15 +1500,18 @@ fn env_u64(name: &str, default: u64) -> u64 {
 /// operates at the already-parsed `WordPiece` level and did not re-derive
 /// this boundary).
 ///
-/// Fixed in `src/normalize.rs`'s `resolve_pieces`: a bare `$IFS` piece
-/// immediately followed, in a brace-expanded alternative's own flat piece
-/// list, by literal text starting with an identifier character is now
-/// folded to `Unresolvable` instead of being confidently (and wrongly)
-/// resolved as `$IFS` itself -- the same fail-closed floor every other
-/// undecidable shape in this module already gets, not a guessed value.
-/// `rm$IFS-rf$IFS/` (issue #82's own motivating case) is unaffected: `-`/
-/// `/` are not identifier-continuation characters, so the hazard never
-/// fires there.
+/// Fixed in `src/normalize.rs`'s `expand_braces`/
+/// `defuse_ifs_glued_to_identifier_start`, at the exact points a brace
+/// member's substituted text joins a `$IFS` piece from the other side (the
+/// original adjacency here, and its mirror shape where a MEMBER supplies
+/// the trailing `$IFS`): a bare `$IFS` piece immediately adjacent to
+/// substituted, identifier-starting text is now folded to `Unresolvable`
+/// (with its `$IFS` provenance preserved, so rule 7's floor still applies)
+/// instead of being confidently (and wrongly) resolved as `$IFS` itself --
+/// the same fail-closed floor every other undecidable shape in this module
+/// already gets, not a guessed value. `rm$IFS-rf$IFS/` (issue #82's own
+/// motivating case) is unaffected: `-`/`/` are not identifier-continuation
+/// characters, so the hazard never fires there.
 ///
 /// Known, accepted residual: `WordPiece::ParameterExpansion` has no
 /// braced-vs-unbraced marker (`$IFS` and `${IFS}` fold to the identical
@@ -1598,6 +1601,13 @@ fn explicitly_braced_ifs_before_a_brace_group_is_unaffected_by_the_fix() {
         .filter(|w| matches!(w.resolution(), Resolution::Unresolvable(_)))
         .count();
     assert!(unresolvable_count > 0, "{:?}", verdict.normalized_argv());
+    // A round-1 fable review of the fix caught that an argv-shape-only
+    // assertion like the one above cannot detect the exact regression class
+    // this fix once introduced (converting the hazardous piece to
+    // Unresolvable while accidentally dropping the `ifs_derived` tag rule
+    // 7's floor depends on, silently downgrading Ask to Allow) -- assert
+    // the DECISION too, not just that something came back unresolvable.
+    assert_eq!(verdict.decision(), Decision::Ask);
 }
 
 /// The main differential-fuzz sweep. Generates [`DEFAULT_ITERATIONS`] (or
@@ -1635,6 +1645,7 @@ fn differential_fuzz_shguard_vs_bash_argv() {
     let mut divergences: Vec<DivergenceReport> = Vec::new();
 
     let mut candidates: Vec<Vec<String>>;
+    let is_replay = std::env::var("SHGUARD_FUZZ_REPLAY").is_ok();
     if let Ok(replay) = std::env::var("SHGUARD_FUZZ_REPLAY") {
         eprintln!("fuzz: replaying a single candidate from SHGUARD_FUZZ_REPLAY: {replay:?}");
         candidates = vec![vec![replay]];
@@ -1706,11 +1717,23 @@ fn differential_fuzz_shguard_vs_bash_argv() {
          reclassification with the same stage count -- generator bug, not \
          a bash/shguard divergence"
     );
-    assert!(
-        compared > 0,
-        "harness compared zero candidates -- check the generator/classifier \
-         wiring before trusting this test's green result"
-    );
+    // A single-candidate SHGUARD_FUZZ_REPLAY is exempt: the whole point of
+    // replaying can be confirming a candidate is now fully unresolvable
+    // (every stage `skipped_unresolvable`, nothing left to compare) --
+    // that's a real, meaningful outcome to report, not evidence the harness
+    // itself is broken the way `compared == 0` would be over a real sweep.
+    if !is_replay {
+        assert!(
+            compared > 0,
+            "harness compared zero candidates -- check the generator/classifier \
+             wiring before trusting this test's green result"
+        );
+    } else if compared == 0 {
+        eprintln!(
+            "fuzz: replayed candidate had no comparable stage (every stage was skipped -- \
+             see skipped_* counts above); this is a normal outcome, not a harness failure"
+        );
+    }
     // Always fails loud, regardless of RootCause: an Allow-direction
     // divergence is the one shape that can be a genuine security bypass
     // (shguard resolved an argv shape bash doesn't actually produce, AND
