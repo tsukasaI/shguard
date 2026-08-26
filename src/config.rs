@@ -154,6 +154,13 @@ impl From<crate::rules::RulesError> for ConfigError {
 pub struct Policy {
     pub(crate) rules: std::sync::Arc<Rules>,
     pub(crate) allowlist: std::sync::Arc<Allowlist>,
+    /// Structured decision-output logging target (issue #108) — `None`
+    /// (the default) unless the user's own config set `decision_log_path`.
+    /// Never populated by the self-protection-only merge path below (that
+    /// synthetic config text has no such key), so this is read off the
+    /// real config-file parse alone, before it's moved into
+    /// [`merge_user_config`].
+    pub(crate) decision_log_path: Option<PathBuf>,
 }
 
 impl Policy {
@@ -241,6 +248,7 @@ impl Policy {
         let blocklist = Rules::embedded()?;
         let allowlist = Allowlist::embedded()?;
 
+        let mut decision_log_path: Option<PathBuf> = None;
         let (rules, allowlist) = match &path {
             Some(path) => {
                 // `symlink_metadata` (`lstat`), not `read_to_string`'s own
@@ -266,6 +274,14 @@ impl Policy {
                     match std::fs::read_to_string(path) {
                         Ok(contents) => {
                             let user_config = UserConfig::parse(&contents)?;
+                            // Read off the real config-file parse alone,
+                            // before `user_config` moves into
+                            // `merge_user_config` below — the
+                            // self-protection-only merges further down
+                            // never set this key, so there is nothing to
+                            // fold across multiple merges the way
+                            // `escalation_floor` needs `.max()` for.
+                            decision_log_path = user_config.decision_log_path().map(PathBuf::from);
                             merge_user_config(blocklist, allowlist, user_config)?
                         }
                         Err(err) => {
@@ -297,6 +313,7 @@ impl Policy {
         Ok(Self {
             rules: std::sync::Arc::new(rules),
             allowlist: std::sync::Arc::new(allowlist),
+            decision_log_path,
         })
     }
 

@@ -660,6 +660,37 @@ the floor off entirely, only to tighten it. A `[[deny]]`/`[[ask]]` entry
 naming one of the five commands directly (`command = "doas"`) is also
 reachable, independent of `escalation_floor`, the same as any other rule.
 
+### Structured decision-output logging
+
+Off by default. shguard's own decision output today is only the hook
+response JSON on stdout (or `shguard check`'s printed/`--json` output) —
+nothing persists across invocations. Set the top-level `decision_log_path`
+key to append one JSONL line per evaluated command to a file:
+
+```toml
+decision_log_path = "/home/user/.local/state/shguard/decisions.jsonl"
+```
+
+Each line is a JSON object:
+
+```json
+{"command":"rm -rf /","decision":"Block","reason":"matches blocklist rule \"rm-recursive-force-dangerous-target\": ...","matched_rule_id":"rm-recursive-force-dangerous-target","deny_message":null,"normalized_argv":["rm","-rf","/"]}
+```
+
+`matched_rule_id` is `null` for an `Allow`, an `Ask`/`Block` decided
+structurally rather than by an exact rule match, or an `Allow` reached by
+an allowlist downgrade. The file is opened in append mode (created if
+missing, never truncated) and a write failure — an unwritable path, a
+missing parent directory, a full disk — is silently dropped rather than
+affecting the returned decision: logging is a best-effort observability
+side channel, not part of the decision contract. Both the real
+PreToolUse hook and `shguard check` write through the same code path, so
+a logged line never disagrees with what either caller actually saw.
+
+An empty `decision_log_path` (`decision_log_path = ""`) fails config load
+closed, the same as any other invalid config value — it is not treated as
+"disabled".
+
 ### Discovery
 
 `SHGUARD_CONFIG` (an explicit path) > `$XDG_CONFIG_HOME/shguard/config.toml`

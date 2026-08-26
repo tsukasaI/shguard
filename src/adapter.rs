@@ -301,6 +301,7 @@ mod tests {
         crate::config::Policy {
             rules: std::sync::Arc::new(crate::rules::Rules::embedded().unwrap()),
             allowlist: std::sync::Arc::new(crate::rules::Allowlist::embedded().unwrap()),
+            decision_log_path: None,
         }
     }
 
@@ -338,6 +339,7 @@ mod tests {
         let policy = crate::config::Policy {
             rules: std::sync::Arc::new(rules),
             allowlist: std::sync::Arc::new(allowlist),
+            decision_log_path: None,
         };
 
         let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"gh pr view"}}"#;
@@ -389,6 +391,7 @@ mod tests {
         let policy = crate::config::Policy {
             rules: std::sync::Arc::new(rules),
             allowlist: std::sync::Arc::new(allowlist),
+            decision_log_path: None,
         };
 
         let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"mytool --force"}}"#;

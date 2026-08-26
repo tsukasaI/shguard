@@ -7,6 +7,7 @@
 pub mod adapter;
 mod ast;
 pub mod config;
+mod decision_log;
 mod gate;
 pub mod normalize;
 mod parser;
@@ -78,9 +79,26 @@ pub fn analyze(command: &str) -> Verdict {
 /// rules and allowlist instead of the embedded defaults alone. [`analyze`]'s
 /// own behavior and signature are untouched — this is an additional entry
 /// point, not a replacement.
+///
+/// # Structured decision-output logging (issue #108)
+///
+/// When `policy` carries a `decision_log_path` (set via the user config's
+/// `decision_log_path` key, off by default), one JSONL line describing the
+/// resulting verdict is appended to that path — see `src/decision_log.rs`.
+/// Logging happens here, inside the one function both the real hook
+/// (`src/adapter.rs`) and the `shguard check` CLI (`src/bin/shguard.rs`,
+/// issue #109) call, so a logged line can never diverge from what either
+/// caller actually saw. A broken log target degrades to "no log line
+/// written" and never affects the returned `Verdict`.
 #[must_use]
 pub fn analyze_with_policy(command: &str, policy: &config::Policy) -> Verdict {
     let command = command.to_string();
     let policy = policy.clone();
-    watchdog::bounded(move || gate::analyze_with_policy(&command, &policy.rules, &policy.allowlist))
+    watchdog::bounded(move || {
+        let verdict = gate::analyze_with_policy(&command, &policy.rules, &policy.allowlist);
+        if let Some(path) = &policy.decision_log_path {
+            decision_log::append(path, &command, &verdict);
+        }
+        verdict
+    })
 }
