@@ -8791,6 +8791,51 @@ mod tests {
         assert_decision("ls$IFS$FLAGS", Decision::Ask);
     }
 
+    // A round-1 fable review of issue #326's argv-shape fix found a
+    // CRITICAL regression: converting the hazardous `$IFS` piece to a
+    // non-"IFS" ParameterExpansion (so the argv shape resolves correctly)
+    // accidentally stripped the `ifs_derived` tag rule 7's floor depends
+    // on, silently downgrading an argument-position shape from Ask to
+    // Allow. Fixed by preserving `ifs_derived: true` through the defuse.
+    // These pin the decision, not just the argv shape, since a shape-only
+    // test cannot catch this exact regression class.
+
+    #[test]
+    fn ifs_glued_to_identifier_starting_brace_member_in_argument_position_still_asks() {
+        assert_decision("echo rm$IFS{a,b}", Decision::Ask);
+        assert_decision("touch rm$IFS{a,b}", Decision::Ask);
+    }
+
+    #[test]
+    fn explicitly_braced_ifs_before_a_brace_group_still_asks_not_allows() {
+        // The accepted residual (an explicitly `${IFS}`-braced reference
+        // immediately before a brace group never actually has this hazard,
+        // but still floats to Unresolvable for the same no-braced-marker
+        // reason) must still floor the DECISION to Ask, not just look
+        // "unresolvable" in the argv shape.
+        assert_decision("echo rm${IFS}{a,b}", Decision::Ask);
+    }
+
+    #[test]
+    fn command_position_non_winning_brace_alternative_is_a_disclosed_limitation_not_a_bypass() {
+        // Issue #368 (disclosed, not silently accepted): command-position
+        // brace alternation only checks the "winning" alternative against
+        // the blocklist; every other alternative is checked only for
+        // whether it contains a substitution, never independently
+        // re-evaluated as its own candidate command. Both brace
+        // alternatives here fold to `rm -rf /` in real bash ("a" reduces
+        // via an unset variable to empty; the empty member does too), but
+        // the FIRST ("a") now correctly floats to Unresolvable via
+        // `defuse_ifs_glued_to_identifier_start`'s own floor, "winning"
+        // the command-position slot and hiding the sibling alternative
+        // that would have matched `rm-recursive-force-dangerous-target`.
+        // Still fail-closed (Ask, never Allow) -- a guardrail-weakening
+        // accuracy gap, not a bypass -- and member-order-dependent:
+        // flipping the members (`{-rf,a}`, not pinned here) lets the
+        // dangerous member win instead and correctly Blocks.
+        assert_decision("rm$IFS{a,}$IFS-rf$IFS/", Decision::Ask);
+    }
+
     #[test]
     fn quoted_ifs_before_substitution_still_fires_rule_1() {
         // A `$IFS` reference INSIDE double quotes never actually splits at

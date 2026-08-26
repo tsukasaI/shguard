@@ -249,6 +249,36 @@ impl NormalizedWord {
         }
     }
 
+    /// [`Self::unresolvable`]'s counterpart for a segment where `$IFS` was
+    /// ALSO involved somewhere in the same run of chunks that collapsed to
+    /// `Unresolvable` (issue #326) — e.g. the hazardous `$IFS`-glued-to-a-
+    /// substituted-brace-member shape, or (pre-existing, same gap) `$IFS`
+    /// folded to its literal default-whitespace text inside a non-splitting
+    /// context (`"$IFS$(evil)"`) that a LATER chunk in the same segment then
+    /// makes `Unresolvable`. Only [`chunks_to_words`], which already tracks
+    /// `ifs_derived` across an entire chunk run, should ever construct this
+    /// — [`Self::unresolvable`]'s other 38+ call sites have no such tracking
+    /// to draw on and stay `ifs_derived: false`, correctly.
+    #[must_use]
+    fn unresolvable_ifs_derived(kind: UnresolvableKind) -> Self {
+        Self {
+            resolution: Resolution::Unresolvable(kind),
+            ifs_derived: true,
+            single_word: false,
+        }
+    }
+
+    /// [`Self::unresolvable_ifs_derived`]'s single-word-guaranteed
+    /// counterpart, mirroring [`Self::unresolvable_single_word`].
+    #[must_use]
+    fn unresolvable_single_word_ifs_derived(kind: UnresolvableKind) -> Self {
+        Self {
+            resolution: Resolution::Unresolvable(kind),
+            ifs_derived: true,
+            single_word: true,
+        }
+    }
+
     /// The word's resolution state.
     #[must_use]
     pub fn resolution(&self) -> &Resolution {
@@ -319,9 +349,20 @@ const DEFAULT_IFS_WHITESPACE: &str = " \t\n";
 /// (brace expansion runs before word splitting in the shell's actual
 /// expansion pipeline) and falls out naturally from the data model: each
 /// brace alternative already denotes its own complete word, so it makes its
-/// own independent splitting decision — `rm$IFS{a,b}` folds as if it were
-/// two separate words `rm$IFSa` and `rm$IFSb`, each of which then resolves
-/// (and potentially splits) on its own.
+/// own independent splitting decision — `rm$IFS{-a,-b}` folds as if it were
+/// two separate words `rm$IFS-a` and `rm$IFS-b`, each of which then
+/// resolves (and potentially splits) on its own.
+///
+/// One documented exception (issue #326): a bare `$IFS` glued DIRECTLY
+/// (no literal text between them) to a brace group whose member starts
+/// with an identifier character (`rm$IFS{a,b}`, unlike `{-a,-b}` above) is
+/// NOT resolved this way — real bash's greedy parameter-name matching
+/// means the substituted member text extends `$IFS`'s own variable name
+/// into an entirely different (and unpredictable) reference once brace
+/// expansion splices it in, not "fold as two independent words" the way
+/// this section otherwise describes. See
+/// `defuse_ifs_glued_to_identifier_start`'s doc for the full mechanism and
+/// why this specific adjacency floats to `Unresolvable` instead.
 ///
 /// `analyze()` (`src/lib.rs`) calls this via `src/gate.rs` — stage 2 of the
 /// pipeline (plan.md §1.1).
@@ -474,6 +515,21 @@ fn fold_word(pieces: &[WordPiece], allow_split: bool) -> Vec<NormalizedWord> {
 /// having produced a word. Callers must not reach this function with a word
 /// `crate::gate`'s own `first_non_vanishing_word_idx` has already skipped as
 /// vanishing — both current call sites already guard on that.
+///
+/// **Known limitation, disclosed rather than silently accepted (issue
+/// #368)**: only `winning` is ever checked against
+/// `crate::rules::Rules::match_command`/`match_ask` — every `leftover`
+/// alternative is checked ONLY for whether it contains a substitution
+/// (rule 3's job), never independently re-evaluated as its own candidate
+/// command. A `leftover` alternative that folds cleanly to a resolvable,
+/// dangerous command is invisible to the blocklist whenever `winning`
+/// itself resolves to something else (commonly `Unresolvable`, e.g. via
+/// [`defuse_ifs_glued_to_identifier_start`]'s own floor) — member ORDER
+/// then decides which of several equally-live interpretations gets
+/// checked. Still fail-closed in direction (this can only ever produce
+/// `Ask`, never `Allow`, since an unresolvable `winning` always floors to
+/// at least `Ask`), so it's a guardrail-weakening accuracy gap, not a
+/// bypass — but real and attacker-selectable via brace-member order.
 #[must_use]
 pub(crate) fn split_command_position(word: &Word) -> (Option<Vec<WordPiece>>, Vec<Vec<WordPiece>>) {
     let Ok(alternatives) = expand_braces(&word.0, 0) else {
@@ -606,6 +662,17 @@ fn expand_braces(
         return Err(UnresolvableKind::ExpansionLimit);
     }
     let mut alternatives: Vec<Vec<WordPiece>> = vec![Vec::new()];
+    // Tracks whether EVERY alternative's last piece was just produced by a
+    // brace-group substitution on the immediately preceding trip through
+    // this loop — the mirror-shape check below (issue #326) is only sound
+    // at that exact join point (see its own call-site comment), not on
+    // every ordinary piece append. Without this flag, an earlier attempt
+    // at this fix re-ran the check on every ordinary-to-ordinary adjacency
+    // too, wrongly floating harmless, explicit-`${IFS}`-braced static text
+    // like `${IFS}-exec` (no brace GROUP involved at all) — the parser
+    // already protects that boundary, and over-firing on it regressed
+    // several of issue #122's own fused-word tests.
+    let mut just_substituted = false;
     for piece in pieces {
         if let WordPiece::BraceAlternation(members) = piece {
             let mut next = Vec::new();
@@ -616,19 +683,147 @@ fn expand_braces(
                             return Err(UnresolvableKind::ExpansionLimit);
                         }
                         let mut combined = prefix.clone();
+                        defuse_ifs_glued_to_identifier_start(&mut combined, suffix.first());
                         combined.extend(suffix);
                         next.push(combined);
                     }
                 }
             }
             alternatives = next;
+            just_substituted = true;
         } else {
             for prefix in &mut alternatives {
+                if just_substituted {
+                    // Issue #326's mirror shape: a brace MEMBER ending in
+                    // `$IFS` (just spliced into `prefix` on the trip through
+                    // this loop that immediately precedes this one) glued
+                    // against the STATIC piece that follows the brace group
+                    // in the original source — e.g. `{a$IFS,b}rm`. Same
+                    // hazard, same soundness argument as the splice-time
+                    // check above (this exact separate-piece adjacency is
+                    // unreachable from genuine static source — the parser
+                    // already fuses it into one longer name — so it can
+                    // only exist here because `prefix`'s last piece came
+                    // from a brace substitution ON THIS TRIP, not from an
+                    // earlier ordinary piece), just checked at the OTHER
+                    // join point piece-combining can create.
+                    defuse_ifs_glued_to_identifier_start(prefix, Some(piece));
+                }
                 prefix.push(piece.clone());
             }
+            just_substituted = false;
         }
     }
     Ok(alternatives)
+}
+
+/// Issue #326: bash's parameter-name matching for a `$IFS`/`${IFS}`
+/// reference is greedy for the UNBRACED spelling — `$IFS` glued directly to
+/// more `[A-Za-z0-9_]` characters is actually a reference to a longer,
+/// different (almost always unset, hence empty-expanding) variable name,
+/// not `$IFS` followed by literal text. Brace expansion happens first,
+/// purely as TEXT substitution, before any `$`-expansion runs — so
+/// `echo$IFS{hello,}` brace-expands to the literal strings `echo$IFShello`
+/// and `echo$IFS` FIRST, and only THEN does `$IFShello` get re-lexed (on
+/// each resulting string independently) as ONE greedy identifier "IFShello"
+/// (unset -> empty), not `$IFS` + literal "hello". Real bash's argv for
+/// this shape is unpredictable from the "brace first, then split each
+/// alternative independently" textbook model (confirmed:
+/// `bash -c 'set -- echo$IFS{Y,}; echo "$#"'` prints `2`, not `3`).
+///
+/// This can only ever be detected at the exact points [`expand_braces`]
+/// combines two piece sequences that weren't adjacent in the original
+/// source — either splicing a brace member's substituted `suffix` onto
+/// `combined` (`{a,b}$IFS`-shaped: the member itself supplies the LEADING
+/// hazard), or, the mirror case, pushing the static piece that follows a
+/// brace group onto a `prefix` whose last piece just came from a member
+/// substitution (`$IFS{a,b}rm`-shaped: the member supplies a TRAILING
+/// `$IFS` that then meets the following static text) — both are called
+/// with the "already accumulated" piece list and the very next piece about
+/// to join it. Genuine static source text with this adjacency is already
+/// correctly folded into ONE longer [`WordPiece::ParameterExpansion`] by
+/// the parser itself (verified: `$IFShello`, typed literally with no
+/// braces at all, already resolves as one opaque unresolvable reference
+/// today), so a bare `ParameterExpansion` piece can never legitimately have
+/// `[A-Za-z0-9_]`-starting literal text as its very next STATIC sibling —
+/// only a substituted brace member, on either side of the join, can
+/// produce that adjacency. Checking `resolve_pieces`'s already-flattened,
+/// post-expansion piece list instead (an earlier version of this fix did
+/// exactly that) cannot tell a substituted adjacency apart from
+/// `${IFS}rm`-shaped ORDINARY static text (braces always protect the
+/// boundary in real bash, so that shape is never hazardous) —
+/// `WordPiece::ParameterExpansion` carries no braced/unbraced marker to
+/// distinguish the two there, and over-firing on ordinary
+/// `${IFS}<command>`-shaped text is far too broad a regression (one of
+/// this module's most common obfuscation-detection shapes) to accept for
+/// this one rare adjacency. Only at these two join points, where the piece
+/// on at least one side is provably brace-substituted rather than static,
+/// is the check sound without that marker.
+///
+/// Once detected, the hazardous `$IFS`/`${IFS}` piece is replaced with a
+/// non-"IFS" [`WordPiece::ParameterExpansion`] — falling through to
+/// [`resolve_piece`]'s general (always-`Unresolvable`) arm — rather than
+/// guessing which characters the real greedy match would have consumed.
+/// `rm$IFS-rf$IFS/` (issue #82's own motivating case) is unaffected: `-`/
+/// `/` are not identifier-continuation characters. A single- or
+/// double-quoted member is also unaffected: its own opening quote
+/// character is not identifier-valid, so it already stops the name at
+/// "IFS" for the same reason a non-identifier literal character would —
+/// this mirrors exactly how quoting already protects ordinary static text.
+/// A backslash-escaped character ([`WordPiece::EscapeSequence`]) is ALSO
+/// unaffected, deliberately: a genuine source backslash is not itself an
+/// identifier character, so it terminates bash's greedy name-lexing at
+/// "IFS" the same way any other non-identifier literal does — treating an
+/// escape as hazardous here would be an accuracy regression relative to
+/// main for a shape main already handles correctly (`echo$IFS{\a,}`).
+///
+/// Known, accepted residual, both directions: an explicitly `${IFS}`-braced
+/// reference immediately before a brace group (`${IFS}{a,b}`), OR a brace
+/// MEMBER's own trailing reference immediately before static text that
+/// happens to itself be explicitly `${IFS}`-braced (`x{a,b}${IFS}y` — the
+/// mirror check has the identical blind spot, since it inspects the same
+/// `WordPiece::ParameterExpansion(name)` with no braced/unbraced marker),
+/// never actually has this hazard in real bash (`${IFS}`'s own closing `}`
+/// is the non-identifier boundary), but gets floated to `Unresolvable` here
+/// anyway for the same carries-no-braced-marker reason above — a narrow,
+/// fail-closed-direction accuracy cost (never a security regression: every
+/// caller already floors an unquoted `$IFS`-derived word to `Ask`
+/// regardless — see [`chunks_to_words`]'s `ifs_derived` threading through
+/// the `Unresolvable` branch too, not only the resolved-text one), unlike
+/// the broad regression checking post-expansion would have caused. A third
+/// variant of the same residual: an EMPTY brace member glued against a
+/// following explicitly `${IFS}`-braced piece (`x{,y}${IFS}z` — the
+/// `just_substituted` flag is still `true` right after the empty member's
+/// own zero-piece substitution, so the mirror check fires on `${IFS}` even
+/// though it's the ORIGINAL static text, not member-supplied) has the
+/// identical no-braced-marker blind spot and the identical fail-closed-only
+/// consequence.
+fn defuse_ifs_glued_to_identifier_start(accumulated: &mut [WordPiece], next: Option<&WordPiece>) {
+    let Some(WordPiece::ParameterExpansion(name)) = accumulated.last_mut() else {
+        return;
+    };
+    if name != "IFS" {
+        return;
+    }
+    let hazard = match next {
+        Some(WordPiece::Literal(text)) => {
+            text.chars().next().is_some_and(is_identifier_continuation)
+        }
+        _ => false,
+    };
+    if hazard {
+        // Any name other than "IFS" falls through to `resolve_piece`'s
+        // general `ParameterExpansion` arm, which is unconditionally
+        // `Unresolvable` regardless of the exact (here, arbitrary)
+        // placeholder name.
+        *name = String::new();
+    }
+}
+
+/// Bash variable-name characters: `[A-Za-z0-9_]`, ASCII-only regardless of
+/// locale (POSIX `Name` grammar).
+fn is_identifier_continuation(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
 }
 
 /// Resolves a brace-free piece sequence into its [`Chunk`]s plus whether
@@ -768,6 +963,21 @@ fn resolve_piece(piece: &WordPiece, allow_split: bool) -> (Chunk, bool) {
         // exception — it always joins to exactly one string under quoting
         // (only its join separator, not its word count, depends on IFS),
         // so it keeps the ordinary `!allow_split` treatment.
+        // Issue #326: an empty name is never produced by real parsing (bash
+        // parameter names are `[A-Za-z_][A-Za-z0-9_]*`; `${}` is a parse
+        // error long before this stage) — it is exclusively the sentinel
+        // `defuse_ifs_glued_to_identifier_start` writes in place of a
+        // hazardous `$IFS` piece. That piece WAS `$IFS` in the source;
+        // defusing it only changes how it resolves (unconditionally
+        // `Unresolvable`, since the real greedy-lexed name is unknown), not
+        // whether `$IFS` was "involved" — so `ifs_derived` must still be
+        // `true` here, or rule 7's `$IFS`-derived-word floor (the only
+        // thing standing between this shape and a silent Ask -> Allow
+        // bypass in argument position) never fires.
+        WordPiece::ParameterExpansion(name) if name.is_empty() => (
+            Chunk::Unresolvable(UnresolvableKind::ParameterExpansion, !allow_split),
+            true,
+        ),
         WordPiece::ParameterExpansion(name) => (
             Chunk::Unresolvable(
                 UnresolvableKind::ParameterExpansion,
@@ -972,7 +1182,17 @@ fn chunks_to_words(
     segments
         .into_iter()
         .filter_map(|segment| match segment {
+            // Issue #326: `ifs_derived` must reach an `Unresolvable` segment
+            // exactly like it already reaches a `Resolved` one below — a
+            // segment doesn't stop being "$IFS was involved here" just
+            // because it also contains a chunk that couldn't be resolved.
+            Err((kind, true)) if ifs_derived => {
+                Some(NormalizedWord::unresolvable_single_word_ifs_derived(kind))
+            }
             Err((kind, true)) => Some(NormalizedWord::unresolvable_single_word(kind)),
+            Err((kind, false)) if ifs_derived => {
+                Some(NormalizedWord::unresolvable_ifs_derived(kind))
+            }
             Err((kind, false)) => Some(NormalizedWord::unresolvable(kind)),
             Ok((text, quoted)) if quoted || !text.is_empty() || !allow_split => {
                 Some(if ifs_derived {
@@ -1402,6 +1622,84 @@ mod tests {
     fn brace_multiplication_with_prefix() {
         let argv = argv_of("echo pre{a,b}");
         assert_eq!(resolved_strings(&argv), vec!["echo", "prea", "preb"]);
+    }
+
+    // ---- issue #326: a bare $IFS glued directly to a brace group whose
+    // member starts with an identifier character floats to Unresolvable,
+    // rather than confidently (and wrongly) folding as two independent
+    // words the way `rm$IFS{-a,-b}` (non-identifier members) still does ----
+    #[test]
+    fn ifs_glued_directly_to_identifier_starting_brace_member_is_unresolvable() {
+        let argv = argv_of("rm$IFS{a,b}");
+        assert_eq!(argv.len(), 2);
+        for word in &argv {
+            assert!(
+                matches!(
+                    word.resolution(),
+                    Resolution::Unresolvable(UnresolvableKind::ParameterExpansion)
+                ),
+                "{:?}",
+                word.resolution()
+            );
+        }
+    }
+
+    #[test]
+    fn ifs_glued_directly_to_non_identifier_starting_brace_member_still_folds_normally() {
+        // Parity control: `-a`/`-b` don't start with an identifier
+        // character, so real bash's greedy name-matching never extends
+        // "IFS" into them -- this must fold exactly like the textbook
+        // "brace first, then split each alternative" model predicts.
+        let argv = argv_of("rm$IFS{-a,-b}");
+        assert_eq!(resolved_strings(&argv), vec!["rm", "-a", "rm", "-b"]);
+    }
+
+    #[test]
+    fn braced_ifs_before_identifier_starting_literal_text_is_unaffected() {
+        // Parity control (the accepted residual's flip side): `${IFS}`
+        // immediately before ORDINARY STATIC identifier-starting text --
+        // not a brace group at all -- must NOT be treated as hazardous.
+        // This is one of the module's most common obfuscation-detection
+        // shapes ($IFS/${IFS} standing in for whitespace before a command
+        // name) and must keep resolving normally.
+        let argv = argv_of("${IFS}rm");
+        assert_eq!(resolved_strings(&argv), vec!["rm"]);
+    }
+
+    #[test]
+    fn ifs_glued_directly_to_brace_member_trailing_ifs_mirror_shape_is_unresolvable() {
+        // The mirror of the leading-adjacency case above: a brace MEMBER
+        // ending in `$IFS`, glued against the STATIC text that follows the
+        // brace group (`{a$IFS,b}rm`) -- same underlying bash mechanism
+        // (the member-supplied trailing $IFS greedily absorbs the
+        // following identifier text), opposite splice direction.
+        let argv = argv_of("{$IFS,x}rm");
+        assert!(
+            argv.iter().any(|w| matches!(
+                w.resolution(),
+                Resolution::Unresolvable(UnresolvableKind::ParameterExpansion)
+            )),
+            "{argv:?}"
+        );
+        let argv = argv_of("{a$IFS,b}rm");
+        assert!(
+            argv.iter().any(|w| matches!(
+                w.resolution(),
+                Resolution::Unresolvable(UnresolvableKind::ParameterExpansion)
+            )),
+            "{argv:?}"
+        );
+    }
+
+    #[test]
+    fn escaped_identifier_char_after_glued_ifs_is_not_a_hazard() {
+        // A genuine source backslash-escape terminates bash's greedy
+        // name-lexing at "IFS" the same way any other non-identifier
+        // literal character would (a backslash is not itself an identifier
+        // character) -- this must resolve exactly like main already does
+        // for this shape, not float to Unresolvable.
+        let argv = argv_of(r"echo$IFS{\a,}");
+        assert_eq!(resolved_strings(&argv), vec!["echo", "a", "echo"]);
     }
 
     // ---- empty quoted word is kept as Resolved("") ----
