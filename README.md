@@ -82,6 +82,32 @@ Add to `settings.json`:
 }
 ```
 
+### Dry-run: `shguard check`
+
+To see what shguard would decide for a command without wiring up a hook,
+run it directly:
+
+```console
+$ shguard check 'rm -rf /'
+Decision: Block
+Reason: recursive delete rooted at /
+Matched rule: embedded-rm-rf-root
+$ echo $?
+1
+```
+
+`shguard check <command>` runs the command through the same evaluation
+path (`analyze_with_policy`) a real PreToolUse hook invocation uses,
+including any `~/.config/shguard/config.toml` policy, so its output always
+matches what the hook itself would decide. It exits `1` on Block (useful
+for a CI step asserting a command is rejected) and `0` on Allow or Ask.
+Add `--json` for machine-readable output:
+
+```console
+$ shguard check 'echo hello' --json
+{"command":"echo hello","decision":"Allow","reason":null,"matched_rule_id":null,"deny_message":null}
+```
+
 ## Configuration
 
 By default shguard needs no setup — the embedded blocklist above is all

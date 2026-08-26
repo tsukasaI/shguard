@@ -150,3 +150,93 @@ fn check_config_flag_with_trailing_argument_exits_with_error() {
         .failure()
         .code(2);
 }
+
+// Issue #109: `shguard check <command>` dry-run mode. Each case below
+// mirrors an existing hook-path test above for the same command
+// (`block_triggering_command_denies_with_reason`, `ask_case_asks`,
+// `allow_case_allows`) so the two entry points are asserted to agree,
+// demonstrating `check` reuses `analyze_with_policy` rather than a
+// reimplemented decision path.
+
+#[test]
+fn check_block_command_exits_nonzero_and_prints_decision() {
+    let assert = Command::cargo_bin("shguard")
+        .expect("shguard binary should build")
+        .args(["check", "rm -rf /"])
+        .assert()
+        .failure()
+        .code(1);
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(stdout.contains("Decision: Block"));
+}
+
+#[test]
+fn check_allow_command_exits_zero() {
+    let assert = Command::cargo_bin("shguard")
+        .expect("shguard binary should build")
+        .args(["check", "echo hello"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(stdout.contains("Decision: Allow"));
+}
+
+#[test]
+fn check_ask_command_exits_zero() {
+    let assert = Command::cargo_bin("shguard")
+        .expect("shguard binary should build")
+        .args(["check", "$(which python3)"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(stdout.contains("Decision: Ask"));
+}
+
+#[test]
+fn check_json_flag_emits_expected_schema() {
+    let assert = Command::cargo_bin("shguard")
+        .expect("shguard binary should build")
+        .args(["check", "rm -rf /", "--json"])
+        .assert()
+        .failure()
+        .code(1);
+    let stdout = assert.get_output().stdout.clone();
+    let value: Value = serde_json::from_slice(&stdout).expect("stdout should be valid JSON");
+    assert_eq!(value["command"], "rm -rf /");
+    assert_eq!(value["decision"], "Block");
+    assert!(value["reason"].is_string());
+    assert!(value.get("matched_rule_id").is_some());
+    assert!(value.get("deny_message").is_some());
+}
+
+#[test]
+fn check_json_flag_before_command_is_also_accepted() {
+    let assert = Command::cargo_bin("shguard")
+        .expect("shguard binary should build")
+        .args(["check", "--json", "echo hello"])
+        .assert()
+        .success();
+    let stdout = assert.get_output().stdout.clone();
+    let value: Value = serde_json::from_slice(&stdout).expect("stdout should be valid JSON");
+    assert_eq!(value["decision"], "Allow");
+}
+
+#[test]
+fn check_missing_command_exits_with_usage_error() {
+    Command::cargo_bin("shguard")
+        .expect("shguard binary should build")
+        .args(["check"])
+        .assert()
+        .failure()
+        .code(2);
+}
+
+#[test]
+fn check_too_many_positional_arguments_exits_with_usage_error() {
+    Command::cargo_bin("shguard")
+        .expect("shguard binary should build")
+        .args(["check", "echo hello", "echo world"])
+        .assert()
+        .failure()
+        .code(2);
+}
