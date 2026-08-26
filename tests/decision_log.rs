@@ -75,6 +75,58 @@ fn empty_decision_log_path_fails_config_load_closed() {
 }
 
 #[test]
+fn decision_log_path_naming_an_existing_directory_fails_config_load_closed() {
+    let existing_dir = tempfile::tempdir().expect("tempdir should create");
+    let (_config_dir, config_path) = write_config(&format!(
+        r#"
+        decision_log_path = {:?}
+        "#,
+        existing_dir.path().to_string_lossy()
+    ));
+
+    isolated_command(&config_path)
+        .args(["check", "echo hello"])
+        .assert()
+        .failure()
+        .code(2);
+}
+
+/// A FIFO is the concrete reproduction a round-1/round-2 review used for
+/// the blocking-log-target hazard `src/lib.rs`'s doc comment and the
+/// README describe — rejecting it at load time (alongside the directory
+/// case above) closes the one shape of that hazard this crate can detect
+/// up front (an already-existing non-regular target), leaving only a
+/// target that starts hanging later (a stale network mount) as a
+/// disclosed, undetectable-at-load-time residual risk.
+#[test]
+#[cfg(unix)]
+fn decision_log_path_naming_an_existing_fifo_fails_config_load_closed() {
+    let dir = tempfile::tempdir().expect("tempdir should create");
+    let fifo_path = dir.path().join("decisions.fifo");
+    let c_path = std::ffi::CString::new(fifo_path.to_str().expect("utf8 path"))
+        .expect("path should have no interior nul");
+    // SAFETY: `mkfifo(3)` with a valid, nul-terminated path and standard
+    // owner-only permission bits; no aliasing/lifetime hazards. `libc` is
+    // already a dependency of this crate (RSS measurement in
+    // `src/watchdog.rs`), reused here rather than adding a new one.
+    let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+    assert_eq!(rc, 0, "mkfifo should succeed in a fresh tempdir");
+
+    let (_config_dir, config_path) = write_config(&format!(
+        r#"
+        decision_log_path = {:?}
+        "#,
+        fifo_path.to_string_lossy()
+    ));
+
+    isolated_command(&config_path)
+        .args(["check", "echo hello"])
+        .assert()
+        .failure()
+        .code(2);
+}
+
+#[test]
 fn check_subcommand_appends_a_decision_log_line_matching_the_verdict() {
     let log_dir = tempfile::tempdir().expect("tempdir should create");
     let log_path = log_dir.path().join("decisions.jsonl");
@@ -159,6 +211,13 @@ fn hook_path_and_check_cli_produce_equivalent_log_content_for_the_same_command()
 /// worker was the only thing that could have logged, so a trip logged
 /// nothing at all. `src/lib.rs`'s `analyze_with_policy` now calls `append`
 /// on the value `watchdog::bounded` actually returns, closing that gap.
+///
+/// Exercised via `shguard check`, not the PreToolUse hook path: `check`
+/// has no watchdog of its own besides `analyze_with_policy`'s
+/// (`src/bin/shguard.rs`'s doc comment), so this pins the module-level
+/// guarantee precisely. The hook path sits behind a SECOND, outer
+/// watchdog (`src/lib.rs`'s doc comment, README's "PreToolUse hook path
+/// caveat") that this test does not and cannot exercise from here.
 #[test]
 fn watchdog_trip_verdict_is_still_logged() {
     let log_dir = tempfile::tempdir().expect("tempdir should create");

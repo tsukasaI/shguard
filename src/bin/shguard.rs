@@ -475,19 +475,29 @@ fn check_config() -> i32 {
 /// (nothing to act on beyond what the human/CI caller already sees
 /// printed), `1` the command Blocks (a real problem, not a runtime
 /// failure — useful for a CI step to fail on), `2` a usage error (missing/
-/// extra arguments, non-UTF-8 command) or the config itself couldn't load.
-/// A config-load failure under `--json` still emits `{"error": "..."}` on
-/// stdout (parsed `json` is already known at that point). Usage errors
-/// (missing/extra arguments, non-UTF-8 command) are always printed as
-/// human-readable text on stderr with empty stdout, regardless of `--json`
-/// — a caller relying on `--json` output should check the exit code first
-/// regardless.
-/// Deliberately outside `main`'s `catch_unwind`/watchdog boundary, exactly
-/// like [`check_config`]: this is a human- or CI-triggered, one-shot
-/// invocation outside the PreToolUse hook contract entirely, with none of
-/// [`run`]'s "never hang, always emit exactly one decision" obligations —
-/// [`shguard::analyze_with_policy`] carries its own bounded-evaluation
-/// watchdog internally regardless (see its own docs).
+/// extra arguments, non-UTF-8 command), the config itself couldn't load, or
+/// evaluation exceeded [`EVALUATION_TIMEOUT`] (see below). A config-load
+/// failure under `--json` still emits `{"error": "..."}` on stdout (parsed
+/// `json` is already known at that point). Usage errors (missing/extra
+/// arguments, non-UTF-8 command) are always printed as human-readable text
+/// on stderr with empty stdout, regardless of `--json` — a caller relying
+/// on `--json` output should check the exit code first regardless.
+///
+/// Deliberately outside `main`'s `catch_unwind` boundary, exactly like
+/// [`check_config`]: this is a human- or CI-triggered, one-shot invocation
+/// outside the PreToolUse hook contract entirely, with none of [`run`]'s
+/// "never hang, always emit exactly one decision" obligations, so a panic
+/// here can simply propagate as a normal process crash rather than needing
+/// to fail closed. It is NOT outside a wall-clock bound, though:
+/// [`evaluate_with_timeout`] wraps the [`shguard::analyze_with_policy`] call
+/// (which — issue #108 — may append to a user-configured
+/// `decision_log_path` after its own internal gate-evaluation watchdog
+/// already returned) in the same [`EVALUATION_TIMEOUT`] [`run`] uses for
+/// the hook path, so a pathological log target (a hung network mount)
+/// fails `check` closed within a bounded time instead of hanging the CI
+/// job or terminal forever — matching the hook path's own bound instead of
+/// leaving `check` as the one caller with no upper bound at all on that
+/// failure mode.
 ///
 /// Writes via `writeln!` (discarding the write error), not
 /// `println!`/`eprintln!`, for the same broken-pipe reasoning
@@ -546,7 +556,21 @@ fn run_check(args: &[std::ffi::OsString]) -> i32 {
         }
     };
 
-    let verdict = shguard::analyze_with_policy(command, &policy);
+    let Some(verdict) = evaluate_with_timeout(command, &policy) else {
+        let message = "shguard check: evaluation exceeded its time budget (possibly a hung \
+                        decision_log_path target); refusing to evaluate (fail-closed)";
+        if json {
+            let value = serde_json::json!({ "error": message });
+            let _ = writeln!(
+                io::stdout(),
+                "{}",
+                serde_json::to_string(&value).unwrap_or_else(|_| value.to_string())
+            );
+        } else {
+            let _ = writeln!(io::stderr(), "{message}");
+        }
+        return 2;
+    };
     let decision = verdict.decision();
     let decision_name = match decision {
         shguard::verdict::Decision::Allow => "Allow",
@@ -586,6 +610,47 @@ fn run_check(args: &[std::ffi::OsString]) -> i32 {
     }
 
     i32::from(decision == shguard::verdict::Decision::Block)
+}
+
+/// Runs [`shguard::analyze_with_policy`] on a worker thread bounded by
+/// [`EVALUATION_TIMEOUT`], mirroring [`run`]'s own hook-path watchdog so
+/// [`run_check`] cannot hang indefinitely on a pathological
+/// `decision_log_path` target — the analysis call includes issue #108's
+/// log-append step, which runs after `analyze_with_policy`'s own internal
+/// gate-evaluation watchdog already returned and is therefore unbounded on
+/// its own. Returns `None` on a timeout, which the caller treats as a
+/// runtime error (exit 2) — the same fail-closed-on-timeout outcome the
+/// hook path already gives for the same failure mode. Unlike [`run`]'s
+/// watchdog, this does not also poll RSS: the failure mode this closes is a
+/// blocking write, not unbounded allocation, so a wall-clock bound alone is
+/// sufficient here.
+///
+/// If the worker thread itself can't be spawned, falls back to running
+/// inline with no bound at all — strictly no worse than `check` behaved
+/// before this function existed, and thread-spawn failure (OS out of
+/// resources) is already a degraded environment for a one-shot CLI
+/// invocation to begin with.
+fn evaluate_with_timeout(
+    command: &str,
+    policy: &shguard::config::Policy,
+) -> Option<shguard::verdict::Verdict> {
+    let owned_command = command.to_string();
+    let owned_policy = policy.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("shguard-check-eval".to_string())
+        .spawn(move || {
+            let verdict = shguard::analyze_with_policy(&owned_command, &owned_policy);
+            // A closed receiver means the timeout already fired and the
+            // caller moved on — nothing left to send to, and this thread
+            // is about to be torn down along with the whole process once
+            // `run_check` returns its exit-2 timeout path.
+            let _ = tx.send(verdict);
+        });
+    let Ok(_worker) = spawned else {
+        return Some(shguard::analyze_with_policy(command, policy));
+    };
+    rx.recv_timeout(EVALUATION_TIMEOUT).ok()
 }
 
 /// The composition root's actual work — config load, stdin read, hand-off

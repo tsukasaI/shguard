@@ -59,9 +59,12 @@ pub(crate) fn append(path: &Path, command: &str, verdict: &Verdict) {
     };
     // One `write_all` call for the whole line plus its newline, not
     // `writeln!` (which would emit the body and `"\n"` as two separate
-    // `write(2)` calls on an O_APPEND fd) — two concurrent shguard
-    // invocations logging to the same path could otherwise interleave
-    // their writes and produce a corrupted, unparseable line.
+    // `write(2)` calls on an O_APPEND fd, guaranteeing two concurrent
+    // shguard invocations could interleave and corrupt a line).
+    // `write_all` still loops on a partial `write(2)` (possible on a full
+    // disk or a signal-interrupted call), so this makes interleaving
+    // essentially never happen for a normal-sized line rather than
+    // formally impossible for one of unbounded size.
     serialized.push('\n');
 
     let Ok(mut file) = open_log_file(path) else {
@@ -207,12 +210,19 @@ mod tests {
         let log_path = dir.path().join("decisions.jsonl");
         append(&log_path, "echo hi", &Verdict::allow(Vec::new()));
 
+        // `mode & 0o077 == 0` (no group/other bits), not an exact `0o600`
+        // equality: `.mode()` is still subject to umask, so an unusual
+        // umask that masks an OWNER bit (never a real-world 022/077 one --
+        // those never touch owner bits, since owner bits are already the
+        // minimum this call requests) could in principle make an exact
+        // comparison flaky without weakening the actual security property
+        // under test.
         let mode = std::fs::metadata(&log_path).unwrap().permissions().mode();
         assert_eq!(
-            mode & 0o777,
-            0o600,
-            "the log file must be created owner-only (it records commands verbatim, \
-             which routinely include inline secrets), got {:o}",
+            mode & 0o077,
+            0,
+            "the log file must not be group/other-readable (it records commands \
+             verbatim, which routinely include inline secrets), got {:o}",
             mode & 0o777
         );
     }
@@ -224,5 +234,66 @@ mod tests {
         // appeared" -- there is no error return from `append` to check.
         let unwritable = std::path::Path::new("/nonexistent-shguard-test-dir/decisions.jsonl");
         append(unwritable, "echo hi", &Verdict::allow(Vec::new()));
+    }
+
+    /// Regression test for the round-2 fable review finding this HIGH
+    /// bug was originally caught by: `crate::analyze_with_policy`
+    /// (`src/lib.rs`) used to call `append` *inside*
+    /// `watchdog::bounded`'s closure, so a `decision_log_path` target that
+    /// blocked past the internal gate-evaluation watchdog's own timeout
+    /// tripped that watchdog and silently replaced an already-computed,
+    /// correct verdict with a fail-closed `Ask`. `append` now runs on the
+    /// value `watchdog::bounded` already returned, so it can no longer
+    /// affect the verdict at all, no matter how long it blocks.
+    ///
+    /// Constructs a `Policy` directly rather than through `Policy::load`:
+    /// loading now rejects a `decision_log_path` that already names a FIFO
+    /// at config-load time (`src/config.rs`), which is exactly the
+    /// pre-existing-non-regular-target shape this test needs to force a
+    /// blocking write. Direct construction is the only way left to
+    /// exercise that write path at all.
+    #[test]
+    #[cfg(unix)]
+    fn a_blocked_log_target_does_not_corrupt_the_verdict() {
+        let dir = tempdir().unwrap();
+        let fifo_path = dir.path().join("decisions.fifo");
+        let c_path = std::ffi::CString::new(fifo_path.to_str().unwrap()).unwrap();
+        // SAFETY: a valid, nul-terminated path and standard owner-only
+        // permission bits; no aliasing/lifetime hazards. Same call
+        // `tests/decision_log.rs`'s own FIFO test already makes.
+        let rc = unsafe { libc_mkfifo(c_path.as_ptr(), 0o600) };
+        assert_eq!(rc, 0, "mkfifo should succeed in a fresh tempdir");
+
+        let reader_fifo_path = fifo_path.clone();
+        let reader = std::thread::spawn(move || {
+            // Longer than `watchdog::bounded`'s own internal timeout
+            // (`src/watchdog.rs`, 2s): the pre-fix code would already have
+            // corrupted the verdict into a fail-closed `Ask` by the time
+            // this reader shows up and unblocks the write.
+            std::thread::sleep(std::time::Duration::from_millis(2_500));
+            let mut file = std::fs::File::open(&reader_fifo_path).unwrap();
+            let mut contents = String::new();
+            std::io::Read::read_to_string(&mut file, &mut contents).unwrap();
+            contents
+        });
+
+        let policy = crate::config::Policy::for_test_with_decision_log_path(fifo_path);
+        let verdict = crate::analyze_with_policy("rm -rf /", &policy);
+        assert_eq!(
+            verdict.decision(),
+            Decision::Block,
+            "a blocked log write must not corrupt the already-computed verdict into a \
+             fail-closed Ask, got: {verdict:?}"
+        );
+
+        let logged = reader.join().unwrap();
+        let value: serde_json::Value = serde_json::from_str(logged.trim()).unwrap();
+        assert_eq!(value["decision"], "Block");
+    }
+
+    #[cfg(unix)]
+    unsafe extern "C" {
+        #[link_name = "mkfifo"]
+        fn libc_mkfifo(path: *const std::ffi::c_char, mode: u32) -> i32;
     }
 }

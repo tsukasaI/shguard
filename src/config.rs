@@ -312,16 +312,34 @@ impl Policy {
 
         // Caught here rather than left to `decision_log::append`'s own
         // fail-open-on-write-failure posture (issue #108): an
-        // already-existing directory at this path would otherwise mean
-        // "logging is silently, permanently broken, with no error anywhere
-        // ever" -- the same "typo'd path defeats the whole feature
-        // invisibly" trap this module already refuses for `SHGUARD_CONFIG`
-        // itself (see the module docs' fail-closed policy).
+        // already-existing directory would otherwise mean "logging is
+        // silently, permanently broken, with no error anywhere ever" --
+        // the same "typo'd path defeats the whole feature invisibly" trap
+        // this module already refuses for `SHGUARD_CONFIG` itself (see the
+        // module docs' fail-closed policy). A FIFO, character device, or
+        // socket is rejected for a sharper reason: `decision_log::append`
+        // now writes outside `analyze_with_policy`'s own bounded-evaluation
+        // watchdog (`src/lib.rs`), and the PreToolUse hook path additionally
+        // runs the whole call inside this binary's own outer
+        // `EVALUATION_TIMEOUT` watchdog (`src/bin/shguard.rs`) -- a write
+        // that blocks on a target with no reader (or one that never
+        // finishes) trips that outer watchdog instead, still silently
+        // replacing an already-computed, correct decision with a
+        // fail-closed `Ask`. Rejecting every already-existing non-regular
+        // target at load time closes the case this crate can actually
+        // detect; a target that hangs for a reason `metadata` can't see up
+        // front (a stale network mount backing an ordinary regular file)
+        // remains a disclosed, undetectable-at-load-time residual risk --
+        // see the README's "Structured decision-output logging" section.
+        // `std::fs::metadata` follows symlinks, so a symlink to a regular
+        // file is unaffected and a symlink to a directory/FIFO/device is
+        // caught the same as a direct one.
         if let Some(log_path) = &decision_log_path
-            && log_path.is_dir()
+            && let Ok(meta) = std::fs::metadata(log_path)
+            && !meta.is_file()
         {
             return Err(ConfigError::InvalidConfig(format!(
-                "decision_log_path {log_path:?} is a directory, not a file"
+                "decision_log_path {log_path:?} exists and is not a regular file"
             )));
         }
 
@@ -330,6 +348,24 @@ impl Policy {
             allowlist: std::sync::Arc::new(allowlist),
             decision_log_path,
         })
+    }
+
+    /// Test-only constructor for exercising `decision_log_path` targets
+    /// [`Policy::load`] would reject at config-load time (a pre-existing
+    /// FIFO, in particular) — used by `src/decision_log.rs`'s
+    /// `a_blocked_log_target_does_not_corrupt_the_verdict` regression test,
+    /// which needs a genuinely blocking write to prove a slow log target
+    /// can't corrupt the verdict `analyze_with_policy` returns.
+    #[cfg(test)]
+    #[allow(clippy::expect_used)]
+    pub(crate) fn for_test_with_decision_log_path(decision_log_path: PathBuf) -> Self {
+        Self {
+            rules: std::sync::Arc::new(Rules::embedded().expect("embedded rules should parse")),
+            allowlist: std::sync::Arc::new(
+                Allowlist::embedded().expect("embedded allowlist should parse"),
+            ),
+            decision_log_path: Some(decision_log_path),
+        }
     }
 
     /// Ids of every deny/ask/allow rule in this policy whose

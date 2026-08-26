@@ -94,18 +94,31 @@ pub fn analyze(command: &str) -> Verdict {
 /// fact.
 ///
 /// The write happens AFTER [`watchdog::bounded`] returns, deliberately
-/// outside its wall-clock bound: logging inside the bounded closure was
+/// outside *this* wall-clock bound: logging inside the bounded closure was
 /// tried first and rejected — a log target that blocks (a FIFO with no
 /// reader, a hung network mount) would trip the watchdog's timeout and
 /// silently replace an already-computed, correct `Allow`/`Ask`/`Block`
 /// with a fail-closed `Ask`, corrupting the real decision to paper over a
-/// logging-only problem. The trade-off this accepts instead: the log write
-/// itself is unbounded, so `decision_log_path` must name a regular,
-/// locally-writable file — never a FIFO, character device, or a path on a
-/// filesystem that can hang (e.g. a stale NFS mount) — see the README's
-/// "Structured decision-output logging" section. An ordinary local file
-/// write essentially never blocks meaningfully in practice, unlike the
-/// pathological targets above.
+/// logging-only problem. [`config::Policy::load`] rejects any
+/// `decision_log_path` that already names a FIFO/device/socket/directory
+/// at load time (`src/config.rs`), closing the detectable case.
+///
+/// This module-level bound is not the only watchdog a caller may sit
+/// behind, though: `src/bin/shguard.rs`'s PreToolUse hook path (`run`) also
+/// wraps this ENTIRE call — decision plus log write — in its own, separate
+/// `EVALUATION_TIMEOUT` watchdog, since `run` itself must never hang
+/// regardless of where the hang comes from. A log target that starts
+/// blocking only *after* config load (a network mount that hangs
+/// mid-session, not a FIFO caught at load time) can therefore still trip
+/// that OUTER watchdog and yield the same fail-closed-`Ask`-instead-of-the-
+/// real-decision outcome for a hook invocation specifically — a residual,
+/// disclosed risk (see the README), not one this function's own bound can
+/// close, since it has no visibility into whatever bound a caller wraps it
+/// in. `shguard check` (issue #109) wraps this whole call in the same
+/// `EVALUATION_TIMEOUT` bound for the same reason (`src/bin/shguard.rs`'s
+/// `evaluate_with_timeout`); a direct library caller has no such outer
+/// watchdog of its own, so for one this function's own bound is the whole
+/// story.
 #[must_use]
 pub fn analyze_with_policy(command: &str, policy: &config::Policy) -> Verdict {
     let command_owned = command.to_string();
