@@ -477,11 +477,11 @@ fn check_config() -> i32 {
 /// failure — useful for a CI step to fail on), `2` a usage error (missing/
 /// extra arguments, non-UTF-8 command) or the config itself couldn't load.
 /// A config-load failure under `--json` still emits `{"error": "..."}` on
-/// stdout (parsed `json` is already known at that point); a usage error
-/// that occurs before argument parsing has even determined `--json` was
-/// requested (missing/extra arguments) has no such flag to consult yet and
-/// stays human-readable-only on stderr with empty stdout — a caller relying
-/// on `--json` output should check the exit code first regardless.
+/// stdout (parsed `json` is already known at that point). Usage errors
+/// (missing/extra arguments, non-UTF-8 command) are always printed as
+/// human-readable text on stderr with empty stdout, regardless of `--json`
+/// — a caller relying on `--json` output should check the exit code first
+/// regardless.
 /// Deliberately outside `main`'s `catch_unwind`/watchdog boundary, exactly
 /// like [`check_config`]: this is a human- or CI-triggered, one-shot
 /// invocation outside the PreToolUse hook contract entirely, with none of

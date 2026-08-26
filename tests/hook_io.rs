@@ -301,3 +301,18 @@ fn check_nonexistent_config_path_exits_with_usage_error() {
         .failure()
         .code(2);
 }
+
+#[test]
+fn check_nonexistent_config_path_with_json_flag_emits_json_error() {
+    let assert = isolated_check(&["check", "echo hello", "--json"])
+        .env(
+            "SHGUARD_CONFIG",
+            "/nonexistent/shguard-config-for-test.toml",
+        )
+        .assert()
+        .failure()
+        .code(2);
+    let stdout = assert.get_output().stdout.clone();
+    let value: Value = serde_json::from_slice(&stdout).expect("stdout should be valid JSON");
+    assert!(value["error"].is_string());
+}

@@ -111,9 +111,9 @@ $ shguard check 'echo hello' --json
 ```
 
 A config-load failure under `--json` still emits `{"error": "..."}` on
-stdout; a usage error (missing/extra arguments) occurs before `--json` is
-even parsed and stays human-readable-only on stderr — check the exit code
-first if you're scripting against this.
+stdout. Usage errors (missing/extra arguments, a non-UTF-8 command) are
+always printed as human-readable text on stderr regardless of `--json` —
+check the exit code (`2`) first if you're scripting against this.
 
 ## Configuration
 
