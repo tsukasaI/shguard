@@ -790,7 +790,14 @@ fn expand_braces(
 /// caller already floors an unquoted `$IFS`-derived word to `Ask`
 /// regardless — see [`chunks_to_words`]'s `ifs_derived` threading through
 /// the `Unresolvable` branch too, not only the resolved-text one), unlike
-/// the broad regression checking post-expansion would have caused.
+/// the broad regression checking post-expansion would have caused. A third
+/// variant of the same residual: an EMPTY brace member glued against a
+/// following explicitly `${IFS}`-braced piece (`x{,y}${IFS}z` — the
+/// `just_substituted` flag is still `true` right after the empty member's
+/// own zero-piece substitution, so the mirror check fires on `${IFS}` even
+/// though it's the ORIGINAL static text, not member-supplied) has the
+/// identical no-braced-marker blind spot and the identical fail-closed-only
+/// consequence.
 fn defuse_ifs_glued_to_identifier_start(accumulated: &mut [WordPiece], next: Option<&WordPiece>) {
     let Some(WordPiece::ParameterExpansion(name)) = accumulated.last_mut() else {
         return;
