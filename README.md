@@ -82,6 +82,39 @@ Add to `settings.json`:
 }
 ```
 
+### Dry-run: `shguard check`
+
+To see what shguard would decide for a command without wiring up a hook,
+run it directly:
+
+```console
+$ shguard check 'rm -rf /'
+Decision: Block
+Reason: matches blocklist rule "rm-recursive-force-dangerous-target": rm with recursive+force flags against a root-level, home, device, or find-placeholder target
+Matched rule: rm-recursive-force-dangerous-target
+$ echo $?
+1
+```
+
+`shguard check <command>` runs the command through the same evaluation
+path (`analyze_with_policy`) a real PreToolUse hook invocation uses,
+including any `~/.config/shguard/config.toml` policy, so its output always
+matches what the hook itself would decide. It exits `1` on Block (useful
+for a CI step asserting a command is rejected), `0` on Allow or Ask, and
+`2` on a usage error (missing/extra arguments, a non-UTF-8 command) or if
+the config itself fails to load. Add `--json` for machine-readable output
+(keys always present, `null` where a field doesn't apply — never omitted):
+
+```console
+$ shguard check 'echo hello' --json
+{"command":"echo hello","decision":"Allow","deny_message":null,"matched_rule_id":null,"reason":null}
+```
+
+A config-load failure under `--json` still emits `{"error": "..."}` on
+stdout. Usage errors (missing/extra arguments, a non-UTF-8 command) are
+always printed as human-readable text on stderr regardless of `--json` —
+check the exit code (`2`) first if you're scripting against this.
+
 ## Configuration
 
 By default shguard needs no setup — the embedded blocklist above is all

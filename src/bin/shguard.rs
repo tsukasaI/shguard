@@ -169,6 +169,18 @@ fn main() {
         Some("--check-config") if extra_arg.is_none() => {
             std::process::exit(check_config());
         }
+        // `check` takes a variable number of its own arguments (the command
+        // string plus an optional `--json`), unlike `--version`/
+        // `--check-config` above which take none — so it can't reuse the
+        // fixed two-arg peek those use. `extra_arg` already consumed the
+        // first token after "check" (if any); reassemble it with the rest
+        // of the iterator so `run_check` sees the complete argument list.
+        Some("check") => {
+            let mut check_args: Vec<std::ffi::OsString> = Vec::new();
+            check_args.extend(extra_arg);
+            check_args.extend(args);
+            std::process::exit(run_check(&check_args));
+        }
         // The PreToolUse hook contract never passes shguard any arguments
         // at all (Claude Code invokes it bare, feeding the payload via
         // stdin) — `first_arg` is `None` on every real hook invocation, so
@@ -184,8 +196,9 @@ fn main() {
             let rest: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
             let _ = writeln!(
                 io::stderr(),
-                "shguard: unrecognized arguments {rest:?} (known flags: --version, \
-                 --check-config, neither taking further arguments)"
+                "shguard: unrecognized arguments {rest:?} (known commands: --version, \
+                 --check-config (neither taking further arguments), check <command> \
+                 [--json])"
             );
             std::process::exit(2);
         }
@@ -441,6 +454,138 @@ fn check_config() -> i32 {
         );
     }
     1
+}
+
+/// `shguard check <command> [--json]` (issue #109): a dry-run mode that
+/// prints the [`shguard::analyze_with_policy`] verdict for a command string
+/// given directly on the command line, instead of through the PreToolUse
+/// stdin contract [`run`] otherwise only ever serves. Exists so rule
+/// authors can iterate on a config change and immediately see the
+/// resulting decision, and so CI can assert a set of commands resolve to
+/// the expected decision without an agent or hook wiring in the loop.
+///
+/// Always evaluates through [`shguard::analyze_with_policy`] — the exact
+/// same pipeline [`run`] hands a real hook payload's command to — never a
+/// separate decision path, so this subcommand's output is guaranteed to
+/// match what a real hook invocation would decide for the same command
+/// under the same config.
+///
+/// Exit codes follow this repo's check/lint convention (same scheme
+/// [`check_config`] already established): `0` the command Allows or Asks
+/// (nothing to act on beyond what the human/CI caller already sees
+/// printed), `1` the command Blocks (a real problem, not a runtime
+/// failure — useful for a CI step to fail on), `2` a usage error (missing/
+/// extra arguments, non-UTF-8 command) or the config itself couldn't load.
+/// A config-load failure under `--json` still emits `{"error": "..."}` on
+/// stdout (parsed `json` is already known at that point). Usage errors
+/// (missing/extra arguments, non-UTF-8 command) are always printed as
+/// human-readable text on stderr with empty stdout, regardless of `--json`
+/// — a caller relying on `--json` output should check the exit code first
+/// regardless.
+/// Deliberately outside `main`'s `catch_unwind`/watchdog boundary, exactly
+/// like [`check_config`]: this is a human- or CI-triggered, one-shot
+/// invocation outside the PreToolUse hook contract entirely, with none of
+/// [`run`]'s "never hang, always emit exactly one decision" obligations —
+/// [`shguard::analyze_with_policy`] carries its own bounded-evaluation
+/// watchdog internally regardless (see its own docs).
+///
+/// Writes via `writeln!` (discarding the write error), not
+/// `println!`/`eprintln!`, for the same broken-pipe reasoning
+/// [`install_panic_hook`]'s own docs give.
+fn run_check(args: &[std::ffi::OsString]) -> i32 {
+    let mut json = false;
+    let mut command: Option<&std::ffi::OsString> = None;
+    for arg in args {
+        // Compared against `&str` directly (not through `arg.to_str()`
+        // first) so a non-UTF-8 first positional is still captured as
+        // `command` below rather than silently misdiagnosed by this loop
+        // as "unexpected argument" — its own UTF-8 check further down is
+        // then reachable and gives the precise reason.
+        if arg == "--json" {
+            json = true;
+        } else if command.is_none() {
+            command = Some(arg);
+        } else {
+            let _ = writeln!(
+                io::stderr(),
+                "shguard check: unexpected argument {arg:?} (usage: shguard check \
+                 <command> [--json])"
+            );
+            return 2;
+        }
+    }
+    let Some(command) = command else {
+        let _ = writeln!(
+            io::stderr(),
+            "shguard check: missing <command> (usage: shguard check <command> [--json])"
+        );
+        return 2;
+    };
+    let Some(command) = command.to_str() else {
+        let _ = writeln!(io::stderr(), "shguard check: <command> must be valid UTF-8");
+        return 2;
+    };
+
+    let policy = match shguard::config::Policy::load() {
+        Ok(policy) => policy,
+        Err(err) => {
+            // `json` is already known at this point (parsed above, before
+            // any analysis runs) — a `--json`-requesting caller gets valid
+            // JSON here too, not empty stdout it can't parse.
+            if json {
+                let value = serde_json::json!({ "error": err.to_string() });
+                let _ = writeln!(
+                    io::stdout(),
+                    "{}",
+                    serde_json::to_string(&value).unwrap_or_else(|_| value.to_string())
+                );
+            } else {
+                let _ = writeln!(io::stderr(), "shguard check: failed to load config: {err}");
+            }
+            return 2;
+        }
+    };
+
+    let verdict = shguard::analyze_with_policy(command, &policy);
+    let decision = verdict.decision();
+    let decision_name = match decision {
+        shguard::verdict::Decision::Allow => "Allow",
+        shguard::verdict::Decision::Ask => "Ask",
+        shguard::verdict::Decision::Block => "Block",
+    };
+    let reason = verdict.reason().map(shguard::verdict::Reason::as_str);
+    let matched_rule_id = verdict.matched_rule().map(shguard::verdict::RuleId::as_str);
+    let deny_message = verdict
+        .deny_message()
+        .map(shguard::verdict::DenyMessage::as_str);
+
+    if json {
+        let value = serde_json::json!({
+            "command": command,
+            "decision": decision_name,
+            "reason": reason,
+            "matched_rule_id": matched_rule_id,
+            "deny_message": deny_message,
+        });
+        let _ = writeln!(
+            io::stdout(),
+            "{}",
+            serde_json::to_string(&value).unwrap_or_else(|_| value.to_string())
+        );
+    } else {
+        let _ = writeln!(io::stdout(), "Decision: {decision_name}");
+        if let Some(reason) = reason {
+            let _ = writeln!(io::stdout(), "Reason: {reason}");
+        }
+        if let Some(matched_rule_id) = matched_rule_id {
+            let _ = writeln!(io::stdout(), "Matched rule: {matched_rule_id}");
+        }
+        if let Some(deny_message) = deny_message {
+            let _ = writeln!(io::stdout(), "Deny message: {deny_message}");
+        }
+    }
+
+    i32::from(decision == shguard::verdict::Decision::Block)
 }
 
 /// The composition root's actual work — config load, stdin read, hand-off
