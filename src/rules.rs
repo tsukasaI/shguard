@@ -3192,8 +3192,51 @@ pub(crate) const EVAL_BUILTIN: &[&str] = &["eval"];
 /// `python` before this list is ever consulted, the same normalization
 /// that also covers every other versioned spelling (`ruby3.2`, `php8.2`, …)
 /// no fixed list could enumerate.
-const EXTRA_PIPELINE_INTERPRETERS: &[&str] =
-    &["python", "node", "perl", "ruby", "lua", "php", "tclsh"];
+///
+/// `osascript`/`irb`/`deno`/`pwsh` (issue #347) share the sink property
+/// this list exists to catch. This list is consulted by NAME alone
+/// (`is_pipeline_interpreter`) with no awareness of a specific
+/// invocation's own flags or arguments — `base64 -d payload | python
+/// script.py` already matches despite `script.py` meaning `python` reads
+/// its script from that file, not stdin, the same over-approximation
+/// every pre-existing entry here already carries. A name only needs to be
+/// CAPABLE of the bare-invocation stdin-execute shape in some realistic
+/// invocation, not incapable of any other shape, to belong on this list.
+///
+/// `osascript`'s own man page states it reads and executes AppleScript/JXA
+/// from stdin whenever no script-file argument is given. `irb`'s own
+/// source (`ruby/irb`'s `init.rb` checks `STDIN.tty?` only to pick a
+/// prompt style, never to decide whether to read-and-evaluate) confirms
+/// piped, non-TTY input is read and evaluated as Ruby the same as
+/// interactive input, just without the prompt decoration — live-confirmed
+/// (`printf 'puts 1+2' | irb` prints `3`). `deno` was live-confirmed too,
+/// correcting an earlier version of this list that excluded it on a stale
+/// 2021 maintainer comment: current stable `deno` (2.9.5) drops a bare
+/// invocation into its REPL, which DOES read and evaluate piped stdin
+/// (`printf 'console.log(7*6)' | deno` prints `42`) — with every
+/// permission granted by default, an even more capable sink than the
+/// other entries here. `pwsh` needs an explicit `-Command -`/`-File -` to
+/// read stdin as a script (Microsoft's own docs), unlike a truly bare
+/// invocation of every other name above — but per this list's own
+/// name-only matching (first paragraph), that's exactly the same shape of
+/// over-approximation `python script.py` already gets: `pwsh` is added on
+/// the strength of its `-Command -`/`-File -` invocations being real and
+/// dangerous, not on a claim that literally every `pwsh` invocation reads
+/// stdin. `expect`/`julia`/`guile` were considered but judged nichier,
+/// unaudited here.
+const EXTRA_PIPELINE_INTERPRETERS: &[&str] = &[
+    "python",
+    "node",
+    "perl",
+    "ruby",
+    "lua",
+    "php",
+    "tclsh",
+    "osascript",
+    "irb",
+    "deno",
+    "pwsh",
+];
 
 /// Strips a trailing distro-style version suffix (`python3.12` -> `python`,
 /// `lua5.4` -> `lua`, `php8.2` -> `php`) so interpreter-name matching
