@@ -8284,9 +8284,10 @@ mod tests {
         assert_decision("echo x | base64 -d | irb", Decision::Block);
     }
 
-    // A fable review of PR #378 live-verified deno's bare REPL and pwsh's
-    // `-Command -`/`-File -` forms both read and execute piped stdin,
-    // correcting an earlier version of this list that excluded both.
+    // A fable review of PR #378 live-verified deno's bare REPL reads and
+    // executes piped stdin, correcting an earlier version of this list
+    // that excluded it; pwsh's `-Command -`/`-File -` stdin forms are per
+    // Microsoft's own documentation (pwsh unavailable to live-verify).
     #[test]
     fn decode_fed_deno_pipe_blocks() {
         assert_decision("echo x | base64 -d | deno", Decision::Block);
