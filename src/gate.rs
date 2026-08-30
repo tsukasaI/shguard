@@ -5856,6 +5856,31 @@ fn short_cluster_contains(token: &str, c: char) -> bool {
         .is_some_and(|rest| !rest.is_empty() && !rest.starts_with('-') && rest.contains(c))
 }
 
+/// Whether `token` is `canonical` itself, or a `getopt_long`-style prefix
+/// abbreviation of it (issue #349's third gap: `xz --dec`, `basenc
+/// --decod`, etc. evaded the exact-string checks below, the same GNU
+/// "unique abbreviation" feature `crate::rules::tar_long_option_abbrev_rewrite`
+/// (issue #128) already accounts for on tar's own long options).
+///
+/// Genuinely unambiguous, real-GNU-tool-included, for every call site
+/// below EXCEPT one documented exception: none of `base64`/`base32`/
+/// `basenc`/`gzip`/`zstd`/`zstdmt`/`bzip2`'s own other long options share a
+/// `de`-prefix with `--decode`/`--decompress`/`--uncompress` (verified
+/// against each tool's own documented option list). `xz`/`lzma` are the
+/// exception: `xz` also has a `--delta` filter option, so a bare `--de`
+/// prefix is genuinely ambiguous between `--decompress` and `--delta` (real
+/// `xz` rejects it; `--dec` onward is unambiguous, matching only
+/// `--decompress`). This function doesn't special-case that — it still
+/// matches a plain `--de` against `--decompress` there — but that's still
+/// safe in this crate's fail-closed direction: a prefix real `xz` would
+/// reject as ambiguous just means the real pipeline errors out and nothing
+/// decodes at all, so recognizing it as a decode stage anyway can only
+/// ever over-flag a command that wouldn't have run in the first place,
+/// never mis-attribute a prefix that DOES run to the wrong flag.
+fn matches_long_flag_prefix(token: &str, canonical: &str) -> bool {
+    token.starts_with("--") && token.len() > 2 && canonical.starts_with(token)
+}
+
 /// Whether `token` is a POSIX-shell interpreter's `-c` flag. `fish` never
 /// reaches this: its option surface takes values in spellings this
 /// presence-only check cannot model (`-C`, `--command=`, unique-prefix
@@ -6242,27 +6267,39 @@ fn is_decode_stage(stage: &[NormalizedWord]) -> bool {
         // `short_cluster_contains` itself case-insensitive, since other
         // commands (e.g. `tar -x`/`-X`) use case to mean different things.
         "base64" | "base32" => scan_for_flag(rest_words, |s| {
-            s == "--decode" || short_cluster_contains(s, 'd') || short_cluster_contains(s, 'D')
+            s == "--decode"
+                || matches_long_flag_prefix(s, "--decode")
+                || short_cluster_contains(s, 'd')
+                || short_cluster_contains(s, 'D')
         })
         .possibly_found(),
         // `basenc` (issue #121) is coreutils-only — GNU `-d`/`--decode`
         // only, no BSD `-D` variant to account for.
         "basenc" => scan_for_flag(rest_words, |s| {
-            s == "--decode" || short_cluster_contains(s, 'd')
+            s == "--decode"
+                || matches_long_flag_prefix(s, "--decode")
+                || short_cluster_contains(s, 'd')
         })
         .possibly_found(),
         "xxd" => scan_for_flag(rest_words, |s| s == "-r").possibly_found(),
         // issue #349: `openssl <cipher-name> -d` (e.g. `openssl aes-256-cbc
         // -d`) is functionally identical to `openssl enc -<cipher-name> -d`
-        // but isn't recognized here — the first word is the cipher name,
-        // not `enc`/`base64`. Recognizing it would mean enumerating (or
-        // pattern-matching) OpenSSL's cipher-name list, which risks false
-        // positives against unrelated first words; tracked rather than
-        // fixed here.
+        // — the first word is the cipher name, not `enc`/`base64`.
+        // `OPENSSL_ENC_CIPHER_NAMES` lists the common symmetric cipher
+        // names `openssl enc`'s own `-ciphername` flags accept (per
+        // `openssl enc -ciphers`/`openssl list -cipher-algorithms`) —
+        // deliberately not exhaustive (OpenSSL's algorithm/mode product is
+        // large and grows with each release), but wide enough to catch the
+        // realistic decode-then-execute shape rather than risk false
+        // positives against an arbitrarily-guessed pattern match.
         "openssl" => {
             let first_could_be_decode_subcommand =
                 rest_words.first().is_some_and(|w| match w.resolution() {
-                    Resolution::Resolved(s) => s == "enc" || s == "base64",
+                    Resolution::Resolved(s) => {
+                        s == "enc"
+                            || s == "base64"
+                            || OPENSSL_ENC_CIPHER_NAMES.contains(&s.as_str())
+                    }
                     Resolution::Unresolvable(_) => true,
                 });
             first_could_be_decode_subcommand
@@ -6272,24 +6309,99 @@ fn is_decode_stage(stage: &[NormalizedWord]) -> bool {
         // `lzma` legacy-format sibling, which shares xz's `-d`/
         // `--decompress`/`--uncompress` flag surface) all compress by
         // default and only decompress with an explicit flag — unlike their
-        // `un*`/`*cat` siblings below. issue #349: none of these flag
-        // checks recognize unambiguous GNU long-option abbreviations
-        // (`--dec`, `--decomp`) the way `getopt_long` itself does; tracked
-        // rather than fixed here, since a safe abbreviation matcher would
-        // touch every long-flag check in this file, not just these arms.
-        "gzip" | "xz" | "zstd" | "lzma" | "zstdmt" => scan_for_flag(rest_words, |s| {
-            s == "--decompress" || s == "--uncompress" || short_cluster_contains(s, 'd')
+        // `un*`/`*cat` siblings below. `pigz`/`pzstd` (parallel gzip/zstd,
+        // issue #349) share their respective serial tool's exact flag
+        // surface.
+        "gzip" | "xz" | "zstd" | "lzma" | "zstdmt" | "pigz" | "pzstd" => {
+            scan_for_flag(rest_words, |s| {
+                s == "--decompress"
+                    || s == "--uncompress"
+                    || matches_long_flag_prefix(s, "--decompress")
+                    || matches_long_flag_prefix(s, "--uncompress")
+                    || short_cluster_contains(s, 'd')
+            })
+            .possibly_found()
+        }
+        // `bzip2`'s parallel implementation, `pbzip2` (issue #349), shares
+        // its exact flag surface.
+        "bzip2" | "pbzip2" => scan_for_flag(rest_words, |s| {
+            s == "--decompress"
+                || matches_long_flag_prefix(s, "--decompress")
+                || short_cluster_contains(s, 'd')
         })
         .possibly_found(),
-        "bzip2" => scan_for_flag(rest_words, |s| {
-            s == "--decompress" || short_cluster_contains(s, 'd')
+        // `lz4` (issue #349) compresses by default like gzip/xz/zstd, using
+        // the identical `-d`/`--decompress` spelling.
+        "lz4" => scan_for_flag(rest_words, |s| {
+            s == "--decompress"
+                || matches_long_flag_prefix(s, "--decompress")
+                || short_cluster_contains(s, 'd')
         })
         .possibly_found(),
+        // `brotli` (issue #349) compresses by default, using `-d`/
+        // `--decompress`.
+        "brotli" => scan_for_flag(rest_words, |s| {
+            s == "--decompress"
+                || matches_long_flag_prefix(s, "--decompress")
+                || short_cluster_contains(s, 'd')
+        })
+        .possibly_found(),
+        // issue #349: decompress-only alias binaries, sharing their parent
+        // tool's exact "always reads/decompresses, no flag needed" shape
+        // that `gunzip`/`zcat`/etc. below already have — `gzcat` (ships in
+        // macOS's own `/usr/bin`), `uncompress` (the classic
+        // compress(1)/LZW decompressor), and xz's own `lz4cat`/`unlz4`
+        // siblings (parallel to `xzcat`/`unxz` below).
         "rev" | "tr" | "gunzip" | "zcat" | "uudecode" | "unxz" | "xzcat" | "bunzip2" | "bzcat"
-        | "unzstd" | "zstdcat" | "unlzma" | "lzcat" | "xzdec" | "lzmadec" => true,
+        | "unzstd" | "zstdcat" | "unlzma" | "lzcat" | "xzdec" | "lzmadec" | "gzcat"
+        | "uncompress" | "lz4cat" | "unlz4" => true,
         _ => false,
     }
 }
+
+/// Common symmetric cipher names `openssl enc -ciphername` accepts as a
+/// direct subcommand (`openssl aes-256-cbc -d`, functionally identical to
+/// `openssl enc -aes-256-cbc -d`) — see `is_decode_stage`'s `"openssl"`
+/// arm. Not exhaustive: OpenSSL's cipher/mode product (AES × key size ×
+/// block mode, plus legacy ciphers) is large and grows across releases: a
+/// pipeline into an unlisted cipher name still floors to the ordinary
+/// pipe-into-interpreter `Ask` (`evaluate_pipeline_shape`), it just misses
+/// THIS stage's own upgrade to `Block`.
+const OPENSSL_ENC_CIPHER_NAMES: &[&str] = &[
+    "aes-128-cbc",
+    "aes-192-cbc",
+    "aes-256-cbc",
+    "aes-128-ecb",
+    "aes-192-ecb",
+    "aes-256-ecb",
+    "aes-128-cfb",
+    "aes-192-cfb",
+    "aes-256-cfb",
+    "aes-128-ofb",
+    "aes-192-ofb",
+    "aes-256-ofb",
+    "aes-128-ctr",
+    "aes-192-ctr",
+    "aes-256-ctr",
+    "aes-128-gcm",
+    "aes-192-gcm",
+    "aes-256-gcm",
+    "aes128",
+    "aes192",
+    "aes256",
+    "des-ede3-cbc",
+    "des-ede3",
+    "des3",
+    "des-cbc",
+    "des",
+    "bf-cbc",
+    "bf",
+    "rc4",
+    "chacha20",
+    "camellia-128-cbc",
+    "camellia-192-cbc",
+    "camellia-256-cbc",
+];
 
 // ---------------------------------------------------------------------
 // CwdContext: issue #103's folded, same-line working-directory tracking
@@ -8556,6 +8668,130 @@ mod tests {
     #[test]
     fn bzip2_bare_compress_is_not_a_decode_stage() {
         assert_decision("bzip2 -c file.txt | sh", Decision::Ask);
+    }
+
+    // ==== Issue #349: decode-stage enumeration gaps ====
+
+    // ---- part 1: missing alias binaries ----
+
+    #[test]
+    fn gzcat_fed_interpreter_pipe_blocks() {
+        assert_decision("cat payload.gz | gzcat | sh", Decision::Block);
+    }
+
+    #[test]
+    fn uncompress_fed_interpreter_pipe_blocks() {
+        assert_decision("cat payload.Z | uncompress | sh", Decision::Block);
+    }
+
+    #[test]
+    fn lz4cat_fed_interpreter_pipe_blocks() {
+        assert_decision("cat payload.lz4 | lz4cat | sh", Decision::Block);
+    }
+
+    #[test]
+    fn unlz4_fed_interpreter_pipe_blocks() {
+        assert_decision("cat payload.lz4 | unlz4 | sh", Decision::Block);
+    }
+
+    #[test]
+    fn pigz_decompress_flag_fed_interpreter_pipe_blocks() {
+        assert_decision("cat payload.gz | pigz -d | sh", Decision::Block);
+    }
+
+    #[test]
+    fn pigz_bare_compress_is_not_a_decode_stage() {
+        assert_decision("pigz -c file.txt | sh", Decision::Ask);
+    }
+
+    #[test]
+    fn pbzip2_decompress_flag_fed_interpreter_pipe_blocks() {
+        assert_decision("cat payload.bz2 | pbzip2 -d | sh", Decision::Block);
+    }
+
+    #[test]
+    fn pzstd_decompress_flag_fed_interpreter_pipe_blocks() {
+        assert_decision("cat payload.zst | pzstd -d | sh", Decision::Block);
+    }
+
+    #[test]
+    fn lz4_decompress_flag_fed_interpreter_pipe_blocks() {
+        assert_decision("cat payload.lz4 | lz4 -d | sh", Decision::Block);
+    }
+
+    #[test]
+    fn lz4_bare_compress_is_not_a_decode_stage() {
+        assert_decision("lz4 -c file.txt | sh", Decision::Ask);
+    }
+
+    #[test]
+    fn brotli_decompress_flag_fed_interpreter_pipe_blocks() {
+        assert_decision("cat payload.br | brotli -d | sh", Decision::Block);
+    }
+
+    #[test]
+    fn brotli_bare_compress_is_not_a_decode_stage() {
+        assert_decision("brotli -c file.txt | sh", Decision::Ask);
+    }
+
+    // ---- part 2: openssl cipher-name subcommand shape ----
+
+    #[test]
+    fn openssl_cipher_name_subcommand_decode_fed_interpreter_pipe_blocks() {
+        assert_decision(
+            "echo cm0gLXJmIC8= | openssl aes-256-cbc -d -k p | sh",
+            Decision::Block,
+        );
+    }
+
+    #[test]
+    fn openssl_cipher_name_subcommand_encode_direction_only_asks() {
+        // No `-d`: this ENCRYPTS, so it must fall through to the plain
+        // "unknown piped content" Ask, not the decode-stage Block.
+        assert_decision("echo hi | openssl aes-256-cbc -k p | sh", Decision::Ask);
+    }
+
+    #[test]
+    fn openssl_unrecognized_first_word_is_not_a_decode_stage() {
+        // Regression guard: an OpenSSL subcommand that is neither `enc`/
+        // `base64` nor a recognized cipher name must not be swept up by
+        // the widened first-word check just because a later `-d` appears.
+        assert_decision("echo hi | openssl req -d -x509 | sh", Decision::Ask);
+    }
+
+    // ---- part 3: GNU long-option abbreviations ----
+
+    #[test]
+    fn xz_decompress_abbreviation_fed_interpreter_pipe_blocks() {
+        assert_decision("cat payload.xz | xz --dec | sh", Decision::Block);
+    }
+
+    #[test]
+    fn basenc_decode_abbreviation_fed_interpreter_pipe_blocks() {
+        assert_decision(
+            "echo cm0gLXJmIC8= | basenc --base64 --dec | sh",
+            Decision::Block,
+        );
+    }
+
+    #[test]
+    fn base64_decode_abbreviation_fed_interpreter_pipe_blocks() {
+        assert_decision("echo cm0gLXJmIC8= | base64 --dec | sh", Decision::Block);
+    }
+
+    #[test]
+    fn gzip_decompress_abbreviation_fed_interpreter_pipe_blocks() {
+        assert_decision("cat payload.gz | gzip --decomp | sh", Decision::Block);
+    }
+
+    #[test]
+    fn xz_unrelated_long_flag_is_not_treated_as_an_abbreviation() {
+        // Regression guard: `--delta` shares xz's own `de` prefix with
+        // `--decompress` (a real ambiguity in xz's own option parser,
+        // documented on `matches_long_flag_prefix`) but is an unrelated
+        // filter flag, not a decompress abbreviation, and carries no
+        // actual decode-stage danger on its own.
+        assert_decision("cat payload.xz | xz --delta=dist=1 | sh", Decision::Ask);
     }
 
     #[test]
