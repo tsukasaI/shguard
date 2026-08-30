@@ -900,6 +900,24 @@ fn apply_attached_word_and_redirect_checks(
         worst = fold_worst(worst, floored);
     }
 
+    // Issue #341: the same directory-stack tilde floor
+    // `evaluate_simple_command` applies to a command's own redirects,
+    // extended to a compound command's/extended test's own attached
+    // redirects, mirroring how issue #78's ascent-descent floor just above
+    // is already shared between the two.
+    if let Some((floor_decision, floor_reason)) =
+        scan_redirect_dirstack_tilde_floor(redirections, rules)
+    {
+        let argv = worst.normalized_argv().to_vec();
+        let floored = match floor_decision {
+            Decision::Ask => Verdict::ask(Reason::new(floor_reason), argv),
+            Decision::Block | Decision::Allow => {
+                unreachable!("scan_redirect_dirstack_tilde_floor only ever produces Ask")
+            }
+        };
+        worst = fold_worst(worst, floored);
+    }
+
     // Issue #203: the same `$HOME`-vs-`~` correlation floor
     // `evaluate_simple_command` applies to a command's own redirects,
     // extended to a compound command's/function definition's/extended
@@ -1382,6 +1400,38 @@ fn scan_redirect_ascent_descent_floor(
     ))
 }
 
+/// Issue #341: `Some(Ask, reason)` when any resolved redirect-write target
+/// in `redirections` (via [`resolved_redirect_write_targets`]) is a bare
+/// directory-stack tilde shorthand (`~+`/`~-`/`~N`) or a `..` step above one
+/// (`~+/..`) that would sit at or above the directory it denotes
+/// ($PWD/$OLDPWD/a pushd-stack entry) if it expanded, matching one of
+/// [`crate::rules::RedirectRule`]'s own targets — `None` otherwise. Same
+/// Ask-only floor reasoning as [`scan_dirstack_tilde_floor`], extended to
+/// shell redirect syntax (`> ...`, `>> ...`) rather than argv-based targets
+/// (`rm -rf ~+`), which carries the identical target namespace via a
+/// separate Rust type (`RedirectRule`, not `CommandRule`) — the same
+/// argv/redirect split [`scan_redirect_ascent_descent_floor`] already
+/// mirrors for issue #78's ascent-descent floor.
+fn scan_redirect_dirstack_tilde_floor(
+    redirections: &[Redirection],
+    rules: &Rules,
+) -> Option<(Decision, String)> {
+    let rule = resolved_redirect_write_targets(redirections)
+        .iter()
+        .find_map(|target| rules.match_redirect_target_dirstack_tilde(target))?;
+    Some((
+        Decision::Ask,
+        format!(
+            "a redirect target is a directory-stack tilde shorthand (`~+`/`~-`/`~N`) or a `..` \
+             step above one (`~+/..`) that would sit at or above the directory it denotes \
+             ($PWD/$OLDPWD/a pushd-stack entry) if it expanded, matching redirect rule {:?} \
+             ({}); shguard has no cwd or directory stack to resolve it against",
+            rule.id().as_str(),
+            rule.reason().as_str(),
+        ),
+    ))
+}
+
 /// Whether a resolved duplication-redirect target value denotes a real fd
 /// operation (a bare fd number, or `-` to request closure) rather than a
 /// genuine filesystem path — see [`check_redirect_targets`]'s docs.
@@ -1670,6 +1720,14 @@ fn evaluate_simple_command(
     // hard match on the *unwidened* target set, so it doesn't see this).
     let redirect_ascent_descent_floor =
         scan_redirect_ascent_descent_floor(&command.redirections, rules);
+    // Issue #341: the same directory-stack tilde floor `scan_dirstack_tilde_floor`
+    // applies to argv-based targets, extended to the command's own shell
+    // redirect targets (`> ...`/`>> ...`) — a separate Rust type
+    // (`RedirectRule`) carries the identical target namespace. Computed
+    // here for the same reason: this floor must survive `core`'s early
+    // returns too.
+    let redirect_dirstack_tilde_floor =
+        scan_redirect_dirstack_tilde_floor(&command.redirections, rules);
     // Issue #203: a redirect-write target beginning with `$HOME`/`${HOME}`
     // that would match a redirect rule if `~` (the same runtime value)
     // stood in its place. shguard performs no environment lookups, so
@@ -1747,6 +1805,7 @@ fn evaluate_simple_command(
     let tar_dashless_floor_present = tar_dashless_floor.is_some();
     let ascent_descent_floor_present = ascent_descent_floor.is_some();
     let redirect_ascent_descent_floor_present = redirect_ascent_descent_floor.is_some();
+    let redirect_dirstack_tilde_floor_present = redirect_dirstack_tilde_floor.is_some();
     let redirect_home_env_floor_present = redirect_home_env_floor.is_some();
     let redirect_rule_ask_floor_present = redirect_rule_ask_floor.is_some();
     let named_user_home_floor_present = named_user_home_floor.is_some();
@@ -1759,6 +1818,7 @@ fn evaluate_simple_command(
     let verdict = apply_tar_dashless_floor(verdict, tar_dashless_floor);
     let verdict = apply_command_ascent_descent_floor(verdict, ascent_descent_floor);
     let verdict = apply_ascent_descent_floor(verdict, redirect_ascent_descent_floor);
+    let verdict = apply_ascent_descent_floor(verdict, redirect_dirstack_tilde_floor);
     let verdict = apply_ascent_descent_floor(verdict, redirect_home_env_floor);
     let verdict = apply_ascent_descent_floor(verdict, redirect_rule_ask_floor);
     let verdict = apply_named_user_home_floor(verdict, named_user_home_floor);
@@ -1808,6 +1868,11 @@ fn evaluate_simple_command(
     // `magic_equal_subst` uncertainty, for the same `$PWD`/`$OLDPWD`/
     // pushd-stack anchor `dirstack_tilde_floor_present` already covers for
     // the unattached case.
+    // `redirect_dirstack_tilde_floor_present` (issue #341) extends it once
+    // more, pairing `dirstack_tilde_floor_present`: an allow entry for
+    // `echo`/`cat` is not consent to a redirect target that is a
+    // `~+`/`~-`/`~N` directory-stack tilde token (or a `..` step above one)
+    // that would land in that same rule's namespace once it expanded.
     // `redirect_home_env_floor_present` (issue #203) extends it once
     // more, for the same reason `redirect_rule_ask_floor_present` below
     // does: an allow entry for `echo`/`cat` is not consent to a `$HOME`-
@@ -1830,6 +1895,7 @@ fn evaluate_simple_command(
         || tar_dashless_floor_present
         || ascent_descent_floor_present
         || redirect_ascent_descent_floor_present
+        || redirect_dirstack_tilde_floor_present
         || redirect_home_env_floor_present
         || redirect_rule_ask_floor_present
         || named_user_home_floor_present
@@ -9762,6 +9828,73 @@ mod tests {
         // RedirectRule shares TargetMatcher::ascent_descent_plausible
         // underneath (see rules.rs's ascent_descent_redirect_dirstack_tilde_descent_floors).
         assert_decision("echo hi > ~-/dev/sda", Decision::Ask);
+    }
+
+    // ==== Issue #341: the bare-anchor/escape-to-empty dirstack tilde floor
+    // (issues #88/#133) had no redirect-target equivalent — `echo hi > ~+`/
+    // `echo hi > ~+/..` stayed Allow while the argv equivalents (`rm -rf
+    // ~+`, `rm -rf ~+/..`) already floored to Ask. Distinct from
+    // `redirect_dirstack_tilde_descent_to_dev_asks` just above, which
+    // exercises the pre-existing ASCENT-DESCENT mechanism (a dirstack
+    // anchor plus a real descended tail), not this bare-anchor one. ====
+
+    #[test]
+    fn redirect_bare_dirstack_tilde_plus_asks() {
+        assert_decision("echo hi > ~+", Decision::Ask);
+    }
+
+    #[test]
+    fn redirect_bare_dirstack_tilde_minus_asks() {
+        assert_decision("echo hi > ~-", Decision::Ask);
+    }
+
+    #[test]
+    fn redirect_bare_dirstack_tilde_numbered_asks() {
+        assert_decision("echo hi > ~3", Decision::Ask);
+    }
+
+    #[test]
+    fn redirect_dirstack_tilde_escape_to_empty_tail_asks() {
+        assert_decision("echo hi > ~+/..", Decision::Ask);
+        assert_decision("echo hi > ~-/..", Decision::Ask);
+        assert_decision("echo hi > ~2/..", Decision::Ask);
+    }
+
+    #[test]
+    fn redirect_append_bare_dirstack_tilde_asks() {
+        assert_decision("echo hi >> ~+", Decision::Ask);
+    }
+
+    #[test]
+    fn redirect_dirstack_tilde_non_escaping_descent_stays_allow() {
+        // Regression guard, mirroring `rm_rf_dirstack_tilde_non_escaping_descent_stays_allow`:
+        // a real (non-escaping) subdirectory tail must not be swept into
+        // the escape-to-empty floor above just because it shares a
+        // dirstack anchor.
+        assert_decision("echo hi > ~+/subdir", Decision::Allow);
+    }
+
+    #[test]
+    fn compound_command_redirect_bare_dirstack_tilde_asks() {
+        // Issue #341's floor is shared between a SimpleCommand's own
+        // redirects and a compound command's/extended test's attached
+        // redirects (`apply_attached_word_and_redirect_checks`), mirroring
+        // how issue #78's ascent-descent floor already is.
+        assert_decision("{ echo hi; } > ~+", Decision::Ask);
+    }
+
+    #[test]
+    fn allowlisted_echo_still_asks_on_redirect_dirstack_tilde() {
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[allow]]
+            id = "user-allow-echo"
+            reason = "trust me"
+            command = "echo"
+        "#,
+        );
+        let verdict = analyze_with_policy("echo hi > ~+", &rules, &allowlist);
+        assert_eq!(verdict.decision(), Decision::Ask);
     }
 
     #[test]
