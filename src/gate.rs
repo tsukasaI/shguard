@@ -2133,6 +2133,50 @@ fn evaluate_simple_command_core(
         );
     }
 
+    // Rule 6e (issue #365): ksh93's `builtin -f <libname> ...` dlopen()s an
+    // arbitrary shared object the same way `enable -f` does (rules/
+    // blocklist.toml's `enable-loadable-builtin`) — checked against the raw
+    // wrapper chain, not `effective`, since `effective_command`'s generic
+    // dash-flag skip would otherwise mis-resolve `libname` itself as the
+    // wrapped command (see `crate::rules::builtin_loadable_library`'s docs).
+    match crate::rules::builtin_loadable_library(&argv) {
+        crate::rules::BuiltinLoadableLibrary::Present => {
+            return apply_leftover_substitution_floor(
+                apply_escalation_floor(
+                    Verdict::block(
+                        Reason::new(
+                            "builtin -f dlopen()s an arbitrary shared object and runs its \
+                             exported code as a new shell builtin"
+                                .to_string(),
+                        ),
+                        argv.clone(),
+                        None,
+                    ),
+                    escalation_floor,
+                ),
+                leftover_floor,
+            );
+        }
+        crate::rules::BuiltinLoadableLibrary::Uncertain => {
+            return apply_leftover_substitution_floor(
+                apply_escalation_floor(
+                    Verdict::ask(
+                        Reason::new(
+                            "`builtin`'s own leading token could not be statically resolved, so \
+                             whether it is a flag that loads a shared object (`-f`) or the \
+                             dispatched command's own name cannot be determined"
+                                .to_string(),
+                        ),
+                        argv.clone(),
+                    ),
+                    escalation_floor,
+                ),
+                leftover_floor,
+            );
+        }
+        crate::rules::BuiltinLoadableLibrary::Absent => {}
+    }
+
     // Rule 6b: `python -c`/`perl -e`/`node -e` — no introspection of
     // non-shell code, unconditional Ask floor. Rule 6d (issue #195): awk's
     // script has no `-c`/`-e`-style flag at all — it's the first bare
@@ -9490,13 +9534,15 @@ mod tests {
     }
 
     // ksh93's `builtin -f <libname>` shares bash `enable -f`'s exact
-    // loadable-builtins shape (verified against ksh93's own manual), but
-    // is NOT covered by a rule here -- unlike `enable`, `builtin` is ALSO
-    // a TRANSPARENT_WRAPPERS dispatcher (issue #245), so a naive
-    // `required_flags = ["f"]` rule false-matches any wrapped command
-    // that happens to use `-f`/`-rf` (confirmed during development: it
-    // broke `builtin_unresolvable_command_floors_to_ask` below). Tracked
-    // as issue #365 rather than shipped with that false-positive.
+    // loadable-builtins shape (verified against ksh93's own manual). Unlike
+    // `enable`, `builtin` is ALSO a TRANSPARENT_WRAPPERS dispatcher (issue
+    // #245), so a naive `required_flags = ["f"]` blocklist rule
+    // false-matches any wrapped command that happens to use `-f`/`-rf`
+    // (confirmed during development of that rule: it broke
+    // `builtin_unresolvable_command_floors_to_ask` below) -- issue #365
+    // closes the gap with position-aware code-level detection instead
+    // (`crate::rules::builtin_loadable_library`), scanning `builtin`'s own
+    // LEADING run of dash-prefixed tokens rather than its whole argv.
     #[test]
     fn ordinary_builtin_dispatch_is_unaffected_by_the_enable_loadable_builtin_rule() {
         // Regression guard: issue #246's new rule must not shadow or
@@ -9504,6 +9550,64 @@ mod tests {
         // decisions, including a wrapped command's own `-f`/`-rf` flags.
         assert_decision("builtin cd /tmp", Decision::Allow);
         assert_decision("builtin rm -rf /", Decision::Block);
+    }
+
+    // Issue #365: ksh93's `builtin -f <libname> ...` own loadable-library
+    // flag, distinguished from the wrapped command's own `-f`/`-rf` by
+    // position (builtin's own flag is only ever its first argv word).
+
+    #[test]
+    fn builtin_loadable_library_with_following_name_blocks() {
+        assert_decision("builtin -f /tmp/evil.so somefn", Decision::Block);
+    }
+
+    #[test]
+    fn builtin_loadable_library_with_no_following_name_still_blocks() {
+        assert_decision("builtin -f /tmp/evil.so", Decision::Block);
+    }
+
+    #[test]
+    fn builtin_loadable_library_glued_value_still_blocks() {
+        assert_decision("builtin -f/tmp/evil.so x", Decision::Block);
+    }
+
+    #[test]
+    fn builtin_loadable_library_clustered_with_dash_d_still_blocks() {
+        assert_decision("builtin -df /tmp/evil.so", Decision::Block);
+    }
+
+    #[test]
+    fn builtin_dash_d_alone_is_not_a_loadable_library_load() {
+        assert_decision("builtin -d cd", Decision::Allow);
+    }
+
+    // Fable review of PR #372: the first version of this detection checked
+    // only `builtin`'s very first tail token, so a SEPARATED leading flag
+    // (`-d -f lib`, lexically identical to clustered `-df lib` in ksh's own
+    // option parser) slipped through as a real bypass.
+    #[test]
+    fn builtin_loadable_library_separated_dash_d_dash_f_still_blocks() {
+        assert_decision("builtin -d -f /tmp/evil.so", Decision::Block);
+    }
+
+    #[test]
+    fn builtin_loadable_library_separated_unrelated_flag_before_dash_f_still_blocks() {
+        assert_decision("builtin -s -f /tmp/evil.so", Decision::Block);
+    }
+
+    #[test]
+    fn builtin_wrapped_commands_own_dash_f_is_not_builtins_own() {
+        // `builtin`'s own `-f`/`-d` only ever appears in its LEADING run of
+        // dash-prefixed tokens (ending at the first bare name/`--`) -- once
+        // a bare command name leads, every later `-f`/`-rf` belongs to the
+        // WRAPPED command, not to `builtin` itself (the exact false-positive
+        // shape a plain `required_flags` rule couldn't avoid).
+        assert_decision("builtin rm -rf /tmp/x", Decision::Allow);
+    }
+
+    #[test]
+    fn builtin_loadable_library_through_sudo_wrapper_still_blocks() {
+        assert_decision("sudo builtin -f /tmp/evil.so somefn", Decision::Block);
     }
 
     #[test]

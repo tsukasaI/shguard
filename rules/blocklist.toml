@@ -1910,7 +1910,11 @@ required_flags = ["f"]
 # that happens to use `-f`/`-rf`/etc. (confirmed: `builtin $CMD -rf /`
 # wrongly matched during development of this rule, since `required_flags`
 # scans the whole argv for the letter at ANY position, not specifically
-# builtin's own leading flag). Closing this needs either a schema
-# extension (a position-constrained flag field) or code-level detection
-# distinguishing "builtin's own -f" from "the wrapped command's -f" —
-# tracked as issue #365 rather than shipping a false-positive-prone check.
+# builtin's own leading flag). Issue #365 closes this with code-level
+# detection instead — `crate::rules::builtin_loadable_library` (src/rules.rs),
+# consumed by `src/gate.rs`'s rule 6e — scanning `builtin`'s own LEADING run
+# of dash-prefixed tokens (stopping at the first bare name/`--`, which is
+# the only place `builtin`'s own options can ever appear in ksh's grammar)
+# for `f` in any cluster, rather than just the first tail token: ksh's
+# option parser treats separated `-d -f lib` identically to clustered
+# `-df lib`.
