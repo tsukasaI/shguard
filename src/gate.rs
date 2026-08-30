@@ -316,7 +316,8 @@ use std::collections::HashMap;
 
 use crate::ast::{
     Assignment, AssignmentValue, Command, CommandLine, CompoundCommand, ElifClause, ExtendedTest,
-    FileRedirectionKind, FunctionDefinition, Pipeline, Redirection, SimpleCommand, Word, WordPiece,
+    FileRedirectionKind, FunctionDefinition, Pipeline, Redirection, Separator, SimpleCommand, Word,
+    WordPiece,
 };
 use crate::normalize::{self, NormalizedWord, Resolution, UnresolvableKind};
 use crate::parser;
@@ -465,11 +466,57 @@ fn evaluate_command_line(
 ) -> Verdict {
     let mut env = Env::new();
     let mut worst = evaluate_pipeline(&command_line.first, &mut env, rules, allowlist, depth, cwd);
-    for (_separator, pipeline) in &command_line.rest {
+    let mut prev_untrustworthy = pipeline_reported_success_is_untrustworthy(&command_line.first);
+    for (separator, pipeline) in &command_line.rest {
+        // Issue #353: `&&` only guarantees the preceding pipeline actually
+        // succeeded when that pipeline wasn't itself `!`-negated — `!
+        // pushd X` reports SUCCESS to `&&` even when the real `pushd`
+        // failed, so a negated pipeline must be treated exactly like a
+        // non-`&&` separator here. Every separator OTHER than `&&` (`;`,
+        // `||`, `&`) already makes the real-world "it failed" branch
+        // reachable regardless of `bang`, which is exactly where
+        // `apply_pushd`'s assume-success gap can desync the tracked stack
+        // from reality. See `CwdState::collapse_stack_on_uncertain_crossing`'s
+        // own docs.
+        if *separator != Separator::And || prev_untrustworthy {
+            cwd.collapse_stack_on_uncertain_crossing();
+        }
+        prev_untrustworthy = pipeline_reported_success_is_untrustworthy(pipeline);
         let verdict = evaluate_pipeline(pipeline, &mut env, rules, allowlist, depth, cwd);
         worst = fold_worst(worst, verdict);
     }
     worst
+}
+
+/// Whether a pipeline's own reported exit status can't be trusted to mean
+/// "the state-mutating command inside it actually succeeded" — the
+/// condition [`evaluate_command_line`] uses to decide a `&&` crossing still
+/// needs `cwd`'s stack collapsed.
+///
+/// A `!`-negated pipeline is the direct case (`! pushd X` reports SUCCESS
+/// to `&&` even when the real `pushd` failed). A single-stage brace group
+/// is the indirect case: its own reported status IS its body's *last*
+/// pipeline's status, so a bang on that last inner pipeline is exactly as
+/// untrustworthy as a bang on the group itself, but invisible to the
+/// group's own `bang` field (which brush-parser only sets for a bang
+/// directly preceding the group). Recurses through nested brace groups
+/// (`{ { ! pushd X; }; }`) for the same reason. Deliberately does NOT
+/// recurse into a `Subshell` (its body mutates a cloned `cwd`, so no
+/// phantom frame can ever reach the caller — `evaluate_pipeline`'s own
+/// docs) or a multi-stage pipeline (never mutates `cwd` at all, same
+/// docs), and `for`/`while`/`until`/`if` bodies already poison `cwd`
+/// outright rather than relying on this collapse (strictly stronger).
+fn pipeline_reported_success_is_untrustworthy(pipeline: &Pipeline) -> bool {
+    if pipeline.bang {
+        return true;
+    }
+    if pipeline.rest.is_empty()
+        && let Command::Compound(CompoundCommand::BraceGroup { body, .. }) = &pipeline.first
+    {
+        let last = body.rest.last().map_or(&body.first, |(_, pl)| pl);
+        return pipeline_reported_success_is_untrustworthy(last);
+    }
+    false
 }
 
 /// Folds every stage of a [`Pipeline`] plus the pipeline-shape rules (rule
@@ -6620,6 +6667,49 @@ impl CwdState {
         self.current = CwdContext::Poisoned;
         self.stack.clear();
     }
+
+    /// Issue #353's mitigation: collapses a non-empty stack down to a
+    /// single [`CwdContext::Poisoned`] sentinel — the same "one or more
+    /// real frames exist here, contents unknown" shape [`Self::seed_unknown_stack`]
+    /// seeds with — leaving `current` untouched. Called at every
+    /// [`crate::ast::Separator`] in a [`crate::ast::CommandLine`] that
+    /// does NOT guarantee the preceding pipeline succeeded (every
+    /// separator except `&&`, OR `&&` following a pipeline whose reported
+    /// success is untrustworthy per
+    /// `crate::gate::pipeline_reported_success_is_untrustworthy` — a
+    /// `!`-negated pipeline reports SUCCESS to `&&` even when the real
+    /// command inside failed, since negation flips the reported exit
+    /// status, not whether the command itself ran; a single-stage brace
+    /// group whose own last inner pipeline is so negated inherits the
+    /// same untrustworthiness, since the group's reported status IS that
+    /// last pipeline's) whenever the stack is non-empty.
+    ///
+    /// [`apply_pushd`]'s own known limitation (assume-success: a `pushd X`
+    /// this module resolves is always assumed to actually `cd` there) means
+    /// the tracked stack can desync from reality the instant a resolved
+    /// push's target doesn't really exist — a real `pushd` to a
+    /// nonexistent target fails outright (no push, no `cd`), so this
+    /// module's stack ends up one frame deeper than reality from that
+    /// point on. Under `&&`-only continuation this is harmless: if the
+    /// real `pushd` fails, `&&` never runs what follows, so any verdict
+    /// about it is vacuous. Once a `;`/`||`/`&` separator makes that
+    /// failure-world reachable, though, a later `popd` recovers whichever
+    /// of TWO adjacent real-world outcomes shguard can no longer
+    /// distinguish — exactly the shape [`CwdContext::Poisoned`] already
+    /// exists to represent. Collapsing at the crossing rather than at
+    /// every individual resolved `pushd` (which would degenerate into
+    /// treating any `pushd` as unverifiable, discarding issue #210's value
+    /// for the extremely common `pushd X && ... && popd` shape entirely)
+    /// confines the cost to command lines that are ACTUALLY two-world —
+    /// still a real precision loss for a benign `pushd /tmp; make; popd`,
+    /// but strictly better than pre-#210's poison-on-any-`pushd` baseline,
+    /// and never worse than the already-accepted plain-`cd` gap (issue
+    /// #103) `current` alone still carries after the collapse.
+    fn collapse_stack_on_uncertain_crossing(&mut self) {
+        if !self.stack.is_empty() {
+            self.stack = vec![CwdContext::Poisoned];
+        }
+    }
 }
 
 /// One `cd`/`pushd` invocation's own target, classified by [`cd_directive`]
@@ -6830,18 +6920,18 @@ fn apply_cwd_effect(cwd: &mut CwdState, argv: &[NormalizedWord], env: &Env) {
 ///
 /// A target that resolves to [`CwdOutcome::Poison`] for an ordinary reason
 /// (an unresolvable word, `HOME=`/`CDPATH=` poisoning, an unmodeled
-/// [`PathForm`]) still pushes the OLD `current` before poisoning: a real
-/// `pushd` always pushes before attempting the `cd` half, even when this
-/// module can't statically resolve where that `cd` lands, so keeping that
-/// half of the model precise costs nothing and is strictly more useful
-/// than discarding it — a later `popd` CAN recover the frame beneath the
-/// poisoned one, though only as reliably as [`CwdOutcome::Resolve`]'s own
-/// known limitation below lets it (this push is exactly as
-/// assume-success-shaped as an ordinary resolved one).
+/// [`PathForm`]) still pushes the OLD `current` before poisoning: pushing
+/// keeps that half of the model as precise as it can be even when this
+/// module can't statically resolve where the `cd` half lands, so a later
+/// `popd` CAN recover the frame beneath the poisoned one, though only as
+/// reliably as [`CwdOutcome::Resolve`]'s own known limitation below lets it
+/// (this push is exactly as assume-success-shaped as an ordinary resolved
+/// one — see that limitation's own note on what a REAL failed `pushd`
+/// nets to, which is not "push, then fail to cd").
 /// [`MAX_CWD_STACK_DEPTH`] bounds this push the same way an ordinary
 /// resolved push is bounded.
 ///
-/// **Known limitation, disclosed rather than silently accepted (issue
+/// **Known limitation, mitigated rather than silently accepted (issue
 /// #353)**: a `CwdOutcome::Resolve` target (an absolute or `~`-anchored
 /// path this module can lexically resolve) is ALWAYS assumed to actually
 /// exist and actually `cd` successfully — this module never touches the
@@ -6849,13 +6939,25 @@ fn apply_cwd_effect(cwd: &mut CwdState, argv: &[NormalizedWord], env: &Env) {
 /// discloses for a bare `cd` (issue #103). For a single `cd`, a wrong
 /// assumption only miscomposes targets within that same command line's
 /// remaining scope. For `pushd`, a wrong assumption is more consequential:
-/// if `X` doesn't really exist, a real `pushd X` fails outright (no push,
-/// no `cd`), so this module's stack ends up ONE FRAME DEEPER than reality
-/// — a later `popd` then recovers the frame that's actually two pushes
-/// back in reality, not one, silently exposing a shallower (potentially
-/// more dangerous) directory than the real shell would have. Not fixable
-/// without adding filesystem access this module deliberately never has;
-/// tracked rather than silently accepted.
+/// a real `pushd X` to a nonexistent `X` fails outright — NOT "push, then
+/// fail to cd" the way this function's own poisoning arm above models an
+/// unresolvable target, but a true no-op: no push, no `cd`, stack and cwd
+/// both unchanged. If this module still recorded the push, its stack
+/// would end up one frame deeper than reality, and a later `popd` would
+/// recover the frame that's actually two pushes back in reality — exposing
+/// a shallower, potentially more dangerous directory than the real shell
+/// would ever reach. `CwdState::collapse_stack_on_uncertain_crossing`
+/// mitigates this: under `&&`-only continuation the gap is inert (a real
+/// failure means what follows never runs, so no verdict about it is
+/// reachable), and every OTHER command-line separator collapses the whole
+/// stack to the same "one or more real frames, contents unknown"
+/// [`CwdContext::Poisoned`] sentinel [`CwdState::seed_unknown_stack`]
+/// already uses — so a `popd` past an uncertain crossing floors to `Ask`
+/// (see [`scan_unknown_cwd_floor`]) instead of confidently recovering the
+/// wrong frame. `current` alone can still be stale in the failure-world
+/// after a crossing — the same, already-accepted plain-`cd` gap issue
+/// #103 has — but the stack-depth desync this issue was filed for is
+/// closed: `pushd`'s remaining gap is never worse than `cd`'s.
 fn apply_pushd(cwd: &mut CwdState, rest: &[NormalizedWord], env: &Env) {
     let target = match extract_single_target(rest) {
         Err(()) => {
@@ -13767,31 +13869,133 @@ done"#,
         );
     }
 
-    // Issue #353 (disclosed, not silently accepted): `apply_pushd` can
+    // Issue #353 (mitigated, not silently accepted): `apply_pushd` can
     // never verify a `pushd` target actually exists (this module never
-    // touches the filesystem). A `pushd` to a lexically-valid but
+    // touches the filesystem), so a `pushd` to a lexically-valid but
     // nonexistent absolute path pushes a frame this module believes is
-    // real; a real shell's `pushd` to that same nonexistent path FAILS
-    // outright (no push, no cd), so shguard's stack ends up one frame
-    // deeper than reality once such a target is involved. A later `popd`
-    // then recovers a frame that's actually one push further back in
-    // reality, exposing a shallower directory than the real shell would.
-    // Requires `;` (not `&&`, which would short-circuit on the real
-    // failed pushd in a genuine shell). Not fixable without adding
-    // filesystem access this module deliberately never has.
+    // real, while a real shell's `pushd` to that same nonexistent path
+    // FAILS outright (no push, no cd) -- requires `;` (not `&&`, which
+    // would short-circuit on the real failed pushd in a genuine shell).
+    // `CwdState::collapse_stack_on_uncertain_crossing` mitigates this: the
+    // `;` crossing collapses the whole stack to `Poisoned` before the
+    // later `popd` runs, so the followup `cp` correctly floors to `Ask`
+    // (via `scan_unknown_cwd_floor`) instead of confidently recovering the
+    // wrong (shallower, here actually MORE dangerous) frame -- was a
+    // silent Allow before this fix.
     #[test]
-    fn pushd_to_a_nonexistent_absolute_path_can_desync_a_later_popds_recovered_frame() {
-        let verdict = decide(
+    fn pushd_to_a_nonexistent_absolute_path_floors_a_later_popds_recovery_to_ask() {
+        assert_decision(
             "pushd ~/.config/shguard; pushd /tmp; pushd /nonexistent-zz-353; \
              popd; cp evil.toml config.toml",
+            Decision::Ask,
         );
-        assert_ne!(
-            verdict.decision(),
+    }
+
+    #[test]
+    fn pushd_pushd_popd_and_chain_stays_precise() {
+        // Regression guard: `&&`-only continuation is unaffected by the
+        // mitigation above -- a real failed `pushd` there means nothing
+        // after it ever runs, so no collapse is needed and this stays as
+        // precise (and as dangerous) as it already was.
+        assert_decision(
+            "pushd ~/.config/shguard && pushd /tmp && popd && cp evil.toml config.toml",
             Decision::Block,
-            "disclosed limitation (issue #353): a pushd to an unverifiable nonexistent \
-             absolute path can desync the modeled stack depth from reality, so a later popd \
-             recovers a shallower frame than a real shell would -- tracked, not silently \
-             accepted"
+        );
+    }
+
+    #[test]
+    fn pushd_semicolon_popd_benign_target_stays_allow() {
+        // Regression guard: the mitigation must not itself introduce a
+        // false Ask for a `;`-separated pushd/popd pair whose target is
+        // ordinary and undangerous either way.
+        assert_decision("pushd /tmp; make; popd; cat config.toml", Decision::Allow);
+    }
+
+    #[test]
+    fn pushd_or_chain_floors_to_ask() {
+        assert_decision(
+            "pushd ~/.config/shguard || pushd /tmp; popd; cp evil.toml config.toml",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn pushd_bang_negated_and_chain_floors_to_ask() {
+        // `! pushd X` reports SUCCESS to `&&` even when the real `pushd`
+        // failed (the negation flips exit status, not whether the pushd
+        // itself ran), so an `&&` following a NEGATED pipeline must
+        // collapse the stack exactly like any other separator --
+        // `pipeline.bang` (issue #353) threads that through from the
+        // parser.
+        assert_decision(
+            "pushd ~/.config/shguard && pushd /tmp && ! pushd /nonexistent-zz-353 && \
+             popd && cp evil.toml config.toml",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn pushd_bang_negated_floors_regardless_of_target() {
+        // `bang` floors unconditionally: the model never trusts a negated
+        // pipeline's reported status, even when the negated `pushd`
+        // targets a real, resolvable path that (unnegated) the model
+        // would otherwise track precisely. This pins that deliberate
+        // trade -- the previous state here was `Block` (precise tracking),
+        // and the `bang` check downgrades it to `Ask`.
+        assert_decision(
+            "pushd ~/.config/shguard && ! pushd /tmp && popd && cp evil.toml config.toml",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn pushd_async_separator_floors_to_ask() {
+        // The `Separator::Async` (`&`) arm of the collapse condition has
+        // the same "not `&&`" shape as `;`/`||` -- pin it explicitly
+        // alongside `pushd_or_chain_floors_to_ask`.
+        assert_decision(
+            "pushd ~/.config/shguard && pushd /nonexistent-zz-353b & popd && cp evil.toml config.toml",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn pushd_bang_negated_inside_brace_group_last_pipeline_floors_to_ask() {
+        // A brace group's own reported exit status is its body's LAST
+        // pipeline's status, so a bang on that last inner pipeline is
+        // exactly as untrustworthy to the enclosing `&&` as a bang on the
+        // group itself -- but invisible to the group's own `bang` field,
+        // which only reflects a bang directly preceding the group.
+        // `pipeline_reported_success_is_untrustworthy` recurses into a
+        // single-stage brace-group stage to see through this.
+        assert_decision(
+            "pushd ~/.config/shguard && pushd /tmp && { ! pushd /nonexistent-zz-353c; } && \
+             popd && cp evil.toml config.toml",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn pushd_bang_negated_after_other_commands_inside_brace_group_floors_to_ask() {
+        // Same as above, with an earlier, unrelated command inside the
+        // group ahead of the negated pipeline -- confirms the recursion
+        // looks at the body's LAST pipeline, not its first.
+        assert_decision(
+            "pushd ~/.config/shguard && pushd /tmp && { true; ! pushd /nonexistent-zz-353d; } && \
+             popd && cp evil.toml config.toml",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn pushd_bang_negated_brace_group_at_start_of_chain_floors_to_ask() {
+        // Same recursion, but the brace group is the very FIRST pipeline
+        // on the line -- exercises the `command_line.first` init site of
+        // `prev_untrustworthy`, not just the loop-body update site.
+        assert_decision(
+            "{ pushd ~/.config/shguard && pushd /tmp && ! pushd /nonexistent-zz-353e; } && \
+             popd && cp evil.toml config.toml",
+            Decision::Ask,
         );
     }
 

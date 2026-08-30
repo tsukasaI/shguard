@@ -338,8 +338,11 @@ fn convert_pipeline(pipeline: &bast::Pipeline) -> Result<Pipeline, ParseError> {
     // time — it changes no argv, no executed command, nothing the rule
     // engine cares about — so the flag is simply ignored rather than
     // rejected. `!` (issue #191) negates the pipeline's exit status, not
-    // which commands run — the same reasoning, so `pipeline.bang` is
-    // likewise ignored rather than rejected.
+    // which commands run, so every consumer of `Command`/`SimpleCommand`
+    // still ignores it — but `pipeline.bang` itself is carried through
+    // (issue #353) since `crate::gate::evaluate_command_line`'s pushd-stack
+    // collapse needs to know a negated pipeline's reported exit status
+    // doesn't mean the pipeline actually succeeded.
 
     let mut commands = pipeline.seq.iter();
     let first = commands
@@ -348,7 +351,11 @@ fn convert_pipeline(pipeline: &bast::Pipeline) -> Result<Pipeline, ParseError> {
     let first = convert_command(first)?;
     let rest = commands.map(convert_command).collect::<Result<_, _>>()?;
 
-    Ok(Pipeline { first, rest })
+    Ok(Pipeline {
+        first,
+        rest,
+        bang: pipeline.bang,
+    })
 }
 
 fn convert_command(command: &bast::Command) -> Result<Command, ParseError> {
