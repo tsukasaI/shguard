@@ -3179,29 +3179,30 @@ pub(crate) const EVAL_BUILTIN: &[&str] = &["eval"];
 /// ([`matches_dangerous_allow_target`] separately chains both lists too,
 /// for a different purpose — rejecting a dangerous `allow` config entry).
 ///
-/// `ruby`/`lua`/`php`/`tclsh`/`python2` (issue #125) share the same
-/// "reads and executes a script from stdin when given no file argument"
-/// property `python`/`node`/`perl` already have here — the exact sink
-/// shape rule 5b/5c exists to catch — so `base64 -d payload | ruby` was
-/// Allow the same way `| ksh` was before issue #55. `python2` specifically
-/// closes the same-issue asymmetry of listing `python3` but not the
-/// still-occasionally-present `python2`.
-const EXTRA_PIPELINE_INTERPRETERS: &[&str] = &[
-    "python", "python2", "python3", "node", "perl", "ruby", "lua", "php", "tclsh",
-];
+/// `ruby`/`lua`/`php`/`tclsh` (issue #125) share the same "reads and
+/// executes a script from stdin when given no file argument" property
+/// `python`/`node`/`perl` already have here — the exact sink shape rule
+/// 5b/5c exists to catch — so `base64 -d payload | ruby` was Allow the same
+/// way `| ksh` was before issue #55. No separate `python2`/`python3`
+/// entries: [`strip_version_suffix`] (issue #346) reduces either to
+/// `python` before this list is ever consulted, the same normalization
+/// that also covers every other versioned spelling (`ruby3.2`, `php8.2`, …)
+/// no fixed list could enumerate.
+const EXTRA_PIPELINE_INTERPRETERS: &[&str] =
+    &["python", "node", "perl", "ruby", "lua", "php", "tclsh"];
 
 /// Strips a trailing distro-style version suffix (`python3.12` -> `python`,
 /// `lua5.4` -> `lua`, `php8.2` -> `php`) so interpreter-name matching
 /// recognises versioned binaries (issue #346) without a hand-maintained list
-/// of every version. Only strips a run of trailing ASCII digits/`.` when a
-/// non-digit character remains before it, so a name that is entirely
-/// digits/dots, or has no version suffix at all, is returned unchanged —
-/// never reduced to an empty string.
-fn strip_version_suffix(name: &str) -> &str {
-    let end = name
-        .rfind(|c: char| !c.is_ascii_digit() && c != '.')
-        .map_or(0, |i| i + 1);
-    if end == 0 { name } else { &name[..end] }
+/// of every version. `trim_end_matches` (byte-index-unsafe alternatives like
+/// `rfind` + manual slicing panic on a multibyte name ending just past a
+/// non-ASCII character, e.g. `café`) only ever strips ASCII digits/`.`, so
+/// it never lands mid-character. Returns `name` unchanged if stripping would
+/// empty it (a name that is entirely digits/dots, or has no version suffix
+/// at all) — never reduced to an empty string.
+pub(crate) fn strip_version_suffix(name: &str) -> &str {
+    let stripped = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    if stripped.is_empty() { name } else { stripped }
 }
 
 /// Whether `name` is an interpreter a pipeline's final stage may be
@@ -5632,13 +5633,31 @@ pub(crate) fn apply_allowlist(verdict: &Verdict, allowlist: &Allowlist) -> Allow
 /// caught the same way an exact `command = "bash"` entry would be — a
 /// `Prefix` matcher this permissive is exactly as dangerous as an exact
 /// one.
+///
+/// An `Exact` entry additionally counts as dangerous if [`strip_version_suffix`]
+/// reduces it to one of the same candidate names (issue #346 follow-up): the
+/// gate now treats a versioned binary (`command = "bash5"`) as the
+/// interpreter it normalizes to, so an allow entry naming it exactly must be
+/// rejected the same way `command = "bash"` already is. Skipped for `Prefix`
+/// entries — a prefix is already checked against every candidate's
+/// unversioned spelling above, and stripping a version suffix from a
+/// user-supplied *prefix* (which may not even end at a version boundary)
+/// has no well-defined meaning.
 fn matches_dangerous_allow_target(entry: &CommandRule) -> bool {
-    SHELL_INTERPRETERS
-        .iter()
-        .chain(EVAL_BUILTIN.iter())
-        .chain(EXTRA_PIPELINE_INTERPRETERS.iter())
-        .chain(TRANSPARENT_WRAPPERS.iter())
-        .any(|name| entry.command.matches(name))
+    let candidates = || {
+        SHELL_INTERPRETERS
+            .iter()
+            .chain(EVAL_BUILTIN.iter())
+            .chain(EXTRA_PIPELINE_INTERPRETERS.iter())
+            .chain(TRANSPARENT_WRAPPERS.iter())
+    };
+    if candidates().any(|name| entry.command.matches(name)) {
+        return true;
+    }
+    match &entry.command {
+        CommandMatch::Exact(exact) => candidates().any(|name| strip_version_suffix(exact) == *name),
+        CommandMatch::Prefix(_) => false,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -5968,6 +5987,37 @@ mod tests {
         )];
         out.extend(rest.iter().map(|w| NormalizedWord::resolved(*w)));
         out
+    }
+
+    // ==== Issue #346: strip_version_suffix edge cases ====
+
+    #[test]
+    fn strip_version_suffix_strips_trailing_digits_and_dots() {
+        assert_eq!(strip_version_suffix("python3.12"), "python");
+        assert_eq!(strip_version_suffix("lua5.4"), "lua");
+        assert_eq!(strip_version_suffix("bash5"), "bash");
+    }
+
+    #[test]
+    fn strip_version_suffix_leaves_unversioned_name_unchanged() {
+        assert_eq!(strip_version_suffix("bash"), "bash");
+    }
+
+    #[test]
+    fn strip_version_suffix_never_empties_a_digit_only_name() {
+        assert_eq!(strip_version_suffix("123"), "123");
+    }
+
+    #[test]
+    fn strip_version_suffix_never_empties_a_dot_only_name() {
+        assert_eq!(strip_version_suffix("..."), "...");
+    }
+
+    #[test]
+    fn strip_version_suffix_is_char_boundary_safe_on_multibyte_names() {
+        // Regression: an earlier `rfind` + byte-index-slice implementation
+        // panicked here ("byte index 4 is not a char boundary").
+        assert_eq!(strip_version_suffix("café"), "café");
     }
 
     // ==== DoD 1: ["rm","-rf","/"] matches, carries reason + rule id ====
