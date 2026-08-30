@@ -2077,7 +2077,7 @@ fn evaluate_simple_command_core(
     let mut command_position_subs = Vec::new();
     let mut command_position_proc_subs = Vec::new();
     if let Some(pieces) = &command_position_pieces {
-        collect_substitutions_into(pieces, &mut command_position_subs);
+        collect_substitutions_into(pieces, true, &mut command_position_subs);
         collect_process_substitutions_into(pieces, &mut command_position_proc_subs);
     }
     if !command_position_subs.is_empty() || !command_position_proc_subs.is_empty() {
@@ -3888,7 +3888,7 @@ fn evaluate_leftover_alternative_substitutions(
     };
     for (_, pieces) in leftover_alternatives {
         let mut subs = Vec::new();
-        collect_substitutions_into(pieces, &mut subs);
+        collect_substitutions_into(pieces, true, &mut subs);
         let mut proc_subs = Vec::new();
         collect_process_substitutions_into(pieces, &mut proc_subs);
 
@@ -4924,7 +4924,7 @@ fn fold_worst(current: Verdict, new: Verdict) -> Verdict {
 /// calls rather than using this and discarding the result.
 fn alternative_has_substitution(pieces: &[WordPiece]) -> bool {
     let mut subs = Vec::new();
-    collect_substitutions_into(pieces, &mut subs);
+    collect_substitutions_into(pieces, true, &mut subs);
     if !subs.is_empty() {
         return true;
     }
@@ -4940,13 +4940,47 @@ fn alternative_has_substitution(pieces: &[WordPiece]) -> bool {
 /// (argument position: recurse each one found).
 fn collect_substitutions(word: &Word) -> Vec<&str> {
     let mut out = Vec::new();
-    collect_substitutions_into(&word.0, &mut out);
+    collect_substitutions_into(&word.0, true, &mut out);
     out
 }
 
-fn collect_substitutions_into<'a>(pieces: &'a [WordPiece], out: &mut Vec<&'a str>) {
+/// `allow_split` mirrors `normalize::resolve_piece`'s own parameter of the
+/// same name: `true` at every top-level call (unquoted context), `false`
+/// once recursed into a [`WordPiece::DoubleQuoted`] — see the
+/// [`WordPiece::CommandSubstitution`]/[`WordPiece::BackquotedSubstitution`]
+/// arm below for why this distinction matters here (issue #361).
+fn collect_substitutions_into<'a>(
+    pieces: &'a [WordPiece],
+    allow_split: bool,
+    out: &mut Vec<&'a str>,
+) {
     for piece in pieces {
         match piece {
+            // Issue #361: an UNQUOTED syntactically empty substitution
+            // (`$()`, ` `` `) contributes nothing at runtime — the same
+            // "provably empty" criterion `normalize::resolve_piece` already
+            // uses (issue #124) to fold it to an empty literal instead of
+            // `Unresolvable`, and the same `allow_split`-gated elision
+            // `chunks_to_words` applies to any other empty, unquoted,
+            // splittable segment. Skipping it here too means a substitution
+            // FUSED into a larger command-position word alongside other
+            // literal content (`r$()m -rf /`) is no longer treated as an
+            // ambiguity source on its own — `normalize_word` already
+            // resolves that word cleanly to `"rm"`, so rule 1 must not
+            // independently re-flag it as unresolvable just because this
+            // scan doesn't yet know it's empty. A QUOTED empty substitution
+            // (`"$()" rm -rf /`) is deliberately NOT skipped: bash keeps a
+            // quoted empty expansion as a real, non-vanishing empty-string
+            // word (`chunks_to_words`'s own quoted-empty-field rule) rather
+            // than eliding it, so `argv[0]` there is the literal empty
+            // string — a genuinely weird shape this scan's existing
+            // conservative Ask is the right posture for, not a shape to
+            // newly resolve through to a bare (and rule-matchless) `Allow`.
+            // A body with ANY actual content (even a no-op like `:`) keeps
+            // the ordinary ambiguity/recursion treatment regardless of
+            // quoting.
+            WordPiece::CommandSubstitution(inner) | WordPiece::BackquotedSubstitution(inner)
+                if allow_split && inner.trim().is_empty() => {}
             WordPiece::CommandSubstitution(inner) | WordPiece::BackquotedSubstitution(inner) => {
                 out.push(inner.as_str());
             }
@@ -4967,10 +5001,10 @@ fn collect_substitutions_into<'a>(pieces: &'a [WordPiece], out: &mut Vec<&'a str
             WordPiece::ArithmeticExpansion(raw) => {
                 out.extend(collect_heredoc_substitutions(raw).substitutions);
             }
-            WordPiece::DoubleQuoted(inner) => collect_substitutions_into(inner, out),
+            WordPiece::DoubleQuoted(inner) => collect_substitutions_into(inner, false, out),
             WordPiece::BraceAlternation(members) => {
                 for member in members {
-                    collect_substitutions_into(&member.0, out);
+                    collect_substitutions_into(&member.0, allow_split, out);
                 }
             }
             WordPiece::Literal(_)
@@ -8752,6 +8786,31 @@ mod tests {
         assert_decision(r#""$()" rm -rf /"#, Decision::Ask);
     }
 
+    // Fable review of PR #376: pins a real, bash-faithful decision-surface
+    // change this fix causes for a brace-alternation sibling shape —
+    // provably converging to the pre-existing baseline (both the literal
+    // `x rm -rf /` and the substitution-free `{x,rm} -rf /` were already
+    // Allow), but undocumented and unpinned until now.
+    #[test]
+    fn empty_substitution_fused_into_the_winning_brace_alternative_resolves_argv_zero() {
+        // The empty substitution lives in the WINNING alternative ("x$()",
+        // tried first) — it resolves cleanly to "x", real bash dispatches
+        // `x rm -rf /`, and the sibling "rm" is just a plain argument, not
+        // a candidate command name. Correctly Allow, not Block.
+        assert_decision("{x$(),rm} -rf /", Decision::Allow);
+    }
+
+    #[test]
+    fn empty_substitution_fused_into_a_losing_brace_alternative_still_blocks() {
+        // Mirror of the case above with the substitution-carrying member
+        // LOSING instead: "rm$()" resolves cleanly to "rm" and wins
+        // argv[0] outright (no substitution left to flag at all), so this
+        // was already Block before this fix and stays Block after it —
+        // pinned alongside the Allow case above so the pair documents the
+        // full behavior, not just one side.
+        assert_decision("{rm$(),x} -rf /", Decision::Block);
+    }
+
     #[test]
     fn command_substitution_with_real_content_command_position_still_asks() {
         // Parity control: a body with actual content (even a harmless
@@ -8771,16 +8830,38 @@ mod tests {
     }
 
     #[test]
-    fn command_substitution_fused_into_a_larger_word_stays_unresolvable() {
-        // Issue #361 (deliberately deferred, not this issue's scope): Rule
-        // 1's command-position scan detects a substitution fused into a
-        // LARGER word (`r$()m`, not a standalone empty-substitution word on
-        // its own) via the raw AST pieces directly
-        // (`collect_substitutions_into`), independent of this fix's
-        // normalization-level vanishing — so this shape must stay
-        // Unresolvable/Ask, not silently start resolving through to
-        // Allow/Block just because the underlying `$()` body is empty.
-        assert_decision("r$()m -rf /", Decision::Ask);
+    fn command_substitution_fused_into_a_larger_word_now_blocks() {
+        // Issue #361: `collect_substitutions_into` now applies the same
+        // "provably empty" criterion `normalize::resolve_piece` already
+        // uses (issue #124), so an UNQUOTED empty substitution fused into a
+        // larger word (`r$()m`, not a standalone empty-substitution word on
+        // its own) no longer floats rule 1's command-position ambiguity —
+        // `normalize_word` already resolved this word cleanly to `"rm"`,
+        // and the underlying rule now sees it.
+        assert_decision("r$()m -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn backquoted_empty_substitution_fused_into_a_larger_word_now_blocks() {
+        assert_decision("r` `m -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn empty_substitution_leading_an_ifs_packed_word_now_blocks() {
+        assert_decision("$IFS$()rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn empty_substitution_fused_into_an_ifs_packed_words_first_segment_now_blocks() {
+        assert_decision("r$()m$IFS-rf$IFS/", Decision::Block);
+    }
+
+    #[test]
+    fn command_substitution_with_real_content_fused_into_a_larger_word_still_asks() {
+        // Parity control: a body with actual content is not "provably
+        // empty" and keeps the ordinary command-position-ambiguity floor,
+        // even fused into a larger word.
+        assert_decision("r$(true)m -rf /", Decision::Ask);
     }
 
     // ==== Issue #82: an `$IFS`-packed command-position word's trailing
