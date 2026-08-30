@@ -479,12 +479,39 @@ fn fold_word(pieces: &[WordPiece], allow_split: bool) -> Vec<NormalizedWord> {
     out
 }
 
+/// Where one of [`split_command_position`]'s `leftover` entries came from —
+/// distinguishes a genuine sibling brace alternative (whose own first word
+/// COULD be a real candidate command name, issue #368) from the pieces
+/// [`split_command_position`] sets aside for other reasons entirely, which
+/// must never be treated as a command-position candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LeftoverOrigin {
+    /// One of the word's OTHER brace-alternation members — the full piece
+    /// run [`fold_word`] would have used for this member had it won
+    /// instead, in `argv[0]`'s position (see the "fold order" docs above:
+    /// `fold_word` concatenates every alternative's own words, so a
+    /// non-winning member's first word is a real word that runs — it's
+    /// just not the one THIS position happened to select). Safe to
+    /// re-fold and check against the blocklist as its own candidate.
+    FullAlternative,
+    /// The winning alternative's own post-`$IFS`-split remainder (issue
+    /// #82) — a SUFFIX of the piece run that already determined `argv[0]`,
+    /// never a fresh command-position candidate of its own.
+    WinningRemainder,
+    /// The raw, un-expanded pieces of a word whose brace expansion itself
+    /// failed ([`UnresolvableKind::ExpansionLimit`]) — unfoldable by
+    /// definition (that's why expansion failed), so never a candidate.
+    RawUnexpanded,
+}
+
 /// Splits a command-position [`Word`]'s brace-alternation structure into
 /// the piece sequence that determines `argv[0]` (the first alternative
 /// [`fold_word`] would fold into at least one output word — "the winning
-/// alternative") and the piece sequences of every other alternative, each
-/// of which resolves to an argument-position token once brace-expanded
-/// rather than to any part of the command name (issue #77).
+/// alternative") and every other alternative's piece sequence, each tagged
+/// with a [`LeftoverOrigin`] (issue #368) — every `leftover` entry still
+/// needs scanning for a substitution (rule 3's job, [`split_command_position`]'s
+/// original purpose, issue #77), but only a [`LeftoverOrigin::FullAlternative`]
+/// entry is also a genuine command-position candidate in its own right.
 ///
 /// Mirrors `fold_word`'s own iteration over [`expand_braces`]'s output so
 /// the two can never diverge: `crate::gate`'s rule 1 needs to know which
@@ -497,43 +524,37 @@ fn fold_word(pieces: &[WordPiece], allow_split: bool) -> Vec<NormalizedWord> {
 /// does still need scanning as an argument-position substitution (rule 3's
 /// job, via the returned leftover pieces).
 ///
-/// Returns `(None, [word.0.clone()])` when brace expansion itself fails
-/// ([`UnresolvableKind::ExpansionLimit`]): `fold_word`'s matching arm folds
-/// the whole word to one `Unresolvable` word in that case, so there is no
-/// winning alternative to hand back — the caller already floors the
-/// decision on that kind through the ordinary unresolvable-`argv[0]` path.
-/// The raw, un-expanded pieces still go out as the sole leftover entry,
-/// though: `collect_substitutions_into`/`collect_process_substitutions_into`
-/// (`crate::gate`) already walk into [`WordPiece::BraceAlternation`]
-/// members directly with no expansion needed, so any substitution the word
-/// contains is still found and recursed rather than silently dropped along
-/// with the abandoned brace expansion.
+/// Returns `(None, [(RawUnexpanded, word.0.clone())])` when brace expansion
+/// itself fails ([`UnresolvableKind::ExpansionLimit`]): `fold_word`'s
+/// matching arm folds the whole word to one `Unresolvable` word in that
+/// case, so there is no winning alternative to hand back — the caller
+/// already floors the decision on that kind through the ordinary
+/// unresolvable-`argv[0]` path. The raw, un-expanded pieces still go out as
+/// the sole leftover entry, though: `collect_substitutions_into`/
+/// `collect_process_substitutions_into` (`crate::gate`) already walk into
+/// [`WordPiece::BraceAlternation`] members directly with no expansion
+/// needed, so any substitution the word contains is still found and
+/// recursed rather than silently dropped along with the abandoned brace
+/// expansion.
 ///
 /// `winning` can also come back `None` after a *successful* expansion whose
 /// every alternative elides to zero words (e.g. `{,}` — both members are
-/// unquoted and empty): every alternative lands in `leftover` instead, none
-/// having produced a word. Callers must not reach this function with a word
-/// `crate::gate`'s own `first_non_vanishing_word_idx` has already skipped as
-/// vanishing — both current call sites already guard on that.
-///
-/// **Known limitation, disclosed rather than silently accepted (issue
-/// #368)**: only `winning` is ever checked against
-/// `crate::rules::Rules::match_command`/`match_ask` — every `leftover`
-/// alternative is checked ONLY for whether it contains a substitution
-/// (rule 3's job), never independently re-evaluated as its own candidate
-/// command. A `leftover` alternative that folds cleanly to a resolvable,
-/// dangerous command is invisible to the blocklist whenever `winning`
-/// itself resolves to something else (commonly `Unresolvable`, e.g. via
-/// [`defuse_ifs_glued_to_identifier_start`]'s own floor) — member ORDER
-/// then decides which of several equally-live interpretations gets
-/// checked. Still fail-closed in direction (this can only ever produce
-/// `Ask`, never `Allow`, since an unresolvable `winning` always floors to
-/// at least `Ask`), so it's a guardrail-weakening accuracy gap, not a
-/// bypass — but real and attacker-selectable via brace-member order.
+/// unquoted and empty): every alternative lands in `leftover` instead
+/// (tagged [`LeftoverOrigin::FullAlternative`]), none having produced a
+/// word. Callers must not reach this function with a word `crate::gate`'s
+/// own `first_non_vanishing_word_idx` has already skipped as vanishing —
+/// both current call sites already guard on that.
+/// One [`split_command_position`] leftover entry: which alternative it
+/// came from ([`LeftoverOrigin`]), paired with that alternative's own piece
+/// run.
+pub(crate) type LeftoverAlternative = (LeftoverOrigin, Vec<WordPiece>);
+
 #[must_use]
-pub(crate) fn split_command_position(word: &Word) -> (Option<Vec<WordPiece>>, Vec<Vec<WordPiece>>) {
+pub(crate) fn split_command_position(
+    word: &Word,
+) -> (Option<Vec<WordPiece>>, Vec<LeftoverAlternative>) {
     let Ok(alternatives) = expand_braces(&word.0, 0) else {
-        return (None, vec![word.0.clone()]);
+        return (None, vec![(LeftoverOrigin::RawUnexpanded, word.0.clone())]);
     };
     let mut winning = None;
     let mut leftover = Vec::new();
@@ -548,7 +569,7 @@ pub(crate) fn split_command_position(word: &Word) -> (Option<Vec<WordPiece>>, Ve
         if produces_word {
             winning = Some(alternative);
         } else {
-            leftover.push(alternative);
+            leftover.push((LeftoverOrigin::FullAlternative, alternative));
         }
     }
     // Issue #82: the winning alternative's OWN pieces can still be
@@ -571,10 +592,23 @@ pub(crate) fn split_command_position(word: &Word) -> (Option<Vec<WordPiece>>, Ve
         let Some((command_position, remainder)) = split_at_first_word_boundary(&pieces) else {
             return pieces;
         };
-        leftover.push(remainder);
+        leftover.push((LeftoverOrigin::WinningRemainder, remainder));
         command_position
     });
     (winning, leftover)
+}
+
+/// Folds one command-position candidate's own complete piece run — a
+/// [`LeftoverOrigin::FullAlternative`] entry from [`split_command_position`]
+/// — into its own word sequence, the same way [`fold_word`] would have for
+/// this alternative had it won `argv[0]`'s position instead (issue #368).
+/// Thin wrapper over [`resolve_pieces`]/[`chunks_to_words`] (both private to
+/// this module) so `crate::gate` can re-check a non-winning alternative
+/// against the blocklist without reaching into either directly.
+#[must_use]
+pub(crate) fn fold_alternative(pieces: &[WordPiece]) -> Vec<NormalizedWord> {
+    let (chunks, ifs_derived) = resolve_pieces(pieces, true);
+    chunks_to_words(chunks, ifs_derived, true)
 }
 
 /// Splits `pieces` at the `$IFS` boundary ending the first non-empty
@@ -2086,8 +2120,10 @@ mod tests {
         // #82) — the substitution lives in the FORMER here, since the
         // winning alternative (the empty member) carries none of its own.
         assert_eq!(leftover.len(), 2);
-        assert!(contains_unresolvable(&fold_pieces(&leftover[0])));
-        assert!(!contains_unresolvable(&fold_pieces(&leftover[1])));
+        assert_eq!(leftover[0].0, LeftoverOrigin::FullAlternative);
+        assert_eq!(leftover[1].0, LeftoverOrigin::WinningRemainder);
+        assert!(contains_unresolvable(&fold_pieces(&leftover[0].1)));
+        assert!(!contains_unresolvable(&fold_pieces(&leftover[1].1)));
     }
 
     // Same word, members swapped: the substitution-carrying member is now
@@ -2106,10 +2142,12 @@ mod tests {
         let winning = winning.unwrap();
         assert_eq!(resolved_strings(&fold_pieces(&winning)), vec!["rm"]);
         assert_eq!(leftover.len(), 2);
+        assert_eq!(leftover[0].0, LeftoverOrigin::FullAlternative);
+        assert_eq!(leftover[1].0, LeftoverOrigin::WinningRemainder);
         // The losing brace member (the empty one) carries no substitution;
         // the winning alternative's own `$IFS`-remainder does.
-        assert!(!contains_unresolvable(&fold_pieces(&leftover[0])));
-        assert!(contains_unresolvable(&fold_pieces(&leftover[1])));
+        assert!(!contains_unresolvable(&fold_pieces(&leftover[0].1)));
+        assert!(contains_unresolvable(&fold_pieces(&leftover[1].1)));
     }
 
     // No brace alternation at all: the whole word is the winning
@@ -2136,7 +2174,10 @@ mod tests {
         let word = first_word(&cmd);
         let (winning, leftover) = split_command_position(word);
         assert!(winning.is_none());
-        assert_eq!(leftover, vec![word.0.clone()]);
+        assert_eq!(
+            leftover,
+            vec![(LeftoverOrigin::RawUnexpanded, word.0.clone())]
+        );
     }
 
     // Security regression (issue #93 fuzzer finding): a bare, unquoted empty
