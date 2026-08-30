@@ -321,7 +321,7 @@ use crate::ast::{
 use crate::normalize::{self, NormalizedWord, Resolution, UnresolvableKind};
 use crate::parser;
 use crate::rules::{
-    Allowlist, AllowlistOutcome, CommandRule, EVAL_BUILTIN, PathForm, Rules, SHELL_INTERPRETERS,
+    Allowlist, AllowlistOutcome, CommandRule, EVAL_BUILTIN, PathForm, Rules,
     WrapperChainEscalation, is_pipeline_interpreter, lexical_normalize, render_cwd_anchor,
 };
 use crate::verdict::{Decision, DenyMessage, Reason, Verdict};
@@ -2111,7 +2111,7 @@ fn evaluate_simple_command_core(
     // Rule 6a: `bash -c '<string>'`/`sh -c`/`zsh -c`/`dash -c` recurses the
     // script exactly like a substitution.
     if let Some((name, rest_words)) = effective
-        && SHELL_INTERPRETERS.contains(&name)
+        && crate::rules::is_shell_interpreter(name)
         && let Some(outcome) =
             evaluate_dash_c(&argv, rest_words, name, rules, allowlist, depth, cwd)
     {
@@ -3180,7 +3180,12 @@ fn evaluate_dash_c(
     depth: usize,
     cwd: &CwdContext,
 ) -> Option<Verdict> {
-    if interpreter == "fish" {
+    // Issue #346 follow-up: a versioned shell binary (`ksh93`, `bash5`)
+    // must recurse its `-c` argument exactly like the unversioned name
+    // would — normalized only for these two membership checks, never for
+    // the `Reason` strings below, which keep reporting the raw argv name.
+    let normalized_interpreter = crate::rules::strip_version_suffix(interpreter);
+    if normalized_interpreter == "fish" {
         return evaluate_fish(argv, rest_words, rules, allowlist, depth, cwd);
     }
     let outer_argv = argv.to_vec();
@@ -3249,7 +3254,7 @@ fn evaluate_dash_c(
         FlagScan::Absent => return None,
     };
 
-    let script_index = if POSIX_STYLE_DASH_C_INTERPRETERS.contains(&interpreter) {
+    let script_index = if POSIX_STYLE_DASH_C_INTERPRETERS.contains(&normalized_interpreter) {
         match find_posix_dash_c_script(rest_words, flag_index + 1) {
             Ok(Some(index)) => index,
             // Ran out of `rest_words` without finding an operand (e.g. a
@@ -4245,7 +4250,7 @@ fn scan_recursable_slots(
                             let payload_argv = normalize::normalize_argv(&synthetic);
                             if let Some((name, rest_words)) =
                                 crate::rules::effective_command(&payload_argv)
-                                && SHELL_INTERPRETERS.contains(&name)
+                                && crate::rules::is_shell_interpreter(name)
                             {
                                 match scan_for_dash_c_before_operand(rest_words, name) {
                                     DashCPosition::FlagFound | DashCPosition::Uncertain => {}
@@ -4445,7 +4450,7 @@ fn scan_recursable_slots(
                             let payload_argv = normalize::normalize_argv(&synthetic);
                             if let Some((name, rest_words)) =
                                 crate::rules::effective_command(&payload_argv)
-                                && SHELL_INTERPRETERS.contains(&name)
+                                && crate::rules::is_shell_interpreter(name)
                             {
                                 match scan_for_dash_c_before_operand(rest_words, name) {
                                     DashCPosition::FlagFound | DashCPosition::Uncertain => {}
@@ -5909,7 +5914,7 @@ enum DashCPosition {
 /// unresolvable, or is a non-option operand (does not start with `-`) —
 /// whichever comes first.
 fn scan_for_dash_c_before_operand(words: &[NormalizedWord], interpreter: &str) -> DashCPosition {
-    if interpreter == "fish" {
+    if crate::rules::strip_version_suffix(interpreter) == "fish" {
         // `-C`/`--init-command` is deliberately transparent here: its
         // payload verdict arrives through `evaluate_fish`'s own recursion,
         // and what this floor decides is the CONTINUATION posture (a
@@ -8021,6 +8026,64 @@ mod tests {
     #[test]
     fn decode_fed_python2_pipe_blocks() {
         assert_decision("echo x | base64 -d | python2", Decision::Block);
+    }
+
+    // ==== Issue #346: a distro-versioned binary name (`lua5.4`, `php8.2`,
+    // `python3.12`) matched no SHELL_INTERPRETERS/EXTRA_PIPELINE_INTERPRETERS
+    // entry by exact string equality, silently skipping rule 5b/5c's
+    // decode-then-execute pipeline Block for these. ====
+
+    #[test]
+    fn decode_fed_versioned_lua_pipe_blocks() {
+        assert_decision("echo x | base64 -d | lua5.4", Decision::Block);
+    }
+
+    #[test]
+    fn decode_fed_versioned_php_pipe_blocks() {
+        assert_decision("echo x | base64 -d | php8.2", Decision::Block);
+    }
+
+    #[test]
+    fn decode_fed_versioned_python_pipe_blocks() {
+        assert_decision("echo x | base64 -d | python3.12", Decision::Block);
+    }
+
+    #[test]
+    fn decode_fed_versioned_tclsh_pipe_blocks() {
+        assert_decision("echo x | base64 -d | tclsh8.6", Decision::Block);
+    }
+
+    #[test]
+    fn decode_fed_versioned_ruby_pipe_blocks() {
+        assert_decision("echo x | base64 -d | ruby3.2", Decision::Block);
+    }
+
+    // Same root cause also affects rule 6a's SHELL_INTERPRETERS-based `-c`
+    // recursion: a versioned shell binary must recurse its `-c` argument
+    // exactly like the unversioned name would.
+    #[test]
+    fn versioned_bash_dash_c_recurses() {
+        assert_decision(r#"bash5 -c "rm -rf /""#, Decision::Block);
+    }
+
+    // Fable review of PR #371: the first fix normalized `is_shell_interpreter`
+    // but left `evaluate_dash_c`'s POSIX_STYLE_DASH_C_INTERPRETERS/fish
+    // membership checks comparing the RAW name, so a versioned POSIX-style
+    // shell (`ksh93`, a real Debian binary name) fell through to the naive
+    // `flag_index + 1` lookup instead of `find_posix_dash_c_script`'s
+    // `-c -- script` handling, reopening the bypass that function exists to
+    // close.
+    #[test]
+    fn versioned_ksh_dash_c_double_dash_script_still_blocks() {
+        assert_decision(r#"ksh93 -c -- "rm -rf /""#, Decision::Block);
+    }
+
+    // A command name that happens to end in digits but has no real
+    // interpreter base (`b2`, a real backup-tool binary) must not be swept
+    // into pipeline-sink classification by the version-suffix strip.
+    #[test]
+    fn decode_fed_b2_pipe_is_not_blocked_by_version_stripping() {
+        assert_decision("echo x | base64 -d | b2", Decision::Allow);
     }
 
     // ==== Issue #57: mke2fs is the implementation behind mkfs.ext4 and
