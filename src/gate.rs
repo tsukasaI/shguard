@@ -5862,21 +5862,23 @@ fn short_cluster_contains(token: &str, c: char) -> bool {
 /// "unique abbreviation" feature `crate::rules::tar_long_option_abbrev_rewrite`
 /// (issue #128) already accounts for on tar's own long options).
 ///
-/// Genuinely unambiguous, real-GNU-tool-included, for every call site
-/// below EXCEPT one documented exception: none of `base64`/`base32`/
-/// `basenc`/`gzip`/`zstd`/`zstdmt`/`bzip2`'s own other long options share a
-/// `de`-prefix with `--decode`/`--decompress`/`--uncompress` (verified
-/// against each tool's own documented option list). `xz`/`lzma` are the
-/// exception: `xz` also has a `--delta` filter option, so a bare `--de`
-/// prefix is genuinely ambiguous between `--decompress` and `--delta` (real
-/// `xz` rejects it; `--dec` onward is unambiguous, matching only
-/// `--decompress`). This function doesn't special-case that — it still
-/// matches a plain `--de` against `--decompress` there — but that's still
-/// safe in this crate's fail-closed direction: a prefix real `xz` would
-/// reject as ambiguous just means the real pipeline errors out and nothing
-/// decodes at all, so recognizing it as a decode stage anyway can only
-/// ever over-flag a command that wouldn't have run in the first place,
-/// never mis-attribute a prefix that DOES run to the wrong flag.
+/// Only `base64`/`base32`/`basenc`/`gzip`/`xz` actually accept
+/// `getopt_long`-style abbreviations at all (coreutils and GNU gzip/xz's
+/// own option parsers do prefix matching; verified live: `gzip --decomp`/
+/// `--unc` and `xz --dec` are accepted, `xz --de` is rejected as
+/// ambiguous — `xz` also has a `--delta` filter option sharing the `de`
+/// prefix, so `--dec` is the shortest unambiguous form, matching only
+/// `--decompress`). `zstd`/`zstdmt`/`bzip2`/`lz4`/`brotli`/`pigz`/
+/// `pbzip2`/`pzstd`, by contrast, do EXACT long-option matching with no
+/// abbreviation support at all (verified live: `zstd --dec`/`lz4 --dec`
+/// are both rejected outright) — for those tools this function's prefix
+/// check can only ever match a spelling the real tool would itself
+/// reject, which is exactly this crate's fail-closed direction: a prefix
+/// real `xz` rejects as ambiguous, or a real `zstd`/`lz4` rejects
+/// entirely, means the real pipeline errors out and nothing decodes at
+/// all, so recognizing it as a decode stage anyway can only ever
+/// over-flag a command that wouldn't have run in the first place, never
+/// mis-attribute a prefix that DOES run to the wrong flag.
 fn matches_long_flag_prefix(token: &str, canonical: &str) -> bool {
     token.starts_with("--") && token.len() > 2 && canonical.starts_with(token)
 }
@@ -6251,10 +6253,19 @@ fn scan_for_dash_c_before_operand(words: &[NormalizedWord], interpreter: &str) -
 /// for `gzip`: `gzip -d` is the fully standard way to decompress with the
 /// `gzip` binary itself, `gunzip` being just a convenience alias for it —
 /// the same relationship holds for `xz -d`/`unxz`, `bzip2 -d`/`bunzip2`,
-/// and `zstd -d`/`unzstd`). issue #349 tracks remaining gaps: sibling
-/// alias binaries not yet covered here (`gzcat`, `pzstd`, `pigz -d`,
-/// `pbzip2 -d`), OpenSSL's cipher-name-as-subcommand shape, and GNU
-/// long-option abbreviation matching.
+/// and `zstd -d`/`unzstd`). issue #349 closed three further gaps: sibling
+/// alias binaries (`gzcat`/`unpigz`/`uncompress`/`lz4cat`/`unlz4`
+/// unconditional; `pigz`/`pbzip2`/`pzstd`/`lz4`/`brotli` flag-gated like
+/// their serial siblings), OpenSSL's cipher-name-as-subcommand shape (plus
+/// its double-dash `--d` spelling — OpenSSL 3.x's option parser accepts
+/// one OR two leading dashes for every option), and GNU long-option
+/// abbreviation matching ([`matches_long_flag_prefix`]). Still-open,
+/// narrower gaps tracked as their own follow-ups rather than re-opening
+/// #349: `lz4c` (Homebrew's legacy lz4 CLI alias) is not yet in the `lz4`
+/// arm below, and `lz4`'s own decompress-by-default-on-a-`.lz4`-extension
+/// behavior (no flag needed when the input operand ends in `.lz4`) is
+/// filename-extension inference this crate's static model doesn't
+/// attempt.
 fn is_decode_stage(stage: &[NormalizedWord]) -> bool {
     let Some((name, rest_words)) = crate::rules::effective_command(stage) else {
         return false;
@@ -6302,8 +6313,13 @@ fn is_decode_stage(stage: &[NormalizedWord]) -> bool {
                     }
                     Resolution::Unresolvable(_) => true,
                 });
+            // OpenSSL 3.x's option parser accepts one OR two leading
+            // dashes for every option (verified live against OpenSSL
+            // 3.6.3: `openssl aes-256-cbc --d -k p` decrypts identically
+            // to `-d`) — `--decrypt`-style abbreviations are rejected, so
+            // only the dash-count variant matters here.
             first_could_be_decode_subcommand
-                && scan_for_flag(rest_words, |s| s == "-d").possibly_found()
+                && scan_for_flag(rest_words, |s| s == "-d" || s == "--d").possibly_found()
         }
         // gzip/xz/zstd (and zstd's `zstdmt` multithread alias, and xz's
         // `lzma` legacy-format sibling, which shares xz's `-d`/
@@ -6349,11 +6365,13 @@ fn is_decode_stage(stage: &[NormalizedWord]) -> bool {
         // issue #349: decompress-only alias binaries, sharing their parent
         // tool's exact "always reads/decompresses, no flag needed" shape
         // that `gunzip`/`zcat`/etc. below already have — `gzcat` (ships in
-        // macOS's own `/usr/bin`), `uncompress` (the classic
-        // compress(1)/LZW decompressor), and xz's own `lz4cat`/`unlz4`
-        // siblings (parallel to `xzcat`/`unxz` below).
+        // macOS's own `/usr/bin`), `unpigz` (pigz's own upstream Makefile
+        // hardlinks it the same way `gunzip` aliases `gzip`), `uncompress`
+        // (the classic compress(1)/LZW decompressor), and lz4's own
+        // `lz4cat`/`unlz4` aliases (same shape as xz's `xzcat`/`unxz`
+        // above).
         "rev" | "tr" | "gunzip" | "zcat" | "uudecode" | "unxz" | "xzcat" | "bunzip2" | "bzcat"
-        | "unzstd" | "zstdcat" | "unlzma" | "lzcat" | "xzdec" | "lzmadec" | "gzcat"
+        | "unzstd" | "zstdcat" | "unlzma" | "lzcat" | "xzdec" | "lzmadec" | "gzcat" | "unpigz"
         | "uncompress" | "lz4cat" | "unlz4" => true,
         _ => false,
     }
@@ -8680,6 +8698,11 @@ mod tests {
     }
 
     #[test]
+    fn unpigz_fed_interpreter_pipe_blocks() {
+        assert_decision("cat payload.gz | unpigz | sh", Decision::Block);
+    }
+
+    #[test]
     fn uncompress_fed_interpreter_pipe_blocks() {
         assert_decision("cat payload.Z | uncompress | sh", Decision::Block);
     }
@@ -8740,6 +8763,18 @@ mod tests {
     fn openssl_cipher_name_subcommand_decode_fed_interpreter_pipe_blocks() {
         assert_decision(
             "echo cm0gLXJmIC8= | openssl aes-256-cbc -d -k p | sh",
+            Decision::Block,
+        );
+    }
+
+    #[test]
+    fn openssl_double_dash_d_decode_fed_interpreter_pipe_blocks() {
+        // OpenSSL 3.x's option parser accepts one OR two leading dashes
+        // for every option, `-d` included (verified live against OpenSSL
+        // 3.6.3: `openssl aes-256-cbc --d -k p` decrypts identically to
+        // `-d`).
+        assert_decision(
+            "echo cm0gLXJmIC8= | openssl aes-256-cbc --d -k p | sh",
             Decision::Block,
         );
     }
