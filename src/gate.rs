@@ -8786,6 +8786,31 @@ mod tests {
         assert_decision(r#""$()" rm -rf /"#, Decision::Ask);
     }
 
+    // Fable review of PR #376: pins a real, bash-faithful decision-surface
+    // change this fix causes for a brace-alternation sibling shape —
+    // provably converging to the pre-existing baseline (both the literal
+    // `x rm -rf /` and the substitution-free `{x,rm} -rf /` were already
+    // Allow), but undocumented and unpinned until now.
+    #[test]
+    fn empty_substitution_fused_into_the_winning_brace_alternative_resolves_argv_zero() {
+        // The empty substitution lives in the WINNING alternative ("x$()",
+        // tried first) — it resolves cleanly to "x", real bash dispatches
+        // `x rm -rf /`, and the sibling "rm" is just a plain argument, not
+        // a candidate command name. Correctly Allow, not Block.
+        assert_decision("{x$(),rm} -rf /", Decision::Allow);
+    }
+
+    #[test]
+    fn empty_substitution_fused_into_a_losing_brace_alternative_still_blocks() {
+        // Mirror of the case above with the substitution-carrying member
+        // LOSING instead: "rm$()" resolves cleanly to "rm" and wins
+        // argv[0] outright (no substitution left to flag at all), so this
+        // was already Block before this fix and stays Block after it —
+        // pinned alongside the Allow case above so the pair documents the
+        // full behavior, not just one side.
+        assert_decision("{rm$(),x} -rf /", Decision::Block);
+    }
+
     #[test]
     fn command_substitution_with_real_content_command_position_still_asks() {
         // Parity control: a body with actual content (even a harmless
@@ -8819,6 +8844,16 @@ mod tests {
     #[test]
     fn backquoted_empty_substitution_fused_into_a_larger_word_now_blocks() {
         assert_decision("r` `m -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn empty_substitution_leading_an_ifs_packed_word_now_blocks() {
+        assert_decision("$IFS$()rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn empty_substitution_fused_into_an_ifs_packed_words_first_segment_now_blocks() {
+        assert_decision("r$()m$IFS-rf$IFS/", Decision::Block);
     }
 
     #[test]
