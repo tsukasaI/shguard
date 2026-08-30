@@ -32,6 +32,52 @@ single Rust binary with an agent-agnostic decision core, so the same
 `analyze()` function can sit behind hook adapters for different coding
 agents.
 
+## Where shguard fits
+
+shguard occupies one specific layer in a stack that can also include
+host-side permission-request tooling and OS-level sandboxing. None of
+these are alternatives to each other: each answers a different question,
+and shguard is a floor those other tools sit above, not a replacement for
+either.
+
+```
++-------------------------------------------------------------+
+| Permission-request tooling (ccgate, Claude Code Auto Mode)  |
+| "should this request be approved right now?"                |
++-------------------------------------------------------------+
+| shguard (PreToolUse hook, this project)                     |
+| "should this exact command shape ever run, evaluated the    |
+|  same way every time?"                                      |
++-------------------------------------------------------------+
+| OS sandbox (Seatbelt, bubblewrap)                           |
+| "what can an ALLOWED, running process actually touch        |
+| (filesystem, network), regardless of shguard's decision?"   |
++-------------------------------------------------------------+
+```
+
+**shguard vs. permission-request tooling.** shguard is deterministic: the
+same command shape gets the same decision every time, with no context or
+conversation history involved. ccgate, in contrast, delegates each
+permission prompt to an LLM that judges whether this specific request, in
+this specific context, should be approved right now, and Claude Code's
+own permission modes decide which categories of requests need a prompt
+at all; either can layer on top of shguard instead of duplicating it.
+ccgate's own writeup states the deterministic-hard-limit boundary
+directly: "ccgate is not a security boundary. Hard limits
+(`permissions.deny`, sandboxing, managed settings) should still do that
+job." ([source](https://dev.to/tak848/ccgate-delegate-claude-code-codex-cli-permission-prompts-to-an-llm-274c)).
+shguard is built to be that kind of deterministic hard limit.
+
+**shguard vs. sandboxes.** shguard decides whether a command executes at
+all; a sandbox constrains what an already-executing process can touch
+once it's running, independent of shguard's decision. These are
+complementary, not overlapping: a sandboxed process can still run a
+command shguard would have blocked if shguard isn't in the loop, and
+shguard blocking a command says nothing about what an *allowed* command
+could still do once it starts running. Run both: shguard as the
+deterministic gate on which commands start, a sandbox as the boundary on
+what a started process can reach.
+
 ## How it works: a four-stage pipeline
 
 1. **Parse** — a thin adapter over [`brush-parser`](https://crates.io/crates/brush-parser)
