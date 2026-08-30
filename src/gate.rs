@@ -3279,7 +3279,7 @@ fn evaluate_command_position_bare_var(
                 Some(historical.as_str()),
                 " under another `IFS` value this line could have held at expansion time \
                  (an earlier same-line reassignment a later one shadowed, an inherited-default \
-                 floor for an `IFS+=` with no statically-known prior, or similar)",
+                 floor chained across one or more same-line `IFS+=` appends, or similar)",
             ));
         }
     }
@@ -3315,6 +3315,19 @@ fn evaluate_command_position_bare_var(
         // same-line-but-different-command's `IFS=` prefix assignment that
         // doesn't even persist to `$name`'s own invocation feed a
         // mis-split argv downstream and mask a real pipeline Block).
+        //
+        // Known residual limitation, tracked as issue #384: this also
+        // means a non-default IFS candidate that would only be caught by
+        // `evaluate_pipeline_shape`'s decode/interpreter-sink scan
+        // (rather than any single per-command blocklist rule) is never
+        // tried against it — e.g. `IFS=,; X='base64,-d'; $X | python3`
+        // stays `Ask` even though real bash's `,`-split makes this
+        // exactly the decode-into-interpreter shape rule 5 exists to
+        // Block (`base64 -d | python3` alone already Blocks). Fixing it
+        // needs the per-stage candidate threaded up to
+        // `evaluate_pipeline`'s own `stage_argvs`, which risks
+        // re-widening the exact desync this comment's own fix closed;
+        // deferred rather than rushed.
         if ifs.is_none() {
             primary_substituted = Some(substituted);
         }
@@ -7976,6 +7989,17 @@ struct Env {
     map: HashMap<String, String>,
     assigned: std::collections::HashSet<String>,
     ifs_history: Vec<String>,
+    /// Running "assume every same-line `IFS+=` appended onto the inherited
+    /// default" hypothesis (issue #358) — `None` until the first `IFS+=`
+    /// with no same-line prior. Tracked separately from `map`'s own
+    /// `IFS+=` chain (which starts from "unset appends onto empty",
+    /// [`Self::apply_one`]'s own docs) because BOTH starting points remain
+    /// live candidates the whole line through, and each needs its own
+    /// running total: `IFS+=,; IFS+=.` must offer `" \t\n,."` (this
+    /// field's chain) as well as `,.` (`map`'s chain) as floors, not just
+    /// the first append's `" \t\n,"` with the second append's `.` composed
+    /// onto the wrong base.
+    ifs_append_floor: Option<String>,
 }
 
 impl Env {
@@ -7984,6 +8008,7 @@ impl Env {
             map: HashMap::new(),
             assigned: std::collections::HashSet::new(),
             ifs_history: Vec::new(),
+            ifs_append_floor: None,
         }
     }
 
@@ -8042,21 +8067,25 @@ impl Env {
                 // `+=`, e.g. `X+='rm -rf /'; $X` wrongly Asked instead of
                 // Blocking).
                 Resolution::Resolved(rhs) if assignment.append => {
+                    // `IFS+=value` could ALSO be appending onto the
+                    // shell's inherited default (`" \t\n"`) rather than
+                    // onto empty/`map`'s own tracked value — plausible
+                    // enough to try as one more floor candidate (see
+                    // `ifs_append_floor`'s own docs) on EVERY append,
+                    // chained, not just the first with no same-line `map`
+                    // prior.
+                    if is_ifs {
+                        let base = self
+                            .ifs_append_floor
+                            .clone()
+                            .unwrap_or_else(|| " \t\n".to_string());
+                        let floor = format!("{base}{rhs}");
+                        self.ifs_history.push(floor.clone());
+                        self.ifs_append_floor = Some(floor);
+                    }
                     match self.map.get(&assignment.name) {
                         Some(prior) => Some(format!("{prior}{rhs}")),
-                        None => {
-                            // `IFS+=value` with no same-line prior could
-                            // ALSO be appending onto the shell's inherited
-                            // default (`" \t\n"`) rather than onto an empty
-                            // string — plausible enough to try as one more
-                            // floor candidate (see `ifs_history`'s own
-                            // docs) alongside the `Some(rhs.clone())` claim
-                            // below, not instead of it.
-                            if is_ifs {
-                                self.ifs_history.push(format!(" \t\n{rhs}"));
-                            }
-                            Some(rhs.clone())
-                        }
+                        None => Some(rhs.clone()),
                     }
                 }
                 Resolution::Resolved(rhs) => Some(rhs.clone()),
@@ -8405,6 +8434,35 @@ mod tests {
         // exactly `:,` — a plain, fully-known concatenation, not merely a
         // floor guess.
         assert_decision("IFS=:; IFS+=,; X='rm,-rf:/'; $X", Decision::Block);
+    }
+
+    #[test]
+    fn issue_358_chained_ifs_appends_both_compose_onto_the_inherited_default_floor() {
+        // `IFS+=,; IFS+=.` with no `map`-known prior at either append must
+        // still offer `" \t\n,."` as a floor -- not just the first
+        // append's `" \t\n,"` with the second append's `.` composed onto
+        // the wrong (unset-starts-empty) base. Before this fix, only the
+        // FIRST append pushed a floor candidate into `ifs_history`
+        // (`apply_one` only did so when `map.get("IFS")` returned `None`,
+        // which stopped being true the instant the first append inserted
+        // a value), so this stayed at `Ask`.
+        assert_decision("IFS+=,; IFS+=.; X='rm -rf./'; $X", Decision::Block);
+    }
+
+    #[test]
+    fn issue_384_non_default_ifs_split_never_reaches_the_pipeline_shape_scan() {
+        // Self-verifying pin for the disclosed residual limitation left
+        // OPEN by this PR (tracked as issue #384, split out from #358):
+        // real bash splits `$X` under `IFS=","` into `base64 -d`, making
+        // this the exact decode-into-interpreter pipeline shape rule 5
+        // exists to Block (`base64 -d | python3` alone already Blocks,
+        // asserted below as a control) -- but the Ask verdict's argv is
+        // pinned to the default-IFS split, so the pipeline-shape scanner
+        // never sees the comma-split candidate. If this ever starts
+        // Blocking, issue #384 is fixed -- update its disclosure comment
+        // (this function, the `if ifs.is_none()` site) and this test.
+        assert_decision("base64 -d | python3", Decision::Block);
+        assert_decision("IFS=,; X='base64,-d'; $X | python3", Decision::Ask);
     }
 
     #[test]
