@@ -11080,6 +11080,47 @@ mod tests {
         ));
     }
 
+    // Issue #346: a versioned interpreter spelling must be rejected the
+    // same way its unversioned form already is — the gate now treats it as
+    // the same interpreter via `strip_version_suffix`, so an allow entry
+    // naming it exactly would otherwise suppress the same recursion-derived
+    // `Ask`s an exact `command = "bash"` entry is already rejected for.
+    #[test]
+    fn user_config_rejects_allow_entry_matching_versioned_interpreter_exactly() {
+        for versioned in ["bash5", "python3.12", "ksh93", "ruby3.2"] {
+            let toml = format!(
+                r#"
+                [[allow]]
+                id = "user-allow-versioned"
+                reason = "trust me"
+                command = "{versioned}"
+                "#
+            );
+            assert!(
+                matches!(
+                    UserConfig::parse(&toml),
+                    Err(RulesError::InvalidRule { .. })
+                ),
+                "expected {versioned:?} to be rejected as a dangerous allow target"
+            );
+        }
+    }
+
+    // A command name that merely happens to end in digits, with no real
+    // interpreter base once stripped, must still be accepted — the same
+    // false-positive-avoidance guarantee `strip_version_suffix` gives the
+    // gate's own matching.
+    #[test]
+    fn user_config_accepts_allow_entry_for_command_ending_in_digits() {
+        let toml = r#"
+            [[allow]]
+            id = "user-allow-b2"
+            reason = "trust me"
+            command = "b2"
+        "#;
+        assert!(UserConfig::parse(toml).is_ok());
+    }
+
     // Issue #55: SHELL_INTERPRETERS gained fish/ksh/tcsh/csh/ash — the
     // fail-closed allow-entry rejection above must catch these the same
     // way it already catches "bash".
