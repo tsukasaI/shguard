@@ -3192,8 +3192,41 @@ pub(crate) const EVAL_BUILTIN: &[&str] = &["eval"];
 /// `python` before this list is ever consulted, the same normalization
 /// that also covers every other versioned spelling (`ruby3.2`, `php8.2`, …)
 /// no fixed list could enumerate.
-const EXTRA_PIPELINE_INTERPRETERS: &[&str] =
-    &["python", "node", "perl", "ruby", "lua", "php", "tclsh"];
+///
+/// `osascript`/`irb` (issue #347) share the same property, verified against
+/// each tool's own documentation rather than live-probed (this
+/// environment blocks executing an actual decode-into-interpreter pipe):
+/// `osascript`'s own man page states it reads and executes AppleScript/JXA
+/// from stdin whenever no script-file argument is given; `irb`'s own man
+/// page/source (`ruby/irb`'s `init.rb` checks `STDIN.tty?` only to pick a
+/// prompt style, never to decide whether to read-and-evaluate) confirms
+/// piped, non-TTY input is read and evaluated as Ruby the same as
+/// interactive input, just without the prompt decoration. `pwsh` was
+/// audited too but does NOT fit this list's exact shape: unlike every name
+/// above, a truly bare `pwsh` with no flags at all does not read piped
+/// stdin as a script (Microsoft's own docs specify that requires an
+/// explicit `-Command -`/`-File -`) — that's a flag-gated concern closer to
+/// rule 6a's `-c` recursion than this bare-invocation pipeline-sink shape,
+/// left to a future issue rather than added here on a shape that doesn't
+/// match. `deno` was also audited and excluded: official docs are silent
+/// on piped-stdin behavior for the bare REPL, and the one substantive
+/// primary source found (a Deno maintainer's own 2021 comment) argues
+/// piping into it is unlikely to work reliably — asserting it executes
+/// stdin without stronger evidence would risk a false claim in a security
+/// tool's own decision logic, so it's left out until independently
+/// verified. `expect`/`julia`/`guile` were considered but judged nichier,
+/// unaudited here.
+const EXTRA_PIPELINE_INTERPRETERS: &[&str] = &[
+    "python",
+    "node",
+    "perl",
+    "ruby",
+    "lua",
+    "php",
+    "tclsh",
+    "osascript",
+    "irb",
+];
 
 /// Strips a trailing distro-style version suffix (`python3.12` -> `python`,
 /// `lua5.4` -> `lua`, `php8.2` -> `php`) so interpreter-name matching

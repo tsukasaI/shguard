@@ -8270,6 +8270,20 @@ mod tests {
         assert_decision("echo x | base64 -d | python2", Decision::Block);
     }
 
+    // ==== Issue #347: a follow-up audit of issue #125's own addition
+    // found osascript/irb share the identical "reads and executes a
+    // script from stdin when given no file argument" property. ====
+
+    #[test]
+    fn decode_fed_osascript_pipe_blocks() {
+        assert_decision("echo x | base64 -d | osascript", Decision::Block);
+    }
+
+    #[test]
+    fn decode_fed_irb_pipe_blocks() {
+        assert_decision("echo x | base64 -d | irb", Decision::Block);
+    }
+
     // ==== Issue #346: a distro-versioned binary name (`lua5.4`, `php8.2`,
     // `python3.12`) matched no SHELL_INTERPRETERS/EXTRA_PIPELINE_INTERPRETERS
     // entry by exact string equality, silently skipping rule 5b/5c's
