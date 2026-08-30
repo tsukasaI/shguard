@@ -5256,6 +5256,20 @@ impl RedirectRule {
             .iter()
             .any(|t| t.ascent_descent_plausible(target))
     }
+
+    /// Issue #341: true when `target` (a redirect's resolved target word)
+    /// is a directory-stack tilde shorthand (`~+`/`~-`/`~N`/`~+N`/`~-N`,
+    /// [`PathForm::DirStack`]) or a `..` step above one
+    /// ([`PathForm::DirStackEscapesEmpty`]) that could plausibly occupy one
+    /// of this rule's own targets ([`TargetMatcher::dirstack_plausible`]) —
+    /// the same gap [`CommandRule::matches_dirstack_tilde_floor`] closes for
+    /// argv-based targets (`rm -rf ~+`), but for shell redirect syntax
+    /// (`> ...`, `>> ...`). Read-only probe, never itself a match (see
+    /// `crate::gate::scan_redirect_dirstack_tilde_floor`).
+    #[must_use]
+    fn dirstack_tilde_plausible(&self, target: &str) -> bool {
+        self.targets.iter().any(|t| t.dirstack_plausible(target))
+    }
 }
 
 /// Checks that no id in `ids` repeats — the duplicate-id-is-`Err` half of
@@ -5403,6 +5417,21 @@ impl Rules {
         self.redirect_rules
             .iter()
             .find(|rule| rule.ascent_descent_plausible(target))
+    }
+
+    /// The first [`RedirectRule`] for which
+    /// [`RedirectRule::dirstack_tilde_plausible`] holds against `target`, if
+    /// any — issue #341's floor, extending #88/#133's argv-side
+    /// directory-stack tilde floor to shell redirect syntax. Read-only
+    /// probe, same shape as [`Self::match_redirect_target_ascent_descent`].
+    #[must_use]
+    pub(crate) fn match_redirect_target_dirstack_tilde(
+        &self,
+        target: &str,
+    ) -> Option<&RedirectRule> {
+        self.redirect_rules
+            .iter()
+            .find(|rule| rule.dirstack_tilde_plausible(target))
     }
 
     /// The first user-configured `ask` [`CommandRule`] that matches `argv`,
