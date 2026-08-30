@@ -234,7 +234,7 @@ fn short_cluster_chars(token: &str) -> HashSet<char> {
 /// options), which is exactly why [`tar_dashless_cluster`] no longer
 /// treats an unmodeled letter as "not a cluster at all" — see its own
 /// docs.
-const TAR_DASHLESS_CONSUMING: &[char] = &['f', 'C'];
+pub(crate) const TAR_DASHLESS_CONSUMING: &[char] = &['f', 'C'];
 const TAR_DASHLESS_BOOLEAN: &[char] = &[
     'x', 'c', 't', 'z', 'v', 'j', 'J', 'a', 'Z', 'k', 'p', 'w', 'm', 'O', 'h', 'S', 'P',
 ];
@@ -303,6 +303,22 @@ pub(crate) enum TarDashlessCluster {
 /// (including any of *those* that are already `-`-prefixed, e.g. a
 /// trailing `-P` after the cluster).
 pub(crate) fn tar_dashless_cluster(tail: &[NormalizedWord]) -> TarDashlessCluster {
+    tar_dashless_cluster_impl(tail, true)
+}
+
+/// [`tar_dashless_cluster`] generalized beyond issue #67's original `x`+`C`
+/// need (dropping the `contains('x')` gate) — issue #356's `-C` composition
+/// need (`tar cCf dir archive.tar file`, no `x` at all: `c` for create, not
+/// extract) has to recognize the SAME dash-less bundling convention
+/// regardless of which mode letter the cluster happens to carry. Shares
+/// [`tar_dashless_cluster_impl`] with the `x`-gated wrapper so the two can
+/// never drift apart on what counts as a plausible/modeled/malformed
+/// cluster — only the `x` requirement differs.
+pub(crate) fn tar_dashless_leading_cluster(tail: &[NormalizedWord]) -> TarDashlessCluster {
+    tar_dashless_cluster_impl(tail, false)
+}
+
+fn tar_dashless_cluster_impl(tail: &[NormalizedWord], require_x: bool) -> TarDashlessCluster {
     let Some((first, rest)) = tail.split_first() else {
         return TarDashlessCluster::NotApplicable;
     };
@@ -315,7 +331,7 @@ pub(crate) fn tar_dashless_cluster(tail: &[NormalizedWord]) -> TarDashlessCluste
     {
         return TarDashlessCluster::NotApplicable;
     }
-    if !cluster.contains('x') {
+    if require_x && !cluster.contains('x') {
         return TarDashlessCluster::NotApplicable;
     }
     if !cluster

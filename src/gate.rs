@@ -7266,7 +7266,11 @@ fn evaluate_composed_cwd_redirects(
 /// lists this tool's accepted long spellings (`env`'s `--chdir`, make's
 /// `--directory`; empty for git, which has no long form for `-C` at
 /// all); the short spelling is always `-C`, this mechanism's only
-/// spelling shared by all four tools issue #209 covers.
+/// spelling shared by all four tools issue #209 covers. Each `long_names`
+/// entry also matches any unambiguous `getopt_long`-style prefix
+/// abbreviation of it via [`matches_long_flag_prefix`] (issue #356 round
+/// 5: `env --chd`/`make --dir` both chdir on real getopt_long-based
+/// parsers) — bare and `=`-attached alike.
 ///
 /// `short_can_attach` gates the glued short form (`-Cdir`, no space):
 /// confirmed locally that GNU `env`/GNU `make` both accept it (`env
@@ -7331,16 +7335,21 @@ fn chain_dash_c_targets(
         let Resolution::Resolved(s) = word.resolution() else {
             continue;
         };
-        let raw: Option<String> = if s == "-C" || long_names.contains(&s.as_str()) {
+        let raw: Option<String> = if s == "-C"
+            || long_names
+                .iter()
+                .any(|name| *name == s || matches_long_flag_prefix(s, name))
+        {
             match words.next().map(NormalizedWord::resolution) {
                 Some(Resolution::Resolved(value)) => Some(value.clone()),
                 Some(Resolution::Unresolvable(_)) | None => None,
             }
-        } else if let Some(attached) = long_names
-            .iter()
-            .find_map(|name| s.strip_prefix(&format!("{name}=")))
+        } else if let Some((name_part, value)) = s.split_once('=')
+            && long_names
+                .iter()
+                .any(|name| *name == name_part || matches_long_flag_prefix(name_part, name))
         {
-            Some(attached.to_string())
+            Some(value.to_string())
         } else if short_can_attach
             && let Some(attached) = s.strip_prefix("-C")
             && !attached.is_empty()
@@ -7453,6 +7462,61 @@ fn find_dash_c_in_cluster(token: &str) -> Option<crate::rules::ClusterValue<'_>>
     })
 }
 
+/// Issue #356 round 5: `tar`'s POSIX "old-style" dash-less leading option
+/// cluster (`tar cCf dir archive.tar file`, equivalent to `tar -c -C dir
+/// -f archive.tar file`, confirmed live on bsdtar to chdir into `dir`
+/// before archiving) — a genuinely different bundling shape from the
+/// dash-prefixed cluster/glued forms [`find_dash_c_in_cluster`] already
+/// covers, valid ONLY as `rest`'s very first token (tar's own bundled-word
+/// convention has no meaning once a real operand has already appeared).
+/// `None` when `rest`'s first token isn't a plausible/fully-modeled
+/// dash-less cluster at all ([`crate::rules::tar_dashless_leading_cluster`],
+/// the same recognition [`crate::rules::tar_dashless_cluster`] uses for
+/// rule-matching purposes but without that function's `x`-only scope —
+/// `cCf`'s `c` is create, not extract) or when the cluster contains no `C`
+/// letter. `Some((None, consumed))` when the cluster is recognized and
+/// does contain `C`, but `C`'s own positional value is missing/unresolvable
+/// — mirrors this file's other branches, which likewise return a matched
+/// occurrence with no resolvable value rather than silently skipping it,
+/// so the caller's existing `raw?` fails the whole composition closed
+/// rather than falling through to a DIFFERENT (and wrong) occurrence.
+/// `consumed` is always `1 (the cluster word) + the number of
+/// value-consuming letters in the cluster`, the same "one token per
+/// letter, one extra per consuming letter" bundling order
+/// [`crate::rules::tar_dashless_leading_cluster`]'s own rewrite already
+/// counts on — the true position, in `rest`, where tar's real remaining
+/// argv resumes.
+fn tar_dashless_leading_cluster_directory(
+    rest: &[NormalizedWord],
+) -> Option<(Option<String>, usize)> {
+    if !matches!(
+        crate::rules::tar_dashless_leading_cluster(rest),
+        crate::rules::TarDashlessCluster::Recognized(_)
+    ) {
+        return None;
+    }
+    let Resolution::Resolved(cluster) = rest[0].resolution() else {
+        return None;
+    };
+    if !cluster.contains('C') {
+        return None;
+    }
+    let mut consumed = 1;
+    let mut anchor = None;
+    for c in cluster.chars() {
+        if c == 'C' {
+            anchor = rest.get(consumed).and_then(|w| match w.resolution() {
+                Resolution::Resolved(value) => Some(value.to_string()),
+                Resolution::Unresolvable(_) => None,
+            });
+        }
+        if crate::rules::TAR_DASHLESS_CONSUMING.contains(&c) {
+            consumed += 1;
+        }
+    }
+    Some((anchor, consumed))
+}
+
 fn resolve_tar_dash_c<'a>(
     rest: &'a [NormalizedWord],
     env: &Env,
@@ -7465,14 +7529,20 @@ fn resolve_tar_dash_c<'a>(
             index += 1;
             continue;
         };
-        let (raw, after): (Option<String>, usize) = if s == "--directory" {
+        let (raw, after): (Option<String>, usize) = if index == 0
+            && let Some((value, consumed)) = tar_dashless_leading_cluster_directory(rest)
+        {
+            (value, consumed)
+        } else if s == "--directory" || matches_long_flag_prefix(s, "--directory") {
             match rest.get(index + 1).map(NormalizedWord::resolution) {
                 Some(Resolution::Resolved(value)) => (Some(value.clone()), index + 2),
                 Some(Resolution::Unresolvable(_)) => (None, index + 2),
                 None => (None, index + 1),
             }
-        } else if let Some(attached) = s.strip_prefix("--directory=") {
-            (Some(attached.to_string()), index + 1)
+        } else if let Some((name_part, value)) = s.split_once('=')
+            && (name_part == "--directory" || matches_long_flag_prefix(name_part, "--directory"))
+        {
+            (Some(value.to_string()), index + 1)
         } else if let Some(location) = find_dash_c_in_cluster(s) {
             match location {
                 crate::rules::ClusterValue::Glued(value) => (Some(value.to_string()), index + 1),
@@ -14650,6 +14720,95 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
         // fail-closed direction, per its own doc comment.
         assert_eq!(
             decide_dash_c("tar -sC ~/.config/shguard -cf out.tar config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    // ==== Issue #356 round 5's three closed gaps ====
+
+    #[test]
+    fn tar_dashless_leading_cluster_composes() {
+        // `tar cCf dir archive.tar file` == `tar -c -C dir -f archive.tar
+        // file` -- bsdtar's own POSIX "old-style" bundled-option word,
+        // confirmed live to chdir before archiving.
+        assert_eq!(
+            decide_dash_c("tar cCf ~/.config/shguard out.tar config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn tar_dashless_leading_cluster_with_c_after_consuming_letter_composes() {
+        // `C` doesn't have to be the letter right before its own value --
+        // `f` (also consuming) leads here, so `dir` is `f`'s own value and
+        // `~/.config/shguard` is `C`'s.
+        assert_eq!(
+            decide_dash_c("tar fCc out.tar ~/.config/shguard config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn tar_dashless_leading_cluster_without_c_is_unaffected() {
+        assert_eq!(
+            decide_dash_c("tar cf out.tar config.toml").decision(),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn tar_dashless_leading_cluster_only_recognized_at_the_very_first_token() {
+        // Regression guard: the same bundled letters appearing AFTER
+        // tar's real first token are ordinary operands, not a second
+        // bundled-option word -- old-style bundling has no meaning past
+        // the leading position.
+        assert_eq!(
+            decide_dash_c("tar -cf out.tar cCf config.toml").decision(),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn tar_directory_abbreviation_composes() {
+        assert_eq!(
+            decide_dash_c("tar --dir ~/.config/shguard -cf out.tar config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn tar_directory_abbreviation_attached_form_composes() {
+        assert_eq!(
+            decide_dash_c("tar --dir=~/.config/shguard -cf out.tar config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn make_directory_abbreviation_composes() {
+        assert_eq!(
+            decide_dash_c("make --dir ~/.config/shguard config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn env_chdir_abbreviation_composes() {
+        assert_eq!(
+            decide("env --chd ~/.config/shguard cp evil.toml config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn tar_directory_abbreviation_too_short_to_be_unambiguous_is_unaffected() {
+        // `matches_long_flag_prefix` requires more than the bare `--`
+        // marker (`token.len() > 2`) -- a 3-char token like `--d` still
+        // matches here since `--directory` is the only long option this
+        // mechanism checks against, but confirm the boundary case (an
+        // empty/near-empty abbreviation) doesn't panic or misbehave.
+        assert_eq!(
+            decide_dash_c("tar --d ~/.config/shguard -cf out.tar config.toml").decision(),
             Decision::Block
         );
     }
