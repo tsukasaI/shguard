@@ -324,7 +324,7 @@ use crate::rules::{
     Allowlist, AllowlistOutcome, CommandRule, EVAL_BUILTIN, PathForm, Rules,
     WrapperChainEscalation, is_pipeline_interpreter, lexical_normalize, render_cwd_anchor,
 };
-use crate::verdict::{Decision, DenyMessage, Reason, Verdict};
+use crate::verdict::{Decision, DenyMessage, Reason, RuleId, Verdict};
 
 /// Cap on how many levels deep a command/backquote substitution (or a
 /// resolved `bash -c` script) may recurse before this module fails closed —
@@ -1556,7 +1556,7 @@ fn has_command_position_leftover_substitution(command: &SimpleCommand) -> bool {
         normalize::split_command_position(&command.words[first_word_idx]);
     leftover_alternatives
         .iter()
-        .any(|pieces| alternative_has_substitution(pieces))
+        .any(|(_, pieces)| alternative_has_substitution(pieces))
 }
 
 /// Applies a user-configured allowlist match to `verdict`: `Ask` -> `Allow`
@@ -2000,6 +2000,14 @@ fn evaluate_simple_command_core(
         allowlist,
         cwd,
     );
+    // Issue #368: a sibling brace alternative that folds cleanly to a
+    // resolved, dangerous command must not be invisible to the blocklist
+    // just because the winning alternative resolves to something else
+    // (commonly `Unresolvable`) — computed once, up front, for the same
+    // reason `leftover_floor` is (this function's early returns below all
+    // need it, not only a `fold_floors` path).
+    let leftover_command_floor =
+        leftover_command_block_floor(&leftover_alternatives, first_word_ast, &argv, rules);
     let mut command_position_subs = Vec::new();
     let mut command_position_proc_subs = Vec::new();
     if let Some(pieces) = &command_position_pieces {
@@ -2008,14 +2016,17 @@ fn evaluate_simple_command_core(
     }
     if !command_position_subs.is_empty() || !command_position_proc_subs.is_empty() {
         return apply_leftover_substitution_floor(
-            evaluate_command_position_substitution(
-                &command_position_subs,
-                &command_position_proc_subs,
-                argv,
-                rules,
-                allowlist,
-                depth,
-                cwd,
+            apply_leftover_command_floor(
+                evaluate_command_position_substitution(
+                    &command_position_subs,
+                    &command_position_proc_subs,
+                    argv,
+                    rules,
+                    allowlist,
+                    depth,
+                    cwd,
+                ),
+                leftover_command_floor.clone(),
             ),
             leftover_floor,
         );
@@ -2028,18 +2039,24 @@ fn evaluate_simple_command_core(
     match argv[0].resolution() {
         Resolution::Unresolvable(UnresolvableKind::ParameterExpansion) => {
             return apply_leftover_substitution_floor(
-                evaluate_command_position_bare_var(first_word_ast, argv, env, rules),
+                apply_leftover_command_floor(
+                    evaluate_command_position_bare_var(first_word_ast, argv, env, rules),
+                    leftover_command_floor,
+                ),
                 leftover_floor,
             );
         }
         Resolution::Unresolvable(kind) => {
             return apply_leftover_substitution_floor(
-                Verdict::ask(
-                    Reason::new(format!(
-                        "command position word is unresolvable ({kind:?}); which command will \
-                         run cannot be determined statically"
-                    )),
-                    argv,
+                apply_leftover_command_floor(
+                    Verdict::ask(
+                        Reason::new(format!(
+                            "command position word is unresolvable ({kind:?}); which command \
+                             will run cannot be determined statically"
+                        )),
+                        argv,
+                    ),
+                    leftover_command_floor,
                 ),
                 leftover_floor,
             );
@@ -3747,7 +3764,7 @@ fn evaluate_argument_substitutions(
 /// only signal) — genuinely just one token, no different from an ordinary
 /// argument-position substitution slot.
 fn evaluate_leftover_alternative_substitutions(
-    leftover_alternatives: &[Vec<WordPiece>],
+    leftover_alternatives: &[normalize::LeftoverAlternative],
     depth: usize,
     rules: &Rules,
     allowlist: &Allowlist,
@@ -3759,7 +3776,7 @@ fn evaluate_leftover_alternative_substitutions(
             worst = Some(worst.map_or(decision, |current| current.max(decision)));
         }
     };
-    for pieces in leftover_alternatives {
+    for (_, pieces) in leftover_alternatives {
         let mut subs = Vec::new();
         collect_substitutions_into(pieces, &mut subs);
         let mut proc_subs = Vec::new();
@@ -3809,6 +3826,103 @@ fn evaluate_leftover_alternative_substitutions(
         }
     }
     worst
+}
+
+/// Computes issue #368's leftover-brace-alternative floor (see
+/// [`apply_leftover_command_floor`]): whether any
+/// [`normalize::LeftoverOrigin::FullAlternative`] entry in
+/// `leftover_alternatives` — a sibling of the brace alternative that
+/// determined `argv[0]` — folds to a resolved command matching a
+/// Block-decision blocklist rule. Only `Block` matters here: every call
+/// site only reaches this from a path that has already committed to at
+/// least `Ask` (rules 1/2/8's own unresolvable-`argv[0]`/command-position-
+/// substitution arms), so an `Ask`-decision rule match changes nothing the
+/// caller doesn't already have — `rules.match_ask` is deliberately never
+/// consulted.
+///
+/// The candidate argv checked per alternative — that alternative's own
+/// fold ([`normalize::fold_alternative`]) followed by the command's
+/// remaining argument words (`argv` from `first_word_ast`'s own total fold
+/// length onward, i.e. everything the winning alternative did NOT
+/// contribute) — is a hypothetical reconstruction, not the literal runtime
+/// argv (which, per `normalize` module docs' "fold order", interleaves
+/// EVERY alternative's own words together in the same single argv,
+/// concatenated in brace-member order). Checking each alternative as if it
+/// alone had won `argv[0]`'s position is what stops brace-member order
+/// from deciding which of several equally-live interpretations gets
+/// checked; it can only ever raise a decision that was already `Ask`
+/// toward `Block`, never introduce a new false Allow.
+///
+/// **Known residual scope, disclosed rather than silently accepted**: this
+/// only rescues a dangerous SIBLING alternative — it does nothing when the
+/// WINNING alternative itself is the dangerous one but was floated to
+/// `Unresolvable` by a conservative floor with no genuinely-dangerous
+/// sibling to fall back to (`$IFS{rm,} -rf /`: the `rm` member wins and is
+/// defused by `defuse_ifs_glued_to_identifier_start`, but its only sibling
+/// is the EMPTY member, which folds to zero words and is skipped by the
+/// `folded.first()` check below — there is no sibling candidate to check
+/// at all). That shape is a precision question about the winning
+/// alternative's OWN classification (issue #326's territory), not a
+/// leftover-alternative-invisibility gap this floor is built to close.
+fn leftover_command_block_floor(
+    leftover_alternatives: &[normalize::LeftoverAlternative],
+    first_word_ast: &Word,
+    argv: &[NormalizedWord],
+    rules: &Rules,
+) -> Option<(RuleId, String)> {
+    let winning_word_count = normalize::normalize_word(first_word_ast).len();
+    let argument_suffix = argv.get(winning_word_count..).unwrap_or(&[]);
+    for (origin, pieces) in leftover_alternatives {
+        if *origin != normalize::LeftoverOrigin::FullAlternative {
+            continue;
+        }
+        let folded = normalize::fold_alternative(pieces);
+        let Some(Resolution::Resolved(name)) = folded.first().map(NormalizedWord::resolution)
+        else {
+            continue;
+        };
+        let name = name.to_string();
+        let mut candidate_argv = folded;
+        candidate_argv.extend_from_slice(argument_suffix);
+        if let Some(rule) = rules.match_command(&candidate_argv)
+            && rule.decision() == Decision::Block
+        {
+            return Some((
+                rule.id().clone(),
+                format!(
+                    "a sibling brace alternative at command position resolves to `{name}`, \
+                     which matches blocklist rule {:?}: {} -- brace-member order must not \
+                     decide which of several equally-live command interpretations gets checked",
+                    rule.id().as_str(),
+                    rule.reason().as_str()
+                ),
+            ));
+        }
+    }
+    None
+}
+
+/// Applies [`leftover_command_block_floor`]'s result (issue #368) to a
+/// verdict produced on an early-return path (rules 1/2/8's own returns, all
+/// reached before `fold_floors`): a matching sibling alternative always
+/// raises the verdict to `Block`, combining the floor's reason with the
+/// verdict's own reason (an `Allow`/bare-`Ask` verdict may have none). A
+/// verdict already `Block` is untouched — this floor never needs to
+/// override an existing Block's own reason/matched-rule audit trail, since
+/// `Block` is already the maximum decision.
+fn apply_leftover_command_floor(verdict: Verdict, floor: Option<(RuleId, String)>) -> Verdict {
+    let Some((rule_id, floor_reason)) = floor else {
+        return verdict;
+    };
+    if verdict.decision() == Decision::Block {
+        return verdict;
+    }
+    let argv = verdict.normalized_argv().to_vec();
+    let reason = match verdict.reason() {
+        Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
+        None => floor_reason,
+    };
+    Verdict::block(Reason::new(reason), argv, Some(rule_id))
 }
 
 /// Combines two rule-3-shaped `Option<Decision>` floors (issue #77:
@@ -8879,24 +8993,79 @@ mod tests {
         assert_decision("echo rm${IFS}{a,b}", Decision::Ask);
     }
 
+    // Issue #368: command-position brace alternation used to check only the
+    // "winning" alternative against the blocklist; every other alternative
+    // was checked only for whether it contains a substitution, never
+    // independently re-evaluated as its own candidate command. Both brace
+    // alternatives here fold to `rm -rf /` in real bash ("a" reduces via an
+    // unset variable to empty; the empty member does too), but the FIRST
+    // ("a") floats to Unresolvable via `defuse_ifs_glued_to_identifier_start`'s
+    // own floor, "winning" the command-position slot — before this fix,
+    // that hid the sibling alternative that matches
+    // `rm-recursive-force-dangerous-target`, member-order-dependently (this
+    // exact case stayed Ask; flipping the members to `{-rf,a}` let the
+    // dangerous member win instead and correctly Blocked, even before this
+    // fix). `leftover_command_block_floor` now checks every sibling
+    // [`normalize::LeftoverOrigin::FullAlternative`] too, closing the gap.
     #[test]
-    fn command_position_non_winning_brace_alternative_is_a_disclosed_limitation_not_a_bypass() {
-        // Issue #368 (disclosed, not silently accepted): command-position
-        // brace alternation only checks the "winning" alternative against
-        // the blocklist; every other alternative is checked only for
-        // whether it contains a substitution, never independently
-        // re-evaluated as its own candidate command. Both brace
-        // alternatives here fold to `rm -rf /` in real bash ("a" reduces
-        // via an unset variable to empty; the empty member does too), but
-        // the FIRST ("a") now correctly floats to Unresolvable via
-        // `defuse_ifs_glued_to_identifier_start`'s own floor, "winning"
-        // the command-position slot and hiding the sibling alternative
-        // that would have matched `rm-recursive-force-dangerous-target`.
-        // Still fail-closed (Ask, never Allow) -- a guardrail-weakening
-        // accuracy gap, not a bypass -- and member-order-dependent:
-        // flipping the members (`{-rf,a}`, not pinned here) lets the
-        // dangerous member win instead and correctly Blocks.
-        assert_decision("rm$IFS{a,}$IFS-rf$IFS/", Decision::Ask);
+    fn command_position_sibling_brace_alternative_blocks_when_winning_is_unresolvable() {
+        assert_decision("rm$IFS{a,}$IFS-rf$IFS/", Decision::Block);
+    }
+
+    #[test]
+    fn command_position_sibling_brace_alternative_blocks_regardless_of_which_member_carries_it() {
+        assert_decision("rm$IFS{a,-rf}$IFS/", Decision::Block);
+    }
+
+    #[test]
+    fn command_position_winning_dangerous_member_still_blocks_without_needing_the_floor() {
+        // Member order flipped from the case above: the dangerous member
+        // wins outright (no defusal involved, since "-rf" doesn't start
+        // with an identifier character), so this already Blocked before
+        // issue #368's fix — pinned here as a regression guard that the new
+        // floor doesn't change behavior on the already-correct path.
+        assert_decision("rm$IFS{-rf,a}$IFS/", Decision::Block);
+    }
+
+    #[test]
+    fn command_position_sibling_brace_alternative_with_ifs_inside_the_member_blocks() {
+        assert_decision("rm$IFS{a$IFS,}-rf$IFS/", Decision::Block);
+    }
+
+    // Known residual gap, disclosed rather than silently accepted (see
+    // `leftover_command_block_floor`'s own doc): here the WINNING
+    // alternative ("rm", defused to Unresolvable by
+    // `defuse_ifs_glued_to_identifier_start`) is itself the dangerous one,
+    // and its only sibling is the empty member, which folds to zero words
+    // and has no candidate command name to check. Still fail-closed (Ask,
+    // never Allow) -- a precision gap in the winning alternative's own
+    // classification, not the leftover-invisibility class of bug issue
+    // #368's floor closes.
+    #[test]
+    fn command_position_winning_alternative_itself_unresolvable_with_no_dangerous_sibling_still_asks()
+     {
+        assert_decision("$IFS{rm,} -rf /", Decision::Ask);
+    }
+
+    #[test]
+    fn command_position_non_winning_brace_alternative_still_allows_when_it_folds_clean() {
+        // Regression guard: the resolved-winning path (no `Unresolvable`
+        // `argv[0]` at all) must be completely untouched by the new floor —
+        // `leftover_command_block_floor` is only ever consulted from the
+        // unresolvable-`argv[0]`/command-position-substitution early
+        // returns, never from the ordinary resolved path.
+        assert_decision("{ls,rm} -rf /", Decision::Allow);
+    }
+
+    #[test]
+    fn command_position_empty_brace_word_does_not_panic() {
+        // `{,}` vanishes entirely (`first_non_vanishing_word_idx` skips it),
+        // so `split_command_position`/`leftover_command_block_floor` never
+        // even see it -- command position passes to `-rf` (an ordinary,
+        // unmatched bare command name) the same way it did before this fix.
+        // Pinned as a regression guard that this shape's behavior is
+        // unchanged, not a claim that it exercises the new floor.
+        assert_decision("{,} -rf /", Decision::Allow);
     }
 
     #[test]
@@ -10060,6 +10229,26 @@ mod tests {
     #[test]
     fn mv_target_dir_abbreviation_stays_out_of_scope() {
         assert_decision("mv --target-dir=/dev/sda x", Decision::Allow);
+    }
+
+    #[test]
+    fn allowlisted_rm_does_not_downgrade_the_sibling_brace_alternative_floor() {
+        // Issue #368: `leftover_command_block_floor` produces a Block
+        // verdict on an early-return path, well before `fold_floors`'s own
+        // allowlist-downgrade step -- confirm an `[[allow]] command = "rm"`
+        // entry still can't turn this into an Allow (plan.md §6 item 8, the
+        // same "Block never downgrades via the allowlist" invariant every
+        // other Block source already has).
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[allow]]
+            id = "user-allow-rm"
+            reason = "trust me"
+            command = "rm"
+        "#,
+        );
+        let verdict = analyze_with_policy("rm$IFS{a,}$IFS-rf$IFS/", &rules, &allowlist);
+        assert_eq!(verdict.decision(), Decision::Block);
     }
 
     #[test]
