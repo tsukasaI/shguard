@@ -43,7 +43,7 @@ either.
 ```
 +-------------------------------------------------------------+
 | Permission-request tooling (ccgate, Claude Code Auto Mode)  |
-| "should THIS request, in this context, be approved?"        |
+| "should this request be approved right now?"                |
 +-------------------------------------------------------------+
 | shguard (PreToolUse hook, this project)                     |
 | "should this exact command shape ever run, evaluated the    |
