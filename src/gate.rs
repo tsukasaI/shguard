@@ -321,7 +321,7 @@ use crate::ast::{
 use crate::normalize::{self, NormalizedWord, Resolution, UnresolvableKind};
 use crate::parser;
 use crate::rules::{
-    Allowlist, AllowlistOutcome, CommandRule, EVAL_BUILTIN, PathForm, Rules, SHELL_INTERPRETERS,
+    Allowlist, AllowlistOutcome, CommandRule, EVAL_BUILTIN, PathForm, Rules,
     WrapperChainEscalation, is_pipeline_interpreter, lexical_normalize, render_cwd_anchor,
 };
 use crate::verdict::{Decision, DenyMessage, Reason, Verdict};
@@ -2111,7 +2111,7 @@ fn evaluate_simple_command_core(
     // Rule 6a: `bash -c '<string>'`/`sh -c`/`zsh -c`/`dash -c` recurses the
     // script exactly like a substitution.
     if let Some((name, rest_words)) = effective
-        && SHELL_INTERPRETERS.contains(&name)
+        && crate::rules::is_shell_interpreter(name)
         && let Some(outcome) =
             evaluate_dash_c(&argv, rest_words, name, rules, allowlist, depth, cwd)
     {
@@ -4245,7 +4245,7 @@ fn scan_recursable_slots(
                             let payload_argv = normalize::normalize_argv(&synthetic);
                             if let Some((name, rest_words)) =
                                 crate::rules::effective_command(&payload_argv)
-                                && SHELL_INTERPRETERS.contains(&name)
+                                && crate::rules::is_shell_interpreter(name)
                             {
                                 match scan_for_dash_c_before_operand(rest_words, name) {
                                     DashCPosition::FlagFound | DashCPosition::Uncertain => {}
@@ -4445,7 +4445,7 @@ fn scan_recursable_slots(
                             let payload_argv = normalize::normalize_argv(&synthetic);
                             if let Some((name, rest_words)) =
                                 crate::rules::effective_command(&payload_argv)
-                                && SHELL_INTERPRETERS.contains(&name)
+                                && crate::rules::is_shell_interpreter(name)
                             {
                                 match scan_for_dash_c_before_operand(rest_words, name) {
                                     DashCPosition::FlagFound | DashCPosition::Uncertain => {}
@@ -8021,6 +8021,52 @@ mod tests {
     #[test]
     fn decode_fed_python2_pipe_blocks() {
         assert_decision("echo x | base64 -d | python2", Decision::Block);
+    }
+
+    // ==== Issue #346: a distro-versioned binary name (`lua5.4`, `php8.2`,
+    // `python3.12`) matched no SHELL_INTERPRETERS/EXTRA_PIPELINE_INTERPRETERS
+    // entry by exact string equality, silently skipping rule 5b/5c's
+    // decode-then-execute pipeline Block for these. ====
+
+    #[test]
+    fn decode_fed_versioned_lua_pipe_blocks() {
+        assert_decision("echo x | base64 -d | lua5.4", Decision::Block);
+    }
+
+    #[test]
+    fn decode_fed_versioned_php_pipe_blocks() {
+        assert_decision("echo x | base64 -d | php8.2", Decision::Block);
+    }
+
+    #[test]
+    fn decode_fed_versioned_python_pipe_blocks() {
+        assert_decision("echo x | base64 -d | python3.12", Decision::Block);
+    }
+
+    #[test]
+    fn decode_fed_versioned_tclsh_pipe_blocks() {
+        assert_decision("echo x | base64 -d | tclsh8.6", Decision::Block);
+    }
+
+    #[test]
+    fn decode_fed_versioned_ruby_pipe_blocks() {
+        assert_decision("echo x | base64 -d | ruby3.2", Decision::Block);
+    }
+
+    // Same root cause also affects rule 6a's SHELL_INTERPRETERS-based `-c`
+    // recursion: a versioned shell binary must recurse its `-c` argument
+    // exactly like the unversioned name would.
+    #[test]
+    fn versioned_bash_dash_c_recurses() {
+        assert_decision(r#"bash5 -c "rm -rf /""#, Decision::Block);
+    }
+
+    // A command name that happens to end in digits but has no real
+    // interpreter base (`b2`, a real backup-tool binary) must not be swept
+    // into pipeline-sink classification by the version-suffix strip.
+    #[test]
+    fn decode_fed_b2_pipe_is_not_blocked_by_version_stripping() {
+        assert_decision("echo x | base64 -d | b2", Decision::Allow);
     }
 
     // ==== Issue #57: mke2fs is the implementation behind mkfs.ext4 and

@@ -3190,15 +3190,43 @@ const EXTRA_PIPELINE_INTERPRETERS: &[&str] = &[
     "python", "python2", "python3", "node", "perl", "ruby", "lua", "php", "tclsh",
 ];
 
+/// Strips a trailing distro-style version suffix (`python3.12` -> `python`,
+/// `lua5.4` -> `lua`, `php8.2` -> `php`) so interpreter-name matching
+/// recognises versioned binaries (issue #346) without a hand-maintained list
+/// of every version. Only strips a run of trailing ASCII digits/`.` when a
+/// non-digit character remains before it, so a name that is entirely
+/// digits/dots, or has no version suffix at all, is returned unchanged —
+/// never reduced to an empty string.
+fn strip_version_suffix(name: &str) -> &str {
+    let end = name
+        .rfind(|c: char| !c.is_ascii_digit() && c != '.')
+        .map_or(0, |i| i + 1);
+    if end == 0 { name } else { &name[..end] }
+}
+
 /// Whether `name` is an interpreter a pipeline's final stage may be
 /// (`crate::gate` rule 5b/5c) — every [`SHELL_INTERPRETERS`] entry, plus
-/// [`EXTRA_PIPELINE_INTERPRETERS`]'s non-shell interpreters. Always call
-/// this rather than consulting either list alone, so a future addition to
+/// [`EXTRA_PIPELINE_INTERPRETERS`]'s non-shell interpreters, after
+/// [`strip_version_suffix`] normalizes a distro-versioned binary name
+/// (`lua5.4`, `php8.2`) down to its base. Always call this rather than
+/// consulting either list alone, so a future addition to
 /// `SHELL_INTERPRETERS` (a new shell) is automatically also recognised as a
 /// pipeline sink, with nothing left to keep in sync by hand.
 #[must_use]
 pub(crate) fn is_pipeline_interpreter(name: &str) -> bool {
+    let name = strip_version_suffix(name);
     SHELL_INTERPRETERS.contains(&name) || EXTRA_PIPELINE_INTERPRETERS.contains(&name)
+}
+
+/// Whether `name` is a [`SHELL_INTERPRETERS`] member once
+/// [`strip_version_suffix`] normalizes a distro-versioned binary name
+/// (`bash5` -> `bash`) — the same normalization [`is_pipeline_interpreter`]
+/// applies, kept as its own function for `crate::gate`'s `-c` recursion call
+/// sites, which need the plain shell-only list rather than the pipeline-sink
+/// union.
+#[must_use]
+pub(crate) fn is_shell_interpreter(name: &str) -> bool {
+    SHELL_INTERPRETERS.contains(&strip_version_suffix(name))
 }
 
 /// How a [`RecursableSlot`]'s value should be recursed — see
