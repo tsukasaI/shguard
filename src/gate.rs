@@ -7501,6 +7501,20 @@ fn tar_dashless_leading_cluster_directory(
     if !cluster.contains('C') {
         return None;
     }
+    // A second `C` in the same cluster chdirs cumulatively on real tar
+    // (`tar cCCf a b out.tar f` archives `a/b/f`), so composing only the
+    // last one would silently under-count relative to the dashed spelling
+    // `tar -C a -C b ...`, which the multi-occurrence scope cut (issue
+    // #354) already fails closed to `None`. Fail closed here too rather
+    // than resolve to the wrong anchor (issue #356 fable review, finding 1).
+    if cluster.matches('C').count() > 1 {
+        let consumed = cluster
+            .chars()
+            .filter(|c| crate::rules::TAR_DASHLESS_CONSUMING.contains(c))
+            .count()
+            + 1;
+        return Some((None, consumed));
+    }
     let mut consumed = 1;
     let mut anchor = None;
     for c in cluster.chars() {
@@ -14801,15 +14815,32 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
     }
 
     #[test]
-    fn tar_directory_abbreviation_too_short_to_be_unambiguous_is_unaffected() {
+    fn tar_directory_minimal_abbreviation_still_composes_fail_closed() {
         // `matches_long_flag_prefix` requires more than the bare `--`
         // marker (`token.len() > 2`) -- a 3-char token like `--d` still
         // matches here since `--directory` is the only long option this
-        // mechanism checks against, but confirm the boundary case (an
-        // empty/near-empty abbreviation) doesn't panic or misbehave.
+        // mechanism checks against. Real tar rejects `--d` as ambiguous
+        // (it also prefixes `--dereference`) and runs nothing, so treating
+        // it as `--directory` anyway over-flags an already-erroring
+        // command rather than under-flagging a real one.
         assert_eq!(
             decide_dash_c("tar --d ~/.config/shguard -cf out.tar config.toml").decision(),
             Decision::Block
+        );
+    }
+
+    #[test]
+    fn tar_dashless_leading_cluster_with_doubled_c_fails_closed() {
+        // Real tar chdirs cumulatively for each `C` in an old-style bundle
+        // (`tar cCCf a b out.tar f` archives `a/b/f`), so composing only
+        // the last `C`'s value would silently under-count relative to the
+        // dashed spelling `tar -C a -C b ...`, which the multi-occurrence
+        // scope cut (issue #354) already fails closed to `None`. A doubled
+        // `C` inside one cluster must fail closed the same way rather than
+        // resolve to the wrong (last) anchor (issue #356 fable review).
+        assert_eq!(
+            decide_dash_c("tar cCCf ~/.config shguard out.tar config.toml").decision(),
+            Decision::Allow
         );
     }
 }
