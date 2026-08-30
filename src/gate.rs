@@ -2162,8 +2162,9 @@ fn evaluate_simple_command_core(
                 apply_escalation_floor(
                     Verdict::ask(
                         Reason::new(
-                            "`builtin`'s own leading flag could not be statically resolved, so \
-                             whether it loads a shared object (`-f`) cannot be determined"
+                            "`builtin`'s own leading token could not be statically resolved, so \
+                             whether it is a flag that loads a shared object (`-f`) or the \
+                             dispatched command's own name cannot be determined"
                                 .to_string(),
                         ),
                         argv.clone(),
@@ -9477,8 +9478,8 @@ mod tests {
     // (confirmed during development of that rule: it broke
     // `builtin_unresolvable_command_floors_to_ask` below) -- issue #365
     // closes the gap with position-aware code-level detection instead
-    // (`crate::rules::builtin_loadable_library`), checking only `builtin`'s
-    // own very first argv word.
+    // (`crate::rules::builtin_loadable_library`), scanning `builtin`'s own
+    // LEADING run of dash-prefixed tokens rather than its whole argv.
     #[test]
     fn ordinary_builtin_dispatch_is_unaffected_by_the_enable_loadable_builtin_rule() {
         // Regression guard: issue #246's new rule must not shadow or
@@ -9517,13 +9518,27 @@ mod tests {
         assert_decision("builtin -d cd", Decision::Allow);
     }
 
+    // Fable review of PR #372: the first version of this detection checked
+    // only `builtin`'s very first tail token, so a SEPARATED leading flag
+    // (`-d -f lib`, lexically identical to clustered `-df lib` in ksh's own
+    // option parser) slipped through as a real bypass.
+    #[test]
+    fn builtin_loadable_library_separated_dash_d_dash_f_still_blocks() {
+        assert_decision("builtin -d -f /tmp/evil.so", Decision::Block);
+    }
+
+    #[test]
+    fn builtin_loadable_library_separated_unrelated_flag_before_dash_f_still_blocks() {
+        assert_decision("builtin -s -f /tmp/evil.so", Decision::Block);
+    }
+
     #[test]
     fn builtin_wrapped_commands_own_dash_f_is_not_builtins_own() {
-        // `builtin`'s own `-f`/`-d` is only ever its very first argv word --
-        // once a bare command name leads, every later `-f`/`-rf` belongs to
-        // the WRAPPED command, not to `builtin` itself (the exact
-        // false-positive shape a plain `required_flags` rule couldn't
-        // avoid).
+        // `builtin`'s own `-f`/`-d` only ever appears in its LEADING run of
+        // dash-prefixed tokens (ending at the first bare name/`--`) -- once
+        // a bare command name leads, every later `-f`/`-rf` belongs to the
+        // WRAPPED command, not to `builtin` itself (the exact false-positive
+        // shape a plain `required_flags` rule couldn't avoid).
         assert_decision("builtin rm -rf /tmp/x", Decision::Allow);
     }
 

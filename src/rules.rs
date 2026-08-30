@@ -4001,17 +4001,21 @@ pub(crate) fn wrapper_chain_escalation(stage: &[NormalizedWord]) -> WrapperChain
 /// `stage`'s wrapper-unwrap chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BuiltinLoadableLibrary {
-    /// `builtin`'s own leading token (its very first argv word — see
-    /// [`builtin_loadable_library`]'s docs on why position, not presence,
-    /// is what's checked) is a `-f`-containing flag cluster (bare `-f`, a
-    /// glued value `-flib.so`, or clustered with `-d`, e.g. `-df`) — loads
-    /// a shared object.
+    /// A `-f`-containing flag cluster (bare `-f`, a glued value
+    /// `-flib.so`, or clustered with `-d`, e.g. `-df`) appears somewhere in
+    /// `builtin`'s own leading run of dash-prefixed tokens — see
+    /// [`builtin_loadable_library`]'s docs on why the whole leading run,
+    /// not just the first token, must be scanned (`builtin -d -f lib` is
+    /// lexically identical to `builtin -df lib` in ksh's own option
+    /// parser). Loads a shared object.
     Present,
-    /// `builtin`'s own leading token is unresolvable — fail closed the same
-    /// way [`WrapperChainEscalation::Unresolved`] does.
+    /// An unresolvable token appears within `builtin`'s own leading
+    /// dash-token run, before either a `-f` cluster or the run's end — fail
+    /// closed the same way [`WrapperChainEscalation::Unresolved`] does.
     Uncertain,
-    /// No `builtin` hop in the chain, or its leading token isn't an `-f`
-    /// cluster (ordinary dispatch, bare `-d`, or no arguments at all).
+    /// No `builtin` hop in the chain, or its leading dash-token run (if
+    /// any) contains no `-f` cluster (ordinary dispatch, bare `-d`, or no
+    /// arguments at all).
     Absent,
 }
 
@@ -4025,13 +4029,22 @@ pub(crate) enum BuiltinLoadableLibrary {
 /// arguments — so a plain `required_flags = ["f"]` blocklist rule
 /// false-matches an ordinary dispatch whose wrapped command happens to use
 /// `-f`/`-rf` (`builtin $CMD -rf /`); that reversion is recorded in
-/// `enable-loadable-builtin`'s own doc comment. `-f`/`-d` are only ever
-/// `builtin`'s OWN flags in its very first argv word (ksh's grammar allows
-/// no other leading option), so this checks position — the chain's
-/// `builtin` hop's first tail token only — rather than [`FlagMatcher`]'s
-/// any-position presence check, mirroring [`wrapper_chain_escalation`]'s
-/// walk but stopping at the first hop resolving to `builtin` instead of an
-/// escalation vector.
+/// `enable-loadable-builtin`'s own doc comment.
+///
+/// `-f`/`-d` are only ever `builtin`'s OWN flags somewhere in its LEADING
+/// run of dash-prefixed tokens (ksh's grammar allows no option after the
+/// first bare name, which starts the dispatched command's own arguments) —
+/// but that run can be more than one token: ksh's option parser treats
+/// `-d -f lib` identically to a single clustered `-df lib` (fable review of
+/// an earlier version of this function, which checked only the very first
+/// tail token, confirmed `builtin -s -f lib`/`builtin -d -f lib` slipped
+/// through as a real bypass). So this walks every leading dash-cluster
+/// token (stopping at the first non-dash-cluster token, `--`, or the end of
+/// `tail`) looking for `f` in ANY of them, rather than [`FlagMatcher`]'s
+/// any-position-in-the-WHOLE-argv presence check (which is what let the
+/// wrapped command's own `-f`/`-rf` false-match in the reverted attempt).
+/// Mirrors [`wrapper_chain_escalation`]'s walk but stopping at the first
+/// hop resolving to `builtin` instead of an escalation vector.
 ///
 /// Without this check, `effective_command`'s generic wrapper-argument skip
 /// (`skip_wrapper_arguments`) mis-resolves `builtin -f evil.so somefn` as an
@@ -4051,19 +4064,38 @@ pub(crate) fn builtin_loadable_library(stage: &[NormalizedWord]) -> BuiltinLoada
         };
         let base = basename(name);
         if base == "builtin" {
-            return match tail.first().map(NormalizedWord::resolution) {
-                Some(Resolution::Resolved(token)) if short_cluster_chars(token).contains(&'f') => {
-                    BuiltinLoadableLibrary::Present
-                }
-                Some(Resolution::Unresolvable(_)) => BuiltinLoadableLibrary::Uncertain,
-                _ => BuiltinLoadableLibrary::Absent,
-            };
+            return builtin_own_leading_flags(tail);
         }
         if !TRANSPARENT_WRAPPERS.contains(&base) {
             return BuiltinLoadableLibrary::Absent;
         }
         rest = skip_wrapper_arguments(base, tail);
     }
+}
+
+/// Scans `tail` (`builtin`'s own argv, unskipped) left-to-right for `f` in
+/// any leading dash-cluster token — see [`builtin_loadable_library`]'s docs
+/// on why the whole leading run, not just `tail`'s first token, matters.
+/// Stops (returning [`BuiltinLoadableLibrary::Absent`]) at the first token
+/// that is `--`, is not `-`-prefixed, or is the bare `-` placeholder — any
+/// of which ends `builtin`'s own option parsing and starts the dispatched
+/// command's own arguments.
+fn builtin_own_leading_flags(tail: &[NormalizedWord]) -> BuiltinLoadableLibrary {
+    for word in tail {
+        match word.resolution() {
+            Resolution::Resolved(token) => {
+                let chars = short_cluster_chars(token);
+                if chars.contains(&'f') {
+                    return BuiltinLoadableLibrary::Present;
+                }
+                if chars.is_empty() {
+                    return BuiltinLoadableLibrary::Absent;
+                }
+            }
+            Resolution::Unresolvable(_) => return BuiltinLoadableLibrary::Uncertain,
+        }
+    }
+    BuiltinLoadableLibrary::Absent
 }
 
 /// One [`RecurseMode::ShellString`] slot's value, found while walking a
