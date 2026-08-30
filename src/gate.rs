@@ -7531,12 +7531,37 @@ fn tar_dashless_leading_cluster_directory(
     Some((anchor, consumed))
 }
 
-fn resolve_tar_dash_c<'a>(
-    rest: &'a [NormalizedWord],
-    env: &Env,
-) -> Option<(String, &'a [NormalizedWord])> {
-    let mut occurrence: Option<(String, usize)> = None;
-    let mut occurrence_count = 0usize;
+/// Issue #354: `tar -C`/`--directory` is positional (each occurrence
+/// redirects tar's OWN working directory only for operands strictly after
+/// it, per GNU tar(1)) but, contrary to this issue's own original framing,
+/// live-verified NOT independent of each other — bsdtar 3.5.3 confirmed
+/// (`tar -cf out.tar -C a sub/f1 -C b f2` on a real `a/b` directory tree
+/// archives `sub/f1` and `b/f2` under `a`, i.e. the second `-C b` resolves
+/// as `a/b`, a real `chdir(2)` relative to wherever the first `-C a` left
+/// tar's cwd): multiple occurrences compose CUMULATIVELY, exactly like
+/// git/make's own repeated `-C` ([`chain_dash_c_targets`]). What tar does
+/// NOT do that git/make's single final anchor modeling assumes is apply
+/// one anchor to the WHOLE tail — each occurrence's anchor only governs
+/// the operands between it and the next occurrence (or the end of the
+/// invocation).
+///
+/// Returns the whole of `rest`, cloned, with every operand between one
+/// resolved occurrence and the next composed against that occurrence's
+/// own cumulative anchor ([`compose_argv_against_cwd`]); operands before
+/// the first occurrence, and any range whose anchor never resolved to
+/// [`CwdContext::Known`] (unresolvable target, or a relative target
+/// following one that never resolved), are left untouched rather than
+/// guessed — the same fail-closed-to-no-composition posture the
+/// single-occurrence version of this function used for the whole
+/// invocation. `None` only when there is no occurrence at all, or not one
+/// of them ever resolves to a known anchor.
+fn resolve_tar_dash_c(rest: &[NormalizedWord], env: &Env) -> Option<Vec<NormalizedWord>> {
+    struct Occurrence {
+        raw: Option<String>,
+        flag_start: usize,
+        after: usize,
+    }
+    let mut occurrences: Vec<Occurrence> = Vec::new();
     let mut index = 0;
     while index < rest.len() {
         let Resolution::Resolved(s) = rest[index].resolution() else {
@@ -7572,18 +7597,40 @@ fn resolve_tar_dash_c<'a>(
             index += 1;
             continue;
         };
-        occurrence_count += 1;
-        occurrence = Some((raw?, after));
+        occurrences.push(Occurrence {
+            raw,
+            flag_start: index,
+            after,
+        });
         index = after;
     }
-    if occurrence_count != 1 {
+    if occurrences.is_empty() {
         return None;
     }
-    let (raw, after) = occurrence?;
-    match resolve_cwd_outcome(&CwdContext::Initial, classify_cd_target(&raw, env)) {
-        CwdContext::Known(anchor) => Some((anchor, &rest[after..])),
-        CwdContext::Initial | CwdContext::Poisoned => None,
+
+    let mut composed = rest.to_vec();
+    let mut current = CwdContext::Initial;
+    let mut any_composed = false;
+    for (i, occurrence) in occurrences.iter().enumerate() {
+        let range_end = occurrences
+            .get(i + 1)
+            .map_or(rest.len(), |next| next.flag_start);
+        current = match &occurrence.raw {
+            // An unresolvable target is exactly as opaque to this
+            // cumulative tracking as `classify_cd_target`'s own `Poison`
+            // arm treats any other unmodeled shape -- no string to
+            // classify at all, so poison directly rather than call it.
+            None => CwdContext::Poisoned,
+            Some(raw) => resolve_cwd_outcome(&current, classify_cd_target(raw, env)),
+        };
+        if let CwdContext::Known(anchor) = &current {
+            let range = &rest[occurrence.after..range_end];
+            composed[occurrence.after..range_end]
+                .clone_from_slice(&compose_argv_against_cwd(range, anchor));
+            any_composed = true;
+        }
     }
+    any_composed.then_some(composed)
 }
 
 /// Issue #209's `env -C dir cmd args...` handling: `env` is already
@@ -7753,10 +7800,10 @@ fn evaluate_dash_c_override(argv: &[NormalizedWord], env: &Env, rules: &Rules) -
             evaluate_composed_argv_match(&composed_argv, argv, "this invocation's own `-C`", rules)
         }
         "tar" => {
-            let (anchor, tail) = resolve_tar_dash_c(rest, env)?;
-            let prefix_len = argv.len() - tail.len();
+            let composed_rest = resolve_tar_dash_c(rest, env)?;
+            let prefix_len = argv.len() - rest.len();
             let mut composed_argv = argv[..prefix_len].to_vec();
-            composed_argv.extend(compose_argv_against_cwd(tail, &anchor));
+            composed_argv.extend(composed_rest);
             evaluate_composed_argv_match(
                 &composed_argv,
                 argv,
@@ -14421,17 +14468,53 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
     }
 
     #[test]
-    fn tar_with_two_dash_c_occurrences_is_a_deliberate_scope_cut_not_modeled() {
-        // Tar's own `-C` is positional (unlike git/make's cumulative
-        // chain) — modeling every possible occurrence's operand range
-        // precisely is the "can of worms" issue #209's own scope note
-        // warns against, so two-or-more occurrences are deliberately not
-        // modeled at all (tracked, not silently accepted — issue #354),
-        // rather than risk attributing the wrong anchor to the wrong
-        // operand range.
+    fn tar_with_two_dash_c_occurrences_composes_each_range_against_its_own_anchor() {
+        // Issue #354: tar's own `-C` is positional (each occurrence only
+        // governs operands strictly after it, up to the next occurrence)
+        // but live-verified (bsdtar 3.5.3) cumulative across occurrences,
+        // exactly like git/make's own repeated `-C` — the second, absolute
+        // `-C ~/.config/shguard` overrides the first `-C /tmp` outright
+        // (`resolve_cwd_outcome`'s own "absolute recovers from Poisoned"
+        // rule), and `-xf config.toml` (strictly after the SECOND
+        // occurrence) composes against that anchor.
         assert_eq!(
             decide_dash_c("tar -C /tmp -C ~/.config/shguard -xf config.toml").decision(),
-            Decision::Allow
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn tar_with_two_relative_dash_c_occurrences_chains_the_second_onto_the_first() {
+        // The genuinely positional case: a RELATIVE second `-C` composes
+        // onto the first occurrence's own anchor, not onto the invoker's
+        // original cwd — matching bsdtar's real `chdir(2)`-per-occurrence
+        // behavior (confirmed live: `tar -C a ... -C b ...` archives from
+        // `a/b`, not from a fresh `b` under the original cwd).
+        assert_eq!(
+            decide_dash_c("tar -C ~/.config -C shguard -xf config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn tar_dash_c_occurrence_only_governs_operands_strictly_after_it() {
+        // The operand strictly BEFORE the second occurrence belongs to
+        // the FIRST occurrence's own range and must not be composed
+        // against the second (later) anchor.
+        assert_eq!(
+            decide_dash_c("tar -C ~/.config/shguard -cf other.tar -C /tmp file").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn tar_dash_c_second_occurrence_unresolvable_does_not_poison_the_first_ranges_composition() {
+        // An unresolvable LATER occurrence must not retroactively
+        // invalidate composition already resolved for an EARLIER range —
+        // only ranges from that point forward lose their anchor.
+        assert_eq!(
+            decide_dash_c("tar -C ~/.config/shguard -cf config.toml -C $(echo x) other").decision(),
+            Decision::Block
         );
     }
 
