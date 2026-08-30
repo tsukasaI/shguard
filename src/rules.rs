@@ -870,6 +870,31 @@ enum ExceptTargetShape {
     Other,
 }
 
+/// Common home-container directory names (issue #364), consulted only by
+/// [`TargetMatcher::ascent_descent_plausible`]'s extra strip-two-components
+/// widening — a small, explicitly disclosed list, not a general
+/// `/home/<user>`-shaped-path detector (this codebase has no such
+/// heuristic anywhere else, deliberately: see that function's own docs).
+/// `"home"` covers Linux/BSD; `"Users"` covers macOS. Missing a container
+/// name here is a silent miss of that one variant, not a false negative in
+/// the sense the rest of this function's design otherwise avoids — same
+/// disclosed trade-off the issue itself accepted as a valid resolution.
+const HOME_CONTAINER_DIRS: &[&str] = &["home", "Users"];
+
+/// Whether `component` names a [`HOME_CONTAINER_DIRS`] entry, compared
+/// case-insensitively (fable review of PR #382): macOS's default APFS/
+/// HFS+ volumes are case-INsensitive, so `users`/`USERS`/`Users` all
+/// resolve to the exact same real directory at runtime — a bare
+/// case-sensitive match would let a one-character respelling of the
+/// very name this list exists to catch silently evade it, a materially
+/// different (and avoidable) gap from the disclosed "unlisted container
+/// name" residual this list already accepts.
+fn is_home_container_dir(component: &str) -> bool {
+    HOME_CONTAINER_DIRS
+        .iter()
+        .any(|dir| dir.eq_ignore_ascii_case(component))
+}
+
 impl TargetMatcher {
     fn except_target_shape(&self) -> ExceptTargetShape {
         match self {
@@ -1013,16 +1038,15 @@ impl TargetMatcher {
     ///   one) would blanket-floor every ascent-then-descent token — the
     ///   same latent shape `TargetMatcher::matches`'s existing
     ///   `NormalizedPrefix` already has.
-    /// - Issue #364: only the tail's very FIRST component is tried as the
-    ///   reappearing name. A tail that spells the home container
-    ///   explicitly before that name (`~alice/../home/bob/.config/
-    ///   shguard/x`) strips `home`, not `bob`, and the resulting `~/bob/
-    ///   .config/shguard/x` candidate matches nothing — the same threat,
-    ///   reachable one component further in. Not fixed here: this
-    ///   codebase has no existing canonical list/heuristic for
-    ///   recognizing `/home/<user>`-shaped paths, and hardcoding one
-    ///   (`"home"`, `"Users"`, ...) would be new, platform-specific
-    ///   speculation this function's design otherwise avoids.
+    /// - Issue #364 (partially closed): a tail that spells a common home
+    ///   CONTAINER directory explicitly before the reappearing name
+    ///   (`~alice/../home/bob/.config/shguard/x`) is now also tried by
+    ///   stripping `comps[0..2]` (`home`/`bob`) when `comps[0]` is in
+    ///   [`HOME_CONTAINER_DIRS`], on top of the plain `comps[0..1]` strip
+    ///   above. This is a small, explicitly disclosed list, not a general
+    ///   `/home/<user>`-shaped-path heuristic — a container name this
+    ///   codebase has no canonical way to detect otherwise. Still misses
+    ///   any container name absent from that list.
     fn ascent_descent_plausible(&self, token: &str) -> bool {
         let strip = match self {
             Self::NormalizedPrefix { strip, .. } | Self::NormalizedExact { strip, .. } => strip,
@@ -1082,9 +1106,20 @@ impl TargetMatcher {
                 // shape is `~/x`), so a bare `~alice/../bob` can never
                 // reach a dangerous namespace here regardless of this
                 // guard's presence.
-                canon.starts_with('~')
+                (canon.starts_with('~')
                     && comps.len() >= 2
-                    && format!("~/{}", comps[1..].join("/")).starts_with(canon.as_str())
+                    && format!("~/{}", comps[1..].join("/")).starts_with(canon.as_str()))
+                    // Issue #364: the same re-anchoring one component
+                    // further in, when the tail spells a common home
+                    // CONTAINER directory before the reappearing name
+                    // (`~alice/../home/bob/.config/shguard/x` strips
+                    // `home` too, not just `bob`) -- see this function's
+                    // own doc for why this is a small, explicitly
+                    // disclosed list rather than a general heuristic.
+                    || (canon.starts_with('~')
+                        && comps.len() >= 3
+                        && is_home_container_dir(&comps[0])
+                        && format!("~/{}", comps[2..].join("/")).starts_with(canon.as_str()))
             }
             Self::NormalizedExact { target, .. } => {
                 let (PathForm::Abs(target_comps) | PathForm::Home(target_comps)) = target else {
@@ -1105,6 +1140,12 @@ impl TargetMatcher {
                     || (matches!(target, PathForm::Home(_))
                         && comps.len() >= 2
                         && comps[1..] == *target_comps)
+                    // Issue #364: same one-component-further widening as
+                    // the prefix arm above.
+                    || (matches!(target, PathForm::Home(_))
+                        && comps.len() >= 3
+                        && is_home_container_dir(&comps[0])
+                        && comps[2..] == *target_comps)
             }
             Self::Exact(_) | Self::Prefix(_) | Self::UrlHost(_) => {
                 unreachable!("filtered out above")
@@ -6620,7 +6661,7 @@ mod tests {
     // mid-tail (`~alice/../bob/...`, where `bob` could be the invoking
     // user's own account) is now also tried re-anchored as `~` — narrowing
     // the residual gap issue #90 documented but didn't fix (a further,
-    // deeper-nested variant is tracked separately as issue #364). ====
+    // deeper-nested variant is partially closed by issue #364, below). ====
 
     #[test]
     fn ascent_descent_escaped_anchor_basename_reanchors_into_self_protect_prefix() {
@@ -6691,6 +6732,96 @@ mod tests {
         let rules = Rules::embedded().unwrap();
         let cmd = argv(&["cp", "evil.toml", "~-/bob/.config/shguard/config.toml"]);
         assert!(rules.match_command(&cmd).is_none());
+        let rule = rules.match_command_ascent_descent(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "self-protect-config-cp-tilde");
+    }
+
+    // ==== Issue #364: the same re-anchoring one component further in, when
+    // the tail spells a common home CONTAINER directory (`home`, `Users`)
+    // explicitly before the reappearing name. ====
+
+    #[test]
+    fn ascent_descent_home_container_basename_reanchors_into_self_protect_prefix() {
+        // The issue's own repro: `home` sits in front of `bob`, so the
+        // plain issue-#118 strip only removes `home`, leaving `~/bob/
+        // .config/shguard/config.toml`, which matches nothing. Stripping
+        // both `home` and `bob` catches it.
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&[
+            "cp",
+            "evil.toml",
+            "~alice/../home/bob/.config/shguard/config.toml",
+        ]);
+        assert!(rules.match_command(&cmd).is_none());
+        let rule = rules.match_command_ascent_descent(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "self-protect-config-cp-tilde");
+    }
+
+    #[test]
+    fn ascent_descent_home_container_basename_reanchors_into_self_protect_exact() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["rm", "-rf", "~alice/../home/bob/.config/shguard"]);
+        let rule = rules.match_command_ascent_descent(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "self-protect-config-rm-tilde");
+    }
+
+    #[test]
+    fn ascent_descent_home_container_basename_reanchors_for_macos_users_dir_too() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&[
+            "cp",
+            "evil.toml",
+            "~alice/../Users/bob/.config/shguard/config.toml",
+        ]);
+        let rule = rules.match_command_ascent_descent(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "self-protect-config-cp-tilde");
+    }
+
+    #[test]
+    fn ascent_descent_unlisted_container_name_still_does_not_floor() {
+        // Disclosed residual: a home-container name not on the small
+        // explicit list (issue #364's own accepted trade-off) still
+        // isn't recognized -- must not regress to a false floor either.
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&[
+            "cp",
+            "evil.toml",
+            "~alice/../export/home/bob/.config/shguard/config.toml",
+        ]);
+        assert!(rules.match_command_ascent_descent(&cmd).is_none());
+    }
+
+    #[test]
+    fn ascent_descent_home_container_match_is_case_insensitive() {
+        // macOS's default APFS/HFS+ volumes are case-insensitive, so
+        // `users` and `Users` resolve to the exact same real directory at
+        // runtime -- a case-sensitive list lookup would let this
+        // respelling silently evade the widening (fable review of PR
+        // #382).
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&[
+            "cp",
+            "evil.toml",
+            "~alice/../users/bob/.config/shguard/config.toml",
+        ]);
+        let rule = rules.match_command_ascent_descent(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "self-protect-config-cp-tilde");
+    }
+
+    #[test]
+    fn ascent_descent_home_container_widening_applies_to_a_plain_relative_ascent_too() {
+        // Same widening as issue #118's own uniformity guarantee -- not
+        // restricted to the named-user-escape source shape.
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["cp", "evil.toml", "../home/bob/.config/shguard/config.toml"]);
+        let rule = rules.match_command_ascent_descent(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "self-protect-config-cp-tilde");
+    }
+
+    #[test]
+    fn ascent_descent_home_container_widening_applies_to_a_dirstack_anchor_too() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["cp", "evil.toml", "~-/home/bob/.config/shguard/config.toml"]);
         let rule = rules.match_command_ascent_descent(&cmd).unwrap();
         assert_eq!(rule.id().as_str(), "self-protect-config-cp-tilde");
     }
