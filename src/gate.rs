@@ -466,7 +466,7 @@ fn evaluate_command_line(
 ) -> Verdict {
     let mut env = Env::new();
     let mut worst = evaluate_pipeline(&command_line.first, &mut env, rules, allowlist, depth, cwd);
-    let mut prev_bang = command_line.first.bang;
+    let mut prev_untrustworthy = pipeline_reported_success_is_untrustworthy(&command_line.first);
     for (separator, pipeline) in &command_line.rest {
         // Issue #353: `&&` only guarantees the preceding pipeline actually
         // succeeded when that pipeline wasn't itself `!`-negated — `!
@@ -478,14 +478,45 @@ fn evaluate_command_line(
         // `apply_pushd`'s assume-success gap can desync the tracked stack
         // from reality. See `CwdState::collapse_stack_on_uncertain_crossing`'s
         // own docs.
-        if *separator != Separator::And || prev_bang {
+        if *separator != Separator::And || prev_untrustworthy {
             cwd.collapse_stack_on_uncertain_crossing();
         }
-        prev_bang = pipeline.bang;
+        prev_untrustworthy = pipeline_reported_success_is_untrustworthy(pipeline);
         let verdict = evaluate_pipeline(pipeline, &mut env, rules, allowlist, depth, cwd);
         worst = fold_worst(worst, verdict);
     }
     worst
+}
+
+/// Whether a pipeline's own reported exit status can't be trusted to mean
+/// "the state-mutating command inside it actually succeeded" — the
+/// condition [`evaluate_command_line`] uses to decide a `&&` crossing still
+/// needs `cwd`'s stack collapsed.
+///
+/// A `!`-negated pipeline is the direct case (`! pushd X` reports SUCCESS
+/// to `&&` even when the real `pushd` failed). A single-stage brace group
+/// is the indirect case: its own reported status IS its body's *last*
+/// pipeline's status, so a bang on that last inner pipeline is exactly as
+/// untrustworthy as a bang on the group itself, but invisible to the
+/// group's own `bang` field (which brush-parser only sets for a bang
+/// directly preceding the group). Recurses through nested brace groups
+/// (`{ { ! pushd X; }; }`) for the same reason. Deliberately does NOT
+/// recurse into a `Subshell` (its body mutates a cloned `cwd`, so no
+/// phantom frame can ever reach the caller — `evaluate_pipeline`'s own
+/// docs) or a multi-stage pipeline (never mutates `cwd` at all, same
+/// docs), and `for`/`while`/`until`/`if` bodies already poison `cwd`
+/// outright rather than relying on this collapse (strictly stronger).
+fn pipeline_reported_success_is_untrustworthy(pipeline: &Pipeline) -> bool {
+    if pipeline.bang {
+        return true;
+    }
+    if pipeline.rest.is_empty()
+        && let Command::Compound(CompoundCommand::BraceGroup { body, .. }) = &pipeline.first
+    {
+        let last = body.rest.last().map_or(&body.first, |(_, pl)| pl);
+        return pipeline_reported_success_is_untrustworthy(last);
+    }
+    false
 }
 
 /// Folds every stage of a [`Pipeline`] plus the pipeline-shape rules (rule
@@ -6513,13 +6544,15 @@ impl CwdState {
     /// seeds with — leaving `current` untouched. Called at every
     /// [`crate::ast::Separator`] in a [`crate::ast::CommandLine`] that
     /// does NOT guarantee the preceding pipeline succeeded (every
-    /// separator except `&&`, OR `&&` following a [`crate::ast::Pipeline`]
-    /// whose own `bang` is set — `! pushd X` reports SUCCESS to `&&` even
-    /// when the real `pushd` failed, since negation flips the reported
-    /// exit status, not whether the pushd itself ran; a fable review of an
-    /// earlier version of this fix confirmed omitting this reopened the
-    /// exact false-Allow issue #353 exists to close) whenever the stack is
-    /// non-empty.
+    /// separator except `&&`, OR `&&` following a pipeline whose reported
+    /// success is untrustworthy per
+    /// `crate::gate::pipeline_reported_success_is_untrustworthy` — a
+    /// `!`-negated pipeline reports SUCCESS to `&&` even when the real
+    /// command inside failed, since negation flips the reported exit
+    /// status, not whether the command itself ran; a single-stage brace
+    /// group whose own last inner pipeline is so negated inherits the
+    /// same untrustworthiness, since the group's reported status IS that
+    /// last pipeline's) whenever the stack is non-empty.
     ///
     /// [`apply_pushd`]'s own known limitation (assume-success: a `pushd X`
     /// this module resolves is always assumed to actually `cd` there) means
@@ -13500,13 +13533,12 @@ done"#,
 
     #[test]
     fn pushd_bang_negated_and_chain_floors_to_ask() {
-        // A fable review of an earlier version of this fix found the exact
-        // #353 false-Allow reopened by `!`: `! pushd X` reports SUCCESS to
-        // `&&` even when the real `pushd` failed (the negation flips exit
-        // status, not whether the pushd itself ran), so an `&&` following
-        // a NEGATED pipeline must collapse the stack exactly like any
-        // other separator -- `pipeline.bang` (issue #353) threads that
-        // through from the parser.
+        // `! pushd X` reports SUCCESS to `&&` even when the real `pushd`
+        // failed (the negation flips exit status, not whether the pushd
+        // itself ran), so an `&&` following a NEGATED pipeline must
+        // collapse the stack exactly like any other separator --
+        // `pipeline.bang` (issue #353) threads that through from the
+        // parser.
         assert_decision(
             "pushd ~/.config/shguard && pushd /tmp && ! pushd /nonexistent-zz-353 && \
              popd && cp evil.toml config.toml",
@@ -13515,16 +13547,66 @@ done"#,
     }
 
     #[test]
-    fn pushd_bang_negated_pushd_that_actually_succeeds_stays_precise() {
-        // Regression guard: `bang` must not collapse the stack for every
-        // negated pipeline unconditionally -- only the SEPARATOR/negation
-        // combination that makes a real failure's continuation reachable
-        // matters. Here the negated `pushd` targets a real, resolvable
-        // path, so the model's own precision (not this floor) is what's
-        // being exercised; this pins that the added `bang` check doesn't
-        // itself downgrade an otherwise-precise chain.
+    fn pushd_bang_negated_floors_regardless_of_target() {
+        // `bang` floors unconditionally: the model never trusts a negated
+        // pipeline's reported status, even when the negated `pushd`
+        // targets a real, resolvable path that (unnegated) the model
+        // would otherwise track precisely. This pins that deliberate
+        // trade -- the previous state here was `Block` (precise tracking),
+        // and the `bang` check downgrades it to `Ask`.
         assert_decision(
             "pushd ~/.config/shguard && ! pushd /tmp && popd && cp evil.toml config.toml",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn pushd_async_separator_floors_to_ask() {
+        // The `Separator::Async` (`&`) arm of the collapse condition has
+        // the same "not `&&`" shape as `;`/`||` -- pin it explicitly
+        // alongside `pushd_or_chain_floors_to_ask`.
+        assert_decision(
+            "pushd ~/.config/shguard && pushd /nonexistent-zz-353b & popd && cp evil.toml config.toml",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn pushd_bang_negated_inside_brace_group_last_pipeline_floors_to_ask() {
+        // A brace group's own reported exit status is its body's LAST
+        // pipeline's status, so a bang on that last inner pipeline is
+        // exactly as untrustworthy to the enclosing `&&` as a bang on the
+        // group itself -- but invisible to the group's own `bang` field,
+        // which only reflects a bang directly preceding the group.
+        // `pipeline_reported_success_is_untrustworthy` recurses into a
+        // single-stage brace-group stage to see through this.
+        assert_decision(
+            "pushd ~/.config/shguard && pushd /tmp && { ! pushd /nonexistent-zz-353c; } && \
+             popd && cp evil.toml config.toml",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn pushd_bang_negated_after_other_commands_inside_brace_group_floors_to_ask() {
+        // Same as above, with an earlier, unrelated command inside the
+        // group ahead of the negated pipeline -- confirms the recursion
+        // looks at the body's LAST pipeline, not its first.
+        assert_decision(
+            "pushd ~/.config/shguard && pushd /tmp && { true; ! pushd /nonexistent-zz-353d; } && \
+             popd && cp evil.toml config.toml",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn pushd_bang_negated_brace_group_at_start_of_chain_floors_to_ask() {
+        // Same recursion, but the brace group is the very FIRST pipeline
+        // on the line -- exercises the `command_line.first` init site of
+        // `prev_untrustworthy`, not just the loop-body update site.
+        assert_decision(
+            "{ pushd ~/.config/shguard && pushd /tmp && ! pushd /nonexistent-zz-353e; } && \
+             popd && cp evil.toml config.toml",
             Decision::Ask,
         );
     }
