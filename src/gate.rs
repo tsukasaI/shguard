@@ -3864,14 +3864,26 @@ fn evaluate_leftover_alternative_substitutions(
 /// at all). That shape is a precision question about the winning
 /// alternative's OWN classification (issue #326's territory), not a
 /// leftover-alternative-invisibility gap this floor is built to close.
+///
+/// **Also disclosed**: a sibling is checked regardless of whether an
+/// EARLIER, statically-resolved-and-non-vanishing sibling would make it
+/// impossible for this one to ever actually claim `argv[0]` at runtime
+/// (`{$X,ls,rm$IFS-rf$IFS} /`: `ls` can never vanish, so `rm` can never
+/// win `argv[0]` in real bash, yet this still Blocks). Deliberately kept
+/// as an over-approximation rather than tracked precisely — a fable review
+/// of this fix judged either acceptable, and precise "can this sibling
+/// ever actually claim the position" tracking is exactly the kind of
+/// speculative generality this codebase avoids for an input already this
+/// obfuscated; the direction is fail-closed (Block on already-`Ask`
+/// input), never a new false Allow.
 fn leftover_command_block_floor(
     leftover_alternatives: &[normalize::LeftoverAlternative],
     first_word_ast: &Word,
     argv: &[NormalizedWord],
     rules: &Rules,
-) -> Option<(RuleId, String)> {
-    let winning_word_count = normalize::normalize_word(first_word_ast).len();
-    let argument_suffix = argv.get(winning_word_count..).unwrap_or(&[]);
+) -> Option<(RuleId, String, Option<DenyMessage>)> {
+    let first_word_fold_len = normalize::normalize_word(first_word_ast).len();
+    let argument_suffix = argv.get(first_word_fold_len..).unwrap_or(&[]);
     for (origin, pieces) in leftover_alternatives {
         if *origin != normalize::LeftoverOrigin::FullAlternative {
             continue;
@@ -3896,6 +3908,7 @@ fn leftover_command_block_floor(
                     rule.id().as_str(),
                     rule.reason().as_str()
                 ),
+                rule.deny_message().cloned(),
             ));
         }
     }
@@ -3906,12 +3919,17 @@ fn leftover_command_block_floor(
 /// verdict produced on an early-return path (rules 1/2/8's own returns, all
 /// reached before `fold_floors`): a matching sibling alternative always
 /// raises the verdict to `Block`, combining the floor's reason with the
-/// verdict's own reason (an `Allow`/bare-`Ask` verdict may have none). A
-/// verdict already `Block` is untouched — this floor never needs to
-/// override an existing Block's own reason/matched-rule audit trail, since
-/// `Block` is already the maximum decision.
-fn apply_leftover_command_floor(verdict: Verdict, floor: Option<(RuleId, String)>) -> Verdict {
-    let Some((rule_id, floor_reason)) = floor else {
+/// verdict's own reason (an `Allow`/bare-`Ask` verdict may have none) and
+/// unconditionally attaching the matched rule's own `deny_message` (issue
+/// #202's convention every other floor in this file follows). A verdict
+/// already `Block` is untouched — this floor never needs to override an
+/// existing Block's own reason/matched-rule audit trail, since `Block` is
+/// already the maximum decision.
+fn apply_leftover_command_floor(
+    verdict: Verdict,
+    floor: Option<(RuleId, String, Option<DenyMessage>)>,
+) -> Verdict {
+    let Some((rule_id, floor_reason, deny_message)) = floor else {
         return verdict;
     };
     if verdict.decision() == Decision::Block {
@@ -3922,7 +3940,7 @@ fn apply_leftover_command_floor(verdict: Verdict, floor: Option<(RuleId, String)
         Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
         None => floor_reason,
     };
-    Verdict::block(Reason::new(reason), argv, Some(rule_id))
+    Verdict::block(Reason::new(reason), argv, Some(rule_id)).with_deny_message(deny_message)
 }
 
 /// Combines two rule-3-shaped `Option<Decision>` floors (issue #77:
@@ -9030,6 +9048,32 @@ mod tests {
     #[test]
     fn command_position_sibling_brace_alternative_with_ifs_inside_the_member_blocks() {
         assert_decision("rm$IFS{a$IFS,}-rf$IFS/", Decision::Block);
+    }
+
+    // Pins `leftover_command_block_floor`'s argument-suffix slice
+    // (`argv.get(first_word_fold_len..)`) specifically for a command whose
+    // dangerous target ("/") lives in a SEPARATE, space-delimited AST word
+    // rather than inside the same braced word as every other test above —
+    // fable review of PR #373 flagged this exact shape as the one novel
+    // path the original test set never directly exercised.
+    #[test]
+    fn command_position_sibling_brace_alternative_blocks_with_target_in_separate_ast_word() {
+        assert_decision("rm$IFS{a,-rf} /", Decision::Block);
+    }
+
+    // Disclosed over-approximation (fable review of PR #373): a sibling is
+    // checked regardless of whether an EARLIER, statically-resolved and
+    // non-vanishing sibling makes it impossible for THIS one to ever
+    // actually claim `argv[0]` at runtime -- `ls` here can never vanish, so
+    // real bash can never let `rm` win the command-position slot (at worst
+    // `ls rm -rf /`, harmless), yet this still Blocks. Deliberately kept
+    // as an accepted over-approximation (see `leftover_command_block_floor`'s
+    // own doc) rather than tracked precisely, since the direction is
+    // fail-closed on already-obfuscated input, never a new false Allow.
+    #[test]
+    fn command_position_sibling_brace_alternative_blocks_even_when_an_earlier_sibling_cannot_vanish()
+     {
+        assert_decision("{$X,ls,rm$IFS-rf$IFS} /", Decision::Block);
     }
 
     // Known residual gap, disclosed rather than silently accepted (see
