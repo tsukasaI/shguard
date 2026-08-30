@@ -60,6 +60,16 @@ Or with Nix:
 nix run github:tsukasaI/shguard
 ```
 
+Or download a prebuilt binary from the [Releases page](https://github.com/tsukasaI/shguard/releases), no Rust toolchain required. Each release publishes `shguard-<target>` for `aarch64-apple-darwin`, `x86_64-apple-darwin`, `aarch64-unknown-linux-gnu`, and `x86_64-unknown-linux-gnu`, plus a `SHA256SUMS` file to verify the download:
+
+```bash
+curl -LO https://github.com/tsukasaI/shguard/releases/latest/download/shguard-x86_64-unknown-linux-gnu
+curl -LO https://github.com/tsukasaI/shguard/releases/latest/download/SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing
+chmod +x shguard-x86_64-unknown-linux-gnu
+mv shguard-x86_64-unknown-linux-gnu /usr/local/bin/shguard
+```
+
 ### Claude Code registration
 
 Add to `settings.json`:
