@@ -292,9 +292,10 @@ pub(crate) enum TarDashlessCluster {
 /// declaring `required_flags = ["x|--extract|--get"]` to never match a
 /// bare-`x` dash-less invocation, no matter what else was present. A
 /// value-consuming letter with no positional argument left to consume
-/// (`tar fC` alone, which also lacks `x` so never reaches this case anyway)
-/// falls back to [`TarDashlessCluster::NotApplicable`], unchanged for that
-/// shape.
+/// falls back to [`TarDashlessCluster::NotApplicable`] — post-issue-#344,
+/// bare `tar xf` (no trailing archive argument at all) is a real,
+/// reachable example of this shape (`tar fC` alone, which also lacks `x`,
+/// never reached this case regardless).
 ///
 /// On success, [`TarDashlessCluster::Recognized`] carries the full
 /// rewritten tail: one or two synthetic tokens per cluster letter,
@@ -8258,6 +8259,48 @@ mod tests {
             .unwrap();
         assert_eq!(matched.decision(), Decision::Block);
         assert_eq!(matched.id().as_str(), "tar-extract-over-root-or-home");
+    }
+
+    // Same gap, but for issue #128's own `--dir=` abbreviation — confirms
+    // the dashless rewrite (this fix) composes correctly with the
+    // abbreviation rewrite, which runs on the ALREADY-rewritten tail
+    // (`tar_dashless_effective_tail`).
+    #[test]
+    fn tar_dashless_x_only_cluster_with_dir_abbreviation_now_blocks() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&["tar", "xf", "a.tar", "--dir=/"]))
+            .unwrap();
+        assert_eq!(matched.decision(), Decision::Block);
+        assert_eq!(matched.id().as_str(), "tar-extract-over-root-or-home");
+    }
+
+    // A no-`C`, three-letter cluster (`z` unmodeled-but-boolean, `v`
+    // boolean, `f` consuming) with a SEPARATE dashed `-C` — guards the
+    // generic per-letter rewrite loop's claim for a cluster shape beyond
+    // the two-letter `xf` this fix's other tests all use.
+    #[test]
+    fn tar_dashless_multi_letter_cluster_without_c_now_blocks() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&["tar", "xzvf", "a.tar", "-C", "/"]))
+            .unwrap();
+        assert_eq!(matched.decision(), Decision::Block);
+        assert_eq!(matched.id().as_str(), "tar-extract-over-root-or-home");
+    }
+
+    // Undeclared-but-real behavior change this fix also causes (found by
+    // fable review of PR #375): dash-less `x`+`P` (absolute-names) with no
+    // `C` in the same cluster now also reaches `tar-absolute-names-ask`,
+    // matching `TAR_DASHLESS_BOOLEAN`'s own doc comment's promise that `-P`
+    // reaches that rule — pinned so this isn't a silent, undocumented
+    // side effect.
+    #[test]
+    fn tar_dashless_x_and_p_cluster_without_c_now_asks() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules.match_command(&argv(&["tar", "xP", "a.tar"])).unwrap();
+        assert_eq!(matched.decision(), Decision::Ask);
+        assert_eq!(matched.id().as_str(), "tar-absolute-names-ask");
     }
 
     // Regression guard: a bare `xf` cluster with no directory-changing
