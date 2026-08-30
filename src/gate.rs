@@ -466,16 +466,22 @@ fn evaluate_command_line(
 ) -> Verdict {
     let mut env = Env::new();
     let mut worst = evaluate_pipeline(&command_line.first, &mut env, rules, allowlist, depth, cwd);
+    let mut prev_bang = command_line.first.bang;
     for (separator, pipeline) in &command_line.rest {
-        // Issue #353: `&&` is the only separator that guarantees the
-        // preceding pipeline actually succeeded — every other one (`;`,
-        // `||`, `&`) makes the real-world "it failed" branch reachable,
-        // which is exactly where `apply_pushd`'s assume-success gap can
-        // desync the tracked stack from reality. See
-        // `CwdState::collapse_stack_on_uncertain_crossing`'s own docs.
-        if *separator != Separator::And {
+        // Issue #353: `&&` only guarantees the preceding pipeline actually
+        // succeeded when that pipeline wasn't itself `!`-negated — `!
+        // pushd X` reports SUCCESS to `&&` even when the real `pushd`
+        // failed, so a negated pipeline must be treated exactly like a
+        // non-`&&` separator here. Every separator OTHER than `&&` (`;`,
+        // `||`, `&`) already makes the real-world "it failed" branch
+        // reachable regardless of `bang`, which is exactly where
+        // `apply_pushd`'s assume-success gap can desync the tracked stack
+        // from reality. See `CwdState::collapse_stack_on_uncertain_crossing`'s
+        // own docs.
+        if *separator != Separator::And || prev_bang {
             cwd.collapse_stack_on_uncertain_crossing();
         }
+        prev_bang = pipeline.bang;
         let verdict = evaluate_pipeline(pipeline, &mut env, rules, allowlist, depth, cwd);
         worst = fold_worst(worst, verdict);
     }
@@ -6507,7 +6513,13 @@ impl CwdState {
     /// seeds with — leaving `current` untouched. Called at every
     /// [`crate::ast::Separator`] in a [`crate::ast::CommandLine`] that
     /// does NOT guarantee the preceding pipeline succeeded (every
-    /// separator except `&&`) whenever the stack is non-empty.
+    /// separator except `&&`, OR `&&` following a [`crate::ast::Pipeline`]
+    /// whose own `bang` is set — `! pushd X` reports SUCCESS to `&&` even
+    /// when the real `pushd` failed, since negation flips the reported
+    /// exit status, not whether the pushd itself ran; a fable review of an
+    /// earlier version of this fix confirmed omitting this reopened the
+    /// exact false-Allow issue #353 exists to close) whenever the stack is
+    /// non-empty.
     ///
     /// [`apply_pushd`]'s own known limitation (assume-success: a `pushd X`
     /// this module resolves is always assumed to actually `cd` there) means
@@ -13476,6 +13488,45 @@ done"#,
         // false Ask for a `;`-separated pushd/popd pair whose target is
         // ordinary and undangerous either way.
         assert_decision("pushd /tmp; make; popd; cat config.toml", Decision::Allow);
+    }
+
+    #[test]
+    fn pushd_or_chain_floors_to_ask() {
+        assert_decision(
+            "pushd ~/.config/shguard || pushd /tmp; popd; cp evil.toml config.toml",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn pushd_bang_negated_and_chain_floors_to_ask() {
+        // A fable review of an earlier version of this fix found the exact
+        // #353 false-Allow reopened by `!`: `! pushd X` reports SUCCESS to
+        // `&&` even when the real `pushd` failed (the negation flips exit
+        // status, not whether the pushd itself ran), so an `&&` following
+        // a NEGATED pipeline must collapse the stack exactly like any
+        // other separator -- `pipeline.bang` (issue #353) threads that
+        // through from the parser.
+        assert_decision(
+            "pushd ~/.config/shguard && pushd /tmp && ! pushd /nonexistent-zz-353 && \
+             popd && cp evil.toml config.toml",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn pushd_bang_negated_pushd_that_actually_succeeds_stays_precise() {
+        // Regression guard: `bang` must not collapse the stack for every
+        // negated pipeline unconditionally -- only the SEPARATOR/negation
+        // combination that makes a real failure's continuation reachable
+        // matters. Here the negated `pushd` targets a real, resolvable
+        // path, so the model's own precision (not this floor) is what's
+        // being exercised; this pins that the added `bang` check doesn't
+        // itself downgrade an otherwise-precise chain.
+        assert_decision(
+            "pushd ~/.config/shguard && ! pushd /tmp && popd && cp evil.toml config.toml",
+            Decision::Ask,
+        );
     }
 
     #[test]

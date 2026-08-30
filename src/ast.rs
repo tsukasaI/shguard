@@ -222,10 +222,21 @@ pub(crate) struct CommandLine {
 ///
 /// Modelled as `first` + `rest` for the same non-empty-list reason as
 /// [`CommandLine`]: a pipeline can never have zero commands.
+///
+/// `bang` (issue #353): whether this pipeline was written with a leading
+/// `!` (negates the pipeline's own exit status, changing no argv and no
+/// executed command — every OTHER consumer of this AST still ignores it
+/// for exactly that reason). `crate::gate::evaluate_command_line`'s
+/// pushd-stack collapse is the one place `bang` does matter: `! pushd X`
+/// reports SUCCESS to `&&` even when the real `pushd` failed, so a
+/// negated pipeline must be treated the same as a non-`&&` separator for
+/// deciding whether the FOLLOWING pipeline runs in a reachable
+/// failure-world.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Pipeline {
     pub(crate) first: Command,
     pub(crate) rest: Vec<Command>,
+    pub(crate) bang: bool,
 }
 
 /// One command in a [`Pipeline`]: an ordinary simple command, a compound
