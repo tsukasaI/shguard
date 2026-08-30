@@ -881,6 +881,20 @@ enum ExceptTargetShape {
 /// disclosed trade-off the issue itself accepted as a valid resolution.
 const HOME_CONTAINER_DIRS: &[&str] = &["home", "Users"];
 
+/// Whether `component` names a [`HOME_CONTAINER_DIRS`] entry, compared
+/// case-insensitively (fable review of PR #382): macOS's default APFS/
+/// HFS+ volumes are case-INsensitive, so `users`/`USERS`/`Users` all
+/// resolve to the exact same real directory at runtime — a bare
+/// case-sensitive match would let a one-character respelling of the
+/// very name this list exists to catch silently evade it, a materially
+/// different (and avoidable) gap from the disclosed "unlisted container
+/// name" residual this list already accepts.
+fn is_home_container_dir(component: &str) -> bool {
+    HOME_CONTAINER_DIRS
+        .iter()
+        .any(|dir| dir.eq_ignore_ascii_case(component))
+}
+
 impl TargetMatcher {
     fn except_target_shape(&self) -> ExceptTargetShape {
         match self {
@@ -1104,7 +1118,7 @@ impl TargetMatcher {
                     // disclosed list rather than a general heuristic.
                     || (canon.starts_with('~')
                         && comps.len() >= 3
-                        && HOME_CONTAINER_DIRS.contains(&comps[0].as_str())
+                        && is_home_container_dir(&comps[0])
                         && format!("~/{}", comps[2..].join("/")).starts_with(canon.as_str()))
             }
             Self::NormalizedExact { target, .. } => {
@@ -1130,7 +1144,7 @@ impl TargetMatcher {
                     // the prefix arm above.
                     || (matches!(target, PathForm::Home(_))
                         && comps.len() >= 3
-                        && HOME_CONTAINER_DIRS.contains(&comps[0].as_str())
+                        && is_home_container_dir(&comps[0])
                         && comps[2..] == *target_comps)
             }
             Self::Exact(_) | Self::Prefix(_) | Self::UrlHost(_) => {
@@ -6775,6 +6789,41 @@ mod tests {
             "~alice/../export/home/bob/.config/shguard/config.toml",
         ]);
         assert!(rules.match_command_ascent_descent(&cmd).is_none());
+    }
+
+    #[test]
+    fn ascent_descent_home_container_match_is_case_insensitive() {
+        // macOS's default APFS/HFS+ volumes are case-insensitive, so
+        // `users` and `Users` resolve to the exact same real directory at
+        // runtime -- a case-sensitive list lookup would let this
+        // respelling silently evade the widening (fable review of PR
+        // #382).
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&[
+            "cp",
+            "evil.toml",
+            "~alice/../users/bob/.config/shguard/config.toml",
+        ]);
+        let rule = rules.match_command_ascent_descent(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "self-protect-config-cp-tilde");
+    }
+
+    #[test]
+    fn ascent_descent_home_container_widening_applies_to_a_plain_relative_ascent_too() {
+        // Same widening as issue #118's own uniformity guarantee -- not
+        // restricted to the named-user-escape source shape.
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["cp", "evil.toml", "../home/bob/.config/shguard/config.toml"]);
+        let rule = rules.match_command_ascent_descent(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "self-protect-config-cp-tilde");
+    }
+
+    #[test]
+    fn ascent_descent_home_container_widening_applies_to_a_dirstack_anchor_too() {
+        let rules = Rules::embedded().unwrap();
+        let cmd = argv(&["cp", "evil.toml", "~-/home/bob/.config/shguard/config.toml"]);
+        let rule = rules.match_command_ascent_descent(&cmd).unwrap();
+        assert_eq!(rule.id().as_str(), "self-protect-config-cp-tilde");
     }
 
     // ==== Issue #80: `~username` (another user's home) floors to Ask via
