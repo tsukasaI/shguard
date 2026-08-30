@@ -221,7 +221,10 @@ fn guardfall_class_e_cases() {
         ("tar -C / -x", Decision::Block),
         ("tar -xf evil.tar -C /", Decision::Block),
         ("tar --extract --directory=/ -f evil.tar", Decision::Block),
-        ("tar xf a.tar -C /", Decision::Ask),
+        // Issue #344: a bare `xf` dash-less cluster's `x` is now also
+        // rewritten into `-x`, so this matches the same Block rule
+        // `tar -x -f a.tar -C /` already does.
+        ("tar xf a.tar -C /", Decision::Block),
         // ---- pins added after a fable-model review of PR #62: all of
         // these already behaved correctly, just weren't yet asserted ----
         ("tar -C ~ -xf evil.tar", Decision::Block),

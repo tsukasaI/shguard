@@ -247,9 +247,9 @@ const TAR_DASHLESS_BOOLEAN: &[char] = &[
 /// own dash-less calling convention is tar-specific, not a general
 /// `FlagMatcher` concern (see [`tar_dashless_cluster`]'s docs).
 pub(crate) enum TarDashlessCluster {
-    /// A recognized `x`+`C` dash-less cluster, already rewritten into its
-    /// dashed-token equivalent — the caller should match flags/targets
-    /// against this instead of the original tail.
+    /// A recognized `x`-containing dash-less cluster, already rewritten
+    /// into its dashed-token equivalent — the caller should match
+    /// flags/targets against this instead of the original tail.
     Recognized(Vec<NormalizedWord>),
     /// `tail`'s first word isn't a plausible dash-less option cluster at
     /// all (unresolved, empty, `-`-prefixed, contains a non-alphabetic
@@ -276,19 +276,25 @@ pub(crate) enum TarDashlessCluster {
 /// [`tar_dashless_rewrite`] for the [`FlagMatcher`]/[`TargetMatcher`]-
 /// facing wrapper most callers actually want.
 ///
-/// [`TarDashlessCluster::Recognized`] fires only when `tail`'s first word
-/// is [`Resolution::Resolved`], non-empty, has no leading `-`, is composed
+/// [`TarDashlessCluster::Recognized`] fires whenever `tail`'s first word is
+/// [`Resolution::Resolved`], non-empty, has no leading `-`, is composed
 /// entirely of ASCII alphabetic characters all drawn from
-/// [`TAR_DASHLESS_CONSUMING`]/[`TAR_DASHLESS_BOOLEAN`], and contains both
-/// `x` and `C` — the specific shape the dash-less form's directory-change
-/// gap needs (a bare dash-less cluster with `x` but not `C`, e.g. `tar xf
-/// a.tar -C /`'s leading `xf`, is left untouched: the trailing `-C /` is
-/// already a normal dashed token pair that existing matching sees on its
-/// own, and rewriting `xf` too would make `tar xf a.tar -C /`'s decision
-/// drift from what it gets today). A value-consuming letter with no
-/// positional argument left to consume (`tar fC` alone, which also lacks
-/// `x` so never reaches this case anyway) falls back to
-/// [`TarDashlessCluster::NotApplicable`], unchanged for that shape.
+/// [`TAR_DASHLESS_CONSUMING`]/[`TAR_DASHLESS_BOOLEAN`], and contains `x` —
+/// `C` need not be in the same cluster (issue #344): `tar xf a.tar
+/// --directory=/`'s leading `xf` is rewritten into `-x -f` the same as `tar
+/// xfC a.tar /`'s `xfC` is, leaving the SEPARATE `--directory=/` for the
+/// existing dashed/long-option matching to see on its own, exactly as it
+/// already does for `tar -x -f a.tar --directory=/`. Before issue #344,
+/// requiring `C` in the SAME cluster left a bare `xf` completely
+/// unrewritten (`NotApplicable`), so `-x`/`--extract`/`--get` never reached
+/// `required_flags` at all even when a real extraction target followed
+/// later in the tail as an ordinary dashed/long token — degrading a rule
+/// declaring `required_flags = ["x|--extract|--get"]` to never match a
+/// bare-`x` dash-less invocation, no matter what else was present. A
+/// value-consuming letter with no positional argument left to consume
+/// (`tar fC` alone, which also lacks `x` so never reaches this case anyway)
+/// falls back to [`TarDashlessCluster::NotApplicable`], unchanged for that
+/// shape.
 ///
 /// On success, [`TarDashlessCluster::Recognized`] carries the full
 /// rewritten tail: one or two synthetic tokens per cluster letter,
@@ -316,9 +322,6 @@ pub(crate) fn tar_dashless_cluster(tail: &[NormalizedWord]) -> TarDashlessCluste
         .all(|c| TAR_DASHLESS_CONSUMING.contains(&c) || TAR_DASHLESS_BOOLEAN.contains(&c))
     {
         return TarDashlessCluster::Unmodeled;
-    }
-    if !cluster.contains('C') {
-        return TarDashlessCluster::NotApplicable;
     }
 
     let mut rewritten = Vec::new();
@@ -8225,20 +8228,51 @@ mod tests {
         assert_eq!(matched.id().as_str(), "tar-extract-over-root-or-home");
     }
 
-    // Regression: the pre-existing dash-aware form (`x` dash-less, `-C`
-    // already dashed) must keep getting exactly the decision it got before
-    // this fix — `tar_dashless_rewrite` only fires when a single dash-less
-    // cluster carries *both* `x` and `C` together, so a bare `xf` (no `C`)
-    // is left untouched and the separate `-C /` is picked up by
-    // tar-directory-root-or-home alone, same as always.
+    // Issue #344: a bare `xf` dash-less cluster (no `C` in the SAME
+    // cluster) now also gets its `x` rewritten into `-x`, so a SEPARATE
+    // dashed `-C /` reaches the same Block `tar-extract-over-root-or-home`
+    // rule a fully-dashed `tar -x -f evil.tar -C /` already does — before
+    // issue #344's fix, `tar_dashless_rewrite` only fired when a single
+    // dash-less cluster carried *both* `x` and `C` together, leaving a bare
+    // `xf` completely unrewritten and `required_flags = ["x|--extract|--get"]`
+    // permanently unsatisfied for this shape, degrading to the weaker Ask
+    // `tar-directory-root-or-home` rule instead.
     #[test]
-    fn tar_dashless_x_only_cluster_with_separate_dashed_c_still_asks() {
+    fn tar_dashless_x_only_cluster_with_separate_dashed_c_now_blocks() {
         let rules = Rules::embedded().unwrap();
         let matched = rules
             .match_command(&argv(&["tar", "xf", "evil.tar", "-C", "/"]))
             .unwrap();
-        assert_eq!(matched.decision(), Decision::Ask);
-        assert_eq!(matched.id().as_str(), "tar-directory-root-or-home");
+        assert_eq!(matched.decision(), Decision::Block);
+        assert_eq!(matched.id().as_str(), "tar-extract-over-root-or-home");
+    }
+
+    // Same gap, but for the long/GNU-style `--directory=`/`--dir=`
+    // spelling (issue #344's own reported repro) rather than a separately
+    // dashed `-C`.
+    #[test]
+    fn tar_dashless_x_only_cluster_with_separate_long_directory_now_blocks() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&["tar", "xf", "a.tar", "--directory=/"]))
+            .unwrap();
+        assert_eq!(matched.decision(), Decision::Block);
+        assert_eq!(matched.id().as_str(), "tar-extract-over-root-or-home");
+    }
+
+    // Regression guard: a bare `xf` cluster with no directory-changing
+    // target at all must stay exactly as unaffected by this rewrite as
+    // before — the rewrite only ever changes which LATER tokens `-x`'s
+    // presence lets a rule's own `required_flags` see, never introduces a
+    // target match that wasn't otherwise there.
+    #[test]
+    fn tar_dashless_x_only_cluster_without_directory_target_still_allows() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["tar", "xf", "a.tar"]))
+                .is_none()
+        );
     }
 
     // Critical negative: an ordinary dash-less tar invocation with no `C`
