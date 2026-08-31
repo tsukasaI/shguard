@@ -1371,8 +1371,7 @@ fn output_redirect_onto_an_ordinary_path_is_unaffected() {
     assert_eq!(permission_decision(&output), "allow");
 }
 
-// Security regression pin (fable review of #204): a fable security review
-// found that an Ask-decision user [[redirect]] rule could downgrade a
+// Security regression pin (issue #204): an Ask-decision user [[redirect]] rule could downgrade a
 // stricter embedded Block verdict end-to-end -- evaluate_simple_command_core
 // (src/gate.rs) returns on the first matching redirect rule before stage
 // 3's argv blocklist match ever runs, so an Ask-decision redirect rule
@@ -1531,7 +1530,7 @@ fn user_config_rule_without_deny_message_omits_additional_context() {
     );
 }
 
-// Regression pin (fable review of #201): a [[ask]] rule's deny_message was
+// Regression pin (issue #201): a [[ask]] rule's deny_message was
 // silently dropped -- apply_ask_floor (src/gate.rs) is a THIRD
 // CommandRule-matched Verdict construction site, distinct from the two
 // exact-blocklist-match sites, and had no with_deny_message call. Per the
