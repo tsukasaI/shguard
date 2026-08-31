@@ -7435,8 +7435,9 @@ fn chain_dash_c_targets(
 /// ISOLATION. Issue #354's multi-occurrence composition (this scan runs
 /// once per occurrence found) can still combine with a DIFFERENT
 /// under-composition source — a value-taking flag whose own value looks
-/// like a `-C` cluster, [`resolve_tar_dash_c`]'s own doc above — to
-/// truncate an earlier occurrence's operand range; that gap belongs to
+/// like a `-C` cluster, the **Known limitation** paragraph above in this
+/// same doc block — to truncate an earlier occurrence's operand range;
+/// that gap belongs to
 /// the caller's occurrence-scanning loop, not to this function's own
 /// per-token matching.
 ///
@@ -7485,13 +7486,18 @@ fn find_dash_c_in_cluster(token: &str) -> Option<crate::rules::ClusterValue<'_>>
 /// the same recognition [`crate::rules::tar_dashless_cluster`] uses for
 /// rule-matching purposes but without that function's `x`-only scope —
 /// `cCf`'s `c` is create, not extract) or when the cluster contains no `C`
-/// letter. `Some((None, consumed))` when the cluster is recognized and
-/// does contain `C`, but `C`'s own positional value is missing/unresolvable
-/// — mirrors this file's other branches, which likewise return a matched
-/// occurrence with no resolvable value rather than silently skipping it,
-/// so the caller's existing `raw?` fails the whole composition closed
-/// rather than falling through to a DIFFERENT (and wrong) occurrence.
-/// `consumed` is always `1 (the cluster word) + the number of
+/// letter. `Some((anchor, consumed))` when the cluster is recognized and
+/// does contain `C`: `anchor` is the cluster's own FINAL cumulative fold
+/// (issue #354/#356) across every `C` found in it, via the same
+/// `resolve_cwd_outcome`/`classify_cd_target` chain [`resolve_tar_dash_c`]
+/// uses across separate dashed occurrences — `None` when that fold never
+/// lands on [`CwdContext::Known`] (a missing/unresolvable `C` value with
+/// no later absolute/home `C` recovering it, or a composed anchor
+/// [`crate::rules::render_cwd_anchor`] itself refuses to render). The
+/// caller (`resolve_tar_dash_c`) treats this whole cluster as ONE
+/// occurrence: an `anchor` of `None` poisons that occurrence forward,
+/// same granularity as an unresolvable dashed `-C` value, not a whole-
+/// composition fail-closed. `consumed` is always `1 (the cluster word) + the number of
 /// value-consuming letters in the cluster`, the same "one token per
 /// letter, one extra per consuming letter" bundling order
 /// [`crate::rules::tar_dashless_leading_cluster`]'s own rewrite already
@@ -14560,6 +14566,32 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
         // real, not merely inert.
         assert_ne!(
             decide_dash_c("tar -C ~/.config/shguard -C $(echo x) config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn tar_dashless_leading_cluster_still_composes_with_a_later_dashed_occurrence() {
+        // The dashless cluster (treated as ONE occurrence, index 0) still
+        // correctly chains onto a LATER dashed `-C` occurrence's own
+        // anchor.
+        assert_eq!(
+            decide_dash_c("tar cCf ~/.config out.tar -C shguard config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn later_dashed_occurrence_chains_onto_the_dashless_clusters_final_folded_anchor() {
+        // Discriminates final-vs-intermediate: `sub`, chained onto the
+        // cluster's own FINAL folded anchor (`~/.config/shguard`), gives
+        // `~/.config/shguard/sub`; `../config.toml` then normalizes back
+        // up into the guarded prefix. Had the outer scan instead chained
+        // onto some INTERMEDIATE state of the cluster's fold
+        // (`~/.config`), the composed target would land one directory
+        // short and this would stay Allow.
+        assert_eq!(
+            decide_dash_c("tar cCCf ~/.config shguard out.tar -C sub ../config.toml").decision(),
             Decision::Block
         );
     }
