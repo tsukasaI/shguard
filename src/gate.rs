@@ -8758,9 +8758,9 @@ mod tests {
         assert_decision("echo x | base64 -d | irb", Decision::Block);
     }
 
-    // deno's bare REPL live-verified to read and
-    // execute piped stdin, correcting an earlier version of this list
-    // that excluded it; pwsh's `-Command -`/`-File -` stdin forms are per
+    // deno's bare REPL was live-verified to read and
+    // execute piped stdin — an earlier version of this list
+    // excluded it; pwsh's `-Command -`/`-File -` stdin forms are per
     // Microsoft's own documentation (pwsh unavailable to live-verify).
     #[test]
     fn decode_fed_deno_pipe_blocks() {
@@ -8815,7 +8815,8 @@ mod tests {
         assert_decision(r#"bash5 -c "rm -rf /""#, Decision::Block);
     }
 
-    // The first fix normalized `is_shell_interpreter`
+    // The first version of the versioned-interpreter-name fix (PR #371)
+    // normalized `is_shell_interpreter`
     // but left `evaluate_dash_c`'s POSIX_STYLE_DASH_C_INTERPRETERS/fish
     // membership checks comparing the RAW name, so a versioned POSIX-style
     // shell (`ksh93`, a real Debian binary name) fell through to the naive
@@ -9401,7 +9402,7 @@ mod tests {
     }
 
     // Pins a real, bash-faithful decision-surface
-    // change this fix causes for a brace-alternation sibling shape —
+    // change the empty-substitution fix (PR #376) causes for a brace-alternation sibling shape —
     // provably converging to the pre-existing baseline (both the literal
     // `x rm -rf /` and the substitution-free `{x,rm} -rf /` were already
     // Allow), but undocumented and unpinned until now.
@@ -10323,7 +10324,7 @@ mod tests {
         assert_decision("echo x | base64 -d | busybox sh", Decision::Block);
     }
 
-    // Issue #245 should-fix (issue #247): builtin joins
+    // Issue #245 should-fix (PR #247): builtin joins
     // TRANSPARENT_WRAPPERS too, so it must be caught by the same
     // interpreter-sink/pipeline-shape paths every other wrapper already
     // is, not just the argv blocklist match the other #245 tests pin.

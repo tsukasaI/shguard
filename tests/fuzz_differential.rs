@@ -1195,13 +1195,13 @@ fn classify_root_cause(
 /// an already-repeated word: a 1-vs-0 "shguard produced one occurrence of a
 /// word bash never produced" case counts too.
 ///
-/// An earlier version of this PR proposed requiring
+/// Requiring
 /// `count >= 2` (i.e. only accepting an already-repeated word's count going
-/// UP, never a brand-new 1-vs-0 word) on the theory that a lone extra word
+/// UP, never a brand-new 1-vs-0 word) was considered on the theory that a lone extra word
 /// is a weaker, more easily-coincidental signal than genuine duplication.
-/// Verified empirically against real mutator output before accepting that
-/// change (`SHGUARD_FUZZ_ITERATIONS=5000`, 3 different seeds) and reverted
-/// it: the `IfsGluedBraceDup` family's actual shape varies by WHICH word
+/// Verified empirically against real mutator output
+/// (`SHGUARD_FUZZ_ITERATIONS=5000`, 3 different seeds) and rejected:
+/// the `IfsGluedBraceDup` family's actual shape varies by WHICH word
 /// ends up over-counted depending on where the empty brace member sits --
 /// `echo$IFS{hello,}` produces shguard argv `["echo","hello","echo"]` vs
 /// bash's `["echo","echo"]`, where `"echo"` is already at parity (2-vs-2)
@@ -1286,7 +1286,7 @@ fn symbolize_word<'a>(
 
 // ---- direct pins for classify_root_cause / has_excess_word_multiplicity /
 // diff_signature: correctness of the fuzzer's OWN classification logic
-// must not rest entirely on seed-dependent sweep runs (issue #327) ----
+// must not rest entirely on seed-dependent sweep runs (PR #327) ----
 
 fn strings(words: &[&str]) -> Vec<String> {
     words.iter().map(|s| (*s).to_string()).collect()
@@ -1352,7 +1352,7 @@ fn has_excess_word_multiplicity_counts_a_lone_extra_word_not_just_repeated_ones(
 
 #[test]
 fn diff_signature_distinguishes_an_empty_word_from_an_extra_word() {
-    // Regression guard (issue #327): an earlier version
+    // Regression guard (PR #327): an earlier version
     // symbolized "" like any other word, so a #324-family divergence
     // (a stray empty word) and an unrelated extra-word divergence produced
     // the SAME signature -- which would fold a regression of the fixed

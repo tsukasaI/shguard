@@ -1523,7 +1523,7 @@ mod tests {
         // file succeed (it's a sibling, not `path` itself) but the final
         // `rename` fail (can't rename a file onto an existing directory) —
         // this leaks the temp file if cleanup only runs on a WRITE
-        // failure and not a rename failure.
+        // failure and not a rename failure (PR #387).
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::create_dir(&path).unwrap();

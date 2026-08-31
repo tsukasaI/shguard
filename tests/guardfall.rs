@@ -721,7 +721,7 @@ fn guardfall_issue_77_brace_command_position_cases() {
         // still lift that to `Block`, not just a rule that would otherwise
         // return `Allow`.
         ("tar{,$(rm -rf /)} xf evil.tar -C /", Decision::Block),
-        // Follow-up: a brace member
+        // Issue #77 follow-up: a brace member
         // that's benign TO RUN (`printf /`, `printf -- -delete`, `printf
         // -- --force`) still supplies a literal, dangerous FLAG or TARGET
         // token once brace-expanded — `leftover_floor` only checks the
@@ -900,7 +900,7 @@ fn guardfall_issue_77_brace_command_position_cases() {
             "sed $(printf -- \"-i /home/user/.config/shguard/config.toml\")",
             Decision::Ask,
         ),
-        // Issue #117 (found against issue #85's fix): a
+        // Issue #117 (a gap in issue #85's fix): a
         // decoy RESOLVED token elsewhere in the tail used to defeat the
         // relaxation above even when the danger was real and exploitable.
         // GNU sed permutes options after operands (POSIX getopt-style), so

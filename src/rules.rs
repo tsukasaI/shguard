@@ -9343,7 +9343,7 @@ mod tests {
         assert_eq!(rule.decision(), Decision::Ask);
     }
 
-    // Regression pin (issue #205): the ancestor rm rule's
+    // Regression pin (PR #205): the ancestor rm rule's
     // required_flags initially only recognized lowercase `-r`, missing
     // the equally-standard uppercase `-R` recursive spelling GNU/BSD rm
     // both accept (`rm -R ~/.config` resolved Allow before this fix).
@@ -10322,7 +10322,7 @@ mod tests {
         );
     }
 
-    // Issue #350 / #214: the cluster scan's
+    // PR #350 (issue #214): the cluster scan's
     // left-to-right search has no notion of which earlier characters are
     // themselves value-taking, so it can split inside an EARLIER flag's
     // own glued value rather than a genuine flag position. Declaring that
@@ -10357,7 +10357,7 @@ mod tests {
         );
     }
 
-    // Issue #350: disclosed limitation, not a silent
+    // PR #350: disclosed limitation, not a silent
     // invariant — the cluster scan CAN newly suppress a rule that used to
     // fire, when a mis-split truncated candidate (from an UNDECLARED
     // earlier flag's glued value) happens to match an except_targets
