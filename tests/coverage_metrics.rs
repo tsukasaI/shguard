@@ -16,13 +16,25 @@ fn read_repo_file(relative_path: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("failed to read {path:?}: {err}"))
 }
 
-/// Counts table-driven regression cases in `tests/guardfall.rs`: every
-/// `(command, Decision::X)` tuple carries exactly one `Decision::`
-/// variant, so counting `Decision::` occurrences is robust against this
-/// file's mix of plain, raw (`r"..."`), and raw-hash (`r#"..."#`) string
-/// literals and multi-line tuples -- unlike matching each case's own
-/// opening line, which a plain `(` or `("` prefix check misses for a raw
-/// string literal (`(r"..."`) or a wrapped tuple.
+/// Counts `Decision::` literal occurrences across the whole of
+/// `tests/guardfall.rs`. NOT scoped to `let cases: &[...] = &[...];`
+/// table literals specifically: this file genuinely mixes two testing
+/// styles -- simple `(command, Decision::X)` tables (one literal per
+/// pinned case) AND combinatorial loop tests that assert a single
+/// `Decision::X` literal once per iteration over a cross product (e.g.
+/// `guardfall_shell_init_directory_token_cases` asserts `Decision::Ask`
+/// inside a nested loop over 11 directories x 2 suffixes x 4 commands =
+/// 88 real assertions from ONE literal). An array-scoped count would
+/// systematically miss every one of those combinatorial assertions
+/// (found by fable review: an earlier, array-scoped version of this
+/// function undercounted by exactly the number of such loop tests).
+/// There is no purely textual way to recover the TRUE assertion count
+/// for a combinatorial loop without executing it, so this function
+/// reports the simpler, exactly-and-mechanically-verifiable unit
+/// instead: total `Decision::` literals, which is a stable LOWER BOUND
+/// on true assertion count, not an attempt at the true count itself --
+/// see the README wording this backs, which describes the metric as
+/// literal occurrences, not "pinned cases".
 fn count_guardfall_cases() -> usize {
     let source = read_repo_file("tests/guardfall.rs");
     ["Decision::Allow", "Decision::Ask", "Decision::Block"]

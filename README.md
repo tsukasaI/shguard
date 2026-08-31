@@ -27,15 +27,21 @@ covers beyond the published GuardFall catalog — see [Attribution](#attribution
 
 Three deterministic, test-backed coverage numbers, checked against the
 actual test sources by `tests/coverage_metrics.rs` on every CI run: if
-either number below drifts from what the tests actually contain, CI
-fails rather than letting it go stale silently.
+any number below drifts from what the tests actually contain, CI fails
+rather than letting it go stale silently.
 
 - **Bypass classes closed:** 7 (GuardFall's five published classes A-E,
   plus shguard's own two extensions, A-ext and C-ext; see the
-  regression table above and [Attribution](#attribution)).
-- **Regression test count:** 389 (384 pinned cases across
+  regression table above, which covers A-D directly, plus class E via
+  the destructive-commands suite in `tests/guardfall.rs`, and
+  [Attribution](#attribution)).
+- **Regression test count:** 389 (384 pinned-decision literals across
   `tests/guardfall.rs`'s internally-discovered regression suite, plus 5
-  externally-attributed cases in `tests/bypass_corpus.toml`).
+  externally-attributed cases in `tests/bypass_corpus.toml`). A lower
+  bound, not an exact assertion count: some of `guardfall.rs`'s tests
+  assert one literal per combinatorial loop iteration rather than one
+  literal per case, so this undercounts the true number of individual
+  assertions that actually run.
 - **Benign corpus size:** 59 (realistic agent-workflow commands in
   `tests/benign_corpus.rs`, verified to `Allow` without friction).
 
