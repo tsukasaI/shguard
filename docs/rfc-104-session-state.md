@@ -224,10 +224,15 @@ folded back in and can only pull the result UP, never let the seeded
 half pull it down. Every attack below is analyzed against that fold, not
 against the seeded evaluation in isolation:
 
-- `export SAFE=echo`, later `$SAFE "rm -rf /"`: a session resolution can
-  only ever *upgrade* the seeded half; the bare-`$VAR` command-position
-  Ask floor still stands regardless, and the fold with the baseline can
-  only raise this further, never lower it.
+- `export SAFE=echo`, later `$SAFE "rm -rf /"`: in COMMAND position
+  specifically, a session resolution can only Block or leave the
+  bare-`$VAR` Ask floor standing -- never Allow on its own (unlike an
+  ARGUMENT-position resolution, e.g. a session-resolved `$F` in `cat
+  $F`, which genuinely can lower the seeded half in isolation, same as
+  the HOME/CDPATH and cwd-anchor cases above). Command position is
+  singled out here only because it's this specific attack's own shape;
+  the general defense, as for every bullet in this pass, is the fold
+  with the baseline, not any property of the seeded half alone.
 - Defining a benign-looking `ls() { :; }` hoping a "known-safe body"
   downgrades a later `ls` invocation: tracked functions are only ever
   worst-wins floors layered ON TOP of the baseline evaluation of the
@@ -306,22 +311,26 @@ module), exactly where `config.rs`'s own I/O already lives today.
   `pub fn analyze_with_session(command: &str, policy: &Policy, session:
   &SessionState) -> (Verdict, SessionState)`. Internally computes the
   headline contract's fold directly: evaluates `command` once with an
-  empty seed and once seeded from `session`, using the SAME
-  gate-level evaluation machinery for both (the empty-seed call is
-  byte-identical in behavior to today's unseeded path, just invoked at
-  the `gate`-internal level rather than through `analyze_with_policy`
-  itself), folds the two verdicts worst-wins via the existing
-  `fold_worst`, and returns that folded verdict alongside the complete
-  next state collected from the SEEDED evaluation (the caller just
-  persists whatever it's handed back). `analyze_with_session` owns
-  EXACTLY ONE `watchdog::bounded` wrap and EXACTLY ONE
-  `decision_log::append` call, over the final folded verdict --
-  it must NOT call `analyze_with_policy` itself for either internal
-  evaluation, since that function performs its own watchdog wrap and
-  its own log append internally, which would double both. `analyze`
-  and `analyze_with_policy` stay unchanged, as an additive new entry
-  point that happens to share their underlying gate machinery, not a
-  caller of either of them.
+  empty seed and once seeded from `session`, BOTH calls going through
+  `gate::analyze_with_policy` (the `pub(crate)` gate-level function,
+  `src/gate.rs` -- distinct from the public `src/lib.rs` function of
+  the same name this bullet forbids calling, below) or its
+  seed-parameter successor per the `src/gate.rs` bullet above (empty
+  seed for one call, session seed for the other; the empty-seed call is
+  byte-identical in behavior to today's unseeded path). Folds the two
+  verdicts worst-wins via the existing `fold_worst`, and returns that
+  folded verdict alongside the complete next state collected from the
+  SEEDED evaluation (the caller just persists whatever it's handed
+  back). `analyze_with_session` owns EXACTLY ONE `watchdog::bounded`
+  wrap and EXACTLY ONE `decision_log::append` call, over the final
+  folded verdict -- it must NOT call `src/lib.rs`'s own PUBLIC
+  `analyze_with_policy` for either internal evaluation (the one this
+  RFC's own `analyze`/`analyze_with_policy` bullet elsewhere refers
+  to), since THAT function performs its own watchdog wrap and its own
+  log append internally, which would double both. `analyze` and
+  `analyze_with_policy` (the `src/lib.rs` ones) stay unchanged, as an
+  additive new entry point that shares the underlying `gate::
+  analyze_with_policy` machinery, not a caller of either of them.
 - **`src/adapter.rs`**: `HookInput` gains `session_id: Option<String>`,
   exposed via `pub fn extract_session_id(stdin: &str) -> Option<String>`
   (this module already owns every Claude-Code-specific field name per
