@@ -817,8 +817,8 @@ impl Policy {
     /// non-`force` caller must not silently clobber.
     ///
     /// Writes via a temp file in the same directory, `fsync`, then
-    /// `rename` into place (`~/dotfiles/claude-code/rules/atomicity.md`),
-    /// so a crash mid-write can never leave a half-written config behind.
+    /// `rename` into place, so a crash mid-write can never leave a
+    /// half-written config behind.
     /// Creates the config directory (and any missing parents) first if it
     /// doesn't exist yet.
     ///
@@ -852,13 +852,12 @@ impl Policy {
 }
 
 /// Writes `contents` to `path` via a temp file in the same directory,
-/// `fsync`, then `rename` (`~/dotfiles/claude-code/rules/atomicity.md`):
-/// never truncate-in-place, so a crash mid-write leaves the original (or
-/// nothing, for a brand-new file) rather than a half-written config.
-/// Best-effort removes the temp file on any failure before returning —
-/// nothing else ever reads a `.tmp-*` file, so leaving one behind on
-/// error would just be silent litter, not a correctness issue, but
-/// cleaning it up costs nothing.
+/// `fsync`, then `rename`: never truncate-in-place, so a crash mid-write
+/// leaves the original (or nothing, for a brand-new file) rather than a
+/// half-written config. Best-effort removes the temp file if the write
+/// OR the rename itself fails (nothing else ever reads a `.tmp-*` file,
+/// so leaving one behind on error would just be silent litter, not a
+/// correctness issue, but cleaning it up costs nothing).
 fn write_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let file_name = path
@@ -867,19 +866,17 @@ fn write_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
         .unwrap_or("config.toml");
     let tmp_path = parent.join(format!(".{file_name}.tmp-{}", std::process::id()));
 
-    let write_result = (|| {
+    let result = (|| {
         let mut file = std::fs::File::create(&tmp_path)?;
         file.write_all(contents.as_bytes())?;
-        file.sync_all()
+        file.sync_all()?;
+        std::fs::rename(&tmp_path, path)
     })();
 
-    match write_result {
-        Ok(()) => std::fs::rename(&tmp_path, path),
-        Err(err) => {
-            let _ = std::fs::remove_file(&tmp_path);
-            Err(err)
-        }
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
     }
+    result
 }
 
 /// `shguard init` (issue #112) content: a header explaining the config
@@ -931,10 +928,10 @@ fn init_config_template() -> String {
 # blocklist below uses. See README.md's Configuration section for the
 # full schema.
 #
-# [[ask]] entries need an explicit `decision = "ask"` -- unlike the
-# embedded blocklist's own [[command]] entries (which default to
-# "block"), a bare `[[ask]]` entry with no `decision` field is checked
-# only as a last-resort floor after every deny rule already missed.
+# [[ask]] entries are checked only as a last-resort floor after every
+# deny rule already missed -- `decision` doesn't need setting on them
+# (membership in [[ask]] alone is what makes an entry Ask; unlike a
+# [[redirect]] entry, which must omit or set decision = "block").
 #
 # Uncomment an example below to try it, or copy a rule from the reference
 # appendix -- give the copy a NEW id first: reusing an embedded id fails
@@ -951,7 +948,6 @@ fn init_config_template() -> String {
 # id = "user-ask-gh"
 # reason = "confirm every gh invocation before it runs"
 # command = "gh"
-# decision = "ask"
 
 # [[allow]]
 # id = "user-allow-rm"
@@ -1505,6 +1501,30 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.toml");
         write_atomically(&path, "hello").unwrap();
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .filter(|name| name != "config.toml")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "unexpected leftover files: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn write_atomically_leaves_no_temp_file_behind_when_rename_fails() {
+        // A directory sitting at `path` makes `File::create` on the temp
+        // file succeed (it's a sibling, not `path` itself) but the final
+        // `rename` fail (can't rename a file onto an existing directory) —
+        // the exact failure mode a fable review of PR #387 caught leaking
+        // the temp file under, since the old code only cleaned up on a
+        // WRITE failure, not a rename failure.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::create_dir(&path).unwrap();
+        assert!(write_atomically(&path, "hello").is_err());
         let leftovers: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(Result::ok)
