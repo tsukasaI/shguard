@@ -6,23 +6,65 @@ behind an opt-in config flag. This is a design writeup only -- no code
 in this document; an implementation issue should be filed separately
 once this design is agreed, scoped by the sections below.
 
-## Headline contract: session state is additive-only
+## Headline contract: session state is additive-only, enforced by a fold
 
-Every consumer of session state MUST go through the gate's existing
-additive-only contracts: `Env`'s rule-2 resolutions (which "only ever
-upgrade Ask to Block", per `Env::apply_one`'s own docs), and `CwdState`'s
-compose-and-`fold_worst` (which never lowers a decision the uncomposed
-evaluation already reached, per `CwdContext`'s own docs). Stated as a
-requirement the implementation issue must carry a property test for:
+**Correction from an earlier draft of this RFC**: relying on `Env`'s and
+`CwdState`'s own internal contracts to make session-seeded evaluation
+"automatically" no-worse-than-baseline does NOT hold. Those contracts
+guarantee monotonicity relative to the UNCOMPOSED baseline within one
+evaluation; they say nothing about comparing two evaluations SEEDED
+DIFFERENTLY, because seeding replaces an input rather than adding a
+candidate on top of it. Concretely: `was_assigned("HOME")` seeded from a
+session turns a `Known`-composed, potentially-Block `cd ~/...`
+composition into `classify_cd_target`'s `Poison` arm, which resolves
+through the Ask-CAPPED unknown-cwd floor instead -- a real Block-to-Ask
+downgrade an attacker can trigger with a no-op-looking `export
+HOME=$HOME` in an earlier command. The same replacement problem hits
+cross-invocation cwd seeding (a session `Known` anchor replaces `Initial`
+as what later relative targets compose against, and a stale or
+attacker-steered anchor can make a composition that WOULD have matched a
+rule under `Initial` no longer match) and the `saturated` flag (blanket
+`assigned` marking for every capped-out name, including `HOME`/`CDPATH`,
+which poisons the SAME way at session-wide scale).
 
-> For any session state `S` and command `C`:
-> `decision(C, S) >= decision(C, SessionState::empty())`.
+**Fix: the invariant is not something the tracking mechanisms are trusted
+to preserve on their own -- it is enforced structurally, by definition,
+at the one point session state feeds into a decision.** Every
+session-aware evaluation computes TWO decisions and folds them
+worst-wins:
 
-This single invariant is both the poisoning defense (see the threat-model
-pass below) and the no-regression guarantee: absent, stale, lost, or
-attacker-fabricated state can only push decisions toward Ask/Block, never
-toward Allow. "State missing" is never "known safe"; it is exactly
-today's documented baseline.
+> `decision(C, S) := fold_worst(decision(C, SessionState::empty()), decision_seeded(C, S))`
+
+where `decision(C, SessionState::empty())` is exactly today's behavior
+(the same evaluation `analyze`/`analyze_with_policy` already produce,
+completely unaffected by whether session tracking is even enabled), and
+`decision_seeded(C, S)` is the same evaluation with `Env`/`CwdState`
+seeded from `S`. `fold_worst` (already used throughout `src/gate.rs` for
+exactly this purpose) can only ever pick the WORSE of the two, so
+`decision(C, S) >= decision(C, SessionState::empty())` holds BY
+CONSTRUCTION, regardless of what `S` contains or how it was seeded --
+this closes the HOME/CDPATH-poisoning downgrade and the stale-cwd-anchor
+downgrade in one mechanism, without needing either seeding path to prove
+its own monotonicity. The cost is one extra full evaluation of `C` per
+session-tracked invocation (cheap -- `analyze` itself is already bounded
+by the existing evaluation watchdog, and doubling a sub-millisecond
+budget is immaterial next to the watchdog's own multi-second ceiling).
+
+This single fold is both the poisoning defense (see the threat-model pass
+below) and the no-regression guarantee: absent, stale, lost, or
+attacker-fabricated state can only push the FOLDED decision toward
+Ask/Block relative to baseline, never toward Allow. "State missing" is
+never "known safe"; it is exactly today's documented baseline, and it
+remains exactly that baseline as one side of the fold even when state IS
+present but wrong.
+
+The implementation issue must carry a property test asserting the fold
+identity directly (`fold_worst(decision(C, empty), decision_seeded(C, S))
+== decision(C, S)`) rather than merely asserting the inequality, since
+the inequality alone would pass even if the fold were accidentally
+implemented as a single seeded evaluation with no baseline comparison at
+all -- exactly the bug this correction exists to prevent from
+recurring.
 
 ## Storage and lifetime
 
@@ -50,15 +92,29 @@ is impossible -- state persists to disk.
   (a constant, e.g. 14 days). Per-file caps: a read size cap (e.g.
   1 MiB) and bounded entry counts (e.g. 512 env names, 256 functions,
   256 aliases); on overflow the store sets a `saturated` flag meaning
-  "every name assigned, no values resolved" -- maximal-caution
-  over-asking, never silent eviction.
+  "every name assigned, no values resolved". This flag is NOT
+  "maximal-caution over-asking" on its own -- blanket `assigned` marking
+  for every capped-out name, `HOME`/`CDPATH` included, poisons the same
+  way a single session-assigned `HOME` does (see the headline contract's
+  correction above), which could otherwise degrade an entire session's
+  worth of `cd`-composed decisions from Block to an Ask-capped floor.
+  Safe here only because the headline fold makes every `decision_seeded`
+  outcome, saturated or not, strictly a floor ON TOP OF the unaffected
+  `decision(C, empty)` baseline.
 - **Concurrency**: parallel Bash calls in one session mean concurrent
   read-modify-write of the same file. Atomic temp-file-plus-rename in
-  the same directory; last-writer-wins. A lost update loses one
-  command's severity-raising entries and degrades toward baseline,
-  which the invariant makes safe. Rejected: `flock`. A hung lock would
-  trip the evaluation watchdog and turn every command into fail-closed
-  Ask, a worse trade than a lost update.
+  the same directory, with a per-writer-unique temp filename (e.g. a
+  random suffix or PID, never a fixed name -- two concurrent writers
+  sharing one temp path could interleave their writes into it before
+  either renames, installing a corrupted file); `fsync` before rename,
+  same reasoning as `write_atomically` elsewhere in this codebase. A
+  lost update loses one command's severity-raising entries and degrades
+  toward baseline, which the headline fold makes safe -- and even a
+  corrupted destination file only degrades to `SessionState::empty()`
+  on the next load, the same safe direction. Rejected: `flock`. A hung
+  lock would trip the evaluation watchdog and turn every command into
+  fail-closed Ask, a worse trade than a lost update. TTL pruning also
+  collects orphaned temp files, not just orphaned session files.
 
 ## What gets tracked
 
@@ -112,7 +168,16 @@ would not fire on denial anyway.
    `cd` is unverified; the implementation issue should verify this
    empirically and, if it turns out reliable, add it only as a
    cross-check that POISONS on mismatch, never as a resolution source on
-   its own.
+   its own. A session-seeded `Known` anchor replacing `Initial` can, on
+   its own, make a composition that WOULD have matched a rule under
+   `Initial` no longer match (the anchor changed, not just added to) --
+   including the `-C`-override family (`resolve_tar_dash_c`,
+   `chain_dash_c_targets`), which returns `None` (no floor at all, not
+   even an Ask cap) on a poisoned anchor, unlike `cd`'s own Ask-capped
+   floor. The headline contract's fold is what keeps this safe: the
+   unaffected `decision(C, empty)` baseline is always folded back in, so
+   a composition dropped by bad session state can only ever be RECOVERED
+   by the baseline evaluation, never lost below it.
 
 ## Opt-in shape
 
@@ -143,39 +208,64 @@ outer hook watchdog into a fail-closed Ask.
 ## Threat-model pass
 
 **Can an agent poison tracked state to launder a later dangerous command
-down to Allow? No, by construction.** Every attack considered reduces to
-the headline invariant above:
+down to Allow? No -- but not for the reason an earlier draft of this RFC
+gave.** An earlier draft argued this from `Env`/`CwdState`'s own internal
+contracts alone, which does NOT hold (see the headline contract's
+correction): a session-assigned `HOME`/`CDPATH`, or a stale/attacker-
+steered session cwd anchor, CAN downgrade a `decision_seeded(C, S)`
+evaluation taken in isolation, in some cases (the `-C`-override family)
+all the way to Allow with no floor at all. The actual defense is the
+headline contract's fold: **the answer is "no" because `decision(C, S)`
+is DEFINED as `fold_worst(decision(C, empty), decision_seeded(C, S))`,
+never `decision_seeded(C, S)` alone** -- whatever damage bad session
+state does to the seeded half, the unaffected baseline half is always
+folded back in and can only pull the result UP, never let the seeded
+half pull it down. Every attack below is analyzed against that fold, not
+against the seeded evaluation in isolation:
 
 - `export SAFE=echo`, later `$SAFE "rm -rf /"`: a session resolution can
-  only ever *upgrade* a decision; the bare-`$VAR` command-position Ask
-  floor still stands regardless. There is no code path where a resolved
-  value alone produces Allow -- the same contract same-line `Env`
-  resolution already has today.
+  only ever *upgrade* the seeded half; the bare-`$VAR` command-position
+  Ask floor still stands regardless, and the fold with the baseline can
+  only raise this further, never lower it.
 - Defining a benign-looking `ls() { :; }` hoping a "known-safe body"
   downgrades a later `ls` invocation: tracked functions are only ever
   worst-wins floors layered ON TOP of the baseline evaluation of the
-  literal command -- they cannot suppress or override it.
+  literal command -- they cannot suppress or override it, and the
+  outer fold with `decision(C, empty)` adds a second layer of the same
+  protection.
+- Session-assigned `HOME`/`CDPATH`, a stale/attacker-steered cwd anchor,
+  or a saturated tracker poisoning every name at once: each of these
+  degrades `decision_seeded(C, S)` on its own (as the headline contract's
+  correction demonstrates concretely), but the fold with
+  `decision(C, empty)` means the WORST this can do is fail to add an
+  upgrade -- it can never remove one the baseline evaluation already
+  found. This is the specific class of attack the fold exists to close,
+  not a residual risk left open.
 - Writing the state file directly (`echo ... > ~/.local/state/shguard/...`):
-  fabricated entries can only ever over-block. This is a self-inflicted
-  denial of service, not a privilege escalation. (Optional hardening:
-  add the session-state directory to the protected-write-path list; not
-  required for soundness given the invariant above already holds.)
+  fabricated entries can only ever over-block within the seeded half,
+  and the fold adds nothing new here. This is a self-inflicted denial of
+  service, not a privilege escalation. (Optional hardening: add the
+  session-state directory to the protected-write-path list; not required
+  for soundness given the fold above already holds.)
 - Cross-session contamination or session-id forgery: the id comes from
   Claude Code's own payload, not from anything inside the analyzed
   command; filename sanitization blocks path traversal; and even a
-  wrongly-matched file can only ever raise severity, never lower it.
-- Phantom state recorded from a command that was denied and never ran: a
-  wrong `Known` cwd or env entry can at worst cause a missed upgrade
-  later, never a drop below baseline.
+  wrongly-matched file can only ever affect the seeded half of the fold,
+  never the baseline half.
+- Phantom state recorded from a command that was denied and never ran:
+  same reasoning -- can only affect the seeded half, and the fold
+  bounds the consequence to "no worse than baseline."
 
 **New attack surface this DOES introduce: secret persistence.** `export
 GITHUB_TOKEN=ghp_...` would persist that value in plaintext session
 state. Mitigations: `0700`/`0600` permissions restrict read access to
 the owning user; the TTL bounds how long exposure lasts; and names
-matching `TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL` (case-insensitive) are
-recorded as `AssignedUnresolved` with the value itself dropped, which
-stays safe under the invariant (it costs only a missed future upgrade,
-never a downgrade). This continues the same disclosed trade-off
+matching `TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL` (case-insensitive,
+non-exhaustive and best-effort -- it will miss real secret-shaped names
+like `GH_PAT`/`AUTHORIZATION`, and is not a security boundary on its
+own) are recorded as `AssignedUnresolved` with the value itself
+dropped, which stays safe under the fold either way (it costs only a
+missed future upgrade, never a downgrade). This continues the same disclosed trade-off
 `decision_log_path` already accepts (an existing opt-in feature that
 writes raw commands to disk) -- README and threat-model.md should carry
 a matching disclosure for this feature.
@@ -195,20 +285,28 @@ module), exactly where `config.rs`'s own I/O already lives today.
     `Store::load(&session_id) -> SessionState` (every failure loads
     `empty()` plus a warning) and `Store::save(&session_id,
     &SessionState)`.
-- **`src/gate.rs`**: `analyze_at_depth` already threads `CwdState`
-  through recursion; the TOP-LEVEL entry point additionally seeds `Env`
-  from `SessionState.env` and collects the top-level effects
-  (assignments, definitions, aliases, final cwd) into the returned next
-  state. Recursion boundaries stay untouched -- session state enters
-  only at the same top-level seed point `CwdContext::Initial` enters at
-  today.
+- **`src/gate.rs`**: `analyze_at_depth`'s own signature and its
+  recursive call sites gain a seed parameter (used only at depth 0;
+  every recursive call keeps passing an empty/default seed exactly as
+  today, so recursion SEMANTICS below the top level stay untouched even
+  though the signatures change to carry the new parameter through). The
+  top-level entry additionally seeds `Env` from `SessionState.env`,
+  seeds `CwdState` per the cwd bullet above, and collects the top-level
+  effects (assignments, definitions, aliases, final cwd) into the
+  returned next state.
 - **`src/lib.rs`**: new
   `pub fn analyze_with_session(command: &str, policy: &Policy, session:
-  &SessionState) -> (Verdict, SessionState)`, taking state in and
-  returning the verdict plus the complete next state (the caller just
-  persists whatever it's handed back). Wrapped in the existing watchdog
-  the same way its siblings are; `analyze` and `analyze_with_policy`
-  stay unchanged, as an additive new entry point.
+  &SessionState) -> (Verdict, SessionState)`. Internally computes the
+  headline contract's fold directly: evaluates `command` once with
+  `SessionState::empty()` (today's `analyze_with_policy`, unchanged) and
+  once seeded from `session`, folds the two verdicts worst-wins via the
+  existing `fold_worst`, and returns that folded verdict alongside the
+  complete next state collected from the SEEDED evaluation (the caller
+  just persists whatever it's handed back). Wrapped in the existing
+  watchdog the same way its siblings are; `analyze` and
+  `analyze_with_policy` stay unchanged, as an additive new entry point
+  whose own two internal evaluations are exactly calls to the existing,
+  already-tested unseeded path.
 - **`src/adapter.rs`**: `HookInput` gains `session_id: Option<String>`,
   exposed via `pub fn extract_session_id(stdin: &str) -> Option<String>`
   (this module already owns every Claude-Code-specific field name per
@@ -226,9 +324,18 @@ module), exactly where `config.rs`'s own I/O already lives today.
   fail-closed Ask and the returned next state is the INPUT state,
   unchanged -- a trip reveals nothing reliable about the command's real
   effects, and leaving state unchanged only risks a missed upgrade
-  later, which the invariant makes safe.
+  later, which the fold makes safe either way.
 
-Suggested implementation slicing, each phase carrying its own
-`decision(C, S) >= decision(C, empty)` property test: (1) `session.rs`
-plus the config key and env-only plumbing, (2) functions and aliases,
-(3) cross-invocation cwd seeding.
+`analyze_with_session` performs the same `decision_log::append` call
+`analyze_with_policy` already does, under the same conditions, logging
+the final FOLDED verdict -- a session-tracked invocation must never
+diverge from `analyze_with_policy`'s own "logged lines never diverge
+from what the caller saw" guarantee just because a second internal
+evaluation ran.
+
+Suggested implementation slicing, each phase carrying its own property
+test asserting the FOLD IDENTITY directly (`fold_worst(decision(C,
+empty), decision_seeded(C, S)) == decision(C, S)`, not merely the
+weaker inequality -- see the headline contract's own note on why):
+(1) `session.rs` plus the config key and env-only plumbing, (2)
+functions and aliases, (3) cross-invocation cwd seeding.
