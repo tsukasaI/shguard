@@ -40,13 +40,13 @@ fn guardfall_headline_cases() {
         //     ahead of the real command — previously resolved argv[0] to
         //     "" (no blocklist match) and Allowed instead of Blocking.
         ("{,rm} -rf /", Decision::Block),
-        // 11. fable-review regression guard on the #10 fix: an assignment's
+        // 11. Regression guard on the #10 fix: an assignment's
         //     empty RHS (`X=`) must still resolve to the literal empty
         //     string, not vanish the assignment — an earlier version of the
         //     elision fix wrongly elided it too, dropping the `X -> ""`
         //     mapping and downgrading this from Block to Ask.
         ("X=; $X rm -rf /", Decision::Block),
-        // 12. fable-review hardening: a quoted-empty word immediately before
+        // 12. Hardening: a quoted-empty word immediately before
         //     an $IFS split at command position must not let a later word
         //     in the same $IFS-delimited run win argv[0] resolution — bash
         //     would exec the empty-string command (which fails), never the
@@ -225,7 +225,7 @@ fn guardfall_class_e_cases() {
         // rewritten into `-x`, so this matches the same Block rule
         // `tar -x -f a.tar -C /` already does.
         ("tar xf a.tar -C /", Decision::Block),
-        // ---- pins added after a fable-model review of PR #62: all of
+        // ---- pins for PR #62: all of
         // these already behaved correctly, just weren't yet asserted ----
         ("tar -C ~ -xf evil.tar", Decision::Block),
         ("tar -C~ -xf evil.tar", Decision::Allow), // literal `~`, not $HOME — see the TOML rule's docs
@@ -702,7 +702,7 @@ fn guardfall_issue_77_brace_command_position_cases() {
         // so the literal "/" from that member hard-matches
         // `rm-recursive-force-dangerous-target` on its own merits.
         ("rm$IFS-rf$IFS/{$(true),}", Decision::Block),
-        // Fable-review follow-up to issue #77: a dangerous leftover-branch
+        // Issue #77 follow-up: a dangerous leftover-branch
         // substitution must still escalate a verdict returned on one of
         // `evaluate_simple_command_core`'s EARLY returns, not just the
         // final blocklist-miss path — rule 1's own return (unresolvable
@@ -721,7 +721,7 @@ fn guardfall_issue_77_brace_command_position_cases() {
         // still lift that to `Block`, not just a rule that would otherwise
         // return `Allow`.
         ("tar{,$(rm -rf /)} xf evil.tar -C /", Decision::Block),
-        // Independent fable + /security-review follow-up: a brace member
+        // Issue #77 follow-up: a brace member
         // that's benign TO RUN (`printf /`, `printf -- -delete`, `printf
         // -- --force`) still supplies a literal, dangerous FLAG or TARGET
         // token once brace-expanded — `leftover_floor` only checks the
@@ -876,7 +876,7 @@ fn guardfall_issue_77_brace_command_position_cases() {
             "sed $(printf -- -i) $(printf ~/.config/shguard/config.toml)",
             Decision::Ask,
         ),
-        // End-to-end pin (fable-review follow-up) for the exact invariant
+        // End-to-end pin for the exact invariant
         // issue #85's own text calls out as the reason a flagless sibling
         // rule was rejected: a resolved, no-`-i` read of the config file
         // must stay Allow. Only unit-level coverage of this existed before
@@ -900,7 +900,7 @@ fn guardfall_issue_77_brace_command_position_cases() {
             "sed $(printf -- \"-i /home/user/.config/shguard/config.toml\")",
             Decision::Ask,
         ),
-        // Issue #117 (fable-review finding against issue #85's fix): a
+        // Issue #117 (a gap in issue #85's fix): a
         // decoy RESOLVED token elsewhere in the tail used to defeat the
         // relaxation above even when the danger was real and exploitable.
         // GNU sed permutes options after operands (POSIX getopt-style), so
@@ -1041,7 +1041,7 @@ fn guardfall_shell_init_persistence_cases() {
     }
 }
 
-/// Fable review of PR #259 (issue #198): a `normalized_prefix` target only
+/// Issue #198: a `normalized_prefix` target only
 /// matches paths *under* the directory it names — the bare directory token
 /// itself (`/etc/cron.d`, with or without a trailing slash) never matched,
 /// so dropping a file straight INTO a protected directory
@@ -1124,8 +1124,8 @@ fn guardfall_shell_init_source_destination_ambiguity_cases() {
 /// match_command` is first-match over `rules/blocklist.toml`'s declared
 /// order, so the new rules being appended at the END of the file is
 /// load-bearing, not incidental (see the comment on this rule family in
-/// `rules/blocklist.toml`). One case per mechanism (fable review of PR
-/// #259, finding 5) so a future reorder that puts a `shell-init-*` rule
+/// `rules/blocklist.toml`). One case per mechanism (PR #259) so a
+/// future reorder that puts a `shell-init-*` rule
 /// ahead of its stricter sibling can't silently regress unnoticed — each
 /// command carries one token matching the earlier rule's targets and one
 /// matching the new rule's, and only the earlier rule's `Block` may win.
@@ -1382,14 +1382,14 @@ fn guardfall_shell_init_redirect_cases() {
         // path — the floor's piece-level substitution doesn't care which.
         ("cat > ${HOME}/.config/shguard/config.toml", Decision::Ask),
         ("cat > \"$HOME/.config/shguard/config.toml\"", Decision::Ask),
-        // fable-review regression guard: quoting only the expansion, not
+        // Regression guard: quoting only the expansion, not
         // the whole target (`"$HOME"/.zshrc` — arguably the more idiomatic
         // shell style than quoting the whole word) must substitute exactly
         // like the bare and whole-word-quoted forms above; an earlier
         // version of this fix only recognised a `DoubleQuoted` piece that
         // was the ENTIRE word and silently fell through to Allow here.
         ("cat > \"$HOME\"/.config/shguard/config.toml", Decision::Ask),
-        // fable-review regression guard: this floor is wired into both
+        // Regression guard: this floor is wired into both
         // `evaluate_simple_command` (a bare command's own redirects) and
         // `apply_attached_word_and_redirect_checks` (a compound command's
         // attached redirects) — an earlier version only had the former,

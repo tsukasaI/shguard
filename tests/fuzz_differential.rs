@@ -234,7 +234,7 @@ fn contains_dangerous_redirect(text: &str) -> bool {
         } else if c == b'<' && j < n && bytes[j] == b'>' {
             j += 1; // `<>` read-write redirect.
         } else if c == b'>' && j < n && bytes[j] == b'|' {
-            j += 1; // `>|` clobber-override write (fable review follow-up).
+            j += 1; // `>|` clobber-override write.
         }
         while j < n && bytes[j].is_ascii_whitespace() {
             j += 1;
@@ -266,7 +266,7 @@ fn absolute_path_and_redirect_guard_rejects_crafted_bypass_attempts() {
     ));
     assert!(contains_absolute_path_invocation("$(/sbin/reboot)"));
     // A brace command GROUP (`{ ...; }`) also puts its contents in command
-    // position (fable review follow-up) -- the mutator never generates
+    // position -- the mutator never generates
     // this shape, but the guard should not silently miss it either.
     assert!(contains_absolute_path_invocation("{ /bin/rm -rf /; }"));
     // Not at a command boundary -- an ordinary argument to `echo`, not an
@@ -278,7 +278,7 @@ fn absolute_path_and_redirect_guard_rejects_crafted_bypass_attempts() {
     assert!(contains_dangerous_redirect("echo hi > /etc/passwd"));
     assert!(contains_dangerous_redirect("echo hi >> /etc/shadow"));
     // `>|` (clobber-override, ignores `set -o noclobber`) is still a write
-    // redirect -- fable review follow-up, the byte-scanner previously left
+    // redirect -- the byte-scanner previously left
     // the `|` unconsumed and never reached the target text.
     assert!(contains_dangerous_redirect("echo hi >| /etc/passwd"));
     assert!(contains_dangerous_redirect("$(: > /etc/cron.d/x)"));
@@ -607,8 +607,8 @@ fn find_real_bash() -> PathBuf {
     PathBuf::from("/bin/bash")
 }
 
-/// Single-quotes `s` for safe splicing into a bash script string (fable
-/// review follow-up): [`find_real_bash`]'s resolved path was previously
+/// Single-quotes `s` for safe splicing into a bash script string:
+/// [`find_real_bash`]'s resolved path was previously
 /// interpolated unquoted, so a `PATH` entry containing whitespace would
 /// word-split and silently break the capture. Escapes an embedded single
 /// quote by closing, emitting an escaped quote, and reopening -- the
@@ -1172,7 +1172,7 @@ enum SkipReason {
 /// the source-text marker AND the multiset-duplication shape (not just
 /// "shguard's argv is longer"), so an unrelated future divergence that
 /// happens to lengthen argv for a different reason isn't silently absorbed
-/// into this bucket -- mirroring the same fable-review-driven scoping
+/// into this bucket -- mirroring the same scoping
 /// discipline the empty-brace-elision classifier this replaces used.
 fn classify_root_cause(
     stage_text: &str,
@@ -1195,13 +1195,13 @@ fn classify_root_cause(
 /// an already-repeated word: a 1-vs-0 "shguard produced one occurrence of a
 /// word bash never produced" case counts too.
 ///
-/// A fable review of an earlier version of this PR proposed requiring
+/// Requiring
 /// `count >= 2` (i.e. only accepting an already-repeated word's count going
-/// UP, never a brand-new 1-vs-0 word) on the theory that a lone extra word
+/// UP, never a brand-new 1-vs-0 word) was considered on the theory that a lone extra word
 /// is a weaker, more easily-coincidental signal than genuine duplication.
-/// Verified empirically against real mutator output before accepting that
-/// change (`SHGUARD_FUZZ_ITERATIONS=5000`, 3 different seeds) and reverted
-/// it: the `IfsGluedBraceDup` family's actual shape varies by WHICH word
+/// Verified empirically against real mutator output
+/// (`SHGUARD_FUZZ_ITERATIONS=5000`, 3 different seeds) and rejected:
+/// the `IfsGluedBraceDup` family's actual shape varies by WHICH word
 /// ends up over-counted depending on where the empty brace member sits --
 /// `echo$IFS{hello,}` produces shguard argv `["echo","hello","echo"]` vs
 /// bash's `["echo","echo"]`, where `"echo"` is already at parity (2-vs-2)
@@ -1240,7 +1240,7 @@ fn has_excess_word_multiplicity(shguard_argv: &[String], bash_argv: &[String]) -
 /// sequences as comma-joined id lists -- with the empty string always
 /// mapped to the fixed token `E` rather than consuming an id, so emptiness
 /// is always distinguishable from "some other word" regardless of how many
-/// distinct non-empty words appear (fable-review follow-up: an earlier
+/// distinct non-empty words appear (an earlier
 /// version symbolized `""` like any other word, so `["a",""]` vs `["a"]`
 /// and `["a","x"]` vs `["a"]` produced the SAME signature -- silently
 /// folding a regression of the fixed empty-word-elision family, #324, into
@@ -1286,8 +1286,7 @@ fn symbolize_word<'a>(
 
 // ---- direct pins for classify_root_cause / has_excess_word_multiplicity /
 // diff_signature: correctness of the fuzzer's OWN classification logic
-// must not rest entirely on seed-dependent sweep runs (fable review of
-// #327) ----
+// must not rest entirely on seed-dependent sweep runs (PR #327) ----
 
 fn strings(words: &[&str]) -> Vec<String> {
     words.iter().map(|s| (*s).to_string()).collect()
@@ -1353,7 +1352,7 @@ fn has_excess_word_multiplicity_counts_a_lone_extra_word_not_just_repeated_ones(
 
 #[test]
 fn diff_signature_distinguishes_an_empty_word_from_an_extra_word() {
-    // Regression guard (fable review of #327): an earlier version
+    // Regression guard (PR #327): an earlier version
     // symbolized "" like any other word, so a #324-family divergence
     // (a stray empty word) and an unrelated extra-word divergence produced
     // the SAME signature -- which would fold a regression of the fixed
@@ -1601,7 +1600,7 @@ fn explicitly_braced_ifs_before_a_brace_group_is_unaffected_by_the_fix() {
         .filter(|w| matches!(w.resolution(), Resolution::Unresolvable(_)))
         .count();
     assert!(unresolvable_count > 0, "{:?}", verdict.normalized_argv());
-    // A round-1 fable review of the fix caught that an argv-shape-only
+    // An argv-shape-only
     // assertion like the one above cannot detect the exact regression class
     // this fix once introduced (converting the hazardous piece to
     // Unresolvable while accidentally dropping the `ifs_derived` tag rule

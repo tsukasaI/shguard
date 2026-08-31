@@ -882,8 +882,8 @@ enum ExceptTargetShape {
 const HOME_CONTAINER_DIRS: &[&str] = &["home", "Users"];
 
 /// Whether `component` names a [`HOME_CONTAINER_DIRS`] entry, compared
-/// case-insensitively (fable review of PR #382): macOS's default APFS/
-/// HFS+ volumes are case-INsensitive, so `users`/`USERS`/`Users` all
+/// case-insensitively: macOS's default APFS/HFS+ volumes are
+/// case-INsensitive, so `users`/`USERS`/`Users` all
 /// resolve to the exact same real directory at runtime — a bare
 /// case-sensitive match would let a one-character respelling of the
 /// very name this list exists to catch silently evade it, a materially
@@ -3557,9 +3557,8 @@ fn wrapper_cluster_booleans(wrapper: &str) -> Option<&'static [char]> {
             'b', 'm', 'B', 'd', 'e', 'i', 'k', 'L', 'n', 'p', 'q', 'r', 'R', 's', 'S', 't', 'v',
             'w',
         ]),
-        // No `"tar"` entry: a round-4 fable review of issue #209 found
-        // that tar's short-flag arity genuinely differs across flavors
-        // for letters that matter (bsdtar's `-s` takes a value; GNU
+        // No `"tar"` entry (issue #209): tar's short-flag arity genuinely
+        // differs across flavors for letters that matter (bsdtar's `-s` takes a value; GNU
         // tar's `-s`/`--same-order` is boolean), so a table built from
         // either flavor silently swallows `-C` in a cluster the OTHER
         // flavor's real tar would not — the same "unverified assumption
@@ -3623,8 +3622,8 @@ fn cluster_takes_separated_value(wrapper: &str, token: &str) -> bool {
 /// stop-here-or-next-token classification for the wrapped-command walk.
 /// Shares [`wrapper_cluster_booleans`]/[`wrapper_value_flags`] with that
 /// function so the two classifications of "where does this wrapper's
-/// value-taking letter's value live" cannot drift apart — issue #209's
-/// fable review found `crate::gate::chain_dash_c_targets` had grown its
+/// value-taking letter's value live" cannot drift apart — issue #209:
+/// `crate::gate::chain_dash_c_targets` had grown its
 /// own, incomplete, from-scratch parsing of env's `-C` position that only
 /// recognized a BARE `-C` token, missing every cluster form (`-iC`,
 /// `-iC<dir>`) `effective_command`'s wrapped-command walk already handles
@@ -3879,7 +3878,7 @@ fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
             ValueFlag::Long("delimiter".to_string()),
             ValueFlag::Long("process-slot-var".to_string()),
         ],
-        // Issue #209's round-3 fable review: `make`/`tar` aren't
+        // Issue #209: `make`/`tar` aren't
         // `TRANSPARENT_WRAPPERS` (they don't exec an arbitrary wrapped
         // command), so these two entries are never reached by
         // `skip_wrapper_flags`/`skip_wrapper_arguments` — they exist
@@ -3908,7 +3907,7 @@ fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
             ValueFlag::Short('W'),
         ],
         // No `"tar"` entry: see `wrapper_cluster_booleans`'s doc for why
-        // a round-4 fable review of issue #209 removed the bsdtar-only
+        // issue #209 removed the bsdtar-only
         // table this used to have (its `-s` classification was wrong for
         // GNU tar's `-s`/`--same-order`, silently dropping `-C`
         // composition on that flavor). `crate::gate::find_dash_c_in_cluster`
@@ -3970,7 +3969,7 @@ fn skip_wrapper_flags(wrapper: &str, argv: &[NormalizedWord]) -> usize {
         let Resolution::Resolved(token) = argv[idx].resolution() else {
             break;
         };
-        // Issue #248 follow-up (fable review of PR #249), generalized to
+        // Issue #248 follow-up, generalized to
         // `env` by issue #265: a value flag clusters trivially with its
         // wrapper's boolean flags — `exec -la foo cmd` and `env -iu FOO
         // rm -rf /` are ordinary, easily-typed spellings, and each
@@ -3986,9 +3985,8 @@ fn skip_wrapper_flags(wrapper: &str, argv: &[NormalizedWord]) -> usize {
         // not the token's last character: `-ajava`/`-aa`/`-acuda` end in
         // `a` too, but that `a` belongs to the GLUED VALUE, and reading
         // them as "value comes from the next token" consumed the real
-        // wrapped command (`rm`) as if it were the flag's value — a fable
-        // review caught exactly that regression in an earlier
-        // `ends_with('a')` version of this check.
+        // wrapped command (`rm`) as if it were the flag's value — a
+        // regression an earlier `ends_with('a')` version of this check had.
         if value_flag_bare_match(&value_flags, token)
             || cluster_takes_separated_value(wrapper, token)
         {
@@ -4168,9 +4166,9 @@ pub(crate) enum BuiltinLoadableLibrary {
 /// run of dash-prefixed tokens (ksh's grammar allows no option after the
 /// first bare name, which starts the dispatched command's own arguments) —
 /// but that run can be more than one token: ksh's option parser treats
-/// `-d -f lib` identically to a single clustered `-df lib` (fable review of
-/// an earlier version of this function, which checked only the very first
-/// tail token, confirmed `builtin -s -f lib`/`builtin -d -f lib` slipped
+/// `-d -f lib` identically to a single clustered `-df lib` (an earlier
+/// version of this function, which checked only the very first
+/// tail token, let `builtin -s -f lib`/`builtin -d -f lib` slip
 /// through as a real bypass). So this walks every leading dash-cluster
 /// token (stopping at the first non-dash-cluster token, `--`, or the end of
 /// `tail`) looking for `f` in ANY of them, rather than [`FlagMatcher`]'s
@@ -6796,8 +6794,7 @@ mod tests {
         // macOS's default APFS/HFS+ volumes are case-insensitive, so
         // `users` and `Users` resolve to the exact same real directory at
         // runtime -- a case-sensitive list lookup would let this
-        // respelling silently evade the widening (fable review of PR
-        // #382).
+        // respelling silently evade the widening.
         let rules = Rules::embedded().unwrap();
         let cmd = argv(&[
             "cp",
@@ -7064,8 +7061,8 @@ mod tests {
     #[test]
     fn dirstack_tilde_escape_to_empty_tail_floors_via_dirstack_not_ascent_descent() {
         // `~+/..` ascends one level *above* the (unknown) anchor — a
-        // different, unequal location from `~+` itself, but (fable review
-        // of PR #340) equally unknown, so it now shares `~+`'s own
+        // different, unequal location from `~+` itself, but
+        // equally unknown, so it now shares `~+`'s own
         // `dirstack_plausible` floor eligibility via
         // `PathForm::DirStackEscapesEmpty` rather than falling through to
         // plain `Opaque` unmatched. It still does NOT reach
@@ -8508,8 +8505,8 @@ mod tests {
         assert_eq!(matched.id().as_str(), "tar-extract-over-root-or-home");
     }
 
-    // Undeclared-but-real behavior change this fix also causes (found by
-    // fable review of PR #375): dash-less `x`+`P` (absolute-names) with no
+    // Undeclared-but-real behavior change this fix also causes:
+    // dash-less `x`+`P` (absolute-names) with no
     // `C` in the same cluster now also reaches `tar-absolute-names-ask`,
     // matching `TAR_DASHLESS_BOOLEAN`'s own doc comment's promise that `-P`
     // reaches that rule — pinned so this isn't a silent, undocumented
@@ -8674,7 +8671,7 @@ mod tests {
         assert!(rules.match_command_dirstack_equal_subst(&cmd).is_some());
     }
 
-    // Round-1 fable review finding: bsdtar 3.5.3 (macOS default) has a
+    // bsdtar 3.5.3 (macOS default) has a
     // `--cd` alias for `-C`/`--directory` that GNU tar doesn't — not a
     // prefix of "directory", so it needs its own exact-name recognition.
     #[test]
@@ -8697,7 +8694,7 @@ mod tests {
         assert_eq!(matched.id().as_str(), "tar-extract-over-root-or-home");
     }
 
-    // Round-1 fable review finding: tar-absolute-names-ask keys on the
+    // tar-absolute-names-ask keys on the
     // long option `--absolute-names`, which needs the same abbreviation
     // treatment as `--directory`/`--extract`.
     #[test]
@@ -8722,7 +8719,7 @@ mod tests {
         assert_eq!(matched.id().as_str(), "tar-absolute-names-ask");
     }
 
-    // Round-2 fable review finding: bsdtar 3.5.3 (macOS default) spells
+    // bsdtar 3.5.3 (macOS default) spells
     // `-P` as `--absolute-paths`, not GNU tar's `--absolute-names` — a
     // different string this crate's own prefix family doesn't cover
     // without its own exact/prefix alias, unlike --cd's relationship to
@@ -8749,7 +8746,7 @@ mod tests {
         assert_eq!(matched.id().as_str(), "tar-absolute-names-ask");
     }
 
-    // Round-1 fable review finding: an abbreviated extract-mode flag with
+    // An abbreviated extract-mode flag with
     // an attached (real-tar-invalid) `=value` must decide identically to
     // the canonical spelling with the same invalid `=value`, not more
     // leniently.
@@ -9346,7 +9343,7 @@ mod tests {
         assert_eq!(rule.decision(), Decision::Ask);
     }
 
-    // Regression pin (fable review of #205): the ancestor rm rule's
+    // Regression pin (PR #205): the ancestor rm rule's
     // required_flags initially only recognized lowercase `-r`, missing
     // the equally-standard uppercase `-R` recursive spelling GNU/BSD rm
     // both accept (`rm -R ~/.config` resolved Allow before this fix).
@@ -10054,7 +10051,7 @@ mod tests {
         );
     }
 
-    // Fable review of this PR flagged this as a documented-but-untested
+    // Documented-but-untested
     // behavior: declaring attached_value_flags is a per-rule trust
     // decision (README's own wording) that can flip a genuine localhost
     // target from excepted to unexcepted -- widening the candidate set
@@ -10086,7 +10083,7 @@ mod tests {
         );
     }
 
-    // Fable review of this PR flagged this as a documented-but-untested
+    // Documented-but-untested
     // behavior: an ordinary combined short-flag cluster containing no
     // declared attached_value_flags letter at all must not have any
     // candidate extracted from it, the same way it wouldn't with the
@@ -10325,7 +10322,7 @@ mod tests {
         );
     }
 
-    // Round-2 fable review of #350 (issue #214): the cluster scan's
+    // PR #350 (issue #214): the cluster scan's
     // left-to-right search has no notion of which earlier characters are
     // themselves value-taking, so it can split inside an EARLIER flag's
     // own glued value rather than a genuine flag position. Declaring that
@@ -10360,7 +10357,7 @@ mod tests {
         );
     }
 
-    // Round-2 fable review of #350: disclosed limitation, not a silent
+    // PR #350: disclosed limitation, not a silent
     // invariant — the cluster scan CAN newly suppress a rule that used to
     // fire, when a mis-split truncated candidate (from an UNDECLARED
     // earlier flag's glued value) happens to match an except_targets
@@ -11194,7 +11191,7 @@ mod tests {
         assert_eq!(rule.id().as_str(), "block-second");
     }
 
-    // The downgrade race a fable review of #204 found is closed (issue
+    // The downgrade race found in #204 is closed (issue
     // #261 made the redirect path fold worst-wins), but user redirect
     // entries stay Block-only as a conservative posture pending issue
     // #100's own review.
