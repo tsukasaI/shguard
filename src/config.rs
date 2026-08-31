@@ -870,6 +870,7 @@ fn write_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
         let mut file = std::fs::File::create(&tmp_path)?;
         file.write_all(contents.as_bytes())?;
         file.sync_all()?;
+        drop(file);
         std::fs::rename(&tmp_path, path)
     })();
 
@@ -937,7 +938,10 @@ fn init_config_template() -> String {
 # appendix -- give the copy a NEW id first: reusing an embedded id fails
 # this whole file closed with a duplicate-id error, by design (issue
 # #112) -- editing this file can only add protection on top of the
-# embedded set, never replace or weaken it.
+# embedded set, never replace or weaken it. If the rule you're copying
+# is a [[redirect]] entry with decision = "ask" (the embedded blocklist
+# can use it; a user [[redirect]] entry cannot, see above), drop that
+# line from your copy or it fails to load.
 
 # [[deny]]
 # id = "user-deny-scary-tool"
