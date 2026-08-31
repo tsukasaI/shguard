@@ -1717,7 +1717,7 @@ fn evaluate_simple_command(
     // other guard here. `has_argument_substitution` above never sees it
     // either: it only scans words strictly after the command-position one.
     let has_leftover_substitution = has_command_position_leftover_substitution(command);
-    // Rule 10's allowlist guard (module docs, "escalation vector"): an
+    // Rule 10's allowlist guard (module docs, "User config precedence"): an
     // escalation-floored Ask must never downgrade to Allow. `Unresolved`
     // chains are excluded too, fail-closed: no allow entry can currently
     // match one (matching needs a resolved effective command), but this
