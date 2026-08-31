@@ -40,13 +40,30 @@ fn count_bypass_corpus_cases() -> usize {
 }
 
 /// Counts benign-command entries in `tests/benign_corpus.rs`: every line
-/// whose first non-whitespace character is `"` is one command-string
-/// array entry, same one-entry-per-line convention as `guardfall.rs`.
+/// whose first non-whitespace character is `"`, but ONLY within the
+/// `commands: &[&str] = &[ ... ];` array literal itself -- scoped this
+/// way (not a bare whole-file scan) because the test body below the
+/// array also has a `"`-first line (its `assert_eq!` format string),
+/// which a whole-file scan would miscount as a 60th command when the
+/// array only holds 59.
 fn count_benign_corpus_commands() -> usize {
-    read_repo_file("tests/benign_corpus.rs")
-        .lines()
-        .filter(|line| line.trim_start().starts_with('"'))
-        .count()
+    let source = read_repo_file("tests/benign_corpus.rs");
+    let mut in_array = false;
+    let mut count = 0;
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("let commands") {
+            in_array = true;
+            continue;
+        }
+        if in_array && trimmed == "];" {
+            break;
+        }
+        if in_array && trimmed.starts_with('"') {
+            count += 1;
+        }
+    }
+    count
 }
 
 /// Extracts the integer immediately following `label` in `readme` (the

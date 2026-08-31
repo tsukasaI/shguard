@@ -36,7 +36,7 @@ fails rather than letting it go stale silently.
 - **Regression test count:** 389 (384 pinned cases across
   `tests/guardfall.rs`'s internally-discovered regression suite, plus 5
   externally-attributed cases in `tests/bypass_corpus.toml`).
-- **Benign corpus size:** 60 (realistic agent-workflow commands in
+- **Benign corpus size:** 59 (realistic agent-workflow commands in
   `tests/benign_corpus.rs`, verified to `Allow` without friction).
 
 This is a different axis from an LLM-based agent's self-reported
