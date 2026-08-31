@@ -11245,7 +11245,7 @@ mod tests {
         assert_eq!(verdict.decision(), Decision::Block);
     }
 
-    // ==== User config precedence: deny > ask > allow (plan.md §6 item 8) ====
+    // ==== deny > ask > allow precedence tests (module docs, "User config precedence") ====
 
     /// Merges `user_toml`'s `[[deny]]`/`[[ask]]`/`[[allow]]` onto the
     /// embedded blocklist/allowlist, the same way `crate::config::Policy`
