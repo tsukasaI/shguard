@@ -2002,11 +2002,10 @@ mod tests {
     // ---- normalize_assignment_value: an empty RHS (`X=`) resolves to
     // exactly one Resolved(""), never zero words — bash assigns X the
     // literal empty string, it does not vanish the assignment the way an
-    // unquoted empty word elides in a splitting context. Regression guard
-    // for the fable-review finding on the elision fix above: an earlier
-    // version of the `chunks_to_words` fix elided this too, which made
-    // `apply_one` drop the `X -> ""` mapping and downgraded `X=; $X rm -rf
-    // /` from Block to Ask. ----
+    // unquoted empty word elides in a splitting context. Regression guard:
+    // an earlier version of the `chunks_to_words` fix elided this too,
+    // which made `apply_one` drop the `X -> ""` mapping and downgraded
+    // `X=; $X rm -rf /` from Block to Ask. ----
     #[test]
     fn assignment_value_empty_rhs_resolves_to_one_empty_word() {
         let cmd = parse_ok("X=");

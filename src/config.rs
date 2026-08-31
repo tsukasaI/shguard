@@ -1522,9 +1522,8 @@ mod tests {
         // A directory sitting at `path` makes `File::create` on the temp
         // file succeed (it's a sibling, not `path` itself) but the final
         // `rename` fail (can't rename a file onto an existing directory) —
-        // the exact failure mode a fable review of PR #387 caught leaking
-        // the temp file under, since the old code only cleaned up on a
-        // WRITE failure, not a rename failure.
+        // this leaks the temp file if cleanup only runs on a WRITE
+        // failure and not a rename failure.
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::create_dir(&path).unwrap();

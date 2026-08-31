@@ -236,8 +236,7 @@ mod tests {
         append(unwritable, "echo hi", &Verdict::allow(Vec::new()));
     }
 
-    /// Regression test for the round-2 fable review finding this HIGH
-    /// bug was originally caught by: `crate::analyze_with_policy`
+    /// Regression test for a HIGH bug: `crate::analyze_with_policy`
     /// (`src/lib.rs`) used to call `append` *inside*
     /// `watchdog::bounded`'s closure, so a `decision_log_path` target that
     /// blocked past the internal gate-evaluation watchdog's own timeout
