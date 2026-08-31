@@ -107,8 +107,9 @@ is impossible -- state persists to disk.
   random suffix or PID, never a fixed name -- two concurrent writers
   sharing one temp path could interleave their writes into it before
   either renames, installing a corrupted file); `fsync` before rename,
-  same reasoning as `write_atomically` elsewhere in this codebase. A
-  lost update loses one command's severity-raising entries and degrades
+  so a crash between write and rename can never leave a half-written
+  file installed at the real path. A lost update loses one command's
+  severity-raising entries and degrades
   toward baseline, which the headline fold makes safe -- and even a
   corrupted destination file only degrades to `SessionState::empty()`
   on the next load, the same safe direction. Rejected: `flock`. A hung
@@ -242,11 +243,18 @@ against the seeded evaluation in isolation:
   found. This is the specific class of attack the fold exists to close,
   not a residual risk left open.
 - Writing the state file directly (`echo ... > ~/.local/state/shguard/...`):
-  fabricated entries can only ever over-block within the seeded half,
-  and the fold adds nothing new here. This is a self-inflicted denial of
-  service, not a privilege escalation. (Optional hardening: add the
-  session-state directory to the protected-write-path list; not required
-  for soundness given the fold above already holds.)
+  this is actually the EASIEST way to fabricate exactly the poisoning
+  entries the bullet above describes (a fake `HOME`/`CDPATH` assignment,
+  a steered cwd anchor, a saturated tracker) -- fabricated entries do
+  NOT "only ever over-block" on their own; the seeded half can be
+  degraded by them the same way, all the way to Allow for the
+  `-C`-override case. What actually stays safe is, again, only the
+  fold: whatever the fabricated entries do to the seeded half, the
+  unaffected baseline half is folded back in regardless. Net effect
+  limited to self-inflicted denial of service (missed upgrades), never
+  privilege escalation. (Optional hardening: add the session-state
+  directory to the protected-write-path list; not required for
+  soundness given the fold above already holds.)
 - Cross-session contamination or session-id forgery: the id comes from
   Claude Code's own payload, not from anything inside the analyzed
   command; filename sanitization blocks path traversal; and even a
@@ -297,16 +305,23 @@ module), exactly where `config.rs`'s own I/O already lives today.
 - **`src/lib.rs`**: new
   `pub fn analyze_with_session(command: &str, policy: &Policy, session:
   &SessionState) -> (Verdict, SessionState)`. Internally computes the
-  headline contract's fold directly: evaluates `command` once with
-  `SessionState::empty()` (today's `analyze_with_policy`, unchanged) and
-  once seeded from `session`, folds the two verdicts worst-wins via the
-  existing `fold_worst`, and returns that folded verdict alongside the
-  complete next state collected from the SEEDED evaluation (the caller
-  just persists whatever it's handed back). Wrapped in the existing
-  watchdog the same way its siblings are; `analyze` and
-  `analyze_with_policy` stay unchanged, as an additive new entry point
-  whose own two internal evaluations are exactly calls to the existing,
-  already-tested unseeded path.
+  headline contract's fold directly: evaluates `command` once with an
+  empty seed and once seeded from `session`, using the SAME
+  gate-level evaluation machinery for both (the empty-seed call is
+  byte-identical in behavior to today's unseeded path, just invoked at
+  the `gate`-internal level rather than through `analyze_with_policy`
+  itself), folds the two verdicts worst-wins via the existing
+  `fold_worst`, and returns that folded verdict alongside the complete
+  next state collected from the SEEDED evaluation (the caller just
+  persists whatever it's handed back). `analyze_with_session` owns
+  EXACTLY ONE `watchdog::bounded` wrap and EXACTLY ONE
+  `decision_log::append` call, over the final folded verdict --
+  it must NOT call `analyze_with_policy` itself for either internal
+  evaluation, since that function performs its own watchdog wrap and
+  its own log append internally, which would double both. `analyze`
+  and `analyze_with_policy` stay unchanged, as an additive new entry
+  point that happens to share their underlying gate machinery, not a
+  caller of either of them.
 - **`src/adapter.rs`**: `HookInput` gains `session_id: Option<String>`,
   exposed via `pub fn extract_session_id(stdin: &str) -> Option<String>`
   (this module already owns every Claude-Code-specific field name per
@@ -326,12 +341,14 @@ module), exactly where `config.rs`'s own I/O already lives today.
   effects, and leaving state unchanged only risks a missed upgrade
   later, which the fold makes safe either way.
 
-`analyze_with_session` performs the same `decision_log::append` call
-`analyze_with_policy` already does, under the same conditions, logging
-the final FOLDED verdict -- a session-tracked invocation must never
-diverge from `analyze_with_policy`'s own "logged lines never diverge
-from what the caller saw" guarantee just because a second internal
-evaluation ran.
+To restate the API shape section's own point precisely: `analyze_with_session`
+calls `decision_log::append` exactly ONCE, over the final FOLDED verdict,
+under the same conditions `analyze_with_policy` already logs under --
+never once per internal evaluation, and never by calling
+`analyze_with_policy` itself for either internal evaluation (which
+would append twice). A session-tracked invocation must not diverge from
+`analyze_with_policy`'s own "logged lines never diverge from what the
+caller saw" guarantee just because a second internal evaluation ran.
 
 Suggested implementation slicing, each phase carrying its own property
 test asserting the FOLD IDENTITY directly (`fold_worst(decision(C,
