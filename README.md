@@ -130,6 +130,12 @@ what a started process can reach.
 cargo install shguard
 ```
 
+Or with Homebrew:
+
+```bash
+brew install tsukasaI/shguard/shguard
+```
+
 Or with Nix:
 
 ```bash
