@@ -181,6 +181,16 @@ fn main() {
             check_args.extend(args);
             std::process::exit(run_check(&check_args));
         }
+        // `init` takes only its own optional `--force` — same variable-
+        // arity reassembly `check` above needs, so a stray extra argument
+        // (not just `--force`) is reported precisely rather than silently
+        // ignored or misrouted to hook mode.
+        Some("init") => {
+            let mut init_args: Vec<std::ffi::OsString> = Vec::new();
+            init_args.extend(extra_arg);
+            init_args.extend(args);
+            std::process::exit(run_init(&init_args));
+        }
         // The PreToolUse hook contract never passes shguard any arguments
         // at all (Claude Code invokes it bare, feeding the payload via
         // stdin) — `first_arg` is `None` on every real hook invocation, so
@@ -198,7 +208,7 @@ fn main() {
                 io::stderr(),
                 "shguard: unrecognized arguments {rest:?} (known commands: --version, \
                  --check-config (neither taking further arguments), check <command> \
-                 [--json])"
+                 [--json], init [--force])"
             );
             std::process::exit(2);
         }
@@ -398,6 +408,56 @@ fn backtrace_requested() -> bool {
     match std::env::var_os("RUST_BACKTRACE") {
         None => false,
         Some(value) => value != "0",
+    }
+}
+
+/// `shguard init [--force]` (issue #112): scaffolds a starter config file
+/// at the same path [`shguard::config::Policy::load`] would discover, so a
+/// user can see (and start extending) the full embedded rule set without
+/// reading source. Deliberately outside `main`'s `catch_unwind`/watchdog
+/// boundary, same reasoning as [`check_config`]: a one-shot, human- or
+/// CI-triggered invocation outside the PreToolUse hook contract entirely.
+///
+/// Exit codes follow this repo's check/lint convention: `0` wrote the
+/// file, `1` refused because something already exists at the target path
+/// (a real, actionable problem: rerun with `--force`, or edit the
+/// existing file directly), `2` a usage error or the target path/write
+/// itself failed.
+///
+/// Writes via `writeln!` (discarding the write error), not
+/// `println!`/`eprintln!`, for the same broken-pipe reasoning
+/// [`install_panic_hook`]'s own docs give.
+fn run_init(args: &[std::ffi::OsString]) -> i32 {
+    let mut force = false;
+    for arg in args {
+        if arg == "--force" {
+            force = true;
+        } else {
+            let _ = writeln!(
+                io::stderr(),
+                "shguard init: unexpected argument {arg:?} (usage: shguard init [--force])"
+            );
+            return 2;
+        }
+    }
+
+    match shguard::config::Policy::init(force) {
+        Ok(path) => {
+            let _ = writeln!(io::stdout(), "shguard init: wrote {}", path.display());
+            0
+        }
+        Err(shguard::config::InitError::AlreadyExists { path }) => {
+            let _ = writeln!(
+                io::stderr(),
+                "shguard init: {} already exists; rerun with --force to overwrite it",
+                path.display()
+            );
+            1
+        }
+        Err(err) => {
+            let _ = writeln!(io::stderr(), "shguard init: {err}");
+            2
+        }
     }
 }
 

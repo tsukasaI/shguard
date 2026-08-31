@@ -59,7 +59,7 @@ use crate::verdict::{Decision, DenyMessage, Reason, RuleId, Verdict};
 
 /// The default blocklist, embedded in the binary so the hook works with
 /// zero setup (plan.md §1.1 stage 3, issue #11 scope).
-const EMBEDDED_BLOCKLIST: &str = include_str!("../rules/blocklist.toml");
+pub(crate) const EMBEDDED_BLOCKLIST: &str = include_str!("../rules/blocklist.toml");
 
 /// The default allowlist, embedded the same way. Ships empty (no entries)
 /// per issue #11 scope — a commented example lives in the file itself.

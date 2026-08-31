@@ -178,7 +178,24 @@ check the exit code (`2`) first if you're scripting against this.
 By default shguard needs no setup — the embedded blocklist above is all
 that runs. To declare your own per-command policy, create
 `~/.config/shguard/config.toml` (or set `SHGUARD_CONFIG` to point at a
-different file):
+different file).
+
+### Scaffolding a starter config: `shguard init`
+
+```console
+$ shguard init
+shguard init: wrote /home/you/.config/shguard/config.toml
+```
+
+Writes a starter config to the same path shguard would otherwise look
+for, with a few commented-out example entries plus the full embedded
+blocklist re-emitted as a commented-out reference appendix, so the
+built-in rule set is discoverable and auditable without reading source.
+Every line in the generated file is a comment: config layers additively
+on top of the embedded blocklist (there's no mechanism to edit or disable
+a built-in rule by id), so copying a reference entry to make it active
+needs a fresh, non-colliding `id` first. Refuses to overwrite an existing
+file; pass `--force` to overwrite it anyway.
 
 ```toml
 [[ask]]

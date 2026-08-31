@@ -87,6 +87,7 @@
 //! profile vector are not caught by either.
 
 use std::collections::HashSet;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::rules::{Allowlist, Rules, UserConfig, merge_user_config};
@@ -163,7 +164,72 @@ pub struct Policy {
     pub(crate) decision_log_path: Option<PathBuf>,
 }
 
+/// `(SHGUARD_CONFIG, XDG_CONFIG_HOME, HOME)`, each `None` if unset — see
+/// [`Policy::read_env_paths`].
+type EnvPaths = (Option<String>, Option<String>, Option<String>);
+
 impl Policy {
+    /// Reads `SHGUARD_CONFIG`/`XDG_CONFIG_HOME`/`HOME` (in that order),
+    /// failing closed on a present-but-non-UTF-8 value for any of the
+    /// three (issue #28 item 1) — shared by [`Self::load`] and
+    /// [`Self::config_path`] so both see identical discovery behavior.
+    fn read_env_paths() -> Result<EnvPaths, ConfigError> {
+        // `var_os` (not `var(..).ok()`) so a *present* but non-UTF-8 value
+        // is distinguishable from *absent* — `var(..).ok()` collapses both
+        // into `None`, silently falling through to XDG/HOME discovery
+        // instead of the hard failure the "set to anything ⇒ explicit"
+        // contract (module docs) requires for `SHGUARD_CONFIG`.
+        let shguard_config = match std::env::var_os("SHGUARD_CONFIG") {
+            Some(value) => Some(
+                value
+                    .into_string()
+                    .map_err(|_| ConfigError::InvalidEnvVar {
+                        var: "SHGUARD_CONFIG",
+                    })?,
+            ),
+            None => None,
+        };
+        let xdg_config_home = match std::env::var_os("XDG_CONFIG_HOME") {
+            Some(value) => Some(
+                value
+                    .into_string()
+                    .map_err(|_| ConfigError::InvalidEnvVar {
+                        var: "XDG_CONFIG_HOME",
+                    })?,
+            ),
+            None => None,
+        };
+        let home = match std::env::var_os("HOME") {
+            Some(value) => Some(
+                value
+                    .into_string()
+                    .map_err(|_| ConfigError::InvalidEnvVar { var: "HOME" })?,
+            ),
+            None => None,
+        };
+        Ok((shguard_config, xdg_config_home, home))
+    }
+
+    /// The config path [`Self::load`] would discover, without loading or
+    /// parsing anything at it — for `shguard init` (issue #112), which
+    /// needs to know WHERE it would write before deciding whether to.
+    /// `Ok(None)` is the same ordinary "never configured, no `$HOME`
+    /// either" case [`Self::resolve_config_path`] documents, not a
+    /// failure; `Err` only for a present-but-non-UTF-8 env var.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidEnvVar`] if `SHGUARD_CONFIG`,
+    /// `XDG_CONFIG_HOME`, or `HOME` is set to a non-UTF-8 value.
+    pub fn config_path() -> Result<Option<PathBuf>, ConfigError> {
+        let (shguard_config, xdg_config_home, home) = Self::read_env_paths()?;
+        Ok(Self::resolve_config_path(
+            shguard_config.as_deref(),
+            xdg_config_home.as_deref(),
+            home.as_deref(),
+        ))
+    }
+
     /// Pure resolution logic — see the module docs' "Discovery" section
     /// for the precedence order and the XDG empty-string convention.
     /// `None` when none of the three inputs yield a path (the ordinary
@@ -201,42 +267,7 @@ impl Policy {
     /// if the default path exists but fails to read for a reason other
     /// than "does not exist".
     pub fn load() -> Result<Self, ConfigError> {
-        // `var_os` (not `var(..).ok()`) so a *present* but non-UTF-8
-        // `SHGUARD_CONFIG` is distinguishable from *absent* — `var(..).ok()`
-        // collapses both into `None`, silently falling through to XDG/HOME
-        // discovery instead of the hard failure the "set to anything ⇒
-        // explicit" contract (module docs) requires.
-        let shguard_config = match std::env::var_os("SHGUARD_CONFIG") {
-            Some(value) => Some(
-                value
-                    .into_string()
-                    .map_err(|_| ConfigError::InvalidEnvVar {
-                        var: "SHGUARD_CONFIG",
-                    })?,
-            ),
-            None => None,
-        };
-        // Same `var_os` treatment as `SHGUARD_CONFIG` above (issue #28 item
-        // 1): a present-but-non-UTF-8 `HOME`/`XDG_CONFIG_HOME` must fail
-        // closed too.
-        let xdg_config_home = match std::env::var_os("XDG_CONFIG_HOME") {
-            Some(value) => Some(
-                value
-                    .into_string()
-                    .map_err(|_| ConfigError::InvalidEnvVar {
-                        var: "XDG_CONFIG_HOME",
-                    })?,
-            ),
-            None => None,
-        };
-        let home = match std::env::var_os("HOME") {
-            Some(value) => Some(
-                value
-                    .into_string()
-                    .map_err(|_| ConfigError::InvalidEnvVar { var: "HOME" })?,
-            ),
-            None => None,
-        };
+        let (shguard_config, xdg_config_home, home) = Self::read_env_paths()?;
         let explicit = shguard_config.is_some();
 
         let path = Self::resolve_config_path(
@@ -744,6 +775,205 @@ fn toml_quote(value: &str) -> String {
     toml::Value::String(value.to_string()).to_string()
 }
 
+/// Everything that can go wrong running `shguard init` (issue #112).
+#[derive(Debug, thiserror::Error)]
+pub enum InitError {
+    /// [`Policy::config_path`] resolved to `None` — no `SHGUARD_CONFIG`
+    /// and no usable `$HOME`/`$XDG_CONFIG_HOME`, so there's nowhere to
+    /// write.
+    #[error(
+        "could not determine a config path to write (SHGUARD_CONFIG is unset and no \
+         $HOME/$XDG_CONFIG_HOME was found)"
+    )]
+    NoConfigPath,
+    /// A `SHGUARD_CONFIG`/`XDG_CONFIG_HOME`/`HOME` value was set but not
+    /// valid UTF-8 — same fail-closed posture as [`Policy::load`].
+    #[error(transparent)]
+    Config(#[from] ConfigError),
+    /// Something already exists at the target path and `force` was not
+    /// set.
+    #[error("{path:?} already exists; pass --force to overwrite it")]
+    AlreadyExists {
+        /// The path that already has something at it.
+        path: PathBuf,
+    },
+    /// A filesystem operation (stat, create-dir, write, rename) failed.
+    #[error("{path:?}: {source}")]
+    Io {
+        /// The path the failing operation targeted.
+        path: PathBuf,
+        /// The underlying I/O error.
+        source: std::io::Error,
+    },
+}
+
+impl Policy {
+    /// Writes `shguard init`'s scaffolded config to the path
+    /// [`Self::config_path`] resolves (issue #112), refusing to overwrite
+    /// an existing file/symlink/anything-else-at-that-path unless `force`
+    /// is `true` — mirrors [`Self::load`]'s own `symlink_metadata`-based
+    /// "nothing there" vs. "something's there" distinction, since a
+    /// dangling symlink or an unreadable file is still something a
+    /// non-`force` caller must not silently clobber.
+    ///
+    /// Writes via a temp file in the same directory, `fsync`, then
+    /// `rename` into place, so a crash mid-write can never leave a
+    /// half-written config behind.
+    /// Creates the config directory (and any missing parents) first if it
+    /// doesn't exist yet.
+    ///
+    /// # Errors
+    ///
+    /// See [`InitError`]'s variants.
+    pub fn init(force: bool) -> Result<PathBuf, InitError> {
+        let path = Self::config_path()?.ok_or(InitError::NoConfigPath)?;
+
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) if force => {}
+            Ok(_) => return Err(InitError::AlreadyExists { path }),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => return Err(InitError::Io { path, source }),
+        }
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| InitError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+
+        write_atomically(&path, &init_config_template()).map_err(|source| InitError::Io {
+            path: path.clone(),
+            source,
+        })?;
+
+        Ok(path)
+    }
+}
+
+/// Writes `contents` to `path` via a temp file in the same directory,
+/// `fsync`, then `rename`: never truncate-in-place, so a crash mid-write
+/// leaves the original (or nothing, for a brand-new file) rather than a
+/// half-written config. Best-effort removes the temp file if the write
+/// OR the rename itself fails (nothing else ever reads a `.tmp-*` file,
+/// so leaving one behind on error would just be silent litter, not a
+/// correctness issue, but cleaning it up costs nothing).
+fn write_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config.toml");
+    let tmp_path = parent.join(format!(".{file_name}.tmp-{}", std::process::id()));
+
+    let result = (|| {
+        let mut file = std::fs::File::create(&tmp_path)?;
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp_path, path)
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    result
+}
+
+/// `shguard init` (issue #112) content: a header explaining the config
+/// schema's additive-only relationship to the embedded blocklist, a few
+/// commented-out example entries per array, then the embedded blocklist
+/// re-emitted verbatim with every line `#`-prefixed as a read-only
+/// reference appendix.
+///
+/// # Why not just dump the embedded blocklist as loadable config
+///
+/// `rules/blocklist.toml`'s own `[[command]]` id space is exactly the
+/// `command_rules`/`ask_rules` id space [`crate::rules::merge_user_config`]
+/// already checks a user config against — writing those same ids back out
+/// as loadable `[[deny]]`/`[[ask]]` entries would make the very first
+/// `Policy::load` after `init` fail with `DuplicateId` on every single
+/// rule, the opposite of "immediately loadable". Merging is also
+/// deliberately additive-only (no replace-by-id mechanism exists), so
+/// even renamed copies could only ever ADD rules on top of the embedded
+/// set, never edit or disable one of its rules — scaffolding the file as
+/// literally loadable would misrepresent what editing it can actually do.
+/// A read-only, commented-out reference instead shows the full rule set
+/// (discoverable/auditable, this issue's own stated goal) without
+/// implying an editable copy is possible.
+fn init_config_template() -> String {
+    let commented_blocklist: String = crate::rules::EMBEDDED_BLOCKLIST
+        .lines()
+        .map(|line| {
+            if line.is_empty() {
+                "#\n".to_string()
+            } else {
+                format!("# {line}\n")
+            }
+        })
+        .collect();
+
+    format!(
+        r#"# shguard user config, scaffolded by `shguard init`.
+#
+# This file is layered ON TOP of shguard's embedded blocklist (below, for
+# reference) -- it can only ADD rules, never edit or disable one already
+# built in. There is no mechanism to override or remove an embedded rule
+# by id; loosening one is only ever possible via a narrowly-targeted
+# `[[allow]]` entry (and never for a shell interpreter, `eval`, or other
+# escalation vector -- rejected at load time).
+#
+# Every entry needs a unique `id` (surfaced in the decision reason) and a
+# `reason`, plus one of `command`/`command_prefix`, optionally narrowed
+# with `required_flags`/`targets` -- the same matcher shape the embedded
+# blocklist below uses. See README.md's Configuration section for the
+# full schema.
+#
+# [[ask]] entries are checked only as a last-resort floor after every
+# deny rule already missed -- `decision` doesn't need setting on them
+# (membership in [[ask]] alone is what makes an entry Ask; unlike a
+# [[redirect]] entry, which must omit or set decision = "block").
+#
+# Uncomment an example below to try it, or copy a rule from the reference
+# appendix -- give the copy a NEW id first: reusing an embedded id fails
+# this whole file closed with a duplicate-id error, by design (issue
+# #112) -- editing this file can only add protection on top of the
+# embedded set, never replace or weaken it. If the rule you're copying
+# is a [[redirect]] entry with decision = "ask" (the embedded blocklist
+# can use it; a user [[redirect]] entry cannot, see above), drop that
+# line from your copy or it fails to load.
+
+# [[deny]]
+# id = "user-deny-scary-tool"
+# reason = "never run this"
+# command = "scary-tool"
+
+# [[ask]]
+# id = "user-ask-gh"
+# reason = "confirm every gh invocation before it runs"
+# command = "gh"
+
+# [[allow]]
+# id = "user-allow-rm"
+# reason = "trust me"
+# command = "rm"
+
+# [[redirect]]
+# id = "user-forbid-redirect-to-secrets"
+# reason = "forbid redirecting into ~/secrets"
+# targets = [{{ normalized_prefix = "~/secrets/" }}]
+
+# ==== Embedded blocklist (read-only reference, not loaded from here) ====
+#
+# Every rule below already runs by default -- this is a comment-only
+# copy of rules/blocklist.toml for discovery/audit, not a second copy
+# shguard reads. Editing these lines has no effect; add new rules above
+# instead.
+
+{commented_blocklist}"#
+    )
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -1226,5 +1456,88 @@ mod tests {
         // resolver, already covered above; kept as a named anchor for anyone
         // looking for load()'s test coverage from this module.
         assert_eq!(Policy::resolve_config_path(None, None, None), None);
+    }
+
+    #[test]
+    fn init_config_template_is_comment_only() {
+        // The whole point of issue #112's reference-appendix design
+        // (see `init_config_template`'s own docs): every line must be a
+        // comment or blank, so the scaffolded file is immediately
+        // loadable (no duplicate-id collision with the embedded
+        // blocklist it quotes) while still surfacing the full rule set.
+        for line in init_config_template().lines() {
+            assert!(
+                line.is_empty() || line.starts_with('#'),
+                "every line must be a comment or blank, found: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn init_config_template_contains_the_embedded_blocklist_reference() {
+        // Spot-check a rule id known to exist in rules/blocklist.toml,
+        // commented out, rather than asserting exact byte equality
+        // against the embedded source (too brittle against unrelated
+        // future rule edits).
+        let template = init_config_template();
+        assert!(template.contains("# id = \"rm-recursive-force-dangerous-target\""));
+    }
+
+    #[test]
+    fn write_atomically_creates_a_new_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_atomically(&path, "hello").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
+    }
+
+    #[test]
+    fn write_atomically_replaces_existing_content_rather_than_appending() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "old content, longer than the new one").unwrap();
+        write_atomically(&path, "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+    }
+
+    #[test]
+    fn write_atomically_leaves_no_temp_file_behind_on_success() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_atomically(&path, "hello").unwrap();
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .filter(|name| name != "config.toml")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "unexpected leftover files: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn write_atomically_leaves_no_temp_file_behind_when_rename_fails() {
+        // A directory sitting at `path` makes `File::create` on the temp
+        // file succeed (it's a sibling, not `path` itself) but the final
+        // `rename` fail (can't rename a file onto an existing directory) —
+        // the exact failure mode a fable review of PR #387 caught leaking
+        // the temp file under, since the old code only cleaned up on a
+        // WRITE failure, not a rename failure.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::create_dir(&path).unwrap();
+        assert!(write_atomically(&path, "hello").is_err());
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .filter(|name| name != "config.toml")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "unexpected leftover files: {leftovers:?}"
+        );
     }
 }
