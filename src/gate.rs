@@ -1717,14 +1717,12 @@ fn evaluate_simple_command(
     // other guard here. `has_argument_substitution` above never sees it
     // either: it only scans words strictly after the command-position one.
     let has_leftover_substitution = has_command_position_leftover_substitution(command);
-    // Rule 10's allowlist guard (module docs): an allow entry matches
-    // through an escalation vector the same way rules do, but consent to
-    // the unprivileged command is not consent to running it under
-    // privilege escalation — an escalation-floored Ask must never
-    // downgrade to Allow. `Unresolved` chains are excluded too,
-    // fail-closed: no allow entry can currently match one (matching needs
-    // a resolved effective command), but this guard must not silently
-    // depend on that staying true. Classified once here and passed into
+    // Rule 10's allowlist guard (module docs, "User config precedence"): an
+    // escalation-floored Ask must never downgrade to Allow. `Unresolved`
+    // chains are excluded too, fail-closed: no allow entry can currently
+    // match one (matching needs a resolved effective command), but this
+    // guard must not silently depend on that staying true. Classified
+    // once here and passed into
     // `core` (same convention as `argv`) so the floor and this guard can
     // never diverge.
     let escalation_chain = crate::rules::wrapper_chain_escalation(&argv);
@@ -1876,11 +1874,8 @@ fn evaluate_simple_command(
 
     // Rule 11's allowlist guard: the same presence-based reasoning as
     // `has_argument_substitution` above (module docs, "User config
-    // precedence") — an inner Ask/Block that propagated up from an
-    // expansion-position substitution must never be suppressed by an allow
-    // entry written for the *outer* command name, which was never about the
-    // inner substitution's unresolved command. `recursable.has_any` extends
-    // the same reasoning to the flock/su `-c` and `find -exec` floors
+    // precedence"). `recursable.has_any` extends
+    // that reasoning to the flock/su `-c` and `find -exec` floors
     // (issues #64/#66/#72): an allow entry written for `flock`/`find`
     // itself is not consent to whatever command their `-c`/`-exec` payload
     // names. `tar_dashless_floor.is_some()` extends it once more: an allow
@@ -1957,23 +1952,19 @@ fn evaluate_simple_command(
     };
     let verdict = apply_ask_floor(verdict, ask_match);
 
-    // Issue #103's composed pass: when the folded cwd is `Known`, re-check
-    // a version of this command's own argv/redirects with every `Rel`-
-    // shaped resolved token composed against that anchor, against ONLY the
-    // ordinary deny/ask blocklist match and redirect-target rules — never
-    // the allowlist (module docs' cwd-context section: an allow entry
-    // matching only the *composed* path must not downgrade a decision the
-    // uncomposed evaluation above already reached). This exclusion is
-    // enforced two ways: structurally, `evaluate_composed_cwd` never
-    // receives or references an `Allowlist` at all, so it categorically
-    // cannot consult one; AND by call-site ordering — this call is placed
-    // strictly AFTER the allowlist-downgrade/ask-floor steps above and
-    // folds in via ordinary worst-wins, so even if some future change gave
-    // the composed pass its own allowlist access, this call's position is
-    // what would keep it from downgrading a decision already reached
-    // above. `allowlist_cannot_downgrade_via_composition` (this file's
-    // test module) pins that ordering — if this call is ever moved earlier
-    // in the pipeline, that test is what would catch it.
+    // Issue #103's composed pass (see `evaluate_composed_cwd`'s own doc for
+    // why the allowlist is never consulted here): when the folded cwd is
+    // `Known`, re-check a version of this command's own argv/redirects
+    // with every `Rel`-shaped resolved token composed against that anchor,
+    // against ONLY the ordinary deny/ask blocklist match and
+    // redirect-target rules. This call is placed strictly AFTER the
+    // allowlist-downgrade/ask-floor steps above and folds in via ordinary
+    // worst-wins, so even if some future change gave the composed pass its
+    // own allowlist access, this call's position is what would keep it
+    // from downgrading a decision already reached above.
+    // `allowlist_cannot_downgrade_via_composition` (this file's test
+    // module) pins that ordering — if this call is ever moved earlier in
+    // the pipeline, that test is what would catch it.
     let verdict = if let CwdContext::Known(anchor) = cwd
         && let Some(composed) =
             evaluate_composed_cwd(&composed_pass_argv, &command.redirections, anchor, rules)
@@ -7215,12 +7206,12 @@ fn compose_argv_against_cwd(argv: &[NormalizedWord], anchor: &str) -> Vec<Normal
 /// shaped token composed against `anchor` — [`compose_argv_against_cwd`])
 /// and `redirections`' resolved write targets against ONLY the ordinary
 /// deny/ask blocklist match and the redirect-target rules — NEVER the
-/// allowlist (module docs' cwd-context section: an allow entry matching
+/// allowlist: an allow entry matching
 /// only the *composed* path must not downgrade a decision the uncomposed
 /// evaluation already reached; enforced by the caller only ever calling
 /// this AFTER its own allowlist-downgrade/ask-floor steps, never by
 /// anything in this function itself, since it never touches an
-/// [`Allowlist`] at all). `None` when neither the composed argv nor any
+/// [`Allowlist`] at all. `None` when neither the composed argv nor any
 /// composed redirect target matches anything.
 ///
 /// The returned [`Verdict`] carries `argv` — the ORIGINAL, uncomposed
@@ -11245,7 +11236,7 @@ mod tests {
         assert_eq!(verdict.decision(), Decision::Block);
     }
 
-    // ==== User config precedence: deny > ask > allow (plan.md §6 item 8) ====
+    // ==== deny > ask > allow precedence tests (module docs, "User config precedence") ====
 
     /// Merges `user_toml`'s `[[deny]]`/`[[ask]]`/`[[allow]]` onto the
     /// embedded blocklist/allowlist, the same way `crate::config::Policy`
