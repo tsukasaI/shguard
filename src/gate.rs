@@ -7383,23 +7383,27 @@ fn chain_dash_c_targets(
     }
 }
 
-/// Issue #209's `tar`-specific `-C`/`--directory` handling: unlike
-/// git/make's own cumulative chain ([`chain_dash_c_targets`]), tar's flag
-/// is positional — GNU tar(1) applies it only to OPERANDS APPEARING
-/// AFTER it, and (unlike git/make) a later occurrence does not compose
-/// relative to an earlier one; each independently redirects tar's own
-/// cwd from that point in the argument list onward. Precisely modeling
-/// every possible occurrence's operand range is the "can of worms" issue
-/// #209's own scope note warns against, so this function takes the
-/// conservative model the issue itself suggests: EXACTLY ONE `-C`/
-/// `--directory` occurrence is resolved (from [`CwdContext::Initial`],
-/// same as the first flag in any chain) and paired with the slice of
-/// `rest` strictly AFTER it — composing only the tokens tar's own `-C`
-/// would actually apply to for the single-occurrence case. Zero
-/// occurrences returns `None` (composition doesn't apply); two or more
-/// also returns `None` rather than risk attributing the wrong anchor to
-/// the wrong operand range — tracked as a deliberate scope cut, not
-/// silently accepted (issue #354).
+/// Issue #209's `tar`-specific `-C`/`--directory` handling: tar's flag is
+/// positional — GNU tar(1) applies it only to OPERANDS APPEARING AFTER
+/// it, unlike git/make's single-final-anchor model
+/// ([`chain_dash_c_targets`]) — but issue #354 live-verified (bsdtar
+/// 3.5.3) that multiple occurrences DO compose cumulatively with each
+/// other, contrary to this function's own original premise (a real
+/// `chdir(2)` per occurrence, so a later relative target lands relative
+/// to wherever the earlier one left tar, not relative to the invoker's
+/// original cwd): see [`resolve_tar_dash_c`]'s own doc for the actual
+/// multi-occurrence model this function now delegates the whole scan to.
+///
+/// **Known limitation carried over from the multi-occurrence model**: an
+/// intervening flag this scan doesn't recognize as value-taking (e.g.
+/// `--exclude PATTERN`) can be misread as a spurious SECOND `-C`
+/// occurrence if its own value happens to start with `-C` (`tar -C
+/// ~/.config/shguard --exclude -C/tmp -cf out.tar file` reads `-C/tmp` as
+/// a second occurrence, truncating the first occurrence's operand range
+/// at that point) — under-composes, same fail-open direction (never
+/// worse than composing nothing) as tar's own unmodeled-arity gap this
+/// function's docs already disclose below, just with a new consequence
+/// (range truncation) now that multiple occurrences are modeled at all.
 ///
 /// A round-3 fable review of issue #209 found this function's short-form
 /// matching (originally `s == "-C"` only) missing tar's cluster and
@@ -7427,7 +7431,14 @@ fn chain_dash_c_targets(
 /// value instead (over-composition) — fail-closed and harmless, since
 /// [`evaluate_composed_argv_match`]'s fold only ever escalates a
 /// decision, never lowers one — but never under-composes for THIS one
-/// bypass shape (a dash-prefixed getopt cluster with unknown arity).
+/// bypass shape (a dash-prefixed getopt cluster with unknown arity) IN
+/// ISOLATION. Issue #354's multi-occurrence composition (this scan runs
+/// once per occurrence found) can still combine with a DIFFERENT
+/// under-composition source — a value-taking flag whose own value looks
+/// like a `-C` cluster, [`resolve_tar_dash_c`]'s own doc above — to
+/// truncate an earlier occurrence's operand range; that gap belongs to
+/// the caller's occurrence-scanning loop, not to this function's own
+/// per-token matching.
 ///
 /// **Known limitation, disclosed rather than silently accepted (issue
 /// #356)**: this closes the getopt-cluster-arity shape specifically, not
@@ -7488,6 +7499,7 @@ fn find_dash_c_in_cluster(token: &str) -> Option<crate::rules::ClusterValue<'_>>
 /// argv resumes.
 fn tar_dashless_leading_cluster_directory(
     rest: &[NormalizedWord],
+    env: &Env,
 ) -> Option<(Option<String>, usize)> {
     if !matches!(
         crate::rules::tar_dashless_leading_cluster(rest),
@@ -7502,32 +7514,38 @@ fn tar_dashless_leading_cluster_directory(
         return None;
     }
     // A second `C` in the same cluster chdirs cumulatively on real tar
-    // (`tar cCCf a b out.tar f` archives `a/b/f`), so composing only the
-    // last one would silently under-count relative to the dashed spelling
-    // `tar -C a -C b ...`, which the multi-occurrence scope cut (issue
-    // #354) already fails closed to `None`. Fail closed here too rather
-    // than resolve to the wrong anchor (issue #356 fable review, finding 1).
-    if cluster.matches('C').count() > 1 {
-        let consumed = cluster
-            .chars()
-            .filter(|c| crate::rules::TAR_DASHLESS_CONSUMING.contains(c))
-            .count()
-            + 1;
-        return Some((None, consumed));
-    }
+    // (`tar cCCf a b out.tar f` archives `a/b/f`) -- fold every `C`
+    // found through the SAME `resolve_cwd_outcome`/`classify_cd_target`
+    // cumulative chain `resolve_tar_dash_c` uses across separate dashed
+    // `-C` occurrences (issue #354's own fix), since a dashless cluster's
+    // `C`s are positionally equivalent to that many consecutive `-C`
+    // occurrences with no operand between them. Fable review (issue
+    // #356 round 2) caught an earlier version of this function that
+    // fails closed to `None` here instead as an unjustified asymmetry
+    // with the dashed spelling, which #354 now models cumulatively.
     let mut consumed = 1;
-    let mut anchor = None;
+    let mut current = CwdContext::Initial;
     for c in cluster.chars() {
         if c == 'C' {
-            anchor = rest.get(consumed).and_then(|w| match w.resolution() {
-                Resolution::Resolved(value) => Some(value.to_string()),
-                Resolution::Unresolvable(_) => None,
-            });
+            current = match rest.get(consumed).map(NormalizedWord::resolution) {
+                Some(Resolution::Resolved(value)) => {
+                    resolve_cwd_outcome(&current, classify_cd_target(value, env))
+                }
+                // Unresolvable (or missing) value is exactly as opaque
+                // as `resolve_tar_dash_c`'s own occurrence loop treats
+                // an unresolvable dashed `-C` value -- poison forward,
+                // not fail the whole cluster closed to `None` outright.
+                Some(Resolution::Unresolvable(_)) | None => CwdContext::Poisoned,
+            };
         }
         if crate::rules::TAR_DASHLESS_CONSUMING.contains(&c) {
             consumed += 1;
         }
     }
+    let anchor = match current {
+        CwdContext::Known(anchor) => Some(anchor),
+        CwdContext::Initial | CwdContext::Poisoned => None,
+    };
     Some((anchor, consumed))
 }
 
@@ -7569,7 +7587,7 @@ fn resolve_tar_dash_c(rest: &[NormalizedWord], env: &Env) -> Option<Vec<Normaliz
             continue;
         };
         let (raw, after): (Option<String>, usize) = if index == 0
-            && let Some((value, consumed)) = tar_dashless_leading_cluster_directory(rest)
+            && let Some((value, consumed)) = tar_dashless_leading_cluster_directory(rest, env)
         {
             (value, consumed)
         } else if s == "--directory" || matches_long_flag_prefix(s, "--directory") {
@@ -14519,6 +14537,34 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
     }
 
     #[test]
+    fn tar_third_occurrence_recovers_after_unresolvable_middle_occurrence() {
+        // An absolute/home-anchored THIRD occurrence recovers from a
+        // Poisoned running anchor outright (`resolve_cwd_outcome`'s own
+        // rule), even though the middle occurrence's own unresolvable
+        // value poisoned the chain -- and the recovered anchor still
+        // composes its own following range.
+        assert_eq!(
+            decide_dash_c(
+                "tar -C /tmp -cf a.tar one -C $(echo x) two -C ~/.config/shguard config.toml"
+            )
+            .decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn tar_poisoned_range_is_not_composed_against_the_earlier_anchor() {
+        // The range strictly between a Poisoned occurrence and the next
+        // one must NOT fall back to composing against the last-known
+        // anchor from before the poisoning -- confirms the poison is
+        // real, not merely inert.
+        assert_ne!(
+            decide_dash_c("tar -C ~/.config/shguard -C $(echo x) config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
     fn dash_c_override_never_composes_a_redirect_target() {
         // Correctness fix over #103's own `evaluate_composed_cwd`: a `-C`
         // flag only changes what the INVOKED PROCESS sees, never how the
@@ -14913,17 +14959,38 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
     }
 
     #[test]
-    fn tar_dashless_leading_cluster_with_doubled_c_fails_closed() {
+    fn tar_dashless_leading_cluster_with_doubled_c_composes_cumulatively() {
         // Real tar chdirs cumulatively for each `C` in an old-style bundle
-        // (`tar cCCf a b out.tar f` archives `a/b/f`), so composing only
-        // the last `C`'s value would silently under-count relative to the
-        // dashed spelling `tar -C a -C b ...`, which the multi-occurrence
-        // scope cut (issue #354) already fails closed to `None`. A doubled
-        // `C` inside one cluster must fail closed the same way rather than
-        // resolve to the wrong (last) anchor (issue #356 fable review).
+        // (`tar cCCf a b out.tar f` archives `a/b/f`) -- issue #354's own
+        // cumulative multi-occurrence model now folds a doubled `C`
+        // inside one dashless cluster the same way as two separate
+        // dashed `-C` occurrences, so this composes to
+        // `~/.config/shguard/config.toml` (the SAME symmetry the dashed
+        // spelling `tar -C ~/.config -C shguard ...` gets), not the
+        // fail-closed `Allow` an earlier version of this fix used
+        // (fable review of issue #356/#354).
         assert_eq!(
             decide_dash_c("tar cCCf ~/.config shguard out.tar config.toml").decision(),
-            Decision::Allow
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn tar_dashless_leading_cluster_with_unresolvable_middle_c_poisons_forward() {
+        // An unresolvable value for one `C` in a doubled cluster poisons
+        // the running fold from that point forward, same granularity
+        // `resolve_tar_dash_c`'s own multi-occurrence loop uses for an
+        // unresolvable dashed `-C` value -- this must NOT resolve to the
+        // FIRST `C`'s own (known) anchor as if the second `C` never
+        // happened, i.e. must never Block via the composed
+        // `~/.config/shguard/config.toml` target. The command floors to
+        // `Ask` regardless (an unresolvable `$(...)` substitution is
+        // always at least `Ask` via rule 2's own floor, independent of
+        // this composition), so `assert_ne!` on `Block` is what actually
+        // isolates this property.
+        assert_ne!(
+            decide_dash_c("tar cCCf ~/.config/shguard $(echo x) out.tar config.toml").decision(),
+            Decision::Block
         );
     }
 }
