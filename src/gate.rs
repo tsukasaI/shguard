@@ -3267,7 +3267,7 @@ fn evaluate_command_position_bare_var(
     // the current resolved value, then every earlier value a later
     // assignment/removal shadowed, then the plain default split — a
     // shared candidate list rather than duplicated match-and-Block arms
-    // for "current" vs. "default" (round 4 fable review, finding 5).
+    // for "current" vs. "default".
     let current_ifs = env.get("IFS");
     let mut candidates: Vec<(Option<&str>, &'static str)> = Vec::new();
     if let Some(current) = current_ifs {
@@ -3310,7 +3310,7 @@ fn evaluate_command_position_bare_var(
         // candidate above) is what the returned Ask verdict's argv must
         // carry: that argv feeds `stage_argvs` for pipeline-shape/decode
         // matching downstream, and a non-default candidate's split can
-        // desync that scan (round 6 fable review — capturing whichever
+        // desync that scan (capturing whichever
         // candidate happened to run FIRST, via `get_or_insert`, let a
         // same-line-but-different-command's `IFS=` prefix assignment that
         // doesn't even persist to `$name`'s own invocation feed a
@@ -4040,8 +4040,8 @@ fn evaluate_leftover_alternative_substitutions(
 /// impossible for this one to ever actually claim `argv[0]` at runtime
 /// (`{$X,ls,rm$IFS-rf$IFS} /`: `ls` can never vanish, so `rm` can never
 /// win `argv[0]` in real bash, yet this still Blocks). Deliberately kept
-/// as an over-approximation rather than tracked precisely — a fable review
-/// of this fix judged either acceptable, and precise "can this sibling
+/// as an over-approximation rather than tracked precisely — either is
+/// acceptable, and precise "can this sibling
 /// ever actually claim the position" tracking is exactly the kind of
 /// speculative generality this codebase avoids for an input already this
 /// obfuscated; the direction is fail-closed (Block on already-`Ask`
@@ -4658,7 +4658,7 @@ fn scan_recursable_slots(
                     // words this arm never scans. Recursing only the
                     // in-word remainder there would silently drop the real
                     // payload and can resolve a genuinely dangerous clause
-                    // to Allow (confirmed fable-review finding: `find /x
+                    // to Allow (`find /x
                     // {-exec,rm} -rf / \;` — main correctly Asks via the
                     // `Unresolvable` arm; recursing only `rm` in isolation
                     // wrongly Allows). Only take the in-word recursion when
@@ -5675,7 +5675,7 @@ enum AwkScriptPosition {
     Absent,
 }
 
-/// Two-phase scan (issue #195 fable-review follow-up): [`scan_for_awk_inline_flag`]
+/// Two-phase scan (issue #195): [`scan_for_awk_inline_flag`]
 /// looks for anything that floors this invocation regardless of where it
 /// falls in `words` first — `-e`/`--source` anywhere, or any `-f`/`-E`/`-i`
 /// whose value names stdin anywhere — since gawk concatenates every one of
@@ -5892,7 +5892,7 @@ fn awk_file_flag_glued_value(flag_token: &str) -> Option<&str> {
 /// `/dev/fd/0` its own device node — either way it's stdin). A value here
 /// means awk's program text comes from the same pipe its *records* would
 /// otherwise come from — unintrospectable and attacker-controllable
-/// through it (issue #195 fable-review follow-up, "Blocker B").
+/// through it (issue #195, "Blocker B").
 fn is_awk_stdin_path(path: &str) -> bool {
     matches!(path, "-" | "/dev/stdin" | "/proc/self/fd/0" | "/dev/fd/0")
 }
@@ -6617,7 +6617,7 @@ const MAX_CWD_STACK_DEPTH: usize = 64;
 ///   itself pushed must poison forward rather than silently no-op past a
 ///   frame that, in the real shell, actually exists. Using [`Self::seed`]
 ///   at one of these boundaries was a confirmed Ask/Block→Allow bypass
-///   (a fable review of the initial #210 landing found it): `pushd
+///   found in the initial #210 landing: `pushd
 ///   ~/.config/shguard && pushd /tmp && cat $(popd && cp evil.toml
 ///   config.toml)` composed the inner `cp` against `/tmp` instead of the
 ///   real, inherited `~/.config/shguard`.
@@ -6653,8 +6653,8 @@ impl CwdState {
     /// inner `popd`/bare-`pushd` a silent, precise no-op (per
     /// [`apply_popd`]/[`apply_pushd_swap`]'s own "empty stack is a safe
     /// no-op" reasoning) even though a real, unmodeled frame is actually
-    /// there to pop back to — a confirmed Ask/Block→Allow regression a
-    /// fable review of the initial #210 landing caught. Seeding with one
+    /// there to pop back to — a confirmed Ask/Block→Allow regression in
+    /// the initial #210 landing. Seeding with one
     /// [`CwdContext::Poisoned`] sentinel frame instead keeps every
     /// operation this recursed scope can itself statically account for
     /// (a balanced `pushd X ... popd` pair fully inside the recursion)
@@ -6923,8 +6923,7 @@ fn apply_cwd_effect(cwd: &mut CwdState, argv: &[NormalizedWord], env: &Env) {
 /// [`cd_directive`] doesn't need: `"-"` (issue #88 precedent: `~-` is
 /// already treated this way, and `pushd -` is not itself a meaningful bash
 /// form) and `pushd +N`/`pushd -N` (bash's own directory-stack-index
-/// rotation syntax — a fable review of the pre-#210 version of this module
-/// caught that without this guard, `+1`/`-1`/etc. lexically classify as an
+/// rotation syntax — without this guard, `+1`/`-1`/etc. lexically classify as an
 /// ordinary `Rel` target and get treated as a real, composable relative
 /// anchor). Both poison the WHOLE state ([`CwdState::poison`]), not just
 /// `current`: a rotation this module doesn't linearly model can reorder or
@@ -7225,9 +7224,9 @@ fn compose_argv_against_cwd(argv: &[NormalizedWord], anchor: &str) -> Vec<Normal
 /// composed redirect target matches anything.
 ///
 /// The returned [`Verdict`] carries `argv` — the ORIGINAL, uncomposed
-/// tokens — never `composed_argv`. A fable security review of this PR
-/// caught a real monotonicity violation from an earlier version that
-/// returned the composed argv: `evaluate_pipeline` folds a stage's
+/// tokens — never `composed_argv`. An earlier version that
+/// returned the composed argv had a real monotonicity violation:
+/// `evaluate_pipeline` folds a stage's
 /// `Verdict::normalized_argv()` into `stage_argvs`, which
 /// `evaluate_pipeline_shape`'s `is_decode_stage` scan also reads — a
 /// composed argv there rewrites a decode command's own subcommand word
@@ -7392,9 +7391,8 @@ fn evaluate_composed_cwd_redirects(
 /// -C/tmp pwd`, `make -C/tmp` both work) but git rejects it outright
 /// (`git -C/tmp status` → "unknown option: -C/tmp") — git's own
 /// `parse-options` doesn't support gluing `-C`'s value the way getopt's
-/// short-option convention does, unlike make's/env's. A fable review of
-/// this PR's round 1 caught `env`'s glued form slipping past this
-/// function entirely (an `else { continue }` silently skipped it),
+/// short-option convention does, unlike make's/env's. `env`'s glued form
+/// used to slip past this function entirely (an `else { continue }` silently skipped it),
 /// letting `env -C~/.config/shguard cp evil.toml config.toml` bypass the
 /// composition this function exists to feed.
 ///
@@ -7407,14 +7405,14 @@ fn evaluate_composed_cwd_redirects(
 /// dir`) via [`crate::rules::locate_cluster_value`] — the same
 /// [`crate::rules::wrapper_cluster_booleans`]/
 /// [`crate::rules::wrapper_value_flags`] tables `effective_command`'s own
-/// wrapped-command walk already uses, so the two can't drift apart. A
-/// round-2 fable review caught this function's `-C`-only matching (the
-/// branches above) missing every cluster form entirely for `env` — `env
+/// wrapped-command walk already uses, so the two can't drift apart. This
+/// function's `-C`-only matching (the
+/// branches above) used to miss every cluster form entirely for `env` — `env
 /// -iC ~/.config/shguard cp evil.toml config.toml` (and its glued
 /// spelling, and reached through a leading wrapper like `nice`) silently
-/// found no anchor and bypassed composition exactly like the round-1
-/// glued-form gap did. A round-3 fable review then found the SAME class
-/// still open for `make` (this function's `git`/`make` caller had
+/// found no anchor and bypassed composition exactly like the glued-form gap
+/// above. The same class was also open
+/// for `make` (this function's `git`/`make` caller had
 /// hard-coded `cluster_wrapper: None` for both, on the unverified
 /// assumption neither tool clusters — true for git, empirically false
 /// for make: `man make` documents `-C`/`-f`/`-I`/`-j`/`-l`/`-o`/`-W` as
@@ -7520,14 +7518,13 @@ fn chain_dash_c_targets(
 /// function's docs already disclose below, just with a new consequence
 /// (range truncation) now that multiple occurrences are modeled at all.
 ///
-/// A round-3 fable review of issue #209 found this function's short-form
-/// matching (originally `s == "-C"` only) missing tar's cluster and
+/// Issue #209: this function's short-form
+/// matching (originally `s == "-C"` only) used to miss tar's cluster and
 /// glued forms entirely, the same bypass class already found and closed
 /// for `env`/`make` — bsdtar clusters `-C` with other boolean short
 /// flags (`tar -vcC dir -f out.tar file` chdirs, verified live) and
 /// accepts a glued value with no cluster prefix at all (`tar -C/tmp -cf
-/// out.tar file` also chdirs). A round-4 fable review then found that
-/// routing this through [`crate::rules::locate_cluster_value`]'s
+/// out.tar file` also chdirs). Routing this through [`crate::rules::locate_cluster_value`]'s
 /// swallow-if-an-earlier-letter-takes-a-value logic (the same mechanism
 /// `env`/`make` correctly use) is unsound for `tar` SPECIFICALLY: that
 /// logic depends on correctly knowing every letter's arity, but tar's
@@ -7558,9 +7555,9 @@ fn chain_dash_c_targets(
 ///
 /// **Known limitation, disclosed rather than silently accepted (issue
 /// #356)**: this closes the getopt-cluster-arity shape specifically, not
-/// every possible spelling of tar's `-C`/`--directory`. A round-5 fable
-/// review found three more real, unmodeled spellings that under-compose
-/// exactly like every gap this issue's prior rounds closed: tar's
+/// every possible spelling of tar's `-C`/`--directory`. Three more real,
+/// unmodeled spellings under-compose
+/// exactly like every gap this issue's prior fixes closed: tar's
 /// "old-style" dashless leading option cluster (`tar cCf dir archive`,
 /// confirmed live to chdir on bsdtar), and an unambiguous prefix of
 /// `--directory` (`--dir`, `--direc`, …, confirmed live on both bsdtar
@@ -7640,9 +7637,8 @@ fn tar_dashless_leading_cluster_directory(
     // cumulative chain `resolve_tar_dash_c` uses across separate dashed
     // `-C` occurrences (issue #354's own fix), since a dashless cluster's
     // `C`s are positionally equivalent to that many consecutive `-C`
-    // occurrences with no operand between them. Fable review (issue
-    // #356 round 2) caught an earlier version of this function that
-    // fails closed to `None` here instead as an unjustified asymmetry
+    // occurrences with no operand between them. Issue #356: an earlier
+    // version of this function failed closed to `None` here instead, an unjustified asymmetry
     // with the dashed spelling, which #354 now models cumulatively.
     let mut consumed = 1;
     let mut current = CwdContext::Initial;
@@ -7782,8 +7778,7 @@ fn resolve_tar_dash_c(rest: &[NormalizedWord], env: &Env) -> Option<Vec<Normaliz
 ///
 /// Locates `env` via [`crate::rules::effective_command_excluding`] with
 /// `env` itself excluded from further unwrapping, rather than checking
-/// `argv[0]`'s basename directly — a fable review of this PR's round 1
-/// caught the `argv[0]`-only check missing `env` reached through any
+/// `argv[0]`'s basename directly — the `argv[0]`-only check used to miss `env` reached through any
 /// LEADING [`crate::rules::TRANSPARENT_WRAPPERS`] member (`nice env -C
 /// ~/.config/shguard cp evil.toml config.toml`, `timeout 5 env -C ...`),
 /// asymmetric with the git/make/tar branch below, which already resolves
@@ -7828,8 +7823,8 @@ fn evaluate_env_dash_c_override(
 /// subcommands reuse the bare letter `-C` for unrelated semantics (`git
 /// commit -C <commit>`, `git cherry-pick -C`, `git notes add -C
 /// <object>`) — scanning the WHOLE tail misreads one of those as a cwd
-/// anchor (a fable review of this PR's round 1 caught `git commit -C
-/// HEAD add config.toml` composing `config.toml` against `HEAD/`, a
+/// anchor (`git commit -C
+/// HEAD add config.toml` used to compose `config.toml` against `HEAD/`, a
 /// commit-ish that is never a real directory).
 ///
 /// git's own global-option grammar (confirmed against a live git binary):
@@ -7911,18 +7906,18 @@ fn evaluate_dash_c_override(argv: &[NormalizedWord], env: &Env, rules: &Rules) -
             } else {
                 rest
             };
-            // Issue #209 round 3: git genuinely has no boolean short-flag
+            // Issue #209: git genuinely has no boolean short-flag
             // surface to cluster `-C` with (`git -pC /tmp` errors
             // "unknown option: -pC"), but make DOES (`make -kC dir`
-            // chdirs) — a round-3 fable review caught this branch's
-            // `cluster_wrapper: None` silently dropping every make
+            // chdirs) — this branch's
+            // `cluster_wrapper: None` used to silently drop every make
             // cluster form the way env's own cluster gap once did.
             let cluster_wrapper = if name == "make" { Some("make") } else { None };
-            // Issue #209 round 5: git has no long spelling for `-C` at
+            // Issue #209: git has no long spelling for `-C` at
             // all, but make DOES (`--directory`, confirmed live: `make
-            // --directory sub` chdirs) — a round-5 fable review caught
-            // this call site's blanket `&[]` silently dropping it for
-            // make the same way earlier rounds dropped other spellings.
+            // --directory sub` chdirs) — this call site's blanket `&[]`
+            // used to silently drop it for
+            // make the same way earlier fixes dropped other spellings.
             let long_names: &[&str] = if name == "make" {
                 &["--directory"]
             } else {
@@ -8343,7 +8338,7 @@ mod tests {
         assert_decision("IFS=; X='rm -rf /'; $X", Decision::Block);
     }
 
-    // A fable review of the first attempt at issue #139 found three
+    // The first attempt at issue #139 had three
     // confirmed Block->Ask regressions relative to main, all caused by
     // treating this fix's own widening (an IFS-informed split) as a
     // REPLACEMENT for the default split rather than an addition to it.
@@ -8538,7 +8533,7 @@ mod tests {
 
     #[test]
     fn issue_139_general_variable_append_with_no_prior_still_resolves() {
-        // Round 6 fable review: `apply_one`'s append arm used to fall back
+        // `apply_one`'s append arm used to fall back
         // to `None` (unresolvable) for a NON-`IFS` variable with no
         // same-line prior, regressing rule 2 below what main had before
         // this branch ever modeled `+=` — main ignored the append bit
@@ -8551,7 +8546,7 @@ mod tests {
 
     #[test]
     fn issue_139_ask_verdict_argv_uses_the_default_split_for_downstream_pipeline_matching() {
-        // Round 6 fable review: the Ask verdict's argv used to be
+        // The Ask verdict's argv used to be
         // whichever IFS candidate happened to be tried FIRST (the
         // current-IFS split), not the default split — but `IFS=,` here is
         // a prefix assignment scoped only to `true`, so real bash resets
@@ -8763,8 +8758,8 @@ mod tests {
         assert_decision("echo x | base64 -d | irb", Decision::Block);
     }
 
-    // A fable review of PR #378 live-verified deno's bare REPL reads and
-    // executes piped stdin, correcting an earlier version of this list
+    // deno's bare REPL live-verified to read and
+    // execute piped stdin, correcting an earlier version of this list
     // that excluded it; pwsh's `-Command -`/`-File -` stdin forms are per
     // Microsoft's own documentation (pwsh unavailable to live-verify).
     #[test]
@@ -8820,7 +8815,7 @@ mod tests {
         assert_decision(r#"bash5 -c "rm -rf /""#, Decision::Block);
     }
 
-    // Fable review of PR #371: the first fix normalized `is_shell_interpreter`
+    // The first fix normalized `is_shell_interpreter`
     // but left `evaluate_dash_c`'s POSIX_STYLE_DASH_C_INTERPRETERS/fish
     // membership checks comparing the RAW name, so a versioned POSIX-style
     // shell (`ksh93`, a real Debian binary name) fell through to the naive
@@ -9405,7 +9400,7 @@ mod tests {
         assert_decision(r#""$()" rm -rf /"#, Decision::Ask);
     }
 
-    // Fable review of PR #376: pins a real, bash-faithful decision-surface
+    // Pins a real, bash-faithful decision-surface
     // change this fix causes for a brace-alternation sibling shape —
     // provably converging to the pre-existing baseline (both the literal
     // `x rm -rf /` and the substitution-free `{x,rm} -rf /` were already
@@ -9667,7 +9662,7 @@ mod tests {
         );
     }
 
-    // A fable review of the fused-word fix above caught a CRITICAL fail-open:
+    // A CRITICAL fail-open in the fused-word fix above:
     // `find_exec_flag_kind`'s `multiple` arm fires `YesFused` for ANY
     // multi-`NormalizedWord` split, not just a full `$IFS` fusion of the
     // whole clause — brace alternation (issue #77) can fuse the flag with
@@ -9704,8 +9699,8 @@ mod tests {
         assert_decision("find${IFS}/x${IFS}-exec rm -rf / \\;", Decision::Ask);
     }
 
-    // A round-2 fable review of the fix above caught a fourth variant of the
-    // same class, this time INSIDE the fused word rather than beyond it:
+    // A fourth variant of the
+    // same class in the fix above, this time INSIDE the fused word rather than beyond it:
     // POSIX only treats a bare `+` as the clause terminator when it
     // immediately follows a literal `{}` argument — any other `+` is an
     // ordinary payload argument (e.g. GNU `rm`'s option permutation,
@@ -9753,8 +9748,8 @@ mod tests {
         assert_decision("find /x -exec rm -rf {} +", Decision::Block);
     }
 
-    // A round-3 fable review of the fix above, hunting for a fifth variant
-    // of the same "clause model" bug class, found one: `-ok`/`-okdir` had
+    // A fifth variant
+    // of the same "clause model" bug class in the fix above: `-ok`/`-okdir` had
     // the SAME `[";", "+"]` terminator set as `-exec`/`-execdir` in
     // `RECURSABLE_SLOTS`, but POSIX/GNU/BSD `find` never give `-ok`/`-okdir`
     // a `+` batching form at all (they prompt per matched file, which is
@@ -9796,7 +9791,7 @@ mod tests {
         assert_decision("ls$IFS$FLAGS", Decision::Ask);
     }
 
-    // A round-1 fable review of issue #326's argv-shape fix found a
+    // Issue #326's argv-shape fix had a
     // CRITICAL regression: converting the hazardous `$IFS` piece to a
     // non-"IFS" ParameterExpansion (so the argv shape resolves correctly)
     // accidentally stripped the `ifs_derived` tag rule 7's floor depends
@@ -9864,14 +9859,14 @@ mod tests {
     // (`argv.get(first_word_fold_len..)`) specifically for a command whose
     // dangerous target ("/") lives in a SEPARATE, space-delimited AST word
     // rather than inside the same braced word as every other test above —
-    // fable review of PR #373 flagged this exact shape as the one novel
+    // this is the one novel
     // path the original test set never directly exercised.
     #[test]
     fn command_position_sibling_brace_alternative_blocks_with_target_in_separate_ast_word() {
         assert_decision("rm$IFS{a,-rf} /", Decision::Block);
     }
 
-    // Disclosed over-approximation (fable review of PR #373): a sibling is
+    // Disclosed over-approximation: a sibling is
     // checked regardless of whether an EARLIER, statically-resolved and
     // non-vanishing sibling makes it impossible for THIS one to ever
     // actually claim `argv[0]` at runtime -- `ls` here can never vanish, so
@@ -10027,7 +10022,7 @@ mod tests {
         assert_decision("awk $(echo -f) script.awk", Decision::Ask);
     }
 
-    // ---- rule 6d fable-review follow-up ("Blocker A", issue #195):
+    // ---- rule 6d ("Blocker A", issue #195):
     // gawk's `-e`/`--source` supply inline program text directly, without
     // `-f` — every spelling must floor to Ask, regardless of where it
     // falls relative to `-f`/`-E` or an operand, since gawk concatenates
@@ -10082,7 +10077,7 @@ mod tests {
         }
     }
 
-    // ---- rule 6d fable-review follow-up ("Blocker B", issue #195): `-f`
+    // ---- rule 6d ("Blocker B", issue #195): `-f`
     // pointed at stdin itself reads awk's program from the same pipe an
     // attacker controls, not a real file. ----
 
@@ -10169,7 +10164,7 @@ mod tests {
         // isn't). Deliberately NOT floored, unlike `-f`/`-E`/`-i` above --
         // documented here so a future reader sees this was a decision, not
         // an oversight, per the bypass-hunt finding that first surfaced it
-        // (issue #195 fable-review follow-up).
+        // (issue #195).
         assert_decision("gawk -l /dev/stdin -f script.awk", Decision::Allow);
     }
 
@@ -10328,7 +10323,7 @@ mod tests {
         assert_decision("echo x | base64 -d | busybox sh", Decision::Block);
     }
 
-    // Issue #245 should-fix (fable review of #247): builtin joins
+    // Issue #245 should-fix (issue #247): builtin joins
     // TRANSPARENT_WRAPPERS too, so it must be caught by the same
     // interpreter-sink/pipeline-shape paths every other wrapper already
     // is, not just the argv blocklist match the other #245 tests pin.
@@ -10560,7 +10555,7 @@ mod tests {
         assert_decision("builtin -d cd", Decision::Allow);
     }
 
-    // Fable review of PR #372: the first version of this detection checked
+    // The first version of this detection checked
     // only `builtin`'s very first tail token, so a SEPARATED leading flag
     // (`-d -f lib`, lexically identical to clustered `-df lib` in ksh's own
     // option parser) slipped through as a real bypass.
@@ -10714,7 +10709,7 @@ mod tests {
 
     #[test]
     fn rm_rf_dirstack_tilde_escape_to_empty_tail_asks() {
-        // Fable review of PR #340: `~+/..` is `$PWD/..` lexically — the
+        // `~+/..` is `$PWD/..` lexically — the
         // same "one level above an unknown-but-real anchor" shape plain
         // `..` is for an unresolved cwd — and must not silently Allow
         // just because `DirStackEscapesEmpty` carries no anchor value to
@@ -11534,7 +11529,7 @@ mod tests {
         assert_decision("exec -afoo rm -rf /", Decision::Block);
     }
 
-    // A fable review of PR #249 found these three cluster spellings are
+    // These three cluster spellings are
     // NOT exotic -- `exec`'s only other flags (`-c`/`-l`) are boolean and
     // cluster naturally with `-a`, so `-la`/`-ca`/`-cla` are ordinary,
     // easily-typed ways to spell "override argv0", each genuinely
@@ -11584,7 +11579,7 @@ mod tests {
         assert_decision("exec -al foo rm -rf /", Decision::Allow);
     }
 
-    // Regression pin for a fable review finding: a first attempt at the
+    // Regression pin: a first attempt at the
     // cluster fix above tested `rest.ends_with('a')` (the TOKEN's last
     // character) instead of "the FIRST `a`'s position is the cluster's
     // last position" -- a glued value that itself ends in the letter `a`
@@ -13944,7 +13939,7 @@ done"#,
         assert_decision(&command, Decision::Ask);
     }
 
-    // A fable review of the above caught a confirmed Ask/Block->Allow
+    // A confirmed Ask/Block->Allow
     // bypass: recursion boundaries that fork/share the CURRENT shell
     // process ($()/backtick/eval) were resetting the stack to empty
     // instead of inheriting it, and an empty-stack `popd`/bare-`pushd`
@@ -14290,7 +14285,7 @@ done"#,
         assert_decision("HOME=/attacker/dir cd && rm config.toml", Decision::Ask);
     }
 
-    // Regression pin for a fable security review finding on this PR: an
+    // Regression pin: an
     // earlier version of `evaluate_composed_cwd` returned a `Verdict`
     // carrying the COMPOSED argv (the anchor-rewritten tokens), not the
     // original. `evaluate_pipeline` folds a stage's own
@@ -14330,7 +14325,7 @@ done"#,
         );
     }
 
-    // Regression pin for a fable security review finding on this PR:
+    // Regression pin:
     // `builtin` was not recognised as a cwd-tracking passthrough, so
     // `builtin cd ~/.config/shguard && cp evil.toml config.toml` silently
     // stayed Allow -- the exact self-protection scenario acceptance
@@ -14344,7 +14339,7 @@ done"#,
         );
     }
 
-    // Regression pin for a fable security review finding on this PR:
+    // Regression pin:
     // `pushd +1`/`pushd -1` (bash's directory-stack-index rotation form,
     // not an ordinary relative path) was lexically classified as a plain
     // `Rel` target and treated as a real, composable anchor -- silently
@@ -14710,8 +14705,8 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
 
     #[test]
     fn make_dash_dash_directory_long_form_also_composes() {
-        // A round-5 fable review found make's `--directory` long form
-        // (confirmed live: `make --directory sub` chdirs) entirely
+        // make's `--directory` long form
+        // (confirmed live: `make --directory sub` chdirs) was entirely
         // unmodeled — this call site's `long_names` was hard-coded to
         // `&[]` on the false assumption that only git and make share
         // `-C`'s "no long form" property; git alone has no long form.
@@ -14878,7 +14873,7 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
         );
     }
 
-    // A fable review of the above caught two confirmed gaps in the
+    // Two confirmed gaps in the
     // `env -C` composition: (1) it only fired when `argv[0]` was
     // literally `env`, so any leading TRANSPARENT_WRAPPERS prefix
     // (`nice`/`timeout`/`sudo`/etc.) reopened the exact bypass this
@@ -14964,7 +14959,7 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
         );
     }
 
-    // A round-2 fable review caught a THIRD gap in `env -C` composition:
+    // A THIRD gap in `env -C` composition:
     // `chain_dash_c_targets` only recognized a bare `-C` token (or `-C`
     // glued directly to its value) — it missed every getopt short-flag
     // CLUSTER form (`-iC dir`, `-iC<dir>`) that real `env` also accepts,
@@ -15040,8 +15035,8 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
         );
     }
 
-    // A round-3 fable review found the SAME bypass class still open for
-    // `make`/`tar`: the round-2 fix built `crate::rules::locate_cluster_value`
+    // The SAME bypass class was still open for
+    // `make`/`tar`: the prior fix built `crate::rules::locate_cluster_value`
     // as a shared source of truth but wired it up for `env` only, on the
     // unverified assumption that git/make/tar "have no boolean short-flag
     // surface of their own to cluster with `-C`" — true for git (`git
@@ -15262,7 +15257,7 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
         // `~/.config/shguard/config.toml` (the SAME symmetry the dashed
         // spelling `tar -C ~/.config -C shguard ...` gets), not the
         // fail-closed `Allow` an earlier version of this fix used
-        // (fable review of issue #356/#354).
+        // (issue #356/#354).
         assert_eq!(
             decide_dash_c("tar cCCf ~/.config shguard out.tar config.toml").decision(),
             Decision::Block
