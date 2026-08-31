@@ -25,9 +25,7 @@ fn read_repo_file(relative_path: &str) -> String {
 /// `guardfall_shell_init_directory_token_cases` asserts `Decision::Ask`
 /// inside a nested loop over 11 directories x 2 suffixes x 4 commands =
 /// 88 real assertions from ONE literal). An array-scoped count would
-/// systematically miss every one of those combinatorial assertions
-/// (found by fable review: an earlier, array-scoped version of this
-/// function undercounted by exactly the number of such loop tests).
+/// systematically miss every one of those combinatorial assertions.
 /// There is no purely textual way to recover the TRUE assertion count
 /// for a combinatorial loop without executing it, so this function
 /// reports the simpler, exactly-and-mechanically-verifiable unit
