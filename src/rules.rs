@@ -3774,13 +3774,72 @@ fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
             ValueFlag::Short('n'),
             ValueFlag::Long("adjustment".to_string()),
         ],
+        // Issue #402: the table below used to list only -u/-g/--user/
+        // --group, missing sudo's other separated-value flags -- an
+        // unlisted one's own value was mistaken for the wrapped command
+        // name by the generic dash-prefix skip, e.g. `sudo -p prompt rm
+        // -rf /` silently resolved to `prompt`, matching no rule (`rm -rf
+        // /` genuinely runs as root in a real shell). Every entry below is
+        // confirmed against sudo's own `long_opts` table
+        // (`src/parse_args.c`) as `required_argument` (a value as a
+        // SEPARATED token, `-X value`/`--name value`, or attached
+        // `--name=value` — [`ValueFlag::Long`] handles both attached and
+        // bare forms already): `-C`/`--close-from`, `-D`/`--chdir`, `-h`/
+        // `--host`, `-p`/`--prompt`, `-R`/`--chroot`, `-r`/`--role`, `-t`/
+        // `--type`, `-T`/`--command-timeout`, `-U`/`--other-user`, `-a`/
+        // `--auth-type` (BSD authentication type). `-c` (BSD login class)
+        // is added SHORT-ONLY, deliberately omitting its real long
+        // spelling, `--login-class`: `-i`'s own real long spelling,
+        // `--login`, strictly prefixes it, and unlike real `getopt_long`
+        // (which resolves an exact match, `--login`, before ever
+        // considering it as an abbreviation of a longer option),
+        // [`ValueFlag::unambiguous_long_prefix`] has no such boolean-flag
+        // awareness — declaring `Long("login-class")` would make it
+        // resolve `sudo --login rm -rf /` (universally valid) as that
+        // entry's abbreviation and wrongly consume `rm` as its value, a
+        // new, universal Block→Ask downgrade. Accepted residual: `sudo
+        // --login-class x rm -rf /` itself still downgrades on a BSD
+        // build (the same class of gap this issue closes elsewhere), but
+        // only for that one long spelling, and only on that flavor —
+        // pinned by
+        // `sudo_dash_dash_login_boolean_flag_still_blocks_without_consuming_the_next_word`
+        // in `src/gate.rs`.
         "sudo" => vec![
             ValueFlag::Short('u'),
             ValueFlag::Short('g'),
             ValueFlag::Long("user".to_string()),
             ValueFlag::Long("group".to_string()),
+            ValueFlag::Short('C'),
+            ValueFlag::Long("close-from".to_string()),
+            ValueFlag::Short('D'),
+            ValueFlag::Long("chdir".to_string()),
+            ValueFlag::Short('h'),
+            ValueFlag::Long("host".to_string()),
+            ValueFlag::Short('p'),
+            ValueFlag::Long("prompt".to_string()),
+            ValueFlag::Short('R'),
+            ValueFlag::Long("chroot".to_string()),
+            ValueFlag::Short('r'),
+            ValueFlag::Long("role".to_string()),
+            ValueFlag::Short('t'),
+            ValueFlag::Long("type".to_string()),
+            ValueFlag::Short('T'),
+            ValueFlag::Long("command-timeout".to_string()),
+            ValueFlag::Short('U'),
+            ValueFlag::Long("other-user".to_string()),
+            ValueFlag::Long("auth-type".to_string()),
+            ValueFlag::Short('a'),
+            ValueFlag::Short('c'),
         ],
-        "doas" => vec![ValueFlag::Short('u')],
+        // Issue #402: `-a`/`-C` (both `doas(1)` separated-value flags,
+        // confirmed against the man page) were missing the same way
+        // sudo's were -- `doas -a pam rm -rf /` silently resolved to
+        // `pam`. doas has no long-option spellings at all.
+        "doas" => vec![
+            ValueFlag::Short('u'),
+            ValueFlag::Short('a'),
+            ValueFlag::Short('C'),
+        ],
         "timeout" => vec![
             ValueFlag::Short('s'),
             ValueFlag::Short('k'),
