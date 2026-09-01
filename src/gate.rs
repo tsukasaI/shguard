@@ -7822,17 +7822,18 @@ fn evaluate_env_dash_c_override(
 /// commit-ish that is never a real directory).
 ///
 /// git's own global-option grammar (confirmed against a live git binary):
-/// every global flag is `-`-prefixed, and only `-C`/`-c` take a value as
-/// a SEPARATE following token — every other short/long global flag is
-/// either boolean or takes its value glued with `=` (`--exec-path=<path>`;
-/// the bare, unglued `--exec-path` form takes no argument at all — it
-/// prints and exits). So the first bare (non-`-`-prefixed) word is always
-/// the subcommand, and this walk can safely skip exactly two tokens for
-/// `-C`/`-c`, one for anything else `-`-prefixed, until it finds that
-/// word. An unresolvable token in this region is kept in-scan (fails
-/// closed the same way [`chain_dash_c_targets`]'s own unresolvable-value
-/// handling already does) rather than guessed to be the subcommand
-/// boundary either way.
+/// every global flag is `-`-prefixed, and only the flags in
+/// [`crate::rules::git_global_takes_separated_value`] (`-C`/`-c`/
+/// `--git-dir`/`--work-tree`/`--namespace`/`--exec-path`/`--config-env`/
+/// `--super-prefix`/`--attr-source`) take a value as a SEPARATE following
+/// token — every other short/long global flag is either boolean or takes
+/// its value glued with `=`. So the first bare (non-`-`-prefixed) word is
+/// always the subcommand, and this walk can safely skip exactly two
+/// tokens for one of those flags, one for anything else `-`-prefixed,
+/// until it finds that word. An unresolvable token in this region is kept
+/// in-scan (fails closed the same way [`chain_dash_c_targets`]'s own
+/// unresolvable-value handling already does) rather than guessed to be
+/// the subcommand boundary either way.
 fn bound_git_global_options(rest: &[NormalizedWord]) -> &[NormalizedWord] {
     let mut index = 0;
     while index < rest.len() {
@@ -7843,7 +7844,11 @@ fn bound_git_global_options(rest: &[NormalizedWord]) -> &[NormalizedWord] {
         if !s.starts_with('-') {
             return &rest[..index];
         }
-        index += if s == "-C" || s == "-c" { 2 } else { 1 };
+        index += if crate::rules::git_global_takes_separated_value(s) {
+            2
+        } else {
+            1
+        };
     }
     rest
 }
@@ -14970,6 +14975,29 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
     fn git_dash_c_before_the_subcommand_still_composes() {
         assert_eq!(
             decide_dash_c("git -C ~/.config/shguard status config.toml").decision(),
+            Decision::Block
+        );
+    }
+
+    // issue #400: `bound_git_global_options` used to hardcode only `-C`/
+    // `-c` as taking a separated value, so a leading `--git-dir`/
+    // `--work-tree` (which also take one) misled the scan into treating
+    // their bare value as the subcommand boundary — the real `-C` anchor
+    // further along was never reached.
+    #[test]
+    fn git_global_dash_dash_git_dir_before_dash_c_still_composes() {
+        assert_eq!(
+            decide_dash_c("git --git-dir /tmp/x -C ~/.config/shguard status config.toml")
+                .decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn git_global_dash_dash_work_tree_before_dash_c_still_composes() {
+        assert_eq!(
+            decide_dash_c("git --work-tree /tmp/x -C ~/.config/shguard status config.toml")
+                .decision(),
             Decision::Block
         );
     }
