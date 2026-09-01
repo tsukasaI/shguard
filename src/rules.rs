@@ -5470,10 +5470,29 @@ impl Rules {
         Self::parse(EMBEDDED_BLOCKLIST)
     }
 
-    /// The first [`CommandRule`] that matches `argv`, if any.
+    /// The worst-decision [`CommandRule`] that matches `argv`, if any —
+    /// Block outranks Ask regardless of declaration order (issue #399,
+    /// mirroring [`Self::match_redirect_target`]'s issue #261 fix); ties
+    /// keep the first-declared rule.
     #[must_use]
     pub(crate) fn match_command(&self, argv: &[NormalizedWord]) -> Option<&CommandRule> {
-        self.command_rules.iter().find(|rule| rule.matches(argv))
+        // Worst-wins, not first-match: an embedded Ask rule that happens
+        // to be declared before a user `[[deny]]` (Block) rule for the
+        // same command must not shadow it — user deny rules are appended
+        // last by `merge_user_config`, so first-match silently downgraded
+        // Block to Ask.
+        let mut ask = None;
+        for rule in &self.command_rules {
+            if !rule.matches(argv) {
+                continue;
+            }
+            match rule.decision() {
+                Decision::Block => return Some(rule),
+                _ if ask.is_none() => ask = Some(rule),
+                _ => {}
+            }
+        }
+        ask
     }
 
     /// The first [`PipelineRule`] that matches `stages` (one normalised
