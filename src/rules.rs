@@ -3785,7 +3785,22 @@ fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
         // `--name value`, matching [`ValueFlag::Long`]'s own attached/bare
         // dual handling): `-C`/`--close-from`, `-D`/`--chdir`, `-h`/
         // `--host`, `-p`/`--prompt`, `-R`/`--chroot`, `-r`/`--role`, `-t`/
-        // `--type`, `-T`/`--command-timeout`, `-U`/`--other-user`.
+        // `--type`, `-T`/`--command-timeout`, `-U`/`--other-user`. `-a`
+        // (BSD authentication type) and `-c` (BSD login class) are
+        // BSD-auth-build-only flags with no long-option spelling in any
+        // sudo doc found — the `env` entry above's union-across-flavors
+        // posture applies (over-blocking on a build that lacks the flag
+        // is safe, since sudo itself errors out there before ever
+        // reaching the wrapped command). Deliberately NOT added: a
+        // `Long("login-class")` entry, even though the man page's prose
+        // calls `-c`'s argument a "class" — no sudo doc actually shows
+        // that long spelling, and `-i`'s own real long spelling,
+        // `--login`, strictly prefixes it, so declaring it would let
+        // `unambiguous_long_prefix` resolve `sudo --login rm -rf /` (a
+        // universally valid invocation) as the fabricated flag's
+        // abbreviation and consume `rm` as its value — a new, universal
+        // Block→Ask downgrade far worse than the BSD-only gap it would
+        // close.
         "sudo" => vec![
             ValueFlag::Short('u'),
             ValueFlag::Short('g'),
@@ -3809,6 +3824,8 @@ fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
             ValueFlag::Long("command-timeout".to_string()),
             ValueFlag::Short('U'),
             ValueFlag::Long("other-user".to_string()),
+            ValueFlag::Short('a'),
+            ValueFlag::Short('c'),
         ],
         // Issue #402: `-a`/`-C` (both `doas(1)` separated-value flags,
         // confirmed against the man page) were missing the same way

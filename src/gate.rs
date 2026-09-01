@@ -11520,10 +11520,23 @@ mod tests {
             "--command-timeout",
             "-U",
             "--other-user",
+            "-a",
+            "-c",
         ] {
             let command = format!("sudo {flag} x rm -rf /");
             assert_decision(&command, Decision::Block);
         }
+    }
+
+    #[test]
+    fn sudo_dash_dash_login_boolean_flag_still_blocks_without_consuming_the_next_word() {
+        // Issue #402's own "don't add this" trap, pinned so a future edit
+        // can't reintroduce it: `-i`'s real long spelling is `--login`
+        // (boolean, no value) -- a hypothetical `Long("login-class")`
+        // entry for `-c` would let `unambiguous_long_prefix` resolve this
+        // universally valid invocation as that fabricated flag's
+        // abbreviation and wrongly consume `rm` as its value.
+        assert_decision("sudo --login rm -rf /", Decision::Block);
     }
 
     #[test]
