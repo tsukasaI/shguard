@@ -551,12 +551,13 @@ command = "mkfs"
 required_flags = ["t|--type"]
 
 # tar extraction with -C/--directory into / or ~ overwrites arbitrary paths
-# with archive contents. Two rules, block before ask (rule order decides —
-# first match in this file wins): the block rule requires an explicit
+# with archive contents. Two rules: the block rule requires an explicit
 # extract flag so a benign `tar -cf backup.tar -C src .` (create, not
 # extract) never matches; the ask rule below drops that requirement to
 # also catch the dash-less old-style invocation form (`tar xf a.tar -C /`),
-# where `x` never appears as its own `-`-prefixed token.
+# where `x` never appears as its own `-`-prefixed token. `match_command`
+# is worst-wins (issue #399), so the block rule outranks the ask rule on
+# any overlap regardless of declaration order.
 #
 # Known limitations (same disclosure stance as the curl `-xURL` gap above
 # and the `git -C <path>` gap in src/rules.rs):
