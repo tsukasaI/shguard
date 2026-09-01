@@ -26,7 +26,9 @@ fn run_hook(stdin: &str) -> Value {
     let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
     cmd.env_remove("SHGUARD_CONFIG")
         .env_remove("XDG_CONFIG_HOME")
-        .env_remove("HOME");
+        .env_remove("HOME")
+        .env_remove("SHGUARD_TEST_PANIC")
+        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB");
     let assert = cmd.write_stdin(stdin).assert().success();
     let output = assert.get_output();
     serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON")
@@ -215,6 +217,7 @@ fn injected_panic_fails_closed_to_ask() {
         .env_remove("SHGUARD_CONFIG")
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("HOME")
+        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .env("SHGUARD_TEST_PANIC", "1")
         .write_stdin(bash_command("echo hi"))
         .assert()
@@ -256,6 +259,8 @@ fn heredoc_inside_unterminated_command_substitution_fails_closed_to_ask() {
         .env_remove("SHGUARD_CONFIG")
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("HOME")
+        .env_remove("SHGUARD_TEST_PANIC")
+        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .timeout(std::time::Duration::from_secs(30))
         .write_stdin(bash_command("<<$( |] "))
         .assert()
@@ -290,6 +295,7 @@ fn memory_budget_trip_fails_closed_to_ask() {
         .env_remove("SHGUARD_CONFIG")
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("HOME")
+        .env_remove("SHGUARD_TEST_PANIC")
         .env("SHGUARD_TEST_MEM_LIMIT_MB", "1")
         .write_stdin(bash_command("echo hi"))
         .assert()

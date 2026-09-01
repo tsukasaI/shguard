@@ -14,6 +14,11 @@ use tempfile::tempdir;
 fn run_hook(stdin: &str) -> Value {
     let assert = Command::cargo_bin("shguard")
         .expect("shguard binary should build")
+        .env_remove("SHGUARD_CONFIG")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("HOME")
+        .env_remove("SHGUARD_TEST_PANIC")
+        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .write_stdin(stdin)
         .assert()
         .success();
@@ -166,16 +171,18 @@ fn check_config_flag_with_trailing_argument_exits_with_error() {
 // using a command a user config denies that the embedded blocklist alone
 // would allow — that's what actually pins config-loading, not the mirrors.
 //
-// Every test that touches config loading (i.e. everything except the pure
-// usage-error cases) isolates the environment the same way
-// `tests/user_config.rs` does, so a host machine's own `SHGUARD_CONFIG`/
-// config file can't make these spuriously fail or pass.
+// Every test in this file isolates the environment the same way
+// `tests/user_config.rs` does, via `run_hook`/`isolated_check`, so a host
+// machine's own `SHGUARD_CONFIG`/config file can't make these spuriously
+// fail or pass.
 
 fn isolated_check(args: &[&str]) -> Command {
     let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
     cmd.env_remove("SHGUARD_CONFIG")
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("HOME")
+        .env_remove("SHGUARD_TEST_PANIC")
+        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .args(args);
     cmd
 }

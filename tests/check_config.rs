@@ -26,7 +26,9 @@ fn run_check_config(envs: &[(&str, &str)]) -> assert_cmd::assert::Assert {
     cmd.arg("--check-config")
         .env_remove("SHGUARD_CONFIG")
         .env_remove("XDG_CONFIG_HOME")
-        .env_remove("HOME");
+        .env_remove("HOME")
+        .env_remove("SHGUARD_TEST_PANIC")
+        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB");
     for (key, value) in envs {
         cmd.env(key, value);
     }
@@ -238,6 +240,8 @@ fn ignores_stdin() {
         .env_remove("SHGUARD_CONFIG")
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("HOME")
+        .env_remove("SHGUARD_TEST_PANIC")
+        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .write_stdin(r#"{"tool_name":"Bash","tool_input":{"command":"echo hi"}}"#)
         .assert()
         .success();
