@@ -1050,17 +1050,22 @@ fn word_contains_overflowing_brace_range(text: &str) -> bool {
 /// `brace_sequence_expr`, whose `number()` panics as soon as it matches
 /// ANY leading `sign? digit+` that overflows `i64` — *before* checking
 /// whether `..` even follows (`{9223372036854775808b}`, no range syntax
-/// at all, still panics). A top-level comma anywhere before the closing
-/// `}` — even with a wildly overflowing leading digit run
+/// at all, still panics). A top-level comma before the closing `}` of a
+/// *terminated* group — even with a wildly overflowing leading digit run
 /// (`{99999999999999999999,x}`) — makes the comma-list branch succeed
-/// instead, so `number()` (and its panic) is never reached at all.
+/// instead, so `number()` (and its panic) is never reached at all. An
+/// *unterminated* group panics regardless of any comma
+/// (`{99999999999999999999,` has no closing `}`, so the comma-list branch
+/// can't match either, and the sequence branch's `number()` still runs).
 ///
 /// This is therefore an UNDER-approximation by construction (matching
 /// the safe direction — a case this misses is still safely contained by
-/// [`catch_parser_panic`], never silently mis-parsed). One known residual,
-/// left to that containment rather than chased further (chasing residuals
-/// is the trap five review rounds already fell into on the substitution
-/// side — see [`word_contains_overflowing_brace_range`]'s docs): `{a..z..N}`
+/// [`catch_parser_panic`], never silently mis-parsed). Known residuals,
+/// all left to that containment rather than chased further (chasing
+/// residuals is the trap five review rounds already fell into on the
+/// substitution side — see [`word_contains_overflowing_brace_range`]'s
+/// docs): any panicking shape [`brace_group_may_avoid_the_panicking_path`]'s
+/// `{`/`,` bail skips (e.g. `{N{}`, an unterminated `{N,`), and `{a..z..N}`
 /// (`character() ".." character() (".." number())?` — brush's char-range
 /// increment) whose overflowing `N` [`parse_brace_range_endpoint`] never
 /// reaches, since it only recognizes numeric leading endpoints.
@@ -1101,9 +1106,9 @@ fn brace_group_panics(after_brace: &str) -> bool {
 /// completes a brace_expr of its own), so the `,` IS this group's top-level
 /// comma and the comma-list branch succeeds without ever reaching
 /// `number()` — a naive depth count instead treats the inner `{` as truly
-/// nested, misses that comma, and wrongly concludes this group panics
-/// (round 6 fable review finding: a real Block→Ask downgrade). Bailing to
-/// "safe to skip" on the first `{` this scan can't resolve, rather than
+/// nested, misses that comma, and wrongly concludes this group panics — a
+/// real Block→Ask downgrade. Bailing to "safe to skip" on the first `{`
+/// this scan can't resolve, rather than
 /// trying to replicate brush's own disambiguation, keeps this an
 /// UNDER-approximation: on real input, "flagged" only remains true when
 /// `after_brace` up to its own `}`/end contains no further `{` and no `,`
@@ -1670,8 +1675,8 @@ mod tests {
         }
     }
 
-    // issue #405 (6th fable review finding): an unresolved `{` before a
-    // group's `,` doesn't necessarily nest — brush's `non_brace_expr_text`
+    // issue #405: an unresolved `{` before a group's `,` doesn't
+    // necessarily nest — brush's `non_brace_expr_text`
     // falls back to treating a `{` that never completes its OWN
     // `brace_expr` as ordinary literal text, so the group's real top-level
     // comma can be one the naive `{`/`}` depth count in
