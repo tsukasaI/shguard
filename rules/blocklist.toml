@@ -310,9 +310,10 @@ targets = [
 # a plain-file match is fully removed by `-f` alone, and a directory match
 # simply fails `rm` without `-r` (unlike `-rf {}`, which also removes a
 # matched directory and everything under it — a strictly worse class,
-# already covered by the sibling rule above). Ordered after
-# `rm-recursive-force-dangerous-target` (first-match-wins) so `rm -rf {}`
-# keeps reporting that rule's id.
+# already covered by the sibling rule above). Both this rule and
+# `rm-recursive-force-dangerous-target` above are Block, so
+# `match_command`'s worst-wins tie-break (issue #399) keeps whichever is
+# declared first, and `rm -rf {}` keeps reporting that rule's id.
 # Deliberately targets ONLY `{}`, not the sibling rule's `/`/`~`/`/dev/`
 # set above: without `-r`, `rm -f` can never remove a directory, so
 # `rm -f /` or `rm -f ~` alone isn't the same destructive class and would
