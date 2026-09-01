@@ -2440,7 +2440,10 @@ fn evaluate_simple_command_core(
             Decision::Allow => unreachable!("rules never carry Decision::Allow"),
         }
         .with_deny_message(rule.deny_message().cloned());
-        return apply_leftover_substitution_floor(verdict, leftover_floor);
+        return apply_leftover_substitution_floor(
+            apply_escalation_floor(verdict, escalation_floor),
+            leftover_floor,
+        );
     }
 
     fold_floors(
@@ -12337,6 +12340,26 @@ mod tests {
         );
         let verdict = analyze_with_policy("doas bash -c 'ls'", &rules, &allowlist);
         assert_eq!(verdict.decision(), Decision::Block);
+    }
+
+    #[test]
+    fn escalation_floor_deny_upgrades_an_ask_decision_rule_match_too() {
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            escalation_floor = "deny"
+        "#,
+        );
+        for cmd in [
+            "sudo cp evil /dev/sda",
+            "sudo rm -r ~",
+            "sudo tar -C / -f a.tar",
+        ] {
+            assert_eq!(
+                analyze_with_policy(cmd, &rules, &allowlist).decision(),
+                Decision::Block,
+                "{cmd}"
+            );
+        }
     }
 
     #[test]
