@@ -522,6 +522,14 @@ fn pipeline_reported_success_is_untrustworthy(pipeline: &Pipeline) -> bool {
     false
 }
 
+/// A non-default-IFS candidate argv rule 2's bare-`$VAR` handling
+/// (`evaluate_command_position_bare_var`'s own docs) found but couldn't
+/// match against any per-command rule, paired with the audit-trail text
+/// describing which `$VAR`/IFS interpretation produced it — issue #384's
+/// `alternates` out-parameter, threaded from there up to
+/// [`evaluate_pipeline`]'s own probe pass.
+type IfsAlternates = Vec<(Vec<NormalizedWord>, String)>;
+
 /// Folds every stage of a [`Pipeline`] plus the pipeline-shape rules (rule
 /// 5: the ported `curl|sh` blocklist rule and the NEW decode/interpreter
 /// structural rules) into one worst-decision-wins [`Verdict`].
@@ -552,6 +560,12 @@ fn evaluate_pipeline(
     let mut stage_argvs = Vec::with_capacity(stages.len());
     let mut worst = Verdict::allow(Vec::new());
     let mut have_worst = false;
+    // Issue #384: non-default-IFS candidates a `Command::Simple` stage's
+    // own rule-2 bare-`$VAR` handling found but couldn't match against any
+    // per-command rule (`evaluate_command_position_bare_var`'s own docs) —
+    // tried again below, after the primary pass, against the
+    // PIPELINE-shape scan specifically (`pipeline_shape_verdict`'s docs).
+    let mut per_stage_alternates: Vec<(usize, IfsAlternates)> = Vec::new();
 
     let stage_count = stages.len();
     let mut last_stage_is_non_simple = false;
@@ -593,9 +607,20 @@ fn evaluate_pipeline(
         let verdict = match command {
             Command::Simple(simple) => {
                 env.apply_assignments(simple);
-                let verdict =
-                    evaluate_simple_command(simple, env, rules, allowlist, depth, &cwd.current);
+                let mut alternates = Vec::new();
+                let verdict = evaluate_simple_command(
+                    simple,
+                    env,
+                    rules,
+                    allowlist,
+                    depth,
+                    &cwd.current,
+                    &mut alternates,
+                );
                 stage_argvs.push(verdict.normalized_argv().to_vec());
+                if !alternates.is_empty() {
+                    per_stage_alternates.push((index, alternates));
+                }
                 // Issue #103: only a single-stage pipeline's own `cd`/
                 // `pushd`/etc. is allowed to mutate `cwd` for whatever
                 // comes after this pipeline — see this function's own docs.
@@ -649,7 +674,102 @@ fn evaluate_pipeline(
         have_worst = true;
     }
 
-    if let Some(rule) = rules.match_pipeline(&stage_argvs) {
+    if let Some(verdict) =
+        pipeline_shape_verdict(&stage_argvs, rules, stage_count, last_stage_is_non_simple)
+    {
+        worst = fold_worst(worst, verdict);
+    }
+
+    // Issue #384's probe pass: each captured non-default-IFS candidate is
+    // tried, ONE STAGE AT A TIME, as a substitute for that stage's own
+    // (always default-IFS) entry in `stage_argvs` — never as a replacement
+    // for the primary entry itself, only as an additional, independent
+    // input to the exact same pipeline-shape check just ran above. Folded
+    // in only when it STRICTLY raises `worst` (`>`, not `fold_worst`'s own
+    // `>=`-tolerant tie-break): a probe that ties with (or loses to)
+    // `worst` changes nothing about the returned verdict, including its
+    // reason text — every input whose primary decision this pass could not
+    // raise is byte-for-byte unaffected by this pass existing at all.
+    // Gated on `stage_count > 1`: the gap this closes is inherently
+    // pipeline-shaped (`evaluate_pipeline_shape`/`rules.match_pipeline`
+    // both require at least two stages), so a single-stage line never
+    // builds a probe in the first place.
+    //
+    // Known residual, left for a future issue rather than chased further:
+    // this only ever swaps ONE stage's argv per probe, so a pipeline where
+    // TWO OR MORE stages each need their own non-default candidate
+    // simultaneously to expose the dangerous shape (`$X | $Y`, both
+    // IFS-split) is still missed — fails safe (stays at whatever `worst`
+    // already computed, never lower), just not raised by this pass.
+    if stage_count > 1 {
+        for (stage_index, candidates) in &per_stage_alternates {
+            for (candidate_argv, description) in candidates {
+                let mut probe_stage_argvs = stage_argvs.clone();
+                probe_stage_argvs[*stage_index] = candidate_argv.clone();
+                let Some(probe) = pipeline_shape_verdict(
+                    &probe_stage_argvs,
+                    rules,
+                    stage_count,
+                    last_stage_is_non_simple,
+                ) else {
+                    continue;
+                };
+                if probe.decision() > worst.decision() {
+                    let reason = Reason::new(format!(
+                        "{description}, which is not itself a blocklist match — under that \
+                         interpretation, {}",
+                        probe
+                            .reason()
+                            .map(crate::verdict::Reason::as_str)
+                            .unwrap_or_default()
+                    ));
+                    worst = match probe.decision() {
+                        Decision::Block => Verdict::block(
+                            reason,
+                            probe.normalized_argv().to_vec(),
+                            probe.matched_rule().cloned(),
+                        )
+                        .with_deny_message(probe.deny_message().cloned()),
+                        Decision::Ask => Verdict::ask(reason, probe.normalized_argv().to_vec())
+                            .with_deny_message(probe.deny_message().cloned()),
+                        Decision::Allow => {
+                            unreachable!("pipeline_shape_verdict never returns Decision::Allow")
+                        }
+                    };
+                }
+            }
+        }
+    }
+
+    worst
+}
+
+/// The pipeline-shape/rule-match verdict for `stage_argvs` alone — rule 5's
+/// [`Rules::match_pipeline`] plus [`evaluate_pipeline_shape`]'s decode/
+/// interpreter-sink scan, or the "final stage is non-simple" Ask when that
+/// applies instead (mutually exclusive with the shape scan, matching
+/// [`evaluate_pipeline`]'s own primary pass). `None` if neither check
+/// fires. Never returns a `Decision::Allow` verdict: `match_pipeline`'s own
+/// rules and [`evaluate_pipeline_shape`] both only ever produce Ask/Block.
+///
+/// Factored out of [`evaluate_pipeline`]'s primary pass so issue #384's
+/// probe pass (that function's own docs) can run the identical check again
+/// against a candidate `stage_argvs` variant without duplicating the fold
+/// logic — folding `match_pipeline`'s verdict before the shape/non-simple
+/// one here, exactly the order the primary pass already applied them in,
+/// so a caller that folds this single combined result into its own running
+/// `worst` behaves identically to folding the two separately (`fold_worst`
+/// is associative: [`Decision`]'s total order makes the max well-defined
+/// regardless of grouping, and a tie always keeps whichever verdict was
+/// folded in first in EITHER grouping).
+fn pipeline_shape_verdict(
+    stage_argvs: &[Vec<NormalizedWord>],
+    rules: &Rules,
+    stage_count: usize,
+    last_stage_is_non_simple: bool,
+) -> Option<Verdict> {
+    let mut worst: Option<Verdict> = None;
+    if let Some(rule) = rules.match_pipeline(stage_argvs) {
         let argv = stage_argvs.last().cloned().unwrap_or_default();
         let reason = Reason::new(format!(
             "pipeline matches blocklist rule {:?}: {}",
@@ -661,24 +781,28 @@ fn evaluate_pipeline(
             Decision::Ask => Verdict::ask(reason, argv),
             Decision::Allow => unreachable!("rules never carry Decision::Allow"),
         };
-        worst = fold_worst(worst, verdict);
+        worst = Some(verdict);
     }
 
     if stage_count > 1 && last_stage_is_non_simple {
-        worst = fold_worst(
-            worst,
-            Verdict::ask(
-                Reason::new(
-                    "pipeline's final stage is a compound command or function definition; \
-                     whether it acts as a data sink for the earlier stages cannot be determined \
-                     structurally, so the pipeline-shape rule cannot apply here — treated as \
-                     unknown, not safe",
-                ),
-                stage_argvs.last().cloned().unwrap_or_default(),
+        let verdict = Verdict::ask(
+            Reason::new(
+                "pipeline's final stage is a compound command or function definition; whether \
+                 it acts as a data sink for the earlier stages cannot be determined \
+                 structurally, so the pipeline-shape rule cannot apply here — treated as \
+                 unknown, not safe",
             ),
+            stage_argvs.last().cloned().unwrap_or_default(),
         );
-    } else if let Some(verdict) = evaluate_pipeline_shape(&stage_argvs) {
-        worst = fold_worst(worst, verdict);
+        worst = Some(match worst {
+            Some(current) => fold_worst(current, verdict),
+            None => verdict,
+        });
+    } else if let Some(verdict) = evaluate_pipeline_shape(stage_argvs) {
+        worst = Some(match worst {
+            Some(current) => fold_worst(current, verdict),
+            None => verdict,
+        });
     }
 
     worst
@@ -1698,7 +1822,11 @@ fn apply_ask_floor(verdict: Verdict, ask_match: Option<&CommandRule>) -> Verdict
 /// precedence: deny > ask > allow" — order and the argument-substitution
 /// eligibility guard both matter, see there). `env` must already have this
 /// command's own prefix assignments merged in by the caller
-/// (`Env::apply_assignments`) before this is called.
+/// (`Env::apply_assignments`) before this is called. `alternates` is
+/// [`evaluate_simple_command_core`]'s own out-parameter, threaded straight
+/// through (see its docs) — [`evaluate_pipeline`] is the only caller that
+/// reads it; [`recurse_find_exec_payload`] passes a throwaway `Vec` since a
+/// directly-recursed `find -exec` payload is not itself a pipeline stage.
 fn evaluate_simple_command(
     command: &SimpleCommand,
     env: &Env,
@@ -1706,6 +1834,7 @@ fn evaluate_simple_command(
     allowlist: &Allowlist,
     depth: usize,
     cwd: &CwdContext,
+    alternates: &mut IfsAlternates,
 ) -> Verdict {
     let argv = normalize::normalize_argv(command);
     let ask_match = rules.match_ask(&argv);
@@ -1849,6 +1978,7 @@ fn evaluate_simple_command(
         },
         escalation_chain,
         cwd,
+        alternates,
     );
     let tar_dashless_floor_present = tar_dashless_floor.is_some();
     let ascent_descent_floor_present = ascent_descent_floor.is_some();
@@ -2009,7 +2139,11 @@ struct SimpleCommandPolicy<'a> {
 /// ordinary blocklist match (stage 3, `crate::rules::Rules::match_command`).
 /// `argv` and `escalation_chain` are computed once by
 /// [`evaluate_simple_command`] (which needs both itself) and passed in
-/// rather than recomputed here.
+/// rather than recomputed here. `alternates` is an out-parameter: rule 2's
+/// bare-`$VAR` handling ([`evaluate_command_position_bare_var`]) appends
+/// any non-default-IFS candidate it finds, for [`evaluate_pipeline`]'s own
+/// probe pass to try later (issue #384) — empty for every command shape
+/// that never reaches that one rule.
 fn evaluate_simple_command_core(
     command: &SimpleCommand,
     argv: Vec<NormalizedWord>,
@@ -2017,6 +2151,7 @@ fn evaluate_simple_command_core(
     policy: SimpleCommandPolicy<'_>,
     escalation_chain: WrapperChainEscalation,
     cwd: &CwdContext,
+    alternates: &mut IfsAlternates,
 ) -> Verdict {
     let SimpleCommandPolicy {
         rules,
@@ -2147,7 +2282,13 @@ fn evaluate_simple_command_core(
         Resolution::Unresolvable(UnresolvableKind::ParameterExpansion) => {
             return apply_leftover_substitution_floor(
                 apply_leftover_command_floor(
-                    evaluate_command_position_bare_var(first_word_ast, argv, env, rules),
+                    evaluate_command_position_bare_var(
+                        first_word_ast,
+                        argv,
+                        env,
+                        rules,
+                        alternates,
+                    ),
                     leftover_command_floor,
                 ),
                 leftover_floor,
@@ -3148,12 +3289,23 @@ fn evaluate_command_position_substitution(
 /// (`stage_argvs`, in [`evaluate_pipeline`]), so an Ask-level non-default
 /// split could otherwise
 /// desync it from what a real, unprefixed invocation of `$name` actually
-/// produces and mask a genuine pipeline Block.
+/// produces and mask a genuine pipeline Block. Issue #384: every
+/// non-default candidate that reaches this point (didn't match any single
+/// per-command rule either) is additionally appended to `alternates` —
+/// [`evaluate_pipeline`]'s own probe pass (its docs) tries each one against
+/// the PIPELINE-shape scan specifically, as an extra check that can only
+/// ever raise the primary decision, never replace or lower it. Capturing
+/// them here, under this call's own live `env`, rather than recomputing
+/// candidates pipeline-side, keeps them under the exact same per-stage
+/// environment state the per-command loop above already used — computing
+/// them later (after later stages' own assignments have run) would
+/// reopen the round-6 desync class this whole function exists to avoid.
 fn evaluate_command_position_bare_var(
     first_word_ast: &Word,
     argv: Vec<NormalizedWord>,
     env: &Env,
     rules: &Rules,
+    alternates: &mut IfsAlternates,
 ) -> Verdict {
     let Some(name) = bare_parameter_name(first_word_ast) else {
         return Verdict::ask(
@@ -3225,22 +3377,19 @@ fn evaluate_command_position_bare_var(
         // candidate happened to run FIRST, via `get_or_insert`, let a
         // same-line-but-different-command's `IFS=` prefix assignment that
         // doesn't even persist to `$name`'s own invocation feed a
-        // mis-split argv downstream and mask a real pipeline Block).
-        //
-        // Known residual limitation, tracked as issue #384: this also
-        // means a non-default IFS candidate that would only be caught by
-        // `evaluate_pipeline_shape`'s decode/interpreter-sink scan
-        // (rather than any single per-command blocklist rule) is never
-        // tried against it — e.g. `IFS=,; X='base64,-d'; $X | python3`
-        // stays `Ask` even though real bash's `,`-split makes this
-        // exactly the decode-into-interpreter shape rule 5 exists to
-        // Block (`base64 -d | python3` alone already Blocks). Fixing it
-        // needs the per-stage candidate threaded up to
-        // `evaluate_pipeline`'s own `stage_argvs`, which risks
-        // re-widening the exact desync this comment's own fix closed;
-        // deferred rather than rushed.
+        // mis-split argv downstream and mask a real pipeline Block). A
+        // non-default candidate instead goes to `alternates` (this
+        // function's own docs) — a PROBE `evaluate_pipeline` tries
+        // separately, never the primary `stage_argvs` entry, so it can
+        // only raise a decision, never desync the primary scan the way a
+        // direct substitution would.
         if ifs.is_none() {
             primary_substituted = Some(substituted);
+        } else {
+            alternates.push((
+                substituted,
+                format!("`${name}` resolves to {value:?}{splitting_note}"),
+            ));
         }
     }
 
@@ -4656,7 +4805,20 @@ fn recurse_find_exec_payload(
             }
         }
     }
-    let inner = evaluate_simple_command(synthetic, &Env::new(), rules, allowlist, depth + 1, cwd);
+    // Issue #384's `alternates` out-param is discarded here — a directly
+    // recursed `find -exec` payload is evaluated standalone
+    // (`evaluate_simple_command`'s own docs), not as a pipeline stage, so
+    // there is no `evaluate_pipeline` probe pass for it to feed.
+    let mut discarded_alternates = Vec::new();
+    let inner = evaluate_simple_command(
+        synthetic,
+        &Env::new(),
+        rules,
+        allowlist,
+        depth + 1,
+        cwd,
+        &mut discarded_alternates,
+    );
     raise_expansion_floor(
         floor,
         inner.decision(),
@@ -8318,19 +8480,39 @@ mod tests {
     }
 
     #[test]
-    fn issue_384_non_default_ifs_split_never_reaches_the_pipeline_shape_scan() {
-        // Self-verifying pin for the disclosed residual limitation left
-        // OPEN by this PR (tracked as issue #384, split out from #358):
-        // real bash splits `$X` under `IFS=","` into `base64 -d`, making
+    fn issue_384_non_default_ifs_split_reaches_the_pipeline_shape_scan() {
+        // Real bash splits `$X` under `IFS=","` into `base64 -d`, making
         // this the exact decode-into-interpreter pipeline shape rule 5
         // exists to Block (`base64 -d | python3` alone already Blocks,
-        // asserted below as a control) -- but the Ask verdict's argv is
-        // pinned to the default-IFS split, so the pipeline-shape scanner
-        // never sees the comma-split candidate. If this ever starts
-        // Blocking, issue #384 is fixed -- update its disclosure comment
-        // (this function, the `if ifs.is_none()` site) and this test.
+        // asserted below as a control). The primary `stage_argvs` entry
+        // still carries only the default-IFS split (round 6's own
+        // desync-avoidance property, unchanged), but `evaluate_pipeline`'s
+        // probe pass now tries this non-default candidate against the
+        // pipeline-shape scan separately and raises the verdict to match.
         assert_decision("base64 -d | python3", Decision::Block);
-        assert_decision("IFS=,; X='base64,-d'; $X | python3", Decision::Ask);
+        assert_decision("IFS=,; X='base64,-d'; $X | python3", Decision::Block);
+    }
+
+    #[test]
+    fn issue_384_no_ifs_candidate_at_all_still_asks() {
+        // Negative control: with no `IFS` reassignment anywhere on the
+        // line, there is only ever the default-IFS candidate — no
+        // alternate for the probe pass to try, so this stays exactly what
+        // it was before issue #384's fix.
+        assert_decision("X='base64,-d'; $X | python3", Decision::Ask);
+    }
+
+    #[test]
+    fn issue_384_probe_that_ties_with_the_primary_decision_changes_nothing() {
+        // A non-default candidate that itself resolves to a harmless
+        // command (no decode/interpreter-sink shape) still only ties with
+        // whatever the primary pass already computed (`echo,hi` -> `echo
+        // hi`, an ordinary Allow-shaped pipe into `python3`, itself an
+        // interpreter with no decode stage upstream, so the primary pass
+        // itself already Asks) -- `evaluate_pipeline`'s probe fold only
+        // ever applies on a STRICT raise, so this must stay at exactly the
+        // same decision the primary pass alone would have produced.
+        assert_decision("IFS=,; X='echo,hi'; $X | python3", Decision::Ask);
     }
 
     #[test]
@@ -12099,6 +12281,7 @@ mod tests {
             },
             WrapperChainEscalation::Absent,
             &CwdContext::Initial,
+            &mut Vec::new(),
         );
         assert_eq!(verdict.decision(), Decision::Ask);
     }
