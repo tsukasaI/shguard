@@ -698,9 +698,11 @@ fn evaluate_pipeline(
     // Known residual, left for a future issue rather than chased further:
     // this only ever swaps ONE stage's argv per probe, so a pipeline where
     // TWO OR MORE stages each need their own non-default candidate
-    // simultaneously to expose the dangerous shape (`$X | $Y`, both
-    // IFS-split) is still missed — fails safe (stays at whatever `worst`
-    // already computed, never lower), just not raised by this pass.
+    // simultaneously to expose the dangerous shape (`$X | $Y` — or even
+    // `$X | $X`, one variable reused across both stages — both needing
+    // their own IFS-split) is still missed — fails safe (stays at whatever
+    // `worst` already computed, never lower), just not raised by this
+    // pass.
     if stage_count > 1 {
         for (stage_index, candidates) in &per_stage_alternates {
             for (candidate_argv, description) in candidates {
@@ -8513,6 +8515,17 @@ mod tests {
         // ever applies on a STRICT raise, so this must stay at exactly the
         // same decision the primary pass alone would have produced.
         assert_decision("IFS=,; X='echo,hi'; $X | python3", Decision::Ask);
+    }
+
+    #[test]
+    fn issue_384_probe_reaches_a_non_default_ifs_candidate_on_the_sink_stage_too() {
+        // Same shape as `issue_384_non_default_ifs_split_reaches_the_pipeline_shape_scan`,
+        // but the non-default candidate is the LAST (sink) stage's own
+        // command position rather than the first (source) stage's — pins
+        // that `evaluate_pipeline`'s probe pass swaps whichever stage index
+        // captured `alternates`, not just stage 0.
+        assert_decision("base64 -d | python3", Decision::Block);
+        assert_decision("IFS=,; X='python3,-u'; base64 -d | $X", Decision::Block);
     }
 
     #[test]

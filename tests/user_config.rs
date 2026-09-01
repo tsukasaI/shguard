@@ -1501,6 +1501,32 @@ fn user_config_pipeline_rule_blocks_a_declared_shape() {
     assert_eq!(permission_decision(&output), "allow");
 }
 
+// issue #384: evaluate_pipeline's non-default-IFS probe pass must reach a
+// user-config [[pipeline]] rule match too, not just evaluate_pipeline_shape's
+// built-in decode/interpreter-sink scan -- a source/sink pair with no
+// embedded per-command rule of its own (so nothing shadows the probe by
+// Blocking earlier, in the bare-$VAR candidate loop itself) that only
+// becomes this exact pipeline shape once its `IFS=,`-split source stage is
+// tried against the rule.
+#[test]
+fn user_config_pipeline_rule_reached_through_a_non_default_ifs_probe() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[pipeline]]
+        id = "user-forbid-fooread-foowrite"
+        reason = "forbid piping fooread's output into foowrite"
+        decision = "block"
+        sources = ["fooread"]
+        sinks = ["foowrite"]
+    "#,
+    );
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+
+    let output = run_hook(&bash_command("IFS=,; X='fooread,-x'; $X | foowrite"), &envs);
+    assert_eq!(permission_decision(&output), "deny");
+    assert!(permission_reason(&output).contains("user-forbid-fooread-foowrite"));
+}
+
 // issue #268: sink_required_flags narrows a pipeline rule to a sink
 // invocation carrying a specific flag, so the flagless spelling of the
 // same source/sink pair stays untouched.
