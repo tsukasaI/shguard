@@ -1602,14 +1602,25 @@ mod tests {
     // anywhere) triggers brush-parser's subshell-vs-arithmetic PEG
     // ambiguity into the same catastrophic backtracking comma-less brace
     // nesting does — this asserts the raw pre-scan rejects a depth the
-    // exponential path would otherwise spend seconds of CPU on (measured:
-    // depth 26 already hits the 2s watchdog), proving the cap is what
-    // stops it, not luck. Fully unbalanced (no `)` at all), unlike the
-    // `$(...)`-pair tests above, since the CPU-DoS shape is specifically a
-    // leading run with nothing closing it.
+    // exponential path would otherwise spend seconds of CPU on, proving
+    // the cap is what stops it, not luck. Fully unbalanced (no `)` at
+    // all), unlike the `$(...)`-pair tests above, since the CPU-DoS shape
+    // is specifically a leading run with nothing closing it. Depth is a
+    // hardcoded literal, like the sibling comma-less-brace test above
+    // (`raw_comma_less_brace_nesting_...`), not derived from
+    // `MAX_RAW_PAREN_NESTING_DEPTH`: a depth derived from the cap under
+    // test would still exceed a future *raised* cap and pass for the
+    // wrong reason, silently stopping this test from ever catching a
+    // cap raised back into the vulnerable 17-63 range. 26 is the
+    // measured depth that already hits the 2s watchdog on the
+    // vulnerable (pre-fix) code.
     #[test]
     fn raw_unbalanced_paren_run_past_the_cap_is_rejected_before_the_exponential_path() {
-        let depth = MAX_RAW_PAREN_NESTING_DEPTH + 10;
+        let depth = 26;
+        assert!(
+            depth > MAX_RAW_PAREN_NESTING_DEPTH,
+            "cap raised past this test's probe depth — re-measure and re-derive"
+        );
         let command = format!("{}a", "(".repeat(depth));
         let start = std::time::Instant::now();
         assert!(parse(&command).is_err());
