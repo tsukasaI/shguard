@@ -5632,6 +5632,29 @@ impl Rules {
         self.ask_rules.iter().find(|rule| rule.matches(argv))
     }
 
+    /// Shared scan behind every `match_command_*` floor probe below: a
+    /// user-config `[[ask]]` rule (`ask_rules`) with a matching
+    /// target/flags shape is just as eligible for any of these floors as
+    /// an embedded blocklist rule (`command_rules`) — both are
+    /// `CommandRule`s. Scanning only `command_rules` would leave that
+    /// floor's own literal-vs-obfuscated-spelling asymmetry alive for user
+    /// config: the literal spelling correctly Asks via the user's rule
+    /// itself, but an obfuscated respelling of the same target/flag
+    /// silently Allows. Centralizing this scan, rather than each probe
+    /// repeating `command_rules.iter().chain(ask_rules.iter())` inline,
+    /// means a future 9th floor probe can't independently drift out of
+    /// sync with the rest. Read-only: never mutates rule state, never
+    /// itself constitutes a match.
+    fn find_command_or_ask_rule(
+        &self,
+        predicate: impl Fn(&CommandRule) -> bool,
+    ) -> Option<&CommandRule> {
+        self.command_rules
+            .iter()
+            .chain(self.ask_rules.iter())
+            .find(|rule| predicate(rule))
+    }
+
     /// The first [`CommandRule`] for which [`CommandRule::matches_except_target`]
     /// holds, if any — plan.md §4's NEW argument-position refinement
     /// (`src/gate.rs`), covering both a bare `$VAR` and a `$()`/backtick
@@ -5643,9 +5666,7 @@ impl Rules {
         &self,
         argv: &[NormalizedWord],
     ) -> Option<&CommandRule> {
-        self.command_rules
-            .iter()
-            .find(|rule| rule.matches_except_target(argv))
+        self.find_command_or_ask_rule(|rule| rule.matches_except_target(argv))
     }
 
     /// The first [`CommandRule`] for which [`CommandRule::matches_except_flags`]
@@ -5660,9 +5681,7 @@ impl Rules {
         &self,
         argv: &[NormalizedWord],
     ) -> Option<&CommandRule> {
-        self.command_rules
-            .iter()
-            .find(|rule| rule.matches_except_flags(argv))
+        self.find_command_or_ask_rule(|rule| rule.matches_except_flags(argv))
     }
 
     /// The first [`CommandRule`] for which
@@ -5675,18 +5694,7 @@ impl Rules {
         &self,
         argv: &[NormalizedWord],
     ) -> Option<&CommandRule> {
-        // A user-config `[[ask]]` rule (`ask_rules`) with its own
-        // `normalized`/`normalized_prefix` target is just as eligible for
-        // this floor as an embedded blocklist rule (`command_rules`) —
-        // both are `CommandRule`s. Scanning only `command_rules` would
-        // leave the literal-vs-ascent-obfuscated-spelling asymmetry alive
-        // for user config: the literal spelling correctly Asks via the
-        // rule itself, but an ascent-then-descent respelling of the same
-        // target silently Allowed.
-        self.command_rules
-            .iter()
-            .chain(self.ask_rules.iter())
-            .find(|rule| rule.matches_ascent_descent_floor(argv))
+        self.find_command_or_ask_rule(|rule| rule.matches_ascent_descent_floor(argv))
     }
 
     /// The first [`CommandRule`] for which
@@ -5699,87 +5707,60 @@ impl Rules {
         &self,
         argv: &[NormalizedWord],
     ) -> Option<&CommandRule> {
-        // A user-config `[[ask]]` rule (`ask_rules`) with its own
-        // bare-`~` target is just as eligible for this floor as an
-        // embedded blocklist rule (`command_rules`) — both are
-        // `CommandRule`s. Scanning only `command_rules` would
-        // leave the same `~username`-vs-bare-`~` asymmetry #80 fixed for
-        // the blocklist alive for user config.
-        self.command_rules
-            .iter()
-            .chain(self.ask_rules.iter())
-            .find(|rule| rule.matches_named_user_home_floor(argv))
+        self.find_command_or_ask_rule(|rule| rule.matches_named_user_home_floor(argv))
     }
 
     /// The first [`CommandRule`] for which
     /// [`CommandRule::matches_dirstack_tilde_floor`] holds, if any — issue
     /// #88's directory-stack tilde floor (`src/gate.rs`). Like
-    /// [`Self::match_command_named_user_home`], scans both `command_rules`
-    /// and `ask_rules` (a user-config rule with its own targets is just as
-    /// eligible for this floor as an embedded one) and is a read-only
-    /// probe: never mutates rule state, never itself constitutes a match.
+    /// [`Self::match_command_named_user_home`], a read-only probe: never
+    /// mutates rule state, never itself constitutes a match.
     #[must_use]
     pub(crate) fn match_command_dirstack_tilde(
         &self,
         argv: &[NormalizedWord],
     ) -> Option<&CommandRule> {
-        self.command_rules
-            .iter()
-            .chain(self.ask_rules.iter())
-            .find(|rule| rule.matches_dirstack_tilde_floor(argv))
+        self.find_command_or_ask_rule(|rule| rule.matches_dirstack_tilde_floor(argv))
     }
 
     /// The first [`CommandRule`] for which
     /// [`CommandRule::matches_unknown_cwd_floor`] holds, if any — issue
     /// #103's poisoned-cwd floor (`src/gate.rs`). Like
-    /// [`Self::match_command_dirstack_tilde`], scans both `command_rules`
-    /// and `ask_rules` and is a read-only probe: never mutates rule state,
-    /// never itself constitutes a match.
+    /// [`Self::match_command_dirstack_tilde`], a read-only probe: never
+    /// mutates rule state, never itself constitutes a match.
     #[must_use]
     pub(crate) fn match_command_unknown_cwd(
         &self,
         argv: &[NormalizedWord],
     ) -> Option<&CommandRule> {
-        self.command_rules
-            .iter()
-            .chain(self.ask_rules.iter())
-            .find(|rule| rule.matches_unknown_cwd_floor(argv))
+        self.find_command_or_ask_rule(|rule| rule.matches_unknown_cwd_floor(argv))
     }
 
     /// The first [`CommandRule`] for which
     /// [`CommandRule::matches_directory_equals_tilde_floor`] holds, if any
     /// — issue #115's zsh `magic_equal_subst` floor (`src/gate.rs`). Like
-    /// [`Self::match_command_named_user_home`], scans both
-    /// `command_rules` and `ask_rules` (a user-config rule with the same
-    /// `=`-terminated-strip + bare-`~`-target shape is just as eligible)
-    /// and is a read-only probe: never mutates rule state, never itself
-    /// constitutes a match.
+    /// [`Self::match_command_named_user_home`], a read-only probe: never
+    /// mutates rule state, never itself constitutes a match.
     #[must_use]
     pub(crate) fn match_command_directory_equals_tilde(
         &self,
         argv: &[NormalizedWord],
     ) -> Option<&CommandRule> {
-        self.command_rules
-            .iter()
-            .chain(self.ask_rules.iter())
-            .find(|rule| rule.matches_directory_equals_tilde_floor(argv))
+        self.find_command_or_ask_rule(|rule| rule.matches_directory_equals_tilde_floor(argv))
     }
 
     /// The first [`CommandRule`] for which
     /// [`CommandRule::matches_dirstack_equal_subst_floor`] holds, if any —
     /// issue #134's attached-dirstack-tilde `magic_equal_subst` floor
     /// (`src/gate.rs`). Like [`Self::match_command_directory_equals_tilde`],
-    /// scans both `command_rules` and `ask_rules` and is a read-only probe:
-    /// never mutates rule state, never itself constitutes a match.
+    /// a read-only probe: never mutates rule state, never itself
+    /// constitutes a match.
     #[must_use]
     pub(crate) fn match_command_dirstack_equal_subst(
         &self,
         argv: &[NormalizedWord],
     ) -> Option<&CommandRule> {
-        self.command_rules
-            .iter()
-            .chain(self.ask_rules.iter())
-            .find(|rule| rule.matches_dirstack_equal_subst_floor(argv))
+        self.find_command_or_ask_rule(|rule| rule.matches_dirstack_equal_subst_floor(argv))
     }
 
     /// The configured escalation floor (issues #35/#36, `crate::gate` rule
