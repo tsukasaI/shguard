@@ -183,6 +183,22 @@ fn is_token_boundary(byte: u8) -> bool {
 /// `Cow::Borrowed` in the overwhelmingly common case (no such shape
 /// present) — no allocation, no copy — matching the hot-path-avoidance
 /// discipline the raw pre-scan functions in this module already follow.
+///
+/// **Known limitation, disclosed rather than silently accepted**: this
+/// scan is NOT quote-aware — a digit run matching this exact shape
+/// INSIDE a quoted string (`echo "a 99999999999999999999>x"`, which
+/// never panics in the first place, since brush treats the whole quoted
+/// span as literal text with no redirect recognized inside it at all)
+/// still gets a space inserted, one byte diverging from what the string
+/// literally reads as. No decision-flip is known to result from this —
+/// the analyzed argv still contains the same digit run, just with an
+/// extra space a `targets`/`except_targets` string match keyed on that
+/// EXACT literal spelling would need to account for — but see
+/// [`word_contains_overflowing_brace_range`]'s own quote-tracking for
+/// the pattern a future fix here should follow if this ever needs
+/// closing; not done here because this scan runs on the WHOLE
+/// command-line string (multiple statements, embedded `$(...)`), a wider
+/// quote-tracking surface than that function's single-word scope.
 fn neutralize_overflowing_io_redirect_numbers(command: &str) -> std::borrow::Cow<'_, str> {
     let bytes = command.as_bytes();
     let mut digit_start: Option<usize> = None;
@@ -940,12 +956,18 @@ fn convert_word(word: &bast::Word) -> Result<Word, ParseError> {
         return Ok(Word(convert_word_text(raw)?));
     }
     // Issue #405: pre-empt, rather than let `parse_brace_expansions` panic
-    // on, a `{N..M}`/`{N..M..S}` brace-range endpoint overflowing `i64` —
-    // routes straight to the SAME rejection [`convert_brace_members`]
-    // already gives every brace range regardless of overflow (its
+    // on, an unquoted `{...}` group brush-parser's `number()` rule would
+    // panic evaluating (see [`brace_group_panics`] for the exact
+    // precondition — not just a well-formed `{N..M}` range; any leading
+    // overflowing digit run right after `{` panics, `..` or not) — routes
+    // straight to the SAME rejection [`convert_brace_members`] already
+    // gives every WELL-FORMED brace range regardless of overflow (its
     // `NumberSequence`/`CharSequence` arms are unconditionally
-    // `Unsupported`), so this changes no decision, only avoids reaching
-    // the panic at all.
+    // `Unsupported`), so this changes no decision for that shape, only
+    // avoids reaching the panic. This is a narrowing, not an elimination,
+    // of the panic surface — [`brace_group_panics`]'s own docs disclose
+    // the residual shapes it can still miss, left to
+    // [`catch_parser_panic`]'s pre-existing (also Ask-only) containment.
     if word_contains_overflowing_brace_range(raw) {
         return Err(ParseError::unsupported(
             "brace range expansion ({1..5} / {a..z})",
@@ -975,42 +997,121 @@ fn is_brace_expr(segment: &bword::BraceExpressionOrText) -> bool {
     matches!(segment, bword::BraceExpressionOrText::Expr(_))
 }
 
-/// True if `text` contains a `{<endpoint>..<endpoint>[..<endpoint>]}`
-/// brace-range whose start, end, or increment field overflows `i64` — the
-/// exact shape that panics brush-parser 0.4.0's brace-sequence parser
-/// (`word.rs:708`, `parse::<i64>().unwrap()`). Scans every `{` in `text`
-/// (not just a leading one — a word can contain more than one brace
-/// group), each independently a candidate range start.
+/// True if `text` contains an UNQUOTED `{` opening a brace group whose
+/// grammar rule brush-parser 0.4.0 would panic evaluating — see
+/// [`brace_group_panics`] for the exact precondition, derived from
+/// brush-parser's own grammar (`word.rs:673-714`, reproduced in that
+/// function's docs). Skips single/double/ANSI-C-quoted spans and
+/// backslash-escaped bytes the same way [`crate::gate`]'s own
+/// `scan_paren_span` does — brace expansion is itself quote-sensitive in
+/// real bash (`'{1..5}'` is never expanded), and brush's grammar already
+/// only recognizes `brace_expr()` outside quotes; scanning `{` without
+/// this would flag literal `{...}` text INSIDE a quoted word that brush
+/// never even attempts to interpret as a range, never mind panics on —
+/// a false-positive `Ask` this pre-scan must not introduce.
 fn word_contains_overflowing_brace_range(text: &str) -> bool {
-    let mut search_from = 0;
-    while let Some(rel) = text[search_from..].find('{') {
-        let after_brace = search_from + rel + 1;
-        if brace_range_overflows(&text[after_brace..]) {
-            return true;
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Quote {
+        None,
+        Single,
+        Double,
+        AnsiC,
+    }
+
+    let bytes = text.as_bytes();
+    let mut quote = Quote::None;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match quote {
+            Quote::Single => {
+                if c == b'\'' {
+                    quote = Quote::None;
+                }
+                i += 1;
+            }
+            Quote::AnsiC | Quote::Double => {
+                if c == b'\\' && i + 1 < bytes.len() {
+                    i += 2;
+                    continue;
+                }
+                let closer = if quote == Quote::AnsiC { b'\'' } else { b'"' };
+                if c == closer {
+                    quote = Quote::None;
+                }
+                i += 1;
+            }
+            Quote::None => {
+                if c == b'\\' && i + 1 < bytes.len() {
+                    i += 2;
+                    continue;
+                }
+                if c == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    quote = Quote::AnsiC;
+                    i += 2;
+                    continue;
+                }
+                match c {
+                    b'\'' => quote = Quote::Single,
+                    b'"' => quote = Quote::Double,
+                    b'{' if brace_group_panics(&text[i + 1..]) => return true,
+                    _ => {}
+                }
+                i += 1;
+            }
         }
-        search_from = after_brace;
     }
     false
 }
 
-/// Given the text immediately following a `{`, checks whether it opens a
-/// `<endpoint>..<endpoint>[..<endpoint>]}` range whose endpoint(s)
-/// overflow `i64`. Not itself a full range-syntax validator — a
-/// non-overflowing or malformed range simply returns `false` here and
-/// falls through to brush-parser's own (panic-free) handling, since
-/// [`word_contains_overflowing_brace_range`] only needs to catch the exact
-/// shape that panics, not validate range syntax in general.
-fn brace_range_overflows(after_brace: &str) -> bool {
-    let Some((first_overflows, rest)) = parse_brace_range_endpoint(after_brace) else {
+/// Whether brush-parser 0.4.0 panics evaluating the `{...}` group whose
+/// content starts at `after_brace` (the text immediately following the
+/// `{`) — derived from its grammar (`word.rs:673-714`):
+///
+/// ```text
+/// brace_expr_inner = brace_text_list_expr / brace_sequence_expr
+/// brace_text_list_expr = brace_text_list_member **<2,> ","   // >=2 comma-separated members
+/// brace_sequence_expr = number() ".." number() (".." number())?
+/// number = sign? digits { digits.parse::<i64>().unwrap() }  // panics here
+/// ```
+///
+/// PEG ordered choice tries `brace_text_list_expr` FIRST; only when that
+/// fails (no top-level `,` before the matching `}`, since a single
+/// non-comma-separated member can never satisfy `**<2,>`) does it fall to
+/// `brace_sequence_expr`, whose `number()` panics as soon as it matches
+/// ANY leading `sign? digit+` that overflows `i64` — *before* checking
+/// whether `..` even follows (`{9223372036854775808b}`, no range syntax
+/// at all, still panics). A top-level comma anywhere before the closing
+/// `}` — even with a wildly overflowing leading digit run
+/// (`{99999999999999999999,x}`) — makes the comma-list branch succeed
+/// instead, so `number()` (and its panic) is never reached at all.
+///
+/// This is therefore an UNDER-approximation by construction (matching
+/// the safe direction — a case this misses is still safely contained by
+/// [`catch_parser_panic`], never silently mis-parsed): it doesn't fully
+/// replicate `brace_text_list_member`'s own nested-brace-aware comma
+/// splitting, just a flat top-level-comma scan up to the first unnested
+/// `}`; a contrived shape that scan misreads (e.g. a comma inside a
+/// FURTHER-nested nested brace group that isn't really top-level) can
+/// still panic uncaught by this pre-scan, same residual `catch_unwind`
+/// containment as before this issue's fix.
+fn brace_group_panics(after_brace: &str) -> bool {
+    if brace_group_has_top_level_comma(after_brace) {
+        return false;
+    }
+    let Some((leading_overflows, rest)) = parse_brace_range_endpoint(after_brace) else {
         return false;
     };
+    if leading_overflows {
+        return true;
+    }
     let Some(rest) = rest.strip_prefix("..") else {
         return false;
     };
     let Some((second_overflows, rest)) = parse_brace_range_endpoint(rest) else {
         return false;
     };
-    if first_overflows || second_overflows {
+    if second_overflows {
         return true;
     }
     let Some(rest) = rest.strip_prefix("..") else {
@@ -1019,19 +1120,46 @@ fn brace_range_overflows(after_brace: &str) -> bool {
     matches!(parse_brace_range_endpoint(rest), Some((true, _)))
 }
 
-/// Parses an optional `-` then an ASCII digit run from the start of `s`,
-/// returning `(overflows_i64, remainder_after_the_digits)`. `None` if `s`
-/// doesn't start with a digit (after an optional `-`) at all — not itself
-/// a range endpoint.
+/// Whether a `,` appears before the `}` that closes the brace group whose
+/// content starts at `after_brace`, tracking nested `{`/`}` depth so an
+/// inner group's own comma doesn't get mistaken for this group's — a
+/// flat, non-quote-aware scan (nested braces inside an already-unquoted
+/// brace group don't themselves introduce new quoting), sufficient for
+/// [`brace_group_panics`]'s own under-approximation.
+fn brace_group_has_top_level_comma(after_brace: &str) -> bool {
+    let mut depth = 0u32;
+    for byte in after_brace.bytes() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' if depth == 0 => return false,
+            b'}' => depth -= 1,
+            b',' if depth == 0 => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Parses an optional `-`/`+` sign then an ASCII digit run from the start
+/// of `s`, returning `(overflows_i64, remainder_after_the_digits)`.
+/// `None` if `s` doesn't start with a digit (after an optional sign) at
+/// all — not itself a range endpoint. Matches brush's own `number()` rule
+/// exactly (`word.rs:706-710`): the sign is a separate grammar element
+/// applied to the parsed value only AFTER the digit run itself parses, so
+/// overflow is checked against the UNSIGNED digit string alone — `-` does
+/// not widen the representable range the way naively parsing `"-<digits>"`
+/// as one signed literal would (`i64::MIN`'s magnitude,
+/// `9223372036854775808`, does not fit in `i64` even though `i64::MIN`
+/// itself does).
 fn parse_brace_range_endpoint(s: &str) -> Option<(bool, &str)> {
-    let unsigned = s.strip_prefix('-').unwrap_or(s);
+    let unsigned = s.strip_prefix(['-', '+']).unwrap_or(s);
     let digit_len = unsigned.bytes().take_while(u8::is_ascii_digit).count();
     if digit_len == 0 {
         return None;
     }
     let sign_len = s.len() - unsigned.len();
-    let end = sign_len + digit_len;
-    Some((s[..end].parse::<i64>().is_err(), &s[end..]))
+    let overflows = unsigned[..digit_len].parse::<i64>().is_err();
+    Some((overflows, &s[sign_len + digit_len..]))
 }
 
 /// Defense-in-depth companion to [`reject_excessive_raw_nesting`] (issue
@@ -1468,13 +1596,80 @@ mod tests {
     }
 
     // crash-fuzzer finding: brush-parser 0.4.0 panics on a `{`-adjacent
-    // digit run past `i64::MAX` (`word.rs:708`,
-    // `parse::<i64>().unwrap()`). Verdict impact is limited to the panic
-    // itself (a brace-range expansion is already `Unsupported`/`ask`
-    // regardless), so this only asserts the panic is contained.
+    // digit run past `i64::MAX` (`word.rs:708`, `parse::<i64>().unwrap()`).
+    // Verdict impact is limited to the panic itself (a brace-range
+    // expansion is already `Unsupported`/`ask` regardless), so this only
+    // asserts the parse still fails cleanly — issue #405's
+    // `brace_group_panics` now pre-empts this exact shape (no `..` at
+    // all) rather than merely containing the panic; see the tests below
+    // for cases distinguishing pre-emption from the residual
+    // `catch_parser_panic` containment `brace_group_panics`'s own docs
+    // disclose it doesn't fully replace.
     #[test]
     fn brace_sequence_number_overflow_is_a_parse_error_not_a_panic() {
         assert!(parse("echo a{9223372036854775808b").is_err());
+    }
+
+    // issue #405 (fable review finding): the leading endpoint's `+` sign
+    // and an `i64::MIN`-magnitude endpoint under a `-` sign must both
+    // still be pre-empted — brush's `number()` rule parses the UNSIGNED
+    // digit run and applies the sign only afterward, so `i64::MIN`'s own
+    // magnitude (`9223372036854775808`) overflows `i64` even though
+    // `i64::MIN` itself does not.
+    #[test]
+    fn brace_sequence_plus_sign_overflow_is_pre_empted() {
+        assert!(parse("echo {+99999999999999999999..1}").is_err());
+    }
+
+    #[test]
+    fn brace_sequence_i64_min_magnitude_overflow_is_pre_empted() {
+        assert!(parse("echo {-9223372036854775808..1}").is_err());
+    }
+
+    // issue #405 (fable review finding): a comma anywhere before the
+    // closing `}` makes brush's comma-list branch succeed FIRST, so its
+    // `number()`-panicking sequence-range branch is never reached at all
+    // — a huge leading digit run here does not panic, and the pre-scan
+    // must not flag it either (this would otherwise be a NEW
+    // Block→Ask/Allow→Ask false-positive downgrade this fix should never
+    // introduce).
+    #[test]
+    fn brace_group_with_a_comma_never_reaches_the_panicking_number_rule() {
+        let cmd = parse_ok("echo {99999999999999999999,x}");
+        let word = &simple(&cmd.first.first).words[1];
+        assert_eq!(
+            word.0,
+            vec![WordPiece::BraceAlternation(vec![
+                Word(vec![WordPiece::Literal("99999999999999999999".to_string())]),
+                Word(vec![WordPiece::Literal("x".to_string())]),
+            ])]
+        );
+    }
+
+    // issue #405 (fable review finding): brace expansion is itself
+    // quote-sensitive in real bash/brush — `'{...}'`/`"{...}"` are never
+    // interpreted as a live range at all, so the raw text inside never
+    // reaches brush's panicking `number()` rule either. The pre-scan must
+    // not flag quoted `{` occurrences (a NEW false-positive downgrade
+    // this fix should never introduce), so this pins that BOTH the parse
+    // succeeds AND the content stays a literal word, matching what
+    // brush/bash actually do with quoted braces.
+    #[test]
+    fn quoted_overflowing_brace_range_is_never_flagged() {
+        for command in [
+            r#"echo "{99999999999999999999..1}""#,
+            "echo '{99999999999999999999..1}'",
+        ] {
+            let cmd = parse_ok(command);
+            let word = &simple(&cmd.first.first).words[1];
+            assert!(
+                !word
+                    .0
+                    .iter()
+                    .any(|piece| matches!(piece, WordPiece::BraceAlternation(_))),
+                "{command:?} must not be treated as a brace expression: {word:?}"
+            );
+        }
     }
 
     // crash-fuzzer finding (issue #405): brush-parser 0.4.0 panics on a
