@@ -11521,6 +11521,7 @@ mod tests {
             "-U",
             "--other-user",
             "-a",
+            "--auth-type",
             "-c",
         ] {
             let command = format!("sudo {flag} x rm -rf /");

@@ -3780,27 +3780,30 @@ fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
         // name by the generic dash-prefix skip, e.g. `sudo -p prompt rm
         // -rf /` silently resolved to `prompt`, matching no rule (`rm -rf
         // /` genuinely runs as root in a real shell). Every entry below is
-        // confirmed against sudo(8) as taking a SEPARATED token value
-        // (short form `-X value`, long form `--name=value` — never
-        // `--name value`, matching [`ValueFlag::Long`]'s own attached/bare
-        // dual handling): `-C`/`--close-from`, `-D`/`--chdir`, `-h`/
+        // confirmed against sudo's own `long_opts` table
+        // (`src/parse_args.c`) as `required_argument` (a value as a
+        // SEPARATED token, `-X value`/`--name value`, or attached
+        // `--name=value` — [`ValueFlag::Long`] handles both attached and
+        // bare forms already): `-C`/`--close-from`, `-D`/`--chdir`, `-h`/
         // `--host`, `-p`/`--prompt`, `-R`/`--chroot`, `-r`/`--role`, `-t`/
-        // `--type`, `-T`/`--command-timeout`, `-U`/`--other-user`. `-a`
-        // (BSD authentication type) and `-c` (BSD login class) are
-        // BSD-auth-build-only flags with no long-option spelling in any
-        // sudo doc found — the `env` entry above's union-across-flavors
-        // posture applies (over-blocking on a build that lacks the flag
-        // is safe, since sudo itself errors out there before ever
-        // reaching the wrapped command). Deliberately NOT added: a
-        // `Long("login-class")` entry, even though the man page's prose
-        // calls `-c`'s argument a "class" — no sudo doc actually shows
-        // that long spelling, and `-i`'s own real long spelling,
-        // `--login`, strictly prefixes it, so declaring it would let
-        // `unambiguous_long_prefix` resolve `sudo --login rm -rf /` (a
-        // universally valid invocation) as the fabricated flag's
-        // abbreviation and consume `rm` as its value — a new, universal
-        // Block→Ask downgrade far worse than the BSD-only gap it would
-        // close.
+        // `--type`, `-T`/`--command-timeout`, `-U`/`--other-user`, `-a`/
+        // `--auth-type` (BSD authentication type). `-c` (BSD login class)
+        // is added SHORT-ONLY, deliberately omitting its real long
+        // spelling, `--login-class`: `-i`'s own real long spelling,
+        // `--login`, strictly prefixes it, and unlike real `getopt_long`
+        // (which resolves an exact match, `--login`, before ever
+        // considering it as an abbreviation of a longer option),
+        // [`ValueFlag::unambiguous_long_prefix`] has no such boolean-flag
+        // awareness — declaring `Long("login-class")` would make it
+        // resolve `sudo --login rm -rf /` (universally valid) as that
+        // entry's abbreviation and wrongly consume `rm` as its value, a
+        // new, universal Block→Ask downgrade. Accepted residual: `sudo
+        // --login-class x rm -rf /` itself still downgrades on a BSD
+        // build (the same class of gap this issue closes elsewhere), but
+        // only for that one long spelling, and only on that flavor —
+        // pinned by
+        // `sudo_dash_dash_login_boolean_flag_still_blocks_without_consuming_the_next_word`
+        // in `src/gate.rs`.
         "sudo" => vec![
             ValueFlag::Short('u'),
             ValueFlag::Short('g'),
@@ -3824,6 +3827,7 @@ fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
             ValueFlag::Long("command-timeout".to_string()),
             ValueFlag::Short('U'),
             ValueFlag::Long("other-user".to_string()),
+            ValueFlag::Long("auth-type".to_string()),
             ValueFlag::Short('a'),
             ValueFlag::Short('c'),
         ],
