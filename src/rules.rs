@@ -2417,47 +2417,19 @@ impl CommandRule {
     /// `crate::gate::scan_directory_equals_tilde_floor`).
     #[must_use]
     pub(crate) fn matches_directory_equals_tilde_floor(&self, argv: &[NormalizedWord]) -> bool {
-        if self.targets.is_empty() {
-            return false;
-        }
-        let has_bare_tilde_target = self.targets.iter().any(|t| {
-            matches!(
-                t,
-                TargetMatcher::NormalizedExact {
-                    target: PathForm::Home(comps),
-                    ..
-                } if comps.is_empty()
-            )
-        });
-        if !has_bare_tilde_target {
-            return false;
-        }
-        let attach_prefixes: Vec<&str> = self
-            .targets
-            .iter()
-            .filter_map(|t| match t {
-                TargetMatcher::NormalizedExact {
-                    strip: Some(strip), ..
-                }
-                | TargetMatcher::NormalizedPrefix {
-                    strip: Some(strip), ..
-                } if strip.ends_with('=') => Some(strip.as_str()),
-                _ => None,
-            })
-            .collect();
-        if attach_prefixes.is_empty() {
-            return false;
-        }
-        let Some(rest_words) = self.matching_rest(argv) else {
-            return false;
-        };
-        resolved_strings(&rest_words).iter().any(|token| {
-            attach_prefixes.iter().any(|prefix| {
-                token
-                    .strip_prefix(*prefix)
-                    .is_some_and(tilde_reachable_via_magic_equal_subst)
-            })
-        })
+        self.matches_attach_after_equal_floor(
+            argv,
+            |t| {
+                matches!(
+                    t,
+                    TargetMatcher::NormalizedExact {
+                        target: PathForm::Home(comps),
+                        ..
+                    } if comps.is_empty()
+                )
+            },
+            tilde_reachable_via_magic_equal_subst,
+        )
     }
 
     /// Issue #134: true when this rule's command+flags match `argv` (via
@@ -2505,17 +2477,43 @@ impl CommandRule {
     /// floor's input (see `crate::gate::scan_dirstack_equal_subst_floor`).
     #[must_use]
     pub(crate) fn matches_dirstack_equal_subst_floor(&self, argv: &[NormalizedWord]) -> bool {
+        self.matches_attach_after_equal_floor(
+            argv,
+            |t| {
+                matches!(
+                    t,
+                    TargetMatcher::NormalizedExact { strip: None, .. }
+                        | TargetMatcher::NormalizedPrefix { strip: None, .. }
+                )
+            },
+            dirstack_reachable_via_magic_equal_subst,
+        )
+    }
+
+    /// Shared core of [`Self::matches_directory_equals_tilde_floor`] (issue
+    /// #115) and [`Self::matches_dirstack_equal_subst_floor`] (issue #134,
+    /// issue #409): both check whether this rule declares some
+    /// corroborating "this could be the floor's shape" target
+    /// (`has_corroborating_target` — a bare-`~` target for #115, any
+    /// unattached bare target for #134; see each caller's own doc for why
+    /// its specific predicate is the right proxy), then whether the rule
+    /// ALSO declares at least one `=`-terminated `strip` prefix among its
+    /// own `targets`, and finally whether some resolved tail token attaches
+    /// a shape `reachable` recognizes (zsh's `magic_equal_subst`-gated
+    /// tilde/dirstack expansion, respectively) directly after one of those
+    /// prefixes. `false` if `self.targets` is empty, or `argv` doesn't
+    /// match this rule's command+flags at all
+    /// ([`Self::matching_rest`]).
+    fn matches_attach_after_equal_floor(
+        &self,
+        argv: &[NormalizedWord],
+        has_corroborating_target: impl Fn(&TargetMatcher) -> bool,
+        reachable: fn(&str) -> bool,
+    ) -> bool {
         if self.targets.is_empty() {
             return false;
         }
-        let has_unattached_target = self.targets.iter().any(|t| {
-            matches!(
-                t,
-                TargetMatcher::NormalizedExact { strip: None, .. }
-                    | TargetMatcher::NormalizedPrefix { strip: None, .. }
-            )
-        });
-        if !has_unattached_target {
+        if !self.targets.iter().any(has_corroborating_target) {
             return false;
         }
         let attach_prefixes: Vec<&str> = self
@@ -2538,11 +2536,9 @@ impl CommandRule {
             return false;
         };
         resolved_strings(&rest_words).iter().any(|token| {
-            attach_prefixes.iter().any(|prefix| {
-                token
-                    .strip_prefix(*prefix)
-                    .is_some_and(dirstack_reachable_via_magic_equal_subst)
-            })
+            attach_prefixes
+                .iter()
+                .any(|prefix| token.strip_prefix(*prefix).is_some_and(reachable))
         })
     }
 }
