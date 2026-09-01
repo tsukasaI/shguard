@@ -1263,7 +1263,7 @@ targets = [{ normalized = "~" }, { normalized = "." }]
 # over these weaker `ask` rules on any overlapping target — e.g. `tee
 # /etc/passwd ~/.bashrc` still Blocks via `tee-write-device-or-
 # critical-file`, not `shell-init-tee`'s `ask` (pinned by
-# `guardfall_shell_init_tee_does_not_shadow_critical_file_block` in
+# `guardfall_shell_init_does_not_shadow_stricter_block_rules` in
 # tests/guardfall.rs).
 
 [[command]]

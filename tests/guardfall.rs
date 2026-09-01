@@ -155,9 +155,9 @@ fn guardfall_class_e_cases() {
         ("cp src dst", Decision::Allow),
         // cp-write-device must never shadow the stricter
         // self-protect-config-cp-tilde Block — same shadowing discipline
-        // as guardfall_shell_init_tee_does_not_shadow_critical_file_block,
-        // enforced here by rule ordering (cp-write-device is appended near
-        // the end of rules/blocklist.toml, after self-protect-config-*).
+        // as guardfall_shell_init_does_not_shadow_stricter_block_rules,
+        // enforced here by match_command's worst-wins tie-break
+        // (issue #399), not by rule ordering.
         ("cp /dev/sda ~/.config/shguard/config.toml", Decision::Block),
         // -t/--target-directory= glued or separated, including the
         // bare-directory form with no trailing slash — the value never
@@ -196,10 +196,10 @@ fn guardfall_class_e_cases() {
         ),
         // rsync-delete-root-or-device must Block even when a `~` anchor
         // rides along, not fall through to the ancestor rule's weaker Ask
-        // — this is the regression the file's own MUST-stay-ordered-before
-        // comment guards against.
+        // — worst-wins (issue #399) guarantees this regardless of the
+        // two rules' declaration order.
         ("rsync -a --delete ~ /", Decision::Block),
-        ("rsync -a --delete src/ ~", Decision::Ask), // self-protect-config-ancestor-rsync-tilde's reason wins first-match
+        ("rsync -a --delete src/ ~", Decision::Ask), // self-protect-config-ancestor-rsync-tilde's reason wins the tie (both Ask)
         ("rsync -a --del src/ ~", Decision::Ask),
         ("rsync -a --delete src/ ./", Decision::Ask),
         ("rsync -a --delete src/ /tmp/staging", Decision::Allow),
@@ -1121,12 +1121,11 @@ fn guardfall_shell_init_source_destination_ambiguity_cases() {
 
 /// Issue #198: the new `shell-init-*` `ask` rules must never shadow an
 /// earlier, stricter `block` rule on the same command — `Rules::
-/// match_command` is first-match over `rules/blocklist.toml`'s declared
-/// order, so the new rules being appended at the END of the file is
-/// load-bearing, not incidental (see the comment on this rule family in
+/// match_command` is worst-wins over `rules/blocklist.toml` regardless
+/// of declared order (issue #399; see the comment on this rule family in
 /// `rules/blocklist.toml`). One case per mechanism (PR #259) so a
-/// future reorder that puts a `shell-init-*` rule
-/// ahead of its stricter sibling can't silently regress unnoticed — each
+/// future edit that adds an overlapping `shell-init-*` `ask` rule
+/// can't silently regress unnoticed — each
 /// command carries one token matching the earlier rule's targets and one
 /// matching the new rule's, and only the earlier rule's `Block` may win.
 #[test]
