@@ -75,10 +75,10 @@ const EMBEDDED_ALLOWLIST: &str = include_str!("../rules/allowlist.toml");
 pub(crate) enum RulesError {
     /// The input is not valid TOML at all. Carries `toml::de::Error`'s
     /// message as a `String`, not the error type itself — `toml` is a
-    /// parsing-driver detail of this module alone (`coding-guidelines/
-    /// principles.md`, "adapters return domain-meaningful errors, not
-    /// driver errors"); this module's own docs (above) already claim no
-    /// TOML type leaves it.
+    /// parsing-driver detail of this module alone
+    /// (`coding-guidelines/principles.md`, "adapters return
+    /// domain-meaningful errors, not driver errors"); this module's own
+    /// docs (above) already claim no TOML type leaves it.
     #[error("invalid TOML: {0}")]
     Syntax(String),
     /// A rule failed a semantic check (empty id, empty reason, a matcher
