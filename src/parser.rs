@@ -148,6 +148,74 @@ fn is_token_boundary(byte: u8) -> bool {
     )
 }
 
+/// Issue #405: inserts a single space between an io-redirect digit run
+/// (`45>out`, `2<in`) and the `<`/`>` it precedes, wherever that digit
+/// run's value overflows `i32` — the exact shape that panics
+/// brush-parser 0.4.0's io-number rule (`peg.rs:695`,
+/// `parse::<i32>().unwrap()`). Unlike an ordinary parser panic elsewhere
+/// in this module, this one happens inside [`BrushParser::parse_program`]
+/// itself (io-number recognition is a whole-command-line grammar
+/// construct, not a per-word one [`convert_word`] could pre-empt the way
+/// [`split_overflowing_leading_tilde`] does) — [`catch_parser_panic`]
+/// there converts the panic into a generic syntax error for the ENTIRE
+/// command line, so an attacker appending ~25 bytes of this shape after
+/// an otherwise-`Block`-worthy command (`rm -rf / 99999999999999999999>x`)
+/// silently downgrades the verdict to `Ask`.
+///
+/// A digit run separated from `<`/`>` by whitespace is not an io-number at
+/// all — it is an ordinary argument word followed by an unprefixed
+/// redirect (empirically confirmed: `rm -rf / 99999999999999999999 >x`
+/// does not panic, and the huge digit run parses as a normal literal
+/// argument) — so inserting exactly one space converts this shape into
+/// one brush already parses correctly, without ever needing to guess at
+/// or alter the digit run's own value. Purely additive: the digit run's
+/// text is preserved byte-for-byte, now visible in the resulting argv as
+/// an ordinary word rather than silently discarding the whole command
+/// line's parse.
+///
+/// Requires a token boundary (or start-of-string) immediately before the
+/// digit run, matching brush's own io-number recognition — otherwise a
+/// digit run glued to a preceding word (`abc123>x`) would be
+/// misidentified; `123` there is part of the word `abc123`, never an
+/// io-number candidate in the first place, and inserting a space there
+/// would change that word's own spelling.
+///
+/// `Cow::Borrowed` in the overwhelmingly common case (no such shape
+/// present) — no allocation, no copy — matching the hot-path-avoidance
+/// discipline the raw pre-scan functions in this module already follow.
+fn neutralize_overflowing_io_redirect_numbers(command: &str) -> std::borrow::Cow<'_, str> {
+    let bytes = command.as_bytes();
+    let mut digit_start: Option<usize> = None;
+    let mut rewritten: Option<String> = None;
+    let mut last_copied = 0;
+
+    for (i, &byte) in bytes.iter().enumerate() {
+        if byte.is_ascii_digit() {
+            if digit_start.is_none() && (i == 0 || is_token_boundary(bytes[i - 1])) {
+                digit_start = Some(i);
+            }
+            continue;
+        }
+        if let Some(start) = digit_start.take()
+            && (byte == b'<' || byte == b'>')
+            && command[start..i].parse::<i32>().is_err()
+        {
+            let out = rewritten.get_or_insert_with(String::new);
+            out.push_str(&command[last_copied..i]);
+            out.push(' ');
+            last_copied = i;
+        }
+    }
+
+    match rewritten {
+        Some(mut out) => {
+            out.push_str(&command[last_copied..]);
+            std::borrow::Cow::Owned(out)
+        }
+        None => std::borrow::Cow::Borrowed(command),
+    }
+}
+
 /// Rejects `command` if its `{`/`}` nesting depth exceeds
 /// [`MAX_RAW_BRACE_NESTING_DEPTH`], its `(`/`)` nesting depth exceeds
 /// [`MAX_RAW_PAREN_NESTING_DEPTH`], its total count of [`NESTING_KEYWORDS`]
@@ -324,6 +392,8 @@ fn check_extended_test_op_count(extended_test_op_count: &mut usize) -> Result<()
 /// `analyze()` (`src/lib.rs`) calls this via `src/gate.rs` — stage 1 of the
 /// pipeline (plan.md §1.1).
 pub(crate) fn parse(command: &str) -> Result<CommandLine, ParseError> {
+    let command = neutralize_overflowing_io_redirect_numbers(command);
+    let command = command.as_ref();
     reject_excessive_raw_nesting(command)?;
 
     let mut parser = BrushParser::new(Cursor::new(command.as_bytes()), &parser_options());
@@ -869,6 +939,18 @@ fn convert_word(word: &bast::Word) -> Result<Word, ParseError> {
     if !raw.contains('{') {
         return Ok(Word(convert_word_text(raw)?));
     }
+    // Issue #405: pre-empt, rather than let `parse_brace_expansions` panic
+    // on, a `{N..M}`/`{N..M..S}` brace-range endpoint overflowing `i64` —
+    // routes straight to the SAME rejection [`convert_brace_members`]
+    // already gives every brace range regardless of overflow (its
+    // `NumberSequence`/`CharSequence` arms are unconditionally
+    // `Unsupported`), so this changes no decision, only avoids reaching
+    // the panic at all.
+    if word_contains_overflowing_brace_range(raw) {
+        return Err(ParseError::unsupported(
+            "brace range expansion ({1..5} / {a..z})",
+        ));
+    }
     let brace_segments =
         catch_parser_panic(|| bword::parse_brace_expansions(raw, &parser_options()))?.map_err(
             |err| ParseError::syntax(format!("brace-expansion parse of {raw:?}: {err}")),
@@ -891,6 +973,65 @@ fn convert_word(word: &bast::Word) -> Result<Word, ParseError> {
 
 fn is_brace_expr(segment: &bword::BraceExpressionOrText) -> bool {
     matches!(segment, bword::BraceExpressionOrText::Expr(_))
+}
+
+/// True if `text` contains a `{<endpoint>..<endpoint>[..<endpoint>]}`
+/// brace-range whose start, end, or increment field overflows `i64` — the
+/// exact shape that panics brush-parser 0.4.0's brace-sequence parser
+/// (`word.rs:708`, `parse::<i64>().unwrap()`). Scans every `{` in `text`
+/// (not just a leading one — a word can contain more than one brace
+/// group), each independently a candidate range start.
+fn word_contains_overflowing_brace_range(text: &str) -> bool {
+    let mut search_from = 0;
+    while let Some(rel) = text[search_from..].find('{') {
+        let after_brace = search_from + rel + 1;
+        if brace_range_overflows(&text[after_brace..]) {
+            return true;
+        }
+        search_from = after_brace;
+    }
+    false
+}
+
+/// Given the text immediately following a `{`, checks whether it opens a
+/// `<endpoint>..<endpoint>[..<endpoint>]}` range whose endpoint(s)
+/// overflow `i64`. Not itself a full range-syntax validator — a
+/// non-overflowing or malformed range simply returns `false` here and
+/// falls through to brush-parser's own (panic-free) handling, since
+/// [`word_contains_overflowing_brace_range`] only needs to catch the exact
+/// shape that panics, not validate range syntax in general.
+fn brace_range_overflows(after_brace: &str) -> bool {
+    let Some((first_overflows, rest)) = parse_brace_range_endpoint(after_brace) else {
+        return false;
+    };
+    let Some(rest) = rest.strip_prefix("..") else {
+        return false;
+    };
+    let Some((second_overflows, rest)) = parse_brace_range_endpoint(rest) else {
+        return false;
+    };
+    if first_overflows || second_overflows {
+        return true;
+    }
+    let Some(rest) = rest.strip_prefix("..") else {
+        return false;
+    };
+    matches!(parse_brace_range_endpoint(rest), Some((true, _)))
+}
+
+/// Parses an optional `-` then an ASCII digit run from the start of `s`,
+/// returning `(overflows_i64, remainder_after_the_digits)`. `None` if `s`
+/// doesn't start with a digit (after an optional `-`) at all — not itself
+/// a range endpoint.
+fn parse_brace_range_endpoint(s: &str) -> Option<(bool, &str)> {
+    let unsigned = s.strip_prefix('-').unwrap_or(s);
+    let digit_len = unsigned.bytes().take_while(u8::is_ascii_digit).count();
+    if digit_len == 0 {
+        return None;
+    }
+    let sign_len = s.len() - unsigned.len();
+    let end = sign_len + digit_len;
+    Some((s[..end].parse::<i64>().is_err(), &s[end..]))
 }
 
 /// Defense-in-depth companion to [`reject_excessive_raw_nesting`] (issue
@@ -1336,12 +1477,83 @@ mod tests {
         assert!(parse("echo a{9223372036854775808b").is_err());
     }
 
-    // crash-fuzzer finding: brush-parser 0.4.0 panics on a redirection
-    // io-number past `i32::MAX` (`parser/peg.rs:695`,
-    // `parse::<i32>().unwrap()`).
+    // crash-fuzzer finding (issue #405): brush-parser 0.4.0 panics on a
+    // redirection io-number past `i32::MAX` (`parser/peg.rs:695`,
+    // `parse::<i32>().unwrap()`), which — unlike the brace-range shape
+    // above — is not itself an unsupported construct, so simply
+    // containing the panic would still leave an otherwise-parseable
+    // command downgraded to a generic syntax-error `Ask`.
+    // `neutralize_overflowing_io_redirect_numbers` inserts a space before
+    // the panic-triggering digit run, so this asserts the parse actually
+    // SUCCEEDS: the huge digit run survives as an ordinary literal
+    // argument word, and the redirect itself parses as an unprefixed
+    // (default-fd) `>` targeting `f`.
     #[test]
-    fn redirection_io_number_overflow_is_a_parse_error_not_a_panic() {
-        assert!(parse("echo 2147483648>f").is_err());
+    fn redirection_io_number_overflow_parses_as_a_literal_argument_not_a_panic() {
+        let cmd = parse_ok("echo 2147483648>f");
+        let simple = simple(&cmd.first.first);
+        assert_eq!(
+            simple.words[1].0,
+            vec![WordPiece::Literal("2147483648".to_string())]
+        );
+        match &simple.redirections[0] {
+            Redirection::File { kind, target } => {
+                assert_eq!(*kind, FileRedirectionKind::Output);
+                assert_eq!(target.0, vec![WordPiece::Literal("f".to_string())]);
+            }
+            other => panic!("expected a File redirection, got {other:?}"),
+        }
+    }
+
+    // The whole point of issue #405: appending this shape after an
+    // otherwise-Block-worthy command must not downgrade the verdict —
+    // pinned at the `parse()` level, since `crate::gate` is what actually
+    // reaches the Block/Ask decision from this AST.
+    #[test]
+    fn redirection_io_number_overflow_does_not_swallow_a_sibling_word() {
+        let cmd = parse_ok("rm -rf / 99999999999999999999>x");
+        let words = &simple(&cmd.first.first).words;
+        assert_eq!(words[0].0, vec![WordPiece::Literal("rm".to_string())]);
+        assert_eq!(words[1].0, vec![WordPiece::Literal("-rf".to_string())]);
+        assert_eq!(words[2].0, vec![WordPiece::Literal("/".to_string())]);
+        assert_eq!(
+            words[3].0,
+            vec![WordPiece::Literal("99999999999999999999".to_string())]
+        );
+    }
+
+    // A digit run already separated from `<`/`>` by whitespace is not an
+    // io-number shape in the first place (contiguity, per brush's own
+    // grammar, is required) — the rewrite must not touch it.
+    #[test]
+    fn io_number_overflow_with_pre_existing_space_is_left_alone() {
+        assert_eq!(
+            neutralize_overflowing_io_redirect_numbers("echo 99999999999999999999 >f"),
+            "echo 99999999999999999999 >f"
+        );
+    }
+
+    // A digit run glued to a PRECEDING word is never an io-number
+    // candidate (io-number requires the whole token to be digits) — the
+    // overflow-adjacent `>` here must not be touched.
+    #[test]
+    fn io_number_overflow_glued_to_a_preceding_word_is_left_alone() {
+        assert_eq!(
+            neutralize_overflowing_io_redirect_numbers("echo abc99999999999999999999>f"),
+            "echo abc99999999999999999999>f"
+        );
+    }
+
+    // A digit run that fits i32 must never be rewritten, even right at
+    // i32::MAX — the ordinary, non-overflowing io-number case is
+    // unaffected by this pre-scan.
+    #[test]
+    fn io_number_at_i32_max_is_left_alone() {
+        let command = format!("echo {}>f", i32::MAX);
+        assert_eq!(
+            neutralize_overflowing_io_redirect_numbers(&command),
+            command
+        );
     }
 
     // ---- 15. brace expansion ----
