@@ -280,66 +280,60 @@ impl Policy {
         let allowlist = Allowlist::embedded()?;
 
         let mut decision_log_path: Option<PathBuf> = None;
+        // `symlink_metadata` (`lstat`), not `read_to_string`'s own error,
+        // decides "nothing configured" vs. "something's there but broken"
+        // (issue #39): a dangling symlink makes `read_to_string` fail with
+        // the same `NotFound` kind a genuinely absent path does, so only a
+        // clean `NotFound` from `lstat` itself -- meaning there truly is no
+        // file, symlink, or anything else at this path -- gets the silent
+        // embedded-only fallback, and only for the (non-explicit) default
+        // path (the guard below): an explicit `SHGUARD_CONFIG` naming a
+        // `NotFound` path instead falls through to the plain `Err(err)` arm
+        // and returns `ConfigError::Io`, the same as any other `lstat`
+        // failure.
         let (rules, allowlist) = match &path {
-            Some(path) => {
-                // `symlink_metadata` (`lstat`), not `read_to_string`'s own
-                // error, decides "nothing configured" vs. "something's
-                // there but broken" (issue #39): a dangling symlink makes
-                // `read_to_string` fail with the same `NotFound` kind a
-                // genuinely absent path does, so only a clean `NotFound`
-                // from `lstat` itself -- meaning there truly is no file,
-                // symlink, or anything else at this path -- gets the
-                // silent embedded-only fallback, and only for the
-                // (non-explicit) default path.
-                let lstat = std::fs::symlink_metadata(path);
-                let truly_absent =
-                    matches!(&lstat, Err(err) if err.kind() == std::io::ErrorKind::NotFound);
-                if truly_absent && !explicit {
+            Some(path) => match std::fs::symlink_metadata(path) {
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound && !explicit => {
                     (blocklist, allowlist)
-                } else if let Err(err) = lstat {
+                }
+                Err(err) => {
                     return Err(ConfigError::Io {
                         path: path.clone(),
                         source: err,
                     });
-                } else {
-                    match std::fs::read_to_string(path) {
-                        Ok(contents) => {
-                            let user_config = UserConfig::parse(&contents)?;
-                            // Read off the real config-file parse alone,
-                            // before `user_config` moves into
-                            // `merge_user_config` below — the
-                            // self-protection-only merges further down
-                            // never set this key, so there is nothing to
-                            // fold across multiple merges the way
-                            // `escalation_floor` needs `.max()` for.
-                            decision_log_path = user_config.decision_log_path().map(PathBuf::from);
-                            merge_user_config(blocklist, allowlist, user_config)?
-                        }
-                        Err(err) => {
-                            return Err(ConfigError::Io {
-                                path: path.clone(),
-                                source: err,
-                            });
-                        }
-                    }
                 }
-            }
+                Ok(_) => match std::fs::read_to_string(path) {
+                    Ok(contents) => {
+                        let user_config = UserConfig::parse(&contents)?;
+                        // Read off the real config-file parse alone, before
+                        // `user_config` moves into `merge_user_config`
+                        // below — the self-protection-only merges further
+                        // down never set this key, so there is nothing to
+                        // fold across multiple merges the way
+                        // `escalation_floor` needs `.max()` for.
+                        decision_log_path = user_config.decision_log_path().map(PathBuf::from);
+                        merge_user_config(blocklist, allowlist, user_config)?
+                    }
+                    Err(err) => {
+                        return Err(ConfigError::Io {
+                            path: path.clone(),
+                            source: err,
+                        });
+                    }
+                },
+            },
             None => (blocklist, allowlist),
         };
 
-        let (rules, allowlist) = match &path {
-            Some(path) => {
-                let mut rules = rules;
-                let mut allowlist = allowlist;
-                for (suffix, config_dir) in self_protection_directories(path)? {
-                    let toml = self_protection_toml(&config_dir.to_string_lossy(), &suffix);
-                    let self_protection = UserConfig::parse(&toml)?;
-                    (rules, allowlist) = merge_user_config(rules, allowlist, self_protection)?;
-                }
-                (rules, allowlist)
+        let mut rules = rules;
+        let mut allowlist = allowlist;
+        if let Some(path) = &path {
+            for (suffix, config_dir) in self_protection_directories(path)? {
+                let toml = self_protection_toml(&config_dir.to_string_lossy(), &suffix);
+                let self_protection = UserConfig::parse(&toml)?;
+                (rules, allowlist) = merge_user_config(rules, allowlist, self_protection)?;
             }
-            None => (rules, allowlist),
-        };
+        }
 
         // Caught here rather than left to `decision_log::append`'s own
         // fail-open-on-write-failure posture (issue #108): an

@@ -2496,12 +2496,46 @@ fn escalation_floor_contribution(
 /// `escalation_floor`, a mere `Ask` — before [`fold_floors`] runs; today
 /// only rule 6a's inner-command case (`sudo bash -c 'ls'`). Folds via
 /// `decision.max(floor_decision)`, the same as [`fold_floors`]'s own
-/// handling, not an Allow-only lift: a verdict already at or above the
-/// configured floor passes through completely untouched (keeping its own
-/// reason/matched-rule audit trail); one below it is replaced with a new
-/// verdict at the floor's decision, combining the floor's reason with the
-/// verdict's own reason when it had one (an Allow verdict has none to
-/// combine).
+/// handling: a verdict already at or above `floor_decision` passes through
+/// completely untouched (keeping its own reason/matched-rule audit trail);
+/// one below it is replaced with a new verdict at the floor's decision,
+/// combining `floor_reason` with the verdict's own reason when it had one
+/// (an `Allow` verdict has none to combine). `deny_message` is
+/// unconditionally attached to a replacement verdict via
+/// [`Verdict::with_deny_message`] — a no-op for the many callers that never
+/// have one (issue #202's callers do; see [`apply_command_ascent_descent_floor`]'s
+/// docs for why those attach one at all) — and left untouched (not cleared)
+/// on the pass-through path.
+///
+/// The single core every `apply_*_floor` function in this module delegates
+/// to. Each keeps its own name and doc comment so its call site stays
+/// self-documenting; only the mechanics live here.
+fn apply_floor(
+    verdict: Verdict,
+    floor_decision: Decision,
+    floor_reason: String,
+    deny_message: Option<DenyMessage>,
+) -> Verdict {
+    if verdict.decision() >= floor_decision {
+        return verdict;
+    }
+    let argv = verdict.normalized_argv().to_vec();
+    let reason = match verdict.reason() {
+        Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
+        None => floor_reason,
+    };
+    match floor_decision {
+        Decision::Block => Verdict::block(Reason::new(reason), argv, None),
+        Decision::Ask | Decision::Allow => Verdict::ask(Reason::new(reason), argv),
+    }
+    .with_deny_message(deny_message)
+}
+
+/// Applies the escalation floor (rule 10) to a verdict produced on an
+/// early-return path that can yield `Allow` — or, under a `deny`-configured
+/// `escalation_floor`, a mere `Ask` — before [`fold_floors`] runs; today
+/// only rule 6a's inner-command case (`sudo bash -c 'ls'`). See
+/// [`apply_floor`] for the shared max-lift mechanics.
 fn apply_escalation_floor(
     verdict: Verdict,
     escalation_floor: Option<(Decision, String)>,
@@ -2509,70 +2543,33 @@ fn apply_escalation_floor(
     let Some((floor_decision, floor_reason)) = escalation_floor else {
         return verdict;
     };
-    if verdict.decision() >= floor_decision {
-        return verdict;
-    }
-    let argv = verdict.normalized_argv().to_vec();
-    let reason = match verdict.reason() {
-        Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
-        None => floor_reason,
-    };
-    match floor_decision {
-        Decision::Block => Verdict::block(Reason::new(reason), argv, None),
-        Decision::Ask | Decision::Allow => Verdict::ask(Reason::new(reason), argv),
-    }
+    apply_floor(verdict, floor_decision, floor_reason, None)
 }
 
 /// Applies rule 11's expansion-position floor
-/// ([`scan_expansion_positions`]'s `floor` field) to `verdict` — the exact
-/// same `decision.max(floor_decision)` max-lift [`apply_escalation_floor`]
-/// already uses, kept as its own named function rather than a shared helper
+/// ([`scan_expansion_positions`]'s `floor` field) to `verdict`, kept as its
+/// own named function rather than inlining [`apply_floor`] at the call site
 /// so each floor's call site stays self-documenting (matching this module's
 /// existing one-function-per-floor convention: `apply_allowlist_downgrade`,
-/// `apply_ask_floor`, `apply_escalation_floor`). A verdict already at or
-/// above the floor passes through untouched, keeping its own reason/
-/// matched-rule audit trail; one below it is replaced with a verdict at the
-/// floor's decision, combining the floor's reason with the verdict's own
-/// reason when it had one (a plain `Allow` has none to combine).
+/// `apply_ask_floor`, `apply_escalation_floor`). See [`apply_floor`] for the
+/// shared max-lift mechanics.
 fn apply_expansion_floor(verdict: Verdict, floor: Option<(Decision, String)>) -> Verdict {
     let Some((floor_decision, floor_reason)) = floor else {
         return verdict;
     };
-    if verdict.decision() >= floor_decision {
-        return verdict;
-    }
-    let argv = verdict.normalized_argv().to_vec();
-    let reason = match verdict.reason() {
-        Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
-        None => floor_reason,
-    };
-    match floor_decision {
-        Decision::Block => Verdict::block(Reason::new(reason), argv, None),
-        Decision::Ask | Decision::Allow => Verdict::ask(Reason::new(reason), argv),
-    }
+    apply_floor(verdict, floor_decision, floor_reason, None)
 }
 
 /// Applies [`scan_recursable_slots`]'s combined floor (issues #64/#66/#72:
 /// the flock/su `-c` shell-string floor and the `find -exec`/`-execdir`/
-/// `-ok`/`-okdir` direct-argv floor) to `verdict` (see
-/// [`apply_expansion_floor`]'s docs for the shared max-lift mechanics and
-/// why each floor gets its own function).
+/// `-ok`/`-okdir` direct-argv floor) to `verdict` (see [`apply_floor`]'s
+/// docs for the shared max-lift mechanics and why each floor gets its own
+/// function).
 fn apply_recursable_floor(verdict: Verdict, floor: Option<(Decision, String)>) -> Verdict {
     let Some((floor_decision, floor_reason)) = floor else {
         return verdict;
     };
-    if verdict.decision() >= floor_decision {
-        return verdict;
-    }
-    let argv = verdict.normalized_argv().to_vec();
-    let reason = match verdict.reason() {
-        Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
-        None => floor_reason,
-    };
-    match floor_decision {
-        Decision::Block => Verdict::block(Reason::new(reason), argv, None),
-        Decision::Ask | Decision::Allow => Verdict::ask(Reason::new(reason), argv),
-    }
+    apply_floor(verdict, floor_decision, floor_reason, None)
 }
 
 /// Issue #67's follow-up: `Some(Ask, reason)` when `argv`
@@ -2609,24 +2606,13 @@ fn scan_tar_dashless_unmodeled_floor(argv: &[NormalizedWord]) -> Option<(Decisio
 }
 
 /// Applies [`scan_tar_dashless_unmodeled_floor`]'s floor to `verdict` (see
-/// [`apply_expansion_floor`]'s docs for the shared max-lift mechanics and
-/// why each floor gets its own function).
+/// [`apply_floor`]'s docs for the shared max-lift mechanics and why each
+/// floor gets its own function).
 fn apply_tar_dashless_floor(verdict: Verdict, floor: Option<(Decision, String)>) -> Verdict {
     let Some((floor_decision, floor_reason)) = floor else {
         return verdict;
     };
-    if verdict.decision() >= floor_decision {
-        return verdict;
-    }
-    let argv = verdict.normalized_argv().to_vec();
-    let reason = match verdict.reason() {
-        Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
-        None => floor_reason,
-    };
-    match floor_decision {
-        Decision::Block => Verdict::block(Reason::new(reason), argv, None),
-        Decision::Ask | Decision::Allow => Verdict::ask(Reason::new(reason), argv),
-    }
+    apply_floor(verdict, floor_decision, floor_reason, None)
 }
 
 /// Issue #78: `Some(Ask, reason)` when `argv` matches a rule's command+
@@ -2664,8 +2650,8 @@ fn scan_ascent_descent_floor(
 }
 
 /// Applies [`scan_ascent_descent_floor`]'s floor to `verdict` — same
-/// max-lift mechanics as [`apply_expansion_floor`], but a distinct
-/// function from [`apply_ascent_descent_floor`] (which three sibling,
+/// max-lift mechanics as [`apply_floor`], but a distinct function from
+/// [`apply_ascent_descent_floor`] (which three sibling,
 /// `RedirectRule`-based floors also happen to share, since `RedirectRule`
 /// has no `deny_message` of its own to carry): [`scan_ascent_descent_floor`]
 /// matches a `CommandRule`, which does, so this attaches it (issue #202) to
@@ -2679,19 +2665,7 @@ fn apply_command_ascent_descent_floor(
     let Some((floor_decision, floor_reason, deny_message)) = floor else {
         return verdict;
     };
-    if verdict.decision() >= floor_decision {
-        return verdict;
-    }
-    let argv = verdict.normalized_argv().to_vec();
-    let reason = match verdict.reason() {
-        Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
-        None => floor_reason,
-    };
-    match floor_decision {
-        Decision::Block => Verdict::block(Reason::new(reason), argv, None),
-        Decision::Ask | Decision::Allow => Verdict::ask(Reason::new(reason), argv),
-    }
-    .with_deny_message(deny_message)
+    apply_floor(verdict, floor_decision, floor_reason, deny_message)
 }
 
 /// Applies a `(Decision, reason)` floor to `verdict` — shared by
@@ -2701,24 +2675,13 @@ fn apply_command_ascent_descent_floor(
 /// `CommandRule` (see [`apply_command_ascent_descent_floor`]'s docs for the
 /// sibling that carries a `CommandRule`'s `deny_message` instead) —
 /// `RedirectRule` has no `deny_message` field, so there is nothing to
-/// attach here. See [`apply_expansion_floor`]'s docs for the shared
-/// max-lift mechanics.
+/// attach here. See [`apply_floor`]'s docs for the shared max-lift
+/// mechanics.
 fn apply_ascent_descent_floor(verdict: Verdict, floor: Option<(Decision, String)>) -> Verdict {
     let Some((floor_decision, floor_reason)) = floor else {
         return verdict;
     };
-    if verdict.decision() >= floor_decision {
-        return verdict;
-    }
-    let argv = verdict.normalized_argv().to_vec();
-    let reason = match verdict.reason() {
-        Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
-        None => floor_reason,
-    };
-    match floor_decision {
-        Decision::Block => Verdict::block(Reason::new(reason), argv, None),
-        Decision::Ask | Decision::Allow => Verdict::ask(Reason::new(reason), argv),
-    }
+    apply_floor(verdict, floor_decision, floor_reason, None)
 }
 
 /// Issue #80: `Some(Ask, reason)` when `argv` matches a rule's command+
@@ -2756,7 +2719,7 @@ fn scan_named_user_home_floor(
 }
 
 /// Applies [`scan_named_user_home_floor`]'s floor to `verdict` (see
-/// [`apply_expansion_floor`]'s docs for the shared max-lift mechanics and
+/// [`apply_floor`]'s docs for the shared max-lift mechanics and
 /// why each floor gets its own function; see
 /// [`apply_command_ascent_descent_floor`]'s docs for why the floor's own
 /// `deny_message` — issue #202 — is unconditionally attached).
@@ -2767,19 +2730,7 @@ fn apply_named_user_home_floor(
     let Some((floor_decision, floor_reason, deny_message)) = floor else {
         return verdict;
     };
-    if verdict.decision() >= floor_decision {
-        return verdict;
-    }
-    let argv = verdict.normalized_argv().to_vec();
-    let reason = match verdict.reason() {
-        Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
-        None => floor_reason,
-    };
-    match floor_decision {
-        Decision::Block => Verdict::block(Reason::new(reason), argv, None),
-        Decision::Ask | Decision::Allow => Verdict::ask(Reason::new(reason), argv),
-    }
-    .with_deny_message(deny_message)
+    apply_floor(verdict, floor_decision, floor_reason, deny_message)
 }
 
 /// Issue #88: `Some(Ask, reason)` when `argv` matches a rule's command+
@@ -2826,7 +2777,7 @@ fn scan_dirstack_tilde_floor(
 }
 
 /// Applies [`scan_dirstack_tilde_floor`]'s floor to `verdict` (see
-/// [`apply_expansion_floor`]'s docs for the shared max-lift mechanics and
+/// [`apply_floor`]'s docs for the shared max-lift mechanics and
 /// why each floor gets its own function; see
 /// [`apply_command_ascent_descent_floor`]'s docs for why the floor's own
 /// `deny_message` — issue #202 — is unconditionally attached).
@@ -2837,19 +2788,7 @@ fn apply_dirstack_tilde_floor(
     let Some((floor_decision, floor_reason, deny_message)) = floor else {
         return verdict;
     };
-    if verdict.decision() >= floor_decision {
-        return verdict;
-    }
-    let argv = verdict.normalized_argv().to_vec();
-    let reason = match verdict.reason() {
-        Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
-        None => floor_reason,
-    };
-    match floor_decision {
-        Decision::Block => Verdict::block(Reason::new(reason), argv, None),
-        Decision::Ask | Decision::Allow => Verdict::ask(Reason::new(reason), argv),
-    }
-    .with_deny_message(deny_message)
+    apply_floor(verdict, floor_decision, floor_reason, deny_message)
 }
 
 /// Issue #115: `Some(Ask, reason)` when `argv` matches a rule's command+
@@ -2888,7 +2827,7 @@ fn scan_directory_equals_tilde_floor(
 }
 
 /// Applies [`scan_directory_equals_tilde_floor`]'s floor to `verdict` (see
-/// [`apply_expansion_floor`]'s docs for the shared max-lift mechanics and
+/// [`apply_floor`]'s docs for the shared max-lift mechanics and
 /// why each floor gets its own function; see
 /// [`apply_command_ascent_descent_floor`]'s docs for why the floor's own
 /// `deny_message` — issue #202 — is unconditionally attached).
@@ -2899,19 +2838,7 @@ fn apply_directory_equals_tilde_floor(
     let Some((floor_decision, floor_reason, deny_message)) = floor else {
         return verdict;
     };
-    if verdict.decision() >= floor_decision {
-        return verdict;
-    }
-    let argv = verdict.normalized_argv().to_vec();
-    let reason = match verdict.reason() {
-        Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
-        None => floor_reason,
-    };
-    match floor_decision {
-        Decision::Block => Verdict::block(Reason::new(reason), argv, None),
-        Decision::Ask | Decision::Allow => Verdict::ask(Reason::new(reason), argv),
-    }
-    .with_deny_message(deny_message)
+    apply_floor(verdict, floor_decision, floor_reason, deny_message)
 }
 
 /// Issue #134: `Some(Ask, reason)` when `argv` matches a rule's command+
@@ -2948,7 +2875,7 @@ fn scan_dirstack_equal_subst_floor(
 }
 
 /// Applies [`scan_dirstack_equal_subst_floor`]'s floor to `verdict` (see
-/// [`apply_expansion_floor`]'s docs for the shared max-lift mechanics and
+/// [`apply_floor`]'s docs for the shared max-lift mechanics and
 /// why each floor gets its own function; see
 /// [`apply_command_ascent_descent_floor`]'s docs for why the floor's own
 /// `deny_message` — issue #202 — is unconditionally attached).
@@ -2959,25 +2886,13 @@ fn apply_dirstack_equal_subst_floor(
     let Some((floor_decision, floor_reason, deny_message)) = floor else {
         return verdict;
     };
-    if verdict.decision() >= floor_decision {
-        return verdict;
-    }
-    let argv = verdict.normalized_argv().to_vec();
-    let reason = match verdict.reason() {
-        Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
-        None => floor_reason,
-    };
-    match floor_decision {
-        Decision::Block => Verdict::block(Reason::new(reason), argv, None),
-        Decision::Ask | Decision::Allow => Verdict::ask(Reason::new(reason), argv),
-    }
-    .with_deny_message(deny_message)
+    apply_floor(verdict, floor_decision, floor_reason, deny_message)
 }
 
 /// Applies issue #77's leftover-alternative substitution floor
 /// (`evaluate_leftover_alternative_substitutions`'s result) to a verdict —
-/// the same max-lift mechanics as [`apply_expansion_floor`]. Unlike the
-/// other floors here, this one is applied at MULTIPLE call sites (rules
+/// the same max-lift mechanics as [`apply_floor`]. Unlike the other floors
+/// here, this one is applied at MULTIPLE call sites (rules
 /// 1/2/6a's early returns, plus folded into [`fold_floors`]'s own
 /// `substitution_result`) rather than just once before `fold_floors` — see
 /// [`evaluate_simple_command_core`]'s `leftover_floor` binding for why:
@@ -3378,36 +3293,25 @@ fn evaluate_dash_c(
             return Some(match rest_words.get(i + 1) {
                 Some(script_word) => match script_word.resolution() {
                     Resolution::Resolved(script) => {
-                        let inner = analyze_at_depth(
+                        let recursed = recurse_shell_string(
                             script,
-                            depth + 1,
+                            outer_argv.clone(),
+                            &format!(
+                                "`{interpreter}`'s `-c` flag position could not be statically \
+                                 resolved, but a trailing word"
+                            ),
+                            depth,
                             rules,
                             allowlist,
                             CwdState::seed(cwd.clone()),
                         );
-                        let reason = format!(
-                            "`{interpreter}`'s `-c` flag position could not be statically \
-                             resolved, but a trailing word recurses through the full pipeline; \
-                             inner decision: {:?}{}",
-                            inner.decision(),
-                            inner
-                                .reason()
-                                .map(|r| format!(" ({})", r.as_str()))
-                                .unwrap_or_default()
-                        );
-                        match inner.decision() {
-                            Decision::Block => Verdict::block(
-                                Reason::new(reason),
-                                outer_argv,
-                                inner.matched_rule().cloned(),
-                            )
-                            .with_deny_message(inner.deny_message().cloned()),
-                            Decision::Ask => Verdict::ask(Reason::new(reason), outer_argv)
-                                .with_deny_message(inner.deny_message().cloned()),
+                        match recursed.decision() {
                             // An inner Allow does not clear the outer
                             // uncertainty — the flag position itself is
                             // still unresolvable, so this floors to Ask
-                            // rather than propagating the inner Allow.
+                            // rather than propagating the inner Allow
+                            // `recurse_shell_string` would otherwise
+                            // return.
                             Decision::Allow => Verdict::ask(
                                 Reason::new(format!(
                                     "`{interpreter}`'s `-c` flag position could not be \
@@ -3416,6 +3320,7 @@ fn evaluate_dash_c(
                                 )),
                                 outer_argv,
                             ),
+                            Decision::Ask | Decision::Block => recursed,
                         }
                     }
                     Resolution::Unresolvable(_) => Verdict::ask(
@@ -4499,7 +4404,7 @@ fn scan_recursable_slots(
                         // (`SIGABRT`, unrecoverable even by
                         // `catch_unwind`, per `src/bin/shguard.rs`'s module
                         // docs) is a fail-OPEN condition: the hook produces
-                        // no decision at all. The explicit check below
+                        // no decision at all. `recurse_find_exec_payload`
                         // spends the SAME budget every other channel
                         // already respects, rather than inventing a new
                         // counter — mirrors `analyze_at_depth`'s own
@@ -4507,101 +4412,14 @@ fn scan_recursable_slots(
                         // (that function is entered with `depth + 1`, so
                         // checking `depth >= MAX_SUBSTITUTION_DEPTH` here,
                         // before incrementing, is equivalent).
-                        if depth >= MAX_SUBSTITUTION_DEPTH {
-                            raise_expansion_floor(
-                                &mut floor,
-                                Decision::Ask,
-                                format!(
-                                    "`find`'s `-exec`/`-execdir`/`-ok`/`-okdir` payload nesting \
-                                     exceeds the recursion depth cap ({MAX_SUBSTITUTION_DEPTH}); \
-                                     refusing to keep recursing (fail-closed denial-of-service \
-                                     guard, see gate.rs module docs)"
-                                ),
-                            );
-                        } else {
-                            let synthetic = SimpleCommand {
-                                assignments: Vec::new(),
-                                words: command.words[span_start..span_end].to_vec(),
-                                redirections: Vec::new(),
-                            };
-                            // Issue #196: a payload that directly execs a
-                            // `SHELL_INTERPRETERS` member with no `-c`
-                            // before its first operand spawns a shell that
-                            // either reads stdin (no operand) or runs the
-                            // operand as a script file (unverifiable
-                            // statically) — rule 6a's own `evaluate_dash_c`
-                            // returns `None` for exactly this shape ("not
-                            // this shape", not "safe"), and nothing else
-                            // below fills the gap since the recursed
-                            // payload alone (`inner`, below) matches no
-                            // blocklist rule either. The flag search is
-                            // position-aware — `sh {} -c` demotes `-c` to a
-                            // positional argument of the found file, the
-                            // same as a real shell's option parser — and
-                            // Block is reserved for the no-operand shape;
-                            // an operand present downgrades to Ask (an
-                            // allowlist-launderable posture, unlike Block)
-                            // since "run my found scripts" is a real,
-                            // opt-in workflow. Scoped to `find`'s DirectArgv
-                            // payload only — a bare top-level `sh`
-                            // invocation is unaffected.
-                            let payload_argv = normalize::normalize_argv(&synthetic);
-                            if let Some((name, rest_words)) =
-                                crate::rules::effective_command(&payload_argv)
-                                && crate::rules::is_shell_interpreter(name)
-                            {
-                                match scan_for_dash_c_before_operand(rest_words, name) {
-                                    DashCPosition::FlagFound | DashCPosition::Uncertain => {}
-                                    DashCPosition::OperandNoFlag => {
-                                        raise_expansion_floor(
-                                            &mut floor,
-                                            Decision::Ask,
-                                            format!(
-                                                "`find`'s `-exec`/`-execdir`/`-ok`/`-okdir` \
-                                                 payload invokes `{name}` directly with an \
-                                                 operand but no `-c` script flag before it; the \
-                                                 shell runs that operand as a script, which is \
-                                                 not statically verifiable"
-                                            ),
-                                        );
-                                    }
-                                    DashCPosition::Absent => {
-                                        raise_expansion_floor(
-                                            &mut floor,
-                                            Decision::Block,
-                                            format!(
-                                                "`find`'s `-exec`/`-execdir`/`-ok`/`-okdir` \
-                                                 payload invokes `{name}` directly with no `-c` \
-                                                 script argument and no operand; this spawns an \
-                                                 interactive or stdin-fed shell per matched \
-                                                 file, which has no batch use"
-                                            ),
-                                        );
-                                    }
-                                }
-                            }
-                            let inner = evaluate_simple_command(
-                                &synthetic,
-                                &Env::new(),
-                                rules,
-                                allowlist,
-                                depth + 1,
-                                cwd,
-                            );
-                            raise_expansion_floor(
-                                &mut floor,
-                                inner.decision(),
-                                format!(
-                                    "`find`'s `-exec`/`-execdir`/`-ok`/`-okdir` payload recurses \
-                                     through the full pipeline; inner decision: {:?}{}",
-                                    inner.decision(),
-                                    inner
-                                        .reason()
-                                        .map(|r| format!(" ({})", r.as_str()))
-                                        .unwrap_or_default()
-                                ),
-                            );
-                        }
+                        let synthetic = SimpleCommand {
+                            assignments: Vec::new(),
+                            words: command.words[span_start..span_end].to_vec(),
+                            redirections: Vec::new(),
+                        };
+                        recurse_find_exec_payload(
+                            &synthetic, "", depth, rules, allowlist, cwd, &mut floor,
+                        );
                     }
 
                     // Fail-closed (design note, issue #72): when no
@@ -4688,122 +4506,56 @@ fn scan_recursable_slots(
                     };
 
                     if !payload_words.is_empty() {
-                        // Same depth-cap rationale as the `Yes` arm above:
-                        // this also calls `evaluate_simple_command` directly
-                        // rather than `analyze_at_depth`, so nothing else on
-                        // this path checks `depth` against
-                        // `MAX_SUBSTITUTION_DEPTH`.
-                        if depth >= MAX_SUBSTITUTION_DEPTH {
-                            raise_expansion_floor(
-                                &mut floor,
-                                Decision::Ask,
-                                format!(
-                                    "`find`'s `-exec`/`-execdir`/`-ok`/`-okdir` payload nesting \
-                                     exceeds the recursion depth cap ({MAX_SUBSTITUTION_DEPTH}); \
-                                     refusing to keep recursing (fail-closed denial-of-service \
-                                     guard, see gate.rs module docs)"
-                                ),
-                            );
-                        } else {
-                            // Every position here is `Resolved` —
-                            // `FindExecFlagKind::YesFused` only ever fires
-                            // when `find_exec_flag_kind` confirmed no
-                            // unresolvable split position exists anywhere in
-                            // this AST word. Rebuilt as literal `WordPiece`s
-                            // (never by re-parsing joined text as fresh
-                            // shell syntax) so a literal `;`/`|`/`&&` inside
-                            // one resolved argument can't be mistaken for
-                            // real shell structure — matching how a real
-                            // `find -exec` execs its payload argv-for-argv
-                            // with no shell re-invocation.
-                            let synthetic_words: Vec<Word> = payload_words
-                                .iter()
-                                .map(|nw| match nw.resolution() {
-                                    Resolution::Resolved(s) => {
-                                        Word(vec![WordPiece::Literal(s.clone())])
-                                    }
-                                    Resolution::Unresolvable(_) => unreachable!(
-                                        "YesFused guarantees every split position in this AST \
-                                         word is resolved"
-                                    ),
-                                })
-                                .collect();
-                            let synthetic = SimpleCommand {
-                                assignments: Vec::new(),
-                                words: synthetic_words,
-                                redirections: Vec::new(),
-                            };
-                            // Issue #196, same floor as the non-fused `Yes`
-                            // arm above (kept in sync deliberately — see
-                            // that arm's own doc for the full rationale).
-                            // Checked against `normalize_argv(&synthetic)`,
-                            // not `payload_words` directly, for the same
-                            // reason the `Yes` arm does this: an unquoted
-                            // empty-string split position normalizes away
-                            // during `synthetic`'s own re-normalization
-                            // (`chunks_to_words` drops an empty unsplit
-                            // segment), so the two could otherwise disagree
-                            // on which token is `effective_command`'s first
-                            // word.
-                            let payload_argv = normalize::normalize_argv(&synthetic);
-                            if let Some((name, rest_words)) =
-                                crate::rules::effective_command(&payload_argv)
-                                && crate::rules::is_shell_interpreter(name)
-                            {
-                                match scan_for_dash_c_before_operand(rest_words, name) {
-                                    DashCPosition::FlagFound | DashCPosition::Uncertain => {}
-                                    DashCPosition::OperandNoFlag => {
-                                        raise_expansion_floor(
-                                            &mut floor,
-                                            Decision::Ask,
-                                            format!(
-                                                "`find`'s `-exec`/`-execdir`/`-ok`/`-okdir` \
-                                                 payload invokes `{name}` directly with an \
-                                                 operand but no `-c` script flag before it; the \
-                                                 shell runs that operand as a script, which is \
-                                                 not statically verifiable"
-                                            ),
-                                        );
-                                    }
-                                    DashCPosition::Absent => {
-                                        raise_expansion_floor(
-                                            &mut floor,
-                                            Decision::Block,
-                                            format!(
-                                                "`find`'s `-exec`/`-execdir`/`-ok`/`-okdir` \
-                                                 payload invokes `{name}` directly with no `-c` \
-                                                 script argument and no operand; this spawns an \
-                                                 interactive or stdin-fed shell per matched \
-                                                 file, which has no batch use"
-                                            ),
-                                        );
-                                    }
+                        // Every position here is `Resolved` —
+                        // `FindExecFlagKind::YesFused` only ever fires
+                        // when `find_exec_flag_kind` confirmed no
+                        // unresolvable split position exists anywhere in
+                        // this AST word. Rebuilt as literal `WordPiece`s
+                        // (never by re-parsing joined text as fresh
+                        // shell syntax) so a literal `;`/`|`/`&&` inside
+                        // one resolved argument can't be mistaken for
+                        // real shell structure — matching how a real
+                        // `find -exec` execs its payload argv-for-argv
+                        // with no shell re-invocation.
+                        let synthetic_words: Vec<Word> = payload_words
+                            .iter()
+                            .map(|nw| match nw.resolution() {
+                                Resolution::Resolved(s) => {
+                                    Word(vec![WordPiece::Literal(s.clone())])
                                 }
-                            }
-                            let inner = evaluate_simple_command(
-                                &synthetic,
-                                &Env::new(),
-                                rules,
-                                allowlist,
-                                depth + 1,
-                                cwd,
-                            );
-                            raise_expansion_floor(
-                                &mut floor,
-                                inner.decision(),
-                                format!(
-                                    "`find`'s `-exec`/`-execdir`/`-ok`/`-okdir` payload (the \
-                                     whole clause fused into one word by $IFS splitting or \
-                                     brace alternation) recurses through the full pipeline; \
-                                     inner decision: {:?}{}",
-                                    inner.decision(),
-                                    inner
-                                        .reason()
-                                        .map(|r| format!(" ({})", r.as_str()))
-                                        .unwrap_or_default()
+                                Resolution::Unresolvable(_) => unreachable!(
+                                    "YesFused guarantees every split position in this AST \
+                                     word is resolved"
                                 ),
-                            );
-                        }
+                            })
+                            .collect();
+                        let synthetic = SimpleCommand {
+                            assignments: Vec::new(),
+                            words: synthetic_words,
+                            redirections: Vec::new(),
+                        };
+                        // Same depth-cap rationale as the `Yes` arm above
+                        // (`recurse_find_exec_payload`'s own docs), and
+                        // issue #196's same floor (kept in sync
+                        // deliberately by sharing the same helper). Checked
+                        // against `normalize_argv(&synthetic)`, not
+                        // `payload_words` directly, inside that helper, for
+                        // the same reason the `Yes` arm does this: an
+                        // unquoted empty-string split position normalizes
+                        // away during `synthetic`'s own re-normalization
+                        // (`chunks_to_words` drops an empty unsplit
+                        // segment), so the two could otherwise disagree on
+                        // which token is `effective_command`'s first word.
+                        recurse_find_exec_payload(
+                            &synthetic,
+                            " (the whole clause fused into one word by $IFS splitting or brace \
+                              alternation)",
+                            depth,
+                            rules,
+                            allowlist,
+                            cwd,
+                            &mut floor,
+                        );
                     }
                     i += 1;
                 }
@@ -4812,6 +4564,112 @@ fn scan_recursable_slots(
     }
 
     RecursableScan { has_any, floor }
+}
+
+/// Depth-cap check, issue #196's shell-interpreter check, and the recursion
+/// itself for one `find -exec`/`-execdir`/`-ok`/`-okdir` payload
+/// [`SimpleCommand`] once its span is known — shared by
+/// [`scan_recursable_slots`]'s `Yes` and `YesFused` arms. `fused_note`
+/// supplies the one message fragment the two arms differ on: empty for the
+/// non-fused `Yes` arm, or a parenthetical describing the fusion for
+/// `YesFused` — spliced straight after "payload" in the recursion floor's
+/// own reason text.
+///
+/// This recurses over an already-parsed `SimpleCommand`, calling
+/// [`evaluate_simple_command`] directly rather than `analyze_at_depth` (a
+/// raw-text re-parse) — so unlike every other recursion channel in this
+/// module, nothing downstream of this call site ever compares `depth`
+/// against [`MAX_SUBSTITUTION_DEPTH`] except the explicit check here. Left
+/// un-capped, `find -exec find -exec find -exec ... rm -rf {} \;` is one
+/// flat `SimpleCommand` with no bracket/keyword nesting for the parser's
+/// own caps to catch, so both callers would recurse this function once per
+/// `-exec`, unbounded — a Rust call-stack overflow (`SIGABRT`,
+/// unrecoverable even by `catch_unwind`, per `src/bin/shguard.rs`'s module
+/// docs) is a fail-OPEN condition: the hook produces no decision at all.
+/// This spends the SAME budget every other channel already respects,
+/// rather than inventing a new counter — mirrors `analyze_at_depth`'s own
+/// `depth > MAX_SUBSTITUTION_DEPTH` check exactly (that function is entered
+/// with `depth + 1`, so checking `depth >= MAX_SUBSTITUTION_DEPTH` here,
+/// before incrementing, is equivalent).
+fn recurse_find_exec_payload(
+    synthetic: &SimpleCommand,
+    fused_note: &str,
+    depth: usize,
+    rules: &Rules,
+    allowlist: &Allowlist,
+    cwd: &CwdContext,
+    floor: &mut Option<(Decision, String)>,
+) {
+    if depth >= MAX_SUBSTITUTION_DEPTH {
+        raise_expansion_floor(
+            floor,
+            Decision::Ask,
+            format!(
+                "`find`'s `-exec`/`-execdir`/`-ok`/`-okdir` payload nesting exceeds the \
+                 recursion depth cap ({MAX_SUBSTITUTION_DEPTH}); refusing to keep recursing \
+                 (fail-closed denial-of-service guard, see gate.rs module docs)"
+            ),
+        );
+        return;
+    }
+    // Issue #196: a payload that directly execs a `SHELL_INTERPRETERS`
+    // member with no `-c` before its first operand spawns a shell that
+    // either reads stdin (no operand) or runs the operand as a script file
+    // (unverifiable statically) — rule 6a's own `evaluate_dash_c` returns
+    // `None` for exactly this shape ("not this shape", not "safe"), and
+    // nothing else below fills the gap since the recursed payload alone
+    // (`inner`, below) matches no blocklist rule either. The flag search is
+    // position-aware — `sh {} -c` demotes `-c` to a positional argument of
+    // the found file, the same as a real shell's option parser — and Block
+    // is reserved for the no-operand shape; an operand present downgrades
+    // to Ask (an allowlist-launderable posture, unlike Block) since "run my
+    // found scripts" is a real, opt-in workflow. Scoped to `find`'s
+    // DirectArgv payload only — a bare top-level `sh` invocation is
+    // unaffected.
+    let payload_argv = normalize::normalize_argv(synthetic);
+    if let Some((name, rest_words)) = crate::rules::effective_command(&payload_argv)
+        && crate::rules::is_shell_interpreter(name)
+    {
+        match scan_for_dash_c_before_operand(rest_words, name) {
+            DashCPosition::FlagFound | DashCPosition::Uncertain => {}
+            DashCPosition::OperandNoFlag => {
+                raise_expansion_floor(
+                    floor,
+                    Decision::Ask,
+                    format!(
+                        "`find`'s `-exec`/`-execdir`/`-ok`/`-okdir` payload invokes `{name}` \
+                         directly with an operand but no `-c` script flag before it; the shell \
+                         runs that operand as a script, which is not statically verifiable"
+                    ),
+                );
+            }
+            DashCPosition::Absent => {
+                raise_expansion_floor(
+                    floor,
+                    Decision::Block,
+                    format!(
+                        "`find`'s `-exec`/`-execdir`/`-ok`/`-okdir` payload invokes `{name}` \
+                         directly with no `-c` script argument and no operand; this spawns an \
+                         interactive or stdin-fed shell per matched file, which has no batch use"
+                    ),
+                );
+            }
+        }
+    }
+    let inner = evaluate_simple_command(synthetic, &Env::new(), rules, allowlist, depth + 1, cwd);
+    raise_expansion_floor(
+        floor,
+        inner.decision(),
+        format!(
+            "`find`'s `-exec`/`-execdir`/`-ok`/`-okdir` payload{fused_note} recurses through the \
+             full pipeline; inner decision: {:?}{}",
+            inner.decision(),
+            inner
+                .reason()
+                .map(|r| format!(" ({})", r.as_str()))
+                .unwrap_or_default()
+        ),
+    );
 }
 
 /// Whether AST word `word` is one of `find`'s
@@ -7940,7 +7798,7 @@ fn scan_unknown_cwd_floor(
 }
 
 /// Applies [`scan_unknown_cwd_floor`]'s floor to `verdict` (see
-/// [`apply_expansion_floor`]'s docs for the shared max-lift mechanics and
+/// [`apply_floor`]'s docs for the shared max-lift mechanics and
 /// why each floor gets its own function; see
 /// [`apply_command_ascent_descent_floor`]'s docs for why the floor's own
 /// `deny_message` — issue #202 — is unconditionally attached).
@@ -7951,19 +7809,7 @@ fn apply_unknown_cwd_floor(
     let Some((floor_decision, floor_reason, deny_message)) = floor else {
         return verdict;
     };
-    if verdict.decision() >= floor_decision {
-        return verdict;
-    }
-    let argv = verdict.normalized_argv().to_vec();
-    let reason = match verdict.reason() {
-        Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
-        None => floor_reason,
-    };
-    match floor_decision {
-        Decision::Block => Verdict::block(Reason::new(reason), argv, None),
-        Decision::Ask | Decision::Allow => Verdict::ask(Reason::new(reason), argv),
-    }
-    .with_deny_message(deny_message)
+    apply_floor(verdict, floor_decision, floor_reason, deny_message)
 }
 
 // ---------------------------------------------------------------------
