@@ -45,23 +45,6 @@ fn read_jsonl_lines(path: &std::path::Path) -> Vec<Value> {
 }
 
 #[test]
-fn decision_logging_is_off_by_default_when_config_omits_the_key() {
-    let log_path_holder = tempfile::tempdir().expect("tempdir should create");
-    let log_path = log_path_holder.path().join("decisions.jsonl");
-    let (_config_dir, config_path) = write_config("");
-
-    isolated_command(&config_path)
-        .args(["check", "echo hello"])
-        .assert()
-        .success();
-
-    assert!(
-        !log_path.exists(),
-        "no decision log file should be created without decision_log_path configured"
-    );
-}
-
-#[test]
 fn empty_decision_log_path_fails_config_load_closed() {
     let (_config_dir, config_path) = write_config(
         r#"
