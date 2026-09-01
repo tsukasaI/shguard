@@ -264,11 +264,16 @@ pub(crate) enum Separator {
     /// `||`
     Or,
     /// `&` (issue #191): backgrounds the pipeline to its left, but that
-    /// pipeline still runs — `crate::gate::evaluate_command_line` already
-    /// folds every separator identically (worst-wins across the whole
-    /// line, regardless of `;`/`&&`/`||`), so `Async` needs no special
-    /// handling there; it exists purely so `src/parser.rs` can stop
-    /// rejecting the syntax outright.
+    /// pipeline still runs — `crate::gate::evaluate_command_line` folds the
+    /// resulting DANGER verdict identically to every other separator
+    /// (worst-wins across the whole line, regardless of `;`/`&&`/`||`). Its
+    /// working-directory effect is a different story (issue #383): a
+    /// backgrounded pipeline runs in its own subshell in real bash, so a
+    /// `cd`/`pushd`/`popd` inside it never persists past the `&` —
+    /// `evaluate_command_line` evaluates the pipeline this separator
+    /// follows against an isolated `cwd` clone specifically because of
+    /// this variant, not the plain worst-wins fold every other separator
+    /// gets.
     Async,
 }
 
@@ -278,10 +283,25 @@ pub(crate) enum Separator {
 /// Modelled as `first` + `rest` (a non-empty list), not two parallel `Vec`s,
 /// so "zero pipelines" and "one fewer separator than pipeline" are not
 /// representable — the plain-`Vec` encoding would allow both.
+///
+/// `trailing_async` (issue #383): whether the LAST pipeline on this line
+/// (`rest.last()`, or `first` when `rest` is empty) is itself followed by a
+/// bare `&` with nothing after it — real bash backgrounds that one
+/// pipeline into its own subshell, so `crate::gate::evaluate_command_line`
+/// must not let ITS `cd`/`pushd`/`popd` effect reach whatever runs after
+/// this whole `CommandLine`, the same isolation every other separator
+/// already gets when a later pipeline exists to observe it via
+/// `Separator::Async`. A `CommandLine` that is itself a `BraceGroup`'s body
+/// (`{ pushd /tmp & }`) is the case that actually matters in practice: the
+/// group runs in the CURRENT shell (unlike a `Subshell`), so its body's own
+/// trailing `&` is the only place this distinction is otherwise invisible
+/// (`crate::parser::convert_compound_list`, which sets this field, used to
+/// silently discard exactly this information).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CommandLine {
     pub(crate) first: Pipeline,
     pub(crate) rest: Vec<(Separator, Pipeline)>,
+    pub(crate) trailing_async: bool,
 }
 
 /// A pipeline: one or more [`Command`]s connected by `|`.

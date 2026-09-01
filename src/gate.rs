@@ -449,17 +449,27 @@ fn analyze_at_depth(
 ///
 /// `cwd` (issue #103) threads the folded working-directory context forward
 /// across every pipeline on the line, uniformly regardless of separator
-/// (`;`/`&&`/`||`/`&` all mutate it forward the same way — a deliberate
-/// over-approximation for `||` (a real shell only runs the right side on
-/// the left side's failure) and, since issue #191, `&` too (`cd /tmp &`
-/// actually backgrounds `cd` into its own subshell in real bash, so the
-/// mutation never really persists to the foreground shell at all); harmless
-/// given the additive, worst-wins nature of everything this context feeds,
-/// see `CwdContext`'s own docs). For DANGER-folding (the actual `Verdict`,
-/// as opposed to `cwd`), backgrounding needs no special-casing at all: the
-/// backgrounded pipeline still runs, just asynchronously, so it is folded
-/// in exactly like every other separator (`crate::ast::Separator::Async`'s
-/// own docs).
+/// (`;`/`&&`/`||` all mutate it forward the same way). For DANGER-folding
+/// (the actual `Verdict`, as opposed to `cwd`), backgrounding needs no
+/// special-casing at all: the backgrounded pipeline still runs, just
+/// asynchronously, so it is folded in exactly like every other separator
+/// (`crate::ast::Separator::Async`'s own docs).
+///
+/// Issue #383: `&` (issue #191) is the one separator that does NOT mutate
+/// `cwd` forward the way the others do — the pipeline it backgrounds runs
+/// in its own subshell in real bash, so a `cd`/`pushd`/`popd` inside it
+/// never actually persists to whatever runs after it. Every pipeline this
+/// function evaluates is therefore checked against whether ITS OWN
+/// trailing separator is `Async` (the following tuple's separator for
+/// every pipeline but the last, [`CommandLine::trailing_async`] for the
+/// last) and, if so, evaluated against an ISOLATED clone of `cwd` instead
+/// of `cwd` itself — the same clone-and-discard pattern
+/// [`evaluate_compound_command`] already uses for a genuinely forking
+/// construct (`Subshell`). `collapse_stack_on_uncertain_crossing`'s own
+/// crossing check (below) is unaffected either way: it reasons about
+/// whether the SHARED `cwd`'s already-tracked stack can still be trusted
+/// crossing INTO this pipeline, independent of whether this pipeline's own
+/// execution will itself be isolated.
 fn evaluate_command_line(
     command_line: &CommandLine,
     rules: &Rules,
@@ -468,9 +478,26 @@ fn evaluate_command_line(
     cwd: &mut CwdState,
 ) -> Verdict {
     let mut env = Env::new();
-    let mut worst = evaluate_pipeline(&command_line.first, &mut env, rules, allowlist, depth, cwd);
+    let first_is_async = command_line
+        .rest
+        .first()
+        .is_some_and(|(separator, _)| *separator == Separator::Async)
+        || (command_line.rest.is_empty() && command_line.trailing_async);
+    let mut worst = if first_is_async {
+        let mut isolated = cwd.clone();
+        evaluate_pipeline(
+            &command_line.first,
+            &mut env,
+            rules,
+            allowlist,
+            depth,
+            &mut isolated,
+        )
+    } else {
+        evaluate_pipeline(&command_line.first, &mut env, rules, allowlist, depth, cwd)
+    };
     let mut prev_untrustworthy = pipeline_reported_success_is_untrustworthy(&command_line.first);
-    for (separator, pipeline) in &command_line.rest {
+    for (index, (separator, pipeline)) in command_line.rest.iter().enumerate() {
         // Issue #353: `&&` only guarantees the preceding pipeline actually
         // succeeded when that pipeline wasn't itself `!`-negated — `!
         // pushd X` reports SUCCESS to `&&` even when the real `pushd`
@@ -485,7 +512,17 @@ fn evaluate_command_line(
             cwd.collapse_stack_on_uncertain_crossing();
         }
         prev_untrustworthy = pipeline_reported_success_is_untrustworthy(pipeline);
-        let verdict = evaluate_pipeline(pipeline, &mut env, rules, allowlist, depth, cwd);
+        let this_is_async = command_line
+            .rest
+            .get(index + 1)
+            .is_some_and(|(separator, _)| *separator == Separator::Async)
+            || (index + 1 == command_line.rest.len() && command_line.trailing_async);
+        let verdict = if this_is_async {
+            let mut isolated = cwd.clone();
+            evaluate_pipeline(pipeline, &mut env, rules, allowlist, depth, &mut isolated)
+        } else {
+            evaluate_pipeline(pipeline, &mut env, rules, allowlist, depth, cwd)
+        };
         worst = fold_worst(worst, verdict);
     }
     worst
@@ -8526,6 +8563,52 @@ mod tests {
         // captured `alternates`, not just stage 0.
         assert_decision("base64 -d | python3", Decision::Block);
         assert_decision("IFS=,; X='python3,-u'; base64 -d | $X", Decision::Block);
+    }
+
+    #[test]
+    fn issue_383_bare_ampersand_backgrounded_cd_does_not_leak_into_the_parent() {
+        // Finding 2: `&` backgrounds ONLY the pipeline to its left into its
+        // own subshell -- real bash's `cd /tmp` there never persists to
+        // whatever runs after the `&`, so `cp` still runs from
+        // `~/.config/shguard` and must Block. Also reproduces with `pushd`
+        // (same code path, `apply_cwd_effect`'s `cd`/`pushd` handling is
+        // uniform).
+        assert_decision(
+            "cd ~/.config/shguard; cd /tmp & cp evil.toml config.toml",
+            Decision::Block,
+        );
+        assert_decision(
+            "pushd /tmp & pushd ~/.config/shguard && cp evil.toml config.toml",
+            Decision::Block,
+        );
+        // Control: with no trailing `&`, the second `cd` genuinely does
+        // move away from the protected directory in real bash too, so this
+        // must stay Allow -- confirms the fix is specific to the Async
+        // separator, not a blanket "ignore every cd but the first" change.
+        assert_decision(
+            "cd ~/.config/shguard; cd /tmp; cp evil.toml config.toml",
+            Decision::Allow,
+        );
+    }
+
+    #[test]
+    fn issue_383_trailing_ampersand_inside_a_brace_group_does_not_leak_out() {
+        // Finding 1: a brace group runs in the CURRENT shell (unlike a
+        // `Subshell`), so its own `cd`/`pushd` effects normally DO persist
+        // past the group -- but `{ pushd /tmp & }`'s `&` still backgrounds
+        // that one pipeline into ITS OWN subshell, same as a bare `&`
+        // outside any group. `CommandLine::trailing_async` (previously
+        // silently discarded by `convert_compound_list`) is what makes this
+        // distinguishable from `{ pushd /tmp; }`, pinned as the control
+        // below.
+        assert_decision(
+            "pushd ~/.config/shguard && { pushd /tmp & } && cp evil.toml config.toml",
+            Decision::Block,
+        );
+        assert_decision(
+            "pushd ~/.config/shguard && { pushd /tmp; } && cp evil.toml config.toml",
+            Decision::Allow,
+        );
     }
 
     #[test]

@@ -462,7 +462,15 @@ fn convert_compound_list<'a>(
         pending_separator = convert_separator(&item.1)?;
     }
 
-    Ok(CommandLine { first, rest })
+    // Issue #383: `pending_separator` at this point is the separator
+    // following the LAST item's own (possibly `&&`/`||`-chained) pipeline —
+    // exactly the trailing-terminator info `CommandLine::trailing_async`
+    // exists to carry, previously dropped here silently.
+    Ok(CommandLine {
+        first,
+        rest,
+        trailing_async: matches!(pending_separator, Separator::Async),
+    })
 }
 
 /// `SeparatorOperator::Async` (`&`, issue #191) maps onto
