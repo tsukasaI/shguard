@@ -1057,15 +1057,13 @@ fn word_contains_overflowing_brace_range(text: &str) -> bool {
 ///
 /// This is therefore an UNDER-approximation by construction (matching
 /// the safe direction — a case this misses is still safely contained by
-/// [`catch_parser_panic`], never silently mis-parsed). Two known residuals,
-/// both left to that containment rather than chased further (chasing them
+/// [`catch_parser_panic`], never silently mis-parsed). One known residual,
+/// left to that containment rather than chased further (chasing residuals
 /// is the trap five review rounds already fell into on the substitution
-/// side — see [`word_contains_overflowing_brace_range`]'s docs): a comma
-/// inside a further-nested brace group that a naive top-level scan doesn't
-/// realize is nested; and `{a..z..N}` (`character() ".." character() (".."
-/// number())?` — brush's char-range increment) whose overflowing `N`
-/// [`parse_brace_range_endpoint`] never reaches, since it only recognizes
-/// numeric leading endpoints.
+/// side — see [`word_contains_overflowing_brace_range`]'s docs): `{a..z..N}`
+/// (`character() ".." character() (".." number())?` — brush's char-range
+/// increment) whose overflowing `N` [`parse_brace_range_endpoint`] never
+/// reaches, since it only recognizes numeric leading endpoints.
 fn brace_group_panics(after_brace: &str) -> bool {
     if brace_group_may_avoid_the_panicking_path(after_brace) {
         return false;
@@ -1092,22 +1090,30 @@ fn brace_group_panics(after_brace: &str) -> bool {
 }
 
 /// Whether [`brace_group_panics`] should stay silent about the brace group
-/// whose content starts at `after_brace` because a `,` genuinely appears
-/// before the `}` that closes it (tracking nested `{`/`}` depth so an
-/// inner group's own comma isn't mistaken for this group's).
-///
-/// `after_brace` is a suffix of a word [`word_contains_overflowing_brace_range`]
-/// already confirmed contains none of `"`, `'`, `` ` ``, `$`, `\` — so
-/// unlike a raw, unfiltered scan, a plain `{`/`}` depth count here cannot
-/// be fooled by a comma or `}` hidden inside quoting or a substitution.
+/// whose content starts at `after_brace` — because a `,` appears before the
+/// `}` that closes it, or because a further `{` appears first and this scan
+/// can't tell whether brush's own grammar treats it as a nested brace group
+/// or, when it doesn't itself resolve to a complete `brace_expr`, as
+/// ordinary literal text via `non_brace_expr_text`'s `!brace_expr() "{"`
+/// fallback (`word.rs:668-670`) — which shifts what this group's own
+/// top-level content and closing `}` really are. `{99999999999999999999{a,b`
+/// is the concrete case: brush treats the inner `{` as literal (it never
+/// completes a brace_expr of its own), so the `,` IS this group's top-level
+/// comma and the comma-list branch succeeds without ever reaching
+/// `number()` — a naive depth count instead treats the inner `{` as truly
+/// nested, misses that comma, and wrongly concludes this group panics
+/// (round 6 fable review finding: a real Block→Ask downgrade). Bailing to
+/// "safe to skip" on the first `{` this scan can't resolve, rather than
+/// trying to replicate brush's own disambiguation, keeps this an
+/// UNDER-approximation: on real input, "flagged" only remains true when
+/// `after_brace` up to its own `}`/end contains no further `{` and no `,`
+/// at all, and any group that shape describes genuinely does reach
+/// `number()` and panic in brush's real grammar.
 fn brace_group_may_avoid_the_panicking_path(after_brace: &str) -> bool {
-    let mut depth = 0u32;
     for byte in after_brace.bytes() {
         match byte {
-            b'{' => depth += 1,
-            b'}' if depth == 0 => return false,
-            b'}' => depth -= 1,
-            b',' if depth == 0 => return true,
+            b'{' | b',' => return true,
+            b'}' => return false,
             _ => {}
         }
     }
@@ -1664,6 +1670,22 @@ mod tests {
         }
     }
 
+    // issue #405 (6th fable review finding): an unresolved `{` before a
+    // group's `,` doesn't necessarily nest — brush's `non_brace_expr_text`
+    // falls back to treating a `{` that never completes its OWN
+    // `brace_expr` as ordinary literal text, so the group's real top-level
+    // comma can be one the naive `{`/`}` depth count in
+    // `brace_group_may_avoid_the_panicking_path` mistook for nested. Both
+    // the digit-run word and its sibling `rm -rf /` must survive.
+    #[test]
+    fn a_dangling_inner_brace_that_brush_treats_as_literal_does_not_hide_the_real_comma() {
+        let cmd = parse_ok("rm -rf / {99999999999999999999{a,b");
+        assert_eq!(
+            simple(&cmd.first.first).words[0].0,
+            vec![WordPiece::Literal("rm".to_string())]
+        );
+    }
+
     // issue #405: any word containing `$` bails, so `${...}` (parameter
     // expansion) is never pre-empted either — unlike the shapes above,
     // this one genuinely still panics in real brush (empirically
@@ -1673,7 +1695,13 @@ mod tests {
     // parse still fails cleanly rather than panicking uncaught.
     #[test]
     fn overflowing_parameter_expansion_range_is_contained_not_pre_empted() {
-        assert!(parse("echo ${99999999999999999999..1}").is_err());
+        // Specifically `Syntax` (catch_parser_panic's containment path),
+        // not `Unsupported` (the pre-emption path) — a bare `.is_err()`
+        // can't distinguish the two.
+        assert!(matches!(
+            parse("echo ${99999999999999999999..1}"),
+            Err(ParseError::Syntax { .. })
+        ));
     }
 
     // crash-fuzzer finding (issue #405): brush-parser 0.4.0 panics on a
