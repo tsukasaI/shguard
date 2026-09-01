@@ -63,8 +63,8 @@ use brush_parser::{Parser as BrushParser, ParserOptions as BrushParserOptions, a
 use crate::ast::{
     Assignment, AssignmentValue, Command, CommandLine, CompoundCommand, ElifClause, ExtendedTest,
     FileRedirectionKind, FunctionDefinition, MAX_BRACE_NESTING_DEPTH, MAX_KEYWORD_NESTING_COUNT,
-    MAX_RAW_BRACE_NESTING_DEPTH, Pipeline, ProcessSubstitutionDirection, Redirection, Separator,
-    SimpleCommand, Word, WordPiece,
+    MAX_RAW_BRACE_NESTING_DEPTH, MAX_RAW_EXTENDED_TEST_COUNT, Pipeline,
+    ProcessSubstitutionDirection, Redirection, Separator, SimpleCommand, Word, WordPiece,
 };
 
 /// Everything that can go wrong converting a raw command string into
@@ -150,46 +150,56 @@ fn is_token_boundary(byte: u8) -> bool {
 
 /// Rejects `command` if its `{`/`}` nesting depth exceeds
 /// [`MAX_RAW_BRACE_NESTING_DEPTH`], its `(`/`)` nesting depth exceeds
-/// [`MAX_BRACE_NESTING_DEPTH`], or its total count of [`NESTING_KEYWORDS`]
-/// occurrences exceeds [`MAX_KEYWORD_NESTING_COUNT`], *before* any
+/// [`MAX_BRACE_NESTING_DEPTH`], its total count of [`NESTING_KEYWORDS`]
+/// occurrences exceeds [`MAX_KEYWORD_NESTING_COUNT`], or its count of
+/// `!`/`&&`/`||` operators inside any single `[[ ... ]]` extended-test
+/// region exceeds [`MAX_RAW_EXTENDED_TEST_COUNT`], *before* any
 /// recursive-descent parser (brush-parser's PEG grammar, or this module's
 /// own brace/word conversion) ever sees the text.
 ///
 /// This is the primary defense against issue #52's abort: deeply nested
 /// `{`/`(` input (e.g. `{a,` repeated thousands of times, or `$(` repeated
-/// thousands of times), or deeply nested `if`/`while`/`until`/`for`/`case`
-/// compound commands, crash with a stack overflow *inside brush-parser's
-/// own PEG grammar* — its mutually recursive descent has no depth limit of
-/// its own, for either kind of nesting — before shguard's AST-level depth
-/// cap (`convert_brace_segment`/`convert_brace_members` in this module,
-/// `normalize::expand_braces`) ever gets a chance to run, because those
-/// only see brush-parser's *output*. A crash there is an uncatchable abort
-/// (`std::panic::catch_unwind` cannot intercept a stack overflow — see
-/// `src/bin/shguard.rs`'s module docs), so the only effective defense is a
-/// linear, non-recursive pre-scan that runs ahead of the parser and rejects
-/// the input outright. All three counters are tracked in one pass (`{`/`}`
-/// alone would miss a `$(`-only attack, which was independently confirmed
-/// to abort even though it never touches shguard's AST-level brace cap at
-/// all, and neither bracket alone catches a keyword-only attack like nested
-/// `if`/`then`/`fi` with no braces or parens at all) — see
-/// [`MAX_BRACE_NESTING_DEPTH`]'s and [`MAX_KEYWORD_NESTING_COUNT`]'s docs
-/// for the chosen cap values and their trade-offs. The `{`/`}` cap is
-/// [`MAX_RAW_BRACE_NESTING_DEPTH`], not [`MAX_BRACE_NESTING_DEPTH`] — see
-/// its own docs for why brace nesting alone needs a much tighter cap than
-/// stack-overflow-driven parenthesis/keyword nesting does (a PEG
-/// catastrophic-backtracking cost, not a stack-depth one).
+/// thousands of times), deeply nested `if`/`while`/`until`/`for`/`case`
+/// compound commands, or a long unparenthesized `!`/`&&`/`||` chain inside
+/// `[[ ... ]]` (issue #401), crash with a stack overflow *inside
+/// brush-parser's own PEG grammar* (or, for the `&&`/`||` shape, in the
+/// recursive `Drop` of the tree it already successfully built) — its
+/// mutually recursive descent has no depth limit of its own, for any of
+/// these nesting kinds — before shguard's AST-level depth cap
+/// (`convert_brace_segment`/`convert_brace_members`/
+/// `collect_extended_test_words` in this module, `normalize::expand_braces`)
+/// ever gets a chance to run, because those only see brush-parser's
+/// *output*. A crash there is an uncatchable abort (`std::panic::catch_unwind`
+/// cannot intercept a stack overflow — see `src/bin/shguard.rs`'s module
+/// docs), so the only effective defense is a linear, non-recursive pre-scan
+/// that runs ahead of the parser and rejects the input outright. All four
+/// counters are tracked in one pass (`{`/`}` alone would miss a `$(`-only
+/// attack, which was independently confirmed to abort even though it never
+/// touches shguard's AST-level brace cap at all; neither bracket alone
+/// catches a keyword-only attack like nested `if`/`then`/`fi` with no
+/// braces or parens at all; and none of the three catches a `[[ ]]`
+/// operator chain, which contains no `{`/`(`/keyword byte at all) — see
+/// [`MAX_BRACE_NESTING_DEPTH`]'s, [`MAX_KEYWORD_NESTING_COUNT`]'s, and
+/// [`MAX_RAW_EXTENDED_TEST_COUNT`]'s docs for the chosen cap values and
+/// their trade-offs. The `{`/`}` cap is [`MAX_RAW_BRACE_NESTING_DEPTH`], not
+/// [`MAX_BRACE_NESTING_DEPTH`] — see its own docs for why brace nesting
+/// alone needs a much tighter cap than stack-overflow-driven
+/// parenthesis/keyword nesting does (a PEG catastrophic-backtracking cost,
+/// not a stack-depth one).
 ///
 /// Scans bytes, not `char`s: every byte this function compares against
-/// (`{`, `}`, `(`, `)`, and every [`is_token_boundary`] delimiter) is
-/// single-byte ASCII, and no UTF-8 continuation byte (`0x80..=0xBF`) can
-/// equal one of them, so counting and slicing on raw bytes is exact for any
-/// valid UTF-8 input and avoids paying for UTF-8 decoding on a hot,
-/// security-critical scan.
+/// (`{`, `}`, `(`, `)`, `[`, `]`, `&`, `|`, and every [`is_token_boundary`]
+/// delimiter) is single-byte ASCII, and no UTF-8 continuation byte
+/// (`0x80..=0xBF`) can equal one of them, so counting and slicing on raw
+/// bytes is exact for any valid UTF-8 input and avoids paying for UTF-8
+/// decoding on a hot, security-critical scan.
 fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
     let mut brace_depth: usize = 0;
     let mut paren_depth: usize = 0;
     let mut keyword_count: usize = 0;
     let mut token_start: Option<usize> = None;
+    let mut in_extended_test = false;
+    let mut extended_test_op_count: usize = 0;
 
     let bytes = command.as_bytes();
     for (i, &byte) in bytes.iter().enumerate() {
@@ -212,19 +222,49 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
                 }
             }
             b')' => paren_depth = paren_depth.saturating_sub(1),
+            // `&&`/`||` are made entirely of `is_token_boundary` bytes, so
+            // they never form a token the tokenizer below could match
+            // whole — checked here, on raw adjacent bytes, instead.
+            // Over-counts on a run of 3+ identical bytes (`&&&&` counts as
+            // 3, not 1) and on any occurrence outside real `[[ ]]` operator
+            // position (e.g. inside a quoted operand) — both fine, same
+            // "can only overestimate, never underestimate" safety direction
+            // as `check_keyword_token`.
+            b'&' if in_extended_test && bytes.get(i + 1) == Some(&b'&') => {
+                check_extended_test_op_count(&mut extended_test_op_count)?;
+            }
+            b'|' if in_extended_test && bytes.get(i + 1) == Some(&b'|') => {
+                check_extended_test_op_count(&mut extended_test_op_count)?;
+            }
             _ => {}
         }
 
         if is_token_boundary(byte) {
             if let Some(start) = token_start.take() {
-                check_keyword_token(&command[start..i], &mut keyword_count)?;
+                let token = &command[start..i];
+                check_keyword_token(token, &mut keyword_count)?;
+                match token {
+                    "[[" => {
+                        in_extended_test = true;
+                        extended_test_op_count = 0;
+                    }
+                    "]]" => in_extended_test = false,
+                    "!" if in_extended_test => {
+                        check_extended_test_op_count(&mut extended_test_op_count)?;
+                    }
+                    _ => {}
+                }
             }
         } else if token_start.is_none() {
             token_start = Some(i);
         }
     }
     if let Some(start) = token_start {
-        check_keyword_token(&command[start..], &mut keyword_count)?;
+        let token = &command[start..];
+        check_keyword_token(token, &mut keyword_count)?;
+        if in_extended_test && token == "!" {
+            check_extended_test_op_count(&mut extended_test_op_count)?;
+        }
     }
 
     Ok(())
@@ -247,6 +287,18 @@ fn check_keyword_token(token: &str, keyword_count: &mut usize) -> Result<(), Par
     Ok(())
 }
 
+/// Increments `extended_test_op_count`, rejecting once the running total
+/// exceeds [`MAX_RAW_EXTENDED_TEST_COUNT`] — see that constant's docs.
+fn check_extended_test_op_count(extended_test_op_count: &mut usize) -> Result<(), ParseError> {
+    *extended_test_op_count += 1;
+    if *extended_test_op_count > MAX_RAW_EXTENDED_TEST_COUNT {
+        return Err(ParseError::unsupported(
+            "extended-test operator count exceeds the raw count cap",
+        ));
+    }
+    Ok(())
+}
+
 /// Parses a raw shell command line into shguard's AST.
 ///
 /// # Errors
@@ -255,8 +307,10 @@ fn check_keyword_token(token: &str, keyword_count: &mut usize) -> Result<(), Par
 /// [`ParseError::Unsupported`] if it parses but contains a construct
 /// shguard's AST cannot represent (see the module docs), including raw
 /// `{`/`}` nesting past [`MAX_RAW_BRACE_NESTING_DEPTH`], `(`/`)` nesting
-/// past [`MAX_BRACE_NESTING_DEPTH`], or [`NESTING_KEYWORDS`] nesting past
-/// [`MAX_KEYWORD_NESTING_COUNT`] ([`reject_excessive_raw_nesting`]).
+/// past [`MAX_BRACE_NESTING_DEPTH`], [`NESTING_KEYWORDS`] nesting past
+/// [`MAX_KEYWORD_NESTING_COUNT`], or `[[ ... ]]` `!`/`&&`/`||` operator
+/// count past [`MAX_RAW_EXTENDED_TEST_COUNT`]
+/// ([`reject_excessive_raw_nesting`]).
 ///
 /// `analyze()` (`src/lib.rs`) calls this via `src/gate.rs` — stage 1 of the
 /// pipeline (plan.md §1.1).
@@ -1527,18 +1581,22 @@ mod tests {
         assert!(parse(&command).is_err());
     }
 
-    // ---- issue #191: collect_extended_test_words's own depth cap. Unlike
-    // `{`/`(`/keyword nesting, a long UNPARENTHESIZED `&&`/`||` chain inside
-    // `[[ ... ]]` (`[[ a && a && a && ... ]]`) still builds a binary tree
-    // one level deeper per operand, with no `{`/`(`/reserved-word byte for
-    // `reject_excessive_raw_nesting`'s raw pre-scan to catch — this cap is
-    // this recursion's only defense, so it is boundary-tested the same way
-    // the brace/paren caps above are. ----
+    // ---- issue #401: reject_excessive_raw_nesting's `[[ ... ]]`
+    // `!`/`&&`/`||` operator cap. A long UNPARENTHESIZED chain inside
+    // `[[ ... ]]` (`[[ a && a && a && ... ]]`, or `[[ ! ! ! ... a ]]`)
+    // builds a binary tree one level deeper per operand, with no
+    // `{`/`(`/reserved-word byte for the raw pre-scan's other three
+    // counters to catch — brush-parser's own recursive descent (or, for
+    // the `&&`/`||` shape, the recursive `Drop` of the tree it already
+    // built) overflows the stack before `collect_extended_test_words`'s
+    // AST-level cap (below) ever gets a chance to run, so this raw count
+    // is the primary defense and is boundary-tested the same way the
+    // brace/paren/keyword caps above are. ----
 
     #[test]
     fn extended_test_and_chain_at_the_cap_still_parses() {
         let mut command = "[[ ".to_string();
-        for _ in 0..MAX_BRACE_NESTING_DEPTH {
+        for _ in 0..MAX_RAW_EXTENDED_TEST_COUNT {
             command.push_str("-f x && ");
         }
         command.push_str("-f x ]]");
@@ -1548,14 +1606,100 @@ mod tests {
     #[test]
     fn extended_test_and_chain_past_the_cap_is_rejected() {
         let mut command = "[[ ".to_string();
-        for _ in 0..(MAX_BRACE_NESTING_DEPTH + 100) {
+        for _ in 0..(MAX_RAW_EXTENDED_TEST_COUNT + 1) {
             command.push_str("-f x && ");
         }
         command.push_str("-f x ]]");
         let construct = unsupported_construct(&command);
         assert!(
-            construct.contains("extended test expression nesting"),
-            "expected the extended-test depth-cap rejection, got: {construct}"
+            construct.contains("extended-test operator count"),
+            "expected the extended-test raw-count-cap rejection, got: {construct}"
+        );
+    }
+
+    #[test]
+    fn extended_test_not_chain_past_the_cap_is_rejected() {
+        // issue #401's other overflow shape: a long `!`/`!`/`!`... chain,
+        // not `&&`/`||`.
+        let mut command = "[[ ".to_string();
+        for _ in 0..(MAX_RAW_EXTENDED_TEST_COUNT + 1) {
+            command.push_str("! ");
+        }
+        command.push_str("-f x ]]");
+        let construct = unsupported_construct(&command);
+        assert!(
+            construct.contains("extended-test operator count"),
+            "expected the extended-test raw-count-cap rejection, got: {construct}"
+        );
+    }
+
+    #[test]
+    fn extended_test_or_chain_past_the_cap_is_rejected() {
+        let mut command = "[[ ".to_string();
+        for _ in 0..(MAX_RAW_EXTENDED_TEST_COUNT + 1) {
+            command.push_str("-f x || ");
+        }
+        command.push_str("-f x ]]");
+        let construct = unsupported_construct(&command);
+        assert!(
+            construct.contains("extended-test operator count"),
+            "expected the extended-test raw-count-cap rejection, got: {construct}"
+        );
+    }
+
+    #[test]
+    fn extended_test_operator_chain_outside_double_bracket_is_not_capped() {
+        // Must not count `!`/`&&`/`||` outside a `[[ ]]` region: a
+        // top-level chain of these between ordinary pipelines is flat,
+        // not recursive, and legitimate at any length.
+        let mut command = String::new();
+        for _ in 0..(MAX_RAW_EXTENDED_TEST_COUNT + 100) {
+            command.push_str("true && ");
+        }
+        command.push_str("true");
+        assert!(parse(&command).is_ok());
+    }
+
+    #[test]
+    fn extended_test_operator_count_resets_across_independent_double_bracket_blocks() {
+        // Two independent `[[ ]]` blocks, each individually under the cap
+        // but summing well past it, must both still parse: each is its
+        // own boolean-expression tree, not one shared recursion.
+        let mut block = "[[ ".to_string();
+        for _ in 0..(MAX_RAW_EXTENDED_TEST_COUNT - 1) {
+            block.push_str("-f x && ");
+        }
+        block.push_str("-f x ]]");
+        let command = format!("{block} && {block} && {block}");
+        assert!(parse(&command).is_ok());
+    }
+
+    /// Constructed programmatically, bypassing the raw pre-scan
+    /// entirely (unlike the brace test above, no raw command string can
+    /// reach this AST shape in practice: any text deep enough to build
+    /// this tree also trips `reject_excessive_raw_nesting`'s new operator
+    /// count) — pins `collect_extended_test_words`'s own depth cap as a
+    /// defense-in-depth backstop in its own right.
+    #[test]
+    fn ast_level_extended_test_nesting_one_past_the_cap_is_rejected() {
+        let leaf = || {
+            Box::new(bast::ExtendedTestExpr::UnaryTest(
+                bast::UnaryPredicate::FileExists,
+                bast::Word {
+                    value: "x".to_string(),
+                    loc: None,
+                },
+            ))
+        };
+        let mut expr = *leaf();
+        for _ in 0..=MAX_BRACE_NESTING_DEPTH {
+            expr = bast::ExtendedTestExpr::And(Box::new(expr), leaf());
+        }
+        let mut words = Vec::new();
+        let result = collect_extended_test_words(&expr, &mut words, 0);
+        assert!(
+            matches!(result, Err(ParseError::Unsupported { .. })),
+            "expected Unsupported, got {result:?}"
         );
     }
 
