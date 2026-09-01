@@ -611,6 +611,47 @@ pub(crate) fn fold_alternative(pieces: &[WordPiece]) -> Vec<NormalizedWord> {
     chunks_to_words(chunks, ifs_derived, true)
 }
 
+/// Result of scanning a word slice left-to-right for a flag token when some
+/// words may be [`Resolution::Unresolvable`]. The scan stops at the FIRST
+/// word that is either a resolved match or unresolvable — an unresolvable
+/// word earlier than a resolved match wins, because position matters (a
+/// word we cannot read at an earlier position may be the flag, or may
+/// demote a later literal flag to a positional argument).
+///
+/// Shared by both [`crate::gate`] and [`crate::rules::wrapper_shell_string_scripts`]
+/// (issues #64/#66/#72, #408) so the flag-position fail-closed semantics
+/// these two types encode can never drift between the two call sites.
+#[must_use]
+pub(crate) enum FlagScan {
+    Found(usize),
+    Uncertain(usize),
+    Absent,
+}
+
+impl FlagScan {
+    /// `true` unless the flag is provably absent (`Found` and `Uncertain`
+    /// both count — fail-closed per issues #71/#53: an unresolvable word
+    /// that might be the flag must never be treated the same as its
+    /// confirmed absence).
+    pub(crate) fn possibly_found(&self) -> bool {
+        !matches!(self, Self::Absent)
+    }
+}
+
+/// Scans `words` left-to-right for the first word that either resolves and
+/// satisfies `matches`, or is unresolvable (see [`FlagScan`]'s docs for why
+/// an earlier unresolvable word wins over a later resolved match).
+pub(crate) fn scan_for_flag(words: &[NormalizedWord], matches: impl Fn(&str) -> bool) -> FlagScan {
+    for (i, w) in words.iter().enumerate() {
+        match w.resolution() {
+            Resolution::Resolved(s) if matches(s) => return FlagScan::Found(i),
+            Resolution::Resolved(_) => {}
+            Resolution::Unresolvable(_) => return FlagScan::Uncertain(i),
+        }
+    }
+    FlagScan::Absent
+}
+
 /// Splits `pieces` at the `$IFS` boundary ending the first non-empty
 /// segment `chunks_to_words` would fold it into — `None` if `pieces` has no
 /// such boundary at all (no top-level `$IFS` piece, or every `$IFS` piece

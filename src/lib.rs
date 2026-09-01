@@ -15,7 +15,26 @@ mod rules;
 pub mod verdict;
 mod watchdog;
 
+use std::path::Path;
+
+pub use decision_log::FileDecisionLog;
 use verdict::Verdict;
+
+/// Port [`analyze_with_policy`] appends one JSONL decision-log line
+/// through, per issue #108 (`coding-guidelines/principles.md`: "ports MUST
+/// be defined next to the code that consumes them" — this is that code).
+/// [`FileDecisionLog`] (`src/decision_log.rs`) is the only implementation
+/// today; the composition root (`src/bin/shguard.rs`) constructs it and
+/// passes it in, so this module never names a concrete filesystem writer
+/// itself (`coding-guidelines/principles.md`, "composition root": "code
+/// outside the composition root MUST NOT know which concrete adapter it is
+/// using").
+pub trait DecisionLogSink {
+    /// Appends one line describing `verdict` for `command` to `path`. See
+    /// [`FileDecisionLog`]'s docs for the concrete format and fail-open
+    /// posture.
+    fn append(&self, path: &Path, command: &str, verdict: &Verdict);
+}
 
 /// Analyzes a raw shell command line and returns the [`Verdict`] the hook
 /// adapter should act on.
@@ -84,14 +103,14 @@ pub fn analyze(command: &str) -> Verdict {
 ///
 /// When `policy` carries a `decision_log_path` (set via the user config's
 /// `decision_log_path` key, off by default), one JSONL line describing the
-/// resulting verdict is appended to that path — see `src/decision_log.rs`.
-/// Logging happens here, inside the one function both the real hook
-/// (`src/adapter.rs`) and the `shguard check` CLI (`src/bin/shguard.rs`,
-/// issue #109) call, so a logged line can never diverge from what either
-/// caller actually saw, and it logs the verdict [`watchdog::bounded`]
-/// actually returned — including its own fail-closed `Ask` on a timeout —
-/// never a verdict a detached, still-running worker computed after the
-/// fact.
+/// resulting verdict is appended to that path via `sink` (see
+/// [`DecisionLogSink`]) — the composition root (`src/bin/shguard.rs`)
+/// constructs the concrete [`FileDecisionLog`] and passes it to both the
+/// real hook path (`src/adapter.rs`) and the `shguard check` CLI (issue
+/// #109), so a logged line can never diverge from what either caller
+/// actually saw, and it logs the verdict [`watchdog::bounded`] actually
+/// returned — including its own fail-closed `Ask` on a timeout — never a
+/// verdict a detached, still-running worker computed after the fact.
 ///
 /// The write happens AFTER [`watchdog::bounded`] returns, deliberately
 /// outside *this* wall-clock bound: logging inside the bounded closure was
@@ -120,14 +139,18 @@ pub fn analyze(command: &str) -> Verdict {
 /// watchdog of its own, so for one this function's own bound is the whole
 /// story.
 #[must_use]
-pub fn analyze_with_policy(command: &str, policy: &config::Policy) -> Verdict {
+pub fn analyze_with_policy(
+    command: &str,
+    policy: &config::Policy,
+    sink: &dyn DecisionLogSink,
+) -> Verdict {
     let command_owned = command.to_string();
     let policy_owned = policy.clone();
     let verdict = watchdog::bounded(move || {
         gate::analyze_with_policy(&command_owned, &policy_owned.rules, &policy_owned.allowlist)
     });
     if let Some(path) = &policy.decision_log_path {
-        decision_log::append(path, command, &verdict);
+        sink.append(path, command, &verdict);
     }
     verdict
 }

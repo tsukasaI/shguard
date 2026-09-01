@@ -4,18 +4,36 @@
 //! [`crate::config::Policy::load`] leaves the field `None` unless the
 //! user's own config sets it.
 //!
-//! Deliberately called from inside [`crate::analyze_with_policy`] itself
-//! rather than from each call site (`src/adapter.rs`'s hook path,
-//! `src/bin/shguard.rs`'s `check` subcommand) — the exact same divergence
+//! [`FileDecisionLog`] implements [`crate::DecisionLogSink`], the port
+//! [`crate::analyze_with_policy`] appends through — the composition root
+//! (`src/bin/shguard.rs`) constructs one instance and passes it to both
+//! `src/adapter.rs`'s hook path and the `check` subcommand (issue #408),
+//! so this module's concrete writer is never named outside this file and
+//! the composition root. The call itself still happens inside
+//! `analyze_with_policy`, not at either caller (the exact same divergence
 //! concern issue #109 closed for the decision itself: logging at the one
-//! shared entry point both callers already go through means the log can
-//! never disagree with what either caller actually saw.
+//! shared entry point both callers go through means the log can never
+//! disagree with what either caller actually saw).
 
 use std::io::Write;
 use std::path::Path;
 
 use crate::normalize::{NormalizedWord, Resolution};
 use crate::verdict::{Decision, Verdict};
+
+/// The only [`crate::DecisionLogSink`] implementation: appends to a real
+/// file on disk. Zero-sized — construction is free, so the composition
+/// root can build one wherever it needs to hand a sink to
+/// [`crate::analyze_with_policy`], including inside a spawned worker
+/// thread (`src/bin/shguard.rs`'s `evaluate_with_timeout`).
+#[derive(Clone, Copy)]
+pub struct FileDecisionLog;
+
+impl crate::DecisionLogSink for FileDecisionLog {
+    fn append(&self, path: &Path, command: &str, verdict: &Verdict) {
+        append(path, command, verdict);
+    }
+}
 
 /// Appends one JSONL line describing `verdict` for `command` to `path`.
 ///
@@ -28,7 +46,7 @@ use crate::verdict::{Decision, Verdict};
 /// the decision contract. A caller who needs to know logging itself is
 /// healthy should watch the log file directly (size, mtime), not
 /// shguard's return value.
-pub(crate) fn append(path: &Path, command: &str, verdict: &Verdict) {
+fn append(path: &Path, command: &str, verdict: &Verdict) {
     let decision = match verdict.decision() {
         Decision::Allow => "Allow",
         Decision::Ask => "Ask",
@@ -277,7 +295,7 @@ mod tests {
         });
 
         let policy = crate::config::Policy::for_test_with_decision_log_path(fifo_path);
-        let verdict = crate::analyze_with_policy("rm -rf /", &policy);
+        let verdict = crate::analyze_with_policy("rm -rf /", &policy, &FileDecisionLog);
         assert_eq!(
             verdict.decision(),
             Decision::Block,

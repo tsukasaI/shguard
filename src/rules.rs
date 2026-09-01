@@ -49,8 +49,7 @@ use std::collections::HashSet;
 
 use serde::Deserialize;
 
-use crate::gate::{FlagScan, scan_for_flag};
-use crate::normalize::{NormalizedWord, Resolution};
+use crate::normalize::{FlagScan, NormalizedWord, Resolution, scan_for_flag};
 use crate::verdict::{Decision, DenyMessage, Reason, RuleId, Verdict};
 
 // ---------------------------------------------------------------------
@@ -74,9 +73,14 @@ const EMBEDDED_ALLOWLIST: &str = include_str!("../rules/allowlist.toml");
 /// and keep going" (fail-closed).
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum RulesError {
-    /// The input is not valid TOML at all.
+    /// The input is not valid TOML at all. Carries `toml::de::Error`'s
+    /// message as a `String`, not the error type itself — `toml` is a
+    /// parsing-driver detail of this module alone
+    /// (`coding-guidelines/principles.md`, "adapters return
+    /// domain-meaningful errors, not driver errors"); this module's own
+    /// docs (above) already claim no TOML type leaves it.
     #[error("invalid TOML: {0}")]
-    Syntax(#[from] toml::de::Error),
+    Syntax(String),
     /// A rule failed a semantic check (empty id, empty reason, a matcher
     /// with no command identifier, an unrecognised flag spec, …).
     #[error("rule {id:?}: {problem}")]
@@ -5492,7 +5496,8 @@ impl Rules {
     /// malformed flag spec), or a duplicate rule id — fail-closed, never a
     /// silently-skipped rule.
     pub(crate) fn parse(toml: &str) -> Result<Self, RulesError> {
-        let dto: RulesFileDto = toml::from_str(toml)?;
+        let dto: RulesFileDto =
+            toml::from_str(toml).map_err(|e| RulesError::Syntax(e.to_string()))?;
 
         let command_rules = dto
             .command
@@ -5808,7 +5813,8 @@ impl Allowlist {
     /// [`Rules::parse`] (invalid TOML, a semantically invalid entry, or a
     /// duplicate id).
     pub(crate) fn parse(toml: &str) -> Result<Self, RulesError> {
-        let dto: AllowlistFileDto = toml::from_str(toml)?;
+        let dto: AllowlistFileDto =
+            toml::from_str(toml).map_err(|e| RulesError::Syntax(e.to_string()))?;
         let entries = dto
             .entry
             .into_iter()
@@ -6020,7 +6026,8 @@ impl UserConfig {
     /// the same way an embedded-blocklist pipeline entry's is — there is
     /// no `"allow"` value to reject here, unlike the command-rule arrays.
     pub(crate) fn parse(toml: &str) -> Result<Self, RulesError> {
-        let dto: UserConfigFileDto = toml::from_str(toml)?;
+        let dto: UserConfigFileDto =
+            toml::from_str(toml).map_err(|e| RulesError::Syntax(e.to_string()))?;
 
         let deny = dto
             .deny
