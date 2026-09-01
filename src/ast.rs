@@ -188,6 +188,32 @@ pub(crate) const MAX_RAW_BRACE_NESTING_DEPTH: usize = 12;
 /// later), never underestimate it.
 pub(crate) const MAX_KEYWORD_NESTING_COUNT: usize = 16;
 
+/// Cap on the total count of `!`/`&&`/`||` operators `src/parser.rs`'s raw
+/// pre-scan tolerates inside one `[[ ... ]]` extended-test region, enforced
+/// by [`crate::parser::reject_excessive_raw_nesting`] (issue #401: none of
+/// `{`/`}`/`(`/`)`/[`NESTING_KEYWORDS`](crate::parser) appear in a long
+/// `[[ ! ! ! ... a ]]`/`[[ a && a && ... ]]` chain, so it sailed through this
+/// scan untouched and reached brush-parser's recursive-descent grammar (or,
+/// for the `&&` shape, the recursive `Drop` of the already-parsed tree)
+/// uncapped — an uncatchable stack-overflow abort with empty stdout, a fail-
+/// open bypass of the whole hook (see the module docs on
+/// [`crate::parser::reject_excessive_raw_nesting`]).
+///
+/// Empirically confirmed thresholds: `!` alone overflows at parse time
+/// around 2052 repetitions; `&&` overflows at drop time around 65838
+/// repetitions (parsing itself succeeds). 64 sits ~30x below the tighter
+/// (parse-time) threshold — the same "far beyond any realistic operand
+/// count" margin [`crate::parser::collect_extended_test_words`]'s own
+/// AST-level depth cap already uses, which this raw cap now runs ahead of.
+/// Unlike [`MAX_KEYWORD_NESTING_COUNT`], the counter resets on each new
+/// `[[` — the recursion this bounds is a single boolean-expression tree
+/// built by one `[[ ... ]]` invocation, and independent `[[ ]]` blocks
+/// chained by `;`/`&&`/`||` at the top level parse and drop separately
+/// (flat, not recursive — same reason top-level `&&`/`||` chains between
+/// pipelines are unbounded and safe), so summing across blocks would only
+/// reject benign scripts without bounding anything real.
+pub(crate) const MAX_RAW_EXTENDED_TEST_COUNT: usize = 64;
+
 /// A separator joining two [`Pipeline`]s in a [`CommandLine`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Separator {
