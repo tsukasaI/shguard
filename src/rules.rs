@@ -5632,20 +5632,19 @@ impl Rules {
         self.ask_rules.iter().find(|rule| rule.matches(argv))
     }
 
-    /// Shared scan behind every `match_command_*` floor probe below
-    /// (issue #403): a user-config `[[ask]]` rule (`ask_rules`) with a
-    /// matching target/flags shape is just as eligible for any of these
-    /// floors as an embedded blocklist rule (`command_rules`) — both are
+    /// Shared scan behind every `match_command_*` floor probe below: a
+    /// user-config `[[ask]]` rule (`ask_rules`) with a matching
+    /// target/flags shape is just as eligible for any of these floors as
+    /// an embedded blocklist rule (`command_rules`) — both are
     /// `CommandRule`s. Scanning only `command_rules` would leave that
     /// floor's own literal-vs-obfuscated-spelling asymmetry alive for user
     /// config: the literal spelling correctly Asks via the user's rule
     /// itself, but an obfuscated respelling of the same target/flag
-    /// silently Allows. Centralized here, rather than each probe repeating
-    /// `command_rules.iter().chain(ask_rules.iter())` inline, specifically
-    /// because two of the eight callers once forgot the `ask_rules` half
-    /// (issue #403's own root cause) — one shared scan means a future 9th
-    /// floor probe can't repeat that mistake. Read-only: never mutates
-    /// rule state, never itself constitutes a match.
+    /// silently Allows. Centralizing this scan, rather than each probe
+    /// repeating `command_rules.iter().chain(ask_rules.iter())` inline,
+    /// means a future 9th floor probe can't independently drift out of
+    /// sync with the rest. Read-only: never mutates rule state, never
+    /// itself constitutes a match.
     fn find_command_or_ask_rule(
         &self,
         predicate: impl Fn(&CommandRule) -> bool,

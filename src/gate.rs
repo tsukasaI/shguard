@@ -3094,17 +3094,16 @@ fn fold_floors(
     if let Some(rule) = except_floors.target {
         decision = decision.max(Decision::Ask);
         reasons.push(format!(
-            "command matches blocklist rule {:?}, but its required flag(s) and/or target could \
-             not be fully checked because an argument is an unresolved $VAR or command \
-             substitution",
+            "command matches rule {:?}, but its required flag(s) and/or target could not be \
+             fully checked because an argument is an unresolved $VAR or command substitution",
             rule.id().as_str()
         ));
     }
     if let Some(rule) = except_floors.flags {
         decision = decision.max(Decision::Ask);
         reasons.push(format!(
-            "command matches blocklist rule {:?}, but a required flag/token could not be fully \
-             checked because an argument is an unresolved $VAR or command substitution",
+            "command matches rule {:?}, but a required flag/token could not be fully checked \
+             because an argument is an unresolved $VAR or command substitution",
             rule.id().as_str()
         ));
     }
