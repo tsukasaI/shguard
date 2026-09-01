@@ -14,6 +14,11 @@ use tempfile::tempdir;
 fn run_hook(stdin: &str) -> Value {
     let assert = Command::cargo_bin("shguard")
         .expect("shguard binary should build")
+        .env_remove("SHGUARD_CONFIG")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("HOME")
+        .env_remove("SHGUARD_TEST_PANIC")
+        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .write_stdin(stdin)
         .assert()
         .success();
@@ -46,10 +51,7 @@ fn block_triggering_command_denies_with_reason() {
 /// was previously never scanned at all denies with a non-empty reason —
 /// exercised end-to-end through the real binary, not just `gate.rs`'s unit
 /// tests, the same reasoning `block_triggering_command_denies_with_reason`
-/// above already applies to argv-position rules. Safe to run non-isolated
-/// (no `SHGUARD_CONFIG`/env stubbing): the embedded blocklist alone already
-/// blocks `rm -rf /`, and `crate::rules::apply_allowlist` is structurally
-/// Block-immune, so no host-local user config could downgrade this.
+/// above already applies to argv-position rules.
 #[test]
 fn assignment_rhs_substitution_denies() {
     let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"X=$(rm -rf /)"},"hook_event_name":"PreToolUse"}"#;
@@ -166,9 +168,11 @@ fn check_config_flag_with_trailing_argument_exits_with_error() {
 // using a command a user config denies that the embedded blocklist alone
 // would allow — that's what actually pins config-loading, not the mirrors.
 //
-// Every test that touches config loading (i.e. everything except the pure
-// usage-error cases) isolates the environment the same way
-// `tests/user_config.rs` does, so a host machine's own `SHGUARD_CONFIG`/
+// Every test that reaches config loading or hook evaluation (i.e.
+// everything except the pure usage-error/`--version` cases above, which
+// `main`'s argument dispatch rejects before any config or env read)
+// isolates the environment the same way `tests/user_config.rs` does, via
+// `run_hook`/`isolated_check`, so a host machine's own `SHGUARD_CONFIG`/
 // config file can't make these spuriously fail or pass.
 
 fn isolated_check(args: &[&str]) -> Command {
@@ -176,6 +180,8 @@ fn isolated_check(args: &[&str]) -> Command {
     cmd.env_remove("SHGUARD_CONFIG")
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("HOME")
+        .env_remove("SHGUARD_TEST_PANIC")
+        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .args(args);
     cmd
 }

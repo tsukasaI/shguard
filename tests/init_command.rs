@@ -16,7 +16,9 @@ fn run_init(args: &[&str], envs: &[(&str, &str)]) -> assert_cmd::assert::Assert 
         .args(args)
         .env_remove("SHGUARD_CONFIG")
         .env_remove("XDG_CONFIG_HOME")
-        .env_remove("HOME");
+        .env_remove("HOME")
+        .env_remove("SHGUARD_TEST_PANIC")
+        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB");
     for (key, value) in envs {
         cmd.env(key, value);
     }
@@ -58,6 +60,8 @@ fn scaffolded_config_loads_cleanly_via_check_config() {
         .env_remove("SHGUARD_CONFIG")
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("HOME")
+        .env_remove("SHGUARD_TEST_PANIC")
+        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .env("SHGUARD_CONFIG", &config_path)
         .assert()
         .success();
@@ -118,6 +122,8 @@ fn ignores_stdin() {
         .env_remove("SHGUARD_CONFIG")
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("HOME")
+        .env_remove("SHGUARD_TEST_PANIC")
+        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .env("SHGUARD_CONFIG", &config_path)
         .write_stdin(r#"{"tool_name":"Bash","tool_input":{"command":"echo hi"}}"#)
         .assert()

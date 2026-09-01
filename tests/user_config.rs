@@ -22,7 +22,9 @@ fn run_hook(stdin: &str, envs: &[(&str, &str)]) -> Value {
     let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
     cmd.env_remove("SHGUARD_CONFIG")
         .env_remove("XDG_CONFIG_HOME")
-        .env_remove("HOME");
+        .env_remove("HOME")
+        .env_remove("SHGUARD_TEST_PANIC")
+        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB");
     for (key, value) in envs {
         cmd.env(key, value);
     }
@@ -802,6 +804,8 @@ fn shguard_config_non_utf8_fails_closed() {
     let assert = cmd
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("HOME")
+        .env_remove("SHGUARD_TEST_PANIC")
+        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .env("SHGUARD_CONFIG", non_utf8)
         .write_stdin(bash_command("echo hi"))
         .assert()
@@ -829,6 +833,8 @@ fn home_non_utf8_fails_closed() {
     let assert = cmd
         .env_remove("SHGUARD_CONFIG")
         .env_remove("XDG_CONFIG_HOME")
+        .env_remove("SHGUARD_TEST_PANIC")
+        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .env("HOME", non_utf8)
         .write_stdin(bash_command("echo hi"))
         .assert()
@@ -854,6 +860,8 @@ fn xdg_config_home_non_utf8_fails_closed() {
         .env_remove("SHGUARD_CONFIG")
         .env("XDG_CONFIG_HOME", non_utf8)
         .env_remove("HOME")
+        .env_remove("SHGUARD_TEST_PANIC")
+        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .write_stdin(bash_command("echo hi"))
         .assert()
         .success();
@@ -899,6 +907,8 @@ fn empty_home_does_not_fall_back_to_cwd_relative_config() {
     let assert = cmd
         .env_remove("SHGUARD_CONFIG")
         .env_remove("XDG_CONFIG_HOME")
+        .env_remove("SHGUARD_TEST_PANIC")
+        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .env("HOME", "")
         .current_dir(dir.path())
         .write_stdin(bash_command("ls -la"))
@@ -1051,6 +1061,8 @@ fn bare_filename_shguard_config_still_loads_a_valid_config() {
     let assert = cmd
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("HOME")
+        .env_remove("SHGUARD_TEST_PANIC")
+        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .env("SHGUARD_CONFIG", "config.toml")
         .current_dir(dir.path())
         .write_stdin(bash_command("scary-tool --run"))
@@ -1092,6 +1104,8 @@ fn relative_dir_shguard_config_does_not_over_match_self_protection() {
     let assert = cmd
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("HOME")
+        .env_remove("SHGUARD_TEST_PANIC")
+        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .env("SHGUARD_CONFIG", "./config.toml")
         .current_dir(dir.path())
         .write_stdin(bash_command("scary-tool --run"))
@@ -1110,6 +1124,8 @@ fn relative_dir_shguard_config_does_not_over_match_self_protection() {
     let assert = cmd
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("HOME")
+        .env_remove("SHGUARD_TEST_PANIC")
+        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .env("SHGUARD_CONFIG", "./config.toml")
         .current_dir(dir.path())
         .write_stdin(bash_command("cp a ./b"))

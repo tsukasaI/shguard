@@ -30,6 +30,8 @@ fn isolated_command(config_path: &std::path::Path) -> Command {
     let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
     cmd.env_remove("XDG_CONFIG_HOME")
         .env_remove("HOME")
+        .env_remove("SHGUARD_TEST_PANIC")
+        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .env("SHGUARD_CONFIG", config_path);
     cmd
 }
