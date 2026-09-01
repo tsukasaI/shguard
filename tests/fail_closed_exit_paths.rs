@@ -10,10 +10,11 @@
 //! each path now exits 0 with a well-formed `ask` decision instead.
 //!
 //! Uses `tests/user_config.rs`'s env-isolation pattern (`SHGUARD_CONFIG`/
-//! `XDG_CONFIG_HOME`/`HOME` all `env_remove`d on the child process) rather
-//! than `tests/hook_io.rs`'s unisolated `run_hook`, so results here depend
-//! only on the embedded rules, never on whatever config happens to exist
-//! on the host machine running the test.
+//! `XDG_CONFIG_HOME`/`HOME`, plus the `SHGUARD_TEST_PANIC`/
+//! `SHGUARD_TEST_MEM_LIMIT_MB` test-injection vars, all `env_remove`d on the
+//! child process), so results here depend only on the embedded rules, never
+//! on whatever config or leaked test-injection env happens to exist on the
+//! host machine running the test.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
