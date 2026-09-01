@@ -44,17 +44,19 @@
 /// A cap as tight as 8 risks a false Ask when the raw scanner over-counts
 /// (e.g. `{`/`(` occurring inside a quoted string it does not parse
 /// quoting out of); 64 tolerates that over-count while still capping actual
-/// unbounded recursion. With [`MAX_RAW_BRACE_NESTING_DEPTH`] in place, this
-/// tolerance argument holds only for the raw scan's `(`/`)` half; the
-/// `{`/`}` half accepts the tighter over-count risk documented there.
+/// unbounded recursion. With [`MAX_RAW_BRACE_NESTING_DEPTH`]/
+/// [`MAX_RAW_PAREN_NESTING_DEPTH`] in place, this tolerance argument no
+/// longer applies to either half of the raw scan — see their own docs for
+/// why each needs a much tighter, PEG-cost-driven cap instead.
 ///
 /// # Known trade-off
 ///
 /// The raw pre-scan in `src/parser.rs::parse` counts every `{`/`}`/`(`/`)`
 /// byte in the input, including ones inside quotes (e.g. a deeply nested
 /// JSON literal passed as a shell argument). Such input can hit this cap
-/// (or, for `{`/`}`, the far tighter [`MAX_RAW_BRACE_NESTING_DEPTH`])
-/// and fail closed to `Ask` even though it is not itself a nesting attack —
+/// (or, more likely given how much tighter they are,
+/// [`MAX_RAW_BRACE_NESTING_DEPTH`]/[`MAX_RAW_PAREN_NESTING_DEPTH`]) and
+/// fail closed to `Ask` even though it is not itself a nesting attack —
 /// an accepted false-positive cost of a scan that is deliberately linear
 /// and non-recursive (the only correctness property that matters for a
 /// stack-overflow defense).
@@ -62,19 +64,16 @@ pub(crate) const MAX_BRACE_NESTING_DEPTH: usize = 64;
 
 /// Cap on `{`/`}` nesting depth specifically for `src/parser.rs`'s raw
 /// pre-scan (`reject_excessive_raw_nesting`) — separate from
-/// [`MAX_BRACE_NESTING_DEPTH`], which the same scan still uses for its
-/// `(`/`)` check, and which every AST-level brace-depth cap
+/// [`MAX_BRACE_NESTING_DEPTH`], which every AST-level brace-depth cap
 /// (`src/parser.rs`'s `convert_brace_segment`/`convert_brace_members`,
 /// `src/normalize.rs`'s `expand_braces`) keeps using unchanged.
 ///
 /// # Why a separate, much smaller cap
 ///
-/// Unlike `(`/`)` nesting (linear-cost stack recursion,
-/// [`MAX_BRACE_NESTING_DEPTH`]'s own docs), a *comma-less* nested brace
-/// group (`{{{x}}}`, no `,` inside any level) makes brush-parser's PEG
-/// grammar backtrack catastrophically — no memoization, ~6.5x cost growth
-/// per two nesting levels (~2.5x per level; crash-fuzzer measurement,
-/// release build):
+/// A *comma-less* nested brace group (`{{{x}}}`, no `,` inside any level)
+/// makes brush-parser's PEG grammar backtrack catastrophically — no
+/// memoization, ~6.5x cost growth per two nesting levels (~2.5x per level;
+/// crash-fuzzer measurement, release build):
 ///
 /// | depth | time |
 /// |---|---|
@@ -102,6 +101,47 @@ pub(crate) const MAX_BRACE_NESTING_DEPTH: usize = 64;
 /// "usable again" or "unusably slow one level earlier" depending on
 /// whether a new grammar version added memoization.
 pub(crate) const MAX_RAW_BRACE_NESTING_DEPTH: usize = 12;
+
+/// Cap on `(`/`)` nesting depth specifically for `src/parser.rs`'s raw
+/// pre-scan (`reject_excessive_raw_nesting`) — issue #404's tightening of
+/// the same PEG-catastrophic-backtracking class [`MAX_RAW_BRACE_NESTING_DEPTH`]
+/// already closed for `{`/`}`. Separate from [`MAX_BRACE_NESTING_DEPTH`],
+/// which every AST-level paren-adjacent depth cap (`collect_extended_test_words`)
+/// keeps using unchanged.
+///
+/// # Why a separate, much smaller cap
+///
+/// A leading run of unbalanced `(` (no matching `)` anywhere) triggers
+/// brush-parser's subshell-vs-arithmetic-expansion PEG ambiguity into the
+/// same catastrophic backtracking `{{{`-nesting does — no memoization
+/// (crash-fuzzer measurement, release build, `shguard check` end to end):
+///
+/// | depth | time |
+/// |---|---|
+/// | 16 | 0.007s (at CLI-startup baseline; no measurable parse cost) |
+/// | 18 | 0.013s |
+/// | 20 | 0.036s |
+/// | 22 | 0.129s |
+/// | 24 | 0.498s |
+/// | 26 | 2.000s (watchdog trip) |
+///
+/// `MAX_BRACE_NESTING_DEPTH`'s own 64-level cap is far above the usable
+/// limit here — a raw paren depth sitting below 64 sailed through
+/// unrejected while spending arbitrary CPU. Via the CLI/hook path this
+/// only stalls for the watchdog's timeout before failing closed to `Ask`;
+/// via the public library API (`shguard::analyze`), the detached watchdog
+/// worker thread keeps burning CPU indefinitely after the caller already
+/// received its `Ask` verdict — a real CPU DoS against any long-lived
+/// process embedding `shguard` as a library, independent of the CLI's own
+/// watchdog protection.
+///
+/// 16 sits at the last depth measured indistinguishable from CLI-startup
+/// baseline (no detectable parse cost at all), with a wide margin below
+/// where growth becomes exponential (18+). Re-measure the same
+/// leading-unbalanced-paren timing curve before raising this on any
+/// `brush-parser` version bump, for the same reason
+/// [`MAX_RAW_BRACE_NESTING_DEPTH`]'s docs give.
+pub(crate) const MAX_RAW_PAREN_NESTING_DEPTH: usize = 16;
 
 /// Cap on the total count of reserved-word compound-command openers (`if`,
 /// `while`, `until`, `for`, `case`) `src/parser.rs`'s raw pre-scan tolerates

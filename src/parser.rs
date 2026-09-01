@@ -63,8 +63,8 @@ use brush_parser::{Parser as BrushParser, ParserOptions as BrushParserOptions, a
 use crate::ast::{
     Assignment, AssignmentValue, Command, CommandLine, CompoundCommand, ElifClause, ExtendedTest,
     FileRedirectionKind, FunctionDefinition, MAX_BRACE_NESTING_DEPTH, MAX_KEYWORD_NESTING_COUNT,
-    MAX_RAW_BRACE_NESTING_DEPTH, MAX_RAW_EXTENDED_TEST_COUNT, Pipeline,
-    ProcessSubstitutionDirection, Redirection, Separator, SimpleCommand, Word, WordPiece,
+    MAX_RAW_BRACE_NESTING_DEPTH, MAX_RAW_EXTENDED_TEST_COUNT, MAX_RAW_PAREN_NESTING_DEPTH,
+    Pipeline, ProcessSubstitutionDirection, Redirection, Separator, SimpleCommand, Word, WordPiece,
 };
 
 /// Everything that can go wrong converting a raw command string into
@@ -150,42 +150,51 @@ fn is_token_boundary(byte: u8) -> bool {
 
 /// Rejects `command` if its `{`/`}` nesting depth exceeds
 /// [`MAX_RAW_BRACE_NESTING_DEPTH`], its `(`/`)` nesting depth exceeds
-/// [`MAX_BRACE_NESTING_DEPTH`], its total count of [`NESTING_KEYWORDS`]
+/// [`MAX_RAW_PAREN_NESTING_DEPTH`], its total count of [`NESTING_KEYWORDS`]
 /// occurrences exceeds [`MAX_KEYWORD_NESTING_COUNT`], or its count of
 /// `!`/`&&`/`||` operators inside any single `[[ ... ]]` extended-test
 /// region exceeds [`MAX_RAW_EXTENDED_TEST_COUNT`], *before* any
 /// recursive-descent parser (brush-parser's PEG grammar, or this module's
 /// own brace/word conversion) ever sees the text.
 ///
-/// This is the primary defense against issue #52's abort: deeply nested
-/// `{`/`(` input (e.g. `{a,` repeated thousands of times, or `$(` repeated
-/// thousands of times), deeply nested `if`/`while`/`until`/`for`/`case`
-/// compound commands, or a long unparenthesized `!`/`&&`/`||` chain inside
-/// `[[ ... ]]` (issue #401), crash with a stack overflow *inside
-/// brush-parser's own PEG grammar* (or, for the `&&`/`||` shape, in the
-/// recursive `Drop` of the tree it already successfully built) — its
-/// mutually recursive descent has no depth limit of its own, for any of
-/// these nesting kinds — before shguard's AST-level depth cap
-/// (`convert_brace_segment`/`convert_brace_members`/
-/// `collect_extended_test_words` in this module, `normalize::expand_braces`)
-/// ever gets a chance to run, because those only see brush-parser's
-/// *output*. A crash there is an uncatchable abort (`std::panic::catch_unwind`
-/// cannot intercept a stack overflow — see `src/bin/shguard.rs`'s module
-/// docs), so the only effective defense is a linear, non-recursive pre-scan
-/// that runs ahead of the parser and rejects the input outright. All four
+/// This is the primary defense against issue #52's abort and issue #404's
+/// CPU-DoS: deeply nested `{`/`(` input (e.g. `{a,` repeated thousands of
+/// times, or `$(` repeated thousands of times) can crash with a stack
+/// overflow *inside brush-parser's own PEG grammar* (or, for the `&&`/`||`
+/// shape below, in the recursive `Drop` of the tree it already
+/// successfully built) — its mutually recursive descent has no depth limit
+/// of its own — while a comma-less `{{{`-nested brace group or a leading
+/// run of unbalanced `(` instead drives that same PEG grammar into
+/// catastrophic backtracking, burning unbounded CPU without ever
+/// overflowing the stack (issue #404 — via the CLI/hook path this only
+/// stalls for the watchdog's timeout, but via the public library API the
+/// detached watchdog worker thread keeps burning CPU indefinitely after
+/// the caller already received its verdict). Deeply nested
+/// `if`/`while`/`until`/`for`/`case` compound commands overflow the stack
+/// the same uncatchable way, and a long unparenthesized `!`/`&&`/`||`
+/// chain inside `[[ ... ]]` (issue #401) does too. None of these reach
+/// shguard's AST-level depth caps (`convert_brace_segment`/
+/// `convert_brace_members`/`collect_extended_test_words` in this module,
+/// `normalize::expand_braces`) in time to matter, because those only see
+/// brush-parser's *output* — a stack overflow is an uncatchable abort
+/// (`std::panic::catch_unwind` cannot intercept one — see
+/// `src/bin/shguard.rs`'s module docs) and unbounded backtracking simply
+/// never returns control to run them, so the only effective defense
+/// against either failure mode is a linear, non-recursive pre-scan that
+/// runs ahead of the parser and rejects the input outright. All four
 /// counters are tracked in one pass (`{`/`}` alone would miss a `$(`-only
 /// attack, which was independently confirmed to abort even though it never
 /// touches shguard's AST-level brace cap at all; neither bracket alone
 /// catches a keyword-only attack like nested `if`/`then`/`fi` with no
 /// braces or parens at all; and none of the three catches a `[[ ]]`
 /// operator chain, which contains no `{`/`(`/keyword byte at all) — see
-/// [`MAX_BRACE_NESTING_DEPTH`]'s, [`MAX_KEYWORD_NESTING_COUNT`]'s, and
-/// [`MAX_RAW_EXTENDED_TEST_COUNT`]'s docs for the chosen cap values and
-/// their trade-offs. The `{`/`}` cap is [`MAX_RAW_BRACE_NESTING_DEPTH`], not
-/// [`MAX_BRACE_NESTING_DEPTH`] — see its own docs for why brace nesting
-/// alone needs a much tighter cap than stack-overflow-driven
-/// parenthesis/keyword nesting does (a PEG catastrophic-backtracking cost,
-/// not a stack-depth one).
+/// [`MAX_RAW_BRACE_NESTING_DEPTH`]'s, [`MAX_RAW_PAREN_NESTING_DEPTH`]'s,
+/// [`MAX_KEYWORD_NESTING_COUNT`]'s, and [`MAX_RAW_EXTENDED_TEST_COUNT`]'s
+/// docs for the chosen cap values, their measured cost curves, and their
+/// trade-offs — both `{`/`}` and `(`/`)` use a raw cap far tighter than
+/// [`MAX_BRACE_NESTING_DEPTH`]'s stack-depth-sized 64, since PEG
+/// backtracking cost grows exponentially with nesting depth while stack
+/// depth grows only linearly.
 ///
 /// Scans bytes, not `char`s: every byte this function compares against
 /// (`{`, `}`, `(`, `)`, `[`, `]`, `&`, `|`, and every [`is_token_boundary`]
@@ -215,7 +224,7 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
             b'}' => brace_depth = brace_depth.saturating_sub(1),
             b'(' => {
                 paren_depth += 1;
-                if paren_depth > MAX_BRACE_NESTING_DEPTH {
+                if paren_depth > MAX_RAW_PAREN_NESTING_DEPTH {
                     return Err(ParseError::unsupported(
                         "parenthesis nesting exceeds the raw depth cap",
                     ));
@@ -307,7 +316,7 @@ fn check_extended_test_op_count(extended_test_op_count: &mut usize) -> Result<()
 /// [`ParseError::Unsupported`] if it parses but contains a construct
 /// shguard's AST cannot represent (see the module docs), including raw
 /// `{`/`}` nesting past [`MAX_RAW_BRACE_NESTING_DEPTH`], `(`/`)` nesting
-/// past [`MAX_BRACE_NESTING_DEPTH`], [`NESTING_KEYWORDS`] nesting past
+/// past [`MAX_RAW_PAREN_NESTING_DEPTH`], [`NESTING_KEYWORDS`] nesting past
 /// [`MAX_KEYWORD_NESTING_COUNT`], or `[[ ... ]]` `!`/`&&`/`||` operator
 /// count past [`MAX_RAW_EXTENDED_TEST_COUNT`]
 /// ([`reject_excessive_raw_nesting`]).
@@ -1571,14 +1580,55 @@ mod tests {
 
     #[test]
     fn raw_paren_nesting_at_the_cap_still_parses() {
-        let command = format!("{}echo hi{}", "$(".repeat(64), ")".repeat(64));
+        let command = format!(
+            "{}echo hi{}",
+            "$(".repeat(MAX_RAW_PAREN_NESTING_DEPTH),
+            ")".repeat(MAX_RAW_PAREN_NESTING_DEPTH)
+        );
         assert!(parse(&command).is_ok());
     }
 
     #[test]
     fn raw_paren_nesting_one_past_the_cap_is_rejected() {
-        let command = format!("{}echo hi{}", "$(".repeat(65), ")".repeat(65));
+        let command = format!(
+            "{}echo hi{}",
+            "$(".repeat(MAX_RAW_PAREN_NESTING_DEPTH + 1),
+            ")".repeat(MAX_RAW_PAREN_NESTING_DEPTH + 1)
+        );
         assert!(parse(&command).is_err());
+    }
+
+    // issue #404: a leading run of unbalanced `(` (no matching `)`
+    // anywhere) triggers brush-parser's subshell-vs-arithmetic PEG
+    // ambiguity into the same catastrophic backtracking comma-less brace
+    // nesting does — this asserts the raw pre-scan rejects a depth the
+    // exponential path would otherwise spend seconds of CPU on, proving
+    // the cap is what stops it, not luck. Fully unbalanced (no `)` at
+    // all), unlike the `$(...)`-pair tests above, since the CPU-DoS shape
+    // is specifically a leading run with nothing closing it. Depth is a
+    // hardcoded literal, like the sibling comma-less-brace test above
+    // (`raw_comma_less_brace_nesting_...`), not derived from
+    // `MAX_RAW_PAREN_NESTING_DEPTH`: a depth derived from the cap under
+    // test would still exceed a future *raised* cap and pass for the
+    // wrong reason, silently stopping this test from ever catching a
+    // cap raised back into the vulnerable 17-63 range. 26 is the
+    // measured depth that already hits the 2s watchdog on the
+    // vulnerable (pre-fix) code.
+    #[test]
+    fn raw_unbalanced_paren_run_past_the_cap_is_rejected_before_the_exponential_path() {
+        let depth = 26;
+        assert!(
+            depth > MAX_RAW_PAREN_NESTING_DEPTH,
+            "cap raised past this test's probe depth — re-measure and re-derive"
+        );
+        let command = format!("{}a", "(".repeat(depth));
+        let start = std::time::Instant::now();
+        assert!(parse(&command).is_err());
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(500),
+            "rejection took {:?}, expected well under the exponential blowup",
+            start.elapsed()
+        );
     }
 
     // ---- issue #401: reject_excessive_raw_nesting's `[[ ... ]]`

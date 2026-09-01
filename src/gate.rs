@@ -179,8 +179,9 @@
 //! *before* this module ever runs, at parse time:
 //! [`crate::ast::MAX_KEYWORD_NESTING_COUNT`] caps how many `for`/`while`/
 //! `until` (plus `if`/`case`, unmodeled) keywords one command line may
-//! contain, and [`crate::ast::MAX_BRACE_NESTING_DEPTH`] caps brace/paren
-//! nesting (which already counts a process substitution's `<(`/`>(`). A
+//! contain, and [`crate::ast::MAX_RAW_BRACE_NESTING_DEPTH`]/
+//! [`crate::ast::MAX_RAW_PAREN_NESTING_DEPTH`] cap brace/paren nesting
+//! (the latter already counts a process substitution's `<(`/`>(`). A
 //! command line could in principle spend both budgets independently (a
 //! deeply substitution-nested string whose innermost level also nests
 //! loops), but each channel is capped on its own terms — one is not a
@@ -191,8 +192,8 @@
 //! recurses over an already-parsed `SimpleCommand`'s `Word`s, not raw text
 //! — but unlike the bodies above, its nesting has no parse-time cap of its
 //! own: `find -exec find -exec find -exec ... rm -rf {} \;` is one flat
-//! `SimpleCommand`, invisible to both `MAX_KEYWORD_NESTING_COUNT` and
-//! `MAX_BRACE_NESTING_DEPTH`. So this channel DOES spend the
+//! `SimpleCommand`, invisible to `MAX_KEYWORD_NESTING_COUNT` and the raw
+//! brace/paren caps alike. So this channel DOES spend the
 //! substitution-depth budget, incrementing `depth` before every recursive
 //! call exactly like a raw-text re-parse would — threading `depth` unchanged
 //! here instead would let this channel nest unboundedly deep, the same
@@ -692,11 +693,11 @@ fn evaluate_pipeline(
 /// rather than incremented. This recursion is bounded pre-parse instead: by
 /// `MAX_KEYWORD_NESTING_COUNT` (`crate::parser::reject_excessive_raw_nesting`)
 /// for how many `for`/`while`/`until`/`if` keywords one command line may
-/// contain, and by `MAX_BRACE_NESTING_DEPTH` for how deeply subshells/brace
-/// groups/process substitutions may nest — both counted at parse time,
-/// before this function ever runs, so this recursion cannot itself be
-/// driven unboundedly deep the way a raw-text substitution re-parse could
-/// be.
+/// contain, and by `MAX_RAW_PAREN_NESTING_DEPTH`/`MAX_RAW_BRACE_NESTING_DEPTH`
+/// for how deeply subshells/process substitutions and brace groups may
+/// nest respectively — all counted at parse time, before this function
+/// ever runs, so this recursion cannot itself be driven unboundedly deep
+/// the way a raw-text substitution re-parse could be.
 ///
 /// Also runs the compound's own attached redirections through the same
 /// checks a [`SimpleCommand`]'s redirections get, and, for a `ForClause`,
