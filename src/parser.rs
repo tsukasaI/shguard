@@ -997,6 +997,174 @@ fn is_brace_expr(segment: &bword::BraceExpressionOrText) -> bool {
     matches!(segment, bword::BraceExpressionOrText::Expr(_))
 }
 
+/// Quote state shared by every scanner in this module that walks raw
+/// shell word text: [`word_contains_overflowing_brace_range`] and
+/// [`skip_quote_aware_span`] (used both for the outer scan and,
+/// recursively, for a nested substitution's own body — see that
+/// function's docs for why a single shared state machine matters here).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Quote {
+    None,
+    Single,
+    Double,
+    AnsiC,
+}
+
+/// Result of [`try_skip_substitution`] at one byte position.
+enum SubstitutionSkip {
+    /// `bytes[i]` doesn't open a `$(...)`/`` `...` `` substitution at
+    /// all — the caller should handle this byte normally.
+    NotAnOpener,
+    /// It does, and closes at this absolute index (the byte just past
+    /// the matching `)`/backtick).
+    Closed(usize),
+    /// It does, but never closes — brush's own parse would fail here
+    /// too, so nothing past this point can be assessed safely.
+    Unterminated,
+}
+
+/// If `bytes[i]` opens a `$(...)` or `` `...` `` command substitution,
+/// skips its entire (quote-aware, recursively substitution-aware) body
+/// via [`skip_quote_aware_span`] and reports where it closes.
+fn try_skip_substitution(bytes: &[u8], i: usize) -> SubstitutionSkip {
+    if bytes[i] == b'$' && bytes.get(i + 1) == Some(&b'(') {
+        return match skip_quote_aware_span(bytes, i + 2, SpanKind::Paren) {
+            Some(end) => SubstitutionSkip::Closed(end),
+            None => SubstitutionSkip::Unterminated,
+        };
+    }
+    if bytes[i] == b'`' {
+        return match skip_quote_aware_span(bytes, i + 1, SpanKind::Backtick) {
+            Some(end) => SubstitutionSkip::Closed(end),
+            None => SubstitutionSkip::Unterminated,
+        };
+    }
+    SubstitutionSkip::NotAnOpener
+}
+
+/// Which closer [`skip_quote_aware_span`] is itself looking for.
+enum SpanKind {
+    /// A `$(...)` substitution — closes on a `)` once nested `(`/`)`
+    /// depth (tracked unconditionally, arithmetic's doubled `$((` and
+    /// any parenthesized sub-expression included) returns to 0.
+    Paren,
+    /// A backtick substitution — closes on the first unescaped,
+    /// unquoted backtick (backtick strings never nest in real shell
+    /// syntax; an inner one must be `\`-escaped).
+    Backtick,
+}
+
+/// Scans forward from absolute index `start` in `bytes` for the closer
+/// [`SpanKind`] describes, quote-aware the same way
+/// [`word_contains_overflowing_brace_range`] is — and, critically,
+/// RECURSIVELY skips any `$(...)`/`` `...` `` substitution it encounters
+/// along the way, in BOTH an unquoted position and a live double-quoted
+/// one (brush's own `double_quoted_word_piece` grammar, `word.rs:782-788`,
+/// keeps `command_substitution()` — and `arithmetic_expansion()`/
+/// `legacy_arithmetic_expansion()`/`parameter_expansion()` — live inside
+/// `"..."`; only single-quoted and ANSI-C `$'...'` text is ever fully
+/// inert). Without this recursion, a substitution nested inside another
+/// substitution's own double-quoted content (`"$(echo "$(...)")"`) would
+/// have its inner `)`/backtick misread as this span's own close — the
+/// unsafe direction, since closing early exposes content that should
+/// still be inside the span to whatever the CALLER treats as live.
+///
+/// Returns the absolute index just past the closer, `None` if `bytes`
+/// ends first (unterminated).
+fn skip_quote_aware_span(bytes: &[u8], start: usize, kind: SpanKind) -> Option<usize> {
+    let mut quote = Quote::None;
+    let mut paren_depth = 1u32; // only consulted for `SpanKind::Paren`
+    let mut i = start;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match quote {
+            Quote::Single => {
+                if c == b'\'' {
+                    quote = Quote::None;
+                }
+                i += 1;
+            }
+            Quote::AnsiC => {
+                if c == b'\\' && i + 1 < bytes.len() {
+                    i += 2;
+                    continue;
+                }
+                if c == b'\'' {
+                    quote = Quote::None;
+                }
+                i += 1;
+            }
+            Quote::Double => {
+                if c == b'\\' && i + 1 < bytes.len() {
+                    i += 2;
+                    continue;
+                }
+                match try_skip_substitution(bytes, i) {
+                    SubstitutionSkip::Closed(next) => {
+                        i = next;
+                        continue;
+                    }
+                    SubstitutionSkip::Unterminated => return None,
+                    SubstitutionSkip::NotAnOpener => {}
+                }
+                if c == b'"' {
+                    quote = Quote::None;
+                }
+                i += 1;
+            }
+            Quote::None => {
+                if c == b'\\' && i + 1 < bytes.len() {
+                    i += 2;
+                    continue;
+                }
+                // This span's OWN closer takes priority over treating
+                // the same byte as a new nested substitution opener —
+                // matters for `SpanKind::Backtick`: a bare backtick here
+                // is real shell syntax's way of closing THIS span (real
+                // backticks never nest unescaped), not the start of one
+                // inside it.
+                match kind {
+                    SpanKind::Backtick if c == b'`' => return Some(i + 1),
+                    SpanKind::Paren if c == b'(' => {
+                        paren_depth += 1;
+                        i += 1;
+                        continue;
+                    }
+                    SpanKind::Paren if c == b')' => {
+                        paren_depth -= 1;
+                        if paren_depth == 0 {
+                            return Some(i + 1);
+                        }
+                        i += 1;
+                        continue;
+                    }
+                    _ => {}
+                }
+                if c == b'$' && bytes.get(i + 1) == Some(&b'\'') {
+                    quote = Quote::AnsiC;
+                    i += 2;
+                    continue;
+                }
+                match try_skip_substitution(bytes, i) {
+                    SubstitutionSkip::Closed(next) => {
+                        i = next;
+                        continue;
+                    }
+                    SubstitutionSkip::Unterminated => return None,
+                    SubstitutionSkip::NotAnOpener => {}
+                }
+                match c {
+                    b'\'' => quote = Quote::Single,
+                    b'"' => quote = Quote::Double,
+                    _ => {}
+                }
+                i += 1;
+            }
+        }
+    }
+    None
+}
+
 /// True if `text` contains an UNQUOTED `{` opening a brace group whose
 /// grammar rule brush-parser 0.4.0 would panic evaluating — see
 /// [`brace_group_panics`] for the exact precondition, derived from
@@ -1011,28 +1179,31 @@ fn is_brace_expr(segment: &bword::BraceExpressionOrText) -> bool {
 /// a false-positive `Ask` this pre-scan must not introduce.
 ///
 /// ALSO skips a `$(...)`/`` `...` `` command substitution's own content
-/// wholesale (via [`skip_balanced_parens`]/[`skip_backtick_substitution`])
-/// — its content is an independent, arbitrary shell fragment brush's
+/// wholesale (via [`try_skip_substitution`]/[`skip_quote_aware_span`]) —
+/// its content is an independent, arbitrary shell fragment brush's
 /// `non_brace_expr_text` rule consumes atomically at the point where it
 /// checks for a possible `brace_expr()`, so a `{` inside it is never a
 /// live brace-group candidate FOR THIS OUTER WORD's expansion, regardless
-/// of what it would mean if evaluated on its own (fable review finding:
-/// `a$(b{99999999999999999999..1})c` never panics in real brush, but the
-/// pre-fix scan flagged it anyway). Does NOT skip `${...}` (parameter
-/// expansion) the same way — a `{` immediately after `$` there is not
-/// itself a substitution boundary the way `$(`/`` ` `` are, and
-/// empirically `${99999999999999999999..1}` genuinely does still panic
-/// in real brush, so continuing to flag it is correct, not a false
-/// positive.
+/// of what it would mean if evaluated on its own. Dispatched in BOTH the
+/// unquoted AND live-double-quoted arms below — brush keeps a
+/// substitution live even inside `"..."` (`word.rs:782-788`), so an
+/// EARLIER fix that only dispatched it in the unquoted arm still
+/// flagged, e.g., `"$(echo "{99999999999999999999..1}")"` (fable review
+/// finding). Does NOT skip `${...}` (parameter expansion) the same way —
+/// a `{` immediately after `$` there is not itself a substitution
+/// boundary the way `$(`/`` ` `` are, and empirically
+/// `${99999999999999999999..1}` genuinely does still panic in real
+/// brush, so continuing to flag it is correct, not a false positive.
+///
+/// ALSO bails entirely (returns `false` — stop assessing this word, fall
+/// through to `catch_parser_panic`'s pre-existing containment) on `$[`
+/// (legacy arithmetic expansion, also live inside double quotes): unlike
+/// `$(`/backtick, its content has no simple universal closer this scan
+/// can search for without its own grammar mirror (`]` can legitimately
+/// appear inside an array-element reference), so rather than risk either
+/// direction of error, this construct is left to the pre-existing panic
+/// containment instead of pre-empted (fable review finding).
 fn word_contains_overflowing_brace_range(text: &str) -> bool {
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Quote {
-        None,
-        Single,
-        Double,
-        AnsiC,
-    }
-
     let bytes = text.as_bytes();
     let mut quote = Quote::None;
     let mut i = 0;
@@ -1045,13 +1216,33 @@ fn word_contains_overflowing_brace_range(text: &str) -> bool {
                 }
                 i += 1;
             }
-            Quote::AnsiC | Quote::Double => {
+            Quote::AnsiC => {
                 if c == b'\\' && i + 1 < bytes.len() {
                     i += 2;
                     continue;
                 }
-                let closer = if quote == Quote::AnsiC { b'\'' } else { b'"' };
-                if c == closer {
+                if c == b'\'' {
+                    quote = Quote::None;
+                }
+                i += 1;
+            }
+            Quote::Double => {
+                if c == b'\\' && i + 1 < bytes.len() {
+                    i += 2;
+                    continue;
+                }
+                if c == b'$' && bytes.get(i + 1) == Some(&b'[') {
+                    return false;
+                }
+                match try_skip_substitution(bytes, i) {
+                    SubstitutionSkip::Closed(next) => {
+                        i = next;
+                        continue;
+                    }
+                    SubstitutionSkip::Unterminated => return false,
+                    SubstitutionSkip::NotAnOpener => {}
+                }
+                if c == b'"' {
                     quote = Quote::None;
                 }
                 i += 1;
@@ -1061,32 +1252,21 @@ fn word_contains_overflowing_brace_range(text: &str) -> bool {
                     i += 2;
                     continue;
                 }
-                if c == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                if c == b'$' && bytes.get(i + 1) == Some(&b'\'') {
                     quote = Quote::AnsiC;
                     i += 2;
                     continue;
                 }
-                if c == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'(' {
-                    match skip_balanced_parens(&text[i + 2..]) {
-                        Some(consumed) => {
-                            i += 2 + consumed;
-                            continue;
-                        }
-                        // Unterminated substitution: nothing after this
-                        // point is safely scannable either (brush's own
-                        // parse fails here regardless), so stop rather
-                        // than guess.
-                        None => return false,
-                    }
+                if c == b'$' && bytes.get(i + 1) == Some(&b'[') {
+                    return false;
                 }
-                if c == b'`' {
-                    match skip_backtick_substitution(&text[i + 1..]) {
-                        Some(consumed) => {
-                            i += 1 + consumed;
-                            continue;
-                        }
-                        None => return false,
+                match try_skip_substitution(bytes, i) {
+                    SubstitutionSkip::Closed(next) => {
+                        i = next;
+                        continue;
                     }
+                    SubstitutionSkip::Unterminated => return false,
+                    SubstitutionSkip::NotAnOpener => {}
                 }
                 match c {
                     b'\'' => quote = Quote::Single,
@@ -1099,101 +1279,6 @@ fn word_contains_overflowing_brace_range(text: &str) -> bool {
         }
     }
     false
-}
-
-/// Skips a `$(...)` command substitution's content (the text starting
-/// right after the `$(`), honoring nested quoting so a quoted `)` inside
-/// it is never mistaken for the substitution's own close — a smaller,
-/// self-contained mirror of [`crate::gate`]'s `scan_paren_span` (not
-/// reused directly: that one is scoped to gate.rs's own redirect-target
-/// analysis and returns different data). Returns the byte offset,
-/// relative to `s`, of the first byte AFTER the matching `)` — `None` if
-/// `s` never closes it (an unterminated substitution).
-///
-/// A quote-unaware `(`/`)` count would close too EARLY on a quoted `)`
-/// inside the substitution (`$(echo ")")`), which is the unsafe
-/// direction here: exiting the skip early would expose the
-/// substitution's own remaining content to
-/// [`word_contains_overflowing_brace_range`]'s outer `{` scan as if it
-/// were live at the OUTER word's level, which real brush never does.
-fn skip_balanced_parens(s: &str) -> Option<usize> {
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Quote {
-        None,
-        Single,
-        Double,
-        AnsiC,
-    }
-
-    let bytes = s.as_bytes();
-    let mut quote = Quote::None;
-    let mut depth = 1u32;
-    let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i];
-        match quote {
-            Quote::Single => {
-                if c == b'\'' {
-                    quote = Quote::None;
-                }
-                i += 1;
-            }
-            Quote::AnsiC | Quote::Double => {
-                if c == b'\\' && i + 1 < bytes.len() {
-                    i += 2;
-                    continue;
-                }
-                let closer = if quote == Quote::AnsiC { b'\'' } else { b'"' };
-                if c == closer {
-                    quote = Quote::None;
-                }
-                i += 1;
-            }
-            Quote::None => {
-                if c == b'\\' && i + 1 < bytes.len() {
-                    i += 2;
-                    continue;
-                }
-                if c == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
-                    quote = Quote::AnsiC;
-                    i += 2;
-                    continue;
-                }
-                match c {
-                    b'\'' => quote = Quote::Single,
-                    b'"' => quote = Quote::Double,
-                    b'(' => depth += 1,
-                    b')' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            return Some(i + 1);
-                        }
-                    }
-                    _ => {}
-                }
-                i += 1;
-            }
-        }
-    }
-    None
-}
-
-/// Skips a backtick command substitution's content (the text starting
-/// right after the opening `` ` ``). Backtick strings don't nest, but DO
-/// support `\` escaping the very next byte (per POSIX, most notably
-/// `` \` ``). Returns the byte offset, relative to `s`, of the first byte
-/// after the closing `` ` `` — `None` if `s` never closes it.
-fn skip_backtick_substitution(s: &str) -> Option<usize> {
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\\' if i + 1 < bytes.len() => i += 2,
-            b'`' => return Some(i + 1),
-            _ => i += 1,
-        }
-    }
-    None
 }
 
 /// Whether brush-parser 0.4.0 panics evaluating the `{...}` group whose
@@ -1885,6 +1970,60 @@ mod tests {
                 "{command:?} must still parse with its rm -rf / prefix intact"
             );
         }
+    }
+
+    // issue #405 (5th fable review finding): brush keeps a command
+    // substitution LIVE even inside a double-quoted span
+    // (`double_quoted_word_piece`, word.rs:782-788), so a `{...}` nested
+    // inside a `$(...)`/backtick substitution that is ITSELF inside
+    // double quotes must still be treated as opaque — an earlier version
+    // of this fix only dispatched the substitution-skip in the unquoted
+    // arm, so this exact shape (one quoting level deeper than the
+    // previous round's finding) was still flagged.
+    #[test]
+    fn brace_group_inside_a_double_quoted_command_substitution_is_never_flagged() {
+        for command in [
+            r#"rm -rf / "$(echo "{99999999999999999999..1}")""#,
+            r#"rm -rf / "`echo "{99999999999999999999..1}"`""#,
+        ] {
+            let cmd = parse_ok(command);
+            assert_eq!(
+                simple(&cmd.first.first).words[0].0,
+                vec![WordPiece::Literal("rm".to_string())],
+                "{command:?} must still parse with its rm -rf / prefix intact"
+            );
+        }
+    }
+
+    // Same review round: a quoted close-paren nested INSIDE a
+    // substitution's own body must not be mistaken for that
+    // substitution's real close — `skip_quote_aware_span` must track
+    // quoting recursively through its own scan, not just the outer
+    // scanner's.
+    #[test]
+    fn quoted_close_paren_inside_a_nested_substitution_does_not_end_the_span_early() {
+        let cmd = parse_ok(r#"rm -rf / a$(x "$(y ")" z)" {99999999999999999999..1})b"#);
+        assert_eq!(
+            simple(&cmd.first.first).words[0].0,
+            vec![WordPiece::Literal("rm".to_string())]
+        );
+    }
+
+    // issue #405 (5th fable review finding): `$[...]` (legacy arithmetic
+    // expansion) is also live inside double quotes and has no simple
+    // universal closer this scan can search for (`]` can legitimately
+    // appear inside an array-element reference) — this pins that the
+    // pre-scan bails entirely rather than guessing, falling through to
+    // catch_parser_panic's pre-existing containment (still fail-closed,
+    // never a false Allow).
+    #[test]
+    fn legacy_arithmetic_expansion_is_not_guessed_at() {
+        assert!(!word_contains_overflowing_brace_range(
+            "$[b{99999999999999999999..1}]"
+        ));
+        assert!(!word_contains_overflowing_brace_range(
+            r#""$[b{99999999999999999999..1}]""#
+        ));
     }
 
     // Unlike `$(...)`/backtick, `${...}` (parameter expansion) is NOT
