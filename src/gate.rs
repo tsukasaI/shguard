@@ -12362,6 +12362,30 @@ mod tests {
         }
     }
 
+    // issue #399: `match_command` was first-match-wins over
+    // `command_rules`, which mixes embedded rules with user `[[deny]]`
+    // rules (appended last by `merge_user_config`) — an earlier embedded
+    // `decision = "ask"` rule could silently shadow a later user Block
+    // rule for the same command.
+    #[test]
+    fn a_user_deny_rule_is_not_shadowed_by_an_earlier_embedded_ask_rule() {
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[deny]]
+            id = "my-cp-device"
+            reason = "cp to a device is never allowed here"
+            command = "cp"
+            targets = [{ normalized_prefix = "/dev/" }]
+        "#,
+        );
+        let verdict = analyze_with_policy("cp evil /dev/sda", &rules, &allowlist);
+        assert_eq!(verdict.decision(), Decision::Block);
+        assert_eq!(
+            verdict.matched_rule().map(RuleId::as_str),
+            Some("my-cp-device")
+        );
+    }
+
     #[test]
     fn escalation_floor_allow_is_rejected_at_config_load() {
         let err = crate::rules::UserConfig::parse(

@@ -1248,10 +1248,10 @@ mod tests {
     }
 
     // Guards issue #101's own ordering trap: an ancestor Ask rule must
-    // never precede (and thereby shadow) the global rm-recursive-force
-    // Block rule within rules/blocklist.toml -- first-match-wins within
-    // one file. `rm -rf ~`/`rm -rf /` must still Block, not downgrade to
-    // Ask, with the ancestor rules present.
+    // never shadow the global rm-recursive-force Block rule within
+    // rules/blocklist.toml. `match_command` is worst-wins (issue #399),
+    // so `rm -rf ~`/`rm -rf /` still Block regardless of declaration
+    // order, with the ancestor rules present.
     #[test]
     fn ancestor_rules_do_not_shadow_the_global_rm_recursive_force_block_rule() {
         use crate::normalize::NormalizedWord;

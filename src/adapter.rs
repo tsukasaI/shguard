@@ -371,10 +371,10 @@ mod tests {
         let allowlist = crate::rules::Allowlist::embedded().unwrap();
         // A command name with no embedded blocklist rule of its own -- the
         // embedded blocklist's own git-push-force rule would otherwise
-        // match `git push --force` first (command_rules is appended-to,
-        // never prepended-to, same first-match-wins ordering issue #97's
-        // pipeline_rules append guarantees for pipelines) and shadow this
-        // user rule's deny_message before it's ever reached.
+        // also match `git push --force` (both Block, so match_command's
+        // worst-wins tie-break keeps whichever is declared first --
+        // issue #399) and shadow this user rule's deny_message before
+        // it's ever reached.
         let user_config = crate::rules::UserConfig::parse(
             r#"
             [[deny]]

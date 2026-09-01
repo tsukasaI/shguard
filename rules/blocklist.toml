@@ -310,9 +310,10 @@ targets = [
 # a plain-file match is fully removed by `-f` alone, and a directory match
 # simply fails `rm` without `-r` (unlike `-rf {}`, which also removes a
 # matched directory and everything under it — a strictly worse class,
-# already covered by the sibling rule above). Ordered after
-# `rm-recursive-force-dangerous-target` (first-match-wins) so `rm -rf {}`
-# keeps reporting that rule's id.
+# already covered by the sibling rule above). Both this rule and
+# `rm-recursive-force-dangerous-target` above are Block, so
+# `match_command`'s worst-wins tie-break (issue #399) keeps whichever is
+# declared first, and `rm -rf {}` keeps reporting that rule's id.
 # Deliberately targets ONLY `{}`, not the sibling rule's `/`/`~`/`/dev/`
 # set above: without `-r`, `rm -f` can never remove a directory, so
 # `rm -f /` or `rm -f ~` alone isn't the same destructive class and would
@@ -551,12 +552,13 @@ command = "mkfs"
 required_flags = ["t|--type"]
 
 # tar extraction with -C/--directory into / or ~ overwrites arbitrary paths
-# with archive contents. Two rules, block before ask (rule order decides —
-# first match in this file wins): the block rule requires an explicit
+# with archive contents. Two rules: the block rule requires an explicit
 # extract flag so a benign `tar -cf backup.tar -C src .` (create, not
 # extract) never matches; the ask rule below drops that requirement to
 # also catch the dash-less old-style invocation form (`tar xf a.tar -C /`),
-# where `x` never appears as its own `-`-prefixed token.
+# where `x` never appears as its own `-`-prefixed token. `match_command`
+# is worst-wins (issue #399), so the block rule outranks the ask rule on
+# any overlap regardless of declaration order.
 #
 # Known limitations (same disclosure stance as the curl `-xURL` gap above
 # and the `git -C <path>` gap in src/rules.rs):
@@ -1094,12 +1096,11 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.conf
 # (no -r) can't remove a non-empty directory at all, and a flagless
 # `rsync src ~` is additive, not destructive.
 #
-# MUST stay ordered after `rm-recursive-force-dangerous-target` above
-# (first-match-wins within this file): that rule already Blocks
-# `rm -rf ~`/`rm -rf /` outright, and an ancestor Ask rule appearing
-# EARLIER in this file would downgrade it to Ask instead — regression-
-# tested by `guardfall_rm_dot_targets`-adjacent cases in
-# tests/guardfall.rs asserting `rm -rf ~` still Blocks.
+# `rm-recursive-force-dangerous-target` above already Blocks
+# `rm -rf ~`/`rm -rf /` outright; `match_command` is worst-wins
+# (issue #399), so that Block outranks this Ask regardless of
+# declaration order — regression-tested by `guardfall_rm_dot_targets`-
+# adjacent cases in tests/guardfall.rs asserting `rm -rf ~` still Blocks.
 [[command]]
 id = "self-protect-config-ancestor-rm-tilde"
 decision = "ask"
@@ -1130,12 +1131,13 @@ targets = [{ normalized = "~/.config" }, { normalized = "~" }]
 # empty/ {} \;` empties every matched directory, the same
 # "delete everything found" shape.
 #
-# MUST stay ordered BEFORE `self-protect-config-ancestor-rsync-tilde`
-# below (first-match-wins): its targets (`/`, `/*`, `/dev/`) are disjoint
-# from that rule's (`~/.config`, `~`), so a pure-`~` command still gets
-# the self-protect reason, but a MIXED command naming both anchors (e.g.
-# `rsync -a --delete ~ /`) must Block via this rule, not fall through to
-# the ancestor rule's weaker Ask — regression-tested in tests/guardfall.rs.
+# Its targets (`/`, `/*`, `/dev/`) are disjoint from
+# `self-protect-config-ancestor-rsync-tilde` below (`~/.config`, `~`), so
+# a pure-`~` command still gets the self-protect reason, but a MIXED
+# command naming both anchors (e.g. `rsync -a --delete ~ /`) Blocks via
+# this rule rather than that rule's weaker Ask — `match_command` is
+# worst-wins (issue #399), so declaration order doesn't matter here
+# either — regression-tested in tests/guardfall.rs.
 [[command]]
 id = "rsync-delete-root-or-device"
 reason = "rsync --delete syncing a root-level, device, or find-placeholder target removes every extraneous file there, recursively and unrecoverably"
@@ -1254,13 +1256,14 @@ targets = [{ normalized = "~" }, { normalized = "." }]
 #   cron.d evil` Allows — the path never appears as a standalone token,
 #   so the any-argv-token matching below cannot see it.
 #
-# These rules are appended at the END of this file so every earlier,
-# stricter `command = "tee"/"dd"/"rm"` rule (the device/critical-file and
-# self-protection families above) keeps first-match priority over the
-# weaker `ask` rules below on any overlapping target — e.g. `tee
-# /etc/passwd ~/.bashrc` must still Block via `tee-write-device-or-
-# critical-file`, not fall through to `shell-init-tee`'s `ask` (pinned by
-# `guardfall_shell_init_tee_does_not_shadow_critical_file_block` in
+# These rules are appended at the END of this file, but `match_command`
+# is worst-wins (issue #399), not first-match: the stricter
+# `command = "tee"/"dd"/"rm"` rules (the device/critical-file and
+# self-protection families above) Block regardless of declaration order
+# over these weaker `ask` rules on any overlapping target — e.g. `tee
+# /etc/passwd ~/.bashrc` still Blocks via `tee-write-device-or-
+# critical-file`, not `shell-init-tee`'s `ask` (pinned by
+# `guardfall_shell_init_does_not_shadow_stricter_block_rules` in
 # tests/guardfall.rs).
 
 [[command]]
@@ -1848,9 +1851,10 @@ targets = [{ normalized_prefix = "/dev/" }]
 # "-C"` above), unlike the shell-init-* family's plain target lists, which
 # disclose that same gap as unfixed (#198, above) — this rule closes it
 # instead since it has only one target to cover, not ~40. Appended here,
-# not near dd-write-device, for the same first-match-priority reason as
-# the shell-init-* family: it must never shadow the stricter
-# self-protect-config-cp-tilde Block above it.
+# not near dd-write-device, for the same reason as the shell-init-*
+# family: `match_command`'s worst-wins scan (issue #399) means it can
+# never shadow the stricter self-protect-config-cp-tilde Block above it,
+# regardless of where it's declared.
 [[command]]
 id = "cp-write-device"
 decision = "ask"
