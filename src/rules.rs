@@ -592,6 +592,16 @@ const GIT_GLOBAL_VALUELESS_FLAGS: &[&str] = &[
     "--icase-pathspecs",
 ];
 
+/// Whether `token` is a `git` global option that takes its value as a
+/// SEPARATE following token (`-C`/`-c`/`--git-dir`/…, per
+/// [`GIT_GLOBAL_VALUE_FLAGS`]) — the single source of truth for both
+/// [`git_strip_global_flags`] here and `gate.rs`'s
+/// `bound_git_global_options`, which used to hardcode only `-C`/`-c` and
+/// so missed `--git-dir`/`--work-tree`/etc (issue #400).
+pub(crate) fn git_global_takes_separated_value(token: &str) -> bool {
+    GIT_GLOBAL_VALUE_FLAGS.contains(&token)
+}
+
 /// See [`GIT_GLOBAL_VALUELESS_FLAGS`] — whether `text` is a global git
 /// option that consumes no *following* token.
 fn git_global_single_token_flag(text: &str) -> bool {
