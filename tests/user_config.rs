@@ -379,6 +379,61 @@ fn user_config_ask_rule_reaches_the_directory_equals_tilde_floor_too() {
     assert!(permission_reason(&output).contains("user-ask-mytool-directory-tilde"));
 }
 
+#[test]
+fn user_config_ask_rule_reaches_the_except_target_floor_too() {
+    // Issue #403: `Rules::match_command_except_target` used to scan only
+    // `command_rules`, unlike its 6 sibling floor probes above and below,
+    // which all chain `ask_rules` too — a substitution-obfuscated target
+    // (`$VAR`) silently bypassed a user `[[ask]]` rule that correctly
+    // fires on the literal spelling. Uses a made-up command name
+    // (`mytool`) so this genuinely exercises the `ask_rules` half of the
+    // chain.
+    let (_dir, config_path) = write_config(
+        r#"
+        [[ask]]
+        id = "user-ask-mytool-secret-target"
+        reason = "confirm mytool touching the secret directory"
+        command = "mytool"
+        targets = [{ normalized_prefix = "~/secret/" }]
+    "#,
+    );
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+
+    let output = run_hook(&bash_command("mytool ~/secret/x"), &envs);
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(permission_reason(&output).contains("user-ask-mytool-secret-target"));
+
+    let output = run_hook(&bash_command("mytool $VAR"), &envs);
+    assert_eq!(permission_decision(&output), "ask");
+
+    let output = run_hook(&bash_command("mytool $(echo x)"), &envs);
+    assert_eq!(permission_decision(&output), "ask");
+}
+
+#[test]
+fn user_config_ask_rule_reaches_the_except_flags_floor_too() {
+    // Issue #403's other half: `Rules::match_command_except_flags` had the
+    // same gap for a flags-only rule (empty `targets`) whose required
+    // flag is hidden inside a substitution-obfuscated word.
+    let (_dir, config_path) = write_config(
+        r#"
+        [[ask]]
+        id = "user-ask-mytool-delete-flag"
+        reason = "confirm mytool with a delete flag"
+        command = "mytool"
+        required_flags = ["-delete"]
+    "#,
+    );
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+
+    let output = run_hook(&bash_command("mytool -delete x"), &envs);
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(permission_reason(&output).contains("user-ask-mytool-delete-flag"));
+
+    let output = run_hook(&bash_command("mytool $(echo -delete) x"), &envs);
+    assert_eq!(permission_decision(&output), "ask");
+}
+
 // ==== except_targets (issue #30) ====
 
 fn curl_localhost_except_config() -> &'static str {
