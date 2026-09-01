@@ -2505,15 +2505,11 @@ fn escalation_floor_contribution(
 /// [`Verdict::with_deny_message`] — a no-op for the many callers that never
 /// have one (issue #202's callers do; see [`apply_command_ascent_descent_floor`]'s
 /// docs for why those attach one at all) — and left untouched (not cleared)
-/// on the pass-through path, matching every floor's original behavior
-/// before this shared core existed (issue #409).
+/// on the pass-through path.
 ///
 /// The single core every `apply_*_floor` function in this module delegates
-/// to (issue #409: 11 functions across two families — with and without a
-/// `deny_message` to carry — had byte-identical bodies before this
-/// extraction). Each keeps its own name and doc comment as the
-/// self-documenting call site issue #409 preserved this for; only the
-/// mechanics moved here.
+/// to. Each keeps its own name and doc comment so its call site stays
+/// self-documenting; only the mechanics live here.
 fn apply_floor(
     verdict: Verdict,
     floor_decision: Decision,
@@ -2654,8 +2650,8 @@ fn scan_ascent_descent_floor(
 }
 
 /// Applies [`scan_ascent_descent_floor`]'s floor to `verdict` — same
-/// max-lift mechanics as [`apply_expansion_floor`], but a distinct
-/// function from [`apply_ascent_descent_floor`] (which three sibling,
+/// max-lift mechanics as [`apply_floor`], but a distinct function from
+/// [`apply_ascent_descent_floor`] (which three sibling,
 /// `RedirectRule`-based floors also happen to share, since `RedirectRule`
 /// has no `deny_message` of its own to carry): [`scan_ascent_descent_floor`]
 /// matches a `CommandRule`, which does, so this attaches it (issue #202) to
@@ -2895,8 +2891,8 @@ fn apply_dirstack_equal_subst_floor(
 
 /// Applies issue #77's leftover-alternative substitution floor
 /// (`evaluate_leftover_alternative_substitutions`'s result) to a verdict —
-/// the same max-lift mechanics as [`apply_expansion_floor`]. Unlike the
-/// other floors here, this one is applied at MULTIPLE call sites (rules
+/// the same max-lift mechanics as [`apply_floor`]. Unlike the other floors
+/// here, this one is applied at MULTIPLE call sites (rules
 /// 1/2/6a's early returns, plus folded into [`fold_floors`]'s own
 /// `substitution_result`) rather than just once before `fold_floors` — see
 /// [`evaluate_simple_command_core`]'s `leftover_floor` binding for why:
@@ -4573,11 +4569,11 @@ fn scan_recursable_slots(
 /// Depth-cap check, issue #196's shell-interpreter check, and the recursion
 /// itself for one `find -exec`/`-execdir`/`-ok`/`-okdir` payload
 /// [`SimpleCommand`] once its span is known — shared by
-/// [`scan_recursable_slots`]'s `Yes` and `YesFused` arms (issue #409: the
-/// two were previously byte-identical apart from one message fragment).
-/// `fused_note` supplies that fragment: empty for the non-fused `Yes` arm,
-/// or a parenthetical describing the fusion for `YesFused` — spliced
-/// straight after "payload" in the recursion floor's own reason text.
+/// [`scan_recursable_slots`]'s `Yes` and `YesFused` arms. `fused_note`
+/// supplies the one message fragment the two arms differ on: empty for the
+/// non-fused `Yes` arm, or a parenthetical describing the fusion for
+/// `YesFused` — spliced straight after "payload" in the recursion floor's
+/// own reason text.
 ///
 /// This recurses over an already-parsed `SimpleCommand`, calling
 /// [`evaluate_simple_command`] directly rather than `analyze_at_depth` (a
