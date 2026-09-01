@@ -11496,6 +11496,47 @@ mod tests {
         assert_decision("sudo -u root rm -rf /", Decision::Block);
     }
 
+    #[test]
+    fn sudo_every_separated_value_flag_no_longer_hides_wrapped_command() {
+        // Issue #402: wrapper_value_flags's "sudo" entry used to list only
+        // -u/-g/--user/--group, so every other separated-value flag below
+        // downgraded this Block to the escalation floor's Ask instead.
+        for flag in [
+            "-C",
+            "--close-from",
+            "-D",
+            "--chdir",
+            "-h",
+            "--host",
+            "-p",
+            "--prompt",
+            "-R",
+            "--chroot",
+            "-r",
+            "--role",
+            "-t",
+            "--type",
+            "-T",
+            "--command-timeout",
+            "-U",
+            "--other-user",
+        ] {
+            let command = format!("sudo {flag} x rm -rf /");
+            assert_decision(&command, Decision::Block);
+        }
+    }
+
+    #[test]
+    fn doas_every_separated_value_flag_no_longer_hides_wrapped_command() {
+        // Issue #402: wrapper_value_flags's "doas" entry used to list only
+        // -u, so -a/-C's value downgraded this Block to the escalation
+        // floor's Ask instead.
+        for flag in ["-u", "-a", "-C"] {
+            let command = format!("doas {flag} x rm -rf /");
+            assert_decision(&command, Decision::Block);
+        }
+    }
+
     // ==== Wrapper-argument regression pins (from the issue #32 session) ====
 
     #[test]
