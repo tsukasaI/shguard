@@ -1431,21 +1431,33 @@ fn guardfall_shell_init_redirect_cases() {
 
 /// PR #314 (crash-fuzzer findings): brush-parser 0.4.0's internal
 /// `parse::<uN>().unwrap()` overflow panics, pinned through the public
-/// [`shguard::analyze`] API. The tilde case is the security-critical one —
-/// the uncontained panic used to take down the whole parse, downgrading the
-/// sibling `rm -rf /` word's blocklist `Block` to the outer fail-closed
-/// `Ask`.
+/// [`shguard::analyze`] API. The tilde and io-redirect cases are the
+/// security-critical ones — an uncontained panic used to take down the
+/// whole parse, downgrading a sibling `rm -rf /` word's blocklist `Block`
+/// to the outer fail-closed `Ask`.
 #[test]
 fn guardfall_brush_parser_overflow_panic_cases() {
     let cases: &[(&str, Decision)] = &[
         // Tilde UID past u64::MAX: must stay Block (sibling word matches
         // the blocklist), not fold to Ask via panic containment.
         ("rm -rf / ~41353561361542343807", Decision::Block),
-        // Brace-sequence number past i64::MAX: contained panic folds to
-        // the parse-error Ask, never Allow.
+        // Brace-sequence number past i64::MAX: a brace range is already
+        // Unsupported/Ask regardless of overflow (issue #405's fix only
+        // routes this to that SAME clean rejection ahead of the panic —
+        // no decision change here, just no longer risks an uncatchable
+        // abort in a `panic = "abort"` embedder).
         ("echo a{9223372036854775808b", Decision::Ask),
-        // Redirection io-number past i32::MAX: same containment fold.
-        ("echo 2147483648>f", Decision::Ask),
+        // Redirection io-number past i32::MAX (issue #405): must stay
+        // Block (sibling word matches the blocklist) rather than
+        // downgrading to Ask via panic containment — the overflowing
+        // digit run is neutralized into an ordinary literal argument
+        // ahead of the parse, so the sibling `rm -rf /` still reaches its
+        // rule match.
+        ("rm -rf / 99999999999999999999>f", Decision::Block),
+        // Same shape standalone (no sibling blocklist word): the huge
+        // digit run parses as an ordinary literal argument to `echo`,
+        // redirected to `f` — genuinely benign, not merely fail-closed.
+        ("echo 2147483648>f", Decision::Allow),
     ];
 
     for (command, expected) in cases {
