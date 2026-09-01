@@ -205,10 +205,17 @@ pub fn handle(stdin: &str) -> Value {
 /// Config-aware sibling of [`handle`]: same stdin/stdout contract, but
 /// `policy` (loaded once at the composition root via
 /// [`crate::config::Policy::load`]) supplies the rules and allowlist
-/// instead of the embedded defaults alone.
+/// instead of the embedded defaults alone. `sink` is the composition
+/// root's own [`crate::DecisionLogSink`] (see that trait's docs).
 #[must_use]
-pub fn handle_with_policy(stdin: &str, policy: &crate::config::Policy) -> Value {
-    respond(stdin, |command| crate::analyze_with_policy(command, policy))
+pub fn handle_with_policy(
+    stdin: &str,
+    policy: &crate::config::Policy,
+    sink: &dyn crate::DecisionLogSink,
+) -> Value {
+    respond(stdin, |command| {
+        crate::analyze_with_policy(command, policy, sink)
+    })
 }
 
 #[cfg(test)]
@@ -315,7 +322,7 @@ mod tests {
         ] {
             assert_eq!(
                 permission_decision(&handle(stdin)),
-                permission_decision(&handle_with_policy(stdin, &policy)),
+                permission_decision(&handle_with_policy(stdin, &policy, &crate::FileDecisionLog)),
                 "{stdin:?}"
             );
         }
@@ -343,14 +350,14 @@ mod tests {
         };
 
         let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"gh pr view"}}"#;
-        let output = handle_with_policy(stdin, &policy);
+        let output = handle_with_policy(stdin, &policy, &crate::FileDecisionLog);
         assert_eq!(permission_decision(&output), "ask");
     }
 
     #[test]
     fn handle_with_policy_malformed_json_fails_closed_to_ask() {
         let policy = embedded_only_policy();
-        let output = handle_with_policy("not json", &policy);
+        let output = handle_with_policy("not json", &policy, &crate::FileDecisionLog);
         assert_eq!(permission_decision(&output), "ask");
         assert!(!permission_reason(&output).is_empty());
     }
@@ -359,7 +366,7 @@ mod tests {
     fn handle_with_policy_non_bash_tool_allows() {
         let policy = embedded_only_policy();
         let stdin = r#"{"tool_name":"Read","tool_input":{"file_path":"/etc/passwd"}}"#;
-        let output = handle_with_policy(stdin, &policy);
+        let output = handle_with_policy(stdin, &policy, &crate::FileDecisionLog);
         assert_eq!(permission_decision(&output), "allow");
     }
 
@@ -395,7 +402,7 @@ mod tests {
         };
 
         let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"mytool --force"}}"#;
-        let output = handle_with_policy(stdin, &policy);
+        let output = handle_with_policy(stdin, &policy, &crate::FileDecisionLog);
         assert_eq!(permission_decision(&output), "deny");
         assert_eq!(
             output["hookSpecificOutput"]["additionalContext"]

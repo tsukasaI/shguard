@@ -736,7 +736,11 @@ fn evaluate_with_timeout(
     let spawned = std::thread::Builder::new()
         .name("shguard-check-eval".to_string())
         .spawn(move || {
-            let verdict = shguard::analyze_with_policy(&owned_command, &owned_policy);
+            let verdict = shguard::analyze_with_policy(
+                &owned_command,
+                &owned_policy,
+                &shguard::FileDecisionLog,
+            );
             // A closed receiver means the timeout already fired and the
             // caller moved on — nothing left to send to, and this thread
             // is about to be torn down along with the whole process once
@@ -744,7 +748,11 @@ fn evaluate_with_timeout(
             let _ = tx.send(verdict);
         });
     let Ok(_worker) = spawned else {
-        return Ok(shguard::analyze_with_policy(command, policy));
+        return Ok(shguard::analyze_with_policy(
+            command,
+            policy,
+            &shguard::FileDecisionLog,
+        ));
     };
     match rx.recv_timeout(EVALUATION_TIMEOUT + CHECK_TIMEOUT_GRACE) {
         Ok(verdict) => Ok(verdict),
@@ -819,7 +827,7 @@ fn run() -> serde_json::Value {
         Ok(_) if stdin.len() as u64 > MAX_STDIN_BYTES => shguard::adapter::fail_closed(&format!(
             "shguard: stdin exceeds {MAX_STDIN_BYTES} bytes; refusing to evaluate"
         )),
-        Ok(_) => shguard::adapter::handle_with_policy(&stdin, &policy),
+        Ok(_) => shguard::adapter::handle_with_policy(&stdin, &policy, &shguard::FileDecisionLog),
         // A read error also covers the case where the input is oversized
         // *and* its true length happens to break UTF-8 exactly at the
         // `MAX_STDIN_BYTES + 1`-byte boundary `take` reads up to:

@@ -320,7 +320,9 @@ use crate::ast::{
     FileRedirectionKind, FunctionDefinition, Pipeline, Redirection, Separator, SimpleCommand, Word,
     WordPiece,
 };
-use crate::normalize::{self, NormalizedWord, Resolution, UnresolvableKind};
+use crate::normalize::{
+    self, FlagScan, NormalizedWord, Resolution, UnresolvableKind, scan_for_flag,
+};
 use crate::parser;
 use crate::rules::{
     Allowlist, AllowlistOutcome, CommandRule, EVAL_BUILTIN, PathForm, Rules,
@@ -6198,51 +6200,6 @@ fn scan_fish_invocation(words: &[NormalizedWord]) -> FishScan {
         }
     }
     scan
-}
-
-/// Result of scanning a word slice left-to-right for a flag token when some
-/// words may be [`Resolution::Unresolvable`]. The scan stops at the FIRST
-/// word that is either a resolved match or unresolvable — an unresolvable
-/// word earlier than a resolved match wins, because position matters (a
-/// word we cannot read at an earlier position may be the flag, or may
-/// demote a later literal flag to a positional argument).
-///
-/// `pub(crate)` (issues #64/#66/#72): `crate::rules::wrapper_shell_string_scripts`
-/// reuses this exact primitive to locate `flock`/`su`'s `-c`/`--command`
-/// flag, rather than duplicating the same fail-closed scan logic there —
-/// one exception to this module's usual "gate depends on rules, not the
-/// reverse" direction (see [`crate::rules::TRANSPARENT_WRAPPERS`]'s docs),
-/// accepted deliberately so the flag-position fail-closed semantics these
-/// two types encode can never drift between the two call sites.
-#[must_use]
-pub(crate) enum FlagScan {
-    Found(usize),
-    Uncertain(usize),
-    Absent,
-}
-
-impl FlagScan {
-    /// `true` unless the flag is provably absent (`Found` and `Uncertain`
-    /// both count — fail-closed per issues #71/#53: an unresolvable word
-    /// that might be the flag must never be treated the same as its
-    /// confirmed absence).
-    fn possibly_found(&self) -> bool {
-        !matches!(self, Self::Absent)
-    }
-}
-
-/// Scans `words` left-to-right for the first word that either resolves and
-/// satisfies `matches`, or is unresolvable (see [`FlagScan`]'s docs for why
-/// an earlier unresolvable word wins over a later resolved match).
-pub(crate) fn scan_for_flag(words: &[NormalizedWord], matches: impl Fn(&str) -> bool) -> FlagScan {
-    for (i, w) in words.iter().enumerate() {
-        match w.resolution() {
-            Resolution::Resolved(s) if matches(s) => return FlagScan::Found(i),
-            Resolution::Resolved(_) => {}
-            Resolution::Unresolvable(_) => return FlagScan::Uncertain(i),
-        }
-    }
-    FlagScan::Absent
 }
 
 /// Result of [`scan_for_dash_c_before_operand`]: where an interpreter's
