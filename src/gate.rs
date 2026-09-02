@@ -1024,9 +1024,9 @@ fn evaluate_compound_command(
         .iter()
         .map(|command| normalize::normalize_argv(command))
         .collect();
-    let interpreters: Vec<&str> = interpreter_argvs
+    let interpreters: Vec<HeredocCandidate<'_>> = interpreter_argvs
         .iter()
-        .filter_map(|argv| crate::rules::effective_command(argv).map(|(name, _)| name))
+        .filter_map(|argv| classify_heredoc_candidate(argv))
         .collect();
 
     apply_attached_word_and_redirect_checks(
@@ -1138,7 +1138,7 @@ fn apply_attached_word_and_redirect_checks(
     extra_words: &[Word],
     extra_words_description: &str,
     redirections: &[Redirection],
-    interpreters: &[&str],
+    interpreters: &[HeredocCandidate<'_>],
     depth: usize,
     rules: &Rules,
     allowlist: &Allowlist,
@@ -4357,6 +4357,40 @@ struct ExpansionAccum<'a> {
     floor: &'a mut Option<(Decision, String)>,
 }
 
+/// Issue #424: how one candidate command relates to a heredoc it might be
+/// attached to. `Shell`/`ShellWithDashC` split apart because they need
+/// different treatment in [`scan_redirection_expansions`]: a plain shell
+/// invocation reads the heredoc as its own script (recursed through
+/// `analyze_at_depth`), but a shell invoked with its own `-c` (`sh -c perl
+/// <<EOF`) execs `-c`'s command instead, which then inherits the shared
+/// stdin and reads the heredoc itself — recursing the body as the outer
+/// shell's syntax would be analysing text nobody parses as shell code.
+enum HeredocCandidate<'a> {
+    Shell(&'a str),
+    ShellWithDashC,
+    NonShell(&'a str),
+}
+
+/// Classifies `argv`'s effective command as a [`HeredocCandidate`], or
+/// `None` if it is not a known interpreter at all (an ordinary command like
+/// `cat`, which a heredoc feeds as inert data, not script content). Shared
+/// by [`scan_expansion_positions`] (the command's own heredoc) and
+/// [`evaluate_compound_command`] (every simple command
+/// [`collect_compound_simple_commands`] finds inside a compound's body).
+fn classify_heredoc_candidate(argv: &[NormalizedWord]) -> Option<HeredocCandidate<'_>> {
+    let (name, rest) = crate::rules::effective_command(argv)?;
+    if crate::rules::is_shell_interpreter(name) {
+        match scan_for_flag(rest, is_dash_c_token) {
+            FlagScan::Absent => Some(HeredocCandidate::Shell(name)),
+            FlagScan::Found(_) | FlagScan::Uncertain(_) => Some(HeredocCandidate::ShellWithDashC),
+        }
+    } else if crate::rules::is_stdin_script_interpreter(name) {
+        Some(HeredocCandidate::NonShell(name))
+    } else {
+        None
+    }
+}
+
 /// Rule 11 (issue #51): scans `command` for `$()`/backtick substitutions
 /// sitting in an expansion position other than argv — assignment RHS, any-
 /// kind redirection target, and an unquoted-delimiter heredoc body — and
@@ -4425,10 +4459,8 @@ fn scan_expansion_positions(
         }
     }
 
-    let interpreters: Vec<&str> = crate::rules::effective_command(argv)
-        .map(|(name, _)| name)
-        .into_iter()
-        .collect();
+    let interpreters: Vec<HeredocCandidate<'_>> =
+        classify_heredoc_candidate(argv).into_iter().collect();
     scan_redirection_expansions(
         &command.redirections,
         &interpreters,
@@ -4446,14 +4478,15 @@ fn scan_expansion_positions(
 /// out so [`evaluate_compound_command`] (issue #75) can run the exact same
 /// check over a compound command's own attached redirections without
 /// needing a whole `SimpleCommand` to wrap them in. `interpreters` are the
-/// candidate effective command names that may end up reading `redirections`'
-/// own heredoc(s) on stdin (`&[]` for a caller with no such command, e.g.
-/// [`evaluate_extended_test`]; more than one name for a compound command,
-/// see [`collect_compound_simple_commands`]) — issue #424's heredoc-as-stdin
-/// floor below needs it, the pre-existing `$()`/backtick scan does not.
+/// candidate [`HeredocCandidate`] classifications of every command that may
+/// end up reading `redirections`' own heredoc(s) on stdin (`&[]` for a
+/// caller with no such command, e.g. [`evaluate_extended_test`]; more than
+/// one for a compound command, see [`collect_compound_simple_commands`]) —
+/// issue #424's heredoc-as-stdin floor below needs it, the pre-existing
+/// `$()`/backtick scan does not.
 fn scan_redirection_expansions(
     redirections: &[Redirection],
-    interpreters: &[&str],
+    interpreters: &[HeredocCandidate<'_>],
     depth: usize,
     rules: &Rules,
     allowlist: &Allowlist,
@@ -4492,19 +4525,40 @@ fn scan_redirection_expansions(
                 // command's own attached heredoc, where more than one
                 // simple command may be inside), so every one is checked,
                 // fail-closed.
-                if let Some(name) = interpreters
+                if interpreters
                     .iter()
-                    .find(|name| crate::rules::is_shell_interpreter(name))
+                    .any(|c| matches!(c, HeredocCandidate::ShellWithDashC))
                 {
+                    // A shell invoked with its own `-c` (`sh -c perl <<EOF`)
+                    // does not read this heredoc as ITS script — it execs
+                    // `-c`'s own command, which then inherits the shared
+                    // stdin and reads the heredoc itself. Recursing the body
+                    // as *this shell's* syntax would analyse text the
+                    // reading command never parses as shell code at all.
+                    // Fail closed rather than resolving what `-c` runs.
                     *accum.has_any = true;
-                    // Bash dequotes `\$`/`` \` ``/`\\` (the only escapes an
-                    // unquoted-delimiter body recognises, same as
-                    // `collect_heredoc_substitutions`'s own docs) before
-                    // handing the body to the reading shell's stdin; a
-                    // quoted delimiter never recognises them at all, so the
-                    // body stays raw. Recursing the un-dequoted text would
-                    // let `\rm -rf /` (which the child shell runs as plain
-                    // `rm -rf /`) be analysed as the inert word `\rm`
+                    raise_expansion_floor(
+                        accum.floor,
+                        Decision::Ask,
+                        "the heredoc is attached to a shell invoked with its own `-c`, whose \
+                         `-c` command (not the shell) actually reads this heredoc's stdin, and \
+                         cannot be introspected"
+                            .to_string(),
+                    );
+                }
+                if let Some(name) = interpreters.iter().find_map(|c| match c {
+                    HeredocCandidate::Shell(name) => Some(*name),
+                    HeredocCandidate::ShellWithDashC | HeredocCandidate::NonShell(_) => None,
+                }) {
+                    *accum.has_any = true;
+                    // Bash dequotes `\$`/`` \` ``/`\\`/`\<newline>` (the
+                    // only escapes an unquoted-delimiter body recognises,
+                    // same as `collect_heredoc_substitutions`'s own docs)
+                    // before handing the body to the reading shell's stdin;
+                    // a quoted delimiter never recognises them at all, so
+                    // the body stays raw. Recursing the un-dequoted text
+                    // would let `\rm -rf /` (which the child shell runs as
+                    // plain `rm -rf /`) be analysed as the inert word `\rm`
                     // instead.
                     let script = if *expand_body {
                         dequote_heredoc_body(body)
@@ -4531,11 +4585,43 @@ fn scan_redirection_expansions(
                              whose own analysis is {decision:?}, not Allow{inner_reason}"
                         ),
                     );
+                    // A command inside the recursed body that is itself a
+                    // stdin-reading interpreter (`sh <<EOF\nperl\n...\nEOF`)
+                    // inherits the SAME shared stdin fd once it runs, and
+                    // consumes whatever heredoc text `sh` itself has not
+                    // yet read — content this recursion analysed as plain
+                    // shell syntax, not that interpreter's own language.
+                    // Static analysis has no execution model to know how
+                    // much of the body `sh` consumed before handing off, so
+                    // any such command anywhere in the body floors to Ask,
+                    // fail-closed, mirroring rule 5b/5c's own "bare
+                    // interpreter reads stdin" posture.
+                    if let Ok(inner_line) = parser::parse(&script) {
+                        let mut inner_commands = Vec::new();
+                        collect_command_line_simple_commands(&inner_line, &mut inner_commands);
+                        if let Some(inner_name) = inner_commands.iter().find_map(|cmd| {
+                            let inner_argv = normalize::normalize_argv(cmd);
+                            crate::rules::effective_command(&inner_argv)
+                                .map(|(n, _)| n.to_string())
+                                .filter(|n| crate::rules::is_pipeline_interpreter(n))
+                        }) {
+                            *accum.has_any = true;
+                            raise_expansion_floor(
+                                accum.floor,
+                                Decision::Ask,
+                                format!(
+                                    "the heredoc body invokes `{inner_name}`, itself a \
+                                     stdin-reading interpreter, which may consume the \
+                                     remainder of this heredoc unexamined"
+                                ),
+                            );
+                        }
+                    }
                 }
-                if let Some(name) = interpreters
-                    .iter()
-                    .find(|name| crate::rules::is_stdin_script_interpreter(name))
-                {
+                if let Some(name) = interpreters.iter().find_map(|c| match c {
+                    HeredocCandidate::NonShell(name) => Some(*name),
+                    HeredocCandidate::Shell(_) | HeredocCandidate::ShellWithDashC => None,
+                }) {
                     *accum.has_any = true;
                     raise_expansion_floor(
                         accum.floor,
@@ -5533,28 +5619,45 @@ fn collect_heredoc_substitutions(body: &str) -> HeredocScan<'_> {
     }
 }
 
-/// Reverses the three escapes an unquoted-delimiter heredoc body recognises
-/// at its top level (`\$`, `` \` ``, `\\` — [`collect_heredoc_substitutions`]'s
-/// own docs) before [`scan_redirection_expansions`] (issue #424) recurses the
-/// body as a shell script: bash performs exactly this dequoting on the body
-/// before handing it to the reading shell's stdin, so analysing the raw text
-/// would let a backslash-escaped payload (`\rm -rf /`, which the child shell
-/// runs as plain `rm -rf /`) be seen as the inert word `\rm` instead. Only
-/// ever called on an `expand_body: true` body — a quoted delimiter's body
-/// recognises none of these escapes, so calling this on one would corrupt
-/// literal text the child shell receives unchanged.
+/// Reverses the four escapes bash's own manual ("Here Documents") states an
+/// unquoted-delimiter heredoc body recognises at its top level — `\$`,
+/// `` \` ``, `\\` (dropping the backslash, keeping the escaped character),
+/// and `\<newline>` (dropping both bytes entirely, a line continuation) —
+/// before [`scan_redirection_expansions`] (issue #424) recurses the body as
+/// a shell script: bash performs exactly this dequoting on the body before
+/// handing it to the reading shell's stdin, so analysing the raw text would
+/// let a backslash-escaped payload (`\$(rm -rf /)`, which the child shell
+/// receives and runs as a real `$(rm -rf /)` substitution) be seen as inert,
+/// escaped text instead. Note this is a stricter set than
+/// [`collect_heredoc_substitutions`]'s own three-escape comment documents —
+/// that scanner's own `\<newline>` gap is a separate, pre-existing issue,
+/// not fixed here. Only ever called on an `expand_body: true` body — a
+/// quoted delimiter's body recognises none of these escapes, so calling
+/// this on one would corrupt literal text the child shell receives
+/// unchanged.
 ///
 /// Scans bytes, not `char`s, for the same reason `collect_heredoc_substitutions`
-/// does (its own docs): `\`, `$`, `` ` `` are single-byte ASCII, and no UTF-8
-/// continuation byte can equal one, so copying every non-matched byte through
-/// unchanged can never split a multi-byte character.
+/// does (its own docs): `\`, `$`, `` ` ``, newline are single-byte ASCII, and
+/// no UTF-8 continuation byte can equal one, so copying every non-matched
+/// byte through unchanged can never split a multi-byte character.
 fn dequote_heredoc_body(body: &str) -> String {
     let bytes = body.as_bytes();
     let mut out = String::with_capacity(body.len());
     let mut start = 0;
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'\\' && i + 1 < bytes.len() && matches!(bytes[i + 1], b'$' | b'`' | b'\\') {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+            // Line-continuation: bash's own manual ("Here Documents")
+            // states `\<newline>` is ignored entirely in an unquoted-
+            // delimiter body — both bytes are dropped, nothing replaces
+            // them, unlike the three escapes below.
+            out.push_str(&body[start..i]);
+            i += 2;
+            start = i;
+        } else if bytes[i] == b'\\'
+            && i + 1 < bytes.len()
+            && matches!(bytes[i + 1], b'$' | b'`' | b'\\')
+        {
             // `start..i` and `i+1..i+2` both end/begin on a single-byte
             // ASCII boundary (`\`, `$`, `` ` ``), always a valid `str`
             // slice point — see this function's docs on why byte-scanning
@@ -13259,6 +13362,39 @@ mod tests {
     }
 
     #[test]
+    fn heredoc_to_shell_interpreter_dequotes_line_continuation_before_recursing() {
+        // `\<newline>` is bash's own heredoc-body line continuation: the
+        // backslash and newline both vanish, joining `r` and `m` into one
+        // word `rm` the reading shell actually executes.
+        assert_decision("sh <<EOF\nr\\\nm -rf /\nEOF", Decision::Block);
+    }
+
+    #[test]
+    fn heredoc_to_shell_dash_c_does_not_recurse_the_shell_itself_asks() {
+        // `sh -c perl` execs `perl`, not `sh`'s own script parser — `sh`
+        // never reads this heredoc as ITS syntax, `perl` does (inheriting
+        // the same stdin once `-c`'s command runs). Recursing the body as
+        // shell syntax would be analysing text nobody parses that way.
+        assert_decision(
+            "sh -c perl <<EOF\nsystem(\"cat ~/.ssh/id_rsa\")\nEOF",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn heredoc_to_bare_interpreter_mid_shell_script_asks() {
+        // `sh` reads only the first heredoc line as its own script; `perl`,
+        // invoked bare on that line, inherits the SAME stdin fd once it
+        // runs and consumes the remaining heredoc lines as its own script —
+        // content this recursion would otherwise have analysed (and
+        // cleared) as plain shell syntax instead.
+        assert_decision(
+            "sh <<EOF\nperl\nsystem(\"cat ~/.ssh/id_rsa\")\nEOF",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
     fn heredoc_attached_to_subshell_wrapping_an_interpreter_asks() {
         assert_decision("(python3) <<EOF\nprint('hi')\nEOF", Decision::Ask);
     }
@@ -13279,6 +13415,43 @@ mod tests {
     #[test]
     fn heredoc_attached_to_subshell_wrapping_a_non_interpreter_unaffected() {
         assert_decision("(cat) <<EOF\nhello\nEOF", Decision::Allow);
+    }
+
+    #[test]
+    fn heredoc_attached_to_if_clause_condition_wrapping_an_interpreter_asks() {
+        assert_decision(
+            "if python3; then true; fi <<EOF\nprint('hi')\nEOF",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn heredoc_attached_to_if_clause_else_wrapping_an_interpreter_asks() {
+        assert_decision(
+            "if false; then true; else python3; fi <<EOF\nprint('hi')\nEOF",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn heredoc_attached_to_while_clause_condition_wrapping_an_interpreter_asks() {
+        assert_decision(
+            "while python3; do true; done <<EOF\nprint('hi')\nEOF",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn heredoc_attached_to_until_clause_body_wrapping_an_interpreter_asks() {
+        assert_decision(
+            "until true; do python3; done <<EOF\nprint('hi')\nEOF",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn heredoc_attached_to_nested_subshell_wrapping_an_interpreter_asks() {
+        assert_decision("( { python3; } ) <<EOF\nprint('hi')\nEOF", Decision::Ask);
     }
 
     // ==== Issue #69: end-to-end pins for scan_paren_span's ANSI-C-quoting
