@@ -861,12 +861,14 @@ targets = [
 # connection as a side effect of the open() call itself, independent of
 # which direction (read/write) ends up used. `exec 3<>/dev/tcp/host/port`
 # (read-write) is the canonical reverse-shell/data-exfil primitive; plain
-# `>`/`>>`/`<` reach the same connection side effect and are covered too,
-# since `normalized_prefix` matches by target path alone, not by
-# redirection kind.
+# `>`/`>>` reach the same connection side effect and are covered too, since
+# `normalized_prefix` matches by target path alone, not by redirection
+# kind. A read-only `<` is NOT covered — `crate::gate`'s
+# `is_redirect_write_applicable` never submits a plain `Input` target to
+# any redirect rule at all (pre-existing, unrelated to this rule).
 [[redirect]]
 id = "redirect-network-pseudo-device"
-reason = "redirecting to /dev/tcp or /dev/udp opens a live network connection — the reverse-shell/data-exfil primitive `exec 3<>/dev/tcp/host/port` relies on"
+reason = "redirecting to /dev/tcp or /dev/udp opens a live network connection (the reverse-shell/data-exfil primitive behind `exec 3<>/dev/tcp/host/port`)"
 targets = [
     { normalized_prefix = "/dev/tcp/" },
     { normalized_prefix = "/dev/udp/" },
