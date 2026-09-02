@@ -468,11 +468,14 @@ fn analyze_at_depth(
 /// clone-and-discard pattern [`evaluate_compound_command`] already uses for
 /// a genuinely forking construct (`Subshell`), except here the isolation
 /// spans multiple pipelines instead of one.
-/// `collapse_stack_on_uncertain_crossing`'s own crossing check (below) is
-/// unaffected either way: it reasons about whether the SHARED `cwd`'s
-/// already-tracked stack can still be trusted crossing INTO this pipeline,
-/// independent of whether this pipeline's own execution will itself be
-/// isolated.
+/// `collapse_stack_on_uncertain_crossing`'s own crossing check (below) must
+/// run against WHICHEVER of `cwd`/`isolated` is actually live at that
+/// crossing, not `cwd` alone — a `pushd` inside an in-progress backgrounded
+/// chain accumulates on `isolated`, so an untrustworthy crossing INTO the
+/// next pipeline of that same chain (issue #353: `||`, or `&&` after a
+/// `!`-negated pipeline) must poison `isolated`'s stack too, or a phantom
+/// frame from a resolved-but-really-failed `pushd` survives into a later
+/// `popd` inside the very chain the isolation was supposed to make opaque.
 fn evaluate_command_line(
     command_line: &CommandLine,
     rules: &Rules,
@@ -504,6 +507,9 @@ fn evaluate_command_line(
         // own docs.
         if *separator != Separator::And || prev_untrustworthy {
             cwd.collapse_stack_on_uncertain_crossing();
+            if let Some(isolated) = isolated.as_mut() {
+                isolated.collapse_stack_on_uncertain_crossing();
+            }
         }
         prev_untrustworthy = pipeline_reported_success_is_untrustworthy(pipeline);
         // `&&`/`||` continue whatever chain (isolated or not) is already in
@@ -8580,8 +8586,8 @@ mod tests {
 
     #[test]
     fn issue_383_bare_ampersand_backgrounded_cd_does_not_leak_into_the_parent() {
-        // Finding 2: `&` backgrounds the pipeline (or `&&`/`||` chain) to
-        // its left into its own subshell -- real bash's `cd /tmp` there
+        // `&` backgrounds the pipeline (or `&&`/`||` chain) to its left into
+        // its own subshell -- real bash's `cd /tmp` there
         // never persists to whatever runs after the `&`, so `cp` still runs
         // from `~/.config/shguard` and must Block. Also reproduces with
         // `pushd` (same code path, `apply_cwd_effect`'s `cd`/`pushd`
@@ -8634,12 +8640,11 @@ mod tests {
 
     #[test]
     fn issue_383_trailing_ampersand_inside_a_brace_group_does_not_leak_out() {
-        // Finding 1: a brace group runs in the CURRENT shell (unlike a
-        // `Subshell`), so its own `cd`/`pushd` effects normally DO persist
-        // past the group -- but `{ pushd /tmp & }`'s `&` still backgrounds
-        // that one pipeline into ITS OWN subshell, same as a bare `&`
-        // outside any group. `CommandLine::trailing_async` (previously
-        // silently discarded by `convert_compound_list`) is what makes this
+        // A brace group runs in the CURRENT shell (unlike a `Subshell`), so
+        // its own `cd`/`pushd` effects normally DO persist past the group
+        // -- but `{ pushd /tmp & }`'s `&` still backgrounds that one
+        // pipeline into ITS OWN subshell, same as a bare `&` outside any
+        // group. `CommandLine::trailing_async` is what makes this
         // distinguishable from `{ pushd /tmp; }`, pinned as the control
         // below.
         assert_decision(
@@ -14296,16 +14301,39 @@ done"#,
 
     #[test]
     fn pushd_async_separator_floors_to_ask() {
-        // The `Separator::Async` (`&`) arm of the collapse condition has
-        // the same "not `&&`" shape as `;`/`||` -- pin it explicitly
-        // alongside `pushd_or_chain_floors_to_ask`. The leading `pushd /tmp`
-        // must run in the FOREGROUND (before the backgrounded chain starts)
-        // so it actually accumulates on the real, shared stack this
-        // crossing collapses -- a `pushd` inside the backgrounded chain
-        // itself would be isolated away entirely (issue #383) and never
-        // reach the real stack this test means to pin.
+        // The `;` crossing right before the `&` already collapses the real
+        // stack here, so this is really a `;`-collapse case (redundant with
+        // `pushd_or_chain_floors_to_ask`) rather than a distinct pin on the
+        // `Separator::Async` arm of the collapse condition -- by the time
+        // any `&` crossing is reached on a foreground chain, that chain can
+        // only have ended via `;` or end-of-line, both already collapsing
+        // the stack on their own. Kept as a regression pin on the shape.
         assert_decision(
             "pushd /tmp; pushd ~/.config/shguard & popd && cp evil.toml config.toml",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn issue_383_uncertain_crossing_inside_a_backgrounded_chain_collapses_the_isolated_clone() {
+        // Issue #353's stack-collapse floor must apply to WHICHEVER of
+        // `cwd`/`isolated` is live at a crossing, not `cwd` alone -- a
+        // `pushd` earlier in an in-progress backgrounded chain accumulates
+        // on `isolated`, so an untrustworthy crossing into the next
+        // pipeline of that SAME chain (`||`, or `&&` after a `!`-negated
+        // pipeline) must poison `isolated`'s stack too. Applying the
+        // collapse only to `cwd` would leave a phantom frame from a
+        // resolved-but-really-failed `pushd /nonexistent` on `isolated`,
+        // which `popd` then pops back to a decoy directory instead of
+        // `Poisoned`.
+        assert_decision(
+            "pushd ~/.config/shguard && pushd /tmp && pushd /nonexistent-zz-383b || popd \
+             && cp evil.toml config.toml &",
+            Decision::Ask,
+        );
+        assert_decision(
+            "pushd ~/.config/shguard && pushd /tmp && ! pushd /nonexistent-zz-383c && popd \
+             && cp evil.toml config.toml &",
             Decision::Ask,
         );
     }
