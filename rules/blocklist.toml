@@ -240,6 +240,17 @@
 #   targets          REQUIRED, non-empty list of target matchers (same
 #                    `{ exact = "…" }` / `{ prefix = "…" }` syntax).
 #                    Unlike [[command]], an empty list is a load-time error.
+#
+# [[token]] — matches a literal substring against every assignment name
+# (`NAME=`) and every argv word of a simple command, independent of which
+# command is being run (issue #426):
+#   id, reason       same as above.
+#   decision         optional: "block" (default) or "ask".
+#   patterns         REQUIRED, non-empty list of literal, case-sensitive
+#                    substrings (not regex). An empty list, or an empty
+#                    or NUL-containing pattern string, is a load-time
+#                    error.
+#   deny_message     optional, same as [[command]].
 
 # =====================================================================
 # File/disk destruction

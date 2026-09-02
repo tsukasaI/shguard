@@ -5432,6 +5432,18 @@ fn convert_token_rule(dto: TokenRuleDto) -> Result<TokenRule, RulesError> {
             "token rule patterns must not be empty",
         ));
     }
+    // `crate::gate::word_literal_skeleton` uses a NUL byte as an
+    // expansion-boundary sentinel when scanning a word's literal pieces —
+    // a pattern containing one could straddle that boundary and either
+    // silently never match (harmless) or, if the sentinel encoding ever
+    // changes, match across two unrelated pieces. Rejected outright so the
+    // sentinel's own value never needs to be a rule author's concern.
+    if dto.patterns.iter().any(|p| p.contains('\0')) {
+        return Err(RulesError::invalid(
+            &dto.id,
+            "token rule patterns must not contain a NUL byte",
+        ));
+    }
 
     let decision = parse_decision(&dto.id, dto.decision.as_deref())?;
 
@@ -6354,6 +6366,12 @@ pub(crate) fn merge_user_config(
         .chain(
             blocklist
                 .ask_rules
+                .iter()
+                .map(|r| r.id.as_str().to_string()),
+        )
+        .chain(
+            blocklist
+                .token_rules
                 .iter()
                 .map(|r| r.id.as_str().to_string()),
         )
@@ -11509,6 +11527,29 @@ mod tests {
         assert!(matches!(
             merge_user_config(blocklist, allowlist, config),
             Err(RulesError::DuplicateId(id)) if id == "self-protect-config-redirect-tilde"
+        ));
+    }
+
+    #[test]
+    fn merge_user_config_rejects_deny_id_colliding_with_embedded_token_id() {
+        // fable review of #430 (finding #2): `merge_user_config`'s
+        // `existing_ids` set was extended with every other embedded rule
+        // kind but not `token_rules` -- a user config could silently reuse
+        // the shipped token rule's id.
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let config = UserConfig::parse(
+            r#"
+            [[deny]]
+            id = "token-credential-shaped-assignment"
+            reason = "totally different rule"
+            command = "totally-different-command"
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(
+            merge_user_config(blocklist, allowlist, config),
+            Err(RulesError::DuplicateId(id)) if id == "token-credential-shaped-assignment"
         ));
     }
 
