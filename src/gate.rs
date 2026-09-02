@@ -4675,6 +4675,39 @@ fn scan_redirection_expansions(
     cwd: &CwdContext,
     accum: &mut ExpansionAccum<'_>,
 ) {
+    // Issue #424 round 4: bash processes a command's own redirections left
+    // to right, expanding each word — command/process substitution
+    // included — at the moment THAT redirection is applied (`man bash`,
+    // REDIRECTION). Once any heredoc among `redirections` has been dup2'd
+    // onto stdin, a substitution fork in a LATER-processed redirection
+    // (`cat <<EOF < <(perl)`, `cat <<EOF > $(perl)`, or a second heredoc's
+    // own body: `cat <<A <<B ... $(perl) ... B`) inherits that same stdin
+    // and reads the heredoc itself — the identical "another process forks
+    // and inherits the shared fd" mechanism `interpreters` above already
+    // covers for a bare pipeline stage or a `for`/assignment substitution,
+    // just reached through a redirection instead of a word. Order is
+    // ignored here (checked regardless of position) — safe direction,
+    // simpler than reproducing bash's own left-to-right redirection
+    // application order.
+    if redirections
+        .iter()
+        .any(|r| matches!(r, Redirection::HereDoc { .. }))
+    {
+        let mut sibling_scan = HeredocCandidateScan::default();
+        scan_redirections_for_heredoc_candidates(redirections, &mut sibling_scan);
+        if !sibling_scan.candidates.is_empty() || sibling_scan.uncertain {
+            *accum.has_any = true;
+            raise_expansion_floor(
+                accum.floor,
+                Decision::Ask,
+                "a substitution in one of this command's own redirections forks a process \
+                 that may inherit this command's heredoc on stdin once it is applied, and \
+                 cannot be introspected"
+                    .to_string(),
+            );
+        }
+    }
+
     for redirection in redirections {
         match redirection {
             Redirection::File { target, .. } => {
@@ -13653,6 +13686,29 @@ mod tests {
     #[test]
     fn heredoc_to_plain_fish_still_recurses_as_shell() {
         assert_decision("fish <<EOF\nrm -rf /\nEOF", Decision::Block);
+    }
+
+    #[test]
+    fn heredoc_sibling_process_substitution_redirect_target_asks() {
+        // Once `<<EOF` is applied, `<(perl)`'s own fork inherits the SAME
+        // stdin — bash expands each redirection's word, substitutions
+        // included, at the moment that redirection is processed.
+        assert_decision("cat <<EOF < <(perl)\nprint(1)\nEOF", Decision::Ask);
+    }
+
+    #[test]
+    fn heredoc_sibling_command_substitution_redirect_target_asks() {
+        assert_decision("cat > $(perl) <<EOF\nprint(1)\nEOF", Decision::Ask);
+    }
+
+    #[test]
+    fn heredoc_sibling_second_heredoc_body_substitution_asks() {
+        assert_decision("cat <<A <<B\nA\n$(perl)\nB", Decision::Ask);
+    }
+
+    #[test]
+    fn heredoc_sibling_redirect_target_without_interpreter_unaffected() {
+        assert_decision("cat <<EOF > out.txt\nhello\nEOF", Decision::Allow);
     }
 
     #[test]
