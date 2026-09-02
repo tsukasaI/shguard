@@ -3098,10 +3098,18 @@ fn push_literal_skeleton(pieces: &[WordPiece], out: &mut String) {
             }
             WordPiece::EscapeSequence(c) => out.push(*c),
             WordPiece::DoubleQuoted(inner) => push_literal_skeleton(inner, out),
-            WordPiece::BraceAlternation(_) => unreachable!(
-                "word_literal_skeletons runs normalize::expand_braces first, which removes \
-                 every BraceAlternation from `pieces` before push_literal_skeleton ever sees it"
-            ),
+            // Structurally unreachable in practice: `word_literal_skeletons`
+            // runs `normalize::expand_braces` first, which removes every
+            // `BraceAlternation` from `pieces` before this function ever
+            // sees them, and the pinned parser crate's own brace pre-pass
+            // is the only place a `BraceAlternation` is ever constructed
+            // (never inside a `DoubleQuoted` sequence). That invariant
+            // rests on the parser crate's behavior, not shguard's own
+            // types, though — failing closed with a sentinel rather than
+            // panicking mirrors how `normalize.rs`'s own
+            // `UnsupportedStructure` handles the identical "should be
+            // impossible" case (its own docs: "rather than panic").
+            WordPiece::BraceAlternation(_) => out.push(TOKEN_SCAN_SENTINEL),
             WordPiece::ParameterExpansion(_)
             | WordPiece::CommandSubstitution(_)
             | WordPiece::BackquotedSubstitution(_)
