@@ -4677,10 +4677,10 @@ fn scan_expansion_positions(
 /// check over a compound command's own attached redirections without
 /// needing a whole `SimpleCommand` to wrap them in. `interpreters` are the
 /// candidate [`HeredocCandidate`] classifications of every command that may
-/// end up reading `redirections`' own heredoc(s) on stdin (`&[]` for a
-/// caller with no such command, e.g. [`evaluate_extended_test`]; more than
-/// one for a compound command, see [`scan_compound_for_heredoc_candidates`]) —
-/// issue #424's heredoc-as-stdin floor below needs it, the pre-existing
+/// end up reading `redirections`' own heredoc(s) on stdin — see
+/// [`apply_attached_word_and_redirect_checks`]'s own docs for what each
+/// caller passes here — issue #424's heredoc-as-stdin floor below needs it,
+/// the pre-existing
 /// `$()`/backtick scan does not.
 fn scan_redirection_expansions(
     redirections: &[Redirection],
