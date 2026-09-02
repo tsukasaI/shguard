@@ -3344,6 +3344,19 @@ pub(crate) fn is_shell_interpreter(name: &str) -> bool {
     SHELL_INTERPRETERS.contains(&strip_version_suffix(name))
 }
 
+/// Whether `name` is an [`EXTRA_PIPELINE_INTERPRETERS`] member once
+/// [`strip_version_suffix`] normalizes a distro-versioned binary name
+/// (`ruby3.2` -> `ruby`) — the non-shell interpreters that list's own docs
+/// establish read and execute a script from stdin when given no file
+/// argument. Mirrors [`is_shell_interpreter`]'s shape, kept as its own
+/// function for `crate::gate`'s heredoc-as-stdin floor (issue #424), which
+/// needs the non-shell list alone rather than the pipeline-sink union
+/// [`is_pipeline_interpreter`] returns.
+#[must_use]
+pub(crate) fn is_stdin_script_interpreter(name: &str) -> bool {
+    EXTRA_PIPELINE_INTERPRETERS.contains(&strip_version_suffix(name))
+}
+
 /// How a [`RecursableSlot`]'s value should be recursed — see
 /// [`RECURSABLE_SLOTS`]'s own docs for the two constructs this
 /// distinguishes.

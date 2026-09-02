@@ -1069,8 +1069,12 @@ fn apply_attached_word_and_redirect_checks(
             extra_words_description,
         );
     }
+    // No enclosing `SimpleCommand` here (a `for` clause / extended test's
+    // own attached redirections, issue #75), so there is no effective
+    // command name for issue #424's heredoc-as-stdin floor to key off.
     scan_redirection_expansions(
         redirections,
+        None,
         depth,
         rules,
         allowlist,
@@ -1923,7 +1927,7 @@ fn evaluate_simple_command(
     // returns (rule 6a's inner-Allow chief among them) that bypass
     // `fold_floors` entirely, and a floor placed inside `core` would vanish
     // on exactly those paths (module docs, rule 11).
-    let expansion = scan_expansion_positions(command, depth, rules, allowlist, cwd);
+    let expansion = scan_expansion_positions(command, &argv, depth, rules, allowlist, cwd);
     // Issues #64/#66/#72: the flock/su `-c` shell-string floor and the
     // `find -exec`/`-execdir`/`-ok`/`-okdir` direct-argv floor. Computed
     // here, in the wrapper layer, for the same reason rule 11's `expansion`
@@ -4269,10 +4273,21 @@ struct ExpansionAccum<'a> {
 /// heredoc body is raw text, not a `Word` (`crate::ast::Redirection::HereDoc`'s
 /// own docs), so it goes through the dedicated
 /// [`collect_heredoc_substitutions`] scanner instead. A quoted-delimiter
-/// heredoc (`expand_body: false`) is never scanned — that arm is skipped
-/// entirely, matching bash performing no expansion on such a body at all.
+/// heredoc (`expand_body: false`) skips the `$()`/backtick scan — that part
+/// is unaffected by `expand_body` (module docs, rule 11) — but not the
+/// interpreter-as-stdin floor (issue #424) `scan_redirection_expansions`
+/// applies regardless, since bash feeds a quoted-delimiter heredoc's literal
+/// text to the reading command's stdin exactly the same as an unquoted one.
+///
+/// `argv` (the caller's already-normalized [`crate::normalize::normalize_argv`]
+/// result) is resolved to an effective command name here, once, for the
+/// issue #424 heredoc-as-stdin floor: whether the heredoc body reaches a
+/// shell (recursed as a script) or a non-shell interpreter (floored to
+/// `Ask`, unintrospectable) depends on which command the heredoc is
+/// attached to, not on the redirection alone.
 fn scan_expansion_positions(
     command: &SimpleCommand,
+    argv: &[crate::normalize::NormalizedWord],
     depth: usize,
     rules: &Rules,
     allowlist: &Allowlist,
@@ -4315,8 +4330,10 @@ fn scan_expansion_positions(
         }
     }
 
+    let interpreter = crate::rules::effective_command(argv).map(|(name, _)| name);
     scan_redirection_expansions(
         &command.redirections,
+        interpreter,
         depth,
         rules,
         allowlist,
@@ -4330,9 +4347,14 @@ fn scan_expansion_positions(
 /// The redirection half of [`scan_expansion_positions`] (rule 11), factored
 /// out so [`evaluate_compound_command`] (issue #75) can run the exact same
 /// check over a compound command's own attached redirections without
-/// needing a whole `SimpleCommand` to wrap them in.
+/// needing a whole `SimpleCommand` to wrap them in. `interpreter` is the
+/// enclosing command's own effective name (`None` for a caller with no such
+/// command, e.g. a `for` clause's attached redirections) — issue #424's
+/// heredoc-as-stdin floor below needs it, the pre-existing `$()`/backtick
+/// scan does not.
 fn scan_redirection_expansions(
     redirections: &[Redirection],
+    interpreter: Option<&str>,
     depth: usize,
     rules: &Rules,
     allowlist: &Allowlist,
@@ -4353,44 +4375,84 @@ fn scan_redirection_expansions(
                 );
             }
             Redirection::HereDoc {
-                expand_body: true,
-                body,
-                ..
+                expand_body, body, ..
             } => {
-                let scan = collect_heredoc_substitutions(body);
-                if scan.unterminated {
-                    *accum.has_any = true;
-                    raise_expansion_floor(
-                        accum.floor,
-                        Decision::Ask,
-                        "the heredoc body contains a `$(`/`` ` `` that never closes before the \
-                         heredoc ends; refusing to allow with unknown content"
-                            .to_string(),
-                    );
+                // Issue #424: the heredoc body is this command's stdin, so
+                // when the command is a known interpreter, the body is
+                // script content, not inert data — the same interpreter
+                // distinction rule 6a/6b already draw for a `-c`/`-e`
+                // argument. Runs on both `expand_body` values: bash feeds a
+                // heredoc's literal text to the reading command's stdin the
+                // same way regardless of whether its own delimiter was
+                // quoted (`expand_body` only governs *this shell's*
+                // parameter/command-substitution expansion of the body
+                // before handing it off, not what the receiving interpreter
+                // then does with it).
+                if let Some(name) = interpreter {
+                    if crate::rules::is_shell_interpreter(name) {
+                        *accum.has_any = true;
+                        let decision = analyze_at_depth(
+                            body,
+                            depth + 1,
+                            rules,
+                            allowlist,
+                            CwdState::seed_unknown_stack(cwd.clone()),
+                        )
+                        .decision();
+                        raise_expansion_floor(
+                            accum.floor,
+                            decision,
+                            format!(
+                                "the heredoc body is fed to shell interpreter `{name}` on \
+                                 stdin, whose own analysis is {decision:?}, not Allow"
+                            ),
+                        );
+                    } else if crate::rules::is_stdin_script_interpreter(name) {
+                        *accum.has_any = true;
+                        raise_expansion_floor(
+                            accum.floor,
+                            Decision::Ask,
+                            format!(
+                                "the heredoc body is fed to non-shell interpreter `{name}` on \
+                                 stdin, which cannot be introspected"
+                            ),
+                        );
+                    }
                 }
-                for inner in &scan.substitutions {
-                    *accum.has_any = true;
-                    let decision = analyze_at_depth(
-                        inner,
-                        depth + 1,
-                        rules,
-                        allowlist,
-                        CwdState::seed_unknown_stack(cwd.clone()),
-                    )
-                    .decision();
-                    raise_expansion_floor(
-                        accum.floor,
-                        decision,
-                        format!(
-                            "the heredoc body contains a command/backquote substitution whose \
-                             inner command is {decision:?}, not Allow"
-                        ),
-                    );
+
+                if *expand_body {
+                    let scan = collect_heredoc_substitutions(body);
+                    if scan.unterminated {
+                        *accum.has_any = true;
+                        raise_expansion_floor(
+                            accum.floor,
+                            Decision::Ask,
+                            "the heredoc body contains a `$(`/`` ` `` that never closes before \
+                             the heredoc ends; refusing to allow with unknown content"
+                                .to_string(),
+                        );
+                    }
+                    for inner in &scan.substitutions {
+                        *accum.has_any = true;
+                        let decision = analyze_at_depth(
+                            inner,
+                            depth + 1,
+                            rules,
+                            allowlist,
+                            CwdState::seed_unknown_stack(cwd.clone()),
+                        )
+                        .decision();
+                        raise_expansion_floor(
+                            accum.floor,
+                            decision,
+                            format!(
+                                "the heredoc body contains a command/backquote substitution \
+                                 whose inner command is {decision:?}, not Allow"
+                            ),
+                        );
+                    }
                 }
             }
-            Redirection::HereDoc {
-                expand_body: false, ..
-            } => {}
         }
     }
 }
@@ -12944,6 +13006,62 @@ mod tests {
     #[test]
     fn heredoc_backquote_blocks() {
         assert_decision("cat <<EOF\n`rm -rf /`\nEOF", Decision::Block);
+    }
+
+    // ==== Issue #424: heredoc-as-stdin fed to a known interpreter ====
+
+    #[test]
+    fn heredoc_to_shell_interpreter_recurses_and_blocks() {
+        assert_decision("sh <<EOF\nrm -rf /\nEOF", Decision::Block);
+    }
+
+    #[test]
+    fn heredoc_to_shell_interpreter_recurses_and_stays_allow() {
+        assert_decision("bash <<EOF\necho hi\nEOF", Decision::Allow);
+    }
+
+    #[test]
+    fn heredoc_to_non_shell_interpreter_asks_quoted_delimiter() {
+        // The issue's own repro: a quoted delimiter (`expand_body: false`)
+        // must not exempt the body from the interpreter-as-stdin floor.
+        assert_decision(
+            "python3 <<'EOF'\nimport os\nos.system('cat ~/.ssh/id_rsa')\nEOF",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn heredoc_to_non_shell_interpreter_asks_unquoted_delimiter() {
+        assert_decision(
+            "python3 <<EOF\nimport os\nos.system('cat ~/.ssh/id_rsa')\nEOF",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn heredoc_to_non_shell_interpreter_through_wrapper_asks() {
+        assert_decision("sudo python3 <<EOF\nprint('hi')\nEOF", Decision::Ask);
+    }
+
+    #[test]
+    fn heredoc_to_non_shell_interpreter_with_dash_argument_asks() {
+        assert_decision("python3 - <<EOF\nprint('hi')\nEOF", Decision::Ask);
+    }
+
+    #[test]
+    fn heredoc_to_ruby_asks() {
+        assert_decision("ruby <<EOF\nputs 'hi'\nEOF", Decision::Ask);
+    }
+
+    #[test]
+    fn heredoc_to_php_asks() {
+        assert_decision("php <<EOF\necho 'hi';\nEOF", Decision::Ask);
+    }
+
+    #[test]
+    fn heredoc_to_non_interpreter_command_unaffected() {
+        // `cat` is not a known interpreter — no new floor applies to it.
+        assert_decision("cat <<EOF\ncat ~/.ssh/id_rsa\nEOF", Decision::Allow);
     }
 
     // ==== Issue #69: end-to-end pins for scan_paren_span's ANSI-C-quoting
