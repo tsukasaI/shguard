@@ -1017,17 +1017,13 @@ fn evaluate_compound_command(
     // that is, so every simple command reachable from this compound's own
     // body/condition (not crossing into a NESTED compound's own separately
     // redirected heredoc, which is scanned independently when
-    // `evaluate_command_line` recurses into it) is checked, fail-closed.
-    let mut interpreter_hosts = Vec::new();
-    collect_compound_simple_commands(compound, &mut interpreter_hosts);
-    let interpreter_argvs: Vec<Vec<NormalizedWord>> = interpreter_hosts
-        .iter()
-        .map(|command| normalize::normalize_argv(command))
-        .collect();
-    let interpreters: Vec<HeredocCandidate<'_>> = interpreter_argvs
-        .iter()
-        .filter_map(|argv| classify_heredoc_candidate(argv))
-        .collect();
+    // `evaluate_command_line` recurses into it), INCLUDING one reached only
+    // through an embedded substitution (`for x in $(perl); do :; done`
+    // inherits the same shared stdin `$(perl)` forks with — round-3 fable
+    // review), is checked, fail-closed — see [`scan_heredoc_candidates`].
+    let mut scan = HeredocCandidateScan::default();
+    scan_compound_for_heredoc_candidates(compound, &mut scan);
+    let interpreters = scan.into_candidates();
 
     apply_attached_word_and_redirect_checks(
         worst,
@@ -1040,76 +1036,6 @@ fn evaluate_compound_command(
         allowlist,
         &redirect_anchor,
     )
-}
-
-/// Collects every [`SimpleCommand`] reachable from `compound`'s own
-/// body/condition (and, for `IfClause`, every `elif`/`else` arm) — used only
-/// to name-resolve candidate interpreters for issue #424's compound-heredoc
-/// floor (see [`evaluate_compound_command`]'s call site). Does not recurse
-/// into a nested [`CompoundCommand`]'s own redirections/heredoc — only its
-/// body, exactly like [`evaluate_command_line`] itself does when it recurses
-/// there, since that nested compound's own attached heredoc (if any) is
-/// scanned independently on its own turn through this same function.
-fn collect_compound_simple_commands<'a>(
-    compound: &'a CompoundCommand,
-    out: &mut Vec<&'a SimpleCommand>,
-) {
-    match compound {
-        CompoundCommand::BraceGroup { body, .. }
-        | CompoundCommand::Subshell { body, .. }
-        | CompoundCommand::ForClause { body, .. } => {
-            collect_command_line_simple_commands(body, out)
-        }
-        CompoundCommand::WhileClause {
-            condition, body, ..
-        }
-        | CompoundCommand::UntilClause {
-            condition, body, ..
-        } => {
-            collect_command_line_simple_commands(condition, out);
-            collect_command_line_simple_commands(body, out);
-        }
-        CompoundCommand::IfClause {
-            condition,
-            then_body,
-            elifs,
-            else_body,
-            ..
-        } => {
-            collect_command_line_simple_commands(condition, out);
-            collect_command_line_simple_commands(then_body, out);
-            for ElifClause { condition, body } in elifs {
-                collect_command_line_simple_commands(condition, out);
-                collect_command_line_simple_commands(body, out);
-            }
-            if let Some(else_body) = else_body {
-                collect_command_line_simple_commands(else_body, out);
-            }
-        }
-    }
-}
-
-/// [`CommandLine`] half of [`collect_compound_simple_commands`]'s walk: every
-/// [`Command::Simple`] across every pipeline stage and every `;`/`&&`/`||`
-/// separated pipeline, descending into a nested compound command's own body
-/// (but not its redirections, see [`collect_compound_simple_commands`]'s
-/// docs) and a function definition's body the same way.
-fn collect_command_line_simple_commands<'a>(
-    line: &'a CommandLine,
-    out: &mut Vec<&'a SimpleCommand>,
-) {
-    for pipeline in std::iter::once(&line.first).chain(line.rest.iter().map(|(_, p)| p)) {
-        for command in std::iter::once(&pipeline.first).chain(pipeline.rest.iter()) {
-            match command {
-                Command::Simple(simple) => out.push(simple),
-                Command::Compound(nested) => collect_compound_simple_commands(nested, out),
-                Command::FunctionDefinition(FunctionDefinition { body, .. }) => {
-                    collect_compound_simple_commands(body, out);
-                }
-                Command::ExtendedTest(_) => {}
-            }
-        }
-    }
 }
 
 /// Shared tail of [`evaluate_compound_command`] and [`evaluate_extended_test`]
@@ -1127,10 +1053,10 @@ fn collect_command_line_simple_commands<'a>(
 /// reason (e.g. `"a `for` clause's `in` word list"`), matching
 /// `scan_word_expansions`'s own `position_description` parameter.
 ///
-/// `interpreters` (issue #424) are the candidate interpreter names
+/// `interpreters` (issue #424) are the candidate [`HeredocCandidate`]s
 /// `scan_redirection_expansions` checks `redirections`' own heredocs
-/// against — every simple command [`collect_compound_simple_commands`]
-/// found inside the caller's body for a compound command, or `&[]` for
+/// against — every one [`scan_compound_for_heredoc_candidates`] found
+/// inside the caller's body for a compound command, or `&[]` for
 /// [`evaluate_extended_test`], which has no body a heredoc could be feeding.
 #[allow(clippy::too_many_arguments)]
 fn apply_attached_word_and_redirect_checks(
@@ -1138,7 +1064,7 @@ fn apply_attached_word_and_redirect_checks(
     extra_words: &[Word],
     extra_words_description: &str,
     redirections: &[Redirection],
-    interpreters: &[HeredocCandidate<'_>],
+    interpreters: &[HeredocCandidate],
     depth: usize,
     rules: &Rules,
     allowlist: &Allowlist,
@@ -4358,36 +4284,292 @@ struct ExpansionAccum<'a> {
 }
 
 /// Issue #424: how one candidate command relates to a heredoc it might be
-/// attached to. `Shell`/`ShellWithDashC` split apart because they need
-/// different treatment in [`scan_redirection_expansions`]: a plain shell
-/// invocation reads the heredoc as its own script (recursed through
-/// `analyze_at_depth`), but a shell invoked with its own `-c` (`sh -c perl
-/// <<EOF`) execs `-c`'s command instead, which then inherits the shared
-/// stdin and reads the heredoc itself — recursing the body as the outer
-/// shell's syntax would be analysing text nobody parses as shell code.
-enum HeredocCandidate<'a> {
-    Shell(&'a str),
-    ShellWithDashC,
-    NonShell(&'a str),
+/// attached to. `Shell`/`Opaque` split apart because they need different
+/// treatment in [`scan_redirection_expansions`]: a plain shell invocation
+/// reads the heredoc as its own script (recursed through
+/// `analyze_at_depth`), but every `Opaque` shape hands the heredoc's stdin
+/// off to some OTHER, statically-unresolved command instead — a shell's own
+/// `-c` (`sh -c perl <<EOF`), `eval` (`eval perl <<EOF`), a transparent
+/// wrapper's own shell-string flag (`flock -c perl`/`env -S perl <<EOF`), or
+/// fish's `-c`/`-C`/`--command`/`--init-command` — so recursing the body as
+/// the NAMED command's own syntax would be analysing text nobody parses
+/// that way; `desc` names the shape for the floor's reason string.
+///
+/// Owns its name (`String`, not `&str`): a candidate is no longer always
+/// read straight off the heredoc's own attached command — [`HeredocCandidateScan`]
+/// also finds one nested inside a freshly-parsed, locally-owned substitution
+/// body, which cannot lend the outer scan a borrow that outlives it.
+enum HeredocCandidate {
+    Shell(String),
+    Opaque(&'static str),
+    NonShell(String),
 }
 
 /// Classifies `argv`'s effective command as a [`HeredocCandidate`], or
 /// `None` if it is not a known interpreter at all (an ordinary command like
 /// `cat`, which a heredoc feeds as inert data, not script content). Shared
-/// by [`scan_expansion_positions`] (the command's own heredoc) and
-/// [`evaluate_compound_command`] (every simple command
-/// [`collect_compound_simple_commands`] finds inside a compound's body).
-fn classify_heredoc_candidate(argv: &[NormalizedWord]) -> Option<HeredocCandidate<'_>> {
+/// by every caller of [`HeredocCandidateScan::record`].
+fn classify_heredoc_candidate(argv: &[NormalizedWord]) -> Option<HeredocCandidate> {
+    // Checked before `effective_command`: a transparent wrapper's own
+    // shell-string flag (`flock -c`, `su -c`, `env -S`, `timeout --foreground
+    // -c`, ...) is not itself the command reading this heredoc — whatever
+    // that flag's string names is — and `effective_command` only resolves
+    // ordinary positional argv, which walks straight past the flag's own
+    // value (`flock /tmp/l -c perl` resolves to the literal token `-c`, not
+    // `perl`). `wrapper_shell_string_scripts` is the same helper issues
+    // #64/#66/#265 already use to find this exact shape.
+    if !crate::rules::wrapper_shell_string_scripts(argv).is_empty() {
+        return Some(HeredocCandidate::Opaque(
+            "a transparent wrapper's own shell-string flag (`flock -c`/`su -c`/`env -S`/...)",
+        ));
+    }
     let (name, rest) = crate::rules::effective_command(argv)?;
+    if crate::rules::EVAL_BUILTIN.contains(&name) {
+        return Some(HeredocCandidate::Opaque("an `eval` invocation"));
+    }
+    // `fish` is deliberately excluded from the `is_dash_c_token` branch
+    // below (that check's own docs) — its option surface takes values in
+    // spellings a presence-only check cannot model, so it gets
+    // `scan_fish_invocation`'s dedicated flag-aware scan instead, the same
+    // one rule 6a's `evaluate_fish` uses.
+    if crate::rules::strip_version_suffix(name) == "fish" {
+        let scan = scan_fish_invocation(rest);
+        let hands_off = scan.has_command_flag
+            || !scan.command_values.is_empty()
+            || !scan.init_values.is_empty()
+            || scan.unreadable_code_value
+            || scan.uncertain.is_some();
+        return Some(if hands_off {
+            HeredocCandidate::Opaque("fish's `-c`/`-C`/`--command`/`--init-command` flag")
+        } else {
+            HeredocCandidate::Shell(name.to_string())
+        });
+    }
     if crate::rules::is_shell_interpreter(name) {
         match scan_for_flag(rest, is_dash_c_token) {
-            FlagScan::Absent => Some(HeredocCandidate::Shell(name)),
-            FlagScan::Found(_) | FlagScan::Uncertain(_) => Some(HeredocCandidate::ShellWithDashC),
+            FlagScan::Absent => Some(HeredocCandidate::Shell(name.to_string())),
+            FlagScan::Found(_) | FlagScan::Uncertain(_) => Some(HeredocCandidate::Opaque(
+                "a shell invoked with its own `-c`",
+            )),
         }
     } else if crate::rules::is_stdin_script_interpreter(name) {
-        Some(HeredocCandidate::NonShell(name))
+        Some(HeredocCandidate::NonShell(name.to_string()))
     } else {
         None
+    }
+}
+
+/// Issue #424 round 3: the accumulator [`scan_compound_for_heredoc_candidates`]
+/// (and its `CommandLine`/`Word`/`Redirection` helpers) fills in while
+/// walking a compound command's own body/condition for candidate heredoc
+/// readers — every [`HeredocCandidate`] found, plus whether a substitution's
+/// own text could not be statically parsed (`uncertain`, fail-closed: an
+/// unparseable inner script might itself invoke an interpreter, so this
+/// folds into an extra [`HeredocCandidate::Opaque`] rather than being
+/// silently dropped).
+#[derive(Default)]
+struct HeredocCandidateScan {
+    candidates: Vec<HeredocCandidate>,
+    uncertain: bool,
+}
+
+impl HeredocCandidateScan {
+    fn record(&mut self, argv: &[NormalizedWord]) {
+        if let Some(candidate) = classify_heredoc_candidate(argv) {
+            self.candidates.push(candidate);
+        }
+    }
+
+    fn into_candidates(mut self) -> Vec<HeredocCandidate> {
+        if self.uncertain {
+            self.candidates.push(HeredocCandidate::Opaque(
+                "a substitution embedded in this compound command whose own text could not be \
+                 statically parsed",
+            ));
+        }
+        self.candidates
+    }
+}
+
+/// Collects every [`HeredocCandidate`] reachable from `compound`'s own
+/// body/condition (and, for `IfClause`, every `elif`/`else` arm), including
+/// one reached only through a `$()`/backtick/process/arithmetic substitution
+/// nested anywhere inside (round-3 fable review: `for x in $(perl); do :;
+/// done` inherits the same shared stdin the substitution's own subshell
+/// forks with, identical in kind to a bare pipeline stage). Does not recurse
+/// into a nested [`CompoundCommand`]'s own redirections/heredoc — only its
+/// body — since that nested compound's own attached heredoc (if any) is
+/// scanned independently on its own turn through
+/// [`evaluate_compound_command`].
+fn scan_compound_for_heredoc_candidates(
+    compound: &CompoundCommand,
+    out: &mut HeredocCandidateScan,
+) {
+    match compound {
+        CompoundCommand::BraceGroup { body, .. } | CompoundCommand::Subshell { body, .. } => {
+            scan_command_line_for_heredoc_candidates(body, out);
+        }
+        CompoundCommand::ForClause { words, body, .. } => {
+            if let Some(words) = words {
+                for word in words {
+                    scan_word_for_heredoc_candidates(word, out);
+                }
+            }
+            scan_command_line_for_heredoc_candidates(body, out);
+        }
+        CompoundCommand::WhileClause {
+            condition, body, ..
+        }
+        | CompoundCommand::UntilClause {
+            condition, body, ..
+        } => {
+            scan_command_line_for_heredoc_candidates(condition, out);
+            scan_command_line_for_heredoc_candidates(body, out);
+        }
+        CompoundCommand::IfClause {
+            condition,
+            then_body,
+            elifs,
+            else_body,
+            ..
+        } => {
+            scan_command_line_for_heredoc_candidates(condition, out);
+            scan_command_line_for_heredoc_candidates(then_body, out);
+            for ElifClause { condition, body } in elifs {
+                scan_command_line_for_heredoc_candidates(condition, out);
+                scan_command_line_for_heredoc_candidates(body, out);
+            }
+            if let Some(else_body) = else_body {
+                scan_command_line_for_heredoc_candidates(else_body, out);
+            }
+        }
+    }
+}
+
+/// [`CommandLine`] half of [`scan_compound_for_heredoc_candidates`]'s walk:
+/// every [`Command`] across every pipeline stage and every `;`/`&&`/`||`
+/// separated pipeline.
+fn scan_command_line_for_heredoc_candidates(line: &CommandLine, out: &mut HeredocCandidateScan) {
+    for pipeline in std::iter::once(&line.first).chain(line.rest.iter().map(|(_, p)| p)) {
+        for command in std::iter::once(&pipeline.first).chain(pipeline.rest.iter()) {
+            scan_command_for_heredoc_candidates(command, out);
+        }
+    }
+}
+
+fn scan_command_for_heredoc_candidates(command: &Command, out: &mut HeredocCandidateScan) {
+    match command {
+        Command::Simple(simple) => {
+            let argv = normalize::normalize_argv(simple);
+            out.record(&argv);
+            for assignment in &simple.assignments {
+                match &assignment.value {
+                    AssignmentValue::Scalar(word) => scan_word_for_heredoc_candidates(word, out),
+                    AssignmentValue::Array(words) => {
+                        for word in words {
+                            scan_word_for_heredoc_candidates(word, out);
+                        }
+                    }
+                }
+            }
+            for word in &simple.words {
+                scan_word_for_heredoc_candidates(word, out);
+            }
+            scan_redirections_for_heredoc_candidates(&simple.redirections, out);
+        }
+        Command::Compound(nested) => scan_compound_for_heredoc_candidates(nested, out),
+        Command::FunctionDefinition(FunctionDefinition { body, .. }) => {
+            scan_compound_for_heredoc_candidates(body, out);
+        }
+        Command::ExtendedTest(test) => {
+            for word in &test.words {
+                scan_word_for_heredoc_candidates(word, out);
+            }
+            scan_redirections_for_heredoc_candidates(&test.redirections, out);
+        }
+    }
+}
+
+/// Descends `redirections`' own targets/heredoc bodies for embedded
+/// candidates — a redirect target or an unquoted-delimiter heredoc body can
+/// itself carry a `$()`/backtick substitution that inherits the enclosing
+/// command's stdin exactly like an ordinary argument-position one does.
+fn scan_redirections_for_heredoc_candidates(
+    redirections: &[Redirection],
+    out: &mut HeredocCandidateScan,
+) {
+    for redirection in redirections {
+        match redirection {
+            Redirection::File { target, .. } => scan_word_for_heredoc_candidates(target, out),
+            Redirection::HereDoc {
+                expand_body: true,
+                body,
+                ..
+            } => {
+                let scan = collect_heredoc_substitutions(body);
+                if scan.unterminated {
+                    out.uncertain = true;
+                }
+                for inner in &scan.substitutions {
+                    scan_substitution_text_for_heredoc_candidates(inner, out);
+                }
+            }
+            Redirection::HereDoc {
+                expand_body: false, ..
+            } => {}
+        }
+    }
+}
+
+fn scan_word_for_heredoc_candidates(word: &Word, out: &mut HeredocCandidateScan) {
+    scan_word_pieces_for_heredoc_candidates(&word.0, out);
+}
+
+fn scan_word_pieces_for_heredoc_candidates(pieces: &[WordPiece], out: &mut HeredocCandidateScan) {
+    for piece in pieces {
+        match piece {
+            WordPiece::CommandSubstitution(raw) | WordPiece::BackquotedSubstitution(raw) => {
+                scan_substitution_text_for_heredoc_candidates(raw, out);
+            }
+            WordPiece::ProcessSubstitution { body, .. } => {
+                scan_command_line_for_heredoc_candidates(body, out);
+            }
+            WordPiece::ArithmeticExpansion(raw) => {
+                let scan = collect_heredoc_substitutions(raw);
+                if scan.unterminated {
+                    out.uncertain = true;
+                }
+                for inner in &scan.substitutions {
+                    scan_substitution_text_for_heredoc_candidates(inner, out);
+                }
+            }
+            WordPiece::DoubleQuoted(inner) => scan_word_pieces_for_heredoc_candidates(inner, out),
+            WordPiece::BraceAlternation(members) => {
+                for member in members {
+                    scan_word_pieces_for_heredoc_candidates(&member.0, out);
+                }
+            }
+            WordPiece::Literal(_)
+            | WordPiece::SingleQuoted(_)
+            | WordPiece::AnsiCQuoted(_)
+            | WordPiece::ParameterExpansion(_)
+            | WordPiece::Tilde(_)
+            | WordPiece::EscapeSequence(_) => {}
+        }
+    }
+}
+
+/// A `$()`/backtick/arithmetic-nested substitution's raw inner text is not
+/// itself an AST node — [`collect_heredoc_substitutions`]/`collect_substitutions`
+/// only ever hand back the text — so it must be re-parsed here the same way
+/// [`analyze_at_depth`] would before its own commands can be walked. A parse
+/// failure sets `uncertain` (fail-closed) rather than being silently
+/// skipped: the caller cannot prove the inner text does NOT invoke an
+/// interpreter just because shguard's own parser rejected it.
+fn scan_substitution_text_for_heredoc_candidates(text: &str, out: &mut HeredocCandidateScan) {
+    match parser::parse(text) {
+        Ok(line) => scan_command_line_for_heredoc_candidates(&line, out),
+        Err(_) => out.uncertain = true,
     }
 }
 
@@ -4459,7 +4641,7 @@ fn scan_expansion_positions(
         }
     }
 
-    let interpreters: Vec<HeredocCandidate<'_>> =
+    let interpreters: Vec<HeredocCandidate> =
         classify_heredoc_candidate(argv).into_iter().collect();
     scan_redirection_expansions(
         &command.redirections,
@@ -4481,12 +4663,12 @@ fn scan_expansion_positions(
 /// candidate [`HeredocCandidate`] classifications of every command that may
 /// end up reading `redirections`' own heredoc(s) on stdin (`&[]` for a
 /// caller with no such command, e.g. [`evaluate_extended_test`]; more than
-/// one for a compound command, see [`collect_compound_simple_commands`]) —
+/// one for a compound command, see [`scan_compound_for_heredoc_candidates`]) —
 /// issue #424's heredoc-as-stdin floor below needs it, the pre-existing
 /// `$()`/backtick scan does not.
 fn scan_redirection_expansions(
     redirections: &[Redirection],
-    interpreters: &[HeredocCandidate<'_>],
+    interpreters: &[HeredocCandidate],
     depth: usize,
     rules: &Rules,
     allowlist: &Allowlist,
@@ -4525,30 +4707,32 @@ fn scan_redirection_expansions(
                 // command's own attached heredoc, where more than one
                 // simple command may be inside), so every one is checked,
                 // fail-closed.
-                if interpreters
-                    .iter()
-                    .any(|c| matches!(c, HeredocCandidate::ShellWithDashC))
-                {
-                    // A shell invoked with its own `-c` (`sh -c perl <<EOF`)
-                    // does not read this heredoc as ITS script — it execs
-                    // `-c`'s own command, which then inherits the shared
-                    // stdin and reads the heredoc itself. Recursing the body
-                    // as *this shell's* syntax would analyse text the
-                    // reading command never parses as shell code at all.
-                    // Fail closed rather than resolving what `-c` runs.
+                if let Some(desc) = interpreters.iter().find_map(|c| match c {
+                    HeredocCandidate::Opaque(desc) => Some(*desc),
+                    HeredocCandidate::Shell(_) | HeredocCandidate::NonShell(_) => None,
+                }) {
+                    // None of these shapes read this heredoc as ITS OWN
+                    // script — each hands the heredoc's stdin off to
+                    // whatever command its own opaque argument names,
+                    // which then inherits the shared fd and reads the
+                    // heredoc itself. Recursing the body as this outer
+                    // command's own syntax would analyse text the actual
+                    // reader never parses that way. Fail closed rather
+                    // than resolving what the opaque argument runs.
                     *accum.has_any = true;
                     raise_expansion_floor(
                         accum.floor,
                         Decision::Ask,
-                        "the heredoc is attached to a shell invoked with its own `-c`, whose \
-                         `-c` command (not the shell) actually reads this heredoc's stdin, and \
-                         cannot be introspected"
-                            .to_string(),
+                        format!(
+                            "the heredoc is attached to {desc}, whose own opaque argument (not \
+                             the outer command) actually reads this heredoc's stdin, and cannot \
+                             be introspected"
+                        ),
                     );
                 }
                 if let Some(name) = interpreters.iter().find_map(|c| match c {
-                    HeredocCandidate::Shell(name) => Some(*name),
-                    HeredocCandidate::ShellWithDashC | HeredocCandidate::NonShell(_) => None,
+                    HeredocCandidate::Shell(name) => Some(name.as_str()),
+                    HeredocCandidate::Opaque(_) | HeredocCandidate::NonShell(_) => None,
                 }) {
                     *accum.has_any = true;
                     // Bash dequotes `\$`/`` \` ``/`\\`/`\<newline>` (the
@@ -4586,24 +4770,30 @@ fn scan_redirection_expansions(
                         ),
                     );
                     // A command inside the recursed body that is itself a
-                    // stdin-reading interpreter (`sh <<EOF\nperl\n...\nEOF`)
-                    // inherits the SAME shared stdin fd once it runs, and
-                    // consumes whatever heredoc text `sh` itself has not
-                    // yet read — content this recursion analysed as plain
-                    // shell syntax, not that interpreter's own language.
-                    // Static analysis has no execution model to know how
-                    // much of the body `sh` consumed before handing off, so
-                    // any such command anywhere in the body floors to Ask,
-                    // fail-closed, mirroring rule 5b/5c's own "bare
-                    // interpreter reads stdin" posture.
+                    // stdin-reading interpreter — reached directly
+                    // (`sh <<EOF\nperl\n...\nEOF`) or only through an
+                    // embedded substitution (`sh <<EOF\necho $(perl)\n...`,
+                    // round-3 fable review) — inherits the SAME shared
+                    // stdin fd once it runs, and consumes whatever heredoc
+                    // text `sh` itself has not yet read — content this
+                    // recursion analysed as plain shell syntax, not that
+                    // interpreter's own language. Static analysis has no
+                    // execution model to know how much of the body `sh`
+                    // consumed before handing off, so any such command
+                    // anywhere in the body floors to Ask, fail-closed,
+                    // mirroring rule 5b/5c's own "bare interpreter reads
+                    // stdin" posture. A parse failure here is not itself
+                    // surfaced — `inner`'s own `analyze_at_depth` call
+                    // above already floored the identical text to `Ask` on
+                    // that same failure.
                     if let Ok(inner_line) = parser::parse(&script) {
-                        let mut inner_commands = Vec::new();
-                        collect_command_line_simple_commands(&inner_line, &mut inner_commands);
-                        if let Some(inner_name) = inner_commands.iter().find_map(|cmd| {
-                            let inner_argv = normalize::normalize_argv(cmd);
-                            crate::rules::effective_command(&inner_argv)
-                                .map(|(n, _)| n.to_string())
-                                .filter(|n| crate::rules::is_pipeline_interpreter(n))
+                        let mut inner_scan = HeredocCandidateScan::default();
+                        scan_command_line_for_heredoc_candidates(&inner_line, &mut inner_scan);
+                        if let Some(inner_name) = inner_scan.candidates.first().map(|c| match c {
+                            HeredocCandidate::Shell(n) | HeredocCandidate::NonShell(n) => {
+                                n.as_str()
+                            }
+                            HeredocCandidate::Opaque(desc) => *desc,
                         }) {
                             *accum.has_any = true;
                             raise_expansion_floor(
@@ -4615,12 +4805,22 @@ fn scan_redirection_expansions(
                                      remainder of this heredoc unexamined"
                                 ),
                             );
+                        } else if inner_scan.uncertain {
+                            *accum.has_any = true;
+                            raise_expansion_floor(
+                                accum.floor,
+                                Decision::Ask,
+                                "the heredoc body contains a substitution whose own text could \
+                                 not be statically parsed, and might invoke a stdin-reading \
+                                 interpreter that consumes the remainder of this heredoc"
+                                    .to_string(),
+                            );
                         }
                     }
                 }
                 if let Some(name) = interpreters.iter().find_map(|c| match c {
-                    HeredocCandidate::NonShell(name) => Some(*name),
-                    HeredocCandidate::Shell(_) | HeredocCandidate::ShellWithDashC => None,
+                    HeredocCandidate::NonShell(name) => Some(name.as_str()),
+                    HeredocCandidate::Shell(_) | HeredocCandidate::Opaque(_) => None,
                 }) {
                     *accum.has_any = true;
                     raise_expansion_floor(
@@ -13392,6 +13592,67 @@ mod tests {
             "sh <<EOF\nperl\nsystem(\"cat ~/.ssh/id_rsa\")\nEOF",
             Decision::Ask,
         );
+    }
+
+    #[test]
+    fn heredoc_to_interpreter_reached_through_a_command_substitution_asks() {
+        // `$(perl)` forks a subshell that inherits the SAME shared stdin
+        // `sh` was handed — the argv-position substitution shape, not a
+        // bare pipeline stage, but the same "another command inherits the
+        // heredoc" mechanism.
+        assert_decision(
+            "sh <<'EOF'\necho $(perl)\nsystem(\"cat ~/.ssh/id_rsa\")\nEOF",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn heredoc_to_interpreter_reached_through_an_assignment_substitution_asks() {
+        assert_decision("sh <<'EOF'\nx=$(perl)\nEOF", Decision::Ask);
+    }
+
+    #[test]
+    fn heredoc_attached_to_compound_wrapping_interpreter_via_substitution_asks() {
+        assert_decision("(echo $(perl)) <<'EOF'\nprint('hi')\nEOF", Decision::Ask);
+    }
+
+    #[test]
+    fn heredoc_to_eval_wrapping_an_interpreter_asks() {
+        // `eval perl <<EOF` hands the heredoc's stdin to `perl`, not to
+        // `eval` itself, once `eval` runs the string it was given.
+        assert_decision("eval perl <<EOF\nprint(1)\nEOF", Decision::Ask);
+    }
+
+    #[test]
+    fn heredoc_to_flock_dash_c_wrapping_an_interpreter_asks() {
+        // `flock`'s own `-c` shell-string flag (issues #64/#66) hides the
+        // real reader from a plain `effective_command` walk the same way a
+        // shell's own `-c` does.
+        assert_decision("flock /tmp/l -c perl <<EOF\nprint(1)\nEOF", Decision::Ask);
+    }
+
+    #[test]
+    fn heredoc_to_env_dash_s_wrapping_an_interpreter_asks() {
+        assert_decision("env -S perl <<EOF\nprint(1)\nEOF", Decision::Ask);
+    }
+
+    #[test]
+    fn heredoc_to_fish_long_command_flag_wrapping_an_interpreter_asks() {
+        // `fish --command`/`-C`/`--init-command` are excluded from the
+        // POSIX-shell `is_dash_c_token` presence-only scan (that check's
+        // own docs) precisely because they need `scan_fish_invocation`'s
+        // flag-aware handling instead.
+        assert_decision("fish --command perl <<EOF\nprint(1)\nEOF", Decision::Ask);
+    }
+
+    #[test]
+    fn heredoc_to_fish_short_dash_c_wrapping_an_interpreter_asks() {
+        assert_decision("fish -c perl <<EOF\nprint(1)\nEOF", Decision::Ask);
+    }
+
+    #[test]
+    fn heredoc_to_plain_fish_still_recurses_as_shell() {
+        assert_decision("fish <<EOF\nrm -rf /\nEOF", Decision::Block);
     }
 
     #[test]
