@@ -4651,6 +4651,8 @@ struct RulesFileDto {
     pipeline: Vec<PipelineRuleDto>,
     #[serde(default)]
     redirect: Vec<RedirectRuleDto>,
+    #[serde(default)]
+    token: Vec<TokenRuleDto>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4721,6 +4723,22 @@ struct RedirectRuleDto {
     #[serde(default)]
     decision: Option<String>,
     targets: Vec<TargetDto>,
+}
+
+/// Issue #426: a rule matching a literal substring against every
+/// assignment name and resolved argv word of a simple command, independent
+/// of which command is being run — `AWS_SECRET_ACCESS_KEY=...` is
+/// credential-shaped whether it prefixes `ls` or stands alone.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TokenRuleDto {
+    id: String,
+    reason: String,
+    #[serde(default)]
+    decision: Option<String>,
+    patterns: Vec<String>,
+    #[serde(default)]
+    deny_message: Option<String>,
 }
 
 /// Parses an optional `decision` string into a [`Decision`], defaulting to
@@ -5395,6 +5413,60 @@ fn convert_redirect_rule(dto: RedirectRuleDto) -> Result<RedirectRule, RulesErro
     })
 }
 
+fn convert_token_rule(dto: TokenRuleDto) -> Result<TokenRule, RulesError> {
+    if dto.id.trim().is_empty() {
+        return Err(RulesError::invalid(&dto.id, "id must not be empty"));
+    }
+    if dto.reason.trim().is_empty() {
+        return Err(RulesError::invalid(&dto.id, "reason must not be empty"));
+    }
+    if dto.patterns.is_empty() {
+        return Err(RulesError::invalid(
+            &dto.id,
+            "token rule requires at least one pattern",
+        ));
+    }
+    if dto.patterns.iter().any(|p| p.is_empty()) {
+        return Err(RulesError::invalid(
+            &dto.id,
+            "token rule patterns must not be empty",
+        ));
+    }
+    // `crate::gate::word_literal_skeleton` uses a NUL byte as an
+    // expansion-boundary sentinel when scanning a word's literal pieces —
+    // a pattern containing one could straddle that boundary and either
+    // silently never match (harmless) or, if the sentinel encoding ever
+    // changes, match across two unrelated pieces. Rejected outright so the
+    // sentinel's own value never needs to be a rule author's concern.
+    if dto.patterns.iter().any(|p| p.contains('\0')) {
+        return Err(RulesError::invalid(
+            &dto.id,
+            "token rule patterns must not contain a NUL byte",
+        ));
+    }
+
+    let decision = parse_decision(&dto.id, dto.decision.as_deref())?;
+
+    let deny_message = match dto.deny_message {
+        Some(message) if message.trim().is_empty() => {
+            return Err(RulesError::invalid(
+                &dto.id,
+                "deny_message must not be empty",
+            ));
+        }
+        Some(message) => Some(DenyMessage::new(message)),
+        None => None,
+    };
+
+    Ok(TokenRule {
+        id: RuleId::new(dto.id),
+        reason: Reason::new(dto.reason),
+        decision,
+        patterns: dto.patterns,
+        deny_message,
+    })
+}
+
 /// A rule matching the target of an output/append redirection (`>`, `>>`)
 /// against a curated list of dangerous paths (block devices, critical
 /// system files). Unlike [`CommandRule`], an empty `targets` list is a
@@ -5459,6 +5531,54 @@ impl RedirectRule {
     }
 }
 
+/// Issue #426: a rule matching a literal, case-sensitive substring against
+/// every assignment name (`NAME=`) and resolved argv word of a simple
+/// command — command-agnostic, unlike [`CommandRule`], since a
+/// credential-shaped token (`AWS_SECRET_ACCESS_KEY=`) is exactly as
+/// sensitive whether it prefixes `ls`, `curl`, or nothing at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TokenRule {
+    id: RuleId,
+    reason: Reason,
+    decision: Decision,
+    patterns: Vec<String>,
+    deny_message: Option<DenyMessage>,
+}
+
+impl TokenRule {
+    #[must_use]
+    pub(crate) fn id(&self) -> &RuleId {
+        &self.id
+    }
+
+    #[must_use]
+    pub(crate) fn reason(&self) -> &Reason {
+        &self.reason
+    }
+
+    #[must_use]
+    pub(crate) fn decision(&self) -> Decision {
+        self.decision
+    }
+
+    #[must_use]
+    pub(crate) fn deny_message(&self) -> Option<&DenyMessage> {
+        self.deny_message.as_ref()
+    }
+
+    /// True when any of this rule's patterns is a substring of any
+    /// `candidates` entry — deliberately plain [`str::contains`], not a
+    /// regex engine: the codebase has no `regex` dependency and every
+    /// existing matcher (`TargetMatcher`, `CommandMatch`, `FlagMatcher`) is
+    /// literal-exact/literal-prefix already.
+    #[must_use]
+    fn matches(&self, candidates: &[String]) -> bool {
+        self.patterns
+            .iter()
+            .any(|pattern| candidates.iter().any(|c| c.contains(pattern.as_str())))
+    }
+}
+
 /// Checks that no id in `ids` repeats — the duplicate-id-is-`Err` half of
 /// "parse, don't validate" (module docs).
 fn reject_duplicate_ids<'a>(ids: impl Iterator<Item = &'a str>) -> Result<(), RulesError> {
@@ -5494,6 +5614,7 @@ pub(crate) struct Rules {
     command_rules: Vec<CommandRule>,
     pipeline_rules: Vec<PipelineRule>,
     redirect_rules: Vec<RedirectRule>,
+    token_rules: Vec<TokenRule>,
     ask_rules: Vec<CommandRule>,
     escalation_floor: Decision,
 }
@@ -5526,19 +5647,26 @@ impl Rules {
             .into_iter()
             .map(convert_redirect_rule)
             .collect::<Result<Vec<_>, _>>()?;
+        let token_rules = dto
+            .token
+            .into_iter()
+            .map(convert_token_rule)
+            .collect::<Result<Vec<_>, _>>()?;
 
         reject_duplicate_ids(
             command_rules
                 .iter()
                 .map(|r| r.id.as_str())
                 .chain(pipeline_rules.iter().map(|r| r.id.as_str()))
-                .chain(redirect_rules.iter().map(|r| r.id.as_str())),
+                .chain(redirect_rules.iter().map(|r| r.id.as_str()))
+                .chain(token_rules.iter().map(|r| r.id.as_str())),
         )?;
 
         Ok(Self {
             command_rules,
             pipeline_rules,
             redirect_rules,
+            token_rules,
             ask_rules: Vec::new(),
             escalation_floor: Decision::Ask,
         })
@@ -5647,6 +5775,27 @@ impl Rules {
     #[must_use]
     pub(crate) fn match_ask(&self, argv: &[NormalizedWord]) -> Option<&CommandRule> {
         self.ask_rules.iter().find(|rule| rule.matches(argv))
+    }
+
+    /// The worst-decision [`TokenRule`] whose patterns match any of
+    /// `candidates` (issue #426: every assignment name plus every resolved
+    /// argv word), if any — Block outranks Ask regardless of declaration
+    /// order, same convention as [`Self::match_command`]/
+    /// [`Self::match_redirect_target`]; ties keep the first-declared rule.
+    #[must_use]
+    pub(crate) fn match_token(&self, candidates: &[String]) -> Option<&TokenRule> {
+        let mut ask = None;
+        for rule in &self.token_rules {
+            if !rule.matches(candidates) {
+                continue;
+            }
+            match rule.decision() {
+                Decision::Block => return Some(rule),
+                _ if ask.is_none() => ask = Some(rule),
+                _ => {}
+            }
+        }
+        ask
     }
 
     /// Shared scan behind every `match_command_*` floor probe below: a
@@ -6220,6 +6369,12 @@ pub(crate) fn merge_user_config(
                 .iter()
                 .map(|r| r.id.as_str().to_string()),
         )
+        .chain(
+            blocklist
+                .token_rules
+                .iter()
+                .map(|r| r.id.as_str().to_string()),
+        )
         .chain(allowlist.entries.iter().map(|r| r.id.as_str().to_string()))
         .collect();
 
@@ -6277,6 +6432,10 @@ pub(crate) fn merge_user_config(
             command_rules,
             pipeline_rules,
             redirect_rules,
+            // Issue #426: no user-config equivalent exists yet
+            // (`UserConfigFileDto` has no `token` field) — carried through
+            // unchanged from the embedded blocklist.
+            token_rules: blocklist.token_rules,
             ask_rules,
             escalation_floor,
         },
@@ -11371,6 +11530,29 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn merge_user_config_rejects_deny_id_colliding_with_embedded_token_id() {
+        // fable review of #430 (finding #2): `merge_user_config`'s
+        // `existing_ids` set was extended with every other embedded rule
+        // kind but not `token_rules` -- a user config could silently reuse
+        // the shipped token rule's id.
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let config = UserConfig::parse(
+            r#"
+            [[deny]]
+            id = "token-credential-shaped-assignment"
+            reason = "totally different rule"
+            command = "totally-different-command"
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(
+            merge_user_config(blocklist, allowlist, config),
+            Err(RulesError::DuplicateId(id)) if id == "token-credential-shaped-assignment"
+        ));
+    }
+
     // ==== issue #99: deny_message ====
 
     #[test]
@@ -13403,5 +13585,61 @@ mod tests {
             NormalizedWord::resolved("--no-verify"),
         ];
         assert!(rules.match_command(&shifted_cmd).is_none());
+    }
+
+    // ==== Issue #426: [[token]] rule loading ====
+
+    #[test]
+    fn token_rule_with_empty_patterns_is_rejected_at_load_time() {
+        let toml = r#"
+            [[token]]
+            id = "test-token"
+            reason = "test"
+            patterns = []
+        "#;
+        let err = Rules::parse(toml).unwrap_err();
+        let RulesError::InvalidRule { problem, .. } = &err else {
+            panic!("expected InvalidRule, got {err:?}");
+        };
+        assert!(problem.contains("pattern"), "got {problem:?}");
+    }
+
+    #[test]
+    fn token_rule_with_an_empty_pattern_string_is_rejected_at_load_time() {
+        let toml = r#"
+            [[token]]
+            id = "test-token"
+            reason = "test"
+            patterns = [""]
+        "#;
+        assert!(Rules::parse(toml).is_err());
+    }
+
+    #[test]
+    fn token_rule_with_a_nul_in_a_pattern_is_rejected_at_load_time() {
+        // fable review round 2 of #430 (finding F6): the NUL-pattern
+        // rejection landed with no dedicated test.
+        let toml =
+            "[[token]]\nid = \"test-token\"\nreason = \"test\"\npatterns = [\"a\\u0000b\"]\n";
+        let err = Rules::parse(toml).unwrap_err();
+        let RulesError::InvalidRule { problem, .. } = &err else {
+            panic!("expected InvalidRule, got {err:?}");
+        };
+        assert!(problem.contains("NUL"), "got {problem:?}");
+    }
+
+    #[test]
+    fn token_rule_loads_and_matches_a_credential_shaped_assignment_name() {
+        let toml = r#"
+            [[token]]
+            id = "test-token"
+            reason = "test"
+            decision = "ask"
+            patterns = ["_SECRET="]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        let rule = rules.match_token(&["MY_SECRET=".to_string()]).unwrap();
+        assert_eq!(rule.id().as_str(), "test-token");
+        assert_eq!(rule.decision(), Decision::Ask);
     }
 }
