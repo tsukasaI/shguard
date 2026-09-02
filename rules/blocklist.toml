@@ -242,8 +242,11 @@
 #                    Unlike [[command]], an empty list is a load-time error.
 #
 # [[token]] — matches a literal substring against every assignment name
-# (`NAME=`) and every argv word of a simple command, independent of which
-# command is being run (issue #426):
+# (`NAME=`), every resolved argv word, and every raw word's own literal
+# text (with each expansion/brace-alternative boundary kept from being
+# straddled), of a simple command, a `for` clause's `in` word list, or an
+# `[[ ]]` extended-test operand — independent of which command is being
+# run (issue #426):
 #   id, reason       same as above.
 #   decision         optional: "block" (default) or "ask".
 #   patterns         REQUIRED, non-empty list of literal, case-sensitive

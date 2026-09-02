@@ -729,7 +729,7 @@ const MAX_BRACE_ALTERNATIVES: usize = 64;
 /// same `UnresolvableKind`) [`MAX_BRACE_ALTERNATIVES`]'s cap already uses,
 /// since both are "this word's brace structure is too large to safely
 /// expand" from the gate's point of view.
-fn expand_braces(
+pub(crate) fn expand_braces(
     pieces: &[WordPiece],
     depth: usize,
 ) -> Result<Vec<Vec<WordPiece>>, UnresolvableKind> {
@@ -1352,7 +1352,7 @@ fn read_hex_digits(
 ///   cover why the NUL check instead lives downstream in
 ///   [`chunks_to_words`], where every literal source is checked uniformly
 ///   rather than only this one.
-fn decode_ansi_c(raw: &str) -> Result<String, UnresolvableKind> {
+pub(crate) fn decode_ansi_c(raw: &str) -> Result<String, UnresolvableKind> {
     let mut bytes: Vec<u8> = Vec::new();
     let mut chars = raw.chars().peekable();
 

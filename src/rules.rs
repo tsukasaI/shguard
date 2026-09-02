@@ -13616,6 +13616,19 @@ mod tests {
     }
 
     #[test]
+    fn token_rule_with_a_nul_in_a_pattern_is_rejected_at_load_time() {
+        // fable review round 2 of #430 (finding F6): the NUL-pattern
+        // rejection landed with no dedicated test.
+        let toml =
+            "[[token]]\nid = \"test-token\"\nreason = \"test\"\npatterns = [\"a\\u0000b\"]\n";
+        let err = Rules::parse(toml).unwrap_err();
+        let RulesError::InvalidRule { problem, .. } = &err else {
+            panic!("expected InvalidRule, got {err:?}");
+        };
+        assert!(problem.contains("NUL"), "got {problem:?}");
+    }
+
+    #[test]
     fn token_rule_loads_and_matches_a_credential_shaped_assignment_name() {
         let toml = r#"
             [[token]]

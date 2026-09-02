@@ -1061,6 +1061,14 @@ fn evaluate_compound_command(
 /// an extended test has no separate body, but its own operands can carry a
 /// `$()`/backtick substitution that inherits the SAME heredoc-on-stdin
 /// mechanism a compound body's substitution does.
+///
+/// The issue #426 token scan below is over-inclusive for one
+/// [`evaluate_extended_test`] shape (fable review round 2, finding F5): an
+/// `[[ ]]` PATTERN operand (`[[ $x == AWS_SECRET_ACCESS_KEY=* ]]`) reaches
+/// Ask even though it's a comparison, not a credential exposure. Accepted:
+/// `extra_words` carries no structural distinction between a comparison
+/// operand and an ordinary one, and scanning every operand uniformly is
+/// what makes the `for`-list case (a real exposure) work at all.
 #[allow(clippy::too_many_arguments)]
 fn apply_attached_word_and_redirect_checks(
     mut worst: Verdict,
@@ -1129,16 +1137,39 @@ fn apply_attached_word_and_redirect_checks(
         worst = fold_worst(worst, verdict);
     }
 
-    // Issue #426 (fable review, finding #3): the same command-agnostic
-    // credential-shaped token scan `evaluate_simple_command` applies to a
-    // SimpleCommand's own argv/assignments, extended to `extra_words` — a
-    // compound command's/extended test's own operand words (a `for`
-    // list-in, an `[[ ]]` operand) never pass through
+    // Issue #426 (fable review round 1, finding #3): the same
+    // command-agnostic credential-shaped token scan `evaluate_simple_command`
+    // applies to a SimpleCommand's own argv/assignments, extended to
+    // `extra_words` — a compound command's/extended test's own operand
+    // words (a `for` list-in, an `[[ ]]` operand) never pass through
     // `evaluate_simple_command`/`scan_token_floor` at all. Only the
     // literal-skeleton scan applies here (`extra_words` are raw AST
     // `Word`s, not `NormalizedWord`s — this function has no resolved-argv
-    // scan to extend).
-    let token_candidates: Vec<String> = extra_words.iter().map(word_literal_skeleton).collect();
+    // scan to extend). Unlike `scan_token_floor`'s own use of
+    // `word_literal_skeletons`, an `Err(ExpansionLimit)` word floors to Ask
+    // explicitly here (fable review round 2, finding F1): `extra_words` has
+    // no `argv`/rule-8 counterpart to fall back on, so silently dropping an
+    // oversized word's contribution (round 1's behavior) left it with no
+    // floor at all.
+    let mut token_candidates: Vec<String> = Vec::new();
+    let mut token_scan_overflowed = false;
+    for word in extra_words {
+        match word_literal_skeletons(word) {
+            Ok(skeletons) => token_candidates.extend(skeletons),
+            Err(_) => token_scan_overflowed = true,
+        }
+    }
+    if token_scan_overflowed {
+        let argv = worst.normalized_argv().to_vec();
+        let floored = Verdict::ask(
+            Reason::new(format!(
+                "{extra_words_description} contains a word whose brace-alternation structure \
+                 is too large to safely scan for credential-shaped tokens"
+            )),
+            argv,
+        );
+        worst = fold_worst(worst, floored);
+    }
     if let Some(rule) = rules.match_token(&token_candidates) {
         let argv = worst.normalized_argv().to_vec();
         let reason = Reason::new(format!(
@@ -3027,39 +3058,50 @@ fn apply_named_user_home_floor(
 /// (`convert_token_rule`), so it can never appear as real pattern text.
 const TOKEN_SCAN_SENTINEL: char = '\0';
 
-/// Issue #426 (fable review, finding #1): appends `pieces`' literal text to
-/// `out`, replacing every expansion (`$VAR`, `$(...)`, backticks, `~`,
-/// `$((...))`, process substitution) with [`TOKEN_SCAN_SENTINEL`] rather
-/// than skipping it — a pattern can therefore never straddle an expansion
-/// boundary and falsely match text that isn't actually contiguous at
-/// runtime, but literal text immediately adjacent to an expansion (e.g.
-/// `AWS_SECRET_ACCESS_KEY=abc123` in `AWS_SECRET_ACCESS_KEY=abc123$X`) is
-/// still seen. This complements, never replaces, [`scan_token_floor`]'s
-/// resolved-argv scan: a word whose LATER piece is an expansion normalises
-/// to `Unresolvable` as a whole (module docs elsewhere: "skip
-/// `Unresolvable`, don't floor on it"), which would otherwise make the
-/// resolved-argv scan blind to a credential literal a real shell still
-/// executes unchanged.
+/// Issue #426 (fable review round 1, finding #1): appends `pieces`' literal
+/// text to `out`, replacing every expansion (`$VAR`, `$(...)`, backticks,
+/// `~`, `$((...))`, process substitution) with [`TOKEN_SCAN_SENTINEL`]
+/// rather than skipping it — a pattern can therefore never straddle an
+/// expansion boundary and falsely match text that isn't actually
+/// contiguous at runtime, but literal text immediately adjacent to an
+/// expansion (e.g. `AWS_SECRET_ACCESS_KEY=abc123` in
+/// `AWS_SECRET_ACCESS_KEY=abc123$X`) is still seen. This complements, never
+/// replaces, [`scan_token_floor`]'s resolved-argv scan: a word whose LATER
+/// piece is an expansion normalises to `Unresolvable` as a whole (module
+/// docs elsewhere: "skip `Unresolvable`, don't floor on it"), which would
+/// otherwise make the resolved-argv scan blind to a credential literal a
+/// real shell still executes unchanged.
 ///
-/// A [`WordPiece::BraceAlternation`] pushes each alternative's own
-/// skeleton followed by a sentinel — alternatives are mutually exclusive
-/// at runtime, so concatenating two without a separating sentinel would
-/// let a pattern falsely span text from two different, never-co-occurring
-/// alternatives.
+/// [`WordPiece::AnsiCQuoted`] is decoded ([`normalize::decode_ansi_c`])
+/// rather than pushed raw (fable review round 2, finding F2): the
+/// resolved-argv scan already decodes `$'...'` when the whole word
+/// resolves, but the skeleton scan is the ONLY scan a word with a trailing
+/// expansion goes through, so `$'AWS_SECRET_ACCESS_KEY\x3dabc'$X` would
+/// otherwise never see the decoded `=`. A decode failure falls back to the
+/// raw text — never worse than round 1's behavior.
+///
+/// Requires every [`WordPiece::BraceAlternation`] already expanded away by
+/// [`normalize::expand_braces`] before this runs (fable review round 2,
+/// finding F1) — see [`word_literal_skeletons`], the only caller. A flat,
+/// single-string skeleton cannot represent a prefix, one of several
+/// alternatives, and a suffix all at once: `export
+/// {AWS_SECRET_ACCESS_KEY,DUMMY}=abc123$X` genuinely exports
+/// `AWS_SECRET_ACCESS_KEY=abc123…`, but round 1's
+/// sentinel-after-each-alternative encoding severed the alternative from
+/// its suffix, silently losing the match.
 fn push_literal_skeleton(pieces: &[WordPiece], out: &mut String) {
     for piece in pieces {
         match piece {
-            WordPiece::Literal(s) | WordPiece::SingleQuoted(s) | WordPiece::AnsiCQuoted(s) => {
-                out.push_str(s);
+            WordPiece::Literal(s) | WordPiece::SingleQuoted(s) => out.push_str(s),
+            WordPiece::AnsiCQuoted(raw) => {
+                out.push_str(&normalize::decode_ansi_c(raw).unwrap_or_else(|_| raw.clone()));
             }
             WordPiece::EscapeSequence(c) => out.push(*c),
             WordPiece::DoubleQuoted(inner) => push_literal_skeleton(inner, out),
-            WordPiece::BraceAlternation(alternatives) => {
-                for alt in alternatives {
-                    push_literal_skeleton(&alt.0, out);
-                    out.push(TOKEN_SCAN_SENTINEL);
-                }
-            }
+            WordPiece::BraceAlternation(_) => unreachable!(
+                "word_literal_skeletons runs normalize::expand_braces first, which removes \
+                 every BraceAlternation from `pieces` before push_literal_skeleton ever sees it"
+            ),
             WordPiece::ParameterExpansion(_)
             | WordPiece::CommandSubstitution(_)
             | WordPiece::BackquotedSubstitution(_)
@@ -3070,18 +3112,28 @@ fn push_literal_skeleton(pieces: &[WordPiece], out: &mut String) {
     }
 }
 
-/// [`push_literal_skeleton`] over one whole [`Word`], as a standalone
-/// `String`.
-fn word_literal_skeleton(word: &Word) -> String {
-    let mut out = String::new();
-    push_literal_skeleton(&word.0, &mut out);
-    out
+/// One skeleton ([`push_literal_skeleton`]) per brace-free member of
+/// `word`'s own cartesian product of brace alternatives
+/// ([`normalize::expand_braces`], the same expansion ordinary word
+/// resolution already performs) — `Err(ExpansionLimit)` on the same
+/// oversized-`{a,b}{a,b}…` shape [`normalize::expand_braces`] itself caps
+/// at (fable review round 2, finding F1).
+fn word_literal_skeletons(word: &Word) -> Result<Vec<String>, UnresolvableKind> {
+    let members = normalize::expand_braces(&word.0, 0)?;
+    Ok(members
+        .iter()
+        .map(|pieces| {
+            let mut out = String::new();
+            push_literal_skeleton(pieces, &mut out);
+            out
+        })
+        .collect())
 }
 
 /// Issue #426: `Some((rule's decision, reason, deny_message))` when a
 /// [`crate::rules::TokenRule`] matches an assignment name (`NAME=`), a
-/// resolved argv word, or a raw word's literal skeleton
-/// ([`word_literal_skeleton`]) of this command — `None` otherwise.
+/// resolved argv word, or one of a raw word's literal skeletons
+/// ([`word_literal_skeletons`]) of this command — `None` otherwise.
 ///
 /// The resolved-argv scan silently skips any `Unresolvable` word rather
 /// than flooring on unresolvability the way most other floors in this file
@@ -3091,11 +3143,21 @@ fn word_literal_skeleton(word: &Word) -> String {
 /// Ask — a blanket regression this additive heuristic must not cause.
 /// Assignment names are plain `String`s (never unresolvable), so
 /// `X_SECRET=$REAL_VALUE ls` still matches on the name alone. The
-/// literal-skeleton scan (added by fable review, finding #1) is what
-/// keeps this floor from going blind on a credential-shaped word that
-/// merely has an expansion attached to it (`AWS_SECRET_ACCESS_KEY=abc123$X`
-/// resolves the WHOLE word to `Unresolvable`, but the credential literal
-/// is still there and a real shell still executes it unchanged).
+/// literal-skeleton scan (fable review round 1, finding #1) is what keeps
+/// this floor from going blind on a credential-shaped word that merely has
+/// an expansion attached to it (`AWS_SECRET_ACCESS_KEY=abc123$X` resolves
+/// the WHOLE word to `Unresolvable`, but the credential literal is still
+/// there and a real shell still executes it unchanged).
+///
+/// A word whose skeleton hits [`UnresolvableKind::ExpansionLimit`] (an
+/// oversized brace product) contributes nothing here, unlike
+/// [`apply_attached_word_and_redirect_checks`]'s own use of
+/// [`word_literal_skeletons`] — `argv` already carries that same
+/// `Unresolvable(ExpansionLimit)` word, which rule 8
+/// (`evaluate_simple_command_core`, "argument-position half") already
+/// floors to Ask on its own, unconditionally. `extra_words` has no such
+/// argv/rule-8 counterpart, which is exactly why that caller floors
+/// explicitly instead.
 fn scan_token_floor(
     command: &SimpleCommand,
     argv: &[NormalizedWord],
@@ -3109,7 +3171,12 @@ fn scan_token_floor(
             Resolution::Resolved(s) => Some(s.clone()),
             Resolution::Unresolvable(_) => None,
         }))
-        .chain(command.words.iter().map(word_literal_skeleton))
+        .chain(
+            command
+                .words
+                .iter()
+                .flat_map(|w| word_literal_skeletons(w).unwrap_or_default()),
+        )
         .collect();
     let rule = rules.match_token(&candidates)?;
     Some((
@@ -9128,6 +9195,72 @@ mod tests {
             "for x in AWS_SECRET_ACCESS_KEY=abc123; do export $x; done",
             Decision::Ask,
         );
+    }
+
+    // fable review round 2 of #430 (finding F1): a flat, sentinel-joined
+    // skeleton cannot represent "prefix + one-of-N-brace-alternatives +
+    // suffix" — round 1's skeleton severed the alternative from a
+    // genuinely-adjacent suffix, so a credential spread across a brace
+    // alternation slipped through even though the real shell would export
+    // it unchanged.
+
+    #[test]
+    fn issue_426_brace_alternative_prefix_with_trailing_credential_shape_still_asks() {
+        assert_decision(
+            "export {AWS_SECRET_ACCESS_KEY,DUMMY}=abc123$X",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn issue_426_brace_alternative_suffix_with_leading_credential_shape_still_asks() {
+        assert_decision("echo {FOO_,BAR}SECRET=x$Y", Decision::Ask);
+    }
+
+    #[test]
+    fn issue_426_brace_alternative_credential_in_a_for_list_still_asks() {
+        assert_decision(
+            "for x in {AWS_SECRET_ACCESS_KEY,D}=abc$Y; do export $x; done",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn issue_426_oversized_brace_product_in_argv_floors_to_ask_via_rule_8() {
+        assert_decision(
+            "for x in {AWS_SECRET_ACCESS_KEY,a,b,c,d,e,f,g,h}{=x,1,2,3,4,5,6,7}; do :; done",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn issue_426_oversized_brace_product_in_extended_test_floors_to_ask() {
+        assert_decision(
+            "[[ {AWS_SECRET_ACCESS_KEY,a,b,c,d,e,f,g,h}{=x,1,2,3,4,5,6,7} ]]",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn issue_426_credential_split_across_a_brace_alternative_boundary_stays_allow() {
+        // The negative pinning the sentinel: a pattern must never match
+        // by spanning what should be a sentinel-separated boundary --
+        // "AWS_SECRET_ACCESS_" and "KEY=abc123" are never actually
+        // adjacent for the same alternative here.
+        assert_decision(
+            "export AWS_SECRET_ACCESS_{DUMMY,OTHER}=abc123",
+            Decision::Allow,
+        );
+    }
+
+    // fable review round 2 of #430 (finding F2): the skeleton scan is the
+    // ONLY scan a word with a trailing expansion goes through, so an
+    // ANSI-C-quoted credential pushed raw (undecoded) never saw its own
+    // `=`.
+
+    #[test]
+    fn issue_426_ansi_c_quoted_credential_with_trailing_expansion_still_asks() {
+        assert_decision(r"export $'AWS_SECRET_ACCESS_KEY\x3dabc'$X", Decision::Ask);
     }
 
     // Issue #139: rule 2's bare-`$VAR` command-position resolution
