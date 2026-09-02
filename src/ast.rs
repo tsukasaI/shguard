@@ -263,15 +263,17 @@ pub(crate) enum Separator {
     And,
     /// `||`
     Or,
-    /// `&` (issue #191): backgrounds the pipeline to its left, but that
-    /// pipeline still runs — `crate::gate::evaluate_command_line` folds the
-    /// resulting DANGER verdict identically to every other separator
-    /// (worst-wins across the whole line, regardless of `;`/`&&`/`||`). Its
-    /// working-directory effect is a different story (issue #383): a
-    /// backgrounded pipeline runs in its own subshell in real bash, so a
-    /// `cd`/`pushd`/`popd` inside it never persists past the `&` —
-    /// `evaluate_command_line` evaluates the pipeline this separator
-    /// follows against an isolated `cwd` clone specifically because of
+    /// `&` (issue #191): backgrounds the whole `&&`/`||` chain to its left
+    /// (per bash grammar, `&` terminates an `and_or` list, not just the one
+    /// pipeline immediately before it), but that chain still runs —
+    /// `crate::gate::evaluate_command_line` folds the resulting DANGER
+    /// verdict identically to every other separator (worst-wins across the
+    /// whole line, regardless of `;`/`&&`/`||`). Its working-directory
+    /// effect is a different story (issue #383): a backgrounded chain runs
+    /// in its own subshell in real bash, so a `cd`/`pushd`/`popd` anywhere
+    /// inside it never persists past the `&` — `evaluate_command_line`
+    /// evaluates every pipeline in the chain this separator terminates
+    /// against one shared isolated `cwd` clone, specifically because of
     /// this variant, not the plain worst-wins fold every other separator
     /// gets.
     Async,
@@ -284,19 +286,17 @@ pub(crate) enum Separator {
 /// so "zero pipelines" and "one fewer separator than pipeline" are not
 /// representable — the plain-`Vec` encoding would allow both.
 ///
-/// `trailing_async` (issue #383): whether the LAST pipeline on this line
-/// (`rest.last()`, or `first` when `rest` is empty) is itself followed by a
-/// bare `&` with nothing after it — real bash backgrounds that one
-/// pipeline into its own subshell, so `crate::gate::evaluate_command_line`
-/// must not let ITS `cd`/`pushd`/`popd` effect reach whatever runs after
-/// this whole `CommandLine`, the same isolation every other separator
-/// already gets when a later pipeline exists to observe it via
+/// `trailing_async` (issue #383): whether the `&&`/`||` chain ending at the
+/// LAST pipeline on this line (`rest.last()`, or `first` when `rest` is
+/// empty) is terminated by a bare `&` with nothing after it — real bash
+/// backgrounds that whole chain into its own subshell, so
+/// `crate::gate::evaluate_command_line` must not let any `cd`/`pushd`/`popd`
+/// effect from within it reach whatever runs after this `CommandLine`, the
+/// same isolation every other backgrounded chain gets when observed via
 /// `Separator::Async`. A `CommandLine` that is itself a `BraceGroup`'s body
 /// (`{ pushd /tmp & }`) is the case that actually matters in practice: the
 /// group runs in the CURRENT shell (unlike a `Subshell`), so its body's own
-/// trailing `&` is the only place this distinction is otherwise invisible
-/// (`crate::parser::convert_compound_list`, which sets this field, used to
-/// silently discard exactly this information).
+/// trailing `&` is the only place this distinction is otherwise invisible.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CommandLine {
     pub(crate) first: Pipeline,

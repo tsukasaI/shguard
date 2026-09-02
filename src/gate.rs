@@ -455,21 +455,24 @@ fn analyze_at_depth(
 /// asynchronously, so it is folded in exactly like every other separator
 /// (`crate::ast::Separator::Async`'s own docs).
 ///
-/// Issue #383: `&` (issue #191) is the one separator that does NOT mutate
-/// `cwd` forward the way the others do — the pipeline it backgrounds runs
-/// in its own subshell in real bash, so a `cd`/`pushd`/`popd` inside it
-/// never actually persists to whatever runs after it. Every pipeline this
-/// function evaluates is therefore checked against whether ITS OWN
-/// trailing separator is `Async` (the following tuple's separator for
-/// every pipeline but the last, [`CommandLine::trailing_async`] for the
-/// last) and, if so, evaluated against an ISOLATED clone of `cwd` instead
-/// of `cwd` itself — the same clone-and-discard pattern
-/// [`evaluate_compound_command`] already uses for a genuinely forking
-/// construct (`Subshell`). `collapse_stack_on_uncertain_crossing`'s own
-/// crossing check (below) is unaffected either way: it reasons about
-/// whether the SHARED `cwd`'s already-tracked stack can still be trusted
-/// crossing INTO this pipeline, independent of whether this pipeline's own
-/// execution will itself be isolated.
+/// Issue #383: `&` (issue #191) does not mutate `cwd` forward the way `;`,
+/// `&&` and `||` do. In bash grammar `&` terminates the whole `&&`/`||`
+/// chain to its left (`list: list separator_op and_or`), not just the one
+/// pipeline immediately before it — `cd /tmp && true &` backgrounds
+/// `cd /tmp && true` as a single unit, so a `cd` anywhere earlier in that
+/// chain must not persist either. [`chain_is_backgrounded`] scans forward
+/// from a pipeline through `&&`/`||` separators to find the `&`/end-of-line
+/// terminator that actually governs it. Every pipeline in a backgrounded
+/// chain shares ONE isolated clone of `cwd` (cloned once at the chain's
+/// first pipeline, then threaded through the rest of the chain) — the same
+/// clone-and-discard pattern [`evaluate_compound_command`] already uses for
+/// a genuinely forking construct (`Subshell`), except here the isolation
+/// spans multiple pipelines instead of one.
+/// `collapse_stack_on_uncertain_crossing`'s own crossing check (below) is
+/// unaffected either way: it reasons about whether the SHARED `cwd`'s
+/// already-tracked stack can still be trusted crossing INTO this pipeline,
+/// independent of whether this pipeline's own execution will itself be
+/// isolated.
 fn evaluate_command_line(
     command_line: &CommandLine,
     rules: &Rules,
@@ -478,24 +481,15 @@ fn evaluate_command_line(
     cwd: &mut CwdState,
 ) -> Verdict {
     let mut env = Env::new();
-    let first_is_async = command_line
-        .rest
-        .first()
-        .is_some_and(|(separator, _)| *separator == Separator::Async)
-        || (command_line.rest.is_empty() && command_line.trailing_async);
-    let mut worst = if first_is_async {
-        let mut isolated = cwd.clone();
-        evaluate_pipeline(
-            &command_line.first,
-            &mut env,
-            rules,
-            allowlist,
-            depth,
-            &mut isolated,
-        )
-    } else {
-        evaluate_pipeline(&command_line.first, &mut env, rules, allowlist, depth, cwd)
-    };
+    let mut isolated = chain_is_backgrounded(command_line, 0).then(|| cwd.clone());
+    let mut worst = evaluate_pipeline(
+        &command_line.first,
+        &mut env,
+        rules,
+        allowlist,
+        depth,
+        isolated.as_mut().unwrap_or(cwd),
+    );
     let mut prev_untrustworthy = pipeline_reported_success_is_untrustworthy(&command_line.first);
     for (index, (separator, pipeline)) in command_line.rest.iter().enumerate() {
         // Issue #353: `&&` only guarantees the preceding pipeline actually
@@ -512,20 +506,39 @@ fn evaluate_command_line(
             cwd.collapse_stack_on_uncertain_crossing();
         }
         prev_untrustworthy = pipeline_reported_success_is_untrustworthy(pipeline);
-        let this_is_async = command_line
-            .rest
-            .get(index + 1)
-            .is_some_and(|(separator, _)| *separator == Separator::Async)
-            || (index + 1 == command_line.rest.len() && command_line.trailing_async);
-        let verdict = if this_is_async {
-            let mut isolated = cwd.clone();
-            evaluate_pipeline(pipeline, &mut env, rules, allowlist, depth, &mut isolated)
-        } else {
-            evaluate_pipeline(pipeline, &mut env, rules, allowlist, depth, cwd)
-        };
+        // `&&`/`||` continue whatever chain (isolated or not) is already in
+        // progress; `;` and `&` both close it, so the next pipeline's chain
+        // is recomputed fresh.
+        if !matches!(separator, Separator::And | Separator::Or) {
+            isolated = chain_is_backgrounded(command_line, index + 1).then(|| cwd.clone());
+        }
+        let verdict = evaluate_pipeline(
+            pipeline,
+            &mut env,
+            rules,
+            allowlist,
+            depth,
+            isolated.as_mut().unwrap_or(cwd),
+        );
         worst = fold_worst(worst, verdict);
     }
     worst
+}
+
+/// Whether the pipeline at `index` (0 = [`CommandLine::first`], `i` = the
+/// pipeline in `rest[i - 1]`) is backgrounded — i.e. whether the `&&`/`||`
+/// chain starting at it is eventually terminated by `&` rather than `;` or
+/// end-of-line. See [`evaluate_command_line`]'s docs for why the whole
+/// chain, not just the immediately-following separator, decides this.
+fn chain_is_backgrounded(command_line: &CommandLine, mut index: usize) -> bool {
+    loop {
+        match command_line.rest.get(index) {
+            Some((Separator::And | Separator::Or, _)) => index += 1,
+            Some((Separator::Async, _)) => return true,
+            Some((Separator::Sequence, _)) => return false,
+            None => return command_line.trailing_async,
+        }
+    }
 }
 
 /// Whether a pipeline's own reported exit status can't be trusted to mean
@@ -8567,12 +8580,12 @@ mod tests {
 
     #[test]
     fn issue_383_bare_ampersand_backgrounded_cd_does_not_leak_into_the_parent() {
-        // Finding 2: `&` backgrounds ONLY the pipeline to its left into its
-        // own subshell -- real bash's `cd /tmp` there never persists to
-        // whatever runs after the `&`, so `cp` still runs from
-        // `~/.config/shguard` and must Block. Also reproduces with `pushd`
-        // (same code path, `apply_cwd_effect`'s `cd`/`pushd` handling is
-        // uniform).
+        // Finding 2: `&` backgrounds the pipeline (or `&&`/`||` chain) to
+        // its left into its own subshell -- real bash's `cd /tmp` there
+        // never persists to whatever runs after the `&`, so `cp` still runs
+        // from `~/.config/shguard` and must Block. Also reproduces with
+        // `pushd` (same code path, `apply_cwd_effect`'s `cd`/`pushd`
+        // handling is uniform).
         assert_decision(
             "cd ~/.config/shguard; cd /tmp & cp evil.toml config.toml",
             Decision::Block,
@@ -8588,6 +8601,34 @@ mod tests {
         assert_decision(
             "cd ~/.config/shguard; cd /tmp; cp evil.toml config.toml",
             Decision::Allow,
+        );
+    }
+
+    #[test]
+    fn issue_383_ampersand_backgrounds_the_whole_and_or_chain_not_just_the_last_pipeline() {
+        // `&` terminates the whole `&&`/`||` list to its left in bash
+        // grammar (`list: list separator_op and_or`), not just the single
+        // pipeline immediately before it -- `cd /tmp && true &` backgrounds
+        // `cd /tmp && true` as one unit, so the earlier `cd`'s effect must
+        // not leak out either. A per-pipeline-only check would isolate just
+        // `true` (a no-op) and let `cd /tmp` mutate the shared cwd, letting
+        // `cp` see `/tmp` instead of `~/.config/shguard` -- reopening this
+        // issue's own bypass.
+        assert_decision(
+            "cd ~/.config/shguard; cd /tmp && true & cp evil.toml config.toml",
+            Decision::Block,
+        );
+        assert_decision(
+            "cd ~/.config/shguard; cd /tmp || true & cp evil.toml config.toml",
+            Decision::Block,
+        );
+        // The isolated clone must also be threaded across every pipeline in
+        // the backgrounded chain (not just the last one reached), otherwise
+        // an earlier `cd` in the chain would be dropped by a fresh
+        // clone-per-pipeline and this would regress from Block to Allow.
+        assert_decision(
+            "cd ~/.config/shguard && cp evil.toml config.toml &",
+            Decision::Block,
         );
     }
 
@@ -14257,9 +14298,14 @@ done"#,
     fn pushd_async_separator_floors_to_ask() {
         // The `Separator::Async` (`&`) arm of the collapse condition has
         // the same "not `&&`" shape as `;`/`||` -- pin it explicitly
-        // alongside `pushd_or_chain_floors_to_ask`.
+        // alongside `pushd_or_chain_floors_to_ask`. The leading `pushd /tmp`
+        // must run in the FOREGROUND (before the backgrounded chain starts)
+        // so it actually accumulates on the real, shared stack this
+        // crossing collapses -- a `pushd` inside the backgrounded chain
+        // itself would be isolated away entirely (issue #383) and never
+        // reach the real stack this test means to pin.
         assert_decision(
-            "pushd ~/.config/shguard && pushd /nonexistent-zz-353b & popd && cp evil.toml config.toml",
+            "pushd /tmp; pushd ~/.config/shguard & popd && cp evil.toml config.toml",
             Decision::Ask,
         );
     }
