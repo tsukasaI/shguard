@@ -14302,12 +14302,14 @@ done"#,
     #[test]
     fn pushd_async_separator_floors_to_ask() {
         // The `;` crossing right before the `&` already collapses the real
-        // stack here, so this is really a `;`-collapse case (redundant with
-        // `pushd_or_chain_floors_to_ask`) rather than a distinct pin on the
-        // `Separator::Async` arm of the collapse condition -- by the time
-        // any `&` crossing is reached on a foreground chain, that chain can
-        // only have ended via `;` or end-of-line, both already collapsing
-        // the stack on their own. Kept as a regression pin on the shape.
+        // stack here, so in THIS specific line the Ask comes from the `;`
+        // arm, not distinctly from the `Separator::Async` arm -- this is
+        // really a `;`-collapse case in disguise (redundant with
+        // `pushd_or_chain_floors_to_ask`). The Async arm does have its own
+        // distinct effect elsewhere (collapsing a live `isolated` clone's
+        // stack mid-chain, or the enclosing scope's stack when the `&` sits
+        // inside a brace group); this test just isn't the one that pins it.
+        // Kept as a regression pin on the overall shape.
         assert_decision(
             "pushd /tmp; pushd ~/.config/shguard & popd && cp evil.toml config.toml",
             Decision::Ask,
