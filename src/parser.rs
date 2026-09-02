@@ -21,10 +21,11 @@
 //!   `crate::ast::CompoundCommand`'s docs)
 //! - here-strings (`<<<`) and `&>`/`&>>` combined stdout/stderr redirections
 //! - redirection kinds shguard's `FileRedirectionKind` has no variant for
-//!   (`<>` read-and-write, `>|` clobber) and fd-number (as opposed to a
-//!   resolved fd-number *word*) redirect targets — see
-//!   `convert_redirect_target`'s docs on why `Fd(_)` is unreachable in
-//!   practice
+//!   (`>|` clobber — issue #425 gave `<>` read-and-write its own variant,
+//!   so the `/dev/tcp`/`/dev/udp` network-pseudo-device rule can see it)
+//!   and fd-number (as opposed to a resolved fd-number *word*) redirect
+//!   targets — see `convert_redirect_target`'s docs on why `Fd(_)` is
+//!   unreachable in practice
 //! - array-element assignment *targets* (`arr[0]=x`, as opposed to an array
 //!   assignment *value*, `arr=(a b c)`, which issue #75 now supports)
 //! - parameter expansions beyond a bare `$NAME`/`${NAME}`, a bare positional
@@ -909,9 +910,15 @@ fn convert_file_redirect_kind(
         bast::IoFileRedirectKind::Append => Ok(FileRedirectionKind::Append),
         bast::IoFileRedirectKind::DuplicateInput => Ok(FileRedirectionKind::DuplicateInput),
         bast::IoFileRedirectKind::DuplicateOutput => Ok(FileRedirectionKind::DuplicateOutput),
-        bast::IoFileRedirectKind::ReadAndWrite | bast::IoFileRedirectKind::Clobber => Err(
-            ParseError::unsupported(format!("redirection kind {kind:?}")),
-        ),
+        // Issue #425: `<>` (`exec 3<>/dev/tcp/host/port`) is now modeled so
+        // the existing `/dev/*` dangerous-target machinery can see it, same
+        // as any other write-applicable redirection. `Clobber` (`>|`)
+        // stays unsupported — no rule targets it yet, out of this issue's
+        // scope.
+        bast::IoFileRedirectKind::ReadAndWrite => Ok(FileRedirectionKind::ReadAndWrite),
+        bast::IoFileRedirectKind::Clobber => Err(ParseError::unsupported(format!(
+            "redirection kind {kind:?}"
+        ))),
     }
 }
 

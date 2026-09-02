@@ -856,6 +856,22 @@ targets = [
     { normalized = "/etc/shadow" },
 ]
 
+# Issue #425: bash's `/dev/tcp/host/port` and `/dev/udp/host/port` are
+# pseudo-devices — no such path exists on disk — that open a live network
+# connection as a side effect of the open() call itself, independent of
+# which direction (read/write) ends up used. `exec 3<>/dev/tcp/host/port`
+# (read-write) is the canonical reverse-shell/data-exfil primitive; plain
+# `>`/`>>`/`<` reach the same connection side effect and are covered too,
+# since `normalized_prefix` matches by target path alone, not by
+# redirection kind.
+[[redirect]]
+id = "redirect-network-pseudo-device"
+reason = "redirecting to /dev/tcp or /dev/udp opens a live network connection — the reverse-shell/data-exfil primitive `exec 3<>/dev/tcp/host/port` relies on"
+targets = [
+    { normalized_prefix = "/dev/tcp/" },
+    { normalized_prefix = "/dev/udp/" },
+]
+
 # tee writes to a file path via argv, not via shell redirect syntax —
 # same dangerous targets as the [[redirect]] rule above.
 [[command]]

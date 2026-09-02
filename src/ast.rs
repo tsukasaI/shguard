@@ -600,6 +600,15 @@ pub(crate) enum FileRedirectionKind {
     /// same target ambiguity applies (`2>&1` vs. `>&/dev/sda`, which is a
     /// genuine file write bash treats identically to `> /dev/sda`).
     DuplicateOutput,
+    /// `<>` (issue #425). Opens `target` for both reading and writing —
+    /// bash's own documented mechanism for `exec 3<>/dev/tcp/host/port`
+    /// reverse-shell/data-exfil primitives, since opening `/dev/tcp/...`
+    /// at all is what establishes the TCP connection, independent of
+    /// which direction ends up used. `crate::gate` treats it as a genuine
+    /// write for the same dangerous-target check `>`/`>>` already get
+    /// (`is_redirect_write_applicable`), rather than as a no-op the way
+    /// `<`'s read-only `Input` is.
+    ReadAndWrite,
 }
 
 /// A shell word: a sequence of [`WordPiece`]s. Kept as a sequence rather than
