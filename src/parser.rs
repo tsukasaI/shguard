@@ -462,12 +462,19 @@ fn convert_compound_list<'a>(
         pending_separator = convert_separator(&item.1)?;
     }
 
-    Ok(CommandLine { first, rest })
+    // `pending_separator` at this point is the separator following the LAST
+    // item's own (possibly `&&`/`||`-chained) pipeline — exactly the
+    // trailing-terminator info `CommandLine::trailing_async` carries.
+    Ok(CommandLine {
+        first,
+        rest,
+        trailing_async: matches!(pending_separator, Separator::Async),
+    })
 }
 
 /// `SeparatorOperator::Async` (`&`, issue #191) maps onto
-/// [`Separator::Async`] — see that variant's docs for why backgrounding
-/// needs no special handling anywhere downstream.
+/// [`Separator::Async`] — see that variant's docs for its cwd-isolation
+/// semantics in `crate::gate::evaluate_command_line`.
 fn convert_separator(sep: &bast::SeparatorOperator) -> Result<Separator, ParseError> {
     match sep {
         bast::SeparatorOperator::Sequence => Ok(Separator::Sequence),
