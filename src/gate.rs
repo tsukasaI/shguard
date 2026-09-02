@@ -2067,6 +2067,13 @@ fn evaluate_simple_command(
     // and `Known` both skip this — see `CwdContext`'s own docs on why
     // `Initial` must never be treated as `Poisoned`).
     let unknown_cwd_floor = scan_unknown_cwd_floor(&argv, rules, cwd);
+    // Issue #426: a credential-shaped token (`AWS_SECRET_ACCESS_KEY=...`)
+    // in either an assignment name or a resolved argv word, independent of
+    // which command it accompanies — `rule 9`'s empty-argv Allow (a bare
+    // `AWS_SECRET_ACCESS_KEY=abc123` with no command at all) is exactly the
+    // case this floor exists to still see, so it must survive `core`'s
+    // early returns the same as every other floor here.
+    let token_floor = scan_token_floor(&command.assignments, &argv, rules);
     // #103's composed pass and #209's `-C`-override pass (both below,
     // after `core`'s early returns are behind us) each need their own
     // normalized argv once `core` has taken ownership of this one —
@@ -2097,6 +2104,7 @@ fn evaluate_simple_command(
     let directory_equals_tilde_floor_present = directory_equals_tilde_floor.is_some();
     let dirstack_equal_subst_floor_present = dirstack_equal_subst_floor.is_some();
     let unknown_cwd_floor_present = unknown_cwd_floor.is_some();
+    let token_floor_present = token_floor.is_some();
     let verdict = apply_expansion_floor(verdict, expansion.floor);
     let verdict = apply_recursable_floor(verdict, recursable.floor);
     let verdict = apply_tar_dashless_floor(verdict, tar_dashless_floor);
@@ -2110,6 +2118,7 @@ fn evaluate_simple_command(
     let verdict = apply_directory_equals_tilde_floor(verdict, directory_equals_tilde_floor);
     let verdict = apply_dirstack_equal_subst_floor(verdict, dirstack_equal_subst_floor);
     let verdict = apply_unknown_cwd_floor(verdict, unknown_cwd_floor);
+    let verdict = apply_token_floor(verdict, token_floor);
 
     // Rule 11's allowlist guard: the same presence-based reasoning as
     // `has_argument_substitution` above (module docs, "User config
@@ -2168,6 +2177,11 @@ fn evaluate_simple_command(
     // `rm`/`tar`/etc. is not consent to a token that might land in that
     // same rule's namespace once an entirely unknown same-line `cd` is
     // accounted for.
+    // `token_floor_present` (issue #426) extends it once more: an allow
+    // entry for a command is not consent to a credential-shaped token
+    // (`AWS_SECRET_ACCESS_KEY=...`) accompanying it — the entry was
+    // written about the command, not about what gets assigned or printed
+    // alongside it.
     let verdict = if has_argument_substitution
         || has_leftover_substitution
         || expansion.has_any
@@ -2184,6 +2198,7 @@ fn evaluate_simple_command(
         || directory_equals_tilde_floor_present
         || dirstack_equal_subst_floor_present
         || unknown_cwd_floor_present
+        || token_floor_present
     {
         verdict
     } else {
@@ -2971,6 +2986,57 @@ fn scan_named_user_home_floor(
 /// [`apply_command_ascent_descent_floor`]'s docs for why the floor's own
 /// `deny_message` — issue #202 — is unconditionally attached).
 fn apply_named_user_home_floor(
+    verdict: Verdict,
+    floor: Option<(Decision, String, Option<DenyMessage>)>,
+) -> Verdict {
+    let Some((floor_decision, floor_reason, deny_message)) = floor else {
+        return verdict;
+    };
+    apply_floor(verdict, floor_decision, floor_reason, deny_message)
+}
+
+/// Issue #426: `Some((rule's decision, reason, deny_message))` when a
+/// [`crate::rules::TokenRule`] matches an assignment name (`NAME=`) or a
+/// resolved argv word of this command — `None` otherwise.
+///
+/// Deliberately scans `argv`'s already-resolved strings, silently skipping
+/// any `Unresolvable` word, rather than flooring on unresolvability the way
+/// most other floors in this file do: this rule cares about EVERY word
+/// position, not one designated slot (an argv-0 wrapper, a redirect
+/// target), so flooring on unresolvable would make any command containing
+/// an unrelated `$VAR` anywhere reach Ask — a blanket regression this
+/// additive heuristic must not cause. Assignment names are plain `String`s
+/// (never unresolvable), so `X_SECRET=$REAL_VALUE ls` still matches on the
+/// name alone.
+fn scan_token_floor(
+    assignments: &[Assignment],
+    argv: &[NormalizedWord],
+    rules: &Rules,
+) -> Option<(Decision, String, Option<DenyMessage>)> {
+    let candidates: Vec<String> = assignments
+        .iter()
+        .map(|a| format!("{}=", a.name))
+        .chain(argv.iter().filter_map(|w| match w.resolution() {
+            Resolution::Resolved(s) => Some(s.clone()),
+            Resolution::Unresolvable(_) => None,
+        }))
+        .collect();
+    let rule = rules.match_token(&candidates)?;
+    Some((
+        rule.decision(),
+        format!(
+            "a token matches rule {:?}: {}",
+            rule.id().as_str(),
+            rule.reason().as_str(),
+        ),
+        rule.deny_message().cloned(),
+    ))
+}
+
+/// Applies [`scan_token_floor`]'s floor to `verdict` (see [`apply_floor`]'s
+/// docs for the shared max-lift mechanics and why each floor gets its own
+/// function).
+fn apply_token_floor(
     verdict: Verdict,
     floor: Option<(Decision, String, Option<DenyMessage>)>,
 ) -> Verdict {
@@ -8852,6 +8918,76 @@ mod tests {
     #[test]
     fn dod_10_ifs_with_reassignment_and_no_hit_asks() {
         assert_decision("IFS=x; a$IFS-b", Decision::Ask);
+    }
+
+    // ==== Issue #426: command-agnostic credential-shaped token scan ====
+
+    #[test]
+    fn issue_426_assignment_shaped_credential_asks() {
+        assert_decision("AWS_SECRET_ACCESS_KEY=abc123 ls", Decision::Ask);
+    }
+
+    #[test]
+    fn issue_426_argv_word_shaped_credential_asks() {
+        assert_decision("echo AWS_SECRET_ACCESS_KEY=abc123", Decision::Ask);
+    }
+
+    #[test]
+    fn issue_426_generic_token_suffix_pattern_asks() {
+        assert_decision("GITHUB_TOKEN=x curl https://example.com", Decision::Ask);
+    }
+
+    #[test]
+    fn issue_426_generic_secret_suffix_pattern_asks() {
+        assert_decision("export DB_PASSWORD=x", Decision::Ask);
+    }
+
+    #[test]
+    fn issue_426_env_wrapped_credential_asks() {
+        assert_decision("env MY_SECRET=x ls", Decision::Ask);
+    }
+
+    #[test]
+    fn issue_426_credential_inside_bash_dash_c_asks() {
+        assert_decision(r#"bash -c "X_SECRET=1 ls""#, Decision::Ask);
+    }
+
+    #[test]
+    fn issue_426_bare_assignment_with_no_command_still_asks() {
+        // Rule 9's empty-argv Allow (module docs) must not hide this —
+        // the whole point of this floor is to survive that early return.
+        assert_decision("AWS_SECRET_ACCESS_KEY=abc123", Decision::Ask);
+    }
+
+    #[test]
+    fn issue_426_plain_assignment_without_credential_shape_stays_allow() {
+        assert_decision("FOO=bar ls", Decision::Allow);
+    }
+
+    #[test]
+    fn issue_426_token_suffix_must_match_the_full_name_prefix() {
+        // `_TOKEN=` must not match a name that merely CONTAINS "token"
+        // without the leading underscore this pattern requires.
+        assert_decision("TOKEN_COUNT=5 ls", Decision::Allow);
+    }
+
+    #[test]
+    fn issue_426_ordinary_command_stays_allow() {
+        assert_decision("echo hello", Decision::Allow);
+    }
+
+    #[test]
+    fn issue_426_allowlisted_command_still_asks_on_credential_token() {
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[allow]]
+            id = "user-allow-ls"
+            reason = "trust me"
+            command = "ls"
+        "#,
+        );
+        let verdict = analyze_with_policy("AWS_SECRET_ACCESS_KEY=abc123 ls", &rules, &allowlist);
+        assert_eq!(verdict.decision(), Decision::Ask);
     }
 
     // Issue #139: rule 2's bare-`$VAR` command-position resolution

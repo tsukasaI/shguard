@@ -1940,3 +1940,27 @@ required_flags = ["f"]
 # for `f` in any cluster, rather than just the first tail token: ksh's
 # option parser treats separated `-d -f lib` identically to clustered
 # `-df lib`.
+
+# Issue #426: a credential-shaped `NAME=` substring, in either an
+# assignment name (`AWS_SECRET_ACCESS_KEY=abc123 ls`) or a resolved argv
+# word (`echo AWS_SECRET_ACCESS_KEY=abc123`) — command-agnostic, unlike
+# every `[[command]]` rule above, since the sensitive part is the token
+# itself, not which command it accompanies. `decision = "ask"`, not the
+# type's own default `block`: the issue's own repro
+# (`AWS_SECRET_ACCESS_KEY=x aws s3 ls`) is also a normal credential-passing
+# workflow, so a hard Block would be a false-positive-prone default for a
+# heuristic this broad. Patterns are deliberately conservative substrings
+# (`_KEY=` is NOT included — `SORT_KEY=`/`CACHE_KEY=` are common
+# false positives); this list is user-config-tunable in spirit, but no
+# user-facing `[[token]]` array exists yet (out of scope for #426, no
+# issue currently open to add it).
+[[token]]
+id = "token-credential-shaped-assignment"
+reason = "a credential-shaped NAME= token (secret/token/password) was found in an assignment or argument, and passing secrets on a command line exposes them via shell history and /proc"
+decision = "ask"
+patterns = [
+    "AWS_SECRET_ACCESS_KEY=",
+    "_SECRET=",
+    "_TOKEN=",
+    "PASSWORD=",
+]
