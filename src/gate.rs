@@ -1056,8 +1056,11 @@ fn evaluate_compound_command(
 /// `interpreters` (issue #424) are the candidate [`HeredocCandidate`]s
 /// `scan_redirection_expansions` checks `redirections`' own heredocs
 /// against — every one [`scan_compound_for_heredoc_candidates`] found
-/// inside the caller's body for a compound command, or `&[]` for
-/// [`evaluate_extended_test`], which has no body a heredoc could be feeding.
+/// inside the caller's body for a compound command, or (issue #424 round 5)
+/// every one found in `extra_words` itself for [`evaluate_extended_test`]:
+/// an extended test has no separate body, but its own operands can carry a
+/// `$()`/backtick substitution that inherits the SAME heredoc-on-stdin
+/// mechanism a compound body's substitution does.
 #[allow(clippy::too_many_arguments)]
 fn apply_attached_word_and_redirect_checks(
     mut worst: Verdict,
@@ -1214,12 +1217,25 @@ fn evaluate_extended_test(
     depth: usize,
     cwd: &CwdContext,
 ) -> Verdict {
+    // Issue #424 round 5: `[[ ]]` is itself a compound command (bash's own
+    // "Compound Commands" docs) — bash applies its own redirections before
+    // expanding its operands, so `[[ $(perl) ]] <<EOF` forks `perl` AFTER
+    // the heredoc is already on stdin, the identical mechanism already
+    // covered when an extended test sits inside ANOTHER compound
+    // (`{ [[ $(perl) ]]; } <<EOF` already reaches this floor via
+    // `Command::ExtendedTest`'s own arm in `scan_command_for_heredoc_candidates`)
+    // — only the top-level `[[ ]] <<EOF` case was missing it.
+    let mut scan = HeredocCandidateScan::default();
+    for word in &test.words {
+        scan_word_for_heredoc_candidates(word, &mut scan);
+    }
+    let interpreters = scan.into_candidates();
     apply_attached_word_and_redirect_checks(
         Verdict::allow(Vec::new()),
         &test.words,
         "an extended test ([[ ]]) operand",
         &test.redirections,
-        &[],
+        &interpreters,
         depth,
         rules,
         allowlist,
@@ -4680,7 +4696,7 @@ fn scan_redirection_expansions(
     // included — at the moment THAT redirection is applied (`man bash`,
     // REDIRECTION). Once any heredoc among `redirections` has been dup2'd
     // onto stdin, a substitution fork in a LATER-processed redirection
-    // (`cat <<EOF < <(perl)`, `cat <<EOF > $(perl)`, or a second heredoc's
+    // (`cat <<EOF < <(perl)`, `cat > $(perl) <<EOF`, or a second heredoc's
     // own body: `cat <<A <<B ... $(perl) ... B`) inherits that same stdin
     // and reads the heredoc itself — the identical "another process forks
     // and inherits the shared fd" mechanism `interpreters` above already
@@ -13709,6 +13725,20 @@ mod tests {
     #[test]
     fn heredoc_sibling_redirect_target_without_interpreter_unaffected() {
         assert_decision("cat <<EOF > out.txt\nhello\nEOF", Decision::Allow);
+    }
+
+    #[test]
+    fn heredoc_attached_to_extended_test_operand_substitution_asks() {
+        // `[[ ]]` is itself a compound command — bash applies its own
+        // redirections before expanding its operands, so `$(perl)` forks
+        // AFTER the heredoc is already on stdin, same mechanism as a
+        // compound body's own embedded substitution.
+        assert_decision("[[ $(perl) ]] <<EOF\nprint(1)\nEOF", Decision::Ask);
+    }
+
+    #[test]
+    fn heredoc_attached_to_extended_test_without_substitution_unaffected() {
+        assert_decision("[[ x = x ]] <<EOF\nhello\nEOF", Decision::Allow);
     }
 
     #[test]
