@@ -299,6 +299,29 @@ fn heredoc_to_python_interpreter_does_not_allow() {
     assert_eq!(permission_decision(&output), "ask");
 }
 
+/// A heredoc attached to a subshell wrapping an interpreter (rather than the
+/// interpreter directly) must not regain the bypass one parenthesis away:
+/// `(python3) <<EOF ... EOF` is the same unintrospectable-stdin shape as the
+/// direct-invocation repro above.
+#[test]
+fn heredoc_attached_to_subshell_wrapping_an_interpreter_does_not_allow() {
+    let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
+    let assert = cmd
+        .env_remove("SHGUARD_CONFIG")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("HOME")
+        .env_remove("SHGUARD_TEST_PANIC")
+        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
+        .write_stdin(bash_command(
+            "(python3) <<'EOF'\nimport os\nos.system('cat ~/.ssh/id_rsa')\nEOF",
+        ))
+        .assert()
+        .success();
+    let output: Value =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout should be valid JSON");
+    assert_eq!(permission_decision(&output), "ask");
+}
+
 /// Dedicated regression pin for the memory-bound watchdog itself (follow-up
 /// to the wall-clock-only watchdog above: a host or container with less
 /// free memory than the runaway allocation can consume within

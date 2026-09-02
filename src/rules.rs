@@ -3346,9 +3346,12 @@ pub(crate) fn is_shell_interpreter(name: &str) -> bool {
 
 /// Whether `name` is an [`EXTRA_PIPELINE_INTERPRETERS`] member once
 /// [`strip_version_suffix`] normalizes a distro-versioned binary name
-/// (`ruby3.2` -> `ruby`) — the non-shell interpreters that list's own docs
-/// establish read and execute a script from stdin when given no file
-/// argument. Mirrors [`is_shell_interpreter`]'s shape, kept as its own
+/// (`ruby3.2` -> `ruby`). Matches by NAME ALONE, the same
+/// over-approximation [`EXTRA_PIPELINE_INTERPRETERS`]'s own docs justify for
+/// `is_pipeline_interpreter` (`python3 script.py` matches despite reading
+/// `script.py`, not stdin) — a name only needs to be CAPABLE of reading a
+/// script from stdin in some realistic invocation, not incapable of any
+/// other shape. Mirrors [`is_shell_interpreter`]'s shape, kept as its own
 /// function for `crate::gate`'s heredoc-as-stdin floor (issue #424), which
 /// needs the non-shell list alone rather than the pipeline-sink union
 /// [`is_pipeline_interpreter`] returns.

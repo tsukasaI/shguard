@@ -1010,16 +1010,106 @@ fn evaluate_compound_command(
         }
     };
 
+    // Issue #424: a heredoc attached to the compound command itself
+    // (`(python3) <<EOF`, `{ sh; } <<EOF`, `for x in y; do python3; done
+    // <<EOF`) is fed to whichever simple command inside actually reads
+    // stdin — static analysis has no execution model telling it which one
+    // that is, so every simple command reachable from this compound's own
+    // body/condition (not crossing into a NESTED compound's own separately
+    // redirected heredoc, which is scanned independently when
+    // `evaluate_command_line` recurses into it) is checked, fail-closed.
+    let mut interpreter_hosts = Vec::new();
+    collect_compound_simple_commands(compound, &mut interpreter_hosts);
+    let interpreter_argvs: Vec<Vec<NormalizedWord>> = interpreter_hosts
+        .iter()
+        .map(|command| normalize::normalize_argv(command))
+        .collect();
+    let interpreters: Vec<&str> = interpreter_argvs
+        .iter()
+        .filter_map(|argv| crate::rules::effective_command(argv).map(|(name, _)| name))
+        .collect();
+
     apply_attached_word_and_redirect_checks(
         worst,
         extra_words,
         "a `for` clause's `in` word list",
         redirections,
+        &interpreters,
         depth,
         rules,
         allowlist,
         &redirect_anchor,
     )
+}
+
+/// Collects every [`SimpleCommand`] reachable from `compound`'s own
+/// body/condition (and, for `IfClause`, every `elif`/`else` arm) — used only
+/// to name-resolve candidate interpreters for issue #424's compound-heredoc
+/// floor (see [`evaluate_compound_command`]'s call site). Does not recurse
+/// into a nested [`CompoundCommand`]'s own redirections/heredoc — only its
+/// body, exactly like [`evaluate_command_line`] itself does when it recurses
+/// there, since that nested compound's own attached heredoc (if any) is
+/// scanned independently on its own turn through this same function.
+fn collect_compound_simple_commands<'a>(
+    compound: &'a CompoundCommand,
+    out: &mut Vec<&'a SimpleCommand>,
+) {
+    match compound {
+        CompoundCommand::BraceGroup { body, .. }
+        | CompoundCommand::Subshell { body, .. }
+        | CompoundCommand::ForClause { body, .. } => {
+            collect_command_line_simple_commands(body, out)
+        }
+        CompoundCommand::WhileClause {
+            condition, body, ..
+        }
+        | CompoundCommand::UntilClause {
+            condition, body, ..
+        } => {
+            collect_command_line_simple_commands(condition, out);
+            collect_command_line_simple_commands(body, out);
+        }
+        CompoundCommand::IfClause {
+            condition,
+            then_body,
+            elifs,
+            else_body,
+            ..
+        } => {
+            collect_command_line_simple_commands(condition, out);
+            collect_command_line_simple_commands(then_body, out);
+            for ElifClause { condition, body } in elifs {
+                collect_command_line_simple_commands(condition, out);
+                collect_command_line_simple_commands(body, out);
+            }
+            if let Some(else_body) = else_body {
+                collect_command_line_simple_commands(else_body, out);
+            }
+        }
+    }
+}
+
+/// [`CommandLine`] half of [`collect_compound_simple_commands`]'s walk: every
+/// [`Command::Simple`] across every pipeline stage and every `;`/`&&`/`||`
+/// separated pipeline, descending into a nested compound command's own body
+/// (but not its redirections, see [`collect_compound_simple_commands`]'s
+/// docs) and a function definition's body the same way.
+fn collect_command_line_simple_commands<'a>(
+    line: &'a CommandLine,
+    out: &mut Vec<&'a SimpleCommand>,
+) {
+    for pipeline in std::iter::once(&line.first).chain(line.rest.iter().map(|(_, p)| p)) {
+        for command in std::iter::once(&pipeline.first).chain(pipeline.rest.iter()) {
+            match command {
+                Command::Simple(simple) => out.push(simple),
+                Command::Compound(nested) => collect_compound_simple_commands(nested, out),
+                Command::FunctionDefinition(FunctionDefinition { body, .. }) => {
+                    collect_compound_simple_commands(body, out);
+                }
+                Command::ExtendedTest(_) => {}
+            }
+        }
+    }
 }
 
 /// Shared tail of [`evaluate_compound_command`] and [`evaluate_extended_test`]
@@ -1036,12 +1126,19 @@ fn evaluate_compound_command(
 /// `extra_words_description` names `extra_words`'s position in a raised
 /// reason (e.g. `"a `for` clause's `in` word list"`), matching
 /// `scan_word_expansions`'s own `position_description` parameter.
+///
+/// `interpreters` (issue #424) are the candidate interpreter names
+/// `scan_redirection_expansions` checks `redirections`' own heredocs
+/// against — every simple command [`collect_compound_simple_commands`]
+/// found inside the caller's body for a compound command, or `&[]` for
+/// [`evaluate_extended_test`], which has no body a heredoc could be feeding.
 #[allow(clippy::too_many_arguments)]
 fn apply_attached_word_and_redirect_checks(
     mut worst: Verdict,
     extra_words: &[Word],
     extra_words_description: &str,
     redirections: &[Redirection],
+    interpreters: &[&str],
     depth: usize,
     rules: &Rules,
     allowlist: &Allowlist,
@@ -1069,12 +1166,9 @@ fn apply_attached_word_and_redirect_checks(
             extra_words_description,
         );
     }
-    // No enclosing `SimpleCommand` here (a `for` clause / extended test's
-    // own attached redirections, issue #75), so there is no effective
-    // command name for issue #424's heredoc-as-stdin floor to key off.
     scan_redirection_expansions(
         redirections,
-        None,
+        interpreters,
         depth,
         rules,
         allowlist,
@@ -1199,6 +1293,7 @@ fn evaluate_extended_test(
         &test.words,
         "an extended test ([[ ]]) operand",
         &test.redirections,
+        &[],
         depth,
         rules,
         allowlist,
@@ -4330,10 +4425,13 @@ fn scan_expansion_positions(
         }
     }
 
-    let interpreter = crate::rules::effective_command(argv).map(|(name, _)| name);
+    let interpreters: Vec<&str> = crate::rules::effective_command(argv)
+        .map(|(name, _)| name)
+        .into_iter()
+        .collect();
     scan_redirection_expansions(
         &command.redirections,
-        interpreter,
+        &interpreters,
         depth,
         rules,
         allowlist,
@@ -4347,14 +4445,15 @@ fn scan_expansion_positions(
 /// The redirection half of [`scan_expansion_positions`] (rule 11), factored
 /// out so [`evaluate_compound_command`] (issue #75) can run the exact same
 /// check over a compound command's own attached redirections without
-/// needing a whole `SimpleCommand` to wrap them in. `interpreter` is the
-/// enclosing command's own effective name (`None` for a caller with no such
-/// command, e.g. a `for` clause's attached redirections) — issue #424's
-/// heredoc-as-stdin floor below needs it, the pre-existing `$()`/backtick
-/// scan does not.
+/// needing a whole `SimpleCommand` to wrap them in. `interpreters` are the
+/// candidate effective command names that may end up reading `redirections`'
+/// own heredoc(s) on stdin (`&[]` for a caller with no such command, e.g.
+/// [`evaluate_extended_test`]; more than one name for a compound command,
+/// see [`collect_compound_simple_commands`]) — issue #424's heredoc-as-stdin
+/// floor below needs it, the pre-existing `$()`/backtick scan does not.
 fn scan_redirection_expansions(
     redirections: &[Redirection],
-    interpreter: Option<&str>,
+    interpreters: &[&str],
     depth: usize,
     rules: &Rules,
     allowlist: &Allowlist,
@@ -4387,37 +4486,65 @@ fn scan_redirection_expansions(
                 // quoted (`expand_body` only governs *this shell's*
                 // parameter/command-substitution expansion of the body
                 // before handing it off, not what the receiving interpreter
-                // then does with it).
-                if let Some(name) = interpreter {
-                    if crate::rules::is_shell_interpreter(name) {
-                        *accum.has_any = true;
-                        let decision = analyze_at_depth(
-                            body,
-                            depth + 1,
-                            rules,
-                            allowlist,
-                            CwdState::seed_unknown_stack(cwd.clone()),
-                        )
-                        .decision();
-                        raise_expansion_floor(
-                            accum.floor,
-                            decision,
-                            format!(
-                                "the heredoc body is fed to shell interpreter `{name}` on \
-                                 stdin, whose own analysis is {decision:?}, not Allow"
-                            ),
-                        );
-                    } else if crate::rules::is_stdin_script_interpreter(name) {
-                        *accum.has_any = true;
-                        raise_expansion_floor(
-                            accum.floor,
-                            Decision::Ask,
-                            format!(
-                                "the heredoc body is fed to non-shell interpreter `{name}` on \
-                                 stdin, which cannot be introspected"
-                            ),
-                        );
-                    }
+                // then does with it). Static analysis has no execution
+                // model to pick which candidate in `interpreters` actually
+                // consumes this heredoc (relevant only for a compound
+                // command's own attached heredoc, where more than one
+                // simple command may be inside), so every one is checked,
+                // fail-closed.
+                if let Some(name) = interpreters
+                    .iter()
+                    .find(|name| crate::rules::is_shell_interpreter(name))
+                {
+                    *accum.has_any = true;
+                    // Bash dequotes `\$`/`` \` ``/`\\` (the only escapes an
+                    // unquoted-delimiter body recognises, same as
+                    // `collect_heredoc_substitutions`'s own docs) before
+                    // handing the body to the reading shell's stdin; a
+                    // quoted delimiter never recognises them at all, so the
+                    // body stays raw. Recursing the un-dequoted text would
+                    // let `\rm -rf /` (which the child shell runs as plain
+                    // `rm -rf /`) be analysed as the inert word `\rm`
+                    // instead.
+                    let script = if *expand_body {
+                        dequote_heredoc_body(body)
+                    } else {
+                        body.clone()
+                    };
+                    let inner = analyze_at_depth(
+                        &script,
+                        depth + 1,
+                        rules,
+                        allowlist,
+                        CwdState::seed_unknown_stack(cwd.clone()),
+                    );
+                    let decision = inner.decision();
+                    let inner_reason = inner
+                        .reason()
+                        .map(|r| format!(": {}", r.as_str()))
+                        .unwrap_or_default();
+                    raise_expansion_floor(
+                        accum.floor,
+                        decision,
+                        format!(
+                            "the heredoc body is fed to shell interpreter `{name}` on stdin, \
+                             whose own analysis is {decision:?}, not Allow{inner_reason}"
+                        ),
+                    );
+                }
+                if let Some(name) = interpreters
+                    .iter()
+                    .find(|name| crate::rules::is_stdin_script_interpreter(name))
+                {
+                    *accum.has_any = true;
+                    raise_expansion_floor(
+                        accum.floor,
+                        Decision::Ask,
+                        format!(
+                            "the heredoc body is fed to non-shell interpreter `{name}` on \
+                             stdin, which cannot be introspected"
+                        ),
+                    );
                 }
 
                 if *expand_body {
@@ -5404,6 +5531,44 @@ fn collect_heredoc_substitutions(body: &str) -> HeredocScan<'_> {
         substitutions,
         unterminated: unterminated || !arithmetic_depths.is_empty(),
     }
+}
+
+/// Reverses the three escapes an unquoted-delimiter heredoc body recognises
+/// at its top level (`\$`, `` \` ``, `\\` — [`collect_heredoc_substitutions`]'s
+/// own docs) before [`scan_redirection_expansions`] (issue #424) recurses the
+/// body as a shell script: bash performs exactly this dequoting on the body
+/// before handing it to the reading shell's stdin, so analysing the raw text
+/// would let a backslash-escaped payload (`\rm -rf /`, which the child shell
+/// runs as plain `rm -rf /`) be seen as the inert word `\rm` instead. Only
+/// ever called on an `expand_body: true` body — a quoted delimiter's body
+/// recognises none of these escapes, so calling this on one would corrupt
+/// literal text the child shell receives unchanged.
+///
+/// Scans bytes, not `char`s, for the same reason `collect_heredoc_substitutions`
+/// does (its own docs): `\`, `$`, `` ` `` are single-byte ASCII, and no UTF-8
+/// continuation byte can equal one, so copying every non-matched byte through
+/// unchanged can never split a multi-byte character.
+fn dequote_heredoc_body(body: &str) -> String {
+    let bytes = body.as_bytes();
+    let mut out = String::with_capacity(body.len());
+    let mut start = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() && matches!(bytes[i + 1], b'$' | b'`' | b'\\') {
+            // `start..i` and `i+1..i+2` both end/begin on a single-byte
+            // ASCII boundary (`\`, `$`, `` ` ``), always a valid `str`
+            // slice point — see this function's docs on why byte-scanning
+            // can never split a multi-byte character.
+            out.push_str(&body[start..i]);
+            out.push(bytes[i + 1] as char);
+            i += 2;
+            start = i;
+        } else {
+            i += 1;
+        }
+    }
+    out.push_str(&body[start..]);
+    out
 }
 
 /// Tries to consume a `$(`/`$((`/`` ` `` token starting at `bytes[i]`.
@@ -13062,6 +13227,58 @@ mod tests {
     fn heredoc_to_non_interpreter_command_unaffected() {
         // `cat` is not a known interpreter — no new floor applies to it.
         assert_decision("cat <<EOF\ncat ~/.ssh/id_rsa\nEOF", Decision::Allow);
+    }
+
+    #[test]
+    fn heredoc_to_versioned_interpreter_name_still_asks() {
+        assert_decision("python3.12 <<EOF\nprint(1)\nEOF", Decision::Ask);
+    }
+
+    #[test]
+    fn heredoc_to_shell_interpreter_propagates_inner_ask() {
+        assert_decision("sh <<EOF\nsudo rm -rf ~someuser\nEOF", Decision::Ask);
+    }
+
+    #[test]
+    fn heredoc_to_shell_interpreter_dequotes_escaped_dollar_before_recursing() {
+        // Unquoted-delimiter body: bash strips the escaping backslash from
+        // `\$(...)` before handing the body to `sh`'s stdin, so `sh` itself
+        // receives and executes a real `$(rm -rf /)` substitution — must
+        // recurse into it, not see an inert escaped-`$` literal.
+        assert_decision("sh <<EOF\n\\$(rm -rf /)\nEOF", Decision::Block);
+    }
+
+    #[test]
+    fn heredoc_to_shell_interpreter_quoted_delimiter_does_not_dequote() {
+        // A quoted delimiter's body recognises no escapes at all: `sh`
+        // itself receives the same literal `\$(rm -rf /)` bash never
+        // unescaped, which is not valid shell syntax to `sh`'s own parser
+        // either — fails closed to Ask rather than the Block a real,
+        // unescaped `$(rm -rf /)` produces, proving no dequoting happened.
+        assert_decision("sh <<'EOF'\n\\$(rm -rf /)\nEOF", Decision::Ask);
+    }
+
+    #[test]
+    fn heredoc_attached_to_subshell_wrapping_an_interpreter_asks() {
+        assert_decision("(python3) <<EOF\nprint('hi')\nEOF", Decision::Ask);
+    }
+
+    #[test]
+    fn heredoc_attached_to_brace_group_wrapping_a_shell_blocks() {
+        assert_decision("{ sh; } <<EOF\nrm -rf /\nEOF", Decision::Block);
+    }
+
+    #[test]
+    fn heredoc_attached_to_for_loop_wrapping_an_interpreter_asks() {
+        assert_decision(
+            "for i in 1; do python3; done <<EOF\nprint('hi')\nEOF",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn heredoc_attached_to_subshell_wrapping_a_non_interpreter_unaffected() {
+        assert_decision("(cat) <<EOF\nhello\nEOF", Decision::Allow);
     }
 
     // ==== Issue #69: end-to-end pins for scan_paren_span's ANSI-C-quoting
