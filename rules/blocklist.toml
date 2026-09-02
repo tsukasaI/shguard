@@ -67,28 +67,54 @@
 #                    `/.`, `~/..`, `../../../..`, etc. are recognized as
 #                    the same target `/`/`~` a literal spelling would be).
 #                    Exactly one of `exact`/`prefix`/`normalized`/
-#                    `normalized_prefix` is required per target entry. An
-#                    optional `strip = "…"` (only legal alongside
-#                    `normalized`/`normalized_prefix`) requires the token
-#                    to literally start with that string first (e.g.
-#                    `strip = "of="` for `dd`'s `of=/dev/sda`, `strip =
-#                    "-C"` for tar's attached `-C/` form) and normalizes
-#                    only the remainder. A `normalized`/`normalized_prefix`
-#                    value that itself normalizes to a pure relative
-#                    ascent, an escape past `$HOME`, or something opaque
-#                    (`""`, `~user`) is a load-time error — almost
-#                    certainly a rule author's mistake. Deliberately NOT
-#                    the default for `exact`/`prefix`: many targets aren't
-#                    paths at all (`dd`'s `of=` prefix, a glob like `/*`,
-#                    an `except_targets` URL prefix), and normalizing an
+#                    `normalized_prefix`/`normalized_basename` is required
+#                    per target entry. An optional `strip = "…"` (only
+#                    legal alongside `normalized`/`normalized_prefix`/
+#                    `normalized_basename`) requires the token to literally
+#                    start with that string first (e.g. `strip = "of="`
+#                    for `dd`'s `of=/dev/sda`, `strip = "-C"` for tar's
+#                    attached `-C/` form) and normalizes only the
+#                    remainder. A `normalized`/`normalized_prefix` value
+#                    that itself normalizes to a pure relative ascent, an
+#                    escape past `$HOME`, or something opaque (`""`,
+#                    `~user`) is a load-time error — almost certainly a
+#                    rule author's mistake. Deliberately NOT the default
+#                    for `exact`/`prefix`: many targets aren't paths at all
+#                    (`dd`'s `of=` prefix, a glob like `/*`, an
+#                    `except_targets` URL prefix), and normalizing an
 #                    `except_targets` entry would silently widen an allow.
 #                    An empty/omitted `targets` list means "no target
 #                    constraint" (e.g. `shred`'s "any target").
+#
+#                    `{ normalized_basename = "…" }` (issue #427) is a
+#                    sixth shape: lexically normalizes the token like
+#                    `normalized`/`normalized_prefix` do, but compares
+#                    only its TRAILING path component (the filename) —
+#                    independent of what directory prefix leads to it, or
+#                    whether that prefix is even resolvable (an unresolved
+#                    `../`, an unknown `~+`/cwd-relative anchor, etc. all
+#                    still carry a certain filename). Matches when the
+#                    trailing component equals the value exactly, OR
+#                    starts with the value followed by a literal `.` — a
+#                    dotenv-family suffix widening (`normalized_basename =
+#                    ".env"` matches `.env`, `.env.local`,
+#                    `.env.production`, anywhere: `.env`, `foo/.env.local`,
+#                    `~/p/.env.production`, `/abs/.env`, `../.env` all
+#                    match). The value itself must be a bare filename — no
+#                    `/`, and not `.`/`..` — a load-time error otherwise.
+#                    The dotted-suffix widening is broad by design: a
+#                    `normalized_basename = "id_rsa"` rule also matches
+#                    `id_rsa.pub`, intentionally (documented, not a bug).
+#                    Out of scope: a named user's home subdirectory
+#                    (`~alice/.env`) never normalizes past `PathForm::Opaque`
+#                    in the first place, the same pre-existing gap
+#                    `normalized`/`normalized_prefix` already have there.
 #   except_targets   optional list of target alternatives, same
 #                    `{ exact = "…" }` / `{ prefix = "…" }` shapes as
-#                    `targets` (never `normalized`/`normalized_prefix` —
-#                    stays literal by policy, see above), plus an opt-in
-#                    fifth shape `{ url_host = "…" }` (issue #102): parses
+#                    `targets` (never `normalized`/`normalized_prefix`/
+#                    `normalized_basename` — stays literal by policy, see
+#                    above), plus an opt-in url_host shape
+#                    `{ url_host = "…" }` (issue #102): parses
 #                    the candidate as a real URL via the `url` crate
 #                    (docs/adr/0002-url-crate.md) and compares its HOST
 #                    component, not a string prefix of the raw text —

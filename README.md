@@ -282,8 +282,9 @@ redirect check used to run first-match and short-circuit every other check
 — and remains as a conservative posture now that the check folds
 worst-wins across rules, targets, and both target-resolution channels. `targets` is required and
 non-empty, using the same `{ exact = … }`/`{ prefix = … }`/
-`{ normalized = … }`/`{ normalized_prefix = … }` matcher shapes as a
-command rule's own `targets`/`except_targets`. User-declared redirect
+`{ normalized = … }`/`{ normalized_prefix = … }`/`{ normalized_basename =
+… }` matcher shapes as a command rule's own `targets`/`except_targets`.
+User-declared redirect
 rules are purely additive: they're checked after every embedded redirect
 rule, so a user rule can only ever add new protected targets — combined
 with the block-only restriction above, it can never weaken or shadow a
