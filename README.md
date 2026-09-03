@@ -489,7 +489,7 @@ either), so treat this as narrowing the gap, not eliminating it.
 The gaps above are all instances of one root cause: `exact`/`prefix`
 compare raw string text, not a parsed URL's *host* component. For a rule
 author who wants that gap fully closed rather than narrowed, `targets`/
-`except_targets` accept a fifth, opt-in shape — `{ url_host = "…" }`
+`except_targets` accept an opt-in shape — `{ url_host = "…" }`
 (issue #102) — that parses the candidate as a real URL (via the
 [`url`](https://crates.io/crates/url) crate, the same WHATWG-standard
 parser browsers use — see `docs/adr/0002-url-crate.md`) and compares its

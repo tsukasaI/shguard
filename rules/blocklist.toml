@@ -100,15 +100,16 @@
 #                    ".env"` matches `.env`, `.env.local`,
 #                    `.env.production`, anywhere: `.env`, `foo/.env.local`,
 #                    `~/p/.env.production`, `/abs/.env`, `../.env` all
-#                    match). The value itself must be a bare filename — no
-#                    `/`, and not `.`/`..` — a load-time error otherwise.
-#                    The dotted-suffix widening is broad by design: a
+#                    match). A named user's home subdirectory
+#                    (`~alice/.env`) matches too, unlike `normalized`/
+#                    `normalized_prefix`: unresolvable and unreachable
+#                    account names still spell a definite trailing
+#                    filename, which is all this shape ever compares. The
+#                    value itself must be a bare filename — no `/`, and
+#                    not `.`/`..` — a load-time error otherwise. The
+#                    dotted-suffix widening is broad by design: a
 #                    `normalized_basename = "id_rsa"` rule also matches
 #                    `id_rsa.pub`, intentionally (documented, not a bug).
-#                    Out of scope: a named user's home subdirectory
-#                    (`~alice/.env`) never normalizes past `PathForm::Opaque`
-#                    in the first place, the same pre-existing gap
-#                    `normalized`/`normalized_prefix` already have there.
 #   except_targets   optional list of target alternatives, same
 #                    `{ exact = "…" }` / `{ prefix = "…" }` shapes as
 #                    `targets` (never `normalized`/`normalized_prefix`/

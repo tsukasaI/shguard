@@ -1486,11 +1486,25 @@ pub(crate) enum PathForm {
     /// remaining components, the same way `~/`/`~//` collapse to bare
     /// `Home(vec![])`. Shell-expands to that account's home directory if
     /// it exists and is reachable — neither of which shguard can verify
-    /// statically. A trailing subdirectory that does NOT collapse away
-    /// (`~username/data`) stays [`PathForm::Opaque`]: out of scope by
-    /// design, symmetric with `Home`/`EscapesHome` only ever covering `~`
-    /// itself, not an arbitrary `~/subdir`.
+    /// statically.
     NamedUserHome,
+    /// A `~username/subdir`-shaped token whose trailing components do NOT
+    /// collapse away (`~username/data`, unlike `NamedUserHome`'s bare
+    /// `~username`) and did NOT escape past the account's home either
+    /// (unlike `NamedUserHomeEscapes`) — issue #427. Distinct from
+    /// `NamedUserHome` because the two anchor-comparing matchers
+    /// (`NormalizedExact`/`NormalizedPrefix`) genuinely cannot say anything
+    /// about an arbitrary account's real home directory, so this used to
+    /// collapse into [`PathForm::Opaque`] (out of scope, symmetric with
+    /// `Home`/`EscapesHome` only ever covering `~` itself) — but
+    /// [`TargetMatcher::NormalizedBasename`] doesn't compare the anchor at
+    /// all, only the TRAILING component, which is exactly as certain here
+    /// as it is for every other anchor shape (`~alice/.env` is a `.env`
+    /// file regardless of whether `~alice` itself is reachable). Carries
+    /// the full component list (not just the last one) so
+    /// `path_form_last_component` can extract it uniformly with every
+    /// other tail-carrying variant.
+    NamedUserHomeSub(Vec<String>),
     /// A `~username/..`-shaped token whose `..` popped past that user's
     /// home — provably outside it, even though the exact resulting path
     /// is unknown (mirrors [`PathForm::EscapesHome`] for a named user
@@ -1657,7 +1671,7 @@ pub(crate) fn lexical_normalize(token: &str) -> PathForm {
         } else if stack.is_empty() {
             PathForm::NamedUserHome
         } else {
-            PathForm::Opaque
+            PathForm::NamedUserHomeSub(stack)
         };
     }
 
@@ -1742,18 +1756,21 @@ fn canonical_render(form: &PathForm) -> Option<String> {
 /// (issue #427). `None` for a form with no filename component at all:
 /// [`PathForm::NamedUserHome`] (a bare `~username`, no tail),
 /// [`PathForm::DirStackEscapesEmpty`] (a bare `~+/..`, no tail), and
-/// [`PathForm::Opaque`] (the empty token, or `~username/subdir` — see that
-/// variant's own docs for why a named user's subdirectory is out of scope
-/// entirely, not just basename-less).
+/// [`PathForm::Opaque`] (only the empty token now that
+/// [`PathForm::NamedUserHomeSub`] carries what `~username/subdir` used to
+/// collapse into here — see that variant's own docs).
 ///
 /// Every other variant carries a `Vec<String>` tail — `Rel`'s regardless of
 /// its `ascent` count, since an unresolved-ascent token still ends in a
-/// definite filename no matter how many directories up it lands.
+/// definite filename no matter how many directories up it lands, and
+/// `NamedUserHomeSub`'s for the same reason: an unreachable/nonexistent
+/// account doesn't change what the trailing component is spelled.
 fn path_form_last_component(form: &PathForm) -> Option<&str> {
     match form {
         PathForm::Abs(comps)
         | PathForm::Home(comps)
         | PathForm::EscapesHome(comps)
+        | PathForm::NamedUserHomeSub(comps)
         | PathForm::NamedUserHomeEscapes(comps)
         | PathForm::DirStack(comps)
         | PathForm::Rel { comps, .. } => comps.last().map(String::as_str),
@@ -1777,9 +1794,10 @@ fn path_form_last_component(form: &PathForm) -> Option<&str> {
 /// resolved absolute path — see `crate::gate`'s module docs).
 ///
 /// `None` for every other [`PathForm`] (`EscapesHome`/`NamedUserHome`/
-/// `NamedUserHomeEscapes`/`DirStack`/`DirStackEscapesEmpty`/`Opaque`) — a
-/// `cd` to one of those shapes poisons `crate::gate`'s folded cwd context
-/// instead of producing an anchor; callers never render one.
+/// `NamedUserHomeSub`/`NamedUserHomeEscapes`/`DirStack`/
+/// `DirStackEscapesEmpty`/`Opaque`) — a `cd` to one of those shapes
+/// poisons `crate::gate`'s folded cwd context instead of producing an
+/// anchor; callers never render one.
 #[must_use]
 pub(crate) fn render_cwd_anchor(form: &PathForm) -> Option<String> {
     match form {
@@ -1799,6 +1817,7 @@ pub(crate) fn render_cwd_anchor(form: &PathForm) -> Option<String> {
         }
         PathForm::EscapesHome(_)
         | PathForm::NamedUserHome
+        | PathForm::NamedUserHomeSub(_)
         | PathForm::NamedUserHomeEscapes(_)
         | PathForm::DirStack(_)
         | PathForm::DirStackEscapesEmpty
@@ -5370,7 +5389,7 @@ fn convert_target(
             })
         }
         (None, None, None, None, Some(base), None) => {
-            if base.is_empty() {
+            if base.trim().is_empty() {
                 return Err(RulesError::invalid(
                     rule_id,
                     "target's `normalized_basename` must not be empty",
@@ -5465,6 +5484,7 @@ fn reject_degenerate_normalized_target(
         PathForm::EscapesHome(_)
         | PathForm::Opaque
         | PathForm::NamedUserHome
+        | PathForm::NamedUserHomeSub(_)
         | PathForm::NamedUserHomeEscapes(_)
         | PathForm::DirStack(_)
         | PathForm::DirStackEscapesEmpty => true,
@@ -12248,6 +12268,77 @@ mod tests {
         // ascent depth.
         let rules = Rules::parse(dotenv_family_rule()).unwrap();
         assert!(rules.match_command(&argv(&["cat", "../.env"])).is_some());
+    }
+
+    #[test]
+    fn normalized_basename_matches_through_an_escaped_home() {
+        let rules = Rules::parse(dotenv_family_rule()).unwrap();
+        assert!(rules.match_command(&argv(&["cat", "~/../.env"])).is_some());
+    }
+
+    #[test]
+    fn normalized_basename_matches_through_an_unresolved_dirstack_anchor() {
+        let rules = Rules::parse(dotenv_family_rule()).unwrap();
+        assert!(rules.match_command(&argv(&["cat", "~+/.env"])).is_some());
+    }
+
+    // fable review of #431: `~alice/subdir` used to collapse to
+    // `PathForm::Opaque`, hiding a tail this matcher can otherwise see --
+    // fixed by `PathForm::NamedUserHomeSub` carrying it instead. Unlike the
+    // anchor-comparing matchers, an unreachable/nonexistent account still
+    // spells a definite trailing filename.
+
+    #[test]
+    fn normalized_basename_matches_a_named_user_home_subdirectory() {
+        let rules = Rules::parse(dotenv_family_rule()).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["cat", "~alice/.env"]))
+                .is_some()
+        );
+        assert!(
+            rules
+                .match_command(&argv(&["cat", "~alice/foo/.env"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn normalized_basename_does_not_match_a_bare_named_user_home() {
+        // No tail at all -- nothing to compare a filename against.
+        let rules = Rules::parse(dotenv_family_rule()).unwrap();
+        assert!(rules.match_command(&argv(&["cat", "~alice"])).is_none());
+        assert!(rules.match_command(&argv(&["cat", "~alice/"])).is_none());
+    }
+
+    #[test]
+    fn normalized_basename_matches_with_an_attached_strip_prefix() {
+        let toml = r#"
+            [[command]]
+            id = "cat-dotenv-family-attached"
+            reason = "test"
+            command = "cat"
+            targets = [{ strip = "--file=", normalized_basename = ".env" }]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["cat", "--file=foo/.env.local"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn normalized_basename_works_in_a_redirect_rule_too() {
+        let toml = r#"
+            [[redirect]]
+            id = "user-forbid-redirect-to-dotenv-family"
+            reason = "test"
+            targets = [{ normalized_basename = ".env" }]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        assert!(rules.match_redirect_target("foo/.env.local").is_some());
+        assert!(rules.match_redirect_target("foo/config.toml").is_none());
     }
 
     #[test]
