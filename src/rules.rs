@@ -1578,8 +1578,8 @@ pub(crate) enum PathForm {
     /// None-slot target through it deserves at least Ask" reasoning
     /// (issue #133 review follow-up).
     DirStackEscapesEmpty,
-    /// Matches nothing: the empty string, or a `~username/subdir` token
-    /// (see [`PathForm::NamedUserHome`]'s docs).
+    /// Matches nothing: only the empty string (a `~username/subdir` token
+    /// is [`PathForm::NamedUserHomeSub`] as of issue #427).
     Opaque,
 }
 
@@ -12282,9 +12282,7 @@ mod tests {
         assert!(rules.match_command(&argv(&["cat", "~+/.env"])).is_some());
     }
 
-    // fable review of #431: `~alice/subdir` used to collapse to
-    // `PathForm::Opaque`, hiding a tail this matcher can otherwise see --
-    // fixed by `PathForm::NamedUserHomeSub` carrying it instead. Unlike the
+    // `PathForm::NamedUserHomeSub` (issue #427): unlike the
     // anchor-comparing matchers, an unreachable/nonexistent account still
     // spells a definite trailing filename.
 
