@@ -83,6 +83,31 @@ fn deny_rule_blocks_matching_command() {
 }
 
 #[test]
+fn deny_rule_normalized_basename_target_blocks_a_dotenv_variant_under_a_nested_path() {
+    // Issue #427's own repro: `.env`-family secret-file rules written as
+    // plain `prefix = ".env"` targets miss a suffix variant once it sits
+    // under any directory prefix (`foo/.env.local`) -- `normalized_basename`
+    // closes that gap by matching the token's own trailing path component,
+    // independent of what directory leads to it.
+    let (_dir, config_path) = write_config(
+        r#"
+        [[deny]]
+        id = "user-deny-dotenv-family"
+        reason = "never read dotenv-family secret files"
+        command = "cat"
+        targets = [{ normalized_basename = ".env" }]
+    "#,
+    );
+
+    let output = run_hook(
+        &bash_command("cat foo/.env.local"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+    assert!(permission_reason(&output).contains("user-deny-dotenv-family"));
+}
+
+#[test]
 fn ask_rule_asks_before_matching_command() {
     let (_dir, config_path) = write_config(
         r#"

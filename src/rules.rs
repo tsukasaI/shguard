@@ -854,6 +854,31 @@ enum TargetMatcher {
         strip: Option<String>,
         canon: String,
     },
+    /// Path-aware basename match (issue #427): the token (after an
+    /// optional `strip`) is lexically normalized, and its TRAILING path
+    /// component — the filename, regardless of what directory prefix
+    /// leads to it — is compared against `base`. Matches when the
+    /// trailing component equals `base` exactly, or starts with `base`
+    /// followed by a literal `.` (a dotenv-family suffix variant: `.env`,
+    /// `.env.local`, `.env.production`, …) — mirroring the migrated-from
+    /// hook's `\.env([.][a-zA-Z0-9_-]+)?` regex, but as a plain
+    /// `starts_with` rather than reimplementing its character class (see
+    /// [`Self::matches`]'s own docs for why that's the safe direction).
+    ///
+    /// Unlike [`Self::NormalizedExact`]/[`Self::NormalizedPrefix`], this
+    /// variant is immune to every anchor-uncertainty floor
+    /// (`ascent_descent_plausible`/`dirstack_plausible`/
+    /// `unknown_cwd_plausible`) — it never claims anything about which
+    /// directory the token resolves to, only about the LAST component's
+    /// name, which is exactly as certain whether the anchor is `/`, `~`,
+    /// an unresolved `..` ascent, or an entirely unknown cwd. Every one of
+    /// those already-uncertain anchors still carries a certain trailing
+    /// filename, so `Self::matches` treats them all as a hard match, not
+    /// a floor.
+    NormalizedBasename {
+        strip: Option<String>,
+        base: String,
+    },
     /// Opt-in URL-aware host match (issue #102): the token is parsed as a
     /// real URL via the `url` crate (docs/adr/0002-url-crate.md) and its
     /// *host* component — not any string prefix of the token — is
@@ -914,9 +939,9 @@ impl TargetMatcher {
         match self {
             Self::UrlHost(_) => ExceptTargetShape::UrlHost,
             Self::Exact(_) | Self::Prefix(_) => ExceptTargetShape::StringLiteral,
-            Self::NormalizedExact { .. } | Self::NormalizedPrefix { .. } => {
-                ExceptTargetShape::Other
-            }
+            Self::NormalizedExact { .. }
+            | Self::NormalizedPrefix { .. }
+            | Self::NormalizedBasename { .. } => ExceptTargetShape::Other,
         }
     }
 
@@ -967,6 +992,14 @@ impl TargetMatcher {
                 };
                 canonical_render(&lexical_normalize(remainder))
                     .is_some_and(|rendered| rendered.starts_with(canon.as_str()))
+            }
+            Self::NormalizedBasename { strip, base } => {
+                let Some(remainder) = strip_target(strip.as_deref(), token) else {
+                    return false;
+                };
+                path_form_last_component(&lexical_normalize(remainder)).is_some_and(|last| {
+                    last == base.as_str() || last.starts_with(&format!("{base}."))
+                })
             }
             Self::UrlHost(host) => parse_url_host(token).is_some_and(|parsed| parsed == *host),
         }
@@ -1064,7 +1097,17 @@ impl TargetMatcher {
     fn ascent_descent_plausible(&self, token: &str) -> bool {
         let strip = match self {
             Self::NormalizedPrefix { strip, .. } | Self::NormalizedExact { strip, .. } => strip,
-            Self::Exact(_) | Self::Prefix(_) | Self::UrlHost(_) => return false,
+            // Issue #427: no floor needed — `Self::matches`'s
+            // `NormalizedBasename` arm already treats an unresolved-ascent
+            // token as a HARD match (see that variant's own docs), since
+            // its trailing filename is exactly as certain no matter how
+            // many directories up the unknown ascent lands.
+            Self::Exact(_)
+            | Self::Prefix(_)
+            | Self::UrlHost(_)
+            | Self::NormalizedBasename { .. } => {
+                return false;
+            }
         };
         let Some(remainder) = strip_target(strip.as_deref(), token) else {
             return false;
@@ -1161,7 +1204,10 @@ impl TargetMatcher {
                         && is_home_container_dir(&comps[0])
                         && comps[2..] == *target_comps)
             }
-            Self::Exact(_) | Self::Prefix(_) | Self::UrlHost(_) => {
+            Self::Exact(_)
+            | Self::Prefix(_)
+            | Self::UrlHost(_)
+            | Self::NormalizedBasename { .. } => {
                 unreachable!("filtered out above")
             }
         }
@@ -1232,7 +1278,18 @@ impl TargetMatcher {
     fn dirstack_plausible(&self, token: &str) -> bool {
         let strip = match self {
             Self::NormalizedExact { strip, .. } | Self::NormalizedPrefix { strip, .. } => strip,
-            Self::Exact(_) | Self::Prefix(_) | Self::UrlHost(_) => return false,
+            // Issue #427: no bare-anchor floor applies — `NormalizedBasename`
+            // has no "bare `~`-shaped target" concept to widen from in the
+            // first place (see `ascent_descent_plausible`'s own comment:
+            // `Self::matches` already hard-matches a non-empty dirstack
+            // tail, and a bare/empty-tail anchor carries no filename at all
+            // for this matcher to compare against).
+            Self::Exact(_)
+            | Self::Prefix(_)
+            | Self::UrlHost(_)
+            | Self::NormalizedBasename { .. } => {
+                return false;
+            }
         };
         if strip.is_some() {
             return false;
@@ -1310,7 +1367,15 @@ impl TargetMatcher {
                 }
                 is_suffix_of(&comps[..comps.len() - 1], &canon_comps)
             }
-            Self::Exact(_) | Self::Prefix(_) | Self::UrlHost(_) => false,
+            // Issue #427: no floor needed — `Self::matches`'s
+            // `NormalizedBasename` arm already hard-matches a `Rel` token
+            // regardless of `CwdContext`, for the same "trailing filename
+            // is certain even when the anchor isn't" reason
+            // `ascent_descent_plausible`'s own comment gives.
+            Self::Exact(_)
+            | Self::Prefix(_)
+            | Self::UrlHost(_)
+            | Self::NormalizedBasename { .. } => false,
         }
     }
 }
@@ -1421,11 +1486,25 @@ pub(crate) enum PathForm {
     /// remaining components, the same way `~/`/`~//` collapse to bare
     /// `Home(vec![])`. Shell-expands to that account's home directory if
     /// it exists and is reachable — neither of which shguard can verify
-    /// statically. A trailing subdirectory that does NOT collapse away
-    /// (`~username/data`) stays [`PathForm::Opaque`]: out of scope by
-    /// design, symmetric with `Home`/`EscapesHome` only ever covering `~`
-    /// itself, not an arbitrary `~/subdir`.
+    /// statically.
     NamedUserHome,
+    /// A `~username/subdir`-shaped token whose trailing components do NOT
+    /// collapse away (`~username/data`, unlike `NamedUserHome`'s bare
+    /// `~username`) and did NOT escape past the account's home either
+    /// (unlike `NamedUserHomeEscapes`) — issue #427. Distinct from
+    /// `NamedUserHome` because the two anchor-comparing matchers
+    /// (`NormalizedExact`/`NormalizedPrefix`) genuinely cannot say anything
+    /// about an arbitrary account's real home directory, so this used to
+    /// collapse into [`PathForm::Opaque`] (out of scope, symmetric with
+    /// `Home`/`EscapesHome` only ever covering `~` itself) — but
+    /// [`TargetMatcher::NormalizedBasename`] doesn't compare the anchor at
+    /// all, only the TRAILING component, which is exactly as certain here
+    /// as it is for every other anchor shape (`~alice/.env` is a `.env`
+    /// file regardless of whether `~alice` itself is reachable). Carries
+    /// the full component list (not just the last one) so
+    /// `path_form_last_component` can extract it uniformly with every
+    /// other tail-carrying variant.
+    NamedUserHomeSub(Vec<String>),
     /// A `~username/..`-shaped token whose `..` popped past that user's
     /// home — provably outside it, even though the exact resulting path
     /// is unknown (mirrors [`PathForm::EscapesHome`] for a named user
@@ -1499,8 +1578,8 @@ pub(crate) enum PathForm {
     /// None-slot target through it deserves at least Ask" reasoning
     /// (issue #133 review follow-up).
     DirStackEscapesEmpty,
-    /// Matches nothing: the empty string, or a `~username/subdir` token
-    /// (see [`PathForm::NamedUserHome`]'s docs).
+    /// Matches nothing: only the empty string (a `~username/subdir` token
+    /// is [`PathForm::NamedUserHomeSub`] as of issue #427).
     Opaque,
 }
 
@@ -1592,7 +1671,7 @@ pub(crate) fn lexical_normalize(token: &str) -> PathForm {
         } else if stack.is_empty() {
             PathForm::NamedUserHome
         } else {
-            PathForm::Opaque
+            PathForm::NamedUserHomeSub(stack)
         };
     }
 
@@ -1671,6 +1750,34 @@ fn canonical_render(form: &PathForm) -> Option<String> {
     }
 }
 
+/// The trailing path component of `form` — the filename a real shell would
+/// actually open, independent of the (possibly entirely unknown) directory
+/// prefix leading to it — for [`TargetMatcher::NormalizedBasename`]
+/// (issue #427). `None` for a form with no filename component at all:
+/// [`PathForm::NamedUserHome`] (a bare `~username`, no tail),
+/// [`PathForm::DirStackEscapesEmpty`] (a bare `~+/..`, no tail), and
+/// [`PathForm::Opaque`] (only the empty token now that
+/// [`PathForm::NamedUserHomeSub`] carries what `~username/subdir` used to
+/// collapse into here — see that variant's own docs).
+///
+/// Every other variant carries a `Vec<String>` tail — `Rel`'s regardless of
+/// its `ascent` count, since an unresolved-ascent token still ends in a
+/// definite filename no matter how many directories up it lands, and
+/// `NamedUserHomeSub`'s for the same reason: an unreachable/nonexistent
+/// account doesn't change what the trailing component is spelled.
+fn path_form_last_component(form: &PathForm) -> Option<&str> {
+    match form {
+        PathForm::Abs(comps)
+        | PathForm::Home(comps)
+        | PathForm::EscapesHome(comps)
+        | PathForm::NamedUserHomeSub(comps)
+        | PathForm::NamedUserHomeEscapes(comps)
+        | PathForm::DirStack(comps)
+        | PathForm::Rel { comps, .. } => comps.last().map(String::as_str),
+        PathForm::NamedUserHome | PathForm::DirStackEscapesEmpty | PathForm::Opaque => None,
+    }
+}
+
 /// Renders a [`PathForm`] back into a token string usable as a folded `cd`
 /// working-directory anchor (issue #103, `crate::gate::CwdContext::Known`).
 ///
@@ -1687,9 +1794,10 @@ fn canonical_render(form: &PathForm) -> Option<String> {
 /// resolved absolute path — see `crate::gate`'s module docs).
 ///
 /// `None` for every other [`PathForm`] (`EscapesHome`/`NamedUserHome`/
-/// `NamedUserHomeEscapes`/`DirStack`/`DirStackEscapesEmpty`/`Opaque`) — a
-/// `cd` to one of those shapes poisons `crate::gate`'s folded cwd context
-/// instead of producing an anchor; callers never render one.
+/// `NamedUserHomeSub`/`NamedUserHomeEscapes`/`DirStack`/
+/// `DirStackEscapesEmpty`/`Opaque`) — a `cd` to one of those shapes
+/// poisons `crate::gate`'s folded cwd context instead of producing an
+/// anchor; callers never render one.
 #[must_use]
 pub(crate) fn render_cwd_anchor(form: &PathForm) -> Option<String> {
     match form {
@@ -1709,6 +1817,7 @@ pub(crate) fn render_cwd_anchor(form: &PathForm) -> Option<String> {
         }
         PathForm::EscapesHome(_)
         | PathForm::NamedUserHome
+        | PathForm::NamedUserHomeSub(_)
         | PathForm::NamedUserHomeEscapes(_)
         | PathForm::DirStack(_)
         | PathForm::DirStackEscapesEmpty
@@ -4694,6 +4803,7 @@ struct TargetDto {
     prefix: Option<String>,
     normalized: Option<String>,
     normalized_prefix: Option<String>,
+    normalized_basename: Option<String>,
     url_host: Option<String>,
     strip: Option<String>,
 }
@@ -5158,26 +5268,36 @@ fn convert_target(
         + usize::from(dto.prefix.is_some())
         + usize::from(dto.normalized.is_some())
         + usize::from(dto.normalized_prefix.is_some())
+        + usize::from(dto.normalized_basename.is_some())
         + usize::from(dto.url_host.is_some());
     if set_count != 1 {
         return Err(RulesError::invalid(
             rule_id,
             "target requires exactly one of `exact`/`prefix`/`normalized`/`normalized_prefix`/\
-             `url_host`",
+             `normalized_basename`/`url_host`",
         ));
     }
-    if is_except_target && (dto.normalized.is_some() || dto.normalized_prefix.is_some()) {
+    if is_except_target
+        && (dto.normalized.is_some()
+            || dto.normalized_prefix.is_some()
+            || dto.normalized_basename.is_some())
+    {
         return Err(RulesError::invalid(
             rule_id,
             "except_targets entries must be `exact`/`prefix` (literal); `normalized`/\
-             `normalized_prefix` would silently widen an allow by normalizing the carve-out, \
-             which must always be an explicit, deliberate choice",
+             `normalized_prefix`/`normalized_basename` would silently widen an allow by \
+             normalizing the carve-out, which must always be an explicit, deliberate choice",
         ));
     }
-    if dto.strip.is_some() && dto.normalized.is_none() && dto.normalized_prefix.is_none() {
+    if dto.strip.is_some()
+        && dto.normalized.is_none()
+        && dto.normalized_prefix.is_none()
+        && dto.normalized_basename.is_none()
+    {
         return Err(RulesError::invalid(
             rule_id,
-            "target's `strip` is only valid alongside `normalized`/`normalized_prefix`",
+            "target's `strip` is only valid alongside `normalized`/`normalized_prefix`/\
+             `normalized_basename`",
         ));
     }
     if dto.strip.as_deref().is_some_and(str::is_empty) {
@@ -5187,16 +5307,17 @@ fn convert_target(
         ));
     }
 
-    // `set_count == 1` above guarantees exactly one of these five is
+    // `set_count == 1` above guarantees exactly one of these six is
     // `Some` — the wildcard arm is unreachable, not a fallback.
     match (
         dto.exact,
         dto.prefix,
         dto.normalized,
         dto.normalized_prefix,
+        dto.normalized_basename,
         dto.url_host,
     ) {
-        (Some(exact), None, None, None, None) => {
+        (Some(exact), None, None, None, None, None) => {
             if exact.trim().is_empty() {
                 return Err(RulesError::invalid(
                     rule_id,
@@ -5205,7 +5326,7 @@ fn convert_target(
             }
             Ok(TargetMatcher::Exact(exact))
         }
-        (None, Some(prefix), None, None, None) => {
+        (None, Some(prefix), None, None, None, None) => {
             // An empty prefix produces a universal matcher
             // (`"".starts_with("")` is always true) — the same hazard
             // `convert_command_rule` already guards against for an empty
@@ -5218,7 +5339,7 @@ fn convert_target(
             }
             Ok(TargetMatcher::Prefix(prefix))
         }
-        (None, None, Some(normalized), None, None) => {
+        (None, None, Some(normalized), None, None, None) => {
             if normalized.trim().is_empty() {
                 return Err(RulesError::invalid(
                     rule_id,
@@ -5232,7 +5353,7 @@ fn convert_target(
                 target,
             })
         }
-        (None, None, None, Some(normalized_prefix), None) => {
+        (None, None, None, Some(normalized_prefix), None, None) => {
             if normalized_prefix.trim().is_empty() {
                 return Err(RulesError::invalid(
                     rule_id,
@@ -5267,7 +5388,39 @@ fn convert_target(
                 canon,
             })
         }
-        (None, None, None, None, Some(url_host)) => {
+        (None, None, None, None, Some(base), None) => {
+            if base.trim().is_empty() {
+                return Err(RulesError::invalid(
+                    rule_id,
+                    "target's `normalized_basename` must not be empty",
+                ));
+            }
+            if base.contains('/') {
+                return Err(RulesError::invalid(
+                    rule_id,
+                    format!(
+                        "target's `normalized_basename` {base:?} contains '/' — it must be a \
+                         bare filename, matched against a token's own trailing path component \
+                         regardless of what directory precedes it, not a path of its own"
+                    ),
+                ));
+            }
+            if base == "." || base == ".." {
+                return Err(RulesError::invalid(
+                    rule_id,
+                    format!(
+                        "target's `normalized_basename` {base:?} is a directory-navigation \
+                         component, not a filename — it can never be a real file's trailing \
+                         path component"
+                    ),
+                ));
+            }
+            Ok(TargetMatcher::NormalizedBasename {
+                strip: dto.strip,
+                base,
+            })
+        }
+        (None, None, None, None, None, Some(url_host)) => {
             if url_host.trim().is_empty() {
                 return Err(RulesError::invalid(
                     rule_id,
@@ -5331,6 +5484,7 @@ fn reject_degenerate_normalized_target(
         PathForm::EscapesHome(_)
         | PathForm::Opaque
         | PathForm::NamedUserHome
+        | PathForm::NamedUserHomeSub(_)
         | PathForm::NamedUserHomeEscapes(_)
         | PathForm::DirStack(_)
         | PathForm::DirStackEscapesEmpty => true,
@@ -12060,6 +12214,226 @@ mod tests {
             targets = [{ normalized = "/" }]
         "#;
         assert!(Rules::parse(toml).is_ok());
+    }
+
+    // ==== issue #427: `normalized_basename` target matcher ====
+
+    fn dotenv_family_rule() -> &'static str {
+        r#"
+            [[command]]
+            id = "cat-dotenv-family"
+            reason = "test"
+            command = "cat"
+            targets = [{ normalized_basename = ".env" }]
+        "#
+    }
+
+    #[test]
+    fn normalized_basename_matches_the_bare_filename() {
+        let rules = Rules::parse(dotenv_family_rule()).unwrap();
+        assert!(rules.match_command(&argv(&["cat", ".env"])).is_some());
+    }
+
+    #[test]
+    fn normalized_basename_matches_under_a_relative_directory_prefix() {
+        let rules = Rules::parse(dotenv_family_rule()).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["cat", "foo/.env.local"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn normalized_basename_matches_under_a_home_anchored_prefix() {
+        let rules = Rules::parse(dotenv_family_rule()).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["cat", "~/p/.env.production"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn normalized_basename_matches_under_an_absolute_prefix() {
+        let rules = Rules::parse(dotenv_family_rule()).unwrap();
+        assert!(rules.match_command(&argv(&["cat", "/abs/.env"])).is_some());
+    }
+
+    #[test]
+    fn normalized_basename_matches_through_an_unresolved_ascent() {
+        // Issue #427: unlike `normalized`/`normalized_prefix`, this needs
+        // no separate Ask-only ascent-descent floor -- the trailing
+        // filename is already a hard match regardless of the unknown
+        // ascent depth.
+        let rules = Rules::parse(dotenv_family_rule()).unwrap();
+        assert!(rules.match_command(&argv(&["cat", "../.env"])).is_some());
+    }
+
+    #[test]
+    fn normalized_basename_matches_through_an_escaped_home() {
+        let rules = Rules::parse(dotenv_family_rule()).unwrap();
+        assert!(rules.match_command(&argv(&["cat", "~/../.env"])).is_some());
+    }
+
+    #[test]
+    fn normalized_basename_matches_through_an_unresolved_dirstack_anchor() {
+        let rules = Rules::parse(dotenv_family_rule()).unwrap();
+        assert!(rules.match_command(&argv(&["cat", "~+/.env"])).is_some());
+    }
+
+    // `PathForm::NamedUserHomeSub` (issue #427): unlike the
+    // anchor-comparing matchers, an unreachable/nonexistent account still
+    // spells a definite trailing filename.
+
+    #[test]
+    fn normalized_basename_matches_a_named_user_home_subdirectory() {
+        let rules = Rules::parse(dotenv_family_rule()).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["cat", "~alice/.env"]))
+                .is_some()
+        );
+        assert!(
+            rules
+                .match_command(&argv(&["cat", "~alice/foo/.env"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn normalized_basename_does_not_match_a_bare_named_user_home() {
+        // No tail at all -- nothing to compare a filename against.
+        let rules = Rules::parse(dotenv_family_rule()).unwrap();
+        assert!(rules.match_command(&argv(&["cat", "~alice"])).is_none());
+        assert!(rules.match_command(&argv(&["cat", "~alice/"])).is_none());
+    }
+
+    #[test]
+    fn normalized_basename_matches_with_an_attached_strip_prefix() {
+        let toml = r#"
+            [[command]]
+            id = "cat-dotenv-family-attached"
+            reason = "test"
+            command = "cat"
+            targets = [{ strip = "--file=", normalized_basename = ".env" }]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["cat", "--file=foo/.env.local"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn normalized_basename_works_in_a_redirect_rule_too() {
+        let toml = r#"
+            [[redirect]]
+            id = "user-forbid-redirect-to-dotenv-family"
+            reason = "test"
+            targets = [{ normalized_basename = ".env" }]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        assert!(rules.match_redirect_target("foo/.env.local").is_some());
+        assert!(rules.match_redirect_target("foo/config.toml").is_none());
+    }
+
+    #[test]
+    fn normalized_basename_does_not_match_an_unrelated_dotted_name() {
+        let rules = Rules::parse(dotenv_family_rule()).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["cat", "foo/.environment"]))
+                .is_none()
+        );
+        assert!(rules.match_command(&argv(&["cat", ".envrc"])).is_none());
+        assert!(rules.match_command(&argv(&["cat", "env"])).is_none());
+    }
+
+    #[test]
+    fn normalized_basename_dotted_suffix_widening_is_documented_behavior() {
+        // The trap: a dotted-suffix widening this broad also matches
+        // `id_rsa.pub` for a `normalized_basename = "id_rsa"` rule --
+        // pinned as intentional, not a bug, per the variant's own docs.
+        let toml = r#"
+            [[command]]
+            id = "cat-id-rsa"
+            reason = "test"
+            command = "cat"
+            targets = [{ normalized_basename = "id_rsa" }]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["cat", "~/.ssh/id_rsa.pub"]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn normalized_basename_rejects_empty_value_at_load_time() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "test"
+            command = "cat"
+            targets = [{ normalized_basename = "" }]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn normalized_basename_rejects_a_value_containing_a_slash() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "test"
+            command = "cat"
+            targets = [{ normalized_basename = "a/b" }]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn normalized_basename_rejects_dot_and_dotdot() {
+        for base in [".", ".."] {
+            let toml = format!(
+                r#"
+                [[command]]
+                id = "x"
+                reason = "test"
+                command = "cat"
+                targets = [{{ normalized_basename = "{base}" }}]
+            "#
+            );
+            assert!(matches!(
+                Rules::parse(&toml),
+                Err(RulesError::InvalidRule { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn except_targets_normalized_basename_is_rejected() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "some reason"
+            command = "tar"
+            targets = [{ normalized = "/" }]
+            except_targets = [{ normalized_basename = ".env" }]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
     }
 
     // ==== issue #102: opt-in `url_host` except_targets matcher ====

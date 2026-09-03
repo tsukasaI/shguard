@@ -7616,7 +7616,7 @@ fn extract_single_target(rest: &[NormalizedWord]) -> Result<Option<&NormalizedWo
 /// same-line `CDPATH=` assignment poisoning only a `Rel` target — `CDPATH`
 /// can redirect a relative `cd` arbitrarily but never affects an absolute
 /// one); every other shape (`Opaque`/`EscapesHome`/`DirStack`/
-/// `NamedUserHome`/`NamedUserHomeEscapes`) poisons.
+/// `NamedUserHome`/`NamedUserHomeSub`/`NamedUserHomeEscapes`) poisons.
 fn classify_cd_target(raw: &str, env: &Env) -> CwdOutcome {
     match lexical_normalize(raw) {
         PathForm::Home(_) => {
@@ -7636,6 +7636,7 @@ fn classify_cd_target(raw: &str, env: &Env) -> CwdOutcome {
         }
         PathForm::EscapesHome(_)
         | PathForm::NamedUserHome
+        | PathForm::NamedUserHomeSub(_)
         | PathForm::NamedUserHomeEscapes(_)
         | PathForm::DirStack(_)
         | PathForm::DirStackEscapesEmpty
@@ -9153,6 +9154,27 @@ mod tests {
         );
         let verdict = analyze_with_policy("AWS_SECRET_ACCESS_KEY=abc123 ls", &rules, &allowlist);
         assert_eq!(verdict.decision(), Decision::Ask);
+    }
+
+    // ==== Issue #427: `normalized_basename` target matcher, exercised
+    // through the real parser/normalizer (not the hand-built `argv` helper
+    // `rules.rs`'s own unit tests use) ====
+
+    #[test]
+    fn issue_427_brace_expanded_dotenv_variant_matches_through_the_real_parser() {
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[deny]]
+            id = "user-deny-dotenv-family"
+            reason = "test"
+            command = "cat"
+            targets = [{ normalized_basename = ".env" }]
+        "#,
+        );
+        // `.env{,.local}` brace-expands to two argv words, `.env` and
+        // `.env.local` -- both must independently reach the matcher.
+        let verdict = analyze_with_policy("cat .env{,.local}", &rules, &allowlist);
+        assert_eq!(verdict.decision(), Decision::Block);
     }
 
     // fable review of #430 (finding #1): a credential literal followed by
