@@ -61,6 +61,15 @@ fn write_config(contents: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     (dir, path)
 }
 
+/// Writes an empty (but valid, `UserConfig::parse("")` succeeds) config
+/// file into `home`'s default XDG path, so `load()` doesn't fail closed
+/// on tests that only care about self-protection (issue #433).
+fn write_empty_config_under_home(home: &std::path::Path) {
+    let config_dir = home.join(".config").join("shguard");
+    fs::create_dir_all(&config_dir).expect("config dir should create");
+    fs::write(config_dir.join("config.toml"), "").expect("config file should write");
+}
+
 // ==== Happy path ====
 
 #[test]
@@ -946,14 +955,15 @@ fn empty_home_does_not_fall_back_to_cwd_relative_config() {
 }
 
 #[test]
-fn absent_default_path_behaves_like_zero_config() {
+fn absent_default_config_fails_closed() {
     let home = tempdir().expect("tempdir should create");
-    // No .config/shguard/config.toml under home at all.
+    // No .config/shguard/config.toml under home at all (issue #433).
     let output = run_hook(
         &bash_command("gh pr view"),
         &[("HOME", home.path().to_str().unwrap())],
     );
-    assert_eq!(permission_decision(&output), "allow");
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(permission_reason(&output).contains("shguard init"));
 }
 
 #[test]
@@ -1330,6 +1340,7 @@ fn cp_onto_resolved_config_path_is_blocked() {
 #[test]
 fn cp_onto_literal_tilde_config_path_is_blocked() {
     let home = tempdir().expect("tempdir should create");
+    write_empty_config_under_home(home.path());
     let output = run_hook(
         &bash_command("cp evil.toml ~/.config/shguard/config.toml"),
         &[("HOME", home.path().to_str().unwrap())],
@@ -1343,6 +1354,7 @@ fn cp_onto_literal_tilde_config_path_is_blocked() {
 #[test]
 fn rm_recursive_on_config_directory_is_blocked() {
     let home = tempdir().expect("tempdir should create");
+    write_empty_config_under_home(home.path());
     let output = run_hook(
         &bash_command("rm -r ~/.config/shguard"),
         &[("HOME", home.path().to_str().unwrap())],
@@ -1356,6 +1368,7 @@ fn rm_recursive_on_config_directory_is_blocked() {
 #[test]
 fn mv_on_config_directory_is_blocked() {
     let home = tempdir().expect("tempdir should create");
+    write_empty_config_under_home(home.path());
     let output = run_hook(
         &bash_command("mv ~/.config/shguard /tmp/backup"),
         &[("HOME", home.path().to_str().unwrap())],
@@ -1366,6 +1379,7 @@ fn mv_on_config_directory_is_blocked() {
 #[test]
 fn unlink_onto_literal_tilde_config_path_is_blocked() {
     let home = tempdir().expect("tempdir should create");
+    write_empty_config_under_home(home.path());
     let output = run_hook(
         &bash_command("unlink ~/.config/shguard/config.toml"),
         &[("HOME", home.path().to_str().unwrap())],
@@ -1376,6 +1390,7 @@ fn unlink_onto_literal_tilde_config_path_is_blocked() {
 #[test]
 fn ln_symlink_swap_onto_literal_tilde_config_path_is_blocked() {
     let home = tempdir().expect("tempdir should create");
+    write_empty_config_under_home(home.path());
     let output = run_hook(
         &bash_command("ln -sf /dev/null ~/.config/shguard/config.toml"),
         &[("HOME", home.path().to_str().unwrap())],
@@ -1425,6 +1440,7 @@ fn sed_in_place_uppercase_i_onto_resolved_config_path_is_blocked() {
 #[test]
 fn output_redirect_onto_literal_tilde_config_path_is_blocked() {
     let home = tempdir().expect("tempdir should create");
+    write_empty_config_under_home(home.path());
     let output = run_hook(
         &bash_command("cat > ~/.config/shguard/config.toml"),
         &[("HOME", home.path().to_str().unwrap())],
@@ -1435,6 +1451,7 @@ fn output_redirect_onto_literal_tilde_config_path_is_blocked() {
 #[test]
 fn append_redirect_onto_literal_tilde_config_path_is_blocked() {
     let home = tempdir().expect("tempdir should create");
+    write_empty_config_under_home(home.path());
     let output = run_hook(
         &bash_command("cat >> ~/.config/shguard/config.toml"),
         &[("HOME", home.path().to_str().unwrap())],
@@ -1460,6 +1477,7 @@ fn output_redirect_onto_resolved_config_path_is_blocked() {
 #[test]
 fn output_redirect_onto_an_ordinary_path_is_unaffected() {
     let home = tempdir().expect("tempdir should create");
+    write_empty_config_under_home(home.path());
     let output = run_hook(
         &bash_command("echo hi > /tmp/ordinary-output.txt"),
         &[("HOME", home.path().to_str().unwrap())],

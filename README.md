@@ -211,10 +211,13 @@ check the exit code (`2`) first if you're scripting against this.
 
 ## Configuration
 
-By default shguard needs no setup — the embedded blocklist above is all
-that runs. To declare your own per-command policy, create
-`~/.config/shguard/config.toml` (or set `SHGUARD_CONFIG` to point at a
-different file).
+shguard needs a config file at the default path
+(`~/.config/shguard/config.toml`, or wherever `SHGUARD_CONFIG` points)
+before it will evaluate any command, whenever `$HOME` or
+`$XDG_CONFIG_HOME` is set (see "Discovery" below). Run `shguard init` to
+scaffold one; even an empty file is valid and runs the embedded blocklist
+alone. To declare your own per-command policy, edit that file (or set
+`SHGUARD_CONFIG` to point at a different one).
 
 ### Scaffolding a starter config: `shguard init`
 
@@ -857,11 +860,14 @@ project-local config file would sit inside the same repository the agent
 already has Bash/Write/Edit access to — a user-global path is a
 meaningfully higher-friction target to tamper with.
 
-If `SHGUARD_CONFIG` is set but the file it names can't be read or fails to
-parse/validate, shguard fails closed — every command asks for human
-confirmation until the config is fixed, rather than silently falling back
-to the embedded blocklist alone. A default path that simply doesn't exist
-is not an error: that's the ordinary zero-config case.
+If `SHGUARD_CONFIG` is set, or a default path resolves (via
+`XDG_CONFIG_HOME`/`HOME`) but nothing is found there, or the file it names
+can't be read or fails to parse/validate, shguard fails closed: every
+command asks for human confirmation until the config is fixed or created
+(`shguard init`), rather than silently falling back to the embedded
+blocklist alone. The only case that still runs embedded-only is when no
+config path can be resolved at all (`SHGUARD_CONFIG` unset and neither
+`XDG_CONFIG_HOME` nor `HOME` usable).
 
 ### Protecting the config file itself
 
