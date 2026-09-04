@@ -154,6 +154,12 @@ sudo mv shguard-x86_64-unknown-linux-gnu /usr/local/bin/shguard
 
 (On macOS, stock `sha256sum` isn't installed; use `shasum -a 256 -c SHA256SUMS --ignore-missing` instead.)
 
+Then scaffold a config file (see "Configuration" below):
+
+```bash
+shguard init
+```
+
 ### Claude Code registration
 
 Add to `settings.json`:
@@ -192,8 +198,8 @@ $ echo $?
 
 `shguard check <command>` runs the command through the same evaluation
 path (`analyze_with_policy`) a real PreToolUse hook invocation uses,
-including any `~/.config/shguard/config.toml` policy, so its output always
-matches what the hook itself would decide. It exits `1` on Block (useful
+including the required `~/.config/shguard/config.toml` policy, so its
+output always matches what the hook itself would decide. It exits `1` on Block (useful
 for a CI step asserting a command is rejected), `0` on Allow or Ask, and
 `2` on a usage error (missing/extra arguments, a non-UTF-8 command) or if
 the config itself fails to load. Add `--json` for machine-readable output
@@ -213,11 +219,11 @@ check the exit code (`2`) first if you're scripting against this.
 
 shguard needs a config file at the default path
 (`~/.config/shguard/config.toml`, or wherever `SHGUARD_CONFIG` points)
-before it will evaluate any command, whenever `$HOME` or
-`$XDG_CONFIG_HOME` is set (see "Discovery" below). Run `shguard init` to
-scaffold one; even an empty file is valid and runs the embedded blocklist
-alone. To declare your own per-command policy, edit that file (or set
-`SHGUARD_CONFIG` to point at a different one).
+before it will evaluate any command, whenever `SHGUARD_CONFIG`,
+`$XDG_CONFIG_HOME`, or `$HOME` is set (see "Discovery" below). Run
+`shguard init` to scaffold one; even an empty file is valid and runs the
+embedded blocklist alone. To declare your own per-command policy, edit
+that file (or set `SHGUARD_CONFIG` to point at a different one).
 
 ### Scaffolding a starter config: `shguard init`
 

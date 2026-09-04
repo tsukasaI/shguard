@@ -820,7 +820,12 @@ fn shguard_config_pointing_at_missing_file_fails_closed() {
         &[("SHGUARD_CONFIG", missing_path.to_str().unwrap())],
     );
     assert_eq!(permission_decision(&output), "ask");
-    assert!(!permission_reason(&output).is_empty());
+    // An explicit SHGUARD_CONFIG naming a missing file is ConfigError::Io,
+    // not ConfigError::Missing (issue #433): the user committed to an
+    // exact location, so its absence is theirs to fix directly, not a
+    // "never configured, run shguard init" case.
+    assert!(permission_reason(&output).contains("could not read"));
+    assert!(!permission_reason(&output).contains("shguard init"));
 }
 
 // A present-but-non-UTF-8 `SHGUARD_CONFIG` must fail closed (hard error),
@@ -960,6 +965,37 @@ fn absent_default_config_fails_closed() {
     // No .config/shguard/config.toml under home at all (issue #433).
     let output = run_hook(
         &bash_command("gh pr view"),
+        &[("HOME", home.path().to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(permission_reason(&output).contains("shguard init"));
+}
+
+#[test]
+fn absent_default_config_via_xdg_config_home_fails_closed() {
+    let home = tempdir().expect("tempdir should create");
+    let xdg = tempdir().expect("tempdir should create");
+    // No shguard/config.toml under the XDG dir at all (issue #433).
+    let output = run_hook(
+        &bash_command("gh pr view"),
+        &[
+            ("HOME", home.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", xdg.path().to_str().unwrap()),
+        ],
+    );
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(permission_reason(&output).contains("shguard init"));
+}
+
+// The Missing state (issue #433) returns before the embedded blocklist or
+// self-protection rules are built at all, so it suppresses their `deny`
+// verdicts down to `ask` too, not just user-declared ones -- pinned here
+// so a regression back to silently running embedded-only is caught.
+#[test]
+fn absent_default_config_still_asks_for_a_command_the_embedded_blocklist_would_deny() {
+    let home = tempdir().expect("tempdir should create");
+    let output = run_hook(
+        &bash_command("cp evil.toml ~/.config/shguard/config.toml"),
         &[("HOME", home.path().to_str().unwrap())],
     );
     assert_eq!(permission_decision(&output), "ask");

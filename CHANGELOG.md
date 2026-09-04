@@ -21,6 +21,12 @@ All notable changes to this project are documented in this file.
   until `shguard init` is run once. CI pipelines running
   `shguard --check-config`/`shguard check` against a checkout with no
   deployed config will start seeing exit code 2 instead of 0.
+- This "missing config" state suppresses the embedded blocklist's own
+  `deny` verdicts down to `ask` too, not only user-declared rules: the
+  merged policy is never built until a config file exists.
+- `ConfigError` is now `#[non_exhaustive]` (adding `ConfigError::Missing`
+  would otherwise be a breaking change for any downstream crate matching
+  on it exhaustively).
 
 ## [0.6.2] - 2026-09-04
 

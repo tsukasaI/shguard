@@ -100,12 +100,13 @@ use crate::rules::{Allowlist, Rules, UserConfig, merge_user_config};
 /// absent config and use embedded-only" once any config path was resolved,
 /// explicit or default (see the module docs' fail-closed policy).
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ConfigError {
-    /// `path` was explicitly named via `SHGUARD_CONFIG`, or was found at
-    /// the default location but could not be read (or does not exist —
-    /// an explicit `SHGUARD_CONFIG` naming a missing file is this variant,
-    /// not [`ConfigError::Missing`], since the user committed to an exact
-    /// location; see [`Policy::load`]).
+    /// `path` could not be read: either `SHGUARD_CONFIG` named it
+    /// explicitly (including naming a missing file — the user committed
+    /// to an exact location, so that case is this variant, not
+    /// [`ConfigError::Missing`]), or something exists at the default
+    /// location but `lstat`/read failed; see [`Policy::load`].
     #[error("could not read {path:?}: {source}")]
     Io {
         path: PathBuf,
@@ -115,8 +116,10 @@ pub enum ConfigError {
     /// The default config path (`XDG_CONFIG_HOME`/`HOME`-derived, never an
     /// explicit `SHGUARD_CONFIG`, see [`ConfigError::Io`] above) resolved
     /// to a location where `lstat` cleanly reports nothing exists at all
-    /// (issue #433).
-    #[error("no config file at {path:?}; run `shguard init` to create one")]
+    /// (issue #433). This state also suppresses every embedded and
+    /// self-protection `deny` rule, not just user-declared ones — the
+    /// merged policy is never built at all until a config file exists.
+    #[error("no config file at {path:?}: create one at your own shell with `shguard init`")]
     Missing { path: PathBuf },
     /// The config file's contents (or the internally-generated
     /// self-protection rules, in the unlikely event their ids collide
@@ -441,8 +444,8 @@ impl Policy {
     /// config contributed — deliberately: no embedded rule uses `url_host`
     /// today (checked `rules/*.toml`), but if a future shipped rule ever
     /// did mix the two shapes, this repo's own CI running
-    /// `shguard --check-config` against a zero-config invocation is
-    /// exactly what should catch that regression before it ships. A rule
+    /// `shguard --check-config` against a `shguard init`-scaffolded config
+    /// is exactly what should catch that regression before it ships. A rule
     /// id flagged this way isn't one a caller can act on themselves the
     /// way `--check-config`'s own "replace the old entry" remediation text
     /// assumes (a user can't edit or override an embedded rule — a
@@ -1453,8 +1456,8 @@ mod tests {
         // A best-effort smoke test: with no discovery inputs, resolve_config_path
         // returns None, so Policy::load's own env-reading path can't be driven
         // deterministically here without mutating process env (test-unsafe) —
-        // covered end-to-end instead by tests/user_config.rs via the real
-        // binary with controlled env vars. This test only exercises the pure
+        // covered end-to-end instead by tests/hook_io.rs via the real
+        // binary with all three env vars stripped. This test only exercises the pure
         // resolver, already covered above; kept as a named anchor for anyone
         // looking for load()'s test coverage from this module.
         assert_eq!(Policy::resolve_config_path(None, None, None), None);
