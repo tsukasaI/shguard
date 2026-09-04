@@ -13,6 +13,11 @@ All notable changes to this project are documented in this file.
   `SHGUARD_CONFIG` naming a missing file already did: every command asks
   for confirmation until a config file is created (even an empty one via
   `shguard init`).
+- `shguard init --force` wasn't covered by any self-protection rule, so an
+  adversarially-prompted agent could run it to erase every user-defined
+  `deny`/`ask` rule in one hook-allowed command. `shguard init`, with or
+  without `--force`, is now denied by the hook whenever a real config file
+  already exists (#435).
 
 ### Compatibility notes
 

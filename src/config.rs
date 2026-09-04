@@ -89,6 +89,12 @@
 //! redirection blind spot — `crate::gate` never analyses what a
 //! redirection target overwrites) and any `SHGUARD_CONFIG`-via-shell-
 //! profile vector are not caught by either.
+//!
+//! [`SELF_PROTECT_INIT_TOML`] adds a third, non-directory-scoped `[[deny]]`
+//! rule against `shguard init` itself (with or without `--force`, issue
+//! #435) — `Policy::init`'s own `--force` overwrite isn't a write-capable
+//! *shell* primitive the rules above's target-matching can see, since the
+//! target path never appears on `shguard init`'s own command line.
 
 use std::collections::HashSet;
 use std::io::Write as _;
@@ -346,6 +352,17 @@ impl Policy {
                 let self_protection = UserConfig::parse(&toml)?;
                 (rules, allowlist) = merge_user_config(rules, allowlist, self_protection)?;
             }
+            // Reached only when a real config file was just read above (the
+            // `NotFound` arms return early) -- so `shguard init` here would
+            // always be overwriting an existing, real config, not the
+            // first-run case. First-run itself never reaches this deny: it
+            // hits one of the `NotFound` arms above instead, which already
+            // fails the whole load closed (issue #433/#434's own posture),
+            // giving every command -- `shguard init` included -- the
+            // ordinary fail-closed `ask` rather than this rule's `deny`
+            // (issue #435).
+            let init_protection = UserConfig::parse(SELF_PROTECT_INIT_TOML)?;
+            (rules, allowlist) = merge_user_config(rules, allowlist, init_protection)?;
         }
 
         // Caught here rather than left to `decision_log::append`'s own
@@ -599,6 +616,21 @@ fn self_protection_directories(path: &Path) -> Result<Vec<(String, PathBuf)>, Co
 
     Ok(directories)
 }
+
+/// Denies `shguard init`, with or without `--force` (issue #435): unlike
+/// the directory-scoped rules below, this one isn't tied to any particular
+/// `config_dir` hop, so it's generated once rather than per-hop. No
+/// `targets` — `shguard init` takes no path argument to match against; the
+/// danger is the subcommand itself, since `--force` unconditionally
+/// overwrites the config file with the comment-only starter template,
+/// erasing every user `deny`/`ask` rule in one command.
+const SELF_PROTECT_INIT_TOML: &str = r#"
+[[deny]]
+id = "shguard-self-protect-init"
+reason = "shguard init/--force overwrites the config file, erasing every user-defined rule; run this manually if you mean it"
+command = "shguard"
+required_tokens = ["init"]
+"#;
 
 /// Generates `[[deny]]`-array TOML text protecting `config_dir` (and
 /// everything under it) from common write-capable commands run through
@@ -1226,6 +1258,35 @@ mod tests {
             "-name",
             "config.toml"
         ]));
+    }
+
+    #[test]
+    fn self_protect_init_rule_blocks_shguard_init_with_and_without_force() {
+        use crate::normalize::NormalizedWord;
+
+        let user_config = UserConfig::parse(SELF_PROTECT_INIT_TOML).unwrap();
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let (rules, _) = merge_user_config(blocklist, allowlist, user_config).unwrap();
+
+        let decision = |argv: &[&str]| {
+            let words: Vec<NormalizedWord> =
+                argv.iter().map(|w| NormalizedWord::resolved(*w)).collect();
+            rules
+                .match_command(&words)
+                .map(|rule| (rule.id().as_str(), rule.decision()))
+        };
+
+        assert_eq!(
+            decision(&["shguard", "init", "--force"]),
+            Some(("shguard-self-protect-init", Decision::Block))
+        );
+        assert_eq!(
+            decision(&["shguard", "init"]),
+            Some(("shguard-self-protect-init", Decision::Block))
+        );
+        assert_eq!(decision(&["shguard", "--version"]), None);
+        assert_eq!(decision(&["shguard", "check", "init"]), None);
     }
 
     #[test]
