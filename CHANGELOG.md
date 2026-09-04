@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## [0.6.3] - 2026-09-04
 
 ### Security
 
@@ -18,6 +18,11 @@ All notable changes to this project are documented in this file.
   `deny`/`ask` rule in one hook-allowed command. `shguard init`, with or
   without `--force`, is now denied by the hook whenever a real config file
   already exists (#435).
+- A relative `XDG_CONFIG_HOME` or `HOME` value used to resolve the config
+  path relative to the current working directory instead of being treated
+  as unset, letting an agent that can write anywhere under the cwd get its
+  own file loaded as the user's config (#436, the same shape #59 already
+  closed for an empty value).
 
 ### Compatibility notes
 
