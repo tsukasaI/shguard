@@ -27,20 +27,23 @@
 //!
 //! # Fail-closed policy
 //!
-//! `SHGUARD_CONFIG` set (to anything), or the default path existing but
-//! unreadable/unparseable/unmergeable, is a hard [`ConfigError`] —
-//! [`Policy::load`]'s caller refuses to evaluate any command until it's
-//! fixed, the same posture `Rules::embedded`'s own load failure already
-//! has (`crate::gate::analyze`). The default path simply not existing at
-//! all — `std::fs::symlink_metadata` itself returning
-//! `io::ErrorKind::NotFound`, `SHGUARD_CONFIG` unset — is the ordinary
-//! "never configured" case: silently proceed embedded-only, matching
-//! ripgrep's `RIPGREP_CONFIG_PATH` precedent. Anything else the default
-//! path could be — a dangling symlink, a directory, an unreadable file,
-//! or any other `lstat` error — is a hard failure too, not silently
-//! skipped (issue #39): `symlink_metadata` (not `read_to_string`'s own
-//! error) is what decides "nothing configured" vs. "something's there but
-//! broken".
+//! `SHGUARD_CONFIG` set (to anything), or a resolved config path
+//! (explicit or default) existing but unreadable/unparseable/unmergeable,
+//! is a hard [`ConfigError`] — [`Policy::load`]'s caller refuses to
+//! evaluate any command until it's fixed, the same posture
+//! `Rules::embedded`'s own load failure already has
+//! (`crate::gate::analyze`). A *resolved* default path simply not
+//! existing at all (`std::fs::symlink_metadata` itself returning
+//! `io::ErrorKind::NotFound`) is a hard failure too, not a silent
+//! embedded-only fallback (issue #433). The only case that still runs
+//! embedded-only is [`Policy::resolve_config_path`] itself returning
+//! `None`, meaning no config *location* is even resolvable
+//! (`SHGUARD_CONFIG` unset, and neither `XDG_CONFIG_HOME` nor `HOME`
+//! usable) — see that function's own docs. Anything else a resolved
+//! default path could be — a dangling symlink, a directory, an unreadable
+//! file, or any other `lstat` error — is a hard failure too
+//! (issue #39): `symlink_metadata` (not `read_to_string`'s own error) is
+//! what decides "nothing there" vs. "something's there but broken".
 //!
 //! # Self-protecting the config file
 //!
@@ -93,20 +96,31 @@ use std::path::{Path, PathBuf};
 use crate::rules::{Allowlist, Rules, UserConfig, merge_user_config};
 
 /// Everything that can go wrong loading a user policy. Every variant is a
-/// hard failure — [`Policy::load`] never falls back to "ignore the bad
-/// config and use embedded-only" once a config path was found (see the
-/// module docs' fail-closed policy).
+/// hard failure — [`Policy::load`] never falls back to "ignore the bad or
+/// absent config and use embedded-only" once any config path was resolved,
+/// explicit or default (see the module docs' fail-closed policy).
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ConfigError {
-    /// `path` exists (or was explicitly named via `SHGUARD_CONFIG`) but
-    /// could not be read for a reason other than "it doesn't exist and
-    /// nothing explicitly pointed at it" (see [`Policy::load`]).
+    /// `path` could not be read: either `SHGUARD_CONFIG` named it
+    /// explicitly (including naming a missing file — the user committed
+    /// to an exact location, so that case is this variant, not
+    /// [`ConfigError::Missing`]), or something exists at the default
+    /// location but `lstat`/read failed; see [`Policy::load`].
     #[error("could not read {path:?}: {source}")]
     Io {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
+    /// The default config path (`XDG_CONFIG_HOME`/`HOME`-derived, never an
+    /// explicit `SHGUARD_CONFIG`, see [`ConfigError::Io`] above) resolved
+    /// to a location where `lstat` cleanly reports nothing exists at all
+    /// (issue #433). This state also suppresses every embedded and
+    /// self-protection `deny` rule, not just user-declared ones — the
+    /// merged policy is never built at all until a config file exists.
+    #[error("no config file at {path:?}: create one at your own shell with `shguard init`")]
+    Missing { path: PathBuf },
     /// The config file's contents (or the internally-generated
     /// self-protection rules, in the unlikely event their ids collide
     /// with a user-declared one) failed to parse, validate, or merge.
@@ -262,10 +276,11 @@ impl Policy {
     /// # Errors
     ///
     /// Returns [`ConfigError`] if `SHGUARD_CONFIG` is set (including to a
-    /// non-UTF-8 value) but the file it names cannot be read, or if a found
-    /// config file (explicit or default) fails to parse/validate/merge, or
-    /// if the default path exists but fails to read for a reason other
-    /// than "does not exist".
+    /// non-UTF-8 value) but the file it names cannot be read or does not
+    /// exist, if the resolved default path exists but fails to read, if
+    /// the resolved default path resolves to nothing at all
+    /// ([`ConfigError::Missing`]), or if a found config file (explicit or
+    /// default) fails to parse/validate/merge.
     pub fn load() -> Result<Self, ConfigError> {
         let (shguard_config, xdg_config_home, home) = Self::read_env_paths()?;
         let explicit = shguard_config.is_some();
@@ -281,20 +296,16 @@ impl Policy {
 
         let mut decision_log_path: Option<PathBuf> = None;
         // `symlink_metadata` (`lstat`), not `read_to_string`'s own error,
-        // decides "nothing configured" vs. "something's there but broken"
-        // (issue #39): a dangling symlink makes `read_to_string` fail with
-        // the same `NotFound` kind a genuinely absent path does, so only a
+        // decides "nothing at this path" vs. "something's there but
+        // broken": a dangling symlink makes `read_to_string` fail with the
+        // same `NotFound` kind a genuinely absent path does, so only a
         // clean `NotFound` from `lstat` itself -- meaning there truly is no
-        // file, symlink, or anything else at this path -- gets the silent
-        // embedded-only fallback, and only for the (non-explicit) default
-        // path (the guard below): an explicit `SHGUARD_CONFIG` naming a
-        // `NotFound` path instead falls through to the plain `Err(err)` arm
-        // and returns `ConfigError::Io`, the same as any other `lstat`
-        // failure.
+        // file, symlink, or anything else at this path -- takes the first
+        // arm below (issues #39, #433).
         let (rules, allowlist) = match &path {
             Some(path) => match std::fs::symlink_metadata(path) {
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound && !explicit => {
-                    (blocklist, allowlist)
+                    return Err(ConfigError::Missing { path: path.clone() });
                 }
                 Err(err) => {
                     return Err(ConfigError::Io {
@@ -433,8 +444,8 @@ impl Policy {
     /// config contributed — deliberately: no embedded rule uses `url_host`
     /// today (checked `rules/*.toml`), but if a future shipped rule ever
     /// did mix the two shapes, this repo's own CI running
-    /// `shguard --check-config` against a zero-config invocation is
-    /// exactly what should catch that regression before it ships. A rule
+    /// `shguard --check-config` against a `shguard init`-scaffolded config
+    /// is exactly what should catch that regression before it ships. A rule
     /// id flagged this way isn't one a caller can act on themselves the
     /// way `--check-config`'s own "replace the old entry" remediation text
     /// assumes (a user can't edit or override an embedded rule — a
@@ -1445,8 +1456,8 @@ mod tests {
         // A best-effort smoke test: with no discovery inputs, resolve_config_path
         // returns None, so Policy::load's own env-reading path can't be driven
         // deterministically here without mutating process env (test-unsafe) —
-        // covered end-to-end instead by tests/user_config.rs via the real
-        // binary with controlled env vars. This test only exercises the pure
+        // covered end-to-end instead by tests/hook_io.rs via the real
+        // binary with all three env vars stripped. This test only exercises the pure
         // resolver, already covered above; kept as a named anchor for anyone
         // looking for load()'s test coverage from this module.
         assert_eq!(Policy::resolve_config_path(None, None, None), None);
