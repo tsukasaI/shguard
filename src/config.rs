@@ -353,7 +353,12 @@ impl Policy {
             // Reached only when a real config file was just read above (the
             // `NotFound` arms return early) -- so `shguard init` here would
             // always be overwriting an existing, real config, not the
-            // legitimate first-run case (issue #435).
+            // first-run case. First-run itself never reaches this deny: it
+            // hits one of the `NotFound` arms above instead, which already
+            // fails the whole load closed (issue #433/#434's own posture),
+            // giving every command -- `shguard init` included -- the
+            // ordinary fail-closed `ask` rather than this rule's `deny`
+            // (issue #435).
             let init_protection = UserConfig::parse(SELF_PROTECT_INIT_TOML)?;
             (rules, allowlist) = merge_user_config(rules, allowlist, init_protection)?;
         }
@@ -1240,15 +1245,24 @@ mod tests {
         let allowlist = Allowlist::embedded().unwrap();
         let (rules, _) = merge_user_config(blocklist, allowlist, user_config).unwrap();
 
-        let matches = |argv: &[&str]| {
+        let decision = |argv: &[&str]| {
             let words: Vec<NormalizedWord> =
                 argv.iter().map(|w| NormalizedWord::resolved(*w)).collect();
-            rules.match_command(&words).is_some()
+            rules
+                .match_command(&words)
+                .map(|rule| (rule.id().as_str(), rule.decision()))
         };
 
-        assert!(matches(&["shguard", "init", "--force"]));
-        assert!(matches(&["shguard", "init"]));
-        assert!(!matches(&["shguard", "--version"]));
+        assert_eq!(
+            decision(&["shguard", "init", "--force"]),
+            Some(("shguard-self-protect-init", Decision::Block))
+        );
+        assert_eq!(
+            decision(&["shguard", "init"]),
+            Some(("shguard-self-protect-init", Decision::Block))
+        );
+        assert_eq!(decision(&["shguard", "--version"]), None);
+        assert_eq!(decision(&["shguard", "check", "init"]), None);
     }
 
     #[test]

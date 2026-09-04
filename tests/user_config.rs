@@ -1412,6 +1412,48 @@ fn mv_on_config_directory_is_blocked() {
     assert_eq!(permission_decision(&output), "deny");
 }
 
+// `shguard init --force` unconditionally overwrites the config file with
+// the comment-only starter template, erasing every user rule -- and unlike
+// the primitives above, no target ever appears on `shguard init`'s own
+// command line for a directory-scoped rule to match (issue #435).
+#[test]
+fn shguard_init_force_onto_an_existing_config_is_denied() {
+    let home = tempdir().expect("tempdir should create");
+    write_empty_config_under_home(home.path());
+    let output = run_hook(
+        &bash_command("shguard init --force"),
+        &[("HOME", home.path().to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+    assert!(permission_reason(&output).contains("shguard-self-protect-init"));
+}
+
+#[test]
+fn shguard_init_without_force_onto_an_existing_config_is_also_denied() {
+    let home = tempdir().expect("tempdir should create");
+    write_empty_config_under_home(home.path());
+    let output = run_hook(
+        &bash_command("shguard init"),
+        &[("HOME", home.path().to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+}
+
+// With no config resolvable at all, `Policy::load` itself fails closed
+// (issue #433/#434) before the self-protection rules are ever generated --
+// `shguard init` on a genuinely fresh machine gets the same `ask` every
+// other command gets, not a spurious `deny` from a rule that was never
+// meant to see this case.
+#[test]
+fn shguard_init_with_no_config_yet_gets_the_ordinary_fail_closed_ask() {
+    let home = tempdir().expect("tempdir should create");
+    let output = run_hook(
+        &bash_command("shguard init --force"),
+        &[("HOME", home.path().to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "ask");
+}
+
 #[test]
 fn unlink_onto_literal_tilde_config_path_is_blocked() {
     let home = tempdir().expect("tempdir should create");

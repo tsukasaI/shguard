@@ -240,7 +240,10 @@ Every line in the generated file is a comment: config layers additively
 on top of the embedded blocklist (there's no mechanism to edit or disable
 a built-in rule by id), so copying a reference entry to make it active
 needs a fresh, non-colliding `id` first. Refuses to overwrite an existing
-file; pass `--force` to overwrite it anyway.
+file; pass `--force` to overwrite it anyway. Once a config exists,
+shguard's own self-protection (below) denies `shguard init` itself via
+the hook, `--force` included, so this is only reachable by running it
+directly rather than through the guarded agent.
 
 ```toml
 [[ask]]
@@ -891,6 +894,13 @@ not a gap (issue #101). Every command in this list matches a file
 *under* the config directory and the bare directory path with no
 trailing slash alike (issue #22/#28 item 2).
 
+Separately, `shguard init`, with or without `--force`, is denied outright
+whenever a real config file already exists: `Policy::init --force`
+unconditionally overwrites the config with the comment-only starter
+template, erasing every user rule, and no path argument on `shguard
+init`'s own command line lets the target-matching rules above see it
+(issue #435).
+
 Separately, `rm -r`/`mv`/`rsync --delete` against an *ancestor* of the
 config directory (`~/.config`, `~`, and their resolved equivalents) asks
 — deleting or renaming an ancestor takes the config directory with it,
@@ -923,6 +933,12 @@ This is a partial mitigation, not a complete one:
   header, not as an argv token) is not caught — the same argv-visibility
   limit the curl `-xURL` short-proxy-flag gap documents elsewhere in this
   README.
+- The `shguard init` self-protection rule matches on the command name
+  `shguard`, so it is name-based like every other rule in this project:
+  operands fed via `xargs` (`echo init --force | xargs shguard`) are
+  invisible to `required_tokens`, and running a renamed copy, a symlink,
+  or `cargo run -- init --force` from a checkout all bypass it the same
+  way any name-based rule can be bypassed.
 
 ### What's not configurable (yet)
 
