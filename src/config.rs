@@ -6,11 +6,12 @@
 //! # Discovery
 //!
 //! `SHGUARD_CONFIG` env var (any value counts as "set", even `""`) >
-//! `$XDG_CONFIG_HOME/shguard/config.toml` (an empty `XDG_CONFIG_HOME`
-//! counts as unset, per the XDG spec) > `$HOME/.config/shguard/config.toml`
-//! (an empty `HOME` counts as unset too, same as `XDG_CONFIG_HOME` — an
-//! empty string is never treated as "search relative to the current
-//! working directory", issue #59).
+//! `$XDG_CONFIG_HOME/shguard/config.toml` (an empty or non-absolute
+//! `XDG_CONFIG_HOME` counts as unset, per the XDG spec) >
+//! `$HOME/.config/shguard/config.toml` (an empty `HOME` counts as unset
+//! too, same as `XDG_CONFIG_HOME` — neither an empty string nor a relative
+//! path is ever treated as "search relative to the current working
+//! directory", issues #59 and #436).
 //! No project-local `.shguard.toml` auto-discovery: shguard's own threat
 //! model includes "the agent it's guarding might be adversarially
 //! prompted to defeat it," and a project-local config file sits inside
@@ -245,7 +246,7 @@ impl Policy {
     }
 
     /// Pure resolution logic — see the module docs' "Discovery" section
-    /// for the precedence order and the XDG empty-string convention.
+    /// for the precedence order and the empty-or-non-absolute convention.
     /// `None` when none of the three inputs yield a path (the ordinary
     /// "never configured, no `$HOME` either" case — see the module docs
     /// on why this is not itself a failure).
@@ -257,15 +258,16 @@ impl Policy {
         if let Some(path) = shguard_config {
             return Some(PathBuf::from(path));
         }
-        if let Some(xdg) = xdg_config_home.filter(|s| !s.is_empty()) {
+        if let Some(xdg) = xdg_config_home.filter(|s| !s.is_empty() && Path::new(s).is_absolute()) {
             return Some(Path::new(xdg).join("shguard").join("config.toml"));
         }
-        home.filter(|s| !s.is_empty()).map(|home| {
-            Path::new(home)
-                .join(".config")
-                .join("shguard")
-                .join("config.toml")
-        })
+        home.filter(|s| !s.is_empty() && Path::new(s).is_absolute())
+            .map(|home| {
+                Path::new(home)
+                    .join(".config")
+                    .join("shguard")
+                    .join("config.toml")
+            })
     }
 
     /// Reads `SHGUARD_CONFIG`/`XDG_CONFIG_HOME`/`HOME`, resolves the
@@ -1008,6 +1010,19 @@ mod tests {
         );
     }
 
+    // Issue #436: a relative `XDG_CONFIG_HOME` must not resolve
+    // cwd-relative — the same "unset" treatment
+    // `empty_xdg_config_home_counts_as_unset` already pins for an empty
+    // value, extended to any non-absolute one.
+    #[test]
+    fn relative_xdg_config_home_counts_as_unset() {
+        let path = Policy::resolve_config_path(None, Some("relative"), Some("/home"));
+        assert_eq!(
+            path,
+            Some(PathBuf::from("/home/.config/shguard/config.toml"))
+        );
+    }
+
     #[test]
     fn home_used_as_last_resort() {
         let path = Policy::resolve_config_path(None, None, Some("/home"));
@@ -1024,6 +1039,15 @@ mod tests {
     #[test]
     fn empty_home_counts_as_unset() {
         let path = Policy::resolve_config_path(None, None, Some(""));
+        assert_eq!(path, None);
+    }
+
+    // Issue #436: a relative `HOME` must not resolve cwd-relative either —
+    // the same extension `relative_xdg_config_home_counts_as_unset` already
+    // pins for `XDG_CONFIG_HOME`.
+    #[test]
+    fn relative_home_counts_as_unset() {
+        let path = Policy::resolve_config_path(None, None, Some("relative"));
         assert_eq!(path, None);
     }
 
