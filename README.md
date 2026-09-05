@@ -213,8 +213,8 @@ fi
 (`printf '%s\n'`, not `echo`, relays `$output` verbatim: some `/bin/sh`
 implementations interpret backslash escapes in `echo`'s argument, which
 would corrupt a `permissionDecisionReason` that itself contains a
-backslash or newline, for example from a heredoc or `printf`-format
-command being evaluated.)
+backslash or newline, for example a user-authored rule `reason`, or a
+TOML parse error message quoting the offending config line.)
 
 Then point `settings.json`'s `command` at the wrapper script (an
 absolute path, not a bare name relying on `PATH`, which would reproduce
