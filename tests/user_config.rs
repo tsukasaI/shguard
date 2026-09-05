@@ -23,6 +23,7 @@ fn run_hook(stdin: &str, envs: &[(&str, &str)]) -> Value {
     cmd.env_remove("SHGUARD_CONFIG")
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("HOME")
+        .env_remove("SHGUARD_STRICT_CONFIG")
         .env_remove("SHGUARD_TEST_PANIC")
         .env_remove("SHGUARD_TEST_MEM_LIMIT_MB");
     for (key, value) in envs {
@@ -826,6 +827,42 @@ fn shguard_config_pointing_at_missing_file_fails_closed() {
     // "never configured, run shguard init" case.
     assert!(permission_reason(&output).contains("could not read"));
     assert!(!permission_reason(&output).contains("shguard init"));
+}
+
+/// Issue #440: `SHGUARD_STRICT_CONFIG` upgrades a config-load failure from
+/// the default `ask` to `deny` — a missing file (`ConfigError::Io`, see
+/// `shguard_config_pointing_at_missing_file_fails_closed` above).
+#[test]
+fn shguard_strict_config_missing_file_denies() {
+    let dir = tempdir().expect("tempdir should create");
+    let missing_path = dir.path().join("does-not-exist.toml");
+
+    let output = run_hook(
+        &bash_command("echo hi"),
+        &[
+            ("SHGUARD_CONFIG", missing_path.to_str().unwrap()),
+            ("SHGUARD_STRICT_CONFIG", "1"),
+        ],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+    assert!(!permission_reason(&output).is_empty());
+}
+
+/// Same as above, but for malformed TOML (`ConfigError::Parse`) rather than
+/// a missing file — both config-load failure shapes must honour strict mode.
+#[test]
+fn shguard_strict_config_invalid_toml_denies() {
+    let (_dir, config_path) = write_config("this is not [valid toml");
+
+    let output = run_hook(
+        &bash_command("echo hi"),
+        &[
+            ("SHGUARD_CONFIG", config_path.to_str().unwrap()),
+            ("SHGUARD_STRICT_CONFIG", "1"),
+        ],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+    assert!(!permission_reason(&output).is_empty());
 }
 
 // A present-but-non-UTF-8 `SHGUARD_CONFIG` must fail closed (hard error),
