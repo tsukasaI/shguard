@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## [0.6.4] - 2026-09-05
 
 ### Security
 
@@ -18,6 +18,10 @@ All notable changes to this project are documented in this file.
   `deny`/`ask` rule in one hook-allowed command. `shguard init`, with or
   without `--force`, is now denied by the hook whenever a real config file
   already exists (#435).
+- `XDG_CONFIG_HOME` set to a relative value was treated as usable, resolving
+  the config path cwd-relative rather than falling through to the
+  `HOME`-derived default (#436) - the same class of gap issue #59 already
+  closed for an empty `HOME`. Now rejected the same way an empty value is.
 - A missing or malformed user config resolved to `ask`, not `deny` (#440) -
   a confirmation dialog a hurried human can click through, not hard enough
   for a strict deployment. Setting the new `SHGUARD_STRICT_CONFIG` env var
