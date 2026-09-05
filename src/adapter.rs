@@ -132,11 +132,9 @@ pub fn fail_closed(reason: &str) -> Value {
 }
 
 /// The stricter fail-closed `deny` output (issue #440's `SHGUARD_STRICT_CONFIG`):
-/// same shape as [`fail_closed`], but `ask` is a confirmation dialog a
-/// hurried human can click through, which isn't hard enough for a
-/// config-load failure under strict mode. Deliberately not the default —
-/// see the composition root's own doc for why only the config-load path
-/// opts into this.
+/// same shape as [`fail_closed`], used only for a config-load failure under
+/// strict mode. See README's "Discovery" section for why this is opt-in
+/// and scoped to config-load failure alone.
 #[must_use]
 pub fn fail_closed_deny(reason: &str) -> Value {
     output_json(PermissionDecision::Deny, reason, None)

@@ -32,6 +32,16 @@ All notable changes to this project are documented in this file.
 - `ConfigError` is now `#[non_exhaustive]` (adding `ConfigError::Missing`
   would otherwise be a breaking change for any downstream crate matching
   on it exhaustively).
+- A missing or malformed user config resolved to `ask`, not `deny` (#440) -
+  a confirmation dialog a hurried human can click through, not hard enough
+  for a strict deployment. Setting the new `SHGUARD_STRICT_CONFIG` env var
+  (any value counts as set) upgrades this specific failure to `deny`. It
+  does not cover the separate PATH-miss/crash gap: if the `shguard` binary
+  itself never runs (not on `PATH`, killed before producing output), the
+  PreToolUse hook contract reads its empty stdout as an implicit allow, and
+  no in-process flag can change that - every hook registration needs a
+  wrapper that checks the exit code and non-empty stdout itself (see
+  README's "Wrapping the binary to fail closed" section).
 
 ## [0.6.2] - 2026-09-04
 

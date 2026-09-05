@@ -422,11 +422,13 @@ fn backtrace_requested() -> bool {
 /// this var to explicitly turn strictness off.
 ///
 /// Scope: this only hardens the config-load-failure path inside `run`. It
-/// does not change the panic/watchdog/stdin-read fail-closed paths above,
-/// which stay `ask` regardless — those are a different failure class this
-/// var isn't meant to cover (see README's "Protecting the config file
-/// itself" section, and the caller-wrapper requirement documented there,
-/// for the PATH-miss/crash gap this can't close either).
+/// does not change `main`'s panic/watchdog fallback paths or `run`'s own
+/// stdin-read failure path, which stay `ask` regardless (including a
+/// config load that itself panics or hangs) — those are a different
+/// failure class this var isn't meant to cover (see README's "Discovery"
+/// section, and the "Wrapping the binary to fail closed" section's
+/// caller-wrapper requirement, for the PATH-miss/crash gap this can't
+/// close either).
 fn strict_config_requested() -> bool {
     std::env::var_os("SHGUARD_STRICT_CONFIG").is_some()
 }
