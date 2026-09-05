@@ -23,6 +23,7 @@ fn run_hook(stdin: &str, envs: &[(&str, &str)]) -> Value {
     cmd.env_remove("SHGUARD_CONFIG")
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("HOME")
+        .env_remove("SHGUARD_STRICT_CONFIG")
         .env_remove("SHGUARD_TEST_PANIC")
         .env_remove("SHGUARD_TEST_MEM_LIMIT_MB");
     for (key, value) in envs {
@@ -828,6 +829,95 @@ fn shguard_config_pointing_at_missing_file_fails_closed() {
     assert!(!permission_reason(&output).contains("shguard init"));
 }
 
+/// Issue #440: `SHGUARD_STRICT_CONFIG` upgrades a config-load failure from
+/// the default `ask` to `deny` — a missing file (`ConfigError::Io`, see
+/// `shguard_config_pointing_at_missing_file_fails_closed` above).
+#[test]
+fn shguard_strict_config_missing_file_denies() {
+    let dir = tempdir().expect("tempdir should create");
+    let missing_path = dir.path().join("does-not-exist.toml");
+
+    let output = run_hook(
+        &bash_command("echo hi"),
+        &[
+            ("SHGUARD_CONFIG", missing_path.to_str().unwrap()),
+            ("SHGUARD_STRICT_CONFIG", "1"),
+        ],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+    assert!(!permission_reason(&output).is_empty());
+}
+
+/// Same as above, but for malformed TOML (`ConfigError::Parse`) rather than
+/// a missing file — both config-load failure shapes must honour strict mode.
+#[test]
+fn shguard_strict_config_invalid_toml_denies() {
+    let (_dir, config_path) = write_config("this is not [valid toml");
+
+    let output = run_hook(
+        &bash_command("echo hi"),
+        &[
+            ("SHGUARD_CONFIG", config_path.to_str().unwrap()),
+            ("SHGUARD_STRICT_CONFIG", "1"),
+        ],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+    assert!(!permission_reason(&output).is_empty());
+}
+
+/// A default config path that resolves to nothing at all is
+/// `ConfigError::Missing`, a distinct variant from the `ConfigError::Io`
+/// the two tests above exercise (see `shguard_config_pointing_at_missing_file_fails_closed`'s
+/// own doc) — strict mode must cover this variant too, not just an
+/// explicit `SHGUARD_CONFIG` naming a bad path.
+#[test]
+fn shguard_strict_config_missing_default_path_denies() {
+    let home = tempdir().expect("tempdir should create");
+
+    let output = run_hook(
+        &bash_command("echo hi"),
+        &[
+            ("HOME", home.path().to_str().unwrap()),
+            ("SHGUARD_STRICT_CONFIG", "1"),
+        ],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+}
+
+/// `SHGUARD_STRICT_CONFIG=""` still counts as set (any value does, per its
+/// doc comment) — this must not be confused with `RUST_BACKTRACE`'s
+/// `"0"`-means-off convention.
+#[test]
+fn shguard_strict_config_empty_value_still_denies() {
+    let dir = tempdir().expect("tempdir should create");
+    let missing_path = dir.path().join("does-not-exist.toml");
+
+    let output = run_hook(
+        &bash_command("echo hi"),
+        &[
+            ("SHGUARD_CONFIG", missing_path.to_str().unwrap()),
+            ("SHGUARD_STRICT_CONFIG", ""),
+        ],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+}
+
+/// Strict mode must never leak into the success path: a valid config still
+/// yields the ordinary decision, not an unconditional `deny`.
+#[test]
+fn shguard_strict_config_with_valid_config_still_allows() {
+    let (_dir, config_path) = write_config("");
+
+    let output = run_hook(
+        &bash_command("echo hi"),
+        &[
+            ("SHGUARD_CONFIG", config_path.to_str().unwrap()),
+            ("SHGUARD_STRICT_CONFIG", "1"),
+        ],
+    );
+    assert_eq!(permission_decision(&output), "allow");
+}
+
 // A present-but-non-UTF-8 `SHGUARD_CONFIG` must fail closed (hard error),
 // not silently collapse into "unset" and fall through to XDG/HOME
 // discovery (issue #23). `run_hook` takes `&str` envs, so this test builds
@@ -843,6 +933,7 @@ fn shguard_config_non_utf8_fails_closed() {
     let assert = cmd
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("HOME")
+        .env_remove("SHGUARD_STRICT_CONFIG")
         .env_remove("SHGUARD_TEST_PANIC")
         .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .env("SHGUARD_CONFIG", non_utf8)
@@ -872,6 +963,7 @@ fn home_non_utf8_fails_closed() {
     let assert = cmd
         .env_remove("SHGUARD_CONFIG")
         .env_remove("XDG_CONFIG_HOME")
+        .env_remove("SHGUARD_STRICT_CONFIG")
         .env_remove("SHGUARD_TEST_PANIC")
         .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .env("HOME", non_utf8)
@@ -899,6 +991,7 @@ fn xdg_config_home_non_utf8_fails_closed() {
         .env_remove("SHGUARD_CONFIG")
         .env("XDG_CONFIG_HOME", non_utf8)
         .env_remove("HOME")
+        .env_remove("SHGUARD_STRICT_CONFIG")
         .env_remove("SHGUARD_TEST_PANIC")
         .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .write_stdin(bash_command("echo hi"))

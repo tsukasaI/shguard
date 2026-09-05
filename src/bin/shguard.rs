@@ -7,7 +7,9 @@
 //!
 //! Never fails *silently* open: every fallible step (config load, stdin
 //! read, JSON serialisation) is matched explicitly and falls back to the
-//! adapter's fail-closed `ask` output rather than unwinding, [`main`] runs
+//! adapter's fail-closed `ask` output (or `deny`, for a config-load
+//! failure under `SHGUARD_STRICT_CONFIG` — see [`strict_config_requested`])
+//! rather than unwinding, [`main`] runs
 //! the whole composition on a worker thread wrapped in
 //! [`std::panic::catch_unwind`] as a last-resort net for a panic reached
 //! through a path this file did not anticipate (e.g. inside a dependency),
@@ -411,6 +413,26 @@ fn backtrace_requested() -> bool {
     }
 }
 
+/// Whether `SHGUARD_STRICT_CONFIG` opts `run`'s config-load failure path
+/// into `deny` instead of the default `ask` (issue #440). Presence-means-on,
+/// matching `SHGUARD_CONFIG` itself (module docs, `src/config.rs`) rather
+/// than `RUST_BACKTRACE`'s `"0"`-means-off convention above: this is a
+/// security-strictness knob, so treating any set value (including `""`) as
+/// "on" is the fail-closed reading — there is no legitimate reason to set
+/// this var to explicitly turn strictness off.
+///
+/// Scope: this only hardens the config-load-failure path inside `run`. It
+/// does not change `main`'s panic/watchdog fallback paths or `run`'s own
+/// stdin-read failure path, which stay `ask` regardless (including a
+/// config load that itself panics or hangs) — those are a different
+/// failure class this var isn't meant to cover (see README's "Discovery"
+/// section, and the "Wrapping the binary to fail closed" section's
+/// caller-wrapper requirement, for the PATH-miss/crash gap this can't
+/// close either).
+fn strict_config_requested() -> bool {
+    std::env::var_os("SHGUARD_STRICT_CONFIG").is_some()
+}
+
 /// `shguard init [--force]` (issue #112): scaffolds a starter config file
 /// at the same path [`shguard::config::Policy::load`] would discover, so a
 /// user can see (and start extending) the full embedded rule set without
@@ -803,10 +825,15 @@ fn run() -> serde_json::Value {
     let policy = match shguard::config::Policy::load() {
         Ok(policy) => policy,
         Err(err) => {
-            return shguard::adapter::fail_closed(&format!(
+            let reason = format!(
                 "shguard: user config failed to load ({err}); refusing to evaluate any command \
                  until this is fixed"
-            ));
+            );
+            return if strict_config_requested() {
+                shguard::adapter::fail_closed_deny(&reason)
+            } else {
+                shguard::adapter::fail_closed(&reason)
+            };
         }
     };
 

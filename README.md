@@ -182,6 +182,48 @@ Add to `settings.json`:
 }
 ```
 
+### Wrapping the binary to fail closed (issue #440)
+
+The registration above invokes the bare `shguard` binary directly, and
+that is not a self-contained fail-closed unit: Claude Code's PreToolUse
+hook protocol treats empty stdout as an implicit *allow* (no output means
+no opinion, so it doesn't block). If `command` resolves to a `shguard`
+that isn't actually on `PATH`, or `exec` fails, or the process is killed
+(for example by the OOM killer) before it writes its JSON decision, the
+hook exits non-zero with empty stdout, and every command silently passes
+unchecked, with no `ask`, no `deny`, and no evidence in the transcript
+that shguard was ever consulted. (An ordinary panic inside `shguard` is
+already caught and emitted as a fail-closed `ask` instead, not this
+failure mode; see `src/bin/shguard.rs`'s own module docs for that
+boundary.) This can't be fixed inside `shguard` itself: it can't emit an
+error for a run that never happened. Every caller must wrap the binary
+in something that checks both the exit code and that stdout is
+non-empty, and emits its own `deny` otherwise, e.g.:
+
+```sh
+#!/bin/sh
+output="$(shguard)"
+if [ $? -ne 0 ] || [ -z "$output" ]; then
+  printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"shguard: did not produce a decision (PATH miss or crash); refusing to evaluate (fail-closed)"}}'
+else
+  printf '%s\n' "$output"
+fi
+```
+
+(`printf '%s\n'`, not `echo`, relays `$output` verbatim: some `/bin/sh`
+implementations interpret backslash escapes in `echo`'s argument, which
+would corrupt a `permissionDecisionReason` that itself contains a
+backslash or newline, for example a user-authored rule `reason`, or a
+TOML parse error message quoting the offending config line.)
+
+Then point `settings.json`'s `command` at the wrapper script (an
+absolute path, not a bare name relying on `PATH`, which would reproduce
+the exact PATH-miss failure this section is about) instead of `shguard`
+directly. This requirement is unconditional and independent of
+`SHGUARD_STRICT_CONFIG` below: strict mode only changes what `shguard`
+itself decides once it does run; it can't do anything about a run that
+never starts.
+
 ### Dry-run: `shguard check`
 
 To see what shguard would decide for a command without wiring up a hook,
@@ -877,6 +919,18 @@ command asks for human confirmation until the config is fixed or created
 blocklist alone. The only case that still runs embedded-only is when no
 config path can be resolved at all (`SHGUARD_CONFIG` unset and neither
 `XDG_CONFIG_HOME` nor `HOME` usable).
+
+Setting `SHGUARD_STRICT_CONFIG` (issue #440, any value counts as set)
+upgrades this specific failure from `ask` to `deny`: an `ask` is a
+confirmation dialog a hurried human can click through, which isn't hard
+enough for a config-load failure in a strict deployment. This only
+changes the config-load-failure decision. It does nothing for the
+PATH-miss/crash case above, which the caller-side wrapper still has to
+handle regardless of whether this variable is set, nor for shguard's
+other internal fail-closed paths (a panic during evaluation, a watchdog
+trip, a stdin read error), which stay `ask` regardless, including a
+config load that itself panics or hangs rather than returning a clean
+error.
 
 ### Protecting the config file itself
 

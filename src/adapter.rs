@@ -131,6 +131,15 @@ pub fn fail_closed(reason: &str) -> Value {
     output_json(PermissionDecision::Ask, reason, None)
 }
 
+/// The stricter fail-closed `deny` output (issue #440's `SHGUARD_STRICT_CONFIG`):
+/// same shape as [`fail_closed`], used only for a config-load failure under
+/// strict mode. See README's "Discovery" section for why this is opt-in
+/// and scoped to config-load failure alone.
+#[must_use]
+pub fn fail_closed_deny(reason: &str) -> Value {
+    output_json(PermissionDecision::Deny, reason, None)
+}
+
 /// Parses `stdin` and pulls out the Bash command to analyse, if any — the
 /// stdin-JSON/tool-name/command-field extraction shared by [`handle`] and
 /// [`handle_with_policy`]; the only difference between them is which
