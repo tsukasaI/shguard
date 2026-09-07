@@ -75,6 +75,12 @@ All notable changes to this project are documented in this file.
 
 ### Security
 
+- An `[[allow]]` entry naming an awk-family interpreter (`awk`, `gawk`,
+  `mawk`, `nawk`, `original-awk`) is now rejected at config load, the same
+  way a `bash`/`eval`/`python3` entry already was (#451). Previously it
+  loaded successfully and silently downgraded rule 6d's Ask for an
+  un-introspectable awk script (`awk 'BEGIN{system("rm -rf /")}'`) to
+  `Allow`.
 - `$'...'` (ANSI-C quoting) combined with a backslash-newline line
   continuation anywhere in the command now fails closed to `Ask` (#444):
   brush-parser's tokenizer strips a `\`+newline pair inside the decoded

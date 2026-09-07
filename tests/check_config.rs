@@ -229,6 +229,28 @@ fn invalid_config_fails_to_load_and_exits_two() {
         .code(2);
 }
 
+/// Issue #451's own reproduction: pre-fix, this exact config made
+/// `--check-config` report "no issues found" (the `[[allow]] command =
+/// "awk"` entry was accepted at load time). It must now fail to load, the
+/// same way an equivalent `command = "python3"` entry already does.
+#[test]
+fn awk_allow_entry_fails_to_load_and_exits_two() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[allow]]
+        id = "allow-awk"
+        reason = "test"
+        command = "awk"
+    "#,
+    );
+    let assert = run_check_config(&[("SHGUARD_CONFIG", config_path.to_str().unwrap())])
+        .failure()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(stderr.contains("allow-awk"));
+    assert!(stderr.contains("must not match"));
+}
+
 /// `--check-config` never touches stdin — pins that it doesn't hang or
 /// misbehave if given a Bash-hook-shaped stdin payload it should ignore
 /// entirely.

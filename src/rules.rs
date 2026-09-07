@@ -3524,6 +3524,26 @@ const EXTRA_PIPELINE_INTERPRETERS: &[&str] = &[
     "pwsh",
 ];
 
+/// The `awk` family (`crate::gate` rule 6d, issue #195): every one of these
+/// names' script either sits in a bare positional operand (no `-c`-style
+/// flag the way `python3`/`perl`/`node` have one) or, for gawk
+/// specifically, behind `-e`/`--source`. Lives here, next to
+/// [`SHELL_INTERPRETERS`]/[`EVAL_BUILTIN`], for the same cross-module
+/// reason those do: so [`matches_dangerous_allow_target`] can reject an
+/// `allow` entry naming any of these five awk variants the same way it
+/// already rejects one naming `bash`/`eval` (issue #451), without `rules` depending
+/// on `gate`. Deliberately NOT added to [`EXTRA_PIPELINE_INTERPRETERS`]/
+/// `is_pipeline_interpreter` (rule 5b/5c's decode-pipe-into-interpreter
+/// floor): that rule is about an interpreter whose *default, flagless*
+/// invocation reads piped stdin bytes as code (`sh`, a bare `python3`) — a
+/// flagless `awk` never does that, piped data feeds its *records*, not its
+/// script, so it isn't the same risk class. This is narrower than "awk's
+/// program never comes from stdin", though: a `-f`/`-E`/`-i` flag's value
+/// can itself name stdin (`-`, `/dev/stdin`, `/proc/self/fd/0`), which
+/// `crate::gate`'s own awk-script scan floors to Ask on its own, independent
+/// of this constant's pipeline-interpreter exclusion.
+pub(crate) const AWK_INTERPRETERS: &[&str] = &["awk", "gawk", "mawk", "nawk", "original-awk"];
+
 /// Strips a trailing distro-style version suffix (`python3.12` -> `python`,
 /// `lua5.4` -> `lua`, `php8.2` -> `php`) so interpreter-name matching
 /// recognises versioned binaries (issue #346) without a hand-maintained list
@@ -6607,8 +6627,9 @@ pub(crate) fn apply_allowlist(verdict: &Verdict, allowlist: &Allowlist) -> Allow
 // ---------------------------------------------------------------------
 
 /// Whether `entry`'s matcher would match any known shell interpreter,
-/// `eval`, or transparent wrapper name (`SHELL_INTERPRETERS`/
-/// `EVAL_BUILTIN`/`EXTRA_PIPELINE_INTERPRETERS`/`TRANSPARENT_WRAPPERS`) —
+/// `eval`, awk variant, or transparent wrapper name (`SHELL_INTERPRETERS`/
+/// `EVAL_BUILTIN`/`EXTRA_PIPELINE_INTERPRETERS`/`AWK_INTERPRETERS`/
+/// `TRANSPARENT_WRAPPERS`) —
 /// used to reject `allow` config entries that would suppress every
 /// recursion-derived `Ask` involving one of those names (`bash -c`
 /// recursion, `eval`'s own recursion (issue #120), a decode-fed pipeline
@@ -6634,6 +6655,7 @@ fn matches_dangerous_allow_target(entry: &CommandRule) -> bool {
             .iter()
             .chain(EVAL_BUILTIN.iter())
             .chain(EXTRA_PIPELINE_INTERPRETERS.iter())
+            .chain(AWK_INTERPRETERS.iter())
             .chain(TRANSPARENT_WRAPPERS.iter())
     };
     if candidates().any(|name| entry.command.matches(name)) {
@@ -6753,10 +6775,10 @@ impl UserConfig {
                 return Err(RulesError::invalid(
                     entry.id.as_str(),
                     "an `allow` entry must not match a shell interpreter, `eval`, \
-                     interpreter pipeline sink, or transparent wrapper name (bash, sh, \
-                     eval, python, ruby, env, xargs, ...) — this would suppress every \
-                     recursion-derived Ask involving that name, including the \
-                     substitution-depth-cap fail-closed guard's own Ask",
+                     interpreter pipeline sink, awk variant, or transparent wrapper name \
+                     (bash, sh, eval, python, ruby, awk, env, xargs, ...) — this would \
+                     suppress every recursion-derived Ask involving that name, including \
+                     the substitution-depth-cap fail-closed guard's own Ask",
                 ));
             }
             // deny_message (issue #99) has nothing to attach to on an
@@ -12351,6 +12373,30 @@ mod tests {
             UserConfig::parse(toml),
             Err(RulesError::InvalidRule { .. })
         ));
+    }
+
+    // Issue #451: AWK_INTERPRETERS joined the candidate list, so an awk
+    // family member's own recursion-derived Ask (rule 6d, un-introspectable
+    // script) must be just as unsuppressable as `eval`'s.
+    #[test]
+    fn user_config_rejects_allow_entry_matching_awk_family_exactly() {
+        for awk in AWK_INTERPRETERS {
+            let toml = format!(
+                r#"
+                [[allow]]
+                id = "user-allow-awk"
+                reason = "trust me"
+                command = "{awk}"
+                "#
+            );
+            assert!(
+                matches!(
+                    UserConfig::parse(&toml),
+                    Err(RulesError::InvalidRule { .. })
+                ),
+                "expected {awk:?} to be rejected as a dangerous allow target"
+            );
+        }
     }
 
     #[test]
