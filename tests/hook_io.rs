@@ -319,12 +319,14 @@ fn check_nonexistent_config_path_exits_with_usage_error() {
 const FIXED_BLOCK_COMMAND: &str = "rm -rf /";
 
 fn stdin_with_permission_mode(command: &str, permission_mode: Option<&str>) -> String {
-    match permission_mode {
-        Some(mode) => format!(
-            r#"{{"tool_name":"Bash","tool_input":{{"command":"{command}"}},"permission_mode":"{mode}"}}"#
-        ),
-        None => format!(r#"{{"tool_name":"Bash","tool_input":{{"command":"{command}"}}}}"#),
+    let mut input = serde_json::json!({
+        "tool_name": "Bash",
+        "tool_input": { "command": command },
+    });
+    if let Some(mode) = permission_mode {
+        input["permission_mode"] = serde_json::Value::String(mode.to_string());
     }
+    input.to_string()
 }
 
 #[test]
