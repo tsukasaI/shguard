@@ -282,9 +282,15 @@ fn deep_if_nesting_split_after_a_comment_line_fails_closed_to_ask() {
 /// unconditionally, so `reject_excessive_raw_nesting` still rejects.
 #[test]
 fn deep_if_nesting_split_after_a_quoted_hash_fails_closed_to_ask() {
+    // The fake comment must repeat with every split keyword, not just
+    // once up front: a single fake comment only suppresses stripping the
+    // first split (the fake comment ends at that continuation's own raw
+    // newline), leaving the remaining 599 splits to trip the cap on their
+    // own -- which would pass even without `strip_raw_line_continuations_blind`
+    // and so wouldn't actually guard the fix.
     let command = format!(
-        "echo 'a #'; {}echo body{}",
-        "i\\\nf true; then ".repeat(600),
+        "{}echo body{}",
+        "echo 'a #'; i\\\nf true; then ".repeat(600),
         "; fi".repeat(600)
     );
     let output = run_hook(&bash_command(&command));
@@ -318,9 +324,14 @@ fn deep_extended_test_negation_split_after_a_quoted_hash_fails_closed_to_ask() {
 /// alone closes this; running both and rejecting on either firing does.
 #[test]
 fn deep_if_nesting_split_after_a_real_comment_then_a_quoted_hash_fails_closed_to_ask() {
+    // Same repeat-per-iteration requirement as the quoted-hash test above:
+    // a single real-comment-then-quoted-hash prefix only suppresses the
+    // first split via the comment-aware scan, which alone still trips the
+    // cap on the remaining 599 -- this must repeat to actually need the
+    // blind scan too.
     let command = format!(
-        "# x\\\n'a #'; {}echo body{}",
-        "i\\\nf true; then ".repeat(600),
+        "{}echo body{}",
+        "# x\\\n'a #'; i\\\nf true; then ".repeat(600),
         "; fi".repeat(600)
     );
     let output = run_hook(&bash_command(&command));
