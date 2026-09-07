@@ -364,13 +364,28 @@ const DENY_MSG_PIPE_TO_INTERPRETER: &str = "Run the file directly (e.g. `bash fi
 const DENY_MSG_IFS: &str =
     "Rewrite the command without `$IFS`; there is no benign interactive use for it.";
 
+/// Shared reason-string prefix [`scan_expansion_positions`]'s heredoc scan
+/// raises when a heredoc body feeds a non-shell interpreter's stdin, and
+/// [`apply_expansion_floor`] matches on to attach [`DENY_MSG_INLINE_INTERPRETER`]
+/// — the same guidance rule 6b/6d's own inline-interpreter-code Ask gets,
+/// since "the interpreter's input can't be introspected" is the same
+/// underlying problem whether that input arrives via `-c`/`-e` or a
+/// heredoc. Threading a `DenyMessage` through [`raise_expansion_floor`]'s
+/// shared `(Decision, String)` floor accumulator (used by ~18 call sites)
+/// would need widening every one of them; matching this one site's own,
+/// fully-controlled reason-string prefix instead is far smaller surface
+/// for the same effect. Kept as one `const` (not duplicated at each of the
+/// two use sites) so the raise and the match can't drift apart.
+const NONSHELL_HEREDOC_REASON_PREFIX: &str = "the heredoc body is fed to non-shell interpreter";
+
 /// Category-3 guidance (issue #471): a construct this module cannot
 /// statically resolve at all. Names the specific construct — the issue's
 /// own "name the construct" requirement — via whichever description is
 /// already available at the call site: [`crate::parser::ParseError::unsupported_construct`]'s
-/// text for a construct the parser itself rejects, or [`UnresolvableKind`]'s
-/// `Debug` spelling for one that parses but that `crate::normalize` could
-/// not fold to a value.
+/// text for a construct the parser itself rejects, or a human-readable
+/// name for [`UnresolvableKind`]'s own variant (see
+/// [`deny_msg_for_unresolvable_kind`]) for one that parses but that
+/// `crate::normalize` could not fold to a value.
 fn deny_msg_unsupported_construct(construct: &str) -> DenyMessage {
     DenyMessage::new(format!(
         "shguard cannot statically analyze this construct ({construct}); use its literal form, \
@@ -386,18 +401,17 @@ fn deny_msg_unsupported_construct(construct: &str) -> DenyMessage {
 /// `ParameterExpansion`/`CommandSubstitution` already get their own
 /// category-1/category-4 message at their own call sites).
 fn deny_msg_for_unresolvable_kind(kind: UnresolvableKind) -> Option<DenyMessage> {
-    match kind {
-        UnresolvableKind::ArithmeticExpansion
-        | UnresolvableKind::ProcessSubstitution
-        | UnresolvableKind::UnsupportedStructure => {
-            Some(deny_msg_unsupported_construct(&format!("{kind:?}")))
-        }
+    let name = match kind {
+        UnresolvableKind::ArithmeticExpansion => "arithmetic expansion ($((...)))",
+        UnresolvableKind::ProcessSubstitution => "process substitution (<(...)/>(...))",
+        UnresolvableKind::UnsupportedStructure => "an unsupported word structure",
         UnresolvableKind::CommandSubstitution
         | UnresolvableKind::ParameterExpansion
         | UnresolvableKind::NonUtf8
         | UnresolvableKind::ExpansionLimit
-        | UnresolvableKind::EmbeddedNul => None,
-    }
+        | UnresolvableKind::EmbeddedNul => return None,
+    };
+    Some(deny_msg_unsupported_construct(name))
 }
 
 /// Analyzes a raw shell command line: parse -> per-simple-command normalise
@@ -2983,7 +2997,10 @@ fn apply_expansion_floor(verdict: Verdict, floor: Option<(Decision, String)>) ->
     let Some((floor_decision, floor_reason)) = floor else {
         return verdict;
     };
-    apply_floor(verdict, floor_decision, floor_reason, None)
+    let deny_message = floor_reason
+        .starts_with(NONSHELL_HEREDOC_REASON_PREFIX)
+        .then(|| DenyMessage::new(DENY_MSG_INLINE_INTERPRETER));
+    apply_floor(verdict, floor_decision, floor_reason, deny_message)
 }
 
 /// Applies [`scan_recursable_slots`]'s combined floor (issues #64/#66/#72:
@@ -3515,10 +3532,12 @@ fn apply_substitution_floor(verdict: Verdict, floor: Option<Decision>) -> Verdic
         Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
         None => floor_reason.to_string(),
     };
+    let deny_message = verdict.deny_message().cloned();
     match floor_decision {
         Decision::Block => Verdict::block(Reason::new(reason), argv, None),
         Decision::Ask | Decision::Allow => Verdict::ask(Reason::new(reason), argv),
     }
+    .with_deny_message(deny_message)
 }
 
 /// Applies rule 8's opaque-unresolvable-kind floor
@@ -5272,8 +5291,7 @@ fn scan_redirection_expansions(
                         accum.floor,
                         Decision::Ask,
                         format!(
-                            "the heredoc body is fed to non-shell interpreter `{name}` on \
-                             stdin, which cannot be introspected"
+                            "{NONSHELL_HEREDOC_REASON_PREFIX} `{name}` on stdin, which cannot be introspected"
                         ),
                     );
                 }
@@ -5957,15 +5975,26 @@ fn has_argument_position_bare_var(argument_words: &[Word]) -> bool {
 // ---------------------------------------------------------------------
 
 /// Picks the worse of two [`Verdict`]s by [`Decision`] (rule: worst-wins,
-/// plan.md §6 item 7). On a tie, keeps `current` — the earlier-encountered
-/// simple command's argv, per this module's documented
+/// plan.md §6 item 7). On a tie, keeps `current`'s argv/reason — the
+/// earlier-encountered simple command's, per this module's documented
 /// "normalized_argv = the simple command that produced the worst decision"
-/// contract (first one wins a tie, not the last).
+/// contract (first one wins a tie, not the last) — but still borrows
+/// `new`'s `deny_message` when `current` has none of its own (issue #471):
+/// a category-specific rewrite hint from a later stage/simple-command must
+/// not be silently dropped just because an earlier, message-less Ask
+/// (e.g. a bare substitution recursion result) happened to tie it first.
 fn fold_worst(current: Verdict, new: Verdict) -> Verdict {
-    if new.decision() > current.decision() {
-        new
-    } else {
-        current
+    match new.decision().cmp(&current.decision()) {
+        std::cmp::Ordering::Greater => new,
+        std::cmp::Ordering::Less => current,
+        std::cmp::Ordering::Equal => {
+            if current.deny_message().is_none()
+                && let Some(message) = new.deny_message()
+            {
+                return current.with_deny_message(Some(message.clone()));
+            }
+            current
+        }
     }
 }
 

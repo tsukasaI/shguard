@@ -583,6 +583,44 @@ mod tests {
         );
     }
 
+    /// Fable-review follow-up to #471: `fold_worst`'s same-decision tie
+    /// used to keep whichever side it saw first, dropping rule 5's
+    /// pipe-to-interpreter message when the message-less argument-position-
+    /// substitution Ask (issue #202's own disclosed gap, see the note at
+    /// the end of this module) happened to be evaluated first. A tie must
+    /// now still surface a message from either side rather than silently
+    /// losing it.
+    #[test]
+    fn pipe_to_interpreter_message_survives_a_tie_with_a_message_less_ask() {
+        let stdin =
+            r#"{"tool_name":"Bash","tool_input":{"command":"echo $(python3 -c \"x\") | bash"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "ask");
+        assert_eq!(
+            additional_context(&output),
+            "Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv \
+             is inspectable."
+        );
+    }
+
+    /// Fable-review follow-up to #471: `python3 - <<EOF ... EOF` (issue
+    /// #471's own row-2 example, the largest single category) reaches the
+    /// gate through the heredoc-as-stdin floor (issue #424), not the
+    /// `-c`/`-e` inline-code site above -- it must get the same guidance,
+    /// not a message-less generic Ask.
+    #[test]
+    fn heredoc_fed_to_non_shell_interpreter_gets_write_to_a_file_guidance() {
+        let stdin =
+            r#"{"tool_name":"Bash","tool_input":{"command":"python3 - <<EOF\nimport os\nEOF"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "ask");
+        assert_eq!(
+            additional_context(&output),
+            "Write the program to a file and run that file instead (e.g. `python3 file.py`, \
+             `awk -f prog.awk`) — inline interpreter code is never inspected."
+        );
+    }
+
     #[test]
     fn awk_inline_script_gets_write_to_a_file_guidance() {
         let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"awk '{print}' file"}}"#;
@@ -600,17 +638,19 @@ mod tests {
         // `${arr[@]}` -- an array-indexed parameter expansion --
         // `src/parser.rs`'s `convert_parameter_expansion` rejects with
         // `ParseError::Unsupported`, whose own `construct` description
-        // names the rejected shape; the message must include it (issue
-        // #471's "name the construct"), not fall back to a generic string.
+        // names the rejected shape in human terms (issue #471's "name the
+        // construct"), not a raw Debug dump of brush's internal
+        // enum/struct fields.
         let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"echo ${arr[@]}"}}"#;
         let output = handle(stdin);
         assert_eq!(permission_decision(&output), "ask");
-        let context = additional_context(&output);
-        assert!(
-            context.contains("parameter expansion form"),
-            "expected the specific construct to be named, got {context:?}"
+        assert_eq!(
+            additional_context(&output),
+            "shguard cannot statically analyze this construct (parameter expansion form: \
+             indirect or array-indexed parameter expansion (${!x}/${arr[i]}/${arr[@]})); use \
+             its literal form, or split the command across separate lines so each piece is \
+             inspectable."
         );
-        assert!(context.contains("shguard cannot statically analyze this construct"));
     }
 
     #[test]
@@ -618,14 +658,16 @@ mod tests {
         // `$((...))` parses successfully (unlike `${arr[@]}`) but normalises
         // to `Unresolvable(ArithmeticExpansion)` -- a different code path
         // (`crate::gate`'s opaque-kind floor, not a `ParseError`) that must
-        // still name the construct.
+        // still name the construct in human terms, not `ArithmeticExpansion`
+        // (the bare enum variant name).
         let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"echo $((1+1))"}}"#;
         let output = handle(stdin);
         assert_eq!(permission_decision(&output), "ask");
-        let context = additional_context(&output);
-        assert!(
-            context.contains("ArithmeticExpansion"),
-            "expected the specific construct to be named, got {context:?}"
+        assert_eq!(
+            additional_context(&output),
+            "shguard cannot statically analyze this construct (arithmetic expansion \
+             ($((...)))); use its literal form, or split the command across separate lines so \
+             each piece is inspectable."
         );
     }
 
@@ -706,21 +748,12 @@ mod tests {
         assert!(permission_reason(&output).contains("recurses through the full pipeline"));
     }
 
-    #[test]
-    fn unresolved_target_message_survives_an_argument_position_substitution() {
-        // The same case as `unresolvable_target_gets_resolve_the_target_guidance`,
-        // named explicitly as issue #202's "argument-position substitution"
-        // recursion class: `$(echo /)` is itself recursed and resolves
-        // cleanly (an inner `Allow`, rule 3's transparency), so the ONLY
-        // reason this stays `Ask` at all is the except-target floor -- the
-        // deny_message must come from that floor, not be dropped by the
-        // inner recursion's own transparent-Allow handling.
-        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"rm -rf $(echo /)"}}"#;
-        let output = handle(stdin);
-        assert_eq!(permission_decision(&output), "ask");
-        assert_eq!(
-            additional_context(&output),
-            "Resolve the target literally so the rule can check it."
-        );
-    }
+    // Note (issue #471 fable review): a category message does NOT currently
+    // survive `evaluate_argument_substitutions`' own recursion path (e.g.
+    // `echo $(python3 -c "x")` still resolves Ask with `deny_message: None`)
+    // -- that function returns a bare `Option<Decision>`, not the inner
+    // verdict's message, a pre-existing gap `Verdict::with_deny_message`'s
+    // own "Known remaining gaps" doc already discloses. Closing it would
+    // mean widening that function's return type and its callers; left as a
+    // documented follow-up rather than expanding this issue's scope.
 }

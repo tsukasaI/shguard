@@ -1193,9 +1193,9 @@ fn convert_file_redirect_kind(
         // stays unsupported — no rule targets it yet, out of this issue's
         // scope.
         bast::IoFileRedirectKind::ReadAndWrite => Ok(FileRedirectionKind::ReadAndWrite),
-        bast::IoFileRedirectKind::Clobber => Err(ParseError::unsupported(format!(
-            "redirection kind {kind:?}"
-        ))),
+        bast::IoFileRedirectKind::Clobber => Err(ParseError::unsupported(
+            "clobber redirection (>|)".to_string(),
+        )),
     }
 }
 
@@ -1615,6 +1615,41 @@ fn convert_tilde(tilde: bword::TildeExpr) -> String {
 /// array-indexed access, defaults, substring operations, case transforms,
 /// …) would lose semantics if squeezed into a bare name, so it is rejected
 /// instead.
+/// A human-readable name for every [`bword::ParameterExpr`] shape this
+/// module rejects, for the `deny_message` an agent sees (issue #471) — the
+/// bare `{:?}` this replaced dumped brush's internal enum/field names
+/// (`Parameter { parameter: NamedWithAllIndices { name: "arr", ... } }`)
+/// instead of naming the actual bash construct.
+fn describe_parameter_expr(expr: &bword::ParameterExpr) -> &'static str {
+    match expr {
+        bword::ParameterExpr::Parameter { .. } => {
+            "indirect or array-indexed parameter expansion (${!x}/${arr[i]}/${arr[@]})"
+        }
+        bword::ParameterExpr::UseDefaultValues { .. } => "default-value expansion (${x:-d})",
+        bword::ParameterExpr::AssignDefaultValues { .. } => "default-value assignment (${x:=d})",
+        bword::ParameterExpr::IndicateErrorIfNullOrUnset { .. } => {
+            "error-if-unset expansion (${x:?msg})"
+        }
+        bword::ParameterExpr::UseAlternativeValue { .. } => {
+            "alternative-value expansion (${x:+alt})"
+        }
+        bword::ParameterExpr::ParameterLength { .. } => "parameter length (${#x})",
+        bword::ParameterExpr::RemoveSmallestSuffixPattern { .. } => "suffix removal (${x%pat})",
+        bword::ParameterExpr::RemoveLargestSuffixPattern { .. } => "suffix removal (${x%%pat})",
+        bword::ParameterExpr::RemoveSmallestPrefixPattern { .. } => "prefix removal (${x#pat})",
+        bword::ParameterExpr::RemoveLargestPrefixPattern { .. } => "prefix removal (${x##pat})",
+        bword::ParameterExpr::Substring { .. } => "substring expansion (${x:off:len})",
+        bword::ParameterExpr::Transform { .. } => "parameter transformation (${x@op})",
+        bword::ParameterExpr::UppercaseFirstChar { .. } => "case modification (${x^})",
+        bword::ParameterExpr::UppercasePattern { .. } => "case modification (${x^^})",
+        bword::ParameterExpr::LowercaseFirstChar { .. } => "case modification (${x,})",
+        bword::ParameterExpr::LowercasePattern { .. } => "case modification (${x,,})",
+        bword::ParameterExpr::ReplaceSubstring { .. } => "pattern substitution (${x/a/b})",
+        bword::ParameterExpr::VariableNames { .. } => "variable-name expansion (${!prefix*})",
+        bword::ParameterExpr::MemberKeys { .. } => "array-key expansion (${!arr[@]})",
+    }
+}
+
 fn convert_parameter_expansion(expr: bword::ParameterExpr) -> Result<WordPiece, ParseError> {
     match expr {
         bword::ParameterExpr::Parameter {
@@ -1630,7 +1665,8 @@ fn convert_parameter_expansion(expr: bword::ParameterExpr) -> Result<WordPiece, 
             indirect: false,
         } => Ok(WordPiece::ParameterExpansion(special.to_string())),
         other => Err(ParseError::unsupported(format!(
-            "parameter expansion form {other:?}"
+            "parameter expansion form: {}",
+            describe_parameter_expr(&other)
         ))),
     }
 }
