@@ -73,7 +73,10 @@
 //! deployed behind one *or more* symlinks (e.g. into a dotfiles repo
 //! behind a `stow`/`home-manager`-style layer of indirection) gets
 //! *every* hop's directory protected, not only the literal path and the
-//! fully-resolved end — see [`self_protection_directories`]'s own docs for
+//! fully-resolved end — plus each hop's `std::fs::canonicalize`d form
+//! (issue #449), catching a symlinked directory *component* earlier in
+//! the path (stow's default "folded" layout) that the file-symlink walk
+//! alone never sees — see [`self_protection_directories`]'s own docs for
 //! the walk's mechanics and its fail-closed behavior on a too-long or
 //! cyclic chain. `rules/blocklist.toml`
 //! separately carries a *static* rule for the literal `~/.config/shguard/`
@@ -347,8 +350,10 @@ impl Policy {
         let mut rules = rules;
         let mut allowlist = allowlist;
         if let Some(path) = &path {
+            let case_insensitive = config_dir_is_case_insensitive();
             for (suffix, config_dir) in self_protection_directories(path)? {
-                let toml = self_protection_toml(&config_dir.to_string_lossy(), &suffix);
+                let toml =
+                    self_protection_toml(&config_dir.to_string_lossy(), &suffix, case_insensitive);
                 let self_protection = UserConfig::parse(&toml)?;
                 (rules, allowlist) = merge_user_config(rules, allowlist, self_protection)?;
             }
@@ -532,6 +537,34 @@ const MAX_SYMLINK_HOPS: usize = 40;
 /// directory gets its own distinctly-id'd rule set that can be merged
 /// into one without an id collision.
 ///
+/// After the hop walk, every directory found so far is additionally
+/// `std::fs::canonicalize`d and, if that differs from every directory
+/// already collected, added under a `"canonical"`/`"canonical-<n>"`
+/// suffix (issue #449): the walk above only ever follows a symlink
+/// chain rooted at the config FILE itself, so a symlinked directory
+/// *component* earlier in the path — e.g. stow's default "folded"
+/// layout, `~/.config -> ~/dotfiles/config`, where the config file
+/// itself is never a symlink — would otherwise leave the real,
+/// fully-resolved directory unprotected. `canonicalize` resolves every
+/// symlinked component of a path, not just a trailing one, so
+/// re-resolving each already-found directory catches that gap for a
+/// command spelled with the SAME degree of resolution the config path
+/// itself was read with (fully literal, or fully resolved). A command
+/// argument that mixes resolution — some symlinked components in its
+/// spelling already resolved, others not (e.g., on macOS, a tempdir
+/// under `/var/...` with only its `.config`-style component resolved,
+/// leaving `/var` unresolved rather than its real `/private/var`) —
+/// matches neither the literal nor the canonical rule; this is the same
+/// lexical-vs-resolved boundary every self-protection rule already has,
+/// not a new gap this fix introduces. A symlinked `$HOME` itself (e.g.
+/// `/Users/alice -> /Volumes/Data/alice`) is a live instance of the same
+/// residual: a command spelled through the literal `/Users/alice/...`
+/// works (protected by `"literal"`), but a fully-resolved-except-that-hop
+/// spelling doesn't. Best-effort: a directory that doesn't exist (yet)
+/// simply fails `canonicalize` and contributes nothing, rather than
+/// failing the whole config load — every directory found by the hop walk
+/// above stays protected regardless.
+///
 /// The walk only ever starts once the literal parent itself is
 /// protectable, same invariant issue #31 established and for the same
 /// reason: a relative `SHGUARD_CONFIG` (e.g. `SHGUARD_CONFIG=config.toml`
@@ -614,6 +647,43 @@ fn self_protection_directories(path: &Path) -> Result<Vec<(String, PathBuf)>, Co
         directories.push((suffix, dir.clone()));
     }
 
+    // Directory-symlink components (issue #449): every hop above comes
+    // from `read_link`ing the config FILE (or a previous hop's target)
+    // itself, so a symlinked directory COMPONENT earlier in the path --
+    // e.g. stow's default "folded" layout, `~/.config ->
+    // ~/dotfiles/config` -- never surfaces as a hop of its own; the file
+    // at the end of that path is never itself a symlink, so the walk
+    // above never even starts. `std::fs::canonicalize` resolves every
+    // symlinked component of a path, not just a trailing one, so
+    // re-resolving each directory already found above catches exactly
+    // that gap. Best-effort: a directory that doesn't exist (yet) fails
+    // `canonicalize` and is silently skipped rather than failing the
+    // whole config load -- every directory found above stays protected
+    // either way, this only ever ADDS coverage.
+    let mut canonical_additions: Vec<(String, PathBuf)> = Vec::new();
+    for (_, dir) in &directories {
+        let Ok(canonical) = std::fs::canonicalize(dir) else {
+            continue;
+        };
+        if !is_protectable(&canonical)
+            || directories
+                .iter()
+                .any(|(_, existing)| *existing == canonical)
+            || canonical_additions
+                .iter()
+                .any(|(_, existing)| *existing == canonical)
+        {
+            continue;
+        }
+        let suffix = if canonical_additions.is_empty() {
+            "canonical".to_string()
+        } else {
+            format!("canonical-{}", canonical_additions.len())
+        };
+        canonical_additions.push((suffix, canonical));
+    }
+    directories.extend(canonical_additions);
+
     Ok(directories)
 }
 
@@ -638,96 +708,100 @@ required_tokens = ["init"]
 /// for why this is generated rather than read from a file. `suffix`
 /// disambiguates rule ids across multiple calls (one per directory
 /// returned by [`self_protection_directories`]) so they can be merged
-/// into one rule set without an id collision.
-fn self_protection_toml(config_dir: &str, suffix: &str) -> String {
+/// into one rule set without an id collision. `case_insensitive` sets
+/// every generated `normalized_prefix` target's own `case_insensitive`
+/// flag (see [`config_dir_is_case_insensitive`]) — see [`TargetMatcher`]
+/// (`crate::rules`) for what that flag does at match time.
+fn self_protection_toml(config_dir: &str, suffix: &str, case_insensitive: bool) -> String {
     let quoted_dir = toml_quote(config_dir);
-    let ancestor_rules = ancestor_rules_toml(config_dir, suffix);
+    let ci_attr = case_insensitive_toml_attr(case_insensitive);
+    let ancestor_rules = ancestor_rules_toml(config_dir, suffix, case_insensitive);
     format!(
         r#"
 [[deny]]
 id = "shguard-self-protect-config-tee-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "tee"
-targets = [{{ normalized_prefix = {quoted_dir} }}]
+targets = [{{ normalized_prefix = {quoted_dir}{ci_attr} }}]
 
 [[deny]]
 id = "shguard-self-protect-config-cp-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "cp"
-targets = [{{ normalized_prefix = {quoted_dir} }}]
+targets = [{{ normalized_prefix = {quoted_dir}{ci_attr} }}]
 
 [[deny]]
 id = "shguard-self-protect-config-mv-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "mv"
-targets = [{{ normalized_prefix = {quoted_dir} }}]
+targets = [{{ normalized_prefix = {quoted_dir}{ci_attr} }}]
 
 [[deny]]
 id = "shguard-self-protect-config-install-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "install"
-targets = [{{ normalized_prefix = {quoted_dir} }}]
+targets = [{{ normalized_prefix = {quoted_dir}{ci_attr} }}]
 
 [[deny]]
 id = "shguard-self-protect-config-sed-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "sed"
 required_flags = ["i|I|--in-place"]
-targets = [{{ normalized_prefix = {quoted_dir} }}]
+targets = [{{ normalized_prefix = {quoted_dir}{ci_attr} }}]
 
 [[deny]]
 id = "shguard-self-protect-config-dd-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "dd"
-targets = [{{ strip = "of=", normalized_prefix = {quoted_dir} }}]
+targets = [{{ strip = "of=", normalized_prefix = {quoted_dir}{ci_attr} }}]
 
 [[deny]]
 id = "shguard-self-protect-config-rm-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "rm"
-targets = [{{ normalized_prefix = {quoted_dir} }}]
+targets = [{{ normalized_prefix = {quoted_dir}{ci_attr} }}]
 
 [[deny]]
 id = "shguard-self-protect-config-unlink-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "unlink"
-targets = [{{ normalized_prefix = {quoted_dir} }}]
+targets = [{{ normalized_prefix = {quoted_dir}{ci_attr} }}]
 
 [[deny]]
 id = "shguard-self-protect-config-ln-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "ln"
-targets = [{{ normalized_prefix = {quoted_dir} }}]
+targets = [{{ normalized_prefix = {quoted_dir}{ci_attr} }}]
 
 [[deny]]
 id = "shguard-self-protect-config-rsync-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "rsync"
-targets = [{{ normalized_prefix = {quoted_dir} }}]
+targets = [{{ normalized_prefix = {quoted_dir}{ci_attr} }}]
 
 [[redirect]]
 id = "shguard-self-protect-config-redirect-{suffix}"
 reason = "redirecting output to shguard's own config directory must never be scripted"
-targets = [{{ normalized_prefix = {quoted_dir} }}]
+targets = [{{ normalized_prefix = {quoted_dir}{ci_attr} }}]
 
 [[deny]]
 id = "shguard-self-protect-config-rmdir-{suffix}"
 reason = "deleting shguard's own config directory must never be scripted"
 command = "rmdir"
-targets = [{{ normalized_prefix = {quoted_dir} }}]
+targets = [{{ normalized_prefix = {quoted_dir}{ci_attr} }}]
 
 [[deny]]
 id = "shguard-self-protect-config-perl-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "perl"
 required_flags = ["i"]
-targets = [{{ normalized_prefix = {quoted_dir} }}]
+targets = [{{ normalized_prefix = {quoted_dir}{ci_attr} }}]
 
 [[deny]]
 id = "shguard-self-protect-config-patch-{suffix}"
 reason = "patching shguard's own config directory must never be scripted"
 command = "patch"
-targets = [{{ normalized_prefix = {quoted_dir} }}]
+targets = [{{ normalized_prefix = {quoted_dir}{ci_attr} }}]
 
 [[deny]]
 id = "shguard-self-protect-config-find-exec-{suffix}"
@@ -735,9 +809,43 @@ decision = "ask"
 reason = "find against shguard's own config directory combined with -exec/-execdir/-ok/-okdir must never be scripted"
 command = "find"
 required_flags = ["-exec|-execdir|-ok|-okdir"]
-targets = [{{ normalized_prefix = {quoted_dir} }}]
+targets = [{{ normalized_prefix = {quoted_dir}{ci_attr} }}]
 {ancestor_rules}"#
     )
+}
+
+/// Whether generated self-protection targets should compare
+/// case-insensitively (issue #449): macOS ships with case-insensitive
+/// (but case-preserving) APFS/HFS+ volumes by default, so a re-cased
+/// spelling of the config path (`/Users/Alice/...` vs
+/// `/users/alice/...`) resolves to the exact same on-disk file — a
+/// byte-exact `starts_with`/`==` comparison (`TargetMatcher::matches`,
+/// `crate::rules`) would wrongly Allow a write reaching the real config
+/// through such a respelling. Gated on `target_os` rather than an actual
+/// filesystem probe (e.g. writing a differently-cased tempfile and
+/// checking whether it collides): simpler, and correct for the default
+/// volume format on every supported macOS install. A case-SENSITIVE APFS
+/// volume (an explicit, non-default macOS install option) folds
+/// unnecessarily conservatively rather than under-protecting — the same
+/// safe-direction trade-off `crate::rules::is_home_container_dir`'s own
+/// case-fold already accepts. NOT reachable on Linux (ext4 is
+/// case-sensitive): a case-insensitive mount there (exFAT/NTFS) is a
+/// known, disclosed residual this check does not cover.
+fn config_dir_is_case_insensitive() -> bool {
+    cfg!(target_os = "macos")
+}
+
+/// The `, case_insensitive = true` inline-table suffix
+/// [`self_protection_toml`]/[`ancestor_rules_toml`] append to each
+/// generated `normalized_prefix`/`normalized` target when
+/// `case_insensitive` is set — empty otherwise, so the generated TOML is
+/// byte-identical to before issue #449 on a case-sensitive filesystem.
+fn case_insensitive_toml_attr(case_insensitive: bool) -> &'static str {
+    if case_insensitive {
+        ", case_insensitive = true"
+    } else {
+        ""
+    }
 }
 
 /// The ancestor-directory rule blocks for `config_dir` (issue #101's
@@ -760,7 +868,7 @@ targets = [{{ normalized_prefix = {quoted_dir} }}]
 /// comment), silently turning "ask near the config directory" into "ask
 /// on every matching command anywhere" — the opposite of this rule's
 /// intent.
-fn ancestor_rules_toml(config_dir: &str, suffix: &str) -> String {
+fn ancestor_rules_toml(config_dir: &str, suffix: &str, case_insensitive: bool) -> String {
     let ancestors: Vec<String> = Path::new(config_dir)
         .ancestors()
         .skip(1)
@@ -770,9 +878,10 @@ fn ancestor_rules_toml(config_dir: &str, suffix: &str) -> String {
     if ancestors.is_empty() {
         return String::new();
     }
+    let ci_attr = case_insensitive_toml_attr(case_insensitive);
     let targets = ancestors
         .iter()
-        .map(|a| format!("{{ normalized = {} }}", toml_quote(a)))
+        .map(|a| format!("{{ normalized = {}{ci_attr} }}", toml_quote(a)))
         .collect::<Vec<_>>()
         .join(", ");
     format!(
@@ -1102,7 +1211,7 @@ mod tests {
     fn self_protection_rules_match_expected_write_commands_under_config_dir() {
         use crate::normalize::NormalizedWord;
 
-        let toml = self_protection_toml("/home/user/.config/shguard", "literal");
+        let toml = self_protection_toml("/home/user/.config/shguard", "literal", false);
         let user_config = UserConfig::parse(&toml).unwrap();
         let blocklist = Rules::embedded().unwrap();
         let allowlist = Allowlist::embedded().unwrap();
@@ -1187,7 +1296,7 @@ mod tests {
     // do — parity between `tee <path>` and `> <path>`.
     #[test]
     fn self_protection_redirect_rule_matches_resolved_config_path() {
-        let toml = self_protection_toml("/home/user/.config/shguard", "literal");
+        let toml = self_protection_toml("/home/user/.config/shguard", "literal", false);
         let user_config = UserConfig::parse(&toml).unwrap();
         let blocklist = Rules::embedded().unwrap();
         let allowlist = Allowlist::embedded().unwrap();
@@ -1211,7 +1320,7 @@ mod tests {
     fn self_protection_rules_match_newly_audited_write_commands_under_config_dir() {
         use crate::normalize::NormalizedWord;
 
-        let toml = self_protection_toml("/home/user/.config/shguard", "literal");
+        let toml = self_protection_toml("/home/user/.config/shguard", "literal", false);
         let user_config = UserConfig::parse(&toml).unwrap();
         let blocklist = Rules::embedded().unwrap();
         let allowlist = Allowlist::embedded().unwrap();
@@ -1293,7 +1402,7 @@ mod tests {
     fn self_protection_ancestor_rules_match_resolved_ancestors() {
         use crate::normalize::NormalizedWord;
 
-        let toml = self_protection_toml("/home/user/.config/shguard", "literal");
+        let toml = self_protection_toml("/home/user/.config/shguard", "literal", false);
         let user_config = UserConfig::parse(&toml).unwrap();
         let blocklist = Rules::embedded().unwrap();
         let allowlist = Allowlist::embedded().unwrap();
@@ -1368,7 +1477,7 @@ mod tests {
         // targets list would mean "no target constraint" per this
         // crate's schema, silently matching almost any rm -r/mv/rsync
         // --delete invocation).
-        let toml = self_protection_toml("/foo", "literal");
+        let toml = self_protection_toml("/foo", "literal", false);
         assert!(
             !toml.contains("ancestor"),
             "no ancestor rules should be generated when config_dir has no proper ancestor \
@@ -1454,6 +1563,47 @@ mod tests {
                 ("literal".to_string(), literal_dir),
                 ("hop-1".to_string(), mid_dir),
                 ("resolved".to_string(), real_dir),
+            ]
+        );
+    }
+
+    // A symlinked directory COMPONENT (issue #449) -- e.g. stow's default
+    // "folded" layout, `~/.config -> ~/dotfiles/config` -- leaves the
+    // config FILE itself an ordinary file, never a symlink, so the hop
+    // walk above never even starts (`read_link` on a real file fails
+    // immediately). Only canonicalizing the literal directory found above
+    // surfaces the real, fully-resolved directory the symlinked component
+    // actually points into.
+    #[test]
+    #[cfg(unix)]
+    fn symlinked_directory_component_is_canonically_protected() {
+        let root = tempdir().unwrap();
+        let root_canonical = root.path().canonicalize().unwrap();
+
+        let real_config_dir = root_canonical
+            .join("dotfiles")
+            .join("config")
+            .join("shguard");
+        std::fs::create_dir_all(&real_config_dir).unwrap();
+        std::fs::write(real_config_dir.join("config.toml"), "").unwrap();
+
+        let home_dir = root_canonical.join("h2");
+        std::fs::create_dir_all(&home_dir).unwrap();
+        std::os::unix::fs::symlink(
+            root_canonical.join("dotfiles").join("config"),
+            home_dir.join(".config"),
+        )
+        .unwrap();
+
+        let literal_dir = home_dir.join(".config").join("shguard");
+        let literal_path = literal_dir.join("config.toml");
+
+        let directories = self_protection_directories(&literal_path).unwrap();
+        assert_eq!(
+            directories,
+            vec![
+                ("literal".to_string(), literal_dir),
+                ("canonical".to_string(), real_config_dir),
             ]
         );
     }

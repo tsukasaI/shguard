@@ -845,6 +845,9 @@ enum TargetMatcher {
         /// the path.
         strip: Option<String>,
         target: PathForm,
+        /// ASCII case-fold `target`/the token's normalized form before
+        /// comparing (issue #449) — see [`TargetDto::case_insensitive`].
+        case_insensitive: bool,
     },
     /// Path-aware prefix match: the token (after an optional `strip`) is
     /// lexically normalized, rendered to its canonical string form via
@@ -853,6 +856,9 @@ enum TargetMatcher {
     NormalizedPrefix {
         strip: Option<String>,
         canon: String,
+        /// ASCII case-fold `canon`/the rendered token before comparing
+        /// (issue #449) — see [`TargetDto::case_insensitive`].
+        case_insensitive: bool,
     },
     /// Path-aware basename match (issue #427): the token (after an
     /// optional `strip`) is lexically normalized, and its TRAILING path
@@ -949,12 +955,21 @@ impl TargetMatcher {
         match self {
             Self::Exact(exact) => token == exact,
             Self::Prefix(prefix) => token.starts_with(prefix.as_str()),
-            Self::NormalizedExact { strip, target } => {
+            Self::NormalizedExact {
+                strip,
+                target,
+                case_insensitive,
+            } => {
                 let Some(remainder) = strip_target(strip.as_deref(), token) else {
                     return false;
                 };
                 let form = lexical_normalize(remainder);
-                if form == *target {
+                let equal = if *case_insensitive {
+                    case_fold_path_form(&form) == case_fold_path_form(target)
+                } else {
+                    form == *target
+                };
+                if equal {
                     return true;
                 }
                 // Fail-closed widenings (issue #65): shguard never knows
@@ -986,12 +1001,23 @@ impl TargetMatcher {
                     _ => false,
                 }
             }
-            Self::NormalizedPrefix { strip, canon } => {
+            Self::NormalizedPrefix {
+                strip,
+                canon,
+                case_insensitive,
+            } => {
                 let Some(remainder) = strip_target(strip.as_deref(), token) else {
                     return false;
                 };
-                canonical_render(&lexical_normalize(remainder))
-                    .is_some_and(|rendered| rendered.starts_with(canon.as_str()))
+                canonical_render(&lexical_normalize(remainder)).is_some_and(|rendered| {
+                    if *case_insensitive {
+                        rendered
+                            .to_ascii_lowercase()
+                            .starts_with(&canon.to_ascii_lowercase())
+                    } else {
+                        rendered.starts_with(canon.as_str())
+                    }
+                })
             }
             Self::NormalizedBasename { strip, base } => {
                 let Some(remainder) = strip_target(strip.as_deref(), token) else {
@@ -1240,6 +1266,7 @@ impl TargetMatcher {
         let Self::NormalizedExact {
             strip,
             target: PathForm::Home(comps),
+            ..
         } = self
         else {
             return false;
@@ -1336,7 +1363,7 @@ impl TargetMatcher {
     /// [`Self::ascent_descent_plausible`].
     fn unknown_cwd_plausible(&self, token: &str) -> bool {
         match self {
-            Self::NormalizedExact { strip, target } => {
+            Self::NormalizedExact { strip, target, .. } => {
                 let target_comps = match target {
                     PathForm::Abs(comps) | PathForm::Home(comps) => comps,
                     _ => return false,
@@ -1350,7 +1377,7 @@ impl TargetMatcher {
                 };
                 !comps.is_empty() && is_suffix_of(&comps, target_comps)
             }
-            Self::NormalizedPrefix { strip, canon } => {
+            Self::NormalizedPrefix { strip, canon, .. } => {
                 let canon_comps = match lexical_normalize(canon) {
                     PathForm::Abs(comps) | PathForm::Home(comps) => comps,
                     _ => return false,
@@ -1747,6 +1774,34 @@ fn canonical_render(form: &PathForm) -> Option<String> {
         // deliberately keeps it capped at.
         PathForm::EscapesHome(_) | PathForm::NamedUserHomeEscapes(_) => None,
         _ => None,
+    }
+}
+
+/// ASCII-lowercases every path component in `form`, preserving its shape
+/// (anchor kind, `ascent`) — used only by
+/// [`TargetMatcher::NormalizedExact`]'s case-insensitive comparison
+/// (issue #449, see [`TargetDto::case_insensitive`]). Folding only the
+/// component TEXT, never the shape, means a target and a token that
+/// normalize to different anchors (`Abs` vs `Home`) still correctly
+/// don't match just because folding happens to run on both.
+fn case_fold_path_form(form: &PathForm) -> PathForm {
+    fn fold(comps: &[String]) -> Vec<String> {
+        comps.iter().map(|c| c.to_ascii_lowercase()).collect()
+    }
+    match form {
+        PathForm::Abs(comps) => PathForm::Abs(fold(comps)),
+        PathForm::Home(comps) => PathForm::Home(fold(comps)),
+        PathForm::EscapesHome(comps) => PathForm::EscapesHome(fold(comps)),
+        PathForm::Rel { ascent, comps } => PathForm::Rel {
+            ascent: *ascent,
+            comps: fold(comps),
+        },
+        PathForm::NamedUserHome => PathForm::NamedUserHome,
+        PathForm::NamedUserHomeSub(comps) => PathForm::NamedUserHomeSub(fold(comps)),
+        PathForm::NamedUserHomeEscapes(comps) => PathForm::NamedUserHomeEscapes(fold(comps)),
+        PathForm::DirStack(comps) => PathForm::DirStack(fold(comps)),
+        PathForm::DirStackEscapesEmpty => PathForm::DirStackEscapesEmpty,
+        PathForm::Opaque => PathForm::Opaque,
     }
 }
 
@@ -4806,6 +4861,16 @@ struct TargetDto {
     normalized_basename: Option<String>,
     url_host: Option<String>,
     strip: Option<String>,
+    /// Opt-in ASCII case-folded comparison for `normalized`/
+    /// `normalized_prefix` (issue #449): used by `crate::config`'s
+    /// generated self-protection rules on a case-insensitive filesystem
+    /// (macOS APFS by default), where a re-cased spelling of the config
+    /// path resolves to the exact same on-disk file. Not documented as
+    /// ordinary rule-authoring syntax in the README — a rule author
+    /// reaching for this should know their own target path lives on a
+    /// case-insensitive volume.
+    #[serde(default)]
+    case_insensitive: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5306,6 +5371,13 @@ fn convert_target(
             "target's `strip` must not be empty",
         ));
     }
+    if dto.case_insensitive && dto.normalized.is_none() && dto.normalized_prefix.is_none() {
+        return Err(RulesError::invalid(
+            rule_id,
+            "target's `case_insensitive` is only valid alongside `normalized`/\
+             `normalized_prefix`",
+        ));
+    }
 
     // `set_count == 1` above guarantees exactly one of these six is
     // `Some` — the wildcard arm is unreachable, not a fallback.
@@ -5351,6 +5423,7 @@ fn convert_target(
             Ok(TargetMatcher::NormalizedExact {
                 strip: dto.strip,
                 target,
+                case_insensitive: dto.case_insensitive,
             })
         }
         (None, None, None, Some(normalized_prefix), None, None) => {
@@ -5383,9 +5456,19 @@ fn convert_target(
             if normalized_prefix.ends_with('/') && !canon.ends_with('/') {
                 canon.push('/');
             }
+            // `canon` is deliberately left in its original case here, even
+            // though `case_insensitive` will fold it inside
+            // `Self::matches` — `canon` has other, non-case-insensitive
+            // consumers (`Self::unknown_cwd_plausible`,
+            // `Self::ascent_descent_plausible`) that `lexical_normalize`
+            // and suffix-compare it against a raw token; pre-folding it
+            // here would silently change THEIR comparison too, an
+            // unrelated regression case-insensitive matching must not
+            // cause.
             Ok(TargetMatcher::NormalizedPrefix {
                 strip: dto.strip,
                 canon,
+                case_insensitive: dto.case_insensitive,
             })
         }
         (None, None, None, None, Some(base), None) => {
@@ -12214,6 +12297,116 @@ mod tests {
             targets = [{ normalized = "/" }]
         "#;
         assert!(Rules::parse(toml).is_ok());
+    }
+
+    // ==== issue #449: `case_insensitive` target matcher flag ====
+
+    // `case_insensitive` only makes sense alongside `normalized`/
+    // `normalized_prefix` — a byte-literal `exact`/`prefix` target has no
+    // normalization step to fold case within.
+    #[test]
+    fn case_insensitive_without_normalized_target_is_rejected() {
+        let toml = r#"
+            [[command]]
+            id = "x"
+            reason = "some reason"
+            command = "tar"
+            targets = [{ exact = "/tmp", case_insensitive = true }]
+        "#;
+        assert!(matches!(
+            Rules::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    // Setup B of issue #449's reproduction table: a `normalized_prefix`
+    // self-protection-style rule with `case_insensitive = true` must still
+    // match a token that only differs from the protected directory by
+    // ASCII case (macOS APFS's default case-insensitive-but-preserving
+    // volumes resolve both spellings to the same on-disk file).
+    #[test]
+    fn normalized_prefix_case_insensitive_matches_recased_token() {
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let config = UserConfig::parse(
+            r#"
+            [[deny]]
+            id = "user-deny-recased-prefix"
+            reason = "test"
+            command = "tee"
+            targets = [{ normalized_prefix = "/Users/h/.config/shguard/", case_insensitive = true }]
+        "#,
+        )
+        .unwrap();
+        let (rules, _) = merge_user_config(blocklist, allowlist, config).unwrap();
+
+        let matches = |argv: &[&str]| {
+            let words: Vec<NormalizedWord> =
+                argv.iter().map(|w| NormalizedWord::resolved(*w)).collect();
+            rules.match_command(&words).is_some()
+        };
+
+        assert!(matches(&["tee", "/Users/h/.config/shguard/config.toml"]));
+        assert!(matches(&["tee", "/USERS/H/.CONFIG/SHGUARD/config.toml"]));
+        assert!(!matches(&["tee", "/Users/h/.config/other/config.toml"]));
+    }
+
+    // The default (`case_insensitive` unset, i.e. `false`) must stay
+    // byte-exact — a re-cased spelling of the same `normalized_prefix`
+    // target must NOT match, the pre-issue-#449 behavior every ordinary
+    // (non-macOS-self-protection) rule keeps.
+    #[test]
+    fn normalized_prefix_without_case_insensitive_stays_byte_exact() {
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let config = UserConfig::parse(
+            r#"
+            [[deny]]
+            id = "user-deny-case-sensitive-prefix"
+            reason = "test"
+            command = "tee"
+            targets = [{ normalized_prefix = "/Users/h/.config/shguard/" }]
+        "#,
+        )
+        .unwrap();
+        let (rules, _) = merge_user_config(blocklist, allowlist, config).unwrap();
+
+        let words: Vec<NormalizedWord> = ["tee", "/USERS/H/.CONFIG/SHGUARD/config.toml"]
+            .iter()
+            .map(|w| NormalizedWord::resolved(*w))
+            .collect();
+        assert!(rules.match_command(&words).is_none());
+    }
+
+    // Same case-folded comparison for `normalized` (`NormalizedExact`) —
+    // covers the ancestor-directory self-protection rules
+    // (`crate::config::ancestor_rules_toml`), which use `normalized`
+    // rather than `normalized_prefix`.
+    #[test]
+    fn normalized_case_insensitive_matches_recased_token() {
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let config = UserConfig::parse(
+            r#"
+            [[deny]]
+            id = "user-deny-recased-exact"
+            reason = "test"
+            command = "rm"
+            targets = [{ normalized = "/Users/h/.config", case_insensitive = true }]
+        "#,
+        )
+        .unwrap();
+        let (rules, _) = merge_user_config(blocklist, allowlist, config).unwrap();
+
+        let matches = |argv: &[&str]| {
+            let words: Vec<NormalizedWord> =
+                argv.iter().map(|w| NormalizedWord::resolved(*w)).collect();
+            rules.match_command(&words).is_some()
+        };
+
+        assert!(matches(&["rm", "/Users/h/.config"]));
+        assert!(matches(&["rm", "/USERS/H/.CONFIG"]));
+        assert!(!matches(&["rm", "/Users/h/.config-other"]));
     }
 
     // ==== issue #427: `normalized_basename` target matcher ====
