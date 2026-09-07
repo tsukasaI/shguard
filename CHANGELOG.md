@@ -13,19 +13,25 @@ All notable changes to this project are documented in this file.
   Autonomous sessions stall on an `Ask` with no human present to answer
   it, and under Claude Code's `bypassPermissions` mode an `Ask` isn't even
   a reliable control (one can permanently disable bypass for the rest of
-  the session, anthropics/claude-code#37420); every `Ask` shguard emits
-  today is a structural fallback (an unresolved `$VAR`/`$(...)`, an
-  interpreter heredoc/inline script, a parser-unsupported construct), not
-  a rule written to expect a human in the loop. The remap runs once, on
-  the whole command line's final decision, so `fold_worst`'s worst-wins
-  fold across a compound line still keeps a genuine `Block` rule's own id
-  and `deny_message` rather than losing them to a generic floored-Ask
-  reason, and `[[allow]]` entries keep rescuing exactly as before. A
-  floored verdict is a `Block` with `matched_rule_id` left `null`, letting
+  the session, anthropics/claude-code#37420); most `Ask` verdicts shguard
+  emits in practice are structural fallbacks (an unresolved
+  `$VAR`/`$(...)`, an interpreter heredoc/inline script, a
+  parser-unsupported construct) rather than a rule written to expect a
+  human in the loop, though the embedded blocklist does carry a handful
+  of `decision = "ask"` rules too (`tar-directory-root-or-home`, the
+  credential-shaped `[[token]]` floor). The remap runs once, on the whole
+  command line's final decision, so `fold_worst`'s worst-wins fold across
+  a compound line still keeps a genuine `Block` rule's own id and
+  `deny_message` rather than losing them to a generic floored-Ask reason,
+  and `[[allow]]` entries keep rescuing exactly as before. A floored
+  verdict is a `Block` with `matched_rule_id` left `null`, letting
   `jq 'select(.decision=="Block" and .matched_rule_id==null)'` isolate
-  every floored `Ask` in a `decision_log_path` log for review or loosening
-  via a targeted `[[allow]]` entry. Also applied to the composition root's
-  own fail-closed paths that never reach `analyze_with_policy` at all
+  every floored `Ask` in a `decision_log_path` log for review; loosening
+  one back via `[[allow]]` only works where an `[[allow]]` entry could
+  already reach it (the escalation floor and credential-token floor are
+  never allowlist-rescuable, so those stay a hard `Block` with no config
+  escape). Also applied to the composition root's own fail-closed paths
+  that never reach `analyze_with_policy` at all
   (malformed/oversized stdin, a missing `command` field, a stdin read
   error); a watchdog time/memory-budget trip and a config-load failure
   itself are excluded, staying `Ask`/`SHGUARD_STRICT_CONFIG`'s own

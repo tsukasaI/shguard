@@ -138,6 +138,17 @@ pub fn analyze(command: &str) -> Verdict {
 /// `evaluate_with_timeout`); a direct library caller has no such outer
 /// watchdog of its own, so for one this function's own bound is the whole
 /// story.
+///
+/// # Ask outcome (issue #467)
+///
+/// When `policy` carries `ask_outcome = "deny"` (default `"ask"`, a
+/// no-op), the verdict this function returns is never `Ask`: any `Ask`
+/// [`gate::analyze_with_policy`] would have produced is floored to
+/// `Block` first (see [`apply_ask_outcome`]'s own docs for the full
+/// reasoning and its interaction with the bounded-evaluation watchdog
+/// above), before logging and before this function returns to its
+/// caller — so a caller reading `verdict.decision()` after this call
+/// never needs its own separate handling for "an `Ask` I can't act on".
 #[must_use]
 pub fn analyze_with_policy(
     command: &str,
@@ -158,15 +169,22 @@ pub fn analyze_with_policy(
 }
 
 /// Floors a terminal `Ask` verdict to `Block` when the user config's
-/// `ask_outcome = "deny"` (issue #467): every `Ask` [`gate::analyze_with_policy`]
-/// can still emit today is a structural fallback (an unresolved
-/// `$VAR`/`$(...)`, an interpreter heredoc/inline script, an `awk` script, a
-/// parser-unsupported construct) that an autonomous session cannot resolve
-/// on its own, and `Ask` is not even a reliable control under
-/// `bypassPermissions` (anthropics/claude-code#37420: one `Ask` can
-/// permanently disable bypass for the rest of the session). Paired with
-/// `decision_log_path` (issue #108), a floored `Ask` stays reviewable and
-/// tunable via `[[allow]]` rather than silently vanishing.
+/// `ask_outcome = "deny"` (issue #467): most `Ask` verdicts
+/// [`gate::analyze_with_policy`] emits in practice are a structural
+/// fallback (an unresolved `$VAR`/`$(...)`, an interpreter heredoc/inline
+/// script, an `awk` script, a parser-unsupported construct) that an
+/// autonomous session cannot resolve on its own, though a handful of
+/// embedded `decision = "ask"` rules (e.g. `tar-directory-root-or-home`,
+/// the credential-shaped `[[token]]` floor) are floored the same way —
+/// neither is any more actionable to an unattended session, and `Ask` is
+/// not even a reliable control under `bypassPermissions`
+/// (anthropics/claude-code#37420: one `Ask` can permanently disable
+/// bypass for the rest of the session). Paired with `decision_log_path`
+/// (issue #108), a floored `Ask` stays reviewable — and loosenable via
+/// `[[allow]]` wherever an allowlist entry could already reach the
+/// underlying command; the escalation floor and the credential-token
+/// floor are never allowlist-rescuable by design, so a command floored
+/// through either of those has no config-level escape.
 ///
 /// `matched_rule_id` is deliberately left `null` on the returned `Block` —
 /// unlike an ordinary rule-matched `Block`, this one names no specific

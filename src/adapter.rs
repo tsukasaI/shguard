@@ -43,9 +43,13 @@
 //! # Fail-closed posture
 //!
 //! - Malformed/missing stdin JSON, or a `tool_name == "Bash"` payload whose
-//!   `tool_input.command` is missing or not a string → `ask`, with a
-//!   reason describing what could not be read. Never a crash, never an
-//!   undocumented silent allow.
+//!   `tool_input.command` is missing or not a string → `ask` by default, a
+//!   reason describing what could not be read attached — never a crash,
+//!   never an undocumented silent allow. [`handle_with_policy`] instead
+//!   emits `deny` for this same failure when its `policy` carries
+//!   `ask_outcome = "deny"` (issue #467, see [`fail_closed_with`]);
+//!   [`handle`] has no `policy` to read that key from, so it always stays
+//!   `ask`.
 //! - `tool_name != "Bash"` → `allow`: shguard only analyses shell commands
 //!   run through the Bash tool, so a non-Bash tool call is out of scope by
 //!   design — the hook defers to Claude Code's normal permission flow
@@ -165,8 +169,9 @@ pub fn fail_closed_with(outcome: Decision, reason: &str) -> Value {
 
 /// Parses `stdin` and pulls out the Bash command to analyse, if any — the
 /// stdin-JSON/tool-name/command-field extraction shared by [`handle`] and
-/// [`handle_with_policy`]; the only difference between them is which
-/// `analyze`-shaped function the extracted command goes to.
+/// [`handle_with_policy`] (via [`respond`], which also picks which
+/// `analyze`-shaped function the extracted command goes to, and — issue
+/// #467 — which fail-closed decision an extraction error here becomes).
 ///
 /// `Ok(None)` means `tool_name != "Bash"` (out of scope by design, the
 /// caller should emit an ordinary `allow`). `Err(reason)` is a

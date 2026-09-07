@@ -4888,11 +4888,15 @@ fn parse_escalation_floor(raw: Option<&str>) -> Result<Decision, RulesError> {
 /// #467) into a [`Decision`], defaulting to `Decision::Ask` — today's
 /// unmodified behavior — when absent. `"deny"` maps to `Decision::Block`;
 /// [`crate::analyze_with_policy`] (`src/lib.rs`) floors every terminal
-/// `Ask` verdict it would otherwise return to this decision, since every
-/// `Ask` the hook emits today is a structural fallback (an unresolved
-/// `$VAR`/`$(...)`, an interpreter heredoc/inline script, a
+/// `Ask` verdict it would otherwise return to this decision: most `Ask`
+/// verdicts the hook emits in practice are a structural fallback (an
+/// unresolved `$VAR`/`$(...)`, an interpreter heredoc/inline script, a
 /// parser-unsupported construct) that an autonomous session cannot
-/// resolve, and `Ask` is not even a reliable control under
+/// resolve, though the embedded blocklist also carries a handful of
+/// `decision = "ask"` rules (e.g. `tar-directory-root-or-home`, the
+/// credential-shaped `[[token]]` floor) that this key floors too — none
+/// of which are any more actionable to an unattended session than a
+/// structural one is, and `Ask` is not even a reliable control under
 /// `bypassPermissions` (anthropics/claude-code#37420). `"allow"` is
 /// rejected the same way [`parse_escalation_floor`] rejects it for
 /// `escalation_floor`: there is no config mechanism that turns a genuine

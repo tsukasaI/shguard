@@ -162,7 +162,8 @@ impl From<crate::rules::RulesError> for ConfigError {
 /// whatever a user config contributed, plus this invocation's
 /// self-protection rules. Opaque to callers outside this crate — the only
 /// public operations are [`Policy::load`], [`Policy::rules_with_mixed_except_targets`],
-/// and passing a `&Policy` to [`crate::analyze_with_policy`].
+/// [`Policy::ask_outcome`], and passing a `&Policy` to
+/// [`crate::analyze_with_policy`].
 ///
 /// `Clone` exists primarily so [`crate::analyze_with_policy`] can hand an
 /// owned copy into the bounded-evaluation worker thread `src/watchdog.rs`

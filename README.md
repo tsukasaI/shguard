@@ -833,12 +833,14 @@ present to answer the prompt, and under Claude Code's `bypassPermissions`
 mode an `Ask` isn't even a reliable control: one `Ask` can permanently
 disable bypass for the rest of the session
 ([anthropics/claude-code#37420](https://github.com/anthropics/claude-code/issues/37420)).
-Every `Ask` shguard emits today is a structural fallback (an unresolved
-`$VAR`/`$(...)`, an interpreter heredoc/inline script, a
-parser-unsupported construct), never a rule written to expect a human in
-the loop; neither `rules/blocklist.toml` nor a typical user config carries
-`[[ask]]` rules. Set the top-level `ask_outcome` key to turn every such
-`Ask` into a `deny` instead:
+Most `Ask` verdicts shguard emits in practice are structural fallbacks (an
+unresolved `$VAR`/`$(...)`, an interpreter heredoc/inline script, a
+parser-unsupported construct) rather than a rule written to expect a
+human in the loop, though the embedded blocklist does carry a handful of
+`decision = "ask"` rules too (e.g. `tar-directory-root-or-home`, the
+credential-shaped `[[token]]` floor). Set the top-level `ask_outcome` key
+to turn every such `Ask`, structural or rule-authored, into a `deny`
+instead:
 
 ```toml
 ask_outcome = "deny"  # default is "ask"; "allow" is rejected at load
@@ -858,7 +860,12 @@ when the original `Ask` came from a specific rule (e.g.
 `tar-directory-root-or-home`), so `jq 'select(.decision=="Block" and
 .matched_rule_id==null)'` against a `decision_log_path` log (below)
 isolates every command this key floored, structural or rule-table, for
-review or loosening via a targeted `[[allow]]` entry. The reason string
+review. A floored command can be loosened via a targeted `[[allow]]`
+entry only where an `[[allow]]` entry could already reach it before
+`ask_outcome` existed; the escalation floor and the credential-token
+floor are never allowlist-rescuable by design, so a command floored
+through either of those stays a hard `Block` under `ask_outcome =
+"deny"` with no config-level escape. The reason string
 combines the original explanation with the fact that `ask_outcome =
 "deny"` floored it, and a `deny_message` tells the agent how to rewrite
 the command: literal paths instead of `$VAR`/`$(...)`, inline interpreter
@@ -979,11 +986,14 @@ confirmation dialog a hurried human can click through, which isn't hard
 enough for a config-load failure in a strict deployment. This only
 changes the config-load-failure decision. It does nothing for the
 PATH-miss/crash case above, which the caller-side wrapper still has to
-handle regardless of whether this variable is set, nor for shguard's
-other internal fail-closed paths (a panic during evaluation, a watchdog
-trip, a stdin read error), which stay `ask` regardless, including a
-config load that itself panics or hangs rather than returning a clean
-error.
+handle regardless of whether this variable is set, nor for a panic
+during evaluation or a watchdog trip, which stay `ask` regardless
+(including a config load that itself panics or hangs rather than
+returning a clean error). A stdin read error (malformed/oversized stdin,
+invalid UTF-8) is different: once config has loaded successfully, that
+path is governed by `ask_outcome` (above) instead, so it emits `deny`
+when `ask_outcome = "deny"` is configured rather than always staying
+`ask`.
 
 ### Protecting the config file itself
 
