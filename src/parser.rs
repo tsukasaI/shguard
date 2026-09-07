@@ -455,6 +455,34 @@ fn strip_raw_line_continuations_blind(command: &str) -> std::borrow::Cow<'_, str
     }
 }
 
+/// Fails closed (`Ask`) if `command` contains both a `$'...'` (ANSI-C
+/// quoting) opener and a raw `\`+newline byte pair anywhere (issue #444):
+/// inside `$'...'`, brush-parser's tokenizer strips a `\`+newline pair the
+/// same way it does outside quotes, but real bash's ANSI-C decoding does
+/// not treat `\`+newline as one of its recognized escapes there and keeps
+/// the raw newline in the decoded value instead. When that decoded value
+/// is later recursed into as a nested script (e.g. `bash -c $'...'`), a
+/// `#` comment before the dropped continuation swallows a line brush
+/// itself never drops, letting a real command on that line go completely
+/// unanalyzed while bash still executes it.
+///
+/// Deliberately the "cruder fallback" from the issue's own suggested
+/// fixes rather than a precise span-length comparison inside
+/// `convert_word`: it does not require the two substrings to be inside
+/// the same `$'...'` span, so it over-Asks on some commands where they
+/// are unrelated — the safe direction for a scan whose only job is
+/// deciding whether this ambiguity could exist at all, given how rare
+/// combining ANSI-C quoting with a literal line continuation is outside
+/// of exactly the adversarial shape this exists to catch.
+fn reject_ansi_c_quote_with_line_continuation(command: &str) -> Result<(), ParseError> {
+    if command.contains("$'") && command.contains("\\\n") {
+        return Err(ParseError::unsupported(
+            "ANSI-C ($'...') quoting combined with a backslash-newline line continuation cannot be safely analyzed: brush and bash disagree on whether the continuation survives inside $'...', which could hide a command on the dropped line",
+        ));
+    }
+    Ok(())
+}
+
 /// Rejects `command` if its `{`/`}` nesting depth exceeds
 /// [`MAX_RAW_BRACE_NESTING_DEPTH`], its `(`/`)` nesting depth exceeds
 /// [`MAX_RAW_PAREN_NESTING_DEPTH`], its total count of [`NESTING_KEYWORDS`]
@@ -624,9 +652,11 @@ fn check_extended_test_op_count(extended_test_op_count: &mut usize) -> Result<()
 /// shguard's AST cannot represent (see the module docs), including raw
 /// `{`/`}` nesting past [`MAX_RAW_BRACE_NESTING_DEPTH`], `(`/`)` nesting
 /// past [`MAX_RAW_PAREN_NESTING_DEPTH`], [`NESTING_KEYWORDS`] nesting past
-/// [`MAX_KEYWORD_NESTING_COUNT`], or `[[ ... ]]` `!`/`&&`/`||` operator
+/// [`MAX_KEYWORD_NESTING_COUNT`], `[[ ... ]]` `!`/`&&`/`||` operator
 /// count past [`MAX_RAW_EXTENDED_TEST_COUNT`]
-/// ([`reject_excessive_raw_nesting`]).
+/// ([`reject_excessive_raw_nesting`]), or `$'...'` ANSI-C quoting combined
+/// with a backslash-newline continuation anywhere in `command`
+/// ([`reject_ansi_c_quote_with_line_continuation`], issue #444).
 ///
 /// `analyze()` (`src/lib.rs`) calls this via `src/gate.rs` — stage 1 of the
 /// pipeline (plan.md §1.1).
@@ -638,6 +668,7 @@ pub(crate) fn parse(command: &str) -> Result<CommandLine, ParseError> {
     // suffices and why running both closes the gap.
     reject_excessive_raw_nesting(strip_raw_line_continuations(command).as_ref())?;
     reject_excessive_raw_nesting(strip_raw_line_continuations_blind(command).as_ref())?;
+    reject_ansi_c_quote_with_line_continuation(command)?;
 
     let mut parser = BrushParser::new(Cursor::new(command.as_bytes()), &parser_options());
     let program = catch_parser_panic(|| parser.parse_program())?
@@ -2590,6 +2621,23 @@ mod tests {
             strip_raw_line_continuations_blind("# x\\\nif true").as_ref(),
             "# xif true"
         );
+    }
+
+    #[test]
+    fn reject_ansi_c_quote_with_line_continuation_rejects_the_combination() {
+        assert!(
+            reject_ansi_c_quote_with_line_continuation("bash -c $'echo x #\\\nrm -rf /'").is_err()
+        );
+    }
+
+    #[test]
+    fn reject_ansi_c_quote_with_line_continuation_allows_ansi_c_alone() {
+        assert!(reject_ansi_c_quote_with_line_continuation("echo $'hello\\nworld'").is_ok());
+    }
+
+    #[test]
+    fn reject_ansi_c_quote_with_line_continuation_allows_continuation_alone() {
+        assert!(reject_ansi_c_quote_with_line_continuation("echo hi\\\nthere").is_ok());
     }
 
     #[test]

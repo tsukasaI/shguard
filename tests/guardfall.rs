@@ -1530,6 +1530,30 @@ fn guardfall_command_after_an_escaped_backslash_and_real_newline_is_still_analyz
     assert_eq!(verdict.decision(), Decision::Block);
 }
 
+/// Issue #444, sibling of #443's same-shape comment bypass but inside
+/// `$'...'` (ANSI-C quoting): brush-parser's tokenizer strips a
+/// `\`+newline pair from the decoded value the same way it does outside
+/// quotes, but real bash's ANSI-C decoding does not treat `\`+newline as a
+/// recognized escape there and keeps the raw newline. Recursing into the
+/// decoded value as a nested script (`bash -c $'...'`) would then see one
+/// merged comment line where bash sees two real lines, hiding the second
+/// line's command entirely. Must fail closed to `Ask` rather than `Allow`.
+#[test]
+fn guardfall_ansi_c_quoted_comment_hiding_a_second_line_fails_closed_to_ask() {
+    let command = "bash -c $'echo x #\\\nrm -rf /'";
+    let verdict = shguard::analyze(command);
+    assert_eq!(verdict.decision(), Decision::Ask);
+}
+
+/// False-positive pin: `$'...'` with no line continuation anywhere in the
+/// command must still resolve normally — this rule is deliberately
+/// scoped to the ambiguous combination, not to ANSI-C quoting itself.
+#[test]
+fn guardfall_ansi_c_quoting_without_a_line_continuation_still_allows() {
+    let verdict = shguard::analyze("echo $'hello\\nworld'");
+    assert_eq!(verdict.decision(), Decision::Allow);
+}
+
 /// A word made of nothing but repeated overflowing-tilde runs: the
 /// per-run remainder recursion this PR first shipped in
 /// `convert_word_text` overflowed the stack at ~2 MiB of input (well
