@@ -334,9 +334,9 @@ headless `ask` (no TTY for that dialog to render into) is denied in all
 six regardless of mode. Claude Code's own harness never resolves a hook
 `ask` on its own when there is a real terminal attached: it always renders
 the dialog and waits, whether or not anyone is actually there to answer
-it. There is no harness-side lever, no `settings.json` field and no hook
-return value, that says "resolve this `ask` to `deny` when running
-unattended" instead. shguard's `[ask_outcome]` per-mode table (issue #469)
+it. No harness-side lever, `settings.json` field, or hook return value
+documented as of this writing says "resolve this `ask` to `deny` when
+running unattended" instead. shguard's `[ask_outcome]` per-mode table (issue #469)
 exists because of that gap specifically: it is the only place in the
 whole pipeline, harness included, where "was a human actually in the
 loop" can be turned into a decision at all, and it can only approximate

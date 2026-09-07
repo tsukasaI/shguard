@@ -13938,8 +13938,13 @@ mod tests {
         assert_eq!(outcome.resolve(None, None), Decision::Ask);
     }
 
+    /// An `Unknown` mode resolves `Ask` regardless of what the table
+    /// configures for its *named* modes (`auto` here) — the `subagent`
+    /// override is a separate axis (agent-id presence, not mode
+    /// recognition) and still applies on top of this, pinned separately by
+    /// `ask_outcome_subagent_override_applies_to_an_unknown_mode_too` below.
     #[test]
-    fn ask_outcome_unknown_permission_mode_resolves_ask_regardless_of_table() {
+    fn ask_outcome_unknown_permission_mode_resolves_ask_regardless_of_named_modes() {
         let user_config = crate::rules::UserConfig::parse(
             r#"
             [ask_outcome]
@@ -13950,6 +13955,26 @@ mod tests {
         let outcome = user_config.ask_outcome();
         let unknown = crate::PermissionMode::Unknown("some-future-mode".to_string());
         assert_eq!(outcome.resolve(Some(&unknown), None), Decision::Ask);
+    }
+
+    /// The `subagent` override is orthogonal to mode recognition: it still
+    /// applies even when `permission_mode` itself is `Unknown`, since it
+    /// keys on `agent_id` presence alone.
+    #[test]
+    fn ask_outcome_subagent_override_applies_to_an_unknown_mode_too() {
+        let user_config = crate::rules::UserConfig::parse(
+            r#"
+            [ask_outcome]
+            subagent = "deny"
+        "#,
+        )
+        .unwrap();
+        let outcome = user_config.ask_outcome();
+        let unknown = crate::PermissionMode::Unknown("some-future-mode".to_string());
+        assert_eq!(
+            outcome.resolve(Some(&unknown), Some("agent-1")),
+            Decision::Block
+        );
     }
 
     #[test]

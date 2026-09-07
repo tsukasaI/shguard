@@ -60,15 +60,18 @@ All notable changes to this project are documented in this file.
   `"allow"` is rejected in every slot, same as the bare-string form, and
   the bare-string form itself is unchanged: it still floors every terminal
   `Ask` unconditionally regardless of `permission_mode`/`agent_id`. An
-  optional `subagent` key overrides the mode-keyed value only when the
-  hook stdin carries an `agent_id`; a `permission_mode` the hook stdin
-  omits, or a value this binary doesn't recognize, resolves to `"ask"`
-  regardless of what the table configures for any named mode. `shguard
-  check` gained a `--permission-mode <mode>` flag so a replay resolves a
-  table-form `ask_outcome` identically to a real hook invocation carrying
-  that mode, including matching `decision_log_path` output; with no flag,
-  `check` resolves the same conservative way an absent `permission_mode`
-  always did.
+  optional `subagent` key overrides the mode-keyed value, in either
+  direction, only when the hook stdin carries an `agent_id`, including
+  when `permission_mode` itself is a value this binary doesn't recognize;
+  a `permission_mode` the hook stdin omits, or an unrecognized value,
+  otherwise resolves to `"ask"` regardless of what the table configures
+  for any named mode. `shguard check` gained a `--permission-mode <mode>`
+  flag so a replay resolves a table-form `ask_outcome` identically to a
+  real hook invocation carrying that mode, including matching
+  `decision_log_path` output; with no flag, `check` resolves the same
+  conservative way an absent `permission_mode` always did. `Policy::ask_outcome`
+  (the library's own public API) now takes a `&HookContext` parameter to
+  resolve against, a breaking change for any caller that used it directly.
 
 ### Security
 

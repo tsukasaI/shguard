@@ -238,6 +238,68 @@ fn subagent_override_applies_only_when_agent_id_is_present() {
     assert_eq!(permission_decision(&output), "deny");
 }
 
+/// `subagent`'s override applies even when `agent_id` is present but not a
+/// JSON string (a number here) -- its mere presence (any non-null value)
+/// is what the override keys on, not its type. A JSON `null` `agent_id`,
+/// by contrast, is treated as absent.
+#[test]
+fn subagent_override_applies_to_a_non_string_agent_id() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [ask_outcome]
+        default  = "ask"
+        subagent = "deny"
+        "#,
+    );
+
+    let non_string_agent_id = r#"{"tool_name":"Bash","tool_input":{"command":"$(which python3)"},"permission_mode":"default","agent_id":42}"#;
+    let output = run_hook(&config_path, non_string_agent_id);
+    assert_eq!(permission_decision(&output), "deny");
+
+    let null_agent_id = r#"{"tool_name":"Bash","tool_input":{"command":"$(which python3)"},"permission_mode":"default","agent_id":null}"#;
+    let output = run_hook(&config_path, null_agent_id);
+    assert_eq!(permission_decision(&output), "ask");
+}
+
+/// `subagent` overrides in either direction: `subagent = "ask"` loosens a
+/// mode's own `"deny"` back to `"ask"` for subagent calls specifically,
+/// not only tightening a mode's `"ask"` to `"deny"`.
+#[test]
+fn subagent_override_can_loosen_a_denying_mode_back_to_ask() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [ask_outcome]
+        auto     = "deny"
+        subagent = "ask"
+        "#,
+    );
+
+    let without_agent_id = r#"{"tool_name":"Bash","tool_input":{"command":"$(which python3)"},"permission_mode":"auto"}"#;
+    let output = run_hook(&config_path, without_agent_id);
+    assert_eq!(permission_decision(&output), "deny");
+
+    let with_agent_id = r#"{"tool_name":"Bash","tool_input":{"command":"$(which python3)"},"permission_mode":"auto","agent_id":"agent-1"}"#;
+    let output = run_hook(&config_path, with_agent_id);
+    assert_eq!(permission_decision(&output), "ask");
+}
+
+/// A table slot with a wrong-typed value (a number instead of a string)
+/// fails config load closed, not silently ignored/defaulted.
+#[test]
+fn wrong_typed_table_slot_fails_config_load_closed() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [ask_outcome]
+        default = 5
+        "#,
+    );
+    isolated_command(&config_path)
+        .args(["check", "echo hi", "--json"])
+        .assert()
+        .failure()
+        .code(2);
+}
+
 // ==== `check --permission-mode` / hook log parity ====
 
 /// `shguard check --permission-mode auto` on a command reproduces exactly
@@ -251,47 +313,65 @@ fn subagent_override_applies_only_when_agent_id_is_present() {
 /// covered.
 #[test]
 fn check_permission_mode_flag_matches_the_hook_paths_own_log_line() {
-    let log_dir = tempfile::tempdir().expect("tempdir should create");
-    let hook_log_path = log_dir.path().join("hook.jsonl");
-    let check_log_path = log_dir.path().join("check.jsonl");
+    // Every documented mode, plus one this binary doesn't recognize — the
+    // PR's central parity claim ("check --permission-mode reproduces
+    // exactly what the hook path would decide") must hold for all of them,
+    // not only `auto`.
+    for mode in [
+        "default",
+        "plan",
+        "acceptEdits",
+        "auto",
+        "dontAsk",
+        "bypassPermissions",
+        "some-future-mode",
+    ] {
+        let log_dir = tempfile::tempdir().expect("tempdir should create");
+        let hook_log_path = log_dir.path().join("hook.jsonl");
+        let check_log_path = log_dir.path().join("check.jsonl");
 
-    let (_hook_dir, hook_config_path) = write_config(&format!(
-        r#"
-        decision_log_path = {:?}
-        {PER_MODE_CONFIG}
-        "#,
-        hook_log_path.to_string_lossy()
-    ));
-    let (_check_dir, check_config_path) = write_config(&format!(
-        r#"
-        decision_log_path = {:?}
-        {PER_MODE_CONFIG}
-        "#,
-        check_log_path.to_string_lossy()
-    ));
+        let (_hook_dir, hook_config_path) = write_config(&format!(
+            r#"
+            decision_log_path = {:?}
+            {PER_MODE_CONFIG}
+            "#,
+            hook_log_path.to_string_lossy()
+        ));
+        let (_check_dir, check_config_path) = write_config(&format!(
+            r#"
+            decision_log_path = {:?}
+            {PER_MODE_CONFIG}
+            "#,
+            check_log_path.to_string_lossy()
+        ));
 
-    let command = "$(which python3)";
-    let hook_stdin = format!(
-        r#"{{"tool_name":"Bash","tool_input":{{"command":{command:?}}},"permission_mode":"auto"}}"#
-    );
-    let hook_output = run_hook(&hook_config_path, &hook_stdin);
-    assert_eq!(permission_decision(&hook_output), "deny");
+        let command = "$(which python3)";
+        let hook_stdin = format!(
+            r#"{{"tool_name":"Bash","tool_input":{{"command":{command:?}}},"permission_mode":{mode:?}}}"#
+        );
+        let hook_output = run_hook(&hook_config_path, &hook_stdin);
+        let check_output = run_check_json(&check_config_path, command, Some(mode));
+        assert_eq!(
+            permission_decision(&hook_output) == "deny",
+            check_output["decision"] == "Block",
+            "mode {mode:?}: hook decision {:?} and check decision {:?} disagree",
+            permission_decision(&hook_output),
+            check_output["decision"]
+        );
 
-    let check_output = run_check_json(&check_config_path, command, Some("auto"));
-    assert_eq!(check_output["decision"], "Block");
+        let hook_lines = read_jsonl_lines(&hook_log_path);
+        let check_lines = read_jsonl_lines(&check_log_path);
+        assert_eq!(hook_lines.len(), 1);
+        assert_eq!(check_lines.len(), 1);
 
-    let hook_lines = read_jsonl_lines(&hook_log_path);
-    let check_lines = read_jsonl_lines(&check_log_path);
-    assert_eq!(hook_lines.len(), 1);
-    assert_eq!(check_lines.len(), 1);
-
-    assert_eq!(hook_lines[0]["permission_mode"], "auto");
-    assert!(hook_lines[0]["agent_id"].is_null());
-    assert_eq!(
-        hook_lines[0], check_lines[0],
-        "the hook and `check --permission-mode auto` log lines for the \
-         same command under the same mode must be identical"
-    );
+        assert_eq!(hook_lines[0]["permission_mode"], mode);
+        assert!(hook_lines[0]["agent_id"].is_null());
+        assert_eq!(
+            hook_lines[0], check_lines[0],
+            "mode {mode:?}: the hook and `check --permission-mode` log lines \
+             for the same command under the same mode must be identical"
+        );
+    }
 }
 
 /// `shguard check` with no `--permission-mode` flag behaves exactly as it
@@ -318,6 +398,38 @@ fn check_permission_mode_missing_value_is_a_usage_error() {
     let (_dir, config_path) = write_config("");
     isolated_command(&config_path)
         .args(["check", "echo hi", "--permission-mode"])
+        .assert()
+        .failure()
+        .code(2);
+}
+
+/// A flag-shaped `--permission-mode` value (e.g. `--json` following it) is
+/// a usage error, not silently consumed as an `Unknown("--json")` mode
+/// value — the loop must not swallow the next real flag.
+#[test]
+fn check_permission_mode_value_looking_like_a_flag_is_a_usage_error() {
+    let (_dir, config_path) = write_config("");
+    isolated_command(&config_path)
+        .args(["check", "echo hi", "--permission-mode", "--json"])
+        .assert()
+        .failure()
+        .code(2);
+}
+
+/// A second `--permission-mode` occurrence is a usage error, not a silent
+/// last-one-wins.
+#[test]
+fn check_permission_mode_given_twice_is_a_usage_error() {
+    let (_dir, config_path) = write_config("");
+    isolated_command(&config_path)
+        .args([
+            "check",
+            "echo hi",
+            "--permission-mode",
+            "auto",
+            "--permission-mode",
+            "default",
+        ])
         .assert()
         .failure()
         .code(2);

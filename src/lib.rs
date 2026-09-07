@@ -101,10 +101,15 @@ impl PermissionMode {
 /// [`analyze_with_policy`], which hands it to `sink.append` for the
 /// decision log and — issue #469 — to `policy`'s `ask_outcome` table to
 /// resolve the per-mode terminal-`Ask` floor; every other step of the
-/// Allow/Ask/Block decision still ignores it. `None` for a field means the
-/// hook stdin omitted it (or, for [`HookContext::none`], that there was no
-/// hook stdin at all, e.g. the `shguard check` CLI path without its own
-/// `--permission-mode` flag) — distinct from `permission_mode` being
+/// Allow/Ask/Block decision still ignores it. `None` for `permission_mode`/
+/// `agent_type` means the hook stdin omitted it or carried a non-string
+/// value; `agent_id` is `None` only when the field was absent or JSON
+/// `null` (a present-but-non-string `agent_id` still resolves to `Some`,
+/// stringified, since its presence alone is what issue #469's `subagent`
+/// `ask_outcome` override keys on). `None` everywhere, via
+/// [`HookContext::none`], additionally means there was no hook stdin at
+/// all, e.g. the `shguard check` CLI path without its own
+/// `--permission-mode` flag — distinct from `permission_mode` being
 /// present as `"default"`. `agent_type` is carried for parity with the
 /// hook's own subagent fields but is not currently logged; only
 /// `permission_mode`/`agent_id` are (`src/decision_log.rs`).

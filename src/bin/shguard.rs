@@ -538,6 +538,11 @@ fn check_config() -> i32 {
     1
 }
 
+/// Usage string shared by every `run_check` argument-error path — kept as
+/// one constant so `--permission-mode`'s addition (issue #469) didn't need
+/// updating at each of the several call sites separately.
+const CHECK_USAGE: &str = "usage: shguard check <command> [--json] [--permission-mode <mode>]";
+
 /// `shguard check <command> [--json] [--permission-mode <mode>]` (issue
 /// #109): a dry-run mode that prints the
 /// [`shguard::analyze_with_policy`] verdict for a command string given
@@ -598,11 +603,6 @@ fn check_config() -> i32 {
 /// Writes via `writeln!` (discarding the write error), not
 /// `println!`/`eprintln!`, for the same broken-pipe reasoning
 /// [`install_panic_hook`]'s own docs give.
-/// Usage string shared by every `run_check` argument-error path — kept as
-/// one constant so `--permission-mode`'s addition (issue #469) didn't need
-/// updating at each of the several call sites separately.
-const CHECK_USAGE: &str = "usage: shguard check <command> [--json] [--permission-mode <mode>]";
-
 fn run_check(args: &[std::ffi::OsString]) -> i32 {
     let mut json = false;
     let mut permission_mode: Option<&std::ffi::OsString> = None;
@@ -617,7 +617,24 @@ fn run_check(args: &[std::ffi::OsString]) -> i32 {
         if arg == "--json" {
             json = true;
         } else if arg == "--permission-mode" {
-            let Some(value) = iter.next() else {
+            if permission_mode.is_some() {
+                let _ = writeln!(
+                    io::stderr(),
+                    "shguard check: --permission-mode given more than once ({CHECK_USAGE})"
+                );
+                return 2;
+            }
+            // A missing value and a flag-shaped value are rejected the same
+            // way: `iter.next()` alone can't tell "no more arguments" apart
+            // from "the next argument is itself a flag this loop would
+            // otherwise swallow as the mode string" (e.g. `--permission-mode
+            // --json` silently treating `--json` as an `Unknown` mode value
+            // rather than the flag it looks like).
+            let value = iter.next().filter(|v| match v.to_str() {
+                Some(v) => !v.starts_with("--"),
+                None => true,
+            });
+            let Some(value) = value else {
                 let _ = writeln!(
                     io::stderr(),
                     "shguard check: --permission-mode requires a value ({CHECK_USAGE})"

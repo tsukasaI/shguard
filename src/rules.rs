@@ -5010,24 +5010,27 @@ fn parse_escalation_floor(raw: Option<&str>) -> Result<Decision, RulesError> {
 /// table key. `"allow"` is rejected the same way [`parse_escalation_floor`]
 /// rejects it for `escalation_floor`: there is no config mechanism that
 /// turns a genuine `Ask` into a silent `Allow`.
-fn parse_ask_outcome_value(raw: &str) -> Result<Decision, RulesError> {
+fn parse_ask_outcome_value(key: &str, raw: &str) -> Result<Decision, RulesError> {
     match raw {
         "ask" => Ok(Decision::Ask),
         "deny" => Ok(Decision::Block),
         other => Err(RulesError::invalid(
             "ask_outcome",
-            format!("ask_outcome must be \"ask\" or \"deny\", got {other:?}"),
+            format!("{key} must be \"ask\" or \"deny\", got {other:?}"),
         )),
     }
 }
 
 /// A per-mode table key: absent keeps the built-in default `Decision::Ask`
 /// (issue #469's "any unset table key keeps the built-in default \"ask\""),
-/// present goes through [`parse_ask_outcome_value`].
-fn parse_ask_outcome_slot(raw: Option<&str>) -> Result<Decision, RulesError> {
+/// present goes through [`parse_ask_outcome_value`]. `key` is the table
+/// key's own name (e.g. `"ask_outcome.auto"`), threaded through so a
+/// rejected value's error names which slot it came from rather than the
+/// generic top-level `"ask_outcome"`.
+fn parse_ask_outcome_slot(key: &str, raw: Option<&str>) -> Result<Decision, RulesError> {
     match raw {
         None => Ok(Decision::Ask),
-        Some(raw) => parse_ask_outcome_value(raw),
+        Some(raw) => parse_ask_outcome_value(key, raw),
     }
 }
 
@@ -5185,27 +5188,34 @@ struct AskOutcomeTableDto {
 /// Allow-to-Ask floor) and rules 6b/6d's own "Ask floor" terminology —
 /// this key floors in the opposite direction (Ask-to-Block), after gate
 /// has already run, not during it.
-fn parse_ask_outcome(raw: Option<&toml::Value>) -> Result<AskOutcome, RulesError> {
+fn parse_ask_outcome(raw: Option<toml::Value>) -> Result<AskOutcome, RulesError> {
     match raw {
         None => Ok(AskOutcome::default()),
-        Some(toml::Value::String(raw)) => parse_ask_outcome_value(raw).map(AskOutcome::Global),
+        Some(toml::Value::String(raw)) => {
+            parse_ask_outcome_value("ask_outcome", &raw).map(AskOutcome::Global)
+        }
         Some(table @ toml::Value::Table(_)) => {
             let dto: AskOutcomeTableDto = table
-                .clone()
                 .try_into()
                 .map_err(|err| RulesError::invalid("ask_outcome", err.to_string()))?;
             let subagent = dto
                 .subagent
                 .as_deref()
-                .map(parse_ask_outcome_value)
+                .map(|raw| parse_ask_outcome_value("ask_outcome.subagent", raw))
                 .transpose()?;
             Ok(AskOutcome::PerMode(AskOutcomeTable {
-                default: parse_ask_outcome_slot(dto.default.as_deref())?,
-                plan: parse_ask_outcome_slot(dto.plan.as_deref())?,
-                accept_edits: parse_ask_outcome_slot(dto.accept_edits.as_deref())?,
-                auto: parse_ask_outcome_slot(dto.auto.as_deref())?,
-                dont_ask: parse_ask_outcome_slot(dto.dont_ask.as_deref())?,
-                bypass_permissions: parse_ask_outcome_slot(dto.bypass_permissions.as_deref())?,
+                default: parse_ask_outcome_slot("ask_outcome.default", dto.default.as_deref())?,
+                plan: parse_ask_outcome_slot("ask_outcome.plan", dto.plan.as_deref())?,
+                accept_edits: parse_ask_outcome_slot(
+                    "ask_outcome.acceptEdits",
+                    dto.accept_edits.as_deref(),
+                )?,
+                auto: parse_ask_outcome_slot("ask_outcome.auto", dto.auto.as_deref())?,
+                dont_ask: parse_ask_outcome_slot("ask_outcome.dontAsk", dto.dont_ask.as_deref())?,
+                bypass_permissions: parse_ask_outcome_slot(
+                    "ask_outcome.bypassPermissions",
+                    dto.bypass_permissions.as_deref(),
+                )?,
                 subagent,
             }))
         }
@@ -6727,7 +6737,7 @@ impl UserConfig {
             .collect::<Result<Vec<_>, _>>()?;
         let escalation_floor = parse_escalation_floor(dto.escalation_floor.as_deref())?;
         let decision_log_path = parse_decision_log_path(dto.decision_log_path.as_deref())?;
-        let ask_outcome = parse_ask_outcome(dto.ask_outcome.as_ref())?;
+        let ask_outcome = parse_ask_outcome(dto.ask_outcome)?;
 
         reject_duplicate_ids(
             deny.iter()

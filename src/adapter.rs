@@ -200,11 +200,30 @@ pub fn fail_closed_with(outcome: Decision, reason: &str) -> Value {
 /// [`respond`]). `context` in the `Err` case is [`HookContext::none`] only
 /// when the JSON itself failed to parse (there is nothing to read
 /// `permission_mode`/`agent_id` off of yet); for the missing-`command`
-/// case, `tool_name`/`permission_mode`/`agent_id`/`agent_type` already
-/// parsed successfully by that point, so the real context — not a stand-in
-/// — is returned, letting issue #469's per-mode `ask_outcome` table
-/// resolve against the actual `permission_mode` this failure occurred
-/// under, rather than discarding it as if it were unreadable.
+/// case, whatever `permission_mode`/`agent_id`/`agent_type` the stdin JSON
+/// carried — absent, present, or present but not the expected type, same
+/// as [`HookInput`]'s own `#[serde(default)]` posture — was already
+/// resolved into the real `context` by that point, so issue #469's
+/// per-mode `ask_outcome` table resolves against it rather than
+/// discarding it as if it were unreadable.
+/// Extracts `agent_id` for [`HookContext`] from the stdin's raw JSON value,
+/// treating any non-null value — not only a string — as "a subagent
+/// context is present": the harness sends a string today, but a present,
+/// non-string `agent_id` (a number, say) is still evidence a subagent
+/// fired the hook, and issue #469's `subagent` `ask_outcome` override must
+/// still apply then rather than silently treating it the same as an
+/// absent field.
+fn subagent_id(agent_id: &Value) -> Option<String> {
+    if agent_id.is_null() {
+        return None;
+    }
+    Some(
+        agent_id
+            .as_str()
+            .map_or_else(|| agent_id.to_string(), str::to_string),
+    )
+}
+
 fn extract_bash_command(
     stdin: &str,
 ) -> Result<Option<(String, HookContext)>, (String, HookContext)> {
@@ -221,7 +240,7 @@ fn extract_bash_command(
 
     let context = HookContext::new(
         input.permission_mode.as_str().map(PermissionMode::parse),
-        input.agent_id.as_str().map(str::to_string),
+        subagent_id(&input.agent_id),
         input.agent_type.as_str().map(str::to_string),
     );
 

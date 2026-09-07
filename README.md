@@ -921,16 +921,23 @@ the same as the bare-string form.
 
 `subagent` is a separate, optional key: when the hook stdin carries an
 `agent_id` (a subagent call), its value overrides whatever the resolved
-`permission_mode` value would otherwise have been; when the table omits
-it, a subagent call resolves through the ordinary mode-keyed value with no
-override at all. It exists as its own key because neither the hooks doc
-nor `docs/threat-model.md`'s own measured matrix say anything
+`permission_mode` value would otherwise have been, in either direction, so
+`subagent = "ask"` can loosen a mode's own `"deny"` back to `"ask"` for
+subagent calls specifically, not only tighten it. When the table omits
+`subagent`, a subagent call resolves through the ordinary mode-keyed value
+with no override at all. It exists as its own key because neither the
+hooks doc nor `docs/threat-model.md`'s own measured matrix say anything
 subagent-specific about a PreToolUse `ask`; its actual harness behavior is
-unverified, tracked as a gap until someone measures it.
+unverified, tracked as a gap until someone measures it. It also applies
+independently of whether `permission_mode` itself is recognized: a
+subagent call under a mode this binary has never heard of still resolves
+through `subagent` rather than the `"ask"` fallback below, since agent-id
+presence and mode recognition are orthogonal.
 
 A `permission_mode` the hook stdin omits, or a value this binary doesn't
 recognize (a future harness mode), resolves to `"ask"` regardless of what
-the table configures for any named mode: this binary has no basis for
+the table configures for any *named* mode (`subagent`, above, is the one
+override that still applies on top of this): this binary has no basis for
 narrowing an autonomous-session floor to a mode it cannot identify.
 `shguard check` has no real hook stdin to read `permission_mode` from
 either, so it resolves the same conservative way unless its own
@@ -955,9 +962,9 @@ A table-form `ask_outcome` also governs the composition root's own
 fail-closed paths, same as the bare-string form does, but resolved against
 whatever context each one has in hand: malformed/oversized stdin and a
 stdin read error never reach a parsed `permission_mode` at all, so they
-resolve the same conservative way an absent mode does (`"ask"`, unless a
-named mode's own `deny` would apply regardless of context, which only the
-bare-string form does); a `Bash` payload missing its `command` field
+resolve the same conservative way an absent mode does (`"ask"` under a
+table; the bare-string `"deny"` form still applies unconditionally,
+regardless of context); a `Bash` payload missing its `command` field
 already has a readable `permission_mode` by that point, so it resolves
 against the actual mode the hook stdin carried, the same as a
 successfully-analyzed command would.

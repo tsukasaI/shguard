@@ -336,10 +336,14 @@ fn hook_path_logs_the_default_permission_mode_as_the_string_default_not_null() {
     assert_eq!(lines[0]["permission_mode"], "default");
 }
 
-/// A non-string `permission_mode`/`agent_id` must log as `null`, the same
-/// as an absent field, not fail the whole stdin parse closed.
+/// A non-string `permission_mode` must log as `null`, the same as an
+/// absent field, not fail the whole stdin parse closed. `agent_id` is
+/// different: its presence alone (any non-null value) is what issue
+/// #469's `subagent` `ask_outcome` override keys on, so a present,
+/// non-string `agent_id` still logs its stringified value rather than
+/// `null` -- pinned separately below.
 #[test]
-fn hook_path_logs_null_for_a_non_string_permission_mode_or_agent_id() {
+fn hook_path_logs_null_for_a_non_string_permission_mode() {
     let log_dir = tempfile::tempdir().expect("tempdir should create");
     let log_path = log_dir.path().join("decisions.jsonl");
     let (_config_dir, config_path) = write_config(&format!(
@@ -349,7 +353,8 @@ fn hook_path_logs_null_for_a_non_string_permission_mode_or_agent_id() {
         log_path.to_string_lossy()
     ));
 
-    let hook_stdin = r#"{"tool_name":"Bash","tool_input":{"command":"echo hello"},"permission_mode":123,"agent_id":{"x":1}}"#;
+    let hook_stdin =
+        r#"{"tool_name":"Bash","tool_input":{"command":"echo hello"},"permission_mode":123}"#;
     isolated_command(&config_path)
         .write_stdin(hook_stdin)
         .assert()
@@ -359,6 +364,58 @@ fn hook_path_logs_null_for_a_non_string_permission_mode_or_agent_id() {
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0]["decision"], "Allow");
     assert!(lines[0]["permission_mode"].is_null());
+}
+
+/// A present, non-string `agent_id` (a JSON object here) is not treated
+/// the same as an absent one: it still logs (stringified), since its
+/// mere presence is what the `subagent` `ask_outcome` override keys on.
+#[test]
+fn hook_path_logs_a_present_non_string_agent_id_stringified() {
+    let log_dir = tempfile::tempdir().expect("tempdir should create");
+    let log_path = log_dir.path().join("decisions.jsonl");
+    let (_config_dir, config_path) = write_config(&format!(
+        r#"
+        decision_log_path = {:?}
+        "#,
+        log_path.to_string_lossy()
+    ));
+
+    let hook_stdin =
+        r#"{"tool_name":"Bash","tool_input":{"command":"echo hello"},"agent_id":{"x":1}}"#;
+    isolated_command(&config_path)
+        .write_stdin(hook_stdin)
+        .assert()
+        .success();
+
+    let lines = read_jsonl_lines(&log_path);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["decision"], "Allow");
+    assert!(!lines[0]["agent_id"].is_null());
+}
+
+/// A JSON `null` `agent_id` (explicitly present but null) logs the same
+/// as an absent field -- only a present, non-null value counts as a
+/// subagent context.
+#[test]
+fn hook_path_logs_null_for_an_explicitly_null_agent_id() {
+    let log_dir = tempfile::tempdir().expect("tempdir should create");
+    let log_path = log_dir.path().join("decisions.jsonl");
+    let (_config_dir, config_path) = write_config(&format!(
+        r#"
+        decision_log_path = {:?}
+        "#,
+        log_path.to_string_lossy()
+    ));
+
+    let hook_stdin =
+        r#"{"tool_name":"Bash","tool_input":{"command":"echo hello"},"agent_id":null}"#;
+    isolated_command(&config_path)
+        .write_stdin(hook_stdin)
+        .assert()
+        .success();
+
+    let lines = read_jsonl_lines(&log_path);
+    assert_eq!(lines.len(), 1);
     assert!(lines[0]["agent_id"].is_null());
 }
 
