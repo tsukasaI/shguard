@@ -2253,3 +2253,60 @@ fn ask_decision_deny_plus_narrow_allow_rescues_a_secrets_scanner_invocation() {
     assert_eq!(permission_decision(&output), "ask");
     assert!(permission_reason(&output).contains("user-gate-trufflehog"));
 }
+
+// Issue #451's own reproduction table: an `awk` allow entry was accepted
+// at config load and then downgraded rule 6d's un-introspectable-script Ask
+// straight to Allow, unlike an equivalent `python3` entry (rejected via
+// `SHELL_INTERPRETERS`'s pipeline-sink cousin) at config load already.
+
+#[test]
+fn awk_inline_script_asks_with_no_config() {
+    let output = run_hook(&bash_command("awk 'BEGIN{system(\"rm -rf /\")}'"), &[]);
+    assert_eq!(permission_decision(&output), "ask");
+}
+
+#[test]
+fn awk_allow_entry_fails_closed_via_hook() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[allow]]
+        id = "allow-awk"
+        reason = "test"
+        command = "awk"
+    "#,
+    );
+
+    let output = run_hook(
+        &bash_command("awk 'BEGIN{system(\"rm -rf /\")}'"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    // Asserting the reason names the rejected entry and the load-time
+    // check, not just "ask", distinguishes this from rule 6d's own
+    // un-introspectable-script Ask (which would also read "ask" but say
+    // nothing about "allow-awk" or a shell-interpreter/awk-variant
+    // rejection) -- the config must never even load, and the load failure's
+    // own fail-closed Ask wins, never the "allow" the pre-fix bug returned.
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(permission_reason(&output).contains("allow-awk"));
+    assert!(permission_reason(&output).contains("must not match"));
+}
+
+#[test]
+fn python3_allow_entry_still_fails_closed_via_hook() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[allow]]
+        id = "allow-python3"
+        reason = "test"
+        command = "python3"
+    "#,
+    );
+
+    let output = run_hook(
+        &bash_command("python3 -c 'import os; os.system(\"rm -rf /\")'"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(permission_reason(&output).contains("allow-python3"));
+    assert!(permission_reason(&output).contains("must not match"));
+}

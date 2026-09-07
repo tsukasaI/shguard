@@ -336,7 +336,7 @@ use crate::normalize::{
 };
 use crate::parser;
 use crate::rules::{
-    Allowlist, AllowlistOutcome, CommandRule, EVAL_BUILTIN, PathForm, Rules,
+    AWK_INTERPRETERS, Allowlist, AllowlistOutcome, CommandRule, EVAL_BUILTIN, PathForm, Rules,
     WrapperChainEscalation, is_pipeline_interpreter, lexical_normalize, render_cwd_anchor,
 };
 use crate::verdict::{Decision, DenyMessage, Reason, RuleId, Verdict};
@@ -6570,26 +6570,6 @@ fn inline_code_flag(name: &str) -> Option<&'static str> {
     }
 }
 
-/// The `awk` family (rule 6d, issue #195): every one of these names' script
-/// either sits in a bare positional operand (no `-c`-style flag the way
-/// `python3`/`perl`/`node` have one) or, for gawk specifically, behind
-/// `-e`/`--source` — see [`scan_for_awk_script`]. Applied to every name
-/// here, not just literal `gawk`: `awk` itself is gawk on most Linux
-/// distributions, and this scan is name-based, not behavior-probed, so a
-/// `gawk`-only flag reaching a plain `awk` invocation must still be
-/// recognized. Deliberately NOT added to
-/// [`crate::rules::EXTRA_PIPELINE_INTERPRETERS`]/`is_pipeline_interpreter`
-/// (rule 5b/5c's decode-pipe-into-interpreter floor): that rule is about an
-/// interpreter whose *default, flagless* invocation reads piped stdin bytes
-/// as code (`sh`, a bare `python3`) — a flagless `awk` never does that,
-/// piped data feeds its *records*, not its script, so it isn't the same
-/// risk class. This is narrower than "awk's program never comes from
-/// stdin", though: `-f`/`-E`'s value can itself name stdin (`-`,
-/// `/dev/stdin`, `/proc/self/fd/0`), which `scan_for_awk_script`'s
-/// `FileFlagStdin` floors to Ask on its own, independent of this
-/// constant's pipeline-interpreter exclusion.
-const AWK_INTERPRETERS: &[&str] = &["awk", "gawk", "mawk", "nawk", "original-awk"];
-
 /// Result of [`scan_for_awk_script`]: where awk's script comes from,
 /// relative to its first non-option operand. Mirrors
 /// [`DashCPosition`]'s position-aware shape, but with the flag/operand
@@ -6650,6 +6630,12 @@ enum AwkScriptPosition {
 /// comes back empty does [`scan_for_awk_file_flag_or_operand`] run its
 /// position-aware walk for the `-f`/`-E`/`-i`-vs-operand question, which
 /// genuinely does depend on which one a real option parser reaches first.
+///
+/// Applied to every [`crate::rules::AWK_INTERPRETERS`] name, not just
+/// literal `gawk`: `awk` itself is gawk on most Linux distributions, and
+/// this scan is name-based, not behavior-probed, so a `gawk`-only flag
+/// (`-e`/`--source`) reaching a plain `awk` invocation must still be
+/// recognized.
 fn scan_for_awk_script(words: &[NormalizedWord]) -> AwkScriptPosition {
     scan_for_awk_inline_flag(words).unwrap_or_else(|| scan_for_awk_file_flag_or_operand(words))
 }
