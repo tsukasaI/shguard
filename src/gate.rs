@@ -13622,6 +13622,73 @@ mod tests {
         assert!(err.is_err());
     }
 
+    // ==== issue #467: `ask_outcome` parse matrix ====
+    //
+    // `crate::rules::UserConfig::ask_outcome`/`parse_ask_outcome` are
+    // `pub(crate)`, unreachable from an integration test (`tests/*.rs`
+    // compiles against the public API only, per
+    // `coding-guidelines/languages/rust.md`'s testing policy) — this matrix
+    // lives here, alongside `escalation_floor`'s own parse-matrix tests
+    // above, rather than in `tests/ask_outcome.rs`.
+
+    #[test]
+    fn ask_outcome_absent_defaults_to_ask() {
+        let user_config = crate::rules::UserConfig::parse("").unwrap();
+        assert_eq!(user_config.ask_outcome(), Decision::Ask);
+    }
+
+    #[test]
+    fn ask_outcome_ask_parses_to_ask() {
+        let user_config = crate::rules::UserConfig::parse(
+            r#"
+            ask_outcome = "ask"
+        "#,
+        )
+        .unwrap();
+        assert_eq!(user_config.ask_outcome(), Decision::Ask);
+    }
+
+    #[test]
+    fn ask_outcome_deny_parses_to_block() {
+        let user_config = crate::rules::UserConfig::parse(
+            r#"
+            ask_outcome = "deny"
+        "#,
+        )
+        .unwrap();
+        assert_eq!(user_config.ask_outcome(), Decision::Block);
+    }
+
+    #[test]
+    fn ask_outcome_allow_is_rejected_at_config_load() {
+        let err = crate::rules::UserConfig::parse(
+            r#"
+            ask_outcome = "allow"
+        "#,
+        );
+        assert!(err.is_err(), "ask_outcome = \"allow\" must be rejected");
+    }
+
+    #[test]
+    fn ask_outcome_block_is_rejected_at_config_load() {
+        let err = crate::rules::UserConfig::parse(
+            r#"
+            ask_outcome = "block"
+        "#,
+        );
+        assert!(err.is_err(), "ask_outcome = \"block\" must be rejected");
+    }
+
+    #[test]
+    fn ask_outcome_empty_string_is_rejected_at_config_load() {
+        let err = crate::rules::UserConfig::parse(
+            r#"
+            ask_outcome = ""
+        "#,
+        );
+        assert!(err.is_err(), "ask_outcome = \"\" must be rejected");
+    }
+
     #[test]
     fn user_deny_rule_naming_doas_itself_still_blocks() {
         // Issues #35/#36: a rule naming an escalation vector's own literal

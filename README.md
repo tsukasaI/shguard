@@ -826,6 +826,71 @@ the floor off entirely, only to tighten it. A `[[deny]]`/`[[ask]]` entry
 naming one of the five commands directly (`command = "doas"`) is also
 reachable, independent of `escalation_floor`, the same as any other rule.
 
+### Ask outcome
+
+Autonomous sessions stall on an `Ask` verdict, since there is no human
+present to answer the prompt, and under Claude Code's `bypassPermissions`
+mode an `Ask` isn't even a reliable control: one `Ask` can permanently
+disable bypass for the rest of the session
+([anthropics/claude-code#37420](https://github.com/anthropics/claude-code/issues/37420)).
+Most `Ask` verdicts shguard emits in practice are structural fallbacks (an
+unresolved `$VAR`/`$(...)`, an interpreter heredoc/inline script, a
+parser-unsupported construct) rather than a rule written to expect a
+human in the loop, though the embedded blocklist does carry 21
+`decision = "ask"` rules too (e.g. `tar-directory-root-or-home`, the
+credential-shaped `[[token]]` floor). Set the top-level `ask_outcome` key
+to turn every such `Ask`, structural or rule-authored, into a `deny`
+instead:
+
+```toml
+ask_outcome = "deny"  # default is "ask"; "allow" is rejected at load
+```
+
+The remap runs once, on the whole command line's final decision, not
+per-command, so a compound line like `$(which foo); rm -rf /` still keeps
+the `rm` rule's own id and `deny_message` instead of losing them to a
+generic floored-Ask reason: the floor only ever replaces a verdict whose
+FINAL decision is `Ask`, and `fold_worst` already resolved that line to
+`Block` before the floor runs. `[[allow]]` entries keep working exactly as
+before, since an allowlist-rescued command that would otherwise `Ask`
+still comes back `Allow`, never floored to `Block`.
+
+A floored verdict is a `Block` with `matched_rule_id` left `null`, even
+when the original `Ask` came from a specific rule (e.g.
+`tar-directory-root-or-home`). `matched_rule_id` alone does not isolate
+one, though: several structural `Block`s the gate decides on its own also
+carry a `null` rule id. Filter on the reason instead, since it only ever
+appears on a verdict this key floored:
+`jq 'select(.reason | contains("ask_outcome = \"deny\""))'` against a
+`decision_log_path` log (below). A floored command can be loosened via a
+targeted `[[allow]]`
+entry only where an `[[allow]]` entry could already reach it before
+`ask_outcome` existed; the escalation floor and the credential-token
+floor are never allowlist-rescuable by design, so a command floored
+through either of those stays a hard `Block` under `ask_outcome =
+"deny"` with no config-level escape. The reason string combines the
+original explanation with the fact that `ask_outcome = "deny"` floored
+it. `deny_message` is preserved verbatim when the rule that produced the
+original `Ask` already declared one (a user `[[ask]]` entry, or an
+embedded `decision = "ask"` rule); otherwise a generic message tells the
+agent how to rewrite the command: literal paths instead of
+`$VAR`/`$(...)`, inline interpreter code moved to a file, a compound
+line split into separate commands, or run it manually.
+
+`ask_outcome` also governs the composition root's own fail-closed paths
+that never reach `analyze_with_policy` at all: malformed or oversized
+stdin, a `Bash` payload missing its `command` field, a stdin read error;
+these floor the same way a structural `Ask` would. It does NOT cover a
+config-load failure itself, since there is no loaded config to read the
+key from at that point (that failure mode is `SHGUARD_STRICT_CONFIG`'s
+own territory, below), nor a watchdog time/memory-budget trip, which is
+created outside the decision pipeline entirely and stays `Ask`
+regardless, so it is never mistaken for an ordinary policy decision.
+
+`"allow"` is rejected when the config is loaded, the same as
+`escalation_floor`: there is no config mechanism that turns a genuine
+`Ask` into a silent `Allow`.
+
 ### Structured decision-output logging
 
 Off by default. shguard's own decision output today is only the hook
@@ -926,11 +991,14 @@ confirmation dialog a hurried human can click through, which isn't hard
 enough for a config-load failure in a strict deployment. This only
 changes the config-load-failure decision. It does nothing for the
 PATH-miss/crash case above, which the caller-side wrapper still has to
-handle regardless of whether this variable is set, nor for shguard's
-other internal fail-closed paths (a panic during evaluation, a watchdog
-trip, a stdin read error), which stay `ask` regardless, including a
-config load that itself panics or hangs rather than returning a clean
-error.
+handle regardless of whether this variable is set, nor for a panic
+during evaluation or a watchdog trip, which stay `ask` regardless
+(including a config load that itself panics or hangs rather than
+returning a clean error). A stdin read error (malformed/oversized stdin,
+invalid UTF-8) is different: once config has loaded successfully, that
+path is governed by `ask_outcome` (above) instead, so it emits `deny`
+when `ask_outcome = "deny"` is configured rather than always staying
+`ask`.
 
 ### Protecting the config file itself
 
