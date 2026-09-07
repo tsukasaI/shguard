@@ -390,7 +390,7 @@ fn hook_path_logs_a_present_non_string_agent_id_stringified() {
     let lines = read_jsonl_lines(&log_path);
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0]["decision"], "Allow");
-    assert!(!lines[0]["agent_id"].is_null());
+    assert_eq!(lines[0]["agent_id"], r#"{"x":1}"#);
 }
 
 /// A JSON `null` `agent_id` (explicitly present but null) logs the same

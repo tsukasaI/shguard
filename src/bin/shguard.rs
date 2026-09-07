@@ -172,11 +172,12 @@ fn main() {
             std::process::exit(check_config());
         }
         // `check` takes a variable number of its own arguments (the command
-        // string plus an optional `--json`), unlike `--version`/
-        // `--check-config` above which take none — so it can't reuse the
-        // fixed two-arg peek those use. `extra_arg` already consumed the
-        // first token after "check" (if any); reassemble it with the rest
-        // of the iterator so `run_check` sees the complete argument list.
+        // string plus optional `--json`/`--permission-mode <mode>` flags),
+        // unlike `--version`/`--check-config` above which take none — so it
+        // can't reuse the fixed two-arg peek those use. `extra_arg` already
+        // consumed the first token after "check" (if any); reassemble it
+        // with the rest of the iterator so `run_check` sees the complete
+        // argument list.
         Some("check") => {
             let mut check_args: Vec<std::ffi::OsString> = Vec::new();
             check_args.extend(extra_arg);
@@ -642,6 +643,20 @@ fn run_check(args: &[std::ffi::OsString]) -> i32 {
                 return 2;
             };
             permission_mode = Some(value);
+        } else if command.is_none() && arg.to_str().is_some_and(|arg| arg.starts_with("--")) {
+            // A `--`-prefixed positional is a typo'd/unrecognized flag, not
+            // a command: a real shell command never begins with `--`, so
+            // silently accepting one here (e.g. `--permission-mode=auto`
+            // typo'd without a space, or any other misspelled flag) would
+            // analyze it as the literal command string, which trivially
+            // resolves `Allow` — exactly the "typo skips the check and
+            // exits 0 anyway" failure mode this binary exists to avoid (see
+            // `main`'s own module doc).
+            let _ = writeln!(
+                io::stderr(),
+                "shguard check: unrecognized flag {arg:?} ({CHECK_USAGE})"
+            );
+            return 2;
         } else if command.is_none() {
             command = Some(arg);
         } else {

@@ -261,6 +261,31 @@ fn subagent_override_applies_to_a_non_string_agent_id() {
     assert_eq!(permission_decision(&output), "ask");
 }
 
+/// The same non-string-`agent_id` presence check applies on the
+/// missing-`command` fail-closed path too, not only the analyzed-command
+/// path above -- both go through the same `subagent_id` extraction in
+/// `src/adapter.rs`, but only one of them was previously covered.
+#[test]
+fn subagent_override_applies_to_a_non_string_agent_id_on_the_missing_command_path() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [ask_outcome]
+        default  = "ask"
+        subagent = "deny"
+        "#,
+    );
+
+    let non_string_agent_id =
+        r#"{"tool_name":"Bash","tool_input":{},"permission_mode":"default","agent_id":42}"#;
+    let output = run_hook(&config_path, non_string_agent_id);
+    assert_eq!(permission_decision(&output), "deny");
+
+    let null_agent_id =
+        r#"{"tool_name":"Bash","tool_input":{},"permission_mode":"default","agent_id":null}"#;
+    let output = run_hook(&config_path, null_agent_id);
+    assert_eq!(permission_decision(&output), "ask");
+}
+
 /// `subagent` overrides in either direction: `subagent = "ask"` loosens a
 /// mode's own `"deny"` back to `"ask"` for subagent calls specifically,
 /// not only tightening a mode's `"ask"` to `"deny"`.
@@ -430,6 +455,21 @@ fn check_permission_mode_given_twice_is_a_usage_error() {
             "--permission-mode",
             "default",
         ])
+        .assert()
+        .failure()
+        .code(2);
+}
+
+/// A `--`-prefixed positional (e.g. `--permission-mode=auto` typo'd
+/// without a space) is rejected as an unrecognized flag, not silently
+/// analyzed as the literal command string -- a typo that skips the check
+/// and exits 0 anyway would be the worst failure mode for a checking
+/// tool.
+#[test]
+fn check_dash_dash_prefixed_positional_is_a_usage_error_not_a_command() {
+    let (_dir, config_path) = write_config("");
+    isolated_command(&config_path)
+        .args(["check", "--permission-mode=auto", "--json"])
         .assert()
         .failure()
         .code(2);

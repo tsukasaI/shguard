@@ -25,10 +25,13 @@
 //!   `"acceptEdits"`, `"auto"`, `"dontAsk"`, `"bypassPermissions"`, parsed
 //!   into [`crate::PermissionMode`], with any other value preserved as
 //!   `Unknown`), and `agent_id`/`agent_type: string` (present only inside a
-//!   subagent call), may be present. A present value of the wrong JSON type
-//!   (not a string) is treated the same as absent, not a parse failure of
-//!   the whole payload. Other context fields (`session_id`, `cwd`,
-//!   `hook_event_name`) may be present and are ignored here.
+//!   subagent call), may be present. A present, wrong-JSON-type
+//!   `permission_mode`/`agent_type` is treated the same as absent, not a
+//!   parse failure of the whole payload; `agent_id` differs — any present,
+//!   non-`null` value (not only a string) counts as present, since issue
+//!   #469's `subagent` `ask_outcome` override keys on that presence alone
+//!   (see [`crate::HookContext`]). Other context fields (`session_id`,
+//!   `cwd`, `hook_event_name`) may be present and are ignored here.
 //! - **stdout**: exit 0, plus
 //!   ```json
 //!   {
@@ -185,6 +188,24 @@ pub fn fail_closed_with(outcome: Decision, reason: &str) -> Value {
     output_json(decision, reason, None)
 }
 
+/// Extracts `agent_id` for [`HookContext`] from the stdin's raw JSON value,
+/// treating any non-null value — not only a string — as "a subagent
+/// context is present": the harness sends a string today, but a present,
+/// non-string `agent_id` (a number, say) is still evidence a subagent
+/// fired the hook, and issue #469's `subagent` `ask_outcome` override must
+/// still apply then rather than silently treating it the same as an
+/// absent field.
+fn subagent_id(agent_id: &Value) -> Option<String> {
+    if agent_id.is_null() {
+        return None;
+    }
+    Some(
+        agent_id
+            .as_str()
+            .map_or_else(|| agent_id.to_string(), str::to_string),
+    )
+}
+
 /// Parses `stdin` and pulls out the Bash command to analyse plus its
 /// [`HookContext`], if any — the stdin-JSON/tool-name/command-field
 /// extraction shared by [`handle`] and [`handle_with_policy`] (via
@@ -206,24 +227,6 @@ pub fn fail_closed_with(outcome: Decision, reason: &str) -> Value {
 /// resolved into the real `context` by that point, so issue #469's
 /// per-mode `ask_outcome` table resolves against it rather than
 /// discarding it as if it were unreadable.
-/// Extracts `agent_id` for [`HookContext`] from the stdin's raw JSON value,
-/// treating any non-null value — not only a string — as "a subagent
-/// context is present": the harness sends a string today, but a present,
-/// non-string `agent_id` (a number, say) is still evidence a subagent
-/// fired the hook, and issue #469's `subagent` `ask_outcome` override must
-/// still apply then rather than silently treating it the same as an
-/// absent field.
-fn subagent_id(agent_id: &Value) -> Option<String> {
-    if agent_id.is_null() {
-        return None;
-    }
-    Some(
-        agent_id
-            .as_str()
-            .map_or_else(|| agent_id.to_string(), str::to_string),
-    )
-}
-
 fn extract_bash_command(
     stdin: &str,
 ) -> Result<Option<(String, HookContext)>, (String, HookContext)> {
