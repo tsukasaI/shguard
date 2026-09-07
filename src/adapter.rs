@@ -515,6 +515,25 @@ mod tests {
     }
 
     #[test]
+    fn handle_with_policy_remaps_an_ordinary_ask_verdict_to_deny_under_ask_outcome_deny() {
+        // Distinct from the fail-closed-stdin-path tests above: this
+        // exercises `crate::analyze_with_policy`'s own terminal remap
+        // (`src/lib.rs`), reached only once a command is successfully
+        // extracted and handed to `analyze`, not an adapter-level parsing
+        // failure.
+        let policy = policy_with_ask_outcome(Decision::Block);
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"rm -rf $DIR"}}"#;
+        let output = handle_with_policy(stdin, &policy, &crate::FileDecisionLog);
+        assert_eq!(permission_decision(&output), "deny");
+        assert!(permission_reason(&output).contains("ask_outcome"));
+        assert!(
+            output["hookSpecificOutput"]
+                .get("additionalContext")
+                .is_some()
+        );
+    }
+
+    #[test]
     fn fail_closed_with_deny_matches_fail_closed_deny() {
         assert_eq!(
             fail_closed_with(Decision::Block, "reason"),

@@ -828,16 +828,17 @@ reachable, independent of `escalation_floor`, the same as any other rule.
 
 ### `ask_outcome`: turning every final Ask into deny
 
-Every `Ask` a real hook invocation sees today is a structural fallback (an
+A real hook invocation reaches `Ask` three ways: a structural fallback (an
 unresolved `$VAR`/`$(...)` in a dangerous position, an inline-interpreter
 one-liner such as `python3 -c "..."`/`node -e "..."`, an `awk 'prog'`
-script, or a parser-unsupported construct), since neither
-`rules/blocklist.toml` nor a typical user config carries an `[[ask]]` rule.
-That's a real problem for an autonomous session: it stalls on the
+script, or a parser-unsupported construct), an embedded `decision = "ask"`
+blocklist rule match (`rules/blocklist.toml` ships several, e.g.
+`tar-directory-root-or-home`), or a user `[[ask]]` rule match. Any of
+these is a real problem for an autonomous session: it stalls on the
 confirmation dialog, and under `bypassPermissions` an `ask` isn't even a
-reliable control (one `ask` can permanently disable bypass for the rest of
-the session). Set the top-level `ask_outcome` key to turn every final
-`Ask` verdict into `deny` instead:
+reliable control (one `ask` can interrupt bypass for the rest of the
+session). Set the top-level `ask_outcome` key to turn every final `Ask`
+verdict into `deny` instead:
 
 ```toml
 ask_outcome = "deny"  # default is "ask"; "allow" is rejected at load
@@ -848,11 +849,14 @@ not a per-command floor: a compound line like `some-ask-producing-cmd; rm
 -rf /` already resolves to `Block` from the real `rm` rule before this
 remap ever runs (worst-decision-wins folding), so the remap can never mask
 a genuine `[[deny]]`/blocklist match or lose its rule id. `matched_rule_id`
-stays `null` on a remapped verdict (see `decision_log_path` below), so
-`jq 'select(.decision=="Block" and .matched_rule_id==null)'` isolates
-floored asks from a real deny-rule match in the log. An `[[allow]]` entry
-that would have rescued an `Ask` to `Allow` still does, since the allowlist
-downgrade runs before this remap ever sees the verdict.
+alone does not distinguish a remapped verdict from a structural `Block`
+decided without a rule match either way (both leave it `null`); every
+remapped verdict's `reason` instead always contains the literal
+`ask_outcome = "deny"` marker, so
+`jq 'select(.reason | contains("ask_outcome"))'` isolates floored asks in
+the log (see `decision_log_path` below). An `[[allow]]` entry that would
+have rescued an `Ask` to `Allow` still does, since the allowlist downgrade
+runs before this remap ever sees the verdict.
 
 `"allow"` is rejected at config load, the same way `escalation_floor`
 rejects it: there is no config mechanism that turns an `Ask` into a silent

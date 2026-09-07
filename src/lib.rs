@@ -145,10 +145,12 @@ pub fn analyze(command: &str) -> Verdict {
 /// default `"ask"`), a *final* `Decision::Ask` — the one [`watchdog::bounded`]
 /// actually returns for this whole command line — is remapped to
 /// `Decision::Block` via [`remap_ask_to_block`] before logging, so an
-/// autonomous session never stalls on a structural `Ask` (unresolved
+/// autonomous session never stalls on any of the three ways a hook
+/// invocation reaches `Ask` today: a structural fallback (unresolved
 /// `$VAR`/`$(...)`, an inline-interpreter one-liner, an unsupported
-/// construct) that neither the embedded blocklist nor a typical user config
-/// carries an `[[ask]]` rule for.
+/// construct), an embedded `decision = "ask"` blocklist rule match (e.g.
+/// `rules/blocklist.toml`'s `tar-directory-root-or-home`), or a user
+/// `[[ask]]` rule match.
 ///
 /// This is a remap of the whole-line fold result, not a per-command floor
 /// applied inside `gate::analyze_with_policy` itself: `gate::fold_worst`
@@ -190,30 +192,32 @@ pub fn analyze_with_policy(
 /// Remaps a final `Decision::Ask` verdict to `Decision::Block` for
 /// `ask_outcome = "deny"` (see [`analyze_with_policy`]'s own docs) —
 /// a no-op on `Allow`/`AllowSuppressed`/`Block`. `matched_rule` stays
-/// `None`: this is never a rule match, so `jq 'select(.decision=="Block"
-/// and .matched_rule_id==null)'` against a `decision_log_path` (issue #108)
-/// isolates floored asks from a genuine `[[deny]]`/blocklist match.
+/// `None`: this is never itself a rule match. That alone does not isolate a
+/// remapped verdict in a `decision_log_path` line, though — several
+/// structural `Block`s in `gate.rs` also carry `matched_rule: None` — so the
+/// combined reason text below (which always contains the literal
+/// `ask_outcome = "deny"` marker) is what a caller should filter on
+/// instead, e.g. `jq 'select(.reason | contains("ask_outcome"))'`.
 fn remap_ask_to_block(verdict: Verdict) -> Verdict {
     if verdict.decision() != Decision::Ask {
         return verdict;
     }
-    let original_reason = verdict.reason().map_or("", Reason::as_str).to_string();
+    let original_reason = verdict
+        .reason()
+        .map_or("ask verdict carried no reason", Reason::as_str)
+        .to_string();
     let deny_message = verdict.deny_message().cloned();
     Verdict::block(
         Reason::new(format!(
-            "{original_reason}; ask_outcome = \"deny\": this command was structurally \
-             unresolvable rather than blocked outright — rewrite unresolved $VAR/$(...) as \
-             literal values, move inline interpreter code to a file, split the line into \
-             separate commands, or run it manually instead of through the agent"
+            "{original_reason}; ask_outcome = \"deny\" remapped this Ask to Block"
         )),
         verdict.normalized_argv().to_vec(),
         None,
     )
     .with_deny_message(deny_message.or_else(|| {
         Some(DenyMessage::new(
-            "ask_outcome = \"deny\" turned this Ask into a Block: rewrite unresolved \
-             $VAR/$(...) as literal values, move inline interpreter code to a file, split the \
-             line into separate commands, or run it manually instead of through the agent",
+            "ask_outcome = \"deny\" turned this Ask into a Block; see the reason for what \
+             was undecidable, and run the command manually if it is genuinely intended",
         ))
     }))
 }
@@ -298,6 +302,30 @@ mod tests {
         let verdict = analyze_with_policy("gh pr view", &policy, &NoopSink);
         assert_eq!(verdict.decision(), Decision::Block);
         assert!(verdict.matched_rule().is_none());
+    }
+
+    #[test]
+    fn ask_outcome_deny_preserves_a_matched_rules_own_deny_message() {
+        // A matched `[[ask]]` rule's own `deny_message` must survive the
+        // remap untouched — the generic fallback guidance only applies
+        // when the original Ask verdict carried none.
+        let policy = policy_from_config(
+            r#"
+            ask_outcome = "deny"
+
+            [[ask]]
+            id = "user-ask-gh"
+            reason = "confirm every gh invocation"
+            command = "gh"
+            deny_message = "use the gh MCP tool instead"
+        "#,
+        );
+        let verdict = analyze_with_policy("gh pr view", &policy, &NoopSink);
+        assert_eq!(verdict.decision(), Decision::Block);
+        assert_eq!(
+            verdict.deny_message().map(DenyMessage::as_str),
+            Some("use the gh MCP tool instead")
+        );
     }
 
     #[test]

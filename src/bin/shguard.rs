@@ -582,7 +582,8 @@ fn check_config() -> i32 {
 /// within a bounded time instead of hanging the CI job or terminal forever —
 /// matching the hook path's own bound (plus a small margin so an internal
 /// timeout inside `analyze_with_policy` itself surfaces as the documented
-/// `Decision: Ask`, not this outer bound's own error) instead of leaving
+/// `Decision: Ask` — or `Decision: Block` under `ask_outcome = "deny"`,
+/// issue #467 — not this outer bound's own error) instead of leaving
 /// `check` as the one caller with no upper bound at all on that failure
 /// mode.
 ///
@@ -716,9 +717,10 @@ fn run_check(args: &[std::ffi::OsString]) -> i32 {
 /// `src/watchdog.rs`) and returns its own fail-closed `Ask` verdict on that
 /// internal trip — this margin must strictly exceed that internal deadline
 /// so a genuine internal time-budget trip has time to be sent back over the
-/// channel and reported as the documented `Decision: Ask` (with its verdict
-/// still logged), rather than losing the race to this function's own outer
-/// `recv_timeout` and being reported instead as `run_check`'s generic
+/// channel and reported as the documented `Decision: Ask` (or
+/// `Decision: Block` under `ask_outcome = "deny"`, issue #467), with its
+/// verdict still logged, rather than losing the race to this function's own
+/// outer `recv_timeout` and being reported instead as `run_check`'s generic
 /// "possibly a hung decision_log_path target" runtime error.
 const CHECK_TIMEOUT_GRACE: Duration = Duration::from_millis(500);
 

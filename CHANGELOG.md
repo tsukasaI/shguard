@@ -8,20 +8,21 @@ All notable changes to this project are documented in this file.
 
 - New optional `ask_outcome` user-config key (default `"ask"`): setting it
   to `"deny"` remaps every final `Ask` verdict a hook invocation resolves
-  to into `deny`, so an autonomous session no longer stalls on the
-  structural fallbacks (an unresolved `$VAR`/`$(...)`, an inline-interpreter
-  one-liner, an `awk` script, a parser-unsupported construct) that today
-  account for essentially every `Ask` a real hook sees, since neither the
-  embedded blocklist nor a typical user config carries an `[[ask]]` rule
-  (#467). Applied as a terminal remap of the whole command line's
-  worst-decision-wins fold result, not a per-command floor, so a compound
-  line's real `[[deny]]`/blocklist match keeps its own rule id and
-  `deny_message` untouched; `[[allow]]` entries still rescue an `Ask` to
-  `Allow` first. `matched_rule_id` stays `null` on a remapped verdict, so a
-  `decision_log_path` line can tell a floored ask apart from a genuine deny
-  match. `"allow"` is rejected at config load, the same posture
-  `escalation_floor` already has. The adapter's own fail-closed fallbacks
-  (malformed stdin, a missing `command` field, oversized stdin, a stdin
+  to into `deny`, so an autonomous session no longer stalls on any of the
+  three ways a hook reaches `Ask` today (a structural fallback such as an
+  unresolved `$VAR`/`$(...)`, an inline-interpreter one-liner, or a
+  parser-unsupported construct; an embedded `decision = "ask"` blocklist
+  rule match; or a user `[[ask]]` rule match) (#467). Applied as a terminal
+  remap of the whole command line's worst-decision-wins fold result, not a
+  per-command floor, so a compound line's real `[[deny]]`/blocklist match
+  keeps its own rule id and `deny_message` untouched; `[[allow]]` entries
+  still rescue an `Ask` to `Allow` first. `matched_rule_id` alone does not
+  distinguish a remapped verdict from an unrelated structural `Block`
+  (both leave it `null`); a remapped verdict's `reason` instead always
+  contains the literal `ask_outcome = "deny"` marker. `"allow"` is rejected
+  at config load, the same posture `escalation_floor` already has. The
+  adapter's own fail-closed fallbacks (malformed stdin, a missing
+  `command` field, oversized stdin, a stdin
   read error) honor the key too.
 
 ## [0.6.4] - 2026-09-05
