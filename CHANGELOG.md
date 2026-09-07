@@ -40,6 +40,16 @@ All notable changes to this project are documented in this file.
   itself are excluded, staying `Ask`/`SHGUARD_STRICT_CONFIG`'s own
   behavior respectively.
 
+### Security
+
+- The dir-stack tilde forms `~+<n>`/`~-<n>` still reached brush-parser
+  0.4.0's unchecked digit-run `unwrap()` when `<n>` overflowed `usize`
+  (#456), the same panic-discards-the-whole-command-line class issue #405
+  fixed for plain `~<uid>`. A trailing `~+99999999999999999999` appended
+  to an otherwise-`Block`-worthy command downgraded the verdict to `Ask`.
+  Both dir-stack forms are now pre-empted into literal text the same way
+  `~<uid>` already was.
+
 ## [0.6.4] - 2026-09-05
 
 ### Security
