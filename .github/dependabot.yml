@@ -1,0 +1,33 @@
+version: 2
+
+updates:
+  # Keeps the SHA-pinned actions in ci.yaml, release.yaml, and
+  # fuzz-nightly.yaml current: Dependabot resolves the new tag's commit SHA
+  # itself and updates both the pin and its trailing "# vX.Y.Z" comment, the
+  # same renewal release.yaml's header currently describes as a manual
+  # `gh api ... --jq '.object.sha'` procedure.
+  #
+  # NOTE: dtolnay/rust-toolchain is pinned to a `master` branch commit (no
+  # version tag), unlike the other tag-pinned actions here. Dependabot's
+  # github-actions updater is documented against tag-based `uses:` refs;
+  # its behavior for a bare-branch commit pin like this one is unverified
+  # in this change, so the manual `gh api .../commits/master --jq '.sha'`
+  # renewal (release.yaml's header) remains the path for that one pin until
+  # confirmed otherwise.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # brush-parser and url are exact-pinned (`=`) per docs/adr/0001-parser-crate.md
+  # and docs/adr/0002-url-crate.md respectively. Both ADRs name the existing
+  # test suite (the parser fixture corpus in src/parser.rs; the url_host
+  # matcher's regression tests in src/rules.rs and tests/user_config.rs) as
+  # the upgrade-compatibility gate for any version bump of these two crates
+  # — not a separate manual review step — so Dependabot is left free to open
+  # PRs for them like any other dependency; CI (`cargo test`) is the gate
+  # that decides whether the bump is safe to merge.
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
