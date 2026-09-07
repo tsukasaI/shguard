@@ -3530,8 +3530,8 @@ const EXTRA_PIPELINE_INTERPRETERS: &[&str] = &[
 /// specifically, behind `-e`/`--source`. Lives here, next to
 /// [`SHELL_INTERPRETERS`]/[`EVAL_BUILTIN`], for the same cross-module
 /// reason those do: so [`matches_dangerous_allow_target`] can reject an
-/// `allow` entry naming `awk`/`gawk`/`mawk`/`nawk` the same way it already
-/// rejects one naming `bash`/`eval` (issue #451), without `rules` depending
+/// `allow` entry naming any of these five awk variants the same way it
+/// already rejects one naming `bash`/`eval` (issue #451), without `rules` depending
 /// on `gate`. Deliberately NOT added to [`EXTRA_PIPELINE_INTERPRETERS`]/
 /// `is_pipeline_interpreter` (rule 5b/5c's decode-pipe-into-interpreter
 /// floor): that rule is about an interpreter whose *default, flagless*
@@ -12380,7 +12380,7 @@ mod tests {
     // script) must be just as unsuppressable as `eval`'s.
     #[test]
     fn user_config_rejects_allow_entry_matching_awk_family_exactly() {
-        for awk in ["awk", "gawk", "mawk", "nawk"] {
+        for awk in AWK_INTERPRETERS {
             let toml = format!(
                 r#"
                 [[allow]]
