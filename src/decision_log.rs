@@ -18,6 +18,7 @@
 use std::io::Write;
 use std::path::Path;
 
+use crate::HookContext;
 use crate::normalize::{NormalizedWord, Resolution};
 use crate::verdict::{Decision, Verdict};
 
@@ -30,8 +31,8 @@ use crate::verdict::{Decision, Verdict};
 pub struct FileDecisionLog;
 
 impl crate::DecisionLogSink for FileDecisionLog {
-    fn append(&self, path: &Path, command: &str, verdict: &Verdict) {
-        append(path, command, verdict);
+    fn append(&self, path: &Path, command: &str, verdict: &Verdict, context: &HookContext) {
+        append(path, command, verdict, context);
     }
 }
 
@@ -46,7 +47,7 @@ impl crate::DecisionLogSink for FileDecisionLog {
 /// the decision contract. A caller who needs to know logging itself is
 /// healthy should watch the log file directly (size, mtime), not
 /// shguard's return value.
-fn append(path: &Path, command: &str, verdict: &Verdict) {
+fn append(path: &Path, command: &str, verdict: &Verdict, context: &HookContext) {
     let decision = match verdict.decision() {
         Decision::Allow => "Allow",
         Decision::Ask => "Ask",
@@ -62,6 +63,8 @@ fn append(path: &Path, command: &str, verdict: &Verdict) {
         .iter()
         .map(word_to_string)
         .collect();
+    let permission_mode = context.permission_mode().map(crate::PermissionMode::as_str);
+    let agent_id = context.agent_id();
 
     let line = serde_json::json!({
         "command": command,
@@ -70,6 +73,8 @@ fn append(path: &Path, command: &str, verdict: &Verdict) {
         "matched_rule_id": matched_rule_id,
         "deny_message": deny_message,
         "normalized_argv": normalized_argv,
+        "permission_mode": permission_mode,
+        "agent_id": agent_id,
     });
 
     let Ok(mut serialized) = serde_json::to_string(&line) else {
@@ -142,7 +147,7 @@ mod tests {
             ],
             Some(RuleId::new("rm-recursive-force-dangerous-target")),
         );
-        append(&log_path, "rm -rf /", &verdict);
+        append(&log_path, "rm -rf /", &verdict, &HookContext::none());
 
         let contents = std::fs::read_to_string(&log_path).unwrap();
         let lines: Vec<&str> = contents.lines().collect();
@@ -155,6 +160,27 @@ mod tests {
             "rm-recursive-force-dangerous-target"
         );
         assert_eq!(value["normalized_argv"], serde_json::json!(["rm", "-rf"]));
+        assert!(value["permission_mode"].is_null());
+        assert!(value["agent_id"].is_null());
+    }
+
+    #[test]
+    fn permission_mode_and_agent_id_are_logged_when_the_context_carries_them() {
+        let dir = tempdir().unwrap();
+        let log_path = dir.path().join("decisions.jsonl");
+
+        let context = HookContext::new(
+            Some(crate::PermissionMode::BypassPermissions),
+            Some("agent-123".to_string()),
+            Some("explore".to_string()),
+        );
+        append(&log_path, "echo hi", &Verdict::allow(Vec::new()), &context);
+
+        let contents = std::fs::read_to_string(&log_path).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(contents.lines().next().unwrap()).unwrap();
+        assert_eq!(value["permission_mode"], "bypassPermissions");
+        assert_eq!(value["agent_id"], "agent-123");
     }
 
     #[test]
@@ -162,8 +188,18 @@ mod tests {
         let dir = tempdir().unwrap();
         let log_path = dir.path().join("decisions.jsonl");
 
-        append(&log_path, "echo one", &Verdict::allow(Vec::new()));
-        append(&log_path, "echo two", &Verdict::allow(Vec::new()));
+        append(
+            &log_path,
+            "echo one",
+            &Verdict::allow(Vec::new()),
+            &HookContext::none(),
+        );
+        append(
+            &log_path,
+            "echo two",
+            &Verdict::allow(Vec::new()),
+            &HookContext::none(),
+        );
 
         let contents = std::fs::read_to_string(&log_path).unwrap();
         assert_eq!(contents.lines().count(), 2);
@@ -180,7 +216,7 @@ mod tests {
                 UnresolvableKind::ParameterExpansion,
             )],
         );
-        append(&log_path, "rm $X", &verdict);
+        append(&log_path, "rm $X", &verdict, &HookContext::none());
 
         let contents = std::fs::read_to_string(&log_path).unwrap();
         let value: serde_json::Value =
@@ -226,7 +262,12 @@ mod tests {
 
         let dir = tempdir().unwrap();
         let log_path = dir.path().join("decisions.jsonl");
-        append(&log_path, "echo hi", &Verdict::allow(Vec::new()));
+        append(
+            &log_path,
+            "echo hi",
+            &Verdict::allow(Vec::new()),
+            &HookContext::none(),
+        );
 
         // `mode & 0o077 == 0` (no group/other bits), not an exact `0o600`
         // equality: `.mode()` is still subject to umask, so an unusual
@@ -251,7 +292,12 @@ mod tests {
         // be observable by the caller in any way other than "no line
         // appeared" -- there is no error return from `append` to check.
         let unwritable = std::path::Path::new("/nonexistent-shguard-test-dir/decisions.jsonl");
-        append(unwritable, "echo hi", &Verdict::allow(Vec::new()));
+        append(
+            unwritable,
+            "echo hi",
+            &Verdict::allow(Vec::new()),
+            &HookContext::none(),
+        );
     }
 
     /// Regression test for a HIGH bug: `crate::analyze_with_policy`
@@ -295,7 +341,8 @@ mod tests {
         });
 
         let policy = crate::config::Policy::for_test_with_decision_log_path(fifo_path);
-        let verdict = crate::analyze_with_policy("rm -rf /", &policy, &FileDecisionLog);
+        let verdict =
+            crate::analyze_with_policy("rm -rf /", &policy, &HookContext::none(), &FileDecisionLog);
         assert_eq!(
             verdict.decision(),
             Decision::Block,

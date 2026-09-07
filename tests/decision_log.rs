@@ -238,6 +238,152 @@ fn watchdog_trip_verdict_is_still_logged() {
     );
 }
 
+// Issue #468: `permission_mode`/`agent_id` from PreToolUse stdin are
+// recorded on the decision log line, and `null` when the hook stdin omits
+// them (or, for `shguard check`, doesn't exist at all).
+
+#[test]
+fn hook_path_logs_permission_mode_and_agent_id_when_present() {
+    let log_dir = tempfile::tempdir().expect("tempdir should create");
+    let log_path = log_dir.path().join("decisions.jsonl");
+    let (_config_dir, config_path) = write_config(&format!(
+        r#"
+        decision_log_path = {:?}
+        "#,
+        log_path.to_string_lossy()
+    ));
+
+    let hook_stdin = r#"{"tool_name":"Bash","tool_input":{"command":"echo hello"},"permission_mode":"bypassPermissions","agent_id":"agent-42","agent_type":"explore"}"#;
+    isolated_command(&config_path)
+        .write_stdin(hook_stdin)
+        .assert()
+        .success();
+
+    let lines = read_jsonl_lines(&log_path);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["permission_mode"], "bypassPermissions");
+    assert_eq!(lines[0]["agent_id"], "agent-42");
+}
+
+#[test]
+fn hook_path_logs_null_permission_mode_and_agent_id_when_absent() {
+    let log_dir = tempfile::tempdir().expect("tempdir should create");
+    let log_path = log_dir.path().join("decisions.jsonl");
+    let (_config_dir, config_path) = write_config(&format!(
+        r#"
+        decision_log_path = {:?}
+        "#,
+        log_path.to_string_lossy()
+    ));
+
+    let hook_stdin = r#"{"tool_name":"Bash","tool_input":{"command":"echo hello"}}"#;
+    isolated_command(&config_path)
+        .write_stdin(hook_stdin)
+        .assert()
+        .success();
+
+    let lines = read_jsonl_lines(&log_path);
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0]["permission_mode"].is_null());
+    assert!(lines[0]["agent_id"].is_null());
+}
+
+#[test]
+fn hook_path_logs_an_unrecognized_permission_mode_verbatim() {
+    let log_dir = tempfile::tempdir().expect("tempdir should create");
+    let log_path = log_dir.path().join("decisions.jsonl");
+    let (_config_dir, config_path) = write_config(&format!(
+        r#"
+        decision_log_path = {:?}
+        "#,
+        log_path.to_string_lossy()
+    ));
+
+    let hook_stdin = r#"{"tool_name":"Bash","tool_input":{"command":"echo hello"},"permission_mode":"some-future-mode"}"#;
+    isolated_command(&config_path)
+        .write_stdin(hook_stdin)
+        .assert()
+        .success();
+
+    let lines = read_jsonl_lines(&log_path);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["permission_mode"], "some-future-mode");
+}
+
+/// Pins the `null` (absent) vs `"default"` (present) distinction
+/// `HookContext` exists to preserve (issue #468) — a present `"default"`
+/// must log as the string `"default"`, not `null`.
+#[test]
+fn hook_path_logs_the_default_permission_mode_as_the_string_default_not_null() {
+    let log_dir = tempfile::tempdir().expect("tempdir should create");
+    let log_path = log_dir.path().join("decisions.jsonl");
+    let (_config_dir, config_path) = write_config(&format!(
+        r#"
+        decision_log_path = {:?}
+        "#,
+        log_path.to_string_lossy()
+    ));
+
+    let hook_stdin =
+        r#"{"tool_name":"Bash","tool_input":{"command":"echo hello"},"permission_mode":"default"}"#;
+    isolated_command(&config_path)
+        .write_stdin(hook_stdin)
+        .assert()
+        .success();
+
+    let lines = read_jsonl_lines(&log_path);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["permission_mode"], "default");
+}
+
+/// A non-string `permission_mode`/`agent_id` must log as `null`, the same
+/// as an absent field, not fail the whole stdin parse closed.
+#[test]
+fn hook_path_logs_null_for_a_non_string_permission_mode_or_agent_id() {
+    let log_dir = tempfile::tempdir().expect("tempdir should create");
+    let log_path = log_dir.path().join("decisions.jsonl");
+    let (_config_dir, config_path) = write_config(&format!(
+        r#"
+        decision_log_path = {:?}
+        "#,
+        log_path.to_string_lossy()
+    ));
+
+    let hook_stdin = r#"{"tool_name":"Bash","tool_input":{"command":"echo hello"},"permission_mode":123,"agent_id":{"x":1}}"#;
+    isolated_command(&config_path)
+        .write_stdin(hook_stdin)
+        .assert()
+        .success();
+
+    let lines = read_jsonl_lines(&log_path);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["decision"], "Allow");
+    assert!(lines[0]["permission_mode"].is_null());
+    assert!(lines[0]["agent_id"].is_null());
+}
+
+#[test]
+fn check_subcommand_logs_null_permission_mode_and_agent_id() {
+    let log_dir = tempfile::tempdir().expect("tempdir should create");
+    let log_path = log_dir.path().join("decisions.jsonl");
+    let (_config_dir, config_path) = write_config(&format!(
+        r#"
+        decision_log_path = {:?}
+        "#,
+        log_path.to_string_lossy()
+    ));
+
+    isolated_command(&config_path)
+        .args(["check", "echo hello"])
+        .assert()
+        .success();
+
+    let lines = read_jsonl_lines(&log_path);
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0]["permission_mode"].is_null());
+    assert!(lines[0]["agent_id"].is_null());
+}
+
 #[test]
 fn allow_decision_logs_a_null_matched_rule_id() {
     let log_dir = tempfile::tempdir().expect("tempdir should create");

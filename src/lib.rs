@@ -32,8 +32,118 @@ use verdict::{Decision, DenyMessage, Reason, Verdict};
 pub trait DecisionLogSink {
     /// Appends one line describing `verdict` for `command` to `path`. See
     /// [`FileDecisionLog`]'s docs for the concrete format and fail-open
-    /// posture.
-    fn append(&self, path: &Path, command: &str, verdict: &Verdict);
+    /// posture, and [`HookContext`]'s docs for what `context` carries.
+    fn append(&self, path: &Path, command: &str, verdict: &Verdict, context: &HookContext);
+}
+
+/// The Claude Code PreToolUse hook's `permission_mode` field (issue #468),
+/// parsed at the adapter boundary (`src/adapter.rs`) rather than kept as a
+/// raw string: `Unknown` preserves any value this binary doesn't recognize
+/// instead of erroring, since an unrecognized mode must never crash or
+/// fail-closed a Bash call — this type makes no policy decision of its own,
+/// that is left to a future issue. `#[non_exhaustive]` since the hook
+/// contract can add a new named mode at any time, which must not be a
+/// breaking change for a caller matching on this enum.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PermissionMode {
+    Default,
+    Plan,
+    AcceptEdits,
+    Auto,
+    DontAsk,
+    BypassPermissions,
+    Unknown(String),
+}
+
+impl PermissionMode {
+    /// Parses the raw `permission_mode` stdin value into a
+    /// [`PermissionMode`], per the hook's documented values (`"default"`,
+    /// `"plan"`, `"acceptEdits"`, `"auto"`, `"dontAsk"`, `"bypassPermissions"`)
+    /// — anything else becomes `Unknown(raw)`, never an error.
+    #[must_use]
+    pub fn parse(raw: &str) -> Self {
+        match raw {
+            "default" => Self::Default,
+            "plan" => Self::Plan,
+            "acceptEdits" => Self::AcceptEdits,
+            "auto" => Self::Auto,
+            "dontAsk" => Self::DontAsk,
+            "bypassPermissions" => Self::BypassPermissions,
+            other => Self::Unknown(other.to_string()),
+        }
+    }
+
+    /// The string form logged to `decision_log_path` — the same spelling
+    /// the hook stdin used, round-tripping `Unknown` back to its original
+    /// raw value.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Default => "default",
+            Self::Plan => "plan",
+            Self::AcceptEdits => "acceptEdits",
+            Self::Auto => "auto",
+            Self::DontAsk => "dontAsk",
+            Self::BypassPermissions => "bypassPermissions",
+            Self::Unknown(raw) => raw,
+        }
+    }
+}
+
+/// A PreToolUse hook call's context beyond the command itself (issue #468):
+/// `permission_mode`, and, inside a subagent, `agent_id`/`agent_type`.
+/// Constructed by `src/adapter.rs` from the hook stdin and passed inward to
+/// [`analyze_with_policy`], which hands it to `sink.append` for the
+/// decision log — it plays no part in the Allow/Ask/Block decision itself.
+/// `None` for a field means the hook stdin omitted it (or, for
+/// [`HookContext::none`], that there was no hook stdin at all, e.g. the
+/// `shguard check` CLI path) — distinct from `permission_mode` being
+/// present as `"default"`. `agent_type` is carried for parity with the
+/// hook's own subagent fields but is not currently logged; only
+/// `permission_mode`/`agent_id` are (`src/decision_log.rs`).
+#[derive(Debug, Clone)]
+pub struct HookContext {
+    permission_mode: Option<PermissionMode>,
+    agent_id: Option<String>,
+    agent_type: Option<String>,
+}
+
+impl HookContext {
+    /// Builds a context from the hook stdin's already-parsed fields.
+    #[must_use]
+    pub fn new(
+        permission_mode: Option<PermissionMode>,
+        agent_id: Option<String>,
+        agent_type: Option<String>,
+    ) -> Self {
+        Self {
+            permission_mode,
+            agent_id,
+            agent_type,
+        }
+    }
+
+    /// The context for a call with no hook stdin at all (`shguard check`).
+    #[must_use]
+    pub fn none() -> Self {
+        Self::new(None, None, None)
+    }
+
+    #[must_use]
+    pub fn permission_mode(&self) -> Option<&PermissionMode> {
+        self.permission_mode.as_ref()
+    }
+
+    #[must_use]
+    pub fn agent_id(&self) -> Option<&str> {
+        self.agent_id.as_deref()
+    }
+
+    #[must_use]
+    pub fn agent_type(&self) -> Option<&str> {
+        self.agent_type.as_deref()
+    }
 }
 
 /// Analyzes a raw shell command line and returns the [`Verdict`] the hook
@@ -153,6 +263,7 @@ pub fn analyze(command: &str) -> Verdict {
 pub fn analyze_with_policy(
     command: &str,
     policy: &config::Policy,
+    context: &HookContext,
     sink: &dyn DecisionLogSink,
 ) -> Verdict {
     let command_owned = command.to_string();
@@ -163,7 +274,7 @@ pub fn analyze_with_policy(
         apply_ask_outcome(verdict, policy_owned.ask_outcome)
     });
     if let Some(path) = &policy.decision_log_path {
-        sink.append(path, command, &verdict);
+        sink.append(path, command, &verdict, context);
     }
     verdict
 }
