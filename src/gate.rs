@@ -13703,7 +13703,10 @@ mod tests {
     #[test]
     fn ask_outcome_absent_defaults_to_ask() {
         let user_config = crate::rules::UserConfig::parse("").unwrap();
-        assert_eq!(user_config.ask_outcome(), Decision::Ask);
+        assert_eq!(
+            user_config.ask_outcome(),
+            crate::rules::AskOutcome::Global(Decision::Ask)
+        );
     }
 
     #[test]
@@ -13714,7 +13717,10 @@ mod tests {
         "#,
         )
         .unwrap();
-        assert_eq!(user_config.ask_outcome(), Decision::Ask);
+        assert_eq!(
+            user_config.ask_outcome(),
+            crate::rules::AskOutcome::Global(Decision::Ask)
+        );
     }
 
     #[test]
@@ -13725,7 +13731,10 @@ mod tests {
         "#,
         )
         .unwrap();
-        assert_eq!(user_config.ask_outcome(), Decision::Block);
+        assert_eq!(
+            user_config.ask_outcome(),
+            crate::rules::AskOutcome::Global(Decision::Block)
+        );
     }
 
     #[test]
@@ -13756,6 +13765,301 @@ mod tests {
         "#,
         );
         assert!(err.is_err(), "ask_outcome = \"\" must be rejected");
+    }
+
+    // ==== issue #469: per-`permission_mode` `[ask_outcome]` table ====
+    //
+    // Same rationale as the #467 matrix above: `UserConfig::ask_outcome`/
+    // `AskOutcome`/`AskOutcomeTable::resolve` are `pub(crate)`, unreachable
+    // from `tests/*.rs`.
+
+    #[test]
+    fn ask_outcome_table_parses_every_key() {
+        let user_config = crate::rules::UserConfig::parse(
+            r#"
+            [ask_outcome]
+            default           = "ask"
+            plan              = "ask"
+            acceptEdits       = "ask"
+            auto              = "deny"
+            dontAsk           = "deny"
+            bypassPermissions = "deny"
+            subagent          = "deny"
+        "#,
+        )
+        .unwrap();
+        let outcome = user_config.ask_outcome();
+        assert_eq!(
+            outcome.resolve(Some(&crate::PermissionMode::Default), None),
+            Decision::Ask
+        );
+        assert_eq!(
+            outcome.resolve(Some(&crate::PermissionMode::Plan), None),
+            Decision::Ask
+        );
+        assert_eq!(
+            outcome.resolve(Some(&crate::PermissionMode::AcceptEdits), None),
+            Decision::Ask
+        );
+        assert_eq!(
+            outcome.resolve(Some(&crate::PermissionMode::Auto), None),
+            Decision::Block
+        );
+        assert_eq!(
+            outcome.resolve(Some(&crate::PermissionMode::DontAsk), None),
+            Decision::Block
+        );
+        assert_eq!(
+            outcome.resolve(Some(&crate::PermissionMode::BypassPermissions), None),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn ask_outcome_empty_table_defaults_every_slot_to_ask() {
+        let user_config = crate::rules::UserConfig::parse(
+            r#"
+            [ask_outcome]
+        "#,
+        )
+        .unwrap();
+        let outcome = user_config.ask_outcome();
+        for mode in [
+            crate::PermissionMode::Default,
+            crate::PermissionMode::Plan,
+            crate::PermissionMode::AcceptEdits,
+            crate::PermissionMode::Auto,
+            crate::PermissionMode::DontAsk,
+            crate::PermissionMode::BypassPermissions,
+        ] {
+            assert_eq!(
+                outcome.resolve(Some(&mode), None),
+                Decision::Ask,
+                "{mode:?}"
+            );
+        }
+        // No `agent_id` -> `subagent` never consulted either way; with the
+        // table empty there is nothing configured for it regardless.
+        assert_eq!(
+            outcome.resolve(Some(&crate::PermissionMode::Auto), Some("agent-1")),
+            Decision::Ask
+        );
+    }
+
+    #[test]
+    fn ask_outcome_table_unset_key_keeps_built_in_ask_default() {
+        // Only `auto` is set -- every other key (including `subagent`)
+        // must still resolve to the built-in `Ask` default.
+        let user_config = crate::rules::UserConfig::parse(
+            r#"
+            [ask_outcome]
+            auto = "deny"
+        "#,
+        )
+        .unwrap();
+        let outcome = user_config.ask_outcome();
+        assert_eq!(
+            outcome.resolve(Some(&crate::PermissionMode::Auto), None),
+            Decision::Block
+        );
+        assert_eq!(
+            outcome.resolve(Some(&crate::PermissionMode::Default), None),
+            Decision::Ask
+        );
+    }
+
+    #[test]
+    fn ask_outcome_table_unknown_key_is_rejected_at_config_load() {
+        let err = crate::rules::UserConfig::parse(
+            r#"
+            [ask_outcome]
+            default = "ask"
+            manual = "deny"
+        "#,
+        );
+        assert!(
+            err.is_err(),
+            "an unrecognized key (e.g. \"manual\" instead of \"default\") must be rejected"
+        );
+    }
+
+    #[test]
+    fn ask_outcome_table_rejects_allow_in_every_slot() {
+        for key in [
+            "default",
+            "plan",
+            "acceptEdits",
+            "auto",
+            "dontAsk",
+            "bypassPermissions",
+            "subagent",
+        ] {
+            let toml = format!(
+                r#"
+                [ask_outcome]
+                {key} = "allow"
+            "#
+            );
+            let err = crate::rules::UserConfig::parse(&toml);
+            assert!(err.is_err(), "{key} = \"allow\" must be rejected");
+        }
+    }
+
+    #[test]
+    fn ask_outcome_neither_string_nor_table_is_rejected() {
+        let err = crate::rules::UserConfig::parse(
+            r#"
+            ask_outcome = 5
+        "#,
+        );
+        assert!(err.is_err(), "a bare integer must be rejected");
+    }
+
+    #[test]
+    fn ask_outcome_absent_permission_mode_resolves_ask_regardless_of_table() {
+        // `None` covers both "hook stdin omitted the field" and "no hook
+        // stdin at all" (`shguard check` with no `--permission-mode`, or a
+        // pre-parse composition-root fail-closed path) -- resolved the
+        // same conservative way `Unknown` is, even when a table sets every
+        // named mode to `deny`.
+        let user_config = crate::rules::UserConfig::parse(
+            r#"
+            [ask_outcome]
+            default           = "deny"
+            plan              = "deny"
+            acceptEdits       = "deny"
+            auto              = "deny"
+            dontAsk           = "deny"
+            bypassPermissions = "deny"
+        "#,
+        )
+        .unwrap();
+        let outcome = user_config.ask_outcome();
+        assert_eq!(outcome.resolve(None, None), Decision::Ask);
+    }
+
+    /// An `Unknown` mode resolves `Ask` regardless of what the table
+    /// configures for its *named* modes (`auto` here) — the `subagent`
+    /// override is a separate axis (agent-id presence, not mode
+    /// recognition) and still applies on top of this, pinned separately by
+    /// `ask_outcome_subagent_override_applies_to_an_unknown_mode_too` below.
+    #[test]
+    fn ask_outcome_unknown_permission_mode_resolves_ask_regardless_of_named_modes() {
+        let user_config = crate::rules::UserConfig::parse(
+            r#"
+            [ask_outcome]
+            auto = "deny"
+        "#,
+        )
+        .unwrap();
+        let outcome = user_config.ask_outcome();
+        let unknown = crate::PermissionMode::Unknown("some-future-mode".to_string());
+        assert_eq!(outcome.resolve(Some(&unknown), None), Decision::Ask);
+    }
+
+    /// The `subagent` override is orthogonal to mode recognition: it still
+    /// applies even when `permission_mode` itself is `Unknown`, since it
+    /// keys on `agent_id` presence alone.
+    #[test]
+    fn ask_outcome_subagent_override_applies_to_an_unknown_mode_too() {
+        let user_config = crate::rules::UserConfig::parse(
+            r#"
+            [ask_outcome]
+            subagent = "deny"
+        "#,
+        )
+        .unwrap();
+        let outcome = user_config.ask_outcome();
+        let unknown = crate::PermissionMode::Unknown("some-future-mode".to_string());
+        assert_eq!(
+            outcome.resolve(Some(&unknown), Some("agent-1")),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn ask_outcome_subagent_override_applies_only_when_agent_id_present() {
+        let user_config = crate::rules::UserConfig::parse(
+            r#"
+            [ask_outcome]
+            default  = "ask"
+            subagent = "deny"
+        "#,
+        )
+        .unwrap();
+        let outcome = user_config.ask_outcome();
+        // No `agent_id` -> the mode-keyed value applies, `subagent` is
+        // never consulted.
+        assert_eq!(
+            outcome.resolve(Some(&crate::PermissionMode::Default), None),
+            Decision::Ask
+        );
+        // `agent_id` present -> `subagent` overrides the mode value.
+        assert_eq!(
+            outcome.resolve(Some(&crate::PermissionMode::Default), Some("agent-1")),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn ask_outcome_subagent_override_beats_an_unrecognized_permission_mode_too() {
+        // `subagent` is checked before the `None`/`Unknown` fallback --
+        // `agent_id`'s presence is itself a fact this binary understands
+        // independent of whether `permission_mode` also parsed to a
+        // recognized value (see `AskOutcomeTable::resolve`'s own docs).
+        let user_config = crate::rules::UserConfig::parse(
+            r#"
+            [ask_outcome]
+            subagent = "deny"
+        "#,
+        )
+        .unwrap();
+        let outcome = user_config.ask_outcome();
+        let unknown = crate::PermissionMode::Unknown("some-future-mode".to_string());
+        assert_eq!(
+            outcome.resolve(Some(&unknown), Some("agent-1")),
+            Decision::Block
+        );
+        assert_eq!(outcome.resolve(None, Some("agent-1")), Decision::Block);
+    }
+
+    #[test]
+    fn ask_outcome_subagent_unset_falls_back_to_the_mode_keyed_value() {
+        let user_config = crate::rules::UserConfig::parse(
+            r#"
+            [ask_outcome]
+            auto = "deny"
+        "#,
+        )
+        .unwrap();
+        let outcome = user_config.ask_outcome();
+        assert_eq!(
+            outcome.resolve(Some(&crate::PermissionMode::Auto), Some("agent-1")),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn ask_outcome_global_bare_string_ignores_permission_mode_and_agent_id_entirely() {
+        // Backward compatibility with #467: the bare-string form floors
+        // every terminal Ask unconditionally, unlike a `PerMode` table
+        // with every slot set to the same value (which would still float
+        // an absent/`Unknown` mode to `Ask` -- see `AskOutcome`'s own
+        // docs).
+        let user_config = crate::rules::UserConfig::parse(
+            r#"
+            ask_outcome = "deny"
+        "#,
+        )
+        .unwrap();
+        let outcome = user_config.ask_outcome();
+        assert_eq!(outcome.resolve(None, None), Decision::Block);
+        let unknown = crate::PermissionMode::Unknown("some-future-mode".to_string());
+        assert_eq!(outcome.resolve(Some(&unknown), None), Decision::Block);
+        assert_eq!(
+            outcome.resolve(Some(&crate::PermissionMode::Default), None),
+            Decision::Block
+        );
     }
 
     #[test]

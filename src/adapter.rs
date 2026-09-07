@@ -25,10 +25,13 @@
 //!   `"acceptEdits"`, `"auto"`, `"dontAsk"`, `"bypassPermissions"`, parsed
 //!   into [`crate::PermissionMode`], with any other value preserved as
 //!   `Unknown`), and `agent_id`/`agent_type: string` (present only inside a
-//!   subagent call), may be present. A present value of the wrong JSON type
-//!   (not a string) is treated the same as absent, not a parse failure of
-//!   the whole payload. Other context fields (`session_id`, `cwd`,
-//!   `hook_event_name`) may be present and are ignored here.
+//!   subagent call), may be present. A present, wrong-JSON-type
+//!   `permission_mode`/`agent_type` is treated the same as absent, not a
+//!   parse failure of the whole payload; `agent_id` differs — any present,
+//!   non-`null` value (not only a string) counts as present, since issue
+//!   #469's `subagent` `ask_outcome` override keys on that presence alone
+//!   (see [`crate::HookContext`]). Other context fields (`session_id`,
+//!   `cwd`, `hook_event_name`) may be present and are ignored here.
 //! - **stdout**: exit 0, plus
 //!   ```json
 //!   {
@@ -53,10 +56,10 @@
 //!   `tool_input.command` is missing or not a string → `ask` by default, a
 //!   reason describing what could not be read attached — never a crash,
 //!   never an undocumented silent allow. [`handle_with_policy`] instead
-//!   emits `deny` for this same failure when its `policy` carries
-//!   `ask_outcome = "deny"` (issue #467, see [`fail_closed_with`]);
-//!   [`handle`] has no `policy` to read that key from, so it always stays
-//!   `ask`.
+//!   emits `deny` for this same failure when its `policy`'s `ask_outcome`
+//!   key resolves to `deny` for the failure's own context (issues
+//!   #467/#469, see [`fail_closed_with`]); [`handle`] has no `policy` to
+//!   read that key from, so it always stays `ask`.
 //! - `tool_name != "Bash"` → `allow`: shguard only analyses shell commands
 //!   run through the Bash tool, so a non-Bash tool call is out of scope by
 //!   design — the hook defers to Claude Code's normal permission flow
@@ -163,9 +166,9 @@ pub fn fail_closed_deny(reason: &str) -> Value {
 }
 
 /// Fail-closed output honoring a loaded [`crate::config::Policy`]'s
-/// `ask_outcome` key (issue #467): `Decision::Block` (`ask_outcome =
-/// "deny"`) emits `deny`, anything else (`Decision::Ask`, the default —
-/// `Decision::Allow` never reaches here) emits `ask`, same as
+/// `ask_outcome` key resolved for the caller's context (issues #467/#469):
+/// `Decision::Block` emits `deny`, anything else (`Decision::Ask`, the
+/// default — `Decision::Allow` never reaches here) emits `ask`, same as
 /// [`fail_closed`]. Used by every composition-root fail-closed path that
 /// already has a `Policy` in hand when it hits a condition it cannot
 /// evaluate a command through — malformed/oversized stdin, a missing or
@@ -185,23 +188,54 @@ pub fn fail_closed_with(outcome: Decision, reason: &str) -> Value {
     output_json(decision, reason, None)
 }
 
+/// Extracts `agent_id` for [`HookContext`] from the stdin's raw JSON value,
+/// treating any non-null value — not only a string — as "a subagent
+/// context is present": the harness sends a string today, but a present,
+/// non-string `agent_id` (a number, say) is still evidence a subagent
+/// fired the hook, and issue #469's `subagent` `ask_outcome` override must
+/// still apply then rather than silently treating it the same as an
+/// absent field.
+fn subagent_id(agent_id: &Value) -> Option<String> {
+    if agent_id.is_null() {
+        return None;
+    }
+    Some(
+        agent_id
+            .as_str()
+            .map_or_else(|| agent_id.to_string(), str::to_string),
+    )
+}
+
 /// Parses `stdin` and pulls out the Bash command to analyse plus its
 /// [`HookContext`], if any — the stdin-JSON/tool-name/command-field
 /// extraction shared by [`handle`] and [`handle_with_policy`] (via
 /// [`respond`], which also picks which `analyze`-shaped function the
-/// extracted command goes to, and — issue #467 — which fail-closed decision
-/// an extraction error here becomes).
+/// extracted command goes to, and — issues #467/#469 — which fail-closed
+/// decision an extraction error here becomes).
 ///
 /// `Ok(None)` means `tool_name != "Bash"` (out of scope by design, the
-/// caller should emit an ordinary `allow`). `Err(reason)` is a
+/// caller should emit an ordinary `allow`). `Err((reason, context))` is a
 /// human-readable failure description — malformed JSON, or a `Bash`
 /// payload whose `tool_input.command` is missing or not a string — left
-/// for the caller to turn into a fail-closed output, since which flavor
-/// (plain `ask`, or `ask_outcome`-aware) depends on whether the caller has
-/// a [`crate::config::Policy`] in hand (issue #467; see [`respond`]).
-fn extract_bash_command(stdin: &str) -> Result<Option<(String, HookContext)>, String> {
-    let input: HookInput = serde_json::from_str(stdin)
-        .map_err(|err| format!("shguard: could not parse PreToolUse stdin as JSON: {err}"))?;
+/// for the caller to turn into a fail-closed output (issue #467; see
+/// [`respond`]). `context` in the `Err` case is [`HookContext::none`] only
+/// when the JSON itself failed to parse (there is nothing to read
+/// `permission_mode`/`agent_id` off of yet); for the missing-`command`
+/// case, whatever `permission_mode`/`agent_id`/`agent_type` the stdin JSON
+/// carried — absent, present, or present but not the expected type, same
+/// as [`HookInput`]'s own `#[serde(default)]` posture — was already
+/// resolved into the real `context` by that point, so issue #469's
+/// per-mode `ask_outcome` table resolves against it rather than
+/// discarding it as if it were unreadable.
+fn extract_bash_command(
+    stdin: &str,
+) -> Result<Option<(String, HookContext)>, (String, HookContext)> {
+    let input: HookInput = serde_json::from_str(stdin).map_err(|err| {
+        (
+            format!("shguard: could not parse PreToolUse stdin as JSON: {err}"),
+            HookContext::none(),
+        )
+    })?;
 
     if input.tool_name != "Bash" {
         return Ok(None);
@@ -209,19 +243,17 @@ fn extract_bash_command(stdin: &str) -> Result<Option<(String, HookContext)>, St
 
     let context = HookContext::new(
         input.permission_mode.as_str().map(PermissionMode::parse),
-        input.agent_id.as_str().map(str::to_string),
+        subagent_id(&input.agent_id),
         input.agent_type.as_str().map(str::to_string),
     );
 
-    let command = input
-        .tool_input
-        .get("command")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            "shguard: Bash tool_input is missing a string \"command\" field".to_string()
-        })?;
-
-    Ok(Some((command.to_string(), context)))
+    match input.tool_input.get("command").and_then(Value::as_str) {
+        Some(command) => Ok(Some((command.to_string(), context))),
+        None => Err((
+            "shguard: Bash tool_input is missing a string \"command\" field".to_string(),
+            context,
+        )),
+    }
 }
 
 /// Builds the `hookSpecificOutput` JSON for one stdin payload, given
@@ -232,16 +264,19 @@ fn extract_bash_command(stdin: &str) -> Result<Option<(String, HookContext)>, St
 /// the same "single fold point, never crash, never silently allow" posture
 /// `crate::analyze` documents for its own internal failure modes.
 ///
-/// `ask_outcome` (issue #467) governs which fail-closed decision these
-/// adapter-level failures emit: [`handle`] always passes `Decision::Ask`
-/// (it has no `Policy`, so no key to read), while [`handle_with_policy`]
-/// passes its `policy`'s own `ask_outcome()` — the same key
+/// `ask_outcome` (issues #467/#469) governs which fail-closed decision
+/// these adapter-level failures emit: [`handle`] always resolves to
+/// `Decision::Ask` (it has no `Policy`, so no key to read), while
+/// [`handle_with_policy`] resolves its `policy`'s own `ask_outcome` table
+/// against whatever [`HookContext`] the failure carries (see
+/// [`extract_bash_command`]'s own docs for when that is a real,
+/// stdin-derived context versus [`HookContext::none`]) — the same key
 /// [`crate::analyze_with_policy`] floors every terminal `Ask` verdict
 /// through, applied here too so a malformed/oversized stdin payload floors
 /// exactly like a structural `Ask` would.
 fn respond(
     stdin: &str,
-    ask_outcome: crate::verdict::Decision,
+    ask_outcome: impl Fn(&HookContext) -> crate::verdict::Decision,
     analyze: impl FnOnce(&str, &HookContext) -> crate::verdict::Verdict,
 ) -> Value {
     let (command, context) = match extract_bash_command(stdin) {
@@ -253,7 +288,7 @@ fn respond(
                 None,
             );
         }
-        Err(reason) => return fail_closed_with(ask_outcome, &reason),
+        Err((reason, context)) => return fail_closed_with(ask_outcome(&context), &reason),
     };
 
     let verdict = analyze(&command, &context);
@@ -273,9 +308,11 @@ fn respond(
 /// JSON the composition root writes to stdout.
 #[must_use]
 pub fn handle(stdin: &str) -> Value {
-    respond(stdin, Decision::Ask, |command, _context| {
-        crate::analyze(command)
-    })
+    respond(
+        stdin,
+        |_context| Decision::Ask,
+        |command, _context| crate::analyze(command),
+    )
 }
 
 /// Config-aware sibling of [`handle`]: same stdin/stdout contract, but
@@ -289,9 +326,11 @@ pub fn handle_with_policy(
     policy: &crate::config::Policy,
     sink: &dyn crate::DecisionLogSink,
 ) -> Value {
-    respond(stdin, policy.ask_outcome(), |command, context| {
-        crate::analyze_with_policy(command, policy, context, sink)
-    })
+    respond(
+        stdin,
+        |context| policy.ask_outcome(context),
+        |command, context| crate::analyze_with_policy(command, policy, context, sink),
+    )
 }
 
 #[cfg(test)]
@@ -385,7 +424,7 @@ mod tests {
             rules: std::sync::Arc::new(crate::rules::Rules::embedded().unwrap()),
             allowlist: std::sync::Arc::new(crate::rules::Allowlist::embedded().unwrap()),
             decision_log_path: None,
-            ask_outcome: crate::verdict::Decision::Ask,
+            ask_outcome: crate::rules::AskOutcome::default(),
         }
     }
 
@@ -424,7 +463,7 @@ mod tests {
             rules: std::sync::Arc::new(rules),
             allowlist: std::sync::Arc::new(allowlist),
             decision_log_path: None,
-            ask_outcome: crate::verdict::Decision::Ask,
+            ask_outcome: crate::rules::AskOutcome::default(),
         };
 
         let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"gh pr view"}}"#;
@@ -477,7 +516,7 @@ mod tests {
             rules: std::sync::Arc::new(rules),
             allowlist: std::sync::Arc::new(allowlist),
             decision_log_path: None,
-            ask_outcome: crate::verdict::Decision::Ask,
+            ask_outcome: crate::rules::AskOutcome::default(),
         };
 
         let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"mytool --force"}}"#;

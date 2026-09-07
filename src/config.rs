@@ -192,17 +192,18 @@ pub struct Policy {
     /// real config-file parse alone, before it's moved into
     /// [`merge_user_config`].
     pub(crate) decision_log_path: Option<PathBuf>,
-    /// The top-level `ask_outcome` user-config key (issue #467) —
-    /// [`crate::verdict::Decision::Ask`] (the default, today's unmodified
-    /// behavior) unless the user's own config set `ask_outcome = "deny"`.
-    /// Read the same way `decision_log_path` is: off the real
-    /// config-file parse alone, never the self-protection-only merges
-    /// below. Consulted by [`crate::analyze_with_policy`] (`src/lib.rs`)
-    /// to floor every terminal `Ask` verdict to `Block` — `crate::gate`
-    /// never reads this field itself (issue #467's design: a terminal
-    /// remap, not a per-command floor threaded through gate's own
+    /// The top-level `ask_outcome` user-config key (issues #467/#469) —
+    /// [`crate::rules::AskOutcome::default`] (today's unmodified behavior)
+    /// unless the user's own config set it, either to #467's bare-string
+    /// form or #469's per-`permission_mode` table. Read the same way
+    /// `decision_log_path` is: off the real config-file parse alone, never
+    /// the self-protection-only merges below. Consulted by
+    /// [`crate::analyze_with_policy`] (`src/lib.rs`) to floor every
+    /// terminal `Ask` verdict to `Block` for the resolved mode —
+    /// `crate::gate` never reads this field itself (issue #467's design: a
+    /// terminal remap, not a per-command floor threaded through gate's own
     /// recursion).
-    pub(crate) ask_outcome: crate::verdict::Decision,
+    pub(crate) ask_outcome: crate::rules::AskOutcome,
 }
 
 /// `(SHGUARD_CONFIG, XDG_CONFIG_HOME, HOME)`, each `None` if unset — see
@@ -323,7 +324,7 @@ impl Policy {
         let allowlist = Allowlist::embedded()?;
 
         let mut decision_log_path: Option<PathBuf> = None;
-        let mut ask_outcome = crate::verdict::Decision::Ask;
+        let mut ask_outcome = crate::rules::AskOutcome::default();
         // `symlink_metadata` (`lstat`), not `read_to_string`'s own error,
         // decides "nothing at this path" vs. "something's there but
         // broken": a dangling symlink makes `read_to_string` fail with the
@@ -462,7 +463,7 @@ impl Policy {
                 Allowlist::embedded().expect("embedded allowlist should parse"),
             ),
             decision_log_path: Some(decision_log_path),
-            ask_outcome: crate::verdict::Decision::Ask,
+            ask_outcome: crate::rules::AskOutcome::default(),
         }
     }
 
@@ -512,14 +513,21 @@ impl Policy {
         ids
     }
 
-    /// The effective `ask_outcome` config key (issue #467) — see this
-    /// struct's own field docs. Public so `src/bin/shguard.rs`'s
-    /// composition-root fail-closed paths (oversized/unreadable stdin,
-    /// hit before any command reaches [`crate::analyze_with_policy`]) can
-    /// honor the same key `adapter::fail_closed_with` applies elsewhere.
+    /// The effective `ask_outcome` config key resolved for `context`
+    /// (issues #467/#469) — see this struct's own field docs and
+    /// [`crate::rules::AskOutcome::resolve`]. Public so `src/bin/shguard.rs`'s
+    /// composition-root fail-closed paths (oversized/unreadable stdin, hit
+    /// before any command reaches [`crate::analyze_with_policy`]) can
+    /// honor the same key `adapter::fail_closed_with` applies elsewhere;
+    /// those paths pass `&HookContext::none()` since none of them have a
+    /// readable `permission_mode` to resolve against, which is exactly the
+    /// "unreadable" fallback #469 documents (a `PerMode` table's
+    /// `None`/`Unknown` handling already resolves this to `Ask` unless the
+    /// bare-string `Global` form is configured).
     #[must_use]
-    pub fn ask_outcome(&self) -> crate::verdict::Decision {
+    pub fn ask_outcome(&self, context: &crate::HookContext) -> crate::verdict::Decision {
         self.ask_outcome
+            .resolve(context.permission_mode(), context.agent_id())
     }
 }
 

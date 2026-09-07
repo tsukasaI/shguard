@@ -40,10 +40,14 @@ pub trait DecisionLogSink {
 /// parsed at the adapter boundary (`src/adapter.rs`) rather than kept as a
 /// raw string: `Unknown` preserves any value this binary doesn't recognize
 /// instead of erroring, since an unrecognized mode must never crash or
-/// fail-closed a Bash call — this type makes no policy decision of its own,
-/// that is left to a future issue. `#[non_exhaustive]` since the hook
-/// contract can add a new named mode at any time, which must not be a
-/// breaking change for a caller matching on this enum.
+/// fail-closed a Bash call. Issue #469's per-mode `ask_outcome` table is
+/// the one place this type does drive a decision — floors an autonomous
+/// session's terminal `Ask` verdict to `Block` when configured for the
+/// resolved mode (`crate::rules::AskOutcomeTable::resolve`); every other
+/// part of the decision pipeline still ignores it entirely.
+/// `#[non_exhaustive]` since the hook contract can add a new named mode at
+/// any time, which must not be a breaking change for a caller matching on
+/// this enum.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionMode {
@@ -95,10 +99,17 @@ impl PermissionMode {
 /// `permission_mode`, and, inside a subagent, `agent_id`/`agent_type`.
 /// Constructed by `src/adapter.rs` from the hook stdin and passed inward to
 /// [`analyze_with_policy`], which hands it to `sink.append` for the
-/// decision log — it plays no part in the Allow/Ask/Block decision itself.
-/// `None` for a field means the hook stdin omitted it (or, for
-/// [`HookContext::none`], that there was no hook stdin at all, e.g. the
-/// `shguard check` CLI path) — distinct from `permission_mode` being
+/// decision log and — issue #469 — to `policy`'s `ask_outcome` table to
+/// resolve the per-mode terminal-`Ask` floor; every other step of the
+/// Allow/Ask/Block decision still ignores it. `None` for `permission_mode`/
+/// `agent_type` means the hook stdin omitted it or carried a non-string
+/// value; `agent_id` is `None` only when the field was absent or JSON
+/// `null` (a present-but-non-string `agent_id` still resolves to `Some`,
+/// stringified, since its presence alone is what issue #469's `subagent`
+/// `ask_outcome` override keys on). `None` everywhere, via
+/// [`HookContext::none`], additionally means there was no hook stdin at
+/// all, e.g. the `shguard check` CLI path without its own
+/// `--permission-mode` flag — distinct from `permission_mode` being
 /// present as `"default"`. `agent_type` is carried for parity with the
 /// hook's own subagent fields but is not currently logged; only
 /// `permission_mode`/`agent_id` are (`src/decision_log.rs`).
@@ -249,11 +260,14 @@ pub fn analyze(command: &str) -> Verdict {
 /// watchdog of its own, so for one this function's own bound is the whole
 /// story.
 ///
-/// # Ask outcome (issue #467)
+/// # Ask outcome (issues #467/#469)
 ///
-/// When `policy` carries `ask_outcome = "deny"` (default `"ask"`, a
-/// no-op), the verdict this function returns is never `Ask`: any `Ask`
-/// [`gate::analyze_with_policy`] would have produced is floored to
+/// `policy`'s `ask_outcome` key resolves to a [`verdict::Decision`] for
+/// `context`'s `permission_mode`/`agent_id` (`crate::rules::AskOutcome::resolve`)
+/// — either #467's single bare-string value, unconditionally, or #469's
+/// per-`permission_mode` table. When that resolves to `Block` (default
+/// `Ask`, a no-op), the verdict this function returns is never `Ask`: any
+/// `Ask` [`gate::analyze_with_policy`] would have produced is floored to
 /// `Block` first (see [`apply_ask_outcome`]'s own docs for the full
 /// reasoning and its interaction with the bounded-evaluation watchdog
 /// above), before logging and before this function returns to its
@@ -268,10 +282,18 @@ pub fn analyze_with_policy(
 ) -> Verdict {
     let command_owned = command.to_string();
     let policy_owned = policy.clone();
+    // Cloned whole, not as two separately-extracted `Option`s, so this
+    // closure resolves `ask_outcome` against exactly the same context
+    // `sink.append` below logs — a `'static` closure moved onto the
+    // watchdog thread can't borrow `context` itself.
+    let context_owned = context.clone();
     let verdict = watchdog::bounded(move || {
         let verdict =
             gate::analyze_with_policy(&command_owned, &policy_owned.rules, &policy_owned.allowlist);
-        apply_ask_outcome(verdict, policy_owned.ask_outcome)
+        let ask_outcome = policy_owned
+            .ask_outcome
+            .resolve(context_owned.permission_mode(), context_owned.agent_id());
+        apply_ask_outcome(verdict, ask_outcome)
     });
     if let Some(path) = &policy.decision_log_path {
         sink.append(path, command, &verdict, context);

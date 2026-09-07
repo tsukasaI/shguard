@@ -172,11 +172,12 @@ fn main() {
             std::process::exit(check_config());
         }
         // `check` takes a variable number of its own arguments (the command
-        // string plus an optional `--json`), unlike `--version`/
-        // `--check-config` above which take none — so it can't reuse the
-        // fixed two-arg peek those use. `extra_arg` already consumed the
-        // first token after "check" (if any); reassemble it with the rest
-        // of the iterator so `run_check` sees the complete argument list.
+        // string plus optional `--json`/`--permission-mode <mode>` flags),
+        // unlike `--version`/`--check-config` above which take none — so it
+        // can't reuse the fixed two-arg peek those use. `extra_arg` already
+        // consumed the first token after "check" (if any); reassemble it
+        // with the rest of the iterator so `run_check` sees the complete
+        // argument list.
         Some("check") => {
             let mut check_args: Vec<std::ffi::OsString> = Vec::new();
             check_args.extend(extra_arg);
@@ -210,7 +211,7 @@ fn main() {
                 io::stderr(),
                 "shguard: unrecognized arguments {rest:?} (known commands: --version, \
                  --check-config (neither taking further arguments), check <command> \
-                 [--json], init [--force])"
+                 [--json] [--permission-mode <mode>], init [--force])"
             );
             std::process::exit(2);
         }
@@ -538,13 +539,30 @@ fn check_config() -> i32 {
     1
 }
 
-/// `shguard check <command> [--json]` (issue #109): a dry-run mode that
-/// prints the [`shguard::analyze_with_policy`] verdict for a command string
-/// given directly on the command line, instead of through the PreToolUse
+/// Usage string shared by every `run_check` argument-error path — kept as
+/// one constant so `--permission-mode`'s addition (issue #469) didn't need
+/// updating at each of the several call sites separately.
+const CHECK_USAGE: &str = "usage: shguard check <command> [--json] [--permission-mode <mode>]";
+
+/// `shguard check <command> [--json] [--permission-mode <mode>]` (issue
+/// #109): a dry-run mode that prints the
+/// [`shguard::analyze_with_policy`] verdict for a command string given
+/// directly on the command line, instead of through the PreToolUse
 /// stdin contract [`run`] otherwise only ever serves. Exists so rule
 /// authors can iterate on a config change and immediately see the
 /// resulting decision, and so CI can assert a set of commands resolve to
 /// the expected decision without an agent or hook wiring in the loop.
+///
+/// `--permission-mode <mode>` (issue #469) reproduces exactly what the
+/// PreToolUse hook would have seen for that `permission_mode` value —
+/// parsed with the same [`shguard::PermissionMode::parse`] the hook stdin
+/// path uses, so a replay resolves a table-form `ask_outcome` config
+/// identically to a real hook invocation carrying the same mode. Omitted,
+/// this subcommand builds [`shguard::HookContext::none`] exactly as it did
+/// before this flag existed — `permission_mode`/`agent_id` both absent,
+/// resolving a `[ask_outcome]` table's per-mode floor the same
+/// conservative way an `Unknown` mode does (`Ask`, unless the config used
+/// #467's bare-string form instead).
 ///
 /// Always evaluates through [`shguard::analyze_with_policy`] — the exact
 /// same pipeline [`run`] hands a real hook payload's command to — never a
@@ -588,8 +606,10 @@ fn check_config() -> i32 {
 /// [`install_panic_hook`]'s own docs give.
 fn run_check(args: &[std::ffi::OsString]) -> i32 {
     let mut json = false;
+    let mut permission_mode: Option<&std::ffi::OsString> = None;
     let mut command: Option<&std::ffi::OsString> = None;
-    for arg in args {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
         // Compared against `&str` directly (not through `arg.to_str()`
         // first) so a non-UTF-8 first positional is still captured as
         // `command` below rather than silently misdiagnosed by this loop
@@ -597,13 +617,52 @@ fn run_check(args: &[std::ffi::OsString]) -> i32 {
         // then reachable and gives the precise reason.
         if arg == "--json" {
             json = true;
+        } else if arg == "--permission-mode" {
+            if permission_mode.is_some() {
+                let _ = writeln!(
+                    io::stderr(),
+                    "shguard check: --permission-mode given more than once ({CHECK_USAGE})"
+                );
+                return 2;
+            }
+            // A missing value and a flag-shaped value are rejected the same
+            // way: `iter.next()` alone can't tell "no more arguments" apart
+            // from "the next argument is itself a flag this loop would
+            // otherwise swallow as the mode string" (e.g. `--permission-mode
+            // --json` silently treating `--json` as an `Unknown` mode value
+            // rather than the flag it looks like).
+            let value = iter.next().filter(|v| match v.to_str() {
+                Some(v) => !v.starts_with("--"),
+                None => true,
+            });
+            let Some(value) = value else {
+                let _ = writeln!(
+                    io::stderr(),
+                    "shguard check: --permission-mode requires a value ({CHECK_USAGE})"
+                );
+                return 2;
+            };
+            permission_mode = Some(value);
+        } else if command.is_none() && arg.to_str().is_some_and(|arg| arg.starts_with("--")) {
+            // A `--`-prefixed positional is a typo'd/unrecognized flag, not
+            // a command: a real shell command never begins with `--`, so
+            // silently accepting one here (e.g. `--permission-mode=auto`
+            // typo'd without a space, or any other misspelled flag) would
+            // analyze it as the literal command string, which trivially
+            // resolves `Allow` — exactly the "typo skips the check and
+            // exits 0 anyway" failure mode this binary exists to avoid (see
+            // `main`'s own module doc).
+            let _ = writeln!(
+                io::stderr(),
+                "shguard check: unrecognized flag {arg:?} ({CHECK_USAGE})"
+            );
+            return 2;
         } else if command.is_none() {
             command = Some(arg);
         } else {
             let _ = writeln!(
                 io::stderr(),
-                "shguard check: unexpected argument {arg:?} (usage: shguard check \
-                 <command> [--json])"
+                "shguard check: unexpected argument {arg:?} ({CHECK_USAGE})"
             );
             return 2;
         }
@@ -611,7 +670,7 @@ fn run_check(args: &[std::ffi::OsString]) -> i32 {
     let Some(command) = command else {
         let _ = writeln!(
             io::stderr(),
-            "shguard check: missing <command> (usage: shguard check <command> [--json])"
+            "shguard check: missing <command> ({CHECK_USAGE})"
         );
         return 2;
     };
@@ -619,6 +678,27 @@ fn run_check(args: &[std::ffi::OsString]) -> i32 {
         let _ = writeln!(io::stderr(), "shguard check: <command> must be valid UTF-8");
         return 2;
     };
+    // Reproduces exactly what the hook path would have seen for this same
+    // `permission_mode` value (issue #469's own recommended design: a
+    // `--permission-mode` flag over threading an `Option<PermissionMode>`
+    // through `analyze_with_policy` itself), including a non-UTF-8 value —
+    // `PermissionMode::parse` takes `&str`, so a non-UTF-8 flag value fails
+    // closed with a precise reason rather than being silently misdiagnosed
+    // as "unexpected argument" the way an unparsed positional would be.
+    let permission_mode = match permission_mode {
+        None => None,
+        Some(value) => match value.to_str() {
+            Some(value) => Some(shguard::PermissionMode::parse(value)),
+            None => {
+                let _ = writeln!(
+                    io::stderr(),
+                    "shguard check: --permission-mode value must be valid UTF-8"
+                );
+                return 2;
+            }
+        },
+    };
+    let context = shguard::HookContext::new(permission_mode, None, None);
 
     let policy = match shguard::config::Policy::load() {
         Ok(policy) => policy,
@@ -640,7 +720,7 @@ fn run_check(args: &[std::ffi::OsString]) -> i32 {
         }
     };
 
-    let verdict = match evaluate_with_timeout(command, &policy) {
+    let verdict = match evaluate_with_timeout(command, &policy, &context) {
         Ok(verdict) => verdict,
         Err(err) => {
             let message = match err {
@@ -751,9 +831,11 @@ enum EvalTimeoutError {
 fn evaluate_with_timeout(
     command: &str,
     policy: &shguard::config::Policy,
+    context: &shguard::HookContext,
 ) -> Result<shguard::verdict::Verdict, EvalTimeoutError> {
     let owned_command = command.to_string();
     let owned_policy = policy.clone();
+    let owned_context = context.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     let spawned = std::thread::Builder::new()
         .name("shguard-check-eval".to_string())
@@ -761,7 +843,7 @@ fn evaluate_with_timeout(
             let verdict = shguard::analyze_with_policy(
                 &owned_command,
                 &owned_policy,
-                &shguard::HookContext::none(),
+                &owned_context,
                 &shguard::FileDecisionLog,
             );
             // A closed receiver means the timeout already fired and the
@@ -774,7 +856,7 @@ fn evaluate_with_timeout(
         return Ok(shguard::analyze_with_policy(
             command,
             policy,
-            &shguard::HookContext::none(),
+            context,
             &shguard::FileDecisionLog,
         ));
     };
@@ -854,7 +936,7 @@ fn run() -> serde_json::Value {
         .read_to_string(&mut stdin)
     {
         Ok(_) if stdin.len() as u64 > MAX_STDIN_BYTES => shguard::adapter::fail_closed_with(
-            policy.ask_outcome(),
+            policy.ask_outcome(&shguard::HookContext::none()),
             &format!("shguard: stdin exceeds {MAX_STDIN_BYTES} bytes; refusing to evaluate"),
         ),
         Ok(_) => shguard::adapter::handle_with_policy(&stdin, &policy, &shguard::FileDecisionLog),
@@ -868,7 +950,7 @@ fn run() -> serde_json::Value {
         // fail-closed path that has a `Policy` in hand, not only
         // `analyze_with_policy`'s own structural `Ask`s).
         Err(err) => shguard::adapter::fail_closed_with(
-            policy.ask_outcome(),
+            policy.ask_outcome(&shguard::HookContext::none()),
             &format!("shguard: could not read stdin: {err}"),
         ),
     }

@@ -326,6 +326,28 @@ to real shguard. The real-shguard interactive cell itself, though, was
 only observed under the since-diagnosed contaminated condition; treat
 that specific cell as a residual gap, not as independently re-verified.
 
+### Why the per-mode `ask_outcome` floor lives in shguard, not the harness
+
+The matrix above (`## Empirical backing`) is one row per mode showing
+interactive `ask` holds a genuine confirmation dialog in all six, while a
+headless `ask` (no TTY for that dialog to render into) is denied in all
+six regardless of mode. Claude Code's own harness never resolves a hook
+`ask` on its own when there is a real terminal attached: it always renders
+the dialog and waits, whether or not anyone is actually there to answer
+it. No harness-side lever, `settings.json` field, or hook return value
+documented as of this writing says "resolve this `ask` to `deny` when
+running unattended" instead. shguard's `[ask_outcome]` per-mode table (issue #469)
+exists because of that gap specifically: it is the only place in the
+whole pipeline, harness included, where "was a human actually in the
+loop" can be turned into a decision at all, and it can only approximate
+that question through `permission_mode`, which correlates with but is not
+identical to "unattended" (an operator could run `auto` mode while
+watching the terminal, for instance). The table's own conservative
+defaults (an absent or unrecognized `permission_mode` resolves to `"ask"`,
+never `"deny"`) reflect that this is shguard's own approximation of a
+question the harness itself never answers, not a measured harness
+behavior.
+
 ### Reproduction method
 
 To reproduce or re-verify this matrix on a future Claude Code version
