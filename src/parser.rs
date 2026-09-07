@@ -1227,7 +1227,7 @@ fn convert_brace_members(
 }
 
 /// When `text` starts with a `~` directly followed by an optional `+`/`-`
-/// sign and a decimal digit run that overflows `u64`, returns the
+/// sign and a decimal digit run that overflows `usize`, returns the
 /// `(tilde_run, remainder)` split at the end of that digit run. This is
 /// the exact shape that panics brush-parser 0.4.0's tilde-expression
 /// parser: the unsigned/`+`-prefixed dir-stack form (`word.rs:909`,
@@ -1251,7 +1251,7 @@ fn split_overflowing_leading_tilde(text: &str) -> Option<(&str, &str)> {
     }
     let (digits, remainder) = digits_start.split_at(digit_len);
     digits
-        .parse::<u64>()
+        .parse::<usize>()
         .is_err()
         .then(|| (&text[..1 + sign_len + digit_len], remainder))
 }

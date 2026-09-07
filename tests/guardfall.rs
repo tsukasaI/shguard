@@ -1441,11 +1441,12 @@ fn guardfall_brush_parser_overflow_panic_cases() {
         // Tilde UID past u64::MAX: must stay Block (sibling word matches
         // the blocklist), not fold to Ask via panic containment.
         ("rm -rf / ~41353561361542343807", Decision::Block),
-        // issue #456: the dir-stack forms (`~+<n>`, `~-<n>`) reach brush's
-        // two OTHER internal digit-parsing rules (`NthDirFromTop`/
-        // `NthDirFromBottomOfDirStack`), which `split_overflowing_leading_
-        // tilde` did not originally cover — both must stay Block for the
-        // exact same reason as the plain `~<uid>` case above.
+        // issue #456: the dir-stack forms reach brush's digit-parsing
+        // rules for `~+<n>` (the same rule as plain `~<uid>` above) and
+        // `~-<n>` (`NthDirFromBottomOfDirStack`), which
+        // `split_overflowing_leading_tilde` did not originally cover —
+        // both must stay Block for the exact same reason as the plain
+        // `~<uid>` case above.
         ("rm -rf / ~+99999999999999999999", Decision::Block),
         ("rm -rf / ~-99999999999999999999", Decision::Block),
         // Brace-sequence number past i64::MAX: a brace range is already
