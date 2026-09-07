@@ -851,17 +851,24 @@ fn run() -> serde_json::Value {
         .take(MAX_STDIN_BYTES + 1)
         .read_to_string(&mut stdin)
     {
-        Ok(_) if stdin.len() as u64 > MAX_STDIN_BYTES => shguard::adapter::fail_closed(&format!(
-            "shguard: stdin exceeds {MAX_STDIN_BYTES} bytes; refusing to evaluate"
-        )),
+        Ok(_) if stdin.len() as u64 > MAX_STDIN_BYTES => shguard::adapter::fail_closed_with(
+            policy.ask_outcome(),
+            &format!("shguard: stdin exceeds {MAX_STDIN_BYTES} bytes; refusing to evaluate"),
+        ),
         Ok(_) => shguard::adapter::handle_with_policy(&stdin, &policy, &shguard::FileDecisionLog),
         // A read error also covers the case where the input is oversized
         // *and* its true length happens to break UTF-8 exactly at the
         // `MAX_STDIN_BYTES + 1`-byte boundary `take` reads up to:
         // `read_to_string` reports that as `InvalidData` rather than
         // `Ok`, and this arm fails closed the same as any other stdin
-        // read error.
-        Err(err) => shguard::adapter::fail_closed(&format!("shguard: could not read stdin: {err}")),
+        // read error. `policy` is already loaded at this point (issue
+        // #467: `ask_outcome` applies to every composition-root
+        // fail-closed path that has a `Policy` in hand, not only
+        // `analyze_with_policy`'s own structural `Ask`s).
+        Err(err) => shguard::adapter::fail_closed_with(
+            policy.ask_outcome(),
+            &format!("shguard: could not read stdin: {err}"),
+        ),
     }
 }
 

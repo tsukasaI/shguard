@@ -18,7 +18,7 @@ mod watchdog;
 use std::path::Path;
 
 pub use decision_log::FileDecisionLog;
-use verdict::Verdict;
+use verdict::{Decision, DenyMessage, Reason, Verdict};
 
 /// Port [`analyze_with_policy`] appends one JSONL decision-log line
 /// through, per issue #108 (`coding-guidelines/principles.md`: "ports MUST
@@ -138,6 +138,17 @@ pub fn analyze(command: &str) -> Verdict {
 /// `evaluate_with_timeout`); a direct library caller has no such outer
 /// watchdog of its own, so for one this function's own bound is the whole
 /// story.
+///
+/// # Ask outcome (issue #467)
+///
+/// When `policy` carries `ask_outcome = "deny"` (default `"ask"`, a
+/// no-op), the verdict this function returns is never `Ask`: any `Ask`
+/// [`gate::analyze_with_policy`] would have produced is floored to
+/// `Block` first (see [`apply_ask_outcome`]'s own docs for the full
+/// reasoning and its interaction with the bounded-evaluation watchdog
+/// above), before logging and before this function returns to its
+/// caller — so a caller reading `verdict.decision()` after this call
+/// never needs its own separate handling for "an `Ask` I can't act on".
 #[must_use]
 pub fn analyze_with_policy(
     command: &str,
@@ -147,10 +158,97 @@ pub fn analyze_with_policy(
     let command_owned = command.to_string();
     let policy_owned = policy.clone();
     let verdict = watchdog::bounded(move || {
-        gate::analyze_with_policy(&command_owned, &policy_owned.rules, &policy_owned.allowlist)
+        let verdict =
+            gate::analyze_with_policy(&command_owned, &policy_owned.rules, &policy_owned.allowlist);
+        apply_ask_outcome(verdict, policy_owned.ask_outcome)
     });
     if let Some(path) = &policy.decision_log_path {
         sink.append(path, command, &verdict);
     }
     verdict
+}
+
+/// Floors a terminal `Ask` verdict to `Block` when the user config's
+/// `ask_outcome = "deny"` (issue #467) — see
+/// [`crate::rules::parse_ask_outcome`] for why this key exists and what it
+/// covers. Preserves the matched rule's own `deny_message` when the `Ask`
+/// came from one (a user `[[ask]]` entry, or an embedded `decision =
+/// "ask"` rule) and falls back to a generic rewrite-guidance message only
+/// otherwise — [`Verdict::matched_rule`] returns `None` for an `Ask`
+/// regardless of origin, so this function cannot itself tell "structural"
+/// and "rule-authored" apart, and assuming structural would put wrong
+/// guidance (e.g. "rewrite the `$VAR`") on a verdict that never had one.
+///
+/// `matched_rule_id` is deliberately left `null` on the returned `Block` —
+/// unlike an ordinary rule-matched `Block`, this one names no specific
+/// rule, whether the original `Ask` came from a structural gate decision
+/// or a rule-table `[[ask]]`/embedded `decision = "ask"` match. This alone
+/// does not isolate a floored `Ask` in a `decision_log_path` log, though:
+/// several pre-existing structural `Block`s (`src/gate.rs`) also carry a
+/// `null` rule id. Filter on the reason instead —
+/// `jq 'select(.reason | contains("ask_outcome = \"deny\""))'` — which only
+/// ever appears on a verdict this function produced.
+///
+/// # Why this is a single terminal remap, not a per-command floor
+///
+/// `crate::gate::fold_worst` keeps the earlier verdict on a decision tie,
+/// so remapping each simple command's `Ask` to `Block` independently, as
+/// `gate.rs` evaluates each one, would let `ask-cmd; rm -rf /` lose the
+/// real `rm` rule's id and `deny_message` to whichever `Ask`-turned-`Block`
+/// folded in first. Running this fold exactly once, over the whole line's
+/// already-resolved final verdict, avoids that.
+///
+/// # Why this runs INSIDE `watchdog::bounded`'s closure, not after it returns
+///
+/// That terminal remap still has to run on [`gate::analyze_with_policy`]'s
+/// own return value specifically, not on whatever [`watchdog::bounded`]
+/// hands back to this function's caller: `watchdog::bounded`'s own
+/// fail-closed `Ask` (`src/watchdog.rs`, a time/memory budget trip) is
+/// created OUTSIDE `gate` entirely, on a code path this crate's threat
+/// model treats as a resource-exhaustion signal, not a structural
+/// can't-resolve-this-statically one — remapping it to `Block` the same
+/// way would misrepresent a watchdog trip as an ordinary policy decision,
+/// and would corrupt the accurate "time/memory budget exceeded" reason a
+/// caller needs to diagnose it. Applying this fold from inside the closure
+/// — wrapping `gate::analyze_with_policy`'s result before it is ever handed
+/// to `watchdog::bounded` — keeps a watchdog trip completely untouched by
+/// construction, rather than relying on excluding it after the fact by
+/// matching against `watchdog.rs`'s own reason strings (fragile, and not
+/// this crate's style of boundary-checking).
+///
+/// `apply_allowlist_downgrade` (`src/gate.rs`) still runs first, at every
+/// recursion level, inside `gate::analyze_with_policy` itself — this
+/// function only ever sees whatever `gate` already decided, so a `[[allow]]`
+/// entry that would have downgraded an `Ask` to `Allow` still does,
+/// unaffected by `ask_outcome`.
+fn apply_ask_outcome(verdict: Verdict, ask_outcome: Decision) -> Verdict {
+    if ask_outcome != Decision::Block || verdict.decision() != Decision::Ask {
+        return verdict;
+    }
+
+    // `Ask` always carries a reason by construction (`Verdict::ask` takes a
+    // `Reason`, not `Option<Reason>`) — `map_or` with an unreachable default
+    // rather than `.expect()`, matching `crate::adapter::respond`'s own
+    // style for the same guarantee.
+    let original_reason = verdict.reason().map_or("", |reason| reason.as_str());
+    let reason = Reason::new(format!(
+        "{original_reason}; ask_outcome = \"deny\": this Ask has been floored to a deny \
+         because an unresolved Ask cannot be acted on by an autonomous session, and Ask is \
+         not a reliable control under bypassPermissions (anthropics/claude-code#37420)"
+    ));
+    // Preserve a rule-authored deny_message when there is one (see this
+    // function's own doc comment); the generic fallback below is only for
+    // a genuinely structural Ask.
+    let deny_message = verdict.deny_message().cloned().unwrap_or_else(|| {
+        DenyMessage::new(
+            "shguard could not statically resolve this command, and this config's ask_outcome \
+             = \"deny\" turns every such Ask into a deny: if it involves an unresolved \
+             $VAR/$(...), rewrite it with a literal path; if it involves inline interpreter \
+             code, move it to a file and run that file; otherwise split a compound line into \
+             separate commands or run this one manually",
+        )
+    });
+
+    Verdict::block(reason, verdict.normalized_argv().to_vec(), None)
+        .with_deny_message(Some(deny_message))
 }
