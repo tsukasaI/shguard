@@ -1,9 +1,14 @@
-# Renewal: each pin below was resolved via
+# Renewal: .github/dependabot.yml's github-actions entry opens a PR bumping
+# each tag-pinned SHA (and its trailing version comment) automatically on
+# its weekly schedule. dtolnay/rust-toolchain below is pinned to a `master`
+# branch commit rather than a tag, so it is NOT covered by that automation
+# (unverified whether Dependabot's github-actions updater tracks bare-branch
+# pins) and still needs the manual procedure:
 #   gh api repos/<owner>/<repo>/git/ref/tags/<tag> --jq '.object.sha'
 # Re-run that for the listed tag (or the current latest tag) and update both
 # the SHA and its trailing version comment when bumping.
 #   - actions/checkout            @ v5.0.1 (shared pin with ci.yml)
-#   - dtolnay/rust-toolchain      @ master, pinned 2026-07-18 (shared pin with ci.yml)
+#   - dtolnay/rust-toolchain      @ master, pinned 2026-07-18 (shared pin with ci.yml) -- manual renewal only, see above
 #   - actions/upload-artifact     @ v4.6.2
 #   - actions/download-artifact   @ v4.3.0
 #   - softprops/action-gh-release @ v3.0.2

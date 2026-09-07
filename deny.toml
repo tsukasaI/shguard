@@ -1,0 +1,44 @@
+# cargo-deny configuration. Run locally with `cargo deny check`; runs in CI
+# via the `cargo-deny` job in .github/workflows/ci.yaml.
+# Ref: coding-guidelines/languages/rust.md "Tooling",
+# github.com/EmbarkStudios/cargo-deny.
+
+[graph]
+all-features = false
+no-default-features = false
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+
+[licenses]
+# shguard's own distribution commitment is `MIT OR Apache-2.0`
+# (Cargo.toml, reaffirmed by docs/adr/0001-parser-crate.md's licence-policy
+# clause). Allow only licences compatible with shipping under that.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Zlib",
+]
+# BSD-3-Clause and ISC aren't in the current dependency tree — kept in the
+# allow list as forward-tolerance for common permissive licences a future
+# transitive dependency could carry, rather than trimmed to today's exact
+# set. cargo-deny's `unmatched license allowance` warning for these two is
+# expected and non-fatal (exit 0).
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
