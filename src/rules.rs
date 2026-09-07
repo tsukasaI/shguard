@@ -1166,7 +1166,11 @@ impl TargetMatcher {
             return false;
         }
         match self {
-            Self::NormalizedPrefix { canon, .. } => {
+            Self::NormalizedPrefix {
+                canon,
+                case_insensitive,
+                ..
+            } => {
                 let candidate = if canon.starts_with('/') {
                     abs_render(&comps)
                 } else if canon.starts_with('~') {
@@ -1174,7 +1178,21 @@ impl TargetMatcher {
                 } else {
                     return false; // degenerate canon (e.g. "."), never plausible
                 };
-                if candidate.starts_with(canon.as_str()) {
+                // `case_insensitive` (issue #449 review follow-up): reads
+                // the SAME flag `TargetMatcher::matches` folds by, so a
+                // self-protection rule case-folded for a macOS APFS volume
+                // doesn't miss a re-cased ascent-descent tail here that
+                // `matches` would have hard-matched had the anchor been
+                // certain instead of merely plausible.
+                let starts_with_canon = |s: &str| -> bool {
+                    if *case_insensitive {
+                        s.to_ascii_lowercase()
+                            .starts_with(&canon.to_ascii_lowercase())
+                    } else {
+                        s.starts_with(canon.as_str())
+                    }
+                };
+                if starts_with_canon(&candidate) {
                     return true;
                 }
                 // Issue #118: the tail's own first component re-anchored as
@@ -1191,7 +1209,7 @@ impl TargetMatcher {
                 // guard's presence.
                 (canon.starts_with('~')
                     && comps.len() >= 2
-                    && format!("~/{}", comps[1..].join("/")).starts_with(canon.as_str()))
+                    && starts_with_canon(&format!("~/{}", comps[1..].join("/"))))
                     // Issue #364: the same re-anchoring one component
                     // further in, when the tail spells a common home
                     // CONTAINER directory before the reappearing name
@@ -1202,16 +1220,30 @@ impl TargetMatcher {
                     || (canon.starts_with('~')
                         && comps.len() >= 3
                         && is_home_container_dir(&comps[0])
-                        && format!("~/{}", comps[2..].join("/")).starts_with(canon.as_str()))
+                        && starts_with_canon(&format!("~/{}", comps[2..].join("/"))))
             }
-            Self::NormalizedExact { target, .. } => {
+            Self::NormalizedExact {
+                target,
+                case_insensitive,
+                ..
+            } => {
                 let (PathForm::Abs(target_comps) | PathForm::Home(target_comps)) = target else {
                     return false;
                 };
                 if target_comps.is_empty() {
                     return false;
                 }
-                *target_comps == comps
+                // `case_insensitive`: same rationale as the prefix arm
+                // above.
+                let eq = |a: &[String], b: &[String]| -> bool {
+                    if *case_insensitive {
+                        a.len() == b.len()
+                            && a.iter().zip(b).all(|(x, y)| x.eq_ignore_ascii_case(y))
+                    } else {
+                        a == b
+                    }
+                };
+                eq(target_comps, &comps)
                     // Issue #118: same re-anchoring as the prefix arm above,
                     // but only against a `~`-anchored target (an `Abs`
                     // target has no anchor a reappearing name could
@@ -1222,13 +1254,13 @@ impl TargetMatcher {
                     // never hold regardless of this guard.
                     || (matches!(target, PathForm::Home(_))
                         && comps.len() >= 2
-                        && comps[1..] == *target_comps)
+                        && eq(&comps[1..], target_comps))
                     // Issue #364: same one-component-further widening as
                     // the prefix arm above.
                     || (matches!(target, PathForm::Home(_))
                         && comps.len() >= 3
                         && is_home_container_dir(&comps[0])
-                        && comps[2..] == *target_comps)
+                        && eq(&comps[2..], target_comps))
             }
             Self::Exact(_)
             | Self::Prefix(_)
@@ -1363,7 +1395,11 @@ impl TargetMatcher {
     /// [`Self::ascent_descent_plausible`].
     fn unknown_cwd_plausible(&self, token: &str) -> bool {
         match self {
-            Self::NormalizedExact { strip, target, .. } => {
+            Self::NormalizedExact {
+                strip,
+                target,
+                case_insensitive,
+            } => {
                 let target_comps = match target {
                     PathForm::Abs(comps) | PathForm::Home(comps) => comps,
                     _ => return false,
@@ -1375,9 +1411,13 @@ impl TargetMatcher {
                     PathForm::Rel { comps, .. } => comps,
                     _ => return false,
                 };
-                !comps.is_empty() && is_suffix_of(&comps, target_comps)
+                !comps.is_empty() && is_suffix_of(&comps, target_comps, *case_insensitive)
             }
-            Self::NormalizedPrefix { strip, canon, .. } => {
+            Self::NormalizedPrefix {
+                strip,
+                canon,
+                case_insensitive,
+            } => {
                 let canon_comps = match lexical_normalize(canon) {
                     PathForm::Abs(comps) | PathForm::Home(comps) => comps,
                     _ => return false,
@@ -1392,7 +1432,7 @@ impl TargetMatcher {
                 if comps.is_empty() {
                     return false;
                 }
-                is_suffix_of(&comps[..comps.len() - 1], &canon_comps)
+                is_suffix_of(&comps[..comps.len() - 1], &canon_comps, *case_insensitive)
             }
             // Issue #427: no floor needed — `Self::matches`'s
             // `NormalizedBasename` arm already hard-matches a `Rel` token
@@ -1411,8 +1451,23 @@ impl TargetMatcher {
 /// empty slice is always a suffix of anything, matching
 /// [`TargetMatcher::unknown_cwd_plausible`]'s "the unknown cwd could just
 /// be the protected directory itself" case for a `NormalizedPrefix` target.
-fn is_suffix_of(needle: &[String], haystack: &[String]) -> bool {
-    needle.len() <= haystack.len() && haystack[haystack.len() - needle.len()..] == *needle
+/// `case_insensitive` compares each component with `eq_ignore_ascii_case`
+/// instead of `==` (issue #449 review follow-up): this floor reads the
+/// matcher's own `case_insensitive` flag, so a self-protection rule
+/// case-folded for a macOS APFS volume doesn't miss the SAME re-cased
+/// spelling here that `TargetMatcher::matches` already tolerates.
+fn is_suffix_of(needle: &[String], haystack: &[String], case_insensitive: bool) -> bool {
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    let tail = &haystack[haystack.len() - needle.len()..];
+    if case_insensitive {
+        tail.iter()
+            .zip(needle)
+            .all(|(h, n)| h.eq_ignore_ascii_case(n))
+    } else {
+        tail == needle
+    }
 }
 
 /// Strips `prefix` (a [`TargetMatcher::NormalizedExact`]/
@@ -4863,12 +4918,13 @@ struct TargetDto {
     strip: Option<String>,
     /// Opt-in ASCII case-folded comparison for `normalized`/
     /// `normalized_prefix` (issue #449): used by `crate::config`'s
-    /// generated self-protection rules on a case-insensitive filesystem
-    /// (macOS APFS by default), where a re-cased spelling of the config
-    /// path resolves to the exact same on-disk file. Not documented as
-    /// ordinary rule-authoring syntax in the README — a rule author
-    /// reaching for this should know their own target path lives on a
-    /// case-insensitive volume.
+    /// generated self-protection rules AND `rules/blocklist.toml`'s own
+    /// static `~/.config/shguard`-literal self-protection rules, on a
+    /// case-insensitive filesystem (macOS APFS by default), where a
+    /// re-cased spelling of the config path resolves to the exact same
+    /// on-disk file. Not documented as ordinary rule-authoring syntax in
+    /// the README — a rule author reaching for this should know their own
+    /// target path lives on a case-insensitive volume.
     #[serde(default)]
     case_insensitive: bool,
 }
@@ -5456,15 +5512,15 @@ fn convert_target(
             if normalized_prefix.ends_with('/') && !canon.ends_with('/') {
                 canon.push('/');
             }
-            // `canon` is deliberately left in its original case here, even
-            // though `case_insensitive` will fold it inside
-            // `Self::matches` — `canon` has other, non-case-insensitive
-            // consumers (`Self::unknown_cwd_plausible`,
-            // `Self::ascent_descent_plausible`) that `lexical_normalize`
-            // and suffix-compare it against a raw token; pre-folding it
-            // here would silently change THEIR comparison too, an
-            // unrelated regression case-insensitive matching must not
-            // cause.
+            // `canon` is deliberately left in its original case here — it
+            // is read by other consumers besides `Self::matches`
+            // (`Self::unknown_cwd_plausible`, `Self::ascent_descent_plausible`)
+            // that also honor `case_insensitive` themselves, but do so at
+            // THEIR own comparison sites, not by relying on `canon` having
+            // been folded ahead of time. Pre-folding `canon` once here
+            // instead would apply the fold unconditionally, even to a
+            // caller that (today, none do) wanted the untouched
+            // author-cased value.
             Ok(TargetMatcher::NormalizedPrefix {
                 strip: dto.strip,
                 canon,
@@ -12407,6 +12463,64 @@ mod tests {
         assert!(matches(&["rm", "/Users/h/.config"]));
         assert!(matches(&["rm", "/USERS/H/.CONFIG"]));
         assert!(!matches(&["rm", "/Users/h/.config-other"]));
+    }
+
+    // `case_insensitive` is a parse-time TOML flag, not gated on the host
+    // OS running this test — so `rules/blocklist.toml`'s own static
+    // `~`-literal self-protection rules (which now carry it, issue #449
+    // review follow-up) can be exercised on any platform, including
+    // Linux CI, even though the flag only ever gets SET on macOS by
+    // `crate::config`'s generated rules.
+    #[test]
+    fn embedded_tilde_self_protection_matches_recased_path() {
+        let blocklist = Rules::embedded().unwrap();
+        let words: Vec<NormalizedWord> = ["tee", "~/.CONFIG/SHGUARD/config.toml"]
+            .iter()
+            .map(|w| NormalizedWord::resolved(*w))
+            .collect();
+        assert!(blocklist.match_command(&words).is_some());
+    }
+
+    #[test]
+    fn embedded_tilde_ancestor_self_protection_matches_recased_path() {
+        let blocklist = Rules::embedded().unwrap();
+        let words: Vec<NormalizedWord> = ["rm", "-r", "~/.CONFIG"]
+            .iter()
+            .map(|w| NormalizedWord::resolved(*w))
+            .collect();
+        assert_eq!(
+            blocklist.match_command(&words).map(CommandRule::decision),
+            Some(Decision::Ask)
+        );
+    }
+
+    // `case_insensitive` must also be honored by the Ask-only floors
+    // (`unknown_cwd_plausible`/`ascent_descent_plausible`), not just
+    // `Self::matches`'s certain-match path — otherwise a case-folded
+    // self-protection rule would still miss a re-cased token under a
+    // poisoned/unknown cwd (issue #449 review follow-up).
+    #[test]
+    fn ascent_descent_floor_honors_case_insensitive() {
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let config = UserConfig::parse(
+            r#"
+            [[deny]]
+            id = "user-deny-recased-ascent-descent"
+            reason = "test"
+            command = "tee"
+            targets = [{ normalized = "~/mystuff", case_insensitive = true }]
+        "#,
+        )
+        .unwrap();
+        let (rules, _) = merge_user_config(blocklist, allowlist, config).unwrap();
+
+        let words: Vec<NormalizedWord> = ["tee", "../MYSTUFF"]
+            .iter()
+            .map(|w| NormalizedWord::resolved(*w))
+            .collect();
+        let rule = rules.match_command_ascent_descent(&words).unwrap();
+        assert_eq!(rule.id().as_str(), "user-deny-recased-ascent-descent");
     }
 
     // ==== issue #427: `normalized_basename` target matcher ====

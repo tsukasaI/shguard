@@ -994,40 +994,40 @@ sink_required_flags = ["f|--force"]
 id = "self-protect-config-tee-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "tee"
-targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]
+targets = [{ normalized_prefix = "~/.config/shguard/", case_insensitive = true }, { normalized = "~/.config/shguard", case_insensitive = true }]
 
 [[command]]
 id = "self-protect-config-cp-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "cp"
-targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]
+targets = [{ normalized_prefix = "~/.config/shguard/", case_insensitive = true }, { normalized = "~/.config/shguard", case_insensitive = true }]
 
 [[command]]
 id = "self-protect-config-mv-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "mv"
-targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]
+targets = [{ normalized_prefix = "~/.config/shguard/", case_insensitive = true }, { normalized = "~/.config/shguard", case_insensitive = true }]
 
 [[command]]
 id = "self-protect-config-install-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "install"
-targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]
+targets = [{ normalized_prefix = "~/.config/shguard/", case_insensitive = true }, { normalized = "~/.config/shguard", case_insensitive = true }]
 
 [[command]]
 id = "self-protect-config-sed-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "sed"
 required_flags = ["i|I|--in-place"]
-targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]
+targets = [{ normalized_prefix = "~/.config/shguard/", case_insensitive = true }, { normalized = "~/.config/shguard", case_insensitive = true }]
 
 [[command]]
 id = "self-protect-config-dd-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "dd"
 targets = [
-    { strip = "of=", normalized_prefix = "~/.config/shguard/" },
-    { strip = "of=", normalized = "~/.config/shguard" },
+    { strip = "of=", normalized_prefix = "~/.config/shguard/", case_insensitive = true },
+    { strip = "of=", normalized = "~/.config/shguard", case_insensitive = true },
 ]
 
 [[command]]
@@ -1035,8 +1035,8 @@ id = "self-protect-config-dcfldd-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "dcfldd"
 targets = [
-    { strip = "of=", normalized_prefix = "~/.config/shguard/" },
-    { strip = "of=", normalized = "~/.config/shguard" },
+    { strip = "of=", normalized_prefix = "~/.config/shguard/", case_insensitive = true },
+    { strip = "of=", normalized = "~/.config/shguard", case_insensitive = true },
 ]
 
 # rm/unlink/ln get a `normalized` alternative for the bare directory (no
@@ -1054,25 +1054,25 @@ targets = [
 id = "self-protect-config-rm-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "rm"
-targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]
+targets = [{ normalized_prefix = "~/.config/shguard/", case_insensitive = true }, { normalized = "~/.config/shguard", case_insensitive = true }]
 
 [[command]]
 id = "self-protect-config-unlink-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "unlink"
-targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]
+targets = [{ normalized_prefix = "~/.config/shguard/", case_insensitive = true }, { normalized = "~/.config/shguard", case_insensitive = true }]
 
 [[command]]
 id = "self-protect-config-ln-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "ln"
-targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]
+targets = [{ normalized_prefix = "~/.config/shguard/", case_insensitive = true }, { normalized = "~/.config/shguard", case_insensitive = true }]
 
 [[command]]
 id = "self-protect-config-rsync-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "rsync"
-targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]
+targets = [{ normalized_prefix = "~/.config/shguard/", case_insensitive = true }, { normalized = "~/.config/shguard", case_insensitive = true }]
 
 # Parity with the write-capable *commands* above (issue #100): a path
 # unreachable via `tee`/`cp`/... must also be unreachable via bare shell
@@ -1089,7 +1089,7 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.conf
 [[redirect]]
 id = "self-protect-config-redirect-tilde"
 reason = "redirecting output to shguard's own config directory must never be scripted"
-targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]
+targets = [{ normalized_prefix = "~/.config/shguard/", case_insensitive = true }, { normalized = "~/.config/shguard", case_insensitive = true }]
 
 # Issue #101 audit: additional write/delete-capable primitives against the
 # same config-directory target list above. Each follows the existing
@@ -1101,14 +1101,14 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.conf
 id = "self-protect-config-rmdir-tilde"
 reason = "deleting shguard's own config directory must never be scripted"
 command = "rmdir"
-targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]
+targets = [{ normalized_prefix = "~/.config/shguard/", case_insensitive = true }, { normalized = "~/.config/shguard", case_insensitive = true }]
 
 [[command]]
 id = "self-protect-config-perl-tilde"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "perl"
 required_flags = ["i"]
-targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]
+targets = [{ normalized_prefix = "~/.config/shguard/", case_insensitive = true }, { normalized = "~/.config/shguard", case_insensitive = true }]
 
 # patch always modifies its target file (that's what patch does) — a
 # flagless invocation naming the config path is destructive-by-mere-
@@ -1120,7 +1120,7 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.conf
 id = "self-protect-config-patch-tilde"
 reason = "patching shguard's own config directory must never be scripted"
 command = "patch"
-targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]
+targets = [{ normalized_prefix = "~/.config/shguard/", case_insensitive = true }, { normalized = "~/.config/shguard", case_insensitive = true }]
 
 # find itself isn't destructive — decision = "ask" rather than "block",
 # the same `tar-absolute-names-ask` precedent above: the actual danger
@@ -1137,7 +1137,7 @@ decision = "ask"
 reason = "find against shguard's own config directory combined with -exec/-execdir/-ok/-okdir must never be scripted"
 command = "find"
 required_flags = ["-exec|-execdir|-ok|-okdir"]
-targets = [{ normalized_prefix = "~/.config/shguard/" }, { normalized = "~/.config/shguard" }]
+targets = [{ normalized_prefix = "~/.config/shguard/", case_insensitive = true }, { normalized = "~/.config/shguard", case_insensitive = true }]
 
 # Ancestor-directory coverage (issue #101's own headline scenario):
 # deleting/renaming/syncing-over an ANCESTOR of the config directory
@@ -1166,14 +1166,20 @@ decision = "ask"
 reason = "deleting an ancestor directory of shguard's own config directory must never be scripted"
 command = "rm"
 required_flags = ["r|R|--recursive"]
-targets = [{ normalized = "~/.config" }, { normalized = "~" }]
+targets = [
+    { normalized = "~/.config", case_insensitive = true },
+    { normalized = "~" },
+]
 
 [[command]]
 id = "self-protect-config-ancestor-mv-tilde"
 decision = "ask"
 reason = "renaming an ancestor directory of shguard's own config directory must never be scripted"
 command = "mv"
-targets = [{ normalized = "~/.config" }, { normalized = "~" }]
+targets = [
+    { normalized = "~/.config", case_insensitive = true },
+    { normalized = "~" },
+]
 
 # Issue #127: `rsync --delete <src> <dst>` removes every file at `<dst>`
 # not present in `<src>` — the same severity class as `rm -rf` against a
@@ -1221,7 +1227,10 @@ command = "rsync"
 required_flags = [
     "--delete|--delete-before|--delete-during|--delete-after|--delete-excluded|--delete-delay|--del|--delete-missing-args",
 ]
-targets = [{ normalized = "~/.config" }, { normalized = "~" }]
+targets = [
+    { normalized = "~/.config", case_insensitive = true },
+    { normalized = "~" },
+]
 
 # Ordered after self-protect-config-ancestor-rsync-tilde above so its
 # narrower, more specific reason keeps first-match priority on the `~`

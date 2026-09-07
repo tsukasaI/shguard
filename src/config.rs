@@ -85,7 +85,12 @@
 //! by design), so an agent that already knows its own `$HOME` (trivially
 //! available via `pwd`/`echo $HOME`) could otherwise dodge a `~`-only
 //! rule by writing an absolute path instead — this module's dynamically
-//! resolved rule closes that gap.
+//! resolved rule closes that gap. That static `~`-literal rule's own
+//! `normalized`/`normalized_prefix` targets carry the same
+//! `case_insensitive = true` (issue #449) this module's generated ones
+//! do — a re-cased `~/.CONFIG/shguard` spelling is exactly as real a
+//! bypass on macOS APFS for the literal-`~` half as for the
+//! dynamically-resolved half.
 //!
 //! Both mechanisms are disclosed as partial, not complete, in the README:
 //! bare shell redirection (`cat > path <<EOF`, rule 9's documented
@@ -1289,6 +1294,51 @@ mod tests {
             "/home/user/.config/shguard/"
         ]));
         assert!(!matches(&["cp", "a.txt", "b.txt"]));
+    }
+
+    // `case_insensitive` is a parse-time TOML flag, not gated on the host
+    // OS running this test (only `config_dir_is_case_insensitive`'s
+    // caller decides whether to set it) — so the `case_insensitive: true`
+    // generation path itself (including `dd`'s combined `strip = "of=",
+    // case_insensitive = true` inline table and the ancestor `normalized`
+    // targets) is exercisable on any platform, including Linux CI, even
+    // though no real invocation of this crate ever passes `true` there.
+    // Issue #449 review follow-up: a generation typo here would otherwise
+    // only surface as a `Policy::load` failure on a macOS-only path,
+    // undetected by CI.
+    #[test]
+    fn self_protection_toml_case_insensitive_generation_matches_recased_commands() {
+        use crate::normalize::NormalizedWord;
+
+        let toml = self_protection_toml("/Users/h/.config/shguard", "literal", true);
+        let user_config = UserConfig::parse(&toml).unwrap();
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let (rules, _) = merge_user_config(blocklist, allowlist, user_config).unwrap();
+
+        let matches = |argv: &[&str]| {
+            let words: Vec<NormalizedWord> =
+                argv.iter().map(|w| NormalizedWord::resolved(*w)).collect();
+            rules.match_command(&words).is_some()
+        };
+
+        assert!(matches(&["tee", "/USERS/H/.CONFIG/SHGUARD/config.toml"]));
+        assert!(matches(&[
+            "dd",
+            "if=/dev/zero",
+            "of=/USERS/H/.CONFIG/SHGUARD/config.toml"
+        ]));
+        let ancestor_decision = |argv: &[&str]| {
+            let words: Vec<NormalizedWord> =
+                argv.iter().map(|w| NormalizedWord::resolved(*w)).collect();
+            rules
+                .match_command(&words)
+                .map(crate::rules::CommandRule::decision)
+        };
+        assert_eq!(
+            ancestor_decision(&["rm", "-r", "/USERS/H/.CONFIG"]),
+            Some(Decision::Ask)
+        );
     }
 
     // issue #100: the generated [[redirect]] entry protects the RESOLVED
