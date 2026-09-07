@@ -108,9 +108,11 @@ fn parser_options() -> BrushParserOptions {
 
 /// Runs a brush-parser entry point and converts an internal panic (a
 /// pinned dependency's own unchecked `unwrap()` — brush-parser 0.4.0 has
-/// three known instances in its tilde/brace-sequence/io-number number
-/// parsing, each an `Err(ParseIntError { kind: PosOverflow })` reached
-/// through an ordinary, if extreme, input) into a `ParseError::Syntax`, so
+/// four known instances in its tilde (unsigned/`+`-prefixed dir-stack
+/// form, `-`-prefixed dir-stack form), brace-sequence, and io-number
+/// number parsing, each an `Err(ParseIntError { kind: PosOverflow })`
+/// reached through an ordinary, if extreme, input) into a
+/// `ParseError::Syntax`, so
 /// it folds into this pipeline's documented fail-closed contract (`ask`)
 /// instead of unwinding out of the public `shguard::analyze`/
 /// `analyze_with_policy` API — `src/lib.rs` documents both as folding
@@ -1224,27 +1226,34 @@ fn convert_brace_members(
         .collect()
 }
 
-/// When `text` starts with a `~` directly followed by a decimal digit run
-/// that overflows `u64`, returns the `(tilde_run, remainder)` split at the
-/// end of that digit run. This is the exact shape that panics
-/// brush-parser 0.4.0's tilde-expression parser (`word.rs:909`,
-/// `parse::<u64>().unwrap()` on the digit run) — bash itself treats
-/// `~<unknown-uid>` as a literal word (no user has a UID this large), so
+/// When `text` starts with a `~` directly followed by an optional `+`/`-`
+/// sign and a decimal digit run that overflows `u64`, returns the
+/// `(tilde_run, remainder)` split at the end of that digit run. This is
+/// the exact shape that panics brush-parser 0.4.0's tilde-expression
+/// parser: the unsigned/`+`-prefixed dir-stack form (`word.rs:909`,
+/// `parse::<usize>().unwrap()`, `TildeExpr::NthDirFromTopOfDirStack`) and
+/// the `-`-prefixed dir-stack form (`word.rs:911`,
+/// `TildeExpr::NthDirFromBottomOfDirStack`) both parse the digit run the
+/// same unchecked way — bash itself treats an out-of-range `~<uid>` or
+/// `~±<n>` dir-stack reference as a literal word (no user has a UID this
+/// large, and no shell has a directory stack this deep), so
 /// [`convert_word_text`] pre-empts the parse for just this leading run
 /// instead of letting the pinned dependency's internal overflow panic
 /// take down the whole word (and, with it, any sibling word in the same
 /// command sharing this call's fate — e.g. a `rm -rf /` in the same argv).
 fn split_overflowing_leading_tilde(text: &str) -> Option<(&str, &str)> {
     let rest = text.strip_prefix('~')?;
-    let digit_len = rest.bytes().take_while(u8::is_ascii_digit).count();
+    let sign_len = usize::from(rest.starts_with(['+', '-']));
+    let digits_start = &rest[sign_len..];
+    let digit_len = digits_start.bytes().take_while(u8::is_ascii_digit).count();
     if digit_len == 0 {
         return None;
     }
-    let (digits, remainder) = rest.split_at(digit_len);
+    let (digits, remainder) = digits_start.split_at(digit_len);
     digits
         .parse::<u64>()
         .is_err()
-        .then(|| (&text[..1 + digit_len], remainder))
+        .then(|| (&text[..1 + sign_len + digit_len], remainder))
 }
 
 /// Runs the ordinary (non-brace) word parse over a fragment of source text
@@ -1589,6 +1598,63 @@ mod tests {
             word.0,
             vec![
                 WordPiece::Literal("~41353561361542343807".to_string()),
+                WordPiece::Literal("/x".to_string()),
+            ]
+        );
+    }
+
+    // issue #456: brush-parser 0.4.0 panics the same unchecked way for the
+    // `+`-prefixed dir-stack form (`word.rs:909`,
+    // `TildeExpr::NthDirFromTopOfDirStack`) as it does for the unsigned
+    // UID form above.
+    #[test]
+    fn tilde_expression_with_overflowing_dirstack_top_is_kept_literal_not_panicked() {
+        let cmd = parse_ok("rm -rf / ~+99999999999999999999");
+        let word = &simple(&cmd.first.first).words[3];
+        assert_eq!(
+            word.0,
+            vec![WordPiece::Literal("~+99999999999999999999".to_string())]
+        );
+    }
+
+    // issue #456: same shape for the `-`-prefixed dir-stack form
+    // (`word.rs:911`, `TildeExpr::NthDirFromBottomOfDirStack`).
+    #[test]
+    fn tilde_expression_with_overflowing_dirstack_bottom_is_kept_literal_not_panicked() {
+        let cmd = parse_ok("rm -rf / ~-99999999999999999999");
+        let word = &simple(&cmd.first.first).words[3];
+        assert_eq!(
+            word.0,
+            vec![WordPiece::Literal("~-99999999999999999999".to_string())]
+        );
+    }
+
+    // issue #456 boundary check: a genuinely small, non-overflowing
+    // dir-stack reference (well within any real directory stack depth)
+    // must still expand as a tilde expression, not get swallowed as
+    // literal text by the overflow pre-emption above.
+    #[test]
+    fn tilde_expression_small_dirstack_top_is_not_treated_as_literal() {
+        let cmd = parse_ok("echo ~+2/x");
+        let word = &simple(&cmd.first.first).words[1];
+        assert_eq!(
+            word.0,
+            vec![
+                WordPiece::Tilde("+2".to_string()),
+                WordPiece::Literal("/x".to_string()),
+            ]
+        );
+    }
+
+    // Same boundary check for the `-`-prefixed dir-stack form.
+    #[test]
+    fn tilde_expression_small_dirstack_bottom_is_not_treated_as_literal() {
+        let cmd = parse_ok("echo ~-1/x");
+        let word = &simple(&cmd.first.first).words[1];
+        assert_eq!(
+            word.0,
+            vec![
+                WordPiece::Tilde("-1".to_string()),
                 WordPiece::Literal("/x".to_string()),
             ]
         );
