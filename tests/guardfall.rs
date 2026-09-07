@@ -1506,13 +1506,12 @@ fn guardfall_backslash_newline_split_between_io_number_and_operator_stays_blocke
     assert_eq!(verdict.decision(), Decision::Block);
 }
 
-/// Issue #443 (fixed-forward regression): an earlier version of the fix
-/// made brush-parser parse a continuation-stripped copy of the command
-/// instead of the original text. Since a `#` comment ends at the first raw
-/// newline regardless of a preceding backslash, that stripped copy merged
-/// a `\`+newline inside a comment with the "next line", swallowing an
-/// arbitrary following command into the comment and returning `Allow`
-/// instead of ever analyzing it. Must stay `Block`.
+/// Issue #443: brush-parser must keep parsing the original, unmodified
+/// command text — never a continuation-stripped copy. A `#` comment ends
+/// at the first raw newline regardless of a preceding backslash, so
+/// parsing a stripped copy would merge a `\`+newline inside a comment with
+/// the "next line", swallowing an arbitrary following command into the
+/// comment and returning `Allow` instead of ever analyzing it.
 #[test]
 fn guardfall_command_hidden_behind_a_split_comment_is_still_analyzed() {
     let command = "echo hi # \\\nrm -rf /";

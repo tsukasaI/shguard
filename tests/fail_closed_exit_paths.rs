@@ -272,6 +272,66 @@ fn deep_if_nesting_split_after_a_comment_line_fails_closed_to_ask() {
     );
 }
 
+/// Fable-review follow-up to #443: a `#` that sits inside a quoted string
+/// but immediately follows a token-boundary byte (here, `'a #'`'s `#` after
+/// a space) makes `strip_raw_line_continuations` wrongly open a comment
+/// brush itself never opens, suppressing stripping of the REAL split
+/// keyword right after it until the next raw newline — reopening the exact
+/// abort this issue exists to close. `strip_raw_line_continuations_blind`
+/// (quote- and comment-blind) has no such gap: it rejoins the continuation
+/// unconditionally, so `reject_excessive_raw_nesting` still rejects.
+#[test]
+fn deep_if_nesting_split_after_a_quoted_hash_fails_closed_to_ask() {
+    let command = format!(
+        "echo 'a #'; {}echo body{}",
+        "i\\\nf true; then ".repeat(600),
+        "; fi".repeat(600)
+    );
+    let output = run_hook(&bash_command(&command));
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(
+        permission_reason(&output).contains("keyword nesting"),
+        "expected the keyword raw-count-cap rejection, got: {}",
+        permission_reason(&output)
+    );
+}
+
+/// Same quoted-`#` bypass shape, against the `[[` opener instead of a
+/// keyword.
+#[test]
+fn deep_extended_test_negation_split_after_a_quoted_hash_fails_closed_to_ask() {
+    let command = format!("echo 'a #'; [\\\n[ {}x ]]", "! ".repeat(3000));
+    let output = run_hook(&bash_command(&command));
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(
+        permission_reason(&output).contains("extended-test operator count"),
+        "expected the extended-test raw-count-cap rejection, got: {}",
+        permission_reason(&output)
+    );
+}
+
+/// Composite adversarial shape: a genuine unquoted comment (which
+/// `strip_raw_line_continuations_blind` alone would strip straight
+/// through, hiding the split keyword after it) immediately followed by a
+/// quoted `#` (which fools `strip_raw_line_continuations`'s comment
+/// tracking into suppressing the real split right after IT). Neither scan
+/// alone closes this; running both and rejecting on either firing does.
+#[test]
+fn deep_if_nesting_split_after_a_real_comment_then_a_quoted_hash_fails_closed_to_ask() {
+    let command = format!(
+        "# x\\\n'a #'; {}echo body{}",
+        "i\\\nf true; then ".repeat(600),
+        "; fi".repeat(600)
+    );
+    let output = run_hook(&bash_command(&command));
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(
+        permission_reason(&output).contains("keyword nesting"),
+        "expected the keyword raw-count-cap rejection, got: {}",
+        permission_reason(&output)
+    );
+}
+
 // ==== B-2: stdin size cap ====
 
 /// Before the fix: stdin was read to completion with no bound at all.

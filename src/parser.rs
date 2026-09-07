@@ -291,17 +291,16 @@ fn skip_raw_continuations(bytes: &[u8], mut i: usize) -> usize {
 ///
 /// **This output must never be fed to brush-parser itself** — only used as
 /// `reject_excessive_raw_nesting`'s input. Brush-parser keeps parsing
-/// `command` unmodified (`parse()` below). An earlier version of this fix
-/// made the stripped copy the actual parser input and was wrong: brush's
-/// comment handling ends a `#...` comment at the first *raw* newline,
-/// continuation or not (confirmed against brush-parser's tokenizer), so
-/// blindly deleting a `\`+newline pair inside a comment merges the next
-/// line into that comment — hiding an arbitrary following command behind
-/// `# \<newline>` (e.g. `echo hi # \<newline>rm -rf /` would have let the
-/// `rm -rf /` disappear entirely rather than being analyzed). Keeping
-/// brush-parser on the untouched original text makes that failure mode
-/// impossible: this function only ever influences whether
-/// `reject_excessive_raw_nesting` rejects up front, never what gets parsed.
+/// `command` unmodified (`parse()` below): brush's comment handling ends a
+/// `#...` comment at the first *raw* newline, continuation or not, so
+/// blindly deleting a `\`+newline pair inside a comment would merge the
+/// next line into that comment — hiding an arbitrary following command
+/// behind `# \<newline>` (e.g. `echo hi # \<newline>rm -rf /` would let the
+/// `rm -rf /` disappear entirely rather than being analyzed) if this
+/// output were what brush-parser itself parsed. Keeping brush-parser on
+/// the untouched original text makes that failure mode impossible: this
+/// function only ever influences whether `reject_excessive_raw_nesting`
+/// rejects up front, never what gets parsed.
 ///
 /// Two properties this scan must get right to avoid *under*-counting a real
 /// nesting/bracket shape relative to what brush-parser will actually see
@@ -317,10 +316,9 @@ fn skip_raw_continuations(bytes: &[u8], mut i: usize) -> usize {
 ///   regardless of what precedes it would, on an even count, glue a
 ///   following real keyword onto the preceding backslash run into a token
 ///   that no longer matches `if`/`while`/etc — under-counting a real,
-///   brush-recognized keyword (confirmed live: `"x\\\\\nif true; then "`
-///   x600 — two backslashes, even — is real separate `if` keywords to
-///   brush, but glues to a non-matching token under parity-blind
-///   stripping).
+///   brush-recognized keyword (e.g. `"x\\\\\nif true; then "` x600 — two
+///   backslashes, even — is real separate `if` keywords to brush, but
+///   glues to a non-matching token under parity-blind stripping).
 /// - **Comments.** A `#` at the start of a word begins a comment that runs
 ///   to the next raw newline, continuation or not (same brush behavior
 ///   this function must never touch for the parser-input reason above) —
@@ -330,15 +328,19 @@ fn skip_raw_continuations(bytes: &[u8], mut i: usize) -> usize {
 ///   glued onto the comment text and miscounted as zero keywords even
 ///   though brush treats the second line as fresh, uncommented code.
 ///
-/// Quote-blindness remains an accepted, disclosed limitation for this scan
-/// copy specifically (unlike for parser input): over- or under-stripping
-/// inside a quoted string can only affect whether this function's *own*
-/// word-start/comment bookkeeping misfires on a quoted `#` or boundary
-/// byte, and the only way that actually changes the keyword count is if
-/// the misfire spans a region that is, in reality, inside quotes — exactly
-/// the case where brush would never treat that text as an unquoted keyword
-/// either, so a false detection here can only ever be conservative
-/// (over-Ask), never a missed one.
+/// Quote-blindness is a real, disclosed limitation for this scan copy
+/// specifically (unlike for parser input): a `#` that sits at a
+/// strip-perceived word boundary but is actually inside a quoted string
+/// (e.g. `echo 'a #'; i\<newline>f ...`) makes this function open a comment
+/// brush itself never opens, which suppresses stripping of every
+/// `\`+newline pair until the next raw newline — including a real,
+/// unquoted continuation later on the same perceived "comment" line. That
+/// under-counts exactly the shape this function exists to catch. See
+/// [`strip_raw_line_continuations_blind`], which has the complementary
+/// blind spot and is run alongside this function for that reason —
+/// between the two, a `\`+newline-split keyword/`[[` opener is rejoined by
+/// at least one of them regardless of which side of a real-vs-quoted `#`
+/// it falls on.
 fn strip_raw_line_continuations(command: &str) -> std::borrow::Cow<'_, str> {
     let bytes = command.as_bytes();
     let mut rewritten: Option<String> = None;
@@ -393,6 +395,54 @@ fn strip_raw_line_continuations(command: &str) -> std::borrow::Cow<'_, str> {
         }
 
         at_word_start = is_token_boundary(byte);
+        i += 1;
+    }
+
+    match rewritten {
+        Some(mut out) => {
+            out.push_str(&command[last_copied..]);
+            std::borrow::Cow::Owned(out)
+        }
+        None => std::borrow::Cow::Borrowed(command),
+    }
+}
+
+/// Blind sibling of [`strip_raw_line_continuations`]: strips every
+/// parity-valid `\`+newline pair unconditionally, with no `#`/comment
+/// awareness at all — so a `#` inside a quoted string can never make it
+/// wrongly suppress stripping. Its own blind spot is the opposite one:
+/// stripping through a *genuine*, unquoted `#...` comment's own
+/// continuation can hide a real split keyword on the fresh line right
+/// after that comment (the case [`strip_raw_line_continuations`]'s
+/// comment-tracking exists to catch). [`reject_excessive_raw_nesting`] is
+/// run against both this and the comment-aware copy, rejecting if either
+/// trips a cap: between the two, a `\`+newline-split keyword/`[[` opener
+/// is rejoined by at least one of them regardless of which side of a
+/// real-vs-quoted `#` it falls on.
+fn strip_raw_line_continuations_blind(command: &str) -> std::borrow::Cow<'_, str> {
+    let bytes = command.as_bytes();
+    let mut rewritten: Option<String> = None;
+    let mut last_copied = 0;
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            let run_start = i;
+            let mut run_end = i;
+            while run_end < bytes.len() && bytes[run_end] == b'\\' {
+                run_end += 1;
+            }
+            let run_len = run_end - run_start;
+            if run_end < bytes.len() && bytes[run_end] == b'\n' && run_len % 2 == 1 {
+                let out = rewritten.get_or_insert_with(String::new);
+                out.push_str(&command[last_copied..run_end - 1]);
+                last_copied = run_end + 1;
+                i = run_end + 1;
+                continue;
+            }
+            i = run_end;
+            continue;
+        }
         i += 1;
     }
 
@@ -583,7 +633,11 @@ fn check_extended_test_op_count(extended_test_op_count: &mut usize) -> Result<()
 pub(crate) fn parse(command: &str) -> Result<CommandLine, ParseError> {
     let command = neutralize_overflowing_io_redirect_numbers(command);
     let command = command.as_ref();
+    // Run against both the comment-aware and the blind scan copies — see
+    // `strip_raw_line_continuations_blind`'s docs for why neither alone
+    // suffices and why running both closes the gap.
     reject_excessive_raw_nesting(strip_raw_line_continuations(command).as_ref())?;
+    reject_excessive_raw_nesting(strip_raw_line_continuations_blind(command).as_ref())?;
 
     let mut parser = BrushParser::new(Cursor::new(command.as_bytes()), &parser_options());
     let program = catch_parser_panic(|| parser.parse_program())?
@@ -2506,6 +2560,39 @@ mod tests {
     }
 
     #[test]
+    fn strip_raw_line_continuations_is_fooled_by_a_quoted_hash_after_a_boundary() {
+        // A `#` inside a quoted string, sitting right after a space, is
+        // indistinguishable from a real comment opener to this quote-blind
+        // scan: it wrongly suppresses stripping the real continuation right
+        // after it. `strip_raw_line_continuations_blind` below has no such
+        // gap -- `reject_excessive_raw_nesting` runs against both.
+        assert_eq!(
+            strip_raw_line_continuations("echo 'a #'; i\\\nf true").as_ref(),
+            "echo 'a #'; i\\\nf true"
+        );
+    }
+
+    #[test]
+    fn strip_raw_line_continuations_blind_ignores_a_quoted_hash() {
+        assert_eq!(
+            strip_raw_line_continuations_blind("echo 'a #'; i\\\nf true").as_ref(),
+            "echo 'a #'; if true"
+        );
+    }
+
+    #[test]
+    fn strip_raw_line_continuations_blind_strips_through_a_real_comment() {
+        // The blind scan's own, opposite blind spot: it has no comment
+        // concept at all, so it strips a continuation inside a genuine
+        // comment too -- `strip_raw_line_continuations` (comment-aware)
+        // covers that shape instead.
+        assert_eq!(
+            strip_raw_line_continuations_blind("# x\\\nif true").as_ref(),
+            "# xif true"
+        );
+    }
+
+    #[test]
     fn strip_raw_line_continuations_handles_a_trailing_lone_backslash() {
         assert_eq!(
             strip_raw_line_continuations("echo x\\").as_ref(),
@@ -2514,10 +2601,10 @@ mod tests {
     }
 
     // brush-parser must always see the ORIGINAL text, never the
-    // continuation-stripped scan copy above -- an earlier version of this
-    // fix got this backwards and, because brush ends a `#` comment at the
-    // first raw newline regardless of what precedes it, hid an arbitrary
-    // following command behind `# \<newline>`.
+    // continuation-stripped scan copy above -- brush ends a `#` comment at
+    // the first raw newline regardless of what precedes it, so parsing the
+    // stripped copy would hide an arbitrary following command behind
+    // `# \<newline>`.
     #[test]
     fn a_command_hidden_behind_a_split_comment_is_not_swallowed() {
         let cmd = parse_ok("echo hi # \\\necho should_still_parse");
