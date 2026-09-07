@@ -4884,6 +4884,34 @@ fn parse_escalation_floor(raw: Option<&str>) -> Result<Decision, RulesError> {
     }
 }
 
+/// Parses the optional top-level `ask_outcome` user-config key (issue
+/// #467) into a [`Decision`], defaulting to `Decision::Ask` — today's
+/// unmodified behavior — when absent. `"deny"` maps to `Decision::Block`;
+/// [`crate::analyze_with_policy`] (`src/lib.rs`) floors every terminal
+/// `Ask` verdict it would otherwise return to this decision, since every
+/// `Ask` the hook emits today is a structural fallback (an unresolved
+/// `$VAR`/`$(...)`, an interpreter heredoc/inline script, a
+/// parser-unsupported construct) that an autonomous session cannot
+/// resolve, and `Ask` is not even a reliable control under
+/// `bypassPermissions` (anthropics/claude-code#37420). `"allow"` is
+/// rejected the same way [`parse_escalation_floor`] rejects it for
+/// `escalation_floor`: there is no config mechanism that turns a genuine
+/// `Ask` into a silent `Allow`. Named `ask_outcome`, not `ask_floor`, to
+/// avoid colliding with `crate::gate`'s existing `apply_ask_floor` (an
+/// Allow-to-Ask floor) and rules 6b/6d's own "Ask floor" terminology —
+/// this key floors in the opposite direction (Ask-to-Block), after gate
+/// has already run, not during it.
+fn parse_ask_outcome(raw: Option<&str>) -> Result<Decision, RulesError> {
+    match raw {
+        None | Some("ask") => Ok(Decision::Ask),
+        Some("deny") => Ok(Decision::Block),
+        Some(other) => Err(RulesError::invalid(
+            "ask_outcome",
+            format!("ask_outcome must be \"ask\" or \"deny\", got {other:?}"),
+        )),
+    }
+}
+
 /// Validates the optional top-level `decision_log_path` user-config key
 /// (issue #108): absent means "logging disabled" (the required off-by-
 /// default posture), and an empty string is rejected rather than silently
@@ -6299,6 +6327,8 @@ struct UserConfigFileDto {
     escalation_floor: Option<String>,
     #[serde(default)]
     decision_log_path: Option<String>,
+    #[serde(default)]
+    ask_outcome: Option<String>,
 }
 
 /// A user-supplied policy config, parsed and validated but not yet merged
@@ -6312,6 +6342,7 @@ pub(crate) struct UserConfig {
     pipeline: Vec<PipelineRule>,
     escalation_floor: Decision,
     decision_log_path: Option<String>,
+    ask_outcome: Decision,
 }
 
 impl UserConfig {
@@ -6371,6 +6402,7 @@ impl UserConfig {
             .collect::<Result<Vec<_>, _>>()?;
         let escalation_floor = parse_escalation_floor(dto.escalation_floor.as_deref())?;
         let decision_log_path = parse_decision_log_path(dto.decision_log_path.as_deref())?;
+        let ask_outcome = parse_ask_outcome(dto.ask_outcome.as_deref())?;
 
         reject_duplicate_ids(
             deny.iter()
@@ -6439,6 +6471,7 @@ impl UserConfig {
             pipeline,
             escalation_floor,
             decision_log_path,
+            ask_outcome,
         })
     }
 
@@ -6452,6 +6485,19 @@ impl UserConfig {
     #[must_use]
     pub(crate) fn decision_log_path(&self) -> Option<&str> {
         self.decision_log_path.as_deref()
+    }
+
+    /// The top-level `ask_outcome` user-config key (issue #467), defaulting
+    /// to [`Decision::Ask`] when absent — see [`parse_ask_outcome`]. Read
+    /// off the real config-file parse alone by
+    /// [`crate::config::Policy::load`], the same way
+    /// [`Self::decision_log_path`] is: the self-protection synthetic TOMLs
+    /// this parser also processes never carry this key, so there is
+    /// nothing to fold across multiple merges the way `escalation_floor`
+    /// needs `.max()` for.
+    #[must_use]
+    pub(crate) fn ask_outcome(&self) -> Decision {
+        self.ask_outcome
     }
 }
 

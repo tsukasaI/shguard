@@ -18,7 +18,7 @@ mod watchdog;
 use std::path::Path;
 
 pub use decision_log::FileDecisionLog;
-use verdict::Verdict;
+use verdict::{Decision, DenyMessage, Reason, Verdict};
 
 /// Port [`analyze_with_policy`] appends one JSONL decision-log line
 /// through, per issue #108 (`coding-guidelines/principles.md`: "ports MUST
@@ -147,10 +147,89 @@ pub fn analyze_with_policy(
     let command_owned = command.to_string();
     let policy_owned = policy.clone();
     let verdict = watchdog::bounded(move || {
-        gate::analyze_with_policy(&command_owned, &policy_owned.rules, &policy_owned.allowlist)
+        let verdict =
+            gate::analyze_with_policy(&command_owned, &policy_owned.rules, &policy_owned.allowlist);
+        apply_ask_outcome(verdict, policy_owned.ask_outcome)
     });
     if let Some(path) = &policy.decision_log_path {
         sink.append(path, command, &verdict);
     }
     verdict
+}
+
+/// Floors a terminal `Ask` verdict to `Block` when the user config's
+/// `ask_outcome = "deny"` (issue #467): every `Ask` [`gate::analyze_with_policy`]
+/// can still emit today is a structural fallback (an unresolved
+/// `$VAR`/`$(...)`, an interpreter heredoc/inline script, an `awk` script, a
+/// parser-unsupported construct) that an autonomous session cannot resolve
+/// on its own, and `Ask` is not even a reliable control under
+/// `bypassPermissions` (anthropics/claude-code#37420: one `Ask` can
+/// permanently disable bypass for the rest of the session). Paired with
+/// `decision_log_path` (issue #108), a floored `Ask` stays reviewable and
+/// tunable via `[[allow]]` rather than silently vanishing.
+///
+/// `matched_rule_id` is deliberately left `null` on the returned `Block` —
+/// unlike an ordinary rule-matched `Block`, this one names no specific
+/// rule; it exists so `jq 'select(.decision=="Block" and
+/// .matched_rule_id==null)'` against the decision log isolates every
+/// floored `Ask` for review, whether the original `Ask` came from a
+/// structural gate decision or a rule-table `[[ask]]`/embedded `decision =
+/// "ask"` match.
+///
+/// # Why this runs INSIDE `watchdog::bounded`'s closure, not after it returns
+///
+/// A per-command floor threaded through `gate.rs`'s own recursion was
+/// rejected: `crate::gate::fold_worst` keeps the earlier verdict on a
+/// decision tie, so remapping each simple command's `Ask` to `Block`
+/// independently would let `ask-cmd; rm -rf /` lose the real `rm` rule's id
+/// and `deny_message` to whichever `Ask`-turned-`Block` was folded in
+/// first. A single terminal remap over the whole line's final verdict
+/// avoids that.
+///
+/// That terminal remap still has to run on [`gate::analyze_with_policy`]'s
+/// own return value specifically, not on whatever [`watchdog::bounded`]
+/// hands back to this function's caller: `watchdog::bounded`'s own
+/// fail-closed `Ask` (`src/watchdog.rs`, a time/memory budget trip) is
+/// created OUTSIDE `gate` entirely, on a code path this crate's threat
+/// model treats as a resource-exhaustion signal, not a structural
+/// can't-resolve-this-statically one — remapping it to `Block` the same
+/// way would misrepresent a watchdog trip as an ordinary policy decision,
+/// and would corrupt the accurate "time/memory budget exceeded" reason a
+/// caller needs to diagnose it. Applying this fold from inside the closure
+/// — wrapping `gate::analyze_with_policy`'s result before it is ever handed
+/// to `watchdog::bounded` — keeps a watchdog trip completely untouched by
+/// construction, rather than relying on excluding it after the fact by
+/// matching against `watchdog.rs`'s own reason strings (fragile, and not
+/// this crate's style of boundary-checking).
+///
+/// `apply_allowlist_downgrade` (`src/gate.rs`) still runs first, at every
+/// recursion level, inside `gate::analyze_with_policy` itself — this
+/// function only ever sees whatever `gate` already decided, so a `[[allow]]`
+/// entry that would have downgraded an `Ask` to `Allow` still does,
+/// unaffected by `ask_outcome`.
+fn apply_ask_outcome(verdict: Verdict, ask_outcome: Decision) -> Verdict {
+    if ask_outcome != Decision::Block || verdict.decision() != Decision::Ask {
+        return verdict;
+    }
+
+    // `Ask` always carries a reason by construction (`Verdict::ask` takes a
+    // `Reason`, not `Option<Reason>`) — `map_or` with an unreachable default
+    // rather than `.expect()`, matching `crate::adapter::respond`'s own
+    // style for the same guarantee.
+    let original_reason = verdict.reason().map_or("", |reason| reason.as_str());
+    let reason = Reason::new(format!(
+        "{original_reason}; ask_outcome = \"deny\": this Ask has been floored to a deny \
+         because an unresolved Ask cannot be acted on by an autonomous session, and Ask is \
+         not a reliable control under bypassPermissions (anthropics/claude-code#37420)"
+    ));
+    let deny_message = DenyMessage::new(
+        "shguard could not statically resolve this command (an unresolved $VAR/$(...), \
+         inline interpreter code, or another parser-unsupported construct), and this config's \
+         ask_outcome = \"deny\" turns every such Ask into a deny: rewrite the command with \
+         literal paths instead of $VAR/$(...), move inline interpreter code to a file and run \
+         that file, split a compound line into separate commands, or run this one manually",
+    );
+
+    Verdict::block(reason, verdict.normalized_argv().to_vec(), None)
+        .with_deny_message(Some(deny_message))
 }

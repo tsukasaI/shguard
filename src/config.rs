@@ -183,6 +183,17 @@ pub struct Policy {
     /// real config-file parse alone, before it's moved into
     /// [`merge_user_config`].
     pub(crate) decision_log_path: Option<PathBuf>,
+    /// The top-level `ask_outcome` user-config key (issue #467) —
+    /// [`crate::verdict::Decision::Ask`] (the default, today's unmodified
+    /// behavior) unless the user's own config set `ask_outcome = "deny"`.
+    /// Read the same way `decision_log_path` is: off the real
+    /// config-file parse alone, never the self-protection-only merges
+    /// below. Consulted by [`crate::analyze_with_policy`] (`src/lib.rs`)
+    /// to floor every terminal `Ask` verdict to `Block` — `crate::gate`
+    /// never reads this field itself (issue #467's design: a terminal
+    /// remap, not a per-command floor threaded through gate's own
+    /// recursion).
+    pub(crate) ask_outcome: crate::verdict::Decision,
 }
 
 /// `(SHGUARD_CONFIG, XDG_CONFIG_HOME, HOME)`, each `None` if unset — see
@@ -303,6 +314,7 @@ impl Policy {
         let allowlist = Allowlist::embedded()?;
 
         let mut decision_log_path: Option<PathBuf> = None;
+        let mut ask_outcome = crate::verdict::Decision::Ask;
         // `symlink_metadata` (`lstat`), not `read_to_string`'s own error,
         // decides "nothing at this path" vs. "something's there but
         // broken": a dangling symlink makes `read_to_string` fail with the
@@ -331,6 +343,7 @@ impl Policy {
                         // fold across multiple merges the way
                         // `escalation_floor` needs `.max()` for.
                         decision_log_path = user_config.decision_log_path().map(PathBuf::from);
+                        ask_outcome = user_config.ask_outcome();
                         merge_user_config(blocklist, allowlist, user_config)?
                     }
                     Err(err) => {
@@ -419,6 +432,7 @@ impl Policy {
             rules: std::sync::Arc::new(rules),
             allowlist: std::sync::Arc::new(allowlist),
             decision_log_path,
+            ask_outcome,
         })
     }
 
@@ -437,6 +451,7 @@ impl Policy {
                 Allowlist::embedded().expect("embedded allowlist should parse"),
             ),
             decision_log_path: Some(decision_log_path),
+            ask_outcome: crate::verdict::Decision::Ask,
         }
     }
 
@@ -484,6 +499,16 @@ impl Policy {
         let mut ids = self.rules.ids_with_mixed_except_targets();
         ids.extend(self.allowlist.ids_with_mixed_except_targets());
         ids
+    }
+
+    /// The effective `ask_outcome` config key (issue #467) — see this
+    /// struct's own field docs. Public so `src/bin/shguard.rs`'s
+    /// composition-root fail-closed paths (oversized/unreadable stdin,
+    /// hit before any command reaches [`crate::analyze_with_policy`]) can
+    /// honor the same key `adapter::fail_closed_with` applies elsewhere.
+    #[must_use]
+    pub fn ask_outcome(&self) -> crate::verdict::Decision {
+        self.ask_outcome
     }
 }
 
