@@ -201,6 +201,16 @@ fn deep_if_nesting_split_by_line_continuation_fails_closed_to_ask_instead_of_abo
     );
     let output = run_hook(&bash_command(&command));
     assert_eq!(permission_decision(&output), "ask");
+    // Asserts the raw cap actually fired, not that some other watchdog
+    // (e.g. the time budget) happened to trip on a slower host — those are
+    // opposite security outcomes: one is the defense working, the other is
+    // luck (mirroring `heredoc_inside_unterminated_command_substitution_...`
+    // below, which makes the same distinction for its own watchdog case).
+    assert!(
+        permission_reason(&output).contains("keyword nesting"),
+        "expected the keyword raw-count-cap rejection, got: {}",
+        permission_reason(&output)
+    );
 }
 
 /// Before the fix: same abort as an unsplit long `[[ ! ! ! ... ]]` chain,
@@ -211,6 +221,55 @@ fn deep_extended_test_negation_split_by_line_continuation_fails_closed_to_ask() 
     let command = format!("[\\\n[ {}x ]]", "! ".repeat(3000));
     let output = run_hook(&bash_command(&command));
     assert_eq!(permission_decision(&output), "ask");
+    assert!(
+        permission_reason(&output).contains("extended-test operator count"),
+        "expected the extended-test raw-count-cap rejection, got: {}",
+        permission_reason(&output)
+    );
+}
+
+/// Same keyword-nesting abort, but split by an EVEN backslash count before
+/// the newline (`x\\<newline>if`) rather than a lone backslash. Real bash
+/// pairs the two backslashes into one literal backslash and leaves the
+/// newline un-stripped — a real, uncontinued separator — so `if` on the
+/// next line is a genuine keyword occurrence brush-parser really does
+/// recurse on; a parity-blind strip would glue it onto the preceding
+/// backslash into a non-matching token and undercount, reopening the abort.
+#[test]
+fn deep_if_nesting_split_by_an_even_backslash_run_fails_closed_to_ask() {
+    let command = format!(
+        "{}echo body{}",
+        "x\\\\\nif true; then ".repeat(600),
+        "; fi".repeat(600)
+    );
+    let output = run_hook(&bash_command(&command));
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(
+        permission_reason(&output).contains("keyword nesting"),
+        "expected the keyword raw-count-cap rejection, got: {}",
+        permission_reason(&output)
+    );
+}
+
+/// Same abort, but the split keyword sits on the line immediately AFTER a
+/// `#`-comment line that itself contains an (irrelevant, non-continuing)
+/// `\`+newline. The comment's own line-continuation-shaped byte pair must
+/// not be treated as extending the comment or eating the following line's
+/// real keyword split.
+#[test]
+fn deep_if_nesting_split_after_a_comment_line_fails_closed_to_ask() {
+    let command = format!(
+        "{}echo body{}",
+        "# x\\\ni\\\nf true; then ".repeat(600),
+        "; fi".repeat(600)
+    );
+    let output = run_hook(&bash_command(&command));
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(
+        permission_reason(&output).contains("keyword nesting"),
+        "expected the keyword raw-count-cap rejection, got: {}",
+        permission_reason(&output)
+    );
 }
 
 // ==== B-2: stdin size cap ====

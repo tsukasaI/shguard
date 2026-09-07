@@ -202,28 +202,58 @@ fn is_token_boundary(byte: u8) -> bool {
 /// closing; not done here because this scan runs on the WHOLE
 /// command-line string (multiple statements, embedded `$(...)`), a wider
 /// quote-tracking surface than that function's single-word scope.
+///
+/// Issue #443: this operates on `command` unmodified (never on a
+/// continuation-stripped copy — see [`strip_raw_line_continuations`]'s
+/// docs on why brush-parser must always see the original bytes), but is
+/// continuation-*transparent* while scanning: a `\`+newline pair
+/// immediately preceded by a digit (inside a run) or immediately
+/// following one (between the run and the `<`/`>`) is skipped over rather
+/// than ending the run, so a digit run split across a continuation
+/// (`21474836\<newline>48>x`) is still recognized and neutralized. Safe to
+/// treat every such pair as a real continuation with no parity check,
+/// unlike [`strip_raw_line_continuations`]'s general case: the byte
+/// immediately before it is always a digit (never another `\`), so the
+/// backslash run ending there is always exactly length 1 (odd) — real
+/// bash never leaves a literal backslash character adjacent to a digit
+/// run this way.
 fn neutralize_overflowing_io_redirect_numbers(command: &str) -> std::borrow::Cow<'_, str> {
     let bytes = command.as_bytes();
     let mut digit_start: Option<usize> = None;
+    let mut digits = String::new();
     let mut rewritten: Option<String> = None;
     let mut last_copied = 0;
+    let mut i = 0;
 
-    for (i, &byte) in bytes.iter().enumerate() {
+    while i < bytes.len() {
+        let byte = bytes[i];
         if byte.is_ascii_digit() {
             if digit_start.is_none() && (i == 0 || is_token_boundary(bytes[i - 1])) {
                 digit_start = Some(i);
+                digits.clear();
             }
+            if digit_start.is_some() {
+                digits.push(byte as char);
+            }
+            i += 1;
             continue;
         }
-        if let Some(start) = digit_start.take()
-            && (byte == b'<' || byte == b'>')
-            && command[start..i].parse::<i32>().is_err()
-        {
-            let out = rewritten.get_or_insert_with(String::new);
-            out.push_str(&command[last_copied..i]);
-            out.push(' ');
-            last_copied = i;
+        if digit_start.is_some() && byte == b'\\' && bytes.get(i + 1) == Some(&b'\n') {
+            i += 2;
+            continue;
         }
+        if digit_start.take().is_some() {
+            let operator_pos = skip_raw_continuations(bytes, i);
+            if matches!(bytes.get(operator_pos), Some(b'<' | b'>'))
+                && digits.parse::<i32>().is_err()
+            {
+                let out = rewritten.get_or_insert_with(String::new);
+                out.push_str(&command[last_copied..i]);
+                out.push(' ');
+                last_copied = i;
+            }
+        }
+        i += 1;
     }
 
     match rewritten {
@@ -235,60 +265,137 @@ fn neutralize_overflowing_io_redirect_numbers(command: &str) -> std::borrow::Cow
     }
 }
 
-/// Removes every `\`+newline line-continuation pair from `command` before
-/// [`reject_excessive_raw_nesting`]'s keyword/`[[` scan and
-/// [`neutralize_overflowing_io_redirect_numbers`]'s digit-run scan ever see
-/// the text (issue #443): brush-parser's own tokenizer strips these outside
-/// quotes before recursing, so a keyword, `[[` opener, or io-number digit
-/// run split across a continuation (`i\<newline>f true; then ...`,
-/// `2147483\<newline>648>x`) rejoins into the exact shape those two raw
-/// scans exist to catch, while the *unstripped* text — the only text either
-/// scan ever saw — sails through untouched. Two of the resulting shapes
-/// reach brush-parser's unbounded recursive descent uncapped (an
-/// uncatchable stack-overflow abort — no decision reaches stdout at all,
-/// fail-open for a `PreToolUse` hook); the third downgrades a `Block` to
-/// `Ask` via [`catch_parser_panic`]'s panic containment.
+/// Advances past zero or more `\`+newline continuation pairs starting at
+/// `i`, returning the index of the first byte that isn't part of one — used
+/// by [`neutralize_overflowing_io_redirect_numbers`] to look past a
+/// continuation sitting directly between a digit run and the `<`/`>` it
+/// would otherwise precede.
+fn skip_raw_continuations(bytes: &[u8], mut i: usize) -> usize {
+    while bytes.get(i) == Some(&b'\\') && bytes.get(i + 1) == Some(&b'\n') {
+        i += 2;
+    }
+    i
+}
+
+/// Builds a *scan-only* copy of `command` with every real `\`+newline
+/// line-continuation pair removed, for [`reject_excessive_raw_nesting`]'s
+/// keyword/`[[` scan to run on instead of the original text (issue #443):
+/// brush-parser's own tokenizer strips these before recursing, so a
+/// keyword or `[[` opener split across a continuation
+/// (`i\<newline>f true; then ...`) rejoins into the exact shape that scan
+/// exists to catch, while the *unstripped* text — the only text the scan
+/// used to see — sailed through untouched, reaching brush-parser's
+/// unbounded recursive descent uncapped: an uncatchable stack-overflow
+/// abort (no decision reaches stdout at all, fail-open for a `PreToolUse`
+/// hook).
 ///
-/// A single left-to-right, non-overlapping removal pass — no escape-parity
-/// tracking — is enough to never *under*-count a real nesting/bracket/
-/// digit-run shape relative to what brush-parser will actually see: real
-/// bash only collapses `X\<newline>Y` into contiguous `XY` when exactly one
-/// backslash separates them. An even backslash count pairs up into literal
-/// backslash characters and leaves the newline un-stripped; an odd count
-/// greater than one leaves at least one leftover literal backslash before
-/// the stripped newline. Either way real bash's own result still contains a
-/// literal backslash and/or newline byte breaking `X` from `Y`, so it is not
-/// the keyword/bracket/digit-run shape being scanned for either — this scan
-/// reaches that same "not a match" conclusion on those inputs, and matches
-/// real bash exactly on the one shape (a lone backslash immediately before
-/// the newline) that does rejoin.
+/// **This output must never be fed to brush-parser itself** — only used as
+/// `reject_excessive_raw_nesting`'s input. Brush-parser keeps parsing
+/// `command` unmodified (`parse()` below). An earlier version of this fix
+/// made the stripped copy the actual parser input and was wrong: brush's
+/// comment handling ends a `#...` comment at the first *raw* newline,
+/// continuation or not (confirmed against brush-parser's tokenizer), so
+/// blindly deleting a `\`+newline pair inside a comment merges the next
+/// line into that comment — hiding an arbitrary following command behind
+/// `# \<newline>` (e.g. `echo hi # \<newline>rm -rf /` would have let the
+/// `rm -rf /` disappear entirely rather than being analyzed). Keeping
+/// brush-parser on the untouched original text makes that failure mode
+/// impossible: this function only ever influences whether
+/// `reject_excessive_raw_nesting` rejects up front, never what gets parsed.
 ///
-/// Feeds the *actual* command brush-parser goes on to parse, not just a
-/// scanning copy — computing what brush's own tokenizer would strip
-/// internally anyway, so parsing outside quotes is unaffected. **Known
-/// limitation, disclosed rather than silently accepted**: this scan is not
-/// quote-aware — like [`neutralize_overflowing_io_redirect_numbers`]'s own
-/// disclosed limitation — so a literal `\<newline>` inside a single-quoted
-/// string (where POSIX semantics keep it completely literal) is stripped
-/// here too. No decision-flip is known to result: this only ever removes
-/// bytes from a word's own text, so it can never introduce a substring a
-/// rule pattern-matches that a shorter version of that same word didn't
-/// already contain.
+/// Two properties this scan must get right to avoid *under*-counting a real
+/// nesting/bracket shape relative to what brush-parser will actually see
+/// (under-counting is the unsafe direction — see [`MAX_KEYWORD_NESTING_COUNT`]):
+///
+/// - **Backslash parity.** Real bash only collapses `X\<newline>Y` into
+///   contiguous `XY` when an *odd* number of backslashes immediately
+///   precedes the newline (the trailing one pairs with the newline as a
+///   continuation; the rest pair up into literal backslash characters). An
+///   *even* count leaves the newline un-stripped — a real, uncontinued
+///   newline that separates commands (or ends a comment) exactly like `;`
+///   does. A parity-blind strip that removes the last `\`+newline
+///   regardless of what precedes it would, on an even count, glue a
+///   following real keyword onto the preceding backslash run into a token
+///   that no longer matches `if`/`while`/etc — under-counting a real,
+///   brush-recognized keyword (confirmed live: `"x\\\\\nif true; then "`
+///   x600 — two backslashes, even — is real separate `if` keywords to
+///   brush, but glues to a non-matching token under parity-blind
+///   stripping).
+/// - **Comments.** A `#` at the start of a word begins a comment that runs
+///   to the next raw newline, continuation or not (same brush behavior
+///   this function must never touch for the parser-input reason above) —
+///   so a continuation *inside* a comment must not be stripped from the
+///   scan copy either, or a real keyword split immediately after that
+///   comment's line (`# x\<newline>i\<newline>f true; then ...`) would be
+///   glued onto the comment text and miscounted as zero keywords even
+///   though brush treats the second line as fresh, uncommented code.
+///
+/// Quote-blindness remains an accepted, disclosed limitation for this scan
+/// copy specifically (unlike for parser input): over- or under-stripping
+/// inside a quoted string can only affect whether this function's *own*
+/// word-start/comment bookkeeping misfires on a quoted `#` or boundary
+/// byte, and the only way that actually changes the keyword count is if
+/// the misfire spans a region that is, in reality, inside quotes — exactly
+/// the case where brush would never treat that text as an unquoted keyword
+/// either, so a false detection here can only ever be conservative
+/// (over-Ask), never a missed one.
 fn strip_raw_line_continuations(command: &str) -> std::borrow::Cow<'_, str> {
     let bytes = command.as_bytes();
     let mut rewritten: Option<String> = None;
     let mut last_copied = 0;
+    let mut at_word_start = true;
+    let mut in_comment = false;
     let mut i = 0;
-    while i + 1 < bytes.len() {
-        if bytes[i] == b'\\' && bytes[i + 1] == b'\n' {
-            let out = rewritten.get_or_insert_with(String::new);
-            out.push_str(&command[last_copied..i]);
-            last_copied = i + 2;
-            i += 2;
+
+    while i < bytes.len() {
+        let byte = bytes[i];
+
+        if in_comment {
+            if byte == b'\n' {
+                in_comment = false;
+                at_word_start = true;
+            }
+            i += 1;
             continue;
         }
+
+        if byte == b'#' && at_word_start {
+            in_comment = true;
+            at_word_start = false;
+            i += 1;
+            continue;
+        }
+
+        if byte == b'\\' {
+            let run_start = i;
+            let mut run_end = i;
+            while run_end < bytes.len() && bytes[run_end] == b'\\' {
+                run_end += 1;
+            }
+            let run_len = run_end - run_start;
+            if run_end < bytes.len() && bytes[run_end] == b'\n' && run_len % 2 == 1 {
+                // Odd run: the last backslash pairs with the newline as a
+                // real continuation. Copy the other run_len - 1 backslashes
+                // through unchanged; strip only the final pair. Preserves
+                // `at_word_start` from before the run, since a stripped
+                // continuation neither starts nor ends a word.
+                let out = rewritten.get_or_insert_with(String::new);
+                out.push_str(&command[last_copied..run_end - 1]);
+                last_copied = run_end + 1;
+                i = run_end + 1;
+                continue;
+            }
+            // Even run, or not followed by a newline: copy through
+            // unchanged. A backslash is never a token boundary.
+            at_word_start = false;
+            i = run_end;
+            continue;
+        }
+
+        at_word_start = is_token_boundary(byte);
         i += 1;
     }
+
     match rewritten {
         Some(mut out) => {
             out.push_str(&command[last_copied..]);
@@ -474,10 +581,9 @@ fn check_extended_test_op_count(extended_test_op_count: &mut usize) -> Result<()
 /// `analyze()` (`src/lib.rs`) calls this via `src/gate.rs` — stage 1 of the
 /// pipeline (plan.md §1.1).
 pub(crate) fn parse(command: &str) -> Result<CommandLine, ParseError> {
-    let command = strip_raw_line_continuations(command);
-    let command = neutralize_overflowing_io_redirect_numbers(command.as_ref());
+    let command = neutralize_overflowing_io_redirect_numbers(command);
     let command = command.as_ref();
-    reject_excessive_raw_nesting(command)?;
+    reject_excessive_raw_nesting(strip_raw_line_continuations(command).as_ref())?;
 
     let mut parser = BrushParser::new(Cursor::new(command.as_bytes()), &parser_options());
     let program = catch_parser_panic(|| parser.parse_program())?
@@ -2339,6 +2445,146 @@ mod tests {
             matches!(result, Err(ParseError::Unsupported { .. })),
             "expected Unsupported, got {result:?}"
         );
+    }
+
+    // ---- issue #443: strip_raw_line_continuations and
+    // neutralize_overflowing_io_redirect_numbers's continuation-transparent
+    // digit-run scan ----
+
+    #[test]
+    fn strip_raw_line_continuations_is_a_no_op_with_no_backslash_newline() {
+        assert!(matches!(
+            strip_raw_line_continuations("echo hi"),
+            std::borrow::Cow::Borrowed("echo hi")
+        ));
+    }
+
+    #[test]
+    fn strip_raw_line_continuations_removes_a_lone_pair() {
+        assert_eq!(
+            strip_raw_line_continuations("i\\\nf true").as_ref(),
+            "if true"
+        );
+    }
+
+    #[test]
+    fn strip_raw_line_continuations_keeps_an_even_backslash_run_and_its_newline() {
+        // Two backslashes pair up into one literal backslash; the newline
+        // is a real, uncontinued separator in real bash and must survive.
+        assert_eq!(
+            strip_raw_line_continuations("x\\\\\nif true").as_ref(),
+            "x\\\\\nif true"
+        );
+    }
+
+    #[test]
+    fn strip_raw_line_continuations_strips_only_the_last_of_an_odd_run() {
+        // Three backslashes: the first two pair into one literal backslash
+        // (kept), the third pairs with the newline (stripped).
+        assert_eq!(
+            strip_raw_line_continuations("x\\\\\\\nif true").as_ref(),
+            "x\\\\if true"
+        );
+    }
+
+    #[test]
+    fn strip_raw_line_continuations_does_not_strip_inside_a_comment() {
+        // Brush ends a comment at the first raw newline regardless of a
+        // preceding backslash, so this scan must not remove it either.
+        assert_eq!(
+            strip_raw_line_continuations("# x\\\nif true").as_ref(),
+            "# x\\\nif true"
+        );
+    }
+
+    #[test]
+    fn strip_raw_line_continuations_still_strips_a_real_continuation_after_a_comment_line() {
+        assert_eq!(
+            strip_raw_line_continuations("# comment\ni\\\nf true").as_ref(),
+            "# comment\nif true"
+        );
+    }
+
+    #[test]
+    fn strip_raw_line_continuations_handles_a_trailing_lone_backslash() {
+        assert_eq!(
+            strip_raw_line_continuations("echo x\\").as_ref(),
+            "echo x\\"
+        );
+    }
+
+    // brush-parser must always see the ORIGINAL text, never the
+    // continuation-stripped scan copy above -- an earlier version of this
+    // fix got this backwards and, because brush ends a `#` comment at the
+    // first raw newline regardless of what precedes it, hid an arbitrary
+    // following command behind `# \<newline>`.
+    #[test]
+    fn a_command_hidden_behind_a_split_comment_is_not_swallowed() {
+        let cmd = parse_ok("echo hi # \\\necho should_still_parse");
+        assert_eq!(cmd.rest.len(), 1);
+        assert_eq!(
+            simple(&cmd.rest[0].1.first).words[0].0,
+            vec![WordPiece::Literal("echo".to_string())]
+        );
+    }
+
+    #[test]
+    fn keyword_split_by_a_real_line_continuation_is_detected() {
+        let command = format!(
+            "{}echo hi{}",
+            "i\\\nf true; then ".repeat(MAX_KEYWORD_NESTING_COUNT + 1),
+            "; fi".repeat(MAX_KEYWORD_NESTING_COUNT + 1)
+        );
+        let construct = unsupported_construct(&command);
+        assert!(
+            construct.contains("keyword nesting"),
+            "expected the keyword raw-count-cap rejection, got: {construct}"
+        );
+    }
+
+    #[test]
+    fn keyword_split_by_an_even_backslash_run_is_still_two_real_keywords_not_a_bypass() {
+        // Two backslashes before the newline: real bash keeps a literal
+        // backslash and a real, uncontinued newline, so `if` on the next
+        // line is a genuine keyword occurrence to brush, not a glued
+        // non-token -- this must still be counted.
+        let command = format!(
+            "{}echo hi{}",
+            "x\\\\\nif true; then ".repeat(MAX_KEYWORD_NESTING_COUNT + 1),
+            "; fi".repeat(MAX_KEYWORD_NESTING_COUNT + 1)
+        );
+        let construct = unsupported_construct(&command);
+        assert!(
+            construct.contains("keyword nesting"),
+            "expected the keyword raw-count-cap rejection, got: {construct}"
+        );
+    }
+
+    #[test]
+    fn double_bracket_opener_split_by_a_real_line_continuation_is_detected() {
+        let mut command = "[\\\n[ ".to_string();
+        for _ in 0..(MAX_RAW_EXTENDED_TEST_COUNT + 1) {
+            command.push_str("! ");
+        }
+        command.push_str("x ]]");
+        let construct = unsupported_construct(&command);
+        assert!(
+            construct.contains("extended-test operator count"),
+            "expected the extended-test raw-count-cap rejection, got: {construct}"
+        );
+    }
+
+    #[test]
+    fn overflowing_io_number_split_by_a_real_line_continuation_is_neutralized() {
+        // Would otherwise panic in brush-parser's io-number rule once its
+        // own tokenizer rejoins the split digit run; catch_parser_panic
+        // would fold that into a whole-command-line syntax error.
+        assert!(parse("echo 21474836\\\n48>f").is_ok());
+    }
+
+    #[test]
+    fn overflowing_io_number_split_between_the_run_and_the_operator_is_neutralized() {
+        assert!(parse("echo 2147483648\\\n>f").is_ok());
     }
 
     // ---- issue #52 follow-up: reject_excessive_raw_nesting's keyword
