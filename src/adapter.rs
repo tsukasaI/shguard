@@ -533,6 +533,59 @@ mod tests {
         assert_ne!(permission_reason(&output), "use --force-with-lease instead");
     }
 
+    /// Fable-review follow-up to #471's `fold_worst` tie-message-borrow
+    /// (issue #202's regression class): a compound line with TWO different
+    /// `[[deny]]`-matched Blocks tied at the same decision must never let
+    /// one rule's `deny_message` end up paired with the OTHER rule's
+    /// `matched_rule_id` in the output/decision log -- `fold_worst`'s
+    /// borrow is restricted to structural-vs-structural (`matched_rule()
+    /// .is_none()` on both sides) specifically to prevent this.
+    #[test]
+    fn fold_worst_tie_never_cross_wires_two_different_rules_deny_messages() {
+        let blocklist = crate::rules::Rules::embedded().unwrap();
+        let allowlist = crate::rules::Allowlist::embedded().unwrap();
+        let user_config = crate::rules::UserConfig::parse(
+            r#"
+            [[deny]]
+            id = "user-deny-mytool-force"
+            reason = "mytool --force is destructive"
+            command = "mytool"
+            required_flags = ["f|--force"]
+            deny_message = "use --force-with-lease instead"
+        "#,
+        )
+        .unwrap();
+        let (rules, allowlist) =
+            crate::rules::merge_user_config(blocklist, allowlist, user_config).unwrap();
+        let policy = crate::config::Policy {
+            rules: std::sync::Arc::new(rules),
+            allowlist: std::sync::Arc::new(allowlist),
+            decision_log_path: None,
+            ask_outcome: crate::rules::AskOutcome::default(),
+        };
+
+        // `rm -rf /` (embedded rule, no deny_message of its own) and
+        // `mytool --force` (user rule, its own deny_message) are both
+        // Block -- a decision tie `fold_worst` must resolve without
+        // borrowing the user rule's message onto the embedded rule's own
+        // reason/matched_rule_id (or vice versa).
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"rm -rf / ; mytool --force"}}"#;
+        let output = handle_with_policy(stdin, &policy, &crate::FileDecisionLog);
+        assert_eq!(permission_decision(&output), "deny");
+        let reason = permission_reason(&output);
+        let context = output["hookSpecificOutput"]["additionalContext"].as_str();
+        if reason.contains("rm-recursive-force-dangerous-target") {
+            assert_eq!(
+                context, None,
+                "the embedded rm rule's own reason must not be paired with the user rule's \
+                 deny_message, got: {context:?}"
+            );
+        } else {
+            assert!(reason.contains("user-deny-mytool-force"));
+            assert_eq!(context, Some("use --force-with-lease instead"));
+        }
+    }
+
     #[test]
     fn bash_block_command_without_deny_message_omits_additional_context_entirely() {
         // A matched rule with no deny_message must not emit
@@ -547,11 +600,24 @@ mod tests {
         );
     }
 
-    // ==== issue #471: category-specific deny_message on every structural
-    // Ask, one test per row of the issue's guidance table, using the
+    // ==== issue #471: category-specific deny_message on one representative
+    // command per row of the issue's guidance table, using the
     // embedded-only `handle()` path (no user config involved) so each case
     // exercises the plain structural `Ask` -- the majority path a caller
-    // with no `ask_outcome` configured actually sees ====
+    // with no `ask_outcome` configured actually sees. NOT a claim that
+    // every possible structural Ask in every category always carries a
+    // message: `apply_expansion_floor`'s heredoc-floor site in particular
+    // is order-dependent -- `raise_expansion_floor` keeps the FIRST reason
+    // raised at a tied Ask decision, so a sibling floor (an unresolved
+    // redirection target, an escalation-floor `sudo`, an unresolved
+    // assignment value) raised before the non-shell-interpreter heredoc
+    // floor wins the reason text and this category's deny_message never
+    // attaches, even though `python3 - <<EOF` alone (no sibling floor)
+    // does get it (see the test below). Disclosed rather than fixed here:
+    // closing it needs the same wider `Option<DenyMessage>` threading
+    // through `raise_expansion_floor`'s ~18 shared call sites that
+    // `Verdict::with_deny_message`'s own "Known remaining gaps" doc
+    // already declines for the same reason. ====
 
     fn additional_context(output: &Value) -> &str {
         output["hookSpecificOutput"]["additionalContext"]
@@ -600,6 +666,18 @@ mod tests {
             additional_context(&output),
             "Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv \
              is inspectable."
+        );
+        // `fold_worst`'s own "first simple command's argv/reason wins a
+        // tie" contract must still hold: the message is borrowed from the
+        // pipeline-shape verdict, but the surviving reason must still be
+        // whichever simple command `fold_worst` saw first, not silently
+        // replaced by the pipeline-shape verdict's own reason too.
+        assert!(
+            permission_reason(&output)
+                .contains("argument-position command/backquote or process substitution"),
+            "expected the first-encountered simple command's own reason to survive the tie, \
+             got: {}",
+            permission_reason(&output)
         );
     }
 

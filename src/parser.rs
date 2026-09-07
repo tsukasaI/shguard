@@ -1603,18 +1603,6 @@ fn convert_tilde(tilde: bword::TildeExpr) -> String {
     }
 }
 
-/// shguard's `WordPiece::ParameterExpansion` only carries the parameter
-/// name (module docs) — only the plain `$NAME`/`${NAME}` form (a direct,
-/// non-indirect named parameter), a bare positional parameter (`$1`, `$2`,
-/// …), or a bare special parameter (`$?`, `$$`, `$!`, `$#`, `$@`, `$*`,
-/// `$-`, `$0`, issue #75) maps onto it — all three are just as opaque/
-/// unresolvable to this stage's static folding as a named variable is, and
-/// `bword::SpecialParameter`'s own `Display` impl already produces exactly
-/// the bare character (`?`, `-`, `$`, `!`, `#`, `@`, `*`, `0`) shguard wants
-/// to store as the "name". Every other `ParameterExpr` shape (indirection,
-/// array-indexed access, defaults, substring operations, case transforms,
-/// …) would lose semantics if squeezed into a bare name, so it is rejected
-/// instead.
 /// A human-readable name for every [`bword::ParameterExpr`] shape this
 /// module rejects, for the `deny_message` an agent sees (issue #471) — the
 /// bare `{:?}` this replaced dumped brush's internal enum/field names
@@ -1650,6 +1638,19 @@ fn describe_parameter_expr(expr: &bword::ParameterExpr) -> &'static str {
     }
 }
 
+/// shguard's `WordPiece::ParameterExpansion` only carries the parameter
+/// name (module docs) — only the plain `$NAME`/`${NAME}` form (a direct,
+/// non-indirect named parameter), a bare positional parameter (`$1`, `$2`,
+/// …), or a bare special parameter (`$?`, `$$`, `$!`, `$#`, `$@`, `$*`,
+/// `$-`, `$0`, issue #75) maps onto it — all three are just as opaque/
+/// unresolvable to this stage's static folding as a named variable is, and
+/// `bword::SpecialParameter`'s own `Display` impl already produces exactly
+/// the bare character (`?`, `-`, `$`, `!`, `#`, `@`, `*`, `0`) shguard wants
+/// to store as the "name". Every other `ParameterExpr` shape (indirection,
+/// array-indexed access, defaults, substring operations, case transforms,
+/// …) would lose semantics if squeezed into a bare name, so it is rejected
+/// instead — see [`describe_parameter_expr`] for the name attached to the
+/// rejection.
 fn convert_parameter_expansion(expr: bword::ParameterExpr) -> Result<WordPiece, ParseError> {
     match expr {
         bword::ParameterExpr::Parameter {

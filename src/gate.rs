@@ -5979,16 +5979,25 @@ fn has_argument_position_bare_var(argument_words: &[Word]) -> bool {
 /// earlier-encountered simple command's, per this module's documented
 /// "normalized_argv = the simple command that produced the worst decision"
 /// contract (first one wins a tie, not the last) — but still borrows
-/// `new`'s `deny_message` when `current` has none of its own (issue #471):
-/// a category-specific rewrite hint from a later stage/simple-command must
-/// not be silently dropped just because an earlier, message-less Ask
+/// `new`'s `deny_message` when `current` has none of its own AND NEITHER
+/// side matched a user/embedded rule (issue #471): a category-specific
+/// structural rewrite hint from a later stage/simple-command must not be
+/// silently dropped just because an earlier, message-less structural Ask
 /// (e.g. a bare substitution recursion result) happened to tie it first.
+/// Restricted to structural-vs-structural on both sides so a rule-matched
+/// verdict's own `deny_message` (written for its own rule's remediation)
+/// can never end up paired with a DIFFERENT rule's `matched_rule_id` in
+/// the decision log or agent-facing output — a fable review caught this
+/// exact cross-wiring on a compound line mixing two different `[[deny]]`
+/// rules, one with its own `deny_message`.
 fn fold_worst(current: Verdict, new: Verdict) -> Verdict {
     match new.decision().cmp(&current.decision()) {
         std::cmp::Ordering::Greater => new,
         std::cmp::Ordering::Less => current,
         std::cmp::Ordering::Equal => {
             if current.deny_message().is_none()
+                && current.matched_rule().is_none()
+                && new.matched_rule().is_none()
                 && let Some(message) = new.deny_message()
             {
                 return current.with_deny_message(Some(message.clone()));

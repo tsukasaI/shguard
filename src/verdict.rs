@@ -203,16 +203,14 @@ impl Verdict {
     }
 
     /// Attaches `deny_message` to an `Ask`/`Block` verdict — a no-op on
-    /// `Allow`/`AllowSuppressed` (there is no rule-declared guidance to
-    /// attach to a clean pass; callers only ever chain this immediately
-    /// after [`Self::ask`]/[`Self::block`] at a rule-matched call site, so
-    /// this is never actually reached for an `Allow`-shaped verdict in
-    /// practice). Kept as a separate builder rather than an extra
-    /// constructor parameter so the ~25 structural (non-rule-matched)
-    /// [`Self::ask`]/[`Self::block`] call sites in `src/gate.rs` are
-    /// unaffected — only the handful of rule-matched sites that have a
-    /// [`crate::rules`] rule object to read a `deny_message` from need to
-    /// call this.
+    /// `Allow`/`AllowSuppressed` (there is no rule-declared or structural
+    /// guidance to attach to a clean pass). Kept as a separate builder
+    /// rather than an extra constructor parameter so most [`Self::ask`]/
+    /// [`Self::block`] call sites in `src/gate.rs` stay unaffected — only
+    /// the sites that have a message to attach (a rule-matched
+    /// [`crate::rules`] rule's own `deny_message`, or, since issue #471,
+    /// one of the category-specific structural constants) need to call
+    /// this.
     ///
     /// Wired up (issue #202) at these `src/gate.rs` sites: the
     /// exact-blocklist-match sites (including the same-line-`cd`
@@ -271,6 +269,20 @@ impl Verdict {
     /// declared `deny_message`, later raised to `Block` by one of these
     /// floors) — same underlying tuple-shape limitation, not a
     /// verdict-re-wrap or floor-scan gap of its own.
+    ///
+    /// A third case (issue #471): `apply_expansion_floor`'s own scan
+    /// (`scan_expansion_positions`) raises several distinct `(Decision,
+    /// String)` reasons through the same shared `raise_expansion_floor`,
+    /// which keeps the FIRST reason seen at a tied decision. Only one of
+    /// those reasons — the non-shell-interpreter heredoc floor — has a
+    /// `deny_message` attached (matched by its own reason-string prefix,
+    /// `src/gate.rs`'s `NONSHELL_HEREDOC_REASON_PREFIX`), so a sibling
+    /// same-decision floor (an unresolved redirection target, an
+    /// escalation floor, an unresolved assignment value) raised earlier in
+    /// scan order silently wins the reason text and this category's
+    /// message never attaches, even on a command that would otherwise get
+    /// it in isolation. Same tuple-shape limitation as the case above;
+    /// closing it needs the same wider threading.
     #[must_use]
     pub fn with_deny_message(mut self, deny_message: Option<DenyMessage>) -> Self {
         match &mut self.detail {
