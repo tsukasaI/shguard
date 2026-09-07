@@ -51,6 +51,15 @@ All notable changes to this project are documented in this file.
 
 ### Security
 
+- `$'...'` (ANSI-C quoting) combined with a backslash-newline line
+  continuation anywhere in the command now fails closed to `Ask` (#444):
+  brush-parser's tokenizer strips a `\`+newline pair inside the decoded
+  value the same way it does outside quotes, but bash's own ANSI-C
+  decoding does not treat `\`+newline as a recognized escape there and
+  keeps the raw newline instead. Recursing into that decoded value as a
+  nested script (`bash -c $'...'`) could previously let a `#` comment
+  swallow a real command on the line bash actually keeps separate,
+  reaching `Allow` for a root-deleting payload.
 - The dir-stack tilde forms `~+<n>`/`~-<n>` still reached brush-parser
   0.4.0's unchecked digit-run `unwrap()` when `<n>` overflowed `usize`
   (#456), the same panic-discards-the-whole-command-line class issue #405
