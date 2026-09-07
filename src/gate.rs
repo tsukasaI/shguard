@@ -90,8 +90,9 @@
 //!    `IFS=` reassignment could have made the default-IFS fold wrong.
 //! 8. Every other unresolvable kind ("rule 8": `NonUtf8`, `ExpansionLimit`,
 //!    `UnsupportedStructure`, `ArithmeticExpansion`, `ProcessSubstitution`,
-//!    and command-position `ParameterExpansion`/`CommandSubstitution` once
-//!    rules 1/2 have had their say) floors to Ask, never Allow. Like rule
+//!    `EmbeddedNul`, and command-position `ParameterExpansion`/
+//!    `CommandSubstitution` once rules 1/2 have had their say) floors to
+//!    Ask, never Allow. Like rule
 //!    3, computed once up front in [`evaluate_simple_command_core`] (issue
 //!    #445) so it survives `core`'s own early returns too (`bash -c ls
 //!    <(rm -rf /)`).
@@ -2440,8 +2441,9 @@ fn evaluate_simple_command_core(
         leftover_command_block_floor(&leftover_alternatives, first_word_ast, &argv, rules);
     // Rule 8 (argument-position half), computed up front for the same
     // reason `leftover_floor` is (issue #445): `NonUtf8`/`ExpansionLimit`/
-    // `UnsupportedStructure`/`ArithmeticExpansion`/`ProcessSubstitution`
-    // floor to Ask wherever they appear in `argv`, and this function's
+    // `UnsupportedStructure`/`ArithmeticExpansion`/`ProcessSubstitution`/
+    // `EmbeddedNul` floor to Ask wherever they appear in `argv`, and this
+    // function's
     // early returns below (rules 1/2/6a/6c/6e, the ordinary blocklist
     // match) must not bypass that floor either (`bash -c ls <(rm -rf /)`).
     let opaque_kind = argv.iter().find_map(|w| match w.resolution() {
@@ -3427,6 +3429,11 @@ fn apply_dirstack_equal_subst_floor(
 /// Allowed before this floor existed). Reason text mirrors [`fold_floors`]'s
 /// own `substitution_result` messaging so a floored verdict reads the same
 /// regardless of which return path triggered it.
+const SUBSTITUTION_FLOOR_BLOCK_REASON: &str = "an argument-position command/backquote or \
+    process substitution recurses to a command that is itself blocked";
+const SUBSTITUTION_FLOOR_ASK_REASON: &str = "an argument-position command/backquote or process \
+    substitution's inner command could not be resolved to Allow";
+
 fn apply_substitution_floor(verdict: Verdict, floor: Option<Decision>) -> Verdict {
     let Some(floor_decision) = floor else {
         return verdict;
@@ -3436,14 +3443,8 @@ fn apply_substitution_floor(verdict: Verdict, floor: Option<Decision>) -> Verdic
     }
     let argv = verdict.normalized_argv().to_vec();
     let floor_reason = match floor_decision {
-        Decision::Block => {
-            "an argument-position command/backquote or process substitution recurses to a \
-             command that is itself blocked"
-        }
-        Decision::Ask | Decision::Allow => {
-            "an argument-position command/backquote or process substitution's inner command \
-             could not be resolved to Allow"
-        }
+        Decision::Block => SUBSTITUTION_FLOOR_BLOCK_REASON,
+        Decision::Ask | Decision::Allow => SUBSTITUTION_FLOOR_ASK_REASON,
     };
     let reason = match verdict.reason() {
         Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
@@ -3582,17 +3583,9 @@ fn fold_floors(
     if let Some(sub_decision) = substitution_result {
         decision = decision.max(sub_decision);
         if sub_decision == Decision::Block {
-            reasons.push(
-                "an argument-position command/backquote substitution recurses to a command that \
-                 is itself blocked"
-                    .to_string(),
-            );
+            reasons.push(SUBSTITUTION_FLOOR_BLOCK_REASON.to_string());
         } else if sub_decision == Decision::Ask {
-            reasons.push(
-                "an argument-position command/backquote substitution's inner command could not \
-                 be resolved to Allow"
-                    .to_string(),
-            );
+            reasons.push(SUBSTITUTION_FLOOR_ASK_REASON.to_string());
         }
     }
 
@@ -16212,6 +16205,27 @@ done"#,
         // independent of that arm's own uncertainty, and lifts the verdict
         // to Block.
         assert_decision("bash $X ls $(rm -rf /)", Decision::Block);
+    }
+
+    #[test]
+    fn bash_dash_c_with_a_clean_process_substitution_floors_to_ask_via_opaque_kind() {
+        // Unlike the `<(rm -rf /)` case above, `<(true)`'s inner command is
+        // harmless, so rule 3's own recursion resolves it to Allow — the
+        // opaque-kind floor (rule 8) is what still lifts this to Ask on the
+        // 6a early-return path.
+        assert_decision("bash -c ls <(true)", Decision::Ask);
+    }
+
+    #[test]
+    fn bash_dash_c_with_an_arithmetic_expansion_argument_floors_to_ask() {
+        assert_decision("bash -c ls $((1+1))", Decision::Ask);
+    }
+
+    #[test]
+    fn bash_dash_c_with_a_clean_argument_substitution_stays_allow() {
+        // Confirms the floor is Allow-transparent: a harmless trailing
+        // substitution must not itself lift an otherwise-Allow verdict.
+        assert_decision("bash -c 'ls' $(true)", Decision::Allow);
     }
 }
 
