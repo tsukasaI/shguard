@@ -44,6 +44,24 @@ fn read_jsonl_lines(path: &std::path::Path) -> Vec<Value> {
         .collect()
 }
 
+/// Issue #467: `ask_outcome = "allow"` would lift every structural `Ask`
+/// floor entirely, and is rejected at config load the same way
+/// `escalation_floor = "allow"` already is — never a silent accept.
+#[test]
+fn ask_outcome_allow_fails_config_load_closed() {
+    let (_config_dir, config_path) = write_config(
+        r#"
+        ask_outcome = "allow"
+        "#,
+    );
+
+    isolated_command(&config_path)
+        .args(["check", "echo hello"])
+        .assert()
+        .failure()
+        .code(2);
+}
+
 #[test]
 fn empty_decision_log_path_fails_config_load_closed() {
     let (_config_dir, config_path) = write_config(
@@ -236,6 +254,39 @@ fn watchdog_trip_verdict_is_still_logged() {
         reason.contains("time budget") || reason.contains("memory budget"),
         "expected a watchdog fail-closed reason to be logged, got: {reason}"
     );
+}
+
+/// Issue #467: `ask_outcome = "deny"` remaps a `watchdog::bounded`
+/// timeout's own fail-closed `Ask` to `Block` too, same as any other final
+/// `Ask` — `src/lib.rs`'s remap runs on whatever `watchdog::bounded`
+/// actually returns, so a watchdog trip is no exception.
+#[test]
+fn watchdog_trip_verdict_is_remapped_to_block_under_ask_outcome_deny() {
+    let log_dir = tempfile::tempdir().expect("tempdir should create");
+    let log_path = log_dir.path().join("decisions.jsonl");
+    let (_config_dir, config_path) = write_config(&format!(
+        r#"
+        ask_outcome = "deny"
+        decision_log_path = {:?}
+        "#,
+        log_path.to_string_lossy()
+    ));
+
+    isolated_command(&config_path)
+        .timeout(std::time::Duration::from_secs(30))
+        .args(["check", "<<$( |] "])
+        .assert()
+        .failure()
+        .code(1);
+
+    let lines = read_jsonl_lines(&log_path);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["decision"], "Block");
+    assert!(lines[0]["matched_rule_id"].is_null());
+    let reason = lines[0]["reason"]
+        .as_str()
+        .expect("reason should be a string");
+    assert!(reason.contains("ask_outcome"));
 }
 
 #[test]

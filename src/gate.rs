@@ -13622,6 +13622,44 @@ mod tests {
         assert!(err.is_err());
     }
 
+    // ==== issue #467: `ask_outcome` parse matrix ====
+
+    #[test]
+    fn ask_outcome_defaults_to_ask_when_absent() {
+        let user_config = crate::rules::UserConfig::parse("").unwrap();
+        assert_eq!(user_config.ask_outcome(), Decision::Ask);
+    }
+
+    #[test]
+    fn ask_outcome_ask_parses_to_ask() {
+        let user_config = crate::rules::UserConfig::parse(r#"ask_outcome = "ask""#).unwrap();
+        assert_eq!(user_config.ask_outcome(), Decision::Ask);
+    }
+
+    #[test]
+    fn ask_outcome_deny_parses_to_block() {
+        let user_config = crate::rules::UserConfig::parse(r#"ask_outcome = "deny""#).unwrap();
+        assert_eq!(user_config.ask_outcome(), Decision::Block);
+    }
+
+    #[test]
+    fn ask_outcome_allow_is_rejected_at_config_load() {
+        let err = crate::rules::UserConfig::parse(r#"ask_outcome = "allow""#);
+        assert!(err.is_err(), "ask_outcome = \"allow\" must be rejected");
+    }
+
+    #[test]
+    fn ask_outcome_rejects_unknown_value() {
+        let err = crate::rules::UserConfig::parse(r#"ask_outcome = "block""#);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn ask_outcome_empty_string_is_rejected() {
+        let err = crate::rules::UserConfig::parse(r#"ask_outcome = """#);
+        assert!(err.is_err());
+    }
+
     #[test]
     fn user_deny_rule_naming_doas_itself_still_blocks() {
         // Issues #35/#36: a rule naming an escalation vector's own literal

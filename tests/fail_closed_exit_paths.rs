@@ -193,6 +193,32 @@ fn oversized_stdin_fails_closed_to_ask() {
     assert!(permission_reason(&output).contains("exceeds"));
 }
 
+/// Issue #467: the oversized-stdin fail-closed path runs AFTER
+/// `shguard::config::Policy::load` (`src/bin/shguard.rs`'s `run`), so it
+/// honors `ask_outcome = "deny"` the same way the ordinary
+/// `analyze_with_policy` path does — `fail_closed_with`, not the plain
+/// `fail_closed` this test file's other cases exercise.
+#[test]
+fn oversized_stdin_denies_under_ask_outcome_deny() {
+    const MAX_STDIN_BYTES: usize = 10 * 1024 * 1024;
+    let config_dir = tempfile::tempdir().expect("tempdir should create");
+    let config_path = config_dir.path().join("config.toml");
+    std::fs::write(&config_path, "ask_outcome = \"deny\"\n").expect("config file should write");
+
+    let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
+    cmd.env_remove("XDG_CONFIG_HOME")
+        .env_remove("HOME")
+        .env_remove("SHGUARD_TEST_PANIC")
+        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
+        .env("SHGUARD_CONFIG", &config_path);
+    let oversized_stdin = "a".repeat(MAX_STDIN_BYTES + 1);
+    let assert = cmd.write_stdin(oversized_stdin).assert().success();
+    let output: Value =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout should be valid JSON");
+    assert_eq!(permission_decision(&output), "deny");
+    assert!(permission_reason(&output).contains("exceeds"));
+}
+
 // ==== B-3: catch_unwind boundary ====
 
 /// Before the fix: no `catch_unwind` boundary existed at all, so any panic

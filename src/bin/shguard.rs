@@ -8,8 +8,9 @@
 //! Never fails *silently* open: every fallible step (config load, stdin
 //! read, JSON serialisation) is matched explicitly and falls back to the
 //! adapter's fail-closed `ask` output (or `deny`, for a config-load
-//! failure under `SHGUARD_STRICT_CONFIG` — see [`strict_config_requested`])
-//! rather than unwinding, [`main`] runs
+//! failure under `SHGUARD_STRICT_CONFIG` — see [`strict_config_requested`] —
+//! or for the stdin-read paths in [`run`] once a policy with `ask_outcome =
+//! "deny"` has loaded, issue #467) rather than unwinding, [`main`] runs
 //! the whole composition on a worker thread wrapped in
 //! [`std::panic::catch_unwind`] as a last-resort net for a panic reached
 //! through a path this file did not anticipate (e.g. inside a dependency),
@@ -422,13 +423,15 @@ fn backtrace_requested() -> bool {
 /// this var to explicitly turn strictness off.
 ///
 /// Scope: this only hardens the config-load-failure path inside `run`. It
-/// does not change `main`'s panic/watchdog fallback paths or `run`'s own
-/// stdin-read failure path, which stay `ask` regardless (including a
-/// config load that itself panics or hangs) — those are a different
-/// failure class this var isn't meant to cover (see README's "Discovery"
-/// section, and the "Wrapping the binary to fail closed" section's
-/// caller-wrapper requirement, for the PATH-miss/crash gap this can't
-/// close either).
+/// does not change `main`'s panic/watchdog fallback paths, which stay `ask`
+/// regardless (including a config load that itself panics or hangs) — those
+/// are a different failure class this var isn't meant to cover (see
+/// README's "Discovery" section, and the "Wrapping the binary to fail
+/// closed" section's caller-wrapper requirement, for the PATH-miss/crash
+/// gap this can't close either). `run`'s own stdin-read failure path is a
+/// separate case again: it stays `ask` unless the policy that already
+/// loaded set `ask_outcome = "deny"` (issue #467), which is orthogonal to
+/// this var.
 fn strict_config_requested() -> bool {
     std::env::var_os("SHGUARD_STRICT_CONFIG").is_some()
 }
@@ -851,9 +854,10 @@ fn run() -> serde_json::Value {
         .take(MAX_STDIN_BYTES + 1)
         .read_to_string(&mut stdin)
     {
-        Ok(_) if stdin.len() as u64 > MAX_STDIN_BYTES => shguard::adapter::fail_closed(&format!(
-            "shguard: stdin exceeds {MAX_STDIN_BYTES} bytes; refusing to evaluate"
-        )),
+        Ok(_) if stdin.len() as u64 > MAX_STDIN_BYTES => shguard::adapter::fail_closed_with(
+            policy.ask_outcome(),
+            &format!("shguard: stdin exceeds {MAX_STDIN_BYTES} bytes; refusing to evaluate"),
+        ),
         Ok(_) => shguard::adapter::handle_with_policy(&stdin, &policy, &shguard::FileDecisionLog),
         // A read error also covers the case where the input is oversized
         // *and* its true length happens to break UTF-8 exactly at the
@@ -861,7 +865,10 @@ fn run() -> serde_json::Value {
         // `read_to_string` reports that as `InvalidData` rather than
         // `Ok`, and this arm fails closed the same as any other stdin
         // read error.
-        Err(err) => shguard::adapter::fail_closed(&format!("shguard: could not read stdin: {err}")),
+        Err(err) => shguard::adapter::fail_closed_with(
+            policy.ask_outcome(),
+            &format!("shguard: could not read stdin: {err}"),
+        ),
     }
 }
 

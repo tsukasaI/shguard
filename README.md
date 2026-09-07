@@ -826,6 +826,57 @@ the floor off entirely, only to tighten it. A `[[deny]]`/`[[ask]]` entry
 naming one of the five commands directly (`command = "doas"`) is also
 reachable, independent of `escalation_floor`, the same as any other rule.
 
+### `ask_outcome`: turning every final Ask into deny
+
+Every `Ask` a real hook invocation sees today is a structural fallback (an
+unresolved `$VAR`/`$(...)` in a dangerous position, an inline-interpreter
+one-liner such as `python3 -c "..."`/`node -e "..."`, an `awk 'prog'`
+script, or a parser-unsupported construct), since neither
+`rules/blocklist.toml` nor a typical user config carries an `[[ask]]` rule.
+That's a real problem for an autonomous session: it stalls on the
+confirmation dialog, and under `bypassPermissions` an `ask` isn't even a
+reliable control (one `ask` can permanently disable bypass for the rest of
+the session). Set the top-level `ask_outcome` key to turn every final
+`Ask` verdict into `deny` instead:
+
+```toml
+ask_outcome = "deny"  # default is "ask"; "allow" is rejected at load
+```
+
+This is a remap of the *final* verdict a whole command line resolves to,
+not a per-command floor: a compound line like `some-ask-producing-cmd; rm
+-rf /` already resolves to `Block` from the real `rm` rule before this
+remap ever runs (worst-decision-wins folding), so the remap can never mask
+a genuine `[[deny]]`/blocklist match or lose its rule id. `matched_rule_id`
+stays `null` on a remapped verdict (see `decision_log_path` below), so
+`jq 'select(.decision=="Block" and .matched_rule_id==null)'` isolates
+floored asks from a real deny-rule match in the log. An `[[allow]]` entry
+that would have rescued an `Ask` to `Allow` still does, since the allowlist
+downgrade runs before this remap ever sees the verdict.
+
+`"allow"` is rejected at config load, the same way `escalation_floor`
+rejects it: there is no config mechanism that turns an `Ask` into a silent
+`Allow`. The remap also covers the adapter's own fail-closed fallbacks
+(malformed stdin, a missing `command` field, oversized stdin, a stdin read
+error): those emit `deny` under `ask_outcome = "deny"` too, not just `ask`.
+A config-load failure itself is out of scope here, since there is no
+config to read the key from at that point; see `SHGUARD_STRICT_CONFIG`
+above for that case instead.
+
+**Residual `ask` paths this key does not reach:** a handful of failure
+modes in `src/bin/shguard.rs`'s hook path still emit `ask` even under
+`ask_outcome = "deny"`, since they happen outside (or before) the policy
+this key lives on ever loads or ever hands back a `Verdict` to remap: the
+outer `EVALUATION_TIMEOUT`/memory-budget watchdog trip, the `catch_unwind`
+panic net, and a worker-thread spawn failure. Fixing that gap needs the
+same `(ask_outcome, decision_log_path)` side-channel plumbing issue #459
+already calls for on the logging side, and is tracked together with it
+rather than here.
+
+The companion control for the measured `dangerouslyDisableSandbox` usage
+this issue was scoped away from is Claude Code's own
+`sandbox.allowUnsandboxedCommands: false` setting, not anything in shguard.
+
 ### Structured decision-output logging
 
 Off by default. shguard's own decision output today is only the hook

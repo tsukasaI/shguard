@@ -43,9 +43,10 @@
 //! # Fail-closed posture
 //!
 //! - Malformed/missing stdin JSON, or a `tool_name == "Bash"` payload whose
-//!   `tool_input.command` is missing or not a string → `ask`, with a
-//!   reason describing what could not be read. Never a crash, never an
-//!   undocumented silent allow.
+//!   `tool_input.command` is missing or not a string → `ask` by default, or
+//!   `deny` when the loaded policy set `ask_outcome = "deny"` (issue #467,
+//!   [`fail_closed_with`]), with a reason describing what could not be
+//!   read. Never a crash, never an undocumented silent allow.
 //! - `tool_name != "Bash"` → `allow`: shguard only analyses shell commands
 //!   run through the Bash tool, so a non-Bash tool call is out of scope by
 //!   design — the hook defers to Claude Code's normal permission flow
@@ -122,10 +123,14 @@ fn output_json(
     output
 }
 
-/// The fail-closed `ask` output, for I/O failures the composition root
-/// encounters before it even has stdin text to hand to [`handle`] (e.g. a
-/// stdin read error). Never carries `additionalContext` — there is no
-/// matched rule to have declared one.
+/// The fail-closed `ask` output, for failures the composition root
+/// encounters outside the ordinary `analyze`/`analyze_with_policy` path
+/// (e.g. a worker-thread spawn failure, or an internal panic caught by
+/// `catch_unwind`) and every one of [`handle`]'s own stdin-parsing failures,
+/// which have no policy to read `ask_outcome` off — [`fail_closed_with`] is
+/// the policy-aware sibling `handle_with_policy` and `src/bin/shguard.rs`'s
+/// post-config-load paths use instead. Never carries `additionalContext` —
+/// there is no matched rule to have declared one.
 #[must_use]
 pub fn fail_closed(reason: &str) -> Value {
     output_json(PermissionDecision::Ask, reason, None)
@@ -140,6 +145,23 @@ pub fn fail_closed_deny(reason: &str) -> Value {
     output_json(PermissionDecision::Deny, reason, None)
 }
 
+/// An adapter-level fail-closed fallback (malformed stdin, a missing/
+/// non-string `command` field, oversized stdin, a stdin read error) that
+/// honors the loaded policy's `ask_outcome` (issue #467): `Decision::Block`
+/// emits `deny`, same as [`fail_closed_deny`]; anything else (the default
+/// `Decision::Ask`) emits `ask`, same as [`fail_closed`]. These fail-closed
+/// paths run before a command is ever handed to `crate::analyze_with_policy`,
+/// so there is no `Verdict` for `ask_outcome`'s ordinary terminal remap
+/// (`src/lib.rs`) to apply to — this is the adapter's own equivalent for the
+/// failure modes that never reach that remap.
+#[must_use]
+pub fn fail_closed_with(ask_outcome: Decision, reason: &str) -> Value {
+    match ask_outcome {
+        Decision::Block => fail_closed_deny(reason),
+        Decision::Allow | Decision::Ask => fail_closed(reason),
+    }
+}
+
 /// Parses `stdin` and pulls out the Bash command to analyse, if any — the
 /// stdin-JSON/tool-name/command-field extraction shared by [`handle`] and
 /// [`handle_with_policy`]; the only difference between them is which
@@ -147,13 +169,15 @@ pub fn fail_closed_deny(reason: &str) -> Value {
 ///
 /// `Ok(None)` means `tool_name != "Bash"` (out of scope by design, the
 /// caller should emit an ordinary `allow`). `Err(value)` is a ready-to-return
-/// fail-closed `ask` output — malformed JSON, or a `Bash` payload whose
-/// `tool_input.command` is missing or not a string.
-fn extract_bash_command(stdin: &str) -> Result<Option<String>, Value> {
+/// fail-closed output — malformed JSON, or a `Bash` payload whose
+/// `tool_input.command` is missing or not a string — `ask` by default, or
+/// `deny` when `ask_outcome` says so (see [`fail_closed_with`]).
+fn extract_bash_command(stdin: &str, ask_outcome: Decision) -> Result<Option<String>, Value> {
     let input: HookInput = serde_json::from_str(stdin).map_err(|err| {
-        fail_closed(&format!(
-            "shguard: could not parse PreToolUse stdin as JSON: {err}"
-        ))
+        fail_closed_with(
+            ask_outcome,
+            &format!("shguard: could not parse PreToolUse stdin as JSON: {err}"),
+        )
     })?;
 
     if input.tool_name != "Bash" {
@@ -165,7 +189,10 @@ fn extract_bash_command(stdin: &str) -> Result<Option<String>, Value> {
         .get("command")
         .and_then(Value::as_str)
         .ok_or_else(|| {
-            fail_closed("shguard: Bash tool_input is missing a string \"command\" field")
+            fail_closed_with(
+                ask_outcome,
+                "shguard: Bash tool_input is missing a string \"command\" field",
+            )
         })?;
 
     Ok(Some(command.to_string()))
@@ -175,11 +202,16 @@ fn extract_bash_command(stdin: &str) -> Result<Option<String>, Value> {
 /// `analyze` (either [`crate::analyze`] or a closure over
 /// [`crate::analyze_with_policy`] and a policy) as the decision source.
 /// Never panics: every error path (malformed JSON, missing fields, wrong
-/// field types) folds to an `ask` decision with a descriptive reason — the
-/// same "single fold point, never crash, never silently allow" posture
-/// `crate::analyze` documents for its own internal failure modes.
-fn respond(stdin: &str, analyze: impl FnOnce(&str) -> crate::verdict::Verdict) -> Value {
-    let command = match extract_bash_command(stdin) {
+/// field types) folds to an `ask`-or-`deny` decision (per `ask_outcome`,
+/// issue #467) with a descriptive reason — the same "single fold point,
+/// never crash, never silently allow" posture `crate::analyze` documents
+/// for its own internal failure modes.
+fn respond(
+    stdin: &str,
+    ask_outcome: Decision,
+    analyze: impl FnOnce(&str) -> crate::verdict::Verdict,
+) -> Value {
+    let command = match extract_bash_command(stdin, ask_outcome) {
         Ok(Some(command)) => command,
         Ok(None) => {
             return output_json(
@@ -208,7 +240,7 @@ fn respond(stdin: &str, analyze: impl FnOnce(&str) -> crate::verdict::Verdict) -
 /// JSON the composition root writes to stdout.
 #[must_use]
 pub fn handle(stdin: &str) -> Value {
-    respond(stdin, crate::analyze)
+    respond(stdin, Decision::Ask, crate::analyze)
 }
 
 /// Config-aware sibling of [`handle`]: same stdin/stdout contract, but
@@ -222,7 +254,7 @@ pub fn handle_with_policy(
     policy: &crate::config::Policy,
     sink: &dyn crate::DecisionLogSink,
 ) -> Value {
-    respond(stdin, |command| {
+    respond(stdin, policy.ask_outcome, |command| {
         crate::analyze_with_policy(command, policy, sink)
     })
 }
@@ -318,6 +350,7 @@ mod tests {
             rules: std::sync::Arc::new(crate::rules::Rules::embedded().unwrap()),
             allowlist: std::sync::Arc::new(crate::rules::Allowlist::embedded().unwrap()),
             decision_log_path: None,
+            ask_outcome: crate::verdict::Decision::Ask,
         }
     }
 
@@ -356,6 +389,7 @@ mod tests {
             rules: std::sync::Arc::new(rules),
             allowlist: std::sync::Arc::new(allowlist),
             decision_log_path: None,
+            ask_outcome: crate::verdict::Decision::Ask,
         };
 
         let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"gh pr view"}}"#;
@@ -408,6 +442,7 @@ mod tests {
             rules: std::sync::Arc::new(rules),
             allowlist: std::sync::Arc::new(allowlist),
             decision_log_path: None,
+            ask_outcome: crate::verdict::Decision::Ask,
         };
 
         let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"mytool --force"}}"#;
@@ -435,6 +470,63 @@ mod tests {
             output["hookSpecificOutput"]
                 .get("additionalContext")
                 .is_none()
+        );
+    }
+
+    // ==== issue #467: adapter-level fail-closed paths honor `ask_outcome` ====
+
+    fn policy_with_ask_outcome(ask_outcome: Decision) -> crate::config::Policy {
+        crate::config::Policy {
+            rules: std::sync::Arc::new(crate::rules::Rules::embedded().unwrap()),
+            allowlist: std::sync::Arc::new(crate::rules::Allowlist::embedded().unwrap()),
+            decision_log_path: None,
+            ask_outcome,
+        }
+    }
+
+    #[test]
+    fn handle_with_policy_malformed_json_denies_under_ask_outcome_deny() {
+        let policy = policy_with_ask_outcome(Decision::Block);
+        let output = handle_with_policy("not json", &policy, &crate::FileDecisionLog);
+        assert_eq!(permission_decision(&output), "deny");
+    }
+
+    #[test]
+    fn handle_with_policy_malformed_json_asks_under_default_ask_outcome() {
+        let policy = policy_with_ask_outcome(Decision::Ask);
+        let output = handle_with_policy("not json", &policy, &crate::FileDecisionLog);
+        assert_eq!(permission_decision(&output), "ask");
+    }
+
+    #[test]
+    fn handle_with_policy_missing_command_field_denies_under_ask_outcome_deny() {
+        let policy = policy_with_ask_outcome(Decision::Block);
+        let stdin = r#"{"tool_name":"Bash","tool_input":{}}"#;
+        let output = handle_with_policy(stdin, &policy, &crate::FileDecisionLog);
+        assert_eq!(permission_decision(&output), "deny");
+    }
+
+    #[test]
+    fn handle_with_policy_missing_command_field_asks_under_default_ask_outcome() {
+        let policy = policy_with_ask_outcome(Decision::Ask);
+        let stdin = r#"{"tool_name":"Bash","tool_input":{}}"#;
+        let output = handle_with_policy(stdin, &policy, &crate::FileDecisionLog);
+        assert_eq!(permission_decision(&output), "ask");
+    }
+
+    #[test]
+    fn fail_closed_with_deny_matches_fail_closed_deny() {
+        assert_eq!(
+            fail_closed_with(Decision::Block, "reason"),
+            fail_closed_deny("reason")
+        );
+    }
+
+    #[test]
+    fn fail_closed_with_ask_matches_fail_closed() {
+        assert_eq!(
+            fail_closed_with(Decision::Ask, "reason"),
+            fail_closed("reason")
         );
     }
 }

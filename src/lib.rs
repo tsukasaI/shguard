@@ -18,7 +18,7 @@ mod watchdog;
 use std::path::Path;
 
 pub use decision_log::FileDecisionLog;
-use verdict::Verdict;
+use verdict::{Decision, DenyMessage, Reason, Verdict};
 
 /// Port [`analyze_with_policy`] appends one JSONL decision-log line
 /// through, per issue #108 (`coding-guidelines/principles.md`: "ports MUST
@@ -138,6 +138,33 @@ pub fn analyze(command: &str) -> Verdict {
 /// `evaluate_with_timeout`); a direct library caller has no such outer
 /// watchdog of its own, so for one this function's own bound is the whole
 /// story.
+///
+/// # `ask_outcome` terminal remap (issue #467)
+///
+/// When `policy` carries `ask_outcome = "deny"` (top-level user-config key,
+/// default `"ask"`), a *final* `Decision::Ask` — the one [`watchdog::bounded`]
+/// actually returns for this whole command line — is remapped to
+/// `Decision::Block` via [`remap_ask_to_block`] before logging, so an
+/// autonomous session never stalls on a structural `Ask` (unresolved
+/// `$VAR`/`$(...)`, an inline-interpreter one-liner, an unsupported
+/// construct) that neither the embedded blocklist nor a typical user config
+/// carries an `[[ask]]` rule for.
+///
+/// This is a remap of the whole-line fold result, not a per-command floor
+/// applied inside `gate::analyze_with_policy` itself: `gate::fold_worst`
+/// already keeps the worst `Decision` across every simple command on the
+/// line, so a compound line like `ask-cmd; rm -rf /` already resolves to
+/// `Decision::Block` from the real `rm` rule (`Decision::Block >
+/// Decision::Ask`) by the time this function sees it — remapping only a
+/// verdict that is STILL `Ask` here can never touch that case, so the real
+/// rule's id/reason/deny_message are never lost to this remap. Applied
+/// after [`watchdog::bounded`] returns (a watchdog-timeout `Ask` is remapped
+/// too — same posture: autonomous sessions should not stall on that either)
+/// and before `sink.append`, so what's logged always matches what the
+/// caller actually saw. `[[allow]]` downgrades already ran, at every
+/// recursion level, inside `gate::analyze_with_policy` itself
+/// (`gate::apply_allowlist_downgrade`) — by construction, this remap can
+/// never see a verdict an allow entry would have rescued.
 #[must_use]
 pub fn analyze_with_policy(
     command: &str,
@@ -149,8 +176,204 @@ pub fn analyze_with_policy(
     let verdict = watchdog::bounded(move || {
         gate::analyze_with_policy(&command_owned, &policy_owned.rules, &policy_owned.allowlist)
     });
+    let verdict = if policy.ask_outcome == Decision::Block {
+        remap_ask_to_block(verdict)
+    } else {
+        verdict
+    };
     if let Some(path) = &policy.decision_log_path {
         sink.append(path, command, &verdict);
     }
     verdict
+}
+
+/// Remaps a final `Decision::Ask` verdict to `Decision::Block` for
+/// `ask_outcome = "deny"` (see [`analyze_with_policy`]'s own docs) —
+/// a no-op on `Allow`/`AllowSuppressed`/`Block`. `matched_rule` stays
+/// `None`: this is never a rule match, so `jq 'select(.decision=="Block"
+/// and .matched_rule_id==null)'` against a `decision_log_path` (issue #108)
+/// isolates floored asks from a genuine `[[deny]]`/blocklist match.
+fn remap_ask_to_block(verdict: Verdict) -> Verdict {
+    if verdict.decision() != Decision::Ask {
+        return verdict;
+    }
+    let original_reason = verdict.reason().map_or("", Reason::as_str).to_string();
+    let deny_message = verdict.deny_message().cloned();
+    Verdict::block(
+        Reason::new(format!(
+            "{original_reason}; ask_outcome = \"deny\": this command was structurally \
+             unresolvable rather than blocked outright — rewrite unresolved $VAR/$(...) as \
+             literal values, move inline interpreter code to a file, split the line into \
+             separate commands, or run it manually instead of through the agent"
+        )),
+        verdict.normalized_argv().to_vec(),
+        None,
+    )
+    .with_deny_message(deny_message.or_else(|| {
+        Some(DenyMessage::new(
+            "ask_outcome = \"deny\" turned this Ask into a Block: rewrite unresolved \
+             $VAR/$(...) as literal values, move inline interpreter code to a file, split the \
+             line into separate commands, or run it manually instead of through the agent",
+        ))
+    }))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::verdict::RuleId;
+
+    /// Discards every logged line — these tests only care about the
+    /// returned `Verdict`, not `decision_log_path` behavior (covered
+    /// separately by `tests/decision_log.rs`).
+    struct NoopSink;
+    impl DecisionLogSink for NoopSink {
+        fn append(&self, _path: &Path, _command: &str, _verdict: &Verdict) {}
+    }
+
+    /// Merges `user_toml`'s `[[deny]]`/`[[ask]]`/`[[allow]]`/`ask_outcome`
+    /// onto the embedded blocklist/allowlist, mirroring `src/gate.rs`'s own
+    /// `policy_from_config` test helper but returning a full
+    /// `config::Policy` — this module's `analyze_with_policy` needs one to
+    /// read `ask_outcome` off, unlike `gate::analyze_with_policy`, which
+    /// never reads it at all (this crate's whole reason for keeping the
+    /// remap here rather than in `gate.rs`).
+    fn policy_from_config(user_toml: &str) -> config::Policy {
+        let blocklist = rules::Rules::embedded().unwrap();
+        let allowlist = rules::Allowlist::embedded().unwrap();
+        let user_config = rules::UserConfig::parse(user_toml).unwrap();
+        let ask_outcome = user_config.ask_outcome();
+        let (rules, allowlist) =
+            rules::merge_user_config(blocklist, allowlist, user_config).unwrap();
+        config::Policy {
+            rules: std::sync::Arc::new(rules),
+            allowlist: std::sync::Arc::new(allowlist),
+            decision_log_path: None,
+            ask_outcome,
+        }
+    }
+
+    #[test]
+    fn ask_outcome_deny_remaps_a_structural_ask_to_block() {
+        // rule 4's except-target refinement: an unresolved `$VAR` in
+        // argument position against `rm -rf` is a genuine structural Ask
+        // with no rule match at all.
+        let policy = policy_from_config(r#"ask_outcome = "deny""#);
+        let verdict = analyze_with_policy("rm -rf $DIR", &policy, &NoopSink);
+        assert_eq!(verdict.decision(), Decision::Block);
+        assert!(verdict.matched_rule().is_none());
+        assert!(verdict.reason().unwrap().as_str().contains("ask_outcome"));
+    }
+
+    #[test]
+    fn ask_outcome_default_leaves_a_structural_ask_as_ask() {
+        let policy = policy_from_config("");
+        let verdict = analyze_with_policy("rm -rf $DIR", &policy, &NoopSink);
+        assert_eq!(verdict.decision(), Decision::Ask);
+    }
+
+    #[test]
+    fn ask_outcome_deny_remaps_an_embedded_ask_rule_to_block() {
+        // The embedded blocklist's `tar-directory-root-or-home` rule
+        // (decision = "ask").
+        let policy = policy_from_config(r#"ask_outcome = "deny""#);
+        let verdict = analyze_with_policy("tar -C / -f a.tar", &policy, &NoopSink);
+        assert_eq!(verdict.decision(), Decision::Block);
+        assert!(verdict.matched_rule().is_none());
+    }
+
+    #[test]
+    fn ask_outcome_deny_remaps_a_user_ask_rule_to_block() {
+        let policy = policy_from_config(
+            r#"
+            ask_outcome = "deny"
+
+            [[ask]]
+            id = "user-ask-gh"
+            reason = "confirm every gh invocation"
+            command = "gh"
+        "#,
+        );
+        let verdict = analyze_with_policy("gh pr view", &policy, &NoopSink);
+        assert_eq!(verdict.decision(), Decision::Block);
+        assert!(verdict.matched_rule().is_none());
+    }
+
+    #[test]
+    fn ask_outcome_deny_leaves_a_real_block_rule_untouched() {
+        let policy = policy_from_config(r#"ask_outcome = "deny""#);
+        let verdict = analyze_with_policy("rm -rf /", &policy, &NoopSink);
+        assert_eq!(verdict.decision(), Decision::Block);
+        assert_eq!(
+            verdict.matched_rule().map(RuleId::as_str),
+            Some("rm-recursive-force-dangerous-target")
+        );
+    }
+
+    #[test]
+    fn ask_outcome_deny_leaves_allow_untouched() {
+        let policy = policy_from_config(r#"ask_outcome = "deny""#);
+        let verdict = analyze_with_policy("echo hello", &policy, &NoopSink);
+        assert_eq!(verdict.decision(), Decision::Allow);
+    }
+
+    #[test]
+    fn allowlist_downgrade_still_wins_over_the_ask_outcome_remap() {
+        // `apply_allowlist_downgrade` runs inside `gate::analyze_with_policy`
+        // itself, before this module's remap ever sees the verdict — an
+        // `[[allow]]` entry that would have rescued a structural Ask to
+        // Allow must still do so, `ask_outcome = "deny"` notwithstanding.
+        let policy = policy_from_config(
+            r#"
+            ask_outcome = "deny"
+
+            [[allow]]
+            id = "user-allow-rm"
+            reason = "trust me"
+            command = "rm"
+        "#,
+        );
+        let verdict = analyze_with_policy("rm -rf $HOME", &policy, &NoopSink);
+        assert_eq!(verdict.decision(), Decision::Allow);
+    }
+
+    #[test]
+    fn ask_outcome_deny_does_not_disturb_fold_worst_tie_breaking() {
+        // `gate::fold_worst` already resolves this compound line to
+        // `Decision::Block` from the real user `[[deny]]` rule (a rule that
+        // also declares its own `deny_message`) before this module's remap
+        // ever runs (`Decision::Block > Decision::Ask`) — the remap only
+        // ever touches a verdict that is STILL `Ask` by the time
+        // `watchdog::bounded` returns, so the real rule's own id AND
+        // deny_message must survive untouched, not the remap's generic
+        // guidance text.
+        let policy = policy_from_config(
+            r#"
+            ask_outcome = "deny"
+
+            [[ask]]
+            id = "user-ask-gh"
+            reason = "confirm every gh invocation"
+            command = "gh"
+
+            [[deny]]
+            id = "user-deny-mytool-force"
+            reason = "mytool --force is destructive"
+            command = "mytool"
+            required_flags = ["f|--force"]
+            deny_message = "use --force-with-lease instead"
+        "#,
+        );
+        let verdict = analyze_with_policy("gh pr view; mytool --force", &policy, &NoopSink);
+        assert_eq!(verdict.decision(), Decision::Block);
+        assert_eq!(
+            verdict.matched_rule().map(RuleId::as_str),
+            Some("user-deny-mytool-force")
+        );
+        assert_eq!(
+            verdict.deny_message().map(DenyMessage::as_str),
+            Some("use --force-with-lease instead")
+        );
+    }
 }

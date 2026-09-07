@@ -4884,6 +4884,26 @@ fn parse_escalation_floor(raw: Option<&str>) -> Result<Decision, RulesError> {
     }
 }
 
+/// Parses the optional top-level `ask_outcome` user-config key (issue
+/// #467) into a [`Decision`], defaulting to `Decision::Ask` when absent —
+/// the ordinary hook behavior of prompting on a final `Ask` verdict.
+/// `"deny"` remaps every final `Ask` to `Block` instead (see
+/// [`crate::analyze_with_policy`]'s terminal remap); `"allow"` would lift
+/// every structural `Ask` floor entirely and is rejected here the same way
+/// [`parse_escalation_floor`] rejects it for `escalation_floor` — there is
+/// deliberately no config mechanism at all that turns an `Ask` verdict into
+/// a silent `Allow`.
+fn parse_ask_outcome(raw: Option<&str>) -> Result<Decision, RulesError> {
+    match raw {
+        None | Some("ask") => Ok(Decision::Ask),
+        Some("deny") => Ok(Decision::Block),
+        Some(other) => Err(RulesError::invalid(
+            "ask_outcome",
+            format!("ask_outcome must be \"ask\" or \"deny\", got {other:?}"),
+        )),
+    }
+}
+
 /// Validates the optional top-level `decision_log_path` user-config key
 /// (issue #108): absent means "logging disabled" (the required off-by-
 /// default posture), and an empty string is rejected rather than silently
@@ -6299,6 +6319,8 @@ struct UserConfigFileDto {
     escalation_floor: Option<String>,
     #[serde(default)]
     decision_log_path: Option<String>,
+    #[serde(default)]
+    ask_outcome: Option<String>,
 }
 
 /// A user-supplied policy config, parsed and validated but not yet merged
@@ -6312,6 +6334,7 @@ pub(crate) struct UserConfig {
     pipeline: Vec<PipelineRule>,
     escalation_floor: Decision,
     decision_log_path: Option<String>,
+    ask_outcome: Decision,
 }
 
 impl UserConfig {
@@ -6371,6 +6394,7 @@ impl UserConfig {
             .collect::<Result<Vec<_>, _>>()?;
         let escalation_floor = parse_escalation_floor(dto.escalation_floor.as_deref())?;
         let decision_log_path = parse_decision_log_path(dto.decision_log_path.as_deref())?;
+        let ask_outcome = parse_ask_outcome(dto.ask_outcome.as_deref())?;
 
         reject_duplicate_ids(
             deny.iter()
@@ -6439,6 +6463,7 @@ impl UserConfig {
             pipeline,
             escalation_floor,
             decision_log_path,
+            ask_outcome,
         })
     }
 
@@ -6452,6 +6477,19 @@ impl UserConfig {
     #[must_use]
     pub(crate) fn decision_log_path(&self) -> Option<&str> {
         self.decision_log_path.as_deref()
+    }
+
+    /// The optional top-level `ask_outcome` user-config key (issue #467) —
+    /// `Decision::Ask` (the default) unless the user's own config set it to
+    /// `"deny"`. Same "read off the real config-file parse alone" posture
+    /// as [`Self::decision_log_path`]: the self-protection synthetic TOMLs
+    /// this parser also processes only ever carry `[[deny]]` rules, never
+    /// this key, so there is nothing to fold across multiple merges the
+    /// way `escalation_floor` needs `.max()` for — a user's real config
+    /// always wins.
+    #[must_use]
+    pub(crate) fn ask_outcome(&self) -> Decision {
+        self.ask_outcome
     }
 }
 
