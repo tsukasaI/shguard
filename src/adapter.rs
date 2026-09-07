@@ -12,15 +12,22 @@
 //!
 //! # Verified stdin/stdout schema
 //!
-//! Re-verified against code.claude.com/docs/en/hooks on 2026-08-15 (plan.md
+//! Re-verified against code.claude.com/docs/en/hooks on 2026-09-07 (plan.md
 //! §0.2's "adapter issue re-fetches the doc before implementation") —
 //! `PreToolUse`'s valid `permissionDecision` values are still
-//! `"allow"`/`"deny"`/`"ask"` as of this date, and `additionalContext` is a
-//! newly-added field (issue #99) this re-verification confirmed:
+//! `"allow"`/`"deny"`/`"ask"` as of this date, and `permission_mode`/
+//! `agent_id`/`agent_type` (issue #468) are now read into
+//! [`crate::HookContext`] for the decision log (see that type's docs):
 //!
 //! - **stdin**: a JSON object. `tool_name: string`; when `tool_name ==
 //!   "Bash"`, `tool_input.command: string` holds the raw shell command
-//!   line. Other context fields (`session_id`, `cwd`, `permission_mode`,
+//!   line. `permission_mode: string` (one of `"default"`, `"plan"`,
+//!   `"acceptEdits"`, `"auto"`, `"dontAsk"`, `"bypassPermissions"`, parsed
+//!   into [`crate::PermissionMode`], with any other value preserved as
+//!   `Unknown`), and `agent_id`/`agent_type: string` (present only inside a
+//!   subagent call), may be present. A present value of the wrong JSON type
+//!   (not a string) is treated the same as absent, not a parse failure of
+//!   the whole payload. Other context fields (`session_id`, `cwd`,
 //!   `hook_event_name`) may be present and are ignored here.
 //! - **stdout**: exit 0, plus
 //!   ```json
@@ -59,18 +66,29 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::verdict::Decision;
+use crate::{HookContext, PermissionMode};
 
 /// The subset of the Claude Code PreToolUse stdin payload shguard reads.
 ///
-/// `tool_input` is kept as a raw [`Value`] rather than a nested struct: the
-/// hook schema is fast-moving (plan.md §0.2), so only the `command` field
-/// is pulled out, defensively, at the point of use instead of committing to
-/// a rigid shape that could start failing to deserialize on a spec change.
+/// Every field but `tool_name` is kept as a raw [`Value`] rather than a
+/// typed field: the hook schema is fast-moving (plan.md §0.2), so each is
+/// pulled out, defensively, at the point of use (via `.as_str()`, which
+/// yields `None` for a present-but-wrong-typed value, not a parse error)
+/// instead of committing to a rigid shape that could start failing to
+/// deserialize the *entire* payload on a spec change or a malformed value —
+/// exactly the trap a typed `Option<String>` field falls into, since serde
+/// still errors on a present value of the wrong type.
 #[derive(Debug, Deserialize)]
 struct HookInput {
     tool_name: String,
     #[serde(default)]
     tool_input: Value,
+    #[serde(default)]
+    permission_mode: Value,
+    #[serde(default)]
+    agent_id: Value,
+    #[serde(default)]
+    agent_type: Value,
 }
 
 /// The three `permissionDecision` values the hook contract defines.
@@ -167,11 +185,12 @@ pub fn fail_closed_with(outcome: Decision, reason: &str) -> Value {
     output_json(decision, reason, None)
 }
 
-/// Parses `stdin` and pulls out the Bash command to analyse, if any — the
-/// stdin-JSON/tool-name/command-field extraction shared by [`handle`] and
-/// [`handle_with_policy`] (via [`respond`], which also picks which
-/// `analyze`-shaped function the extracted command goes to, and — issue
-/// #467 — which fail-closed decision an extraction error here becomes).
+/// Parses `stdin` and pulls out the Bash command to analyse plus its
+/// [`HookContext`], if any — the stdin-JSON/tool-name/command-field
+/// extraction shared by [`handle`] and [`handle_with_policy`] (via
+/// [`respond`], which also picks which `analyze`-shaped function the
+/// extracted command goes to, and — issue #467 — which fail-closed decision
+/// an extraction error here becomes).
 ///
 /// `Ok(None)` means `tool_name != "Bash"` (out of scope by design, the
 /// caller should emit an ordinary `allow`). `Err(reason)` is a
@@ -180,13 +199,19 @@ pub fn fail_closed_with(outcome: Decision, reason: &str) -> Value {
 /// for the caller to turn into a fail-closed output, since which flavor
 /// (plain `ask`, or `ask_outcome`-aware) depends on whether the caller has
 /// a [`crate::config::Policy`] in hand (issue #467; see [`respond`]).
-fn extract_bash_command(stdin: &str) -> Result<Option<String>, String> {
+fn extract_bash_command(stdin: &str) -> Result<Option<(String, HookContext)>, String> {
     let input: HookInput = serde_json::from_str(stdin)
         .map_err(|err| format!("shguard: could not parse PreToolUse stdin as JSON: {err}"))?;
 
     if input.tool_name != "Bash" {
         return Ok(None);
     }
+
+    let context = HookContext::new(
+        input.permission_mode.as_str().map(PermissionMode::parse),
+        input.agent_id.as_str().map(str::to_string),
+        input.agent_type.as_str().map(str::to_string),
+    );
 
     let command = input
         .tool_input
@@ -196,7 +221,7 @@ fn extract_bash_command(stdin: &str) -> Result<Option<String>, String> {
             "shguard: Bash tool_input is missing a string \"command\" field".to_string()
         })?;
 
-    Ok(Some(command.to_string()))
+    Ok(Some((command.to_string(), context)))
 }
 
 /// Builds the `hookSpecificOutput` JSON for one stdin payload, given
@@ -217,10 +242,10 @@ fn extract_bash_command(stdin: &str) -> Result<Option<String>, String> {
 fn respond(
     stdin: &str,
     ask_outcome: crate::verdict::Decision,
-    analyze: impl FnOnce(&str) -> crate::verdict::Verdict,
+    analyze: impl FnOnce(&str, &HookContext) -> crate::verdict::Verdict,
 ) -> Value {
-    let command = match extract_bash_command(stdin) {
-        Ok(Some(command)) => command,
+    let (command, context) = match extract_bash_command(stdin) {
+        Ok(Some(command_and_context)) => command_and_context,
         Ok(None) => {
             return output_json(
                 PermissionDecision::Allow,
@@ -231,7 +256,7 @@ fn respond(
         Err(reason) => return fail_closed_with(ask_outcome, &reason),
     };
 
-    let verdict = analyze(&command);
+    let verdict = analyze(&command, &context);
     let decision = PermissionDecision::from(verdict.decision());
     let reason = verdict
         .reason()
@@ -248,7 +273,9 @@ fn respond(
 /// JSON the composition root writes to stdout.
 #[must_use]
 pub fn handle(stdin: &str) -> Value {
-    respond(stdin, Decision::Ask, crate::analyze)
+    respond(stdin, Decision::Ask, |command, _context| {
+        crate::analyze(command)
+    })
 }
 
 /// Config-aware sibling of [`handle`]: same stdin/stdout contract, but
@@ -262,8 +289,8 @@ pub fn handle_with_policy(
     policy: &crate::config::Policy,
     sink: &dyn crate::DecisionLogSink,
 ) -> Value {
-    respond(stdin, policy.ask_outcome(), |command| {
-        crate::analyze_with_policy(command, policy, sink)
+    respond(stdin, policy.ask_outcome(), |command, context| {
+        crate::analyze_with_policy(command, policy, context, sink)
     })
 }
 

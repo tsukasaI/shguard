@@ -761,6 +761,7 @@ fn evaluate_with_timeout(
             let verdict = shguard::analyze_with_policy(
                 &owned_command,
                 &owned_policy,
+                &shguard::HookContext::none(),
                 &shguard::FileDecisionLog,
             );
             // A closed receiver means the timeout already fired and the
@@ -773,6 +774,7 @@ fn evaluate_with_timeout(
         return Ok(shguard::analyze_with_policy(
             command,
             policy,
+            &shguard::HookContext::none(),
             &shguard::FileDecisionLog,
         ));
     };

@@ -308,6 +308,78 @@ fn check_nonexistent_config_path_exits_with_usage_error() {
         .code(2);
 }
 
+// Issue #468: `permission_mode` (and, inside a subagent, `agent_id`/
+// `agent_type`) is read from PreToolUse stdin and recorded on the decision
+// log, but must never change the Allow/Ask/Block decision itself. Each
+// variant below is asserted against the SAME fixed command to prove that.
+
+/// The command whose decision must stay identical across every
+/// `permission_mode` variant below: a real embedded-blocklist Block, the
+/// same one `block_triggering_command_denies_with_reason` already covers.
+const FIXED_BLOCK_COMMAND: &str = "rm -rf /";
+
+fn stdin_with_permission_mode(command: &str, permission_mode: Option<&str>) -> String {
+    match permission_mode {
+        Some(mode) => format!(
+            r#"{{"tool_name":"Bash","tool_input":{{"command":"{command}"}},"permission_mode":"{mode}"}}"#
+        ),
+        None => format!(r#"{{"tool_name":"Bash","tool_input":{{"command":"{command}"}}}}"#),
+    }
+}
+
+#[test]
+fn permission_mode_never_changes_the_decision() {
+    for (command, expected) in [(FIXED_BLOCK_COMMAND, "deny"), ("echo hello", "allow")] {
+        let baseline =
+            permission_decision(&run_hook(&stdin_with_permission_mode(command, None))).to_string();
+        assert_eq!(baseline, expected);
+        for mode in [
+            "default",
+            "plan",
+            "acceptEdits",
+            "auto",
+            "dontAsk",
+            "bypassPermissions",
+            "some-future-mode",
+        ] {
+            let output = run_hook(&stdin_with_permission_mode(command, Some(mode)));
+            assert_eq!(
+                permission_decision(&output),
+                baseline,
+                "permission_mode {mode:?} changed the decision for {command:?}"
+            );
+        }
+    }
+}
+
+/// A `permission_mode`/`agent_id`/`agent_type` of the wrong JSON type (not a
+/// string) must be treated the same as absent, not fail the whole stdin
+/// parse closed — these are `serde_json::Value` fields precisely so a
+/// present-but-wrong-typed value can't turn into an adapter-level parse
+/// failure (`src/adapter.rs`'s `HookInput` doc).
+#[test]
+fn non_string_permission_mode_and_agent_fields_do_not_change_the_decision() {
+    let baseline =
+        permission_decision(&run_hook(&stdin_with_permission_mode("echo hello", None))).to_string();
+    for stdin in [
+        r#"{"tool_name":"Bash","tool_input":{"command":"echo hello"},"permission_mode":123}"#,
+        r#"{"tool_name":"Bash","tool_input":{"command":"echo hello"},"agent_id":{"x":1}}"#,
+        r#"{"tool_name":"Bash","tool_input":{"command":"echo hello"},"agent_type":["a"]}"#,
+        r#"{"tool_name":"Read","tool_input":{},"permission_mode":123}"#,
+    ] {
+        let output = run_hook(stdin);
+        assert_eq!(
+            permission_decision(&output),
+            if stdin.contains("\"tool_name\":\"Read\"") {
+                "allow"
+            } else {
+                baseline.as_str()
+            },
+            "non-string field changed the decision for {stdin:?}"
+        );
+    }
+}
+
 #[test]
 fn check_nonexistent_config_path_with_json_flag_emits_json_error() {
     let assert = isolated_check(&["check", "echo hello", "--json"])

@@ -907,12 +907,20 @@ Each line is a JSON object (keys serialize alphabetically, matching
 against the built binary:
 
 ```json
-{"command":"rm -rf /","decision":"Block","deny_message":null,"matched_rule_id":"rm-recursive-force-dangerous-target","normalized_argv":["rm","-rf","/"],"reason":"matches blocklist rule \"rm-recursive-force-dangerous-target\": rm with recursive+force flags against a root-level, home, device, or find-placeholder target"}
+{"agent_id":null,"command":"rm -rf /","decision":"Block","deny_message":null,"matched_rule_id":"rm-recursive-force-dangerous-target","normalized_argv":["rm","-rf","/"],"permission_mode":null,"reason":"matches blocklist rule \"rm-recursive-force-dangerous-target\": rm with recursive+force flags against a root-level, home, device, or find-placeholder target"}
 ```
 
 `matched_rule_id` is `null` for an `Allow`, an `Ask`/`Block` decided
 structurally rather than by an exact rule match, or an `Allow` reached by
-an allowlist downgrade. The file is opened in append mode (created if
+an allowlist downgrade. `permission_mode` (issue #468) is the PreToolUse
+hook stdin's `permission_mode` value verbatim (`"default"`, `"plan"`,
+`"acceptEdits"`, `"auto"`, `"dontAsk"`, `"bypassPermissions"`, or an
+unrecognized value logged as-is), `null` when the hook stdin omitted the
+field, which is distinct from a present `"default"`. `agent_id` is the
+subagent identifier the hook stdin carries when the call happened inside a
+subagent, `null` otherwise. Neither field affects the Allow/Ask/Block
+decision, and `shguard check` (no real hook stdin) always logs both as
+`null`. The file is opened in append mode (created if
 missing with `0600` permissions — it records every evaluated command
 verbatim, which routinely contains inline secrets — never truncated), and
 a write failure — a missing parent directory, a full disk — is silently

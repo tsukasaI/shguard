@@ -6,6 +6,14 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- The PreToolUse hook's `permission_mode` field, and, inside a subagent,
+  `agent_id`/`agent_type`, are now read from stdin and recorded on the
+  `decision_log_path` log line (#468). `permission_mode` is parsed into a
+  typed value with an `Unknown` variant that preserves any value this
+  binary doesn't recognize, so a future harness mode never crashes or
+  fails closed a Bash call. Purely additive: these three fields play no
+  part in the Allow/Ask/Block decision, and `shguard check` (no real hook
+  stdin) logs `permission_mode`/`agent_id` as `null`.
 - New optional `ask_outcome` user-config key (default `"ask"`, `"allow"`
   rejected at load the same way `escalation_floor` rejects it): set
   `ask_outcome = "deny"` to floor every terminal `Ask` verdict
