@@ -1479,6 +1479,22 @@ fn guardfall_brush_parser_overflow_panic_cases() {
     }
 }
 
+/// Issue #443: the io-number digit run panic case above, but with the
+/// overflowing run split across a `\`+newline line continuation
+/// (`21474836\<newline>48`). Before the fix, `neutralize_overflowing_io_redirect_numbers`
+/// scanned the raw, unstripped text, never saw a contiguous overflowing
+/// digit run, and left it untouched; brush-parser's own tokenizer then
+/// rejoined the two halves and panicked in its io-number parsing, which
+/// [`catch_parser_panic`](../src/parser.rs) folds into a whole-command-line
+/// syntax error — downgrading this `rm -rf /` from `Block` to `Ask`. Must
+/// stay `Block`, matching the unsplit control case above.
+#[test]
+fn guardfall_backslash_newline_split_io_number_overflow_stays_blocked() {
+    let command = "rm -rf /; echo 21474836\\\n48>/dev/null";
+    let verdict = shguard::analyze(command);
+    assert_eq!(verdict.decision(), Decision::Block);
+}
+
 /// A word made of nothing but repeated overflowing-tilde runs: the
 /// per-run remainder recursion this PR first shipped in
 /// `convert_word_text` overflowed the stack at ~2 MiB of input (well

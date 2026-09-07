@@ -235,6 +235,69 @@ fn neutralize_overflowing_io_redirect_numbers(command: &str) -> std::borrow::Cow
     }
 }
 
+/// Removes every `\`+newline line-continuation pair from `command` before
+/// [`reject_excessive_raw_nesting`]'s keyword/`[[` scan and
+/// [`neutralize_overflowing_io_redirect_numbers`]'s digit-run scan ever see
+/// the text (issue #443): brush-parser's own tokenizer strips these outside
+/// quotes before recursing, so a keyword, `[[` opener, or io-number digit
+/// run split across a continuation (`i\<newline>f true; then ...`,
+/// `2147483\<newline>648>x`) rejoins into the exact shape those two raw
+/// scans exist to catch, while the *unstripped* text — the only text either
+/// scan ever saw — sails through untouched. Two of the resulting shapes
+/// reach brush-parser's unbounded recursive descent uncapped (an
+/// uncatchable stack-overflow abort — no decision reaches stdout at all,
+/// fail-open for a `PreToolUse` hook); the third downgrades a `Block` to
+/// `Ask` via [`catch_parser_panic`]'s panic containment.
+///
+/// A single left-to-right, non-overlapping removal pass — no escape-parity
+/// tracking — is enough to never *under*-count a real nesting/bracket/
+/// digit-run shape relative to what brush-parser will actually see: real
+/// bash only collapses `X\<newline>Y` into contiguous `XY` when exactly one
+/// backslash separates them. An even backslash count pairs up into literal
+/// backslash characters and leaves the newline un-stripped; an odd count
+/// greater than one leaves at least one leftover literal backslash before
+/// the stripped newline. Either way real bash's own result still contains a
+/// literal backslash and/or newline byte breaking `X` from `Y`, so it is not
+/// the keyword/bracket/digit-run shape being scanned for either — this scan
+/// reaches that same "not a match" conclusion on those inputs, and matches
+/// real bash exactly on the one shape (a lone backslash immediately before
+/// the newline) that does rejoin.
+///
+/// Feeds the *actual* command brush-parser goes on to parse, not just a
+/// scanning copy — computing what brush's own tokenizer would strip
+/// internally anyway, so parsing outside quotes is unaffected. **Known
+/// limitation, disclosed rather than silently accepted**: this scan is not
+/// quote-aware — like [`neutralize_overflowing_io_redirect_numbers`]'s own
+/// disclosed limitation — so a literal `\<newline>` inside a single-quoted
+/// string (where POSIX semantics keep it completely literal) is stripped
+/// here too. No decision-flip is known to result: this only ever removes
+/// bytes from a word's own text, so it can never introduce a substring a
+/// rule pattern-matches that a shorter version of that same word didn't
+/// already contain.
+fn strip_raw_line_continuations(command: &str) -> std::borrow::Cow<'_, str> {
+    let bytes = command.as_bytes();
+    let mut rewritten: Option<String> = None;
+    let mut last_copied = 0;
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'\\' && bytes[i + 1] == b'\n' {
+            let out = rewritten.get_or_insert_with(String::new);
+            out.push_str(&command[last_copied..i]);
+            last_copied = i + 2;
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    match rewritten {
+        Some(mut out) => {
+            out.push_str(&command[last_copied..]);
+            std::borrow::Cow::Owned(out)
+        }
+        None => std::borrow::Cow::Borrowed(command),
+    }
+}
+
 /// Rejects `command` if its `{`/`}` nesting depth exceeds
 /// [`MAX_RAW_BRACE_NESTING_DEPTH`], its `(`/`)` nesting depth exceeds
 /// [`MAX_RAW_PAREN_NESTING_DEPTH`], its total count of [`NESTING_KEYWORDS`]
@@ -411,7 +474,8 @@ fn check_extended_test_op_count(extended_test_op_count: &mut usize) -> Result<()
 /// `analyze()` (`src/lib.rs`) calls this via `src/gate.rs` — stage 1 of the
 /// pipeline (plan.md §1.1).
 pub(crate) fn parse(command: &str) -> Result<CommandLine, ParseError> {
-    let command = neutralize_overflowing_io_redirect_numbers(command);
+    let command = strip_raw_line_continuations(command);
+    let command = neutralize_overflowing_io_redirect_numbers(command.as_ref());
     let command = command.as_ref();
     reject_excessive_raw_nesting(command)?;
 

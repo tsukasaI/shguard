@@ -176,6 +176,43 @@ fn keyword_nesting_is_not_defeated_by_closer_words_in_argument_position() {
     assert_eq!(permission_decision(&output), "ask");
 }
 
+// ==== B-1 follow-up: `\`+newline line continuations inside the raw scan ====
+//
+// Issue #443: brush-parser's own tokenizer strips a `\`+newline line
+// continuation before recursing, but the raw pre-scans above tokenized the
+// UNSTRIPPED text — so splitting the exact keyword/`[[` shape those scans
+// look for across a continuation defeated detection entirely while
+// brush-parser rejoined and recursed on it anyway, reaching the same
+// uncatchable stack-overflow abort as the unsplit cases above.
+// `src/parser.rs::strip_raw_line_continuations` closes this by removing
+// every such pair before either raw scan runs.
+
+/// Before the fix: same abort as `deep_if_nesting_fails_closed_to_ask_instead_of_aborting`
+/// above, but every `if` keyword is split as `i\<newline>f` — the raw
+/// keyword scan never recognized the split token as `if` at all, so
+/// `MAX_KEYWORD_NESTING_COUNT` was never enforced and brush-parser's own
+/// tokenizer (which does strip the continuation) recursed unboundedly.
+#[test]
+fn deep_if_nesting_split_by_line_continuation_fails_closed_to_ask_instead_of_aborting() {
+    let command = format!(
+        "{}echo body{}",
+        "i\\\nf true; then ".repeat(600),
+        "; fi".repeat(600)
+    );
+    let output = run_hook(&bash_command(&command));
+    assert_eq!(permission_decision(&output), "ask");
+}
+
+/// Before the fix: same abort as an unsplit long `[[ ! ! ! ... ]]` chain,
+/// but the `[[` opener itself is split as `[\<newline>[` — `in_extended_test`
+/// never turned on, so `MAX_RAW_EXTENDED_TEST_COUNT` was never enforced.
+#[test]
+fn deep_extended_test_negation_split_by_line_continuation_fails_closed_to_ask() {
+    let command = format!("[\\\n[ {}x ]]", "! ".repeat(3000));
+    let output = run_hook(&bash_command(&command));
+    assert_eq!(permission_decision(&output), "ask");
+}
+
 // ==== B-2: stdin size cap ====
 
 /// Before the fix: stdin was read to completion with no bound at all.
