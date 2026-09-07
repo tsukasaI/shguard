@@ -533,15 +533,15 @@ mod tests {
         assert_ne!(permission_reason(&output), "use --force-with-lease instead");
     }
 
-    /// Fable-review follow-up to #471's `fold_worst` tie-message-borrow
-    /// (issue #202's regression class): a compound line with TWO different
-    /// `[[deny]]`-matched Blocks tied at the same decision must never let
-    /// one rule's `deny_message` end up paired with the OTHER rule's
-    /// `matched_rule_id` in the output/decision log -- `fold_worst`'s
-    /// borrow is restricted to structural-vs-structural (`matched_rule()
-    /// .is_none()` on both sides) specifically to prevent this.
+    /// `fold_worst`'s documented tie contract: the FIRST-encountered simple
+    /// command's verdict wins a same-decision tie outright, including its
+    /// `deny_message` (or lack of one) -- it never borrows the other side's
+    /// message. A compound line with TWO different `[[deny]]`-matched
+    /// Blocks tied at the same decision must resolve to the first rule's
+    /// own reason and its own (absent) deny_message, never a mix of one
+    /// rule's message with the other's `matched_rule_id`.
     #[test]
-    fn fold_worst_tie_never_cross_wires_two_different_rules_deny_messages() {
+    fn fold_worst_tie_keeps_first_matched_rules_own_reason_and_message() {
         let blocklist = crate::rules::Rules::embedded().unwrap();
         let allowlist = crate::rules::Allowlist::embedded().unwrap();
         let user_config = crate::rules::UserConfig::parse(
@@ -564,26 +564,25 @@ mod tests {
             ask_outcome: crate::rules::AskOutcome::default(),
         };
 
-        // `rm -rf /` (embedded rule, no deny_message of its own) and
-        // `mytool --force` (user rule, its own deny_message) are both
-        // Block -- a decision tie `fold_worst` must resolve without
-        // borrowing the user rule's message onto the embedded rule's own
-        // reason/matched_rule_id (or vice versa).
+        // `rm -rf /` (embedded rule, first simple command, no deny_message
+        // of its own) and `mytool --force` (user rule, second simple
+        // command, its own deny_message) are both Block -- a decision tie
+        // must resolve to the FIRST simple command's own reason and its
+        // own (absent) deny_message, never a mix of the two rules.
         let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"rm -rf / ; mytool --force"}}"#;
         let output = handle_with_policy(stdin, &policy, &crate::FileDecisionLog);
         assert_eq!(permission_decision(&output), "deny");
-        let reason = permission_reason(&output);
-        let context = output["hookSpecificOutput"]["additionalContext"].as_str();
-        if reason.contains("rm-recursive-force-dangerous-target") {
-            assert_eq!(
-                context, None,
-                "the embedded rm rule's own reason must not be paired with the user rule's \
-                 deny_message, got: {context:?}"
-            );
-        } else {
-            assert!(reason.contains("user-deny-mytool-force"));
-            assert_eq!(context, Some("use --force-with-lease instead"));
-        }
+        assert!(
+            permission_reason(&output).contains("rm-recursive-force-dangerous-target"),
+            "expected the first-encountered rule's own reason to win the tie, got: {}",
+            permission_reason(&output)
+        );
+        assert_eq!(
+            output["hookSpecificOutput"]["additionalContext"].as_str(),
+            None,
+            "the first rule's own (absent) deny_message must not be replaced by the second \
+             rule's message"
+        );
     }
 
     #[test]
@@ -608,11 +607,11 @@ mod tests {
     // every possible structural Ask in every category always carries a
     // message: `apply_expansion_floor`'s heredoc-floor site in particular
     // is order-dependent -- `raise_expansion_floor` keeps the FIRST reason
-    // raised at a tied Ask decision, so a sibling floor (an unresolved
-    // redirection target, an escalation-floor `sudo`, an unresolved
-    // assignment value) raised before the non-shell-interpreter heredoc
-    // floor wins the reason text and this category's deny_message never
-    // attaches, even though `python3 - <<EOF` alone (no sibling floor)
+    // raised at a tied Ask decision, so a sibling floor (e.g. a
+    // substitution in an assignment value or a redirection target) raised
+    // before the non-shell-interpreter heredoc floor wins the reason text
+    // and this category's deny_message never attaches, even though
+    // `python3 - <<EOF` alone (no sibling floor)
     // does get it (see the test below). Disclosed rather than fixed here:
     // closing it needs the same wider `Option<DenyMessage>` threading
     // through `raise_expansion_floor`'s ~18 shared call sites that
@@ -646,38 +645,6 @@ mod tests {
             additional_context(&output),
             "Write the program to a file and run that file instead (e.g. `python3 file.py`, \
              `awk -f prog.awk`) — inline interpreter code is never inspected."
-        );
-    }
-
-    /// Fable-review follow-up to #471: `fold_worst`'s same-decision tie
-    /// used to keep whichever side it saw first, dropping rule 5's
-    /// pipe-to-interpreter message when the message-less argument-position-
-    /// substitution Ask (issue #202's own disclosed gap, see the note at
-    /// the end of this module) happened to be evaluated first. A tie must
-    /// now still surface a message from either side rather than silently
-    /// losing it.
-    #[test]
-    fn pipe_to_interpreter_message_survives_a_tie_with_a_message_less_ask() {
-        let stdin =
-            r#"{"tool_name":"Bash","tool_input":{"command":"echo $(python3 -c \"x\") | bash"}}"#;
-        let output = handle(stdin);
-        assert_eq!(permission_decision(&output), "ask");
-        assert_eq!(
-            additional_context(&output),
-            "Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv \
-             is inspectable."
-        );
-        // `fold_worst`'s own "first simple command's argv/reason wins a
-        // tie" contract must still hold: the message is borrowed from the
-        // pipeline-shape verdict, but the surviving reason must still be
-        // whichever simple command `fold_worst` saw first, not silently
-        // replaced by the pipeline-shape verdict's own reason too.
-        assert!(
-            permission_reason(&output)
-                .contains("argument-position command/backquote or process substitution"),
-            "expected the first-encountered simple command's own reason to survive the tie, \
-             got: {}",
-            permission_reason(&output)
         );
     }
 

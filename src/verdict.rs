@@ -253,7 +253,12 @@ impl Verdict {
     ///   `fold_floors`'s `substitution_result` and independently via
     ///   `apply_leftover_substitution_floor` at several early-return
     ///   sites), argument-position substitution recursion
-    ///   (`evaluate_argument_substitutions`'s `substitution_result`),
+    ///   (`evaluate_argument_substitutions`'s `substitution_result` — this
+    ///   is also why a same-decision `fold_worst` tie can drop a later
+    ///   stage's structural `deny_message` entirely, e.g.
+    ///   `echo $(python3 -c "x") | bash` loses the pipe-to-interpreter
+    ///   message to the message-less substitution-recursion Ask that ties
+    ///   it first; issue #495 tracks fixing both via this same site),
     ///   `flock`/`su -c` and `find -exec`'s shared shell-string floor
     ///   (`scan_recursable_slots`), and expansion-position recursion
     ///   (`scan_word_expansions`/`scan_redirection_expansions`, the latter
@@ -277,12 +282,12 @@ impl Verdict {
     /// those reasons — the non-shell-interpreter heredoc floor — has a
     /// `deny_message` attached (matched by its own reason-string prefix,
     /// `src/gate.rs`'s `NONSHELL_HEREDOC_REASON_PREFIX`), so a sibling
-    /// same-decision floor (an unresolved redirection target, an
-    /// escalation floor, an unresolved assignment value) raised earlier in
-    /// scan order silently wins the reason text and this category's
-    /// message never attaches, even on a command that would otherwise get
-    /// it in isolation. Same tuple-shape limitation as the case above;
-    /// closing it needs the same wider threading.
+    /// same-decision floor (e.g. a substitution in an assignment value or
+    /// a redirection target) raised earlier in scan order silently wins
+    /// the reason text and this category's message never attaches, even
+    /// on a command that would otherwise get it in isolation. Same
+    /// tuple-shape limitation as the case above; closing it needs the
+    /// same wider threading.
     #[must_use]
     pub fn with_deny_message(mut self, deny_message: Option<DenyMessage>) -> Self {
         match &mut self.detail {
