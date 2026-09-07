@@ -210,7 +210,7 @@ fn main() {
                 io::stderr(),
                 "shguard: unrecognized arguments {rest:?} (known commands: --version, \
                  --check-config (neither taking further arguments), check <command> \
-                 [--json], init [--force])"
+                 [--json] [--permission-mode <mode>], init [--force])"
             );
             std::process::exit(2);
         }
@@ -538,13 +538,25 @@ fn check_config() -> i32 {
     1
 }
 
-/// `shguard check <command> [--json]` (issue #109): a dry-run mode that
-/// prints the [`shguard::analyze_with_policy`] verdict for a command string
-/// given directly on the command line, instead of through the PreToolUse
+/// `shguard check <command> [--json] [--permission-mode <mode>]` (issue
+/// #109): a dry-run mode that prints the
+/// [`shguard::analyze_with_policy`] verdict for a command string given
+/// directly on the command line, instead of through the PreToolUse
 /// stdin contract [`run`] otherwise only ever serves. Exists so rule
 /// authors can iterate on a config change and immediately see the
 /// resulting decision, and so CI can assert a set of commands resolve to
 /// the expected decision without an agent or hook wiring in the loop.
+///
+/// `--permission-mode <mode>` (issue #469) reproduces exactly what the
+/// PreToolUse hook would have seen for that `permission_mode` value —
+/// parsed with the same [`shguard::PermissionMode::parse`] the hook stdin
+/// path uses, so a replay resolves a table-form `ask_outcome` config
+/// identically to a real hook invocation carrying the same mode. Omitted,
+/// this subcommand builds [`shguard::HookContext::none`] exactly as it did
+/// before this flag existed — `permission_mode`/`agent_id` both absent,
+/// resolving a `[ask_outcome]` table's per-mode floor the same
+/// conservative way an `Unknown` mode does (`Ask`, unless the config used
+/// #467's bare-string form instead).
 ///
 /// Always evaluates through [`shguard::analyze_with_policy`] — the exact
 /// same pipeline [`run`] hands a real hook payload's command to — never a
@@ -586,10 +598,17 @@ fn check_config() -> i32 {
 /// Writes via `writeln!` (discarding the write error), not
 /// `println!`/`eprintln!`, for the same broken-pipe reasoning
 /// [`install_panic_hook`]'s own docs give.
+/// Usage string shared by every `run_check` argument-error path — kept as
+/// one constant so `--permission-mode`'s addition (issue #469) didn't need
+/// updating at each of the several call sites separately.
+const CHECK_USAGE: &str = "usage: shguard check <command> [--json] [--permission-mode <mode>]";
+
 fn run_check(args: &[std::ffi::OsString]) -> i32 {
     let mut json = false;
+    let mut permission_mode: Option<&std::ffi::OsString> = None;
     let mut command: Option<&std::ffi::OsString> = None;
-    for arg in args {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
         // Compared against `&str` directly (not through `arg.to_str()`
         // first) so a non-UTF-8 first positional is still captured as
         // `command` below rather than silently misdiagnosed by this loop
@@ -597,13 +616,21 @@ fn run_check(args: &[std::ffi::OsString]) -> i32 {
         // then reachable and gives the precise reason.
         if arg == "--json" {
             json = true;
+        } else if arg == "--permission-mode" {
+            let Some(value) = iter.next() else {
+                let _ = writeln!(
+                    io::stderr(),
+                    "shguard check: --permission-mode requires a value ({CHECK_USAGE})"
+                );
+                return 2;
+            };
+            permission_mode = Some(value);
         } else if command.is_none() {
             command = Some(arg);
         } else {
             let _ = writeln!(
                 io::stderr(),
-                "shguard check: unexpected argument {arg:?} (usage: shguard check \
-                 <command> [--json])"
+                "shguard check: unexpected argument {arg:?} ({CHECK_USAGE})"
             );
             return 2;
         }
@@ -611,7 +638,7 @@ fn run_check(args: &[std::ffi::OsString]) -> i32 {
     let Some(command) = command else {
         let _ = writeln!(
             io::stderr(),
-            "shguard check: missing <command> (usage: shguard check <command> [--json])"
+            "shguard check: missing <command> ({CHECK_USAGE})"
         );
         return 2;
     };
@@ -619,6 +646,27 @@ fn run_check(args: &[std::ffi::OsString]) -> i32 {
         let _ = writeln!(io::stderr(), "shguard check: <command> must be valid UTF-8");
         return 2;
     };
+    // Reproduces exactly what the hook path would have seen for this same
+    // `permission_mode` value (issue #469's own recommended design: a
+    // `--permission-mode` flag over threading an `Option<PermissionMode>`
+    // through `analyze_with_policy` itself), including a non-UTF-8 value —
+    // `PermissionMode::parse` takes `&str`, so a non-UTF-8 flag value fails
+    // closed with a precise reason rather than being silently misdiagnosed
+    // as "unexpected argument" the way an unparsed positional would be.
+    let permission_mode = match permission_mode {
+        None => None,
+        Some(value) => match value.to_str() {
+            Some(value) => Some(shguard::PermissionMode::parse(value)),
+            None => {
+                let _ = writeln!(
+                    io::stderr(),
+                    "shguard check: --permission-mode value must be valid UTF-8"
+                );
+                return 2;
+            }
+        },
+    };
+    let context = shguard::HookContext::new(permission_mode, None, None);
 
     let policy = match shguard::config::Policy::load() {
         Ok(policy) => policy,
@@ -640,7 +688,7 @@ fn run_check(args: &[std::ffi::OsString]) -> i32 {
         }
     };
 
-    let verdict = match evaluate_with_timeout(command, &policy) {
+    let verdict = match evaluate_with_timeout(command, &policy, &context) {
         Ok(verdict) => verdict,
         Err(err) => {
             let message = match err {
@@ -751,9 +799,11 @@ enum EvalTimeoutError {
 fn evaluate_with_timeout(
     command: &str,
     policy: &shguard::config::Policy,
+    context: &shguard::HookContext,
 ) -> Result<shguard::verdict::Verdict, EvalTimeoutError> {
     let owned_command = command.to_string();
     let owned_policy = policy.clone();
+    let owned_context = context.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     let spawned = std::thread::Builder::new()
         .name("shguard-check-eval".to_string())
@@ -761,7 +811,7 @@ fn evaluate_with_timeout(
             let verdict = shguard::analyze_with_policy(
                 &owned_command,
                 &owned_policy,
-                &shguard::HookContext::none(),
+                &owned_context,
                 &shguard::FileDecisionLog,
             );
             // A closed receiver means the timeout already fired and the
@@ -774,7 +824,7 @@ fn evaluate_with_timeout(
         return Ok(shguard::analyze_with_policy(
             command,
             policy,
-            &shguard::HookContext::none(),
+            context,
             &shguard::FileDecisionLog,
         ));
     };
@@ -854,7 +904,7 @@ fn run() -> serde_json::Value {
         .read_to_string(&mut stdin)
     {
         Ok(_) if stdin.len() as u64 > MAX_STDIN_BYTES => shguard::adapter::fail_closed_with(
-            policy.ask_outcome(),
+            policy.ask_outcome(&shguard::HookContext::none()),
             &format!("shguard: stdin exceeds {MAX_STDIN_BYTES} bytes; refusing to evaluate"),
         ),
         Ok(_) => shguard::adapter::handle_with_policy(&stdin, &policy, &shguard::FileDecisionLog),
@@ -868,7 +918,7 @@ fn run() -> serde_json::Value {
         // fail-closed path that has a `Policy` in hand, not only
         // `analyze_with_policy`'s own structural `Ask`s).
         Err(err) => shguard::adapter::fail_closed_with(
-            policy.ask_outcome(),
+            policy.ask_outcome(&shguard::HookContext::none()),
             &format!("shguard: could not read stdin: {err}"),
         ),
     }

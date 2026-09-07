@@ -310,7 +310,12 @@ fn check_nonexistent_config_path_exits_with_usage_error() {
 
 // Issue #468: `permission_mode` (and, inside a subagent, `agent_id`/
 // `agent_type`) is read from PreToolUse stdin and recorded on the decision
-// log, but must never change the Allow/Ask/Block decision itself. Each
+// log. With no `ask_outcome` configured (this file's `run_hook` never sets
+// `SHGUARD_CONFIG`, so the embedded-only default `ask_outcome =
+// AskOutcome::Global(Decision::Ask)` applies), it never changes the
+// Allow/Ask/Block decision either — issue #469's `[ask_outcome]` table is
+// the one config shape that does key a decision off `permission_mode`/
+// `agent_id` (see `tests/ask_outcome_per_mode.rs`), out of scope here. Each
 // variant below is asserted against the SAME fixed command to prove that.
 
 /// The command whose decision must stay identical across every

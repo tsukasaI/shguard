@@ -351,8 +351,10 @@ fn malformed_stdin_asks_with_no_ask_outcome_configured() {
 }
 
 /// Malformed stdin JSON emits `deny` once `ask_outcome = "deny"` is
-/// configured: `crate::adapter::respond` passes the loaded `Policy`'s own
-/// `ask_outcome()` into `fail_closed_with` for exactly this path.
+/// configured: `crate::adapter::respond` resolves the loaded `Policy`'s own
+/// `ask_outcome` against this failure's context (`HookContext::none()`,
+/// since the JSON never parsed) into `fail_closed_with` for exactly this
+/// path.
 #[test]
 fn malformed_stdin_denies_when_ask_outcome_is_deny() {
     let (_dir, config_path) = write_config(
@@ -405,7 +407,8 @@ fn oversized_stdin_asks_with_no_ask_outcome_configured() {
 
 /// The same oversized-stdin path denies under `ask_outcome = "deny"`:
 /// `run` (`src/bin/shguard.rs`) already has `policy` loaded at this point,
-/// and passes `policy.ask_outcome()` into `fail_closed_with`.
+/// and resolves `policy.ask_outcome(&HookContext::none())` into
+/// `fail_closed_with`.
 #[test]
 fn oversized_stdin_denies_when_ask_outcome_is_deny() {
     const MAX_STDIN_BYTES: usize = 10 * 1024 * 1024;

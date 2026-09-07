@@ -5005,34 +5005,216 @@ fn parse_escalation_floor(raw: Option<&str>) -> Result<Decision, RulesError> {
     }
 }
 
-/// Parses the optional top-level `ask_outcome` user-config key (issue
-/// #467) into a [`Decision`], defaulting to `Decision::Ask` — today's
-/// unmodified behavior — when absent. `"deny"` maps to `Decision::Block`;
-/// [`crate::analyze_with_policy`] (`src/lib.rs`) floors every terminal
-/// `Ask` verdict it would otherwise return to this decision: most `Ask`
-/// verdicts the hook emits in practice are a structural fallback (an
-/// unresolved `$VAR`/`$(...)`, an interpreter heredoc/inline script, a
-/// parser-unsupported construct) that an autonomous session cannot
-/// resolve, though the embedded blocklist also carries 21
-/// `decision = "ask"` rules (e.g. `tar-directory-root-or-home`, the
-/// credential-shaped `[[token]]` floor) that this key floors too — none
-/// of which are any more actionable to an unattended session than a
-/// structural one is, and `Ask` is not even a reliable control under
-/// `bypassPermissions` (anthropics/claude-code#37420). `"allow"` is
-/// rejected the same way [`parse_escalation_floor`] rejects it for
-/// `escalation_floor`: there is no config mechanism that turns a genuine
-/// `Ask` into a silent `Allow`. Named `ask_outcome`, not `ask_floor`, to
-/// avoid colliding with `crate::gate`'s existing `apply_ask_floor` (an
+/// A single `"ask"`/`"deny"` slot shared by every `ask_outcome` shape
+/// (issues #467/#469): the top-level bare-string form, and each per-mode
+/// table key. `"allow"` is rejected the same way [`parse_escalation_floor`]
+/// rejects it for `escalation_floor`: there is no config mechanism that
+/// turns a genuine `Ask` into a silent `Allow`.
+fn parse_ask_outcome_value(raw: &str) -> Result<Decision, RulesError> {
+    match raw {
+        "ask" => Ok(Decision::Ask),
+        "deny" => Ok(Decision::Block),
+        other => Err(RulesError::invalid(
+            "ask_outcome",
+            format!("ask_outcome must be \"ask\" or \"deny\", got {other:?}"),
+        )),
+    }
+}
+
+/// A per-mode table key: absent keeps the built-in default `Decision::Ask`
+/// (issue #469's "any unset table key keeps the built-in default \"ask\""),
+/// present goes through [`parse_ask_outcome_value`].
+fn parse_ask_outcome_slot(raw: Option<&str>) -> Result<Decision, RulesError> {
+    match raw {
+        None => Ok(Decision::Ask),
+        Some(raw) => parse_ask_outcome_value(raw),
+    }
+}
+
+/// The resolved `ask_outcome` user-config key (issues #467/#469): either
+/// the bare-string form's single [`Decision`] (`Global`), applied to every
+/// terminal `Ask` unconditionally regardless of `permission_mode`/
+/// `agent_id` — this is NOT the same as a `PerMode` table with every slot
+/// set to the same value, since a `PerMode` table still floors an absent
+/// or `Unknown` `permission_mode` to `Ask` (see [`AskOutcomeTable::resolve`]),
+/// which would silently narrow #467's existing unconditional-floor
+/// behavior for a caller with no `permission_mode` in hand at all (e.g.
+/// `shguard check` before issue #469's own `--permission-mode` flag) — or
+/// the per-`permission_mode` table (`PerMode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AskOutcome {
+    Global(Decision),
+    PerMode(AskOutcomeTable),
+}
+
+impl Default for AskOutcome {
+    /// The absent-key default: `Global(Decision::Ask)`, today's unmodified
+    /// (pre-#467) behavior.
+    fn default() -> Self {
+        Self::Global(Decision::Ask)
+    }
+}
+
+impl AskOutcome {
+    /// Resolves the effective [`Decision`] for one hook call. `Global`
+    /// ignores `permission_mode`/`agent_id` entirely, by construction (see
+    /// this type's own docs); `PerMode` defers to
+    /// [`AskOutcomeTable::resolve`].
+    #[must_use]
+    pub(crate) fn resolve(
+        &self,
+        permission_mode: Option<&crate::PermissionMode>,
+        agent_id: Option<&str>,
+    ) -> Decision {
+        match self {
+            Self::Global(decision) => *decision,
+            Self::PerMode(table) => table.resolve(permission_mode, agent_id),
+        }
+    }
+}
+
+/// The `[ask_outcome]` per-mode table (issue #469): one slot per
+/// `permission_mode` value the hook stdin documents, plus an optional
+/// `subagent` override. Every slot defaults to `Decision::Ask` when the
+/// user config's table omits it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AskOutcomeTable {
+    default: Decision,
+    plan: Decision,
+    accept_edits: Decision,
+    auto: Decision,
+    dont_ask: Decision,
+    bypass_permissions: Decision,
+    /// `None` means "inherit the mode-keyed value" (issue #469: "overrides
+    /// the mode value when `agent_id` is present" implies no override at
+    /// all when this key is absent) — distinct from the six mode slots
+    /// above, whose own absence instead means the built-in default `Ask`.
+    subagent: Option<Decision>,
+}
+
+impl AskOutcomeTable {
+    /// `permission_mode: None` covers both "the hook stdin omitted the
+    /// field" and "this caller has no hook stdin at all" (`shguard check`
+    /// with no `--permission-mode` flag, or a pre-parse composition-root
+    /// fail-closed path that never got far enough to read it) — resolved
+    /// the same conservative way `Some(Unknown(_))` is: `Decision::Ask`,
+    /// regardless of what the table configures for any named mode, since
+    /// this binary has no basis for narrowing an autonomous-session floor
+    /// to a mode it cannot identify.
+    ///
+    /// The `subagent` override is checked FIRST, before the mode lookup —
+    /// including before the `None`/`Unknown` fallback above — because
+    /// `agent_id`'s presence is itself a fact this binary understands
+    /// (issue #468 already reads it off the hook stdin) independent of
+    /// whether `permission_mode` also parsed to a recognized value; a
+    /// configured `subagent` override is meant to apply to every subagent
+    /// call, not only ones whose `permission_mode` also happens to be
+    /// recognized.
+    #[must_use]
+    fn resolve(
+        &self,
+        permission_mode: Option<&crate::PermissionMode>,
+        agent_id: Option<&str>,
+    ) -> Decision {
+        if agent_id.is_some()
+            && let Some(subagent) = self.subagent
+        {
+            return subagent;
+        }
+        match permission_mode {
+            None => Decision::Ask,
+            Some(crate::PermissionMode::Unknown(_)) => Decision::Ask,
+            Some(crate::PermissionMode::Default) => self.default,
+            Some(crate::PermissionMode::Plan) => self.plan,
+            Some(crate::PermissionMode::AcceptEdits) => self.accept_edits,
+            Some(crate::PermissionMode::Auto) => self.auto,
+            Some(crate::PermissionMode::DontAsk) => self.dont_ask,
+            Some(crate::PermissionMode::BypassPermissions) => self.bypass_permissions,
+        }
+    }
+}
+
+/// The `[ask_outcome]` table shape (issue #469's documented keys — exact
+/// stdin spellings, e.g. `default`, never `manual`). `deny_unknown_fields`
+/// fails config load closed on any other key, the same posture
+/// [`UserConfigFileDto`] already applies at the top level.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AskOutcomeTableDto {
+    #[serde(default)]
+    default: Option<String>,
+    #[serde(default)]
+    plan: Option<String>,
+    #[serde(default, rename = "acceptEdits")]
+    accept_edits: Option<String>,
+    #[serde(default)]
+    auto: Option<String>,
+    #[serde(default, rename = "dontAsk")]
+    dont_ask: Option<String>,
+    #[serde(default, rename = "bypassPermissions")]
+    bypass_permissions: Option<String>,
+    #[serde(default)]
+    subagent: Option<String>,
+}
+
+/// Parses the optional top-level `ask_outcome` user-config key (issues
+/// #467/#469) into an [`AskOutcome`], defaulting to
+/// `AskOutcome::Global(Decision::Ask)` — today's unmodified behavior —
+/// when absent. Accepts either #467's bare string or #469's per-mode
+/// table (see [`AskOutcome`]'s own docs for why these are not
+/// interchangeable) — dispatched on the raw [`toml::Value`]'s own kind
+/// rather than a `#[serde(untagged)]` enum, since an untagged enum's
+/// deserialize failure collapses every candidate variant's error into one
+/// generic "data did not match any variant" message, losing exactly the
+/// `unknown field \"foo\"` detail `deny_unknown_fields` exists to report
+/// for a mistyped table key.
+///
+/// [`crate::analyze_with_policy`]/[`crate::adapter::respond`] resolve this
+/// against the hook call's actual `permission_mode`/`agent_id` (see
+/// [`AskOutcome::resolve`]) — most `Ask` verdicts the hook emits in
+/// practice are a structural fallback (an unresolved `$VAR`/`$(...)`, an
+/// interpreter heredoc/inline script, a parser-unsupported construct) that
+/// an autonomous session cannot resolve, though the embedded blocklist
+/// also carries 21 `decision = "ask"` rules (e.g.
+/// `tar-directory-root-or-home`, the credential-shaped `[[token]]` floor)
+/// that this key floors too — none of which are any more actionable to an
+/// unattended session than a structural one is, and `Ask` is not even a
+/// reliable control under `bypassPermissions`
+/// (anthropics/claude-code#37420). Named `ask_outcome`, not `ask_floor`,
+/// to avoid colliding with `crate::gate`'s existing `apply_ask_floor` (an
 /// Allow-to-Ask floor) and rules 6b/6d's own "Ask floor" terminology —
 /// this key floors in the opposite direction (Ask-to-Block), after gate
 /// has already run, not during it.
-fn parse_ask_outcome(raw: Option<&str>) -> Result<Decision, RulesError> {
+fn parse_ask_outcome(raw: Option<&toml::Value>) -> Result<AskOutcome, RulesError> {
     match raw {
-        None | Some("ask") => Ok(Decision::Ask),
-        Some("deny") => Ok(Decision::Block),
+        None => Ok(AskOutcome::default()),
+        Some(toml::Value::String(raw)) => parse_ask_outcome_value(raw).map(AskOutcome::Global),
+        Some(table @ toml::Value::Table(_)) => {
+            let dto: AskOutcomeTableDto = table
+                .clone()
+                .try_into()
+                .map_err(|err| RulesError::invalid("ask_outcome", err.to_string()))?;
+            let subagent = dto
+                .subagent
+                .as_deref()
+                .map(parse_ask_outcome_value)
+                .transpose()?;
+            Ok(AskOutcome::PerMode(AskOutcomeTable {
+                default: parse_ask_outcome_slot(dto.default.as_deref())?,
+                plan: parse_ask_outcome_slot(dto.plan.as_deref())?,
+                accept_edits: parse_ask_outcome_slot(dto.accept_edits.as_deref())?,
+                auto: parse_ask_outcome_slot(dto.auto.as_deref())?,
+                dont_ask: parse_ask_outcome_slot(dto.dont_ask.as_deref())?,
+                bypass_permissions: parse_ask_outcome_slot(dto.bypass_permissions.as_deref())?,
+                subagent,
+            }))
+        }
         Some(other) => Err(RulesError::invalid(
             "ask_outcome",
-            format!("ask_outcome must be \"ask\" or \"deny\", got {other:?}"),
+            format!(
+                "ask_outcome must be a string or a table, got {}",
+                other.type_str()
+            ),
         )),
     }
 }
@@ -6471,7 +6653,7 @@ struct UserConfigFileDto {
     #[serde(default)]
     decision_log_path: Option<String>,
     #[serde(default)]
-    ask_outcome: Option<String>,
+    ask_outcome: Option<toml::Value>,
 }
 
 /// A user-supplied policy config, parsed and validated but not yet merged
@@ -6485,7 +6667,7 @@ pub(crate) struct UserConfig {
     pipeline: Vec<PipelineRule>,
     escalation_floor: Decision,
     decision_log_path: Option<String>,
-    ask_outcome: Decision,
+    ask_outcome: AskOutcome,
 }
 
 impl UserConfig {
@@ -6545,7 +6727,7 @@ impl UserConfig {
             .collect::<Result<Vec<_>, _>>()?;
         let escalation_floor = parse_escalation_floor(dto.escalation_floor.as_deref())?;
         let decision_log_path = parse_decision_log_path(dto.decision_log_path.as_deref())?;
-        let ask_outcome = parse_ask_outcome(dto.ask_outcome.as_deref())?;
+        let ask_outcome = parse_ask_outcome(dto.ask_outcome.as_ref())?;
 
         reject_duplicate_ids(
             deny.iter()
@@ -6630,16 +6812,16 @@ impl UserConfig {
         self.decision_log_path.as_deref()
     }
 
-    /// The top-level `ask_outcome` user-config key (issue #467), defaulting
-    /// to [`Decision::Ask`] when absent — see [`parse_ask_outcome`]. Read
-    /// off the real config-file parse alone by
+    /// The top-level `ask_outcome` user-config key (issues #467/#469),
+    /// defaulting to [`AskOutcome::default`] when absent — see
+    /// [`parse_ask_outcome`]. Read off the real config-file parse alone by
     /// [`crate::config::Policy::load`], the same way
     /// [`Self::decision_log_path`] is: the self-protection synthetic TOMLs
     /// this parser also processes never carry this key, so there is
     /// nothing to fold across multiple merges the way `escalation_floor`
     /// needs `.max()` for.
     #[must_use]
-    pub(crate) fn ask_outcome(&self) -> Decision {
+    pub(crate) fn ask_outcome(&self) -> AskOutcome {
         self.ask_outcome
     }
 }
