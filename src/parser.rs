@@ -100,6 +100,20 @@ impl ParseError {
             construct: construct.into(),
         }
     }
+
+    /// The unsupported construct's own description, for issue #471's
+    /// category-specific `DenyMessage` at `crate::gate`'s top-level parse
+    /// failure site — `None` for [`Self::Syntax`] (a genuine syntax error
+    /// names no specific construct to point the agent at). Exposed as a
+    /// method rather than a public field: `construct`/`message` stay
+    /// private to this module, matching this enum's other fields.
+    #[must_use]
+    pub(crate) fn unsupported_construct(&self) -> Option<&str> {
+        match self {
+            Self::Unsupported { construct } => Some(construct),
+            Self::Syntax { .. } => None,
+        }
+    }
 }
 
 fn parser_options() -> BrushParserOptions {

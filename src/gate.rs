@@ -346,6 +346,60 @@ use crate::verdict::{Decision, DenyMessage, Reason, RuleId, Verdict};
 /// see the module docs' "Substitution recursion and the depth cap" section.
 const MAX_SUBSTITUTION_DEPTH: usize = 8;
 
+/// Issue #471: category-specific `DenyMessage` guidance, attached via
+/// [`Verdict::with_deny_message`] at each structural `Ask` site below —
+/// one constant/function per row of the issue's own guidance table. Plain
+/// data, not logic: which constant applies is decided at each call site by
+/// which structural rule produced the `Ask`, already known there without
+/// re-deriving it.
+const DENY_MSG_BARE_VAR: &str =
+    "Expand the variable yourself and re-issue the command with the literal path or binary name.";
+const DENY_MSG_INLINE_INTERPRETER: &str = "Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f \
+     prog.awk`) — inline interpreter code is never inspected.";
+const DENY_MSG_COMMAND_SUBSTITUTION: &str =
+    "Run the substitution first, then call the resulting binary literally.";
+const DENY_MSG_UNRESOLVED_TARGET: &str = "Resolve the target literally so the rule can check it.";
+const DENY_MSG_PIPE_TO_INTERPRETER: &str = "Run the file directly (e.g. `bash file.sh`) instead \
+     of piping it in, so the argv is inspectable.";
+const DENY_MSG_IFS: &str =
+    "Rewrite the command without `$IFS`; there is no benign interactive use for it.";
+
+/// Category-3 guidance (issue #471): a construct this module cannot
+/// statically resolve at all. Names the specific construct — the issue's
+/// own "name the construct" requirement — via whichever description is
+/// already available at the call site: [`crate::parser::ParseError::unsupported_construct`]'s
+/// text for a construct the parser itself rejects, or [`UnresolvableKind`]'s
+/// `Debug` spelling for one that parses but that `crate::normalize` could
+/// not fold to a value.
+fn deny_msg_unsupported_construct(construct: &str) -> DenyMessage {
+    DenyMessage::new(format!(
+        "shguard cannot statically analyze this construct ({construct}); use its literal form, \
+         or split the command across separate lines so each piece is inspectable."
+    ))
+}
+
+/// Category-3 guidance for the subset of [`UnresolvableKind`] that names an
+/// actual shell construct the agent could rewrite (`$((...))`, a process
+/// substitution, or a structurally-unsupported word shape) — `None` for
+/// every other kind (`NonUtf8`/`ExpansionLimit`/`EmbeddedNul` are encoding/
+/// resource-limit conditions, not a construct to name, and
+/// `ParameterExpansion`/`CommandSubstitution` already get their own
+/// category-1/category-4 message at their own call sites).
+fn deny_msg_for_unresolvable_kind(kind: UnresolvableKind) -> Option<DenyMessage> {
+    match kind {
+        UnresolvableKind::ArithmeticExpansion
+        | UnresolvableKind::ProcessSubstitution
+        | UnresolvableKind::UnsupportedStructure => {
+            Some(deny_msg_unsupported_construct(&format!("{kind:?}")))
+        }
+        UnresolvableKind::CommandSubstitution
+        | UnresolvableKind::ParameterExpansion
+        | UnresolvableKind::NonUtf8
+        | UnresolvableKind::ExpansionLimit
+        | UnresolvableKind::EmbeddedNul => None,
+    }
+}
+
 /// Analyzes a raw shell command line: parse -> per-simple-command normalise
 /// -> rules -> structural gate -> worst-decision-wins fold across every
 /// simple command on the line (`crate::verdict::Decision`'s `Ord`).
@@ -443,10 +497,16 @@ fn analyze_at_depth(
 
     match parser::parse(command) {
         Ok(command_line) => evaluate_command_line(&command_line, rules, allowlist, depth, &mut cwd),
-        Err(err) => Verdict::ask(
-            Reason::new(format!("could not parse command: {err}")),
-            Vec::new(),
-        ),
+        Err(err) => {
+            let deny_message = err
+                .unsupported_construct()
+                .map(deny_msg_unsupported_construct);
+            Verdict::ask(
+                Reason::new(format!("could not parse command: {err}")),
+                Vec::new(),
+            )
+            .with_deny_message(deny_message)
+        }
     }
 }
 
@@ -1373,13 +1433,16 @@ fn evaluate_pipeline_shape(stages: &[Vec<NormalizedWord>]) -> Option<Verdict> {
             None,
         ))
     } else {
-        Some(Verdict::ask(
-            Reason::new(
-                "pipeline pipes into an interpreter with no decode stage upstream; the piped \
-                 content cannot be statically verified",
-            ),
-            last.clone(),
-        ))
+        Some(
+            Verdict::ask(
+                Reason::new(
+                    "pipeline pipes into an interpreter with no decode stage upstream; the \
+                     piped content cannot be statically verified",
+                ),
+                last.clone(),
+            )
+            .with_deny_message(Some(DenyMessage::new(DENY_MSG_PIPE_TO_INTERPRETER))),
+        )
     }
 }
 
@@ -2518,6 +2581,7 @@ fn evaluate_simple_command_core(
             );
         }
         Resolution::Unresolvable(kind) => {
+            let kind = *kind;
             return apply_opaque_kind_floor(
                 apply_substitution_floor(
                     apply_leftover_command_floor(
@@ -2527,7 +2591,8 @@ fn evaluate_simple_command_core(
                                  command will run cannot be determined statically"
                             )),
                             argv,
-                        ),
+                        )
+                        .with_deny_message(deny_msg_for_unresolvable_kind(kind)),
                         leftover_command_floor,
                     ),
                     substitution_result,
@@ -3481,7 +3546,7 @@ fn apply_opaque_kind_floor(verdict: Verdict, kind: Option<UnresolvableKind>) -> 
         Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
         None => floor_reason,
     };
-    Verdict::ask(Reason::new(reason), argv)
+    Verdict::ask(Reason::new(reason), argv).with_deny_message(deny_msg_for_unresolvable_kind(kind))
 }
 
 /// Rules 4 and 4b's argument-position-ambiguity floors, bundled into one
@@ -3532,6 +3597,15 @@ fn fold_floors(
     // `fold_floors` never tries to keep floors' reasons separately
     // attributable either, so a `deny_message` present here gets the same
     // "always folded in" treatment.
+    // Issue #471: once no rule-authored `deny_message` applies, fall back to
+    // this function's own structural, category-specific guidance — in the
+    // same target-before-flags priority as the rule-authored case above,
+    // then interpreter-code (issue #471's category 2) before `$IFS`
+    // (category 7) before the opaque-kind floor (category 3), an ordering
+    // that only matters when more than one of these floors fires on the
+    // same command; whichever comes first here is what a caller sees, the
+    // same "one slot, priority order" shape the rule-authored branch above
+    // already established.
     let deny_message = except_floors
         .target
         .and_then(crate::rules::CommandRule::deny_message)
@@ -3540,7 +3614,18 @@ fn fold_floors(
                 .flags
                 .and_then(crate::rules::CommandRule::deny_message)
         })
-        .cloned();
+        .cloned()
+        .or_else(|| {
+            interpreter_code_floor
+                .is_some()
+                .then(|| DenyMessage::new(DENY_MSG_INLINE_INTERPRETER))
+        })
+        .or_else(|| {
+            (except_floors.target.is_some() || except_floors.flags.is_some())
+                .then(|| DenyMessage::new(DENY_MSG_UNRESOLVED_TARGET))
+        })
+        .or_else(|| ifs_floor.then(|| DenyMessage::new(DENY_MSG_IFS)))
+        .or_else(|| opaque_kind.and_then(deny_msg_for_unresolvable_kind));
 
     if let Some(reason) = interpreter_code_floor {
         decision = decision.max(Decision::Ask);
@@ -3658,6 +3743,7 @@ fn evaluate_command_position_substitution(
             ),
             argv,
         )
+        .with_deny_message(Some(DenyMessage::new(DENY_MSG_COMMAND_SUBSTITUTION)))
     }
 }
 
@@ -3720,7 +3806,8 @@ fn evaluate_command_position_bare_var(
                  command will run cannot be determined statically",
             ),
             argv,
-        );
+        )
+        .with_deny_message(Some(DenyMessage::new(DENY_MSG_BARE_VAR)));
     };
 
     let Some(value) = env.get(name) else {
@@ -3729,7 +3816,8 @@ fn evaluate_command_position_bare_var(
                 "command position `${name}` has no statically-known value on this command line"
             )),
             argv,
-        );
+        )
+        .with_deny_message(Some(DenyMessage::new(DENY_MSG_BARE_VAR)));
     };
 
     // Every distinct IFS interpretation worth trying, most-specific first:
@@ -3806,6 +3894,7 @@ fn evaluate_command_position_bare_var(
         )),
         primary_substituted.unwrap_or(argv),
     )
+    .with_deny_message(Some(DenyMessage::new(DENY_MSG_BARE_VAR)))
 }
 
 /// Rule 6a: `bash -c '<string>'`/`sh -c`/`zsh -c`/`dash -c`. Returns `None`

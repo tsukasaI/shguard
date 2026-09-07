@@ -546,4 +546,181 @@ mod tests {
                 .is_none()
         );
     }
+
+    // ==== issue #471: category-specific deny_message on every structural
+    // Ask, one test per row of the issue's guidance table, using the
+    // embedded-only `handle()` path (no user config involved) so each case
+    // exercises the plain structural `Ask` -- the majority path a caller
+    // with no `ask_outcome` configured actually sees ====
+
+    fn additional_context(output: &Value) -> &str {
+        output["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+    }
+
+    #[test]
+    fn bare_var_command_position_gets_expand_the_variable_guidance() {
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"$UNSETVAR foo"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "ask");
+        assert_eq!(
+            additional_context(&output),
+            "Expand the variable yourself and re-issue the command with the literal path or \
+             binary name."
+        );
+    }
+
+    #[test]
+    fn inline_interpreter_code_gets_write_to_a_file_guidance() {
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"python3 -c 'print(1)'"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "ask");
+        assert_eq!(
+            additional_context(&output),
+            "Write the program to a file and run that file instead (e.g. `python3 file.py`, \
+             `awk -f prog.awk`) — inline interpreter code is never inspected."
+        );
+    }
+
+    #[test]
+    fn awk_inline_script_gets_write_to_a_file_guidance() {
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"awk '{print}' file"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "ask");
+        assert_eq!(
+            additional_context(&output),
+            "Write the program to a file and run that file instead (e.g. `python3 file.py`, \
+             `awk -f prog.awk`) — inline interpreter code is never inspected."
+        );
+    }
+
+    #[test]
+    fn parser_unsupported_construct_is_named_in_the_guidance() {
+        // `${arr[@]}` -- an array-indexed parameter expansion --
+        // `src/parser.rs`'s `convert_parameter_expansion` rejects with
+        // `ParseError::Unsupported`, whose own `construct` description
+        // names the rejected shape; the message must include it (issue
+        // #471's "name the construct"), not fall back to a generic string.
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"echo ${arr[@]}"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "ask");
+        let context = additional_context(&output);
+        assert!(
+            context.contains("parameter expansion form"),
+            "expected the specific construct to be named, got {context:?}"
+        );
+        assert!(context.contains("shguard cannot statically analyze this construct"));
+    }
+
+    #[test]
+    fn arithmetic_expansion_is_named_in_the_guidance() {
+        // `$((...))` parses successfully (unlike `${arr[@]}`) but normalises
+        // to `Unresolvable(ArithmeticExpansion)` -- a different code path
+        // (`crate::gate`'s opaque-kind floor, not a `ParseError`) that must
+        // still name the construct.
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"echo $((1+1))"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "ask");
+        let context = additional_context(&output);
+        assert!(
+            context.contains("ArithmeticExpansion"),
+            "expected the specific construct to be named, got {context:?}"
+        );
+    }
+
+    #[test]
+    fn command_substitution_command_position_gets_run_first_guidance() {
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"$(echo ls)"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "ask");
+        assert_eq!(
+            additional_context(&output),
+            "Run the substitution first, then call the resulting binary literally."
+        );
+    }
+
+    #[test]
+    fn unresolvable_target_gets_resolve_the_target_guidance() {
+        // `rm -rf $(echo /)` matches the embedded `rm-recursive-force-\
+        // dangerous-target` rule's command+flags, but its target is an
+        // argument-position substitution -- the except-target floor
+        // (`crate::gate::fold_floors`), not a definite rule match, and that
+        // rule declares no `deny_message` of its own, so this exercises the
+        // structural fallback specifically.
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"rm -rf $(echo /)"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "ask");
+        assert_eq!(
+            additional_context(&output),
+            "Resolve the target literally so the rule can check it."
+        );
+    }
+
+    #[test]
+    fn pipe_to_interpreter_gets_run_the_file_directly_guidance() {
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"cat x.sh | bash"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "ask");
+        assert_eq!(
+            additional_context(&output),
+            "Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv \
+             is inspectable."
+        );
+    }
+
+    #[test]
+    fn ifs_derived_word_gets_rewrite_without_ifs_guidance() {
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"echo${IFS}hi"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "ask");
+        assert_eq!(
+            additional_context(&output),
+            "Rewrite the command without `$IFS`; there is no benign interactive use for it."
+        );
+    }
+
+    // ==== issue #202's regression class, applied to issue #471's new
+    // category-specific messages: the message must survive a recursion/
+    // re-wrap boundary, not be lost or silently replaced by a generic one ====
+
+    #[test]
+    fn bare_var_message_survives_a_bash_dash_c_rewrap() {
+        // `recurse_shell_string` (rule 6a's own recursion core) maps the
+        // recursed script's inner `Verdict` to an outer one carrying the
+        // outer `bash -c ...` argv -- the inner `Ask`'s deny_message (here,
+        // category 1's bare-`$VAR` guidance) must still be the one that
+        // reaches the top-level verdict, not a generic "bash -c recurses"
+        // fallback.
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"bash -c '$UNSETVAR foo'"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "ask");
+        assert_eq!(
+            additional_context(&output),
+            "Expand the variable yourself and re-issue the command with the literal path or \
+             binary name."
+        );
+        // The outer reason names the recursion, distinct from the inner
+        // deny_message -- confirms this is the re-wrapped outer verdict,
+        // not an accidental pass-through of the inner one's own reason.
+        assert!(permission_reason(&output).contains("recurses through the full pipeline"));
+    }
+
+    #[test]
+    fn unresolved_target_message_survives_an_argument_position_substitution() {
+        // The same case as `unresolvable_target_gets_resolve_the_target_guidance`,
+        // named explicitly as issue #202's "argument-position substitution"
+        // recursion class: `$(echo /)` is itself recursed and resolves
+        // cleanly (an inner `Allow`, rule 3's transparency), so the ONLY
+        // reason this stays `Ask` at all is the except-target floor -- the
+        // deny_message must come from that floor, not be dropped by the
+        // inner recursion's own transparent-Allow handling.
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"rm -rf $(echo /)"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "ask");
+        assert_eq!(
+            additional_context(&output),
+            "Resolve the target literally so the rule can check it."
+        );
+    }
 }
