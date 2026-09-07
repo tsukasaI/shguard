@@ -456,26 +456,31 @@ fn strip_raw_line_continuations_blind(command: &str) -> std::borrow::Cow<'_, str
 }
 
 /// Fails closed (`Ask`) if `command` contains both a `$'...'` (ANSI-C
-/// quoting) opener and a raw `\`+newline byte pair anywhere (issue #444):
-/// inside `$'...'`, brush-parser's tokenizer strips a `\`+newline pair the
-/// same way it does outside quotes, but real bash's ANSI-C decoding does
-/// not treat `\`+newline as one of its recognized escapes there and keeps
-/// the raw newline in the decoded value instead. When that decoded value
-/// is later recursed into as a nested script (e.g. `bash -c $'...'`), a
-/// `#` comment before the dropped continuation swallows a line brush
-/// itself never drops, letting a real command on that line go completely
-/// unanalyzed while bash still executes it.
+/// quoting) opener — checked in `command` itself and in `blind`, the
+/// already-computed [`strip_raw_line_continuations_blind`] copy, since
+/// bash's own input layer removes a `\`+newline pair before its tokenizer
+/// even looks for the `$'` opener, so `$\<newline>'...'` forms one in real
+/// bash without the literal two-byte substring `$'` ever appearing in
+/// `command` — and a raw `\`+newline byte pair anywhere in `command`
+/// (issue #444): inside `$'...'`, brush-parser's tokenizer strips a
+/// `\`+newline pair the same way it does outside quotes, but real bash's
+/// ANSI-C decoding does not treat `\`+newline as one of its recognized
+/// escapes there and keeps the raw newline in the decoded value instead.
+/// When that decoded value is later recursed into as a nested script
+/// (e.g. `bash -c $'...'`), a `#` comment before the dropped continuation
+/// swallows a line brush itself never drops, letting a real command on
+/// that line go completely unanalyzed while bash still executes it.
 ///
 /// Deliberately the "cruder fallback" from the issue's own suggested
 /// fixes rather than a precise span-length comparison inside
 /// `convert_word`: it does not require the two substrings to be inside
 /// the same `$'...'` span, so it over-Asks on some commands where they
-/// are unrelated — the safe direction for a scan whose only job is
-/// deciding whether this ambiguity could exist at all, given how rare
-/// combining ANSI-C quoting with a literal line continuation is outside
-/// of exactly the adversarial shape this exists to catch.
-fn reject_ansi_c_quote_with_line_continuation(command: &str) -> Result<(), ParseError> {
-    if command.contains("$'") && command.contains("\\\n") {
+/// are unrelated — the safe direction here.
+fn reject_ansi_c_quote_with_line_continuation(
+    command: &str,
+    blind: &str,
+) -> Result<(), ParseError> {
+    if command.contains("\\\n") && (command.contains("$'") || blind.contains("$'")) {
         return Err(ParseError::unsupported(
             "ANSI-C ($'...') quoting combined with a backslash-newline line continuation cannot be safely analyzed: brush and bash disagree on whether the continuation survives inside $'...', which could hide a command on the dropped line",
         ));
@@ -667,8 +672,9 @@ pub(crate) fn parse(command: &str) -> Result<CommandLine, ParseError> {
     // `strip_raw_line_continuations_blind`'s docs for why neither alone
     // suffices and why running both closes the gap.
     reject_excessive_raw_nesting(strip_raw_line_continuations(command).as_ref())?;
-    reject_excessive_raw_nesting(strip_raw_line_continuations_blind(command).as_ref())?;
-    reject_ansi_c_quote_with_line_continuation(command)?;
+    let blind = strip_raw_line_continuations_blind(command);
+    reject_excessive_raw_nesting(blind.as_ref())?;
+    reject_ansi_c_quote_with_line_continuation(command, blind.as_ref())?;
 
     let mut parser = BrushParser::new(Cursor::new(command.as_bytes()), &parser_options());
     let program = catch_parser_panic(|| parser.parse_program())?
@@ -2623,21 +2629,33 @@ mod tests {
         );
     }
 
+    fn reject_ansi_c(command: &str) -> Result<(), ParseError> {
+        let blind = strip_raw_line_continuations_blind(command);
+        reject_ansi_c_quote_with_line_continuation(command, blind.as_ref())
+    }
+
     #[test]
     fn reject_ansi_c_quote_with_line_continuation_rejects_the_combination() {
-        assert!(
-            reject_ansi_c_quote_with_line_continuation("bash -c $'echo x #\\\nrm -rf /'").is_err()
-        );
+        assert!(reject_ansi_c("bash -c $'echo x #\\\nrm -rf /'").is_err());
     }
 
     #[test]
     fn reject_ansi_c_quote_with_line_continuation_allows_ansi_c_alone() {
-        assert!(reject_ansi_c_quote_with_line_continuation("echo $'hello\\nworld'").is_ok());
+        assert!(reject_ansi_c("echo $'hello\\nworld'").is_ok());
     }
 
     #[test]
     fn reject_ansi_c_quote_with_line_continuation_allows_continuation_alone() {
-        assert!(reject_ansi_c_quote_with_line_continuation("echo hi\\\nthere").is_ok());
+        assert!(reject_ansi_c("echo hi\\\nthere").is_ok());
+    }
+
+    /// Bash's input layer removes a `\`+newline pair before its tokenizer
+    /// looks for the `$'` opener, so `$\<newline>'...'` forms an ANSI-C
+    /// opener in real bash without the literal substring `$'` ever
+    /// appearing in the raw command — checking `blind` too closes this.
+    #[test]
+    fn reject_ansi_c_quote_with_line_continuation_rejects_a_split_opener() {
+        assert!(reject_ansi_c("bash -c $\\\n'echo x #\\\nrm -rf /'").is_err());
     }
 
     #[test]

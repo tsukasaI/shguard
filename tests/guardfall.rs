@@ -1554,6 +1554,19 @@ fn guardfall_ansi_c_quoting_without_a_line_continuation_still_allows() {
     assert_eq!(verdict.decision(), Decision::Allow);
 }
 
+/// Fable-review follow-up to #444: bash's own input layer removes a
+/// `\`+newline pair before its tokenizer looks for the `$'` opener, so
+/// `$\<newline>'...'` forms a real ANSI-C opener in bash without the
+/// literal two-byte substring `$'` ever appearing in the raw command —
+/// the check must also search `strip_raw_line_continuations_blind`'s
+/// output, not just the raw command text, to catch this.
+#[test]
+fn guardfall_ansi_c_quoted_comment_hiding_a_second_line_via_a_split_opener_fails_closed_to_ask() {
+    let command = "bash -c $\\\n'echo x #\\\nrm -rf /'";
+    let verdict = shguard::analyze(command);
+    assert_eq!(verdict.decision(), Decision::Ask);
+}
+
 /// A word made of nothing but repeated overflowing-tilde runs: the
 /// per-run remainder recursion this PR first shipped in
 /// `convert_word_text` overflowed the stack at ~2 MiB of input (well
