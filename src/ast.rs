@@ -225,7 +225,17 @@ pub(crate) const MAX_RAW_PAREN_NESTING_DEPTH: usize = 16;
 /// only openers, and never decrementing, has no closer for an attacker to
 /// inject against: the count can only ever overestimate true nesting depth
 /// (safe direction — an inflated count fails closed to `Ask` earlier, never
-/// later), never underestimate it.
+/// later). Without a `\`+newline-split keyword (`i\<newline>f`) being
+/// rejoined before counting, it would go unrecognized as `if` and
+/// undercount, while brush-parser's own tokenizer rejoined and recursed on
+/// it regardless — so the raw text is counted twice (issue #443), once
+/// through `crate::parser::strip_raw_line_continuations` and once through
+/// `crate::parser::strip_raw_line_continuations_blind`, rejecting if either
+/// scan's count exceeds this cap: each rejoins the continuations the other
+/// can miss (see the two functions' docs). Both stripped copies are
+/// scan-only inputs to this counter — brush-parser itself always parses the
+/// untouched original text — see `strip_raw_line_continuations`'s docs on
+/// why.
 pub(crate) const MAX_KEYWORD_NESTING_COUNT: usize = 16;
 
 /// Cap on the total count of `!`/`&&`/`||` operators `src/parser.rs`'s raw

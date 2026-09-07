@@ -176,6 +176,173 @@ fn keyword_nesting_is_not_defeated_by_closer_words_in_argument_position() {
     assert_eq!(permission_decision(&output), "ask");
 }
 
+// ==== B-1 follow-up: `\`+newline line continuations inside the raw scan ====
+//
+// Issue #443: brush-parser's own tokenizer strips a `\`+newline line
+// continuation before recursing, but the raw pre-scans above tokenized the
+// UNSTRIPPED text — so splitting the exact keyword/`[[` shape those scans
+// look for across a continuation defeated detection entirely while
+// brush-parser rejoined and recursed on it anyway, reaching the same
+// uncatchable stack-overflow abort as the unsplit cases above.
+// `src/parser.rs::strip_raw_line_continuations` closes this by removing
+// every such pair before either raw scan runs.
+
+/// Before the fix: same abort as `deep_if_nesting_fails_closed_to_ask_instead_of_aborting`
+/// above, but every `if` keyword is split as `i\<newline>f` — the raw
+/// keyword scan never recognized the split token as `if` at all, so
+/// `MAX_KEYWORD_NESTING_COUNT` was never enforced and brush-parser's own
+/// tokenizer (which does strip the continuation) recursed unboundedly.
+#[test]
+fn deep_if_nesting_split_by_line_continuation_fails_closed_to_ask_instead_of_aborting() {
+    let command = format!(
+        "{}echo body{}",
+        "i\\\nf true; then ".repeat(600),
+        "; fi".repeat(600)
+    );
+    let output = run_hook(&bash_command(&command));
+    assert_eq!(permission_decision(&output), "ask");
+    // Asserts the raw cap actually fired, not that some other watchdog
+    // (e.g. the time budget) happened to trip on a slower host — those are
+    // opposite security outcomes: one is the defense working, the other is
+    // luck (mirroring `heredoc_inside_unterminated_command_substitution_...`
+    // below, which makes the same distinction for its own watchdog case).
+    assert!(
+        permission_reason(&output).contains("keyword nesting"),
+        "expected the keyword raw-count-cap rejection, got: {}",
+        permission_reason(&output)
+    );
+}
+
+/// Before the fix: same abort as an unsplit long `[[ ! ! ! ... ]]` chain,
+/// but the `[[` opener itself is split as `[\<newline>[` — `in_extended_test`
+/// never turned on, so `MAX_RAW_EXTENDED_TEST_COUNT` was never enforced.
+#[test]
+fn deep_extended_test_negation_split_by_line_continuation_fails_closed_to_ask() {
+    let command = format!("[\\\n[ {}x ]]", "! ".repeat(3000));
+    let output = run_hook(&bash_command(&command));
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(
+        permission_reason(&output).contains("extended-test operator count"),
+        "expected the extended-test raw-count-cap rejection, got: {}",
+        permission_reason(&output)
+    );
+}
+
+/// Same keyword-nesting abort, but split by an EVEN backslash count before
+/// the newline (`x\\<newline>if`) rather than a lone backslash. Real bash
+/// pairs the two backslashes into one literal backslash and leaves the
+/// newline un-stripped — a real, uncontinued separator — so `if` on the
+/// next line is a genuine keyword occurrence brush-parser really does
+/// recurse on; a parity-blind strip would glue it onto the preceding
+/// backslash into a non-matching token and undercount, reopening the abort.
+#[test]
+fn deep_if_nesting_split_by_an_even_backslash_run_fails_closed_to_ask() {
+    let command = format!(
+        "{}echo body{}",
+        "x\\\\\nif true; then ".repeat(600),
+        "; fi".repeat(600)
+    );
+    let output = run_hook(&bash_command(&command));
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(
+        permission_reason(&output).contains("keyword nesting"),
+        "expected the keyword raw-count-cap rejection, got: {}",
+        permission_reason(&output)
+    );
+}
+
+/// Same abort, but the split keyword sits on the line immediately AFTER a
+/// `#`-comment line that itself contains an (irrelevant, non-continuing)
+/// `\`+newline. The comment's own line-continuation-shaped byte pair must
+/// not be treated as extending the comment or eating the following line's
+/// real keyword split.
+#[test]
+fn deep_if_nesting_split_after_a_comment_line_fails_closed_to_ask() {
+    let command = format!(
+        "{}echo body{}",
+        "# x\\\ni\\\nf true; then ".repeat(600),
+        "; fi".repeat(600)
+    );
+    let output = run_hook(&bash_command(&command));
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(
+        permission_reason(&output).contains("keyword nesting"),
+        "expected the keyword raw-count-cap rejection, got: {}",
+        permission_reason(&output)
+    );
+}
+
+/// Fable-review follow-up to #443: a `#` that sits inside a quoted string
+/// but immediately follows a token-boundary byte (here, `'a #'`'s `#` after
+/// a space) makes `strip_raw_line_continuations` wrongly open a comment
+/// brush itself never opens, suppressing stripping of the REAL split
+/// keyword right after it until the next raw newline — reopening the exact
+/// abort this issue exists to close. `strip_raw_line_continuations_blind`
+/// (quote- and comment-blind) has no such gap: it rejoins the continuation
+/// unconditionally, so `reject_excessive_raw_nesting` still rejects.
+#[test]
+fn deep_if_nesting_split_after_a_quoted_hash_fails_closed_to_ask() {
+    // The fake comment must repeat with every split keyword, not just
+    // once up front: a single fake comment only suppresses stripping the
+    // first split (the fake comment ends at that continuation's own raw
+    // newline), leaving the remaining 599 splits to trip the cap on their
+    // own -- which would pass even without `strip_raw_line_continuations_blind`
+    // and so wouldn't actually guard the fix.
+    let command = format!(
+        "{}echo body{}",
+        "echo 'a #'; i\\\nf true; then ".repeat(600),
+        "; fi".repeat(600)
+    );
+    let output = run_hook(&bash_command(&command));
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(
+        permission_reason(&output).contains("keyword nesting"),
+        "expected the keyword raw-count-cap rejection, got: {}",
+        permission_reason(&output)
+    );
+}
+
+/// Same quoted-`#` bypass shape, against the `[[` opener instead of a
+/// keyword.
+#[test]
+fn deep_extended_test_negation_split_after_a_quoted_hash_fails_closed_to_ask() {
+    let command = format!("echo 'a #'; [\\\n[ {}x ]]", "! ".repeat(3000));
+    let output = run_hook(&bash_command(&command));
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(
+        permission_reason(&output).contains("extended-test operator count"),
+        "expected the extended-test raw-count-cap rejection, got: {}",
+        permission_reason(&output)
+    );
+}
+
+/// Composite adversarial shape: a genuine unquoted comment (which
+/// `strip_raw_line_continuations_blind` alone would strip straight
+/// through, hiding the split keyword after it) immediately followed by a
+/// quoted `#` (which fools `strip_raw_line_continuations`'s comment
+/// tracking into suppressing the real split right after IT). Neither scan
+/// alone closes this; running both and rejecting on either firing does.
+#[test]
+fn deep_if_nesting_split_after_a_real_comment_then_a_quoted_hash_fails_closed_to_ask() {
+    // Same repeat-per-iteration requirement as the quoted-hash test above:
+    // a single real-comment-then-quoted-hash prefix only suppresses the
+    // first split via the comment-aware scan, which alone still trips the
+    // cap on the remaining 599 -- this must repeat to actually need the
+    // blind scan too.
+    let command = format!(
+        "{}echo body{}",
+        "# x\\\n'a #'; i\\\nf true; then ".repeat(600),
+        "; fi".repeat(600)
+    );
+    let output = run_hook(&bash_command(&command));
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(
+        permission_reason(&output).contains("keyword nesting"),
+        "expected the keyword raw-count-cap rejection, got: {}",
+        permission_reason(&output)
+    );
+}
+
 // ==== B-2: stdin size cap ====
 
 /// Before the fix: stdin was read to completion with no bound at all.

@@ -1479,6 +1479,57 @@ fn guardfall_brush_parser_overflow_panic_cases() {
     }
 }
 
+/// Issue #443: the io-number digit run panic case above, but with the
+/// overflowing run split across a `\`+newline line continuation
+/// (`21474836\<newline>48`). Before the fix, `neutralize_overflowing_io_redirect_numbers`
+/// scanned the raw, unstripped text, never saw a contiguous overflowing
+/// digit run, and left it untouched; brush-parser's own tokenizer then
+/// rejoined the two halves and panicked in its io-number parsing, which
+/// [`catch_parser_panic`](../src/parser.rs) folds into a whole-command-line
+/// syntax error — downgrading this `rm -rf /` from `Block` to `Ask`. Must
+/// stay `Block`, matching the unsplit control case above.
+#[test]
+fn guardfall_backslash_newline_split_io_number_overflow_stays_blocked() {
+    let command = "rm -rf /; echo 21474836\\\n48>/dev/null";
+    let verdict = shguard::analyze(command);
+    assert_eq!(verdict.decision(), Decision::Block);
+}
+
+/// Same class, but the continuation sits between the digit run and the
+/// operator (`2147483648\<newline>>/dev/null`) rather than inside the run
+/// itself — a second shape the neutralizer's continuation-transparent scan
+/// must also recognize (`crate::parser::skip_raw_continuations`).
+#[test]
+fn guardfall_backslash_newline_split_between_io_number_and_operator_stays_blocked() {
+    let command = "rm -rf /; echo 2147483648\\\n>/dev/null";
+    let verdict = shguard::analyze(command);
+    assert_eq!(verdict.decision(), Decision::Block);
+}
+
+/// Issue #443: brush-parser must keep parsing the original, unmodified
+/// command text — never a continuation-stripped copy. A `#` comment ends
+/// at the first raw newline regardless of a preceding backslash, so
+/// parsing a stripped copy would merge a `\`+newline inside a comment with
+/// the "next line", swallowing an arbitrary following command into the
+/// comment and returning `Allow` instead of ever analyzing it.
+#[test]
+fn guardfall_command_hidden_behind_a_split_comment_is_still_analyzed() {
+    let command = "echo hi # \\\nrm -rf /";
+    let verdict = shguard::analyze(command);
+    assert_eq!(verdict.decision(), Decision::Block);
+}
+
+/// Companion to the comment case above: a real (uncontinued, even
+/// backslash count) newline must still separate two real commands — this
+/// is not specific to comments, any raw newline the parser-input text
+/// keeps intact must still end the preceding statement.
+#[test]
+fn guardfall_command_after_an_escaped_backslash_and_real_newline_is_still_analyzed() {
+    let command = "echo hi\\\\\nrm -rf /";
+    let verdict = shguard::analyze(command);
+    assert_eq!(verdict.decision(), Decision::Block);
+}
+
 /// A word made of nothing but repeated overflowing-tilde runs: the
 /// per-run remainder recursion this PR first shipped in
 /// `convert_word_text` overflowed the stack at ~2 MiB of input (well
