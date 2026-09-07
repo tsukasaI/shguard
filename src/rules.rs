@@ -4892,7 +4892,7 @@ fn parse_escalation_floor(raw: Option<&str>) -> Result<Decision, RulesError> {
 /// verdicts the hook emits in practice are a structural fallback (an
 /// unresolved `$VAR`/`$(...)`, an interpreter heredoc/inline script, a
 /// parser-unsupported construct) that an autonomous session cannot
-/// resolve, though the embedded blocklist also carries a handful of
+/// resolve, though the embedded blocklist also carries 21
 /// `decision = "ask"` rules (e.g. `tar-directory-root-or-home`, the
 /// credential-shaped `[[token]]` floor) that this key floors too — none
 /// of which are any more actionable to an unattended session than a

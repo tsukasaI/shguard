@@ -17,15 +17,18 @@ All notable changes to this project are documented in this file.
   emits in practice are structural fallbacks (an unresolved
   `$VAR`/`$(...)`, an interpreter heredoc/inline script, a
   parser-unsupported construct) rather than a rule written to expect a
-  human in the loop, though the embedded blocklist does carry a handful
-  of `decision = "ask"` rules too (`tar-directory-root-or-home`, the
-  credential-shaped `[[token]]` floor). The remap runs once, on the whole
-  command line's final decision, so `fold_worst`'s worst-wins fold across
-  a compound line still keeps a genuine `Block` rule's own id and
-  `deny_message` rather than losing them to a generic floored-Ask reason,
-  and `[[allow]]` entries keep rescuing exactly as before. A floored
-  verdict is a `Block` with `matched_rule_id` left `null`, letting
-  `jq 'select(.decision=="Block" and .matched_rule_id==null)'` isolate
+  human in the loop, though the embedded blocklist does carry 21
+  `decision = "ask"` rules too (`tar-directory-root-or-home`, the
+  credential-shaped `[[token]]` floor, among others) that this key floors
+  the same way, preserving a rule's own `deny_message` when it has one.
+  The remap runs once, on the whole command line's final decision, so
+  `fold_worst`'s worst-wins fold across a compound line still keeps a
+  genuine `Block` rule's own id and `deny_message` rather than losing
+  them to a generic floored-Ask reason, and `[[allow]]` entries keep
+  rescuing exactly as before. A floored verdict is a `Block` with
+  `matched_rule_id` left `null` and a reason naming `ask_outcome =
+  "deny"` explicitly, letting
+  `jq 'select(.reason | contains("ask_outcome = \"deny\""))'` isolate
   every floored `Ask` in a `decision_log_path` log for review; loosening
   one back via `[[allow]]` only works where an `[[allow]]` entry could
   already reach it (the escalation floor and credential-token floor are

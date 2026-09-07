@@ -836,7 +836,7 @@ disable bypass for the rest of the session
 Most `Ask` verdicts shguard emits in practice are structural fallbacks (an
 unresolved `$VAR`/`$(...)`, an interpreter heredoc/inline script, a
 parser-unsupported construct) rather than a rule written to expect a
-human in the loop, though the embedded blocklist does carry a handful of
+human in the loop, though the embedded blocklist does carry 21
 `decision = "ask"` rules too (e.g. `tar-directory-root-or-home`, the
 credential-shaped `[[token]]` floor). Set the top-level `ask_outcome` key
 to turn every such `Ask`, structural or rule-authored, into a `deny`
@@ -857,20 +857,25 @@ still comes back `Allow`, never floored to `Block`.
 
 A floored verdict is a `Block` with `matched_rule_id` left `null`, even
 when the original `Ask` came from a specific rule (e.g.
-`tar-directory-root-or-home`), so `jq 'select(.decision=="Block" and
-.matched_rule_id==null)'` against a `decision_log_path` log (below)
-isolates every command this key floored, structural or rule-table, for
-review. A floored command can be loosened via a targeted `[[allow]]`
+`tar-directory-root-or-home`). `matched_rule_id` alone does not isolate
+one, though: several structural `Block`s the gate decides on its own also
+carry a `null` rule id. Filter on the reason instead, since it only ever
+appears on a verdict this key floored:
+`jq 'select(.reason | contains("ask_outcome = \"deny\""))'` against a
+`decision_log_path` log (below). A floored command can be loosened via a
+targeted `[[allow]]`
 entry only where an `[[allow]]` entry could already reach it before
 `ask_outcome` existed; the escalation floor and the credential-token
 floor are never allowlist-rescuable by design, so a command floored
 through either of those stays a hard `Block` under `ask_outcome =
-"deny"` with no config-level escape. The reason string
-combines the original explanation with the fact that `ask_outcome =
-"deny"` floored it, and a `deny_message` tells the agent how to rewrite
-the command: literal paths instead of `$VAR`/`$(...)`, inline interpreter
-code moved to a file, a compound line split into separate commands, or
-run it manually.
+"deny"` with no config-level escape. The reason string combines the
+original explanation with the fact that `ask_outcome = "deny"` floored
+it. `deny_message` is preserved verbatim when the rule that produced the
+original `Ask` already declared one (a user `[[ask]]` entry, or an
+embedded `decision = "ask"` rule); otherwise a generic message tells the
+agent how to rewrite the command: literal paths instead of
+`$VAR`/`$(...)`, inline interpreter code moved to a file, a compound
+line split into separate commands, or run it manually.
 
 `ask_outcome` also governs the composition root's own fail-closed paths
 that never reach `analyze_with_policy` at all: malformed or oversized

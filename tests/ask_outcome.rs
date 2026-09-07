@@ -115,6 +115,22 @@ fn structural_ask_is_remapped_to_block_when_ask_outcome_is_deny() {
     assert!(!deny_message.is_empty());
 }
 
+/// The same structural-Ask remap, exercised through the PreToolUse hook's
+/// stdin contract instead of `shguard check` — both entry points share
+/// `src/lib.rs::analyze_with_policy`, so this pins that the remap is not
+/// somehow reachable only from one of them.
+#[test]
+fn structural_ask_is_remapped_to_deny_via_the_hook_path_too() {
+    let (_dir, config_path) = write_config(
+        r#"
+        ask_outcome = "deny"
+        "#,
+    );
+    let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"$(which python3)"}}"#;
+    let output = run_hook(&config_path, stdin);
+    assert_eq!(permission_decision(&output), "deny");
+}
+
 // ==== rule-table Ask, remapped ====
 
 /// A rule-table `decision = "ask"` match (`tar-directory-root-or-home`,
@@ -134,9 +150,10 @@ fn rule_table_ask_stays_ask_with_no_ask_outcome_configured() {
 
 /// The same rule-table Ask is remapped to `Block` once `ask_outcome =
 /// "deny"` is configured — `matched_rule_id` still goes `null` even though
-/// a specific rule id drove the original Ask, so `jq 'select(.decision==
-/// "Block" and .matched_rule_id==null)'` isolates every floored Ask
-/// uniformly, structural or rule-table.
+/// a specific rule id drove the original Ask, matching the structural
+/// case's own shape (a reason-based `jq` filter, not `matched_rule_id`
+/// alone, is what isolates a floored Ask uniformly — several pre-existing
+/// structural Blocks also carry a null rule id).
 #[test]
 fn rule_table_ask_is_remapped_to_block_when_ask_outcome_is_deny() {
     let (_dir, config_path) = write_config(
@@ -225,6 +242,16 @@ fn allowlisted_command_stays_allow_not_remapped_to_block() {
     );
     let output = run_check_json(&config_path, "rm -rf $HOME");
     assert_eq!(output["decision"], "Allow");
+    // `Allow` alone would also pass for a command that was never an Ask in
+    // the first place — assert the allowlist-downgrade reason specifically,
+    // so this test actually fails if the rescue stopped happening.
+    let reason = output["reason"]
+        .as_str()
+        .expect("reason should be a string");
+    assert!(
+        reason.contains("user-allow-rm"),
+        "expected the allowlist-downgrade reason naming the rescuing entry, got: {reason}"
+    );
 }
 
 // ==== compound command: the remap must not steal a real Block's identity ====
@@ -249,6 +276,33 @@ fn compound_command_keeps_the_real_block_rule_id_over_the_remap() {
         output["matched_rule_id"],
         "rm-recursive-force-dangerous-target"
     );
+}
+
+// ==== a rule-authored deny_message survives the remap ====
+
+/// A user `[[ask]]` rule that already declares its own `deny_message` must
+/// keep it verbatim after the remap, not lose it to the generic
+/// rewrite-guidance message: `src/lib.rs::apply_ask_outcome` cannot tell a
+/// rule-authored `Ask` from a structural one (`Verdict::matched_rule`
+/// returns `None` for `Ask` either way), so it must never assume the
+/// generic $VAR/$(...) guidance applies and overwrite a message that was
+/// never about that at all.
+#[test]
+fn rule_authored_deny_message_survives_the_remap() {
+    let (_dir, config_path) = write_config(
+        r#"
+        ask_outcome = "deny"
+
+        [[ask]]
+        id = "user-ask-gh"
+        reason = "confirm every gh invocation"
+        command = "gh"
+        deny_message = "run `gh auth status` first"
+        "#,
+    );
+    let output = run_check_json(&config_path, "gh pr view");
+    assert_eq!(output["decision"], "Block");
+    assert_eq!(output["deny_message"], "run `gh auth status` first");
 }
 
 // ==== watchdog timeout Ask is excluded from the remap ====
