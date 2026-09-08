@@ -1968,8 +1968,15 @@ fn deny_message_surfaces_through_the_named_user_home_floor() {
         deny_message = "confirm the target account before copying"
     "#,
     );
+    // No `-r`/`-R`/`--recursive`: issue #450 added a built-in
+    // self-protect-config-ancestor-cp-tilde rule (also `command = "cp"`,
+    // also targeting bare `~`) that would otherwise tie with this user
+    // rule on the same named-user-home floor and win (ties keep the
+    // first-declared rule, and embedded rules are declared before user
+    // ones) -- flagless `cp` stays outside that rule's `required_flags`,
+    // isolating this test back to the user rule alone.
     let output = run_hook(
-        &bash_command("cp -r x ~someuser"),
+        &bash_command("cp x ~someuser"),
         &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
     );
     assert_eq!(permission_decision(&output), "ask");
