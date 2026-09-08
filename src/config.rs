@@ -316,10 +316,11 @@ impl Policy {
     /// exist, if the resolved default path exists but fails to read, if
     /// the resolved default path resolves to nothing at all
     /// ([`ConfigError::Missing`]), if a found config file (explicit or
-    /// default) fails to parse/validate/merge, if the config path's
-    /// symlink chain is too long or cyclic ([`ConfigError::SymlinkChain`],
-    /// see [`self_protection_directories`]), or if a user config's
-    /// `decision_log_path` fails any of its own validation checks
+    /// default) fails to parse/validate/merge, if the config path's or a
+    /// configured `decision_log_path`'s symlink chain is too long or cyclic
+    /// ([`ConfigError::SymlinkChain`], see [`self_protection_directories`]),
+    /// or if a user config's `decision_log_path` fails any of its own
+    /// validation checks
     /// ([`ConfigError::InvalidConfig`]: not an absolute path, a
     /// trailing-slash/relative-component path, a symlink, an existing
     /// non-regular file, a missing parent directory, or an unreadable

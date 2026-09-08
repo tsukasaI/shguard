@@ -87,9 +87,11 @@
 //! 7. `$IFS`-derived words ("rule 7") — normalise.rs already folds against
 //!    the *default* IFS; this module adds the untrusted floor: a blocklist
 //!    hit still Blocks, but a miss floors to Ask, because a same-line
-//!    `IFS=` reassignment could have made the default-IFS fold wrong — like
-//!    any other structural Ask, a user-configured `[[allow]]` entry can
-//!    still downgrade that miss to Allow (`apply_allowlist_downgrade`).
+//!    `IFS=` reassignment could have made the default-IFS fold wrong — this
+//!    floor is not among the ones excluded from allow-downgrade eligibility
+//!    (unlike rule 3's, module docs above), so a user-configured `[[allow]]`
+//!    entry can still downgrade that miss to Allow
+//!    (`apply_allowlist_downgrade`).
 //! 8. Every other unresolvable kind ("rule 8": `NonUtf8`, `ExpansionLimit`,
 //!    `UnsupportedStructure`, `ArithmeticExpansion`, `ProcessSubstitution`,
 //!    `EmbeddedNul`, and command-position `ParameterExpansion`/
@@ -3185,12 +3187,18 @@ fn escalation_floor_contribution(
 /// docs for why those attach one at all) — and left untouched (not cleared)
 /// on the pass-through path.
 ///
-/// The single core every `apply_*_floor` function in this module delegates
-/// to — about a dozen unrelated floors (rules 3, 6c, 6e, 8, 10, 11, the
-/// blocklist-match floor, and more), each an early-return path that can
-/// yield `Allow`/a mere `Ask` before [`fold_floors`] runs. Each keeps its
-/// own name and doc comment so its call site stays self-documenting; only
-/// the mechanics live here.
+/// The shared core about a dozen otherwise-unrelated `apply_*_floor`
+/// helpers below delegate to — [`apply_escalation_floor`] (rule 10),
+/// [`apply_expansion_floor`] (rule 11), [`apply_recursable_floor`],
+/// [`apply_tar_dashless_floor`], [`apply_command_ascent_descent_floor`]/
+/// [`apply_ascent_descent_floor`], [`apply_named_user_home_floor`],
+/// [`apply_token_floor`], [`apply_dirstack_tilde_floor`]/
+/// [`apply_directory_equals_tilde_floor`]/[`apply_dirstack_equal_subst_floor`],
+/// and [`apply_unknown_cwd_floor`]. [`apply_substitution_floor`] (rule 3)
+/// and [`apply_opaque_kind_floor`] (rule 8) use the same max-lift mechanics
+/// but keep their own inlined copies rather than delegating here (see
+/// their own docs). Each keeps its own name and doc comment so its call
+/// site stays self-documenting; only the mechanics live here.
 fn apply_floor(
     verdict: Verdict,
     floor_decision: Decision,

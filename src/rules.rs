@@ -8,7 +8,8 @@
 //!   set of except-target matchers (issue #30: "matches unless the target
 //!   is one of these shapes").
 //! - [`PipelineRule`] matches the shape of a whole pipeline (the ported
-//!   `curl|wget → sh` installer-pipe pattern). The more general decode-pipe
+//!   `curl|wget → sh` installer-pipe pattern, plus issue #268's
+//!   `find | xargs rm -f` shape). The more general decode-pipe
 //!   gate (rules 5b/5c: a `base64`/`gunzip`/… decode stage piped into an
 //!   interpreter) is implemented separately, structurally, in
 //!   `crate::gate::evaluate_pipeline_shape` rather than as rule data here.
@@ -27,10 +28,10 @@
 //!
 //! [`CommandRuleDto`]/[`PipelineRuleDto`]/[`RedirectRuleDto`]/[`RulesFileDto`]
 //! (and the other `*Dto`/`*File` types this module derives `Deserialize`
-//! for: `TargetDto`, `TokenRuleDto`, `AllowlistFileDto`, `UserConfigFileDto`)
-//! are the only serde-aware types in this module, private to it — the rest
-//! of the crate (and every other module) never sees a serde attribute or a
-//! TOML type
+//! for: `TargetDto`, `TokenRuleDto`, `AllowlistFileDto`, `UserConfigFileDto`,
+//! `AskOutcomeTableDto`) are the only serde-aware types in this module,
+//! private to it — the rest of the crate (and every other module) never
+//! sees a serde attribute or a TOML type
 //! (`coding-guidelines/principles.md`, "dependencies point inward"). Loading
 //! is a one-step boundary: [`Rules::parse`]/[`Allowlist::parse`] either
 //! return a fully-valid, typed rule set, or an [`RulesError`] — a duplicate
@@ -2356,10 +2357,11 @@ impl CommandRule {
     /// case below rather than left as a residual gap.
     ///
     /// Blast radius beyond the motivating example (mirrors
-    /// [`Self::matches_except_flags`]'s own documented trade-off for a
-    /// `required_flags`-only rule with no `required_tokens` — no longer an
-    /// embedded rule since issue #146 split `git-no-verify-any-subcommand`
-    /// into per-subcommand rules, but still pinned as a synthetic rule in
+    /// [`Self::matches_except_flags`]'s own documented trade-off for
+    /// `git-no-verify-any-subcommand` — a `required_flags`-only rule with
+    /// no `required_tokens`; no longer an embedded rule since issue #146
+    /// split it into per-subcommand rules, but still pinned as a synthetic
+    /// rule in
     /// `matches_except_flags_no_required_tokens_rule_fires_regardless_of_subcommand`
     /// below — which would floor EVERY `git` invocation containing an
     /// unresolvable word — no per-command semantics, module

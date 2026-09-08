@@ -25,8 +25,9 @@
 #                    short-flag vs exact-token distinction.
 #   targets          optional list of target alternatives, ANY one hit by
 #                    ANY argv token matches (ORed) — `Allowlist::parse`
-#                    shares `CommandRuleDto`/`convert_target` with the
-#                    blocklist (src/rules.rs), so every target shape
+#                    shares `CommandRuleDto`/`convert_command_rule` (which
+#                    calls `convert_target`) with the blocklist
+#                    (src/rules.rs), so every target shape
 #                    documented in rules/blocklist.toml's own schema
 #                    comment (`exact`/`prefix`/`normalized`/
 #                    `normalized_prefix`/`normalized_basename`/`url_host`,

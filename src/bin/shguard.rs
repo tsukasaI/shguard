@@ -857,7 +857,10 @@ const CHECK_USAGE: &str = "usage: shguard check <command> [--json] [--permission
 /// panic there does not crash the process directly — the worker thread
 /// dies, the channel disconnects, and this function reports it as the
 /// documented [`EvalTimeoutError::Disconnected`] exit-2 message rather than
-/// needing to fail closed itself. It is NOT outside a wall-clock bound, though:
+/// needing to fail closed itself (except on `evaluate_with_timeout`'s own
+/// spawn-failure fallback, which runs the evaluation inline with no worker
+/// thread at all — a panic there DOES propagate as an ordinary process
+/// crash, same as this function's own reasoning above). It is NOT outside a wall-clock bound, though:
 /// [`evaluate_with_timeout`] wraps the [`shguard::analyze_with_policy`] call
 /// (which — issue #108 — may append to a user-configured
 /// `decision_log_path` after its own internal gate-evaluation watchdog

@@ -191,10 +191,12 @@ pub(crate) const MAX_RAW_PAREN_NESTING_DEPTH: usize = 16;
 /// `select` was probed too and excluded: brush-parser rejects it with an
 /// immediate syntax error rather than recursing on it, so it is not a
 /// stack-overflow vector at all. `[[ … ]]` was probed at the same time and
-/// excluded for a different reason then (brush-parser rejected it too) —
-/// that has since changed: `[[ … ]]` is modeled as [`Command::ExtendedTest`]
-/// (issue #191) and *is* a real stack-overflow vector of its own, bounded
-/// separately by [`MAX_RAW_EXTENDED_TEST_COUNT`]
+/// excluded then too, but for a shguard-side reason, not a brush-parser
+/// one: `src/parser.rs` mapped it straight to `ParseError::Unsupported`
+/// without ever recursing into it (brush-parser itself always parsed it
+/// fine). That has since changed: `[[ … ]]` is modeled as
+/// [`Command::ExtendedTest`] (issue #191) and *is* a real stack-overflow
+/// vector of its own, bounded separately by [`MAX_RAW_EXTENDED_TEST_COUNT`]
 /// (`crate::parser::reject_excessive_raw_nesting`, issue #401) rather than
 /// by this keyword-nesting counter. `function` is also excluded
 /// deliberately: its body is a brace group, so its recursion is already
