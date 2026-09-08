@@ -188,9 +188,15 @@ pub(crate) const MAX_RAW_PAREN_NESTING_DEPTH: usize = 16;
 /// realistic multi-loop one-liner — and the quoted-text false-count above —
 /// more headroom than 8 did.
 ///
-/// `select` and `[[ … ]]` were probed too and excluded: brush-parser rejects
-/// both with an immediate syntax error rather than recursing on them, so
-/// they are not a stack-overflow vector at all. `function` is also excluded
+/// `select` was probed too and excluded: brush-parser rejects it with an
+/// immediate syntax error rather than recursing on it, so it is not a
+/// stack-overflow vector at all. `[[ … ]]` was probed at the same time and
+/// excluded for a different reason then (brush-parser rejected it too) —
+/// that has since changed: `[[ … ]]` is modeled as [`Command::ExtendedTest`]
+/// (issue #191) and *is* a real stack-overflow vector of its own, bounded
+/// separately by [`MAX_RAW_EXTENDED_TEST_COUNT`]
+/// (`crate::parser::reject_excessive_raw_nesting`, issue #401) rather than
+/// by this keyword-nesting counter. `function` is also excluded
 /// deliberately: its body is a brace group, so its recursion is already
 /// bounded by [`MAX_BRACE_NESTING_DEPTH`] and counting the keyword itself
 /// would only add false positives with no additional safety.

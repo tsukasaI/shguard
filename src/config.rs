@@ -103,10 +103,7 @@
 //! dynamically-resolved half.
 //!
 //! Both mechanisms are disclosed as partial, not complete, in the README:
-//! bare shell redirection (`cat > path <<EOF`, rule 9's documented
-//! redirection blind spot — `crate::gate` never analyses what a
-//! redirection target overwrites) and any `SHGUARD_CONFIG`-via-shell-
-//! profile vector are not caught by either.
+//! a `SHGUARD_CONFIG`-via-shell-profile vector is not caught by either.
 //!
 //! [`SELF_PROTECT_INIT_TOML`] adds a third, non-directory-scoped `[[deny]]`
 //! rule against `shguard init` itself (with or without `--force`, issue
@@ -318,8 +315,15 @@ impl Policy {
     /// non-UTF-8 value) but the file it names cannot be read or does not
     /// exist, if the resolved default path exists but fails to read, if
     /// the resolved default path resolves to nothing at all
-    /// ([`ConfigError::Missing`]), or if a found config file (explicit or
-    /// default) fails to parse/validate/merge.
+    /// ([`ConfigError::Missing`]), if a found config file (explicit or
+    /// default) fails to parse/validate/merge, if the config path's
+    /// symlink chain is too long or cyclic ([`ConfigError::SymlinkChain`],
+    /// see [`self_protection_directories`]), or if a user config's
+    /// `decision_log_path` fails any of its own validation checks
+    /// ([`ConfigError::InvalidConfig`]: not an absolute path, a
+    /// trailing-slash/relative-component path, a symlink, an existing
+    /// non-regular file, a missing parent directory, or an unreadable
+    /// `lstat`).
     pub fn load() -> Result<Self, ConfigError> {
         let (shguard_config, xdg_config_home, home) = Self::read_env_paths()?;
         let explicit = shguard_config.is_some();

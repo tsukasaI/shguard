@@ -4,11 +4,14 @@
 //!
 //! This module owns every Claude-Code-specific field name (`tool_name`,
 //! `tool_input.command`, `hookSpecificOutput`, …). The composition root
-//! (`src/bin/shguard.rs`) calls only [`handle`]; nothing else in the crate
-//! depends on this module, and this module never depends on anything in
-//! `src/bin/`. A future Codex/Cursor adapter is a sibling module with its
-//! own `handle`-shaped entry point, not a change here (plan.md's "dependencies
-//! point inward").
+//! (`src/bin/shguard.rs`) calls [`handle_with_policy`] on the hook path
+//! plus [`fail_closed`]/[`fail_closed_deny`]/[`fail_closed_with`] on its
+//! various fail-closed exits — never bare [`handle`], which exists for
+//! callers with no [`crate::config::Policy`] to hand it; nothing else in
+//! the crate depends on this module, and this module never depends on
+//! anything in `src/bin/`. A future Codex/Cursor adapter is a sibling
+//! module with its own `handle`-shaped entry point, not a change here
+//! (plan.md's "dependencies point inward").
 //!
 //! # Verified stdin/stdout schema
 //!

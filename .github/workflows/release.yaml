@@ -7,8 +7,8 @@
 #   gh api repos/<owner>/<repo>/git/ref/tags/<tag> --jq '.object.sha'
 # Re-run that for the listed tag (or the current latest tag) and update both
 # the SHA and its trailing version comment when bumping.
-#   - actions/checkout            @ v5.0.1 (shared pin with ci.yml)
-#   - dtolnay/rust-toolchain      @ master, pinned 2026-07-18 (shared pin with ci.yml) -- manual renewal only, see above
+#   - actions/checkout            @ v5.0.1 (shared pin with ci.yaml)
+#   - dtolnay/rust-toolchain      @ master, pinned 2026-07-18 (shared pin with ci.yaml) -- manual renewal only, see above
 #   - actions/upload-artifact     @ v4.6.2
 #   - actions/download-artifact   @ v4.3.0
 #   - softprops/action-gh-release @ v3.0.2

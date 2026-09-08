@@ -22,7 +22,7 @@ brush-parser = "=0.4.0"
 # two memory watchdogs (`getrusage(RUSAGE_SELF, ...)` in src/bin/shguard.rs,
 # `sysconf`/`proc_pidinfo` in src/watchdog.rs) and for `O_NOFOLLOW` on the
 # decision-log open in src/decision_log.rs. Not exact-pinned: unlike
-# brush-parser/url above there is no upgrade-compatibility gate this
+# brush-parser above/url below there is no upgrade-compatibility gate this
 # crate's version bumps could break (it is a thin, stable FFI surface, not
 # a parser whose behavior shguard depends on matching exactly).
 libc = "0.2"

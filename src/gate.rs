@@ -86,8 +86,10 @@
 //!    "definitely not" — fail-closed, per plan.md §4.
 //! 7. `$IFS`-derived words ("rule 7") — normalise.rs already folds against
 //!    the *default* IFS; this module adds the untrusted floor: a blocklist
-//!    hit still Blocks, but a miss is Ask, never Allow, because a same-line
-//!    `IFS=` reassignment could have made the default-IFS fold wrong.
+//!    hit still Blocks, but a miss floors to Ask, because a same-line
+//!    `IFS=` reassignment could have made the default-IFS fold wrong — like
+//!    any other structural Ask, a user-configured `[[allow]]` entry can
+//!    still downgrade that miss to Allow (`apply_allowlist_downgrade`).
 //! 8. Every other unresolvable kind ("rule 8": `NonUtf8`, `ExpansionLimit`,
 //!    `UnsupportedStructure`, `ArithmeticExpansion`, `ProcessSubstitution`,
 //!    `EmbeddedNul`, and command-position `ParameterExpansion`/
@@ -1105,7 +1107,8 @@ fn evaluate_compound_command(
     // `evaluate_command_line` recurses into it), INCLUDING one reached only
     // through an embedded substitution (`for x in $(perl); do :; done`
     // inherits the same shared stdin `$(perl)` forks with — round-3 fable
-    // review), is checked, fail-closed — see [`scan_heredoc_candidates`].
+    // review), is checked, fail-closed — see
+    // [`scan_compound_for_heredoc_candidates`].
     let mut scan = HeredocCandidateScan::default();
     scan_compound_for_heredoc_candidates(compound, &mut scan);
     let interpreters = scan.into_candidates();
@@ -1154,6 +1157,16 @@ fn evaluate_compound_command(
 /// `extra_words` carries no structural distinction between a comparison
 /// operand and an ordinary one, and scanning every operand uniformly is
 /// what makes the `for`-list case (a real exposure) work at all.
+///
+/// `#[allow(clippy::too_many_arguments)]`: unlike `evaluate_simple_command_core`
+/// (`SimpleCommandPolicy`) or the expansion-scan helpers (`ExpansionAccum`,
+/// `ExceptFloors`), these parameters are not one cohesive group with its
+/// own identity — they're the caller-specific pieces (`extra_words`, its
+/// description, `redirections`, `interpreters`) plus the ordinary
+/// pass-through context (`depth`, `rules`, `allowlist`, `redirect_anchor`)
+/// every recursive check in this file already threads through, so bundling
+/// them into a struct would just relocate the count rather than group
+/// anything meaningful.
 #[allow(clippy::too_many_arguments)]
 fn apply_attached_word_and_redirect_checks(
     mut worst: Verdict,
@@ -3159,10 +3172,7 @@ fn escalation_floor_contribution(
     Some((floor_decision, reason))
 }
 
-/// Applies the escalation floor (rule 10) to a verdict produced on an
-/// early-return path that can yield `Allow` — or, under a `deny`-configured
-/// `escalation_floor`, a mere `Ask` — before [`fold_floors`] runs; today
-/// only rule 6a's inner-command case (`sudo bash -c 'ls'`). Folds via
+/// Raises `verdict` to at least `floor_decision`, folding via
 /// `decision.max(floor_decision)`, the same as [`fold_floors`]'s own
 /// handling: a verdict already at or above `floor_decision` passes through
 /// completely untouched (keeping its own reason/matched-rule audit trail);
@@ -3176,8 +3186,11 @@ fn escalation_floor_contribution(
 /// on the pass-through path.
 ///
 /// The single core every `apply_*_floor` function in this module delegates
-/// to. Each keeps its own name and doc comment so its call site stays
-/// self-documenting; only the mechanics live here.
+/// to — about a dozen unrelated floors (rules 3, 6c, 6e, 8, 10, 11, the
+/// blocklist-match floor, and more), each an early-return path that can
+/// yield `Allow`/a mere `Ask` before [`fold_floors`] runs. Each keeps its
+/// own name and doc comment so its call site stays self-documenting; only
+/// the mechanics live here.
 fn apply_floor(
     verdict: Verdict,
     floor_decision: Decision,
