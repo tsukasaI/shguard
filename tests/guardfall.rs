@@ -1560,6 +1560,14 @@ fn guardfall_shell_init_redirect_cases() {
         // must stay Allow — the floor is a correlation with an existing
         // redirect rule's own target, not "any `~user` redirect Asks".
         ("echo x >> ~root/notes.txt", Decision::Allow),
+        // Regression guard: this floor is wired into both
+        // `evaluate_simple_command` (a bare command's own redirects) and
+        // `apply_attached_word_and_redirect_checks` (a compound command's
+        // attached redirects) — an earlier version of the sibling `$HOME`
+        // floor only had the former, so wrapping the exact same redirect
+        // in a brace group silently regained the pre-fix Allow.
+        ("{ echo x; } >> ~root/.zshrc", Decision::Ask),
+        ("echo x 2> ~root/.zshrc", Decision::Ask),
     ];
 
     for (command, expected) in cases {

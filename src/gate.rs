@@ -1986,8 +1986,8 @@ fn home_env_word_with_tilde_substituted(word: &Word) -> Option<Word> {
 ///
 /// Mirrors [`scan_redirect_home_env_floor`]'s `$HOME`-vs-`~` substitution
 /// and the argv-side named-user-home floor (issue #80,
-/// [`crate::rules::TargetMatcher::named_user_home_plausible`]): unlike a
-/// bare `~` (which [`normalize::resolve_piece`] folds to the literal `~`
+/// `crate::rules::TargetMatcher::named_user_home_plausible`): unlike a
+/// bare `~` (which `normalize::resolve_piece` folds to the literal `~`
 /// and every `~`-anchored redirect rule target already matches directly),
 /// `~user` only expands to a real home directory if that account exists
 /// and is reachable — neither of which shguard can verify (module docs —
