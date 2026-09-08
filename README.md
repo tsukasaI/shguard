@@ -1099,8 +1099,9 @@ when `ask_outcome = "deny"` is configured rather than always staying
 ### Protecting the config file itself
 
 shguard automatically denies `tee`/`cp`/`mv`/`install`/`sed -i`/`-I`
-(or `--in-place`)/`dd of=`/`rm`/`unlink`/`ln`/`rsync`/`rmdir`/`perl -i`/
-`patch` writes targeting its own resolved config path, and the literal
+(or `--in-place`)/`dd of=`/`dcfldd of=`/`rm`/`unlink`/`ln`/`rsync`/
+`rmdir`/`perl -i`/`patch` writes targeting its own resolved config path,
+and the literal
 `~/.config/shguard/` token for any user — an agent shouldn't be able to
 edit its own guardrails via a shell command. `find` combined with
 `-exec`/`-execdir`/`-ok`/`-okdir` against the config path asks rather
@@ -1130,6 +1131,16 @@ shape, genuinely destructive) — only the recursively-destructive form of
 each command is covered (a flagless `rm ~` can't remove a non-empty
 directory at all; a flagless `rsync src ~` is additive, not
 destructive).
+
+The same ancestor list also asks for a recursive copy or archive
+extraction *into* an ancestor of the config directory: flagless `rsync`
+(default rsync already recurses into a directory source), `cp
+-r`/`-R`/`--recursive`, `tar -x`/`--extract`/`--get` combined with
+`-C`/`--directory`, and `unzip -d` (issue #450). A payload that happens
+to contain `shguard/config.toml` overwrites the config while the command
+line only ever names the ancestor directory as its destination, so
+these are just as dangerous as the delete/rename half above despite
+looking merely additive on the surface.
 
 This is a partial mitigation, not a complete one:
 

@@ -51,8 +51,9 @@
 //! [`self_protection_toml`] generates `[[deny]]` rules, at load time,
 //! targeting the config directory for the full audited set of write/
 //! delete-capable primitives (issue #101): `tee`, `cp`, `mv`, `install`,
-//! `sed -i`, `dd`'s `of=<path>` shape, `rsync`, `rmdir`, `perl -i`,
-//! `patch`, and `find` combined with `-exec`/`-execdir`/`-ok`/`-okdir`
+//! `sed -i`, `dd`/`dcfldd`'s `of=<path>` shape (issue #450), `rsync`,
+//! `rmdir`, `perl -i`, `patch`, and `find` combined with
+//! `-exec`/`-execdir`/`-ok`/`-okdir`
 //! (the last as `decision = "ask"`, not `"block"` — the danger lives in
 //! what `find` invokes, only partially visible to a command-line-only
 //! analyzer), plus one `[[redirect]]` rule (issue #100) for the same
@@ -61,7 +62,13 @@
 //! be unreachable via `>`. [`ancestor_rules_toml`] adds a second,
 //! `decision = "ask"` family covering `rm -r`/`mv`/`rsync --delete`
 //! against an ANCESTOR of the config directory (`~/.config`, `~`, and
-//! their resolved equivalents) — deleting or renaming an ancestor takes
+//! their resolved equivalents), plus (issue #450) a recursive-copy/
+//! extract half — flagless `rsync`, `cp -r`/`-R`/`--recursive`,
+//! `tar -x`/`--extract`/`--get` combined with `-C`/`--directory`, and
+//! `unzip -d` — over the same ancestor list, since a recursive copy or
+//! archive extraction whose payload happens to contain
+//! `shguard/config.toml` replaces the config while only ever naming the
+//! ancestor directory — deleting or renaming an ancestor takes
 //! the config directory with it even though the ancestor path itself
 //! never appears in the direct-target list above —
 //! the one place this crate builds a rule's TOML text in code rather than
@@ -795,6 +802,12 @@ command = "dd"
 targets = [{{ strip = "of=", normalized_prefix = {quoted_dir}{ci_attr} }}]
 
 [[deny]]
+id = "shguard-self-protect-config-dcfldd-{suffix}"
+reason = "writing to shguard's own config directory must never be scripted"
+command = "dcfldd"
+targets = [{{ strip = "of=", normalized_prefix = {quoted_dir}{ci_attr} }}]
+
+[[deny]]
 id = "shguard-self-protect-config-rm-{suffix}"
 reason = "writing to shguard's own config directory must never be scripted"
 command = "rm"
@@ -907,6 +920,23 @@ fn case_insensitive_toml_attr(case_insensitive: bool) -> &'static str {
 /// comment), silently turning "ask near the config directory" into "ask
 /// on every matching command anywhere" — the opposite of this rule's
 /// intent.
+///
+/// Issue #450 adds a second half alongside the original delete/rename
+/// family above: a recursive copy or archive extraction whose payload
+/// happens to contain `shguard/config.toml` overwrites the config while
+/// only ever naming the ancestor directory as its destination — flagless
+/// `rsync` (default rsync already recurses into directories; the
+/// existing ancestor rule above is scoped to `--delete*` only), `cp`
+/// with `-r`/`-R`/`--recursive`, `tar -x`/`--extract`/`--get` combined
+/// with `-C`/`--directory`, and `unzip -d`. `tar`'s targets mirror the
+/// static `tar-extract-over-root-or-home` rule's shape
+/// (`rules/blocklist.toml`): both a bare `normalized` target (the
+/// `-C <dir>`/`--directory <dir>` separate-argument spelling) and a
+/// `strip`-based one for each of `-C`/`--directory=`'s concatenated
+/// forms, since `targets` matches any token, not a positional argument
+/// tied to the flag. `unzip -d <dir>`'s destination is always a separate
+/// argument, but a `strip = "-d"` target is added defensively for the
+/// same concatenated-flag shape the tar rule already guards against.
 fn ancestor_rules_toml(config_dir: &str, suffix: &str, case_insensitive: bool) -> String {
     let ancestors: Vec<String> = Path::new(config_dir)
         .ancestors()
@@ -921,6 +951,29 @@ fn ancestor_rules_toml(config_dir: &str, suffix: &str, case_insensitive: bool) -
     let targets = ancestors
         .iter()
         .map(|a| format!("{{ normalized = {}{ci_attr} }}", toml_quote(a)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let extract_targets = ancestors
+        .iter()
+        .map(|a| {
+            let quoted = toml_quote(a);
+            format!(
+                "{{ normalized = {quoted}{ci_attr} }}, \
+                 {{ strip = \"-C\", normalized = {quoted}{ci_attr} }}, \
+                 {{ strip = \"--directory=\", normalized = {quoted}{ci_attr} }}"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let unzip_targets = ancestors
+        .iter()
+        .map(|a| {
+            let quoted = toml_quote(a);
+            format!(
+                "{{ normalized = {quoted}{ci_attr} }}, \
+                 {{ strip = \"-d\", normalized = {quoted}{ci_attr} }}"
+            )
+        })
         .collect::<Vec<_>>()
         .join(", ");
     format!(
@@ -949,6 +1002,37 @@ required_flags = [
     "--delete|--delete-before|--delete-during|--delete-after|--delete-excluded|--delete-delay",
 ]
 targets = [{targets}]
+
+[[deny]]
+id = "shguard-self-protect-config-ancestor-rsync-copy-{suffix}"
+decision = "ask"
+reason = "recursively copying into an ancestor directory of shguard's own config directory must never be scripted"
+command = "rsync"
+targets = [{targets}]
+
+[[deny]]
+id = "shguard-self-protect-config-ancestor-cp-{suffix}"
+decision = "ask"
+reason = "recursively copying into an ancestor directory of shguard's own config directory must never be scripted"
+command = "cp"
+required_flags = ["r|R|--recursive"]
+targets = [{targets}]
+
+[[deny]]
+id = "shguard-self-protect-config-ancestor-tar-extract-{suffix}"
+decision = "ask"
+reason = "extracting an archive into an ancestor directory of shguard's own config directory must never be scripted"
+command = "tar"
+required_flags = ["x|--extract|--get", "C|--directory"]
+targets = [{extract_targets}]
+
+[[deny]]
+id = "shguard-self-protect-config-ancestor-unzip-{suffix}"
+decision = "ask"
+reason = "extracting an archive into an ancestor directory of shguard's own config directory must never be scripted"
+command = "unzip"
+required_flags = ["d"]
+targets = [{unzip_targets}]
 "#
     )
 }
@@ -1307,6 +1391,14 @@ mod tests {
             "if=/dev/zero",
             "of=/home/user/.config/shguard/config.toml"
         ]));
+        // issue #450: dcfldd is a drop-in dd variant with identical if=/of=
+        // semantics, missing from the resolved-path family though already
+        // present in the static tilde family (rules/blocklist.toml, #123).
+        assert!(matches(&[
+            "dcfldd",
+            "if=/dev/zero",
+            "of=/home/user/.config/shguard/config.toml"
+        ]));
         assert!(matches(&["rm", "/home/user/.config/shguard/config.toml"]));
         // rm -r on the bare directory (no trailing slash) — issue #22's core
         // scenario, deleting the whole config directory in one shot.
@@ -1526,6 +1618,70 @@ mod tests {
         );
         assert_eq!(
             match_decision(&["mv", "/home/user/.config/other-app", "/tmp/backup"]),
+            None
+        );
+    }
+
+    // Issue #450's reproduction table: a recursive copy or archive
+    // extraction into an ANCESTOR of the config directory (naming only
+    // e.g. `~/.config`, never `~/.config/shguard` itself) can overwrite
+    // `config.toml` while every existing ancestor rule (rm -r/mv/rsync
+    // --delete) stays silent, since none of them covered a recursive
+    // copy/extract payload.
+    #[test]
+    fn self_protection_ancestor_rules_cover_recursive_copy_and_extract() {
+        use crate::normalize::NormalizedWord;
+
+        let toml = self_protection_toml("/home/user/.config/shguard", "literal", false);
+        let user_config = UserConfig::parse(&toml).unwrap();
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let (rules, _) = merge_user_config(blocklist, allowlist, user_config).unwrap();
+
+        let match_decision = |argv: &[&str]| {
+            let words: Vec<NormalizedWord> =
+                argv.iter().map(|w| NormalizedWord::resolved(*w)).collect();
+            rules
+                .match_command(&words)
+                .map(crate::rules::CommandRule::decision)
+        };
+
+        // Previously-Allow rows from the issue's reproduction table.
+        assert_eq!(
+            match_decision(&["rsync", "-a", "payload/", "/home/user/.config/"]),
+            Some(Decision::Ask)
+        );
+        assert_eq!(
+            match_decision(&["cp", "-r", "payload/.", "/home/user/.config/"]),
+            Some(Decision::Ask)
+        );
+        assert_eq!(
+            match_decision(&["tar", "-xf", "p.tar", "-C", "/home/user/.config"]),
+            Some(Decision::Ask)
+        );
+        assert_eq!(
+            match_decision(&["unzip", "-o", "p.zip", "-d", "/home/user/.config"]),
+            Some(Decision::Ask)
+        );
+
+        // Control rows: already-correct behavior must be unchanged.
+        assert_eq!(
+            match_decision(&["rsync", "-a", "--delete", "p/", "/home/user/.config/"]),
+            Some(Decision::Ask)
+        );
+
+        // False-positive guards: flagless cp / tar or unzip without an
+        // ancestor destination stay untouched.
+        assert_eq!(
+            match_decision(&["cp", "notes.txt", "/home/user/.config"]),
+            None
+        );
+        assert_eq!(
+            match_decision(&["tar", "-cf", "out.tar", "/home/user/.config"]),
+            None
+        );
+        assert_eq!(
+            match_decision(&["unzip", "-o", "p.zip", "-d", "/tmp/elsewhere"]),
             None
         );
     }
