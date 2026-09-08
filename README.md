@@ -1042,11 +1042,15 @@ mid-session) remains undetectable at load time. **`decision_log_path` must
 be an absolute path**: a relative path would resolve against the invoking
 process's current working directory, which varies per hook invocation, so
 config loading rejects one outright rather than accepting an ambiguous
-target. The path (or its parent directory) is also automatically added to
-the same self-protection deny rules that guard shguard's own config file
-(`rm`, `truncate`, `ln -sf`, `tee`, `cp`, `mv`, and friends against it are
-`Ask`/`Block`), since the log an agent's own commands are being audited
-into must not be deletable or redirectable by that same agent.
+target. The exact log path is also automatically added to the same
+self-protection deny-rule generator that guards shguard's own config file
+(`rm`, `ln -sf`, `tee`, `cp`, `mv`, and friends against that exact path
+are `Block`; recursively deleting or renaming its containing directory is
+`Ask`), since the log an agent's own commands are being audited into must
+not be deletable or redirectable by that same agent. Scoped to the exact
+file rather than the whole containing directory, so an ordinary write to
+some other, unrelated file the log happens to share a directory with is
+unaffected.
 
 **Outer-watchdog caveat:** both the real hook (`shguard`'s stdin contract)
 and `shguard check` (issue #109) additionally wrap their *entire*

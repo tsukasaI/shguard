@@ -183,6 +183,27 @@ fn relative_decision_log_path_fails_config_load_closed() {
         .code(2);
 }
 
+/// A trailing `/` is dropped by `Path::parent()`/`components()`, so
+/// without a dedicated check `decision_log_path = "$dir/newsub/"` would
+/// pass the missing-parent-directory check (its parent, `$dir`, exists)
+/// while naming something the OS can never open as a regular file.
+#[test]
+fn decision_log_path_with_a_trailing_slash_fails_config_load_closed() {
+    let dir = tempfile::tempdir().expect("tempdir should create");
+    let log_path_with_trailing_slash = format!("{}/", dir.path().join("newsub").display());
+    let (_config_dir, config_path) = write_config(&format!(
+        r#"
+        decision_log_path = {log_path_with_trailing_slash:?}
+        "#,
+    ));
+
+    isolated_command(&config_path)
+        .args(["check", "echo hello"])
+        .assert()
+        .failure()
+        .code(2);
+}
+
 #[test]
 fn check_subcommand_appends_a_decision_log_line_matching_the_verdict() {
     let log_dir = tempfile::tempdir().expect("tempdir should create");
@@ -513,12 +534,15 @@ fn check_subcommand_logs_null_permission_mode_and_agent_id() {
     assert!(lines[0]["agent_id"].is_null());
 }
 
-// Issue #458 item 4: the log path itself used to be undefended -- `rm`,
-// `truncate -s0`, and `ln -sf` against it were all `Allow` (only
-// `~/.bashrc`-class targets were floored by `shell-init-ln`), so the
-// audit trail was deletable/overwritable/redirectable by the very agent
-// it audits. `Policy::load` now folds the log path's own directory into
-// the same self-protection deny rules the config directory gets.
+// Issue #458 item 4: the log path itself used to be undefended -- `rm`
+// and `ln -sf` against it were both `Allow` (only `~/.bashrc`-class
+// targets were floored by `shell-init-ln`), so the audit trail was
+// deletable/redirectable by the very agent it audits. `Policy::load` now
+// folds the log path itself into the same self-protection deny-rule
+// generation the config file gets, scoped to the exact log path (not its
+// whole containing directory, to avoid over-protecting unrelated files a
+// user-chosen log directory might also hold -- see `self_protection_toml`'s
+// `exact_target` doc comment in `src/config.rs`).
 
 #[test]
 fn rm_against_the_decision_log_path_is_blocked() {
@@ -543,6 +567,12 @@ fn rm_against_the_decision_log_path_is_blocked() {
     );
 }
 
+/// Not a self-protection rule: `truncate -s0`/`--size` against ANY target
+/// already `Block`s via the pre-existing, global `truncate-zero` rule
+/// (`rules/blocklist.toml`), regardless of `decision_log_path`. Pinned
+/// here anyway so a future narrowing of `truncate-zero` (e.g. adding a
+/// `targets` restriction it doesn't have today) doesn't silently leave
+/// the decision log truncatable.
 #[test]
 fn truncate_against_the_decision_log_path_is_blocked() {
     let log_dir = tempfile::tempdir().expect("tempdir should create");
@@ -564,8 +594,9 @@ fn truncate_against_the_decision_log_path_is_blocked() {
         .code(1);
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
     assert!(
-        stdout.contains("Decision: Block"),
-        "expected truncate -s0 against the decision log path to Block, got: {stdout}"
+        stdout.contains("Matched rule: truncate-zero"),
+        "expected truncate -s0 against the decision log path to Block via the global \
+         truncate-zero rule, got: {stdout}"
     );
 }
 

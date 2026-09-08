@@ -385,6 +385,7 @@ impl Policy {
                     case_insensitive,
                     "config",
                     "config directory",
+                    false,
                 );
                 let self_protection = UserConfig::parse(&toml)?;
                 (rules, allowlist) = merge_user_config(rules, allowlist, self_protection)?;
@@ -457,6 +458,29 @@ impl Policy {
                     "decision_log_path {log_path:?} must be an absolute path"
                 )));
             }
+            // A trailing `/` (`Path::parent()`/`components()` silently drop
+            // it, unlike the raw string this checks instead) or a `.`/`..`
+            // component names a directory-shaped path, not a file: the
+            // parent-directory check below would see it as "parent exists,
+            // file itself absent" and accept it, and every future append
+            // would then fail forever with `EISDIR`/`ENOTDIR` -- exactly
+            // the load-time-invisible failure fix #458 item 2 exists to
+            // close, just with a different underlying OS error.
+            let has_directory_shaped_component = log_path
+                .to_string_lossy()
+                .ends_with(std::path::MAIN_SEPARATOR)
+                || log_path.components().any(|component| {
+                    matches!(
+                        component,
+                        std::path::Component::CurDir | std::path::Component::ParentDir
+                    )
+                });
+            if has_directory_shaped_component {
+                return Err(ConfigError::InvalidConfig(format!(
+                    "decision_log_path {log_path:?} must name a file directly, not a \
+                     trailing-slash or relative-component path"
+                )));
+            }
             match std::fs::symlink_metadata(log_path) {
                 Ok(meta) if meta.is_symlink() => {
                     return Err(ConfigError::InvalidConfig(format!(
@@ -485,23 +509,38 @@ impl Policy {
             }
 
             // Issue #458 item 4: without this, the log path itself is the
-            // audit trail's own single point of failure -- `rm`/
-            // `truncate -s0`/`ln -sf` against it were all `Allow`, since
-            // only `~/.bashrc`-class targets are floored elsewhere. Reuses
-            // the exact mechanism the config file protects itself with
+            // audit trail's own single point of failure -- `rm`/`ln -sf`
+            // against it were both `Allow`, since only `~/.bashrc`-class
+            // targets are floored elsewhere. Reuses the exact mechanism
+            // the config file protects itself with
             // ([`self_protection_directories`]/[`self_protection_toml`])
             // rather than inventing a second one, distinguished from the
             // config rule set by the `"decision-log"`/`"decision log
-            // directory"` `id_kind`/`noun` pair so ids never collide even
-            // when the log lives inside the config directory itself.
+            // file"` `id_kind`/`noun` pair so ids never collide even when
+            // the log lives inside the config directory itself.
+            //
+            // `exact_target = true`, unlike the config call site above:
+            // `self_protection_directories` returns DIRECTORIES (it walks
+            // `log_path`'s own symlink/canonicalization chain the same
+            // way it does for the config file), but the log is one file
+            // inside a directory that may hold unrelated files the user
+            // never asked shguard to protect -- reconstructing the exact
+            // log file path at each returned directory (same file name,
+            // since `decision_log_path` is already rejected above if it
+            // is itself a symlink) keeps the direct write-rules scoped to
+            // that one file while `ancestor_rules_toml` still floors
+            // recursive deletion/rename of the directory itself.
             let case_insensitive = config_dir_is_case_insensitive();
+            let log_file_name = log_path.file_name().unwrap_or_default();
             for (suffix, log_dir) in self_protection_directories(log_path)? {
+                let log_file_at_hop = log_dir.join(log_file_name);
                 let toml = self_protection_toml(
-                    &log_dir.to_string_lossy(),
+                    &log_file_at_hop.to_string_lossy(),
                     &suffix,
                     case_insensitive,
                     "decision-log",
-                    "decision log directory",
+                    "decision log file",
+                    true,
                 );
                 let self_protection = UserConfig::parse(&toml)?;
                 (rules, allowlist) = merge_user_config(rules, allowlist, self_protection)?;
@@ -809,123 +848,148 @@ command = "shguard"
 required_tokens = ["init"]
 "#;
 
-/// Generates `[[deny]]`-array TOML text protecting `config_dir` (and
-/// everything under it) from common write-capable commands run through
-/// Bash — see the module docs' "Self-protecting the config file" section
-/// for why this is generated rather than read from a file. `suffix`
-/// disambiguates rule ids across multiple calls (one per directory
-/// returned by [`self_protection_directories`]) so they can be merged
-/// into one rule set without an id collision. `case_insensitive` sets
-/// every generated `normalized_prefix` target's own `case_insensitive`
-/// flag (see [`config_dir_is_case_insensitive`]) — see [`TargetMatcher`]
+/// Generates `[[deny]]`-array TOML text protecting `target_path` from
+/// common write-capable commands run through Bash — see the module docs'
+/// "Self-protecting the config file" section for why this is generated
+/// rather than read from a file. `suffix` disambiguates rule ids across
+/// multiple calls (one per directory returned by
+/// [`self_protection_directories`]) so they can be merged into one rule
+/// set without an id collision. `case_insensitive` sets every generated
+/// target's own `case_insensitive` flag (see
+/// [`config_dir_is_case_insensitive`]) — see [`TargetMatcher`]
 /// (`crate::rules`) for what that flag does at match time. `id_kind`/`noun`
 /// parameterize what is being protected (`"config"`/`"config directory"`
 /// for the config self-protection call site, `"decision-log"`/`"decision
-/// log directory"` for [`Policy::load`]'s decision-log self-protection —
-/// issue #458 item 4) so this one mechanism generates both rule families
-/// rather than a near-duplicate function.
+/// log file"` for [`Policy::load`]'s decision-log self-protection — issue
+/// #458 item 4) so this one mechanism generates both rule families rather
+/// than a near-duplicate function.
+///
+/// `exact_target` chooses the target match shape: `false` (the config
+/// call site) matches `target_path` as a `normalized_prefix` — every path
+/// under that directory is protected, appropriate for a directory this
+/// crate itself fully owns (`~/.config/shguard`). `true` (the decision-log
+/// call site) matches it as an exact `normalized` path instead — a
+/// prefix match here would either over-protect an arbitrary,
+/// user-chosen log directory shared with unrelated files (blocking
+/// ordinary writes anywhere in it) or, worse, under-protect via a
+/// same-prefix collision (`normalized_prefix` is a plain string
+/// `starts_with`, so it would also match `decisions.jsonl.bak`,
+/// `decisions.jsonl2`, and the like — see [`self_protection_directories`]'s
+/// own doc comment on this exact hazard). `ancestor_rules_toml` still
+/// protects `target_path`'s ancestors (its parent directory and up) with
+/// `ask`-level recursive-delete/rename rules regardless of `exact_target`,
+/// since `Path::ancestors()` treats a file path and a directory path the
+/// same way.
 fn self_protection_toml(
-    config_dir: &str,
+    target_path: &str,
     suffix: &str,
     case_insensitive: bool,
     id_kind: &str,
     noun: &str,
+    exact_target: bool,
 ) -> String {
-    let quoted_dir = toml_quote(config_dir);
+    let quoted_dir = toml_quote(target_path);
     let ci_attr = case_insensitive_toml_attr(case_insensitive);
-    let ancestor_rules = ancestor_rules_toml(config_dir, suffix, case_insensitive, id_kind, noun);
+    let target_kind = if exact_target {
+        "normalized"
+    } else {
+        "normalized_prefix"
+    };
+    let plain_target = format!("{target_kind} = {quoted_dir}{ci_attr}");
+    let dd_target = format!("strip = \"of=\", {target_kind} = {quoted_dir}{ci_attr}");
+    let ancestor_rules = ancestor_rules_toml(target_path, suffix, case_insensitive, id_kind, noun);
     format!(
         r#"
 [[deny]]
 id = "shguard-self-protect-{id_kind}-tee-{suffix}"
 reason = "writing to shguard's own {noun} must never be scripted"
 command = "tee"
-targets = [{{ normalized_prefix = {quoted_dir}{ci_attr} }}]
+targets = [{{ {plain_target} }}]
 
 [[deny]]
 id = "shguard-self-protect-{id_kind}-cp-{suffix}"
 reason = "writing to shguard's own {noun} must never be scripted"
 command = "cp"
-targets = [{{ normalized_prefix = {quoted_dir}{ci_attr} }}]
+targets = [{{ {plain_target} }}]
 
 [[deny]]
 id = "shguard-self-protect-{id_kind}-mv-{suffix}"
 reason = "writing to shguard's own {noun} must never be scripted"
 command = "mv"
-targets = [{{ normalized_prefix = {quoted_dir}{ci_attr} }}]
+targets = [{{ {plain_target} }}]
 
 [[deny]]
 id = "shguard-self-protect-{id_kind}-install-{suffix}"
 reason = "writing to shguard's own {noun} must never be scripted"
 command = "install"
-targets = [{{ normalized_prefix = {quoted_dir}{ci_attr} }}]
+targets = [{{ {plain_target} }}]
 
 [[deny]]
 id = "shguard-self-protect-{id_kind}-sed-{suffix}"
 reason = "writing to shguard's own {noun} must never be scripted"
 command = "sed"
 required_flags = ["i|I|--in-place"]
-targets = [{{ normalized_prefix = {quoted_dir}{ci_attr} }}]
+targets = [{{ {plain_target} }}]
 
 [[deny]]
 id = "shguard-self-protect-{id_kind}-dd-{suffix}"
 reason = "writing to shguard's own {noun} must never be scripted"
 command = "dd"
-targets = [{{ strip = "of=", normalized_prefix = {quoted_dir}{ci_attr} }}]
+targets = [{{ {dd_target} }}]
 
 [[deny]]
 id = "shguard-self-protect-{id_kind}-dcfldd-{suffix}"
 reason = "writing to shguard's own {noun} must never be scripted"
 command = "dcfldd"
-targets = [{{ strip = "of=", normalized_prefix = {quoted_dir}{ci_attr} }}]
+targets = [{{ {dd_target} }}]
 
 [[deny]]
 id = "shguard-self-protect-{id_kind}-rm-{suffix}"
 reason = "writing to shguard's own {noun} must never be scripted"
 command = "rm"
-targets = [{{ normalized_prefix = {quoted_dir}{ci_attr} }}]
+targets = [{{ {plain_target} }}]
 
 [[deny]]
 id = "shguard-self-protect-{id_kind}-unlink-{suffix}"
 reason = "writing to shguard's own {noun} must never be scripted"
 command = "unlink"
-targets = [{{ normalized_prefix = {quoted_dir}{ci_attr} }}]
+targets = [{{ {plain_target} }}]
 
 [[deny]]
 id = "shguard-self-protect-{id_kind}-ln-{suffix}"
 reason = "writing to shguard's own {noun} must never be scripted"
 command = "ln"
-targets = [{{ normalized_prefix = {quoted_dir}{ci_attr} }}]
+targets = [{{ {plain_target} }}]
 
 [[deny]]
 id = "shguard-self-protect-{id_kind}-rsync-{suffix}"
 reason = "writing to shguard's own {noun} must never be scripted"
 command = "rsync"
-targets = [{{ normalized_prefix = {quoted_dir}{ci_attr} }}]
+targets = [{{ {plain_target} }}]
 
 [[redirect]]
 id = "shguard-self-protect-{id_kind}-redirect-{suffix}"
 reason = "redirecting output to shguard's own {noun} must never be scripted"
-targets = [{{ normalized_prefix = {quoted_dir}{ci_attr} }}]
+targets = [{{ {plain_target} }}]
 
 [[deny]]
 id = "shguard-self-protect-{id_kind}-rmdir-{suffix}"
 reason = "deleting shguard's own {noun} must never be scripted"
 command = "rmdir"
-targets = [{{ normalized_prefix = {quoted_dir}{ci_attr} }}]
+targets = [{{ {plain_target} }}]
 
 [[deny]]
 id = "shguard-self-protect-{id_kind}-perl-{suffix}"
 reason = "writing to shguard's own {noun} must never be scripted"
 command = "perl"
 required_flags = ["i"]
-targets = [{{ normalized_prefix = {quoted_dir}{ci_attr} }}]
+targets = [{{ {plain_target} }}]
 
 [[deny]]
 id = "shguard-self-protect-{id_kind}-patch-{suffix}"
 reason = "patching shguard's own {noun} must never be scripted"
 command = "patch"
-targets = [{{ normalized_prefix = {quoted_dir}{ci_attr} }}]
+targets = [{{ {plain_target} }}]
 
 [[deny]]
 id = "shguard-self-protect-{id_kind}-find-exec-{suffix}"
@@ -933,7 +997,7 @@ decision = "ask"
 reason = "find against shguard's own {noun} combined with -exec/-execdir/-ok/-okdir must never be scripted"
 command = "find"
 required_flags = ["-exec|-execdir|-ok|-okdir"]
-targets = [{{ normalized_prefix = {quoted_dir}{ci_attr} }}]
+targets = [{{ {plain_target} }}]
 {ancestor_rules}"#
     )
 }
@@ -1446,6 +1510,7 @@ mod tests {
             false,
             "config",
             "config directory",
+            false,
         );
         let user_config = UserConfig::parse(&toml).unwrap();
         let blocklist = Rules::embedded().unwrap();
@@ -1543,26 +1608,39 @@ mod tests {
     // only surface as a `Policy::load` failure on a macOS-only path,
     // undetected by CI.
     // Issue #458 item 4: `self_protection_toml`/`ancestor_rules_toml` are
-    // reused, not duplicated, to protect `decision_log_path`'s directory
-    // the same way the config directory protects itself -- `id_kind`/
-    // `noun` are the only difference, so generated ids/reasons must
-    // reflect whichever pair was passed rather than always saying
-    // "config".
+    // reused, not duplicated, to protect `decision_log_path` the same way
+    // the config directory protects itself -- `id_kind`/`noun` are one
+    // difference (generated ids/reasons must reflect whichever pair was
+    // passed rather than always saying "config"), `exact_target` is the
+    // other: the decision-log call site passes `true` and an exact FILE
+    // path (not a directory) so the generated `[[deny]]` targets are
+    // `normalized`, never `normalized_prefix` -- a directory-prefix match
+    // here would either over-protect every unrelated file the user's
+    // chosen log directory happens to hold, or under-protect via a
+    // same-prefix collision with a differently-named file.
     #[test]
     fn self_protection_toml_id_kind_and_noun_parameterize_the_generated_rules() {
         let toml = self_protection_toml(
-            "/home/user/.local/state/shguard",
+            "/home/user/.local/state/shguard/decisions.jsonl",
             "literal",
             false,
             "decision-log",
-            "decision log directory",
+            "decision log file",
+            true,
         );
         assert!(toml.contains(r#"id = "shguard-self-protect-decision-log-rm-literal""#));
-        assert!(
-            toml.contains("writing to shguard's own decision log directory must never be scripted")
-        );
+        assert!(toml.contains("writing to shguard's own decision log file must never be scripted"));
         assert!(!toml.contains("shguard-self-protect-config-"));
         assert!(!toml.contains("own config directory"));
+        assert!(
+            toml.contains(
+                r#"targets = [{ normalized = "/home/user/.local/state/shguard/decisions.jsonl" }]"#
+            ),
+            "exact_target = true must generate an exact `normalized` match, never \
+             `normalized_prefix` (which would over- or under-match sibling files in \
+             the same directory), got: {toml}"
+        );
+        assert!(!toml.contains("normalized_prefix ="));
     }
 
     #[test]
@@ -1575,6 +1653,7 @@ mod tests {
             true,
             "config",
             "config directory",
+            false,
         );
         let user_config = UserConfig::parse(&toml).unwrap();
         let blocklist = Rules::embedded().unwrap();
@@ -1617,6 +1696,7 @@ mod tests {
             false,
             "config",
             "config directory",
+            false,
         );
         let user_config = UserConfig::parse(&toml).unwrap();
         let blocklist = Rules::embedded().unwrap();
@@ -1647,6 +1727,7 @@ mod tests {
             false,
             "config",
             "config directory",
+            false,
         );
         let user_config = UserConfig::parse(&toml).unwrap();
         let blocklist = Rules::embedded().unwrap();
@@ -1735,6 +1816,7 @@ mod tests {
             false,
             "config",
             "config directory",
+            false,
         );
         let user_config = UserConfig::parse(&toml).unwrap();
         let blocklist = Rules::embedded().unwrap();
@@ -1795,6 +1877,7 @@ mod tests {
             false,
             "config",
             "config directory",
+            false,
         );
         let user_config = UserConfig::parse(&toml).unwrap();
         let blocklist = Rules::embedded().unwrap();
@@ -1963,7 +2046,14 @@ mod tests {
         // targets list would mean "no target constraint" per this
         // crate's schema, silently matching almost any rm -r/mv/rsync
         // --delete invocation).
-        let toml = self_protection_toml("/foo", "literal", false, "config", "config directory");
+        let toml = self_protection_toml(
+            "/foo",
+            "literal",
+            false,
+            "config",
+            "config directory",
+            false,
+        );
         assert!(
             !toml.contains("ancestor"),
             "no ancestor rules should be generated when config_dir has no proper ancestor \

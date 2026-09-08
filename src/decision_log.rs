@@ -102,7 +102,20 @@ fn append(path: &Path, command: &str, verdict: &Verdict, context: &HookContext) 
             // "nothing happened" -- exactly the silent-failure trap
             // `Policy::load`'s load-time validation exists to close, left
             // open here for every failure it can't see up front.
-            eprintln!("shguard: could not write to decision log {path:?}: {err}");
+            //
+            // `writeln!` with the write error discarded, not `eprintln!`
+            // (which panics on a write failure): `append` runs on
+            // `analyze_with_policy`'s ordinary call path, inside `main`'s
+            // top-level `catch_unwind`, so a broken stderr pipe (`EPIPE`
+            // -- Claude Code's process tree can produce one, per
+            // `src/bin/shguard.rs`'s `install_panic_hook` doc comment)
+            // would turn a silent logging failure into a real panic,
+            // exactly the crash this module's own fail-open contract
+            // above promises never happens.
+            let _ = writeln!(
+                std::io::stderr(),
+                "shguard: could not write to decision log {path:?}: {err}"
+            );
             return;
         }
     };
@@ -308,20 +321,54 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_parent_directory_is_reported_on_stderr_not_a_panic() {
+    fn a_missing_parent_directory_does_not_panic() {
         // Fail-open on the logging side: this must not panic, and the
         // caller sees no return value either way -- there is no error
-        // return from `append` to check. `Policy::load` now rejects this
-        // exact shape of `decision_log_path` at config-load time (issue
-        // #458 item 2), but `append` is exercised directly here, bypassing
+        // return from `append` to check (the stderr line itself is not
+        // captured/asserted here). `Policy::load` now rejects this exact
+        // shape of `decision_log_path` at config-load time (issue #458
+        // item 2), but `append` is exercised directly here, bypassing
         // that check, to confirm its own open-failure path still degrades
-        // to a stderr line (issue #458 item 2) instead of a crash.
+        // gracefully instead of a crash.
         let unwritable = std::path::Path::new("/nonexistent-shguard-test-dir/decisions.jsonl");
         append(
             unwritable,
             "echo hi",
             &Verdict::allow(Vec::new()),
             &HookContext::none(),
+        );
+    }
+
+    /// Issue #458 item 1's `O_NOFOLLOW` closes the load-to-append TOCTOU:
+    /// `Policy::load` already rejects a `decision_log_path` that is a
+    /// symlink at config-load time, so the only way left to reach
+    /// `open_log_file` with one is a symlink planted after that check --
+    /// exercised here by calling `append` directly, bypassing
+    /// `Policy::load` entirely. Without `O_NOFOLLOW`, this would append
+    /// the JSONL line into `real_target` (a symlink-following `open`
+    /// follows straight through); with it, the open fails and `real_target`
+    /// stays untouched.
+    #[test]
+    #[cfg(unix)]
+    fn open_log_file_refuses_to_follow_a_symlink() {
+        let dir = tempdir().unwrap();
+        let real_target = dir.path().join("real.txt");
+        std::fs::write(&real_target, "").unwrap();
+        let symlink_path = dir.path().join("decisions.jsonl");
+        std::os::unix::fs::symlink(&real_target, &symlink_path).unwrap();
+
+        append(
+            &symlink_path,
+            "echo hi",
+            &Verdict::allow(Vec::new()),
+            &HookContext::none(),
+        );
+
+        let contents = std::fs::read_to_string(&real_target).unwrap();
+        assert!(
+            contents.is_empty(),
+            "O_NOFOLLOW should have refused to write through the symlink, but \
+             real_target now contains: {contents:?}"
         );
     }
 
