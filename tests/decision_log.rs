@@ -333,7 +333,7 @@ fn watchdog_trip_verdict_is_still_logged() {
 
 /// Issue #459: unlike `check`, the PreToolUse hook path's own outer
 /// watchdog (`src/bin/shguard.rs`'s `EVALUATION_TIMEOUT`, started before
-/// config load and stdin read) always wins the race against
+/// config load and stdin read) always wins the wall-clock race against
 /// `analyze_with_policy`'s internal watchdog for a genuine hang — see
 /// `tests/fail_closed_exit_paths.rs`'s
 /// `heredoc_inside_unterminated_command_substitution_fails_closed_to_ask`
@@ -345,6 +345,27 @@ fn watchdog_trip_verdict_is_still_logged() {
 /// stdin JSON, before handing the command to `analyze_with_policy`) gives
 /// `emit_first_result`'s trip arm a command and context to log against even
 /// though the worker itself never gets there.
+///
+/// Uses `SHGUARD_TEST_MEM_LIMIT_MB=64` (debug-only, same injection point
+/// `tests/fail_closed_exit_paths.rs`'s own
+/// `memory_budget_trip_fails_closed_to_ask` pins) rather than the plain
+/// wall-clock trip: the binary's outer memory arm and
+/// `analyze_with_policy`'s internal one poll RSS independently and can, in
+/// principle, race each other for a plain unbounded-allocation trip.
+/// `LogState` (`src/bin/shguard.rs`) resolves that race in the outer trip's
+/// favor whenever it gets there first (claiming ownership of the log
+/// before it even emits stdout), but the worker can still occasionally
+/// claim it a few microseconds earlier, in which case the logged reason is
+/// the worker's own rather than the one this trip prints to stdout — a
+/// disclosed, narrow tie, not this test's concern. Forcing the outer arm's
+/// 64 MiB threshold far below the internal watchdog's 256 MiB one removes
+/// that race entirely, so this test pins the intended code path (the outer
+/// trip's own `log_trip_best_effort`) deterministically instead of
+/// depending on which side happens to win.
+#[cfg_attr(
+    not(debug_assertions),
+    ignore = "SHGUARD_TEST_MEM_LIMIT_MB injection point is compiled out in release builds"
+)]
 #[test]
 fn hook_path_watchdog_trip_is_still_logged() {
     let log_dir = tempfile::tempdir().expect("tempdir should create");
@@ -358,6 +379,7 @@ fn hook_path_watchdog_trip_is_still_logged() {
 
     let hook_stdin = r#"{"tool_name":"Bash","tool_input":{"command":"<<$( |] "},"hook_event_name":"PreToolUse"}"#;
     isolated_command(&config_path)
+        .env("SHGUARD_TEST_MEM_LIMIT_MB", "64")
         .timeout(std::time::Duration::from_secs(30))
         .write_stdin(hook_stdin)
         .assert()
@@ -371,8 +393,8 @@ fn hook_path_watchdog_trip_is_still_logged() {
         .as_str()
         .expect("reason should be a string");
     assert!(
-        reason.contains("exceeded its"),
-        "expected a watchdog fail-closed reason to be logged, got: {reason}"
+        reason.contains("memory budget") && !reason.contains("growth"),
+        "expected the binary's own outer-watchdog memory-trip reason to be logged, got: {reason}"
     );
 }
 

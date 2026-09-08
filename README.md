@@ -1062,27 +1062,37 @@ already-computed, correct decision with a fail-closed `Ask` (`check`
 reports this as a distinct exit-2 runtime error rather than printing a
 `Decision: Ask` line, so it isn't mistaken for a real decision).
 
-For the real hook path specifically, the outer watchdog's deadline starts
-*before* config load and stdin read even run, so for a genuine hang inside
-the analysis pipeline itself, not just a blocking log write, it always
-wins the race against `analyze_with_policy`'s own internal watchdog:
-`analyze_with_policy` never gets a chance to return, let alone log, before
-the outer bound fires (issue #459). The outer watchdog closes that gap
-itself: it appends its own fail-closed `Ask` line to `decision_log_path`,
-using the command and context it captured right after parsing stdin,
-bounded independently (250ms) so that a log target which is *itself* the
-thing hanging can't turn this best-effort write into a second hang on top
-of the first. This still leaves one case unlogged: a hang during config
-load or the stdin read itself, before there is any command yet to
-attribute the trip to. `check` has no equivalent; its own outer bound
-(`evaluate_with_timeout`) adds enough grace margin over
-`analyze_with_policy`'s internal one that a genuine internal trip there
-still surfaces normally and gets logged the ordinary way, so only a
-genuinely stuck log target reaches `check`'s outer bound, in which case
-nothing was left to log regardless of which watchdog would have written
-it. A direct library caller has no such outer watchdog at all; for one,
-`analyze_with_policy`'s own internal bound (mentioned above) is the whole
-story.
+For the real hook path specifically, the outer watchdog's wall-clock
+deadline starts *before* config load and stdin read even run, so for a
+genuine hang inside the analysis pipeline itself, not just a blocking log
+write, it always wins the race against `analyze_with_policy`'s own internal
+watchdog: `analyze_with_policy` never gets a chance to return, let alone
+log, before the outer bound fires (issue #459). (The two watchdogs' memory
+arms are not strictly ordered the same way, since each polls RSS
+independently, so the outer trip claims ownership of the log the instant
+it fires, before it even writes to stdout, and wins that race whenever it
+gets there first. The one narrow exception is the worker claiming it a few
+microseconds earlier, in which case the outer trip waits briefly for the
+worker's own write to finish rather than writing a second line, so a given
+invocation still gets exactly one log line, though on that rare tie it may
+name the worker's own in-flight reason rather than the one printed to
+stdout; it is never a duplicate, and in the ordinary case never a missed
+line either.) The outer watchdog closes the wall-clock case itself: it
+appends its own fail-closed `Ask` line to `decision_log_path`, using the
+command and context it captured right after parsing stdin, bounded
+independently (matching the inner watchdog's own RSS-poll interval) so
+that a log target which is *itself* the thing hanging can't turn this
+best-effort write into a second hang on top of the first. This still
+leaves one case unlogged: a hang during config load or the stdin read
+itself, before there is any command yet to attribute the trip to. `check`
+has no equivalent; its own outer bound (`evaluate_with_timeout`) adds
+enough grace margin over `analyze_with_policy`'s internal one that a
+genuine internal trip there still surfaces normally and gets logged the
+ordinary way, so only a genuinely stuck log target reaches `check`'s outer
+bound, in which case nothing was left to log regardless of which watchdog
+would have written it. A direct library caller has no such outer watchdog
+at all; for one, `analyze_with_policy`'s own internal bound (mentioned
+above) is the whole story.
 
 An empty `decision_log_path` (`decision_log_path = ""`), a relative path, a
 symlink, one naming an existing directory/FIFO/device/socket, or one whose

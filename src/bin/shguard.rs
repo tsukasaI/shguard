@@ -89,6 +89,8 @@
 
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
@@ -170,17 +172,87 @@ struct EarlyInfo {
     context: shguard::HookContext,
 }
 
-/// Bound on [`log_trip_best_effort`]'s own append call. `decision_log_path`
-/// is validated at config-load time to be a regular local file
-/// (`src/config.rs`), so a normal append finishes in low single-digit
-/// milliseconds; this only matters for the one residual, disclosed risk
-/// `src/lib.rs`'s own docs already carry — a target that starts blocking
-/// only after that check (e.g. a network mount gone stale mid-session).
-/// 250ms is generous next to the normal case and small next to
-/// [`EVALUATION_TIMEOUT`], so even the hostile case adds only a bounded,
-/// barely-noticeable delay to the fail-closed exit this whole watchdog
-/// exists to keep fast.
-const TRIP_LOG_TIMEOUT: Duration = Duration::from_millis(250);
+/// Bound on [`log_trip_best_effort`]'s own append call, and on how long it
+/// waits for a worker that got there first (see [`LogState`]) to finish its
+/// own write. `decision_log_path` is validated at config-load time to be a
+/// regular local file (`src/config.rs`), so a normal append finishes in low
+/// single-digit milliseconds; this only matters for the one residual,
+/// disclosed risk `src/lib.rs`'s own docs already carry — a target that
+/// starts blocking only after that check (e.g. a network mount gone stale
+/// mid-session). Reuses [`MEMORY_POLL_INTERVAL`] rather than a larger value
+/// of its own: on the `MemoryTrip` arm specifically, the abandoned worker
+/// may still be allocating at the multi-GB/s rate [`EVALUATION_TIMEOUT`]'s
+/// own docs describe, so this bound doubles as the RSS overshoot this whole
+/// watchdog already tolerates from one extra poll interval — a longer
+/// bound here would let a hostile log target buy the runaway worker
+/// meaningfully more headroom on exactly the memory-constrained host this
+/// arm exists to protect.
+const TRIP_LOG_TIMEOUT: Duration = MEMORY_POLL_INTERVAL;
+
+/// [`LogState`]'s "nobody has touched the decision log for this invocation
+/// yet" value — the only state [`AtomicU8::new`] is ever constructed with.
+const LOG_UNCLAIMED: u8 = 0;
+/// [`LogState`]'s "the worker's own [`DedupSink::append`] is writing (or
+/// about to)" value.
+const LOG_WORKER: u8 = 1;
+/// [`LogState`]'s "the worker's own write finished" value.
+const LOG_DONE: u8 = 2;
+/// [`LogState`]'s "[`emit_first_result`]'s trip arm claimed the log for
+/// itself" value.
+const LOG_MAIN: u8 = 3;
+
+/// Shared between [`DedupSink`] (on the worker thread) and
+/// [`log_trip_best_effort`] (on `main`) so at most one decision-log line is
+/// ever written for a single hook invocation, and — unlike a plain
+/// swap-and-race flag — so the *fail-closed decision `main` is about to
+/// emit to stdout* always wins ownership of the log the instant a trip
+/// fires, rather than whichever side's write happens to finish first
+/// (issue #459 follow-up): the `MemoryTrip` arm's outer (this binary's) and
+/// inner (`analyze_with_policy`'s own `watchdog::bounded`) watchdogs poll
+/// RSS on independent, phase-shifted [`MEMORY_POLL_INTERVAL`] cycles, so
+/// either can cross its own threshold first. A plain "first `swap` wins"
+/// flag lets the *worker* win that race after `main` has already decided
+/// and emitted a *different* fail-closed reason to stdout — a duplicate at
+/// best, a decision-log entry that names a reason nobody ever saw at
+/// worst. `main`'s trip arm instead claims [`LOG_MAIN`] unconditionally,
+/// as the very first thing it does — before `emit`, before formatting
+/// anything — so the only way the worker's `DedupSink::append` still wins
+/// is if it claimed [`LOG_WORKER`] microseconds earlier, in which case
+/// [`log_trip_best_effort`] waits (bounded by [`TRIP_LOG_TIMEOUT`]) for it
+/// to reach [`LOG_DONE`] rather than writing a second, conflicting line.
+type LogState = AtomicU8;
+
+/// Wraps [`shguard::FileDecisionLog`] so its write only happens if no trip
+/// has claimed [`LOG_MAIN`] first — see [`LogState`]'s own docs for why
+/// this direction (main taking priority) is the one that keeps the log
+/// consistent with what stdout actually emitted.
+struct DedupSink {
+    state: Arc<LogState>,
+}
+
+impl shguard::DecisionLogSink for DedupSink {
+    fn append(
+        &self,
+        path: &std::path::Path,
+        command: &str,
+        verdict: &shguard::verdict::Verdict,
+        context: &shguard::HookContext,
+    ) {
+        if self
+            .state
+            .compare_exchange(
+                LOG_UNCLAIMED,
+                LOG_WORKER,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_ok()
+        {
+            shguard::FileDecisionLog.append(path, command, verdict, context);
+            self.state.store(LOG_DONE, Ordering::SeqCst);
+        }
+    }
+}
 
 fn main() {
     // `args_os`, not `args`: the latter panics outright on a non-UTF-8
@@ -253,15 +325,23 @@ fn main() {
 
     let (result_tx, result_rx) = std::sync::mpsc::channel();
     let (early_tx, early_rx) = std::sync::mpsc::channel();
+    // Shared with `DedupSink` (built inside `run`, on the worker thread) so
+    // a watchdog trip's `log_trip_best_effort` and the worker's own
+    // ordinary logging can never both write for the same invocation — see
+    // `LogState`'s own docs for why a trip claims this ahead of the
+    // worker, not merely before it.
+    let log_state = Arc::new(LogState::new(LOG_UNCLAIMED));
+    let worker_log_state = log_state.clone();
     let worker = std::thread::Builder::new()
         .name("shguard-eval".to_string())
         .spawn(move || {
-            let output = std::panic::catch_unwind(move || run(&early_tx)).unwrap_or_else(|_| {
-                shguard::adapter::fail_closed(
-                    "shguard: internal panic while evaluating the command; refusing to \
-                     evaluate (fail-closed)",
-                )
-            });
+            let output = std::panic::catch_unwind(move || run(&early_tx, worker_log_state))
+                .unwrap_or_else(|_| {
+                    shguard::adapter::fail_closed(
+                        "shguard: internal panic while evaluating the command; refusing to \
+                         evaluate (fail-closed)",
+                    )
+                });
             // A closed receiver means `main` already timed out and moved
             // on (see below) — nothing left to send to.
             let _ = result_tx.send(output);
@@ -278,7 +358,7 @@ fn main() {
         return;
     };
 
-    emit_first_result(&result_rx, &early_rx);
+    emit_first_result(&result_rx, &early_rx, &log_state);
     // The worker already sent (or the process is about to exit on a
     // watchdog-trip path — time, memory, or disconnect — in which case
     // this line is never reached) — join to avoid leaving a detached
@@ -371,21 +451,32 @@ fn resolve_first_result(
 /// The only caller of [`resolve_first_result`], invoked from [`main`]: applies
 /// [`MEMORY_LIMIT_BYTES`] (or its debug-only test override) and
 /// [`EVALUATION_TIMEOUT`], then emits whatever it resolved to. On either
-/// trip (or a worker disconnect), emits the fail-closed decision and
-/// exits the process immediately — see the module docs' "evaluation
-/// watchdog" section for why exiting, not merely returning, is required.
-fn emit_first_result(rx: &Receiver<serde_json::Value>, early_rx: &Receiver<EarlyInfo>) {
+/// trip (or a worker disconnect), emits the fail-closed decision, makes a
+/// best-effort attempt to log it ([`log_trip_best_effort`], bounded by
+/// [`TRIP_LOG_TIMEOUT`]), and only then exits the process — see the module
+/// docs' "evaluation watchdog" section for why exiting, not merely
+/// returning, is required.
+fn emit_first_result(
+    rx: &Receiver<serde_json::Value>,
+    early_rx: &Receiver<EarlyInfo>,
+    log_state: &LogState,
+) {
     match resolve_first_result(rx, memory_limit_bytes(), EVALUATION_TIMEOUT) {
         FirstResult::Output(output) => emit(output),
         FirstResult::MemoryTrip(reason)
         | FirstResult::TimeTrip(reason)
         | FirstResult::Disconnected(reason) => {
+            // Claimed before anything else in this arm, including `emit`
+            // below — see `LogState`'s own docs for why the decision this
+            // arm is about to emit must win ownership of the log ahead of
+            // the worker's own, possibly different, in-flight write.
+            let prior_state = log_state.swap(LOG_MAIN, Ordering::SeqCst);
             emit(shguard::adapter::fail_closed(&reason));
             // Emitted to stdout first, deliberately: the decision Claude
             // Code actually waits on must never be delayed by this
             // best-effort log write (see `log_trip_best_effort`'s own
             // docs for its bound).
-            log_trip_best_effort(early_rx.try_recv().ok(), &reason);
+            log_trip_best_effort(early_rx.try_recv().ok(), &reason, prior_state, log_state);
             std::process::exit(0);
         }
     }
@@ -399,6 +490,24 @@ fn emit_first_result(rx: &Receiver<serde_json::Value>, early_rx: &Receiver<Early
 /// `src/lib.rs`) is abandoned mid-evaluation and never reaches that call
 /// before [`std::process::exit`] tears the whole process down.
 ///
+/// `prior_state` is whatever [`LogState`] held immediately before
+/// [`emit_first_result`] claimed [`LOG_MAIN`] — the outcome of that race
+/// against the worker's own [`DedupSink::append`], already decided by the
+/// time this function runs:
+/// - [`LOG_WORKER`]: the worker claimed the log microseconds earlier and is
+///   writing (or about to). Rather than writing a second, conflicting
+///   line, this waits (bounded by [`TRIP_LOG_TIMEOUT`]) for it to reach
+///   [`LOG_DONE`] and returns without writing anything itself — the one
+///   remaining case where the logged reason can be the worker's own,
+///   racing one rather than the reason this trip emitted to stdout, a tie
+///   of the same class `resolve_first_result`'s own try-the-channel-first
+///   race already accepts elsewhere in this file. If the worker doesn't
+///   finish within the bound either, this invocation goes entirely
+///   unlogged rather than risking a torn or duplicate write.
+/// - [`LOG_DONE`]: the worker already finished; nothing left to do.
+/// - [`LOG_UNCLAIMED`]: this trip arm won outright — falls through to
+///   perform the write itself, below.
+///
 /// `early_info` is `None` when [`run`] never got as far as sending one — a
 /// hang during config load or the stdin read itself, before there is any
 /// command to attribute a trip to; this is a no-op in that case, same as
@@ -409,11 +518,36 @@ fn emit_first_result(rx: &Receiver<serde_json::Value>, early_rx: &Receiver<Early
 /// itself doing the hanging (the one residual, disclosed risk `src/lib.rs`'s
 /// docs already carry for the ordinary, non-trip logging path — a network
 /// mount gone stale mid-session) must not turn this best-effort log write
-/// into the very hang this whole watchdog exists to bound. If the write
-/// doesn't finish within the bound, it is simply abandoned — `main` is
-/// about to call [`std::process::exit`] regardless, which tears down every
-/// thread including this one.
-fn log_trip_best_effort(early_info: Option<EarlyInfo>, reason: &str) {
+/// into a second hang on top of the one this watchdog already exists to
+/// bound. If the write doesn't finish within the bound, it is simply
+/// abandoned: `main` calls [`std::process::exit`] right after this returns
+/// regardless, which tears down the spawned thread along with everything
+/// else on any target where that call can actually make progress; a thread
+/// genuinely stuck in an uninterruptible kernel-level write (e.g. a hard
+/// NFS mount) is a pre-existing exposure this bound does not newly
+/// introduce, since the abandoned evaluation worker itself carries the
+/// same risk whenever it reaches `analyze_with_policy`'s own logging call.
+fn log_trip_best_effort(
+    early_info: Option<EarlyInfo>,
+    reason: &str,
+    prior_state: u8,
+    log_state: &LogState,
+) {
+    match prior_state {
+        LOG_WORKER => {
+            let deadline = Instant::now() + TRIP_LOG_TIMEOUT;
+            while log_state.load(Ordering::SeqCst) != LOG_DONE && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            return;
+        }
+        LOG_DONE => return,
+        // `LOG_UNCLAIMED`: falls through to write below. `LOG_MAIN` cannot
+        // appear here — `emit_first_result` is the only writer of it, and
+        // runs at most once per process.
+        _ => {}
+    }
+
     let Some(early_info) = early_info else {
         return;
     };
@@ -998,15 +1132,17 @@ fn evaluate_with_timeout(
 /// The composition root's actual work — config load, stdin read, hand-off
 /// to the adapter — as a plain fn item, not a closure passed to
 /// [`std::panic::catch_unwind`] in [`main`]: `main` calls it as `move ||
-/// run(&early_tx)`, so `catch_unwind`'s `UnwindSafe` bound falls on that
-/// thin closure rather than on this function's own body, which stays a
-/// capture-free fn item taking its one dependency ([`EarlyInfo`]'s sender)
-/// as an explicit parameter instead of reaching for `AssertUnwindSafe` or
-/// closing over shared state. `Sender<EarlyInfo>` itself carries no
+/// run(&early_tx, worker_log_state)`, so `catch_unwind`'s `UnwindSafe` bound
+/// falls on that thin closure rather than on this function's own body,
+/// which stays a capture-free fn item taking its two dependencies
+/// ([`EarlyInfo`]'s sender, [`DedupSink`]'s shared [`LogState`]) as explicit
+/// parameters instead of reaching for `AssertUnwindSafe` or closing over
+/// shared state. Neither `Sender<EarlyInfo>` nor `Arc<LogState>` carries
 /// unwind-unsafe interior state — a panic mid-`send` either lands before or
 /// after the message is queued, never partway through a value the receiver
-/// could observe half-mutated — so the auto-trait check passes without an
-/// escape hatch.
+/// could observe half-mutated, and an atomic `swap`/`compare_exchange` has
+/// no lock to poison — so the auto-trait check passes without an escape
+/// hatch.
 ///
 /// The `catch_unwind` boundary in `main` covers everything in here,
 /// including [`shguard::config::Policy::load`] — a panic inside TOML
@@ -1022,7 +1158,7 @@ fn evaluate_with_timeout(
 /// run outside the PreToolUse hook contract entirely — it has none of
 /// `run`'s "never hang, always emit exactly one decision" obligations, so
 /// it needs neither the panic boundary nor the watchdog.
-fn run(early_tx: &Sender<EarlyInfo>) -> serde_json::Value {
+fn run(early_tx: &Sender<EarlyInfo>, log_state: Arc<LogState>) -> serde_json::Value {
     // Test-only panic injection (issue #52): there is no currently-known
     // reachable panic in this binary to regression-test the `catch_unwind`
     // boundary against directly, and leaving "prevents fail-open on a
@@ -1081,13 +1217,20 @@ fn run(early_tx: &Sender<EarlyInfo>) -> serde_json::Value {
             // immediately after; it never affects the decision below, only
             // what a later watchdog trip can log.
             if let Some((command, context)) = shguard::adapter::peek_bash_command(&stdin) {
+                // The receiver lives in `main`, held until after
+                // `worker.join()` (well past this send), so this can only
+                // fail if `main` already exited via a watchdog trip before
+                // reaching that join — in which case the whole process is
+                // already on its way down and there is nothing left for a
+                // send failure to report.
                 let _ = early_tx.send(EarlyInfo {
                     decision_log_path: policy.decision_log_path().map(std::path::Path::to_path_buf),
                     command,
                     context,
                 });
             }
-            shguard::adapter::handle_with_policy(&stdin, &policy, &shguard::FileDecisionLog)
+            let sink = DedupSink { state: log_state };
+            shguard::adapter::handle_with_policy(&stdin, &policy, &sink)
         }
         // A read error also covers the case where the input is oversized
         // *and* its true length happens to break UTF-8 exactly at the
