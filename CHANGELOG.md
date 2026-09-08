@@ -75,6 +75,17 @@ All notable changes to this project are documented in this file.
 
 ### Security
 
+- The PreToolUse hook adapter no longer emits an explicit `permissionDecision:
+  "allow"` for a non-`Bash` `tool_name` (#462). shguard only analyses shell
+  commands, so `Write`/`Edit`/MCP tool calls were always out of scope, but
+  `"allow"` is the value that suppresses Claude Code's own permission
+  prompt, so under a hook matcher broader than `"Bash"` (`""`, `"*"`, or a
+  second matcher entry), every non-Bash tool call was silently
+  auto-approved instead of falling through to Claude Code's normal
+  permission flow. The adapter now omits `permissionDecision` from its
+  output entirely for these calls, genuinely deferring to that flow, while
+  still emitting valid non-empty JSON so the README's fail-closed wrapper
+  convention (empty stdout treated as `deny`) isn't tripped.
 - A read-only `<` redirect to `/dev/tcp/host/port` or `/dev/udp/host/port`
   (`cat </dev/tcp/host/port`, `exec 3</dev/tcp/host/port`, and the same
   target reached via a `$()` substitution) now `Block`s (#455), closing

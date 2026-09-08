@@ -392,6 +392,12 @@ fn non_string_permission_mode_and_agent_fields_do_not_change_the_decision() {
     // field at all — issue #462) regardless of a wrong-typed `permission_mode`.
     let output = run_hook(r#"{"tool_name":"Read","tool_input":{},"permission_mode":123}"#);
     assert!(output["hookSpecificOutput"]["permissionDecision"].is_null());
+    assert_eq!(
+        output["hookSpecificOutput"]["hookEventName"]
+            .as_str()
+            .expect("hookEventName should be a string"),
+        "PreToolUse"
+    );
 }
 
 #[test]

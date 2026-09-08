@@ -220,7 +220,7 @@ its module doc) -- a sibling module, not a change to the shared
   fires for `apply_patch` and MCP tools too
   (see "Payload shape" above), and whether Codex's own hook
   registration can be similarly scoped is unverified in this RFC.
-  Mirroring the explicit-`"allow"` behavior unconditionally risks
+  Emitting an explicit `"allow"` for these out-of-scope tools would risk
   auto-approving a tool call Codex's own approval flow would otherwise
   have prompted for -- a security downgrade relative to running no hook
   at all. **Decision: for any `tool_name` other than `"Bash"`, the
