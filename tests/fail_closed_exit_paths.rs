@@ -495,9 +495,18 @@ fn heredoc_attached_to_subshell_wrapping_an_interpreter_does_not_allow() {
 /// `EVALUATION_TIMEOUT` gets SIGKILLed before the wall-clock bound alone
 /// ever fires). Uses `SHGUARD_TEST_MEM_LIMIT_MB` (debug-only, mirrors
 /// `SHGUARD_TEST_PANIC`'s pattern) set to `1` MB — comfortably below any
-/// process's baseline RSS — against an ordinary, otherwise-`allow`able
-/// command, so the memory arm trips on the very first poll without this
-/// test itself needing to allocate hundreds of MB to exercise it.
+/// process's baseline RSS — so the memory arm trips on the very first poll
+/// without this test itself needing to allocate hundreds of MB to exercise
+/// it.
+///
+/// Issue #457: the payload here MUST genuinely never finish, not merely be
+/// fast under a tiny memory limit — `src/bin/shguard.rs::resolve_first_result`
+/// checks the channel before tripping, so a command that actually completes
+/// would correctly win that race and resolve to its own real result instead
+/// of `ask`. `<<$( |] ` is the #315 unbounded-allocating hang
+/// (`heredoc_inside_unterminated_command_substitution_fails_closed_to_ask`
+/// above) — it never sends a result at all, so this only ever exercises the
+/// genuine fail-closed path, not a race.
 #[cfg_attr(
     not(debug_assertions),
     ignore = "SHGUARD_TEST_MEM_LIMIT_MB injection point is compiled out in release builds"
@@ -511,7 +520,8 @@ fn memory_budget_trip_fails_closed_to_ask() {
         .env_remove("HOME")
         .env_remove("SHGUARD_TEST_PANIC")
         .env("SHGUARD_TEST_MEM_LIMIT_MB", "1")
-        .write_stdin(bash_command("echo hi"))
+        .timeout(std::time::Duration::from_secs(30))
+        .write_stdin(bash_command("<<$( |] "))
         .assert()
         .success();
     let output: Value =
