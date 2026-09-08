@@ -35,7 +35,7 @@ rather than letting it go stale silently.
   regression table above, which covers A-D directly, plus class E via
   the destructive-commands suite in `tests/guardfall.rs`, and
   [Attribution](#attribution)).
-- **Regression test count:** 422 (417 pinned-decision literals across
+- **Regression test count:** 432 (427 pinned-decision literals across
   `tests/guardfall.rs`'s internally-discovered regression suite, plus 5
   externally-attributed cases in `tests/bypass_corpus.toml`). A lower
   bound, not an exact assertion count: some of `guardfall.rs`'s tests
@@ -394,6 +394,12 @@ below take:
   origin refs/heads/main` are not recognised as targeting `main` by this
   matcher shape. Widening this to cover refspec forms is a separate,
   git-specific concern, not part of `targets`' general boolean composition.
+  This is distinct from `git-push-force`'s own force-push detection: issue
+  #452 closed the gap where a `+`-prefixed refspec, e.g. `git push origin
+  +main`, force-pushed with no `-f`/`--force` flag at all; `src/gate.rs`
+  now detects that structurally and blocks it the same as `--force`. What
+  remains open here is narrower: `targets`' own branch-name matcher still
+  can't parse which branch a refspec names.
 
 The one shape genuinely not expressible today is AND *between* two
 `targets` alternatives within a single rule ("some token matches X AND some

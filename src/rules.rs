@@ -6300,6 +6300,20 @@ impl Rules {
         Self::parse(EMBEDDED_BLOCKLIST)
     }
 
+    /// The embedded/user-config [`CommandRule`] declared with id `id`, if
+    /// any — issue #452: lets a `src/gate.rs` structural check (one that
+    /// detects the same *intent* as an existing TOML rule through a shape
+    /// `required_flags`/`targets` can't express, e.g. `git push`'s `+`
+    /// refspec spelling of a force push) reuse that rule's own
+    /// reason/deny_message/id rather than duplicating that text as a
+    /// second source of truth.
+    #[must_use]
+    pub(crate) fn command_rule_by_id(&self, id: &str) -> Option<&CommandRule> {
+        self.command_rules
+            .iter()
+            .find(|rule| rule.id.as_str() == id)
+    }
+
     /// The worst-decision [`CommandRule`] that matches `argv`, if any —
     /// Block outranks Ask regardless of declaration order (issue #399,
     /// mirroring [`Self::match_redirect_target`]'s issue #261 fix); ties

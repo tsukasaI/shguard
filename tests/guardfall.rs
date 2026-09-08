@@ -355,6 +355,27 @@ fn guardfall_git_cases() {
             "git --config-env=core.hooksPath=ENVVAR commit -m x",
             Decision::Block,
         ),
+        // issue #452, fix 1: a `+`-prefixed refspec force-pushes with no
+        // `-f`/`--force` flag on the line at all — `git-push-force`'s own
+        // `required_flags` can't see it, so `src/gate.rs` detects it
+        // structurally and reuses that rule's identity.
+        ("git push origin +main", Decision::Block),
+        ("git push origin +HEAD:main", Decision::Block),
+        // Control: the existing `-f`/`--force` spelling stays Block too.
+        ("git push --force origin main", Decision::Block),
+        // issue #452, fix 2: working-tree discard without `--`.
+        ("git checkout .", Decision::Ask),
+        ("git checkout -f", Decision::Ask),
+        ("git restore .", Decision::Ask),
+        // Control: the existing `--` spelling stays Block.
+        ("git checkout -- .", Decision::Block),
+        // issue #452, fix 3: `-d -f`/`-df` and the long-form
+        // `--delete --force` are the same force-delete-of-unmerged-branch
+        // operation as `-D`.
+        ("git branch -df feature", Decision::Block),
+        ("git branch --delete --force feature", Decision::Block),
+        // Control: the existing `-D` spelling stays Block.
+        ("git branch -D feature", Decision::Block),
     ];
 
     for (command, expected) in cases {

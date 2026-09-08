@@ -2879,7 +2879,20 @@ fn evaluate_simple_command_core(
     // carry `Decision::Ask` (e.g. `tar-directory-root-or-home`) — the
     // substitution floor must still be able to lift that to `Block`
     // (issues #77/#445), the same as every other return in this function.
-    if let Some(rule) = rules.match_command(&argv) {
+    //
+    // Issue #452, fix 1: a `git push` with a structurally detected `+`
+    // refspec force push (no `-f`/`--force` flag for `required_flags` to
+    // see) reuses `git-push-force`'s own id/reason/deny_message, exactly
+    // as if it had matched that rule directly — falls back to `None` only
+    // if a future rule-file edit ever renamed/removed that id, in which
+    // case this stays a silent Allow rather than panicking (fail-closed
+    // for a rule lookup would need a *stricter* fallback, not a panic, but
+    // no known rule-file change removes an embedded rule id, so this has
+    // no live effect today).
+    let git_push_force_rule = git_push_plus_refspec(&argv)
+        .then(|| rules.command_rule_by_id("git-push-force"))
+        .flatten();
+    if let Some(rule) = rules.match_command(&argv).or(git_push_force_rule) {
         let reason = Reason::new(format!(
             "matches blocklist rule {:?}: {}",
             rule.id().as_str(),
@@ -2891,6 +2904,31 @@ fn evaluate_simple_command_core(
             Decision::Allow => unreachable!("rules never carry Decision::Allow"),
         }
         .with_deny_message(rule.deny_message().cloned());
+        return apply_opaque_kind_floor(
+            apply_substitution_floor(
+                apply_escalation_floor(verdict, escalation_floor),
+                substitution_result,
+            ),
+            opaque_kind,
+        );
+    }
+
+    // Issue #452, fix 2: `git checkout <path>` with no `--` separator is
+    // positionally indistinguishable from `git checkout <branch>` for pure
+    // rule data, EXCEPT when a resolved operand normalizes to `.` — see
+    // `git_checkout_or_restore_dot`'s own docs. Ask, not Block: the
+    // issue's expected column reserves Block for the unambiguous `--`
+    // spelling, already handled above by `git-checkout-dashdash`.
+    if git_checkout_or_restore_dot(&argv, "checkout") {
+        let verdict = Verdict::ask(
+            Reason::new(
+                "git checkout <path> with a resolved operand normalizing to `.` (the current \
+                 directory) discards every uncommitted working-tree change under this \
+                 invocation's cwd — the same intent as `git checkout -- .` (Block), but without \
+                 the `--` separator a rule-data match can key off of",
+            ),
+            argv,
+        );
         return apply_opaque_kind_floor(
             apply_substitution_floor(
                 apply_escalation_floor(verdict, escalation_floor),
@@ -9053,6 +9091,63 @@ fn bound_git_global_options(rest: &[NormalizedWord]) -> &[NormalizedWord] {
         };
     }
     rest
+}
+
+/// `rest` following a resolved `git <subcommand>` word, if `subcommand`
+/// names the effective (post-global-option) subcommand of a `git`
+/// invocation — shared by the two issue #452 structural checks below,
+/// each of which needs the operands *after* the subcommand word rather
+/// than [`bound_git_global_options`]'s own before-the-subcommand slice.
+fn git_subcommand_operands<'a>(
+    argv: &'a [NormalizedWord],
+    subcommand: &str,
+) -> Option<&'a [NormalizedWord]> {
+    let (name, rest) = crate::rules::effective_command(argv)?;
+    if name != "git" {
+        return None;
+    }
+    let globals = bound_git_global_options(rest);
+    let word = rest.get(globals.len())?;
+    matches!(word.resolution(), Resolution::Resolved(s) if s == subcommand)
+        .then(|| &rest[globals.len() + 1..])
+}
+
+/// Issue #452, fix 1: `git push` can force-push via a `+`-prefixed refspec
+/// (`git push origin +main`, `git push +HEAD:main`) with no `-f`/`--force`
+/// flag anywhere on the line — the same destructive intent
+/// `git-push-force`'s own `required_flags = ["f|--force"]` cannot see,
+/// since rule data has no way to express "a positional operand starts
+/// with `+`". True whenever a resolved, non-flag operand after `push`
+/// begins with `+` and is more than just `+` itself.
+fn git_push_plus_refspec(argv: &[NormalizedWord]) -> bool {
+    let Some(operands) = git_subcommand_operands(argv, "push") else {
+        return false;
+    };
+    operands.iter().any(|word| {
+        matches!(word.resolution(), Resolution::Resolved(s) if s.len() > 1 && s.starts_with('+'))
+    })
+}
+
+/// Issue #452, fix 2: `git checkout <path>`/`git restore <path>` with no
+/// `--` separator is positionally indistinguishable from `git checkout
+/// <branch>` — pure rule data can't tell "this operand is a path" from
+/// "this operand is a branch/commit-ish name" — EXCEPT when the operand
+/// lexically normalizes to `.` (the current directory,
+/// [`PathForm::Rel`] with no ascent and no components): git never accepts
+/// a bare `.` as a branch/commit-ish name, so this shape can only ever be
+/// the destructive path form, discarding every uncommitted working-tree
+/// change under the invocation's cwd. Ask, not Block — the issue's own
+/// expected column reserves Block for the unambiguous `--` spelling.
+fn git_checkout_or_restore_dot(argv: &[NormalizedWord], subcommand: &str) -> bool {
+    let Some(operands) = git_subcommand_operands(argv, subcommand) else {
+        return false;
+    };
+    operands.iter().any(|word| match word.resolution() {
+        Resolution::Resolved(s) if !s.starts_with('-') => {
+            matches!(lexical_normalize(s), PathForm::Rel { ascent: 0, ref comps } if comps.is_empty())
+        }
+        _ => false,
+    })
 }
 
 /// Issue #209: a narrower, single-invocation version of issue #103's

@@ -720,6 +720,12 @@ command = "git"
 required_tokens = ["push"]
 required_flags = ["f|--force"]
 
+# issue #452: a `+`-prefixed refspec (`git push origin +main`, `git push
+# +HEAD:main`) is the same force push with no `-f`/`--force` flag at all —
+# `required_flags` has nothing to match. `src/gate.rs`'s
+# `git_push_plus_refspec` detects this structurally and reuses this rule's
+# own id/reason/deny_message rather than declaring a second one here.
+
 [[command]]
 id = "git-reset-hard"
 reason = "git reset --hard irreversibly discards uncommitted changes"
@@ -824,6 +830,37 @@ command = "git"
 required_tokens = ["checkout"]
 required_flags = ["--"]
 
+# issue #452: `-f`/`--force` discards local modifications the same way the
+# `--` spelling above does, but less unambiguously (a real `git checkout -f
+# <branch>` genuinely does discard every local modification when
+# switching, yet `-f` alone doesn't name a specific path the way `-- .`
+# does) — Ask rather than Block. A flagless `git checkout .`/`git checkout
+# <path>` is positionally indistinguishable from `git checkout <branch>`
+# in rule data at all; `src/gate.rs`'s `git_checkout_or_restore_dot` covers
+# the one case that's unambiguous regardless of position: an operand that
+# lexically normalizes to `.` can never be a branch/commit-ish name.
+[[command]]
+id = "git-checkout-force-ask"
+decision = "ask"
+reason = "git checkout -f/--force discards local modifications when switching branches"
+command = "git"
+required_tokens = ["checkout"]
+required_flags = ["f|--force"]
+
+# issue #452: `git restore <path>` (no `--staged`) discards working-tree
+# changes the same way `git checkout -- <path>` does; `git restore
+# --staged <path>` alone only unstages (non-destructive). `required_flags`
+# can express "the flag IS present", never "some flag OTHER than --staged
+# is present" or "not only --staged" — so this asks on every `git restore`
+# invocation, `--staged`-only calls included, rather than silently missing
+# the destructive ones.
+[[command]]
+id = "git-restore-ask"
+decision = "ask"
+reason = "git restore <path> discards uncommitted working-tree changes (git restore --staged <path> alone is safe, but no rule shape here can require \"anything other than only --staged\")"
+command = "git"
+required_tokens = ["restore"]
+
 # No required_flags: every invocation blocks unconditionally, which is also
 # why the git-*-no-verify enumeration above has no git-rebase-no-verify —
 # `--no-verify` on rebase (rebase's `-m` is boolean `--merge`, so it can't
@@ -847,14 +884,28 @@ required_flags = ["--amend"]
 value_flags = ["m", "message"]
 
 # -D only (force-delete of unmerged branches). -d (safe, merged-only) is
-# intentionally not blocked. `--delete` alone = -d (safe form); -D requires
-# `--delete --force` in long form (not covered here — rare, acceptable gap).
+# intentionally not blocked.
 [[command]]
 id = "git-branch-force-delete"
 reason = "git branch -D force-deletes a branch, discarding unmerged commits"
 command = "git"
 required_tokens = ["branch"]
 required_flags = ["D"]
+
+# issue #452: -d and -f together (in either order, clustered `-df`/`-fd`
+# or separated `-d -f`) is the exact same force-delete-of-unmerged-branch
+# operation as -D, just spelled as the flag pair — as is the long-form
+# `--delete --force`, previously an acknowledged, uncovered gap. Two
+# `required_flags` entries are ANDed (`CommandRule::matches`'s
+# `.iter().all(...)`), which is exactly "(d AND f)" — closing both
+# spellings with one rule alongside the `-D` rule above, which stays as
+# its own, narrower entry.
+[[command]]
+id = "git-branch-force-delete-flags"
+reason = "git branch -d -f / --delete --force force-deletes a branch, discarding unmerged commits — the same operation as -D"
+command = "git"
+required_tokens = ["branch"]
+required_flags = ["d|--delete", "f|--force"]
 
 [[command]]
 id = "git-stash-drop"
