@@ -6949,15 +6949,30 @@ fn awk_file_flag_glued_value(flag_token: &str) -> Option<&str> {
 /// Whether `path` is one of the well-known aliases for stdin: `-` (the
 /// POSIX convention most utilities honor), `/dev/stdin`, `/proc/self/fd/0`,
 /// and `/dev/fd/0` (Linux symlinks `/dev/fd` to `/proc/self/fd`; BSD/macOS
-/// give `/dev/fd/0` its own device node — either way it's stdin). Shared by
-/// awk's `-f`/`-E`/`-i` file-value scan (issue #195, "Blocker B": a value
-/// here means awk's program text comes from the same pipe its *records*
-/// would otherwise come from — unintrospectable and attacker-controllable
-/// through it) and [`is_interpreter_sink`]'s `source`/`.` case (issue #446:
-/// same reasoning for a script sourced from the pipe instead of read as
-/// records).
+/// give `/dev/fd/0` its own device node — either way it's stdin). Compared
+/// through [`lexical_normalize`] rather than by exact string, so a
+/// double-slash/`.`-component respelling (`/dev//stdin`, `/dev/./stdin`)
+/// that a real shell still opens as stdin doesn't dodge this check the way
+/// a byte-exact match would. Shared by awk's `-f`/`-E`/`-i` file-value scan
+/// (issue #195, "Blocker B": a value here means awk's program text comes
+/// from the same pipe its *records* would otherwise come from —
+/// unintrospectable and attacker-controllable through it) and
+/// [`is_interpreter_sink`]'s `source`/`.` case (issue #446: same reasoning
+/// for a script sourced from the pipe instead of read as records).
 fn is_stdin_alias_path(path: &str) -> bool {
-    matches!(path, "-" | "/dev/stdin" | "/proc/self/fd/0" | "/dev/fd/0")
+    if path == "-" {
+        return true;
+    }
+    let PathForm::Abs(comps) = lexical_normalize(path) else {
+        return false;
+    };
+    [
+        &["dev", "stdin"][..],
+        &["proc", "self", "fd", "0"][..],
+        &["dev", "fd", "0"][..],
+    ]
+    .iter()
+    .any(|alias| comps.iter().map(String::as_str).eq(alias.iter().copied()))
 }
 
 /// Whether `token` is awk's `-e`/`--source` inline-script flag, in any
@@ -7007,6 +7022,12 @@ fn awk_value_flag_needs_separate_arg(token: &str) -> bool {
 /// explicit stdin-alias operand ([`is_stdin_alias_path`]) — an ordinary
 /// `source script.sh` reads that file and ignores its stdin entirely, so
 /// treating the name alone as a sink would float every such pipe to Ask.
+/// The operand is taken after skipping one leading `--` (`source --
+/// /dev/stdin` still sources `/dev/stdin`, per bash/zsh both accepting `--`
+/// as `source`'s own end-of-options marker), and an unresolvable operand
+/// fails CLOSED (treated as a sink) rather than open — the same direction
+/// every other fail-closed floor in this module takes, since a dynamic
+/// value could resolve to a stdin alias at runtime.
 fn is_interpreter_sink(stage: &[NormalizedWord]) -> bool {
     let Some((name, rest)) = crate::rules::effective_command(stage) else {
         return false;
@@ -7014,11 +7035,18 @@ fn is_interpreter_sink(stage: &[NormalizedWord]) -> bool {
     if is_pipeline_interpreter(name) {
         return true;
     }
-    matches!(name, "source" | ".")
-        && matches!(
-            rest.first().map(NormalizedWord::resolution),
-            Some(Resolution::Resolved(v)) if is_stdin_alias_path(v)
-        )
+    if !matches!(name, "source" | ".") {
+        return false;
+    }
+    let operand = match rest.first().map(NormalizedWord::resolution) {
+        Some(Resolution::Resolved(v)) if v == "--" => rest.get(1).map(NormalizedWord::resolution),
+        other => other,
+    };
+    match operand {
+        Some(Resolution::Resolved(v)) => is_stdin_alias_path(v),
+        Some(Resolution::Unresolvable(_)) => true,
+        None => false,
+    }
 }
 
 /// Whether short-option cluster token `token` (e.g. `-rf`) includes flag
