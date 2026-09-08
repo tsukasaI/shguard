@@ -876,9 +876,12 @@ required_tokens = ["init"]
 /// than a near-duplicate function.
 ///
 /// `exact_target` chooses the target match shape: `false` (the config
-/// call site) matches `target_path` as a `normalized_prefix` — every path
-/// under that directory is protected, appropriate for a directory this
-/// crate itself fully owns (`~/.config/shguard`). `true` (the decision-log
+/// call site) matches `target_path` as a slash-terminated `normalized_prefix`
+/// plus a bare `normalized` on `target_path` itself (issue #460) — every
+/// path under that directory, and the directory itself, is protected,
+/// without also matching a sibling that merely shares the string prefix
+/// (`~/.config/shguard-backup`), appropriate for a directory this crate
+/// itself fully owns (`~/.config/shguard`). `true` (the decision-log
 /// call site) matches it as an exact `normalized` path instead — a
 /// prefix match here would either over-protect an arbitrary,
 /// user-chosen log directory shared with unrelated files (blocking
@@ -901,13 +904,32 @@ fn self_protection_toml(
 ) -> String {
     let quoted_dir = toml_quote(target_path);
     let ci_attr = case_insensitive_toml_attr(case_insensitive);
-    let target_kind = if exact_target {
-        "normalized"
+    // `!exact_target` pairs a slash-terminated `normalized_prefix` with a
+    // bare `normalized` on `target_path` itself (issue #460): a bare
+    // `normalized_prefix = "<dir>"` is a plain `starts_with`, so it also
+    // matches a sibling that merely shares the string prefix
+    // (`~/.config/shguard-backup`); the added `normalized` target covers
+    // the directory named exactly, since the slash-terminated prefix is
+    // longer than that token and can never match it. Mirrors the
+    // already-shipped static `normalized_prefix = "~/.config/shguard/"`
+    // pairing in `rules/blocklist.toml`.
+    let quoted_dir_slash = toml_quote(&format!("{target_path}/"));
+    let plain_targets = if exact_target {
+        format!("{{ normalized = {quoted_dir}{ci_attr} }}")
     } else {
-        "normalized_prefix"
+        format!(
+            "{{ normalized_prefix = {quoted_dir_slash}{ci_attr} }}, \
+             {{ normalized = {quoted_dir}{ci_attr} }}"
+        )
     };
-    let plain_target = format!("{target_kind} = {quoted_dir}{ci_attr}");
-    let dd_target = format!("strip = \"of=\", {target_kind} = {quoted_dir}{ci_attr}");
+    let dd_targets = if exact_target {
+        format!("{{ strip = \"of=\", normalized = {quoted_dir}{ci_attr} }}")
+    } else {
+        format!(
+            "{{ strip = \"of=\", normalized_prefix = {quoted_dir_slash}{ci_attr} }}, \
+             {{ strip = \"of=\", normalized = {quoted_dir}{ci_attr} }}"
+        )
+    };
     let ancestor_rules = ancestor_rules_toml(target_path, suffix, case_insensitive, id_kind, noun);
     format!(
         r#"
@@ -915,92 +937,92 @@ fn self_protection_toml(
 id = "shguard-self-protect-{id_kind}-tee-{suffix}"
 reason = "writing to shguard's own {noun} must never be scripted"
 command = "tee"
-targets = [{{ {plain_target} }}]
+targets = [{plain_targets}]
 
 [[deny]]
 id = "shguard-self-protect-{id_kind}-cp-{suffix}"
 reason = "writing to shguard's own {noun} must never be scripted"
 command = "cp"
-targets = [{{ {plain_target} }}]
+targets = [{plain_targets}]
 
 [[deny]]
 id = "shguard-self-protect-{id_kind}-mv-{suffix}"
 reason = "writing to shguard's own {noun} must never be scripted"
 command = "mv"
-targets = [{{ {plain_target} }}]
+targets = [{plain_targets}]
 
 [[deny]]
 id = "shguard-self-protect-{id_kind}-install-{suffix}"
 reason = "writing to shguard's own {noun} must never be scripted"
 command = "install"
-targets = [{{ {plain_target} }}]
+targets = [{plain_targets}]
 
 [[deny]]
 id = "shguard-self-protect-{id_kind}-sed-{suffix}"
 reason = "writing to shguard's own {noun} must never be scripted"
 command = "sed"
 required_flags = ["i|I|--in-place"]
-targets = [{{ {plain_target} }}]
+targets = [{plain_targets}]
 
 [[deny]]
 id = "shguard-self-protect-{id_kind}-dd-{suffix}"
 reason = "writing to shguard's own {noun} must never be scripted"
 command = "dd"
-targets = [{{ {dd_target} }}]
+targets = [{dd_targets}]
 
 [[deny]]
 id = "shguard-self-protect-{id_kind}-dcfldd-{suffix}"
 reason = "writing to shguard's own {noun} must never be scripted"
 command = "dcfldd"
-targets = [{{ {dd_target} }}]
+targets = [{dd_targets}]
 
 [[deny]]
 id = "shguard-self-protect-{id_kind}-rm-{suffix}"
 reason = "writing to shguard's own {noun} must never be scripted"
 command = "rm"
-targets = [{{ {plain_target} }}]
+targets = [{plain_targets}]
 
 [[deny]]
 id = "shguard-self-protect-{id_kind}-unlink-{suffix}"
 reason = "writing to shguard's own {noun} must never be scripted"
 command = "unlink"
-targets = [{{ {plain_target} }}]
+targets = [{plain_targets}]
 
 [[deny]]
 id = "shguard-self-protect-{id_kind}-ln-{suffix}"
 reason = "writing to shguard's own {noun} must never be scripted"
 command = "ln"
-targets = [{{ {plain_target} }}]
+targets = [{plain_targets}]
 
 [[deny]]
 id = "shguard-self-protect-{id_kind}-rsync-{suffix}"
 reason = "writing to shguard's own {noun} must never be scripted"
 command = "rsync"
-targets = [{{ {plain_target} }}]
+targets = [{plain_targets}]
 
 [[redirect]]
 id = "shguard-self-protect-{id_kind}-redirect-{suffix}"
 reason = "redirecting output to shguard's own {noun} must never be scripted"
-targets = [{{ {plain_target} }}]
+targets = [{plain_targets}]
 
 [[deny]]
 id = "shguard-self-protect-{id_kind}-rmdir-{suffix}"
 reason = "deleting shguard's own {noun} must never be scripted"
 command = "rmdir"
-targets = [{{ {plain_target} }}]
+targets = [{plain_targets}]
 
 [[deny]]
 id = "shguard-self-protect-{id_kind}-perl-{suffix}"
 reason = "writing to shguard's own {noun} must never be scripted"
 command = "perl"
 required_flags = ["i"]
-targets = [{{ {plain_target} }}]
+targets = [{plain_targets}]
 
 [[deny]]
 id = "shguard-self-protect-{id_kind}-patch-{suffix}"
 reason = "patching shguard's own {noun} must never be scripted"
 command = "patch"
-targets = [{{ {plain_target} }}]
+targets = [{plain_targets}]
 
 [[deny]]
 id = "shguard-self-protect-{id_kind}-find-exec-{suffix}"
@@ -1008,7 +1030,7 @@ decision = "ask"
 reason = "find against shguard's own {noun} combined with -exec/-execdir/-ok/-okdir must never be scripted"
 command = "find"
 required_flags = ["-exec|-execdir|-ok|-okdir"]
-targets = [{{ {plain_target} }}]
+targets = [{plain_targets}]
 {ancestor_rules}"#
     )
 }
@@ -1606,6 +1628,51 @@ mod tests {
             "/home/user/.config/shguard/"
         ]));
         assert!(!matches(&["cp", "a.txt", "b.txt"]));
+    }
+
+    // Issue #460: sibling directories sharing the config directory's string
+    // prefix must never be denied.
+    #[test]
+    fn self_protection_rules_do_not_deny_sibling_directories_sharing_a_string_prefix() {
+        use crate::normalize::NormalizedWord;
+
+        let toml = self_protection_toml(
+            "/home/user/.config/shguard",
+            "literal",
+            false,
+            "config",
+            "config directory",
+            false,
+        );
+        let user_config = UserConfig::parse(&toml).unwrap();
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let (rules, _) = merge_user_config(blocklist, allowlist, user_config).unwrap();
+
+        let matches = |argv: &[&str]| {
+            let words: Vec<NormalizedWord> =
+                argv.iter().map(|w| NormalizedWord::resolved(*w)).collect();
+            rules.match_command(&words).is_some()
+        };
+
+        assert!(matches(&["tee", "/home/user/.config/shguard/config.toml"]));
+        assert!(!matches(&["tee", "/home/user/.config/shguardX/notes.txt"]));
+        assert!(!matches(&["tee", "/home/user/.config/shguard-backup/x"]));
+        // `dd`'s `strip = "of="` target is built by a separate branch
+        // (`dd_targets`) from the plain one above -- covered independently
+        // so it can't silently regress on its own.
+        assert!(!matches(&[
+            "dd",
+            "if=/dev/zero",
+            "of=/home/user/.config/shguard-backup/x"
+        ]));
+        // The `[[redirect]]` rule is also built from `plain_targets`,
+        // independently of `match_command` above.
+        assert!(
+            rules
+                .match_redirect_target("/home/user/.config/shguard-backup/x")
+                .is_none()
+        );
     }
 
     // `case_insensitive` is a parse-time TOML flag, not gated on the host
