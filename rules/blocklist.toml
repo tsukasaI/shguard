@@ -984,10 +984,12 @@ targets = [
 # `>`/`>>` reach the same connection side effect and are covered too, since
 # `normalized_prefix` matches by target path alone, not by redirection
 # kind. Issue #455: a read-only `<` (`cat </dev/tcp/host/port`, `exec
-# 3</dev/tcp/host/port`) is covered too — `crate::gate`'s
-# `is_redirect_write_applicable` special-cases a plain `Input` target
-# against this rule's own `/dev/tcp/`/`/dev/udp/` prefixes, since opening
-# the pseudo-device for reading still establishes the connection.
+# 3</dev/tcp/host/port`, and the same via a `$()` substitution target) is
+# covered too — `crate::gate::is_network_pseudo_device` special-cases a
+# plain `Input` target against bash's own literal `/dev/tcp/`/`/dev/udp/`
+# pseudo-device prefixes (an unlinked, deliberately non-normalized copy
+# of this rule's own targets — see that function's docs for why), since
+# opening the pseudo-device for reading still establishes the connection.
 [[redirect]]
 id = "redirect-network-pseudo-device"
 reason = "redirecting to /dev/tcp or /dev/udp opens a live network connection (the reverse-shell/data-exfil primitive behind `exec 3<>/dev/tcp/host/port`)"
