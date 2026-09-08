@@ -495,9 +495,25 @@ fn heredoc_attached_to_subshell_wrapping_an_interpreter_does_not_allow() {
 /// `EVALUATION_TIMEOUT` gets SIGKILLed before the wall-clock bound alone
 /// ever fires). Uses `SHGUARD_TEST_MEM_LIMIT_MB` (debug-only, mirrors
 /// `SHGUARD_TEST_PANIC`'s pattern) set to `1` MB — comfortably below any
-/// process's baseline RSS — against an ordinary, otherwise-`allow`able
-/// command, so the memory arm trips on the very first poll without this
-/// test itself needing to allocate hundreds of MB to exercise it.
+/// process's baseline RSS — so the memory arm trips on the very first poll
+/// without this test itself needing to allocate hundreds of MB to exercise
+/// it.
+///
+/// Issue #457: the payload here MUST genuinely never finish, not merely be
+/// fast under a tiny memory limit — `src/bin/shguard.rs::resolve_first_result`
+/// checks the channel before tripping, so a command that actually completes
+/// would correctly win that race and resolve to its own real result instead
+/// of `ask`. `<<$( |] ` is the #315 unbounded-allocating hang
+/// (`heredoc_inside_unterminated_command_substitution_fails_closed_to_ask`
+/// above); the worker's own `analyze` call is bounded by
+/// `src/watchdog.rs::bounded` too (issue #319), so it eventually produces an
+/// `ask` of its own — but the binary's 1 MB memory arm trips on its very
+/// first poll, well before that library-level watchdog's 2s/256 MiB bounds
+/// can fire, so this test still exercises the binary's own fail-closed path
+/// specifically. The assertion below excludes the library watchdog's
+/// "bytes RSS growth" wording for the same reason: matching only the
+/// binary's own reason text pins the intended trip point instead of passing
+/// vacuously if the wrong watchdog fired first.
 #[cfg_attr(
     not(debug_assertions),
     ignore = "SHGUARD_TEST_MEM_LIMIT_MB injection point is compiled out in release builds"
@@ -511,13 +527,18 @@ fn memory_budget_trip_fails_closed_to_ask() {
         .env_remove("HOME")
         .env_remove("SHGUARD_TEST_PANIC")
         .env("SHGUARD_TEST_MEM_LIMIT_MB", "1")
-        .write_stdin(bash_command("echo hi"))
+        .timeout(std::time::Duration::from_secs(30))
+        .write_stdin(bash_command("<<$( |] "))
         .assert()
         .success();
     let output: Value =
         serde_json::from_slice(&assert.get_output().stdout).expect("stdout should be valid JSON");
     assert_eq!(permission_decision(&output), "ask");
-    assert!(permission_reason(&output).contains("memory budget"));
+    let reason = permission_reason(&output);
+    assert!(
+        reason.contains("memory budget") && !reason.contains("growth"),
+        "expected the binary's own memory-trip reason, got: {reason}"
+    );
 }
 
 // ==== Library API watchdog (issue #319) ====

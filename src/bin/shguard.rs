@@ -25,33 +25,37 @@
 //!
 //! [`run`] executes on a dedicated worker thread ([`main`]) that sends its
 //! result back over a channel; [`main`] waits on that channel in a polling
-//! loop ([`emit_first_result`]), each iteration bounded by
+//! loop ([`resolve_first_result`]), each iteration bounded by
 //! [`MEMORY_POLL_INTERVAL`] (or whatever's left of [`EVALUATION_TIMEOUT`],
 //! if shorter) so it can check the worker's actual memory use between
 //! polls without giving up wall-clock bounding. A trip on *either* bound —
 //! [`EVALUATION_TIMEOUT`] elapses, or RSS crosses [`MEMORY_LIMIT_BYTES`] —
-//! makes `main` emit the fail-closed decision itself and call
-//! [`std::process::exit`] — the runaway worker cannot be interrupted (Rust
-//! has no safe thread-cancel primitive) and may still be spinning and
-//! allocating, so exiting the whole process is the only way to actually
-//! stop it; leaving it running detached would still eventually be reaped
-//! by the OS, but only after however much memory or CPU it manages to
-//! consume in the meantime, which is exactly the failure this defense
-//! exists to bound. The memory bound exists because the wall-clock bound
-//! alone is not sufficient: a host or container with less free memory
-//! than the runaway worker can allocate within [`EVALUATION_TIMEOUT`] gets
-//! SIGKILLed by the OS before `recv_timeout` ever returns — empty stdout,
-//! the exact fail-open condition this whole watchdog exists to close.
-//! `main` is the *only* place that writes to stdout for exactly this
-//! reason: if the worker happened to finish and try to emit its own
-//! decision at, say, t=2.1s — just after `main`'s 2s timeout already
-//! fired — two JSON decisions on stdout would corrupt Claude Code's hook
-//! protocol, which expects exactly one. Splitting `run` (compute) from
-//! `emit` (the only writer) makes that structurally impossible: the
-//! worker only ever sends a value over the channel, it never touches
-//! stdout itself, and `main` calls `emit` (via [`std::process::exit`], on
-//! a timeout or memory-trip path, or after `recv_timeout` returns `Ok`)
-//! exactly once no matter which path is taken.
+//! checks the channel one last time (non-blocking) in case the worker's
+//! real result is already there, then, only if it isn't, makes `main`
+//! (via [`emit_first_result`]) emit the fail-closed decision itself and
+//! call [`std::process::exit`] — the runaway worker cannot be interrupted
+//! (Rust has no safe thread-cancel primitive) and may still be spinning
+//! and allocating, so exiting the whole process is the only way to
+//! actually stop it; leaving it running detached would still eventually
+//! be reaped by the OS, but only after however much memory or CPU it
+//! manages to consume in the meantime, which is exactly the failure this
+//! defense exists to bound. The memory bound exists because the
+//! wall-clock bound alone is not sufficient: a host or container with
+//! less free memory than the runaway worker can allocate within
+//! [`EVALUATION_TIMEOUT`] gets SIGKILLed by the OS before `recv_timeout`
+//! ever returns — empty stdout, the exact fail-open condition this whole
+//! watchdog exists to close. `main` is the *only* place that writes to
+//! stdout for exactly this reason: if the worker happened to finish and
+//! try to emit its own decision at, say, t=2.1s — just after `main`'s 2s
+//! timeout already fired — two JSON decisions on stdout would corrupt
+//! Claude Code's hook protocol, which expects exactly one. Splitting
+//! `run` (compute) from `emit` (the only writer) makes that structurally
+//! impossible: the worker only ever sends a value over the channel, it
+//! never touches stdout itself, and `main` calls `emit` (via
+//! [`std::process::exit`] on a timeout or memory-trip path with nothing
+//! left in the channel, or with the worker's own result — found either by
+//! the normal `recv_timeout` or by one of the trip arms' last-chance
+//! `try_recv`) exactly once no matter which path is taken.
 //!
 //! [`EVALUATION_TIMEOUT`]'s value and the measurements behind it, and
 //! [`MEMORY_LIMIT_BYTES`]'s value and the measurements behind it, live on
@@ -124,7 +128,7 @@ const MAX_STDIN_BYTES: u64 = 10 * 1024 * 1024;
 /// gap.
 const EVALUATION_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// How often [`emit_first_result`]'s watchdog polls the worker's actual
+/// How often [`resolve_first_result`]'s watchdog polls the worker's actual
 /// memory use (via [`current_rss_bytes`]) while waiting on the result
 /// channel, instead of blocking on a single [`EVALUATION_TIMEOUT`]-long
 /// `recv_timeout` the way the wall-clock-only watchdog used to. Short
@@ -135,7 +139,7 @@ const EVALUATION_TIMEOUT: Duration = Duration::from_secs(2);
 /// resolves in well under one interval to begin with.
 const MEMORY_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Hard RSS budget for the whole process, polled by [`emit_first_result`]
+/// Hard RSS budget for the whole process, polled by [`resolve_first_result`]
 /// independently of [`EVALUATION_TIMEOUT`] (follow-up to the wall-clock
 /// watchdog above: the same unbounded-allocating-loop input peaks at
 /// several GB RSS well within the 2s wall-clock budget, so a host or
@@ -254,63 +258,107 @@ fn main() {
     let _ = worker.join();
 }
 
-/// Waits up to [`EVALUATION_TIMEOUT`] for `rx` to produce a result,
-/// polling the worker's RSS against [`MEMORY_LIMIT_BYTES`] every
-/// [`MEMORY_POLL_INTERVAL`] while it waits, and emits whichever happens
-/// first: the worker's real result, a wall-clock trip, or a memory trip.
-/// The RSS check runs at the *start* of each loop iteration — including
-/// the very first, before ever waiting on `rx` — so a worker that has
-/// already blown the memory budget by the time `main` gets here (rather
-/// than only sometime while `main` is waiting) is still caught
-/// immediately rather than after an extra poll interval. On either trip
-/// (or if the worker disconnects without sending — the channel's sender
-/// was dropped, meaning the worker thread ended without producing a
-/// result), emits the fail-closed decision itself and exits the process
-/// immediately — see the module docs' "evaluation watchdog" section for
-/// why exiting, not merely returning, is required.
-fn emit_first_result(rx: &Receiver<serde_json::Value>) {
-    let deadline = Instant::now() + EVALUATION_TIMEOUT;
-    let memory_limit = memory_limit_bytes();
+/// What [`resolve_first_result`] found: either the worker's own result, or
+/// a reason one of the fail-closed trips fired. Splitting the decision
+/// (pure, no I/O) from emitting it and exiting the process lets
+/// `resolve_first_result` be unit-tested directly — including the
+/// try-the-channel-first race below — without a test ever calling
+/// [`std::process::exit`] on itself.
+#[derive(Debug)]
+enum FirstResult {
+    Output(serde_json::Value),
+    MemoryTrip(String),
+    TimeTrip(String),
+    Disconnected(String),
+}
+
+/// Waits up to `timeout` for `rx` to produce a result, polling the
+/// worker's RSS against `memory_limit` every [`MEMORY_POLL_INTERVAL`]
+/// while it waits, and resolves to whichever happens first: the worker's
+/// real result, a wall-clock trip, or a memory trip. The RSS check runs
+/// at the *start* of each loop iteration — including the very first,
+/// before ever waiting on `rx` — so a worker that has already blown the
+/// memory budget by the time `main` gets here (rather than only sometime
+/// while `main` is waiting) is still caught immediately rather than after
+/// an extra poll interval.
+///
+/// Both trip arms — memory and wall-clock — check `rx` one last time
+/// (`try_recv`, non-blocking) before resolving to a fail-closed trip:
+/// mirrors `src/watchdog.rs::bounded_with_memory_limit`'s own
+/// try-the-channel-first check (see that function's docs for the full
+/// race). The worker may have already sent its real result in the gap
+/// between the last poll and this one tripping — preferring that result
+/// over discarding it means a verdict computed just before the deadline,
+/// `Block` included, is no longer discarded except in the sub-millisecond
+/// window between this `try_recv` and the process actually exiting
+/// (inherent: closing that last sliver would mean blocking on the exact
+/// hang this watchdog exists to bound).
+fn resolve_first_result(
+    rx: &Receiver<serde_json::Value>,
+    memory_limit: u64,
+    timeout: Duration,
+) -> FirstResult {
+    let deadline = Instant::now() + timeout;
     loop {
         if let Some(rss) = current_rss_bytes()
             && rss > memory_limit
         {
-            emit(shguard::adapter::fail_closed(&format!(
+            if let Ok(output) = rx.try_recv() {
+                return FirstResult::Output(output);
+            }
+            return FirstResult::MemoryTrip(format!(
                 "shguard: evaluation exceeded its memory budget ({rss} bytes RSS); \
                  refusing to evaluate (fail-closed)"
-            )));
-            std::process::exit(0);
+            ));
         }
 
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            emit(shguard::adapter::fail_closed(
+            if let Ok(output) = rx.try_recv() {
+                return FirstResult::Output(output);
+            }
+            return FirstResult::TimeTrip(
                 "shguard: evaluation exceeded its time budget; refusing to evaluate \
-                 (fail-closed)",
-            ));
-            std::process::exit(0);
+                 (fail-closed)"
+                    .to_string(),
+            );
         }
 
         match rx.recv_timeout(remaining.min(MEMORY_POLL_INTERVAL)) {
-            Ok(output) => {
-                emit(output);
-                return;
-            }
+            Ok(output) => return FirstResult::Output(output),
             // Not yet past `deadline` (checked above) — loop around to
             // re-sample RSS before waiting again.
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
-                emit(shguard::adapter::fail_closed(
+                return FirstResult::Disconnected(
                     "shguard: evaluation worker stopped without producing a result; \
-                     refusing to evaluate (fail-closed)",
-                ));
-                std::process::exit(0);
+                     refusing to evaluate (fail-closed)"
+                        .to_string(),
+                );
             }
         }
     }
 }
 
-/// Effective RSS budget used by [`emit_first_result`] — [`MEMORY_LIMIT_BYTES`]
+/// The only caller of [`resolve_first_result`], invoked from [`main`]: applies
+/// [`MEMORY_LIMIT_BYTES`] (or its debug-only test override) and
+/// [`EVALUATION_TIMEOUT`], then emits whatever it resolved to. On either
+/// trip (or a worker disconnect), emits the fail-closed decision and
+/// exits the process immediately — see the module docs' "evaluation
+/// watchdog" section for why exiting, not merely returning, is required.
+fn emit_first_result(rx: &Receiver<serde_json::Value>) {
+    match resolve_first_result(rx, memory_limit_bytes(), EVALUATION_TIMEOUT) {
+        FirstResult::Output(output) => emit(output),
+        FirstResult::MemoryTrip(reason)
+        | FirstResult::TimeTrip(reason)
+        | FirstResult::Disconnected(reason) => {
+            emit(shguard::adapter::fail_closed(&reason));
+            std::process::exit(0);
+        }
+    }
+}
+
+/// Effective RSS budget used by [`resolve_first_result`] — [`MEMORY_LIMIT_BYTES`]
 /// in release builds. Debug builds additionally honour
 /// `SHGUARD_TEST_MEM_LIMIT_MB`, mirroring `run`'s `SHGUARD_TEST_PANIC`
 /// injection pattern, so `tests/fail_closed_exit_paths.rs` can pin the
@@ -328,7 +376,7 @@ fn memory_limit_bytes() -> u64 {
 
 /// Current process RSS in bytes via `getrusage(RUSAGE_SELF, ...)`, or
 /// `None` if the call fails or this platform doesn't support it — in
-/// either case [`emit_first_result`] simply skips the memory-trip check
+/// either case [`resolve_first_result`] simply skips the memory-trip check
 /// for that poll; [`EVALUATION_TIMEOUT`]'s wall-clock bound still applies
 /// regardless. `ru_maxrss` reports *peak* RSS, not current — exactly what
 /// a one-shot process whose memory only grows in the pathological case
@@ -358,7 +406,7 @@ fn current_rss_bytes() -> Option<u64> {
 }
 
 /// Non-Unix fallback: no `getrusage`, so the memory-trip check is simply
-/// unavailable and [`emit_first_result`] relies on [`EVALUATION_TIMEOUT`]
+/// unavailable and [`resolve_first_result`] relies on [`EVALUATION_TIMEOUT`]
 /// alone, same as before this watchdog existed.
 #[cfg(not(unix))]
 fn current_rss_bytes() -> Option<u64> {
@@ -965,4 +1013,125 @@ fn emit(output: serde_json::Value) {
         serde_json::to_string(&output).unwrap_or_else(|_| SERIALIZATION_FAILURE_OUTPUT.to_string());
     let mut stdout = io::stdout();
     let _ = writeln!(stdout, "{json}");
+}
+
+/// Issue #457: [`resolve_first_result`] is deliberately pure (no I/O, no
+/// [`std::process::exit`]) so its try-the-channel-first race can be pinned
+/// deterministically here, rather than only through a real subprocess and
+/// real wall-clock timing (`tests/fail_closed_exit_paths.rs`, which still
+/// covers the genuine-hang side end to end). Every test below sends the
+/// worker's result into the channel *before* calling
+/// `resolve_first_result`, then forces the trip condition it targets
+/// (`memory_limit` of `0`, or a `timeout` already elapsed) — so there is no
+/// timing window to race at all: either `try_recv` sees the value that is
+/// already sitting there, or it doesn't, deterministically.
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::{Duration, FirstResult, resolve_first_result};
+
+    fn output_value() -> serde_json::Value {
+        serde_json::json!({"hookSpecificOutput": {"permissionDecision": "deny"}})
+    }
+
+    /// A worker result already sitting in the channel wins over the memory
+    /// trip: `memory_limit: 0` guarantees the RSS check trips on the very
+    /// first iteration (real RSS is never zero), but that must not discard
+    /// the value `try_recv` finds waiting for it. `#[cfg(unix)]`: mirrors
+    /// `current_rss_bytes`'s own platform gating — on any other platform
+    /// there is no RSS check to trip in the first place. Paired with
+    /// `memory_trip_fails_closed_when_the_channel_stays_empty` below: on its
+    /// own, this test can't distinguish "the memory arm's `try_recv` won"
+    /// from "the memory arm never ran and the ordinary `recv_timeout` path
+    /// won instead" — the sibling test pins that the arm genuinely trips
+    /// under the same `memory_limit`.
+    #[cfg(unix)]
+    #[test]
+    fn memory_trip_prefers_a_result_already_in_the_channel() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(output_value()).expect("receiver still open");
+        let resolved = resolve_first_result(&rx, 0, Duration::from_secs(30));
+        match resolved {
+            FirstResult::Output(value) => assert_eq!(value, output_value()),
+            other => {
+                panic!("expected the pre-sent result to win over the memory trip, got: {other:?}")
+            }
+        }
+    }
+
+    /// Same race, wall-clock side: `timeout: Duration::ZERO` means
+    /// `deadline` is already in the past by the time the loop's first
+    /// `Instant::now()` re-check runs, tripping the time bound on the very
+    /// first iteration — again, must not discard an already-ready result.
+    #[test]
+    fn time_trip_prefers_a_result_already_in_the_channel() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(output_value()).expect("receiver still open");
+        let resolved = resolve_first_result(&rx, u64::MAX, Duration::ZERO);
+        match resolved {
+            FirstResult::Output(value) => assert_eq!(value, output_value()),
+            other => {
+                panic!("expected the pre-sent result to win over the time trip, got: {other:?}")
+            }
+        }
+    }
+
+    /// Genuine fail-closed side, memory arm: with nothing ever sent, the
+    /// same `memory_limit: 0` trip must still resolve to `MemoryTrip`, not
+    /// hang or silently prefer an empty channel. `#[cfg(unix)]` for the same
+    /// reason as the test above — without a real RSS reading, this would
+    /// fall through to `TimeTrip` after the full deadline instead. A short
+    /// 2s deadline (not 30s like the other tests here) bounds how long a
+    /// regression that broke the memory trip would take to fail this test,
+    /// rather than only surfacing after the fallback wall-clock trip fires.
+    #[cfg(unix)]
+    #[test]
+    fn memory_trip_fails_closed_when_the_channel_stays_empty() {
+        let (_tx, rx) = std::sync::mpsc::channel::<serde_json::Value>();
+        let resolved = resolve_first_result(&rx, 0, Duration::from_secs(2));
+        assert!(
+            matches!(resolved, FirstResult::MemoryTrip(_)),
+            "expected a memory trip, got: {resolved:?}"
+        );
+    }
+
+    /// Genuine fail-closed side, wall-clock arm: same shape as above, for
+    /// `TimeTrip`.
+    #[test]
+    fn time_trip_fails_closed_when_the_channel_stays_empty() {
+        let (_tx, rx) = std::sync::mpsc::channel::<serde_json::Value>();
+        let resolved = resolve_first_result(&rx, u64::MAX, Duration::ZERO);
+        assert!(
+            matches!(resolved, FirstResult::TimeTrip(_)),
+            "expected a time trip, got: {resolved:?}"
+        );
+    }
+
+    /// The sender dropping without ever sending (worker panicked/exited
+    /// without producing a result) resolves to `Disconnected`, distinct
+    /// from either trip.
+    #[test]
+    fn disconnected_sender_fails_closed_without_a_trip() {
+        let (tx, rx) = std::sync::mpsc::channel::<serde_json::Value>();
+        drop(tx);
+        let resolved = resolve_first_result(&rx, u64::MAX, Duration::from_secs(30));
+        assert!(
+            matches!(resolved, FirstResult::Disconnected(_)),
+            "expected a disconnect, got: {resolved:?}"
+        );
+    }
+
+    /// The ordinary path: a result that arrives during the blocking
+    /// `recv_timeout` wait (neither trip condition true) resolves to
+    /// `Output` via the normal receive, not the trip arms' `try_recv`.
+    #[test]
+    fn result_sent_before_either_bound_trips_resolves_normally() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(output_value()).expect("receiver still open");
+        let resolved = resolve_first_result(&rx, u64::MAX, Duration::from_secs(30));
+        match resolved {
+            FirstResult::Output(value) => assert_eq!(value, output_value()),
+            _ => panic!("expected the normal receive path to win"),
+        }
+    }
 }
