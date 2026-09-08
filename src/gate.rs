@@ -4057,6 +4057,11 @@ fn evaluate_command_position_bare_var(
         .with_deny_message(Some(DenyMessage::new(DENY_MSG_BARE_VAR)));
     };
 
+    // Issue #463: an explicit unresolvable reassignment (`X=$(evil)`) still
+    // removes `name` from `env`'s map and falls through to this Ask exactly
+    // as before — `Env::apply_assignments`'s own docs treat a stale
+    // resolution as worse than none, and a bare `env.get(name)` miss must
+    // keep meaning "forget what we knew", not "fall back to history".
     let Some(value) = env.get(name) else {
         return Verdict::ask(
             Reason::new(format!(
@@ -4066,6 +4071,7 @@ fn evaluate_command_position_bare_var(
         )
         .with_deny_message(Some(DenyMessage::new(DENY_MSG_BARE_VAR)));
     };
+    let name_history = env.value_history(name);
 
     // Every distinct IFS interpretation worth trying, most-specific first:
     // the current resolved value, then every earlier value a later
@@ -4131,6 +4137,37 @@ fn evaluate_command_position_bare_var(
                 substituted,
                 format!("`${name}` resolves to {value:?}{splitting_note}"),
             ));
+        }
+    }
+
+    // Issue #463: `value` above is only the CURRENT resolution — the same
+    // value-scoping gap this function's own docs describe for `IFS`
+    // applies to every OTHER name too. A same-line `X='rm -rf /'; X=ls
+    // true` resolves `X=ls`'s own RHS fine, so `env.get("X")` moves on to
+    // `"ls"` and never un-sets back to `"rm -rf /"` after `true` exits
+    // (`Env`'s own docs) — this line's dangerous value is still one `$X`
+    // invocation could hold. Try every earlier RESOLVED value on record
+    // (default-split only, mirroring `ifs_history`'s own additive floor)
+    // and Block on any match rather than reporting an unresolvable Ask over
+    // a value the command line could never actually keep.
+    for historical in name_history {
+        if historical.as_str() == value {
+            continue;
+        }
+        let substituted = substitute_command_name(&argv, historical, None);
+        if let Some(rule) = rules.match_command(&substituted) {
+            return Verdict::block(
+                Reason::new(format!(
+                    "`${name}` resolves to {historical:?} on this command line (an earlier \
+                     same-line assignment a later reassignment or command-scoped prefix \
+                     assignment shadowed), which matches blocklist rule {:?}: {}",
+                    rule.id().as_str(),
+                    rule.reason().as_str()
+                )),
+                substituted,
+                Some(rule.id().clone()),
+            )
+            .with_deny_message(rule.deny_message().cloned());
         }
     }
 
@@ -9502,24 +9539,32 @@ fn apply_unknown_cwd_floor(
 /// attacker-controlled-`HOME` case those checks exist to catch, not a case
 /// they may fail open on.
 ///
-/// `ifs_history` (issue #139, round 4) separately accumulates every value
-/// ever statically resolved for `IFS` on this line, in order, and — unlike
-/// `map` — a later reassignment or removal never shrinks it. `map.get("IFS")`
-/// alone answers "what does `IFS` resolve to right now", but rule 2's
-/// bare-`$VAR` substitution needs "what could `IFS` have been at the moment
-/// `$VAR` was actually expanded", which can differ: a same-line `IFS=, true`
-/// is a prefix assignment scoped to `true` alone and never persists past it
-/// (bash resets `$IFS` back to whatever it was before the instant `true`
-/// exits), and a later `IFS=$(evil)` that fails to resolve simply removes
-/// `IFS` from `map` even though the shell's real `$IFS` is still whatever it
-/// last persistently held. `evaluate_command_position_bare_var` tries every
-/// entry in `ifs_history` (plus the default split) as a floor, so a
-/// shadowed-or-reverted-but-still-possible split is never silently missed —
-/// purely additive, matching every other floor in this file.
+/// `value_history` (issue #139 round 4 for `IFS`; generalized to every
+/// name by issue #463) separately accumulates every value ever statically
+/// resolved for a given name on this line, in order, and — unlike `map` —
+/// a later reassignment never shrinks it. `map.get(name)` alone answers
+/// "what does `name` resolve to right now", but rule 2's bare-`$VAR`
+/// resolution needs "what could `name` have been at the moment `$VAR` was
+/// actually expanded", which can differ: a same-line `X=v true` is a prefix
+/// assignment scoped to `true` alone and never persists past it (bash
+/// resets `$X` back to whatever it was before the instant `true` exits),
+/// so a later, differently-resolved reassignment shadows it in `map`
+/// without that shadow reflecting reality. `evaluate_command_position_bare_var`
+/// additionally tries every OTHER entry in `value_history(name)` (default
+/// split only) once `map.get(name)`'s own current resolution has already
+/// been tried, so a shadowed-but-still-possible value is never silently
+/// missed — purely additive, matching every other floor in this file.
+/// This is deliberately narrower than `assigned`'s "touched at all"
+/// tracking: an explicit unresolvable reassignment (`X=$(evil)`) still
+/// removes `name` from `map` with no history fallback for the *current*
+/// resolution — [`Self::apply_one`]'s own docs treat a stale value as
+/// worse than none, and `value_history` only ever adds EXTRA Block-only
+/// candidates alongside an already-known current value, never substitutes
+/// for one.
 struct Env {
     map: HashMap<String, String>,
     assigned: std::collections::HashSet<String>,
-    ifs_history: Vec<String>,
+    value_history: HashMap<String, Vec<String>>,
     /// Running "assume every same-line `IFS+=` appended onto the inherited
     /// default" hypothesis (issue #358) — `None` until the first `IFS+=`
     /// with no same-line prior. Tracked separately from `map`'s own
@@ -9538,7 +9583,7 @@ impl Env {
         Self {
             map: HashMap::new(),
             assigned: std::collections::HashSet::new(),
-            ifs_history: Vec::new(),
+            value_history: HashMap::new(),
             ifs_append_floor: None,
         }
     }
@@ -9547,11 +9592,18 @@ impl Env {
         self.map.get(name).map(String::as_str)
     }
 
-    /// Every value `IFS` has ever statically resolved to on this line so
+    /// Every value `name` has ever statically resolved to on this line so
     /// far, in assignment order — see this struct's own docs for why this
-    /// must survive a later shadow/removal that `map.get("IFS")` would not.
+    /// must survive a later shadow/removal that `map.get(name)` would not.
+    fn value_history(&self, name: &str) -> &[String] {
+        self.value_history.get(name).map_or(&[], Vec::as_slice)
+    }
+
+    /// [`Self::value_history`] specialized to `IFS` — rule 2's `IFS`-aware
+    /// splitting candidates (`evaluate_command_position_bare_var`'s own
+    /// docs) only ever care about this one name.
     fn ifs_history(&self) -> &[String] {
-        &self.ifs_history
+        self.value_history("IFS")
     }
 
     /// Whether `name` was assigned anywhere on this command line so far
@@ -9611,7 +9663,10 @@ impl Env {
                             .clone()
                             .unwrap_or_else(|| " \t\n".to_string());
                         let floor = format!("{base}{rhs}");
-                        self.ifs_history.push(floor.clone());
+                        self.value_history
+                            .entry(assignment.name.clone())
+                            .or_default()
+                            .push(floor.clone());
                         self.ifs_append_floor = Some(floor);
                     }
                     match self.map.get(&assignment.name) {
@@ -9626,9 +9681,10 @@ impl Env {
         };
         match resolved {
             Some(value) => {
-                if is_ifs {
-                    self.ifs_history.push(value.clone());
-                }
+                self.value_history
+                    .entry(assignment.name.clone())
+                    .or_default()
+                    .push(value.clone());
                 self.map.insert(assignment.name.clone(), value);
             }
             None => {
@@ -9978,6 +10034,30 @@ mod tests {
         // module doc's "session state could still differ at runtime"
         // rationale, unaffected by which IFS produced the split.
         assert_decision("IFS=,; X=echo,hello; $X", Decision::Ask);
+    }
+
+    // Issue #463: `Env` is line-scoped and never un-sets a command-scoped
+    // prefix assignment (`X=v cmd`) once its own command exits, so a later
+    // `X=ls true` shadows an earlier dangerous `X='rm -rf /'` in `map`
+    // exactly the way an ordinary persisting reassignment would, even
+    // though bash itself only ever hands `"ls"` to `true`'s own
+    // environment. Rule 2's bare-`$X` resolution used to consult only
+    // `map`'s current value, so `$X` resolved to `"ls"` here and matched no
+    // blocklist rule — an Ask, over a command line that runs `rm -rf /` for
+    // real. `Env::value_history` (generalizing the existing `IFS`-only
+    // `ifs_history` mechanism to every name) now lets rule 2 try every
+    // value ever assigned to `X` on this line, not just the current one.
+
+    #[test]
+    fn issue_463_prefix_scoped_reassignment_does_not_hide_earlier_dangerous_value() {
+        assert_decision("X='rm -rf /'; X=ls true; $X", Decision::Block);
+    }
+
+    #[test]
+    fn issue_463_bare_var_control_without_prefix_reassignment_still_blocks() {
+        // The repro's control case: no intervening `X=ls true` at all, so
+        // this must keep Blocking exactly as it always has.
+        assert_decision("X='rm -rf /'; $X", Decision::Block);
     }
 
     #[test]
