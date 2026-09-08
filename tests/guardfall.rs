@@ -361,14 +361,27 @@ fn guardfall_git_cases() {
         // structurally and reuses that rule's identity.
         ("git push origin +main", Decision::Block),
         ("git push origin +HEAD:main", Decision::Block),
-        // Control: the existing `-f`/`--force` spelling stays Block too.
-        ("git push --force origin main", Decision::Block),
+        // Global `-C` options before the subcommand must not confuse the
+        // structural scan for where `push`'s own operands start.
+        ("git -C /tmp push origin +main", Decision::Block),
+        // An unresolvable operand after `push` can't be proven to start
+        // with `+` OR proven not to — the existing except-flags floor
+        // (rule 4b) already asks here regardless of this fix.
+        ("git push origin +$BRANCH", Decision::Ask),
+        // Plain, non-`+` push stays untouched by this fix.
+        ("git push origin main", Decision::Allow),
         // issue #452, fix 2: working-tree discard without `--`.
         ("git checkout .", Decision::Ask),
+        ("git checkout ..", Decision::Ask),
         ("git checkout -f", Decision::Ask),
         ("git restore .", Decision::Ask),
+        // `--staged` alone is non-destructive, but the blanket restore
+        // rule asks regardless (its own docs explain why).
+        ("git restore --staged foo.txt", Decision::Ask),
         // Control: the existing `--` spelling stays Block.
         ("git checkout -- .", Decision::Block),
+        // Plain branch switches must not be caught by the dot check.
+        ("git checkout feature", Decision::Allow),
         // issue #452, fix 3: `-d -f`/`-df` and the long-form
         // `--delete --force` are the same force-delete-of-unmerged-branch
         // operation as `-D`.
@@ -376,6 +389,9 @@ fn guardfall_git_cases() {
         ("git branch --delete --force feature", Decision::Block),
         // Control: the existing `-D` spelling stays Block.
         ("git branch -D feature", Decision::Block),
+        // -d alone (merged-only delete) must stay Allow — proves the new
+        // rule's two `required_flags` entries are ANDed, not ORed.
+        ("git branch -d feature", Decision::Allow),
     ];
 
     for (command, expected) in cases {

@@ -2883,16 +2883,28 @@ fn evaluate_simple_command_core(
     // Issue #452, fix 1: a `git push` with a structurally detected `+`
     // refspec force push (no `-f`/`--force` flag for `required_flags` to
     // see) reuses `git-push-force`'s own id/reason/deny_message, exactly
-    // as if it had matched that rule directly — falls back to `None` only
-    // if a future rule-file edit ever renamed/removed that id, in which
-    // case this stays a silent Allow rather than panicking (fail-closed
-    // for a rule lookup would need a *stricter* fallback, not a panic, but
-    // no known rule-file change removes an embedded rule id, so this has
-    // no live effect today).
-    let git_push_force_rule = git_push_plus_refspec(&argv)
-        .then(|| rules.command_rule_by_id("git-push-force"))
-        .flatten();
-    if let Some(rule) = rules.match_command(&argv).or(git_push_force_rule) {
+    // as if it had matched that rule directly. `command_rule_by_id`
+    // returning `None` here (a future rule-file edit renaming/removing
+    // that id) is pinned unreachable by
+    // `rules::embedded_git_push_force_rule_id_exists_for_gate_reuse`
+    // below, rather than left as a silently-accepted fail-open gap.
+    let toml_match = rules.match_command(&argv);
+    // Worst-wins with the ordinary blocklist match (mirrors
+    // `Rules::match_command`'s own Block-outranks-Ask contract, issue
+    // #399): an embedded/user `[[command]]` rule that already matches
+    // this `git push ...` argv with `Decision::Block` must not be shadowed
+    // by the structural reuse below, and — symmetrically — the structural
+    // Block must not be shadowed by a same-argv `Decision::Ask` match
+    // either, even though no embedded rule matches `git push` at less than
+    // Block today.
+    let rule = match toml_match {
+        Some(rule) if rule.decision() == Decision::Block => Some(rule),
+        _ => git_push_plus_refspec(&argv)
+            .then(|| rules.command_rule_by_id("git-push-force"))
+            .flatten()
+            .or(toml_match),
+    };
+    if let Some(rule) = rule {
         let reason = Reason::new(format!(
             "matches blocklist rule {:?}: {}",
             rule.id().as_str(),
@@ -2915,17 +2927,20 @@ fn evaluate_simple_command_core(
 
     // Issue #452, fix 2: `git checkout <path>` with no `--` separator is
     // positionally indistinguishable from `git checkout <branch>` for pure
-    // rule data, EXCEPT when a resolved operand normalizes to `.` — see
-    // `git_checkout_or_restore_dot`'s own docs. Ask, not Block: the
-    // issue's expected column reserves Block for the unambiguous `--`
-    // spelling, already handled above by `git-checkout-dashdash`.
-    if git_checkout_or_restore_dot(&argv, "checkout") {
+    // rule data, EXCEPT when a resolved operand normalizes to a bare,
+    // no-descent path (`.`, `..`, and their trailing-slash/descend-then-
+    // ascend equivalents) — see `git_checkout_dot`'s own docs. Ask, not
+    // Block: the issue's expected column reserves Block for the
+    // unambiguous `--` spelling, already handled above by
+    // `git-checkout-dashdash`.
+    if git_checkout_dot(&argv) {
         let verdict = Verdict::ask(
             Reason::new(
-                "git checkout <path> with a resolved operand normalizing to `.` (the current \
-                 directory) discards every uncommitted working-tree change under this \
-                 invocation's cwd — the same intent as `git checkout -- .` (Block), but without \
-                 the `--` separator a rule-data match can key off of",
+                "git checkout <path> with a resolved operand normalizing to a bare, no-descent \
+                 path (`.`, `..`, or an equivalent respelling) discards every uncommitted \
+                 working-tree change reachable from this invocation's cwd — the same intent as \
+                 `git checkout -- .` (Block), but without the `--` separator a rule-data match \
+                 can key off of",
             ),
             argv,
         );
@@ -9128,23 +9143,25 @@ fn git_push_plus_refspec(argv: &[NormalizedWord]) -> bool {
     })
 }
 
-/// Issue #452, fix 2: `git checkout <path>`/`git restore <path>` with no
-/// `--` separator is positionally indistinguishable from `git checkout
-/// <branch>` — pure rule data can't tell "this operand is a path" from
-/// "this operand is a branch/commit-ish name" — EXCEPT when the operand
-/// lexically normalizes to `.` (the current directory,
-/// [`PathForm::Rel`] with no ascent and no components): git never accepts
-/// a bare `.` as a branch/commit-ish name, so this shape can only ever be
-/// the destructive path form, discarding every uncommitted working-tree
-/// change under the invocation's cwd. Ask, not Block — the issue's own
-/// expected column reserves Block for the unambiguous `--` spelling.
-fn git_checkout_or_restore_dot(argv: &[NormalizedWord], subcommand: &str) -> bool {
-    let Some(operands) = git_subcommand_operands(argv, subcommand) else {
+/// Issue #452, fix 2: `git checkout <path>` with no `--` separator is
+/// positionally indistinguishable from `git checkout <branch>` — pure
+/// rule data can't tell "this operand is a path" from "this operand is a
+/// branch/commit-ish name" — EXCEPT when the operand lexically normalizes
+/// to a bare, no-descent [`PathForm::Rel`] (empty `comps`, any `ascent`:
+/// `.`, `./`, `..`, `../`, `foo/..`, …). `git check-ref-format` forbids
+/// `..` anywhere in a refname, so a purely-ascending operand — same as a
+/// bare `.` — can never be a branch/commit-ish name either; this shape can
+/// only ever be the destructive path form, discarding every uncommitted
+/// working-tree change under (or, for `..`, above) the invocation's cwd.
+/// Ask, not Block — the issue's own expected column reserves Block for
+/// the unambiguous `--` spelling.
+fn git_checkout_dot(argv: &[NormalizedWord]) -> bool {
+    let Some(operands) = git_subcommand_operands(argv, "checkout") else {
         return false;
     };
     operands.iter().any(|word| match word.resolution() {
         Resolution::Resolved(s) if !s.starts_with('-') => {
-            matches!(lexical_normalize(s), PathForm::Rel { ascent: 0, ref comps } if comps.is_empty())
+            matches!(lexical_normalize(s), PathForm::Rel { ref comps, .. } if comps.is_empty())
         }
         _ => false,
     })

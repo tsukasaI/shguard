@@ -715,7 +715,7 @@ required_flags = ["x|--extract|--get", "P|--absolute-names"]
 
 [[command]]
 id = "git-push-force"
-reason = "git push --force/-f overwrites remote history; --force-with-lease is the safe alternative"
+reason = "git push --force/-f (or an equivalent +-prefixed refspec, e.g. `git push origin +main`) overwrites remote history; --force-with-lease is the safe alternative"
 command = "git"
 required_tokens = ["push"]
 required_flags = ["f|--force"]

@@ -9123,6 +9123,22 @@ mod tests {
         Rules::embedded().unwrap();
     }
 
+    // Issue #452: `crate::gate::git_push_plus_refspec`'s structural Block
+    // reuses this rule's id/reason/deny_message via
+    // `Rules::command_rule_by_id("git-push-force")` rather than declaring
+    // a second rule — a rename or removal of this id would silently fail
+    // that lookup open (`+`-refspec force pushes falling through to
+    // Allow) with nothing else to catch it. Pinned here instead.
+    #[test]
+    fn embedded_git_push_force_rule_id_exists_for_gate_reuse() {
+        assert!(
+            Rules::embedded()
+                .unwrap()
+                .command_rule_by_id("git-push-force")
+                .is_some()
+        );
+    }
+
     // Every embedded `[[redirect]]` rule's decision level, as an exact
     // map: adding one is a deliberate choice between Block (a target with
     // no legitimate write path) and Ask (issue #261's shell-init family,
