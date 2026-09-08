@@ -7246,12 +7246,16 @@ mod tests {
     }
 
     #[test]
-    fn rm_recursive_without_force_root_does_not_match() {
+    fn rm_recursive_without_force_root_matches() {
+        // issue #453: `rm -r` (no `-f`) against `/` still deletes every
+        // writable file there non-interactively, via the sibling
+        // `rm-recursive-dangerous-target` rule.
         let rules = Rules::embedded().unwrap();
-        assert!(
+        assert_eq!(
             rules
                 .match_command(&argv(&["rm", "--recursive", "/"]))
-                .is_none()
+                .map(|rule| rule.id().as_str()),
+            Some("rm-recursive-dangerous-target")
         );
     }
 
@@ -10652,11 +10656,11 @@ mod tests {
         // `rm-recursive-force-dangerous-target` requires BOTH `r` and `f` —
         // having only `-r` must not satisfy *that* rule's flag gating, even
         // with an unresolvable tail. `match_command_except_target` may
-        // still return the flagless `self-protect-config-rm-tilde` rule
+        // still return the r-only `rm-recursive-dangerous-target` rule
         // instead (the same fail-safe "unresolvable target could be
         // anything" refinement issue #22 extends to `rm`, already present
         // for `cp`/`tee`/`mv`/`install`/`dd`) — what must not happen is the
-        // *dangerous-target* rule firing on an incomplete flag set.
+        // *force*-gated rule firing on an incomplete flag set.
         let rules = Rules::embedded().unwrap();
         let cmd = argv_with_unresolvable_tail(&["rm", "-r"]);
         let matched = rules.match_command_except_target(&cmd);
@@ -10671,18 +10675,18 @@ mod tests {
     // own companion `matches_except_flags_still_fires_via_a_different_rule_for_the_right_subcommand`):
     // an `assert_ne` on one rule id alone would still pass if NO rule
     // matched at all — a silent regression. Pin the positive expectation:
-    // the same argv still floors to `self-protect-config-rm-tilde`
-    // (flagless, targets the config directory), since its lack of a
-    // `required_flags` constraint means the missing `-f` never disqualifies
-    // it the way it disqualifies `rm-recursive-force-dangerous-target`.
+    // the same argv still floors via a different, r-only rule (issue #453's
+    // `rm-recursive-dangerous-target`), since its lack of an `f` requirement
+    // means the missing `-f` never disqualifies it the way it disqualifies
+    // `rm-recursive-force-dangerous-target`.
     #[test]
-    fn except_target_requires_required_flags_too_still_fires_self_protect_rule() {
+    fn except_target_still_fires_via_a_different_rule_when_force_is_missing() {
         let rules = Rules::embedded().unwrap();
         let cmd = argv_with_unresolvable_tail(&["rm", "-r"]);
         let matched = rules.match_command_except_target(&cmd);
         assert_eq!(
             matched.map(|rule| rule.id().as_str()),
-            Some("self-protect-config-rm-tilde")
+            Some("rm-recursive-dangerous-target")
         );
     }
 

@@ -10480,10 +10480,10 @@ mod tests {
     }
 
     #[test]
-    fn mkfs_without_type_flag_does_not_falsely_match_dispatcher_rule() {
-        // `mkfs` with no `-t`/`--type` just prints usage and does nothing
-        // destructive; no other rule claims bare `mkfs` either.
-        assert_decision("mkfs /dev/sda1", Decision::Allow);
+    fn mkfs_without_type_flag_still_blocks() {
+        // issue #453: util-linux `mkfs` with no `-t`/`--type` defaults to
+        // ext2, same destructive effect as an explicit `-t`.
+        assert_decision("mkfs /dev/sda1", Decision::Block);
     }
 
     // ==== Issue #58: truncate --size and git tag --force long forms
