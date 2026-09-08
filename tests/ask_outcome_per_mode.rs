@@ -428,6 +428,54 @@ fn check_permission_mode_missing_value_is_a_usage_error() {
         .code(2);
 }
 
+/// issue #465: a usage error still emits `{"error": "..."}` on stdout when
+/// `--json` was already parsed before the error is raised, instead of
+/// leaving a `--json` caller with empty stdout it can't parse. `--json`
+/// here precedes `--permission-mode`, so it has already been observed by
+/// the time the missing-value error fires.
+#[test]
+fn check_permission_mode_missing_value_usage_error_is_json_when_json_precedes_it() {
+    let (_dir, config_path) = write_config("");
+    let assert = isolated_command(&config_path)
+        .args(["check", "echo hi", "--json", "--permission-mode"])
+        .assert()
+        .failure()
+        .code(2);
+    let output = assert.get_output();
+    let value: Value =
+        serde_json::from_slice(&output.stdout).expect("--json usage error should be valid JSON");
+    assert!(
+        value.get("error").is_some_and(Value::is_string),
+        "expected an \"error\" string field, got {value:?}"
+    );
+}
+
+/// Same as above, for the likelier real-world usage error: `--json` with
+/// no `<command>` at all. Also pins that stderr stays empty in this case
+/// -- the whole point of #465's fix is a `--json` caller having somewhere
+/// to look other than stderr.
+#[test]
+fn check_missing_command_usage_error_is_json_when_json_precedes_it() {
+    let (_dir, config_path) = write_config("");
+    let assert = isolated_command(&config_path)
+        .args(["check", "--json"])
+        .assert()
+        .failure()
+        .code(2);
+    let output = assert.get_output();
+    assert!(
+        output.stderr.is_empty(),
+        "expected empty stderr, got {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value =
+        serde_json::from_slice(&output.stdout).expect("--json usage error should be valid JSON");
+    assert!(
+        value.get("error").is_some_and(Value::is_string),
+        "expected an \"error\" string field, got {value:?}"
+    );
+}
+
 /// A flag-shaped `--permission-mode` value (e.g. `--json` following it) is
 /// a usage error, not silently consumed as an `Unknown("--json")` mode
 /// value — the loop must not swallow the next real flag.

@@ -809,6 +809,28 @@ fn check_config() -> i32 {
 /// updating at each of the several call sites separately.
 const CHECK_USAGE: &str = "usage: shguard check <command> [--json] [--permission-mode <mode>]";
 
+/// Reports a `run_check` usage error and returns its exit code (`2`).
+/// `json` reflects whatever `--json` parsing has observed so far when the
+/// error is raised — issue #465: a `--json` caller that also mistypes a
+/// flag or omits `<command>` previously got empty stdout on this path
+/// (text went to stderr unconditionally), leaving the one caller who most
+/// needs a structured error with nothing to parse. Emits the same
+/// `{"error": "..."}` shape the config-load and evaluation-timeout error
+/// paths below already use.
+fn check_usage_error(json: bool, message: &str) -> i32 {
+    if json {
+        let value = serde_json::json!({ "error": message });
+        let _ = writeln!(
+            io::stdout(),
+            "{}",
+            serde_json::to_string(&value).unwrap_or_else(|_| value.to_string())
+        );
+    } else {
+        let _ = writeln!(io::stderr(), "{message}");
+    }
+    2
+}
+
 /// `shguard check <command> [--json] [--permission-mode <mode>]` (issue
 /// #109): a dry-run mode that prints the
 /// [`shguard::analyze_with_policy`] verdict for a command string given
@@ -842,11 +864,13 @@ const CHECK_USAGE: &str = "usage: shguard check <command> [--json] [--permission
 /// failure — useful for a CI step to fail on), `2` a usage error (missing/
 /// extra arguments, non-UTF-8 command), the config itself couldn't load, or
 /// evaluation exceeded [`EVALUATION_TIMEOUT`] (see below). A config-load
-/// failure under `--json` still emits `{"error": "..."}` on stdout (parsed
-/// `json` is already known at that point). Usage errors (missing/extra
-/// arguments, non-UTF-8 command) are always printed as human-readable text
-/// on stderr with empty stdout, regardless of `--json` — a caller relying
-/// on `--json` output should check the exit code first regardless.
+/// failure under `--json` still emits `{"error": "..."}` on stdout. Usage
+/// errors (missing/extra arguments, non-UTF-8 command) do the same
+/// whenever `--json` was already seen by the point the error is raised
+/// (issue #465) — arguments are parsed left to right and this function
+/// returns at the first error, so a `--json` flag positioned AFTER the
+/// offending argument is never reached and that case still falls back to
+/// a human-readable stderr message.
 ///
 /// Deliberately outside `main`'s `catch_unwind` boundary, exactly like
 /// [`check_config`]: this is a human- or CI-triggered, one-shot invocation
@@ -891,11 +915,12 @@ fn run_check(args: &[std::ffi::OsString]) -> i32 {
             json = true;
         } else if arg == "--permission-mode" {
             if permission_mode.is_some() {
-                let _ = writeln!(
-                    io::stderr(),
-                    "shguard check: --permission-mode given more than once ({CHECK_USAGE})"
+                return check_usage_error(
+                    json,
+                    &format!(
+                        "shguard check: --permission-mode given more than once ({CHECK_USAGE})"
+                    ),
                 );
-                return 2;
             }
             // A missing value and a flag-shaped value are rejected the same
             // way: `iter.next()` alone can't tell "no more arguments" apart
@@ -908,11 +933,10 @@ fn run_check(args: &[std::ffi::OsString]) -> i32 {
                 None => true,
             });
             let Some(value) = value else {
-                let _ = writeln!(
-                    io::stderr(),
-                    "shguard check: --permission-mode requires a value ({CHECK_USAGE})"
+                return check_usage_error(
+                    json,
+                    &format!("shguard check: --permission-mode requires a value ({CHECK_USAGE})"),
                 );
-                return 2;
             };
             permission_mode = Some(value);
         } else if command.is_none() && arg.to_str().is_some_and(|arg| arg.starts_with("--")) {
@@ -924,31 +948,27 @@ fn run_check(args: &[std::ffi::OsString]) -> i32 {
             // resolves `Allow` — exactly the "typo skips the check and
             // exits 0 anyway" failure mode this binary exists to avoid (see
             // `main`'s own module doc).
-            let _ = writeln!(
-                io::stderr(),
-                "shguard check: unrecognized flag {arg:?} ({CHECK_USAGE})"
+            return check_usage_error(
+                json,
+                &format!("shguard check: unrecognized flag {arg:?} ({CHECK_USAGE})"),
             );
-            return 2;
         } else if command.is_none() {
             command = Some(arg);
         } else {
-            let _ = writeln!(
-                io::stderr(),
-                "shguard check: unexpected argument {arg:?} ({CHECK_USAGE})"
+            return check_usage_error(
+                json,
+                &format!("shguard check: unexpected argument {arg:?} ({CHECK_USAGE})"),
             );
-            return 2;
         }
     }
     let Some(command) = command else {
-        let _ = writeln!(
-            io::stderr(),
-            "shguard check: missing <command> ({CHECK_USAGE})"
+        return check_usage_error(
+            json,
+            &format!("shguard check: missing <command> ({CHECK_USAGE})"),
         );
-        return 2;
     };
     let Some(command) = command.to_str() else {
-        let _ = writeln!(io::stderr(), "shguard check: <command> must be valid UTF-8");
-        return 2;
+        return check_usage_error(json, "shguard check: <command> must be valid UTF-8");
     };
     // Reproduces exactly what the hook path would have seen for this same
     // `permission_mode` value (issue #469's own recommended design: a
@@ -962,11 +982,10 @@ fn run_check(args: &[std::ffi::OsString]) -> i32 {
         Some(value) => match value.to_str() {
             Some(value) => Some(shguard::PermissionMode::parse(value)),
             None => {
-                let _ = writeln!(
-                    io::stderr(),
-                    "shguard check: --permission-mode value must be valid UTF-8"
+                return check_usage_error(
+                    json,
+                    "shguard check: --permission-mode value must be valid UTF-8",
                 );
-                return 2;
             }
         },
     };
