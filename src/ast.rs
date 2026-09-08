@@ -593,7 +593,11 @@ pub(crate) enum Redirection {
 /// (row 18: `echo x > /dev/null`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FileRedirectionKind {
-    /// `<`
+    /// `<`. Ordinarily a no-op for the dangerous-target check — reading an
+    /// ordinary file is harmless. Issue #455's exception:
+    /// `crate::gate::is_redirect_write_applicable` still treats `target`
+    /// as connection-applicable when it's a network pseudo-device (see
+    /// `crate::gate::is_network_pseudo_device`'s docs for why).
     Input,
     /// `>`
     Output,
@@ -616,8 +620,9 @@ pub(crate) enum FileRedirectionKind {
     /// at all is what establishes the TCP connection, independent of
     /// which direction ends up used. `crate::gate` treats it as a genuine
     /// write for the same dangerous-target check `>`/`>>` already get
-    /// (`is_redirect_write_applicable`), rather than as a no-op the way
-    /// `<`'s read-only `Input` is.
+    /// (`is_redirect_write_applicable`), rather than as the no-op `<`'s
+    /// read-only `Input` is for a non-network target (issue #455, see
+    /// `Input`'s own docs).
     ReadAndWrite,
 }
 

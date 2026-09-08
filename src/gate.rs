@@ -1478,8 +1478,9 @@ fn evaluate_pipeline_shape(stages: &[Vec<NormalizedWord>]) -> Option<Verdict> {
     }
 }
 
-/// Checks output/append (and, issue #75, genuine-file-write duplication)
-/// redirect targets against redirect rules. Returns the first matching
+/// Checks output/append (and, issue #75, genuine-file-write duplication;
+/// issue #455, a plain `<` to a network pseudo-device) redirect targets
+/// against redirect rules. Returns the first matching
 /// rule, or `None` if no redirect target hits a rule. Only
 /// statically-resolved targets are checked; a target shape this function
 /// cannot prove anything about is simply left to the other checks
@@ -1525,11 +1526,13 @@ fn check_redirect_targets<'a>(
 /// ([`scan_word_expansions`]/[`scan_redirection_expansions`]), which only
 /// asks whether that inner command is dangerous to RUN, never what it
 /// would statically PRINT (`echo /dev/sda` is harmless to run, but its
-/// output is the dangerous string). Applicability mirrors
-/// `resolved_redirect_write_targets` exactly (same `kind` filtering,
-/// including the `DuplicateOutput` fd-vs-path check, applied to the
-/// RESOLVED string instead of a normalized literal) — the two differ only
-/// in where the candidate string comes from.
+/// output is the dangerous string). Applicability mostly mirrors
+/// `resolved_redirect_write_targets` (same `DuplicateOutput` fd-vs-path
+/// check, applied to the RESOLVED string instead of a normalized literal)
+/// — the one deliberate divergence is `Input` (issue #455, see this
+/// function's own docs below), which can't be filtered on the unresolved
+/// literal word the way `is_redirect_write_applicable` filters it, since
+/// the network-pseudo-device shape only appears after resolution here.
 ///
 /// Known residual dodges (disclosed, not fixed — all currently Allow with
 /// no regression from this function's own scope): `$(echo -e
@@ -1545,16 +1548,23 @@ fn check_redirect_targets<'a>(
 /// single bare substitution). Separately, a *preceding* heredoc on the same
 /// command masks this resolver's new Block with the heredoc's own Ask
 /// floor, since that floor is evaluated first.
+///
+/// Issue #455: unlike [`resolved_redirect_write_targets`]'s `Input` arm,
+/// a plain `<` target isn't filtered out up front here — it's let through
+/// to resolution and checked against [`is_network_pseudo_device`]
+/// afterwards instead, since the applicability test needs the RESOLVED
+/// substitution output (`cat <$(echo /dev/tcp/host/port)`), not the
+/// unresolved literal word `is_redirect_write_applicable` sees.
+/// `DuplicateInput` (`<&`) stays excluded even for a network target: bash
+/// rejects `cat <&$(echo /dev/tcp/host/port)` as an ambiguous redirect
+/// and opens no socket.
 fn resolved_redirect_substitution_targets(redirections: &[Redirection]) -> Vec<String> {
     let mut targets = Vec::new();
     for redir in redirections {
         let Redirection::File { kind, target } = redir else {
             continue;
         };
-        if matches!(
-            kind,
-            FileRedirectionKind::Input | FileRedirectionKind::DuplicateInput
-        ) {
+        if matches!(kind, FileRedirectionKind::DuplicateInput) {
             continue;
         }
         let Some((quoted, inner)) = single_command_substitution_text(target) else {
@@ -1583,6 +1593,14 @@ fn resolved_redirect_substitution_targets(redirections: &[Redirection]) -> Vec<S
                 .to_string()
         };
         if matches!(kind, FileRedirectionKind::DuplicateOutput) && is_fd_or_close(&resolved) {
+            continue;
+        }
+        // Issue #455: a plain `<` substitution result is only
+        // connection-applicable when it resolves to a network
+        // pseudo-device — every other resolved `<` target (e.g.
+        // `cat <$(echo file.txt)`) stays excluded, mirroring
+        // `is_redirect_write_applicable`'s own `Input` scoping.
+        if matches!(kind, FileRedirectionKind::Input) && !is_network_pseudo_device(&resolved) {
             continue;
         }
         targets.push(resolved);
@@ -1752,10 +1770,12 @@ fn resolve_printf_output(args: &[NormalizedWord]) -> Option<String> {
 
 /// Every resolved target word from `redirections` whose kind represents a
 /// genuine filesystem write (issue #75's Output/Append and discriminated
-/// DuplicateOutput) — the same target set [`check_redirect_targets`]
-/// checks against redirect rules, extracted so
-/// [`scan_redirect_ascent_descent_floor`] (issue #78) can reuse the exact
-/// same applicability filtering rather than duplicating it.
+/// DuplicateOutput) or a connection-establishing open of a `/dev/tcp/`/
+/// `/dev/udp/` pseudo-device via a plain `Input` redirect (issue #455) —
+/// the same target set [`check_redirect_targets`] checks against redirect
+/// rules, extracted so [`scan_redirect_ascent_descent_floor`] (issue #78)
+/// can reuse the exact same applicability filtering rather than
+/// duplicating it.
 fn resolved_redirect_write_targets(redirections: &[Redirection]) -> Vec<String> {
     let mut targets = Vec::new();
     for redir in redirections {
@@ -1775,7 +1795,24 @@ fn resolved_redirect_write_targets(redirections: &[Redirection]) -> Vec<String> 
     targets
 }
 
-/// Whether `kind`'s target is a genuine filesystem write worth a path
+/// Bash's own byte-exact test for its network pseudo-devices
+/// (`/dev/tcp/host/port`, `/dev/udp/host/port`, man bash `REDIRECTION`):
+/// opening either, in any direction, establishes the connection —
+/// `resolved_redirect_write_targets`'s `Input` arm and
+/// `resolved_redirect_substitution_targets` (issue #455) both need this
+/// exact predicate so a `$()`-produced target can't dodge the check a
+/// literal one gets. Deliberately NOT lexically normalized: bash matches
+/// this prefix literally against the exec'd path, so `/dev/../dev/tcp/...`
+/// or `/dev//tcp/...` is an ordinary (nonexistent) file to bash and opens
+/// no socket — normalizing here would only manufacture false Blocks, not
+/// close a real gap.
+fn is_network_pseudo_device(target: &str) -> bool {
+    target.starts_with("/dev/tcp/") || target.starts_with("/dev/udp/")
+}
+
+/// Whether `kind`'s target is a genuine filesystem write, or a
+/// connection-establishing network-pseudo-device open via a plain `Input`
+/// redirect (issue #455, see [`is_network_pseudo_device`]), worth a path
 /// check at all — shared by [`resolved_redirect_write_targets`] and
 /// [`scan_redirect_home_env_floor`] (issue #203) so the two can never
 /// diverge on which redirect kinds count as a write.
@@ -1789,14 +1826,26 @@ fn is_redirect_write_applicable(kind: &FileRedirectionKind, normalized: &[Normal
         FileRedirectionKind::Output
         | FileRedirectionKind::Append
         | FileRedirectionKind::ReadAndWrite => true,
+        // Issue #455: an ordinary `<` target is harmless to read, so it
+        // stays excluded — except a network pseudo-device (see
+        // `is_network_pseudo_device`), making `cat </dev/tcp/host/port`
+        // and `exec 3</dev/tcp/host/port` connect/beacon/download
+        // primitives just like the write-direction forms.
+        FileRedirectionKind::Input => normalized.iter().any(|word| {
+            matches!(word.resolution(), Resolution::Resolved(s) if is_network_pseudo_device(s))
+        }),
         // `<&` never writes its target the way `>&`/`>`/`>>` can — the
         // redirect rules this checks against are specifically about
         // overwriting a dangerous path, so a read-only duplication
-        // (`cat <&/dev/sda`) gets the same free pass an ordinary `<`
-        // already does; excluding it here doesn't skip checking any
-        // write, since every genuine write path is covered by the other
-        // arms.
-        FileRedirectionKind::Input | FileRedirectionKind::DuplicateInput => false,
+        // (`cat <&/dev/sda`) gets the same free pass an ordinary `<` to a
+        // non-network target does; excluding it here doesn't skip
+        // checking any write, since every genuine write path is covered
+        // by the other arms. Unlike `<`, `<&` doesn't get the #455
+        // network-pseudo-device exception either: bash rejects
+        // `cat <&/dev/tcp/host/port` as an ambiguous redirect and opens
+        // no socket, unlike `>&/dev/tcp/host/port`, which does connect
+        // and is already covered by `DuplicateOutput` below.
+        FileRedirectionKind::DuplicateInput => false,
         // A duplication output target (`2>&1` vs. `>&/dev/sda`) is only
         // a genuine filesystem write — and so only worth a path check —
         // when its resolved value is NOT a bare fd number or `-`.
@@ -14959,14 +15008,76 @@ mod tests {
         assert_decision("exec 3>/dev/tcp/10.0.0.1/4444", Decision::Block);
     }
 
+    // ==== Issue #455: read-only `<` redirect to /dev/tcp//dev/udp ====
+
     #[test]
-    fn plain_input_redirect_to_dev_tcp_stays_allow() {
-        // Out of this issue's scope: `is_redirect_write_applicable`
-        // deliberately treats a read-only `<` as never worth a
-        // dangerous-target check (its own docs) — a genuine gap for the
-        // `cat </dev/tcp/host/port` connect-and-read shape, but a
-        // pre-existing one this issue's `<>` repro doesn't touch.
-        assert_decision("exec 3</dev/tcp/10.0.0.1/4444", Decision::Allow);
+    fn plain_input_redirect_to_dev_tcp_now_blocks() {
+        // Was Allow before issue #455: `is_redirect_write_applicable`
+        // used to skip every plain `Input` target. Opening
+        // `/dev/tcp/host/port` for reading still establishes the TCP
+        // connection, so `exec 3</dev/tcp/host/port` is the same
+        // connect/beacon primitive as the `>`/`<>` forms above.
+        assert_decision("exec 3</dev/tcp/10.0.0.1/4444", Decision::Block);
+    }
+
+    #[test]
+    fn cat_input_redirect_to_dev_tcp_blocks() {
+        assert_decision("cat </dev/tcp/1.2.3.4/80", Decision::Block);
+    }
+
+    #[test]
+    fn cat_input_redirect_to_dev_tcp_blocks_through_bash_dash_c() {
+        assert_decision("bash -c \"cat </dev/tcp/1.2.3.4/80\"", Decision::Block);
+    }
+
+    #[test]
+    fn plain_input_redirect_to_dev_udp_also_blocks() {
+        // Both literals in `is_network_pseudo_device` are exercised on
+        // the `<` direction, not just `/dev/tcp/`.
+        assert_decision("exec 3</dev/udp/1.2.3.4/53", Decision::Block);
+    }
+
+    #[test]
+    fn read_write_redirect_to_dev_tcp_control_still_blocks() {
+        // Issue #455's repro table control row: already Block since
+        // issue #425, unaffected by this change.
+        assert_decision("exec 3<>/dev/tcp/1.2.3.4/80", Decision::Block);
+    }
+
+    #[test]
+    fn plain_input_redirect_to_ordinary_file_still_allows() {
+        // Regression guard: the issue #455 fix is scoped to
+        // `/dev/tcp/`/`/dev/udp/` targets only — an ordinary-file `<`
+        // redirect must stay unaffected.
+        assert_decision("cat < file.txt", Decision::Allow);
+    }
+
+    #[test]
+    fn plain_input_redirect_to_a_dangerous_non_network_device_still_allows() {
+        // Stronger regression guard than the ordinary-file case above:
+        // `/dev/sda` DOES match a redirect rule
+        // (`redirect-overwrite-device-or-critical-file`) once submitted,
+        // so this would flip to Block if the issue #455 fix widened past
+        // `/dev/tcp/`/`/dev/udp/` to every `Input` target — reading a raw
+        // block device is out of this issue's scope.
+        assert_decision("cat </dev/sda", Decision::Allow);
+    }
+
+    #[test]
+    fn plain_input_redirect_substitution_to_dev_tcp_blocks() {
+        // The `$()`-substitution channel (`resolved_redirect_substitution_targets`)
+        // must get the same `Input` exception as the literal-target
+        // channel — otherwise `cat <$(echo /dev/tcp/host/port)` dodges
+        // the check entirely.
+        assert_decision("cat <$(echo /dev/tcp/1.2.3.4/80)", Decision::Block);
+    }
+
+    #[test]
+    fn plain_input_redirect_substitution_to_an_ordinary_path_still_allows() {
+        // Regression guard mirroring `plain_input_redirect_to_a_dangerous_non_network_device_still_allows`
+        // for the substitution channel: only a network-pseudo-device
+        // resolved value is connection-applicable.
+        assert_decision("cat <$(echo /dev/sda)", Decision::Allow);
     }
 
     #[test]

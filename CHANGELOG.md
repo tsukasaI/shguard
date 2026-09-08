@@ -75,6 +75,16 @@ All notable changes to this project are documented in this file.
 
 ### Security
 
+- A read-only `<` redirect to `/dev/tcp/host/port` or `/dev/udp/host/port`
+  (`cat </dev/tcp/host/port`, `exec 3</dev/tcp/host/port`, and the same
+  target reached via a `$()` substitution) now `Block`s (#455), closing
+  the "known gap" disclosed in 0.6.2's `#425` entry: bash establishes the
+  TCP/UDP connection when the pseudo-device is opened, regardless of
+  which direction (`<`/`>`/`<>`) ends up used, so a read-only open is the
+  same connect/beacon/download primitive the write-direction forms were
+  already blocked for. Scoped narrowly to `/dev/tcp/`/`/dev/udp/`
+  targets: an ordinary-file `<` redirect (`cat < file.txt`) is
+  unaffected.
 - An `[[allow]]` entry naming an awk-family interpreter (`awk`, `gawk`,
   `mawk`, `nawk`, `original-awk`) is now rejected at config load, the same
   way a `bash`/`eval`/`python3` entry already was (#451). Previously it
