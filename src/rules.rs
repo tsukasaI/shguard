@@ -9118,6 +9118,46 @@ mod tests {
         );
     }
 
+    // Issue #446: `curl-wget-pipe-to-shell`'s `sinks` drifted from
+    // `SHELL_INTERPRETERS` twice (issue #55's fish/ksh/tcsh/csh/ash, then
+    // `dash`), each time silently downgrading `curl ... | <shell>` from
+    // Block to Ask. Enforces the comment's promise mechanically instead of
+    // relying on it being kept by hand, the same pattern
+    // `shell_init_target_lists_are_in_sync` already uses for a different
+    // duplicated list. `source`/`.` are checked separately: they are not
+    // `SHELL_INTERPRETERS` members (they need a stdin-alias operand, not
+    // just a bare name, to actually act as a sink — see
+    // `crate::gate`'s `is_interpreter_sink`), but belong in this rule's
+    // `sinks` the same way `pwsh` belongs in `EXTRA_PIPELINE_INTERPRETERS`.
+    #[test]
+    fn curl_wget_pipe_to_shell_sinks_cover_shell_interpreters() {
+        let doc: toml::Value = toml::from_str(EMBEDDED_BLOCKLIST).unwrap();
+        let rule = doc["pipeline"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("curl-wget-pipe-to-shell"))
+            .unwrap();
+        let sinks: Vec<&str> = rule["sinks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        for shell in SHELL_INTERPRETERS {
+            assert!(
+                sinks.contains(shell),
+                "curl-wget-pipe-to-shell's sinks is missing {shell:?} from SHELL_INTERPRETERS"
+            );
+        }
+        for extra in ["source", "."] {
+            assert!(
+                sinks.contains(&extra),
+                "curl-wget-pipe-to-shell's sinks is missing {extra:?}"
+            );
+        }
+    }
+
     #[test]
     fn embedded_allowlist_parses() {
         // rules/allowlist.toml must parse and validate

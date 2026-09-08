@@ -6763,7 +6763,7 @@ fn scan_for_awk_script(words: &[NormalizedWord]) -> AwkScriptPosition {
 /// - `-e`/`--source` ([`awk_inline_flag_name`]) anywhere.
 /// - any `-f`/`-E`/`-i` ([`is_awk_file_flag`]) whose value
 ///   ([`awk_file_flag_glued_value`] if glued, else the following word) is
-///   a stdin alias ([`is_awk_stdin_path`]) anywhere. A `-f`/`-E`/`-i` whose
+///   a stdin alias ([`is_stdin_alias_path`]) anywhere. A `-f`/`-E`/`-i` whose
 ///   value is an ordinary file does NOT return here — it's skipped, and
 ///   the scan continues, since a later flag could still be `-e`/`--source`
 ///   or a stdin-sourced one.
@@ -6791,14 +6791,14 @@ fn scan_for_awk_inline_flag(words: &[NormalizedWord]) -> Option<AwkScriptPositio
         }
         if is_awk_file_flag(s) {
             if let Some(glued) = awk_file_flag_glued_value(s) {
-                if is_awk_stdin_path(glued) {
+                if is_stdin_alias_path(glued) {
                     return Some(AwkScriptPosition::FileFlagStdin);
                 }
                 i += 1;
                 continue;
             }
             match words.get(i + 1).map(NormalizedWord::resolution) {
-                Some(Resolution::Resolved(v)) if is_awk_stdin_path(v) => {
+                Some(Resolution::Resolved(v)) if is_stdin_alias_path(v) => {
                     return Some(AwkScriptPosition::FileFlagStdin);
                 }
                 Some(Resolution::Unresolvable(_)) => return Some(AwkScriptPosition::Uncertain),
@@ -6914,14 +6914,14 @@ fn is_awk_file_flag(token: &str) -> bool {
 /// resolve to a stdin alias at runtime.
 fn classify_awk_file_value(flag_token: &str, next: Option<&NormalizedWord>) -> AwkScriptPosition {
     if let Some(glued) = awk_file_flag_glued_value(flag_token) {
-        return if is_awk_stdin_path(glued) {
+        return if is_stdin_alias_path(glued) {
             AwkScriptPosition::FileFlagStdin
         } else {
             AwkScriptPosition::FileFlag
         };
     }
     match next.map(NormalizedWord::resolution) {
-        Some(Resolution::Resolved(v)) if is_awk_stdin_path(v) => AwkScriptPosition::FileFlagStdin,
+        Some(Resolution::Resolved(v)) if is_stdin_alias_path(v) => AwkScriptPosition::FileFlagStdin,
         Some(Resolution::Resolved(_)) | None => AwkScriptPosition::FileFlag,
         Some(Resolution::Unresolvable(_)) => AwkScriptPosition::Uncertain,
     }
@@ -6946,15 +6946,17 @@ fn awk_file_flag_glued_value(flag_token: &str) -> Option<&str> {
         })
 }
 
-/// Whether `path` is one of the well-known aliases for stdin that
-/// `-f`/`-E`/`-i` accept in place of a real file: `-` (the POSIX
-/// convention most utilities honor), `/dev/stdin`, `/proc/self/fd/0`, and
-/// `/dev/fd/0` (Linux symlinks `/dev/fd` to `/proc/self/fd`; BSD/macOS give
-/// `/dev/fd/0` its own device node — either way it's stdin). A value here
-/// means awk's program text comes from the same pipe its *records* would
-/// otherwise come from — unintrospectable and attacker-controllable
-/// through it (issue #195, "Blocker B").
-fn is_awk_stdin_path(path: &str) -> bool {
+/// Whether `path` is one of the well-known aliases for stdin: `-` (the
+/// POSIX convention most utilities honor), `/dev/stdin`, `/proc/self/fd/0`,
+/// and `/dev/fd/0` (Linux symlinks `/dev/fd` to `/proc/self/fd`; BSD/macOS
+/// give `/dev/fd/0` its own device node — either way it's stdin). Shared by
+/// awk's `-f`/`-E`/`-i` file-value scan (issue #195, "Blocker B": a value
+/// here means awk's program text comes from the same pipe its *records*
+/// would otherwise come from — unintrospectable and attacker-controllable
+/// through it) and [`is_interpreter_sink`]'s `source`/`.` case (issue #446:
+/// same reasoning for a script sourced from the pipe instead of read as
+/// records).
+fn is_stdin_alias_path(path: &str) -> bool {
     matches!(path, "-" | "/dev/stdin" | "/proc/self/fd/0" | "/dev/fd/0")
 }
 
@@ -6999,8 +7001,24 @@ fn awk_value_flag_needs_separate_arg(token: &str) -> bool {
 /// it actually runs, not by its own literal argv\[0\] token. `xargs` is one
 /// of the wrappers that helper already knows about, so it needs no special
 /// case here.
+///
+/// `source`/`.` (issue #446) are not in [`is_pipeline_interpreter`]'s lists:
+/// unlike a bare `sh`, they only read stdin as their script with an
+/// explicit stdin-alias operand ([`is_stdin_alias_path`]) — an ordinary
+/// `source script.sh` reads that file and ignores its stdin entirely, so
+/// treating the name alone as a sink would float every such pipe to Ask.
 fn is_interpreter_sink(stage: &[NormalizedWord]) -> bool {
-    crate::rules::effective_command(stage).is_some_and(|(name, _)| is_pipeline_interpreter(name))
+    let Some((name, rest)) = crate::rules::effective_command(stage) else {
+        return false;
+    };
+    if is_pipeline_interpreter(name) {
+        return true;
+    }
+    matches!(name, "source" | ".")
+        && matches!(
+            rest.first().map(NormalizedWord::resolution),
+            Some(Resolution::Resolved(v)) if is_stdin_alias_path(v)
+        )
 }
 
 /// Whether short-option cluster token `token` (e.g. `-rf`) includes flag
