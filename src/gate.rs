@@ -4101,7 +4101,7 @@ fn evaluate_command_position_bare_var(
     candidates.push((None, default_note));
 
     let mut primary_substituted = None;
-    for (ifs, splitting_note) in candidates {
+    for &(ifs, splitting_note) in &candidates {
         let substituted = substitute_command_name(&argv, value, ifs);
         if let Some(rule) = rules.match_command(&substituted) {
             return Verdict::block(
@@ -4146,28 +4146,41 @@ fn evaluate_command_position_bare_var(
     // true` resolves `X=ls`'s own RHS fine, so `env.get("X")` moves on to
     // `"ls"` and never un-sets back to `"rm -rf /"` after `true` exits
     // (`Env`'s own docs) — this line's dangerous value is still one `$X`
-    // invocation could hold. Try every earlier RESOLVED value on record
-    // (default-split only, mirroring `ifs_history`'s own additive floor)
-    // and Block on any match rather than reporting an unresolvable Ask over
-    // a value the command line could never actually keep.
+    // invocation could hold. Try every earlier RESOLVED value on record,
+    // through the SAME `candidates` IFS-splitting matrix already built
+    // above (an earlier `X=rm:-rf:/` could itself only split apart under a
+    // same-line `IFS=:`), and Block on any match. A miss goes to
+    // `alternates` exactly like a non-default current-value candidate does
+    // above — a historical value is a probe, never the primary `stage_argvs`
+    // entry, for the same desync reason.
     for historical in name_history {
         if historical.as_str() == value {
             continue;
         }
-        let substituted = substitute_command_name(&argv, historical, None);
-        if let Some(rule) = rules.match_command(&substituted) {
-            return Verdict::block(
-                Reason::new(format!(
-                    "`${name}` resolves to {historical:?} on this command line (an earlier \
-                     same-line assignment a later reassignment or command-scoped prefix \
-                     assignment shadowed), which matches blocklist rule {:?}: {}",
-                    rule.id().as_str(),
-                    rule.reason().as_str()
-                )),
+        for &(ifs, splitting_note) in &candidates {
+            let substituted = substitute_command_name(&argv, historical, ifs);
+            if let Some(rule) = rules.match_command(&substituted) {
+                return Verdict::block(
+                    Reason::new(format!(
+                        "`${name}` resolves to {historical:?} on this command line (an earlier \
+                         same-line assignment that a later reassignment or command-scoped \
+                         prefix assignment shadowed){splitting_note}, which matches blocklist \
+                         rule {:?}: {}",
+                        rule.id().as_str(),
+                        rule.reason().as_str()
+                    )),
+                    substituted,
+                    Some(rule.id().clone()),
+                )
+                .with_deny_message(rule.deny_message().cloned());
+            }
+            alternates.push((
                 substituted,
-                Some(rule.id().clone()),
-            )
-            .with_deny_message(rule.deny_message().cloned());
+                format!(
+                    "`${name}` resolves to {historical:?} (an earlier same-line value)\
+                         {splitting_note}"
+                ),
+            ));
         }
     }
 
@@ -9549,18 +9562,29 @@ fn apply_unknown_cwd_floor(
 /// assignment scoped to `true` alone and never persists past it (bash
 /// resets `$X` back to whatever it was before the instant `true` exits),
 /// so a later, differently-resolved reassignment shadows it in `map`
-/// without that shadow reflecting reality. `evaluate_command_position_bare_var`
-/// additionally tries every OTHER entry in `value_history(name)` (default
-/// split only) once `map.get(name)`'s own current resolution has already
-/// been tried, so a shadowed-but-still-possible value is never silently
-/// missed — purely additive, matching every other floor in this file.
+/// without that shadow reflecting reality — `Env` deliberately does not
+/// distinguish that case from an ordinary persisting reassignment
+/// (`X=v; X=w; $X`), so `value_history` treats both the same way; this is
+/// the same conservative over-approximation `ifs_history` already made,
+/// widening rule 2's Block coverage, never introducing a false Allow.
+/// `evaluate_command_position_bare_var` additionally tries every OTHER
+/// entry in `value_history(name)` once `map.get(name)`'s own current
+/// resolution has already been tried, so a shadowed-but-still-possible
+/// value is never silently missed — purely additive, matching every other
+/// floor in this file.
+///
 /// This is deliberately narrower than `assigned`'s "touched at all"
-/// tracking: an explicit unresolvable reassignment (`X=$(evil)`) still
-/// removes `name` from `map` with no history fallback for the *current*
-/// resolution — [`Self::apply_one`]'s own docs treat a stale value as
-/// worse than none, and `value_history` only ever adds EXTRA Block-only
-/// candidates alongside an already-known current value, never substitutes
-/// for one.
+/// tracking, and narrower than `IFS`'s OWN use of its own history: an
+/// explicit unresolvable reassignment (`X=$(evil)`) still removes `name`
+/// from `map` with no history fallback for the *name being resolved as
+/// the command itself* — [`Self::apply_one`]'s own docs treat a stale
+/// value as worse than none, and rule 2 only ever adds EXTRA Block-only
+/// `value_history` candidates alongside an already-known current
+/// resolution for `name`, never substituting for a missing one. `IFS` is
+/// the one deliberate exception to that: it is consulted as a SPLITTING
+/// candidate for whatever `name` already resolved to, not as `name`
+/// itself, so `ifs_history` is tried even when `IFS`'s own current value
+/// is unresolvable (see `evaluate_command_position_bare_var`'s own docs).
 struct Env {
     map: HashMap<String, String>,
     assigned: std::collections::HashSet<String>,
@@ -10054,10 +10078,23 @@ mod tests {
     }
 
     #[test]
-    fn issue_463_bare_var_control_without_prefix_reassignment_still_blocks() {
-        // The repro's control case: no intervening `X=ls true` at all, so
-        // this must keep Blocking exactly as it always has.
-        assert_decision("X='rm -rf /'; $X", Decision::Block);
+    fn issue_463_same_commands_own_prefix_reassignment_does_not_hide_a_prior_value_either() {
+        // `X=ls $X` is itself a same-command prefix assignment scoped to
+        // the very command it appears on (`Env::apply_assignments`'s own
+        // docs) — `$X`'s own expansion happens under `X`'s value BEFORE
+        // this new `X=ls`, so this must Block on the pre-existing `X`
+        // value exactly as `issue_139_earlier_persisting_ifs_survives_a_
+        // same_commands_prefix_shadow` already pins for `IFS`.
+        assert_decision("X='rm -rf /'; X=ls $X", Decision::Block);
+    }
+
+    #[test]
+    fn issue_463_ordinary_persisting_reassignment_is_treated_the_same_as_a_prefix_one() {
+        // No prefix assignment at all here — `X=ls` is a plain, persisting
+        // reassignment. `value_history` doesn't distinguish the two (this
+        // struct's own docs), the same conservative over-approximation
+        // `ifs_history` already makes for `IFS`, so this also Blocks.
+        assert_decision("X=rm; X=ls; $X -rf /", Decision::Block);
     }
 
     #[test]
