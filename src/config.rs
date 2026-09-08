@@ -80,7 +80,10 @@
 //! deployed behind one *or more* symlinks (e.g. into a dotfiles repo
 //! behind a `stow`/`home-manager`-style layer of indirection) gets
 //! *every* hop's directory protected, not only the literal path and the
-//! fully-resolved end — plus each hop's `std::fs::canonicalize`d form
+//! fully-resolved end — except the one hop whose target exists but isn't
+//! an ordinary regular file (e.g. `SHGUARD_CONFIG=/dev/null`), which is
+//! never a real, user-owned config location (issue #461) — plus each
+//! remaining hop's `std::fs::canonicalize`d form
 //! (issue #449), catching a symlinked directory *component* earlier in
 //! the path (stow's default "folded" layout) that the file-symlink walk
 //! alone never sees — see [`self_protection_directories`]'s own docs for
@@ -687,6 +690,16 @@ const MAX_SYMLINK_HOPS: usize = 40;
 /// (issue #24); a bare `/` parent (from e.g. `SHGUARD_CONFIG=/config.toml`)
 /// would deny writes to almost any absolute path (issue #28 item 3).
 ///
+/// The final hop's directory is additionally dropped (not just excluded
+/// from the dedup set above) when the fully-resolved target exists but
+/// isn't an ordinary regular file (issue #461): `SHGUARD_CONFIG=/dev/null`
+/// — a well-established "empty config, embedded rules only" idiom — would
+/// otherwise self-protect `/dev` itself, denying every unrelated
+/// `/dev/...` target (`2>/dev/null` included). A target that doesn't
+/// exist yet, or a `metadata` error, is treated as protectable as
+/// before — this only ever narrows the *last* hop, never an earlier one a
+/// symlink chain also passes through.
+///
 /// Each returned entry is paired with a `suffix` distinguishing it in
 /// [`self_protection_toml`]'s generated rule ids: `"literal"` for the
 /// starting parent, `"resolved"` for the final hop's parent, and
@@ -786,6 +799,21 @@ fn self_protection_directories(path: &Path) -> Result<Vec<(String, PathBuf)>, Co
         if let Some(dir) = current.parent().filter(|dir| is_protectable(dir)) {
             chain_dirs.push(dir.to_path_buf());
         }
+    }
+
+    // Drop the final hop's directory alone when its target is non-regular
+    // (issue #461, see this function's own doc comment). `chain_dirs.last()`
+    // is exactly this hop's directory when one was pushed for it, since the
+    // loop above only ever appends in hop order.
+    if let Some(final_dir) = current.parent().filter(|dir| is_protectable(dir)) {
+        let final_target_is_non_regular =
+            std::fs::metadata(&current).is_ok_and(|meta| !meta.is_file());
+        if final_target_is_non_regular && chain_dirs.last() == Some(&final_dir.to_path_buf()) {
+            chain_dirs.pop();
+        }
+    }
+    if chain_dirs.is_empty() {
+        return Ok(Vec::new());
     }
 
     let last_index = chain_dirs.len() - 1;

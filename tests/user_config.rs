@@ -2317,3 +2317,86 @@ fn python3_allow_entry_still_fails_closed_via_hook() {
     assert!(permission_reason(&output).contains("allow-python3"));
     assert!(permission_reason(&output).contains("must not match"));
 }
+
+// Issue #461: `SHGUARD_CONFIG=/dev/null` is documented (`scripts/smoke.sh`)
+// as loading an empty config so only the embedded ruleset applies. Before
+// the fix, `self_protection_directories("/dev/null")` yielded the literal
+// directory `/dev`, so config self-protection generated `[[deny]]`/
+// `[[redirect]]` rules over `/dev` itself -- denying every `/dev/...`
+// target, including the extremely common `2>/dev/null`/`>/dev/null` idiom.
+// `self_protection_directories` now drops only the final hop's directory
+// when its resolved target isn't a regular file, which `/dev/null` (a
+// character device) never is -- these two rows pin the issue's own
+// reproduction table.
+
+#[test]
+fn dev_null_config_allows_redirecting_stderr_to_dev_null() {
+    let output = run_hook(
+        &bash_command("ls foo 2>/dev/null"),
+        &[("SHGUARD_CONFIG", "/dev/null")],
+    );
+    assert_eq!(permission_decision(&output), "allow");
+}
+
+#[test]
+fn dev_null_config_allows_writing_to_dev_null() {
+    let output = run_hook(
+        &bash_command("echo hi > /dev/null"),
+        &[("SHGUARD_CONFIG", "/dev/null")],
+    );
+    assert_eq!(permission_decision(&output), "allow");
+}
+
+// Positive control: a REAL config file's own directory must still be
+// self-protected exactly as before -- this fix is scoped to a non-regular
+// FINAL hop, not to config self-protection in general.
+#[test]
+fn dev_null_fix_does_not_weaken_self_protection_for_a_real_config_directory() {
+    let (_dir, config_path) = write_config("");
+    let output = run_hook(
+        &bash_command(&format!(
+            "tee {}",
+            config_path.to_str().expect("path should be valid UTF-8")
+        )),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+    assert!(permission_reason(&output).contains("shguard-self-protect-config-tee-literal"));
+}
+
+// The literal config directory must stay protected even when the config
+// FILE itself is a symlink to `/dev/null` -- only the `/dev` hop the
+// symlink resolves through is excluded, not the real, user-owned
+// directory holding the symlink (issue #461's own reproduction scope is
+// the bare `SHGUARD_CONFIG=/dev/null` idiom, not this symlink shape, but a
+// fix that dropped the whole chain instead of just the offending hop would
+// silently reopen `ln_symlink_swap_onto_literal_tilde_config_path_is_blocked`'s
+// own attack -- this pins that the fix is scoped correctly).
+#[test]
+fn config_symlinked_to_dev_null_still_protects_its_own_literal_directory() {
+    let home = tempdir().expect("tempdir should create");
+    let config_dir = home.path().join(".config").join("shguard");
+    fs::create_dir_all(&config_dir).expect("config dir should create");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("/dev/null", config_dir.join("config.toml"))
+        .expect("symlink should create");
+
+    let deny_output = run_hook(
+        &bash_command(&format!(
+            "tee {}",
+            config_dir
+                .join("config.toml")
+                .to_str()
+                .expect("path should be valid UTF-8")
+        )),
+        &[("HOME", home.path().to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&deny_output), "deny");
+    assert!(permission_reason(&deny_output).contains("shguard-self-protect-config-tee-literal"));
+
+    let allow_output = run_hook(
+        &bash_command("ls foo 2>/dev/null"),
+        &[("HOME", home.path().to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&allow_output), "allow");
+}

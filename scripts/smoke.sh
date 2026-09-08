@@ -25,9 +25,11 @@ fi
 # Isolate the run from the developer's real user config (issue #59, E2-5):
 # without this, a `~/.config/shguard/config.toml` on the machine running
 # this script silently changes which fixtures pass or fail. `/dev/null`
-# reads as an empty (zero-rule) config, not a missing one -- verified
-# against src/config.rs's load path -- so this deterministically exercises
-# the embedded ruleset only.
+# reads as an empty (zero-rule) config, not a missing one, and (issue #461)
+# `src/config.rs`'s config self-protection now skips generating rules over
+# `/dev/null`'s parent directory (`/dev`) since it doesn't resolve to a
+# regular file -- so this deterministically exercises the embedded ruleset
+# only, with no spurious `/dev/*` denials.
 export SHGUARD_CONFIG=/dev/null
 
 pass=0
