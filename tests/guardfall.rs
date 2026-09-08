@@ -436,6 +436,39 @@ fn guardfall_rm_dot_targets() {
     }
 }
 
+/// Issue #453: three filesystem-destruction shapes adjacent to existing
+/// Block rules were Allow — bare `mkfs <device>` (no `-t`), `rm -r` (no
+/// `-f`) against a root-level target, and `rm -rf ./*`/`rm -rf *`.
+#[test]
+fn guardfall_issue_453_filesystem_gaps() {
+    let cases: &[(&str, Decision)] = &[
+        // 1. Bare `mkfs <device>` (no -t): util-linux defaults to ext2.
+        ("mkfs /dev/sda1", Decision::Block),
+        ("mkfs -t ext4 /dev/sda1", Decision::Block), // control
+        ("mkfs.ext4 /dev/sda1", Decision::Block),    // control
+        // 2. `rm -r` (no -f) against a root-level/device target still
+        //    deletes every writable file non-interactively.
+        ("rm -r /*", Decision::Block),
+        ("rm -r /", Decision::Block),
+        ("rm -rf /*", Decision::Block), // control
+        // 3. `rm -rf ./*`/`rm -rf *` are the spellings that actually wipe
+        //    the current directory's contents (GNU rm refuses `rm -rf .`).
+        ("rm -rf ./*", Decision::Block),
+        ("rm -rf *", Decision::Block),
+        ("rm -rf .", Decision::Block), // control
+    ];
+
+    for (command, expected) in cases {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
 /// Issue #54: `timeout`/`ionice`/`flock` joined `TRANSPARENT_WRAPPERS`, so
 /// a wrapped `rm -rf /` must reach the same rm rule a bare invocation does.
 #[test]

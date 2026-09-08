@@ -303,6 +303,13 @@ targets = [
     { normalized = "/*" },
     { normalized = "~" },
     { normalized = "." },
+    # issue #453: `./*` and bare `*` both lexically normalize to
+    # `Rel{ascent:0, comps:["*"]}` — a different value from `.`'s
+    # `Rel{ascent:0, comps:[]}` above, so they need their own entry. GNU rm
+    # actually *refuses* `rm -rf .` ("refusing to remove '.'"), making
+    # `./*`/`*` the spelling that really deletes the current directory's
+    # contents; this keeps both at the same tier as `.`.
+    { normalized = "*" },
     # ".."/"../" (previously separate `exact` entries) are subsumed by
     # "/"'s pure-ascent widening (issue #65): `{ normalized = "/" }` also
     # matches any token that lexically normalizes to a pure relative
@@ -342,6 +349,24 @@ targets = [
     # only thing it costs is a literal `$HOME/{}` file, which does not
     # occur in practice.
     { normalized = "~/{}" },
+]
+
+# issue #453: `rm -r` (recursive, no `-f`) against a root-level or device
+# target is still non-interactively destructive — GNU/BSD `rm` only prompts
+# for write-protected files, and only on a tty, so `rm -r /*` deletes every
+# writable file under `/` unattended. `~` is deliberately NOT included here:
+# `self-protect-config-ancestor-rm-tilde` below already floors bare
+# `rm -r ~` to Ask. `.`/`*` are out of this issue's stated scope (root/device
+# targets only) and stay Allow.
+[[command]]
+id = "rm-recursive-dangerous-target"
+reason = "rm -r against a root-level or device target deletes every writable file there, non-interactively"
+command = "rm"
+required_flags = ["r|R|--recursive"]
+targets = [
+    { normalized = "/" },
+    { normalized = "/*" },
+    { normalized_prefix = "/dev/" },
 ]
 
 # `-r`/`-R` is unnecessary for `rm -f {}` (no `-type f` needed either) to
@@ -586,11 +611,16 @@ id = "blkdiscard-any-device"
 reason = "blkdiscard discards (TRIMs) the target device's contents, destroying any existing filesystem or data"
 command = "blkdiscard"
 
+# issue #453: util-linux mkfs defaults to ext2 when -t/--type is omitted, so
+# a bare `mkfs <device>` is exactly as destructive as `mkfs -t ext4 <device>`
+# — it has no informational default mode besides -V/--help, same "any bare
+# invocation is dangerous" shape as shred/blkdiscard above. Dropping the
+# former `required_flags = ["t|--type"]` closes that gap instead of trying
+# to enumerate every non-destructive flag.
 [[command]]
 id = "mkfs-dispatcher-any-filesystem"
-reason = "mkfs -t <type> dispatches to mkfs.<type>, formatting a filesystem and destroying all data on the target"
+reason = "mkfs formats a filesystem (ext2 by default without -t/--type), destroying all data on the target"
 command = "mkfs"
-required_flags = ["t|--type"]
 
 # tar extraction with -C/--directory into / or ~ overwrites arbitrary paths
 # with archive contents. Two rules: the block rule requires an explicit
