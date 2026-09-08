@@ -2317,3 +2317,49 @@ fn python3_allow_entry_still_fails_closed_via_hook() {
     assert!(permission_reason(&output).contains("allow-python3"));
     assert!(permission_reason(&output).contains("must not match"));
 }
+
+// Issue #461: `SHGUARD_CONFIG=/dev/null` is documented (`scripts/smoke.sh`)
+// as loading an empty config so only the embedded ruleset applies. Before
+// the fix, `self_protection_directories("/dev/null")` yielded the literal
+// directory `/dev`, so config self-protection generated `[[deny]]`/
+// `[[redirect]]` rules over `/dev` itself -- denying every `/dev/...`
+// target, including the extremely common `2>/dev/null`/`>/dev/null` idiom.
+// `Policy::load` now skips self-protection generation whenever the
+// resolved config path isn't a regular file, which `/dev/null` (a
+// character device) never is -- these two rows pin the issue's own
+// reproduction table.
+
+#[test]
+fn dev_null_config_allows_redirecting_stderr_to_dev_null() {
+    let output = run_hook(
+        &bash_command("ls foo 2>/dev/null"),
+        &[("SHGUARD_CONFIG", "/dev/null")],
+    );
+    assert_eq!(permission_decision(&output), "allow");
+}
+
+#[test]
+fn dev_null_config_allows_writing_to_dev_null() {
+    let output = run_hook(
+        &bash_command("echo hi > /dev/null"),
+        &[("SHGUARD_CONFIG", "/dev/null")],
+    );
+    assert_eq!(permission_decision(&output), "allow");
+}
+
+// Positive control: a REAL config file's own directory must still be
+// self-protected exactly as before -- this fix is scoped to non-regular
+// config targets like `/dev/null`, not to config self-protection in
+// general.
+#[test]
+fn dev_null_fix_does_not_weaken_self_protection_for_a_real_config_directory() {
+    let (_dir, config_path) = write_config("");
+    let output = run_hook(
+        &bash_command(&format!(
+            "tee {}",
+            config_path.to_str().expect("path should be valid UTF-8")
+        )),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+}

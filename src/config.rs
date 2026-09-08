@@ -339,7 +339,7 @@ impl Policy {
         // clean `NotFound` from `lstat` itself -- meaning there truly is no
         // file, symlink, or anything else at this path -- takes the first
         // arm below (issues #39, #433).
-        let (rules, allowlist) = match &path {
+        let (rules, allowlist, config_is_regular_file) = match &path {
             Some(path) => match std::fs::symlink_metadata(path) {
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound && !explicit => {
                     return Err(ConfigError::Missing { path: path.clone() });
@@ -352,6 +352,27 @@ impl Policy {
                 }
                 Ok(_) => match std::fs::read_to_string(path) {
                     Ok(contents) => {
+                        // `metadata` (not the `symlink_metadata` above)
+                        // follows the full symlink chain, so a config
+                        // reached through a `stow`/`chezmoi`-style symlink
+                        // to a real file still self-protects normally --
+                        // only a config path that doesn't resolve to a
+                        // regular file at all (e.g. `/dev/null`, a
+                        // character device) is not a user-owned location
+                        // worth protecting the directory around (issue
+                        // #461). Any metadata error here is a hard failure,
+                        // same as every other unexpected error in this
+                        // module: `read_to_string` just succeeded against
+                        // this same path, so a failure here means the
+                        // target changed underneath the read, and fail-open
+                        // (silently skipping self-protection) is the wrong
+                        // default for that.
+                        let is_regular_file = std::fs::metadata(path)
+                            .map(|meta| meta.is_file())
+                            .map_err(|err| ConfigError::Io {
+                                path: path.clone(),
+                                source: err,
+                            })?;
                         let user_config = UserConfig::parse(&contents)?;
                         // Read off the real config-file parse alone, before
                         // `user_config` moves into `merge_user_config`
@@ -361,7 +382,9 @@ impl Policy {
                         // `escalation_floor` needs `.max()` for.
                         decision_log_path = user_config.decision_log_path().map(PathBuf::from);
                         ask_outcome = user_config.ask_outcome();
-                        merge_user_config(blocklist, allowlist, user_config)?
+                        let (rules, allowlist) =
+                            merge_user_config(blocklist, allowlist, user_config)?;
+                        (rules, allowlist, is_regular_file)
                     }
                     Err(err) => {
                         return Err(ConfigError::Io {
@@ -371,24 +394,26 @@ impl Policy {
                     }
                 },
             },
-            None => (blocklist, allowlist),
+            None => (blocklist, allowlist, true),
         };
 
         let mut rules = rules;
         let mut allowlist = allowlist;
         if let Some(path) = &path {
-            let case_insensitive = config_dir_is_case_insensitive();
-            for (suffix, config_dir) in self_protection_directories(path)? {
-                let toml = self_protection_toml(
-                    &config_dir.to_string_lossy(),
-                    &suffix,
-                    case_insensitive,
-                    "config",
-                    "config directory",
-                    false,
-                );
-                let self_protection = UserConfig::parse(&toml)?;
-                (rules, allowlist) = merge_user_config(rules, allowlist, self_protection)?;
+            if config_is_regular_file {
+                let case_insensitive = config_dir_is_case_insensitive();
+                for (suffix, config_dir) in self_protection_directories(path)? {
+                    let toml = self_protection_toml(
+                        &config_dir.to_string_lossy(),
+                        &suffix,
+                        case_insensitive,
+                        "config",
+                        "config directory",
+                        false,
+                    );
+                    let self_protection = UserConfig::parse(&toml)?;
+                    (rules, allowlist) = merge_user_config(rules, allowlist, self_protection)?;
+                }
             }
             // Reached only when a real config file was just read above (the
             // `NotFound` arms return early) -- so `shguard init` here would
