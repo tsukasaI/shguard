@@ -256,6 +256,26 @@ fn extract_bash_command(
     }
 }
 
+/// Best-effort peek at the Bash command and [`HookContext`] a stdin payload
+/// carries, without making any decision (issue #459). Folds both of
+/// [`extract_bash_command`]'s non-analyzable outcomes — `tool_name !=
+/// "Bash"` and a malformed/incomplete payload — to `None`: both are cases
+/// [`respond`] itself short-circuits to `allow`/a fail-closed decision
+/// without ever calling into `analyze`, so there is no analysis pipeline
+/// that could hang and nothing worth attributing a later trip to.
+///
+/// The composition root (`src/bin/shguard.rs`) calls this once, immediately
+/// after reading stdin and *before* [`handle_with_policy`]'s own call to
+/// `analyze_with_policy`, so its outer watchdog has a command and context in
+/// hand for the decision log even if that analysis call itself never
+/// returns — [`handle_with_policy`] performs the authoritative extraction
+/// and decision-making independently; this is a read-only duplicate for
+/// logging purposes alone, never itself part of the decision.
+#[must_use]
+pub fn peek_bash_command(stdin: &str) -> Option<(String, HookContext)> {
+    extract_bash_command(stdin).ok().flatten()
+}
+
 /// Builds the `hookSpecificOutput` JSON for one stdin payload, given
 /// `analyze` (either [`crate::analyze`] or a closure over
 /// [`crate::analyze_with_policy`] and a policy) as the decision source.

@@ -299,9 +299,9 @@ fn hook_path_and_check_cli_produce_equivalent_log_content_for_the_same_command()
 /// on that: the repro below trips the fast memory-budget branch (~0.45s),
 /// well inside both bounds, so it still pins the module-level "the value
 /// `watchdog::bounded` actually returns gets logged" guarantee precisely.
-/// The hook path sits behind its own outer watchdog too (`src/lib.rs`'s doc
-/// comment, README's "PreToolUse hook path caveat") that this test does not
-/// and cannot exercise from here.
+/// The hook path's own outer watchdog trip is a different code path
+/// entirely (`src/bin/shguard.rs`'s `log_trip_best_effort`, issue #459) —
+/// see `hook_path_watchdog_trip_is_still_logged` below for that one.
 #[test]
 fn watchdog_trip_verdict_is_still_logged() {
     let log_dir = tempfile::tempdir().expect("tempdir should create");
@@ -327,6 +327,51 @@ fn watchdog_trip_verdict_is_still_logged() {
         .expect("reason should be a string");
     assert!(
         reason.contains("time budget") || reason.contains("memory budget"),
+        "expected a watchdog fail-closed reason to be logged, got: {reason}"
+    );
+}
+
+/// Issue #459: unlike `check`, the PreToolUse hook path's own outer
+/// watchdog (`src/bin/shguard.rs`'s `EVALUATION_TIMEOUT`, started before
+/// config load and stdin read) always wins the race against
+/// `analyze_with_policy`'s internal watchdog for a genuine hang — see
+/// `tests/fail_closed_exit_paths.rs`'s
+/// `heredoc_inside_unterminated_command_substitution_fails_closed_to_ask`
+/// for the same repro exercised against stdout alone. That means the
+/// worker computing the real decision is abandoned mid-evaluation and
+/// never reaches `analyze_with_policy`'s own `sink.append` call, which used
+/// to leave this exact case — the hook-path input most worth auditing —
+/// entirely unlogged. `run`'s `early_tx` send (right after parsing the
+/// stdin JSON, before handing the command to `analyze_with_policy`) gives
+/// `emit_first_result`'s trip arm a command and context to log against even
+/// though the worker itself never gets there.
+#[test]
+fn hook_path_watchdog_trip_is_still_logged() {
+    let log_dir = tempfile::tempdir().expect("tempdir should create");
+    let log_path = log_dir.path().join("decisions.jsonl");
+    let (_config_dir, config_path) = write_config(&format!(
+        r#"
+        decision_log_path = {:?}
+        "#,
+        log_path.to_string_lossy()
+    ));
+
+    let hook_stdin = r#"{"tool_name":"Bash","tool_input":{"command":"<<$( |] "},"hook_event_name":"PreToolUse"}"#;
+    isolated_command(&config_path)
+        .timeout(std::time::Duration::from_secs(30))
+        .write_stdin(hook_stdin)
+        .assert()
+        .success();
+
+    let lines = read_jsonl_lines(&log_path);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["command"], "<<$( |] ");
+    assert_eq!(lines[0]["decision"], "Ask");
+    let reason = lines[0]["reason"]
+        .as_str()
+        .expect("reason should be a string");
+    assert!(
+        reason.contains("exceeded its"),
         "expected a watchdog fail-closed reason to be logged, got: {reason}"
     );
 }

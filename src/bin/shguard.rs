@@ -88,8 +88,11 @@
 //! now or in the future, without re-deriving this whole section.
 
 use std::io::{self, Read, Write};
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
+
+use shguard::DecisionLogSink;
 
 /// The fail-closed output written when even producing JSON fails — a
 /// hand-written literal, not `serde_json`, so it cannot itself fail to
@@ -154,6 +157,30 @@ const MEMORY_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// project to anchor against (checked README.md and docs/ before picking
 /// this number). Re-measure both figures above before changing this.
 const MEMORY_LIMIT_BYTES: u64 = 256 * 1024 * 1024;
+
+/// The command and context [`run`] sends over a dedicated channel
+/// immediately after it parses the hook stdin's Bash command — before
+/// handing that command to `analyze_with_policy`, which is the call that
+/// can actually hang (issue #459). Lets [`emit_first_result`]'s watchdog
+/// trip arms attribute a fail-closed decision to the decision log even
+/// though the worker that would otherwise have logged it never gets to.
+struct EarlyInfo {
+    decision_log_path: Option<PathBuf>,
+    command: String,
+    context: shguard::HookContext,
+}
+
+/// Bound on [`log_trip_best_effort`]'s own append call. `decision_log_path`
+/// is validated at config-load time to be a regular local file
+/// (`src/config.rs`), so a normal append finishes in low single-digit
+/// milliseconds; this only matters for the one residual, disclosed risk
+/// `src/lib.rs`'s own docs already carry — a target that starts blocking
+/// only after that check (e.g. a network mount gone stale mid-session).
+/// 250ms is generous next to the normal case and small next to
+/// [`EVALUATION_TIMEOUT`], so even the hostile case adds only a bounded,
+/// barely-noticeable delay to the fail-closed exit this whole watchdog
+/// exists to keep fast.
+const TRIP_LOG_TIMEOUT: Duration = Duration::from_millis(250);
 
 fn main() {
     // `args_os`, not `args`: the latter panics outright on a non-UTF-8
@@ -225,10 +252,11 @@ fn main() {
     install_panic_hook();
 
     let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let (early_tx, early_rx) = std::sync::mpsc::channel();
     let worker = std::thread::Builder::new()
         .name("shguard-eval".to_string())
         .spawn(move || {
-            let output = std::panic::catch_unwind(run).unwrap_or_else(|_| {
+            let output = std::panic::catch_unwind(move || run(&early_tx)).unwrap_or_else(|_| {
                 shguard::adapter::fail_closed(
                     "shguard: internal panic while evaluating the command; refusing to \
                      evaluate (fail-closed)",
@@ -250,7 +278,7 @@ fn main() {
         return;
     };
 
-    emit_first_result(&result_rx);
+    emit_first_result(&result_rx, &early_rx);
     // The worker already sent (or the process is about to exit on a
     // watchdog-trip path — time, memory, or disconnect — in which case
     // this line is never reached) — join to avoid leaving a detached
@@ -346,15 +374,67 @@ fn resolve_first_result(
 /// trip (or a worker disconnect), emits the fail-closed decision and
 /// exits the process immediately — see the module docs' "evaluation
 /// watchdog" section for why exiting, not merely returning, is required.
-fn emit_first_result(rx: &Receiver<serde_json::Value>) {
+fn emit_first_result(rx: &Receiver<serde_json::Value>, early_rx: &Receiver<EarlyInfo>) {
     match resolve_first_result(rx, memory_limit_bytes(), EVALUATION_TIMEOUT) {
         FirstResult::Output(output) => emit(output),
         FirstResult::MemoryTrip(reason)
         | FirstResult::TimeTrip(reason)
         | FirstResult::Disconnected(reason) => {
             emit(shguard::adapter::fail_closed(&reason));
+            // Emitted to stdout first, deliberately: the decision Claude
+            // Code actually waits on must never be delayed by this
+            // best-effort log write (see `log_trip_best_effort`'s own
+            // docs for its bound).
+            log_trip_best_effort(early_rx.try_recv().ok(), &reason);
             std::process::exit(0);
         }
+    }
+}
+
+/// Bounded, best-effort attempt to record a watchdog-trip decision in the
+/// user's `decision_log_path` (issue #459) — every genuine hang the
+/// PreToolUse hook's outer watchdog exists to bound previously left no
+/// trace in the decision log at all, because the worker that would have
+/// logged it (`crate::analyze_with_policy`'s own `sink.append` call,
+/// `src/lib.rs`) is abandoned mid-evaluation and never reaches that call
+/// before [`std::process::exit`] tears the whole process down.
+///
+/// `early_info` is `None` when [`run`] never got as far as sending one — a
+/// hang during config load or the stdin read itself, before there is any
+/// command to attribute a trip to; this is a no-op in that case, same as
+/// when the resolved policy has no `decision_log_path` configured at all.
+///
+/// Runs the actual [`shguard::DecisionLogSink::append`] call on its own
+/// thread, bounded by [`TRIP_LOG_TIMEOUT`], rather than inline: an append
+/// itself doing the hanging (the one residual, disclosed risk `src/lib.rs`'s
+/// docs already carry for the ordinary, non-trip logging path — a network
+/// mount gone stale mid-session) must not turn this best-effort log write
+/// into the very hang this whole watchdog exists to bound. If the write
+/// doesn't finish within the bound, it is simply abandoned — `main` is
+/// about to call [`std::process::exit`] regardless, which tears down every
+/// thread including this one.
+fn log_trip_best_effort(early_info: Option<EarlyInfo>, reason: &str) {
+    let Some(early_info) = early_info else {
+        return;
+    };
+    let Some(path) = early_info.decision_log_path else {
+        return;
+    };
+    let verdict = shguard::verdict::Verdict::ask(shguard::verdict::Reason::new(reason), Vec::new());
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("shguard-trip-log".to_string())
+        .spawn(move || {
+            shguard::FileDecisionLog.append(
+                &path,
+                &early_info.command,
+                &verdict,
+                &early_info.context,
+            );
+            let _ = done_tx.send(());
+        });
+    if spawned.is_ok() {
+        let _ = done_rx.recv_timeout(TRIP_LOG_TIMEOUT);
     }
 }
 
@@ -917,12 +997,16 @@ fn evaluate_with_timeout(
 
 /// The composition root's actual work — config load, stdin read, hand-off
 /// to the adapter — as a plain fn item, not a closure passed to
-/// [`std::panic::catch_unwind`] in [`main`]. A closure that captures
-/// surrounding state can fail `UnwindSafe`'s auto-trait check (typically
-/// worked around with `AssertUnwindSafe`, which is exactly the kind of
-/// "trust me" the type system is otherwise enforcing here); a capture-free
-/// fn item holds no state at all, so it satisfies `UnwindSafe` on its own
-/// and no such escape hatch is needed.
+/// [`std::panic::catch_unwind`] in [`main`]: `main` calls it as `move ||
+/// run(&early_tx)`, so `catch_unwind`'s `UnwindSafe` bound falls on that
+/// thin closure rather than on this function's own body, which stays a
+/// capture-free fn item taking its one dependency ([`EarlyInfo`]'s sender)
+/// as an explicit parameter instead of reaching for `AssertUnwindSafe` or
+/// closing over shared state. `Sender<EarlyInfo>` itself carries no
+/// unwind-unsafe interior state — a panic mid-`send` either lands before or
+/// after the message is queued, never partway through a value the receiver
+/// could observe half-mutated — so the auto-trait check passes without an
+/// escape hatch.
 ///
 /// The `catch_unwind` boundary in `main` covers everything in here,
 /// including [`shguard::config::Policy::load`] — a panic inside TOML
@@ -938,7 +1022,7 @@ fn evaluate_with_timeout(
 /// run outside the PreToolUse hook contract entirely — it has none of
 /// `run`'s "never hang, always emit exactly one decision" obligations, so
 /// it needs neither the panic boundary nor the watchdog.
-fn run() -> serde_json::Value {
+fn run(early_tx: &Sender<EarlyInfo>) -> serde_json::Value {
     // Test-only panic injection (issue #52): there is no currently-known
     // reachable panic in this binary to regression-test the `catch_unwind`
     // boundary against directly, and leaving "prevents fail-open on a
@@ -987,7 +1071,24 @@ fn run() -> serde_json::Value {
             policy.ask_outcome(&shguard::HookContext::none()),
             &format!("shguard: stdin exceeds {MAX_STDIN_BYTES} bytes; refusing to evaluate"),
         ),
-        Ok(_) => shguard::adapter::handle_with_policy(&stdin, &policy, &shguard::FileDecisionLog),
+        Ok(_) => {
+            // Issue #459: sent before `handle_with_policy`'s own call into
+            // `analyze_with_policy` — the one call in this function that
+            // can actually hang — so `main`'s outer watchdog has a command
+            // and context in hand for the decision log even if that call
+            // never returns. `peek_bash_command` is a read-only duplicate
+            // of the extraction `handle_with_policy` performs for real
+            // immediately after; it never affects the decision below, only
+            // what a later watchdog trip can log.
+            if let Some((command, context)) = shguard::adapter::peek_bash_command(&stdin) {
+                let _ = early_tx.send(EarlyInfo {
+                    decision_log_path: policy.decision_log_path().map(std::path::Path::to_path_buf),
+                    command,
+                    context,
+                });
+            }
+            shguard::adapter::handle_with_policy(&stdin, &policy, &shguard::FileDecisionLog)
+        }
         // A read error also covers the case where the input is oversized
         // *and* its true length happens to break UTF-8 exactly at the
         // `MAX_STDIN_BYTES + 1`-byte boundary `take` reads up to:

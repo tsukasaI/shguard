@@ -247,17 +247,27 @@ pub fn analyze(command: &str) -> Verdict {
 /// behind, though: `src/bin/shguard.rs`'s PreToolUse hook path (`run`) also
 /// wraps this ENTIRE call — decision plus log write — in its own, separate
 /// `EVALUATION_TIMEOUT` watchdog, since `run` itself must never hang
-/// regardless of where the hang comes from. A log target that starts
-/// blocking only *after* config load (a network mount that hangs
-/// mid-session, not a FIFO caught at load time) can therefore still trip
-/// that OUTER watchdog and yield the same fail-closed-`Ask`-instead-of-the-
-/// real-decision outcome for a hook invocation specifically — a residual,
-/// disclosed risk (see the README), not one this function's own bound can
-/// close, since it has no visibility into whatever bound a caller wraps it
-/// in. `shguard check` (issue #109) wraps this whole call in the same
-/// `EVALUATION_TIMEOUT` bound for the same reason (`src/bin/shguard.rs`'s
-/// `evaluate_with_timeout`); a direct library caller has no such outer
-/// watchdog of its own, so for one this function's own bound is the whole
+/// regardless of where the hang comes from, and that outer deadline starts
+/// earlier than this function's own (before config load and stdin read, not
+/// just before this call), so for a genuine hang the outer watchdog always
+/// wins the race — this function's own fail-closed `Ask` above is never
+/// reached at all, and neither is its `sink.append` call. Issue #459: this
+/// used to mean a hook-path trip left no trace in the decision log
+/// whatsoever, since the worker that would have logged it is abandoned
+/// mid-evaluation. `run`'s outer watchdog now closes that gap itself — its
+/// trip arms (`log_trip_best_effort`) append a fail-closed `Ask` line
+/// against the command and context `run` sent over a side channel
+/// immediately after parsing stdin, bounded independently so a hung log
+/// target can't turn this best-effort write into a second hang. One case
+/// stays unlogged, because there is no command yet to attribute a trip to:
+/// a hang during config load or the stdin read itself, before `run` has
+/// anything to send. `shguard check` (issue #109) wraps this whole call in
+/// the same `EVALUATION_TIMEOUT` bound for the same underlying reason
+/// (`src/bin/shguard.rs`'s `evaluate_with_timeout`), but with enough grace
+/// margin added that this function's own internal trip has time to surface
+/// and be logged normally instead of losing that race — see
+/// `evaluate_with_timeout`'s own docs; a direct library caller has no such
+/// outer watchdog of its own, so for one this function's own bound is the whole
 /// story.
 ///
 /// # Ask outcome (issues #467/#469)

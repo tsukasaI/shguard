@@ -636,6 +636,17 @@ impl Policy {
         self.ask_outcome
             .resolve(context.permission_mode(), context.agent_id())
     }
+
+    /// The `decision_log_path` this policy resolved, if any (issue #459).
+    /// Public for the same reason [`Self::ask_outcome`] is: `src/bin/shguard.rs`'s
+    /// composition root needs it outside [`crate::analyze_with_policy`]'s
+    /// own call — specifically, to hand a decision-log target to its
+    /// outer watchdog's trip arms, which run on a path that never reaches
+    /// `analyze_with_policy` at all.
+    #[must_use]
+    pub fn decision_log_path(&self) -> Option<&std::path::Path> {
+        self.decision_log_path.as_deref()
+    }
 }
 
 /// Cap on symlink hops [`self_protection_directories`] walks when
