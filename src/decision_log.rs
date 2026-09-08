@@ -39,14 +39,15 @@ impl crate::DecisionLogSink for FileDecisionLog {
 /// Appends one JSONL line describing `verdict` for `command` to `path`.
 ///
 /// Best-effort and fail-open on the logging side only: a write failure
-/// (unwritable path, missing parent directory, disk full) is silently
-/// dropped rather than propagated or panicking. This mirrors `analyze`'s
-/// own single-fold-point posture (`src/lib.rs`) — a broken log target must
-/// never turn a real Allow/Ask/Block decision into a crash or an altered
-/// verdict, since logging is an observability side channel, not part of
-/// the decision contract. A caller who needs to know logging itself is
-/// healthy should watch the log file directly (size, mtime), not
-/// shguard's return value.
+/// (unwritable path, missing parent directory, disk full, a symlink
+/// `O_NOFOLLOW` refuses to open) never propagates or panics — it is
+/// reported once on stderr (issue #458 item 2) and otherwise dropped. This
+/// mirrors `analyze`'s own single-fold-point posture (`src/lib.rs`) — a
+/// broken log target must never turn a real Allow/Ask/Block decision into
+/// a crash or an altered verdict, since logging is an observability side
+/// channel, not part of the decision contract. A caller who needs to know
+/// logging itself is healthy should watch the log file directly (size,
+/// mtime) or capture stderr, not shguard's return value.
 fn append(path: &Path, command: &str, verdict: &Verdict, context: &HookContext) {
     let decision = match verdict.decision() {
         Decision::Allow => "Allow",
@@ -90,8 +91,33 @@ fn append(path: &Path, command: &str, verdict: &Verdict, context: &HookContext) 
     // formally impossible for one of unbounded size.
     serialized.push('\n');
 
-    let Ok(mut file) = open_log_file(path) else {
-        return;
+    let mut file = match open_log_file(path) {
+        Ok(file) => file,
+        Err(err) => {
+            // One-shot process per invocation, so one stderr line here
+            // can never spam (issue #458 item 2): a failed open (missing
+            // parent directory despite `Policy::load`'s own check, an
+            // unwritable existing file, `O_NOFOLLOW` rejecting a symlink
+            // planted after that check) used to be indistinguishable from
+            // "nothing happened" -- exactly the silent-failure trap
+            // `Policy::load`'s load-time validation exists to close, left
+            // open here for every failure it can't see up front.
+            //
+            // `writeln!` with the write error discarded, not `eprintln!`
+            // (which panics on a write failure): `append` runs on
+            // `analyze_with_policy`'s ordinary call path, inside `main`'s
+            // top-level `catch_unwind`, so a broken stderr pipe (`EPIPE`
+            // -- Claude Code's process tree can produce one, per
+            // `src/bin/shguard.rs`'s `install_panic_hook` doc comment)
+            // would turn a silent logging failure into a real panic,
+            // exactly the crash this module's own fail-open contract
+            // above promises never happens.
+            let _ = writeln!(
+                std::io::stderr(),
+                "shguard: could not write to decision log {path:?}: {err}"
+            );
+            return;
+        }
     };
     let _ = file.write_all(serialized.as_bytes());
 }
@@ -103,6 +129,13 @@ fn append(path: &Path, command: &str, verdict: &Verdict, context: &HookContext) 
 /// contains inline secrets (`export TOKEN=...`, `curl -H "Authorization:
 /// ..."`). `.mode()` only applies at creation time, so it never fights an
 /// existing file's own permissions.
+///
+/// `O_NOFOLLOW` on unix (issue #458 item 1) closes the TOCTOU window
+/// between `Policy::load`'s own symlink rejection and this open: a symlink
+/// planted at `path` after that check (or a target whose `decision_log_path`
+/// never existed at load time, so there was nothing to reject) is refused
+/// here too, rather than followed into redirecting every appended line at
+/// whatever the symlink points to.
 fn open_log_file(path: &Path) -> std::io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.create(true).append(true);
@@ -110,6 +143,7 @@ fn open_log_file(path: &Path) -> std::io::Result<std::fs::File> {
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
+        options.custom_flags(libc::O_NOFOLLOW);
     }
     options.open(path)
 }
@@ -287,16 +321,54 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_parent_directory_is_silently_dropped_not_a_panic() {
-        // Fail-open on the logging side: this must not panic, and must not
-        // be observable by the caller in any way other than "no line
-        // appeared" -- there is no error return from `append` to check.
+    fn a_missing_parent_directory_does_not_panic() {
+        // Fail-open on the logging side: this must not panic, and the
+        // caller sees no return value either way -- there is no error
+        // return from `append` to check (the stderr line itself is not
+        // captured/asserted here). `Policy::load` now rejects this exact
+        // shape of `decision_log_path` at config-load time (issue #458
+        // item 2), but `append` is exercised directly here, bypassing
+        // that check, to confirm its own open-failure path still degrades
+        // gracefully instead of a crash.
         let unwritable = std::path::Path::new("/nonexistent-shguard-test-dir/decisions.jsonl");
         append(
             unwritable,
             "echo hi",
             &Verdict::allow(Vec::new()),
             &HookContext::none(),
+        );
+    }
+
+    /// Issue #458 item 1's `O_NOFOLLOW` closes the load-to-append TOCTOU:
+    /// `Policy::load` already rejects a `decision_log_path` that is a
+    /// symlink at config-load time, so the only way left to reach
+    /// `open_log_file` with one is a symlink planted after that check --
+    /// exercised here by calling `append` directly, bypassing
+    /// `Policy::load` entirely. Without `O_NOFOLLOW`, this would append
+    /// the JSONL line into `real_target` (a symlink-following `open`
+    /// follows straight through); with it, the open fails and `real_target`
+    /// stays untouched.
+    #[test]
+    #[cfg(unix)]
+    fn open_log_file_refuses_to_follow_a_symlink() {
+        let dir = tempdir().unwrap();
+        let real_target = dir.path().join("real.txt");
+        std::fs::write(&real_target, "").unwrap();
+        let symlink_path = dir.path().join("decisions.jsonl");
+        std::os::unix::fs::symlink(&real_target, &symlink_path).unwrap();
+
+        append(
+            &symlink_path,
+            "echo hi",
+            &Verdict::allow(Vec::new()),
+            &HookContext::none(),
+        );
+
+        let contents = std::fs::read_to_string(&real_target).unwrap();
+        assert!(
+            contents.is_empty(),
+            "O_NOFOLLOW should have refused to write through the symlink, but \
+             real_target now contains: {contents:?}"
         );
     }
 
