@@ -2125,6 +2125,10 @@ fn evaluate_simple_command(
     // `core` would vanish on exactly those paths. Needs `&argv` before it
     // is moved into `evaluate_simple_command_core` below.
     let recursable = scan_recursable_slots(command, &argv, rules, allowlist, depth, cwd);
+    // Issue #448: an `alias NAME=VALUE` argument's own value, recursed
+    // unconditionally the same way a same-line function definition's body
+    // already is (issue #75) — see `scan_alias_definition_floor`'s own docs.
+    let alias_floor = scan_alias_definition_floor(&argv, rules, allowlist, depth, cwd);
     // Tar's dash-less option cluster (issue #67) fails
     // closed on any letter this crate doesn't model, rather than silently
     // falling through to `Allow` the way the whole cluster used to when a
@@ -2250,8 +2254,10 @@ fn evaluate_simple_command(
     let dirstack_equal_subst_floor_present = dirstack_equal_subst_floor.is_some();
     let unknown_cwd_floor_present = unknown_cwd_floor.is_some();
     let token_floor_present = token_floor.is_some();
+    let alias_floor_present = alias_floor.is_some();
     let verdict = apply_expansion_floor(verdict, expansion.floor);
     let verdict = apply_recursable_floor(verdict, recursable.floor);
+    let verdict = apply_recursable_floor(verdict, alias_floor);
     let verdict = apply_tar_dashless_floor(verdict, tar_dashless_floor);
     let verdict = apply_command_ascent_descent_floor(verdict, ascent_descent_floor);
     let verdict = apply_ascent_descent_floor(verdict, redirect_ascent_descent_floor);
@@ -2327,6 +2333,10 @@ fn evaluate_simple_command(
     // (`AWS_SECRET_ACCESS_KEY=...`) accompanying it — the entry was
     // written about the command, not about what gets assigned or printed
     // alongside it.
+    // `alias_floor_present` (issue #448) extends it once more: an allow
+    // entry for `alias` is not consent to whatever a `NAME=VALUE` argument's
+    // own value would do once evaluated — the entry was written about
+    // running `alias`, not about the expansion it defines.
     let verdict = if has_argument_substitution
         || has_leftover_substitution
         || expansion.has_any
@@ -2344,6 +2354,7 @@ fn evaluate_simple_command(
         || dirstack_equal_subst_floor_present
         || unknown_cwd_floor_present
         || token_floor_present
+        || alias_floor_present
     {
         verdict
     } else {
@@ -5711,6 +5722,99 @@ fn scan_recursable_slots(
     RecursableScan { has_any, floor }
 }
 
+/// Issue #448: a top-level `alias NAME=VALUE` argument (any number of them
+/// on one `alias` invocation) is recursed the same way a same-line function
+/// body already is (issue #75, `evaluate_function_definition`) —
+/// unconditionally, regardless of whether a LATER top-level command in this
+/// same line actually calls the alias by name. `evaluate_function_definition`
+/// makes that same "reachable?" call for functions: `f() { rm -rf /; }`
+/// alone, never called, still blocks. Mirroring it here rather than adding a
+/// narrower name-matching mechanism keeps the two otherwise-identical
+/// constructs on one policy. Real bash only expands an alias with
+/// `shopt -s expand_aliases` set (or an interactive shell), so most aliased
+/// lines never actually run the value — but RFC #104's own rationale
+/// (`docs/rfc-104-session-state.md:147-152`) argues the false-positive cost
+/// of tracking one anyway lands only on a line that aliased something
+/// dangerous in the first place, so this is applied unconditionally rather
+/// than gated on `shopt`/`set -o` appearing earlier in the line.
+///
+/// An `alias` argument that fails to resolve statically floors to `Ask`
+/// (fail-closed, same posture as every other unresolvable-shell-string case
+/// in this module) rather than being silently skipped.
+///
+/// Seeded with [`CwdState::seed_unknown_stack`], not the ordinary
+/// [`CwdState::seed`] `su -c`/`flock -c` use: an alias expansion runs
+/// inline in the CURRENT shell process, exactly like [`evaluate_eval`]'s own
+/// `eval` (see that function's call site) — not in a forked subprocess the
+/// way `su -c`/`flock -c` do — so it inherits the live, possibly-nonempty
+/// directory stack the same way `eval` does (`CwdState`'s own docs describe
+/// conflating the two as a confirmed Ask/Block→Allow bypass).
+///
+/// Known residual, left for a future issue rather than chased further:
+/// bash aliases are prefix substitutions, not standalone commands — `alias
+/// x='rm -rf'` followed by `x /` expands to `rm -rf /`, but this floor only
+/// ever evaluates the alias's own value in isolation (`rm -rf` alone matches
+/// no rule) and never composes it with whatever argv a later call supplies.
+/// Doing so would need the name-matching + argument-composition mechanism
+/// issue #448's own suggested fix described and this implementation
+/// deliberately did not build, for consistency with #75's own unconditional,
+/// call-independent function-body evaluation. Fails safe: this floor can
+/// only ever raise a verdict above what it already was, never lower one.
+fn scan_alias_definition_floor(
+    argv: &[NormalizedWord],
+    rules: &Rules,
+    allowlist: &Allowlist,
+    depth: usize,
+    cwd: &CwdContext,
+) -> Option<(Decision, String)> {
+    let (name, rest) = crate::rules::effective_command(argv)?;
+    if name != "alias" {
+        return None;
+    }
+    let mut floor: Option<(Decision, String)> = None;
+    for word in rest {
+        let value = match word.resolution() {
+            Resolution::Resolved(token) => match token.split_once('=') {
+                // An empty value (`alias x=`) defines a real but inert
+                // alias — bash never treats an empty expansion as a
+                // parse-worthy command, so there's nothing here to recurse
+                // into (`parser::parse("")` itself errors, which would
+                // otherwise wrongly Ask-floor this benign shape).
+                Some((_, value)) if !value.trim().is_empty() => value,
+                _ => continue,
+            },
+            Resolution::Unresolvable(_) => {
+                raise_expansion_floor(
+                    &mut floor,
+                    Decision::Ask,
+                    "an `alias` argument could not be statically resolved; whether it defines a \
+                     NAME=VALUE alias, and what its expansion would be, is unknown"
+                        .to_string(),
+                );
+                continue;
+            }
+        };
+        let inner = recurse_shell_string(
+            value,
+            argv.to_vec(),
+            "an `alias` definition's own value",
+            depth,
+            rules,
+            allowlist,
+            CwdState::seed_unknown_stack(cwd.clone()),
+        );
+        raise_expansion_floor(
+            &mut floor,
+            inner.decision(),
+            inner
+                .reason()
+                .map(|r| r.as_str().to_string())
+                .unwrap_or_default(),
+        );
+    }
+    floor
+}
+
 /// Depth-cap check, issue #196's shell-interpreter check, and the recursion
 /// itself for one `find -exec`/`-execdir`/`-ok`/`-okdir` payload
 /// [`SimpleCommand`] once its span is known — shared by
@@ -7970,9 +8074,32 @@ fn apply_cwd_effect(cwd: &mut CwdState, argv: &[NormalizedWord], env: &Env) {
         "pushd" => apply_pushd(cwd, rest, env),
         "popd" => apply_popd(cwd, rest),
         "source" | "eval" | "." => cwd.poison(),
+        // Issue #448: an `alias NAME=VALUE` definition's value runs inline
+        // in the current shell (same reasoning as `scan_alias_definition_
+        // floor`'s own `CwdState::seed_unknown_stack` choice), so a value
+        // that itself contains a `cd`/`pushd`/etc. can move the CALLER's own
+        // cwd once the alias is later invoked — same poison-unconditionally
+        // posture `source`/`eval`/`.` already take above, rather than
+        // re-parsing the value to check (this module never re-parses a raw
+        // string just to decide whether to poison; `eval`'s own arm is the
+        // precedent). `alias -p`/a bare `alias`/an `alias NAME` lookup with
+        // no `=` defines nothing new, so only a genuine assignment argument
+        // triggers this.
+        "alias" if rest.iter().any(is_alias_assignment_argument) => cwd.poison(),
         // "dirs" (list-only) and every ordinary command fall through here —
         // neither touches cwd.
         _ => {}
+    }
+}
+
+/// Whether `word` is an `alias` argument that actually defines something
+/// (`NAME=VALUE`) rather than a flag (`-p`) or a bare lookup name — shared by
+/// [`apply_cwd_effect`]'s poisoning check and [`scan_alias_definition_
+/// floor`]'s own recursion, which the same shape gates.
+fn is_alias_assignment_argument(word: &NormalizedWord) -> bool {
+    match word.resolution() {
+        Resolution::Resolved(token) => token.contains('='),
+        Resolution::Unresolvable(_) => true,
     }
 }
 
@@ -8120,7 +8247,8 @@ fn apply_popd(cwd: &mut CwdState, rest: &[NormalizedWord]) {
 /// reach the CALLER's own cwd-tracking scope (a `for`/`while`/`until`
 /// loop's own body/condition), a simple command whose effective name is
 /// one of the cwd-changing directives [`apply_cwd_effect`] tracks
-/// (`cd`/`pushd`/`popd`/`source`/`.`/`eval`) OR whose effective command
+/// (`cd`/`pushd`/`popd`/`source`/`.`/`eval`/an `alias NAME=VALUE`
+/// assignment) OR whose effective command
 /// couldn't be resolved at all (fail-closed, mirroring
 /// [`apply_cwd_effect`]'s own `effective_command` guard: an unresolvable
 /// name might itself be one of those). `dirs` and an ordinary command are
@@ -8165,8 +8293,13 @@ fn command_may_change_cwd(command: &Command) -> bool {
             }
             match crate::rules::effective_command(&argv) {
                 None => true,
-                Some((name, _)) => {
+                Some((name, rest)) => {
                     matches!(name, "cd" | "pushd" | "popd" | "source" | "eval" | ".")
+                        // Issue #448: same gate `apply_cwd_effect`'s own
+                        // "alias" arm uses — only a genuine `NAME=VALUE`
+                        // assignment argument can poison; `alias -p`/a bare
+                        // lookup defines nothing new.
+                        || (name == "alias" && rest.iter().any(is_alias_assignment_argument))
                 }
             }
         }
