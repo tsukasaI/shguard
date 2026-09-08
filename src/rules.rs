@@ -7018,7 +7018,7 @@ impl UserConfig {
 /// `pipeline_rules`, never prepended: [`Rules::match_pipeline`] folds
 /// worst-wins across declaration order (issue #465) and keeps the
 /// first-declared rule on a tie, same convention as
-/// [`Self::match_redirect_target`] above, so appending is what makes a
+/// [`Rules::match_redirect_target`] above, so appending is what makes a
 /// user pipeline rule report second rather than shadowing a built-in one
 /// it ties with on the same sources/sinks shape. `escalation_floor` folds via `max` rather than overwriting —
 /// see the inline comment at that line for why an overwrite would be

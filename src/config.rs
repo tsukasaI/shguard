@@ -388,7 +388,7 @@ impl Policy {
             let case_insensitive = config_dir_is_case_insensitive();
             for (suffix, config_dir) in self_protection_directories(path)? {
                 let toml = self_protection_toml(
-                    require_utf8_config_dir(&config_dir)?,
+                    require_utf8_path(&config_dir)?,
                     &suffix,
                     case_insensitive,
                     "config",
@@ -543,7 +543,14 @@ impl Policy {
             for (suffix, log_dir) in self_protection_directories(log_path)? {
                 let log_file_at_hop = log_dir.join(log_file_name);
                 let toml = self_protection_toml(
-                    &log_file_at_hop.to_string_lossy(),
+                    // issue #465: the decision-log self-protection call
+                    // site has the identical lossy-substitution hazard
+                    // the config directory call site above closes -- a
+                    // non-UTF-8 directory component surfacing through
+                    // `self_protection_directories`'s own `canonicalize`
+                    // call would otherwise bake an unmatchable rule here
+                    // too.
+                    require_utf8_path(&log_file_at_hop)?,
                     &suffix,
                     case_insensitive,
                     "decision-log",
@@ -846,10 +853,14 @@ fn self_protection_directories(path: &Path) -> Result<Vec<(String, PathBuf)>, Co
     // above never even starts. `std::fs::canonicalize` resolves every
     // symlinked component of a path, not just a trailing one, so
     // re-resolving each directory already found above catches exactly
-    // that gap. Best-effort: a directory that doesn't exist (yet) fails
-    // `canonicalize` and is silently skipped rather than failing the
-    // whole config load -- every directory found above stays protected
-    // either way, this only ever ADDS coverage.
+    // that gap. Best-effort ONLY for a `canonicalize` I/O error: a
+    // directory that doesn't exist (yet) fails `canonicalize` and is
+    // silently skipped rather than failing the whole config load -- every
+    // directory found above stays protected either way, this only ever
+    // ADDS coverage. A non-UTF-8 canonical RESULT is a different matter
+    // entirely (issue #465): [`require_utf8_path`] rejects it at the
+    // caller, failing the whole load closed rather than silently
+    // returning a rule that can never match.
     let mut canonical_additions: Vec<(String, PathBuf)> = Vec::new();
     for (_, dir) in &directories {
         let Ok(canonical) = std::fs::canonicalize(dir) else {
@@ -877,21 +888,21 @@ fn self_protection_directories(path: &Path) -> Result<Vec<(String, PathBuf)>, Co
     Ok(directories)
 }
 
-/// `config_dir` as a UTF-8 `&str` for [`self_protection_toml`], or a
-/// fail-closed [`ConfigError::InvalidConfig`] instead of the
-/// `to_string_lossy` substitution this replaces (issue #465):
-/// `to_string_lossy` would silently swap in U+FFFD for a non-UTF-8
-/// component -- reachable only via a non-UTF-8 symlink target here (the
-/// equivalent `SHGUARD_CONFIG`/`XDG_CONFIG_HOME`/`HOME` env vars are
-/// already rejected by [`Policy::read_env_paths`]) -- baking a
+/// `path` as a UTF-8 `&str` for [`self_protection_toml`], or a fail-closed
+/// [`ConfigError::InvalidConfig`] instead of the `to_string_lossy`
+/// substitution this replaces (issue #465): `to_string_lossy` would
+/// silently swap in U+FFFD for a non-UTF-8 component, baking a
 /// self-protection rule whose target string can never match the real
-/// path it was meant to protect.
-fn require_utf8_config_dir(config_dir: &Path) -> Result<&str, ConfigError> {
-    config_dir.to_str().ok_or_else(|| {
-        ConfigError::InvalidConfig(format!(
-            "config directory {config_dir:?} is not valid UTF-8"
-        ))
-    })
+/// path it was meant to protect. Reachable via a non-UTF-8 symlink
+/// target, or a non-UTF-8 directory component that only surfaces once
+/// [`self_protection_directories`]'s own `canonicalize` resolves it (the
+/// equivalent `SHGUARD_CONFIG`/`XDG_CONFIG_HOME`/`HOME` env vars are
+/// already rejected by [`Policy::read_env_paths`]). Shared by both call
+/// sites in [`Policy::load`]: the config directory's own self-protection
+/// and the decision-log file's.
+fn require_utf8_path(path: &Path) -> Result<&str, ConfigError> {
+    path.to_str()
+        .ok_or_else(|| ConfigError::InvalidConfig(format!("path {path:?} is not valid UTF-8")))
 }
 
 /// Denies `shguard init`, with or without `--force` (issue #435): unlike
@@ -1399,8 +1410,10 @@ fn write_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
     // of following whatever is already there. Retry a handful of times on
     // a genuine name collision (astronomically unlikely, not adversarial)
     // before giving up.
-    let mut last_err = None;
-    for _ in 0..8 {
+    const MAX_TEMP_NAME_ATTEMPTS: u32 = 8;
+    let mut last_err =
+        std::io::Error::other("failed to create atomic-write temp file after retries");
+    for _ in 0..MAX_TEMP_NAME_ATTEMPTS {
         let tmp_path = parent.join(format!(
             ".{file_name}.tmp-{}-{:016x}",
             std::process::id(),
@@ -1424,20 +1437,24 @@ fn write_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
                 return result;
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                last_err = Some(e);
+                last_err = e;
             }
             Err(e) => return Err(e),
         }
     }
-    Err(last_err
-        .unwrap_or_else(|| std::io::Error::other("failed to create atomic-write temp file")))
+    Err(last_err)
 }
 
-/// An unpredictable `u64` for [`write_atomically`]'s temp-file suffix,
-/// without pulling in a `rand` dependency: [`std::collections::hash_map::RandomState`]
-/// seeds its SipHash keys from the OS's own randomness source on
-/// construction, so hashing nothing still yields a value an outside
-/// observer cannot predict.
+/// An unpredictable-to-an-outside-observer `u64` for [`write_atomically`]'s
+/// temp-file suffix, without pulling in a `rand` dependency:
+/// [`std::collections::hash_map::RandomState`]'s SipHash keys are seeded
+/// from OS randomness, so hashing nothing still yields a value nobody
+/// outside this process can guess in advance. Note the suffix only needs
+/// to be unguessable, not cryptographically random -- `write_atomically`'s
+/// own `create_new` (`O_EXCL`) is what actually closes the symlink race;
+/// a predictable suffix would only let a local attacker force a
+/// collision and fail the write, never redirect it through a planted
+/// symlink the way the old `File::create` (no `O_EXCL`) did.
 fn random_u64() -> u64 {
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hasher};
@@ -2502,17 +2519,17 @@ mod tests {
     }
 
     #[test]
-    fn require_utf8_config_dir_accepts_a_valid_path() {
+    fn require_utf8_path_accepts_a_valid_path() {
         let dir = Path::new("/home/user/.config/shguard");
         assert_eq!(
-            require_utf8_config_dir(dir).unwrap(),
+            require_utf8_path(dir).unwrap(),
             "/home/user/.config/shguard"
         );
     }
 
     #[test]
     #[cfg(unix)]
-    fn require_utf8_config_dir_fails_closed_on_non_utf8_instead_of_lossy_substitution() {
+    fn require_utf8_path_fails_closed_on_non_utf8_instead_of_lossy_substitution() {
         // issue #465: this must return an error, never a lossily
         // substituted (U+FFFD) string that silently generates a
         // self-protection rule which can never match the real path.
@@ -2525,7 +2542,7 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
 
         let non_utf8 = PathBuf::from(OsStr::from_bytes(&[b'/', b'x', 0xFF, 0xFE, b'y']));
-        let err = require_utf8_config_dir(&non_utf8).unwrap_err();
+        let err = require_utf8_path(&non_utf8).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidConfig(_)));
         assert!(err.to_string().contains("UTF-8"));
     }

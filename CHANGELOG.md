@@ -73,8 +73,41 @@ All notable changes to this project are documented in this file.
   (the library's own public API) now takes a `&HookContext` parameter to
   resolve against, a breaking change for any caller that used it directly.
 
+### Fixed
+
+- `Rules::match_pipeline` now folds worst-wins across declaration order,
+  same as `match_command`/`match_redirect_target`/`match_token` already
+  did (#465): a future embedded or user `[[pipeline]]` rule declaring
+  `decision = "ask"` for the same sources/sinks shape as an existing
+  `"block"` rule can no longer shadow it just by being declared first.
+  Latent-only at the time: every embedded pipeline rule is `"block"`
+  today.
+- `shguard check --json` usage errors (missing/extra arguments, an
+  invalid `--permission-mode` usage) now emit `{"error": "..."}` on
+  stdout, matching the existing config-load-failure and
+  evaluation-timeout behavior, whenever `--json` was already parsed by
+  the time the error is raised (#465). Arguments are parsed left to
+  right, so a `--json` flag positioned after the offending argument is
+  never reached and that case still falls back to a human-readable
+  stderr message.
+
 ### Security
 
+- `write_atomically` (used by `shguard init`) now creates its temp file
+  with `OpenOptions::create_new` (`O_EXCL`) and an unpredictable
+  filename suffix, instead of `File::create` (which follows an existing
+  symlink) on a predictable `.{file}.tmp-{pid}` name (#465): anything
+  with write access to the config directory could previously pre-plant a
+  symlink at that name and have `shguard init`/config-write operations
+  silently write through it instead of creating a genuinely new file.
+- A non-UTF-8 config-directory path component -- reachable via a
+  non-UTF-8 symlink target, either directly or via
+  `self_protection_directories`'s own directory-component
+  `canonicalize` resolution -- now fails config load closed instead of
+  `to_string_lossy` silently substituting U+FFFD into a generated
+  self-protection rule that could then never match the real path it was
+  meant to protect (#465). Applies to both the config directory's own
+  self-protection and the decision-log file's.
 - The PreToolUse hook adapter no longer emits an explicit `permissionDecision:
   "allow"` for a non-`Bash` `tool_name` (#462). shguard only analyses shell
   commands, so `Write`/`Edit`/MCP tool calls were always out of scope, but

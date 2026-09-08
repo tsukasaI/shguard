@@ -450,6 +450,32 @@ fn check_permission_mode_missing_value_usage_error_is_json_when_json_precedes_it
     );
 }
 
+/// Same as above, for the likelier real-world usage error: `--json` with
+/// no `<command>` at all. Also pins that stderr stays empty in this case
+/// -- the whole point of #465's fix is a `--json` caller having somewhere
+/// to look other than stderr.
+#[test]
+fn check_missing_command_usage_error_is_json_when_json_precedes_it() {
+    let (_dir, config_path) = write_config("");
+    let assert = isolated_command(&config_path)
+        .args(["check", "--json"])
+        .assert()
+        .failure()
+        .code(2);
+    let output = assert.get_output();
+    assert!(
+        output.stderr.is_empty(),
+        "expected empty stderr, got {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value =
+        serde_json::from_slice(&output.stdout).expect("--json usage error should be valid JSON");
+    assert!(
+        value.get("error").is_some_and(Value::is_string),
+        "expected an \"error\" string field, got {value:?}"
+    );
+}
+
 /// A flag-shaped `--permission-mode` value (e.g. `--json` following it) is
 /// a usage error, not silently consumed as an `Unknown("--json")` mode
 /// value — the loop must not swallow the next real flag.
