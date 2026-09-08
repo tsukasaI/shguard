@@ -2039,12 +2039,19 @@ fn scan_redirect_named_user_home_floor(
 /// [`home_env_word_with_tilde_substituted`]'s docs), so unlike that
 /// function this never needs to look inside a leading `DoubleQuoted`
 /// sequence.
+///
+/// `rules::is_dirstack_shape` excludes `~+`/`~-`/`~N`/`~+N`/`~-N` — those
+/// are directory-stack shorthand ([`crate::rules::PathForm::DirStack`]),
+/// not a named user, and already get their own floor
+/// ([`scan_redirect_dirstack_tilde_floor`], issue #341); without this
+/// exclusion a `~+`-prefixed target would also match here and produce a
+/// (currently redundant, but conceptually wrong) named-user-home reason.
 fn named_user_home_word_with_tilde_substituted(word: &Word) -> Option<Word> {
     let (first, rest) = word.0.split_first()?;
     let WordPiece::Tilde(user) = first else {
         return None;
     };
-    if user.is_empty() {
+    if user.is_empty() || crate::rules::is_dirstack_shape(user) {
         return None;
     }
     let mut out = vec![WordPiece::Tilde(String::new())];
@@ -12691,6 +12698,29 @@ mod tests {
         // it expanded — the floor must survive the allowlist downgrade.
         let verdict = analyze_with_policy("rm -rf ~someuser", &rules, &allowlist);
         assert_eq!(verdict.decision(), Decision::Ask);
+    }
+
+    #[test]
+    fn allowlisted_echo_still_asks_on_redirect_named_user_home() {
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[allow]]
+            id = "user-allow-echo"
+            reason = "trust me"
+            command = "echo"
+        "#,
+        );
+        // An allow entry for `echo` is consent to `echo` in general, not to
+        // a redirect target that is a `~username` shorthand that would land
+        // in a redirect rule's own namespace if it expanded — the
+        // redirect-side floor (issue #454) must survive the allowlist
+        // downgrade the same way the argv-side floor just above does.
+        let verdict = analyze_with_policy("echo x >> ~someuser/.zshrc", &rules, &allowlist);
+        assert_eq!(verdict.decision(), Decision::Ask);
+        // Control: a `~username` redirect target outside any redirect
+        // rule's namespace stays Allow even under the same allow entry.
+        let verdict = analyze_with_policy("echo x >> ~someuser/notes.txt", &rules, &allowlist);
+        assert_eq!(verdict.decision(), Decision::Allow);
     }
 
     #[test]

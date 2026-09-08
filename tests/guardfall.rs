@@ -1553,8 +1553,7 @@ fn guardfall_shell_init_redirect_cases() {
         // Issue #454: `~user` is a named user's home shorthand, which only
         // expands to a real home directory if that account exists and is
         // reachable — the redirect-side counterpart to issue #80's argv
-        // floor. Verified against the issue's own reproduction table.
-        ("echo x >> ~/.zshrc", Decision::Ask),
+        // floor.
         ("echo x >> ~root/.zshrc", Decision::Ask),
         // `~user` targets outside the shell-init/persistence namespace
         // must stay Allow — the floor is a correlation with an existing
@@ -1567,7 +1566,13 @@ fn guardfall_shell_init_redirect_cases() {
         // floor only had the former, so wrapping the exact same redirect
         // in a brace group silently regained the pre-fix Allow.
         ("{ echo x; } >> ~root/.zshrc", Decision::Ask),
+        ("f() { :; } >> ~root/.zshrc", Decision::Ask),
         ("echo x 2> ~root/.zshrc", Decision::Ask),
+        // Regression guard: this floor is capped at Ask, never the matched
+        // rule's own decision — `~root/.config/shguard/config.toml` would
+        // hit a Block-level self-protection rule if `~root` expanded, but
+        // shguard cannot verify that account exists.
+        ("cat > ~root/.config/shguard/config.toml", Decision::Ask),
     ];
 
     for (command, expected) in cases {
