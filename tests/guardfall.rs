@@ -338,6 +338,9 @@ fn guardfall_git_cases() {
             "git -c core.hooksPath=/dev/null merge other",
             Decision::Block,
         ),
+        // The issue's own headline spelling: an empty hooksPath disables
+        // hooks the same way `/dev/null` does.
+        ("git -c core.hooksPath= commit -m x", Decision::Block),
         // Case-insensitive key match (git config keys are case-insensitive).
         (
             "git -c Core.HooksPath=/dev/null commit -m x",
