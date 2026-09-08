@@ -100,6 +100,20 @@ impl ParseError {
             construct: construct.into(),
         }
     }
+
+    /// The unsupported construct's own description, for issue #471's
+    /// category-specific `DenyMessage` at `crate::gate`'s top-level parse
+    /// failure site — `None` for [`Self::Syntax`] (a genuine syntax error
+    /// names no specific construct to point the agent at). Exposed as a
+    /// method rather than a public field: `construct`/`message` stay
+    /// private to this module, matching this enum's other fields.
+    #[must_use]
+    pub(crate) fn unsupported_construct(&self) -> Option<&str> {
+        match self {
+            Self::Unsupported { construct } => Some(construct),
+            Self::Syntax { .. } => None,
+        }
+    }
 }
 
 fn parser_options() -> BrushParserOptions {
@@ -1179,9 +1193,9 @@ fn convert_file_redirect_kind(
         // stays unsupported — no rule targets it yet, out of this issue's
         // scope.
         bast::IoFileRedirectKind::ReadAndWrite => Ok(FileRedirectionKind::ReadAndWrite),
-        bast::IoFileRedirectKind::Clobber => Err(ParseError::unsupported(format!(
-            "redirection kind {kind:?}"
-        ))),
+        bast::IoFileRedirectKind::Clobber => Err(ParseError::unsupported(
+            "clobber redirection (>|)".to_string(),
+        )),
     }
 }
 
@@ -1589,6 +1603,41 @@ fn convert_tilde(tilde: bword::TildeExpr) -> String {
     }
 }
 
+/// A human-readable name for every [`bword::ParameterExpr`] shape this
+/// module rejects, for the `deny_message` an agent sees (issue #471) — the
+/// bare `{:?}` this replaced dumped brush's internal enum/field names
+/// (`Parameter { parameter: NamedWithAllIndices { name: "arr", ... } }`)
+/// instead of naming the actual bash construct.
+fn describe_parameter_expr(expr: &bword::ParameterExpr) -> &'static str {
+    match expr {
+        bword::ParameterExpr::Parameter { .. } => {
+            "indirect or array-indexed parameter expansion (${!x}/${arr[i]}/${arr[@]})"
+        }
+        bword::ParameterExpr::UseDefaultValues { .. } => "default-value expansion (${x:-d})",
+        bword::ParameterExpr::AssignDefaultValues { .. } => "default-value assignment (${x:=d})",
+        bword::ParameterExpr::IndicateErrorIfNullOrUnset { .. } => {
+            "error-if-unset expansion (${x:?msg})"
+        }
+        bword::ParameterExpr::UseAlternativeValue { .. } => {
+            "alternative-value expansion (${x:+alt})"
+        }
+        bword::ParameterExpr::ParameterLength { .. } => "parameter length (${#x})",
+        bword::ParameterExpr::RemoveSmallestSuffixPattern { .. } => "suffix removal (${x%pat})",
+        bword::ParameterExpr::RemoveLargestSuffixPattern { .. } => "suffix removal (${x%%pat})",
+        bword::ParameterExpr::RemoveSmallestPrefixPattern { .. } => "prefix removal (${x#pat})",
+        bword::ParameterExpr::RemoveLargestPrefixPattern { .. } => "prefix removal (${x##pat})",
+        bword::ParameterExpr::Substring { .. } => "substring expansion (${x:off:len})",
+        bword::ParameterExpr::Transform { .. } => "parameter transformation (${x@op})",
+        bword::ParameterExpr::UppercaseFirstChar { .. } => "case modification (${x^})",
+        bword::ParameterExpr::UppercasePattern { .. } => "case modification (${x^^})",
+        bword::ParameterExpr::LowercaseFirstChar { .. } => "case modification (${x,})",
+        bword::ParameterExpr::LowercasePattern { .. } => "case modification (${x,,})",
+        bword::ParameterExpr::ReplaceSubstring { .. } => "pattern substitution (${x/a/b})",
+        bword::ParameterExpr::VariableNames { .. } => "variable-name expansion (${!prefix*})",
+        bword::ParameterExpr::MemberKeys { .. } => "array-key expansion (${!arr[@]})",
+    }
+}
+
 /// shguard's `WordPiece::ParameterExpansion` only carries the parameter
 /// name (module docs) — only the plain `$NAME`/`${NAME}` form (a direct,
 /// non-indirect named parameter), a bare positional parameter (`$1`, `$2`,
@@ -1600,7 +1649,8 @@ fn convert_tilde(tilde: bword::TildeExpr) -> String {
 /// to store as the "name". Every other `ParameterExpr` shape (indirection,
 /// array-indexed access, defaults, substring operations, case transforms,
 /// …) would lose semantics if squeezed into a bare name, so it is rejected
-/// instead.
+/// instead — see [`describe_parameter_expr`] for the name attached to the
+/// rejection.
 fn convert_parameter_expansion(expr: bword::ParameterExpr) -> Result<WordPiece, ParseError> {
     match expr {
         bword::ParameterExpr::Parameter {
@@ -1616,7 +1666,8 @@ fn convert_parameter_expansion(expr: bword::ParameterExpr) -> Result<WordPiece, 
             indirect: false,
         } => Ok(WordPiece::ParameterExpansion(special.to_string())),
         other => Err(ParseError::unsupported(format!(
-            "parameter expansion form {other:?}"
+            "parameter expansion form: {}",
+            describe_parameter_expr(&other)
         ))),
     }
 }

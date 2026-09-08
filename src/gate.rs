@@ -346,6 +346,74 @@ use crate::verdict::{Decision, DenyMessage, Reason, RuleId, Verdict};
 /// see the module docs' "Substitution recursion and the depth cap" section.
 const MAX_SUBSTITUTION_DEPTH: usize = 8;
 
+/// Issue #471: category-specific `DenyMessage` guidance, attached via
+/// [`Verdict::with_deny_message`] at each structural `Ask` site below —
+/// one constant/function per row of the issue's own guidance table. Plain
+/// data, not logic: which constant applies is decided at each call site by
+/// which structural rule produced the `Ask`, already known there without
+/// re-deriving it.
+const DENY_MSG_BARE_VAR: &str =
+    "Expand the variable yourself and re-issue the command with the literal path or binary name.";
+const DENY_MSG_INLINE_INTERPRETER: &str = "Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f \
+     prog.awk`) — inline interpreter code is never inspected.";
+const DENY_MSG_COMMAND_SUBSTITUTION: &str =
+    "Run the substitution first, then call the resulting binary literally.";
+const DENY_MSG_UNRESOLVED_TARGET: &str = "Resolve the target literally so the rule can check it.";
+const DENY_MSG_PIPE_TO_INTERPRETER: &str = "Run the file directly (e.g. `bash file.sh`) instead \
+     of piping it in, so the argv is inspectable.";
+const DENY_MSG_IFS: &str =
+    "Rewrite the command without `$IFS`; there is no benign interactive use for it.";
+
+/// Shared reason-string prefix [`scan_expansion_positions`]'s heredoc scan
+/// raises when a heredoc body feeds a non-shell interpreter's stdin, and
+/// [`apply_expansion_floor`] matches on to attach [`DENY_MSG_INLINE_INTERPRETER`]
+/// — the same guidance rule 6b/6d's own inline-interpreter-code Ask gets,
+/// since "the interpreter's input can't be introspected" is the same
+/// underlying problem whether that input arrives via `-c`/`-e` or a
+/// heredoc. Threading a `DenyMessage` through [`raise_expansion_floor`]'s
+/// shared `(Decision, String)` floor accumulator (used by ~18 call sites)
+/// would need widening every one of them; matching this one site's own,
+/// fully-controlled reason-string prefix instead is far smaller surface
+/// for the same effect. Kept as one `const` (not duplicated at each of the
+/// two use sites) so the raise and the match can't drift apart.
+const NONSHELL_HEREDOC_REASON_PREFIX: &str = "the heredoc body is fed to non-shell interpreter";
+
+/// Category-3 guidance (issue #471): a construct this module cannot
+/// statically resolve at all. Names the specific construct — the issue's
+/// own "name the construct" requirement — via whichever description is
+/// already available at the call site: [`crate::parser::ParseError::unsupported_construct`]'s
+/// text for a construct the parser itself rejects, or a human-readable
+/// name for [`UnresolvableKind`]'s own variant (see
+/// [`deny_msg_for_unresolvable_kind`]) for one that parses but that
+/// `crate::normalize` could not fold to a value.
+fn deny_msg_unsupported_construct(construct: &str) -> DenyMessage {
+    DenyMessage::new(format!(
+        "shguard cannot statically analyze this construct ({construct}); use its literal form, \
+         or split the command across separate lines so each piece is inspectable."
+    ))
+}
+
+/// Category-3 guidance for the subset of [`UnresolvableKind`] that names an
+/// actual shell construct the agent could rewrite (`$((...))`, a process
+/// substitution, or a structurally-unsupported word shape) — `None` for
+/// every other kind (`NonUtf8`/`ExpansionLimit`/`EmbeddedNul` are encoding/
+/// resource-limit conditions, not a construct to name, and
+/// `ParameterExpansion`/`CommandSubstitution` already get their own
+/// category-1/category-4 message at their own call sites).
+fn deny_msg_for_unresolvable_kind(kind: UnresolvableKind) -> Option<DenyMessage> {
+    let name = match kind {
+        UnresolvableKind::ArithmeticExpansion => "arithmetic expansion ($((...)))",
+        UnresolvableKind::ProcessSubstitution => "process substitution (<(...)/>(...))",
+        UnresolvableKind::UnsupportedStructure => "an unsupported word structure",
+        UnresolvableKind::CommandSubstitution
+        | UnresolvableKind::ParameterExpansion
+        | UnresolvableKind::NonUtf8
+        | UnresolvableKind::ExpansionLimit
+        | UnresolvableKind::EmbeddedNul => return None,
+    };
+    Some(deny_msg_unsupported_construct(name))
+}
+
 /// Analyzes a raw shell command line: parse -> per-simple-command normalise
 /// -> rules -> structural gate -> worst-decision-wins fold across every
 /// simple command on the line (`crate::verdict::Decision`'s `Ord`).
@@ -443,10 +511,16 @@ fn analyze_at_depth(
 
     match parser::parse(command) {
         Ok(command_line) => evaluate_command_line(&command_line, rules, allowlist, depth, &mut cwd),
-        Err(err) => Verdict::ask(
-            Reason::new(format!("could not parse command: {err}")),
-            Vec::new(),
-        ),
+        Err(err) => {
+            let deny_message = err
+                .unsupported_construct()
+                .map(deny_msg_unsupported_construct);
+            Verdict::ask(
+                Reason::new(format!("could not parse command: {err}")),
+                Vec::new(),
+            )
+            .with_deny_message(deny_message)
+        }
     }
 }
 
@@ -1373,13 +1447,16 @@ fn evaluate_pipeline_shape(stages: &[Vec<NormalizedWord>]) -> Option<Verdict> {
             None,
         ))
     } else {
-        Some(Verdict::ask(
-            Reason::new(
-                "pipeline pipes into an interpreter with no decode stage upstream; the piped \
-                 content cannot be statically verified",
-            ),
-            last.clone(),
-        ))
+        Some(
+            Verdict::ask(
+                Reason::new(
+                    "pipeline pipes into an interpreter with no decode stage upstream; the \
+                     piped content cannot be statically verified",
+                ),
+                last.clone(),
+            )
+            .with_deny_message(Some(DenyMessage::new(DENY_MSG_PIPE_TO_INTERPRETER))),
+        )
     }
 }
 
@@ -2518,6 +2595,7 @@ fn evaluate_simple_command_core(
             );
         }
         Resolution::Unresolvable(kind) => {
+            let kind = *kind;
             return apply_opaque_kind_floor(
                 apply_substitution_floor(
                     apply_leftover_command_floor(
@@ -2527,7 +2605,8 @@ fn evaluate_simple_command_core(
                                  command will run cannot be determined statically"
                             )),
                             argv,
-                        ),
+                        )
+                        .with_deny_message(deny_msg_for_unresolvable_kind(kind)),
                         leftover_command_floor,
                     ),
                     substitution_result,
@@ -2918,7 +2997,10 @@ fn apply_expansion_floor(verdict: Verdict, floor: Option<(Decision, String)>) ->
     let Some((floor_decision, floor_reason)) = floor else {
         return verdict;
     };
-    apply_floor(verdict, floor_decision, floor_reason, None)
+    let deny_message = floor_reason
+        .starts_with(NONSHELL_HEREDOC_REASON_PREFIX)
+        .then(|| DenyMessage::new(DENY_MSG_INLINE_INTERPRETER));
+    apply_floor(verdict, floor_decision, floor_reason, deny_message)
 }
 
 /// Applies [`scan_recursable_slots`]'s combined floor (issues #64/#66/#72:
@@ -3450,10 +3532,12 @@ fn apply_substitution_floor(verdict: Verdict, floor: Option<Decision>) -> Verdic
         Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
         None => floor_reason.to_string(),
     };
+    let deny_message = verdict.deny_message().cloned();
     match floor_decision {
         Decision::Block => Verdict::block(Reason::new(reason), argv, None),
         Decision::Ask | Decision::Allow => Verdict::ask(Reason::new(reason), argv),
     }
+    .with_deny_message(deny_message)
 }
 
 /// Applies rule 8's opaque-unresolvable-kind floor
@@ -3481,7 +3565,7 @@ fn apply_opaque_kind_floor(verdict: Verdict, kind: Option<UnresolvableKind>) -> 
         Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
         None => floor_reason,
     };
-    Verdict::ask(Reason::new(reason), argv)
+    Verdict::ask(Reason::new(reason), argv).with_deny_message(deny_msg_for_unresolvable_kind(kind))
 }
 
 /// Rules 4 and 4b's argument-position-ambiguity floors, bundled into one
@@ -3532,6 +3616,15 @@ fn fold_floors(
     // `fold_floors` never tries to keep floors' reasons separately
     // attributable either, so a `deny_message` present here gets the same
     // "always folded in" treatment.
+    // Issue #471: once no rule-authored `deny_message` applies, fall back to
+    // this function's own structural, category-specific guidance — in the
+    // same target-before-flags priority as the rule-authored case above,
+    // then interpreter-code (issue #471's category 2) before `$IFS`
+    // (category 7) before the opaque-kind floor (category 3), an ordering
+    // that only matters when more than one of these floors fires on the
+    // same command; whichever comes first here is what a caller sees, the
+    // same "one slot, priority order" shape the rule-authored branch above
+    // already established.
     let deny_message = except_floors
         .target
         .and_then(crate::rules::CommandRule::deny_message)
@@ -3540,7 +3633,18 @@ fn fold_floors(
                 .flags
                 .and_then(crate::rules::CommandRule::deny_message)
         })
-        .cloned();
+        .cloned()
+        .or_else(|| {
+            interpreter_code_floor
+                .is_some()
+                .then(|| DenyMessage::new(DENY_MSG_INLINE_INTERPRETER))
+        })
+        .or_else(|| {
+            (except_floors.target.is_some() || except_floors.flags.is_some())
+                .then(|| DenyMessage::new(DENY_MSG_UNRESOLVED_TARGET))
+        })
+        .or_else(|| ifs_floor.then(|| DenyMessage::new(DENY_MSG_IFS)))
+        .or_else(|| opaque_kind.and_then(deny_msg_for_unresolvable_kind));
 
     if let Some(reason) = interpreter_code_floor {
         decision = decision.max(Decision::Ask);
@@ -3658,6 +3762,7 @@ fn evaluate_command_position_substitution(
             ),
             argv,
         )
+        .with_deny_message(Some(DenyMessage::new(DENY_MSG_COMMAND_SUBSTITUTION)))
     }
 }
 
@@ -3720,7 +3825,8 @@ fn evaluate_command_position_bare_var(
                  command will run cannot be determined statically",
             ),
             argv,
-        );
+        )
+        .with_deny_message(Some(DenyMessage::new(DENY_MSG_BARE_VAR)));
     };
 
     let Some(value) = env.get(name) else {
@@ -3729,7 +3835,8 @@ fn evaluate_command_position_bare_var(
                 "command position `${name}` has no statically-known value on this command line"
             )),
             argv,
-        );
+        )
+        .with_deny_message(Some(DenyMessage::new(DENY_MSG_BARE_VAR)));
     };
 
     // Every distinct IFS interpretation worth trying, most-specific first:
@@ -3806,6 +3913,7 @@ fn evaluate_command_position_bare_var(
         )),
         primary_substituted.unwrap_or(argv),
     )
+    .with_deny_message(Some(DenyMessage::new(DENY_MSG_BARE_VAR)))
 }
 
 /// Rule 6a: `bash -c '<string>'`/`sh -c`/`zsh -c`/`dash -c`. Returns `None`
@@ -5183,8 +5291,7 @@ fn scan_redirection_expansions(
                         accum.floor,
                         Decision::Ask,
                         format!(
-                            "the heredoc body is fed to non-shell interpreter `{name}` on \
-                             stdin, which cannot be introspected"
+                            "{NONSHELL_HEREDOC_REASON_PREFIX} `{name}` on stdin, which cannot be introspected"
                         ),
                     );
                 }
@@ -5868,15 +5975,23 @@ fn has_argument_position_bare_var(argument_words: &[Word]) -> bool {
 // ---------------------------------------------------------------------
 
 /// Picks the worse of two [`Verdict`]s by [`Decision`] (rule: worst-wins,
-/// plan.md §6 item 7). On a tie, keeps `current` — the earlier-encountered
-/// simple command's argv, per this module's documented
+/// plan.md §6 item 7). On a tie, keeps `current`'s argv/reason/deny_message —
+/// the earlier-encountered simple command's, per this module's documented
 /// "normalized_argv = the simple command that produced the worst decision"
-/// contract (first one wins a tie, not the last).
+/// contract (first one wins a tie, not the last). A `current` with no
+/// `deny_message` of its own does NOT borrow `new`'s: borrowing across two
+/// verdicts risks pairing one verdict's reason/matched_rule with a
+/// DIFFERENT verdict's remediation hint, which is unsafe both for
+/// rule-matched Asks (no rule-origin tracking exists on `VerdictDetail::Ask`
+/// to guard against it) and structural Asks (the messages describe
+/// different simple commands). See issue #495's follow-up for a
+/// message-preserving fix at the actual origin
+/// (`evaluate_argument_substitutions`) instead of at this fold.
 fn fold_worst(current: Verdict, new: Verdict) -> Verdict {
-    if new.decision() > current.decision() {
-        new
-    } else {
-        current
+    match new.decision().cmp(&current.decision()) {
+        std::cmp::Ordering::Greater => new,
+        std::cmp::Ordering::Less => current,
+        std::cmp::Ordering::Equal => current,
     }
 }
 

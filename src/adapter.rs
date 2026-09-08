@@ -533,6 +533,58 @@ mod tests {
         assert_ne!(permission_reason(&output), "use --force-with-lease instead");
     }
 
+    /// `fold_worst`'s documented tie contract: the FIRST-encountered simple
+    /// command's verdict wins a same-decision tie outright, including its
+    /// `deny_message` (or lack of one) -- it never borrows the other side's
+    /// message. A compound line with TWO different `[[deny]]`-matched
+    /// Blocks tied at the same decision must resolve to the first rule's
+    /// own reason and its own (absent) deny_message, never a mix of one
+    /// rule's message with the other's `matched_rule_id`.
+    #[test]
+    fn fold_worst_tie_keeps_first_matched_rules_own_reason_and_message() {
+        let blocklist = crate::rules::Rules::embedded().unwrap();
+        let allowlist = crate::rules::Allowlist::embedded().unwrap();
+        let user_config = crate::rules::UserConfig::parse(
+            r#"
+            [[deny]]
+            id = "user-deny-mytool-force"
+            reason = "mytool --force is destructive"
+            command = "mytool"
+            required_flags = ["f|--force"]
+            deny_message = "use --force-with-lease instead"
+        "#,
+        )
+        .unwrap();
+        let (rules, allowlist) =
+            crate::rules::merge_user_config(blocklist, allowlist, user_config).unwrap();
+        let policy = crate::config::Policy {
+            rules: std::sync::Arc::new(rules),
+            allowlist: std::sync::Arc::new(allowlist),
+            decision_log_path: None,
+            ask_outcome: crate::rules::AskOutcome::default(),
+        };
+
+        // `rm -rf /` (embedded rule, first simple command, no deny_message
+        // of its own) and `mytool --force` (user rule, second simple
+        // command, its own deny_message) are both Block -- a decision tie
+        // must resolve to the FIRST simple command's own reason and its
+        // own (absent) deny_message, never a mix of the two rules.
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"rm -rf / ; mytool --force"}}"#;
+        let output = handle_with_policy(stdin, &policy, &crate::FileDecisionLog);
+        assert_eq!(permission_decision(&output), "deny");
+        assert!(
+            permission_reason(&output).contains("rm-recursive-force-dangerous-target"),
+            "expected the first-encountered rule's own reason to win the tie, got: {}",
+            permission_reason(&output)
+        );
+        assert_eq!(
+            output["hookSpecificOutput"]["additionalContext"].as_str(),
+            None,
+            "the first rule's own (absent) deny_message must not be replaced by the second \
+             rule's message"
+        );
+    }
+
     #[test]
     fn bash_block_command_without_deny_message_omits_additional_context_entirely() {
         // A matched rule with no deny_message must not emit
@@ -546,4 +598,207 @@ mod tests {
                 .is_none()
         );
     }
+
+    // ==== issue #471: category-specific deny_message on one representative
+    // command per row of the issue's guidance table, using the
+    // embedded-only `handle()` path (no user config involved) so each case
+    // exercises the plain structural `Ask` -- the majority path a caller
+    // with no `ask_outcome` configured actually sees. NOT a claim that
+    // every possible structural Ask in every category always carries a
+    // message: `apply_expansion_floor`'s heredoc-floor site in particular
+    // is order-dependent -- `raise_expansion_floor` keeps the FIRST reason
+    // raised at a tied Ask decision, so a sibling floor (e.g. a
+    // substitution in an assignment value or a redirection target) raised
+    // before the non-shell-interpreter heredoc floor wins the reason text
+    // and this category's deny_message never attaches, even though
+    // `python3 - <<EOF` alone (no sibling floor)
+    // does get it (see the test below). Disclosed rather than fixed here:
+    // closing it needs the same wider `Option<DenyMessage>` threading
+    // through `raise_expansion_floor`'s ~18 shared call sites that
+    // `Verdict::with_deny_message`'s own "Known remaining gaps" doc
+    // already declines for the same reason. ====
+
+    fn additional_context(output: &Value) -> &str {
+        output["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+    }
+
+    #[test]
+    fn bare_var_command_position_gets_expand_the_variable_guidance() {
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"$UNSETVAR foo"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "ask");
+        assert_eq!(
+            additional_context(&output),
+            "Expand the variable yourself and re-issue the command with the literal path or \
+             binary name."
+        );
+    }
+
+    #[test]
+    fn inline_interpreter_code_gets_write_to_a_file_guidance() {
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"python3 -c 'print(1)'"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "ask");
+        assert_eq!(
+            additional_context(&output),
+            "Write the program to a file and run that file instead (e.g. `python3 file.py`, \
+             `awk -f prog.awk`) — inline interpreter code is never inspected."
+        );
+    }
+
+    /// Fable-review follow-up to #471: `python3 - <<EOF ... EOF` (issue
+    /// #471's own row-2 example, the largest single category) reaches the
+    /// gate through the heredoc-as-stdin floor (issue #424), not the
+    /// `-c`/`-e` inline-code site above -- it must get the same guidance,
+    /// not a message-less generic Ask.
+    #[test]
+    fn heredoc_fed_to_non_shell_interpreter_gets_write_to_a_file_guidance() {
+        let stdin =
+            r#"{"tool_name":"Bash","tool_input":{"command":"python3 - <<EOF\nimport os\nEOF"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "ask");
+        assert_eq!(
+            additional_context(&output),
+            "Write the program to a file and run that file instead (e.g. `python3 file.py`, \
+             `awk -f prog.awk`) — inline interpreter code is never inspected."
+        );
+    }
+
+    #[test]
+    fn awk_inline_script_gets_write_to_a_file_guidance() {
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"awk '{print}' file"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "ask");
+        assert_eq!(
+            additional_context(&output),
+            "Write the program to a file and run that file instead (e.g. `python3 file.py`, \
+             `awk -f prog.awk`) — inline interpreter code is never inspected."
+        );
+    }
+
+    #[test]
+    fn parser_unsupported_construct_is_named_in_the_guidance() {
+        // `${arr[@]}` -- an array-indexed parameter expansion --
+        // `src/parser.rs`'s `convert_parameter_expansion` rejects with
+        // `ParseError::Unsupported`, whose own `construct` description
+        // names the rejected shape in human terms (issue #471's "name the
+        // construct"), not a raw Debug dump of brush's internal
+        // enum/struct fields.
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"echo ${arr[@]}"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "ask");
+        assert_eq!(
+            additional_context(&output),
+            "shguard cannot statically analyze this construct (parameter expansion form: \
+             indirect or array-indexed parameter expansion (${!x}/${arr[i]}/${arr[@]})); use \
+             its literal form, or split the command across separate lines so each piece is \
+             inspectable."
+        );
+    }
+
+    #[test]
+    fn arithmetic_expansion_is_named_in_the_guidance() {
+        // `$((...))` parses successfully (unlike `${arr[@]}`) but normalises
+        // to `Unresolvable(ArithmeticExpansion)` -- a different code path
+        // (`crate::gate`'s opaque-kind floor, not a `ParseError`) that must
+        // still name the construct in human terms, not `ArithmeticExpansion`
+        // (the bare enum variant name).
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"echo $((1+1))"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "ask");
+        assert_eq!(
+            additional_context(&output),
+            "shguard cannot statically analyze this construct (arithmetic expansion \
+             ($((...)))); use its literal form, or split the command across separate lines so \
+             each piece is inspectable."
+        );
+    }
+
+    #[test]
+    fn command_substitution_command_position_gets_run_first_guidance() {
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"$(echo ls)"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "ask");
+        assert_eq!(
+            additional_context(&output),
+            "Run the substitution first, then call the resulting binary literally."
+        );
+    }
+
+    #[test]
+    fn unresolvable_target_gets_resolve_the_target_guidance() {
+        // `rm -rf $(echo /)` matches the embedded `rm-recursive-force-\
+        // dangerous-target` rule's command+flags, but its target is an
+        // argument-position substitution -- the except-target floor
+        // (`crate::gate::fold_floors`), not a definite rule match, and that
+        // rule declares no `deny_message` of its own, so this exercises the
+        // structural fallback specifically.
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"rm -rf $(echo /)"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "ask");
+        assert_eq!(
+            additional_context(&output),
+            "Resolve the target literally so the rule can check it."
+        );
+    }
+
+    #[test]
+    fn pipe_to_interpreter_gets_run_the_file_directly_guidance() {
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"cat x.sh | bash"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "ask");
+        assert_eq!(
+            additional_context(&output),
+            "Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv \
+             is inspectable."
+        );
+    }
+
+    #[test]
+    fn ifs_derived_word_gets_rewrite_without_ifs_guidance() {
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"echo${IFS}hi"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "ask");
+        assert_eq!(
+            additional_context(&output),
+            "Rewrite the command without `$IFS`; there is no benign interactive use for it."
+        );
+    }
+
+    // ==== issue #202's regression class, applied to issue #471's new
+    // category-specific messages: the message must survive a recursion/
+    // re-wrap boundary, not be lost or silently replaced by a generic one ====
+
+    #[test]
+    fn bare_var_message_survives_a_bash_dash_c_rewrap() {
+        // `recurse_shell_string` (rule 6a's own recursion core) maps the
+        // recursed script's inner `Verdict` to an outer one carrying the
+        // outer `bash -c ...` argv -- the inner `Ask`'s deny_message (here,
+        // category 1's bare-`$VAR` guidance) must still be the one that
+        // reaches the top-level verdict, not a generic "bash -c recurses"
+        // fallback.
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"bash -c '$UNSETVAR foo'"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "ask");
+        assert_eq!(
+            additional_context(&output),
+            "Expand the variable yourself and re-issue the command with the literal path or \
+             binary name."
+        );
+        // The outer reason names the recursion, distinct from the inner
+        // deny_message -- confirms this is the re-wrapped outer verdict,
+        // not an accidental pass-through of the inner one's own reason.
+        assert!(permission_reason(&output).contains("recurses through the full pipeline"));
+    }
+
+    // Note (issue #471 fable review): a category message does NOT currently
+    // survive `evaluate_argument_substitutions`' own recursion path (e.g.
+    // `echo $(python3 -c "x")` still resolves Ask with `deny_message: None`)
+    // -- that function returns a bare `Option<Decision>`, not the inner
+    // verdict's message, a pre-existing gap `Verdict::with_deny_message`'s
+    // own "Known remaining gaps" doc already discloses. Closing it would
+    // mean widening that function's return type and its callers; left as a
+    // documented follow-up rather than expanding this issue's scope.
 }
