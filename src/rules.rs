@@ -7015,11 +7015,12 @@ impl UserConfig {
 /// posture pending issue #100's own review, not the downgrade race that
 /// first motivated it. `pipeline` entries
 /// (issue #97) are appended AFTER the embedded blocklist's own
-/// `pipeline_rules`, never prepended, even though [`Rules::match_pipeline`]
-/// now folds worst-wins across declaration order (issue #465) — Block
-/// still outranks Ask regardless of position, so this ordering is no
-/// longer load-bearing for that guarantee but is kept for readability and
-/// as defense in depth. `escalation_floor` folds via `max` rather than overwriting —
+/// `pipeline_rules`, never prepended: [`Rules::match_pipeline`] folds
+/// worst-wins across declaration order (issue #465) and keeps the
+/// first-declared rule on a tie, same convention as
+/// [`Self::match_redirect_target`] above, so appending is what makes a
+/// user pipeline rule report second rather than shadowing a built-in one
+/// it ties with on the same sources/sinks shape. `escalation_floor` folds via `max` rather than overwriting —
 /// see the inline comment at that line for why an overwrite would be
 /// wrong given how `src/config.rs`'s `Policy::load` calls this function
 /// more than once.

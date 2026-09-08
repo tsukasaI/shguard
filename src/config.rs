@@ -2531,6 +2531,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn write_atomically_ignores_a_symlink_planted_at_the_old_predictable_temp_name() {
         // issue #465: `write_atomically` used to write through
         // `.{file}.tmp-{pid}`, a name any local writer of the config
@@ -2560,8 +2561,8 @@ mod tests {
 
     #[test]
     fn write_atomically_leaves_no_temp_file_behind_when_rename_fails() {
-        // A directory sitting at `path` makes `File::create` on the temp
-        // file succeed (it's a sibling, not `path` itself) but the final
+        // A directory sitting at `path` makes creating the temp file
+        // succeed (it's a sibling, not `path` itself) but the final
         // `rename` fail (can't rename a file onto an existing directory) —
         // this leaks the temp file if cleanup only runs on a WRITE
         // failure and not a rename failure (PR #387).
