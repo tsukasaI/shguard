@@ -1550,6 +1550,29 @@ fn guardfall_shell_init_redirect_cases() {
         // (`cd $X && echo x > passwd`), so it is a redirect-vs-command
         // parity gap, not something this rule introduced.
         ("cd $X && echo x >> .zshrc", Decision::Allow),
+        // Issue #454: `~user` is a named user's home shorthand, which only
+        // expands to a real home directory if that account exists and is
+        // reachable — the redirect-side counterpart to issue #80's argv
+        // floor.
+        ("echo x >> ~root/.zshrc", Decision::Ask),
+        // `~user` targets outside the shell-init/persistence namespace
+        // must stay Allow — the floor is a correlation with an existing
+        // redirect rule's own target, not "any `~user` redirect Asks".
+        ("echo x >> ~root/notes.txt", Decision::Allow),
+        // Regression guard: this floor is wired into both
+        // `evaluate_simple_command` (a bare command's own redirects) and
+        // `apply_attached_word_and_redirect_checks` (a compound command's
+        // attached redirects) — an earlier version of the sibling `$HOME`
+        // floor only had the former, so wrapping the exact same redirect
+        // in a brace group silently regained the pre-fix Allow.
+        ("{ echo x; } >> ~root/.zshrc", Decision::Ask),
+        ("f() { :; } >> ~root/.zshrc", Decision::Ask),
+        ("echo x 2> ~root/.zshrc", Decision::Ask),
+        // Regression guard: this floor is capped at Ask, never the matched
+        // rule's own decision — `~root/.config/shguard/config.toml` would
+        // hit a Block-level self-protection rule if `~root` expanded, but
+        // shguard cannot verify that account exists.
+        ("cat > ~root/.config/shguard/config.toml", Decision::Ask),
     ];
 
     for (command, expected) in cases {

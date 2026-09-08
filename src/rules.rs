@@ -1750,7 +1750,7 @@ pub(crate) enum PathForm {
 /// name. Used by [`lexical_normalize`] to route these tokens to
 /// [`PathForm::DirStack`]/[`PathForm::Opaque`] (issue #88) instead of
 /// [`PathForm::NamedUserHome`]/[`NamedUserHomeEscapes`].
-fn is_dirstack_shape(prefix: &str) -> bool {
+pub(crate) fn is_dirstack_shape(prefix: &str) -> bool {
     if prefix == "+" || prefix == "-" {
         return true;
     }
