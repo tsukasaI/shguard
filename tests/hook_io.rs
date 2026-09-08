@@ -85,13 +85,20 @@ fn malformed_stdin_fails_closed_without_crashing() {
     assert!(!permission_reason(&output).is_empty());
 }
 
-/// A non-Bash tool call is out of scope for shguard and is allowed through
-/// unguarded rather than asking on every non-shell tool call.
+/// A non-Bash tool call is out of scope for shguard and genuinely defers to
+/// Claude Code's normal permission flow (issue #462) — no `permissionDecision`
+/// field at all, rather than an explicit `allow` that would auto-approve it.
 #[test]
-fn non_bash_tool_allows() {
+fn non_bash_tool_defers() {
     let stdin = r#"{"tool_name":"Read","tool_input":{"file_path":"/etc/passwd"},"hook_event_name":"PreToolUse"}"#;
     let output = run_hook(stdin);
-    assert_eq!(permission_decision(&output), "allow");
+    assert!(output["hookSpecificOutput"]["permissionDecision"].is_null());
+    assert_eq!(
+        output["hookSpecificOutput"]["hookEventName"]
+            .as_str()
+            .expect("hookEventName should be a string"),
+        "PreToolUse"
+    );
 }
 
 /// `--version` prints the crate version and does not touch stdin.
@@ -372,19 +379,19 @@ fn non_string_permission_mode_and_agent_fields_do_not_change_the_decision() {
         r#"{"tool_name":"Bash","tool_input":{"command":"echo hello"},"permission_mode":123}"#,
         r#"{"tool_name":"Bash","tool_input":{"command":"echo hello"},"agent_id":{"x":1}}"#,
         r#"{"tool_name":"Bash","tool_input":{"command":"echo hello"},"agent_type":["a"]}"#,
-        r#"{"tool_name":"Read","tool_input":{},"permission_mode":123}"#,
     ] {
         let output = run_hook(stdin);
         assert_eq!(
             permission_decision(&output),
-            if stdin.contains("\"tool_name\":\"Read\"") {
-                "allow"
-            } else {
-                baseline.as_str()
-            },
+            baseline.as_str(),
             "non-string field changed the decision for {stdin:?}"
         );
     }
+
+    // A non-Bash `tool_name` still genuinely defers (no `permissionDecision`
+    // field at all — issue #462) regardless of a wrong-typed `permission_mode`.
+    let output = run_hook(r#"{"tool_name":"Read","tool_input":{},"permission_mode":123}"#);
+    assert!(output["hookSpecificOutput"]["permissionDecision"].is_null());
 }
 
 #[test]

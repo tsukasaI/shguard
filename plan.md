@@ -60,9 +60,14 @@ docs.anthropic.com/en/docs/claude-code/hooks).
   }
   ```
 
-  `permissionDecision` ∈ `allow` / `deny` / **`ask`** / `defer`. `ask` escalates
-  to the normal user confirmation dialog — this is what makes shguard's
-  three-way `Verdict` directly representable. Exit 2 is an alternative hard
+  `permissionDecision` ∈ `allow` / `deny` / **`ask`** only, with no `defer`
+  value (re-verified 2026-09-08, issue #462; `src/adapter.rs`'s own doc is
+  the authoritative re-verification). `ask` escalates to the normal user
+  confirmation dialog — this is what makes shguard's three-way `Verdict`
+  directly representable. Genuinely deferring to Claude Code's normal
+  permission flow, for a non-Bash `tool_name` (out of scope for shguard),
+  means omitting `permissionDecision` from the output entirely, not
+  emitting a `defer` value that doesn't exist. Exit 2 is an alternative hard
   block (stderr fed to the model, stdout ignored); shguard uses the JSON path
   exclusively so all three decisions travel one mechanism.
 - Registration: `settings.json` → `hooks.PreToolUse[].matcher: "Bash"`,
