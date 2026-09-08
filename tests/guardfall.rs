@@ -1642,3 +1642,44 @@ fn guardfall_repeated_overflowing_tilde_runs_do_not_overflow_the_stack() {
     let verdict = shguard::analyze(&format!("echo {word}"));
     assert_eq!(verdict.decision(), Decision::Allow);
 }
+
+/// Issue #448: a same-invocation `alias NAME=VALUE` was never linked to a
+/// later bare-word call the way a same-line function definition already is
+/// (issue #75) — with `shopt -s expand_aliases` set and the call on a LATER
+/// line of the same command string, real non-interactive bash does expand
+/// it, but shguard Allowed. `scan_alias_definition_floor` now recurses the
+/// alias's own value unconditionally, the same way `evaluate_function_
+/// definition` already does for a function body.
+#[test]
+fn guardfall_shopt_expand_aliases_two_line_alias_call_blocks() {
+    let command = "shopt -s expand_aliases; alias x=\"rm -rf /\"\nx";
+    let verdict = shguard::analyze(command);
+    assert_eq!(verdict.decision(), Decision::Block);
+}
+
+/// Non-executing variant listed in issue #448 so it is never re-filed as a
+/// bypass: `alias x="..."; x` on one line does not execute in real
+/// non-interactive bash (aliases are off, and the line is parsed before the
+/// alias exists) — but since #448's fix mirrors #75's own unconditional
+/// function-body evaluation (a defined-but-never-called dangerous function
+/// already blocks, `eager_function_body_evaluation_blocks_even_though_the_
+/// call_is_a_bare_word`), the alias DEFINITION alone floors this to Block
+/// too, regardless of the trailing call ever running.
+#[test]
+fn guardfall_alias_same_line_no_expand_aliases_still_blocks_on_definition_alone() {
+    let command = "alias x=\"rm -rf /\"; x";
+    let verdict = shguard::analyze(command);
+    assert_eq!(verdict.decision(), Decision::Block);
+}
+
+/// Second non-executing variant from issue #448: `bash -ic x` does not
+/// inherit the alias from a non-interactive parent shell either. Same
+/// reasoning as the sibling test above — the alias's own definition still
+/// floors the line to Block on its own, independent of whether `bash -ic x`
+/// itself would ever expand it.
+#[test]
+fn guardfall_alias_bash_ic_call_still_blocks_on_definition_alone() {
+    let command = "alias x=\"rm -rf /\"; bash -ic x";
+    let verdict = shguard::analyze(command);
+    assert_eq!(verdict.decision(), Decision::Block);
+}
