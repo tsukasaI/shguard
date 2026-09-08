@@ -360,7 +360,7 @@ targets = [
 # targets only) and stay Allow.
 [[command]]
 id = "rm-recursive-dangerous-target"
-reason = "rm -r against a root-level or device target deletes every writable file there, non-interactively"
+reason = "rm -r against a root-level or device target deletes every writable file there, without needing -f"
 command = "rm"
 required_flags = ["r|R|--recursive"]
 targets = [
@@ -614,9 +614,7 @@ command = "blkdiscard"
 # issue #453: util-linux mkfs defaults to ext2 when -t/--type is omitted, so
 # a bare `mkfs <device>` is exactly as destructive as `mkfs -t ext4 <device>`
 # — it has no informational default mode besides -V/--help, same "any bare
-# invocation is dangerous" shape as shred/blkdiscard above. Dropping the
-# former `required_flags = ["t|--type"]` closes that gap instead of trying
-# to enumerate every non-destructive flag.
+# invocation is dangerous" shape as shred/blkdiscard above.
 [[command]]
 id = "mkfs-dispatcher-any-filesystem"
 reason = "mkfs formats a filesystem (ext2 by default without -t/--type), destroying all data on the target"

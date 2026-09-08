@@ -10656,11 +10656,11 @@ mod tests {
         // `rm-recursive-force-dangerous-target` requires BOTH `r` and `f` —
         // having only `-r` must not satisfy *that* rule's flag gating, even
         // with an unresolvable tail. `match_command_except_target` may
-        // still return the flagless `self-protect-config-rm-tilde` rule
+        // still return the r-only `rm-recursive-dangerous-target` rule
         // instead (the same fail-safe "unresolvable target could be
         // anything" refinement issue #22 extends to `rm`, already present
         // for `cp`/`tee`/`mv`/`install`/`dd`) — what must not happen is the
-        // *dangerous-target* rule firing on an incomplete flag set.
+        // *force*-gated rule firing on an incomplete flag set.
         let rules = Rules::embedded().unwrap();
         let cmd = argv_with_unresolvable_tail(&["rm", "-r"]);
         let matched = rules.match_command_except_target(&cmd);
