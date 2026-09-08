@@ -1,17 +1,23 @@
 //! Stage 3 of the pipeline (plan.md §1.1): mechanical, exact matching of a
 //! resolved argv against `rules/blocklist.toml`/`rules/allowlist.toml`.
 //!
-//! Three rule kinds:
+//! Four rule kinds:
 //! - [`CommandRule`] matches one simple command's argv: a command-name
 //!   matcher, a set of required flags, a set of required bare tokens
 //!   (subcommands/positional arguments), a set of target matchers, and a
 //!   set of except-target matchers (issue #30: "matches unless the target
 //!   is one of these shapes").
 //! - [`PipelineRule`] matches the shape of a whole pipeline (the ported
-//!   `curl|wget → sh` installer-pipe pattern only — the general decode-pipe
-//!   gate is a later issue, plan.md §1.1 stage 4).
+//!   `curl|wget → sh` installer-pipe pattern, plus issue #268's
+//!   `find | xargs rm -f` shape). The more general decode-pipe
+//!   gate (rules 5b/5c: a `base64`/`gunzip`/… decode stage piped into an
+//!   interpreter) is implemented separately, structurally, in
+//!   `crate::gate::evaluate_pipeline_shape` rather than as rule data here.
 //! - [`RedirectRule`] matches a redirection target (output/append only)
 //!   against a dangerous-path list (block devices, critical system files).
+//! - [`TokenRule`] (issue #426) matches a literal, case-sensitive substring
+//!   against every assignment name/resolved argv word of a simple command,
+//!   independent of the command name.
 //!
 //! Everything here operates on already-normalised [`NormalizedWord`] values
 //! (`crate::normalize`, B2) — no raw strings, no regex over the command
@@ -20,9 +26,12 @@
 //!
 //! # Parse, don't validate
 //!
-//! [`CommandRuleDto`]/[`PipelineRuleDto`]/[`RedirectRuleDto`]/[`RulesFileDto`] are the only
-//! serde-aware types in this module, private to it — the rest of the crate
-//! (and every other module) never sees a serde attribute or a TOML type
+//! [`CommandRuleDto`]/[`PipelineRuleDto`]/[`RedirectRuleDto`]/[`RulesFileDto`]
+//! (and the other `*Dto`/`*File` types this module derives `Deserialize`
+//! for: `TargetDto`, `TokenRuleDto`, `AllowlistFileDto`, `UserConfigFileDto`,
+//! `AskOutcomeTableDto`) are the only serde-aware types in this module,
+//! private to it — the rest of the crate (and every other module) never
+//! sees a serde attribute or a TOML type
 //! (`coding-guidelines/principles.md`, "dependencies point inward"). Loading
 //! is a one-step boundary: [`Rules::parse`]/[`Allowlist::parse`] either
 //! return a fully-valid, typed rule set, or an [`RulesError`] — a duplicate
@@ -2349,8 +2358,13 @@ impl CommandRule {
     ///
     /// Blast radius beyond the motivating example (mirrors
     /// [`Self::matches_except_flags`]'s own documented trade-off for
-    /// `git-no-verify-any-subcommand`, which floors EVERY `git` invocation
-    /// containing an unresolvable word — no per-command semantics, module
+    /// `git-no-verify-any-subcommand` — a `required_flags`-only rule with
+    /// no `required_tokens`; no longer an embedded rule since issue #146
+    /// split it into per-subcommand rules, but still pinned as a synthetic
+    /// rule in
+    /// `matches_except_flags_no_required_tokens_rule_fires_regardless_of_subcommand`
+    /// below — which would floor EVERY `git` invocation containing an
+    /// unresolvable word — no per-command semantics, module
     /// docs): any `sed` invocation whose entire tail is a single
     /// unresolvable word floors to `Ask` via `self-protect-config-sed-tilde`,
     /// regardless of any actual connection to shguard's config path — e.g.
@@ -2542,9 +2556,13 @@ impl CommandRule {
     /// half of a rule's constraints — same as [`Self::matches_except_target`]'s
     /// own target-ambiguity check. Combined with [`Self::relaxed_required_tokens_match`]
     /// trivially returning `true` when a rule has no `required_tokens` at
-    /// all, a rule like `git-no-verify-any-subcommand` (`required_flags =
-    /// ["--no-verify"]`, no `required_tokens`) floors EVERY `git`
-    /// invocation containing an unresolvable word to `Ask`, regardless of
+    /// all, a rule like the now-hypothetical `git-no-verify-any-subcommand`
+    /// (`required_flags = ["--no-verify"]`, no `required_tokens`; no longer
+    /// an embedded rule since issue #146 split it into per-subcommand rules
+    /// — see the synthetic rule pinned in
+    /// `matches_except_flags_no_required_tokens_rule_fires_regardless_of_subcommand`
+    /// below) would floor EVERY `git` invocation containing an unresolvable
+    /// word to `Ask`, regardless of
     /// subcommand — not just the `find-delete`/`truncate-zero`/
     /// `git-push-force` shapes this rule was written against. That is the
     /// intended fail-closed consequence of having no positional
@@ -6211,8 +6229,9 @@ fn reject_duplicate_ids<'a>(ids: impl Iterator<Item = &'a str>) -> Result<(), Ru
 // Rules (blocklist)
 // ---------------------------------------------------------------------
 
-/// A loaded, validated rule set: [`CommandRule`]s, [`PipelineRule`]s, and
-/// [`RedirectRule`]s, every id unique within the set.
+/// A loaded, validated rule set: [`CommandRule`]s, [`PipelineRule`]s,
+/// [`RedirectRule`]s, and [`TokenRule`]s (issue #426), every id unique
+/// within the set.
 ///
 /// `ask_rules` is always empty for a [`Self::parse`]d/[`Self::embedded`]
 /// set — `RulesFileDto`/`rules/blocklist.toml` have no `[[ask]]` array of

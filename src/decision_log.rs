@@ -7,7 +7,7 @@
 //! [`FileDecisionLog`] implements [`crate::DecisionLogSink`], the port
 //! [`crate::analyze_with_policy`] appends through — the composition root
 //! (`src/bin/shguard.rs`) constructs one instance and passes it to both
-//! `src/adapter.rs`'s hook path and the `check` subcommand (issue #408),
+//! `src/adapter.rs`'s hook path and the `check` subcommand (issue #109),
 //! so this module's concrete writer is never named outside this file and
 //! the composition root. The call itself still happens inside
 //! `analyze_with_policy`, not at either caller (the exact same divergence

@@ -44,8 +44,11 @@
 //! less free memory than the runaway worker can allocate within
 //! [`EVALUATION_TIMEOUT`] gets SIGKILLed by the OS before `recv_timeout`
 //! ever returns — empty stdout, the exact fail-open condition this whole
-//! watchdog exists to close. `main` is the *only* place that writes to
-//! stdout for exactly this reason: if the worker happened to finish and
+//! watchdog exists to close. On the hook path, `main` is the *only* place
+//! that writes to stdout for exactly this reason (`run_check`, `run_init`,
+//! `check_config`, and `--version` are separate subcommands that write
+//! their own stdout output and never race this watchdog): if the worker
+//! happened to finish and
 //! try to emit its own decision at, say, t=2.1s — just after `main`'s 2s
 //! timeout already fired — two JSON decisions on stdout would corrupt
 //! Claude Code's hook protocol, which expects exactly one. Splitting
@@ -848,9 +851,16 @@ const CHECK_USAGE: &str = "usage: shguard check <command> [--json] [--permission
 /// Deliberately outside `main`'s `catch_unwind` boundary, exactly like
 /// [`check_config`]: this is a human- or CI-triggered, one-shot invocation
 /// outside the PreToolUse hook contract entirely, with none of [`run`]'s
-/// "never hang, always emit exactly one decision" obligations, so a panic
-/// here can simply propagate as a normal process crash rather than needing
-/// to fail closed. It is NOT outside a wall-clock bound, though:
+/// "never hang, always emit exactly one decision" obligations. Evaluation
+/// itself still runs on a separate worker thread (`evaluate_with_timeout`'s
+/// `shguard-check-eval`, mirroring [`run`]'s own hook-path setup), so a
+/// panic there does not crash the process directly — the worker thread
+/// dies, the channel disconnects, and this function reports it as the
+/// documented [`EvalTimeoutError::Disconnected`] exit-2 message rather than
+/// needing to fail closed itself (except on `evaluate_with_timeout`'s own
+/// spawn-failure fallback, which runs the evaluation inline with no worker
+/// thread at all — a panic there DOES propagate as an ordinary process
+/// crash, same as this function's own reasoning above). It is NOT outside a wall-clock bound, though:
 /// [`evaluate_with_timeout`] wraps the [`shguard::analyze_with_policy`] call
 /// (which — issue #108 — may append to a user-configured
 /// `decision_log_path` after its own internal gate-evaluation watchdog
@@ -1053,8 +1063,10 @@ fn run_check(args: &[std::ffi::OsString]) -> i32 {
 /// [`evaluate_with_timeout`]'s outer bound. `analyze_with_policy` already
 /// bounds its own gate evaluation internally to `EVALUATION_TIMEOUT` (see
 /// `src/watchdog.rs`) and returns its own fail-closed `Ask` verdict on that
-/// internal trip — this margin must strictly exceed that internal deadline
-/// so a genuine internal time-budget trip has time to be sent back over the
+/// internal trip — it is `EVALUATION_TIMEOUT + CHECK_TIMEOUT_GRACE` (this
+/// function's outer bound), not this margin alone, that must strictly
+/// exceed that internal deadline, so a genuine internal time-budget trip
+/// has time to be sent back over the
 /// channel and reported as the documented `Decision: Ask` (with its verdict
 /// still logged), rather than losing the race to this function's own outer
 /// `recv_timeout` and being reported instead as `run_check`'s generic
@@ -1150,14 +1162,18 @@ fn evaluate_with_timeout(
 /// So does the watchdog timeout: `run` executes entirely on the worker
 /// thread `main` spawns, so a hang anywhere in here (stdin read, config
 /// load, or command evaluation) is bounded by [`EVALUATION_TIMEOUT`] the
-/// same way. The `--version`/`--check-config` branches in `main` are
-/// deliberately outside both boundaries: `--version` never touches config,
-/// stdin, or command evaluation, so there is nothing there for the
-/// fail-closed guarantee to protect; `--check-config` ([`check_config`])
-/// does load config, but as a human- or CI-triggered, one-shot diagnostic
-/// run outside the PreToolUse hook contract entirely — it has none of
-/// `run`'s "never hang, always emit exactly one decision" obligations, so
-/// it needs neither the panic boundary nor the watchdog.
+/// same way. The `--version`/`--check-config`/`check`/`init` branches in
+/// `main` are all deliberately outside both boundaries: `--version` never
+/// touches config, stdin, or command evaluation, so there is nothing there
+/// for the fail-closed guarantee to protect; `--check-config`
+/// ([`check_config`]), `check` ([`run_check`]), and `init` ([`run_init`])
+/// do load config (`check`/`init` also read/write files), but each is a
+/// human- or CI-triggered, one-shot diagnostic or scaffolding run outside
+/// the PreToolUse hook contract entirely — none of them has `run`'s "never
+/// hang, always emit exactly one decision" obligations, so none needs the
+/// panic boundary or the watchdog (`run_check` does still bound its own
+/// evaluation call separately, via `evaluate_with_timeout` — see that
+/// function's docs).
 fn run(early_tx: &Sender<EarlyInfo>, log_state: Arc<LogState>) -> serde_json::Value {
     // Test-only panic injection (issue #52): there is no currently-known
     // reachable panic in this binary to regression-test the `catch_unwind`

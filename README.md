@@ -1204,9 +1204,9 @@ This is a partial mitigation, not a complete one:
 
 - A redirection target that is itself a `$()`/backtick substitution has its
   *inner command* checked (issue #51) — but the target *path* it resolves to
-  is not checked against this list at all (see Limitations below), so
-  `cat > path <<EOF` still is not caught this way, and a `SHGUARD_CONFIG`
-  override set via a shell profile is outside shguard's visibility entirely.
+  is not checked against this list at all (see Limitations below). A
+  `SHGUARD_CONFIG` override set via a shell profile is outside shguard's
+  visibility entirely.
 - A relative path after `cd`-ing into the config directory *within the same
   command line* (`cd ~/.config/shguard && cp evil.toml config.toml`) IS
   caught (issue #103): shguard statically resolves a same-line `cd`/`pushd`

@@ -54,10 +54,17 @@
 //! bound different scopes (this one only the evaluation pipeline; the
 //! binary's also config load and stdin read) and the binary's bound is
 //! always at least as strict — its wall-clock deadline starts earlier
-//! (before stdin is even read) and its absolute memory cap is always `<=`
-//! this module's `baseline + `[`MEMORY_LIMIT_BYTES`]` (`baseline` cannot be
-//! negative) — so the binary's watchdog trips first, or the evaluation
-//! finishes before either does. The extra thread-spawn is a small,
+//! (before stdin is even read), so for the time bound the binary's
+//! watchdog always trips first (or the evaluation finishes before either
+//! does). The memory bound is not ordered the same way: its absolute cap
+//! is always `<=` this module's `baseline + `[`MEMORY_LIMIT_BYTES`]`
+//! (`baseline` cannot be negative), but both watchdogs poll RSS on
+//! independent, unsynchronised cycles (`src/bin/shguard.rs`'s `LogState`
+//! docs cover this), so whichever one's poll happens to land
+//! after the crossing observes it first — the binary's watchdog usually
+//! trips first, given the lower-or-equal cap, but this module's can win
+//! the race too. Either way the outcome is the same fail-closed `Ask`. The
+//! extra thread-spawn is a small,
 //! accepted cost, not a correctness gap.
 
 use std::sync::mpsc::RecvTimeoutError;
