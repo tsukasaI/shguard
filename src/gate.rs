@@ -5775,8 +5775,13 @@ fn scan_alias_definition_floor(
     for word in rest {
         let value = match word.resolution() {
             Resolution::Resolved(token) => match token.split_once('=') {
-                Some((_, value)) => value,
-                None => continue,
+                // An empty value (`alias x=`) defines a real but inert
+                // alias — bash never treats an empty expansion as a
+                // parse-worthy command, so there's nothing here to recurse
+                // into (`parser::parse("")` itself errors, which would
+                // otherwise wrongly Ask-floor this benign shape).
+                Some((_, value)) if !value.trim().is_empty() => value,
+                _ => continue,
             },
             Resolution::Unresolvable(_) => {
                 raise_expansion_floor(
@@ -8069,9 +8074,32 @@ fn apply_cwd_effect(cwd: &mut CwdState, argv: &[NormalizedWord], env: &Env) {
         "pushd" => apply_pushd(cwd, rest, env),
         "popd" => apply_popd(cwd, rest),
         "source" | "eval" | "." => cwd.poison(),
+        // Issue #448: an `alias NAME=VALUE` definition's value runs inline
+        // in the current shell (same reasoning as `scan_alias_definition_
+        // floor`'s own `CwdState::seed_unknown_stack` choice), so a value
+        // that itself contains a `cd`/`pushd`/etc. can move the CALLER's own
+        // cwd once the alias is later invoked — same poison-unconditionally
+        // posture `source`/`eval`/`.` already take above, rather than
+        // re-parsing the value to check (this module never re-parses a raw
+        // string just to decide whether to poison; `eval`'s own arm is the
+        // precedent). `alias -p`/a bare `alias`/an `alias NAME` lookup with
+        // no `=` defines nothing new, so only a genuine assignment argument
+        // triggers this.
+        "alias" if rest.iter().any(is_alias_assignment_argument) => cwd.poison(),
         // "dirs" (list-only) and every ordinary command fall through here —
         // neither touches cwd.
         _ => {}
+    }
+}
+
+/// Whether `word` is an `alias` argument that actually defines something
+/// (`NAME=VALUE`) rather than a flag (`-p`) or a bare lookup name — shared by
+/// [`apply_cwd_effect`]'s poisoning check and [`scan_alias_definition_
+/// floor`]'s own recursion, which the same shape gates.
+fn is_alias_assignment_argument(word: &NormalizedWord) -> bool {
+    match word.resolution() {
+        Resolution::Resolved(token) => token.contains('='),
+        Resolution::Unresolvable(_) => true,
     }
 }
 
@@ -8219,7 +8247,8 @@ fn apply_popd(cwd: &mut CwdState, rest: &[NormalizedWord]) {
 /// reach the CALLER's own cwd-tracking scope (a `for`/`while`/`until`
 /// loop's own body/condition), a simple command whose effective name is
 /// one of the cwd-changing directives [`apply_cwd_effect`] tracks
-/// (`cd`/`pushd`/`popd`/`source`/`.`/`eval`) OR whose effective command
+/// (`cd`/`pushd`/`popd`/`source`/`.`/`eval`/an `alias NAME=VALUE`
+/// assignment) OR whose effective command
 /// couldn't be resolved at all (fail-closed, mirroring
 /// [`apply_cwd_effect`]'s own `effective_command` guard: an unresolvable
 /// name might itself be one of those). `dirs` and an ordinary command are
@@ -8264,8 +8293,13 @@ fn command_may_change_cwd(command: &Command) -> bool {
             }
             match crate::rules::effective_command(&argv) {
                 None => true,
-                Some((name, _)) => {
+                Some((name, rest)) => {
                     matches!(name, "cd" | "pushd" | "popd" | "source" | "eval" | ".")
+                        // Issue #448: same gate `apply_cwd_effect`'s own
+                        // "alias" arm uses — only a genuine `NAME=VALUE`
+                        // assignment argument can poison; `alias -p`/a bare
+                        // lookup defines nothing new.
+                        || (name == "alias" && rest.iter().any(is_alias_assignment_argument))
                 }
             }
         }

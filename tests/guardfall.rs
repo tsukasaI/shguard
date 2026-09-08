@@ -1683,3 +1683,38 @@ fn guardfall_alias_bash_ic_call_still_blocks_on_definition_alone() {
     let verdict = shguard::analyze(command);
     assert_eq!(verdict.decision(), Decision::Block);
 }
+
+/// Fable-review follow-up to #448: an `alias NAME=VALUE` value runs inline
+/// in the current shell when later invoked, exactly like a same-line
+/// function body already does (`evaluate_function_definition`'s own
+/// definition-site `cwd.poison()`) and like `eval`'s argument does — so a
+/// `cd` hidden inside an alias's value must poison the CALLER's own cwd
+/// tracking the same way those two already do, not silently leave it
+/// resolved. Before this follow-up, `cp` below composed against the known
+/// (but stale, since only the ALIAS's value would really run the `cd`)
+/// `~/.config/shguard` anchor and Allowed straight through
+/// `self-protect-config-cp-tilde`.
+#[test]
+fn guardfall_alias_definition_with_a_cd_poisons_cwd_like_a_function_definition_does() {
+    let function_definition = "f() { cd ~/.config/shguard; }; cp evil.toml config.toml";
+    let alias_definition = "alias x=\"cd ~/.config/shguard\"; cp evil.toml config.toml";
+    assert_eq!(
+        shguard::analyze(function_definition).decision(),
+        shguard::analyze(alias_definition).decision(),
+    );
+    assert_ne!(
+        shguard::analyze(alias_definition).decision(),
+        Decision::Allow
+    );
+}
+
+/// False-positive pin, sibling to the poisoning test above: `alias x=""`
+/// (or any `NAME=VALUE` pair whose value is empty/all-whitespace) defines a
+/// real but inert alias in bash — there is nothing to recurse into or to
+/// poison `cwd` over, and `parser::parse("")` itself errors, which would
+/// otherwise wrongly floor this benign shape to `Ask`.
+#[test]
+fn guardfall_alias_empty_value_argument_still_allows() {
+    let verdict = shguard::analyze("alias x=\"\"");
+    assert_eq!(verdict.decision(), Decision::Allow);
+}
