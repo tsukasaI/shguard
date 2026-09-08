@@ -983,9 +983,11 @@ targets = [
 # (read-write) is the canonical reverse-shell/data-exfil primitive; plain
 # `>`/`>>` reach the same connection side effect and are covered too, since
 # `normalized_prefix` matches by target path alone, not by redirection
-# kind. A read-only `<` is NOT covered — `crate::gate`'s
-# `is_redirect_write_applicable` never submits a plain `Input` target to
-# any redirect rule at all (pre-existing, unrelated to this rule).
+# kind. Issue #455: a read-only `<` (`cat </dev/tcp/host/port`, `exec
+# 3</dev/tcp/host/port`) is covered too — `crate::gate`'s
+# `is_redirect_write_applicable` special-cases a plain `Input` target
+# against this rule's own `/dev/tcp/`/`/dev/udp/` prefixes, since opening
+# the pseudo-device for reading still establishes the connection.
 [[redirect]]
 id = "redirect-network-pseudo-device"
 reason = "redirecting to /dev/tcp or /dev/udp opens a live network connection (the reverse-shell/data-exfil primitive behind `exec 3<>/dev/tcp/host/port`)"
