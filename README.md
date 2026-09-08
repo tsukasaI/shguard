@@ -1099,8 +1099,9 @@ when `ask_outcome = "deny"` is configured rather than always staying
 ### Protecting the config file itself
 
 shguard automatically denies `tee`/`cp`/`mv`/`install`/`sed -i`/`-I`
-(or `--in-place`)/`dd of=`/`rm`/`unlink`/`ln`/`rsync`/`rmdir`/`perl -i`/
-`patch` writes targeting its own resolved config path, and the literal
+(or `--in-place`)/`dd of=`/`dcfldd of=`/`rm`/`unlink`/`ln`/`rsync`/
+`rmdir`/`perl -i`/`patch` writes targeting its own resolved config path,
+and the literal
 `~/.config/shguard/` token for any user — an agent shouldn't be able to
 edit its own guardrails via a shell command. `find` combined with
 `-exec`/`-execdir`/`-ok`/`-okdir` against the config path asks rather
@@ -1126,10 +1127,31 @@ even though the ancestor path never appears in the direct-target list
 above (issue #101). This is `ask`, not `deny`: unlike a direct hit on the
 config path itself, `targets` matching can't tell `mv src ~` (an
 ordinary, non-destructive destination) apart from `mv ~ /tmp` (the same
-shape, genuinely destructive) — only the recursively-destructive form of
+shape, genuinely destructive) — only the recursively-DELETING form of
 each command is covered (a flagless `rm ~` can't remove a non-empty
-directory at all; a flagless `rsync src ~` is additive, not
-destructive).
+directory at all; a flagless `rsync src ~` never removes extraneous
+files already at `~`, since that needs `--delete*`).
+
+A flagless `rsync`/`cp` can still OVERWRITE files already at an
+ancestor, though, a distinct danger issue #450 covers separately: the
+same ancestor list (`~/.config`, `~`, and their resolved equivalents)
+also asks for a recursive copy or archive extraction *into* an ancestor
+of the config directory: flagless `rsync` (recursion has too many
+spellings, `-a`/`-r`/`--recursive`/`--archive`/a bundled short-flag
+cluster like `-rv`, to enumerate without leaving a bypass, same as the
+existing direct rsync rule above), `cp -r`/`-R`/`-a`/`--recursive`/
+`--archive` (including via `-t`/`--target-directory=`), `tar
+-x`/`--extract`/`--get` combined with `-C`/`--directory`, and `unzip -d`
+(including its concatenated `-d<dir>` spelling, per `unzip`'s own manual
+page). A payload that happens to contain `shguard/config.toml`
+overwrites the config while the command line only ever names the
+ancestor directory as its destination, so these are just as dangerous
+as the delete/rename half above despite looking merely additive on the
+surface. Like the delete/rename half, `targets` matching can't tell a
+source position from a destination one apart, so `rsync -a
+~/.config/ backup:/x/` or `cp -r ~/.config /tmp/backup` (reading FROM
+the ancestor, ordinary) also ask, the same trade-off `mv src ~` already
+accepts above.
 
 This is a partial mitigation, not a complete one:
 

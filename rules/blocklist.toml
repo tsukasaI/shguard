@@ -1159,9 +1159,14 @@ targets = [{ normalized_prefix = "~/.config/shguard/", case_insensitive = true }
 # stop a SCRIPTED self-disable (a human sees a real prompt in every
 # permission mode measured there), which is the property self-protection
 # actually needs. Scoped to the flags that make each command
-# recursively/destructively touch its target — a flagless `rm ~`
+# recursively/destructively DELETE at its target — a flagless `rm ~`
 # (no -r) can't remove a non-empty directory at all, and a flagless
-# `rsync src ~` is additive, not destructive.
+# `rsync src ~` never removes extraneous files already at `~` (that
+# needs `--delete*`). It can still OVERWRITE files already there,
+# though -- a distinct danger issue #450 covers separately, below, with
+# its own flagless `self-protect-config-ancestor-{cp,rsync-copy,
+# tar-extract,unzip}-tilde` family (no `--delete*` requirement, since
+# overwriting needs no such flag).
 #
 # `rm-recursive-force-dangerous-target` above already Blocks
 # `rm -rf ~`/`rm -rf /` outright; `match_command` is worst-wins
@@ -1256,6 +1261,74 @@ required_flags = [
     "--delete|--delete-before|--delete-during|--delete-after|--delete-excluded|--delete-delay|--del|--delete-missing-args",
 ]
 targets = [{ normalized = "~" }, { normalized = "." }]
+
+# Issue #450: the literal-`~` half of the recursive-copy/extract ancestor
+# family that `src/config.rs`'s `ancestor_rules_toml` generates for the
+# RESOLVED config path (`shguard-self-protect-config-ancestor-{cp,
+# rsync-copy,tar-extract,unzip}-<suffix>`) -- a spelling using `~`
+# directly never reaches that dynamically-generated, resolved-path rule
+# set (`normalize.rs` never expands `~`/`$HOME`), the same gap the
+# rm/mv/rsync-delete tilde rules above already close for the delete/
+# rename half.
+[[command]]
+id = "self-protect-config-ancestor-cp-tilde"
+decision = "ask"
+reason = "recursively copying into an ancestor directory of shguard's own config directory must never be scripted"
+command = "cp"
+required_flags = ["r|R|a|--recursive|--archive"]
+# Same bare-`~` exclusion as the tar/unzip rules below: only `~/.config`
+# gets the `-t`/`--target-directory=` concatenated-flag alternatives
+# (mirrors `cp-write-device`'s own target shape).
+targets = [
+    { normalized = "~/.config", case_insensitive = true },
+    { strip = "--target-directory=", normalized = "~/.config", case_insensitive = true },
+    { strip = "-t", normalized = "~/.config", case_insensitive = true },
+    { normalized = "~" },
+]
+
+[[command]]
+id = "self-protect-config-ancestor-rsync-copy-tilde"
+decision = "ask"
+reason = "recursively copying into an ancestor directory of shguard's own config directory must never be scripted"
+command = "rsync"
+targets = [
+    { normalized = "~/.config", case_insensitive = true },
+    { normalized = "~" },
+]
+
+[[command]]
+id = "self-protect-config-ancestor-tar-extract-tilde"
+decision = "ask"
+reason = "extracting an archive into an ancestor directory of shguard's own config directory must never be scripted"
+command = "tar"
+required_flags = ["x|--extract|--get", "C|--directory"]
+# The bare `~` target deliberately has NO `strip = "-C"`/`strip =
+# "--directory="` alternative, unlike `~/.config` above -- mirroring
+# `tar-extract-over-root-or-home`'s own split between its "/" target
+# (both `strip` forms) and its bare `~` target (neither): a concatenated
+# `-C~`/`--directory=~` naming bare home is left to the separate
+# `directory_equals_tilde`/dirstack structural floors (issues #88/#115,
+# `src/rules.rs`) rather than this rule's own hard match.
+targets = [
+    { normalized = "~/.config", case_insensitive = true },
+    { strip = "-C", normalized = "~/.config", case_insensitive = true },
+    { strip = "--directory=", normalized = "~/.config", case_insensitive = true },
+    { normalized = "~" },
+]
+
+[[command]]
+id = "self-protect-config-ancestor-unzip-tilde"
+decision = "ask"
+reason = "extracting an archive into an ancestor directory of shguard's own config directory must never be scripted"
+command = "unzip"
+required_flags = ["d"]
+# Same bare-`~` exclusion as the tar rule above, for consistency: only
+# `~/.config` gets the `strip = "-d"` concatenated-flag alternative.
+targets = [
+    { normalized = "~/.config", case_insensitive = true },
+    { strip = "-d", normalized = "~/.config", case_insensitive = true },
+    { normalized = "~" },
+]
 
 # Known gap (not fixed here): some rsync implementations (e.g. macOS's
 # default openrsync) accept unambiguous long-option PREFIXES, so

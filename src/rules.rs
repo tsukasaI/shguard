@@ -10429,11 +10429,95 @@ mod tests {
         let rule = rules
             .match_command(&argv(&["rsync", "-a", "--delete", "/tmp/x/", "~/.config/"]))
             .unwrap();
+        assert_eq!(
+            rule.id().as_str(),
+            "self-protect-config-ancestor-rsync-tilde"
+        );
+        assert_eq!(rule.decision(), Decision::Ask);
+    }
+
+    // Issue #450's recursive-copy/extract half of the ancestor family --
+    // asserting `rule.id()`, not just `Decision::Ask`, so a future
+    // unrelated Ask rule on the same command can't silently make this
+    // pass for the wrong reason (unlike the plain decision-only checks
+    // above, added before that failure mode was on file).
+    #[test]
+    fn self_protect_ancestor_rsync_copy_literal_tilde_asks() {
+        let rules = Rules::embedded().unwrap();
+        let rule = rules
+            .match_command(&argv(&["rsync", "-a", "payload/", "~/.config/"]))
+            .unwrap();
+        assert_eq!(
+            rule.id().as_str(),
+            "self-protect-config-ancestor-rsync-copy-tilde"
+        );
         assert_eq!(rule.decision(), Decision::Ask);
     }
 
     #[test]
-    fn self_protect_ancestor_rsync_without_delete_does_not_match() {
+    fn self_protect_ancestor_cp_recursive_literal_tilde_asks() {
+        let rules = Rules::embedded().unwrap();
+        for cmd in [
+            argv(&["cp", "-r", "payload/.", "~/.config/"]),
+            argv(&["cp", "--archive", "payload/.", "~/.config/"]),
+            argv(&["cp", "-r", "payload", "--target-directory=~/.config"]),
+            argv(&["cp", "-r", "payload", "-t~/.config"]),
+        ] {
+            let rule = rules.match_command(&cmd).unwrap();
+            assert_eq!(rule.id().as_str(), "self-protect-config-ancestor-cp-tilde");
+            assert_eq!(rule.decision(), Decision::Ask);
+        }
+        // Flagless cp is additive at the destination, same as flagless
+        // rsync above -- not covered by this rule.
+        assert!(
+            rules
+                .match_command(&argv(&["cp", "payload", "~/.config/"]))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn self_protect_ancestor_tar_extract_literal_tilde_asks() {
+        let rules = Rules::embedded().unwrap();
+        for cmd in [
+            argv(&["tar", "-xf", "p.tar", "-C", "~/.config"]),
+            argv(&["tar", "-xf", "p.tar", "-C~/.config"]),
+            argv(&["tar", "-xf", "p.tar", "--directory=~/.config"]),
+        ] {
+            let rule = rules.match_command(&cmd).unwrap();
+            assert_eq!(
+                rule.id().as_str(),
+                "self-protect-config-ancestor-tar-extract-tilde"
+            );
+            assert_eq!(rule.decision(), Decision::Ask);
+        }
+    }
+
+    #[test]
+    fn self_protect_ancestor_unzip_literal_tilde_asks() {
+        let rules = Rules::embedded().unwrap();
+        for cmd in [
+            argv(&["unzip", "p.zip", "-d", "~/.config"]),
+            argv(&["unzip", "p.zip", "-d~/.config"]),
+        ] {
+            let rule = rules.match_command(&cmd).unwrap();
+            assert_eq!(
+                rule.id().as_str(),
+                "self-protect-config-ancestor-unzip-tilde"
+            );
+            assert_eq!(rule.decision(), Decision::Ask);
+        }
+    }
+
+    // Issue #450 added a flagless `rsync` ancestor rule
+    // (`self-protect-config-ancestor-rsync-copy-tilde`, tested above), so
+    // a flagless rsync no longer stays universally unmatched near the
+    // config directory the way this test's name once implied -- what it
+    // actually pins is narrower: `~/.config/other/` is a SIBLING/child of
+    // the ancestor, not the ancestor itself, so no ancestor rule (delete
+    // or copy) fires on it either way.
+    #[test]
+    fn self_protect_ancestor_rsync_non_ancestor_subdir_does_not_match() {
         let rules = Rules::embedded().unwrap();
         assert!(
             rules
