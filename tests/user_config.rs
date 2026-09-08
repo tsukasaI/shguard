@@ -1451,6 +1451,45 @@ fn write_to_intermediate_hop_of_a_two_hop_symlink_chain_is_denied() {
     assert_eq!(permission_decision(&output), "deny");
 }
 
+// issue #465: a symlinked config whose resolved target lives inside a
+// non-UTF-8-named directory used to have that directory's path silently
+// lossy-substituted (U+FFFD) when generating its self-protection rule --
+// a rule that can never match the real path it was meant to protect. Load
+// must now fail closed instead of scaffolding a rule that silently does
+// nothing. Linux-only: unlike the `SHGUARD_CONFIG`/`HOME`/`XDG_CONFIG_HOME`
+// non-UTF-8 tests above (which only need an env var's *bytes*, never an
+// actual path on disk), this one needs a real directory ENTRY with a
+// non-UTF-8 name -- APFS enforces valid UTF-8 filenames at the syscall
+// level and refuses to create one at all, while ext4 (Linux) treats a
+// filename as an opaque byte string and allows it.
+#[test]
+#[cfg(target_os = "linux")]
+fn config_dir_with_non_utf8_component_fails_closed_instead_of_lossy_substitution() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let real_dir = tempdir().expect("tempdir should create");
+    let non_utf8_dir = real_dir
+        .path()
+        .join(OsStr::from_bytes(&[b'x', 0xFF, 0xFE, b'y']));
+    fs::create_dir_all(&non_utf8_dir).expect("non-utf8-named dir should create");
+    let real_config = non_utf8_dir.join("config.toml");
+    fs::write(&real_config, "").expect("config file should write");
+
+    let home = tempdir().expect("tempdir should create");
+    let config_dir = home.path().join(".config").join("shguard");
+    fs::create_dir_all(&config_dir).expect("config dir should create");
+    std::os::unix::fs::symlink(&real_config, config_dir.join("config.toml"))
+        .expect("symlink should create");
+
+    let output = run_hook(
+        &bash_command("echo hi"),
+        &[("HOME", home.path().to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(permission_reason(&output).contains("UTF-8"));
+}
+
 #[test]
 fn cp_onto_resolved_config_path_is_blocked() {
     let (_dir, config_path) = write_config("");

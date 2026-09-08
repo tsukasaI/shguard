@@ -388,7 +388,7 @@ impl Policy {
             let case_insensitive = config_dir_is_case_insensitive();
             for (suffix, config_dir) in self_protection_directories(path)? {
                 let toml = self_protection_toml(
-                    &config_dir.to_string_lossy(),
+                    require_utf8_config_dir(&config_dir)?,
                     &suffix,
                     case_insensitive,
                     "config",
@@ -875,6 +875,23 @@ fn self_protection_directories(path: &Path) -> Result<Vec<(String, PathBuf)>, Co
     directories.extend(canonical_additions);
 
     Ok(directories)
+}
+
+/// `config_dir` as a UTF-8 `&str` for [`self_protection_toml`], or a
+/// fail-closed [`ConfigError::InvalidConfig`] instead of the
+/// `to_string_lossy` substitution this replaces (issue #465):
+/// `to_string_lossy` would silently swap in U+FFFD for a non-UTF-8
+/// component -- reachable only via a non-UTF-8 symlink target here (the
+/// equivalent `SHGUARD_CONFIG`/`XDG_CONFIG_HOME`/`HOME` env vars are
+/// already rejected by [`Policy::read_env_paths`]) -- baking a
+/// self-protection rule whose target string can never match the real
+/// path it was meant to protect.
+fn require_utf8_config_dir(config_dir: &Path) -> Result<&str, ConfigError> {
+    config_dir.to_str().ok_or_else(|| {
+        ConfigError::InvalidConfig(format!(
+            "config directory {config_dir:?} is not valid UTF-8"
+        ))
+    })
 }
 
 /// Denies `shguard init`, with or without `--force` (issue #435): unlike
@@ -1371,20 +1388,60 @@ fn write_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("config.toml");
-    let tmp_path = parent.join(format!(".{file_name}.tmp-{}", std::process::id()));
 
-    let result = (|| {
-        let mut file = std::fs::File::create(&tmp_path)?;
-        file.write_all(contents.as_bytes())?;
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(&tmp_path, path)
-    })();
-
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp_path);
+    // issue #465: a predictable `.{file}.tmp-{pid}` name let anything with
+    // write access to the config directory pre-plant a symlink there, and
+    // `File::create` (a plain `open` without `O_EXCL`) would silently
+    // follow it, writing config contents through the symlink instead of
+    // creating our own file. An unpredictable suffix plus `create_new`
+    // (`O_EXCL`) closes both halves of that race: the name can't be
+    // guessed in advance, and even a guessed/colliding name fails instead
+    // of following whatever is already there. Retry a handful of times on
+    // a genuine name collision (astronomically unlikely, not adversarial)
+    // before giving up.
+    let mut last_err = None;
+    for _ in 0..8 {
+        let tmp_path = parent.join(format!(
+            ".{file_name}.tmp-{}-{:016x}",
+            std::process::id(),
+            random_u64()
+        ));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+        {
+            Ok(mut file) => {
+                let result = (|| {
+                    file.write_all(contents.as_bytes())?;
+                    file.sync_all()?;
+                    drop(file);
+                    std::fs::rename(&tmp_path, path)
+                })();
+                if result.is_err() {
+                    let _ = std::fs::remove_file(&tmp_path);
+                }
+                return result;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                last_err = Some(e);
+            }
+            Err(e) => return Err(e),
+        }
     }
-    result
+    Err(last_err
+        .unwrap_or_else(|| std::io::Error::other("failed to create atomic-write temp file")))
+}
+
+/// An unpredictable `u64` for [`write_atomically`]'s temp-file suffix,
+/// without pulling in a `rand` dependency: [`std::collections::hash_map::RandomState`]
+/// seeds its SipHash keys from the OS's own randomness source on
+/// construction, so hashing nothing still yields a value an outside
+/// observer cannot predict.
+fn random_u64() -> u64 {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    RandomState::new().build_hasher().finish()
 }
 
 /// `shguard init` (issue #112) content: a header explaining the config
@@ -2441,6 +2498,63 @@ mod tests {
         assert!(
             leftovers.is_empty(),
             "unexpected leftover files: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn require_utf8_config_dir_accepts_a_valid_path() {
+        let dir = Path::new("/home/user/.config/shguard");
+        assert_eq!(
+            require_utf8_config_dir(dir).unwrap(),
+            "/home/user/.config/shguard"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn require_utf8_config_dir_fails_closed_on_non_utf8_instead_of_lossy_substitution() {
+        // issue #465: this must return an error, never a lossily
+        // substituted (U+FFFD) string that silently generates a
+        // self-protection rule which can never match the real path.
+        // Building the `PathBuf` from raw bytes is a pure, in-memory
+        // operation -- unlike planting an actual non-UTF-8-named
+        // directory entry on disk (the end-to-end regression test in
+        // `tests/user_config.rs`), it needs no filesystem support and so
+        // runs the same on every unix, including macOS's UTF-8-only APFS.
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let non_utf8 = PathBuf::from(OsStr::from_bytes(&[b'/', b'x', 0xFF, 0xFE, b'y']));
+        let err = require_utf8_config_dir(&non_utf8).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidConfig(_)));
+        assert!(err.to_string().contains("UTF-8"));
+    }
+
+    #[test]
+    fn write_atomically_ignores_a_symlink_planted_at_the_old_predictable_temp_name() {
+        // issue #465: `write_atomically` used to write through
+        // `.{file}.tmp-{pid}`, a name any local writer of the config
+        // directory could predict and pre-plant as a symlink ahead of
+        // time. Even with a symlink sitting at that exact legacy name,
+        // the fix's randomized `create_new` (O_EXCL) temp name must never
+        // touch it: the real config write goes through cleanly, and the
+        // symlink's target is left untouched.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let planted_target = dir.path().join("attacker-owned");
+        std::fs::write(&planted_target, "attacker content").unwrap();
+        let legacy_tmp_name = dir
+            .path()
+            .join(format!(".config.toml.tmp-{}", std::process::id()));
+        std::os::unix::fs::symlink(&planted_target, &legacy_tmp_name).unwrap();
+
+        write_atomically(&path, "real content").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "real content");
+        assert_eq!(
+            std::fs::read_to_string(&planted_target).unwrap(),
+            "attacker content",
+            "the planted symlink's target must be untouched"
         );
     }
 

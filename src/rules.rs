@@ -6358,11 +6358,28 @@ impl Rules {
         ask
     }
 
-    /// The first [`PipelineRule`] that matches `stages` (one normalised
-    /// argv per pipeline stage, in order), if any.
+    /// The worst-decision [`PipelineRule`] that matches `stages` (one
+    /// normalised argv per pipeline stage, in order), if any — Block
+    /// outranks Ask regardless of declaration order (issue #465, aligning
+    /// with [`Self::match_command`]/[`Self::match_redirect_target`]/
+    /// [`Self::match_token`]); ties keep the first-declared rule.
     #[must_use]
     pub(crate) fn match_pipeline(&self, stages: &[Vec<NormalizedWord>]) -> Option<&PipelineRule> {
-        self.pipeline_rules.iter().find(|rule| rule.matches(stages))
+        // Worst-wins, not first-match: all embedded pipeline rules are
+        // Block today, but a future embedded Ask pipeline rule declared
+        // before a Block one for the same shape must not shadow it.
+        let mut ask = None;
+        for rule in &self.pipeline_rules {
+            if !rule.matches(stages) {
+                continue;
+            }
+            match rule.decision() {
+                Decision::Block => return Some(rule),
+                _ if ask.is_none() => ask = Some(rule),
+                _ => {}
+            }
+        }
+        ask
     }
 
     /// The worst-decision [`RedirectRule`] whose target list matches
@@ -6998,12 +7015,11 @@ impl UserConfig {
 /// posture pending issue #100's own review, not the downgrade race that
 /// first motivated it. `pipeline` entries
 /// (issue #97) are appended AFTER the embedded blocklist's own
-/// `pipeline_rules`, never prepended: [`Rules::match_pipeline`] is
-/// first-match-wins, so appending is what keeps a user-declared pipeline
-/// rule from ever shadowing a built-in one sharing the same
-/// sources/sinks shape — a user `decision = "ask"` rule for
-/// `curl`→`sh` must never suppress the embedded `curl-wget-pipe-to-shell`
-/// Block. `escalation_floor` folds via `max` rather than overwriting —
+/// `pipeline_rules`, never prepended, even though [`Rules::match_pipeline`]
+/// now folds worst-wins across declaration order (issue #465) — Block
+/// still outranks Ask regardless of position, so this ordering is no
+/// longer load-bearing for that guarantee but is kept for readability and
+/// as defense in depth. `escalation_floor` folds via `max` rather than overwriting —
 /// see the inline comment at that line for why an overwrite would be
 /// wrong given how `src/config.rs`'s `Policy::load` calls this function
 /// more than once.
@@ -7089,10 +7105,10 @@ pub(crate) fn merge_user_config(
     let mut redirect_rules = blocklist.redirect_rules;
     redirect_rules.extend(user_config.redirect);
 
-    // Append, never prepend: `Rules::match_pipeline` is first-match-wins,
-    // so a user pipeline rule must land after the embedded blocklist's own
-    // pipeline rules to guarantee it can only ever add new pipeline shapes,
-    // never shadow a built-in one sharing the same sources/sinks.
+    // Append, never prepend: `Rules::match_pipeline` folds worst-wins and
+    // keeps the first-declared rule on a tie (issue #465), so appending is
+    // what makes a user pipeline rule report second rather than shadowing
+    // a built-in one it ties with on the same sources/sinks shape.
     let mut pipeline_rules = blocklist.pipeline_rules;
     pipeline_rules.extend(user_config.pipeline);
 
@@ -10618,6 +10634,34 @@ mod tests {
         assert!(rules.match_pipeline(&stages).is_none());
     }
 
+    #[test]
+    fn match_pipeline_prefers_block_over_an_earlier_ask() {
+        // issue #465: declaration order must not decide the decision,
+        // mirroring match_command/match_redirect_target/match_token's own
+        // worst-wins regression tests. A hypothetical embedded Ask rule
+        // declared before a Block rule for the same pipeline shape must
+        // not shadow the Block.
+        let toml = r#"
+            [[pipeline]]
+            id = "ask-first"
+            decision = "ask"
+            reason = "declared first"
+            sources = ["curl"]
+            sinks = ["sh"]
+
+            [[pipeline]]
+            id = "block-second"
+            reason = "declared second"
+            sources = ["curl"]
+            sinks = ["sh"]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        let stages = vec![argv(&["curl", "http://x/install.sh"]), argv(&["sh"])];
+        let rule = rules.match_pipeline(&stages).unwrap();
+        assert_eq!(rule.id().as_str(), "block-second");
+        assert_eq!(rule.decision(), Decision::Block);
+    }
+
     // ==== NEW rule 4 partial-match API: matches_except_target /
     // match_command_except_target (plan.md §4, src/gate.rs) ====
 
@@ -13736,9 +13780,9 @@ mod tests {
     fn merge_user_config_pipeline_entry_never_shadows_a_builtin_pipeline_rule() {
         // A user rule sharing the embedded curl-wget-pipe-to-shell rule's
         // exact sources/sinks shape, but with a weaker `ask` decision, must
-        // never win the match: Rules::match_pipeline is first-match-wins,
-        // so merge_user_config appending (not prepending) user pipeline
-        // rules after the embedded ones is load-bearing here.
+        // never win the match: Rules::match_pipeline folds worst-wins
+        // (issue #465), so the embedded Block outranks the user Ask
+        // regardless of declaration order.
         let blocklist = Rules::embedded().unwrap();
         let allowlist = Allowlist::embedded().unwrap();
         let config = UserConfig::parse(
