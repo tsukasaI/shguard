@@ -946,8 +946,16 @@ reason = "piping a downloaded script straight into an interpreter executes unrev
 sources = ["curl", "wget"]
 # Keep in sync with src/rules.rs's SHELL_INTERPRETERS/is_pipeline_interpreter —
 # issue #55 added fish/ksh/tcsh/csh/ash there but this list drifted (a real
-# bypass: `curl ... | ksh` reached Allow until this was fixed).
-sinks = ["sh", "bash", "zsh", "fish", "ksh", "tcsh", "csh", "ash"]
+# bypass: `curl ... | ksh` reached Allow until this was fixed), and issue
+# #446 found `dash` had drifted the same way. src/rules.rs's
+# `curl_wget_pipe_to_shell_sinks_cover_shell_interpreters` test now enforces
+# this superset instead of leaving it to a comment. `source`/`.` are also
+# named here (issue #446): unlike the shells above, they only pipe a script
+# into `-c`-style stdin execution with an explicit stdin-alias operand
+# (`source /dev/stdin`), which name-only sink matching can't express, so
+# this over-approximates the same way `pwsh` already does in
+# EXTRA_PIPELINE_INTERPRETERS.
+sinks = ["sh", "bash", "zsh", "dash", "fish", "ksh", "tcsh", "csh", "ash", "source", "."]
 
 # The piped spelling of the same "delete every match" effect the two `{}`
 # placeholder rules and `find-delete` already Block: with `xargs` the
