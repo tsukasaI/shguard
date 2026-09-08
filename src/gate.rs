@@ -1338,6 +1338,24 @@ fn apply_attached_word_and_redirect_checks(
         worst = fold_worst(worst, floored);
     }
 
+    // Issue #454: the same named-user-home floor `evaluate_simple_command`
+    // applies to a command's own redirects, extended to a compound
+    // command's/function definition's/extended test's own attached
+    // redirects, mirroring how issue #203's `$HOME` floor just above is
+    // already shared between the two.
+    if let Some((floor_decision, floor_reason)) =
+        scan_redirect_named_user_home_floor(redirections, rules)
+    {
+        let argv = worst.normalized_argv().to_vec();
+        let floored = match floor_decision {
+            Decision::Ask => Verdict::ask(Reason::new(floor_reason), argv),
+            Decision::Block | Decision::Allow => {
+                unreachable!("scan_redirect_named_user_home_floor only ever produces Ask")
+            }
+        };
+        worst = fold_worst(worst, floored);
+    }
+
     worst
 }
 
@@ -1961,6 +1979,79 @@ fn home_env_word_with_tilde_substituted(word: &Word) -> Option<Word> {
     None
 }
 
+/// Issue #454: `Some((Ask, reason))` when a redirect-write target begins
+/// with `~user` — [`WordPiece::Tilde`] with a non-empty user, a named
+/// user's home shorthand — and substituting the bare `~` for that piece
+/// resolves to a string one of `rules`' redirect rules matches.
+///
+/// Mirrors [`scan_redirect_home_env_floor`]'s `$HOME`-vs-`~` substitution
+/// and the argv-side named-user-home floor (issue #80,
+/// [`crate::rules::TargetMatcher::named_user_home_plausible`]): unlike a
+/// bare `~` (which [`normalize::resolve_piece`] folds to the literal `~`
+/// and every `~`-anchored redirect rule target already matches directly),
+/// `~user` only expands to a real home directory if that account exists
+/// and is reachable — neither of which shguard can verify (module docs —
+/// no passwd/env lookups) — so this can only ever float to `Ask`, never
+/// inherit the matched rule's own (possibly stricter) decision.
+fn scan_redirect_named_user_home_floor(
+    redirections: &[Redirection],
+    rules: &Rules,
+) -> Option<(Decision, String)> {
+    for redir in redirections {
+        let Redirection::File { kind, target } = redir else {
+            continue;
+        };
+        let normalized = normalize::normalize_word(target);
+        if !is_redirect_write_applicable(kind, &normalized) {
+            continue;
+        }
+        let Some(substituted) = named_user_home_word_with_tilde_substituted(target) else {
+            continue;
+        };
+        for word in normalize::normalize_word(&substituted) {
+            let Resolution::Resolved(candidate) = word.resolution() else {
+                continue;
+            };
+            if let Some(rule) = rules.match_redirect_target(candidate) {
+                return Some((
+                    Decision::Ask,
+                    format!(
+                        "redirect target is a named-user home shorthand (`~user`), which would \
+                         match redirect rule {:?} ({}) if `~user` expanded to an existing \
+                         account's home directory; shguard cannot verify that account exists or \
+                         is reachable",
+                        rule.id().as_str(),
+                        rule.reason().as_str(),
+                    ),
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// Piece-level substitution behind [`scan_redirect_named_user_home_floor`]:
+/// a leading `~user` piece ([`WordPiece::Tilde`] with a non-empty user)
+/// replaced with a bare `~` ([`WordPiece::Tilde`] with an empty user),
+/// every other piece untouched; `None` when `word` doesn't start with a
+/// named-user tilde. Tilde expansion never happens inside quotes (unlike
+/// `$HOME`, which can appear as `"$HOME"` — see
+/// [`home_env_word_with_tilde_substituted`]'s docs), so unlike that
+/// function this never needs to look inside a leading `DoubleQuoted`
+/// sequence.
+fn named_user_home_word_with_tilde_substituted(word: &Word) -> Option<Word> {
+    let (first, rest) = word.0.split_first()?;
+    let WordPiece::Tilde(user) = first else {
+        return None;
+    };
+    if user.is_empty() {
+        return None;
+    }
+    let mut out = vec![WordPiece::Tilde(String::new())];
+    out.extend_from_slice(rest);
+    Some(Word(out))
+}
+
 /// Whether any word in `argument_words` contains a command/backquote
 /// substitution segment (`$(...)`/`` `...` ``), including a word mixing
 /// literal text with one (`x$(echo /)` normalises to a single
@@ -2168,6 +2259,15 @@ fn evaluate_simple_command(
     // here for the same reason every floor in this function is: it's the
     // only signal such a target ever gets.
     let redirect_home_env_floor = scan_redirect_home_env_floor(&command.redirections, rules);
+    // Issue #454: a redirect-write target beginning with `~user` (a named
+    // user's home shorthand) that would match a redirect rule if `~` (the
+    // account's real home, unresolvable without a passwd lookup shguard
+    // never performs) stood in its place — the redirect-side counterpart
+    // to issue #80's argv floor. Computed here for the same reason every
+    // floor in this function is: it must survive `core`'s early returns
+    // too.
+    let redirect_named_user_home_floor =
+        scan_redirect_named_user_home_floor(&command.redirections, rules);
     // Issue #261: an Ask-level redirect-rule match. `core` returns early
     // only for a Block (see its own comment), so this is where an Ask
     // arrives — computed here for the same reason every floor above is:
@@ -2247,6 +2347,7 @@ fn evaluate_simple_command(
     let redirect_ascent_descent_floor_present = redirect_ascent_descent_floor.is_some();
     let redirect_dirstack_tilde_floor_present = redirect_dirstack_tilde_floor.is_some();
     let redirect_home_env_floor_present = redirect_home_env_floor.is_some();
+    let redirect_named_user_home_floor_present = redirect_named_user_home_floor.is_some();
     let redirect_rule_ask_floor_present = redirect_rule_ask_floor.is_some();
     let named_user_home_floor_present = named_user_home_floor.is_some();
     let dirstack_tilde_floor_present = dirstack_tilde_floor.is_some();
@@ -2263,6 +2364,7 @@ fn evaluate_simple_command(
     let verdict = apply_ascent_descent_floor(verdict, redirect_ascent_descent_floor);
     let verdict = apply_ascent_descent_floor(verdict, redirect_dirstack_tilde_floor);
     let verdict = apply_ascent_descent_floor(verdict, redirect_home_env_floor);
+    let verdict = apply_ascent_descent_floor(verdict, redirect_named_user_home_floor);
     let verdict = apply_ascent_descent_floor(verdict, redirect_rule_ask_floor);
     let verdict = apply_named_user_home_floor(verdict, named_user_home_floor);
     let verdict = apply_dirstack_tilde_floor(verdict, dirstack_tilde_floor);
@@ -2319,6 +2421,11 @@ fn evaluate_simple_command(
     // does: an allow entry for `echo`/`cat` is not consent to a `$HOME`-
     // prefixed redirect target that would land in that same rule's
     // namespace once substituted with its `~` equivalent.
+    // `redirect_named_user_home_floor_present` (issue #454) extends it
+    // once more, pairing `named_user_home_floor_present`: an allow entry
+    // for `echo`/`cat` is not consent to a redirect target that is a
+    // `~username` shorthand that would land in that same rule's namespace
+    // once it expanded.
     // `redirect_rule_ask_floor_present` (issue #261) extends it once
     // more: an allow entry for `echo`/`cat` is not consent to redirecting
     // that command's output into a protected shell-init path — the entry
@@ -2347,6 +2454,7 @@ fn evaluate_simple_command(
         || redirect_ascent_descent_floor_present
         || redirect_dirstack_tilde_floor_present
         || redirect_home_env_floor_present
+        || redirect_named_user_home_floor_present
         || redirect_rule_ask_floor_present
         || named_user_home_floor_present
         || dirstack_tilde_floor_present

@@ -1550,6 +1550,16 @@ fn guardfall_shell_init_redirect_cases() {
         // (`cd $X && echo x > passwd`), so it is a redirect-vs-command
         // parity gap, not something this rule introduced.
         ("cd $X && echo x >> .zshrc", Decision::Allow),
+        // Issue #454: `~user` is a named user's home shorthand, which only
+        // expands to a real home directory if that account exists and is
+        // reachable — the redirect-side counterpart to issue #80's argv
+        // floor. Verified against the issue's own reproduction table.
+        ("echo x >> ~/.zshrc", Decision::Ask),
+        ("echo x >> ~root/.zshrc", Decision::Ask),
+        // `~user` targets outside the shell-init/persistence namespace
+        // must stay Allow — the floor is a correlation with an existing
+        // redirect rule's own target, not "any `~user` redirect Asks".
+        ("echo x >> ~root/notes.txt", Decision::Allow),
     ];
 
     for (command, expected) in cases {
