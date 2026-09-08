@@ -619,6 +619,21 @@ fn git_global_single_token_flag(text: &str) -> bool {
         })
 }
 
+/// Whether `key_value` — the text following `-c`/`--config-env`'s `=` or
+/// separator, e.g. `"core.hooksPath=/dev/null"` or bare `"core.hooksPath"`
+/// — names the `core.hooksPath` config variable. Git config section/key
+/// names are matched case-insensitively when (as here) there is no
+/// subsection, so `Core.HooksPath`/`CORE.HOOKSPATH` are the same variable.
+/// The value half (present or not, literal or `--config-env`'s indirect
+/// environment-variable name) is deliberately ignored: setting this
+/// variable to anything — including an empty string, which git resolves
+/// to "no hooks directory" — disables every hook the same way
+/// `--no-verify` does (issue #447).
+fn git_config_key_is_hooks_path(key_value: &str) -> bool {
+    let key = key_value.split_once('=').map_or(key_value, |(key, _)| key);
+    key.eq_ignore_ascii_case("core.hookspath")
+}
+
 /// Strips a leading run of `git`'s own global value-taking options (and
 /// their separated values) from `tail`. Returns `None` — no rewrite
 /// needed — for every non-`git` command, and for a `git` invocation with
@@ -635,6 +650,35 @@ fn git_global_single_token_flag(text: &str) -> bool {
 /// regardless of whether it itself resolves — git's own argument parser
 /// consumes exactly one token here no matter its content, so there is
 /// nothing to gain by waiting to see whether that content is readable.
+/// The one exception: if that token IS readable and names
+/// `core.hooksPath` (`-c core.hooksPath=...`), a synthetic `--no-verify`
+/// token is appended to the returned tail — `git -c core.hooksPath=<any>
+/// commit` disables every hook exactly like `--no-verify` does (issue
+/// #447), and stripping the pair here (like every other global flag)
+/// would otherwise discard that evidence before any `git-*-no-verify`
+/// rule ever saw the tail. `--config-env`'s attached spelling
+/// (`--config-env=core.hooksPath=ENVVAR`) gets the same treatment in the
+/// `git_global_single_token_flag` branch below.
+///
+/// `-c`/`--config-env`'s value is the one place in this function where
+/// "consumes exactly one token no matter its content" (the general
+/// principle two paragraphs up) stops holding: an UNRESOLVABLE `-c`/
+/// `--config-env` value might just as well be `core.hooksPath=...` as
+/// anything else, and dropping it outright (like every other global
+/// flag's value) would silently discard that possibility before any
+/// rule — the ordinary blocklist match or the `matches_except_flags`
+/// floor it feeds — ever saw it, recreating this same issue #447 gap one
+/// level of indirection deeper. Such a value is therefore moved, not
+/// dropped: it is still consumed here (so the subcommand keeps its
+/// positional slot, same as a resolved value), but carried to the END of
+/// the returned tail instead of discarded. Appending after the
+/// subcommand and its own flags means [`Positionals`] has already
+/// aligned everything required-tokens cares about before hitting this
+/// trailing unresolvable word, so `required_tokens` confirmation for the
+/// visible portion is untouched — but the word is still present for
+/// `matches_except_flags`'s `has_unresolvable` scan to float an
+/// otherwise-clean-looking `git commit -m x` (config value hidden behind
+/// a substitution) up to `Ask` instead of a silent `Allow`.
 ///
 /// A recognized *single-token* global ([`git_global_single_token_flag`]:
 /// value-less like `--no-pager`, or attached-value like `--git-dir=/x`)
@@ -657,20 +701,45 @@ fn git_strip_global_flags(base: &str, tail: &[NormalizedWord]) -> Option<Vec<Nor
         return None;
     }
     let mut consumed = 0;
+    let mut synthesize_no_verify = false;
+    let mut deferred_unresolvable_config_values = Vec::new();
     while let Some(Resolution::Resolved(text)) = tail.get(consumed).map(NormalizedWord::resolution)
     {
         if GIT_GLOBAL_VALUE_FLAGS.contains(&text.as_str()) {
-            if tail.get(consumed + 1).is_none() {
+            let Some(value_word) = tail.get(consumed + 1) else {
                 break;
+            };
+            if text == "-c" || text == "--config-env" {
+                match value_word.resolution() {
+                    Resolution::Resolved(value) if git_config_key_is_hooks_path(value) => {
+                        synthesize_no_verify = true;
+                    }
+                    Resolution::Resolved(_) => {}
+                    Resolution::Unresolvable(_) => {
+                        deferred_unresolvable_config_values.push(value_word.clone());
+                    }
+                }
             }
             consumed += 2;
         } else if git_global_single_token_flag(text) {
+            if let Some(kv) = text.strip_prefix("--config-env=")
+                && git_config_key_is_hooks_path(kv)
+            {
+                synthesize_no_verify = true;
+            }
             consumed += 1;
         } else {
             break;
         }
     }
-    (consumed > 0).then(|| tail[consumed..].to_vec())
+    (consumed > 0).then(|| {
+        let mut stripped = tail[consumed..].to_vec();
+        if synthesize_no_verify {
+            stripped.push(NormalizedWord::resolved("--no-verify"));
+        }
+        stripped.extend(deferred_unresolvable_config_values);
+        stripped
+    })
 }
 
 /// Composes every per-command calling-convention rewrite this module
@@ -9822,6 +9891,108 @@ mod tests {
         // A trailing `-C` with nothing after it: git_strip_global_flags
         // must not consume past the end of the tail.
         assert_eq!(git_strip_global_flags("git", &argv(&["-C"])), None);
+    }
+
+    // ==== issue #447: `-c core.hooksPath=...` is `--no-verify` in disguise ====
+
+    #[test]
+    fn git_dash_c_hooks_path_synthesizes_no_verify_for_commit() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&[
+                "git",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "commit",
+                "-m",
+                "x",
+            ]))
+            .unwrap();
+        assert_eq!(matched.id().as_str(), "git-commit-no-verify-short");
+    }
+
+    #[test]
+    fn git_dash_c_hooks_path_synthesizes_no_verify_for_push() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&["git", "-c", "core.hooksPath=/dev/null", "push"]))
+            .unwrap();
+        assert_eq!(matched.id().as_str(), "git-push-no-verify");
+    }
+
+    #[test]
+    fn git_dash_c_hooks_path_synthesizes_no_verify_for_merge() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&[
+                "git",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "merge",
+                "other",
+            ]))
+            .unwrap();
+        assert_eq!(matched.id().as_str(), "git-merge-no-verify");
+    }
+
+    #[test]
+    fn git_dash_c_hooks_path_key_match_is_case_insensitive() {
+        // Git config section/key names are case-insensitive.
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&[
+                "git",
+                "-c",
+                "Core.HooksPath=/dev/null",
+                "commit",
+                "-m",
+                "x",
+            ]))
+            .unwrap();
+        assert_eq!(matched.id().as_str(), "git-commit-no-verify-short");
+    }
+
+    #[test]
+    fn git_config_env_separated_hooks_path_synthesizes_no_verify() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&[
+                "git",
+                "--config-env",
+                "core.hooksPath=ENVVAR",
+                "commit",
+                "-m",
+                "x",
+            ]))
+            .unwrap();
+        assert_eq!(matched.id().as_str(), "git-commit-no-verify-short");
+    }
+
+    #[test]
+    fn git_config_env_attached_hooks_path_synthesizes_no_verify() {
+        let rules = Rules::embedded().unwrap();
+        let matched = rules
+            .match_command(&argv(&[
+                "git",
+                "--config-env=core.hooksPath=ENVVAR",
+                "commit",
+                "-m",
+                "x",
+            ]))
+            .unwrap();
+        assert_eq!(matched.id().as_str(), "git-commit-no-verify-short");
+    }
+
+    #[test]
+    fn git_dash_c_unrelated_key_does_not_synthesize_no_verify() {
+        // False-positive pin: an ordinary `-c` config override must not
+        // trigger the no-verify family.
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["git", "-c", "user.name=x", "commit", "-m", "x"]))
+                .is_none()
+        );
     }
 
     // ==== issue #68: tar -P/--absolute-names bypasses -C entirely ====

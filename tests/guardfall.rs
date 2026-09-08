@@ -327,6 +327,31 @@ fn guardfall_git_cases() {
         ("git tag -D v1.0.0", Decision::Block),
         ("git tag --delete v1.0.0", Decision::Block),
         ("git tag -f v1.0.0", Decision::Block),
+        // issue #447: `-c core.hooksPath=...` disables every git hook,
+        // the same intent as `--no-verify` — must Block the same way.
+        (
+            "git -c core.hooksPath=/dev/null commit -m x",
+            Decision::Block,
+        ),
+        ("git -c core.hooksPath=/dev/null push", Decision::Block),
+        (
+            "git -c core.hooksPath=/dev/null merge other",
+            Decision::Block,
+        ),
+        // Case-insensitive key match (git config keys are case-insensitive).
+        (
+            "git -c Core.HooksPath=/dev/null commit -m x",
+            Decision::Block,
+        ),
+        // `--config-env`'s separated and attached spellings.
+        (
+            "git --config-env core.hooksPath=ENVVAR commit -m x",
+            Decision::Block,
+        ),
+        (
+            "git --config-env=core.hooksPath=ENVVAR commit -m x",
+            Decision::Block,
+        ),
     ];
 
     for (command, expected) in cases {
