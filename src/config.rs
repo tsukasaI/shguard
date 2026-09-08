@@ -80,7 +80,10 @@
 //! deployed behind one *or more* symlinks (e.g. into a dotfiles repo
 //! behind a `stow`/`home-manager`-style layer of indirection) gets
 //! *every* hop's directory protected, not only the literal path and the
-//! fully-resolved end — plus each hop's `std::fs::canonicalize`d form
+//! fully-resolved end — except the one hop whose target exists but isn't
+//! an ordinary regular file (e.g. `SHGUARD_CONFIG=/dev/null`), which is
+//! never a real, user-owned config location (issue #461) — plus each
+//! remaining hop's `std::fs::canonicalize`d form
 //! (issue #449), catching a symlinked directory *component* earlier in
 //! the path (stow's default "folded" layout) that the file-symlink walk
 //! alone never sees — see [`self_protection_directories`]'s own docs for
@@ -339,7 +342,7 @@ impl Policy {
         // clean `NotFound` from `lstat` itself -- meaning there truly is no
         // file, symlink, or anything else at this path -- takes the first
         // arm below (issues #39, #433).
-        let (rules, allowlist, config_is_regular_file) = match &path {
+        let (rules, allowlist) = match &path {
             Some(path) => match std::fs::symlink_metadata(path) {
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound && !explicit => {
                     return Err(ConfigError::Missing { path: path.clone() });
@@ -352,27 +355,6 @@ impl Policy {
                 }
                 Ok(_) => match std::fs::read_to_string(path) {
                     Ok(contents) => {
-                        // `metadata` (not the `symlink_metadata` above)
-                        // follows the full symlink chain, so a config
-                        // reached through a `stow`/`chezmoi`-style symlink
-                        // to a real file still self-protects normally --
-                        // only a config path that doesn't resolve to a
-                        // regular file at all (e.g. `/dev/null`, a
-                        // character device) is not a user-owned location
-                        // worth protecting the directory around (issue
-                        // #461). Any metadata error here is a hard failure,
-                        // same as every other unexpected error in this
-                        // module: `read_to_string` just succeeded against
-                        // this same path, so a failure here means the
-                        // target changed underneath the read, and fail-open
-                        // (silently skipping self-protection) is the wrong
-                        // default for that.
-                        let is_regular_file = std::fs::metadata(path)
-                            .map(|meta| meta.is_file())
-                            .map_err(|err| ConfigError::Io {
-                                path: path.clone(),
-                                source: err,
-                            })?;
                         let user_config = UserConfig::parse(&contents)?;
                         // Read off the real config-file parse alone, before
                         // `user_config` moves into `merge_user_config`
@@ -382,9 +364,7 @@ impl Policy {
                         // `escalation_floor` needs `.max()` for.
                         decision_log_path = user_config.decision_log_path().map(PathBuf::from);
                         ask_outcome = user_config.ask_outcome();
-                        let (rules, allowlist) =
-                            merge_user_config(blocklist, allowlist, user_config)?;
-                        (rules, allowlist, is_regular_file)
+                        merge_user_config(blocklist, allowlist, user_config)?
                     }
                     Err(err) => {
                         return Err(ConfigError::Io {
@@ -394,26 +374,24 @@ impl Policy {
                     }
                 },
             },
-            None => (blocklist, allowlist, true),
+            None => (blocklist, allowlist),
         };
 
         let mut rules = rules;
         let mut allowlist = allowlist;
         if let Some(path) = &path {
-            if config_is_regular_file {
-                let case_insensitive = config_dir_is_case_insensitive();
-                for (suffix, config_dir) in self_protection_directories(path)? {
-                    let toml = self_protection_toml(
-                        &config_dir.to_string_lossy(),
-                        &suffix,
-                        case_insensitive,
-                        "config",
-                        "config directory",
-                        false,
-                    );
-                    let self_protection = UserConfig::parse(&toml)?;
-                    (rules, allowlist) = merge_user_config(rules, allowlist, self_protection)?;
-                }
+            let case_insensitive = config_dir_is_case_insensitive();
+            for (suffix, config_dir) in self_protection_directories(path)? {
+                let toml = self_protection_toml(
+                    &config_dir.to_string_lossy(),
+                    &suffix,
+                    case_insensitive,
+                    "config",
+                    "config directory",
+                    false,
+                );
+                let self_protection = UserConfig::parse(&toml)?;
+                (rules, allowlist) = merge_user_config(rules, allowlist, self_protection)?;
             }
             // Reached only when a real config file was just read above (the
             // `NotFound` arms return early) -- so `shguard init` here would
@@ -712,6 +690,16 @@ const MAX_SYMLINK_HOPS: usize = 40;
 /// (issue #24); a bare `/` parent (from e.g. `SHGUARD_CONFIG=/config.toml`)
 /// would deny writes to almost any absolute path (issue #28 item 3).
 ///
+/// The final hop's directory is additionally dropped (not just excluded
+/// from the dedup set above) when the fully-resolved target exists but
+/// isn't an ordinary regular file (issue #461): `SHGUARD_CONFIG=/dev/null`
+/// — a well-established "empty config, embedded rules only" idiom — would
+/// otherwise self-protect `/dev` itself, denying every unrelated
+/// `/dev/...` target (`2>/dev/null` included). A target that doesn't
+/// exist yet, or a `metadata` error, is treated as protectable as
+/// before — this only ever narrows the *last* hop, never an earlier one a
+/// symlink chain also passes through.
+///
 /// Each returned entry is paired with a `suffix` distinguishing it in
 /// [`self_protection_toml`]'s generated rule ids: `"literal"` for the
 /// starting parent, `"resolved"` for the final hop's parent, and
@@ -811,6 +799,21 @@ fn self_protection_directories(path: &Path) -> Result<Vec<(String, PathBuf)>, Co
         if let Some(dir) = current.parent().filter(|dir| is_protectable(dir)) {
             chain_dirs.push(dir.to_path_buf());
         }
+    }
+
+    // Drop the final hop's directory alone when its target is non-regular
+    // (issue #461, see this function's own doc comment). `chain_dirs.last()`
+    // is exactly this hop's directory when one was pushed for it, since the
+    // loop above only ever appends in hop order.
+    if let Some(final_dir) = current.parent().filter(|dir| is_protectable(dir)) {
+        let final_target_is_non_regular =
+            std::fs::metadata(&current).is_ok_and(|meta| !meta.is_file());
+        if final_target_is_non_regular && chain_dirs.last() == Some(&final_dir.to_path_buf()) {
+            chain_dirs.pop();
+        }
+    }
+    if chain_dirs.is_empty() {
+        return Ok(Vec::new());
     }
 
     let last_index = chain_dirs.len() - 1;
