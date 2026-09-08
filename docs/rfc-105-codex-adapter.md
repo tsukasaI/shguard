@@ -213,13 +213,14 @@ its module doc) -- a sibling module, not a change to the shared
   property that matters on Codex.
 - **What an out-of-scope tool call (`apply_patch`, an MCP tool) gets as
   its OWN `PreToolUse` output is a decision this RFC must make, not
-  leave implicit.** `src/adapter.rs`'s own Claude Code adapter emits an
-  explicit `"allow"` for any non-Bash tool, which is safe there because
-  Claude Code's own hook registration is matcher-scoped to Bash calls
-  only. Codex's `PreToolUse` fires for `apply_patch` and MCP tools too
+  leave implicit.** `src/adapter.rs`'s own Claude Code adapter emits no
+  `permissionDecision` at all for any non-Bash tool (issue #462),
+  genuinely deferring to Claude Code's normal permission flow rather
+  than auto-approving via an explicit `"allow"`. Codex's `PreToolUse`
+  fires for `apply_patch` and MCP tools too
   (see "Payload shape" above), and whether Codex's own hook
   registration can be similarly scoped is unverified in this RFC.
-  Mirroring the explicit-`"allow"` behavior unconditionally risks
+  Emitting an explicit `"allow"` for these out-of-scope tools would risk
   auto-approving a tool call Codex's own approval flow would otherwise
   have prompted for -- a security downgrade relative to running no hook
   at all. **Decision: for any `tool_name` other than `"Bash"`, the

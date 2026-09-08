@@ -12,10 +12,20 @@
 //!
 //! # Verified stdin/stdout schema
 //!
-//! Re-verified against code.claude.com/docs/en/hooks on 2026-09-07 (plan.md
+//! Re-verified against code.claude.com/docs/en/hooks on 2026-09-08 (plan.md
 //! §0.2's "adapter issue re-fetches the doc before implementation") —
-//! `PreToolUse`'s valid `permissionDecision` values are still
-//! `"allow"`/`"deny"`/`"ask"` as of this date, and `permission_mode`/
+//! `PreToolUse`'s valid `permissionDecision` values are `"allow"`/`"deny"`/
+//! `"ask"`/`"defer"` as of this date, but `"defer"` is unrelated to "no
+//! opinion": it is a mechanism for integrations that run `claude -p` as a
+//! subprocess to pause a tool call and resume it later, honored only in
+//! non-interactive (`-p`) mode; an interactive session logs a warning and
+//! ignores it. shguard never emits it (issue #462). Genuinely deferring to
+//! Claude Code's normal permission flow (for a non-Bash `tool_name`, out of
+//! scope for shguard) means omitting `permissionDecision` entirely, per the
+//! doc's own "exit 0 with no output/decision means the tool call continues
+//! through the normal permission flow" wording; see also its `SessionStart`
+//! example of a decision-less `hookSpecificOutput` object carrying only
+//! `hookEventName`. `permission_mode`/
 //! `agent_id`/`agent_type` (issue #468) are now read into
 //! [`crate::HookContext`] for the decision log (see that type's docs):
 //!
@@ -49,6 +59,11 @@
 //!   unless the matched rule declared a `deny_message` (issue #99,
 //!   `crate::verdict::Verdict::deny_message`) — it carries guidance for the
 //!   *agent*, distinct from `permissionDecisionReason`'s "why" explanation.
+//!   For `tool_name != "Bash"` (see [`no_decision_json`]), the output instead
+//!   omits `permissionDecision` (and `permissionDecisionReason`/
+//!   `additionalContext` with it) entirely — still valid, non-empty JSON,
+//!   but carrying no decision for Claude Code to act on. Never `"defer"` —
+//!   see the schema note above.
 //!
 //! # Fail-closed posture
 //!
@@ -60,10 +75,12 @@
 //!   key resolves to `deny` for the failure's own context (issues
 //!   #467/#469, see [`fail_closed_with`]); [`handle`] has no `policy` to
 //!   read that key from, so it always stays `ask`.
-//! - `tool_name != "Bash"` → `allow`: shguard only analyses shell commands
-//!   run through the Bash tool, so a non-Bash tool call is out of scope by
-//!   design — the hook defers to Claude Code's normal permission flow
-//!   instead of asking on every non-shell tool call.
+//! - `tool_name != "Bash"` → [`no_decision_json`]'s no-`permissionDecision`
+//!   output: shguard only analyses shell commands run through the Bash
+//!   tool, so a non-Bash tool call is out of scope by design — the hook
+//!   genuinely defers to Claude Code's normal permission flow (rather than
+//!   emitting an explicit `allow`, which would auto-approve the call and
+//!   suppress the prompt) instead of asking on every non-shell tool call.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -147,6 +164,27 @@ fn output_json(
     output
 }
 
+/// The genuine "no opinion" output for `tool_name != "Bash"` (issue #462):
+/// omits `permissionDecision` entirely instead of emitting `"allow"` —
+/// `"allow"` is the value that *suppresses* the permission prompt, the same
+/// semantic shguard's own `Allow` verdict relies on for Bash, so emitting it
+/// here for every non-Bash tool call would auto-approve `Write`/`Edit`/MCP
+/// calls under any hook matcher broader than `"Bash"`. Deliberately NOT
+/// named after or emitting `"defer"`: that value exists in the hooks doc,
+/// but as a headless-only pause/resume mechanism unrelated to "no opinion"
+/// (see this module's own doc); emitting it here would pause an interactive
+/// session's tool call instead of deferring to its permission flow. Still
+/// valid, non-empty JSON (distinct from [`output_json`]'s `allow`/`deny`/
+/// `ask` shapes) so the README's wrapper convention — empty stdout treated
+/// as `deny` — isn't tripped.
+fn no_decision_json() -> Value {
+    serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse"
+        }
+    })
+}
+
 /// The fail-closed `ask` output, for I/O failures the composition root
 /// encounters before it even has stdin text to hand to [`handle`] (e.g. a
 /// stdin read error). Never carries `additionalContext` — there is no
@@ -214,7 +252,7 @@ fn subagent_id(agent_id: &Value) -> Option<String> {
 /// decision an extraction error here becomes).
 ///
 /// `Ok(None)` means `tool_name != "Bash"` (out of scope by design, the
-/// caller should emit an ordinary `allow`). `Err((reason, context))` is a
+/// caller should emit the no-decision output). `Err((reason, context))` is a
 /// human-readable failure description — malformed JSON, or a `Bash`
 /// payload whose `tool_input.command` is missing or not a string — left
 /// for the caller to turn into a fail-closed output (issue #467; see
@@ -260,8 +298,8 @@ fn extract_bash_command(
 /// carries, without making any decision (issue #459). Folds both of
 /// [`extract_bash_command`]'s non-analyzable outcomes — `tool_name !=
 /// "Bash"` and a malformed/incomplete payload — to `None`: both are cases
-/// [`respond`] itself short-circuits to `allow`/a fail-closed decision
-/// without ever calling into `analyze`, so there is no analysis pipeline
+/// [`respond`] itself short-circuits to a no-decision output/a fail-closed
+/// decision without ever calling into `analyze`, so there is no analysis pipeline
 /// that could hang and nothing worth attributing a later trip to.
 ///
 /// The composition root (`src/bin/shguard.rs`) calls this once, immediately
@@ -301,13 +339,7 @@ fn respond(
 ) -> Value {
     let (command, context) = match extract_bash_command(stdin) {
         Ok(Some(command_and_context)) => command_and_context,
-        Ok(None) => {
-            return output_json(
-                PermissionDecision::Allow,
-                "shguard only analyses commands run through the Bash tool",
-                None,
-            );
-        }
+        Ok(None) => return no_decision_json(),
         Err((reason, context)) => return fail_closed_with(ask_outcome(&context), &reason),
     };
 
@@ -417,10 +449,21 @@ mod tests {
     }
 
     #[test]
-    fn non_bash_tool_allows() {
+    fn non_bash_tool_defers_without_permission_decision() {
         let stdin = r#"{"tool_name":"Read","tool_input":{"file_path":"/etc/passwd"}}"#;
         let output = handle(stdin);
-        assert_eq!(permission_decision(&output), "allow");
+        // Issue #462: a non-Bash tool must genuinely defer to Claude Code's
+        // normal permission flow, not be auto-approved via an explicit
+        // "allow" — so no permissionDecision field at all, on an otherwise
+        // valid, non-empty hookSpecificOutput object.
+        assert!(output["hookSpecificOutput"]["permissionDecision"].is_null());
+        assert!(output["hookSpecificOutput"]["permissionDecisionReason"].is_null());
+        assert_eq!(
+            output["hookSpecificOutput"]["hookEventName"]
+                .as_str()
+                .unwrap(),
+            "PreToolUse"
+        );
     }
 
     #[test]
@@ -500,11 +543,17 @@ mod tests {
     }
 
     #[test]
-    fn handle_with_policy_non_bash_tool_allows() {
+    fn handle_with_policy_non_bash_tool_defers_without_permission_decision() {
         let policy = embedded_only_policy();
         let stdin = r#"{"tool_name":"Read","tool_input":{"file_path":"/etc/passwd"}}"#;
         let output = handle_with_policy(stdin, &policy, &crate::FileDecisionLog);
-        assert_eq!(permission_decision(&output), "allow");
+        assert!(output["hookSpecificOutput"]["permissionDecision"].is_null());
+        assert_eq!(
+            output["hookSpecificOutput"]["hookEventName"]
+                .as_str()
+                .unwrap(),
+            "PreToolUse"
+        );
     }
 
     // ==== issue #99: additionalContext ====
