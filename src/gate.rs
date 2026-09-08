@@ -13634,6 +13634,71 @@ mod tests {
     }
 
     #[test]
+    fn git_dash_c_hooks_path_disables_hooks_like_no_verify() {
+        // Issue #447: `git -c core.hooksPath=<empty-or-missing-dir>`
+        // disables every git hook for that invocation, the same intent as
+        // `--no-verify` — the enumerated no-verify family must Block it.
+        assert_decision(
+            "git -c core.hooksPath=/dev/null commit -m x",
+            Decision::Block,
+        );
+        assert_decision("git -c core.hooksPath=/dev/null push", Decision::Block);
+        assert_decision(
+            "git -c core.hooksPath=/dev/null merge other",
+            Decision::Block,
+        );
+        // Git config section/key names are case-insensitive.
+        assert_decision(
+            "git -c Core.HooksPath=/dev/null commit -m x",
+            Decision::Block,
+        );
+        // `--config-env`'s separated and attached spellings reach the same
+        // config variable, just with the value indirected through an
+        // environment variable instead of spelled out literally.
+        assert_decision(
+            "git --config-env core.hooksPath=ENVVAR commit -m x",
+            Decision::Block,
+        );
+        assert_decision(
+            "git --config-env=core.hooksPath=ENVVAR commit -m x",
+            Decision::Block,
+        );
+        // Control: an ordinary `-c` override unrelated to hooksPath must
+        // not trigger the no-verify family.
+        assert_decision("git -c user.name=x commit -m x", Decision::Allow);
+    }
+
+    #[test]
+    fn git_dash_c_unresolvable_value_floors_to_ask_not_allow() {
+        // Issue #447's own "discards the evidence" half: `-c`/
+        // `--config-env`'s value is the one global-flag value whose
+        // CONTENT is security-relevant (it could be `core.hooksPath=...`
+        // just as easily as anything else), so `git_strip_global_flags`
+        // must not silently drop an unresolvable one the way it drops
+        // every other global flag's value — that would recreate this same
+        // bypass one layer of indirection deeper (a command substitution
+        // standing in for the whole `-c` argument). Previously this
+        // resolved to a silent `Allow`; it must fail closed to `Ask`
+        // instead, without weakening the fully-visible `--force` case
+        // below, which stays `Block` regardless of `-c`'s opaque value.
+        assert_decision(
+            r#"git -c "$(echo core.hooksPath=/dev/null)" commit -m x"#,
+            Decision::Ask,
+        );
+        assert_decision(
+            r#"git -c core.hooksPath="$(mktemp -d)" commit -m x"#,
+            Decision::Ask,
+        );
+        assert_decision(r#"git --config-env="$X" commit -m x"#, Decision::Ask);
+        assert_decision(
+            r#"git --config-env core.hooksPath="$X" push"#,
+            Decision::Ask,
+        );
+        assert_decision(r#"git -c "$X" push --force"#, Decision::Block);
+        assert_decision(r#"git -c "$X" status"#, Decision::Allow);
+    }
+
+    #[test]
     fn invariant_violation_fallback_asks_not_allow() {
         // Issue #37: `evaluate_simple_command_core`'s first-word-scan
         // fallback is structurally unreachable through the normal
