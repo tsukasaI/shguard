@@ -904,29 +904,19 @@ fn self_protection_toml(
 ) -> String {
     let quoted_dir = toml_quote(target_path);
     let ci_attr = case_insensitive_toml_attr(case_insensitive);
-    // `exact_target` (decision-log call site): a single `normalized` match
-    // on the exact file path is already correct as-is.
-    //
-    // `!exact_target` (config call site, issue #460): `target_path` names a
-    // DIRECTORY this crate fully owns, and the intent is "protect
-    // everything under it" -- but a bare `normalized_prefix = "<dir>"` is a
-    // plain `starts_with`, so it also matches any SIBLING that merely
-    // shares the string prefix (`~/.config/shguard-backup`,
-    // `~/.config/shguardX`), which was never meant to be covered. Appending
-    // `/` makes the prefix match only at/below the directory boundary (the
-    // same convention `rules/blocklist.toml`'s own `normalized_prefix =
-    // "/dev/"` already uses, and the exact mechanism
-    // `TargetMatcher::from_dto` already implements for an
-    // author-supplied trailing slash -- see `crate::rules`). A separate
-    // `normalized` target for the bare directory itself is added alongside
-    // it so that a command naming the directory exactly (no descendant
-    // path component) -- e.g. `rm` on the directory itself -- is still
-    // covered; the slash-terminated prefix alone would not match it, since
-    // it is shorter than the required prefix.
+    // `!exact_target` pairs a slash-terminated `normalized_prefix` with a
+    // bare `normalized` on `target_path` itself (issue #460): a bare
+    // `normalized_prefix = "<dir>"` is a plain `starts_with`, so it also
+    // matches a sibling that merely shares the string prefix
+    // (`~/.config/shguard-backup`); the added `normalized` target covers
+    // the directory named exactly, since the slash-terminated prefix is
+    // longer than that token and can never match it. Mirrors the
+    // already-shipped static `normalized_prefix = "~/.config/shguard/"`
+    // pairing in `rules/blocklist.toml`.
+    let quoted_dir_slash = toml_quote(&format!("{target_path}/"));
     let plain_targets = if exact_target {
         format!("{{ normalized = {quoted_dir}{ci_attr} }}")
     } else {
-        let quoted_dir_slash = toml_quote(&format!("{target_path}/"));
         format!(
             "{{ normalized_prefix = {quoted_dir_slash}{ci_attr} }}, \
              {{ normalized = {quoted_dir}{ci_attr} }}"
@@ -935,7 +925,6 @@ fn self_protection_toml(
     let dd_targets = if exact_target {
         format!("{{ strip = \"of=\", normalized = {quoted_dir}{ci_attr} }}")
     } else {
-        let quoted_dir_slash = toml_quote(&format!("{target_path}/"));
         format!(
             "{{ strip = \"of=\", normalized_prefix = {quoted_dir_slash}{ci_attr} }}, \
              {{ strip = \"of=\", normalized = {quoted_dir}{ci_attr} }}"
@@ -1641,12 +1630,8 @@ mod tests {
         assert!(!matches(&["cp", "a.txt", "b.txt"]));
     }
 
-    // Issue #460: a bare `normalized_prefix = "/home/user/.config/shguard"`
-    // (no trailing slash) is a plain `starts_with`, so it also matches any
-    // sibling directory that merely shares the string prefix -- exactly
-    // the false positive this test guards against, using the issue's own
-    // reproduction table (`~/.config/shguardX`, `~/.config/shguard-backup`)
-    // alongside the still-must-deny config file itself.
+    // Issue #460: sibling directories sharing the config directory's string
+    // prefix must never be denied.
     #[test]
     fn self_protection_rules_do_not_deny_sibling_directories_sharing_a_string_prefix() {
         use crate::normalize::NormalizedWord;
@@ -1673,6 +1658,21 @@ mod tests {
         assert!(matches(&["tee", "/home/user/.config/shguard/config.toml"]));
         assert!(!matches(&["tee", "/home/user/.config/shguardX/notes.txt"]));
         assert!(!matches(&["tee", "/home/user/.config/shguard-backup/x"]));
+        // `dd`'s `strip = "of="` target is built by a separate branch
+        // (`dd_targets`) from the plain one above -- covered independently
+        // so it can't silently regress on its own.
+        assert!(!matches(&[
+            "dd",
+            "if=/dev/zero",
+            "of=/home/user/.config/shguard-backup/x"
+        ]));
+        // The `[[redirect]]` rule is also built from `plain_targets`,
+        // independently of `match_command` above.
+        assert!(
+            rules
+                .match_redirect_target("/home/user/.config/shguard-backup/x")
+                .is_none()
+        );
     }
 
     // `case_insensitive` is a parse-time TOML flag, not gated on the host
