@@ -1017,7 +1017,8 @@ it always logs `null` for `check`). The file is opened in append mode
 (created if
 missing with `0600` permissions — it records every evaluated command
 verbatim, which routinely contains inline secrets — never truncated), and
-a write failure — a missing parent directory, a full disk — is silently
+a write failure — an unwritable file, a full disk, a symlink planted at
+the path after config load — is reported once on stderr and otherwise
 dropped rather than affecting the returned decision: logging is a
 best-effort observability side channel, not part of the decision
 contract. Both the real PreToolUse hook and `shguard check` write through
@@ -1032,12 +1033,20 @@ decision into a spurious `Ask` — see `src/lib.rs`'s doc comment), so
 `decision_log_path` must name a regular, locally-writable file — never a
 FIFO, character device, or a path on a filesystem that can hang (e.g. a
 stale NFS mount). Config loading rejects a `decision_log_path` that
-already names a directory, FIFO, device, or socket, closing the case this
-crate can detect up front; a target that only starts hanging later (a
-network mount that goes stale mid-session) remains undetectable at load
-time. A relative path resolves against the invoking process's current
-working directory, which varies per hook invocation — use an absolute
-path.
+already names a directory, FIFO, device, socket, or symlink (opening it
+also uses `O_NOFOLLOW` on unix, so a symlink swapped in after config load
+is refused too, not silently followed), and rejects one whose parent
+directory doesn't exist, closing the case this crate can detect up front;
+a target that only starts hanging later (a network mount that goes stale
+mid-session) remains undetectable at load time. **`decision_log_path` must
+be an absolute path**: a relative path would resolve against the invoking
+process's current working directory, which varies per hook invocation, so
+config loading rejects one outright rather than accepting an ambiguous
+target. The path (or its parent directory) is also automatically added to
+the same self-protection deny rules that guard shguard's own config file
+(`rm`, `truncate`, `ln -sf`, `tee`, `cp`, `mv`, and friends against it are
+`Ask`/`Block`), since the log an agent's own commands are being audited
+into must not be deletable or redirectable by that same agent.
 
 **Outer-watchdog caveat:** both the real hook (`shguard`'s stdin contract)
 and `shguard check` (issue #109) additionally wrap their *entire*
@@ -1053,10 +1062,10 @@ never got the chance to run. A direct library caller has no such outer
 watchdog and is not subject to this caveat; for one, `analyze_with_policy`'s
 own internal bound (mentioned above) is the whole story.
 
-An empty `decision_log_path` (`decision_log_path = ""`), or one naming an
-existing directory/FIFO/device/socket, fails config load closed, the same
-as any other invalid config value — none of these are treated as
-"disabled".
+An empty `decision_log_path` (`decision_log_path = ""`), a relative path, a
+symlink, one naming an existing directory/FIFO/device/socket, or one whose
+parent directory doesn't exist, fails config load closed, the same as any
+other invalid config value — none of these are treated as "disabled".
 
 The log file is never rotated or capped: it grows by one line per
 evaluated command for as long as `decision_log_path` stays configured.

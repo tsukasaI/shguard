@@ -111,6 +111,78 @@ fn decision_log_path_naming_an_existing_fifo_fails_config_load_closed() {
         .code(2);
 }
 
+/// Issue #458 item 1: a symlink at `decision_log_path` used to be followed
+/// (symlink-following `std::fs::metadata` at load, symlink-following open
+/// at append), letting it redirect every appended line into any
+/// user-writable file. `Policy::load` now uses `symlink_metadata` and
+/// rejects `is_symlink()` outright.
+#[test]
+#[cfg(unix)]
+fn decision_log_path_naming_a_symlink_fails_config_load_closed() {
+    let dir = tempfile::tempdir().expect("tempdir should create");
+    let real_target = dir.path().join("redirected.txt");
+    fs::write(&real_target, "").expect("target file should write");
+    let symlink_path = dir.path().join("decisions.jsonl");
+    std::os::unix::fs::symlink(&real_target, &symlink_path).expect("symlink should create");
+
+    let (_config_dir, config_path) = write_config(&format!(
+        r#"
+        decision_log_path = {:?}
+        "#,
+        symlink_path.to_string_lossy()
+    ));
+
+    isolated_command(&config_path)
+        .args(["check", "echo hello"])
+        .assert()
+        .failure()
+        .code(2);
+}
+
+/// Issue #458 item 2: `decision_log_path`'s parent directory not existing
+/// used to pass the load-time check (`NotFound` was accepted
+/// unconditionally) and then fail every future append forever, silently
+/// dropped. `Policy::load` now requires the parent directory to already
+/// exist.
+#[test]
+fn decision_log_path_with_a_missing_parent_directory_fails_config_load_closed() {
+    let dir = tempfile::tempdir().expect("tempdir should create");
+    let log_path = dir
+        .path()
+        .join("nonexistent-subdir")
+        .join("decisions.jsonl");
+    let (_config_dir, config_path) = write_config(&format!(
+        r#"
+        decision_log_path = {:?}
+        "#,
+        log_path.to_string_lossy()
+    ));
+
+    isolated_command(&config_path)
+        .args(["check", "echo hello"])
+        .assert()
+        .failure()
+        .code(2);
+}
+
+/// Issue #458 item 3: a relative `decision_log_path` used to load and
+/// resolve against the hook's per-invocation cwd (the guarded repo, not a
+/// stable location). `Policy::load` now rejects any non-absolute value.
+#[test]
+fn relative_decision_log_path_fails_config_load_closed() {
+    let (_config_dir, config_path) = write_config(
+        r#"
+        decision_log_path = "decisions.jsonl"
+        "#,
+    );
+
+    isolated_command(&config_path)
+        .args(["check", "echo hello"])
+        .assert()
+        .failure()
+        .code(2);
+}
+
 #[test]
 fn check_subcommand_appends_a_decision_log_line_matching_the_verdict() {
     let log_dir = tempfile::tempdir().expect("tempdir should create");
@@ -439,6 +511,88 @@ fn check_subcommand_logs_null_permission_mode_and_agent_id() {
     assert_eq!(lines.len(), 1);
     assert!(lines[0]["permission_mode"].is_null());
     assert!(lines[0]["agent_id"].is_null());
+}
+
+// Issue #458 item 4: the log path itself used to be undefended -- `rm`,
+// `truncate -s0`, and `ln -sf` against it were all `Allow` (only
+// `~/.bashrc`-class targets were floored by `shell-init-ln`), so the
+// audit trail was deletable/overwritable/redirectable by the very agent
+// it audits. `Policy::load` now folds the log path's own directory into
+// the same self-protection deny rules the config directory gets.
+
+#[test]
+fn rm_against_the_decision_log_path_is_blocked() {
+    let log_dir = tempfile::tempdir().expect("tempdir should create");
+    let log_path = log_dir.path().join("decisions.jsonl");
+    let (_config_dir, config_path) = write_config(&format!(
+        r#"
+        decision_log_path = {:?}
+        "#,
+        log_path.to_string_lossy()
+    ));
+
+    let assert = isolated_command(&config_path)
+        .args(["check", &format!("rm {:?}", log_path.to_string_lossy())])
+        .assert()
+        .failure()
+        .code(1);
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(
+        stdout.contains("Decision: Block"),
+        "expected rm against the decision log path to Block, got: {stdout}"
+    );
+}
+
+#[test]
+fn truncate_against_the_decision_log_path_is_blocked() {
+    let log_dir = tempfile::tempdir().expect("tempdir should create");
+    let log_path = log_dir.path().join("decisions.jsonl");
+    let (_config_dir, config_path) = write_config(&format!(
+        r#"
+        decision_log_path = {:?}
+        "#,
+        log_path.to_string_lossy()
+    ));
+
+    let assert = isolated_command(&config_path)
+        .args([
+            "check",
+            &format!("truncate -s0 {:?}", log_path.to_string_lossy()),
+        ])
+        .assert()
+        .failure()
+        .code(1);
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(
+        stdout.contains("Decision: Block"),
+        "expected truncate -s0 against the decision log path to Block, got: {stdout}"
+    );
+}
+
+#[test]
+fn ln_sf_over_the_decision_log_path_is_blocked() {
+    let log_dir = tempfile::tempdir().expect("tempdir should create");
+    let log_path = log_dir.path().join("decisions.jsonl");
+    let (_config_dir, config_path) = write_config(&format!(
+        r#"
+        decision_log_path = {:?}
+        "#,
+        log_path.to_string_lossy()
+    ));
+
+    let assert = isolated_command(&config_path)
+        .args([
+            "check",
+            &format!("ln -sf ./notes.txt {:?}", log_path.to_string_lossy()),
+        ])
+        .assert()
+        .failure()
+        .code(1);
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(
+        stdout.contains("Decision: Block"),
+        "expected ln -sf over the decision log path to Block, got: {stdout}"
+    );
 }
 
 #[test]

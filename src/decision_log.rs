@@ -39,14 +39,15 @@ impl crate::DecisionLogSink for FileDecisionLog {
 /// Appends one JSONL line describing `verdict` for `command` to `path`.
 ///
 /// Best-effort and fail-open on the logging side only: a write failure
-/// (unwritable path, missing parent directory, disk full) is silently
-/// dropped rather than propagated or panicking. This mirrors `analyze`'s
-/// own single-fold-point posture (`src/lib.rs`) — a broken log target must
-/// never turn a real Allow/Ask/Block decision into a crash or an altered
-/// verdict, since logging is an observability side channel, not part of
-/// the decision contract. A caller who needs to know logging itself is
-/// healthy should watch the log file directly (size, mtime), not
-/// shguard's return value.
+/// (unwritable path, missing parent directory, disk full, a symlink
+/// `O_NOFOLLOW` refuses to open) never propagates or panics — it is
+/// reported once on stderr (issue #458 item 2) and otherwise dropped. This
+/// mirrors `analyze`'s own single-fold-point posture (`src/lib.rs`) — a
+/// broken log target must never turn a real Allow/Ask/Block decision into
+/// a crash or an altered verdict, since logging is an observability side
+/// channel, not part of the decision contract. A caller who needs to know
+/// logging itself is healthy should watch the log file directly (size,
+/// mtime) or capture stderr, not shguard's return value.
 fn append(path: &Path, command: &str, verdict: &Verdict, context: &HookContext) {
     let decision = match verdict.decision() {
         Decision::Allow => "Allow",
@@ -90,8 +91,20 @@ fn append(path: &Path, command: &str, verdict: &Verdict, context: &HookContext) 
     // formally impossible for one of unbounded size.
     serialized.push('\n');
 
-    let Ok(mut file) = open_log_file(path) else {
-        return;
+    let mut file = match open_log_file(path) {
+        Ok(file) => file,
+        Err(err) => {
+            // One-shot process per invocation, so one stderr line here
+            // can never spam (issue #458 item 2): a failed open (missing
+            // parent directory despite `Policy::load`'s own check, an
+            // unwritable existing file, `O_NOFOLLOW` rejecting a symlink
+            // planted after that check) used to be indistinguishable from
+            // "nothing happened" -- exactly the silent-failure trap
+            // `Policy::load`'s load-time validation exists to close, left
+            // open here for every failure it can't see up front.
+            eprintln!("shguard: could not write to decision log {path:?}: {err}");
+            return;
+        }
     };
     let _ = file.write_all(serialized.as_bytes());
 }
@@ -103,6 +116,13 @@ fn append(path: &Path, command: &str, verdict: &Verdict, context: &HookContext) 
 /// contains inline secrets (`export TOKEN=...`, `curl -H "Authorization:
 /// ..."`). `.mode()` only applies at creation time, so it never fights an
 /// existing file's own permissions.
+///
+/// `O_NOFOLLOW` on unix (issue #458 item 1) closes the TOCTOU window
+/// between `Policy::load`'s own symlink rejection and this open: a symlink
+/// planted at `path` after that check (or a target whose `decision_log_path`
+/// never existed at load time, so there was nothing to reject) is refused
+/// here too, rather than followed into redirecting every appended line at
+/// whatever the symlink points to.
 fn open_log_file(path: &Path) -> std::io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.create(true).append(true);
@@ -110,6 +130,7 @@ fn open_log_file(path: &Path) -> std::io::Result<std::fs::File> {
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
+        options.custom_flags(libc::O_NOFOLLOW);
     }
     options.open(path)
 }
@@ -287,10 +308,14 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_parent_directory_is_silently_dropped_not_a_panic() {
-        // Fail-open on the logging side: this must not panic, and must not
-        // be observable by the caller in any way other than "no line
-        // appeared" -- there is no error return from `append` to check.
+    fn a_missing_parent_directory_is_reported_on_stderr_not_a_panic() {
+        // Fail-open on the logging side: this must not panic, and the
+        // caller sees no return value either way -- there is no error
+        // return from `append` to check. `Policy::load` now rejects this
+        // exact shape of `decision_log_path` at config-load time (issue
+        // #458 item 2), but `append` is exercised directly here, bypassing
+        // that check, to confirm its own open-failure path still degrades
+        // to a stderr line (issue #458 item 2) instead of a crash.
         let unwritable = std::path::Path::new("/nonexistent-shguard-test-dir/decisions.jsonl");
         append(
             unwritable,
