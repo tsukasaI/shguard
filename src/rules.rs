@@ -1331,10 +1331,10 @@ impl TargetMatcher {
                         a == b
                     }
                 };
-                // Issue #506 review: the `comps[1..]`/`comps[2..]` widening
-                // arms below exist to catch a REAPPEARING NAME after an
+                // Issue #506: the `comps[1..]`/`comps[2..]` widening arms
+                // below exist to catch a REAPPEARING NAME after an
                 // escaped/unresolved ascent (`~alice/../bob` re-descending
-                // into the very `bob` this rule cares about) — a
+                // into the very `bob` this rule cares about), a
                 // coincidence specific enough to be worth flooring to Ask.
                 // A target made ENTIRELY of glob wildcard components
                 // (`*`/`**`, e.g. `~/*`) has no such specificity: `comps`'s

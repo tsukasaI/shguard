@@ -465,6 +465,10 @@ fn guardfall_issue_453_filesystem_gaps() {
         ("rm -r /*", Decision::Block),
         ("rm -r /", Decision::Block),
         ("rm -rf /*", Decision::Block), // control
+        // issue #506: `/**`, the bash globstar spelling of the root wipe
+        // `/*` above already Blocks.
+        ("rm -r /**", Decision::Block),
+        ("rm -rf /**", Decision::Block),
         // 3. `rm -rf ./*`/`rm -rf *` are the spellings that actually wipe
         //    the current directory's contents (GNU rm refuses `rm -rf .`).
         ("rm -rf ./*", Decision::Block),
@@ -484,13 +488,20 @@ fn guardfall_issue_453_filesystem_gaps() {
         ("rm -r ~/**", Decision::Ask),
         // Still a genuinely different path, so still Allow.
         ("rm -rf ~/subdir/*", Decision::Allow),
-        // issue #506 review: an unresolved ascent landing at an unknown
-        // location, then globbing a sibling directory that merely ENDS in
-        // `/*`, must not be confused with the `~/*`/`~/**` targets above —
-        // `*`/`**` alone carry no re-anchoring specificity the way a real
+        // issue #506: an unresolved ascent landing at an unknown location,
+        // then globbing a sibling directory that merely ENDS in `/*`, must
+        // not be confused with the `~/*`/`~/**` targets above. `*`/`**`
+        // alone carry no re-anchoring specificity the way a real
         // reappearing name does.
         ("rm -r ../build/*", Decision::Allow),
         ("rm -rf ../build/*", Decision::Allow),
+        // The DIRECT (unwidened) match is unaffected by the guard above:
+        // an unresolved ascent that then globs EVERYTHING wherever it
+        // lands is still plausibly dangerous on its own merit.
+        ("rm -r ../*", Decision::Ask),
+        ("rm -rf ../*", Decision::Ask),
+        ("rm -r ../**", Decision::Ask),
+        ("rm -rf ../**", Decision::Ask),
         // 6. issue #506: `find -exec rm -r {} \;` (no `-f`) achieves the
         //    same unattended writable-file-tree destruction as the
         //    root/device targets `rm-recursive-dangerous-target` already

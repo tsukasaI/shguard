@@ -301,11 +301,15 @@ targets = [
     # `/tmp/../dev/sda` spellings already do below. `/tmp/*` collapses to
     # `Abs(["tmp","*"])`, a different value, and correctly stays unmatched.
     { normalized = "/*" },
+    # issue #506: `/**` is the bash globstar spelling of the same root
+    # wipe `/*` above already Blocks -- a different normalized component,
+    # same reasoning as `**` vs. `*` for the cwd-relative targets below.
+    { normalized = "/**" },
     { normalized = "~" },
     # issue #506: `~/*`/`~/**` wipe $HOME's writable contents exactly like
-    # bare `~` above (rm -r would remove the directory itself; -rf removes
-    # everything in it non-interactively either way), so they belong at
-    # the same tier for the same reason -- NOT because of any config
+    # bare `~` above (`rm -rf` removes everything under it non-
+    # interactively regardless of dotglob), so they belong at the same
+    # tier for the same reason -- NOT because of any config
     # self-protection angle: bash's default (non-`dotglob`) `*`/`**` never
     # match a leading-dot name, so this does not actually reach
     # `~/.config` on its own. `~/**` needs its own entry: it lexically
@@ -387,6 +391,9 @@ required_flags = ["r|R|--recursive"]
 targets = [
     { normalized = "/" },
     { normalized = "/*" },
+    # issue #506: `/**`, the bash globstar spelling, same reasoning as
+    # `**` vs. `*` for the cwd-relative targets in the `-rf` sibling rule.
+    { normalized = "/**" },
     { normalized_prefix = "/dev/" },
     # issue #506: `find -exec rm -r {} \;`-style recursion achieves the
     # same unattended, writable-file-tree destruction as the root/device
