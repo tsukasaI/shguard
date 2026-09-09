@@ -13,8 +13,15 @@ All notable changes to this project are documented in this file.
   `find -exec rm -r {} \;`-style recursive deletion without `-f` through
   find's own placeholder (now matches `rm-recursive-dangerous-target`'s own
   `{}`/`/{}`/`~/{}` targets, mirroring its `-rf` sibling rule).
-### Security
-
+- `git_push_plus_refspec`'s structural detection of a `+`-prefixed
+  force-push refspec no longer misreads a separate-value flag's own operand
+  (`git push -o +foo origin main`'s `+foo`, `-o`'s value) as the refspec
+  (#504). The operand walk now recognizes `-o`/`--push-option`/`--repo`/
+  `--exec`/`--receive-pack` and skips the value token they consume (a glued
+  `=` spelling is an ordinary one-token flag, needing no special handling),
+  and stops flag classification entirely after a bare `--` (git treats
+  every word after it as positional, so `-o` there is a remote/refspec
+  name, not the flag).
 - `curl-wget-pipe-to-shell`'s pipeline sink match now recognizes a
   versioned/distro-suffixed shell binary (`dash5`) as the interpreter it
   normalizes to, the same way `is_pipeline_interpreter`/`is_shell_interpreter`
