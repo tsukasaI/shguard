@@ -379,6 +379,11 @@ fn guardfall_git_cases() {
         ("git push --push-option=foo origin +main", Decision::Block),
         // A real `+`-prefixed refspec after `-o`'s value is still caught.
         ("git push -o foo origin +main", Decision::Block),
+        // issue #504 follow-up: after a bare `--`, git treats every
+        // remaining word as positional -- `-o` there is a remote/refspec
+        // name, not the flag, so its own `+`-prefixed operand must still
+        // be caught rather than swallowed as if it were `-o`'s value.
+        ("git push -- -o +main", Decision::Block),
         // issue #452, fix 2: working-tree discard without `--`.
         ("git checkout .", Decision::Ask),
         ("git checkout ..", Decision::Ask),
