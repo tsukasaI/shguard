@@ -6,6 +6,15 @@ All notable changes to this project are documented in this file.
 
 ### Security
 
+- Three `rm -rf`/`rm -r` shapes adjacent to #453/#505's fixes are now
+  covered (#506): the bash globstar spelling (`rm -rf **`, same tier as
+  `rm -rf *`), a bare home-directory glob wipe (`rm -rf ~/*`, Ask tier,
+  same as the existing `rm -r ~` self-protection floor), and
+  `find -exec rm -r {} \;`-style recursive deletion without `-f` through
+  find's own placeholder (now matches `rm-recursive-dangerous-target`'s own
+  `{}`/`/{}`/`~/{}` targets, mirroring its `-rf` sibling rule).
+### Security
+
 - `curl-wget-pipe-to-shell`'s pipeline sink match now recognizes a
   versioned/distro-suffixed shell binary (`dash5`) as the interpreter it
   normalizes to, the same way `is_pipeline_interpreter`/`is_shell_interpreter`

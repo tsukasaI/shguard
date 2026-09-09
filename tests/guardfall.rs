@@ -456,6 +456,24 @@ fn guardfall_issue_453_filesystem_gaps() {
         ("rm -rf ./*", Decision::Block),
         ("rm -rf *", Decision::Block),
         ("rm -rf .", Decision::Block), // control
+        // 4. issue #506: the bash globstar spelling wipes the same ground
+        //    as `*`/`./*` above and needs its own entry (different
+        //    normalized component).
+        ("rm -rf **", Decision::Block),
+        ("rm -rf ./**", Decision::Block),
+        // 5. issue #506: `~/*` wipes every writable file directly under
+        //    `$HOME`, taking shguard's own config with it — same
+        //    self-protection concern as bare `rm -r ~`, Ask tier.
+        ("rm -rf ~/*", Decision::Ask),
+        ("rm -r ~/*", Decision::Ask),
+        // Still a genuinely different path, so still Allow.
+        ("rm -rf ~/subdir/*", Decision::Allow),
+        // 6. issue #506: `find -exec rm -r {} \;` (no `-f`) achieves the
+        //    same unattended writable-file-tree destruction as the
+        //    root/device targets `rm-recursive-dangerous-target` already
+        //    covers, through find's own `{}` placeholder.
+        (r"find / -exec rm -r {} \;", Decision::Block),
+        (r"find / -exec rm -r {} +", Decision::Block),
     ];
 
     for (command, expected) in cases {
@@ -744,9 +762,11 @@ fn guardfall_find_exec_rm_force_placeholder_cases() {
         // existing `{}`-target treatment in `rm-recursive-force-dangerous-target`.
         ("rm -f {}", Decision::Block),
         // Controls: out of this issue's scope, unchanged.
-        (r"find /x -exec rm -r {} +", Decision::Allow), // -r alone (no -f) matches neither rule, unaffected by this fix
-        ("find -delete", Decision::Block),              // unaffected by this fix
-        ("rm -f file", Decision::Allow),                // plain rm, no placeholder target
+        // issue #506 closed this gap: `-r` alone (no `-f`) now matches
+        // `rm-recursive-dangerous-target`'s own `{}` target entry.
+        (r"find /x -exec rm -r {} +", Decision::Block),
+        ("find -delete", Decision::Block), // unaffected by this fix
+        ("rm -f file", Decision::Allow),   // plain rm, no placeholder target
     ];
 
     for (command, expected) in cases {

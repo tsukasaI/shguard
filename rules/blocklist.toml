@@ -310,6 +310,12 @@ targets = [
     # `./*`/`*` the spelling that really deletes the current directory's
     # contents; this keeps both at the same tier as `.`.
     { normalized = "*" },
+    # issue #506: the bash globstar spelling (`shopt -s globstar`, or a
+    # shell where `**` is meaningful on its own) normalizes to its own
+    # single component `**`, a different value from `*` above, so it needs
+    # its own entry at the same tier — `**`/`./**` both delete the current
+    # directory's contents exactly like `*`/`./*` already do.
+    { normalized = "**" },
     # ".."/"../" (previously separate `exact` entries) are subsumed by
     # "/"'s pure-ascent widening (issue #65): `{ normalized = "/" }` also
     # matches any token that lexically normalizes to a pure relative
@@ -367,6 +373,18 @@ targets = [
     { normalized = "/" },
     { normalized = "/*" },
     { normalized_prefix = "/dev/" },
+    # issue #506: `find -exec rm -r {} \;`-style recursion achieves the
+    # same unattended, writable-file-tree destruction as the root/device
+    # targets above through find's own `{}` placeholder rather than a
+    # literal dangerous path — the same reasoning `rm-recursive-force-
+    # dangerous-target`'s sibling `{}`/`/{}`/`~/{}` entries already apply,
+    # but reachable here without `-f`: `rm -r <dir>` alone still removes a
+    # directory's writable contents non-interactively, it only prompts for
+    # write-protected files on a tty. See that rule's own doc for the
+    # collapse semantics these three entries share.
+    { normalized = "{}" },
+    { normalized = "/{}" },
+    { normalized = "~/{}" },
 ]
 
 # `-r`/`-R` is unnecessary for `rm -f {}` (no `-type f` needed either) to
@@ -1265,6 +1283,14 @@ required_flags = ["r|R|--recursive"]
 targets = [
     { normalized = "~/.config", case_insensitive = true },
     { normalized = "~" },
+    # issue #506: `~/*` normalizes to a different value than bare `~`
+    # (`Home(["*"])` vs. `Home([])`) so needs its own entry, but wipes the
+    # same ground — every writable file directly under `$HOME`, `.config`
+    # included, taking shguard's own config with it exactly like deleting
+    # `~` itself does. Same tier as `~` for the same reason: `targets`
+    # can't distinguish this from `rm -rf ~/* other/dest` positionally, so
+    # a flat Block would false-positive too broadly.
+    { normalized = "~/*" },
 ]
 
 [[command]]
