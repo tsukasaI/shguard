@@ -370,6 +370,15 @@ fn guardfall_git_cases() {
         ("git push origin +$BRANCH", Decision::Ask),
         // Plain, non-`+` push stays untouched by this fix.
         ("git push origin main", Decision::Allow),
+        // issue #504: `-o`'s own separate-value operand must not be
+        // misread as a `+`-prefixed refspec.
+        ("git push -o +foo origin main", Decision::Allow),
+        ("git push --push-option +foo origin main", Decision::Allow),
+        // The glued `=` spelling consumes no extra operand, so a `+`
+        // refspec after it is still detected.
+        ("git push --push-option=foo origin +main", Decision::Block),
+        // A real `+`-prefixed refspec after `-o`'s value is still caught.
+        ("git push -o foo origin +main", Decision::Block),
         // issue #452, fix 2: working-tree discard without `--`.
         ("git checkout .", Decision::Ask),
         ("git checkout ..", Decision::Ask),
