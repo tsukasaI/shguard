@@ -2967,7 +2967,20 @@ impl PipelineRule {
         let Some((sink_name, sink_tail)) = effective_command(sink_stage) else {
             return false;
         };
-        if !self.sinks.iter().any(|sink| sink == sink_name) {
+        // Issue #497: a versioned/distro-suffixed sink binary (`dash5`)
+        // resolves to the same interpreter `strip_version_suffix` already
+        // normalizes it to elsewhere (`is_pipeline_interpreter`,
+        // `is_shell_interpreter`) — the sink match must recognize it too.
+        // Exact match is still tried first: a `sinks` entry can itself be a
+        // literal name ending in a digit that is NOT a version suffix
+        // (`sinks = ["python3"]`, issue #97's own test), and
+        // `strip_version_suffix("python3")` reduces that to `"python"`,
+        // which must not shadow the literal spelling's own exact match.
+        if !self
+            .sinks
+            .iter()
+            .any(|sink| sink == sink_name || sink == strip_version_suffix(sink_name))
+        {
             return false;
         }
         // Membership semantics (no `--` end-of-flags awareness, an
@@ -10625,6 +10638,15 @@ mod tests {
             argv(&["wget", "-O-", "http://x/install.sh"]),
             argv(&["bash"]),
         ];
+        assert!(rules.match_pipeline(&stages).is_some());
+    }
+
+    // Issue #497: a versioned/distro-suffixed sink name (`dash5`) must be
+    // recognized the same way the unversioned spelling already is.
+    #[test]
+    fn curl_pipe_versioned_dash_sink_matches() {
+        let rules = Rules::embedded().unwrap();
+        let stages = vec![argv(&["curl", "http://x/install.sh"]), argv(&["dash5"])];
         assert!(rules.match_pipeline(&stages).is_some());
     }
 
