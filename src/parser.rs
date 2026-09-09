@@ -612,19 +612,29 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
                         extended_test_op_count = 0;
                     }
                     // Issue #489: NOT `"]]" => in_extended_test = false`.
-                    // This raw scan is quote-blind — a quoted `]]` token
+                    // This raw scan is quote-blind, so a quoted `]]` token
                     // (` ]] `, which tokenizes as a standalone `]]` once
                     // surrounded by spaces) is not a real closer to brush,
                     // but would still turn tracking off here, letting
                     // every `!`/`&&`/`||` after it go uncounted and
                     // brush's own unary-negation recursion overflow the
                     // stack uncaught. Once opened, tracking is never
-                    // turned back off within the same raw scan — the same
+                    // turned back off within the same raw scan, the same
                     // "over-count is safe, under-count is not" posture
                     // this function already applies to `&&`/`||`
-                    // themselves — so a legitimately closed and reopened
-                    // `[[ ]]` pair later in the same command only costs a
-                    // harmless over-count, never a missed operator.
+                    // themselves for exactly this case. This does NOT make
+                    // the whole function under-count-proof, though: the
+                    // `"[["` arm just below still resets
+                    // `extended_test_op_count` unconditionally on any raw
+                    // `[[` token, including a quoted one appearing inside
+                    // an already-open real region, which IS a genuine
+                    // missed-operator gap of the identical class, tracked
+                    // separately as issue #528 rather than folded into
+                    // this fix (the two directions are in direct tension
+                    // without real quote-tracking: a legitimately
+                    // reopened `[[ ]]` pair after a real close must still
+                    // reset the count, and this byte-blind scan cannot
+                    // tell that apart from a quoted fake `[[`).
                     "!" if in_extended_test => {
                         check_extended_test_op_count(&mut extended_test_op_count)?;
                     }

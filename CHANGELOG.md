@@ -13,9 +13,10 @@ All notable changes to this project are documented in this file.
   the prior quote-blind toggle let every `!`/`&&`/`||` after it go
   uncounted, reaching brush's own uncaught stack-overflow abort. Once a
   region opens, tracking is never turned back off within the same raw
-  scan (only a fresh `[[` resets the count), the same "over-count is
-  safe, under-count is not" posture this scanner already applies
-  elsewhere.
+  scan (only a fresh `[[` resets the count). A symmetric gap remains and
+  is tracked separately as #528: a quoted `[[` can still reset the count
+  mid-region, so this fix narrows but does not close every quote-blind
+  under-count in this scanner.
 
 - `git_push_plus_refspec`'s structural detection of a `+`-prefixed
   force-push refspec no longer misreads a separate-value flag's own operand
