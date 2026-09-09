@@ -2971,11 +2971,9 @@ impl PipelineRule {
         // resolves to the same interpreter `strip_version_suffix` already
         // normalizes it to elsewhere (`is_pipeline_interpreter`,
         // `is_shell_interpreter`) — the sink match must recognize it too.
-        // Exact match is still tried first: a `sinks` entry can itself be a
-        // literal name ending in a digit that is NOT a version suffix
-        // (`sinks = ["python3"]`, issue #97's own test), and
-        // `strip_version_suffix("python3")` reduces that to `"python"`,
-        // which must not shadow the literal spelling's own exact match.
+        // Only the runtime name is normalized; a `sinks` entry is compared
+        // literally, so an entry that itself ends in a digit (`python3`)
+        // is reachable only through the exact-match arm.
         if !self
             .sinks
             .iter()
