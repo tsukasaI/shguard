@@ -1331,6 +1331,24 @@ impl TargetMatcher {
                         a == b
                     }
                 };
+                // Issue #506 review: the `comps[1..]`/`comps[2..]` widening
+                // arms below exist to catch a REAPPEARING NAME after an
+                // escaped/unresolved ascent (`~alice/../bob` re-descending
+                // into the very `bob` this rule cares about) — a
+                // coincidence specific enough to be worth flooring to Ask.
+                // A target made ENTIRELY of glob wildcard components
+                // (`*`/`**`, e.g. `~/*`) has no such specificity: `comps`'s
+                // own trailing component is a wildcard for essentially any
+                // benign relative path (`../build/*`, `../dist/*`, ...),
+                // so the same widening would flag nearly every sibling-
+                // directory glob cleanup, not a real re-anchoring risk.
+                // Excluded from the widening arms only — the DIRECT `eq`
+                // just below is unaffected, so `rm -r ../*` (an unresolved
+                // ascent landing who-knows-where, then globbing
+                // everything there) still asks on its own, unwidened
+                // merit.
+                let widening_target_is_wildcard_only =
+                    target_comps.iter().all(|c| c == "*" || c == "**");
                 eq(target_comps, &comps)
                     // Issue #118: same re-anchoring as the prefix arm above,
                     // but only against a `~`-anchored target (an `Abs`
@@ -1341,11 +1359,13 @@ impl TargetMatcher {
                     // non-empty (checked just above), so the equality can
                     // never hold regardless of this guard.
                     || (matches!(target, PathForm::Home(_))
+                        && !widening_target_is_wildcard_only
                         && comps.len() >= 2
                         && eq(&comps[1..], target_comps))
                     // Issue #364: same one-component-further widening as
                     // the prefix arm above.
                     || (matches!(target, PathForm::Home(_))
+                        && !widening_target_is_wildcard_only
                         && comps.len() >= 3
                         && is_home_container_dir(&comps[0])
                         && eq(&comps[2..], target_comps))

@@ -475,13 +475,22 @@ fn guardfall_issue_453_filesystem_gaps() {
         //    normalized component).
         ("rm -rf **", Decision::Block),
         ("rm -rf ./**", Decision::Block),
-        // 5. issue #506: `~/*` wipes every writable file directly under
-        //    `$HOME`, taking shguard's own config with it — same
-        //    self-protection concern as bare `rm -r ~`, Ask tier.
-        ("rm -rf ~/*", Decision::Ask),
+        // 5. issue #506: `~/*`/`~/**` wipe every writable file directly
+        //    under `$HOME`, same reason (and tier split) as bare `~`:
+        //    Block with `-f`, Ask without it.
+        ("rm -rf ~/*", Decision::Block),
         ("rm -r ~/*", Decision::Ask),
+        ("rm -rf ~/**", Decision::Block),
+        ("rm -r ~/**", Decision::Ask),
         // Still a genuinely different path, so still Allow.
         ("rm -rf ~/subdir/*", Decision::Allow),
+        // issue #506 review: an unresolved ascent landing at an unknown
+        // location, then globbing a sibling directory that merely ENDS in
+        // `/*`, must not be confused with the `~/*`/`~/**` targets above —
+        // `*`/`**` alone carry no re-anchoring specificity the way a real
+        // reappearing name does.
+        ("rm -r ../build/*", Decision::Allow),
+        ("rm -rf ../build/*", Decision::Allow),
         // 6. issue #506: `find -exec rm -r {} \;` (no `-f`) achieves the
         //    same unattended writable-file-tree destruction as the
         //    root/device targets `rm-recursive-dangerous-target` already
@@ -775,9 +784,10 @@ fn guardfall_find_exec_rm_force_placeholder_cases() {
         // Direct (non-`find`) `rm -f {}` also Blocks — consistent with the
         // existing `{}`-target treatment in `rm-recursive-force-dangerous-target`.
         ("rm -f {}", Decision::Block),
-        // Controls: out of this issue's scope, unchanged.
         // issue #506 closed this gap: `-r` alone (no `-f`) now matches
-        // `rm-recursive-dangerous-target`'s own `{}` target entry.
+        // `rm-recursive-dangerous-target`'s own `{}` target entry (this
+        // row previously pinned Allow, documenting the gap as out of
+        // #453's scope).
         (r"find /x -exec rm -r {} +", Decision::Block),
         ("find -delete", Decision::Block), // unaffected by this fix
         ("rm -f file", Decision::Allow),   // plain rm, no placeholder target

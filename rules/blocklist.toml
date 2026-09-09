@@ -302,6 +302,17 @@ targets = [
     # `Abs(["tmp","*"])`, a different value, and correctly stays unmatched.
     { normalized = "/*" },
     { normalized = "~" },
+    # issue #506: `~/*`/`~/**` wipe $HOME's writable contents exactly like
+    # bare `~` above (rm -r would remove the directory itself; -rf removes
+    # everything in it non-interactively either way), so they belong at
+    # the same tier for the same reason -- NOT because of any config
+    # self-protection angle: bash's default (non-`dotglob`) `*`/`**` never
+    # match a leading-dot name, so this does not actually reach
+    # `~/.config` on its own. `~/**` needs its own entry: it lexically
+    # normalizes to a different single component than `~/*`, the same way
+    # bare `**` differs from `*` above.
+    { normalized = "~/*" },
+    { normalized = "~/**" },
     { normalized = "." },
     # issue #453: `./*` and bare `*` both lexically normalize to
     # `Rel{ascent:0, comps:["*"]}` — a different value from `.`'s
@@ -362,11 +373,15 @@ targets = [
 # for write-protected files, and only on a tty, so `rm -r /*` deletes every
 # writable file under `/` unattended. `~` is deliberately NOT included here:
 # `self-protect-config-ancestor-rm-tilde` below already floors bare
-# `rm -r ~` to Ask. `.`/`*` are out of this issue's stated scope (root/device
-# targets only) and stay Allow.
+# `rm -r ~` (and, since issue #506, `~/*`/`~/**`) to Ask. `.`/`*` are out of
+# this issue's stated scope (root/device targets only) and stay Allow.
+# issue #506 extended this rule's own targets below with find's `{}`
+# placeholder family, the same unattended-destruction risk through a
+# different (uncontrolled, not literal) target -- `reason` below is worded
+# to cover both shapes, mirroring the sibling `-rf` rule's own wording.
 [[command]]
 id = "rm-recursive-dangerous-target"
-reason = "rm -r against a root-level or device target deletes every writable file there, without needing -f"
+reason = "rm -r against a root-level, device, or find-placeholder target deletes every writable file there, without needing -f"
 command = "rm"
 required_flags = ["r|R|--recursive"]
 targets = [
@@ -1283,14 +1298,16 @@ required_flags = ["r|R|--recursive"]
 targets = [
     { normalized = "~/.config", case_insensitive = true },
     { normalized = "~" },
-    # issue #506: `~/*` normalizes to a different value than bare `~`
-    # (`Home(["*"])` vs. `Home([])`) so needs its own entry, but wipes the
-    # same ground — every writable file directly under `$HOME`, `.config`
-    # included, taking shguard's own config with it exactly like deleting
-    # `~` itself does. Same tier as `~` for the same reason: `targets`
-    # can't distinguish this from `rm -rf ~/* other/dest` positionally, so
-    # a flat Block would false-positive too broadly.
+    # issue #506: `~/*`/`~/**` each normalize to a different value than
+    # bare `~` (`Home(["*"])`/`Home(["**"])` vs. `Home([])`) so need their
+    # own entries, at the same tier as `~` for the same reason: `rm -r`
+    # (no `-f`) still non-interactively removes a directory's writable
+    # contents, GNU/BSD `rm` only prompts for write-protected files on a
+    # tty. Not a config self-protection claim: bash's default
+    # (non-`dotglob`) `*`/`**` never match a leading-dot name, so this
+    # does not on its own reach `~/.config` the way bare `~` does.
     { normalized = "~/*" },
+    { normalized = "~/**" },
 ]
 
 [[command]]
