@@ -5782,7 +5782,10 @@ fn scan_recursable_slots(
         }
     }
 
-    let is_find = crate::rules::effective_command(argv).is_some_and(|(name, _)| name == "find");
+    // Issue #493 follow-up: fold for recognition only, `name` itself is
+    // never displayed here.
+    let is_find = crate::rules::effective_command(argv)
+        .is_some_and(|(name, _)| crate::rules::fold_command_name(name) == "find");
     if is_find {
         let mut i = 0;
         while i < command.words.len() {

@@ -1385,6 +1385,29 @@ fn deny_rule_recurses_through_ligature_spelled_shell() {
     assert_eq!(permission_decision(&output), "deny");
 }
 
+// Issue #493 follow-up: a fable code-reviewer pass proved `find`'s own
+// recognition site was still raw case-sensitive, so `FIND . -exec sh -c
+// '...' ;` bypassed find-exec recursion entirely (never even reached the
+// wrapped command's own rule matching) even though every other #493 fix
+// was in place.
+#[test]
+fn deny_rule_recurses_through_uppercase_find_exec() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[deny]]
+        id = "user-deny-scary-tool"
+        reason = "never run this"
+        command = "scary-tool"
+    "#,
+    );
+
+    let output = run_hook(
+        &bash_command("FIND . -exec sh -c 'scary-tool --run' ';'"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+}
+
 // A dangling symlink at the default config path must fail closed (`ask`),
 // not silently fall back to embedded-only coverage (issue #39):
 // `read_to_string` fails with the same `NotFound` kind a genuinely absent

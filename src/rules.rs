@@ -3664,9 +3664,9 @@ pub(crate) const AWK_INTERPRETERS: &[&str] = &["awk", "gawk", "mawk", "nawk", "o
 /// #493). macOS APFS's default case-insensitive collation is full Unicode
 /// case folding, not bare ASCII lowercasing — verified directly on this
 /// filesystem: `ſh` (U+017F LATIN SMALL LETTER LONG S), `awk` spelled with
-/// a Kelvin sign (U+212A) in place of `k`, and `fiſh`/`fish` spelled with
-/// Latin ligatures (U+FB00-U+FB06: ﬀ, ﬁ, ﬂ, ﬃ, ﬄ, ﬅ, ﬆ) or German ß/ẞ, all
-/// name the same inode as their plain-ASCII spelling. `str::to_lowercase()`
+/// a Kelvin sign (U+212A) in place of `k`, and `fish` spelled with a Latin
+/// ligature (U+FB00-U+FB06: ﬀ, ﬁ, ﬂ, ﬃ, ﬄ, ﬅ, ﬆ, e.g. `ﬁsh`) or German ß/ẞ,
+/// all name the same inode as their plain-ASCII spelling. `str::to_lowercase()`
 /// alone closes the Kelvin-sign gap (its Unicode lowercase mapping already
 /// reduces U+212A to `k`, and ẞ to ß) but every other fold here changes
 /// EITHER which character represents an already-lowercase letter (long s
@@ -4688,9 +4688,12 @@ pub(crate) fn builtin_loadable_library(stage: &[NormalizedWord]) -> BuiltinLoada
             return builtin_own_leading_flags(tail);
         }
         // Issue #493 follow-up: fold for wrapper recognition only —
-        // `builtin` above stays raw, it's a shell keyword never resolved
-        // through the filesystem, so APFS case-insensitivity is not the
-        // right lens for it.
+        // `builtin` above stays raw. Unlike `command`/`exec` (also shell
+        // builtins, but ones this codebase treats as real wrapper names
+        // via `TRANSPARENT_WRAPPERS` and folds accordingly), `builtin`'s
+        // own case-sensitive comparison here isn't reached through that
+        // list at all, so folding it would need its own justification
+        // this narrow, single-keyword check doesn't have.
         let folded_base = fold_command_name(base);
         if !TRANSPARENT_WRAPPERS.contains(&folded_base.as_str()) {
             return BuiltinLoadableLibrary::Absent;
@@ -13008,6 +13011,10 @@ mod tests {
         assert_eq!(fold_command_name("\u{FB02}ock"), "flock"); // ﬂock -> flock
         assert_eq!(fold_command_name("ba\u{00DF}"), "bass"); // baß -> bass
         assert_eq!(fold_command_name("be\u{FB06}"), "best"); // beﬆ -> best
+        // ẞ (U+1E9E, uppercase sharp s) lowercases to ß first, then folds
+        // to "ss" -- pins the doc's own ordering claim, not just ß itself.
+        assert_eq!(fold_command_name("ba\u{1E9E}"), "bass"); // baẞ -> bass
+        assert_eq!(fold_command_name("a\u{FB03}x"), "affix"); // aﬃx -> affix
     }
 
     #[test]
