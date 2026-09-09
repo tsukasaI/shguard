@@ -1342,6 +1342,49 @@ fn deny_rule_recurses_into_uppercase_bash_dash_c() {
     assert_eq!(permission_decision(&output), "deny");
 }
 
+// Issue #493 follow-up: a fable code-reviewer pass proved a case-variant
+// TRANSPARENT WRAPPER name (not just the interpreter itself) also reached
+// Allow, since the wrapper-unwrap walk's own recognition was ASCII-only
+// case-sensitive too -- `SUDO bash -c '...'` never even reached rule 6a's
+// recursion because `SUDO` wasn't recognized as a wrapper to unwrap through
+// at all. `\u{...}` escapes, not a literal ligature glyph, so an editor's
+// NFC normalization can't silently turn this into an ASCII-only test.
+#[test]
+fn deny_rule_recurses_through_uppercase_sudo_wrapper() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[deny]]
+        id = "user-deny-scary-tool"
+        reason = "never run this"
+        command = "scary-tool"
+    "#,
+    );
+
+    let output = run_hook(
+        &bash_command("SUDO bash -c 'scary-tool --run'"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+}
+
+#[test]
+fn deny_rule_recurses_through_ligature_spelled_shell() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[deny]]
+        id = "user-deny-scary-tool"
+        reason = "never run this"
+        command = "scary-tool"
+    "#,
+    );
+
+    let output = run_hook(
+        &bash_command("\u{FB01}sh -c 'scary-tool --run'"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+}
+
 // A dangling symlink at the default config path must fail closed (`ask`),
 // not silently fall back to embedded-only coverage (issue #39):
 // `read_to_string` fails with the same `NotFound` kind a genuinely absent
