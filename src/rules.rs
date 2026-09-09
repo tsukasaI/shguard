@@ -3662,10 +3662,14 @@ pub(crate) fn strip_version_suffix(name: &str) -> &str {
 /// (`lua5.4`, `php8.2`) down to its base. Always call this rather than
 /// consulting either list alone, so a future addition to
 /// `SHELL_INTERPRETERS` (a new shell) is automatically also recognised as a
-/// pipeline sink, with nothing left to keep in sync by hand.
+/// pipeline sink, with nothing left to keep in sync by hand. Case-folded
+/// before stripping (issue #493): a case-variant spelling (`PYTHON3`)
+/// resolves to the same binary as the lowercase name on a case-insensitive
+/// filesystem (macOS APFS default), so recognition must not depend on case.
 #[must_use]
 pub(crate) fn is_pipeline_interpreter(name: &str) -> bool {
-    let name = strip_version_suffix(name);
+    let lower = name.to_ascii_lowercase();
+    let name = strip_version_suffix(&lower);
     SHELL_INTERPRETERS.contains(&name) || EXTRA_PIPELINE_INTERPRETERS.contains(&name)
 }
 
@@ -3674,10 +3678,12 @@ pub(crate) fn is_pipeline_interpreter(name: &str) -> bool {
 /// (`bash5` -> `bash`) — the same normalization [`is_pipeline_interpreter`]
 /// applies, kept as its own function for `crate::gate`'s `-c` recursion call
 /// sites, which need the plain shell-only list rather than the pipeline-sink
-/// union.
+/// union. Case-folded first, see [`is_pipeline_interpreter`]'s doc (issue
+/// #493).
 #[must_use]
 pub(crate) fn is_shell_interpreter(name: &str) -> bool {
-    SHELL_INTERPRETERS.contains(&strip_version_suffix(name))
+    let lower = name.to_ascii_lowercase();
+    SHELL_INTERPRETERS.contains(&strip_version_suffix(&lower))
 }
 
 /// Whether `name` is an [`EXTRA_PIPELINE_INTERPRETERS`] member once
@@ -3690,10 +3696,12 @@ pub(crate) fn is_shell_interpreter(name: &str) -> bool {
 /// other shape. Mirrors [`is_shell_interpreter`]'s shape, kept as its own
 /// function for `crate::gate`'s heredoc-as-stdin floor (issue #424), which
 /// needs the non-shell list alone rather than the pipeline-sink union
-/// [`is_pipeline_interpreter`] returns.
+/// [`is_pipeline_interpreter`] returns. Case-folded first, see
+/// [`is_pipeline_interpreter`]'s doc (issue #493).
 #[must_use]
 pub(crate) fn is_stdin_script_interpreter(name: &str) -> bool {
-    EXTRA_PIPELINE_INTERPRETERS.contains(&strip_version_suffix(name))
+    let lower = name.to_ascii_lowercase();
+    EXTRA_PIPELINE_INTERPRETERS.contains(&strip_version_suffix(&lower))
 }
 
 /// How a [`RecursableSlot`]'s value should be recursed — see
@@ -6778,6 +6786,13 @@ pub(crate) fn apply_allowlist(verdict: &Verdict, allowlist: &Allowlist) -> Allow
 /// unversioned spelling above, and stripping a version suffix from a
 /// user-supplied *prefix* (which may not even end at a version boundary)
 /// has no well-defined meaning.
+///
+/// Both comparisons case-fold `entry.command` (issue #493): an allow entry
+/// naming `AWK` or `BASH` is exactly as dangerous as one naming the
+/// lowercase spelling once interpreter recognition itself is
+/// case-insensitive, so this rejection must not be case-blind either —
+/// otherwise `[[allow]] command = "AWK"` would sail through this check
+/// while `crate::gate`'s own recognition treats it as the real interpreter.
 fn matches_dangerous_allow_target(entry: &CommandRule) -> bool {
     let candidates = || {
         SHELL_INTERPRETERS
@@ -6787,11 +6802,20 @@ fn matches_dangerous_allow_target(entry: &CommandRule) -> bool {
             .chain(AWK_INTERPRETERS.iter())
             .chain(TRANSPARENT_WRAPPERS.iter())
     };
-    if candidates().any(|name| entry.command.matches(name)) {
+    let matches_ci = |name: &str| match &entry.command {
+        CommandMatch::Exact(exact) => exact.eq_ignore_ascii_case(name),
+        CommandMatch::Prefix(prefix) => name
+            .to_ascii_lowercase()
+            .starts_with(&prefix.to_ascii_lowercase()),
+    };
+    if candidates().any(|name| matches_ci(name)) {
         return true;
     }
     match &entry.command {
-        CommandMatch::Exact(exact) => candidates().any(|name| strip_version_suffix(exact) == *name),
+        CommandMatch::Exact(exact) => {
+            let lower = exact.to_ascii_lowercase();
+            candidates().any(|name| strip_version_suffix(&lower) == *name)
+        }
         CommandMatch::Prefix(_) => false,
     }
 }
@@ -12830,6 +12854,59 @@ mod tests {
                 "expected {awk:?} to be rejected as a dangerous allow target"
             );
         }
+    }
+
+    // Issue #493: a case-variant allow entry (`AWK`, `BASH`) must be
+    // rejected exactly like the lowercase spelling, since a case-insensitive
+    // filesystem resolves both to the same binary.
+    #[test]
+    fn user_config_rejects_allow_entry_matching_awk_family_case_variant() {
+        let toml = r#"
+            [[allow]]
+            id = "user-allow-awk-upper"
+            reason = "trust me"
+            command = "AWK"
+        "#;
+        assert!(matches!(
+            UserConfig::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn user_config_rejects_allow_entry_matching_bash_case_variant() {
+        let toml = r#"
+            [[allow]]
+            id = "user-allow-bash-upper"
+            reason = "trust me"
+            command = "BASH"
+        "#;
+        assert!(matches!(
+            UserConfig::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    // Issue #493: a case-variant interpreter name resolves to the same
+    // binary as the lowercase spelling on a case-insensitive filesystem
+    // (macOS APFS default), so recognition must not depend on case.
+    #[test]
+    fn is_shell_interpreter_is_case_insensitive() {
+        assert!(is_shell_interpreter("bash"));
+        assert!(is_shell_interpreter("BASH"));
+        assert!(is_shell_interpreter("Bash"));
+    }
+
+    #[test]
+    fn is_pipeline_interpreter_is_case_insensitive() {
+        assert!(is_pipeline_interpreter("python3"));
+        assert!(is_pipeline_interpreter("PYTHON3"));
+    }
+
+    #[test]
+    fn is_stdin_script_interpreter_is_case_insensitive() {
+        assert!(is_stdin_script_interpreter("python3"));
+        assert!(is_stdin_script_interpreter("PYTHON3"));
     }
 
     #[test]

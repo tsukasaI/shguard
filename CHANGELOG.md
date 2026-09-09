@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Security
+
+- Every interpreter-name comparison in the gate (`AWK_INTERPRETERS`
+  membership, `inline_code_flag`, `is_shell_interpreter`,
+  `is_pipeline_interpreter`, `is_stdin_script_interpreter`, the `fish`
+  recognition in rule 6a's `-c` recursion and the heredoc floor, and
+  `matches_dangerous_allow_target`'s own `[[allow]]` rejection) is now
+  case-folded before matching (#493). A case-variant interpreter spelling
+  (`AWK`, `BASH`, `PYTHON3`) resolves to the same binary as the lowercase
+  name on a case-insensitive filesystem (macOS APFS default), and
+  previously slipped past every one of these checks.
+
 ## [0.7.0] - 2026-09-08
 
 ### Added

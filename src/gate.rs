@@ -2961,7 +2961,11 @@ fn evaluate_simple_command_core(
     // present. Carries its own reason string (rather than a shared `bool`)
     // since the two shapes need different wording.
     let interpreter_code_floor: Option<String> = effective.and_then(|(name, rest_words)| {
-        if let Some(flag) = inline_code_flag(name) {
+        // Case-folded only for the two membership checks below (issue
+        // #493) — `name` itself keeps its raw case in every message string
+        // that follows, matching `evaluate_dash_c`'s own precedent.
+        let lower_name = name.to_ascii_lowercase();
+        if let Some(flag) = inline_code_flag(&lower_name) {
             scan_for_flag(rest_words, |s| s == flag)
                 .possibly_found()
                 .then(|| {
@@ -2969,7 +2973,7 @@ fn evaluate_simple_command_core(
                      introspected"
                         .to_string()
                 })
-        } else if AWK_INTERPRETERS.contains(&name) {
+        } else if AWK_INTERPRETERS.contains(&lower_name.as_str()) {
             match scan_for_awk_script(rest_words) {
                 AwkScriptPosition::InlineScript => Some(format!(
                     "`{name}`'s script is a bare positional argument (no `-c`/`-e`-style flag) \
@@ -4244,7 +4248,10 @@ fn evaluate_dash_c(
     // must recurse its `-c` argument exactly like the unversioned name
     // would — normalized only for these two membership checks, never for
     // the `Reason` strings below, which keep reporting the raw argv name.
-    let normalized_interpreter = crate::rules::strip_version_suffix(interpreter);
+    // Case-folded too (issue #493): a case-variant spelling (`BASH`)
+    // resolves to the same binary on a case-insensitive filesystem.
+    let lower_interpreter = interpreter.to_ascii_lowercase();
+    let normalized_interpreter = crate::rules::strip_version_suffix(&lower_interpreter);
     if normalized_interpreter == "fish" {
         return evaluate_fish(argv, rest_words, rules, allowlist, depth, cwd);
     }
@@ -5062,7 +5069,7 @@ fn classify_heredoc_candidate(argv: &[NormalizedWord]) -> Option<HeredocCandidat
     // spellings a presence-only check cannot model, so it gets
     // `scan_fish_invocation`'s dedicated flag-aware scan instead, the same
     // one rule 6a's `evaluate_fish` uses.
-    if crate::rules::strip_version_suffix(name) == "fish" {
+    if crate::rules::strip_version_suffix(&name.to_ascii_lowercase()) == "fish" {
         let scan = scan_fish_invocation(rest);
         let hands_off = scan.has_command_flag
             || !scan.command_values.is_empty()
@@ -7731,7 +7738,7 @@ enum DashCPosition {
 /// unresolvable, or is a non-option operand (does not start with `-`) —
 /// whichever comes first.
 fn scan_for_dash_c_before_operand(words: &[NormalizedWord], interpreter: &str) -> DashCPosition {
-    if crate::rules::strip_version_suffix(interpreter) == "fish" {
+    if crate::rules::strip_version_suffix(&interpreter.to_ascii_lowercase()) == "fish" {
         // `-C`/`--init-command` is deliberately transparent here: its
         // payload verdict arrives through `evaluate_fish`'s own recursion,
         // and what this floor decides is the CONTINUATION posture (a
