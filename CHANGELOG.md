@@ -6,6 +6,17 @@ All notable changes to this project are documented in this file.
 
 ### Security
 
+- `reject_excessive_raw_nesting`'s `[[ ... ]]` extended-test-operator raw
+  scan no longer lets a quoted `]]` token (`' ]] '`, which tokenizes as a
+  standalone `]]` once surrounded by spaces) turn tracking off mid-region
+  (#489). brush treats it as a literal quoted string, not a real closer;
+  the prior quote-blind toggle let every `!`/`&&`/`||` after it go
+  uncounted, reaching brush's own uncaught stack-overflow abort. Once a
+  region opens, tracking is never turned back off within the same raw
+  scan (only a fresh `[[` resets the count), the same "over-count is
+  safe, under-count is not" posture this scanner already applies
+  elsewhere.
+
 - `git_push_plus_refspec`'s structural detection of a `+`-prefixed
   force-push refspec no longer misreads a separate-value flag's own operand
   (`git push -o +foo origin main`'s `+foo`, `-o`'s value) as the refspec
