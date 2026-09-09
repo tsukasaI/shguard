@@ -9382,8 +9382,8 @@ const GIT_PUSH_VALUE_FLAGS: &[&str] =
 /// begins with `+` and is more than just `+` itself.
 ///
 /// Walks `operands` index-by-index rather than a plain iterator (issue
-/// #504) so a plain iterator can't tell a flag's own value token from a
-/// positional operand — a separate-value flag's own value (`-o +foo`'s
+/// #504) because a plain iterator can't tell a flag's own value token from
+/// a positional operand — a separate-value flag's own value (`-o +foo`'s
 /// `+foo`) is skipped as that flag's value, not misread as a refspec.
 /// Stops all flag classification after a bare `--` (issue #504 follow-up):
 /// git itself treats every word after `--` as positional, so `-o` there is
