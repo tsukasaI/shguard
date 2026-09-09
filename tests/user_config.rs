@@ -1321,6 +1321,27 @@ fn deny_rule_recurses_into_bash_dash_c() {
     assert_eq!(permission_decision(&output), "deny");
 }
 
+// Issue #493: a case-variant interpreter spelling must recurse through
+// rule 6a exactly like the lowercase spelling, since a case-insensitive
+// filesystem resolves both to the same binary.
+#[test]
+fn deny_rule_recurses_into_uppercase_bash_dash_c() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[deny]]
+        id = "user-deny-scary-tool"
+        reason = "never run this"
+        command = "scary-tool"
+    "#,
+    );
+
+    let output = run_hook(
+        &bash_command("BASH -c 'scary-tool --run'"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+}
+
 // A dangling symlink at the default config path must fail closed (`ask`),
 // not silently fall back to embedded-only coverage (issue #39):
 // `read_to_string` fails with the same `NotFound` kind a genuinely absent
@@ -2308,6 +2329,15 @@ fn ask_decision_deny_plus_narrow_allow_rescues_a_secrets_scanner_invocation() {
 #[test]
 fn awk_inline_script_asks_with_no_config() {
     let output = run_hook(&bash_command("awk 'BEGIN{system(\"rm -rf /\")}'"), &[]);
+    assert_eq!(permission_decision(&output), "ask");
+}
+
+// Issue #493: a case-variant interpreter spelling must ask exactly like the
+// lowercase spelling, since a case-insensitive filesystem resolves both to
+// the same binary.
+#[test]
+fn uppercase_awk_inline_script_asks_with_no_config() {
+    let output = run_hook(&bash_command("AWK 'BEGIN{system(\"rm -rf /\")}'"), &[]);
     assert_eq!(permission_decision(&output), "ask");
 }
 

@@ -628,6 +628,12 @@ fn guardfall_find_exec_bare_interpreter_cases() {
             r#"find . -exec fish --command "rm -rf /" \;"#,
             Decision::Block,
         ),
+        // Issue #493: a case-variant interpreter spelling must recurse
+        // through `-C`/`--command` exactly like the lowercase spelling.
+        (
+            r#"find . -exec FISH --command "rm -rf /" \;"#,
+            Decision::Block,
+        ),
         // Issue #269: the attached and init-command spellings this scan
         // could not see before -- `-C` runs its argument too, and
         // `--command=` is the same flag as `--command`.

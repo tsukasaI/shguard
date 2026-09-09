@@ -3652,6 +3652,23 @@ const EXTRA_PIPELINE_INTERPRETERS: &[&str] = &[
 /// of this constant's pipeline-interpreter exclusion.
 pub(crate) const AWK_INTERPRETERS: &[&str] = &["awk", "gawk", "mawk", "nawk", "original-awk"];
 
+/// Folds `name` for case-insensitive interpreter-name comparison (issue
+/// #493). macOS APFS's default case-insensitive collation is full Unicode
+/// case folding, not bare ASCII lowercasing — verified directly on this
+/// filesystem: `ſh` (U+017F LATIN SMALL LETTER LONG S) and `sh` name the
+/// same inode, and so do `awk` spelled with a Kelvin sign (U+212A) in place
+/// of `k` and the plain ASCII spelling. `str::to_lowercase()` alone closes
+/// the Kelvin-sign gap (its Unicode lowercase mapping already reduces
+/// U+212A to `k`) but not long s, which has no lowercase mapping at all —
+/// it's already lowercase — so unifying it with `s` needs an explicit fold,
+/// not lowercasing. This covers exactly those two folds relevant to `a`-`z`
+/// interpreter names; it is not a general Unicode case-folding
+/// implementation (no case-folding crate/table is pulled in for this).
+#[must_use]
+pub(crate) fn fold_command_name(name: &str) -> String {
+    name.to_lowercase().replace('\u{017F}', "s")
+}
+
 /// Strips a trailing distro-style version suffix (`python3.12` -> `python`,
 /// `lua5.4` -> `lua`, `php8.2` -> `php`) so interpreter-name matching
 /// recognises versioned binaries (issue #346) without a hand-maintained list
@@ -3679,7 +3696,7 @@ pub(crate) fn strip_version_suffix(name: &str) -> &str {
 /// filesystem (macOS APFS default), so recognition must not depend on case.
 #[must_use]
 pub(crate) fn is_pipeline_interpreter(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
+    let lower = fold_command_name(name);
     let name = strip_version_suffix(&lower);
     SHELL_INTERPRETERS.contains(&name) || EXTRA_PIPELINE_INTERPRETERS.contains(&name)
 }
@@ -3693,7 +3710,7 @@ pub(crate) fn is_pipeline_interpreter(name: &str) -> bool {
 /// #493).
 #[must_use]
 pub(crate) fn is_shell_interpreter(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
+    let lower = fold_command_name(name);
     SHELL_INTERPRETERS.contains(&strip_version_suffix(&lower))
 }
 
@@ -3711,7 +3728,7 @@ pub(crate) fn is_shell_interpreter(name: &str) -> bool {
 /// [`is_pipeline_interpreter`]'s doc (issue #493).
 #[must_use]
 pub(crate) fn is_stdin_script_interpreter(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
+    let lower = fold_command_name(name);
     EXTRA_PIPELINE_INTERPRETERS.contains(&strip_version_suffix(&lower))
 }
 
@@ -6798,10 +6815,11 @@ pub(crate) fn apply_allowlist(verdict: &Verdict, allowlist: &Allowlist) -> Allow
 /// user-supplied *prefix* (which may not even end at a version boundary)
 /// has no well-defined meaning.
 ///
-/// Both comparisons case-fold `entry.command` (issue #493): an allow entry
-/// naming `AWK` or `BASH` is exactly as dangerous as one naming the
+/// Both comparisons case-fold `entry.command` (issue #493, folded via
+/// [`fold_command_name`] rather than ASCII-only lowercasing): an allow
+/// entry naming `AWK` or `BASH` is exactly as dangerous as one naming the
 /// lowercase spelling once interpreter recognition itself is
-/// case-insensitive, so this rejection must not be case-blind either —
+/// case-insensitive, so this rejection must not be case-sensitive either —
 /// otherwise `[[allow]] command = "AWK"` would sail through this check
 /// while `crate::gate`'s own recognition treats it as the real interpreter.
 fn matches_dangerous_allow_target(entry: &CommandRule) -> bool {
@@ -6814,17 +6832,17 @@ fn matches_dangerous_allow_target(entry: &CommandRule) -> bool {
             .chain(TRANSPARENT_WRAPPERS.iter())
     };
     let matches_ci = |name: &str| match &entry.command {
-        CommandMatch::Exact(exact) => exact.eq_ignore_ascii_case(name),
-        CommandMatch::Prefix(prefix) => name
-            .to_ascii_lowercase()
-            .starts_with(&prefix.to_ascii_lowercase()),
+        CommandMatch::Exact(exact) => fold_command_name(exact) == fold_command_name(name),
+        CommandMatch::Prefix(prefix) => {
+            fold_command_name(name).starts_with(&fold_command_name(prefix))
+        }
     };
     if candidates().any(|name| matches_ci(name)) {
         return true;
     }
     match &entry.command {
         CommandMatch::Exact(exact) => {
-            let lower = exact.to_ascii_lowercase();
+            let lower = fold_command_name(exact);
             candidates().any(|name| strip_version_suffix(&lower) == *name)
         }
         CommandMatch::Prefix(_) => false,
@@ -12939,6 +12957,23 @@ mod tests {
             id = "user-allow-b-prefix"
             reason = "trust me"
             command_prefix = "b"
+        "#;
+        assert!(matches!(
+            UserConfig::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    // Issue #493: a case-variant prefix must be rejected exactly like the
+    // lowercase spelling, exercising `matches_dangerous_allow_target`'s
+    // `Prefix` branch specifically (`Exact` alone was covered above).
+    #[test]
+    fn user_config_rejects_allow_entry_whose_uppercase_prefix_captures_a_shell_interpreter() {
+        let toml = r#"
+            [[allow]]
+            id = "user-allow-ba-prefix-upper"
+            reason = "trust me"
+            command_prefix = "BA"
         "#;
         assert!(matches!(
             UserConfig::parse(toml),
