@@ -9369,6 +9369,17 @@ fn git_subcommand_operands<'a>(
         .then(|| &rest[globals.len() + 1..])
 }
 
+/// `git push` flags that consume their value as a SEPARATE following token
+/// (`git push -o foo`, not `-ofoo`), so [`git_push_plus_refspec`]'s operand
+/// walk must skip that value token rather than misreading it as a
+/// positional refspec candidate (issue #504: `git push -o +foo origin main`
+/// mistook `+foo`, `-o`'s own operand, for a `+`-prefixed force-push
+/// refspec). A glued `=` spelling (`--push-option=foo`) is a single token
+/// that never string-equals an entry here, so it naturally falls through
+/// to the ordinary one-token-per-flag step below without special-casing.
+const GIT_PUSH_VALUE_FLAGS: &[&str] =
+    &["-o", "--push-option", "--repo", "--exec", "--receive-pack"];
+
 /// Issue #452, fix 1: `git push` can force-push via a `+`-prefixed refspec
 /// (`git push origin +main`, `git push +HEAD:main`) with no `-f`/`--force`
 /// flag anywhere on the line — the same destructive intent
@@ -9376,13 +9387,45 @@ fn git_subcommand_operands<'a>(
 /// since rule data has no way to express "a positional operand starts
 /// with `+`". True whenever a resolved, non-flag operand after `push`
 /// begins with `+` and is more than just `+` itself.
+///
+/// Walks `operands` index-by-index rather than a plain iterator (issue
+/// #504) because a plain iterator can't tell a flag's own value token from
+/// a positional operand — a separate-value flag's own value (`-o +foo`'s
+/// `+foo`) is skipped as that flag's value, not misread as a refspec.
+/// Stops all flag classification after a bare `--` (issue #504 follow-up):
+/// git itself treats every word after `--` as positional, so `-o` there is
+/// a remote/refspec name, not the flag, and its own `+`-prefixed operand
+/// must still be caught.
 fn git_push_plus_refspec(argv: &[NormalizedWord]) -> bool {
     let Some(operands) = git_subcommand_operands(argv, "push") else {
         return false;
     };
-    operands.iter().any(|word| {
-        matches!(word.resolution(), Resolution::Resolved(s) if s.len() > 1 && s.starts_with('+'))
-    })
+    let mut index = 0;
+    let mut past_separator = false;
+    while index < operands.len() {
+        let Resolution::Resolved(s) = operands[index].resolution() else {
+            index += 1;
+            continue;
+        };
+        if !past_separator && s == "--" {
+            past_separator = true;
+            index += 1;
+            continue;
+        }
+        if !past_separator && s.starts_with('-') {
+            index += if GIT_PUSH_VALUE_FLAGS.contains(&s.as_str()) {
+                2
+            } else {
+                1
+            };
+            continue;
+        }
+        if s.len() > 1 && s.starts_with('+') {
+            return true;
+        }
+        index += 1;
+    }
+    false
 }
 
 /// Issue #452, fix 2: `git checkout <path>` with no `--` separator is

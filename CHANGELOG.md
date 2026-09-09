@@ -15,6 +15,15 @@ All notable changes to this project are documented in this file.
   (`AWK`, `BASH`, `PYTHON3`) resolves to the same binary as the lowercase
   name on a case-insensitive filesystem (macOS APFS default), and
   previously slipped past every one of these checks.
+- `git_push_plus_refspec`'s structural detection of a `+`-prefixed
+  force-push refspec no longer misreads a separate-value flag's own operand
+  (`git push -o +foo origin main`'s `+foo`, `-o`'s value) as the refspec
+  (#504). The operand walk now recognizes `-o`/`--push-option`/`--repo`/
+  `--exec`/`--receive-pack` and skips the value token they consume (a glued
+  `=` spelling is an ordinary one-token flag, needing no special handling),
+  and stops flag classification entirely after a bare `--` (git treats
+  every word after it as positional, so `-o` there is a remote/refspec
+  name, not the flag).
 - `curl-wget-pipe-to-shell`'s pipeline sink match now recognizes a
   versioned/distro-suffixed shell binary (`dash5`) as the interpreter it
   normalizes to, the same way `is_pipeline_interpreter`/`is_shell_interpreter`
