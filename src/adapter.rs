@@ -883,24 +883,28 @@ mod tests {
         );
     }
 
-    // Issue #495's own headline repro: a message-less argument-position
-    // substitution recursion Ask ties with a LATER pipe-to-interpreter
-    // Ask that does carry a deny_message -- `fold_worst`'s first-wins tie
-    // contract must not drop the second stage's message now that it's
-    // attached at its own origin, not borrowed across verdicts at the
-    // fold point.
+    // Issue #495's own headline repro: an argument-position substitution
+    // recursion Ask ties with a LATER pipe-to-interpreter Ask that also
+    // carries a (different) deny_message -- `fold_worst`'s first-wins tie
+    // contract keeps the FIRST (substitution-recursion) stage's own
+    // message, not the pipe stage's: the fix is that the tying verdict is
+    // no longer message-LESS, not that the second stage's message wins the
+    // tie (that would be the unsafe cross-verdict borrow #495's own issue
+    // text explains was reverted). Pins the actual surfaced message so a
+    // future change silently reverting to message-less can't pass by
+    // merely checking presence.
     #[test]
-    fn fold_worst_tie_no_longer_drops_pipe_stage_deny_message_to_message_less_substitution_ask() {
+    fn fold_worst_tie_surfaces_the_first_tying_stages_own_message_not_message_less() {
         let stdin =
             r#"{"tool_name":"Bash","tool_input":{"command":"echo $(python3 -c \"x\") | bash"}}"#;
         let output = handle(stdin);
         assert_eq!(permission_decision(&output), "ask");
-        assert!(
-            output["hookSpecificOutput"]["additionalContext"]
-                .as_str()
-                .is_some(),
-            "the pipe-to-interpreter stage's own deny_message must not be dropped by the \
-             argument-position substitution recursion's tie"
+        assert_eq!(
+            additional_context(&output),
+            "Write the program to a file and run that file instead (e.g. `python3 file.py`, \
+             `awk -f prog.awk`) — inline interpreter code is never inspected.",
+            "the substitution-recursion stage's own deny_message (the first side of the tie) \
+             must survive, not the pipe-to-interpreter stage's"
         );
     }
 }

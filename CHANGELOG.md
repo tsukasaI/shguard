@@ -10,9 +10,12 @@ All notable changes to this project are documented in this file.
   backquote/process substitution recursion) now threads the recursed inner
   verdict's own `deny_message` through instead of flattening to a bare
   `Decision` (#495). A same-decision `fold_worst` tie against a later,
-  differently-originated stage (e.g. `echo $(python3 -c "x") | bash`'s
-  pipe-to-interpreter Ask) no longer drops that stage's message to a
-  message-less substitution-recursion Ask that ties it first.
+  differently-originated stage no longer yields a message-less verdict:
+  `echo $(python3 -c "x") | bash` now carries the inline-interpreter
+  message from the tying substitution-recursion stage itself (still the
+  first-encountered side of the tie, per `fold_worst`'s own contract, not
+  a borrow from the second, pipe-to-interpreter stage).
+
 ### Security
 
 - Several `rm -rf`/`rm -r` shapes adjacent to #453/#505's fixes are now
