@@ -9760,21 +9760,27 @@ struct Env {
     /// the first append's `" \t\n,"` with the second append's `.` composed
     /// onto the wrong base.
     ifs_append_floor: Option<String>,
-    /// Issue #516: names whose most recent removal from `map` was a
-    /// GENUINELY PERSISTING reassignment with an unresolvable RHS
+    /// Issue #516: names for which the most recent PERSISTING (non-prefix-
+    /// scoped) assignment on this line had an unresolvable RHS, meaning
+    /// `$name`'s real runtime value is genuinely unknown from this point on
     /// (`X=$(evil)` with no following command on the same simple command —
-    /// [`Self::apply_one`]'s own docs) rather than a command-scoped prefix
-    /// one (`X=$(evil) true`). Real bash resets `$X` back to its prior
-    /// value the instant a prefix-scoped command exits, so `value_history`'s
-    /// fallback is safe there; a persisting reassignment's new value truly
-    /// does take over, even though it's unresolvable here, so falling back
-    /// to a now-stale historical value would be a genuine false Block, not
-    /// a conservative over-approximation — [`Self::apply_one`] inserts a
-    /// name here on that shape and removes it the moment any later
-    /// assignment resolves `name` again (a following prefix-scoped
-    /// unresolvable assignment for the SAME name does not reinstate the
-    /// persisting-invalidation state; it moves the "why is `map` missing an
-    /// entry" story back to command-scoped, where history is safe again).
+    /// [`Self::apply_one`]'s own docs), as opposed to a command-scoped
+    /// prefix one (`X=$(evil) true`), which never changes what persists in
+    /// the real shell at all. `value_history`'s fallback is safe for the
+    /// latter (the old value truly does survive once the prefix-scoped
+    /// command exits) but not the former (the new, unresolvable value truly
+    /// does take over) — a fallback there would be a genuine false Block,
+    /// not a conservative over-approximation.
+    ///
+    /// Only a PERSISTING assignment (`is_prefix_scoped == false` in
+    /// [`Self::apply_one`]) may ever insert into or remove from this set,
+    /// whether its own RHS resolves or not: a prefix-scoped assignment
+    /// cannot clear a genuinely unknown persisting value an earlier command
+    /// left behind either (`X=$(evil); X=ls true; $X` still has `$X`
+    /// holding `$(evil)`'s own unknown value once `true` exits — `"ls"`
+    /// never actually took over), so a prefix-scoped assignment must leave
+    /// this set entirely alone in both of its own branches, not just the
+    /// unresolvable one.
     persisting_unresolvable: std::collections::HashSet<String>,
 }
 
@@ -9896,13 +9902,21 @@ impl Env {
                     .or_default()
                     .push(value.clone());
                 self.map.insert(assignment.name.clone(), value);
-                self.persisting_unresolvable.remove(&assignment.name);
+                // A prefix-scoped resolution (`X=v cmd`) doesn't persist
+                // past `cmd` in real bash either, so it must not clear a
+                // genuinely persisting unresolvable state some EARLIER
+                // command on this line left behind: `X=$(evil); X=ls true;
+                // $X` still has `$X` holding `$(evil)`'s own unknown value
+                // once `true` exits, `"ls"` never having actually taken
+                // over. Only a persisting resolution (no words) can clear
+                // it, the same asymmetry `None`'s own branch below applies.
+                if !is_prefix_scoped {
+                    self.persisting_unresolvable.remove(&assignment.name);
+                }
             }
             None => {
                 self.map.remove(&assignment.name);
-                if is_prefix_scoped {
-                    self.persisting_unresolvable.remove(&assignment.name);
-                } else {
+                if !is_prefix_scoped {
                     self.persisting_unresolvable.insert(assignment.name.clone());
                 }
             }
@@ -10329,6 +10343,38 @@ mod tests {
         // would be a false Block, not a safe over-approximation, exactly
         // the distinction `Env::persisting_unresolvable` now tracks.
         assert_decision("X=rm; X=$(echo ls); $X -rf /", Decision::Ask);
+    }
+
+    #[test]
+    fn issue_516_a_later_prefix_scoped_assignment_does_not_clear_earlier_persisting_state() {
+        // A fable code-reviewer pass on PR #532 found a real bug: the first
+        // draft cleared `persisting_unresolvable` on ANY resolved
+        // reassignment, prefix-scoped ones included. But a prefix-scoped
+        // assignment (`X=ls true`) never changes what persists in the real
+        // shell at all -- `$X` still holds the earlier `X=$(evil)`'s own
+        // unknown value once `true` exits, `"ls"` never actually taking
+        // over. Wrongly clearing the set let `$X` fall back all the way to
+        // the much-earlier `"rm -rf /"`, a false Block: the true value at
+        // this point is genuinely unknown, not `"rm -rf /"`.
+        assert_decision(
+            "X='rm -rf /'; X=$(evil); X=$(evil2) true; $X",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn issue_516_a_later_prefix_scoped_resolved_reassignment_does_not_clear_it_either() {
+        // Same bug, the other resolved-then-prefix-scoped ordering: `X=ls
+        // true` (resolved, prefix-scoped) sits between the persisting
+        // unresolvable `X=$(evil)` and a second prefix-scoped unresolvable
+        // `X=$(evil2) true` -- none of these three intermediate steps ever
+        // actually persists a new value past its own command, so `$X`'s
+        // real runtime value is still `$(evil)`'s own unknown output the
+        // whole time.
+        assert_decision(
+            "X='rm -rf /'; X=$(evil); X=ls true; X=$(evil2) true; $X",
+            Decision::Ask,
+        );
     }
 
     #[test]
