@@ -4137,7 +4137,23 @@ fn evaluate_command_position_bare_var(
     // either: unlike a command-scoped prefix assignment, the real shell's
     // `$name` truly does take on the new (unknown) value here, so an older
     // historical entry is stale, not merely shadowed.
-    let name_history: &[String] = if value.is_none() && env.is_persisting_unresolvable(name) {
+    //
+    // A fable code-reviewer pass on PR #532 (round 3) found this must NOT
+    // be conditioned on `value.is_none()`: `Env::apply_one`'s own docs (see
+    // `persisting_unresolvable`'s field doc) establish that only a
+    // PERSISTING assignment can ever clear the set, so once `name` is in
+    // it, EVERY later prefix-scoped assignment for that name — resolved or
+    // not — leaves it there. A resolved prefix-scoped assignment
+    // (`X=ls true`) still updates `map` (issue #463's own design, `Env`'s
+    // struct docs), so `env.get(name)` can be `Some("ls")` even while the
+    // real runtime value is still whatever the earlier persisting
+    // unresolvable assignment actually produced: `X='rm -rf /';
+    // X=$(evil); X=ls true; $X` must not fall back to the pre-`$(evil)`
+    // `"rm -rf /"` just because `map` currently shows a resolved value —
+    // the `"ls"` current-value candidate is still tried below (it can only
+    // ever raise the decision toward Ask/Block, never toward a false
+    // Allow), but no STALE history entry may.
+    let name_history: &[String] = if env.is_persisting_unresolvable(name) {
         &[]
     } else {
         env.value_history(name)
@@ -10375,6 +10391,30 @@ mod tests {
             "X='rm -rf /'; X=$(evil); X=ls true; X=$(evil2) true; $X",
             Decision::Ask,
         );
+    }
+
+    #[test]
+    fn issue_516_a_resolved_prefix_scoped_current_value_does_not_reach_stale_history_either() {
+        // Round 3: a fable code-reviewer pass on PR #532 found the round-2
+        // fix's guard (`value.is_none() && env.is_persisting_unresolvable`)
+        // didn't generalize -- it only suppressed history when the CURRENT
+        // value was also missing. Here `X=ls true` is prefix-scoped and
+        // resolved, so `env.get("X")` hits `Some("ls")`, but the true
+        // runtime value is still `$(evil)`'s own unknown output (the
+        // earlier persisting unresolvable assignment) -- `"ls"` never
+        // actually took over. The old guard let this fall through to
+        // `value_history`'s much-earlier `"rm -rf /"`, a false Block.
+        assert_decision("X='rm -rf /'; X=$(evil); X=ls true; $X", Decision::Ask);
+    }
+
+    #[test]
+    fn issue_516_same_commands_own_resolved_prefix_assignment_does_not_reach_stale_history() {
+        // Same bug, the same-command-prefix-assignment variant: `X=ls $X`
+        // is itself scoped to the very command being evaluated, so `$X`
+        // expands under `$(evil)`'s own still-unknown value, never `"ls"`
+        // (which only takes effect for a hypothetical command after this
+        // one) and never the much-earlier `"rm -rf /"` either.
+        assert_decision("X='rm -rf /'; X=$(evil); X=ls $X", Decision::Ask);
     }
 
     #[test]
