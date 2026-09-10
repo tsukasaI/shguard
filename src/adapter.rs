@@ -907,4 +907,46 @@ mod tests {
              must survive, not the pipe-to-interpreter stage's"
         );
     }
+
+    // Issue #495 review (round 2): pins `apply_substitution_floor`'s
+    // priority when the PRE-FLOOR verdict itself already carries a message
+    // -- that message must survive, not be replaced by the floor's own.
+    // Mutation-tested: reverting the fix to prefer the floor's message
+    // makes this fail (surfaces the inline-interpreter message instead of
+    // the arithmetic-expansion one).
+    #[test]
+    fn substitution_floor_keeps_the_pre_floor_verdicts_own_message_over_the_floors() {
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"$((1+1)) $(rm -rf /)"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "deny");
+        assert_eq!(
+            additional_context(&output),
+            "shguard cannot statically analyze this construct (arithmetic expansion \
+             ($((...)))); use its literal form, or split the command across separate lines so \
+             each piece is inspectable.",
+            "the pre-floor verdict's own arithmetic-expansion message must survive the \
+             substitution floor overriding its DECISION, not be replaced by the floor's own \
+             message"
+        );
+    }
+
+    // Issue #495 review (round 2): pins the case where the PRE-FLOOR
+    // verdict has NO message of its own, so the floor's own message must
+    // apply -- the other half of `apply_substitution_floor`'s fallback,
+    // exercised through one of its nine direct early-return call sites
+    // (rule 6a's `bash -c` outcome) rather than through `fold_floors`.
+    #[test]
+    fn substitution_floor_falls_back_to_its_own_message_when_pre_floor_verdict_has_none() {
+        let stdin =
+            r#"{"tool_name":"Bash","tool_input":{"command":"bash -c \"ls\" $(python3 -c \"x\")"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "ask");
+        assert_eq!(
+            additional_context(&output),
+            "Write the program to a file and run that file instead (e.g. `python3 file.py`, \
+             `awk -f prog.awk`) — inline interpreter code is never inspected.",
+            "the substitution floor's own message must apply when the pre-floor verdict (rule \
+             6a's bash -c outcome) carries none of its own"
+        );
+    }
 }

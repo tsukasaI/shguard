@@ -3775,17 +3775,21 @@ fn apply_substitution_floor(
     if verdict.decision() >= floor_decision {
         return verdict;
     }
-    // Issue #495 review: captured before `verdict` is consumed below.
-    // Preferring the floor's own message (the recursed inner verdict's,
-    // threaded through `evaluate_argument_substitutions`) when it has one,
-    // but falling back to the pre-floor verdict's message rather than
-    // discarding it -- the floor decision governing the DECISION doesn't
-    // mean the pre-floor verdict's own message stopped applying: `reason`
-    // below still folds the pre-floor verdict's reason text in (`"{existing};
-    // {floor_reason}"`), so a message describing part of that same reason
-    // (e.g. an unresolvable-kind Ask's own deny_msg_for_unresolvable_kind
-    // guidance) must not silently vanish just because this floor also
-    // fired.
+    // Issue #495 review (round 2): captured before `verdict` is consumed
+    // below. Preferring the PRE-FLOOR verdict's own message when it has
+    // one, falling back to the floor's own message only when it doesn't --
+    // the opposite priority from an earlier round of this fix, corrected
+    // after review proved it backwards: `fold_floors` (the sibling path
+    // that also consumes this same substitution_result data, `substitution_
+    // deny_message` there) ranks the substitution floor's own message
+    // LOWEST priority, below every other structural message -- this site
+    // must match that priority, or the same input shape surfaces a
+    // different winning message depending on which of the two paths
+    // happens to fire. `reason` below still folds the pre-floor verdict's
+    // reason text in first (`"{existing}; {floor_reason}"`), consistent
+    // with the pre-floor verdict's message also taking priority: the
+    // governing DECISION comes from the floor, but the more specific,
+    // already-reported reason/message pair is the pre-floor verdict's own.
     let verdict_deny_message = verdict.deny_message().cloned();
     let argv = verdict.normalized_argv().to_vec();
     let floor_reason = match floor_decision {
@@ -3800,7 +3804,7 @@ fn apply_substitution_floor(
         Decision::Block => Verdict::block(Reason::new(reason), argv, None),
         Decision::Ask | Decision::Allow => Verdict::ask(Reason::new(reason), argv),
     }
-    .with_deny_message(floor_deny_message.or(verdict_deny_message))
+    .with_deny_message(verdict_deny_message.or(floor_deny_message))
 }
 
 /// Applies rule 8's opaque-unresolvable-kind floor
