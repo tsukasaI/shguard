@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- `evaluate_argument_substitutions` (rule 3: argument-position command/
+  backquote/process substitution recursion) now threads the recursed inner
+  verdict's own `deny_message` through instead of flattening to a bare
+  `Decision` (#495). A same-decision `fold_worst` tie against a later,
+  differently-originated stage no longer yields a message-less verdict:
+  `echo $(python3 -c "x") | bash` now carries the inline-interpreter
+  message from the tying substitution-recursion stage itself (still the
+  first-encountered side of the tie, per `fold_worst`'s own contract, not
+  a borrow from the second, pipe-to-interpreter stage).
+
 ### Security
 
 - `reject_excessive_raw_nesting`'s `[[ ... ]]` extended-test-operator raw
