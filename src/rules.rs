@@ -646,6 +646,50 @@ fn git_config_key_is_hooks_path(key_value: &str) -> bool {
     key.eq_ignore_ascii_case("core.hookspath")
 }
 
+/// Whether `key_value` names the `include.path` config variable (issue
+/// #499, follow-up from #447/#498's `core.hooksPath` detection). `-c
+/// include.path=<file>`/`--config-env=include.path=<file>` injects an
+/// arbitrary config file for the duration of the invocation — that file's
+/// own contents could set `core.hooksPath` (or anything else
+/// security-relevant) indirectly, but are not statically inspectable
+/// here. Consulted by `crate::gate`'s own structural check
+/// (`git_config_smuggled_verdict`) rather than folded into
+/// [`git_strip_global_flags`]'s `--no-verify`-equivalence rewrite the way
+/// [`git_config_key_is_hooks_path`] is: a brand-new `required_flags`-keyed
+/// rule for this would open an unrelated false-Ask floor for ANY OTHER
+/// unresolvable `-c` value on the same `git` invocation, since
+/// `crate::rules::CommandRule`'s except-flags floor can't tell "this
+/// unresolvable word could resolve to the flag I need" apart from "this
+/// flag is a synthetic marker no real command line could ever spell". A
+/// hand-verdict structural check (mirroring
+/// `crate::gate::git_checkout_dot`'s own shape) has no such floor to open.
+/// Deliberately scoped to the exact `include.path` key, not the
+/// conditional `includeIf.<condition>.path` family (same file-injection
+/// effect, gated on a runtime condition this function doesn't evaluate) —
+/// a disclosed residual gap, not covered by the issue this fixes.
+pub(crate) fn git_config_key_is_include_path(key_value: &str) -> bool {
+    let key = key_value.split_once('=').map_or(key_value, |(key, _)| key);
+    key.eq_ignore_ascii_case("include.path")
+}
+
+/// Whether `key_value` names an `alias.<name>` config variable (issue
+/// #499). `-c alias.<name>=<value>` defines or overrides a git alias for
+/// the duration of the invocation — structurally closer to inline shell
+/// execution than to a config toggle: a value beginning with `!` runs as
+/// an arbitrary shell command, and even a plain git-subcommand value can
+/// redefine what a builtin-looking subcommand does (`alias.co = "!rm -rf
+/// /"`-style). The alias's own NAME (`alias.<name>`, a subsection, unlike
+/// `core`/`include`'s flat keys) is git-config case-sensitive and not
+/// compared against anything here — only the `alias.` section prefix
+/// matters, so this fires regardless of what the alias is named. See
+/// [`git_config_key_is_include_path`]'s doc for why this is consulted
+/// structurally in `crate::gate` rather than via a `required_flags` rule.
+pub(crate) fn git_config_key_is_alias(key_value: &str) -> bool {
+    let key = key_value.split_once('=').map_or(key_value, |(key, _)| key);
+    key.split_once('.')
+        .is_some_and(|(section, name)| section.eq_ignore_ascii_case("alias") && !name.is_empty())
+}
+
 /// Strips a leading run of `git`'s own global value-taking options (and
 /// their separated values) from `tail`. Returns `None` — no rewrite
 /// needed — for every non-`git` command, and for a `git` invocation with

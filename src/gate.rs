@@ -3136,6 +3136,22 @@ fn evaluate_simple_command_core(
         );
     }
 
+    // Issue #499: `git -c include.path=...`/`-c alias.<name>=...` smuggle
+    // in equivalent no-verify/hook-disabling (or, for `alias`, arbitrary
+    // shell) behavior through the same `-c` conduit #498's own
+    // `core.hooksPath` detection uses — see `git_config_smuggled_verdict`'s
+    // own doc for why this is a hand-verdict structural check rather than
+    // a `required_flags` rule.
+    if let Some(verdict) = git_config_smuggled_verdict(&argv) {
+        return apply_opaque_kind_floor(
+            apply_substitution_floor(
+                apply_escalation_floor(verdict, escalation_floor),
+                substitution_result,
+            ),
+            opaque_kind,
+        );
+    }
+
     fold_floors(
         argv,
         interpreter_code_floor,
@@ -9455,6 +9471,86 @@ fn git_checkout_dot(argv: &[NormalizedWord]) -> bool {
     })
 }
 
+/// Issue #499, follow-up from #447/#498: whether `argv`'s `git`
+/// `-c`/`--config-env` global options carry an `include.path` (Ask) or
+/// `alias.<name>` (Block) value — the same `-c` conduit #498's own
+/// `core.hooksPath`-equals-`--no-verify` detection uses, but for two
+/// shapes that need their own Verdict rather than being folded into that
+/// rewrite: see `crate::rules::git_config_key_is_include_path`'s doc for
+/// why a `required_flags`-keyed rule isn't used here (it would open an
+/// unrelated false-Ask floor for any OTHER unresolvable `-c` value on the
+/// same invocation). Structural, hand-verdict shape mirrors
+/// [`git_checkout_dot`] just above. `alias` outranks `include.path` when
+/// both are present on the same line — checked in that order, first
+/// match wins, consistent with this scan not needing to report both.
+fn git_config_smuggled_verdict(argv: &[NormalizedWord]) -> Option<Verdict> {
+    let (name, rest) = crate::rules::effective_command(argv)?;
+    if name != "git" {
+        return None;
+    }
+    let globals = bound_git_global_options(rest);
+    let mut index = 0;
+    let mut include_path_seen = false;
+    while index < globals.len() {
+        let Resolution::Resolved(s) = globals[index].resolution() else {
+            index += 1;
+            continue;
+        };
+        if s == "-c" || s == "--config-env" {
+            if let Some(Resolution::Resolved(value)) =
+                globals.get(index + 1).map(NormalizedWord::resolution)
+            {
+                if crate::rules::git_config_key_is_alias(value) {
+                    return Some(Verdict::block(
+                        Reason::new(
+                            "git -c alias.<name>=<value>/--config-env=alias.<name>=<value> \
+                             defines or overrides a git alias for this invocation, structurally \
+                             closer to inline shell execution than to a config toggle (a value \
+                             beginning with `!` runs as an arbitrary shell command)",
+                        ),
+                        argv.to_vec(),
+                        None,
+                    ));
+                }
+                if crate::rules::git_config_key_is_include_path(value) {
+                    include_path_seen = true;
+                }
+            }
+        } else if let Some(kv) = s.strip_prefix("--config-env=") {
+            if crate::rules::git_config_key_is_alias(kv) {
+                return Some(Verdict::block(
+                    Reason::new(
+                        "git -c alias.<name>=<value>/--config-env=alias.<name>=<value> defines \
+                         or overrides a git alias for this invocation, structurally closer to \
+                         inline shell execution than to a config toggle (a value beginning with \
+                         `!` runs as an arbitrary shell command)",
+                    ),
+                    argv.to_vec(),
+                    None,
+                ));
+            }
+            if crate::rules::git_config_key_is_include_path(kv) {
+                include_path_seen = true;
+            }
+        }
+        index += if crate::rules::git_global_takes_separated_value(s) {
+            2
+        } else {
+            1
+        };
+    }
+    include_path_seen.then(|| {
+        Verdict::ask(
+            Reason::new(
+                "git -c include.path=<file>/--config-env=include.path=<file> injects an \
+                 arbitrary config file; its contents are not statically inspectable and could \
+                 set core.hooksPath or any other security-relevant setting indirectly",
+            ),
+            argv.to_vec(),
+        )
+    })
+}
+
 /// Issue #209: a narrower, single-invocation version of issue #103's
 /// same-line `cd`/`pushd` composition, for the handful of tools that
 /// accept a `-C <dir>`-shaped flag changing THEIR OWN working directory
@@ -14319,6 +14415,47 @@ mod tests {
         );
         assert_decision(r#"git -c "$X" push --force"#, Decision::Block);
         assert_decision(r#"git -c "$X" status"#, Decision::Allow);
+    }
+
+    #[test]
+    fn git_dash_c_include_path_and_alias_smuggling_are_detected() {
+        // Issue #499, follow-up from #447/#498: the same `-c` conduit
+        // that can smuggle in `core.hooksPath=...` also accepts
+        // `include.path=<file>` (an uninspectable arbitrary config file,
+        // Ask) and `alias.<name>=<value>` (structurally closer to inline
+        // shell execution, Block).
+        assert_decision("git -c include.path=evil.conf commit -m x", Decision::Ask);
+        assert_decision(
+            "git --config-env include.path=ENVVAR commit -m x",
+            Decision::Ask,
+        );
+        assert_decision(
+            "git --config-env=include.path=ENVVAR commit -m x",
+            Decision::Ask,
+        );
+        // Git config section/key names are case-insensitive.
+        assert_decision("git -c Include.Path=evil.conf commit -m x", Decision::Ask);
+        assert_decision(r#"git -c alias.co="!rm -rf /" co"#, Decision::Block);
+        assert_decision(
+            r#"git --config-env alias.co="!rm -rf /" co"#,
+            Decision::Block,
+        );
+        assert_decision(
+            r#"git --config-env=alias.co="!rm -rf /" co"#,
+            Decision::Block,
+        );
+        // The alias's own section is case-insensitive; its name is not
+        // compared against anything, so any name fires.
+        assert_decision(r#"git -c Alias.whatever="!id" whatever"#, Decision::Block);
+        // A `-c "$X"` whose value is entirely unresolvable must not
+        // spuriously trigger either new detection (no synthetic
+        // `required_flags` rule is involved here, so nothing false-Asks on
+        // the mere presence of an unresolvable `-c` value the way a
+        // `required_flags`-keyed approach would have).
+        assert_decision(r#"git -c "$X" status"#, Decision::Allow);
+        // Control: an ordinary `-c` override unrelated to either key must
+        // not trigger either detection.
+        assert_decision("git -c user.name=x commit -m x", Decision::Allow);
     }
 
     #[test]

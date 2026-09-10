@@ -6,6 +6,18 @@ All notable changes to this project are documented in this file.
 
 ### Security
 
+- `git -c include.path=<file>`/`-c alias.<name>=<value>` (and their
+  `--config-env` spellings) no longer resolve to Allow (#499, follow-up
+  from #447/#498). `include.path` injects an arbitrary, uninspectable
+  config file (Ask); `alias.<name>` defines or overrides a git alias for
+  the invocation, structurally closer to inline shell execution than a
+  config toggle (Block). Detected structurally in `crate::gate`
+  (`git_config_smuggled_verdict`), not via a `required_flags` rule, since
+  a new rule keyed on a synthetic marker flag would open an unrelated
+  false-Ask floor for any other unresolvable `-c` value on the same
+  invocation.
+### Security
+
 - Every interpreter-name comparison in the gate (`AWK_INTERPRETERS`
   membership, `inline_code_flag`, `is_shell_interpreter`,
   `is_pipeline_interpreter`, `is_stdin_script_interpreter`, the `fish`
