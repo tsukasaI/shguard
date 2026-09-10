@@ -20,6 +20,20 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- Rule 2's bare-`$VAR` command-position resolution now falls back to
+  `value_history` even when the CURRENT value is missing because a later,
+  command-scoped prefix assignment's own RHS was unresolvable (#516,
+  follow-up from #463/#515): `X='rm -rf /'; X=$(evil) true; $X` now Blocks
+  on the earlier `"rm -rf /"`, since real bash resets `$X` back to it the
+  instant `true` exits, the same command-scoped-prefix-assignment gap
+  #463/#515 already closed for a *resolved* shadowing value. A genuinely
+  PERSISTING unresolvable reassignment (no following command on that same
+  simple command, e.g. `X=rm; X=$(echo ls); $X -rf /`) is unaffected and
+  still Asks: `Env` now tracks which shape produced the missing current
+  value, since a persisting reassignment's new value truly does take over,
+  and a historical fallback there would be a false Block rather than a
+  safe over-approximation.
+
 - `evaluate_argument_substitutions` (rule 3: argument-position command/
   backquote/process substitution recursion) now threads the recursed inner
   verdict's own `deny_message` through instead of flattening to a bare
