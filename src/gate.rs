@@ -4117,20 +4117,31 @@ fn evaluate_command_position_bare_var(
     };
 
     // Issue #463: an explicit unresolvable reassignment (`X=$(evil)`) still
-    // removes `name` from `env`'s map and falls through to this Ask exactly
-    // as before — `Env::apply_assignments`'s own docs treat a stale
-    // resolution as worse than none, and a bare `env.get(name)` miss must
-    // keep meaning "forget what we knew", not "fall back to history".
-    let Some(value) = env.get(name) else {
-        return Verdict::ask(
-            Reason::new(format!(
-                "command position `${name}` has no statically-known value on this command line"
-            )),
-            argv,
-        )
-        .with_deny_message(Some(DenyMessage::new(DENY_MSG_BARE_VAR)));
+    // removes `name` from `env`'s map — `Env::apply_assignments`'s own docs
+    // treat a stale *current* resolution as worse than none, so a bare
+    // `env.get(name)` miss must still mean "forget what we currently know".
+    // Issue #516: that must not also discard `value_history` — the same
+    // command-scoped-prefix-assignment gap #463 fixed for a resolved
+    // shadowing value applies just as much to an UNRESOLVABLE one:
+    // `X='rm -rf /'; X=$(evil) true; $X` never lets `true`'s own
+    // command-scoped `X=$(evil)` persist past it in real bash either, so
+    // the earlier `"rm -rf /"` is still a value `$X` could hold here. When
+    // there is no current value, `value` stays `None` below and the
+    // "current value" candidate loop is skipped entirely, but the
+    // historical-value loop further down still runs — the two loops no
+    // longer require a live current value to reach the history fallback.
+    let value = env.get(name);
+    // Issue #516: a GENUINELY PERSISTING unresolvable reassignment (no
+    // following command on that same simple command — `Env`'s own docs on
+    // `persisting_unresolvable`) must not fall back to `value_history`
+    // either: unlike a command-scoped prefix assignment, the real shell's
+    // `$name` truly does take on the new (unknown) value here, so an older
+    // historical entry is stale, not merely shadowed.
+    let name_history: &[String] = if value.is_none() && env.is_persisting_unresolvable(name) {
+        &[]
+    } else {
+        env.value_history(name)
     };
-    let name_history = env.value_history(name);
 
     // Every distinct IFS interpretation worth trying, most-specific first:
     // the current resolved value, then every earlier value a later
@@ -4160,42 +4171,44 @@ fn evaluate_command_position_bare_var(
     candidates.push((None, default_note));
 
     let mut primary_substituted = None;
-    for &(ifs, splitting_note) in &candidates {
-        let substituted = substitute_command_name(&argv, value, ifs);
-        if let Some(rule) = rules.match_command(&substituted) {
-            return Verdict::block(
-                Reason::new(format!(
-                    "`${name}` resolves to {value:?} on this command line, which matches \
-                     blocklist rule {:?}{splitting_note}: {}",
-                    rule.id().as_str(),
-                    rule.reason().as_str()
-                )),
-                substituted,
-                Some(rule.id().clone()),
-            )
-            .with_deny_message(rule.deny_message().cloned());
-        }
-        // The default-IFS split (`ifs.is_none()`, always the last
-        // candidate above) is what the returned Ask verdict's argv must
-        // carry: that argv feeds `stage_argvs` for pipeline-shape/decode
-        // matching downstream, and a non-default candidate's split can
-        // desync that scan (capturing whichever
-        // candidate happened to run FIRST, via `get_or_insert`, let a
-        // same-line-but-different-command's `IFS=` prefix assignment that
-        // doesn't even persist to `$name`'s own invocation feed a
-        // mis-split argv downstream and mask a real pipeline Block). A
-        // non-default candidate instead goes to `alternates` (this
-        // function's own docs) — a PROBE `evaluate_pipeline` tries
-        // separately, never the primary `stage_argvs` entry, so it can
-        // only raise a decision, never desync the primary scan the way a
-        // direct substitution would.
-        if ifs.is_none() {
-            primary_substituted = Some(substituted);
-        } else {
-            alternates.push((
-                substituted,
-                format!("`${name}` resolves to {value:?}{splitting_note}"),
-            ));
+    if let Some(value) = value {
+        for &(ifs, splitting_note) in &candidates {
+            let substituted = substitute_command_name(&argv, value, ifs);
+            if let Some(rule) = rules.match_command(&substituted) {
+                return Verdict::block(
+                    Reason::new(format!(
+                        "`${name}` resolves to {value:?} on this command line, which matches \
+                         blocklist rule {:?}{splitting_note}: {}",
+                        rule.id().as_str(),
+                        rule.reason().as_str()
+                    )),
+                    substituted,
+                    Some(rule.id().clone()),
+                )
+                .with_deny_message(rule.deny_message().cloned());
+            }
+            // The default-IFS split (`ifs.is_none()`, always the last
+            // candidate above) is what the returned Ask verdict's argv must
+            // carry: that argv feeds `stage_argvs` for pipeline-shape/decode
+            // matching downstream, and a non-default candidate's split can
+            // desync that scan (capturing whichever
+            // candidate happened to run FIRST, via `get_or_insert`, let a
+            // same-line-but-different-command's `IFS=` prefix assignment that
+            // doesn't even persist to `$name`'s own invocation feed a
+            // mis-split argv downstream and mask a real pipeline Block). A
+            // non-default candidate instead goes to `alternates` (this
+            // function's own docs) — a PROBE `evaluate_pipeline` tries
+            // separately, never the primary `stage_argvs` entry, so it can
+            // only raise a decision, never desync the primary scan the way a
+            // direct substitution would.
+            if ifs.is_none() {
+                primary_substituted = Some(substituted);
+            } else {
+                alternates.push((
+                    substituted,
+                    format!("`${name}` resolves to {value:?}{splitting_note}"),
+                ));
+            }
         }
     }
 
@@ -4213,7 +4226,7 @@ fn evaluate_command_position_bare_var(
     // above — a historical value is a probe, never the primary `stage_argvs`
     // entry, for the same desync reason.
     for historical in name_history {
-        if historical.as_str() == value {
+        if Some(historical.as_str()) == value {
             continue;
         }
         for &(ifs, splitting_note) in &candidates {
@@ -4243,14 +4256,28 @@ fn evaluate_command_position_bare_var(
         }
     }
 
-    Verdict::ask(
-        Reason::new(format!(
+    let reason = match value {
+        Some(value) => format!(
             "`${name}` resolves to {value:?} on this command line, but the resulting command \
              matches no blocklist rule — session state could still differ at runtime"
-        )),
-        primary_substituted.unwrap_or(argv),
-    )
-    .with_deny_message(Some(DenyMessage::new(DENY_MSG_BARE_VAR)))
+        ),
+        None if name_history.is_empty() => {
+            format!("command position `${name}` has no statically-known value on this command line")
+        }
+        // Issue #516: a same-line, command-scoped prefix assignment with an
+        // unresolvable RHS (`X=$(evil) true`) removed `name`'s CURRENT
+        // value, but an earlier same-line value is still on record and
+        // matched no blocklist rule either — say so, rather than the plain
+        // "no statically-known value" message above, which would wrongly
+        // suggest `name_history` was never consulted.
+        None => format!(
+            "command position `${name}` has no statically-known CURRENT value on this command \
+             line (a later command-scoped prefix assignment's own unresolvable RHS discarded \
+             it), but every earlier same-line value on record matches no blocklist rule either"
+        ),
+    };
+    Verdict::ask(Reason::new(reason), primary_substituted.unwrap_or(argv))
+        .with_deny_message(Some(DenyMessage::new(DENY_MSG_BARE_VAR)))
 }
 
 /// Rule 6a: `bash -c '<string>'`/`sh -c`/`zsh -c`/`dash -c`. Returns `None`
@@ -9705,17 +9732,19 @@ fn apply_unknown_cwd_floor(
 /// floor in this file.
 ///
 /// This is deliberately narrower than `assigned`'s "touched at all"
-/// tracking, and narrower than `IFS`'s OWN use of its own history: an
-/// explicit unresolvable reassignment (`X=$(evil)`) still removes `name`
-/// from `map` with no history fallback for the *name being resolved as
-/// the command itself* — [`Self::apply_one`]'s own docs treat a stale
-/// value as worse than none, and rule 2 only ever adds EXTRA Block-only
-/// `value_history` candidates alongside an already-known current
-/// resolution for `name`, never substituting for a missing one. `IFS` is
-/// the one deliberate exception to that: it is consulted as a SPLITTING
-/// candidate for whatever `name` already resolved to, not as `name`
-/// itself, so `ifs_history` is tried even when `IFS`'s own current value
-/// is unresolvable (see `evaluate_command_position_bare_var`'s own docs).
+/// tracking: an explicit unresolvable reassignment (`X=$(evil)`) still
+/// removes `name` from `map` — [`Self::apply_one`]'s own docs treat a stale
+/// *current* value as worse than none — but issue #516 found that must not
+/// also block the history fallback for the *name being resolved as the
+/// command itself*: a same-line, command-scoped prefix assignment with an
+/// unresolvable RHS (`X='rm -rf /'; X=$(evil) true; $X`) never persists
+/// past its own command in real bash either, exactly like a resolved
+/// shadowing prefix assignment already doesn't, so `value_history` must
+/// still be tried when `map.get(name)` comes up empty, not only alongside
+/// an already-known current resolution — `evaluate_command_position_bare_var`
+/// now consults `value_history` unconditionally, current-value candidates
+/// simply being absent from that scan when there is no current resolution
+/// to try.
 struct Env {
     map: HashMap<String, String>,
     assigned: std::collections::HashSet<String>,
@@ -9731,6 +9760,22 @@ struct Env {
     /// the first append's `" \t\n,"` with the second append's `.` composed
     /// onto the wrong base.
     ifs_append_floor: Option<String>,
+    /// Issue #516: names whose most recent removal from `map` was a
+    /// GENUINELY PERSISTING reassignment with an unresolvable RHS
+    /// (`X=$(evil)` with no following command on the same simple command —
+    /// [`Self::apply_one`]'s own docs) rather than a command-scoped prefix
+    /// one (`X=$(evil) true`). Real bash resets `$X` back to its prior
+    /// value the instant a prefix-scoped command exits, so `value_history`'s
+    /// fallback is safe there; a persisting reassignment's new value truly
+    /// does take over, even though it's unresolvable here, so falling back
+    /// to a now-stale historical value would be a genuine false Block, not
+    /// a conservative over-approximation — [`Self::apply_one`] inserts a
+    /// name here on that shape and removes it the moment any later
+    /// assignment resolves `name` again (a following prefix-scoped
+    /// unresolvable assignment for the SAME name does not reinstate the
+    /// persisting-invalidation state; it moves the "why is `map` missing an
+    /// entry" story back to command-scoped, where history is safe again).
+    persisting_unresolvable: std::collections::HashSet<String>,
 }
 
 impl Env {
@@ -9740,6 +9785,7 @@ impl Env {
             assigned: std::collections::HashSet::new(),
             value_history: HashMap::new(),
             ifs_append_floor: None,
+            persisting_unresolvable: std::collections::HashSet::new(),
         }
     }
 
@@ -9770,6 +9816,14 @@ impl Env {
         self.assigned.contains(name)
     }
 
+    /// Issue #516: whether `name`'s current absence from `map` is a
+    /// genuinely persisting invalidation (see [`Self::persisting_unresolvable`]'s
+    /// own docs) that `evaluate_command_position_bare_var` must NOT paper
+    /// over with a stale `value_history` fallback.
+    fn is_persisting_unresolvable(&self, name: &str) -> bool {
+        self.persisting_unresolvable.contains(name)
+    }
+
     /// Folds `command`'s own assignments into the map. Must be called
     /// before evaluating `command` itself, so a same-command prefix
     /// assignment (`X=rm $X -rf /`) is visible to that very command, and
@@ -9782,12 +9836,13 @@ impl Env {
     /// is worse than no resolution at all, since rule 2 only ever uses a
     /// resolution to *upgrade* Ask to Block.
     fn apply_assignments(&mut self, command: &SimpleCommand) {
+        let is_prefix_scoped = !command.words.is_empty();
         for assignment in &command.assignments {
-            self.apply_one(assignment);
+            self.apply_one(assignment, is_prefix_scoped);
         }
     }
 
-    fn apply_one(&mut self, assignment: &Assignment) {
+    fn apply_one(&mut self, assignment: &Assignment, is_prefix_scoped: bool) {
         self.assigned.insert(assignment.name.clone());
         let is_ifs = assignment.name == "IFS";
         let resolved = match normalize::normalize_assignment_value(assignment).as_slice() {
@@ -9841,9 +9896,15 @@ impl Env {
                     .or_default()
                     .push(value.clone());
                 self.map.insert(assignment.name.clone(), value);
+                self.persisting_unresolvable.remove(&assignment.name);
             }
             None => {
                 self.map.remove(&assignment.name);
+                if is_prefix_scoped {
+                    self.persisting_unresolvable.remove(&assignment.name);
+                } else {
+                    self.persisting_unresolvable.insert(assignment.name.clone());
+                }
             }
         }
     }
@@ -10217,6 +10278,57 @@ mod tests {
         // value exactly as `issue_139_earlier_persisting_ifs_survives_a_
         // same_commands_prefix_shadow` already pins for `IFS`.
         assert_decision("X='rm -rf /'; X=ls $X", Decision::Block);
+    }
+
+    // Issue #516, follow-up from #463/#515: #463's fix only reached a
+    // command-scoped prefix reassignment whose OWN RHS statically resolved
+    // (`X=ls true`). When that reassignment's RHS is itself unresolvable
+    // (`X=$(evil) true`), `apply_one` removes `X` from `map` entirely with
+    // no history entry of its own, so `env.get("X")` came up empty and
+    // `evaluate_command_position_bare_var` used to bail straight to Ask
+    // without ever trying `value_history`'s still-recorded earlier value —
+    // even though real bash resets `$X` back to `"rm -rf /"` the instant
+    // `true` exits, exactly as it would for a resolved shadowing value.
+
+    #[test]
+    fn issue_516_prefix_scoped_assignment_with_unresolvable_rhs_falls_back_to_history() {
+        assert_decision("X='rm -rf /'; X=$(evil) true; $X", Decision::Block);
+    }
+
+    #[test]
+    fn issue_516_same_commands_own_unresolvable_prefix_assignment_falls_back_too() {
+        // `X=$(evil) $X` is itself a same-command prefix assignment scoped
+        // to the very command it appears on — `$X`'s own expansion happens
+        // under the pre-existing `X` value BEFORE this new, unresolvable
+        // `X=$(evil)` ever takes effect.
+        assert_decision("X='rm -rf /'; X=$(evil) $X", Decision::Block);
+    }
+
+    #[test]
+    fn issue_516_no_history_at_all_still_asks_with_the_original_message() {
+        // No prior assignment on record for `X` at all — the plain "no
+        // statically-known value" Ask, not the #516 history-fallback one.
+        assert_decision("X=$(evil) true; $X", Decision::Ask);
+    }
+
+    #[test]
+    fn issue_516_history_present_but_no_candidate_matches_still_asks() {
+        // An earlier value IS on record, but it's benign — falling back to
+        // history must never manufacture a Block out of nothing.
+        assert_decision("X=echo; X=$(evil) true; $X hello", Decision::Ask);
+    }
+
+    #[test]
+    fn issue_516_genuinely_persisting_unresolvable_reassignment_still_does_not_fall_back() {
+        // The other half of #516's own fix: `variable_indirection_
+        // reassignment_invalidates_stale_value` pins the case this must NOT
+        // change — `X=$(echo ls)` here has no following command on its own
+        // simple command, so it's a genuinely PERSISTING reassignment, not
+        // a command-scoped prefix one. Real bash really does overwrite `$X`
+        // with an unknown value here; falling back to the stale `"rm"`
+        // would be a false Block, not a safe over-approximation, exactly
+        // the distinction `Env::persisting_unresolvable` now tracks.
+        assert_decision("X=rm; X=$(echo ls); $X -rf /", Decision::Ask);
     }
 
     #[test]
@@ -12247,6 +12359,12 @@ mod tests {
     fn variable_indirection_reassignment_invalidates_stale_value() {
         // X is resolved to "rm", then reassigned to an unresolvable value —
         // the stale "rm" resolution must not leak into the third command.
+        // This is a genuinely PERSISTING reassignment (no following command
+        // on `X=$(echo ls)`'s own simple command), unlike issue #516's
+        // command-scoped prefix case
+        // (`issue_516_genuinely_persisting_unresolvable_reassignment_still_
+        // does_not_fall_back` pins this same command as the case #516's own
+        // history fallback must NOT reach).
         assert_decision("X=rm; X=$(echo ls); $X -rf /", Decision::Ask);
     }
 
