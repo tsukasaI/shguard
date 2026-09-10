@@ -186,31 +186,74 @@ impl From<crate::rules::RulesError> for ConfigError {
 /// The field stays private: callers reach the underlying path only through
 /// [`Self::as_path`] (or, for a whole [`Policy`], [`Policy::decision_log_path`]),
 /// never by constructing or matching on this type directly.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct DecisionLogPath(PathBuf);
 
 impl DecisionLogPath {
     /// Runs every check `Policy::load` used to apply inline against a
-    /// resolved `decision_log_path` value: an absolute path (issue #458
-    /// item 3, mirroring #436/#437's rejection of a relative
-    /// `XDG_CONFIG_HOME`/`HOME`), no trailing-slash/`.`/`..` component (a
-    /// directory-shaped path would otherwise let the parent-directory check
-    /// below "succeed" and every future append fail forever with
-    /// `EISDIR`/`ENOTDIR`), not a symlink (issue #458 item 1: paired with
-    /// `decision_log::open_log_file`'s `O_NOFOLLOW`, closing the
-    /// load-to-append TOCTOU window a symlink-following check here would
-    /// otherwise reopen), and either an existing regular file or absent
-    /// with an existing parent directory (issue #458 item 2: a missing
-    /// parent means every future append fails forever, silently dropped by
-    /// `decision_log::append`'s own fail-open posture — exactly the
-    /// "typo'd path defeats the feature invisibly" trap this whole check
-    /// exists to close).
+    /// resolved `decision_log_path` value.
+    ///
+    /// Relative paths are rejected outright (issue #458 item 3, mirroring
+    /// issues #436/#437's rejection of a relative `XDG_CONFIG_HOME`/`HOME`):
+    /// a relative `decision_log_path` would resolve against the hook's
+    /// per-invocation working directory — the guarded repo, not a stable
+    /// location — so it's caught before any of the checks below rather than
+    /// let this "succeed" with an ambiguous target.
+    ///
+    /// A trailing-slash or `.`/`..` component names a directory-shaped
+    /// path, not a file: the parent-directory check below would otherwise
+    /// see "parent exists, file itself absent" and accept it, and every
+    /// future append would then fail forever with `EISDIR`/`ENOTDIR` —
+    /// exactly the load-time-invisible failure issue #458 item 2 exists to
+    /// close, just with a different underlying OS error.
+    ///
+    /// `std::fs::symlink_metadata` (`lstat`), not `metadata`, so a symlink
+    /// is inspected as a symlink rather than followed (issue #458 item 1):
+    /// a symlink-following check here paired with
+    /// `decision_log::open_log_file`'s symlink-following open would let a
+    /// symlink planted at this path redirect every appended line into any
+    /// user-writable file. `open_log_file` pairs this load-time rejection
+    /// with `O_NOFOLLOW` at open time, closing the remaining load-to-append
+    /// TOCTOU window (a symlink swapped in after this check still hits
+    /// `O_NOFOLLOW` and fails the append, rather than being silently
+    /// followed).
+    ///
+    /// An already-existing non-regular target (directory, FIFO, character
+    /// device, socket) is rejected rather than left to
+    /// `decision_log::append`'s own fail-open-on-write-failure posture
+    /// (issue #108): silently, permanently broken logging with no error
+    /// anywhere is the same "typo'd path defeats the whole feature
+    /// invisibly" trap this module already refuses for `SHGUARD_CONFIG`
+    /// itself. A FIFO/device/socket specifically is rejected for a sharper
+    /// reason too: `decision_log::append` writes outside
+    /// `analyze_with_policy`'s own bounded-evaluation watchdog
+    /// (`src/watchdog.rs`), and the PreToolUse hook path additionally runs
+    /// the whole call inside `src/bin/shguard.rs`'s own outer
+    /// `EVALUATION_TIMEOUT` watchdog — a write that blocks on a target with
+    /// no reader (or one that never finishes) trips that outer watchdog
+    /// instead, still silently replacing an already-computed, correct
+    /// decision with a fail-closed `Ask`. A target that hangs for a reason
+    /// `metadata` can't see up front (a stale network mount backing an
+    /// ordinary regular file) remains a disclosed, undetectable-at-load-time
+    /// residual risk — see the README's "Structured decision-output
+    /// logging" section.
+    ///
+    /// A `NotFound` error is expected and accepted — `decision_log` creates
+    /// the file on first append — but only when the log path's PARENT
+    /// directory already exists (issue #458 item 2): a missing parent means
+    /// every future append fails forever, silently dropped by
+    /// `decision_log::append`'s own fail-open posture, exactly the "typo'd
+    /// path defeats the feature invisibly" trap this whole check exists to
+    /// close. Any OTHER metadata error (e.g. `PermissionDenied` on the path
+    /// or a parent component) is rejected here too, not silently ignored,
+    /// for the same reason.
     ///
     /// Deliberately does NOT run the self-protection rule-merging
     /// `Policy::load` layers on top of a validated path (issue #458 item
     /// 4) — that step needs `rules`/`allowlist` to fold into, which this
     /// type has no business owning; `Policy::load` still does that itself,
-    /// against `raw_path.as_path()` once this returns `Ok`.
+    /// against the returned value's own [`Self::as_path`] once this
+    /// returns `Ok`.
     ///
     /// # Errors
     ///
@@ -222,6 +265,12 @@ impl DecisionLogPath {
                 "decision_log_path {raw_path:?} must be an absolute path"
             )));
         }
+        // Checks the raw string, not `Path::parent()`/`components()`
+        // (which silently drop a trailing `/`): a trailing separator or a
+        // `.`/`..` component names a directory-shaped path, not a file,
+        // and the parent-directory check below would otherwise see
+        // "parent exists, file itself absent" and accept it, letting
+        // every future append fail forever with `EISDIR`/`ENOTDIR`.
         let has_directory_shaped_component = raw_path
             .to_string_lossy()
             .ends_with(std::path::MAIN_SEPARATOR)
@@ -525,62 +574,13 @@ impl Policy {
             (rules, allowlist) = merge_user_config(rules, allowlist, init_protection)?;
         }
 
-        // Caught here rather than left to `decision_log::append`'s own
-        // fail-open-on-write-failure posture (issue #108): an
-        // already-existing directory would otherwise mean "logging is
-        // silently, permanently broken, with no error anywhere ever" --
-        // the same "typo'd path defeats the whole feature invisibly" trap
-        // this module already refuses for `SHGUARD_CONFIG` itself (see the
-        // module docs' fail-closed policy). A FIFO, character device, or
-        // socket is rejected for a sharper reason: `decision_log::append`
-        // now writes outside `analyze_with_policy`'s own bounded-evaluation
-        // watchdog (`src/lib.rs`), and the PreToolUse hook path additionally
-        // runs the whole call inside this binary's own outer
-        // `EVALUATION_TIMEOUT` watchdog (`src/bin/shguard.rs`) -- a write
-        // that blocks on a target with no reader (or one that never
-        // finishes) trips that outer watchdog instead, still silently
-        // replacing an already-computed, correct decision with a
-        // fail-closed `Ask`. Rejecting every already-existing non-regular
-        // target at load time closes the case this crate can actually
-        // detect; a target that hangs for a reason `metadata` can't see up
-        // front (a stale network mount backing an ordinary regular file)
-        // remains a disclosed, undetectable-at-load-time residual risk --
-        // see the README's "Structured decision-output logging" section.
-        //
-        // `std::fs::symlink_metadata` (`lstat`), not `metadata`, so a
-        // symlink at `decision_log_path` is inspected as a symlink rather
-        // than followed (issue #458 item 1): a symlink-following check here
-        // paired with `decision_log::open_log_file`'s symlink-following
-        // open would let a symlink planted at this path redirect every
-        // appended line into any user-writable file. `open_log_file` pairs
-        // this load-time rejection with `O_NOFOLLOW` at open time, closing
-        // the remaining load-to-append TOCTOU window (a symlink swapped in
-        // after this check still hits `O_NOFOLLOW` and fails the append,
-        // rather than being silently followed).
-        //
-        // A `NotFound` error is expected and accepted -- `decision_log`
-        // creates the file on first append -- but only when the log path's
-        // PARENT directory already exists (issue #458 item 2): a missing
-        // parent means every future append fails forever, silently dropped
-        // by `decision_log::append`'s own fail-open posture, which is
-        // exactly the "typo'd path defeats the feature invisibly" trap this
-        // whole check exists to close. Any OTHER metadata error (e.g.
-        // `PermissionDenied` on the path or a parent component) is rejected
-        // here too, not silently ignored, for the same reason.
-        //
-        // Relative paths are rejected outright (issue #458 item 3, mirroring
-        // issues #436/#437's rejection of a relative `XDG_CONFIG_HOME`/
-        // `HOME`): a relative `decision_log_path` would resolve against the
-        // hook's per-invocation working directory -- the guarded repo, not
-        // a stable location -- so it's caught before any of the checks
-        // above rather than let load "succeed" with an ambiguous target.
         // Issue #519: `DecisionLogPath::parse` owns every check this block
         // used to run inline (absolute path, no trailing-slash/relative
         // component, not a symlink, existing regular file or absent with an
-        // existing parent) -- see its own doc for the full rationale behind
-        // each one. The self-protection rule-merging below stays here: it
-        // needs `rules`/`allowlist` to fold into, which the parsed value has
-        // no business owning.
+        // existing parent) -- see its own doc comment for the full
+        // rationale behind each one. The self-protection rule-merging below
+        // stays here: it needs `rules`/`allowlist` to fold into, which the
+        // parsed value has no business owning.
         let decision_log_path: Option<DecisionLogPath> =
             decision_log_path.map(DecisionLogPath::parse).transpose()?;
         if let Some(decision_log_path) = &decision_log_path {

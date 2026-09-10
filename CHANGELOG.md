@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
-### Fixed
+### Changed
 
 - `Policy`'s `decision_log_path` field is now a `DecisionLogPath` newtype
   rather than a plain `PathBuf` (#519, follow-up from #465's
@@ -17,6 +17,8 @@ All notable changes to this project are documented in this file.
   own validation-bypassing constructor was a symptom of. No behavior
   change on any load path; the same checks run in the same order with the
   same error messages.
+
+### Fixed
 
 - `evaluate_argument_substitutions` (rule 3: argument-position command/
   backquote/process substitution recursion) now threads the recursed inner
