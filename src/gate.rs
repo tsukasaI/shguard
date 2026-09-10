@@ -9472,51 +9472,61 @@ fn git_checkout_dot(argv: &[NormalizedWord]) -> bool {
 }
 
 /// Issue #500, follow-up from #447/#498: `git` also accepts config
-/// overrides purely through `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/
-/// `GIT_CONFIG_VALUE_<n>` environment variables (`GIT_CONFIG_COUNT=1
+/// overrides purely through environment variables — `GIT_CONFIG_COUNT`/
+/// `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` (`GIT_CONFIG_COUNT=1
 /// GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git commit
-/// -m x`), achieving the identical effect as `-c core.hooksPath=...`
-/// (#498) — or `-c include.path=...`/`-c alias.*=...` (#499) — with no
-/// trace in the command's own argv at all.
+/// -m x`), and `GIT_CONFIG_PARAMETERS` (git's own internal encoding of a
+/// `-c` list, e.g. `GIT_CONFIG_PARAMETERS="'core.hooksPath'='/dev/null'"`)
+/// and `GIT_CONFIG_GLOBAL` (redirects the global config file itself) —
+/// achieving the identical effect as `-c core.hooksPath=...` (#498) — or
+/// `-c include.path=...`/`-c alias.*=...` (#499) — with no trace in the
+/// command's own argv at all. Matched by the shared `GIT_CONFIG` prefix
+/// so this covers the whole family, not just the three names the issue's
+/// own repro used.
 ///
 /// Scoped to a same-line assignment prefix (`command.assignments`), the
-/// only shape of this a per-invocation static analyzer can see at all: a
-/// real environment variable set by an earlier, separate command is
-/// invisible to shguard regardless (docs/threat-model.md's own "session
-/// state is invisible to shguard" boundary — each `analyze()` call sees
-/// exactly one command string in isolation). An `env
-/// GIT_CONFIG_COUNT=... git ...` wrapper spelling of the same idea is a
-/// disclosed residual gap, not covered here.
+/// only shape of this a per-invocation static analyzer can see at all.
+/// Several sibling channels remain disclosed, uncovered gaps, all sharing
+/// the same "can't see it" root cause even when they occur on the exact
+/// command line being analyzed: `export GIT_CONFIG_COUNT=...; git ...`
+/// (a separate, prior statement — outside this one command's assignment
+/// prefix), `GIT_CONFIG_COUNT=... bash -c "git ..."` (the recursion into
+/// `bash -c`'s own argument evaluates a fresh command string that starts
+/// its own `command.assignments` from empty), and `env GIT_CONFIG_COUNT=...
+/// git ...` (the wrapper spelling of the same idea). None of these is a
+/// "separate command, invisible regardless" case in the way
+/// docs/threat-model.md's "session state is invisible to shguard"
+/// boundary describes — they're same-line, single-command variations this
+/// scan's own same-line-prefix scoping still misses.
 ///
-/// Floors to Ask on the mere PRESENCE of any `GIT_CONFIG_COUNT`/
-/// `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` assignment, regardless of
-/// its resolved value, rather than trying to pair each `GIT_CONFIG_KEY_<n>`
-/// with its `GIT_CONFIG_VALUE_<n>` by index (and resolve `GIT_CONFIG_COUNT`
-/// to know how many pairs git actually reads) to mirror #499's Ask/Block
-/// split by specific key — this codebase has no general mechanism yet for
-/// that kind of indexed env-var-to-config-semantics mapping (this issue's
-/// own "why not fixed in #498" discussion), and env-var-sourced git config
-/// on an agent-issued single command line is unusual enough on its own to
-/// warrant the same "can't fully introspect" Ask posture this codebase
-/// already applies elsewhere (e.g. awk's own un-introspectable-script
-/// floor, issues #451/#467).
+/// Floors to Ask on the mere PRESENCE of any `GIT_CONFIG`-prefixed
+/// assignment, regardless of its resolved value, rather than trying to
+/// pair each `GIT_CONFIG_KEY_<n>` with its `GIT_CONFIG_VALUE_<n>` by index
+/// (and resolve `GIT_CONFIG_COUNT` to know how many pairs git actually
+/// reads, or parse `GIT_CONFIG_PARAMETERS`'s own quoting) to mirror #499's
+/// Ask/Block split by specific key — this codebase has no general
+/// mechanism yet for that kind of indexed env-var-to-config-semantics
+/// mapping (this issue's own "why not fixed in #498" discussion), and
+/// env-var-sourced git config on an agent-issued single command line is
+/// unusual enough on its own to warrant the same "can't fully introspect"
+/// Ask posture this codebase already applies elsewhere (e.g. awk's own
+/// un-introspectable-script floor, issue #451).
 fn git_config_env_var_verdict(argv: &[NormalizedWord], command: &SimpleCommand) -> Option<Verdict> {
     let (name, _) = crate::rules::effective_command(argv)?;
     if name != "git" {
         return None;
     }
-    let smuggled = command.assignments.iter().any(|assignment| {
-        assignment.name == "GIT_CONFIG_COUNT"
-            || assignment.name.starts_with("GIT_CONFIG_KEY_")
-            || assignment.name.starts_with("GIT_CONFIG_VALUE_")
-    });
+    let smuggled = command
+        .assignments
+        .iter()
+        .any(|assignment| assignment.name.starts_with("GIT_CONFIG"));
     smuggled.then(|| {
         Verdict::ask(
             Reason::new(
-                "a GIT_CONFIG_COUNT/GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> environment-variable \
-                 assignment overrides git config the same way `-c` does, but with no trace in \
-                 the command's own argv; its specific key/value pairs are not statically \
-                 cross-referenced here",
+                "a GIT_CONFIG*-prefixed environment-variable assignment (GIT_CONFIG_COUNT/KEY_<n>/\
+                 VALUE_<n>, GIT_CONFIG_PARAMETERS, or GIT_CONFIG_GLOBAL) overrides git config the \
+                 same way `-c` does, but with no trace in the command's own argv; its specific \
+                 key/value pairs are not statically cross-referenced here",
             ),
             argv.to_vec(),
         )
@@ -14408,6 +14418,22 @@ mod tests {
         assert_decision("GIT_CONFIG_KEY_0=user.name git commit -m x", Decision::Ask);
         assert_decision(
             "GIT_CONFIG_VALUE_0=/dev/null git commit -m x",
+            Decision::Ask,
+        );
+        // Two sibling channels a fable code-reviewer pass on PR #531 found
+        // uncovered by the original three-name check: GIT_CONFIG_PARAMETERS
+        // is git's own internal encoding of a `-c` list (confirmed live:
+        // `GIT_CONFIG_PARAMETERS="'core.hooksPath'='/dev/null'" git config
+        // --get core.hooksPath` prints `/dev/null`, no pre-staged file
+        // needed), and GIT_CONFIG_GLOBAL redirects the global config file
+        // itself -- both the identical threat class as the three-name case
+        // above, matched by the shared GIT_CONFIG prefix.
+        assert_decision(
+            r#"GIT_CONFIG_PARAMETERS="'core.hooksPath'='/dev/null'" git commit -m x"#,
+            Decision::Ask,
+        );
+        assert_decision(
+            "GIT_CONFIG_GLOBAL=/tmp/evil.gitconfig git commit -m x",
             Decision::Ask,
         );
         // Control: an unrelated same-line assignment prefix on a git
