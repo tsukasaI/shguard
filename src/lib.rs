@@ -13,6 +13,7 @@ pub mod normalize;
 mod parser;
 mod rules;
 pub mod verdict;
+#[doc(hidden)]
 pub mod watchdog;
 
 use std::path::Path;

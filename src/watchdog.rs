@@ -45,7 +45,8 @@
 //!   evaluation is responsible for, independent of whatever else the host
 //!   process is doing — which in turn requires *current*, not *peak*, RSS
 //!   as the underlying measurement (see [`current_rss_bytes`]'s docs for
-//!   why the binary's own `getrusage`-peak approach doesn't carry over).
+//!   why [`peak_rss_bytes`]'s own `getrusage`-peak approach, used by the
+//!   binary's own outer watchdog, doesn't carry over here).
 //!
 //! # Nesting when called through the `shguard` binary
 //!
@@ -280,15 +281,14 @@ fn fail_closed(reason: &str) -> Verdict {
 /// that poll; [`EVALUATION_TIMEOUT`]'s wall-clock bound still applies
 /// regardless.
 ///
-/// Deliberately *not* `src/bin/shguard.rs::current_rss_bytes`'s
-/// `getrusage`/`ru_maxrss` approach, despite both living in this package
-/// (bin and lib targets, not separate workspace crates) and wanting the
-/// same thing: `ru_maxrss` is a *peak*, a monotonically non-decreasing
-/// high-water mark for the whole process. The binary can get away with
-/// that because it never takes a delta — it compares peak directly
-/// against an absolute cap once, in a process that started at ~zero. This
-/// module *does* take a delta (`rss - baseline_rss` in
-/// [`bounded_with_memory_limit`]), and a delta of two peaks is not the
+/// Deliberately *not* [`peak_rss_bytes`]'s `getrusage`/`ru_maxrss`
+/// approach, despite both living in this module and wanting the same
+/// thing: `ru_maxrss` is a *peak*, a monotonically non-decreasing
+/// high-water mark for the whole process. `src/bin/shguard.rs`'s own outer
+/// watchdog can get away with that because it never takes a delta — it
+/// compares peak directly against an absolute cap once, in a process that
+/// started at ~zero. This module *does* take a delta (`rss - baseline_rss`
+/// in [`bounded_with_memory_limit`]), and a delta of two peaks is not the
 /// same thing as the memory this one call is responsible for: once
 /// *anything* in the host process pushes the peak up — including a prior
 /// trip of this very watchdog leaving a runaway thread allocating in the
@@ -417,6 +417,18 @@ pub fn peak_rss_bytes() -> Option<u64> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// Issue #518: `peak_rss_bytes` moved here from `src/bin/shguard.rs`
+    /// specifically so this `unsafe` FFI is reachable from `tests/` at all
+    /// (previously only exercised incidentally through that binary's own
+    /// `assert_cmd` integration tests) — a running test process's own RSS
+    /// is never zero, so any `Some` value at all confirms the call
+    /// actually reached the OS rather than silently short-circuiting.
+    #[cfg(unix)]
+    #[test]
+    fn peak_rss_bytes_reports_a_nonzero_value_for_the_running_process() {
+        assert!(peak_rss_bytes().is_some_and(|rss| rss > 0));
+    }
 
     #[test]
     fn fast_pipeline_returns_its_own_verdict_unmodified() {

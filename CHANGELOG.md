@@ -22,8 +22,12 @@ All notable changes to this project are documented in this file.
   `shguard::watchdog::peak_rss_bytes`, making that `unsafe` FFI directly
   unit-testable instead of reachable only through `assert_cmd` integration
   tests, per `coding-guidelines/languages/rust.md`'s "binaries MUST stay
-  thin". No behavior change: same bounds, same trip conditions, same
-  fail-closed outcomes on every existing path.
+  thin", now unit-tested directly. No behavior change to any bound, trip
+  condition, or fail-closed outcome; `evaluate_with_timeout`'s own
+  wall-clock-only bound additionally now benefits from issue #457's
+  try-the-channel-first race check, which its prior single `recv_timeout`
+  call never had (its own remaining timeout window is unchanged either
+  way).
 
 - `Policy`'s `decision_log_path` field is now a `DecisionLogPath` newtype
   rather than a plain `PathBuf` (#519, follow-up from #465's
