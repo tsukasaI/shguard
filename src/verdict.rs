@@ -249,21 +249,26 @@ impl Verdict {
     ///   through it: command-position substitution recursion
     ///   (`evaluate_command_position_substitution`, rule 1), the
     ///   leftover-alternative substitution floor
-    ///   (`evaluate_leftover_alternative_substitutions`, applied both via
-    ///   `fold_floors`'s `substitution_result` and independently via
-    ///   `apply_leftover_substitution_floor` at several early-return
-    ///   sites), argument-position substitution recursion
-    ///   (`evaluate_argument_substitutions`'s `substitution_result` — this
-    ///   is also why a same-decision `fold_worst` tie can drop a later
-    ///   stage's structural `deny_message` entirely, e.g.
-    ///   `echo $(python3 -c "x") | bash` loses the pipe-to-interpreter
-    ///   message to the message-less substitution-recursion Ask that ties
-    ///   it first; issue #495 tracks fixing both via this same site),
+    ///   (`evaluate_leftover_alternative_substitutions`, folded into the
+    ///   same `substitution_result` binding that carries
+    ///   `evaluate_argument_substitutions`'s own fix below — reaching a
+    ///   `Verdict` through both `fold_floors`'s own use of it and
+    ///   `apply_substitution_floor`'s several early-return call sites),
     ///   `flock`/`su -c` and `find -exec`'s shared shell-string floor
     ///   (`scan_recursable_slots`), and expansion-position recursion
-    ///   (`scan_word_expansions`/`scan_redirection_expansions`, the latter
-    ///   also reached from `apply_attached_word_and_redirect_checks`'s
-    ///   compound-command attached-redirect path).
+    ///   (`scan_word_expansions`/
+    ///   `scan_redirection_expansions`, the latter also reached from
+    ///   `apply_attached_word_and_redirect_checks`'s compound-command
+    ///   attached-redirect path). Argument-position substitution recursion
+    ///   (`evaluate_argument_substitutions`) is fixed (issue #495): its
+    ///   `substitution_result` now threads `Option<DenyMessage>` alongside
+    ///   the decision, so a same-decision `fold_worst` tie against a
+    ///   later, differently-originated stage no longer yields a
+    ///   message-less verdict — each recursed verdict now carries its own
+    ///   message from construction, so the fold's existing
+    ///   first-wins-on-tie contract surfaces the first (tying) stage's own
+    ///   message instead of dropping it, with no unsafe cross-verdict
+    ///   borrowing needed to do so.
     ///
     /// A related, narrower case: several `(Decision, String)`-floor
     /// appliers (`apply_escalation_floor`, `apply_expansion_floor`,

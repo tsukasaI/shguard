@@ -611,7 +611,30 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
                         in_extended_test = true;
                         extended_test_op_count = 0;
                     }
-                    "]]" => in_extended_test = false,
+                    // Issue #489: NOT `"]]" => in_extended_test = false`.
+                    // This raw scan is quote-blind, so a quoted `]]` token
+                    // (` ]] `, which tokenizes as a standalone `]]` once
+                    // surrounded by spaces) is not a real closer to brush,
+                    // but would still turn tracking off here, letting
+                    // every `!`/`&&`/`||` after it go uncounted and
+                    // brush's own unary-negation recursion overflow the
+                    // stack uncaught. Once opened, tracking is never
+                    // turned back off within the same raw scan, the same
+                    // "over-count is safe, under-count is not" posture
+                    // this function already applies to `&&`/`||`
+                    // themselves for exactly this case. This does NOT make
+                    // the whole function under-count-proof, though: the
+                    // `"[["` arm just below still resets
+                    // `extended_test_op_count` unconditionally on any raw
+                    // `[[` token, including a quoted one appearing inside
+                    // an already-open real region, which IS a genuine
+                    // missed-operator gap of the identical class, tracked
+                    // separately as issue #528 rather than folded into
+                    // this fix (the two directions are in direct tension
+                    // without real quote-tracking: a legitimately
+                    // reopened `[[ ]]` pair after a real close must still
+                    // reset the count, and this byte-blind scan cannot
+                    // tell that apart from a quoted fake `[[`).
                     "!" if in_extended_test => {
                         check_extended_test_op_count(&mut extended_test_op_count)?;
                     }
@@ -2544,6 +2567,28 @@ mod tests {
         }
         command.push_str("true");
         assert!(parse(&command).is_ok());
+    }
+
+    // Issue #489: a quoted `]]` token (`' ]] '`, which tokenizes as a
+    // standalone `]]` once surrounded by spaces) must not be able to turn
+    // extended-test tracking off mid-region -- brush treats it as a
+    // literal, quoted string, not a real closer, so every `!`/`&&`/`||`
+    // after it is still inside the same `[[ ... ]]` region and must still
+    // be counted, or brush's own unary-negation recursion overflows the
+    // stack uncaught once the raw pre-scan undercounts past the real cap.
+    #[test]
+    fn extended_test_op_count_survives_a_quoted_closer_mid_region() {
+        let mut command = "[[ x == ' ]] ' && ".to_string();
+        for _ in 0..MAX_RAW_EXTENDED_TEST_COUNT {
+            command.push_str("! ");
+        }
+        command.push_str("y ]]");
+        let err = parse(&command).unwrap_err();
+        assert!(
+            err.to_string().contains("extended-test operator count"),
+            "expected the extended-test raw-count-cap rejection despite the \
+             quoted `]]`, got: {err}"
+        );
     }
 
     #[test]

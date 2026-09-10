@@ -3785,13 +3785,37 @@ const SUBSTITUTION_FLOOR_BLOCK_REASON: &str = "an argument-position command/back
 const SUBSTITUTION_FLOOR_ASK_REASON: &str = "an argument-position command/backquote or process \
     substitution's inner command could not be resolved to Allow";
 
-fn apply_substitution_floor(verdict: Verdict, floor: Option<Decision>) -> Verdict {
-    let Some(floor_decision) = floor else {
+fn apply_substitution_floor(
+    verdict: Verdict,
+    floor: Option<(Decision, Option<DenyMessage>)>,
+) -> Verdict {
+    let Some((floor_decision, floor_deny_message)) = floor else {
         return verdict;
     };
     if verdict.decision() >= floor_decision {
         return verdict;
     }
+    // Issue #495 review (round 2): captured before `verdict` is consumed
+    // below. Preferring the PRE-FLOOR verdict's own message when it has
+    // one, falling back to the floor's own message only when it doesn't --
+    // the opposite priority from an earlier round of this fix, corrected
+    // after review proved it backwards: `fold_floors` (the sibling path
+    // that also consumes this same substitution_result data, its own
+    // `substitution_deny_message`) ranks the substitution floor's own
+    // message LOWEST priority, below every other structural message, and
+    // this site's STRICT-lift path (the only path where this function
+    // ever actually swaps in the floor's message — see the early return
+    // just above) must match that priority for the same reason. This does
+    // NOT claim every apply_*_floor call site in this file shares this
+    // exact contract: a same-decision TIE (`verdict.decision() ==
+    // floor_decision`, returned unmodified by the early check above,
+    // never reaching this line at all) is a distinct, pre-existing
+    // question this fix doesn't touch. `reason` below still folds the
+    // pre-floor verdict's reason text in first (`"{existing}; {floor_reason}"`), consistent
+    // with the pre-floor verdict's message also taking priority: the
+    // governing DECISION comes from the floor, but the more specific,
+    // already-reported reason/message pair is the pre-floor verdict's own.
+    let verdict_deny_message = verdict.deny_message().cloned();
     let argv = verdict.normalized_argv().to_vec();
     let floor_reason = match floor_decision {
         Decision::Block => SUBSTITUTION_FLOOR_BLOCK_REASON,
@@ -3801,12 +3825,11 @@ fn apply_substitution_floor(verdict: Verdict, floor: Option<Decision>) -> Verdic
         Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
         None => floor_reason.to_string(),
     };
-    let deny_message = verdict.deny_message().cloned();
     match floor_decision {
         Decision::Block => Verdict::block(Reason::new(reason), argv, None),
         Decision::Ask | Decision::Allow => Verdict::ask(Reason::new(reason), argv),
     }
-    .with_deny_message(deny_message)
+    .with_deny_message(verdict_deny_message.or(floor_deny_message))
 }
 
 /// Applies rule 8's opaque-unresolvable-kind floor
@@ -3866,7 +3889,7 @@ fn fold_floors(
     escalation_floor: Option<(Decision, String)>,
     opaque_kind: Option<UnresolvableKind>,
     except_floors: ExceptFloors<'_>,
-    substitution_result: Option<Decision>,
+    substitution_result: Option<(Decision, Option<DenyMessage>)>,
 ) -> Verdict {
     let mut decision = Decision::Allow;
     let mut reasons: Vec<String> = Vec::new();
@@ -3894,6 +3917,12 @@ fn fold_floors(
     // same command; whichever comes first here is what a caller sees, the
     // same "one slot, priority order" shape the rule-authored branch above
     // already established.
+    // Issue #495: captured before the priority chain below consumes it,
+    // since the chain needs the message half now but `substitution_result`
+    // itself (its decision half) is still needed, unconsumed, further down.
+    let substitution_deny_message = substitution_result
+        .as_ref()
+        .and_then(|(_, message)| message.clone());
     let deny_message = except_floors
         .target
         .and_then(crate::rules::CommandRule::deny_message)
@@ -3913,7 +3942,12 @@ fn fold_floors(
                 .then(|| DenyMessage::new(DENY_MSG_UNRESOLVED_TARGET))
         })
         .or_else(|| ifs_floor.then(|| DenyMessage::new(DENY_MSG_IFS)))
-        .or_else(|| opaque_kind.and_then(deny_msg_for_unresolvable_kind));
+        .or_else(|| opaque_kind.and_then(deny_msg_for_unresolvable_kind))
+        // Issue #495: lowest priority, matching `substitution_result`'s own
+        // position as the last decision folded in below — a rule-authored
+        // or other structural message here already reflects something more
+        // specific than "some recursed substitution was worse than Allow".
+        .or(substitution_deny_message);
 
     if let Some(reason) = interpreter_code_floor {
         decision = decision.max(Decision::Ask);
@@ -3953,7 +3987,7 @@ fn fold_floors(
             rule.id().as_str()
         ));
     }
-    if let Some(sub_decision) = substitution_result {
+    if let Some((sub_decision, _)) = substitution_result {
         decision = decision.max(sub_decision);
         if sub_decision == Decision::Block {
             reasons.push(SUBSTITUTION_FLOOR_BLOCK_REASON.to_string());
@@ -4727,32 +4761,42 @@ fn evaluate_argument_substitutions(
     rules: &Rules,
     allowlist: &Allowlist,
     cwd: &CwdContext,
-) -> Option<Decision> {
-    let mut worst: Option<Decision> = None;
-    let mut raise = |decision: Decision| {
+) -> Option<(Decision, Option<DenyMessage>)> {
+    let mut worst: Option<(Decision, Option<DenyMessage>)> = None;
+    // Issue #495: threads each recursed verdict's OWN `deny_message` along
+    // with its decision, rather than flattening to a bare `Decision` and
+    // losing it — the message is attached at its true origin, so a later
+    // `fold_worst` tie against a different-origin verdict never has to
+    // borrow a message across verdicts (unsafe in general, see
+    // `Verdict::with_deny_message`'s docs) to avoid losing this one.
+    // First-wins on a same-decision tie among these recursed verdicts
+    // themselves, mirroring `fold_worst`'s own tie contract.
+    let mut raise = |decision: Decision, deny_message: Option<DenyMessage>| {
         if decision != Decision::Allow {
-            worst = Some(worst.map_or(decision, |current| current.max(decision)));
+            worst = Some(match worst.take() {
+                Some(current) if current.0 >= decision => current,
+                _ => (decision, deny_message),
+            });
         }
     };
     for word in argument_words {
         for inner in collect_substitutions(word) {
-            raise(
-                analyze_at_depth(
-                    inner,
-                    depth + 1,
-                    rules,
-                    allowlist,
-                    CwdState::seed_unknown_stack(cwd.clone()),
-                )
-                .decision(),
+            let verdict = analyze_at_depth(
+                inner,
+                depth + 1,
+                rules,
+                allowlist,
+                CwdState::seed_unknown_stack(cwd.clone()),
             );
+            raise(verdict.decision(), verdict.deny_message().cloned());
         }
         // Structural, not raw text — recurses at the SAME depth (see
         // `evaluate_command_position_substitution`'s docs on this
         // distinction).
         for inner in collect_process_substitutions(word) {
             let mut isolated = CwdState::seed_unknown_stack(cwd.clone());
-            raise(evaluate_command_line(inner, rules, allowlist, depth, &mut isolated).decision());
+            let verdict = evaluate_command_line(inner, rules, allowlist, depth, &mut isolated);
+            raise(verdict.decision(), verdict.deny_message().cloned());
         }
     }
     worst
@@ -4999,17 +5043,30 @@ fn apply_leftover_command_floor(
     Verdict::block(Reason::new(reason), argv, Some(rule_id)).with_deny_message(deny_message)
 }
 
-/// Combines two rule-3-shaped `Option<Decision>` floors (issue #77:
+/// Combines two rule-3-shaped floors (issue #77:
 /// [`evaluate_argument_substitutions`]'s and
 /// [`evaluate_leftover_alternative_substitutions`]'s) into one, the same
 /// worst-of-`Some` semantics [`fold_worst`] uses for [`Verdict`]s — `None`
 /// means "nothing to recurse", not "Allow", so it must never win over a
-/// `Some` from the other side. `Option<Decision>`'s derived `Ord` already
-/// gives exactly that (`None < Some(_)`, `Some` compared by `Decision`'s
-/// own worst-wins order), so this is `Option::max` under a name that says
-/// why it's being called here.
-fn fold_optional_decision(a: Option<Decision>, b: Option<Decision>) -> Option<Decision> {
-    a.max(b)
+/// `Some` from the other side, and on a same-decision tie the first
+/// (`a`) wins, mirroring `fold_worst`'s own tie contract. Only `a`
+/// ([`evaluate_argument_substitutions`]) carries a `deny_message` (issue
+/// #495); `b` ([`evaluate_leftover_alternative_substitutions`]) is still
+/// flattened to a bare `Decision` at its own call site — a separate,
+/// still-open instance of `Verdict::with_deny_message`'s "Known remaining
+/// gaps" — so it's paired with `None` here rather than widening this
+/// fix's scope to a site issue #495 doesn't cover.
+fn fold_optional_decision(
+    a: Option<(Decision, Option<DenyMessage>)>,
+    b: Option<Decision>,
+) -> Option<(Decision, Option<DenyMessage>)> {
+    let b = b.map(|decision| (decision, None));
+    match (a, b) {
+        (None, None) => None,
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (Some(a), Some(b)) => Some(if a.0 >= b.0 { a } else { b }),
+    }
 }
 
 /// The result of [`scan_expansion_positions`] (rule 11): whether any
