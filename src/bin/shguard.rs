@@ -25,10 +25,12 @@
 //!
 //! [`run`] executes on a dedicated worker thread ([`main`]) that sends its
 //! result back over a channel; [`main`] waits on that channel in a polling
-//! loop ([`resolve_first_result`]), each iteration bounded by
-//! [`MEMORY_POLL_INTERVAL`] (or whatever's left of [`EVALUATION_TIMEOUT`],
-//! if shorter) so it can check the worker's actual memory use between
-//! polls without giving up wall-clock bounding. A trip on *either* bound —
+//! loop ([`resolve_first_result`], built on `shguard::watchdog::poll_with_budget`
+//! — issue #518, shared with `src/watchdog.rs`'s own library-facing
+//! watchdog), each iteration bounded by [`MEMORY_POLL_INTERVAL`] (or
+//! whatever's left of [`EVALUATION_TIMEOUT`], if shorter) so it can check
+//! the worker's actual memory use between polls without giving up
+//! wall-clock bounding. A trip on *either* bound —
 //! [`EVALUATION_TIMEOUT`] elapses, or RSS crosses [`MEMORY_LIMIT_BYTES`] —
 //! checks the channel one last time (non-blocking) in case the worker's
 //! real result is already there, then, only if it isn't, makes `main`
@@ -94,10 +96,11 @@ use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use shguard::DecisionLogSink;
+use shguard::watchdog::{PollOutcome, poll_with_budget};
 
 /// The fail-closed output written when even producing JSON fails — a
 /// hand-written literal, not `serde_json`, so it cannot itself fail to
@@ -386,68 +389,40 @@ enum FirstResult {
 /// Waits up to `timeout` for `rx` to produce a result, polling the
 /// worker's RSS against `memory_limit` every [`MEMORY_POLL_INTERVAL`]
 /// while it waits, and resolves to whichever happens first: the worker's
-/// real result, a wall-clock trip, or a memory trip. The RSS check runs
-/// at the *start* of each loop iteration — including the very first,
-/// before ever waiting on `rx` — so a worker that has already blown the
-/// memory budget by the time `main` gets here (rather than only sometime
-/// while `main` is waiting) is still caught immediately rather than after
-/// an extra poll interval.
+/// real result, a wall-clock trip, or a memory trip.
 ///
-/// Both trip arms — memory and wall-clock — check `rx` one last time
-/// (`try_recv`, non-blocking) before resolving to a fail-closed trip:
-/// mirrors `src/watchdog.rs::bounded_with_memory_limit`'s own
-/// try-the-channel-first check (see that function's docs for the full
-/// race). The worker may have already sent its real result in the gap
-/// between the last poll and this one tripping — preferring that result
-/// over discarding it means a verdict computed just before the deadline,
-/// `Block` included, is no longer discarded except in the sub-millisecond
-/// window between this `try_recv` and the process actually exiting
-/// (inherent: closing that last sliver would mean blocking on the exact
-/// hang this watchdog exists to bound).
+/// Issue #518: the actual polling loop — including issue #457's own
+/// try-the-channel-first race on both trip arms — is
+/// `shguard::watchdog::poll_with_budget`, shared with `src/watchdog.rs`'s
+/// own [`bounded_with_memory_limit`]-equivalent for the library entry
+/// points; this function only supplies the two things that differ here
+/// (an ABSOLUTE RSS cap rather than a delta, via [`current_rss_bytes`],
+/// and the `FirstResult` shape `main`'s emit-and-exit arm expects instead
+/// of a fail-closed [`shguard::verdict::Verdict`] directly).
 fn resolve_first_result(
     rx: &Receiver<serde_json::Value>,
     memory_limit: u64,
     timeout: Duration,
 ) -> FirstResult {
     let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(rss) = current_rss_bytes()
-            && rss > memory_limit
-        {
-            if let Ok(output) = rx.try_recv() {
-                return FirstResult::Output(output);
-            }
-            return FirstResult::MemoryTrip(format!(
-                "shguard: evaluation exceeded its memory budget ({rss} bytes RSS); \
-                 refusing to evaluate (fail-closed)"
-            ));
-        }
-
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            if let Ok(output) = rx.try_recv() {
-                return FirstResult::Output(output);
-            }
-            return FirstResult::TimeTrip(
-                "shguard: evaluation exceeded its time budget; refusing to evaluate \
-                 (fail-closed)"
-                    .to_string(),
-            );
-        }
-
-        match rx.recv_timeout(remaining.min(MEMORY_POLL_INTERVAL)) {
-            Ok(output) => return FirstResult::Output(output),
-            // Not yet past `deadline` (checked above) — loop around to
-            // re-sample RSS before waiting again.
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => {
-                return FirstResult::Disconnected(
-                    "shguard: evaluation worker stopped without producing a result; \
-                     refusing to evaluate (fail-closed)"
-                        .to_string(),
-                );
-            }
-        }
+    let outcome = poll_with_budget(rx, deadline, MEMORY_POLL_INTERVAL, || {
+        current_rss_bytes().filter(|&rss| rss > memory_limit)
+    });
+    match outcome {
+        PollOutcome::Received(output) => FirstResult::Output(output),
+        PollOutcome::MemoryTripped(rss) => FirstResult::MemoryTrip(format!(
+            "shguard: evaluation exceeded its memory budget ({rss} bytes RSS); refusing to \
+             evaluate (fail-closed)"
+        )),
+        PollOutcome::TimedOut => FirstResult::TimeTrip(
+            "shguard: evaluation exceeded its time budget; refusing to evaluate (fail-closed)"
+                .to_string(),
+        ),
+        PollOutcome::Disconnected => FirstResult::Disconnected(
+            "shguard: evaluation worker stopped without producing a result; refusing to \
+             evaluate (fail-closed)"
+                .to_string(),
+        ),
     }
 }
 
@@ -591,43 +566,21 @@ fn memory_limit_bytes() -> u64 {
     MEMORY_LIMIT_BYTES
 }
 
-/// Current process RSS in bytes via `getrusage(RUSAGE_SELF, ...)`, or
-/// `None` if the call fails or this platform doesn't support it — in
-/// either case [`resolve_first_result`] simply skips the memory-trip check
-/// for that poll; [`EVALUATION_TIMEOUT`]'s wall-clock bound still applies
-/// regardless. `ru_maxrss` reports *peak* RSS, not current — exactly what
-/// a one-shot process whose memory only grows in the pathological case
-/// wants to bound. Units differ by platform: bytes on macOS, kilobytes
-/// everywhere else `getrusage` is available (Linux, other BSDs) — the
-/// `cfg` below converts the latter to bytes so callers never see the
-/// platform difference.
-#[cfg(unix)]
+/// Current process RSS in bytes, or `None` if the call fails or this
+/// platform doesn't support it — in either case [`resolve_first_result`]
+/// simply skips the memory-trip check for that poll; [`EVALUATION_TIMEOUT`]'s
+/// wall-clock bound still applies regardless.
+///
+/// Issue #518: the actual `getrusage`/`ru_maxrss` measurement (a *peak*,
+/// not current, reading — exactly what a one-shot process whose memory
+/// only grows in the pathological case wants to bound) moved into
+/// `shguard::watchdog::peak_rss_bytes`, per `coding-guidelines/languages/rust.md`'s
+/// "binaries MUST stay thin": that `unsafe` FFI is now reachable from
+/// `tests/` directly, not just through this binary's own `assert_cmd`
+/// integration tests. This function stays as a thin, binary-local alias so
+/// every call site here keeps its existing name.
 fn current_rss_bytes() -> Option<u64> {
-    // SAFETY: `usage` is a valid, zero-initialised `libc::rusage`, and its
-    // address is the sole out-pointer `getrusage` writes through;
-    // `RUSAGE_SELF` targets the calling process, which is always valid to
-    // query.
-    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
-    if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } != 0 {
-        return None;
-    }
-    let raw = u64::try_from(usage.ru_maxrss).ok()?;
-    #[cfg(target_os = "macos")]
-    {
-        Some(raw)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Some(raw.saturating_mul(1024))
-    }
-}
-
-/// Non-Unix fallback: no `getrusage`, so the memory-trip check is simply
-/// unavailable and [`resolve_first_result`] relies on [`EVALUATION_TIMEOUT`]
-/// alone, same as before this watchdog existed.
-#[cfg(not(unix))]
-fn current_rss_bytes() -> Option<u64> {
-    None
+    shguard::watchdog::peak_rss_bytes()
 }
 
 /// Installs a one-line panic hook in place of the Rust default (which
@@ -1114,7 +1067,11 @@ enum EvalTimeoutError {
 /// own internal gate-evaluation watchdog already returned and is therefore
 /// unbounded on its own. Unlike [`run`]'s watchdog, this does not also poll
 /// RSS: the failure mode this closes is a blocking write, not unbounded
-/// allocation, so a wall-clock bound alone is sufficient here.
+/// allocation, so a wall-clock bound alone is sufficient here — the shared
+/// [`poll_with_budget`] core (issue #518) is given an `over_budget` closure
+/// that always returns `None` and a `poll_interval` at least as long as the
+/// whole remaining timeout, so it degrades to one non-polling wait rather
+/// than actually looping.
 ///
 /// If the worker thread itself can't be spawned, falls back to running
 /// inline with no bound at all — strictly no worse than `check` behaved
@@ -1153,10 +1110,19 @@ fn evaluate_with_timeout(
             &shguard::FileDecisionLog,
         ));
     };
-    match rx.recv_timeout(EVALUATION_TIMEOUT + CHECK_TIMEOUT_GRACE) {
-        Ok(verdict) => Ok(verdict),
-        Err(RecvTimeoutError::Timeout) => Err(EvalTimeoutError::TimedOut),
-        Err(RecvTimeoutError::Disconnected) => Err(EvalTimeoutError::Disconnected),
+    let timeout = EVALUATION_TIMEOUT + CHECK_TIMEOUT_GRACE;
+    let deadline = Instant::now() + timeout;
+    match poll_with_budget(&rx, deadline, timeout, || None) {
+        PollOutcome::Received(verdict) => Ok(verdict),
+        PollOutcome::TimedOut => Err(EvalTimeoutError::TimedOut),
+        PollOutcome::Disconnected => Err(EvalTimeoutError::Disconnected),
+        // Unreachable: `over_budget` above is `|| None` unconditionally, so
+        // this arm can never actually fire. Handled defensively rather than
+        // via `unreachable!()` — this composition-root path is exactly the
+        // one `main`'s own `catch_unwind` boundary exists to protect, and a
+        // provably-dead branch is still a branch a future edit could make
+        // live again by accident.
+        PollOutcome::MemoryTripped(_) => Err(EvalTimeoutError::TimedOut),
     }
 }
 

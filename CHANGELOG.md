@@ -4,6 +4,27 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- The RSS-polling/timeout-bookkeeping loop behind `src/bin/shguard.rs`'s
+  outer watchdog (`resolve_first_result`) and `src/watchdog.rs`'s own
+  library-facing watchdog (`bounded_with_memory_limit`) is now one shared,
+  directly unit-tested core, `shguard::watchdog::poll_with_budget` (#518,
+  follow-up from #465's architecture-checklist pass). The two watchdogs
+  still decide independently what to DO on a trip (the binary emits and
+  `std::process::exit`s; the library returns a fail-closed `Ask`) and on
+  what counts as "over budget" (an absolute RSS cap vs. a delta from a
+  baseline) -- only the polling mechanism itself, including issue #457's
+  own try-the-channel-first race fix on both trip arms, is now shared
+  rather than duplicated. `src/bin/shguard.rs`'s `evaluate_with_timeout`
+  (bounding `run_check`'s own evaluation call) is built on the same core.
+  The binary's `getrusage`/`ru_maxrss` peak-RSS measurement moved into
+  `shguard::watchdog::peak_rss_bytes`, making that `unsafe` FFI directly
+  unit-testable instead of reachable only through `assert_cmd` integration
+  tests, per `coding-guidelines/languages/rust.md`'s "binaries MUST stay
+  thin". No behavior change: same bounds, same trip conditions, same
+  fail-closed outcomes on every existing path.
+
 ### Fixed
 
 - `evaluate_argument_substitutions` (rule 3: argument-position command/

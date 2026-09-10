@@ -8,10 +8,12 @@
 //! allocating loop. A consumer calling [`crate::analyze`] directly (not
 //! through the `shguard` binary) still hit that hang/OOM unprotected.
 //!
-//! This is a *separate* implementation from `src/bin/shguard.rs`'s own
-//! watchdog, not shared code, because two of that one's assumptions don't
-//! hold for a library entry point a downstream consumer can call from
-//! inside an arbitrary, long-lived host process:
+//! This is a *separate* trip policy from `src/bin/shguard.rs`'s own outer
+//! watchdog — as of issue #518, the two now share the actual polling
+//! mechanism ([`poll_with_budget`]), but decide independently what to DO
+//! once a trip fires, because two of the binary's assumptions don't hold
+//! for a library entry point a downstream consumer can call from inside an
+//! arbitrary, long-lived host process:
 //!
 //! - **No `std::process::exit`.** The binary's watchdog kills the whole
 //!   process on a trip — safe there because a hook invocation is a
@@ -93,6 +95,101 @@ const MEMORY_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// from near-zero. Re-measure before changing this.
 const MEMORY_LIMIT_BYTES: u64 = 256 * 1024 * 1024;
 
+/// Outcome of [`poll_with_budget`] — see that function's own docs.
+///
+/// Issue #518: shared between this module's [`bounded_with_memory_limit`]
+/// (delta-RSS, returns a fail-closed [`Verdict`] on every non-`Received`
+/// arm) and `src/bin/shguard.rs`'s own outer watchdog (`resolve_first_result`,
+/// absolute-RSS, emits+`std::process::exit`s on every non-`Received` arm
+/// instead). `pub` (not `pub(crate)`) and `#[doc(hidden)]` purely so the
+/// separately-compiled `shguard` binary crate can reach it at all — Rust
+/// grants a package's own `src/bin/*.rs` no special visibility into its
+/// library crate's `pub(crate)` items, the same as any other external
+/// crate depending on this one. This is deliberately excluded from the
+/// crate's documented, crates.io-facing public API (unlike [`bounded`]/
+/// [`bounded_with_memory_limit`]'s own public library entry points,
+/// `crate::analyze`/`crate::analyze_with_policy`) — it is implementation
+/// plumbing for this package's own binary target, not a general-purpose
+/// primitive a downstream library consumer should build against.
+#[doc(hidden)]
+#[derive(Debug)]
+pub enum PollOutcome<T> {
+    /// The channel produced a value before either bound tripped.
+    Received(T),
+    /// `deadline` passed with no value received.
+    TimedOut,
+    /// `over_budget` reported a trip, carrying whatever measurement it
+    /// returned (a byte count, for both current callers).
+    MemoryTripped(u64),
+    /// The sending side was dropped with no value ever sent (e.g. a
+    /// panicking worker unwound before it could send).
+    Disconnected,
+}
+
+/// Shared polling core between this module's own [`bounded_with_memory_limit`]
+/// and `src/bin/shguard.rs`'s own outer watchdog (issue #518, follow-up
+/// from #465's architecture-checklist pass — this loop used to be
+/// duplicated between the two, with #457's own `try_recv`-before-tripping
+/// race fix needing to be applied, and kept in sync, in both copies
+/// independently).
+///
+/// Waits on `rx` until either a value arrives, `deadline` passes, or
+/// `over_budget()` (checked at the START of every iteration, including the
+/// very first, so a caller already over budget before this is ever called
+/// is caught immediately rather than after one extra `poll_interval`)
+/// returns `Some`. `poll_interval` bounds how long any single wait can
+/// block before this loop re-checks `over_budget` and the deadline —
+/// pass the full remaining timeout (or longer) to degrade to a single
+/// non-polling wait when there is no `over_budget` check to interleave
+/// (`src/bin/shguard.rs`'s `evaluate_with_timeout`, which only bounds wall
+/// clock, does this).
+///
+/// Both non-`Received` trip points (`over_budget` firing, `deadline`
+/// passing) check `rx` one last time with a non-blocking `try_recv` before
+/// resolving to a trip: the sender may have already produced its real
+/// value in the gap between the last wait returning and this check
+/// firing, and preferring that value over discarding it is exactly what
+/// issue #457 fixed here (previously only one of the two copies of this
+/// loop had the check; this shared core means it can no longer drift back
+/// out of sync between them).
+///
+/// Does not own `rx`'s sending side or any worker thread — a caller that
+/// wants to `join` a spawned thread on [`PollOutcome::Received`], or leave
+/// it detached on any other outcome, does so itself; this function's only
+/// job is deciding which of the three outcomes happened first.
+#[doc(hidden)]
+pub fn poll_with_budget<T>(
+    rx: &std::sync::mpsc::Receiver<T>,
+    deadline: Instant,
+    poll_interval: Duration,
+    mut over_budget: impl FnMut() -> Option<u64>,
+) -> PollOutcome<T> {
+    loop {
+        if let Some(measurement) = over_budget() {
+            if let Ok(value) = rx.try_recv() {
+                return PollOutcome::Received(value);
+            }
+            return PollOutcome::MemoryTripped(measurement);
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            if let Ok(value) = rx.try_recv() {
+                return PollOutcome::Received(value);
+            }
+            return PollOutcome::TimedOut;
+        }
+
+        match rx.recv_timeout(remaining.min(poll_interval)) {
+            Ok(value) => return PollOutcome::Received(value),
+            // Not yet past `deadline` (checked above) — loop around to
+            // re-check `over_budget` before waiting again.
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return PollOutcome::Disconnected,
+        }
+    }
+}
+
 /// Runs `pipeline` to completion on its own thread, bounded by
 /// [`EVALUATION_TIMEOUT`] and [`MEMORY_LIMIT_BYTES`] — see
 /// [`bounded_with_memory_limit`] for the full behavior; this is the fixed-
@@ -145,65 +242,31 @@ fn bounded_with_memory_limit(
         );
     };
 
-    loop {
-        if let Some(baseline) = baseline_rss
-            && let Some(rss) = current_rss_bytes()
-        {
-            let delta = rss.saturating_sub(baseline);
-            if delta > memory_limit_bytes {
-                // The worker may have already sent its real result in the
-                // gap between the last `recv_timeout` returning and this
-                // check tripping (e.g. unrelated growth elsewhere in the
-                // host process pushed the delta over budget just as the
-                // worker finished) — prefer that over discarding a
-                // verdict the pipeline already computed, `Block` included.
-                if let Ok(verdict) = result_rx.try_recv() {
-                    let _ = worker.join();
-                    return verdict;
-                }
-                // `worker` is dropped here without joining — deliberately:
-                // joining would block on the exact hang this function
-                // exists to bound. See the module docs' "No
-                // std::process::exit" section.
-                return fail_closed(&format!(
-                    "shguard: evaluation exceeded its memory budget ({delta} bytes RSS \
-                     growth); refusing to evaluate (fail-closed)"
-                ));
-            }
+    let outcome = poll_with_budget(&result_rx, deadline, MEMORY_POLL_INTERVAL, || {
+        let baseline = baseline_rss?;
+        let rss = current_rss_bytes()?;
+        let delta = rss.saturating_sub(baseline);
+        (delta > memory_limit_bytes).then_some(delta)
+    });
+    match outcome {
+        PollOutcome::Received(verdict) => {
+            let _ = worker.join();
+            verdict
         }
-
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            // Same race as the memory-trip branch above: the worker may
-            // have already sent its real result in the gap between the
-            // last `recv_timeout` timing out and this check (which itself
-            // does an RSS read) finding the deadline passed. Prefer that
-            // real result over discarding it.
-            if let Ok(verdict) = result_rx.try_recv() {
-                let _ = worker.join();
-                return verdict;
-            }
-            return fail_closed(
-                "shguard: evaluation exceeded its time budget; refusing to evaluate \
-                 (fail-closed)",
-            );
-        }
-
-        match result_rx.recv_timeout(remaining.min(MEMORY_POLL_INTERVAL)) {
-            Ok(verdict) => {
-                let _ = worker.join();
-                return verdict;
-            }
-            // Not yet past `deadline` (checked above) — loop around to
-            // re-sample RSS before waiting again.
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => {
-                return fail_closed(
-                    "shguard: evaluation worker stopped without producing a result; \
-                     refusing to evaluate (fail-closed)",
-                );
-            }
-        }
+        // `worker` is dropped here without joining — deliberately: joining
+        // would block on the exact hang this function exists to bound. See
+        // the module docs' "No std::process::exit" section.
+        PollOutcome::MemoryTripped(delta) => fail_closed(&format!(
+            "shguard: evaluation exceeded its memory budget ({delta} bytes RSS growth); \
+             refusing to evaluate (fail-closed)"
+        )),
+        PollOutcome::TimedOut => fail_closed(
+            "shguard: evaluation exceeded its time budget; refusing to evaluate (fail-closed)",
+        ),
+        PollOutcome::Disconnected => fail_closed(
+            "shguard: evaluation worker stopped without producing a result; refusing to \
+             evaluate (fail-closed)",
+        ),
     }
 }
 
@@ -305,7 +368,53 @@ mod platform {
     }
 }
 
+/// Current process RSS in bytes via `getrusage(RUSAGE_SELF, ...)`'s
+/// `ru_maxrss` field — a *peak*, not current, measurement (issue #518,
+/// moved out of `src/bin/shguard.rs` so this `unsafe` FFI is reachable from
+/// `tests/` at all, per `coding-guidelines/languages/rust.md`'s "binaries
+/// MUST stay thin"; the binary's own outer watchdog compares this directly
+/// against an absolute cap, which is sound only because the process's own
+/// baseline footprint at startup is negligible — see [`current_rss_bytes`]'s
+/// own doc for why THIS module's `bounded_with_memory_limit` needs current,
+/// not peak, RSS instead, and does not use this function). `None` if the
+/// call fails or this platform has no `getrusage` (non-`unix`) — either
+/// way the caller simply has no memory-trip signal for that poll.
+///
+/// Units differ by platform: bytes on macOS, kilobytes everywhere else
+/// `getrusage` is available (Linux, other BSDs) — converted to bytes here
+/// so callers never see the platform difference.
+#[doc(hidden)]
+#[cfg(unix)]
+pub fn peak_rss_bytes() -> Option<u64> {
+    // SAFETY: `usage` is a valid, zero-initialised `libc::rusage`, and its
+    // address is the sole out-pointer `getrusage` writes through;
+    // `RUSAGE_SELF` targets the calling process, which is always valid to
+    // query.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } != 0 {
+        return None;
+    }
+    let raw = u64::try_from(usage.ru_maxrss).ok()?;
+    #[cfg(target_os = "macos")]
+    {
+        Some(raw)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Some(raw.saturating_mul(1024))
+    }
+}
+
+/// Non-Unix fallback: no `getrusage`, so the memory-trip check is simply
+/// unavailable to a caller relying on this function.
+#[doc(hidden)]
+#[cfg(not(unix))]
+pub fn peak_rss_bytes() -> Option<u64> {
+    None
+}
+
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -333,6 +442,94 @@ mod tests {
     fn panicking_pipeline_fails_closed_to_ask() {
         let verdict = bounded(|| panic!("watchdog test: injected panic"));
         assert_eq!(verdict.decision(), crate::verdict::Decision::Ask);
+    }
+
+    // ==== `poll_with_budget` itself, direct unit tests with a hand-built
+    // channel (issue #518's own motivation: this loop used to be
+    // duplicated in `src/bin/shguard.rs`, reachable only through
+    // `assert_cmd` integration tests; a shared, `pub` core is directly
+    // unit-testable here instead). ====
+
+    #[test]
+    fn poll_with_budget_returns_a_fast_result_before_either_bound() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(42).unwrap();
+        let outcome = poll_with_budget(
+            &rx,
+            Instant::now() + Duration::from_secs(10),
+            Duration::from_millis(10),
+            || None,
+        );
+        assert!(matches!(outcome, PollOutcome::Received(42)));
+    }
+
+    #[test]
+    fn poll_with_budget_times_out_when_nothing_ever_arrives() {
+        let (_tx, rx) = std::sync::mpsc::channel::<u8>();
+        let outcome = poll_with_budget(
+            &rx,
+            Instant::now() + Duration::from_millis(50),
+            Duration::from_millis(10),
+            || None,
+        );
+        assert!(matches!(outcome, PollOutcome::TimedOut));
+    }
+
+    #[test]
+    fn poll_with_budget_reports_disconnected_when_the_sender_drops() {
+        let (tx, rx) = std::sync::mpsc::channel::<u8>();
+        drop(tx);
+        let outcome = poll_with_budget(
+            &rx,
+            Instant::now() + Duration::from_secs(10),
+            Duration::from_millis(10),
+            || None,
+        );
+        assert!(matches!(outcome, PollOutcome::Disconnected));
+    }
+
+    #[test]
+    fn poll_with_budget_trips_on_over_budget_even_before_the_first_wait() {
+        let (_tx, rx) = std::sync::mpsc::channel::<u8>();
+        // A budget check that trips on its very first call, before any
+        // `recv_timeout` -- pins the "checked at the start of every
+        // iteration, including the very first" doc claim.
+        let outcome = poll_with_budget(
+            &rx,
+            Instant::now() + Duration::from_secs(10),
+            Duration::from_millis(10),
+            || Some(999),
+        );
+        assert!(matches!(outcome, PollOutcome::MemoryTripped(999)));
+    }
+
+    #[test]
+    fn poll_with_budget_prefers_an_already_sent_value_over_a_trip() {
+        // Issue #457's own race, pinned directly against the shared core: a
+        // value already sitting in the channel by the time `over_budget`
+        // trips must win over discarding it.
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(7).unwrap();
+        let outcome = poll_with_budget(
+            &rx,
+            Instant::now() + Duration::from_secs(10),
+            Duration::from_millis(10),
+            || Some(1),
+        );
+        assert!(matches!(outcome, PollOutcome::Received(7)));
+    }
+
+    #[test]
+    fn poll_with_budget_prefers_an_already_sent_value_over_a_timeout() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(7).unwrap();
+        let outcome = poll_with_budget(
+            &rx,
+            Instant::now(), // already-passed deadline
+            Duration::from_millis(10),
+            || None,
+        );
+        assert!(matches!(outcome, PollOutcome::Received(7)));
     }
 
     /// Deterministic pin for the memory-trip branch itself (as opposed to
