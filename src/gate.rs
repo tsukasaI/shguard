@@ -3780,13 +3780,18 @@ fn apply_substitution_floor(
     // one, falling back to the floor's own message only when it doesn't --
     // the opposite priority from an earlier round of this fix, corrected
     // after review proved it backwards: `fold_floors` (the sibling path
-    // that also consumes this same substitution_result data, `substitution_
-    // deny_message` there) ranks the substitution floor's own message
-    // LOWEST priority, below every other structural message -- this site
-    // must match that priority, or the same input shape surfaces a
-    // different winning message depending on which of the two paths
-    // happens to fire. `reason` below still folds the pre-floor verdict's
-    // reason text in first (`"{existing}; {floor_reason}"`), consistent
+    // that also consumes this same substitution_result data, its own
+    // `substitution_deny_message`) ranks the substitution floor's own
+    // message LOWEST priority, below every other structural message, and
+    // this site's STRICT-lift path (the only path where this function
+    // ever actually swaps in the floor's message — see the early return
+    // just above) must match that priority for the same reason. This does
+    // NOT claim every apply_*_floor call site in this file shares this
+    // exact contract: a same-decision TIE (`verdict.decision() ==
+    // floor_decision`, returned unmodified by the early check above,
+    // never reaching this line at all) is a distinct, pre-existing
+    // question this fix doesn't touch. `reason` below still folds the
+    // pre-floor verdict's reason text in first (`"{existing}; {floor_reason}"`), consistent
     // with the pre-floor verdict's message also taking priority: the
     // governing DECISION comes from the floor, but the more specific,
     // already-reported reason/message pair is the pre-floor verdict's own.

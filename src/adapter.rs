@@ -908,15 +908,21 @@ mod tests {
         );
     }
 
-    // Issue #495 review (round 2): pins `apply_substitution_floor`'s
+    // Issue #495 review (round 3): pins `apply_substitution_floor`'s
     // priority when the PRE-FLOOR verdict itself already carries a message
     // -- that message must survive, not be replaced by the floor's own.
-    // Mutation-tested: reverting the fix to prefer the floor's message
-    // makes this fail (surfaces the inline-interpreter message instead of
-    // the arithmetic-expansion one).
+    // Round 2's version of this test used `$((1+1)) $(rm -rf /)`, whose
+    // substitution floor happens to carry NO message of its own (no
+    // bundled rule declares `deny_message`), making the assertion pass
+    // under EITHER priority ordering -- vacuous, caught by mutation
+    // testing in round 3's review. This version nests a `python3 -c`
+    // (which DOES have a category deny_message) inside the blocked
+    // substitution, so the floor's own message is a real, different
+    // candidate the pre-floor verdict's arithmetic-expansion message must
+    // still outrank.
     #[test]
     fn substitution_floor_keeps_the_pre_floor_verdicts_own_message_over_the_floors() {
-        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"$((1+1)) $(rm -rf /)"}}"#;
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"$((1+1)) $(python3 -c \"x\" $(rm -rf /))"}}"#;
         let output = handle(stdin);
         assert_eq!(permission_decision(&output), "deny");
         assert_eq!(
@@ -926,7 +932,7 @@ mod tests {
              each piece is inspectable.",
             "the pre-floor verdict's own arithmetic-expansion message must survive the \
              substitution floor overriding its DECISION, not be replaced by the floor's own \
-             message"
+             (here, real and different) inline-interpreter message"
         );
     }
 

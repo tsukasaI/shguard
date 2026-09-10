@@ -250,13 +250,13 @@ impl Verdict {
     ///   (`evaluate_command_position_substitution`, rule 1), the
     ///   leftover-alternative substitution floor
     ///   (`evaluate_leftover_alternative_substitutions`, folded into the
-    ///   same `substitution_result` binding `evaluate_argument_
-    ///   substitutions`'s own fix below applies to — reaching a `Verdict`
-    ///   through both `fold_floors`'s own use of it AND
-    ///   `apply_substitution_floor`'s several early-return call sites, the
-    ///   same two paths), `flock`/`su -c` and `find -exec`'s shared
-    ///   shell-string floor (`scan_recursable_slots`),
-    ///   and expansion-position recursion (`scan_word_expansions`/
+    ///   same `substitution_result` binding that carries
+    ///   `evaluate_argument_substitutions`'s own fix below — reaching a
+    ///   `Verdict` through both `fold_floors`'s own use of it and
+    ///   `apply_substitution_floor`'s several early-return call sites),
+    ///   `flock`/`su -c` and `find -exec`'s shared shell-string floor
+    ///   (`scan_recursable_slots`), and expansion-position recursion
+    ///   (`scan_word_expansions`/
     ///   `scan_redirection_expansions`, the latter also reached from
     ///   `apply_attached_word_and_redirect_checks`'s compound-command
     ///   attached-redirect path). Argument-position substitution recursion
