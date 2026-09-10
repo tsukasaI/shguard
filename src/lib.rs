@@ -314,7 +314,7 @@ pub fn analyze_with_policy(
             .resolve(context_owned.permission_mode(), context_owned.agent_id());
         apply_ask_outcome(verdict, ask_outcome)
     });
-    if let Some(path) = &policy.decision_log_path {
+    if let Some(path) = policy.decision_log_path() {
         sink.append(path, command, &verdict, context);
     }
     verdict
