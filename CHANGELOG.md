@@ -15,9 +15,9 @@ All notable changes to this project are documented in this file.
   `-c "$X"`) also floors to Ask, since it could name either just as easily
   as an ordinary key. Detected structurally in `crate::gate`
   (`git_config_smuggled_verdict`), not via a `required_flags` rule, since
-  a new rule keyed on a synthetic marker flag would open an unrelated
-  false-Ask floor for any other unresolvable `-c` value on the same
-  invocation.
+  a new rule keyed on a synthetic marker flag can't be told apart from a
+  genuinely unresolvable value by the except-flags floor that rule shape
+  relies on.
 
 - Every interpreter-name comparison in the gate (`AWK_INTERPRETERS`
   membership, `inline_code_flag`, `is_shell_interpreter`,

@@ -9471,18 +9471,23 @@ fn git_checkout_dot(argv: &[NormalizedWord]) -> bool {
     })
 }
 
+const GIT_CONFIG_ALIAS_REASON: &str = "git -c alias.<name>=<value>/--config-env=alias.<name>=<value> defines or overrides a \
+     git alias for this invocation, structurally closer to inline shell execution than to a \
+     config toggle (a value beginning with `!` runs as an arbitrary shell command)";
+
 /// Issue #499, follow-up from #447/#498: whether `argv`'s `git`
 /// `-c`/`--config-env` global options carry an `include.path` (Ask) or
 /// `alias.<name>` (Block) value — the same `-c` conduit #498's own
 /// `core.hooksPath`-equals-`--no-verify` detection uses, but for two
 /// shapes that need their own Verdict rather than being folded into that
 /// rewrite: see `crate::rules::git_config_key_is_include_path`'s doc for
-/// why a `required_flags`-keyed rule isn't used here (it would open an
-/// unrelated false-Ask floor for any OTHER unresolvable `-c` value on the
-/// same invocation). Structural, hand-verdict shape mirrors
-/// [`git_checkout_dot`] just above. `alias` outranks `include.path` when
-/// both are present on the same line — checked in that order, first
-/// match wins, consistent with this scan not needing to report both.
+/// why a `required_flags`-keyed rule isn't used here (a synthetic marker
+/// flag can't be told apart from a genuinely unresolvable one by
+/// `crate::rules::CommandRule`'s except-flags floor). Structural,
+/// hand-verdict shape mirrors [`git_checkout_dot`] just above. `alias`
+/// outranks `include.path` when both are present on the same line —
+/// checked in that order, first match wins, consistent with this scan not
+/// needing to report both.
 ///
 /// A `-c`/`--config-env` value that is itself UNRESOLVABLE (`-c
 /// "$(echo alias.co=!id)"`, `-c "alias.co=$X"`) floors to Ask rather than
@@ -9506,14 +9511,11 @@ fn git_checkout_dot(argv: &[NormalizedWord]) -> bool {
 /// `--config-env` flag at all (an `Unresolvable` `NormalizedWord` keeps no
 /// literal residue), so it's invisible here and relies entirely on
 /// whatever OTHER rule's own except-flags floor happens to fire on the
-/// same unresolvable word — `git-push-force`'s `required_flags` has no
-/// `required_tokens` scoping, so it catches this in practice regardless
-/// of subcommand, but that's an incidental property of a rule this
-/// function doesn't control, not a guarantee.
-const GIT_CONFIG_ALIAS_REASON: &str = "git -c alias.<name>=<value>/--config-env=alias.<name>=<value> defines or overrides a \
-     git alias for this invocation, structurally closer to inline shell execution than to a \
-     config toggle (a value beginning with `!` runs as an arbitrary shell command)";
-
+/// same unresolvable word — `git-push-force`'s `required_flags` has a
+/// `required_tokens = ["push"]` scoping, but `matches_except_flags` can't
+/// rule out an opaque word being `push` either, so it fires regardless of
+/// subcommand in practice, catching this case too — an incidental
+/// property of a rule this function doesn't control, not a guarantee.
 fn git_config_smuggled_verdict(argv: &[NormalizedWord]) -> Option<Verdict> {
     let (name, rest) = crate::rules::effective_command(argv)?;
     if name != "git" {
@@ -14490,11 +14492,14 @@ mod tests {
         // A `-c "$X"` whose value is entirely unresolvable floors to Ask
         // (review follow-up): it could just as easily be `alias.*` as an
         // ordinary key, and there is no literal text here to rule that
-        // out. Also covers a whole `--config-env="$X"` token folding to
-        // one opaque `Unresolvable` word.
+        // out.
         assert_decision(r#"git -c "$X" status"#, Decision::Ask);
         assert_decision(r#"git -c "alias.co=$X" co"#, Decision::Ask);
         assert_decision(r#"git -c "$(echo alias.co=!id)" co"#, Decision::Ask);
+        // A whole `--config-env="$X"` token folds to one opaque
+        // `Unresolvable` word, invisible to `git_config_smuggled_verdict`
+        // itself (disclosed in its own doc); this Ask comes from
+        // `git-push-force`'s unrelated `required_flags` floor instead.
         assert_decision(r#"git --config-env="$X" status"#, Decision::Ask);
         // Control: an ordinary, fully-resolved `-c` override unrelated to
         // either key must not trigger either detection.

@@ -656,13 +656,15 @@ fn git_config_key_is_hooks_path(key_value: &str) -> bool {
 /// (`git_config_smuggled_verdict`) rather than folded into
 /// [`git_strip_global_flags`]'s `--no-verify`-equivalence rewrite the way
 /// [`git_config_key_is_hooks_path`] is: a brand-new `required_flags`-keyed
-/// rule for this would open an unrelated false-Ask floor for ANY OTHER
-/// unresolvable `-c` value on the same `git` invocation, since
-/// `crate::rules::CommandRule`'s except-flags floor can't tell "this
-/// unresolvable word could resolve to the flag I need" apart from "this
-/// flag is a synthetic marker no real command line could ever spell". A
-/// hand-verdict structural check (mirroring
-/// `crate::gate::git_checkout_dot`'s own shape) has no such floor to open.
+/// rule keyed on a synthetic marker flag can't be distinguished by
+/// `crate::rules::CommandRule`'s except-flags floor from a genuinely
+/// unresolvable value that could resolve to the flag it needs — the floor
+/// has no way to tell "this is a marker no real command line could ever
+/// spell" apart from "this is real user input". A hand-verdict structural
+/// check (mirroring `crate::gate::git_checkout_dot`'s own shape) knows
+/// which value it's looking at is a `-c`/`--config-env` value specifically,
+/// so it can floor an unresolvable one to Ask on its own terms without
+/// touching any other rule's unrelated except-flags floor.
 /// Deliberately scoped to the exact `include.path` key, not the
 /// conditional `includeIf.<condition>.path` family (same file-injection
 /// effect, gated on a runtime condition this function doesn't evaluate) —
