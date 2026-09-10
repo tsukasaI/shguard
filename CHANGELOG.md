@@ -31,6 +31,23 @@ All notable changes to this project are documented in this file.
   genuinely unresolvable value by the except-flags floor that rule shape
   relies on.
 
+- Any `GIT_CONFIG`-prefixed environment-variable assignment
+  (`GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>`,
+  `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_GLOBAL`) on a `git` invocation no
+  longer resolves to Allow (#500, follow-up from #447/#498). These achieve
+  the same config override as `-c core.hooksPath=...` with no trace in the
+  command's own argv; the mere presence of the family floors to Ask, since
+  this codebase has no general mechanism yet for pairing
+  `GIT_CONFIG_KEY_<n>` with `GIT_CONFIG_VALUE_<n>` by index (or parsing
+  `GIT_CONFIG_PARAMETERS`'s own quoting) to mirror #499's Ask/Block split
+  by specific key. Scoped to a same-line assignment prefix, the only shape
+  visible to a per-invocation static analyzer; disclosed residual gaps
+  include a separate, prior `export GIT_CONFIG_COUNT=...` statement, the
+  same assignment prefixed onto a nested `bash -c "git ..."` (the
+  recursion evaluates a fresh command string with its own, empty
+  assignment prefix), and the `env GIT_CONFIG_COUNT=... git ...` wrapper
+  spelling.
+
 - `reject_excessive_raw_nesting`'s `[[ ... ]]` extended-test-operator raw
   scan no longer lets a quoted `]]` token (`' ]] '`, which tokenizes as a
   standalone `]]` once surrounded by spaces) turn tracking off mid-region
