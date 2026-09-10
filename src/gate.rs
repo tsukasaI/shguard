@@ -3136,6 +3136,22 @@ fn evaluate_simple_command_core(
         );
     }
 
+    // Issue #500, follow-up from #447/#498: git also accepts config
+    // overrides purely through GIT_CONFIG_COUNT/GIT_CONFIG_KEY_<n>/
+    // GIT_CONFIG_VALUE_<n> environment variables, achieving the same
+    // effect as `-c core.hooksPath=...` with no trace in the command's
+    // own argv at all — see `git_config_env_var_verdict`'s own doc for
+    // scope.
+    if let Some(verdict) = git_config_env_var_verdict(&argv, command) {
+        return apply_opaque_kind_floor(
+            apply_substitution_floor(
+                apply_escalation_floor(verdict, escalation_floor),
+                substitution_result,
+            ),
+            opaque_kind,
+        );
+    }
+
     fold_floors(
         argv,
         interpreter_code_floor,
@@ -9455,6 +9471,58 @@ fn git_checkout_dot(argv: &[NormalizedWord]) -> bool {
     })
 }
 
+/// Issue #500, follow-up from #447/#498: `git` also accepts config
+/// overrides purely through `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/
+/// `GIT_CONFIG_VALUE_<n>` environment variables (`GIT_CONFIG_COUNT=1
+/// GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git commit
+/// -m x`), achieving the identical effect as `-c core.hooksPath=...`
+/// (#498) — or `-c include.path=...`/`-c alias.*=...` (#499) — with no
+/// trace in the command's own argv at all.
+///
+/// Scoped to a same-line assignment prefix (`command.assignments`), the
+/// only shape of this a per-invocation static analyzer can see at all: a
+/// real environment variable set by an earlier, separate command is
+/// invisible to shguard regardless (docs/threat-model.md's own "session
+/// state is invisible to shguard" boundary — each `analyze()` call sees
+/// exactly one command string in isolation). An `env
+/// GIT_CONFIG_COUNT=... git ...` wrapper spelling of the same idea is a
+/// disclosed residual gap, not covered here.
+///
+/// Floors to Ask on the mere PRESENCE of any `GIT_CONFIG_COUNT`/
+/// `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` assignment, regardless of
+/// its resolved value, rather than trying to pair each `GIT_CONFIG_KEY_<n>`
+/// with its `GIT_CONFIG_VALUE_<n>` by index (and resolve `GIT_CONFIG_COUNT`
+/// to know how many pairs git actually reads) to mirror #499's Ask/Block
+/// split by specific key — this codebase has no general mechanism yet for
+/// that kind of indexed env-var-to-config-semantics mapping (this issue's
+/// own "why not fixed in #498" discussion), and env-var-sourced git config
+/// on an agent-issued single command line is unusual enough on its own to
+/// warrant the same "can't fully introspect" Ask posture this codebase
+/// already applies elsewhere (e.g. awk's own un-introspectable-script
+/// floor, issues #451/#467).
+fn git_config_env_var_verdict(argv: &[NormalizedWord], command: &SimpleCommand) -> Option<Verdict> {
+    let (name, _) = crate::rules::effective_command(argv)?;
+    if name != "git" {
+        return None;
+    }
+    let smuggled = command.assignments.iter().any(|assignment| {
+        assignment.name == "GIT_CONFIG_COUNT"
+            || assignment.name.starts_with("GIT_CONFIG_KEY_")
+            || assignment.name.starts_with("GIT_CONFIG_VALUE_")
+    });
+    smuggled.then(|| {
+        Verdict::ask(
+            Reason::new(
+                "a GIT_CONFIG_COUNT/GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> environment-variable \
+                 assignment overrides git config the same way `-c` does, but with no trace in \
+                 the command's own argv; its specific key/value pairs are not statically \
+                 cross-referenced here",
+            ),
+            argv.to_vec(),
+        )
+    })
+}
+
 /// Issue #209: a narrower, single-invocation version of issue #103's
 /// same-line `cd`/`pushd` composition, for the handful of tools that
 /// accept a `-C <dir>`-shaped flag changing THEIR OWN working directory
@@ -14319,6 +14387,33 @@ mod tests {
         );
         assert_decision(r#"git -c "$X" push --force"#, Decision::Block);
         assert_decision(r#"git -c "$X" status"#, Decision::Allow);
+    }
+
+    #[test]
+    fn git_config_env_var_smuggling_is_detected() {
+        // Issue #500, follow-up from #447/#498: the same core.hooksPath
+        // override achievable via `-c` is also achievable purely through
+        // GIT_CONFIG_COUNT/GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n>
+        // environment variables, with no trace in argv at all.
+        assert_decision(
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath \
+             GIT_CONFIG_VALUE_0=/dev/null git commit -m x",
+            Decision::Ask,
+        );
+        // The mere presence of the family floors to Ask regardless of
+        // which specific key/value is set -- this codebase has no general
+        // mechanism yet for pairing GIT_CONFIG_KEY_<n> with
+        // GIT_CONFIG_VALUE_<n> by index.
+        assert_decision("GIT_CONFIG_COUNT=1 git commit -m x", Decision::Ask);
+        assert_decision("GIT_CONFIG_KEY_0=user.name git commit -m x", Decision::Ask);
+        assert_decision(
+            "GIT_CONFIG_VALUE_0=/dev/null git commit -m x",
+            Decision::Ask,
+        );
+        // Control: an unrelated same-line assignment prefix on a git
+        // invocation must not trigger this floor.
+        assert_decision("GIT_AUTHOR_NAME=x git commit -m x", Decision::Allow);
+        assert_decision("git commit -m x", Decision::Allow);
     }
 
     #[test]

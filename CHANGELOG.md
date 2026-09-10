@@ -6,6 +6,19 @@ All notable changes to this project are documented in this file.
 
 ### Security
 
+- `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>`
+  environment-variable assignments on a `git` invocation no longer resolve
+  to Allow (#500, follow-up from #447/#498). These achieve the same config
+  override as `-c core.hooksPath=...` with no trace in the command's own
+  argv; the mere presence of the family floors to Ask, since this codebase
+  has no general mechanism yet for pairing `GIT_CONFIG_KEY_<n>` with
+  `GIT_CONFIG_VALUE_<n>` by index to mirror #499's Ask/Block split by
+  specific key. Scoped to a same-line assignment prefix, the only shape
+  visible to a per-invocation static analyzer; an `env
+  GIT_CONFIG_COUNT=... git ...` wrapper spelling is a disclosed residual
+  gap.
+### Security
+
 - Every interpreter-name comparison in the gate (`AWK_INTERPRETERS`
   membership, `inline_code_flag`, `is_shell_interpreter`,
   `is_pipeline_interpreter`, `is_stdin_script_interpreter`, the `fish`
