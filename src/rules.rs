@@ -2211,10 +2211,15 @@ impl CommandRule {
                     return Some(effective);
                 }
             }
-            if !TRANSPARENT_WRAPPERS.contains(&base) {
+            // Issue #493 follow-up: fold for wrapper recognition only —
+            // `self.command.matches`/`effective_tail` above keep the raw
+            // name, since general command-name matching case-sensitivity
+            // is a separate, broader concern this fix does not touch.
+            let folded_base = fold_command_name(base);
+            if !TRANSPARENT_WRAPPERS.contains(&folded_base.as_str()) {
                 return None;
             }
-            rest = skip_wrapper_arguments(base, tail);
+            rest = skip_wrapper_arguments(&folded_base, tail);
         }
     }
 
@@ -2515,10 +2520,13 @@ impl CommandRule {
             if self.command.matches(base) {
                 return Some(effective_tail(base, tail));
             }
-            if !TRANSPARENT_WRAPPERS.contains(&base) {
+            // Issue #493 follow-up: fold for wrapper recognition only, see
+            // the sibling walk above.
+            let folded_base = fold_command_name(base);
+            if !TRANSPARENT_WRAPPERS.contains(&folded_base.as_str()) {
                 return None;
             }
-            rest = skip_wrapper_arguments(base, tail);
+            rest = skip_wrapper_arguments(&folded_base, tail);
         }
     }
 
@@ -3672,6 +3680,39 @@ const EXTRA_PIPELINE_INTERPRETERS: &[&str] = &[
 /// of this constant's pipeline-interpreter exclusion.
 pub(crate) const AWK_INTERPRETERS: &[&str] = &["awk", "gawk", "mawk", "nawk", "original-awk"];
 
+/// Folds `name` for case-insensitive interpreter-name comparison (issue
+/// #493). macOS APFS's default case-insensitive collation is full Unicode
+/// case folding, not bare ASCII lowercasing — verified directly on this
+/// filesystem: `ſh` (U+017F LATIN SMALL LETTER LONG S), `awk` spelled with
+/// a Kelvin sign (U+212A) in place of `k`, and `fish` spelled with a Latin
+/// ligature (U+FB00-U+FB06: ﬀ, ﬁ, ﬂ, ﬃ, ﬄ, ﬅ, ﬆ, e.g. `ﬁsh`) or German ß/ẞ,
+/// all name the same inode as their plain-ASCII spelling. `str::to_lowercase()`
+/// alone closes the Kelvin-sign gap (its Unicode lowercase mapping already
+/// reduces U+212A to `k`, and ẞ to ß) but every other fold here changes
+/// EITHER which character represents an already-lowercase letter (long s
+/// has no lowercase mapping at all, it's already lowercase) OR how many
+/// characters represent it (each ligature is one code point standing in
+/// for two or three ASCII letters) — neither is something a lowercase
+/// mapping alone can express, so each needs its own explicit fold. This is
+/// the closed set of Unicode `CaseFolding.txt` C/F entries whose fold
+/// consists purely of ASCII letters, applied in the order needed for `ẞ`
+/// to still resolve to `ss` after lowercasing produces `ß` first; it is
+/// not a general Unicode case-folding implementation (no case-folding
+/// crate/table is pulled in for this, and this list is not guaranteed
+/// exhaustive against every future Unicode addition).
+#[must_use]
+pub(crate) fn fold_command_name(name: &str) -> String {
+    name.to_lowercase()
+        .replace('\u{017F}', "s") // ſ (long s)
+        .replace('\u{00DF}', "ss") // ß (sharp s; ẞ already lowercases to this)
+        .replace('\u{FB00}', "ff") // ﬀ
+        .replace('\u{FB01}', "fi") // ﬁ
+        .replace('\u{FB02}', "fl") // ﬂ
+        .replace('\u{FB03}', "ffi") // ﬃ
+        .replace('\u{FB04}', "ffl") // ﬄ
+        .replace(['\u{FB05}', '\u{FB06}'], "st") // ﬅ (long s + t), ﬆ (st)
+}
+
 /// Strips a trailing distro-style version suffix (`python3.12` -> `python`,
 /// `lua5.4` -> `lua`, `php8.2` -> `php`) so interpreter-name matching
 /// recognises versioned binaries (issue #346) without a hand-maintained list
@@ -3693,10 +3734,14 @@ pub(crate) fn strip_version_suffix(name: &str) -> &str {
 /// (`lua5.4`, `php8.2`) down to its base. Always call this rather than
 /// consulting either list alone, so a future addition to
 /// `SHELL_INTERPRETERS` (a new shell) is automatically also recognised as a
-/// pipeline sink, with nothing left to keep in sync by hand.
+/// pipeline sink, with nothing left to keep in sync by hand. Case-folded
+/// before stripping (issue #493): a case-variant spelling (`PYTHON3`)
+/// resolves to the same binary as the lowercase name on a case-insensitive
+/// filesystem (macOS APFS default), so recognition must not depend on case.
 #[must_use]
 pub(crate) fn is_pipeline_interpreter(name: &str) -> bool {
-    let name = strip_version_suffix(name);
+    let lower = fold_command_name(name);
+    let name = strip_version_suffix(&lower);
     SHELL_INTERPRETERS.contains(&name) || EXTRA_PIPELINE_INTERPRETERS.contains(&name)
 }
 
@@ -3705,10 +3750,12 @@ pub(crate) fn is_pipeline_interpreter(name: &str) -> bool {
 /// (`bash5` -> `bash`) — the same normalization [`is_pipeline_interpreter`]
 /// applies, kept as its own function for `crate::gate`'s `-c` recursion call
 /// sites, which need the plain shell-only list rather than the pipeline-sink
-/// union.
+/// union. Case-folded first, see [`is_pipeline_interpreter`]'s doc (issue
+/// #493).
 #[must_use]
 pub(crate) fn is_shell_interpreter(name: &str) -> bool {
-    SHELL_INTERPRETERS.contains(&strip_version_suffix(name))
+    let lower = fold_command_name(name);
+    SHELL_INTERPRETERS.contains(&strip_version_suffix(&lower))
 }
 
 /// Whether `name` is an [`EXTRA_PIPELINE_INTERPRETERS`] member once
@@ -3721,10 +3768,12 @@ pub(crate) fn is_shell_interpreter(name: &str) -> bool {
 /// other shape. Mirrors [`is_shell_interpreter`]'s shape, kept as its own
 /// function for `crate::gate`'s heredoc-as-stdin floor (issue #424), which
 /// needs the non-shell list alone rather than the pipeline-sink union
-/// [`is_pipeline_interpreter`] returns.
+/// [`is_pipeline_interpreter`] returns. Case-folded first, see
+/// [`is_pipeline_interpreter`]'s doc (issue #493).
 #[must_use]
 pub(crate) fn is_stdin_script_interpreter(name: &str) -> bool {
-    EXTRA_PIPELINE_INTERPRETERS.contains(&strip_version_suffix(name))
+    let lower = fold_command_name(name);
+    EXTRA_PIPELINE_INTERPRETERS.contains(&strip_version_suffix(&lower))
 }
 
 /// How a [`RecursableSlot`]'s value should be recursed — see
@@ -3892,8 +3941,14 @@ pub(crate) fn effective_command_excluding<'a>(
             return None;
         };
         let base = basename(name);
-        if TRANSPARENT_WRAPPERS.contains(&base) && !excluded.contains(&base) {
-            rest = skip_wrapper_arguments(base, tail);
+        // Issue #493 follow-up: fold for wrapper recognition and the
+        // caller-supplied `excluded` list only; the returned "resolved
+        // command name" stays raw for the caller's own display use.
+        let folded_base = fold_command_name(base);
+        if TRANSPARENT_WRAPPERS.contains(&folded_base.as_str())
+            && !excluded.contains(&folded_base.as_str())
+        {
+            rest = skip_wrapper_arguments(&folded_base, tail);
         } else {
             return Some((base, tail));
         }
@@ -4569,14 +4624,17 @@ pub(crate) fn wrapper_chain_escalation(stage: &[NormalizedWord]) -> WrapperChain
             };
         };
         let base = basename(name);
-        if let Some(&vector) = ESCALATION_VECTORS.iter().find(|v| **v == base) {
+        // Issue #493 follow-up: fold for both checks below -- `SUDO`/
+        // `sudo` must be recognized identically as an escalation vector.
+        let folded_base = fold_command_name(base);
+        if let Some(&vector) = ESCALATION_VECTORS.iter().find(|v| **v == folded_base) {
             return WrapperChainEscalation::Contains(vector);
         }
-        if !TRANSPARENT_WRAPPERS.contains(&base) {
+        if !TRANSPARENT_WRAPPERS.contains(&folded_base.as_str()) {
             return WrapperChainEscalation::Absent;
         }
         passed_wrapper = true;
-        rest = skip_wrapper_arguments(base, tail);
+        rest = skip_wrapper_arguments(&folded_base, tail);
     }
 }
 
@@ -4649,10 +4707,18 @@ pub(crate) fn builtin_loadable_library(stage: &[NormalizedWord]) -> BuiltinLoada
         if base == "builtin" {
             return builtin_own_leading_flags(tail);
         }
-        if !TRANSPARENT_WRAPPERS.contains(&base) {
+        // Issue #493 follow-up: fold for wrapper recognition only —
+        // `builtin` above stays raw. Unlike `command`/`exec` (also shell
+        // builtins, but ones this codebase treats as real wrapper names
+        // via `TRANSPARENT_WRAPPERS` and folds accordingly), `builtin`'s
+        // own case-sensitive comparison here isn't reached through that
+        // list at all, so folding it would need its own justification
+        // this narrow, single-keyword check doesn't have.
+        let folded_base = fold_command_name(base);
+        if !TRANSPARENT_WRAPPERS.contains(&folded_base.as_str()) {
             return BuiltinLoadableLibrary::Absent;
         }
-        rest = skip_wrapper_arguments(base, tail);
+        rest = skip_wrapper_arguments(&folded_base, tail);
     }
 }
 
@@ -4889,13 +4955,18 @@ pub(crate) fn wrapper_shell_string_scripts(stage: &[NormalizedWord]) -> Vec<Scri
             break;
         };
         let base = basename(name);
-        if !TRANSPARENT_WRAPPERS.contains(&base) {
+        // Issue #493 follow-up: fold once and reuse for every internal
+        // wrapper-name comparison below (`env`, `wrapper_value_flags`,
+        // `RECURSABLE_SLOTS`'s own `command` field) — a case-variant
+        // wrapper spelling must recurse identically to the lowercase one.
+        let base = fold_command_name(base);
+        if !TRANSPARENT_WRAPPERS.contains(&base.as_str()) {
             break;
         }
         if base == "env" {
             collect_env_split_string_slots(tail, &mut slots);
         }
-        let value_flags = wrapper_value_flags(base);
+        let value_flags = wrapper_value_flags(&base);
         for slot in RECURSABLE_SLOTS
             .iter()
             .filter(|slot| slot.command == base && matches!(slot.mode, RecurseMode::ShellString))
@@ -4933,7 +5004,7 @@ pub(crate) fn wrapper_shell_string_scripts(stage: &[NormalizedWord]) -> Vec<Scri
                 FlagScan::Absent => {}
             }
         }
-        rest = skip_wrapper_arguments(base, tail);
+        rest = skip_wrapper_arguments(&base, tail);
     }
     slots
 }
@@ -4991,17 +5062,20 @@ pub(crate) fn su_username_matches_blocklisted_command<'a>(
             return None;
         };
         let base = basename(name);
+        // Issue #493 follow-up: fold once and reuse for every internal
+        // wrapper-name comparison below, same as the sibling walk above.
+        let base = fold_command_name(base);
         if base == "su" {
-            let idx = skip_wrapper_flags(base, tail);
+            let idx = skip_wrapper_flags(&base, tail);
             return rules
                 .command_rules
                 .iter()
                 .find(|rule| rule.matches(&tail[idx..]));
         }
-        if !TRANSPARENT_WRAPPERS.contains(&base) {
+        if !TRANSPARENT_WRAPPERS.contains(&base.as_str()) {
             return None;
         }
-        rest = skip_wrapper_arguments(base, tail);
+        rest = skip_wrapper_arguments(&base, tail);
     }
 }
 
@@ -6809,6 +6883,14 @@ pub(crate) fn apply_allowlist(verdict: &Verdict, allowlist: &Allowlist) -> Allow
 /// unversioned spelling above, and stripping a version suffix from a
 /// user-supplied *prefix* (which may not even end at a version boundary)
 /// has no well-defined meaning.
+///
+/// Both comparisons case-fold `entry.command` (issue #493, folded via
+/// [`fold_command_name`] rather than ASCII-only lowercasing): an allow
+/// entry naming `AWK` or `BASH` is exactly as dangerous as one naming the
+/// lowercase spelling once interpreter recognition itself is
+/// case-insensitive, so this rejection must not be case-sensitive either —
+/// otherwise `[[allow]] command = "AWK"` would sail through this check
+/// while `crate::gate`'s own recognition treats it as the real interpreter.
 fn matches_dangerous_allow_target(entry: &CommandRule) -> bool {
     let candidates = || {
         SHELL_INTERPRETERS
@@ -6818,11 +6900,20 @@ fn matches_dangerous_allow_target(entry: &CommandRule) -> bool {
             .chain(AWK_INTERPRETERS.iter())
             .chain(TRANSPARENT_WRAPPERS.iter())
     };
-    if candidates().any(|name| entry.command.matches(name)) {
+    let matches_ci = |name: &str| match &entry.command {
+        CommandMatch::Exact(exact) => fold_command_name(exact) == fold_command_name(name),
+        CommandMatch::Prefix(prefix) => {
+            fold_command_name(name).starts_with(&fold_command_name(prefix))
+        }
+    };
+    if candidates().any(|name| matches_ci(name)) {
         return true;
     }
     match &entry.command {
-        CommandMatch::Exact(exact) => candidates().any(|name| strip_version_suffix(exact) == *name),
+        CommandMatch::Exact(exact) => {
+            let lower = fold_command_name(exact);
+            candidates().any(|name| strip_version_suffix(&lower) == *name)
+        }
         CommandMatch::Prefix(_) => false,
     }
 }
@@ -12872,6 +12963,85 @@ mod tests {
         }
     }
 
+    // Issue #493: a case-variant allow entry (`AWK`, `BASH`) must be
+    // rejected exactly like the lowercase spelling, since a case-insensitive
+    // filesystem resolves both to the same binary.
+    #[test]
+    fn user_config_rejects_allow_entry_matching_awk_family_case_variant() {
+        let toml = r#"
+            [[allow]]
+            id = "user-allow-awk-upper"
+            reason = "trust me"
+            command = "AWK"
+        "#;
+        assert!(matches!(
+            UserConfig::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn user_config_rejects_allow_entry_matching_bash_case_variant() {
+        let toml = r#"
+            [[allow]]
+            id = "user-allow-bash-upper"
+            reason = "trust me"
+            command = "BASH"
+        "#;
+        assert!(matches!(
+            UserConfig::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    // Issue #493: a case-variant interpreter name resolves to the same
+    // binary as the lowercase spelling on a case-insensitive filesystem
+    // (macOS APFS default), so recognition must not depend on case.
+    #[test]
+    fn is_shell_interpreter_is_case_insensitive() {
+        assert!(is_shell_interpreter("bash"));
+        assert!(is_shell_interpreter("BASH"));
+        assert!(is_shell_interpreter("Bash"));
+    }
+
+    #[test]
+    fn is_pipeline_interpreter_is_case_insensitive() {
+        assert!(is_pipeline_interpreter("python3"));
+        assert!(is_pipeline_interpreter("PYTHON3"));
+    }
+
+    #[test]
+    fn is_stdin_script_interpreter_is_case_insensitive() {
+        assert!(is_stdin_script_interpreter("python3"));
+        assert!(is_stdin_script_interpreter("PYTHON3"));
+    }
+
+    // Issue #493 follow-up: a fable code-reviewer pass proved macOS APFS's
+    // case-insensitive collation is full Unicode case folding, not ASCII
+    // lowercasing alone -- these fold to the same inode as their plain
+    // spelling on that filesystem. Written as `\u{...}` escapes, not
+    // literal glyphs: an editor or terminal NFC-normalizing the source
+    // would silently turn the Kelvin-sign/ligature cases into ASCII ones
+    // and defeat the point of the test.
+    #[test]
+    fn fold_command_name_covers_known_apfs_case_folds() {
+        assert_eq!(fold_command_name("\u{017F}h"), "sh"); // ſh -> sh (long s)
+        assert_eq!(fold_command_name("aw\u{212A}"), "awk"); // awK (Kelvin) -> awk
+        assert_eq!(fold_command_name("\u{FB01}sh"), "fish"); // ﬁsh -> fish
+        assert_eq!(fold_command_name("\u{FB02}ock"), "flock"); // ﬂock -> flock
+        assert_eq!(fold_command_name("ba\u{00DF}"), "bass"); // baß -> bass
+        assert_eq!(fold_command_name("be\u{FB06}"), "best"); // beﬆ -> best
+        // ẞ (U+1E9E, uppercase sharp s) lowercases to ß first, then folds
+        // to "ss" -- pins the doc's own ordering claim, not just ß itself.
+        assert_eq!(fold_command_name("ba\u{1E9E}"), "bass"); // baẞ -> bass
+        assert_eq!(fold_command_name("a\u{FB03}x"), "affix"); // aﬃx -> affix
+    }
+
+    #[test]
+    fn is_shell_interpreter_covers_ligature_fold() {
+        assert!(is_shell_interpreter("\u{FB01}sh")); // ﬁsh
+    }
+
     #[test]
     fn user_config_rejects_allow_entry_whose_prefix_captures_a_shell_interpreter() {
         // command_prefix = "b" matches "bash" at runtime via CommandMatch::Prefix's
@@ -12882,6 +13052,23 @@ mod tests {
             id = "user-allow-b-prefix"
             reason = "trust me"
             command_prefix = "b"
+        "#;
+        assert!(matches!(
+            UserConfig::parse(toml),
+            Err(RulesError::InvalidRule { .. })
+        ));
+    }
+
+    // Issue #493: a case-variant prefix must be rejected exactly like the
+    // lowercase spelling, exercising `matches_dangerous_allow_target`'s
+    // `Prefix` branch specifically (`Exact` alone was covered above).
+    #[test]
+    fn user_config_rejects_allow_entry_whose_uppercase_prefix_captures_a_shell_interpreter() {
+        let toml = r#"
+            [[allow]]
+            id = "user-allow-ba-prefix-upper"
+            reason = "trust me"
+            command_prefix = "BA"
         "#;
         assert!(matches!(
             UserConfig::parse(toml),
