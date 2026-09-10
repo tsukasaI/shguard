@@ -173,6 +173,117 @@ impl From<crate::rules::RulesError> for ConfigError {
     }
 }
 
+/// A `decision_log_path` user-config value that has already passed every
+/// check [`Policy::load`] applies to it (issue #519, follow-up from #465's
+/// architecture-checklist pass, coding-guidelines/principles.md's "parse,
+/// don't validate": before this type existed, `Policy` held a plain
+/// `Option<PathBuf>` and validated it post-hoc, so an unchecked path was a
+/// representable, if momentarily inconsistent, state). Constructing one
+/// outside `#[cfg(test)]` is only possible through [`Self::parse`], so a
+/// live `Policy`'s `decision_log_path` field can never hold a value this
+/// module's own checks haven't already run over.
+///
+/// The field stays private: callers reach the underlying path only through
+/// [`Self::as_path`] (or, for a whole [`Policy`], [`Policy::decision_log_path`]),
+/// never by constructing or matching on this type directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DecisionLogPath(PathBuf);
+
+impl DecisionLogPath {
+    /// Runs every check `Policy::load` used to apply inline against a
+    /// resolved `decision_log_path` value: an absolute path (issue #458
+    /// item 3, mirroring #436/#437's rejection of a relative
+    /// `XDG_CONFIG_HOME`/`HOME`), no trailing-slash/`.`/`..` component (a
+    /// directory-shaped path would otherwise let the parent-directory check
+    /// below "succeed" and every future append fail forever with
+    /// `EISDIR`/`ENOTDIR`), not a symlink (issue #458 item 1: paired with
+    /// `decision_log::open_log_file`'s `O_NOFOLLOW`, closing the
+    /// load-to-append TOCTOU window a symlink-following check here would
+    /// otherwise reopen), and either an existing regular file or absent
+    /// with an existing parent directory (issue #458 item 2: a missing
+    /// parent means every future append fails forever, silently dropped by
+    /// `decision_log::append`'s own fail-open posture — exactly the
+    /// "typo'd path defeats the feature invisibly" trap this whole check
+    /// exists to close).
+    ///
+    /// Deliberately does NOT run the self-protection rule-merging
+    /// `Policy::load` layers on top of a validated path (issue #458 item
+    /// 4) — that step needs `rules`/`allowlist` to fold into, which this
+    /// type has no business owning; `Policy::load` still does that itself,
+    /// against `raw_path.as_path()` once this returns `Ok`.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::InvalidConfig`] with a message naming which check
+    /// failed, for any of the reasons above.
+    fn parse(raw_path: PathBuf) -> Result<Self, ConfigError> {
+        if !raw_path.is_absolute() {
+            return Err(ConfigError::InvalidConfig(format!(
+                "decision_log_path {raw_path:?} must be an absolute path"
+            )));
+        }
+        let has_directory_shaped_component = raw_path
+            .to_string_lossy()
+            .ends_with(std::path::MAIN_SEPARATOR)
+            || raw_path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::CurDir | std::path::Component::ParentDir
+                )
+            });
+        if has_directory_shaped_component {
+            return Err(ConfigError::InvalidConfig(format!(
+                "decision_log_path {raw_path:?} must name a file directly, not a trailing-slash \
+                 or relative-component path"
+            )));
+        }
+        match std::fs::symlink_metadata(&raw_path) {
+            Ok(meta) if meta.is_symlink() => {
+                return Err(ConfigError::InvalidConfig(format!(
+                    "decision_log_path {raw_path:?} is a symlink, which is not allowed"
+                )));
+            }
+            Ok(meta) if !meta.is_file() => {
+                return Err(ConfigError::InvalidConfig(format!(
+                    "decision_log_path {raw_path:?} exists and is not a regular file"
+                )));
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                let parent_exists = raw_path.parent().is_some_and(|parent| parent.is_dir());
+                if !parent_exists {
+                    return Err(ConfigError::InvalidConfig(format!(
+                        "decision_log_path {raw_path:?}'s parent directory does not exist"
+                    )));
+                }
+            }
+            Err(err) => {
+                return Err(ConfigError::InvalidConfig(format!(
+                    "decision_log_path {raw_path:?} could not be checked: {err}"
+                )));
+            }
+        }
+        Ok(Self(raw_path))
+    }
+
+    fn as_path(&self) -> &std::path::Path {
+        &self.0
+    }
+
+    /// Test-only escape hatch, deliberately bypassing [`Self::parse`]'s own
+    /// checks: `src/decision_log.rs`'s `a_blocked_log_target_does_not_
+    /// corrupt_the_verdict` regression test needs a genuinely blocking
+    /// write target (a pre-existing FIFO) that `parse` would reject
+    /// outright, to prove a slow log target can't corrupt the verdict
+    /// `analyze_with_policy` returns. Confining the bypass to test code
+    /// (rather than a `pub(crate)` constructor real callers could also
+    /// reach) is the whole point of this type existing at all.
+    #[cfg(test)]
+    fn for_test_unchecked(raw_path: PathBuf) -> Self {
+        Self(raw_path)
+    }
+}
+
 /// A fully loaded, merged policy: the embedded blocklist/allowlist, plus
 /// whatever a user config contributed, plus this invocation's
 /// self-protection rules. Opaque to callers outside this crate — the only
@@ -197,8 +308,11 @@ pub struct Policy {
     /// Never populated by the self-protection-only merge path below (that
     /// synthetic config text has no such key), so this is read off the
     /// real config-file parse alone, before it's moved into
-    /// [`merge_user_config`].
-    pub(crate) decision_log_path: Option<PathBuf>,
+    /// [`merge_user_config`]. [`DecisionLogPath`] (issue #519), not a bare
+    /// `PathBuf`: every value here has already passed
+    /// [`DecisionLogPath::parse`]'s own checks, so an unvalidated path is
+    /// not a state this field can represent outside test code.
+    pub(crate) decision_log_path: Option<DecisionLogPath>,
     /// The top-level `ask_outcome` user-config key (issues #467/#469) —
     /// [`crate::rules::AskOutcome::default`] (today's unmodified behavior)
     /// unless the user's own config set it, either to #467's bare-string
@@ -460,61 +574,17 @@ impl Policy {
         // hook's per-invocation working directory -- the guarded repo, not
         // a stable location -- so it's caught before any of the checks
         // above rather than let load "succeed" with an ambiguous target.
-        if let Some(log_path) = &decision_log_path {
-            if !log_path.is_absolute() {
-                return Err(ConfigError::InvalidConfig(format!(
-                    "decision_log_path {log_path:?} must be an absolute path"
-                )));
-            }
-            // A trailing `/` (`Path::parent()`/`components()` silently drop
-            // it, unlike the raw string this checks instead) or a `.`/`..`
-            // component names a directory-shaped path, not a file: the
-            // parent-directory check below would see it as "parent exists,
-            // file itself absent" and accept it, and every future append
-            // would then fail forever with `EISDIR`/`ENOTDIR` -- exactly
-            // the load-time-invisible failure fix #458 item 2 exists to
-            // close, just with a different underlying OS error.
-            let has_directory_shaped_component = log_path
-                .to_string_lossy()
-                .ends_with(std::path::MAIN_SEPARATOR)
-                || log_path.components().any(|component| {
-                    matches!(
-                        component,
-                        std::path::Component::CurDir | std::path::Component::ParentDir
-                    )
-                });
-            if has_directory_shaped_component {
-                return Err(ConfigError::InvalidConfig(format!(
-                    "decision_log_path {log_path:?} must name a file directly, not a \
-                     trailing-slash or relative-component path"
-                )));
-            }
-            match std::fs::symlink_metadata(log_path) {
-                Ok(meta) if meta.is_symlink() => {
-                    return Err(ConfigError::InvalidConfig(format!(
-                        "decision_log_path {log_path:?} is a symlink, which is not allowed"
-                    )));
-                }
-                Ok(meta) if !meta.is_file() => {
-                    return Err(ConfigError::InvalidConfig(format!(
-                        "decision_log_path {log_path:?} exists and is not a regular file"
-                    )));
-                }
-                Ok(_) => {}
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                    let parent_exists = log_path.parent().is_some_and(|parent| parent.is_dir());
-                    if !parent_exists {
-                        return Err(ConfigError::InvalidConfig(format!(
-                            "decision_log_path {log_path:?}'s parent directory does not exist"
-                        )));
-                    }
-                }
-                Err(err) => {
-                    return Err(ConfigError::InvalidConfig(format!(
-                        "decision_log_path {log_path:?} could not be checked: {err}"
-                    )));
-                }
-            }
+        // Issue #519: `DecisionLogPath::parse` owns every check this block
+        // used to run inline (absolute path, no trailing-slash/relative
+        // component, not a symlink, existing regular file or absent with an
+        // existing parent) -- see its own doc for the full rationale behind
+        // each one. The self-protection rule-merging below stays here: it
+        // needs `rules`/`allowlist` to fold into, which the parsed value has
+        // no business owning.
+        let decision_log_path: Option<DecisionLogPath> =
+            decision_log_path.map(DecisionLogPath::parse).transpose()?;
+        if let Some(decision_log_path) = &decision_log_path {
+            let log_path = decision_log_path.as_path();
 
             // Issue #458 item 4: without this, the log path itself is the
             // audit trail's own single point of failure -- `rm`/`ln -sf`
@@ -575,7 +645,11 @@ impl Policy {
     /// FIFO, in particular) — used by `src/decision_log.rs`'s
     /// `a_blocked_log_target_does_not_corrupt_the_verdict` regression test,
     /// which needs a genuinely blocking write to prove a slow log target
-    /// can't corrupt the verdict `analyze_with_policy` returns.
+    /// can't corrupt the verdict `analyze_with_policy` returns. Issue #519:
+    /// goes through [`DecisionLogPath::for_test_unchecked`] rather than
+    /// [`DecisionLogPath::parse`] precisely because a FIFO is exactly what
+    /// `parse` exists to reject — this constructor's whole reason for
+    /// existing is to reach a state `Policy::load` itself can never produce.
     #[cfg(test)]
     #[allow(clippy::expect_used)]
     pub(crate) fn for_test_with_decision_log_path(decision_log_path: PathBuf) -> Self {
@@ -584,7 +658,7 @@ impl Policy {
             allowlist: std::sync::Arc::new(
                 Allowlist::embedded().expect("embedded allowlist should parse"),
             ),
-            decision_log_path: Some(decision_log_path),
+            decision_log_path: Some(DecisionLogPath::for_test_unchecked(decision_log_path)),
             ask_outcome: crate::rules::AskOutcome::default(),
         }
     }
@@ -660,7 +734,9 @@ impl Policy {
     /// `analyze_with_policy` at all.
     #[must_use]
     pub fn decision_log_path(&self) -> Option<&std::path::Path> {
-        self.decision_log_path.as_deref()
+        self.decision_log_path
+            .as_ref()
+            .map(DecisionLogPath::as_path)
     }
 }
 

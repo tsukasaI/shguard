@@ -6,6 +6,18 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- `Policy`'s `decision_log_path` field is now a `DecisionLogPath` newtype
+  rather than a plain `PathBuf` (#519, follow-up from #465's
+  architecture-checklist pass, "parse, don't validate"). Every check
+  `Policy::load` used to apply inline (absolute path, no trailing-slash or
+  relative component, not a symlink, existing regular file or absent with
+  an existing parent) now lives in `DecisionLogPath::parse`, so a
+  live `Policy` can no longer represent an unvalidated `decision_log_path`
+  outside test code, closing the gap `for_test_with_decision_log_path`'s
+  own validation-bypassing constructor was a symptom of. No behavior
+  change on any load path; the same checks run in the same order with the
+  same error messages.
+
 - `evaluate_argument_substitutions` (rule 3: argument-position command/
   backquote/process substitution recursion) now threads the recursed inner
   verdict's own `deny_message` through instead of flattening to a bare
