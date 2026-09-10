@@ -865,12 +865,94 @@ mod tests {
         assert!(permission_reason(&output).contains("recurses through the full pipeline"));
     }
 
-    // Note (issue #471 fable review): a category message does NOT currently
-    // survive `evaluate_argument_substitutions`' own recursion path (e.g.
-    // `echo $(python3 -c "x")` still resolves Ask with `deny_message: None`)
-    // -- that function returns a bare `Option<Decision>`, not the inner
-    // verdict's message, a pre-existing gap `Verdict::with_deny_message`'s
-    // own "Known remaining gaps" doc already discloses. Closing it would
-    // mean widening that function's return type and its callers; left as a
-    // documented follow-up rather than expanding this issue's scope.
+    // Issue #495: `evaluate_argument_substitutions` now threads the
+    // recursed inner verdict's own `deny_message` through instead of
+    // flattening to a bare `Decision` -- a category message DOES survive
+    // this recursion path.
+    #[test]
+    fn argument_position_substitution_recursion_carries_inner_deny_message() {
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"echo $(python3 -c \"x\")"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "ask");
+        assert_eq!(
+            additional_context(&output),
+            "Write the program to a file and run that file instead (e.g. `python3 file.py`, \
+             `awk -f prog.awk`) — inline interpreter code is never inspected.",
+            "the recursed inner verdict's own category-specific deny_message must survive \
+             argument-position substitution recursion, not flatten to None"
+        );
+    }
+
+    // Issue #495's own headline repro: an argument-position substitution
+    // recursion Ask ties with a LATER pipe-to-interpreter Ask that also
+    // carries a (different) deny_message -- `fold_worst`'s first-wins tie
+    // contract keeps the FIRST (substitution-recursion) stage's own
+    // message, not the pipe stage's: the fix is that the tying verdict is
+    // no longer message-LESS, not that the second stage's message wins the
+    // tie (that would be the unsafe cross-verdict borrow #495's own issue
+    // text explains was reverted). Pins the actual surfaced message so a
+    // future change silently reverting to message-less can't pass by
+    // merely checking presence.
+    #[test]
+    fn fold_worst_tie_surfaces_the_first_tying_stages_own_message_not_message_less() {
+        let stdin =
+            r#"{"tool_name":"Bash","tool_input":{"command":"echo $(python3 -c \"x\") | bash"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "ask");
+        assert_eq!(
+            additional_context(&output),
+            "Write the program to a file and run that file instead (e.g. `python3 file.py`, \
+             `awk -f prog.awk`) — inline interpreter code is never inspected.",
+            "the substitution-recursion stage's own deny_message (the first side of the tie) \
+             must survive, not the pipe-to-interpreter stage's"
+        );
+    }
+
+    // Issue #495 review (round 3): pins `apply_substitution_floor`'s
+    // priority when the PRE-FLOOR verdict itself already carries a message
+    // -- that message must survive, not be replaced by the floor's own.
+    // Round 2's version of this test used `$((1+1)) $(rm -rf /)`, whose
+    // substitution floor happens to carry NO message of its own (no
+    // bundled rule declares `deny_message`), making the assertion pass
+    // under EITHER priority ordering -- vacuous, caught by mutation
+    // testing in round 3's review. This version nests a `python3 -c`
+    // (which DOES have a category deny_message) inside the blocked
+    // substitution, so the floor's own message is a real, different
+    // candidate the pre-floor verdict's arithmetic-expansion message must
+    // still outrank.
+    #[test]
+    fn substitution_floor_keeps_the_pre_floor_verdicts_own_message_over_the_floors() {
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"$((1+1)) $(python3 -c \"x\" $(rm -rf /))"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "deny");
+        assert_eq!(
+            additional_context(&output),
+            "shguard cannot statically analyze this construct (arithmetic expansion \
+             ($((...)))); use its literal form, or split the command across separate lines so \
+             each piece is inspectable.",
+            "the pre-floor verdict's own arithmetic-expansion message must survive the \
+             substitution floor overriding its DECISION, not be replaced by the floor's own \
+             (here, real and different) inline-interpreter message"
+        );
+    }
+
+    // Issue #495 review (round 2): pins the case where the PRE-FLOOR
+    // verdict has NO message of its own, so the floor's own message must
+    // apply -- the other half of `apply_substitution_floor`'s fallback,
+    // exercised through one of its nine direct early-return call sites
+    // (rule 6a's `bash -c` outcome) rather than through `fold_floors`.
+    #[test]
+    fn substitution_floor_falls_back_to_its_own_message_when_pre_floor_verdict_has_none() {
+        let stdin =
+            r#"{"tool_name":"Bash","tool_input":{"command":"bash -c \"ls\" $(python3 -c \"x\")"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "ask");
+        assert_eq!(
+            additional_context(&output),
+            "Write the program to a file and run that file instead (e.g. `python3 file.py`, \
+             `awk -f prog.awk`) — inline interpreter code is never inspected.",
+            "the substitution floor's own message must apply when the pre-floor verdict (rule \
+             6a's bash -c outcome) carries none of its own"
+        );
+    }
 }

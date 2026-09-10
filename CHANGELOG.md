@@ -4,7 +4,32 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- `evaluate_argument_substitutions` (rule 3: argument-position command/
+  backquote/process substitution recursion) now threads the recursed inner
+  verdict's own `deny_message` through instead of flattening to a bare
+  `Decision` (#495). A same-decision `fold_worst` tie against a later,
+  differently-originated stage no longer yields a message-less verdict:
+  `echo $(python3 -c "x") | bash` now carries the inline-interpreter
+  message from the tying substitution-recursion stage itself (still the
+  first-encountered side of the tie, per `fold_worst`'s own contract, not
+  a borrow from the second, pipe-to-interpreter stage).
+
 ### Security
+
+- `git -c include.path=<file>`/`-c alias.<name>=<value>` (and their
+  `--config-env` spellings) no longer resolve to Allow (#499, follow-up
+  from #447/#498). `include.path` injects an arbitrary, uninspectable
+  config file (Ask); `alias.<name>` defines or overrides a git alias for
+  the invocation, structurally closer to inline shell execution than a
+  config toggle (Block). An unresolvable `-c`/`--config-env` value (e.g.
+  `-c "$X"`) also floors to Ask, since it could name either just as easily
+  as an ordinary key. Detected structurally in `crate::gate`
+  (`git_config_smuggled_verdict`), not via a `required_flags` rule, since
+  a new rule keyed on a synthetic marker flag can't be told apart from a
+  genuinely unresolvable value by the except-flags floor that rule shape
+  relies on.
 
 - Any `GIT_CONFIG`-prefixed environment-variable assignment
   (`GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>`,
@@ -23,6 +48,17 @@ All notable changes to this project are documented in this file.
   assignment prefix), and the `env GIT_CONFIG_COUNT=... git ...` wrapper
   spelling.
 
+- `reject_excessive_raw_nesting`'s `[[ ... ]]` extended-test-operator raw
+  scan no longer lets a quoted `]]` token (`' ]] '`, which tokenizes as a
+  standalone `]]` once surrounded by spaces) turn tracking off mid-region
+  (#489). brush treats it as a literal quoted string, not a real closer;
+  the prior quote-blind toggle let every `!`/`&&`/`||` after it go
+  uncounted, reaching brush's own uncaught stack-overflow abort. Once a
+  region opens, tracking is never turned back off within the same raw
+  scan (only a fresh `[[` resets the count). A symmetric gap remains and
+  is tracked separately as #528: a quoted `[[` can still reset the count
+  mid-region, so this fix narrows but does not close every quote-blind
+  under-count in this scanner.
 - Every interpreter-name comparison in the gate (`AWK_INTERPRETERS`
   membership, `inline_code_flag`, `is_shell_interpreter`,
   `is_pipeline_interpreter`, `is_stdin_script_interpreter`, the `fish`

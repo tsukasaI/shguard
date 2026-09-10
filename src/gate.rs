@@ -3136,12 +3136,27 @@ fn evaluate_simple_command_core(
         );
     }
 
+    // Issue #499: `git -c include.path=...`/`-c alias.<name>=...` smuggle
+    // in equivalent no-verify/hook-disabling (or, for `alias`, arbitrary
+    // shell) behavior through the same `-c` conduit #498's own
+    // `core.hooksPath` detection uses — see `git_config_smuggled_verdict`'s
+    // own doc for why this is a hand-verdict structural check rather than
+    // a `required_flags` rule.
+    if let Some(verdict) = git_config_smuggled_verdict(&argv) {
+        return apply_opaque_kind_floor(
+            apply_substitution_floor(
+                apply_escalation_floor(verdict, escalation_floor),
+                substitution_result,
+            ),
+            opaque_kind,
+        );
+    }
+
     // Issue #500, follow-up from #447/#498: git also accepts config
-    // overrides purely through GIT_CONFIG_COUNT/GIT_CONFIG_KEY_<n>/
-    // GIT_CONFIG_VALUE_<n> environment variables, achieving the same
-    // effect as `-c core.hooksPath=...` with no trace in the command's
-    // own argv at all — see `git_config_env_var_verdict`'s own doc for
-    // scope.
+    // overrides purely through GIT_CONFIG*-prefixed environment
+    // variables, achieving the same effect as `-c core.hooksPath=...`
+    // with no trace in the command's own argv at all — see
+    // `git_config_env_var_verdict`'s own doc for scope.
     if let Some(verdict) = git_config_env_var_verdict(&argv, command) {
         return apply_opaque_kind_floor(
             apply_substitution_floor(
@@ -3785,13 +3800,37 @@ const SUBSTITUTION_FLOOR_BLOCK_REASON: &str = "an argument-position command/back
 const SUBSTITUTION_FLOOR_ASK_REASON: &str = "an argument-position command/backquote or process \
     substitution's inner command could not be resolved to Allow";
 
-fn apply_substitution_floor(verdict: Verdict, floor: Option<Decision>) -> Verdict {
-    let Some(floor_decision) = floor else {
+fn apply_substitution_floor(
+    verdict: Verdict,
+    floor: Option<(Decision, Option<DenyMessage>)>,
+) -> Verdict {
+    let Some((floor_decision, floor_deny_message)) = floor else {
         return verdict;
     };
     if verdict.decision() >= floor_decision {
         return verdict;
     }
+    // Issue #495 review (round 2): captured before `verdict` is consumed
+    // below. Preferring the PRE-FLOOR verdict's own message when it has
+    // one, falling back to the floor's own message only when it doesn't --
+    // the opposite priority from an earlier round of this fix, corrected
+    // after review proved it backwards: `fold_floors` (the sibling path
+    // that also consumes this same substitution_result data, its own
+    // `substitution_deny_message`) ranks the substitution floor's own
+    // message LOWEST priority, below every other structural message, and
+    // this site's STRICT-lift path (the only path where this function
+    // ever actually swaps in the floor's message — see the early return
+    // just above) must match that priority for the same reason. This does
+    // NOT claim every apply_*_floor call site in this file shares this
+    // exact contract: a same-decision TIE (`verdict.decision() ==
+    // floor_decision`, returned unmodified by the early check above,
+    // never reaching this line at all) is a distinct, pre-existing
+    // question this fix doesn't touch. `reason` below still folds the
+    // pre-floor verdict's reason text in first (`"{existing}; {floor_reason}"`), consistent
+    // with the pre-floor verdict's message also taking priority: the
+    // governing DECISION comes from the floor, but the more specific,
+    // already-reported reason/message pair is the pre-floor verdict's own.
+    let verdict_deny_message = verdict.deny_message().cloned();
     let argv = verdict.normalized_argv().to_vec();
     let floor_reason = match floor_decision {
         Decision::Block => SUBSTITUTION_FLOOR_BLOCK_REASON,
@@ -3801,12 +3840,11 @@ fn apply_substitution_floor(verdict: Verdict, floor: Option<Decision>) -> Verdic
         Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
         None => floor_reason.to_string(),
     };
-    let deny_message = verdict.deny_message().cloned();
     match floor_decision {
         Decision::Block => Verdict::block(Reason::new(reason), argv, None),
         Decision::Ask | Decision::Allow => Verdict::ask(Reason::new(reason), argv),
     }
-    .with_deny_message(deny_message)
+    .with_deny_message(verdict_deny_message.or(floor_deny_message))
 }
 
 /// Applies rule 8's opaque-unresolvable-kind floor
@@ -3866,7 +3904,7 @@ fn fold_floors(
     escalation_floor: Option<(Decision, String)>,
     opaque_kind: Option<UnresolvableKind>,
     except_floors: ExceptFloors<'_>,
-    substitution_result: Option<Decision>,
+    substitution_result: Option<(Decision, Option<DenyMessage>)>,
 ) -> Verdict {
     let mut decision = Decision::Allow;
     let mut reasons: Vec<String> = Vec::new();
@@ -3894,6 +3932,12 @@ fn fold_floors(
     // same command; whichever comes first here is what a caller sees, the
     // same "one slot, priority order" shape the rule-authored branch above
     // already established.
+    // Issue #495: captured before the priority chain below consumes it,
+    // since the chain needs the message half now but `substitution_result`
+    // itself (its decision half) is still needed, unconsumed, further down.
+    let substitution_deny_message = substitution_result
+        .as_ref()
+        .and_then(|(_, message)| message.clone());
     let deny_message = except_floors
         .target
         .and_then(crate::rules::CommandRule::deny_message)
@@ -3913,7 +3957,12 @@ fn fold_floors(
                 .then(|| DenyMessage::new(DENY_MSG_UNRESOLVED_TARGET))
         })
         .or_else(|| ifs_floor.then(|| DenyMessage::new(DENY_MSG_IFS)))
-        .or_else(|| opaque_kind.and_then(deny_msg_for_unresolvable_kind));
+        .or_else(|| opaque_kind.and_then(deny_msg_for_unresolvable_kind))
+        // Issue #495: lowest priority, matching `substitution_result`'s own
+        // position as the last decision folded in below — a rule-authored
+        // or other structural message here already reflects something more
+        // specific than "some recursed substitution was worse than Allow".
+        .or(substitution_deny_message);
 
     if let Some(reason) = interpreter_code_floor {
         decision = decision.max(Decision::Ask);
@@ -3953,7 +4002,7 @@ fn fold_floors(
             rule.id().as_str()
         ));
     }
-    if let Some(sub_decision) = substitution_result {
+    if let Some((sub_decision, _)) = substitution_result {
         decision = decision.max(sub_decision);
         if sub_decision == Decision::Block {
             reasons.push(SUBSTITUTION_FLOOR_BLOCK_REASON.to_string());
@@ -4727,32 +4776,42 @@ fn evaluate_argument_substitutions(
     rules: &Rules,
     allowlist: &Allowlist,
     cwd: &CwdContext,
-) -> Option<Decision> {
-    let mut worst: Option<Decision> = None;
-    let mut raise = |decision: Decision| {
+) -> Option<(Decision, Option<DenyMessage>)> {
+    let mut worst: Option<(Decision, Option<DenyMessage>)> = None;
+    // Issue #495: threads each recursed verdict's OWN `deny_message` along
+    // with its decision, rather than flattening to a bare `Decision` and
+    // losing it — the message is attached at its true origin, so a later
+    // `fold_worst` tie against a different-origin verdict never has to
+    // borrow a message across verdicts (unsafe in general, see
+    // `Verdict::with_deny_message`'s docs) to avoid losing this one.
+    // First-wins on a same-decision tie among these recursed verdicts
+    // themselves, mirroring `fold_worst`'s own tie contract.
+    let mut raise = |decision: Decision, deny_message: Option<DenyMessage>| {
         if decision != Decision::Allow {
-            worst = Some(worst.map_or(decision, |current| current.max(decision)));
+            worst = Some(match worst.take() {
+                Some(current) if current.0 >= decision => current,
+                _ => (decision, deny_message),
+            });
         }
     };
     for word in argument_words {
         for inner in collect_substitutions(word) {
-            raise(
-                analyze_at_depth(
-                    inner,
-                    depth + 1,
-                    rules,
-                    allowlist,
-                    CwdState::seed_unknown_stack(cwd.clone()),
-                )
-                .decision(),
+            let verdict = analyze_at_depth(
+                inner,
+                depth + 1,
+                rules,
+                allowlist,
+                CwdState::seed_unknown_stack(cwd.clone()),
             );
+            raise(verdict.decision(), verdict.deny_message().cloned());
         }
         // Structural, not raw text — recurses at the SAME depth (see
         // `evaluate_command_position_substitution`'s docs on this
         // distinction).
         for inner in collect_process_substitutions(word) {
             let mut isolated = CwdState::seed_unknown_stack(cwd.clone());
-            raise(evaluate_command_line(inner, rules, allowlist, depth, &mut isolated).decision());
+            let verdict = evaluate_command_line(inner, rules, allowlist, depth, &mut isolated);
+            raise(verdict.decision(), verdict.deny_message().cloned());
         }
     }
     worst
@@ -4999,17 +5058,30 @@ fn apply_leftover_command_floor(
     Verdict::block(Reason::new(reason), argv, Some(rule_id)).with_deny_message(deny_message)
 }
 
-/// Combines two rule-3-shaped `Option<Decision>` floors (issue #77:
+/// Combines two rule-3-shaped floors (issue #77:
 /// [`evaluate_argument_substitutions`]'s and
 /// [`evaluate_leftover_alternative_substitutions`]'s) into one, the same
 /// worst-of-`Some` semantics [`fold_worst`] uses for [`Verdict`]s — `None`
 /// means "nothing to recurse", not "Allow", so it must never win over a
-/// `Some` from the other side. `Option<Decision>`'s derived `Ord` already
-/// gives exactly that (`None < Some(_)`, `Some` compared by `Decision`'s
-/// own worst-wins order), so this is `Option::max` under a name that says
-/// why it's being called here.
-fn fold_optional_decision(a: Option<Decision>, b: Option<Decision>) -> Option<Decision> {
-    a.max(b)
+/// `Some` from the other side, and on a same-decision tie the first
+/// (`a`) wins, mirroring `fold_worst`'s own tie contract. Only `a`
+/// ([`evaluate_argument_substitutions`]) carries a `deny_message` (issue
+/// #495); `b` ([`evaluate_leftover_alternative_substitutions`]) is still
+/// flattened to a bare `Decision` at its own call site — a separate,
+/// still-open instance of `Verdict::with_deny_message`'s "Known remaining
+/// gaps" — so it's paired with `None` here rather than widening this
+/// fix's scope to a site issue #495 doesn't cover.
+fn fold_optional_decision(
+    a: Option<(Decision, Option<DenyMessage>)>,
+    b: Option<Decision>,
+) -> Option<(Decision, Option<DenyMessage>)> {
+    let b = b.map(|decision| (decision, None));
+    match (a, b) {
+        (None, None) => None,
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (Some(a), Some(b)) => Some(if a.0 >= b.0 { a } else { b }),
+    }
 }
 
 /// The result of [`scan_expansion_positions`] (rule 11): whether any
@@ -9468,6 +9540,124 @@ fn git_checkout_dot(argv: &[NormalizedWord]) -> bool {
             matches!(lexical_normalize(s), PathForm::Rel { ref comps, .. } if comps.is_empty())
         }
         _ => false,
+    })
+}
+
+const GIT_CONFIG_ALIAS_REASON: &str = "git -c alias.<name>=<value>/--config-env=alias.<name>=<value> defines or overrides a \
+     git alias for this invocation, structurally closer to inline shell execution than to a \
+     config toggle (a value beginning with `!` runs as an arbitrary shell command)";
+
+/// Issue #499, follow-up from #447/#498: whether `argv`'s `git`
+/// `-c`/`--config-env` global options carry an `include.path` (Ask) or
+/// `alias.<name>` (Block) value — the same `-c` conduit #498's own
+/// `core.hooksPath`-equals-`--no-verify` detection uses, but for two
+/// shapes that need their own Verdict rather than being folded into that
+/// rewrite: see `crate::rules::git_config_key_is_include_path`'s doc for
+/// why a `required_flags`-keyed rule isn't used here (a synthetic marker
+/// flag can't be told apart from a genuinely unresolvable one by
+/// `crate::rules::CommandRule`'s except-flags floor). Structural,
+/// hand-verdict shape mirrors [`git_checkout_dot`] just above. `alias`
+/// outranks `include.path` when both are present on the same line —
+/// checked in that order, first match wins, consistent with this scan not
+/// needing to report both.
+///
+/// A `-c`/`--config-env` value that is itself UNRESOLVABLE (`-c
+/// "$(echo alias.co=!id)"`, `-c "alias.co=$X"`) floors to Ask rather than
+/// silently returning `None` (review follow-up): it could just as easily
+/// be an `alias.*` override as an ordinary, benign key, and this scan has
+/// no literal text to inspect for an unresolvable word (unlike the
+/// resolved-but-partially-opaque case `git_strip_global_flags`'s own
+/// deferred-unresolvable-value handling covers for the `core.hooksPath`
+/// family, which only reaches `matches_except_flags`'s floor for the
+/// no-verify rule family's enumerated builtin subcommands — an alias can
+/// only ever be *invoked* as a non-builtin word, exactly the set that
+/// floor structurally never covers). Checked last, after both resolved
+/// cases, so a confirmed `alias`/`include.path` match still reports its
+/// own specific reason rather than the generic unresolvable one.
+///
+/// **Known residual gap, disclosed rather than silently accepted**: this
+/// covers the SEPARATE-value spelling's unresolvable value
+/// (`-c "$X"`/`--config-env "$X"`) directly. The ATTACHED spelling
+/// (`--config-env="$X"`) is different: when the whole token folds to one
+/// opaque `Unresolvable` word, this scan can't even tell it WAS a
+/// `--config-env` flag at all (an `Unresolvable` `NormalizedWord` keeps no
+/// literal residue), so it's invisible here and relies entirely on
+/// whatever OTHER rule's own except-flags floor happens to fire on the
+/// same unresolvable word — `git-push-force`'s `required_flags` has a
+/// `required_tokens = ["push"]` scoping, but `matches_except_flags` can't
+/// rule out an opaque word being `push` either, so it fires regardless of
+/// subcommand in practice, catching this case too — an incidental
+/// property of a rule this function doesn't control, not a guarantee.
+fn git_config_smuggled_verdict(argv: &[NormalizedWord]) -> Option<Verdict> {
+    let (name, rest) = crate::rules::effective_command(argv)?;
+    if name != "git" {
+        return None;
+    }
+    let globals = bound_git_global_options(rest);
+    let mut index = 0;
+    let mut include_path_seen = false;
+    let mut unresolvable_value_seen = false;
+    while index < globals.len() {
+        let Resolution::Resolved(s) = globals[index].resolution() else {
+            index += 1;
+            continue;
+        };
+        if s == "-c" || s == "--config-env" {
+            match globals.get(index + 1).map(NormalizedWord::resolution) {
+                Some(Resolution::Resolved(value)) => {
+                    if crate::rules::git_config_key_is_alias(value) {
+                        return Some(Verdict::block(
+                            Reason::new(GIT_CONFIG_ALIAS_REASON),
+                            argv.to_vec(),
+                            None,
+                        ));
+                    }
+                    if crate::rules::git_config_key_is_include_path(value) {
+                        include_path_seen = true;
+                    }
+                }
+                Some(Resolution::Unresolvable(_)) => {
+                    unresolvable_value_seen = true;
+                }
+                None => {}
+            }
+        } else if let Some(kv) = s.strip_prefix("--config-env=") {
+            if crate::rules::git_config_key_is_alias(kv) {
+                return Some(Verdict::block(
+                    Reason::new(GIT_CONFIG_ALIAS_REASON),
+                    argv.to_vec(),
+                    None,
+                ));
+            }
+            if crate::rules::git_config_key_is_include_path(kv) {
+                include_path_seen = true;
+            }
+        }
+        index += if crate::rules::git_global_takes_separated_value(s) {
+            2
+        } else {
+            1
+        };
+    }
+    if include_path_seen {
+        return Some(Verdict::ask(
+            Reason::new(
+                "git -c include.path=<file>/--config-env=include.path=<file> injects an \
+                 arbitrary config file; its contents are not statically inspectable and could \
+                 set core.hooksPath or any other security-relevant setting indirectly",
+            ),
+            argv.to_vec(),
+        ));
+    }
+    unresolvable_value_seen.then(|| {
+        Verdict::ask(
+            Reason::new(
+                "git -c/--config-env's value could not be statically resolved; it could name \
+                 alias.<name> or include.path just as easily as an ordinary config key, and \
+                 neither is inspectable through an unresolved $VAR/command substitution",
+            ),
+            argv.to_vec(),
+        )
     })
 }
 
@@ -14396,7 +14586,58 @@ mod tests {
             Decision::Ask,
         );
         assert_decision(r#"git -c "$X" push --force"#, Decision::Block);
-        assert_decision(r#"git -c "$X" status"#, Decision::Allow);
+        // Issue #499 follow-up: an unresolvable `-c` value could just as
+        // easily be `alias.*`/`include.path` as an ordinary key, so this
+        // now floors to Ask too via `git_config_smuggled_verdict` rather
+        // than staying Allow.
+        assert_decision(r#"git -c "$X" status"#, Decision::Ask);
+    }
+
+    #[test]
+    fn git_dash_c_include_path_and_alias_smuggling_are_detected() {
+        // Issue #499, follow-up from #447/#498: the same `-c` conduit
+        // that can smuggle in `core.hooksPath=...` also accepts
+        // `include.path=<file>` (an uninspectable arbitrary config file,
+        // Ask) and `alias.<name>=<value>` (structurally closer to inline
+        // shell execution, Block).
+        assert_decision("git -c include.path=evil.conf commit -m x", Decision::Ask);
+        assert_decision(
+            "git --config-env include.path=ENVVAR commit -m x",
+            Decision::Ask,
+        );
+        assert_decision(
+            "git --config-env=include.path=ENVVAR commit -m x",
+            Decision::Ask,
+        );
+        // Git config section/key names are case-insensitive.
+        assert_decision("git -c Include.Path=evil.conf commit -m x", Decision::Ask);
+        assert_decision(r#"git -c alias.co="!rm -rf /" co"#, Decision::Block);
+        assert_decision(
+            r#"git --config-env alias.co="!rm -rf /" co"#,
+            Decision::Block,
+        );
+        assert_decision(
+            r#"git --config-env=alias.co="!rm -rf /" co"#,
+            Decision::Block,
+        );
+        // The alias's own section is case-insensitive; its name is not
+        // compared against anything, so any name fires.
+        assert_decision(r#"git -c Alias.whatever="!id" whatever"#, Decision::Block);
+        // A `-c "$X"` whose value is entirely unresolvable floors to Ask
+        // (review follow-up): it could just as easily be `alias.*` as an
+        // ordinary key, and there is no literal text here to rule that
+        // out.
+        assert_decision(r#"git -c "$X" status"#, Decision::Ask);
+        assert_decision(r#"git -c "alias.co=$X" co"#, Decision::Ask);
+        assert_decision(r#"git -c "$(echo alias.co=!id)" co"#, Decision::Ask);
+        // A whole `--config-env="$X"` token folds to one opaque
+        // `Unresolvable` word, invisible to `git_config_smuggled_verdict`
+        // itself (disclosed in its own doc); this Ask comes from
+        // `git-push-force`'s unrelated `required_flags` floor instead.
+        assert_decision(r#"git --config-env="$X" status"#, Decision::Ask);
+        // Control: an ordinary, fully-resolved `-c` override unrelated to
+        // either key must not trigger either detection.
+        assert_decision("git -c user.name=x commit -m x", Decision::Allow);
     }
 
     #[test]
