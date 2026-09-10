@@ -9758,9 +9758,11 @@ fn apply_unknown_cwd_floor(
 /// shadowing prefix assignment already doesn't, so `value_history` must
 /// still be tried when `map.get(name)` comes up empty, not only alongside
 /// an already-known current resolution — `evaluate_command_position_bare_var`
-/// now consults `value_history` unconditionally, current-value candidates
-/// simply being absent from that scan when there is no current resolution
-/// to try.
+/// consults `value_history` unless [`Self::is_persisting_unresolvable`]
+/// says the current absence (or a later prefix-scoped resolution on top of
+/// it) traces back to a genuinely persisting unresolvable reassignment,
+/// current-value candidates simply being absent from that scan when there
+/// is no current resolution to try.
 struct Env {
     map: HashMap<String, String>,
     assigned: std::collections::HashSet<String>,
@@ -9838,10 +9840,14 @@ impl Env {
         self.assigned.contains(name)
     }
 
-    /// Issue #516: whether `name`'s current absence from `map` is a
-    /// genuinely persisting invalidation (see [`Self::persisting_unresolvable`]'s
-    /// own docs) that `evaluate_command_position_bare_var` must NOT paper
-    /// over with a stale `value_history` fallback.
+    /// Issue #516: whether the most recent PERSISTING (non-prefix-scoped)
+    /// assignment to `name` had an unresolvable RHS, independent of what
+    /// `map` currently shows — a LATER prefix-scoped resolution updates
+    /// `map` (e.g. to `Some("ls")`) without ever clearing this (see
+    /// [`Self::persisting_unresolvable`]'s own docs for why). `true` means
+    /// `evaluate_command_position_bare_var` must NOT paper over the
+    /// genuinely unknown runtime value with a stale `value_history`
+    /// fallback, regardless of what `map` holds right now.
     fn is_persisting_unresolvable(&self, name: &str) -> bool {
         self.persisting_unresolvable.contains(name)
     }
