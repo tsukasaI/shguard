@@ -301,7 +301,22 @@ targets = [
     # `/tmp/../dev/sda` spellings already do below. `/tmp/*` collapses to
     # `Abs(["tmp","*"])`, a different value, and correctly stays unmatched.
     { normalized = "/*" },
+    # issue #506: `/**` is the bash globstar spelling of the same root
+    # wipe `/*` above already Blocks -- a different normalized component,
+    # same reasoning as `**` vs. `*` for the cwd-relative targets below.
+    { normalized = "/**" },
     { normalized = "~" },
+    # issue #506: `~/*`/`~/**` wipe $HOME's writable contents exactly like
+    # bare `~` above (`rm -rf` removes everything under it non-
+    # interactively regardless of dotglob), so they belong at the same
+    # tier for the same reason -- NOT because of any config
+    # self-protection angle: bash's default (non-`dotglob`) `*`/`**` never
+    # match a leading-dot name, so this does not actually reach
+    # `~/.config` on its own. `~/**` needs its own entry: it lexically
+    # normalizes to a different single component than `~/*`, the same way
+    # bare `**` differs from `*` above.
+    { normalized = "~/*" },
+    { normalized = "~/**" },
     { normalized = "." },
     # issue #453: `./*` and bare `*` both lexically normalize to
     # `Rel{ascent:0, comps:["*"]}` — a different value from `.`'s
@@ -310,6 +325,12 @@ targets = [
     # `./*`/`*` the spelling that really deletes the current directory's
     # contents; this keeps both at the same tier as `.`.
     { normalized = "*" },
+    # issue #506: the bash globstar spelling (`shopt -s globstar`, or a
+    # shell where `**` is meaningful on its own) normalizes to its own
+    # single component `**`, a different value from `*` above, so it needs
+    # its own entry at the same tier — `**`/`./**` both delete the current
+    # directory's contents exactly like `*`/`./*` already do.
+    { normalized = "**" },
     # ".."/"../" (previously separate `exact` entries) are subsumed by
     # "/"'s pure-ascent widening (issue #65): `{ normalized = "/" }` also
     # matches any token that lexically normalizes to a pure relative
@@ -356,17 +377,36 @@ targets = [
 # for write-protected files, and only on a tty, so `rm -r /*` deletes every
 # writable file under `/` unattended. `~` is deliberately NOT included here:
 # `self-protect-config-ancestor-rm-tilde` below already floors bare
-# `rm -r ~` to Ask. `.`/`*` are out of this issue's stated scope (root/device
-# targets only) and stay Allow.
+# `rm -r ~` (and, since issue #506, `~/*`/`~/**`) to Ask. `.`/`*` are out of
+# this issue's stated scope (root/device targets only) and stay Allow.
+# issue #506 extended this rule's own targets below with find's `{}`
+# placeholder family, the same unattended-destruction risk through a
+# different (uncontrolled, not literal) target -- `reason` below is worded
+# to cover both shapes, mirroring the sibling `-rf` rule's own wording.
 [[command]]
 id = "rm-recursive-dangerous-target"
-reason = "rm -r against a root-level or device target deletes every writable file there, without needing -f"
+reason = "rm -r against a root-level, device, or find-placeholder target deletes every writable file there, without needing -f"
 command = "rm"
 required_flags = ["r|R|--recursive"]
 targets = [
     { normalized = "/" },
     { normalized = "/*" },
+    # issue #506: `/**`, the bash globstar spelling, same reasoning as
+    # `**` vs. `*` for the cwd-relative targets in the `-rf` sibling rule.
+    { normalized = "/**" },
     { normalized_prefix = "/dev/" },
+    # issue #506: `find -exec rm -r {} \;`-style recursion achieves the
+    # same unattended, writable-file-tree destruction as the root/device
+    # targets above through find's own `{}` placeholder rather than a
+    # literal dangerous path — the same reasoning `rm-recursive-force-
+    # dangerous-target`'s sibling `{}`/`/{}`/`~/{}` entries already apply,
+    # but reachable here without `-f`: `rm -r <dir>` alone still removes a
+    # directory's writable contents non-interactively, it only prompts for
+    # write-protected files on a tty. See that rule's own doc for the
+    # collapse semantics these three entries share.
+    { normalized = "{}" },
+    { normalized = "/{}" },
+    { normalized = "~/{}" },
 ]
 
 # `-r`/`-R` is unnecessary for `rm -f {}` (no `-type f` needed either) to
@@ -1265,6 +1305,16 @@ required_flags = ["r|R|--recursive"]
 targets = [
     { normalized = "~/.config", case_insensitive = true },
     { normalized = "~" },
+    # issue #506: `~/*`/`~/**` each normalize to a different value than
+    # bare `~` (`Home(["*"])`/`Home(["**"])` vs. `Home([])`) so need their
+    # own entries, at the same tier as `~` for the same reason: `rm -r`
+    # (no `-f`) still non-interactively removes a directory's writable
+    # contents, GNU/BSD `rm` only prompts for write-protected files on a
+    # tty. Not a config self-protection claim: bash's default
+    # (non-`dotglob`) `*`/`**` never match a leading-dot name, so this
+    # does not on its own reach `~/.config` the way bare `~` does.
+    { normalized = "~/*" },
+    { normalized = "~/**" },
 ]
 
 [[command]]

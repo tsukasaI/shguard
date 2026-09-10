@@ -1321,6 +1321,93 @@ fn deny_rule_recurses_into_bash_dash_c() {
     assert_eq!(permission_decision(&output), "deny");
 }
 
+// Issue #493: a case-variant interpreter spelling must recurse through
+// rule 6a exactly like the lowercase spelling, since a case-insensitive
+// filesystem resolves both to the same binary.
+#[test]
+fn deny_rule_recurses_into_uppercase_bash_dash_c() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[deny]]
+        id = "user-deny-scary-tool"
+        reason = "never run this"
+        command = "scary-tool"
+    "#,
+    );
+
+    let output = run_hook(
+        &bash_command("BASH -c 'scary-tool --run'"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+}
+
+// Issue #493 follow-up: a fable code-reviewer pass proved a case-variant
+// TRANSPARENT WRAPPER name (not just the interpreter itself) also reached
+// Allow, since the wrapper-unwrap walk's own recognition was ASCII-only
+// case-sensitive too -- `SUDO bash -c '...'` never even reached rule 6a's
+// recursion because `SUDO` wasn't recognized as a wrapper to unwrap through
+// at all. `\u{...}` escapes, not a literal ligature glyph, so an editor's
+// NFC normalization can't silently turn this into an ASCII-only test.
+#[test]
+fn deny_rule_recurses_through_uppercase_sudo_wrapper() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[deny]]
+        id = "user-deny-scary-tool"
+        reason = "never run this"
+        command = "scary-tool"
+    "#,
+    );
+
+    let output = run_hook(
+        &bash_command("SUDO bash -c 'scary-tool --run'"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+}
+
+#[test]
+fn deny_rule_recurses_through_ligature_spelled_shell() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[deny]]
+        id = "user-deny-scary-tool"
+        reason = "never run this"
+        command = "scary-tool"
+    "#,
+    );
+
+    let output = run_hook(
+        &bash_command("\u{FB01}sh -c 'scary-tool --run'"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+}
+
+// Issue #493 follow-up: a fable code-reviewer pass proved `find`'s own
+// recognition site was still raw case-sensitive, so `FIND . -exec sh -c
+// '...' ;` bypassed find-exec recursion entirely (never even reached the
+// wrapped command's own rule matching) even though every other #493 fix
+// was in place.
+#[test]
+fn deny_rule_recurses_through_uppercase_find_exec() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[deny]]
+        id = "user-deny-scary-tool"
+        reason = "never run this"
+        command = "scary-tool"
+    "#,
+    );
+
+    let output = run_hook(
+        &bash_command("FIND . -exec sh -c 'scary-tool --run' ';'"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+}
+
 // A dangling symlink at the default config path must fail closed (`ask`),
 // not silently fall back to embedded-only coverage (issue #39):
 // `read_to_string` fails with the same `NotFound` kind a genuinely absent
@@ -2308,6 +2395,15 @@ fn ask_decision_deny_plus_narrow_allow_rescues_a_secrets_scanner_invocation() {
 #[test]
 fn awk_inline_script_asks_with_no_config() {
     let output = run_hook(&bash_command("awk 'BEGIN{system(\"rm -rf /\")}'"), &[]);
+    assert_eq!(permission_decision(&output), "ask");
+}
+
+// Issue #493: a case-variant interpreter spelling must ask exactly like the
+// lowercase spelling, since a case-insensitive filesystem resolves both to
+// the same binary.
+#[test]
+fn uppercase_awk_inline_script_asks_with_no_config() {
+    let output = run_hook(&bash_command("AWK 'BEGIN{system(\"rm -rf /\")}'"), &[]);
     assert_eq!(permission_decision(&output), "ask");
 }
 
