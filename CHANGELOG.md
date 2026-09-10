@@ -11,12 +11,13 @@ All notable changes to this project are documented in this file.
   from #447/#498). `include.path` injects an arbitrary, uninspectable
   config file (Ask); `alias.<name>` defines or overrides a git alias for
   the invocation, structurally closer to inline shell execution than a
-  config toggle (Block). Detected structurally in `crate::gate`
+  config toggle (Block). An unresolvable `-c`/`--config-env` value (e.g.
+  `-c "$X"`) also floors to Ask, since it could name either just as easily
+  as an ordinary key. Detected structurally in `crate::gate`
   (`git_config_smuggled_verdict`), not via a `required_flags` rule, since
   a new rule keyed on a synthetic marker flag would open an unrelated
   false-Ask floor for any other unresolvable `-c` value on the same
   invocation.
-### Security
 
 - Every interpreter-name comparison in the gate (`AWK_INTERPRETERS`
   membership, `inline_code_flag`, `is_shell_interpreter`,
