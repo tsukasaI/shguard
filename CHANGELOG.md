@@ -6,6 +6,17 @@ All notable changes to this project are documented in this file.
 
 ### Security
 
+- `reject_excessive_raw_nesting`'s `[[ ... ]]` extended-test-operator raw
+  scan no longer lets a quoted `]]` token (`' ]] '`, which tokenizes as a
+  standalone `]]` once surrounded by spaces) turn tracking off mid-region
+  (#489). brush treats it as a literal quoted string, not a real closer;
+  the prior quote-blind toggle let every `!`/`&&`/`||` after it go
+  uncounted, reaching brush's own uncaught stack-overflow abort. Once a
+  region opens, tracking is never turned back off within the same raw
+  scan (only a fresh `[[` resets the count). A symmetric gap remains and
+  is tracked separately as #528: a quoted `[[` can still reset the count
+  mid-region, so this fix narrows but does not close every quote-blind
+  under-count in this scanner.
 - Every interpreter-name comparison in the gate (`AWK_INTERPRETERS`
   membership, `inline_code_flag`, `is_shell_interpreter`,
   `is_pipeline_interpreter`, `is_stdin_script_interpreter`, the `fish`
