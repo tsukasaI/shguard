@@ -865,12 +865,42 @@ mod tests {
         assert!(permission_reason(&output).contains("recurses through the full pipeline"));
     }
 
-    // Note (issue #471 fable review): a category message does NOT currently
-    // survive `evaluate_argument_substitutions`' own recursion path (e.g.
-    // `echo $(python3 -c "x")` still resolves Ask with `deny_message: None`)
-    // -- that function returns a bare `Option<Decision>`, not the inner
-    // verdict's message, a pre-existing gap `Verdict::with_deny_message`'s
-    // own "Known remaining gaps" doc already discloses. Closing it would
-    // mean widening that function's return type and its callers; left as a
-    // documented follow-up rather than expanding this issue's scope.
+    // Issue #495: `evaluate_argument_substitutions` now threads the
+    // recursed inner verdict's own `deny_message` through instead of
+    // flattening to a bare `Decision` -- a category message DOES survive
+    // this recursion path.
+    #[test]
+    fn argument_position_substitution_recursion_carries_inner_deny_message() {
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"echo $(python3 -c \"x\")"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "ask");
+        assert_eq!(
+            additional_context(&output),
+            "Write the program to a file and run that file instead (e.g. `python3 file.py`, \
+             `awk -f prog.awk`) — inline interpreter code is never inspected.",
+            "the recursed inner verdict's own category-specific deny_message must survive \
+             argument-position substitution recursion, not flatten to None"
+        );
+    }
+
+    // Issue #495's own headline repro: a message-less argument-position
+    // substitution recursion Ask ties with a LATER pipe-to-interpreter
+    // Ask that does carry a deny_message -- `fold_worst`'s first-wins tie
+    // contract must not drop the second stage's message now that it's
+    // attached at its own origin, not borrowed across verdicts at the
+    // fold point.
+    #[test]
+    fn fold_worst_tie_no_longer_drops_pipe_stage_deny_message_to_message_less_substitution_ask() {
+        let stdin =
+            r#"{"tool_name":"Bash","tool_input":{"command":"echo $(python3 -c \"x\") | bash"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "ask");
+        assert!(
+            output["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .is_some(),
+            "the pipe-to-interpreter stage's own deny_message must not be dropped by the \
+             argument-position substitution recursion's tie"
+        );
+    }
 }
