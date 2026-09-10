@@ -15,6 +15,19 @@ All notable changes to this project are documented in this file.
   (`AWK`, `BASH`, `PYTHON3`) resolves to the same binary as the lowercase
   name on a case-insensitive filesystem (macOS APFS default), and
   previously slipped past every one of these checks.
+- Several `rm -rf`/`rm -r` shapes adjacent to #453/#505's fixes are now
+  covered (#506): the bash globstar spelling at the filesystem root and the
+  current directory (`rm -rf /**`/`rm -rf **`, same tier as `/*`/`*`), a
+  bare home-directory glob wipe (`rm -rf ~/*`/`rm -rf ~/**`, same tier
+  split as bare `rm -r ~`: Block with `-f`, Ask without), and
+  `find -exec rm -r {} \;`-style recursive deletion without `-f` through
+  find's own placeholder (now matches `rm-recursive-dangerous-target`'s own
+  `{}`/`/{}`/`~/{}` targets, mirroring its `-rf` sibling rule). A
+  `TargetMatcher` re-anchoring widening used only for these home-anchored
+  wildcard targets now excludes wildcard-only components (`*`/`**`), since
+  they carry no reappearing-name specificity and would otherwise flag
+  ordinary sibling-directory glob cleanups after an unresolved `..` ascent
+  (`rm -rf ../build/*`).
 - `git_push_plus_refspec`'s structural detection of a `+`-prefixed
   force-push refspec no longer misreads a separate-value flag's own operand
   (`git push -o +foo origin main`'s `+foo`, `-o`'s value) as the refspec
