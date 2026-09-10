@@ -157,7 +157,7 @@ pub enum PollOutcome<T> {
 /// Does not own `rx`'s sending side or any worker thread — a caller that
 /// wants to `join` a spawned thread on [`PollOutcome::Received`], or leave
 /// it detached on any other outcome, does so itself; this function's only
-/// job is deciding which of the three outcomes happened first.
+/// job is deciding which of the four outcomes happened first.
 #[doc(hidden)]
 pub fn poll_with_budget<T>(
     rx: &std::sync::mpsc::Receiver<T>,
@@ -359,8 +359,7 @@ mod platform {
 /// implementation above (any non-Linux, non-macOS target, `unix` or
 /// otherwise): the memory-trip check is simply unavailable here and
 /// [`bounded_with_memory_limit`] relies on [`EVALUATION_TIMEOUT`] alone,
-/// same posture as `src/bin/shguard.rs::current_rss_bytes`'s own
-/// non-Unix fallback.
+/// same posture as [`peak_rss_bytes`]'s own non-`unix` fallback.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 mod platform {
     pub(super) fn current_rss_bytes() -> Option<u64> {
@@ -368,8 +367,8 @@ mod platform {
     }
 }
 
-/// Current process RSS in bytes via `getrusage(RUSAGE_SELF, ...)`'s
-/// `ru_maxrss` field — a *peak*, not current, measurement (issue #518,
+/// The calling process's peak RSS in bytes, via `getrusage(RUSAGE_SELF,
+/// ...)`'s `ru_maxrss` field (issue #518,
 /// moved out of `src/bin/shguard.rs` so this `unsafe` FFI is reachable from
 /// `tests/` at all, per `coding-guidelines/languages/rust.md`'s "binaries
 /// MUST stay thin"; the binary's own outer watchdog compares this directly
