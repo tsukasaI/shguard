@@ -18,6 +18,19 @@ All notable changes to this project are documented in this file.
 
 ### Security
 
+- `git -c include.path=<file>`/`-c alias.<name>=<value>` (and their
+  `--config-env` spellings) no longer resolve to Allow (#499, follow-up
+  from #447/#498). `include.path` injects an arbitrary, uninspectable
+  config file (Ask); `alias.<name>` defines or overrides a git alias for
+  the invocation, structurally closer to inline shell execution than a
+  config toggle (Block). An unresolvable `-c`/`--config-env` value (e.g.
+  `-c "$X"`) also floors to Ask, since it could name either just as easily
+  as an ordinary key. Detected structurally in `crate::gate`
+  (`git_config_smuggled_verdict`), not via a `required_flags` rule, since
+  a new rule keyed on a synthetic marker flag can't be told apart from a
+  genuinely unresolvable value by the except-flags floor that rule shape
+  relies on.
+
 - `reject_excessive_raw_nesting`'s `[[ ... ]]` extended-test-operator raw
   scan no longer lets a quoted `]]` token (`' ]] '`, which tokenizes as a
   standalone `]]` once surrounded by spaces) turn tracking off mid-region

@@ -3136,6 +3136,22 @@ fn evaluate_simple_command_core(
         );
     }
 
+    // Issue #499: `git -c include.path=...`/`-c alias.<name>=...` smuggle
+    // in equivalent no-verify/hook-disabling (or, for `alias`, arbitrary
+    // shell) behavior through the same `-c` conduit #498's own
+    // `core.hooksPath` detection uses — see `git_config_smuggled_verdict`'s
+    // own doc for why this is a hand-verdict structural check rather than
+    // a `required_flags` rule.
+    if let Some(verdict) = git_config_smuggled_verdict(&argv) {
+        return apply_opaque_kind_floor(
+            apply_substitution_floor(
+                apply_escalation_floor(verdict, escalation_floor),
+                substitution_result,
+            ),
+            opaque_kind,
+        );
+    }
+
     fold_floors(
         argv,
         interpreter_code_floor,
@@ -9512,6 +9528,124 @@ fn git_checkout_dot(argv: &[NormalizedWord]) -> bool {
     })
 }
 
+const GIT_CONFIG_ALIAS_REASON: &str = "git -c alias.<name>=<value>/--config-env=alias.<name>=<value> defines or overrides a \
+     git alias for this invocation, structurally closer to inline shell execution than to a \
+     config toggle (a value beginning with `!` runs as an arbitrary shell command)";
+
+/// Issue #499, follow-up from #447/#498: whether `argv`'s `git`
+/// `-c`/`--config-env` global options carry an `include.path` (Ask) or
+/// `alias.<name>` (Block) value — the same `-c` conduit #498's own
+/// `core.hooksPath`-equals-`--no-verify` detection uses, but for two
+/// shapes that need their own Verdict rather than being folded into that
+/// rewrite: see `crate::rules::git_config_key_is_include_path`'s doc for
+/// why a `required_flags`-keyed rule isn't used here (a synthetic marker
+/// flag can't be told apart from a genuinely unresolvable one by
+/// `crate::rules::CommandRule`'s except-flags floor). Structural,
+/// hand-verdict shape mirrors [`git_checkout_dot`] just above. `alias`
+/// outranks `include.path` when both are present on the same line —
+/// checked in that order, first match wins, consistent with this scan not
+/// needing to report both.
+///
+/// A `-c`/`--config-env` value that is itself UNRESOLVABLE (`-c
+/// "$(echo alias.co=!id)"`, `-c "alias.co=$X"`) floors to Ask rather than
+/// silently returning `None` (review follow-up): it could just as easily
+/// be an `alias.*` override as an ordinary, benign key, and this scan has
+/// no literal text to inspect for an unresolvable word (unlike the
+/// resolved-but-partially-opaque case `git_strip_global_flags`'s own
+/// deferred-unresolvable-value handling covers for the `core.hooksPath`
+/// family, which only reaches `matches_except_flags`'s floor for the
+/// no-verify rule family's enumerated builtin subcommands — an alias can
+/// only ever be *invoked* as a non-builtin word, exactly the set that
+/// floor structurally never covers). Checked last, after both resolved
+/// cases, so a confirmed `alias`/`include.path` match still reports its
+/// own specific reason rather than the generic unresolvable one.
+///
+/// **Known residual gap, disclosed rather than silently accepted**: this
+/// covers the SEPARATE-value spelling's unresolvable value
+/// (`-c "$X"`/`--config-env "$X"`) directly. The ATTACHED spelling
+/// (`--config-env="$X"`) is different: when the whole token folds to one
+/// opaque `Unresolvable` word, this scan can't even tell it WAS a
+/// `--config-env` flag at all (an `Unresolvable` `NormalizedWord` keeps no
+/// literal residue), so it's invisible here and relies entirely on
+/// whatever OTHER rule's own except-flags floor happens to fire on the
+/// same unresolvable word — `git-push-force`'s `required_flags` has a
+/// `required_tokens = ["push"]` scoping, but `matches_except_flags` can't
+/// rule out an opaque word being `push` either, so it fires regardless of
+/// subcommand in practice, catching this case too — an incidental
+/// property of a rule this function doesn't control, not a guarantee.
+fn git_config_smuggled_verdict(argv: &[NormalizedWord]) -> Option<Verdict> {
+    let (name, rest) = crate::rules::effective_command(argv)?;
+    if name != "git" {
+        return None;
+    }
+    let globals = bound_git_global_options(rest);
+    let mut index = 0;
+    let mut include_path_seen = false;
+    let mut unresolvable_value_seen = false;
+    while index < globals.len() {
+        let Resolution::Resolved(s) = globals[index].resolution() else {
+            index += 1;
+            continue;
+        };
+        if s == "-c" || s == "--config-env" {
+            match globals.get(index + 1).map(NormalizedWord::resolution) {
+                Some(Resolution::Resolved(value)) => {
+                    if crate::rules::git_config_key_is_alias(value) {
+                        return Some(Verdict::block(
+                            Reason::new(GIT_CONFIG_ALIAS_REASON),
+                            argv.to_vec(),
+                            None,
+                        ));
+                    }
+                    if crate::rules::git_config_key_is_include_path(value) {
+                        include_path_seen = true;
+                    }
+                }
+                Some(Resolution::Unresolvable(_)) => {
+                    unresolvable_value_seen = true;
+                }
+                None => {}
+            }
+        } else if let Some(kv) = s.strip_prefix("--config-env=") {
+            if crate::rules::git_config_key_is_alias(kv) {
+                return Some(Verdict::block(
+                    Reason::new(GIT_CONFIG_ALIAS_REASON),
+                    argv.to_vec(),
+                    None,
+                ));
+            }
+            if crate::rules::git_config_key_is_include_path(kv) {
+                include_path_seen = true;
+            }
+        }
+        index += if crate::rules::git_global_takes_separated_value(s) {
+            2
+        } else {
+            1
+        };
+    }
+    if include_path_seen {
+        return Some(Verdict::ask(
+            Reason::new(
+                "git -c include.path=<file>/--config-env=include.path=<file> injects an \
+                 arbitrary config file; its contents are not statically inspectable and could \
+                 set core.hooksPath or any other security-relevant setting indirectly",
+            ),
+            argv.to_vec(),
+        ));
+    }
+    unresolvable_value_seen.then(|| {
+        Verdict::ask(
+            Reason::new(
+                "git -c/--config-env's value could not be statically resolved; it could name \
+                 alias.<name> or include.path just as easily as an ordinary config key, and \
+                 neither is inspectable through an unresolved $VAR/command substitution",
+            ),
+            argv.to_vec(),
+        )
+    })
+}
+
 /// Issue #209: a narrower, single-invocation version of issue #103's
 /// same-line `cd`/`pushd` composition, for the handful of tools that
 /// accept a `-C <dir>`-shaped flag changing THEIR OWN working directory
@@ -14375,7 +14509,58 @@ mod tests {
             Decision::Ask,
         );
         assert_decision(r#"git -c "$X" push --force"#, Decision::Block);
-        assert_decision(r#"git -c "$X" status"#, Decision::Allow);
+        // Issue #499 follow-up: an unresolvable `-c` value could just as
+        // easily be `alias.*`/`include.path` as an ordinary key, so this
+        // now floors to Ask too via `git_config_smuggled_verdict` rather
+        // than staying Allow.
+        assert_decision(r#"git -c "$X" status"#, Decision::Ask);
+    }
+
+    #[test]
+    fn git_dash_c_include_path_and_alias_smuggling_are_detected() {
+        // Issue #499, follow-up from #447/#498: the same `-c` conduit
+        // that can smuggle in `core.hooksPath=...` also accepts
+        // `include.path=<file>` (an uninspectable arbitrary config file,
+        // Ask) and `alias.<name>=<value>` (structurally closer to inline
+        // shell execution, Block).
+        assert_decision("git -c include.path=evil.conf commit -m x", Decision::Ask);
+        assert_decision(
+            "git --config-env include.path=ENVVAR commit -m x",
+            Decision::Ask,
+        );
+        assert_decision(
+            "git --config-env=include.path=ENVVAR commit -m x",
+            Decision::Ask,
+        );
+        // Git config section/key names are case-insensitive.
+        assert_decision("git -c Include.Path=evil.conf commit -m x", Decision::Ask);
+        assert_decision(r#"git -c alias.co="!rm -rf /" co"#, Decision::Block);
+        assert_decision(
+            r#"git --config-env alias.co="!rm -rf /" co"#,
+            Decision::Block,
+        );
+        assert_decision(
+            r#"git --config-env=alias.co="!rm -rf /" co"#,
+            Decision::Block,
+        );
+        // The alias's own section is case-insensitive; its name is not
+        // compared against anything, so any name fires.
+        assert_decision(r#"git -c Alias.whatever="!id" whatever"#, Decision::Block);
+        // A `-c "$X"` whose value is entirely unresolvable floors to Ask
+        // (review follow-up): it could just as easily be `alias.*` as an
+        // ordinary key, and there is no literal text here to rule that
+        // out.
+        assert_decision(r#"git -c "$X" status"#, Decision::Ask);
+        assert_decision(r#"git -c "alias.co=$X" co"#, Decision::Ask);
+        assert_decision(r#"git -c "$(echo alias.co=!id)" co"#, Decision::Ask);
+        // A whole `--config-env="$X"` token folds to one opaque
+        // `Unresolvable` word, invisible to `git_config_smuggled_verdict`
+        // itself (disclosed in its own doc); this Ask comes from
+        // `git-push-force`'s unrelated `required_flags` floor instead.
+        assert_decision(r#"git --config-env="$X" status"#, Decision::Ask);
+        // Control: an ordinary, fully-resolved `-c` override unrelated to
+        // either key must not trigger either detection.
+        assert_decision("git -c user.name=x commit -m x", Decision::Allow);
     }
 
     #[test]
