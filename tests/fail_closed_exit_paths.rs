@@ -109,6 +109,20 @@ fn substitution_nesting_within_cap_still_recurses() {
     assert_eq!(permission_decision(&output), "allow");
 }
 
+/// Before the fix: `rc=134` (`SIGABRT`), empty stdout — brush-parser's
+/// array-subscript grammar recurses once per unclosed `[`, with no depth
+/// limit of its own, and neither the `{`/`}` nor the `(`/`)` raw counter
+/// tracks `[` at all. `run_hook`'s `.assert().success()` already requires
+/// exit 0 with well-formed JSON on stdout, so a regression back to the
+/// uncaught abort would fail this test at that assertion, before
+/// `permission_decision` is ever reached.
+#[test]
+fn deep_bracket_nesting_fails_closed_to_ask_instead_of_aborting() {
+    let command = format!("rm -rf / {}", "a[".repeat(4096));
+    let output = run_hook(&bash_command(&command));
+    assert_eq!(permission_decision(&output), "ask");
+}
+
 // ==== B-1 follow-up: raw compound-command keyword nesting count ====
 //
 // The bracket counters above only catch `{`/`(` recursion. brush-parser's

@@ -143,6 +143,33 @@ pub(crate) const MAX_RAW_BRACE_NESTING_DEPTH: usize = 12;
 /// [`MAX_RAW_BRACE_NESTING_DEPTH`]'s docs give.
 pub(crate) const MAX_RAW_PAREN_NESTING_DEPTH: usize = 16;
 
+/// Cap on `[`/`]` nesting depth specifically for `src/parser.rs`'s raw
+/// pre-scan (`reject_excessive_raw_nesting`) — brush-parser 0.4.0's
+/// array-subscript grammar recurses once per simultaneously-unclosed `[`
+/// (`word.rs`'s `expansion_parser::__parse_array_element_name` /
+/// `__parse_arithmetic_word_piece::<__parse_array_index>`), the same
+/// unbounded-recursion class [`MAX_RAW_BRACE_NESTING_DEPTH`]/
+/// [`MAX_RAW_PAREN_NESTING_DEPTH`] already close for `{`/`(`, and nothing
+/// else in the raw pre-scan tracked `[` at all before this cap existed.
+///
+/// # Why a separate, much smaller cap
+///
+/// A run of unclosed `a[` (any name byte before `[` triggers the same
+/// grammar path) overflows the worker's 2 MiB stack — an uncatchable
+/// abort, not a slow parse — with the crash boundary measured (fuzzer,
+/// debug build, `~500` bytes/recursion-pair) between depth 3748 (returns
+/// normally, 359ms) and depth 3749 (aborts). Cost curve below the cliff:
+/// 512 -> 10ms, 1024 -> 32ms, 2048 -> 100ms, 3000 -> 1034ms, 3600 -> 413ms.
+/// A *closed* subscript (`a[0]`, `a[]`, even `a[b[c]]`) never recurses this
+/// way regardless of repeat count — only simultaneously-*unclosed* `[`
+/// depth matters, which is exactly what this counter tracks.
+///
+/// 16 matches [`MAX_RAW_PAREN_NESTING_DEPTH`] and leaves a ~230x margin
+/// below the measured crash boundary. Re-measure the same unclosed-`[`
+/// depth curve before raising this on any `brush-parser` version bump, for
+/// the same reason [`MAX_RAW_BRACE_NESTING_DEPTH`]'s docs give.
+pub(crate) const MAX_RAW_BRACKET_NESTING_DEPTH: usize = 16;
+
 /// Cap on the total count of reserved-word compound-command openers (`if`,
 /// `while`, `until`, `for`, `case`) `src/parser.rs`'s raw pre-scan tolerates
 /// in one command, enforced by [`crate::parser::reject_excessive_raw_nesting`]
