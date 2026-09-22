@@ -450,6 +450,37 @@ fn guardfall_rm_dot_targets() {
     }
 }
 
+/// `~/.*`/`.* ` is bash's dotglob spelling: unlike `~/*`/`~/**`, it DOES
+/// expand to leading-dot entries (`.ssh`, `.aws`, `.config/shguard`) even
+/// without `shopt -s dotglob`, so it is a strict superset of the already-
+/// Ask `~/.config` target and must be at least as strict, not Allow.
+#[test]
+fn guardfall_rm_dotglob_tilde_targets() {
+    let cases: &[(&str, Decision)] = &[
+        ("rm -rf ~/.*", Decision::Block),
+        ("rm -r ~/.*", Decision::Ask),
+        ("rm -fr ~/.*", Decision::Block),
+        ("rm --recursive --force ~/.*", Decision::Block),
+        ("mv ~/.* /tmp", Decision::Ask),
+        ("cd ~ && rm -rf .*", Decision::Block),
+        ("rm -rf .*", Decision::Block),
+        ("rm -rf ./.*", Decision::Block),
+        // Control: `~/.config` itself is unchanged by this fix.
+        ("rm -r ~/.config", Decision::Ask),
+        ("rm -rf ~/.config/shguard", Decision::Block),
+    ];
+
+    for (command, expected) in cases {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
 /// Issue #453: three filesystem-destruction shapes adjacent to existing
 /// Block rules were Allow — bare `mkfs <device>` (no `-t`), `rm -r` (no
 /// `-f`) against a root-level target, and `rm -rf ./*`/`rm -rf *`.
