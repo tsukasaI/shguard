@@ -7951,7 +7951,8 @@ fn scan_for_dash_c_before_operand(words: &[NormalizedWord], interpreter: &str) -
 /// abbreviation matching ([`matches_long_flag_prefix`]). Still-open,
 /// narrower gaps tracked as their own follow-ups rather than re-opening
 /// #349: `lz4c` (Homebrew's legacy lz4 CLI alias) is not yet in the `lz4`
-/// arm below, and `lz4`'s own decompress-by-default-on-a-`.lz4`-extension
+/// pattern of the bzip2/lz4/brotli arm below, and `lz4`'s own
+/// decompress-by-default-on-a-`.lz4`-extension
 /// behavior (no flag needed when the input operand ends in `.lz4`) is
 /// filename-extension inference this crate's static model doesn't
 /// attempt.
@@ -8027,25 +8028,11 @@ fn is_decode_stage(stage: &[NormalizedWord]) -> bool {
             })
             .possibly_found()
         }
-        // `bzip2`'s parallel implementation, `pbzip2` (issue #349), shares
-        // its exact flag surface.
-        "bzip2" | "pbzip2" => scan_for_flag(rest_words, |s| {
-            s == "--decompress"
-                || matches_long_flag_prefix(s, "--decompress")
-                || short_cluster_contains(s, 'd')
-        })
-        .possibly_found(),
-        // `lz4` (issue #349) compresses by default like gzip/xz/zstd, using
-        // the identical `-d`/`--decompress` spelling.
-        "lz4" => scan_for_flag(rest_words, |s| {
-            s == "--decompress"
-                || matches_long_flag_prefix(s, "--decompress")
-                || short_cluster_contains(s, 'd')
-        })
-        .possibly_found(),
-        // `brotli` (issue #349) compresses by default, using `-d`/
-        // `--decompress`.
-        "brotli" => scan_for_flag(rest_words, |s| {
+        // `bzip2` and its parallel implementation `pbzip2` (issue #349),
+        // `lz4`, and `brotli` (issue #349) all compress by default and
+        // decompress only with `-d`/`--decompress`. Unlike the gzip/xz
+        // family above, none of them spells the flag `--uncompress`.
+        "bzip2" | "pbzip2" | "lz4" | "brotli" => scan_for_flag(rest_words, |s| {
             s == "--decompress"
                 || matches_long_flag_prefix(s, "--decompress")
                 || short_cluster_contains(s, 'd')
