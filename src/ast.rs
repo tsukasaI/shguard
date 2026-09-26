@@ -143,6 +143,74 @@ pub(crate) const MAX_RAW_BRACE_NESTING_DEPTH: usize = 12;
 /// [`MAX_RAW_BRACE_NESTING_DEPTH`]'s docs give.
 pub(crate) const MAX_RAW_PAREN_NESTING_DEPTH: usize = 16;
 
+/// Cap on the total count of raw `{` bytes [`crate::parser::reject_excessive_raw_nesting`]
+/// tolerates in one command, counted once per `{` byte and never decremented
+/// on a `}` — unlike [`MAX_RAW_BRACE_NESTING_DEPTH`]'s balanced depth
+/// counter, this one cannot be driven back down.
+///
+/// # Why a second, non-decrementing counter is needed at all
+///
+/// A quoted, backslash-escaped, heredoc-body, or `#`-comment `}` is not a
+/// real brace-group closer to `brush-parser` — bash never treats it as one
+/// either — but [`MAX_RAW_BRACE_NESTING_DEPTH`]'s depth counter decrements
+/// on every raw `}` byte regardless, with no quote/escape/heredoc/comment
+/// awareness. So real nesting can grow unboundedly while the depth counter
+/// this raw pre-scan relies on stays pinned at 0-1, sailing straight past
+/// the depth cap (crash-fuzzer bisection, release build, real hook binary):
+/// `rm -rf / ` + `{\}`x2925 + `x` + `}`x2925 (backslash-escaped closer) and
+/// `rm -rf / ` + `{'}'`x2925 + `x` + `}`x2925 (quoted closer) both abort
+/// with an uncatchable stack overflow and empty stdout — a fail-open bypass
+/// of the whole hook. Heredoc-body and `#`-comment closers abort the same
+/// way. Counting only openers, never decrementing, has no closer for an
+/// attacker to inject against, the same reasoning [`MAX_KEYWORD_NESTING_COUNT`]'s
+/// docs give for keyword closers: the count can only ever overestimate true
+/// nesting depth (safe direction).
+///
+/// # Why 128
+///
+/// Bisected against a debug build (`cargo test`'s 2MiB test-thread stack,
+/// the tighter of the two budgets this crate ships against): the `{\}`
+/// escaped-closer shape aborts between 550 and 600 raw `{` bytes. 128 sits
+/// a ~4.3x margin below that floor. Re-bisect the same shape before raising
+/// this on any `brush-parser` version bump, the same as every other raw-scan
+/// cap in this module.
+///
+/// # Known trade-off
+///
+/// Like [`MAX_BRACE_NESTING_DEPTH`], this counts every raw `{` byte
+/// including ones inside quotes, heredoc bodies, and comments. Legitimate
+/// input with more than 128 `{` bytes — a large inline JSON literal, an awk
+/// or jq body — now fails closed to `Ask` where it previously did not.
+pub(crate) const MAX_RAW_BRACE_OPEN_COUNT: usize = 128;
+
+/// Cap on the total count of raw `(` bytes [`crate::parser::reject_excessive_raw_nesting`]
+/// tolerates in one command, counted once per `(` byte and never decremented
+/// on a `)` — the `(`/`)` counterpart of [`MAX_RAW_BRACE_OPEN_COUNT`], for
+/// the identical reason: a quoted, backslash-escaped, or `$(...)`-nested `)`
+/// is not a real closer to `brush-parser`, so [`MAX_RAW_PAREN_NESTING_DEPTH`]'s
+/// decrementing depth counter can be driven back down by injecting one
+/// while real nesting keeps growing (crash-fuzzer bisection: `rm -rf / ` +
+/// `$(echo ")"`x3000 + `x` + `)`x3000 aborts with an uncatchable stack
+/// overflow and empty stdout, sailing straight past the depth cap).
+///
+/// # Why 32
+///
+/// Bisected against a debug build (the tighter of shguard's two shipped
+/// stack budgets, same as [`MAX_RAW_BRACE_OPEN_COUNT`]): the quoted-closer
+/// shape above aborts between 136 and 149 raw `(` bytes — far tighter than
+/// the brace counterpart, because each `$(...)` unit costs more stack per
+/// level than a bare `{`. 32 sits a ~4.25x margin below that floor.
+/// Re-bisect the same shape before raising this on any `brush-parser`
+/// version bump.
+///
+/// # Known trade-off
+///
+/// Like [`MAX_RAW_BRACE_OPEN_COUNT`], this counts every raw `(` byte
+/// including ones inside quotes and nested substitutions. Legitimate input
+/// chaining more than 32 command substitutions or subshells in one line now
+/// fails closed to `Ask` where it previously did not.
+pub(crate) const MAX_RAW_PAREN_OPEN_COUNT: usize = 32;
+
 /// Cap on the total count of reserved-word compound-command openers (`if`,
 /// `while`, `until`, `for`, `case`) `src/parser.rs`'s raw pre-scan tolerates
 /// in one command, enforced by [`crate::parser::reject_excessive_raw_nesting`]
@@ -220,11 +288,20 @@ pub(crate) const MAX_RAW_PAREN_NESTING_DEPTH: usize = 16;
 /// # Why a total count, not a balanced depth like [`MAX_BRACE_NESTING_DEPTH`]
 ///
 /// A `{`/`}`/`(`/`)` depth counter that decrements on the closing character
-/// is safe because a bare closer in argument position (e.g. `echo }`) is
-/// either a shell syntax error or breaks the nesting it would need to fake —
-/// live-confirmed. The same is not true of keyword closers: `echo fi` and
-/// `echo done` are ordinary, valid arguments (live-confirmed to resolve
-/// normally), so a decrementing counter keyed on the words `fi`/`done`/`esac`
+/// is NOT safe: a quoted, backslash-escaped, heredoc-body, or `#`-comment
+/// closer (e.g. `echo "}"`, `echo \}`, a `}` inside a `<<EOF` body, or one
+/// after a `#`) is not a real brace/paren closer to `brush-parser`, but the
+/// decrementing counter treats it as one regardless, letting real nesting
+/// grow unboundedly while the counter stays pinned at 0-1 (crash-fuzzer,
+/// live-confirmed — see [`MAX_RAW_BRACE_OPEN_COUNT`]'s and
+/// [`MAX_RAW_PAREN_OPEN_COUNT`]'s docs for the exact aborting repros). Those
+/// two non-decrementing counters close that gap; [`MAX_RAW_BRACE_NESTING_DEPTH`]/
+/// [`MAX_RAW_PAREN_NESTING_DEPTH`]'s decrementing counters remain useful only
+/// for bounding PEG-backtracking cost on well-formed nesting, not as a
+/// stack-overflow defense on their own. The same closer-injection problem is
+/// not new: keyword closers have always had it. `echo fi` and `echo done`
+/// are ordinary, valid arguments (live-confirmed to resolve normally), so a
+/// decrementing counter keyed on the words `fi`/`done`/`esac`
 /// could be driven back down by injecting those words as arguments inside
 /// genuinely-nested input that still recurses past the crash threshold —
 /// live-confirmed: `("if true; then echo fi; " x 2000) + "echo done" + ("

@@ -109,6 +109,51 @@ fn substitution_nesting_within_cap_still_recurses() {
     assert_eq!(permission_decision(&output), "allow");
 }
 
+// ==== raw brace/paren open-count caps (issue #52 follow-up) ====
+//
+// `reject_excessive_raw_nesting`'s `{`/`}` and `(`/`)` depth counters
+// decrement on every raw closer byte, quote/escape/heredoc/comment-blind.
+// A closer that is not a real closer to brush-parser (quoted, backslash-
+// escaped, inside a heredoc body, or after a `#` comment) still decrements
+// the depth counter, so real nesting can grow past the crash threshold
+// while the depth counter itself never exceeds 0-1. Before the fix
+// (`src/ast.rs::MAX_RAW_BRACE_OPEN_COUNT`/`MAX_RAW_PAREN_OPEN_COUNT`), every
+// one of these independently aborted with `rc=134`, empty stdout — a
+// fail-open bypass of the whole hook.
+
+/// Before the fix: aborts (crash-fuzzer bisection: ~2925 repetitions in a
+/// release build). The backslash before each `}` escapes it, so it is a
+/// literal character to brush-parser, not a brace-group closer — but the
+/// depth counter's `}` arm decrements on it regardless.
+#[test]
+fn escaped_brace_closer_fails_closed_instead_of_bypassing_the_depth_cap() {
+    let command = format!("rm -rf / {}x{}", r"{\}".repeat(3000), "}".repeat(3000));
+    let output = run_hook(&bash_command(&command));
+    assert_eq!(permission_decision(&output), "ask");
+}
+
+/// Before the fix: aborts the same way, via a quoted `}` instead of a
+/// backslash-escaped one.
+#[test]
+fn quoted_brace_closer_fails_closed_instead_of_bypassing_the_depth_cap() {
+    let command = format!("rm -rf / {}x{}", "{'}'".repeat(3000), "}".repeat(3000));
+    let output = run_hook(&bash_command(&command));
+    assert_eq!(permission_decision(&output), "ask");
+}
+
+/// Before the fix: aborts via a quoted `)` inside a `$(...)` command
+/// substitution instead of a bare one.
+#[test]
+fn quoted_paren_closer_fails_closed_instead_of_bypassing_the_depth_cap() {
+    let command = format!(
+        "rm -rf / {}x{}",
+        "$(echo \")\"".repeat(150),
+        ")".repeat(150)
+    );
+    let output = run_hook(&bash_command(&command));
+    assert_eq!(permission_decision(&output), "ask");
+}
+
 // ==== B-1 follow-up: raw compound-command keyword nesting count ====
 //
 // The bracket counters above only catch `{`/`(` recursion. brush-parser's
