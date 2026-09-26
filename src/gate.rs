@@ -340,8 +340,9 @@ use crate::normalize::{
 };
 use crate::parser;
 use crate::rules::{
-    AWK_INTERPRETERS, Allowlist, AllowlistOutcome, CommandRule, EVAL_BUILTIN, PathForm, Rules,
-    WrapperChainEscalation, is_pipeline_interpreter, lexical_normalize, render_cwd_anchor,
+    AWK_INTERPRETERS, Allowlist, AllowlistOutcome, CommandRule, EVAL_BUILTIN, PathForm,
+    RedirectRule, Rules, WrapperChainEscalation, is_pipeline_interpreter, lexical_normalize,
+    render_cwd_anchor,
 };
 use crate::verdict::{Decision, DenyMessage, Reason, RuleId, Verdict};
 
@@ -1970,6 +1971,38 @@ fn scan_redirect_home_env_floor(
     redirections: &[Redirection],
     rules: &Rules,
 ) -> Option<(Decision, String)> {
+    scan_redirect_substituted_target_floor(
+        redirections,
+        rules,
+        home_env_word_with_tilde_substituted,
+        |rule| {
+            format!(
+                "redirect target begins with `$HOME`, which expands to the same value \
+                 as `~`; substituting `~` would match redirect rule {:?} ({}) — this \
+                 can't be proven without an environment lookup shguard never performs, \
+                 so it's flagged, not blocked",
+                rule.id().as_str(),
+                rule.reason().as_str(),
+            )
+        },
+    )
+}
+
+/// Shared core of [`scan_redirect_home_env_floor`] (issue #203) and
+/// [`scan_redirect_named_user_home_floor`] (issue #454): scan every
+/// redirect-write target ([`is_redirect_write_applicable`]), apply
+/// `substitute`'s piece-level tilde substitution, and if a resolved
+/// candidate from the substituted word matches one of `rules`' redirect
+/// rules, float `(Decision::Ask, reason(rule))` — always capped to `Ask`
+/// regardless of the matched rule's own decision, since neither caller can
+/// prove the substitution without an environment lookup or passwd lookup
+/// shguard never performs (see each caller's own docs for why).
+fn scan_redirect_substituted_target_floor(
+    redirections: &[Redirection],
+    rules: &Rules,
+    substitute: fn(&Word) -> Option<Word>,
+    reason: impl Fn(&RedirectRule) -> String,
+) -> Option<(Decision, String)> {
     for redir in redirections {
         let Redirection::File { kind, target } = redir else {
             continue;
@@ -1978,7 +2011,7 @@ fn scan_redirect_home_env_floor(
         if !is_redirect_write_applicable(kind, &normalized) {
             continue;
         }
-        let Some(substituted) = home_env_word_with_tilde_substituted(target) else {
+        let Some(substituted) = substitute(target) else {
             continue;
         };
         for word in normalize::normalize_word(&substituted) {
@@ -1986,17 +2019,7 @@ fn scan_redirect_home_env_floor(
                 continue;
             };
             if let Some(rule) = rules.match_redirect_target(candidate) {
-                return Some((
-                    Decision::Ask,
-                    format!(
-                        "redirect target begins with `$HOME`, which expands to the same value \
-                         as `~`; substituting `~` would match redirect rule {:?} ({}) — this \
-                         can't be proven without an environment lookup shguard never performs, \
-                         so it's flagged, not blocked",
-                        rule.id().as_str(),
-                        rule.reason().as_str(),
-                    ),
-                ));
+                return Some((Decision::Ask, reason(rule)));
             }
         }
     }
@@ -2061,37 +2084,21 @@ fn scan_redirect_named_user_home_floor(
     redirections: &[Redirection],
     rules: &Rules,
 ) -> Option<(Decision, String)> {
-    for redir in redirections {
-        let Redirection::File { kind, target } = redir else {
-            continue;
-        };
-        let normalized = normalize::normalize_word(target);
-        if !is_redirect_write_applicable(kind, &normalized) {
-            continue;
-        }
-        let Some(substituted) = named_user_home_word_with_tilde_substituted(target) else {
-            continue;
-        };
-        for word in normalize::normalize_word(&substituted) {
-            let Resolution::Resolved(candidate) = word.resolution() else {
-                continue;
-            };
-            if let Some(rule) = rules.match_redirect_target(candidate) {
-                return Some((
-                    Decision::Ask,
-                    format!(
-                        "redirect target is a named-user home shorthand (`~user`), which would \
-                         match redirect rule {:?} ({}) if `~user` expanded to an existing \
-                         account's home directory; shguard cannot verify that account exists or \
-                         is reachable",
-                        rule.id().as_str(),
-                        rule.reason().as_str(),
-                    ),
-                ));
-            }
-        }
-    }
-    None
+    scan_redirect_substituted_target_floor(
+        redirections,
+        rules,
+        named_user_home_word_with_tilde_substituted,
+        |rule| {
+            format!(
+                "redirect target is a named-user home shorthand (`~user`), which would \
+                 match redirect rule {:?} ({}) if `~user` expanded to an existing \
+                 account's home directory; shguard cannot verify that account exists or \
+                 is reachable",
+                rule.id().as_str(),
+                rule.reason().as_str(),
+            )
+        },
+    )
 }
 
 /// Piece-level substitution behind [`scan_redirect_named_user_home_floor`]:
