@@ -10178,6 +10178,29 @@ mod tests {
         );
     }
 
+    /// A word made of nothing but repeated overflowing-tilde runs: the
+    /// per-run remainder recursion this PR first shipped in
+    /// `parser::convert_word_text` overflowed the stack at ~2 MiB of input
+    /// (well under the 10 MiB stdin cap), and a stack overflow aborts — no
+    /// verdict on stdout, which fails OPEN in the hook. Pins the iterative
+    /// rewrite.
+    ///
+    /// Calls `analyze` directly (this module's own, watchdog-free) rather
+    /// than `shguard::analyze`: the public entry point wraps this same call
+    /// in `watchdog::bounded`'s 2s wall-clock budget, and this input's ~0.5s
+    /// cost on an idle host leaves headroom that CPU contention from other
+    /// tests or processes can consume, turning a stack-overflow regression
+    /// pin into a flaky timeout (issue #520). Deliberately not run on a
+    /// thread with a larger explicit stack size: libtest's default test
+    /// thread stack matches the production `shguard-eval` worker's default
+    /// (`src/watchdog.rs`), which is exactly the condition this pin needs to
+    /// keep catching the recursion regression.
+    #[test]
+    fn repeated_overflowing_tilde_runs_do_not_overflow_the_stack() {
+        let word = "~41353561361542343807".repeat(100_000);
+        assert_decision(&format!("echo {word}"), Decision::Allow);
+    }
+
     // ==== Issue #12 DoD: all 11 cases, exact decisions ====
 
     #[test]

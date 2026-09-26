@@ -1785,18 +1785,6 @@ fn guardfall_ansi_c_quoted_comment_hiding_a_second_line_via_a_split_opener_fails
     assert_eq!(verdict.decision(), Decision::Ask);
 }
 
-/// A word made of nothing but repeated overflowing-tilde runs: the
-/// per-run remainder recursion this PR first shipped in
-/// `convert_word_text` overflowed the stack at ~2 MiB of input (well
-/// under the 10 MiB stdin cap), and a stack overflow aborts — no verdict
-/// on stdout, which fails OPEN in the hook. Pins the iterative rewrite.
-#[test]
-fn guardfall_repeated_overflowing_tilde_runs_do_not_overflow_the_stack() {
-    let word = "~41353561361542343807".repeat(100_000);
-    let verdict = shguard::analyze(&format!("echo {word}"));
-    assert_eq!(verdict.decision(), Decision::Allow);
-}
-
 /// Issue #448: a same-invocation `alias NAME=VALUE` was never linked to a
 /// later bare-word call the way a same-line function definition already is
 /// (issue #75) — with `shopt -s expand_aliases` set and the call on a LATER
