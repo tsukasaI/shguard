@@ -10179,7 +10179,7 @@ mod tests {
     }
 
     /// A word made of nothing but repeated overflowing-tilde runs: the
-    /// per-run remainder recursion this PR first shipped in
+    /// per-run remainder recursion #314 first shipped in
     /// `parser::convert_word_text` overflowed the stack at ~2 MiB of input
     /// (well under the 10 MiB stdin cap), and a stack overflow aborts — no
     /// verdict on stdout, which fails OPEN in the hook. Pins the iterative
@@ -10190,9 +10190,9 @@ mod tests {
     /// in `watchdog::bounded`'s 2s wall-clock budget, and this input's ~0.5s
     /// cost on an idle host leaves headroom that CPU contention from other
     /// tests or processes can consume, turning a stack-overflow regression
-    /// pin into a flaky timeout (issue #520). Deliberately not run on a
-    /// thread with a larger explicit stack size: libtest's default test
-    /// thread stack matches the production `shguard-eval` worker's default
+    /// pin into a flaky timeout. Deliberately not run on a thread with a
+    /// larger explicit stack size: libtest's default test thread stack
+    /// matches the production `shguard-eval` worker's default
     /// (`src/watchdog.rs`), which is exactly the condition this pin needs to
     /// keep catching the recursion regression.
     #[test]
