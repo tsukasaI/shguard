@@ -2251,17 +2251,19 @@ impl CommandRule {
                 return None;
             };
             let base = basename(name);
-            if self.command.matches(base) {
-                let effective = effective_tail(base, tail);
+            // Issue #536: folded once and reused for the blocklist match
+            // itself, not just wrapper recognition — a re-cased binary
+            // name (`RM`, `/bin/Rm`) resolves to the same inode as its
+            // lowercase spelling on a case-insensitive filesystem (macOS
+            // APFS default), so blocklist matching must not depend on
+            // case any more than wrapper recognition already doesn't.
+            let folded_base = fold_command_name(base);
+            if self.command.matches(&folded_base) {
+                let effective = effective_tail(&folded_base, tail);
                 if self.constraints_match(&effective) {
                     return Some(effective);
                 }
             }
-            // Issue #493 follow-up: fold for wrapper recognition only —
-            // `self.command.matches`/`effective_tail` above keep the raw
-            // name, since general command-name matching case-sensitivity
-            // is a separate, broader concern this fix does not touch.
-            let folded_base = fold_command_name(base);
             if !TRANSPARENT_WRAPPERS.contains(&folded_base.as_str()) {
                 return None;
             }
@@ -2563,12 +2565,12 @@ impl CommandRule {
                 return None;
             };
             let base = basename(name);
-            if self.command.matches(base) {
-                return Some(effective_tail(base, tail));
-            }
-            // Issue #493 follow-up: fold for wrapper recognition only, see
-            // the sibling walk above.
+            // Issue #536: fold before the blocklist match, same as the
+            // sibling walk above.
             let folded_base = fold_command_name(base);
+            if self.command.matches(&folded_base) {
+                return Some(effective_tail(&folded_base, tail));
+            }
             if !TRANSPARENT_WRAPPERS.contains(&folded_base.as_str()) {
                 return None;
             }

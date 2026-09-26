@@ -9494,7 +9494,11 @@ fn git_subcommand_operands<'a>(
     subcommand: &str,
 ) -> Option<&'a [NormalizedWord]> {
     let (name, rest) = crate::rules::effective_command(argv)?;
-    if name != "git" {
+    // Issue #536: fold before comparing — a re-cased `GIT`/`Git` binary
+    // name resolves to the same inode as `git` on a case-insensitive
+    // filesystem (macOS APFS default), so this check must not depend on
+    // case any more than wrapper recognition already doesn't.
+    if crate::rules::fold_command_name(name) != "git" {
         return None;
     }
     let globals = bound_git_global_options(rest);
@@ -9633,7 +9637,8 @@ const GIT_CONFIG_ALIAS_REASON: &str = "git -c alias.<name>=<value>/--config-env=
 /// property of a rule this function doesn't control, not a guarantee.
 fn git_config_smuggled_verdict(argv: &[NormalizedWord]) -> Option<Verdict> {
     let (name, rest) = crate::rules::effective_command(argv)?;
-    if name != "git" {
+    // Issue #536: fold before comparing, same as `git_subcommand_operands`.
+    if crate::rules::fold_command_name(name) != "git" {
         return None;
     }
     let globals = bound_git_global_options(rest);
@@ -9746,7 +9751,8 @@ fn git_config_smuggled_verdict(argv: &[NormalizedWord]) -> Option<Verdict> {
 /// un-introspectable-script floor, issue #451).
 fn git_config_env_var_verdict(argv: &[NormalizedWord], command: &SimpleCommand) -> Option<Verdict> {
     let (name, _) = crate::rules::effective_command(argv)?;
-    if name != "git" {
+    // Issue #536: fold before comparing, same as `git_subcommand_operands`.
+    if crate::rules::fold_command_name(name) != "git" {
         return None;
     }
     let smuggled = command
@@ -13380,6 +13386,55 @@ mod tests {
         // Regression: the new floor must not weaken the existing certain
         // bare-`~` case, which stays a hard Block via the rule itself.
         assert_decision("rm -rf ~", Decision::Block);
+    }
+
+    // ==== Issue #536: blocklist command-name matching must fold case, the
+    // same as wrapper recognition already does (issue #493) — a re-cased
+    // binary name (`RM`, `/bin/Rm`) resolves to the same inode as its
+    // lowercase spelling on a case-insensitive filesystem (macOS APFS
+    // default) ====
+
+    #[test]
+    fn uppercase_rm_rf_root_still_blocks() {
+        assert_decision("RM -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn absolute_path_uppercase_rm_rf_home_still_blocks() {
+        assert_decision("/bin/Rm -rf ~", Decision::Block);
+    }
+
+    #[test]
+    fn uppercase_dd_still_blocks() {
+        assert_decision("DD if=/dev/zero of=/dev/disk0", Decision::Block);
+    }
+
+    #[test]
+    fn uppercase_git_push_force_still_blocks() {
+        assert_decision("GIT push --force origin main", Decision::Block);
+    }
+
+    #[test]
+    fn uppercase_git_dash_c_still_strips_global_flags_before_matching() {
+        // Regression for the compound bug: an unfolded `base` would match
+        // the rule's own command name but skip `git_strip_global_flags`,
+        // still missing the `push --force` shape underneath `-C`.
+        assert_decision("GIT -C /tmp push --force", Decision::Block);
+    }
+
+    #[test]
+    fn uppercase_git_config_env_var_smuggling_still_asks() {
+        assert_decision("GIT_CONFIG_COUNT=1 GIT commit -m x", Decision::Ask);
+    }
+
+    #[test]
+    fn uppercase_rm_rf_unresolvable_target_still_asks() {
+        assert_decision("RM -rf $X", Decision::Ask);
+    }
+
+    #[test]
+    fn bare_uppercase_ls_still_allows() {
+        assert_decision("LS", Decision::Allow);
     }
 
     #[test]
