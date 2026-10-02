@@ -64,9 +64,9 @@ use brush_parser::{Parser as BrushParser, ParserOptions as BrushParserOptions, a
 use crate::ast::{
     Assignment, AssignmentValue, Command, CommandLine, CompoundCommand, ElifClause, ExtendedTest,
     FileRedirectionKind, FunctionDefinition, MAX_BRACE_NESTING_DEPTH, MAX_KEYWORD_NESTING_COUNT,
-    MAX_RAW_BRACE_NESTING_DEPTH, MAX_RAW_BRACKET_OPENER_COUNT, MAX_RAW_EXTENDED_TEST_COUNT,
-    MAX_RAW_PAREN_NESTING_DEPTH, Pipeline, ProcessSubstitutionDirection, Redirection, Separator,
-    SimpleCommand, Word, WordPiece,
+    MAX_RAW_BRACE_NESTING_DEPTH, MAX_RAW_BRACE_OPEN_COUNT, MAX_RAW_BRACKET_OPENER_COUNT,
+    MAX_RAW_EXTENDED_TEST_COUNT, MAX_RAW_PAREN_NESTING_DEPTH, MAX_RAW_PAREN_OPEN_COUNT, Pipeline,
+    ProcessSubstitutionDirection, Redirection, Separator, SimpleCommand, Word, WordPiece,
 };
 
 /// Everything that can go wrong converting a raw command string into
@@ -504,8 +504,10 @@ fn reject_ansi_c_quote_with_line_continuation(
 }
 
 /// Rejects `command` if its `{`/`}` nesting depth exceeds
-/// [`MAX_RAW_BRACE_NESTING_DEPTH`], its `(`/`)` nesting depth exceeds
-/// [`MAX_RAW_PAREN_NESTING_DEPTH`], its total `[` count exceeds
+/// [`MAX_RAW_BRACE_NESTING_DEPTH`], its total count of raw `{` bytes exceeds
+/// [`MAX_RAW_BRACE_OPEN_COUNT`], its `(`/`)` nesting depth exceeds
+/// [`MAX_RAW_PAREN_NESTING_DEPTH`], its total count of raw `(` bytes exceeds
+/// [`MAX_RAW_PAREN_OPEN_COUNT`], its total `[` count exceeds
 /// [`MAX_RAW_BRACKET_OPENER_COUNT`], its total count of
 /// [`NESTING_KEYWORDS`] occurrences exceeds [`MAX_KEYWORD_NESTING_COUNT`],
 /// or its count of `!`/`&&`/`||` operators inside any single `[[ ... ]]`
@@ -537,7 +539,7 @@ fn reject_ansi_c_quote_with_line_continuation(
 /// `src/bin/shguard.rs`'s module docs) and unbounded backtracking simply
 /// never returns control to run them, so the only effective defense
 /// against either failure mode is a linear, non-recursive pre-scan that
-/// runs ahead of the parser and rejects the input outright. All five
+/// runs ahead of the parser and rejects the input outright. All seven
 /// counters are tracked in one pass (`{`/`}` alone would miss a `$(`-only
 /// attack, which was independently confirmed to abort even though it never
 /// touches shguard's AST-level brace cap at all; neither bracket alone
@@ -546,13 +548,19 @@ fn reject_ansi_c_quote_with_line_continuation(
 /// `{`/`(`/`[`/keyword byte at all; and a run of `a[` openers — brush's
 /// array-subscript grammar recurses once per `[` — contains no
 /// `{`/`(`/keyword byte either and is unaffected by the paren/brace caps)
-/// — see [`MAX_RAW_BRACE_NESTING_DEPTH`]'s, [`MAX_RAW_PAREN_NESTING_DEPTH`]'s,
+/// — see [`MAX_RAW_BRACE_NESTING_DEPTH`]'s, [`MAX_RAW_BRACE_OPEN_COUNT`]'s,
+/// [`MAX_RAW_PAREN_NESTING_DEPTH`]'s, [`MAX_RAW_PAREN_OPEN_COUNT`]'s,
 /// [`MAX_RAW_BRACKET_OPENER_COUNT`]'s, [`MAX_KEYWORD_NESTING_COUNT`]'s, and
 /// [`MAX_RAW_EXTENDED_TEST_COUNT`]'s docs for the chosen cap values, their
-/// measured cost curves, and their trade-offs — `{`/`}` and `(`/`)`
-/// nesting and the `[` opener count all use a raw cap far tighter than [`MAX_BRACE_NESTING_DEPTH`]'s
-/// stack-depth-sized 64, since PEG backtracking cost grows exponentially
-/// with nesting depth while stack depth grows only linearly.
+/// measured cost curves, and their trade-offs — the depth counters and the
+/// `[` opener count use a raw cap far tighter than
+/// [`MAX_BRACE_NESTING_DEPTH`]'s stack-depth-sized 64, since PEG
+/// backtracking cost grows exponentially with nesting depth while stack
+/// depth grows only linearly. The open-count counters exist separately from
+/// the depth counters because a quoted, backslash-escaped, heredoc-body, or
+/// `#`-comment closer byte is not a real closer to `brush-parser` but the
+/// depth counters cannot tell — see [`MAX_RAW_BRACE_OPEN_COUNT`]'s docs for
+/// the aborting repros that slip past the depth counters alone.
 ///
 /// Scans bytes, not `char`s: every byte this function compares against
 /// (`{`, `}`, `(`, `)`, `[`, `&`, `|`, and every [`is_token_boundary`]
@@ -562,7 +570,9 @@ fn reject_ansi_c_quote_with_line_continuation(
 /// decoding on a hot, security-critical scan.
 fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
     let mut brace_depth: usize = 0;
+    let mut brace_open_count: usize = 0;
     let mut paren_depth: usize = 0;
+    let mut paren_open_count: usize = 0;
     let mut bracket_count: usize = 0;
     let mut keyword_count: usize = 0;
     let mut token_start: Option<usize> = None;
@@ -579,6 +589,18 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
                         "brace nesting exceeds the raw depth cap",
                     ));
                 }
+                // Never decremented — see `MAX_RAW_BRACE_OPEN_COUNT`'s docs
+                // for why the decrementing `brace_depth` counter above
+                // cannot be relied on alone: a quoted/escaped/heredoc/
+                // comment `}` is not a real closer to brush-parser but
+                // still decrements `brace_depth`, letting real nesting grow
+                // unboundedly underneath it.
+                brace_open_count += 1;
+                if brace_open_count > MAX_RAW_BRACE_OPEN_COUNT {
+                    return Err(ParseError::unsupported(
+                        "brace opener count exceeds the raw count cap",
+                    ));
+                }
             }
             b'}' => brace_depth = brace_depth.saturating_sub(1),
             b'(' => {
@@ -586,6 +608,15 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
                 if paren_depth > MAX_RAW_PAREN_NESTING_DEPTH {
                     return Err(ParseError::unsupported(
                         "parenthesis nesting exceeds the raw depth cap",
+                    ));
+                }
+                // Never decremented — the `(`/`)` counterpart of
+                // `brace_open_count` above, see `MAX_RAW_PAREN_OPEN_COUNT`'s
+                // docs.
+                paren_open_count += 1;
+                if paren_open_count > MAX_RAW_PAREN_OPEN_COUNT {
+                    return Err(ParseError::unsupported(
+                        "parenthesis opener count exceeds the raw count cap",
                     ));
                 }
             }
@@ -709,8 +740,10 @@ fn check_extended_test_op_count(extended_test_op_count: &mut usize) -> Result<()
 /// Returns [`ParseError::Syntax`] if `command` is not valid shell syntax, or
 /// [`ParseError::Unsupported`] if it parses but contains a construct
 /// shguard's AST cannot represent (see the module docs), including raw
-/// `{`/`}` nesting past [`MAX_RAW_BRACE_NESTING_DEPTH`], `(`/`)` nesting
-/// past [`MAX_RAW_PAREN_NESTING_DEPTH`], `[` count past
+/// `{`/`}` nesting past [`MAX_RAW_BRACE_NESTING_DEPTH`] or raw `{` count
+/// past [`MAX_RAW_BRACE_OPEN_COUNT`], `(`/`)` nesting past
+/// [`MAX_RAW_PAREN_NESTING_DEPTH`] or raw `(` count past
+/// [`MAX_RAW_PAREN_OPEN_COUNT`], `[` count past
 /// [`MAX_RAW_BRACKET_OPENER_COUNT`], [`NESTING_KEYWORDS`] nesting past
 /// [`MAX_KEYWORD_NESTING_COUNT`], `[[ ... ]]` `!`/`&&`/`||` operator
 /// count past [`MAX_RAW_EXTENDED_TEST_COUNT`]
@@ -2509,11 +2542,13 @@ mod tests {
             "$[]",
         ] {
             let command = format!("echo {}", unit.repeat(MAX_RAW_BRACKET_OPENER_COUNT + 1));
-            assert_eq!(
-                unsupported_construct(&command),
-                "bracket opener count exceeds the raw cap",
-                "{unit}"
-            );
+            // The `$(` unit trips the (tighter) paren opener cap first.
+            let expected = if unit.contains('(') {
+                "parenthesis opener count exceeds the raw count cap"
+            } else {
+                "bracket opener count exceeds the raw cap"
+            };
+            assert_eq!(unsupported_construct(&command), expected, "{unit}");
         }
         // False-positive guard: a realistic number of sequential, properly
         // closed subscripts, up to the cap, must still parse.
