@@ -141,6 +141,18 @@ fn quoted_brace_closer_fails_closed_instead_of_bypassing_the_depth_cap() {
     assert_eq!(permission_decision(&output), "ask");
 }
 
+/// Before the fix: aborts at ~73 openers. A quoted `}` inside a `${...}`
+/// parameter expansion recurses far deeper per `{` than a bare brace group
+/// does, so the opener cap must sit below this shape's floor, not just the
+/// `{\}` brace-group one. 100 openers is under the old cap of 128 but over
+/// the parameter-expansion crash floor.
+#[test]
+fn quoted_brace_closer_in_parameter_expansion_fails_closed_below_the_old_cap() {
+    let command = format!("echo {}x{}", "${a/'}'".repeat(100), "}".repeat(100));
+    let output = run_hook(&bash_command(&command));
+    assert_eq!(permission_decision(&output), "ask");
+}
+
 /// Before the fix: aborts via a quoted `)` inside a `$(...)` command
 /// substitution instead of a bare one.
 #[test]

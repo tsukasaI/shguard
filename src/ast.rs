@@ -166,22 +166,30 @@ pub(crate) const MAX_RAW_PAREN_NESTING_DEPTH: usize = 16;
 /// docs give for keyword closers: the count can only ever overestimate true
 /// nesting depth (safe direction).
 ///
-/// # Why 128
+/// # Why 32
 ///
-/// Bisected against a debug build (`cargo test`'s 2MiB test-thread stack,
-/// the tighter of the two budgets this crate ships against): the `{\}`
-/// escaped-closer shape aborts between 550 and 600 raw `{` bytes. 128 sits
-/// a ~4.3x margin below that floor. Re-bisect the same shape before raising
-/// this on any `brush-parser` version bump, the same as every other raw-scan
-/// cap in this module.
+/// Bisected against a debug build (`cargo test`'s 2MiB thread stack, the
+/// tighter of the two budgets this crate ships against) with the cap lifted,
+/// smallest aborting count of raw `{` openers per shape. A bare brace group
+/// with a quoted or escaped closer (`{\}`, `{'}'`) aborts at 579, but
+/// parameter expansions recurse much deeper per `{`: `${a/'}'`, `${a//'}'`,
+/// `${a^^'}'`, `${a,,'}'` and an escaped `${a/\}` at 73, `${a/b/'}'` at 72
+/// (the lowest floor found), `${a:1:2'}'` at 76, `${a:-'}'`, `${a:+'}'`,
+/// `${a#'}'` and `${a:-\}` at 120, `${!a'}'` and `${a@'}'` at 168. Shapes
+/// that nest a bare `${` inside another (`${a:-${'}'`) never reach the
+/// count: their unhidden `{` drives [`MAX_RAW_BRACE_NESTING_DEPTH`] first.
+/// 32 sits ~2.25x below the 72 floor. Re-bisect every parameter-expansion
+/// operator form, not just the brace-group one, before raising this on any
+/// `brush-parser` version bump.
 ///
 /// # Known trade-off
 ///
 /// Like [`MAX_BRACE_NESTING_DEPTH`], this counts every raw `{` byte
 /// including ones inside quotes, heredoc bodies, and comments. Legitimate
-/// input with more than 128 `{` bytes — a large inline JSON literal, an awk
-/// or jq body — now fails closed to `Ask` where it previously did not.
-pub(crate) const MAX_RAW_BRACE_OPEN_COUNT: usize = 128;
+/// input with more than 32 `{` bytes anywhere in one command — a large
+/// inline JSON literal, an awk or jq body, a long run of `${...}`
+/// expansions — now fails closed to `Ask` where it previously did not.
+pub(crate) const MAX_RAW_BRACE_OPEN_COUNT: usize = 32;
 
 /// Cap on the total count of raw `(` bytes [`crate::parser::reject_excessive_raw_nesting`]
 /// tolerates in one command, counted once per `(` byte and never decremented
@@ -196,12 +204,14 @@ pub(crate) const MAX_RAW_BRACE_OPEN_COUNT: usize = 128;
 /// # Why 32
 ///
 /// Bisected against a debug build (the tighter of shguard's two shipped
-/// stack budgets, same as [`MAX_RAW_BRACE_OPEN_COUNT`]): the quoted-closer
-/// shape above aborts between 136 and 149 raw `(` bytes — far tighter than
-/// the brace counterpart, because each `$(...)` unit costs more stack per
-/// level than a bare `{`. 32 sits a ~4.25x margin below that floor.
-/// Re-bisect the same shape before raising this on any `brush-parser`
-/// version bump.
+/// stack budgets, same as [`MAX_RAW_BRACE_OPEN_COUNT`]) with the cap lifted:
+/// the quoted-closer `$(echo ")"` shape above aborts at 145 raw `(` bytes
+/// (the same at 145 for a single-quoted or backslash-escaped closer), and a
+/// process substitution `<(echo ")"` at 96, the lowest paren floor found.
+/// 32 sits a ~3x margin below that. Parameter-expansion `{` nesting is
+/// tighter per opener than either, which is why the brace counterpart is
+/// sized against its own floor. Re-bisect these shapes
+/// before raising this on any `brush-parser` version bump.
 ///
 /// # Known trade-off
 ///
