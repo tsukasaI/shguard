@@ -143,6 +143,35 @@ pub(crate) const MAX_RAW_BRACE_NESTING_DEPTH: usize = 12;
 /// [`MAX_RAW_BRACE_NESTING_DEPTH`]'s docs give.
 pub(crate) const MAX_RAW_PAREN_NESTING_DEPTH: usize = 16;
 
+/// Cap on the total count of `[` bytes in one command, enforced by
+/// `src/parser.rs`'s raw pre-scan (`reject_excessive_raw_nesting`).
+/// brush-parser 0.4.0's array-subscript and legacy `$[ ... ]` arithmetic
+/// grammars recurse once per `[` opener (`word.rs`'s
+/// `expansion_parser::__parse_array_element_name` /
+/// `__parse_arithmetic_word_piece::<__parse_array_index>`), with no depth
+/// limit of its own.
+///
+/// # Why an opener count, not a net `[`/`]` depth
+///
+/// brush hides a closing `]` inside quotes, backticks, `$(`, `$((`, `${`
+/// and `$[`, so a repeated `a["]"` or `a[$(])` keeps any `]`-decrementing
+/// depth at 1 while brush recurses once per `a[`. The recursion depth is
+/// bounded by the opener count however the closers are hidden, so every
+/// `[` counts and `]` never decrements.
+///
+/// # Why 64
+///
+/// Measured on a debug build, 2 MiB worker stack, `echo ` plus a unit
+/// repeated N times, smallest aborting N: `a[` 1282, `$[` 151 (the lowest
+/// per-`[` threshold; `$[$[` aborts at 76 units, the same ~151 openers).
+/// `$[` has no identifier prefix, so every `[` is counted rather than only
+/// `[` after an identifier byte. 64 leaves ~2.3x margin below the lowest
+/// measured boundary while tolerating ordinary commands (`[ -f x ]`,
+/// `[[ ... ]]`, globs). Re-measure before raising this on any
+/// `brush-parser` version bump, for the same reason
+/// [`MAX_RAW_BRACE_NESTING_DEPTH`]'s docs give.
+pub(crate) const MAX_RAW_BRACKET_OPENER_COUNT: usize = 64;
+
 /// Cap on the total count of reserved-word compound-command openers (`if`,
 /// `while`, `until`, `for`, `case`) `src/parser.rs`'s raw pre-scan tolerates
 /// in one command, enforced by [`crate::parser::reject_excessive_raw_nesting`]
