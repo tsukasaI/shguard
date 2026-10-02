@@ -116,12 +116,17 @@ impl RulesError {
 // ---------------------------------------------------------------------
 
 /// How a rule identifies the command name (argv\[0\]).
+///
+/// Matching is case-folded (issue #536): callers fold the runtime argv name
+/// with [`fold_command_name`] before [`Self::matches`], and the rule-side
+/// names below are stored already folded (by `convert_command_rule`), so
+/// the comparison itself is a plain byte comparison.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CommandMatch {
-    /// The exact command name, e.g. `"rm"`.
+    /// The exact command name, e.g. `"rm"`; stored folded.
     Exact(String),
-    /// A command-name prefix, e.g. `"mkfs."` for the `mkfs.*` family. An
-    /// explicit field, not regex, per issue #11 scope.
+    /// A command-name prefix, e.g. `"mkfs."` for the `mkfs.*` family; stored
+    /// folded. An explicit field, not regex, per issue #11 scope.
     Prefix(String),
 }
 
@@ -5609,7 +5614,9 @@ fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesErr
                 ));
             }
             dto.required_tokens.splice(0..0, sugar_tokens);
-            CommandMatch::Exact(name)
+            // Folded after the sugar split: only the command name is
+            // case-folded; `required_tokens` (subcommands) stay case-sensitive.
+            CommandMatch::Exact(fold_command_name(&name))
         }
         (None, Some(prefix)) => {
             // An empty `command_prefix` produces `CommandMatch::Prefix("")`,
@@ -5630,7 +5637,7 @@ fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesErr
                      matching is only available via `command`, not `command_prefix`",
                 ));
             }
-            CommandMatch::Prefix(prefix)
+            CommandMatch::Prefix(fold_command_name(&prefix))
         }
         (None, None) => {
             return Err(RulesError::invalid(
@@ -13428,6 +13435,46 @@ mod tests {
             .map(|w| NormalizedWord::resolved(*w))
             .collect();
         assert!(rules.match_command(&words).is_none());
+    }
+
+    // Regression for the #542 review: runtime argv names are folded before
+    // matching, so a user rule's own `command`/`command_prefix` must be
+    // stored folded too, or an uppercase rule name never matches anything.
+    #[test]
+    fn user_deny_with_uppercase_command_matches_any_casing() {
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let config = UserConfig::parse(
+            r#"
+            [[deny]]
+            id = "user-deny-rscript"
+            reason = "test"
+            command = "Rscript"
+
+            [[deny]]
+            id = "user-deny-prefix"
+            reason = "test"
+            command_prefix = "Mk"
+            required_tokens = ["Sub"]
+        "#,
+        )
+        .unwrap();
+        let (rules, _) = merge_user_config(blocklist, allowlist, config).unwrap();
+
+        let matches = |argv: &[&str]| {
+            let words: Vec<NormalizedWord> =
+                argv.iter().map(|w| NormalizedWord::resolved(*w)).collect();
+            rules.match_command(&words).is_some()
+        };
+
+        for name in ["Rscript", "rscript", "RSCRIPT", "/usr/bin/Rscript"] {
+            assert!(matches(&[name, "-e", "1"]), "{name}");
+        }
+        for name in ["Mkfoo", "mkfoo", "MKFOO"] {
+            assert!(matches(&[name, "Sub"]), "{name}");
+        }
+        // Required tokens (subcommands) stay case-sensitive.
+        assert!(!matches(&["mkfoo", "sub"]));
     }
 
     // Same case-folded comparison for `normalized` (`NormalizedExact`) —
