@@ -6414,6 +6414,32 @@ pub(crate) struct Rules {
     escalation_floor: Decision,
 }
 
+/// Shared scan behind every worst-decision-wins `match_*` method on
+/// [`Rules`]: a Block anywhere in `rules` outranks an Ask regardless of
+/// declaration order (issue #261, extended by #399/#465/#426 to
+/// command/pipeline/token rules), because rules appended later by
+/// `merge_user_config` (e.g. a user `[[deny]]`) must not be shadowed by an
+/// earlier-declared embedded Ask rule for the same shape. Ties keep the
+/// first-declared rule.
+fn worst_wins<R>(
+    rules: &[R],
+    decision: impl Fn(&R) -> Decision,
+    matches: impl Fn(&R) -> bool,
+) -> Option<&R> {
+    let mut ask = None;
+    for rule in rules {
+        if !matches(rule) {
+            continue;
+        }
+        match decision(rule) {
+            Decision::Block => return Some(rule),
+            _ if ask.is_none() => ask = Some(rule),
+            _ => {}
+        }
+    }
+    ask
+}
+
 impl Rules {
     /// Parses `toml` into a validated [`Rules`] set.
     ///
@@ -6499,23 +6525,9 @@ impl Rules {
     /// keep the first-declared rule.
     #[must_use]
     pub(crate) fn match_command(&self, argv: &[NormalizedWord]) -> Option<&CommandRule> {
-        // Worst-wins, not first-match: an embedded Ask rule that happens
-        // to be declared before a user `[[deny]]` (Block) rule for the
-        // same command must not shadow it — user deny rules are appended
-        // last by `merge_user_config`, so first-match silently downgraded
-        // Block to Ask.
-        let mut ask = None;
-        for rule in &self.command_rules {
-            if !rule.matches(argv) {
-                continue;
-            }
-            match rule.decision() {
-                Decision::Block => return Some(rule),
-                _ if ask.is_none() => ask = Some(rule),
-                _ => {}
-            }
-        }
-        ask
+        worst_wins(&self.command_rules, CommandRule::decision, |rule| {
+            rule.matches(argv)
+        })
     }
 
     /// The worst-decision [`PipelineRule`] that matches `stages` (one
@@ -6525,21 +6537,9 @@ impl Rules {
     /// [`Self::match_token`]); ties keep the first-declared rule.
     #[must_use]
     pub(crate) fn match_pipeline(&self, stages: &[Vec<NormalizedWord>]) -> Option<&PipelineRule> {
-        // Worst-wins, not first-match: all embedded pipeline rules are
-        // Block today, but a future embedded Ask pipeline rule declared
-        // before a Block one for the same shape must not shadow it.
-        let mut ask = None;
-        for rule in &self.pipeline_rules {
-            if !rule.matches(stages) {
-                continue;
-            }
-            match rule.decision() {
-                Decision::Block => return Some(rule),
-                _ if ask.is_none() => ask = Some(rule),
-                _ => {}
-            }
-        }
-        ask
+        worst_wins(&self.pipeline_rules, PipelineRule::decision, |rule| {
+            rule.matches(stages)
+        })
     }
 
     /// The worst-decision [`RedirectRule`] whose target list matches
@@ -6547,22 +6547,9 @@ impl Rules {
     /// order (issue #261); ties keep the first-declared rule.
     #[must_use]
     pub(crate) fn match_redirect_target(&self, target: &str) -> Option<&RedirectRule> {
-        // Worst-wins, not first-match (issue #261): a Block anywhere in
-        // the list must outrank an Ask that happens to be declared
-        // earlier, otherwise adding the first Ask-level redirect rule
-        // would silently downgrade an existing Block on the same target.
-        let mut ask = None;
-        for rule in &self.redirect_rules {
-            if !rule.matches(target) {
-                continue;
-            }
-            match rule.decision() {
-                Decision::Block => return Some(rule),
-                _ if ask.is_none() => ask = Some(rule),
-                _ => {}
-            }
-        }
-        ask
+        worst_wins(&self.redirect_rules, RedirectRule::decision, |rule| {
+            rule.matches(target)
+        })
     }
 
     /// The first [`RedirectRule`] for which
@@ -6610,18 +6597,9 @@ impl Rules {
     /// [`Self::match_redirect_target`]; ties keep the first-declared rule.
     #[must_use]
     pub(crate) fn match_token(&self, candidates: &[String]) -> Option<&TokenRule> {
-        let mut ask = None;
-        for rule in &self.token_rules {
-            if !rule.matches(candidates) {
-                continue;
-            }
-            match rule.decision() {
-                Decision::Block => return Some(rule),
-                _ if ask.is_none() => ask = Some(rule),
-                _ => {}
-            }
-        }
-        ask
+        worst_wins(&self.token_rules, TokenRule::decision, |rule| {
+            rule.matches(candidates)
+        })
     }
 
     /// Shared scan behind every `match_command_*` floor probe below: a
