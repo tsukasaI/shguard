@@ -2684,17 +2684,7 @@ impl CommandRule {
     /// `crate::gate::scan_ascent_descent_floor`).
     #[must_use]
     pub(crate) fn matches_ascent_descent_floor(&self, argv: &[NormalizedWord]) -> bool {
-        if self.targets.is_empty() {
-            return false;
-        }
-        let Some(rest_words) = self.matching_rest(argv) else {
-            return false;
-        };
-        resolved_strings(&rest_words).iter().any(|token| {
-            self.targets
-                .iter()
-                .any(|t| t.ascent_descent_plausible(token))
-        })
+        self.matches_resolved_tail_floor(argv, TargetMatcher::ascent_descent_plausible)
     }
 
     /// issue #80: true when this rule's command+flags match `argv` (via
@@ -2707,17 +2697,7 @@ impl CommandRule {
     /// `crate::gate::scan_named_user_home_floor`).
     #[must_use]
     pub(crate) fn matches_named_user_home_floor(&self, argv: &[NormalizedWord]) -> bool {
-        if self.targets.is_empty() {
-            return false;
-        }
-        let Some(rest_words) = self.matching_rest(argv) else {
-            return false;
-        };
-        resolved_strings(&rest_words).iter().any(|token| {
-            self.targets
-                .iter()
-                .any(|t| t.named_user_home_plausible(token))
-        })
+        self.matches_resolved_tail_floor(argv, TargetMatcher::named_user_home_plausible)
     }
 
     /// issue #88: true when this rule's command+flags match `argv` (via
@@ -2746,15 +2726,7 @@ impl CommandRule {
     /// [`Self::matches`], so there is nothing for this floor to add.
     #[must_use]
     pub(crate) fn matches_dirstack_tilde_floor(&self, argv: &[NormalizedWord]) -> bool {
-        if self.targets.is_empty() {
-            return false;
-        }
-        let Some(rest_words) = self.matching_rest(argv) else {
-            return false;
-        };
-        resolved_strings(&rest_words)
-            .iter()
-            .any(|token| self.targets.iter().any(|t| t.dirstack_plausible(token)))
+        self.matches_resolved_tail_floor(argv, TargetMatcher::dirstack_plausible)
     }
 
     /// Issue #103: true when this rule's command+flags match `argv` (via
@@ -2771,6 +2743,28 @@ impl CommandRule {
     /// a `gate.rs` floor's input.
     #[must_use]
     pub(crate) fn matches_unknown_cwd_floor(&self, argv: &[NormalizedWord]) -> bool {
+        self.matches_resolved_tail_floor(argv, TargetMatcher::unknown_cwd_plausible)
+    }
+
+    /// Shared core of the four unattached-token floor probes above
+    /// ([`Self::matches_ascent_descent_floor`] issue #78,
+    /// [`Self::matches_named_user_home_floor`] issue #80,
+    /// [`Self::matches_dirstack_tilde_floor`] issue #88,
+    /// [`Self::matches_unknown_cwd_floor`] issue #103): `false` if
+    /// `self.targets` is empty, or `argv` doesn't match this rule's
+    /// command+flags at all ([`Self::matching_rest`]); otherwise true when
+    /// some resolved tail token is `plausible` against one of this rule's
+    /// own `targets`. The sibling attached-token pair
+    /// ([`Self::matches_directory_equals_tilde_floor`]/
+    /// [`Self::matches_dirstack_equal_subst_floor`]) has its own shared
+    /// core, [`Self::matches_attach_after_equal_floor`], because it also
+    /// needs a corroborating-target check and an `=`-terminated attach
+    /// prefix this unattached case has no equivalent of.
+    fn matches_resolved_tail_floor(
+        &self,
+        argv: &[NormalizedWord],
+        plausible: fn(&TargetMatcher, &str) -> bool,
+    ) -> bool {
         if self.targets.is_empty() {
             return false;
         }
@@ -2779,7 +2773,7 @@ impl CommandRule {
         };
         resolved_strings(&rest_words)
             .iter()
-            .any(|token| self.targets.iter().any(|t| t.unknown_cwd_plausible(token)))
+            .any(|token| self.targets.iter().any(|t| plausible(t, token)))
     }
 
     /// issue #115: true when this rule's command+flags match `argv` (via
