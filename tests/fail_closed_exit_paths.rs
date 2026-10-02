@@ -123,6 +123,33 @@ fn deep_bracket_nesting_fails_closed_to_ask_instead_of_aborting() {
     assert_eq!(permission_decision(&output), "ask");
 }
 
+/// Before the fix: `rc=134` (`SIGABRT`), empty stdout. brush-parser's
+/// array-subscript recursion is quote-aware, so a `]` inside double quotes
+/// does not close the subscript — but the raw scan's `]` decrement was
+/// quote-blind, keeping its depth at 1 while brush recursed once per `a[`.
+#[test]
+fn deep_bracket_nesting_with_double_quoted_close_fails_closed_to_ask() {
+    let command = format!("echo {}", "a[\"]\"".repeat(20000));
+    let output = run_hook(&bash_command(&command));
+    assert_eq!(permission_decision(&output), "ask");
+}
+
+/// Same bypass as above, with the `]` hidden inside single quotes.
+#[test]
+fn deep_bracket_nesting_with_single_quoted_close_fails_closed_to_ask() {
+    let command = format!("echo {}", "a[']'".repeat(20000));
+    let output = run_hook(&bash_command(&command));
+    assert_eq!(permission_decision(&output), "ask");
+}
+
+/// Same bypass as above, with the `]` backslash-escaped.
+#[test]
+fn deep_bracket_nesting_with_escaped_close_fails_closed_to_ask() {
+    let command = format!("echo {}", "a[\\]".repeat(20000));
+    let output = run_hook(&bash_command(&command));
+    assert_eq!(permission_decision(&output), "ask");
+}
+
 // ==== B-1 follow-up: raw compound-command keyword nesting count ====
 //
 // The bracket counters above only catch `{`/`(` recursion. brush-parser's

@@ -570,7 +570,11 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
     let mut extended_test_op_count: usize = 0;
 
     let bytes = command.as_bytes();
+    let mut quote = RawQuote::None;
+    let mut escaped = false;
     for (i, &byte) in bytes.iter().enumerate() {
+        let closes_bracket = !escaped && quote == RawQuote::None;
+        advance_raw_quote_state(bytes, i, &mut quote, &mut escaped);
         match byte {
             b'{' => {
                 brace_depth += 1;
@@ -598,7 +602,13 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
                     ));
                 }
             }
-            b']' => bracket_depth = bracket_depth.saturating_sub(1),
+            // Only a `]` outside quotes and not backslash-escaped can close
+            // a subscript to brush: its `a[` grammar is quote-aware, so
+            // `a["]"` repeated recurses once per `a[` while a quote-blind
+            // decrement here would hold the depth at 1. `[` above stays
+            // quote-blind, so any scanner/brush disagreement can only
+            // over-count ("over-count is safe, under-count is not").
+            b']' if closes_bracket => bracket_depth = bracket_depth.saturating_sub(1),
             // `&&`/`||` are made entirely of `is_token_boundary` bytes, so
             // they never form a token the tokenizer below could match
             // whole — checked here, on raw adjacent bytes, instead.
@@ -668,6 +678,53 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
     }
 
     Ok(())
+}
+
+/// Quote context of the byte being scanned by
+/// [`reject_excessive_raw_nesting`], used only to decide whether a `]` can
+/// close an array subscript.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RawQuote {
+    None,
+    Single,
+    Double,
+    /// `$'...'`: single-quoted, but `\` escapes the next byte (e.g. `\'`).
+    AnsiC,
+}
+
+/// Advances the quote/escape state past `bytes[i]`. The caller samples the
+/// state *before* calling this, so a quote byte or backslash itself is never
+/// treated as unquoted/unescaped context for the byte that follows it.
+fn advance_raw_quote_state(bytes: &[u8], i: usize, quote: &mut RawQuote, escaped: &mut bool) {
+    let byte = bytes[i];
+    if *escaped {
+        *escaped = false;
+        return;
+    }
+    match *quote {
+        RawQuote::None => match byte {
+            b'\\' => *escaped = true,
+            b'\'' if i > 0 && bytes[i - 1] == b'$' => *quote = RawQuote::AnsiC,
+            b'\'' => *quote = RawQuote::Single,
+            b'"' => *quote = RawQuote::Double,
+            _ => {}
+        },
+        RawQuote::Single => {
+            if byte == b'\'' {
+                *quote = RawQuote::None;
+            }
+        }
+        RawQuote::AnsiC => match byte {
+            b'\\' => *escaped = true,
+            b'\'' => *quote = RawQuote::None,
+            _ => {}
+        },
+        RawQuote::Double => match byte {
+            b'\\' => *escaped = true,
+            b'"' => *quote = RawQuote::None,
+            _ => {}
+        },
+    }
 }
 
 /// Increments `keyword_count` if `token` is one of [`NESTING_KEYWORDS`],
@@ -2489,6 +2546,26 @@ mod tests {
             unsupported_construct(&command),
             "bracket nesting exceeds the raw depth cap"
         );
+    }
+
+    #[test]
+    fn raw_bracket_scan_ignores_quoted_or_escaped_close_but_not_real_close() {
+        // Quoted/escaped `]` does not close the subscript to brush, so these
+        // must hit the cap...
+        for unit in ["a[\"]\"", "a[']'", "a[\\]", "a[$']\\']'"] {
+            let command = format!("echo {}", unit.repeat(MAX_RAW_BRACKET_NESTING_DEPTH + 1));
+            assert_eq!(
+                unsupported_construct(&command),
+                "bracket nesting exceeds the raw depth cap",
+                "{unit}"
+            );
+        }
+        // ...while many sequential, properly closed subscripts must not.
+        let command = format!(
+            "echo {}",
+            "a[\"k\"] ".repeat(MAX_RAW_BRACKET_NESTING_DEPTH * 4)
+        );
+        assert!(parse(&command).is_ok());
     }
 
     // issue #404: a leading run of unbalanced `(` (no matching `)`
