@@ -7972,8 +7972,7 @@ fn is_decode_stage(stage: &[NormalizedWord]) -> bool {
         // `short_cluster_contains` itself case-insensitive, since other
         // commands (e.g. `tar -x`/`-X`) use case to mean different things.
         "base64" | "base32" => scan_for_flag(rest_words, |s| {
-            s == "--decode"
-                || matches_long_flag_prefix(s, "--decode")
+            matches_long_flag_prefix(s, "--decode")
                 || short_cluster_contains(s, 'd')
                 || short_cluster_contains(s, 'D')
         })
@@ -7981,9 +7980,7 @@ fn is_decode_stage(stage: &[NormalizedWord]) -> bool {
         // `basenc` (issue #121) is coreutils-only — GNU `-d`/`--decode`
         // only, no BSD `-D` variant to account for.
         "basenc" => scan_for_flag(rest_words, |s| {
-            s == "--decode"
-                || matches_long_flag_prefix(s, "--decode")
-                || short_cluster_contains(s, 'd')
+            matches_long_flag_prefix(s, "--decode") || short_cluster_contains(s, 'd')
         })
         .possibly_found(),
         "xxd" => scan_for_flag(rest_words, |s| s == "-r").possibly_found(),
@@ -8024,9 +8021,7 @@ fn is_decode_stage(stage: &[NormalizedWord]) -> bool {
         // surface.
         "gzip" | "xz" | "zstd" | "lzma" | "zstdmt" | "pigz" | "pzstd" => {
             scan_for_flag(rest_words, |s| {
-                s == "--decompress"
-                    || s == "--uncompress"
-                    || matches_long_flag_prefix(s, "--decompress")
+                matches_long_flag_prefix(s, "--decompress")
                     || matches_long_flag_prefix(s, "--uncompress")
                     || short_cluster_contains(s, 'd')
             })
@@ -8037,9 +8032,7 @@ fn is_decode_stage(stage: &[NormalizedWord]) -> bool {
         // decompress only with `-d`/`--decompress`. Unlike the gzip/xz
         // family above, none of them spells the flag `--uncompress`.
         "bzip2" | "pbzip2" | "lz4" | "brotli" => scan_for_flag(rest_words, |s| {
-            s == "--decompress"
-                || matches_long_flag_prefix(s, "--decompress")
-                || short_cluster_contains(s, 'd')
+            matches_long_flag_prefix(s, "--decompress") || short_cluster_contains(s, 'd')
         })
         .possibly_found(),
         // issue #349: decompress-only alias binaries, sharing their parent
@@ -9050,6 +9043,12 @@ fn evaluate_composed_cwd_redirects(
 /// from `Initial` rather than composing against any OUTER same-line
 /// `cd`'s own [`CwdContext`] — a lower-priority compounding of two
 /// already-narrow mechanisms this function deliberately doesn't attempt.
+///
+/// `long_names` entries are matched via [`matches_long_flag_prefix`] alone
+/// (no separate exact-equality check first — that function already matches
+/// `canonical` itself, not just a shortened prefix of it), so every entry
+/// must be `--`-prefixed and longer than two characters, the same
+/// contract [`matches_long_flag_prefix`]'s own callers already satisfy.
 fn chain_dash_c_targets(
     rest: &[NormalizedWord],
     long_names: &[&str],
@@ -9067,7 +9066,7 @@ fn chain_dash_c_targets(
         let raw: Option<String> = if s == "-C"
             || long_names
                 .iter()
-                .any(|name| *name == s || matches_long_flag_prefix(s, name))
+                .any(|name| matches_long_flag_prefix(s, name))
         {
             match words.next().map(NormalizedWord::resolution) {
                 Some(Resolution::Resolved(value)) => Some(value.clone()),
@@ -9076,7 +9075,7 @@ fn chain_dash_c_targets(
         } else if let Some((name_part, value)) = s.split_once('=')
             && long_names
                 .iter()
-                .any(|name| *name == name_part || matches_long_flag_prefix(name_part, name))
+                .any(|name| matches_long_flag_prefix(name_part, name))
         {
             Some(value.to_string())
         } else if short_can_attach
@@ -9323,14 +9322,14 @@ fn resolve_tar_dash_c(rest: &[NormalizedWord], env: &Env) -> Option<Vec<Normaliz
             && let Some((value, consumed)) = tar_dashless_leading_cluster_directory(rest, env)
         {
             (value, consumed)
-        } else if s == "--directory" || matches_long_flag_prefix(s, "--directory") {
+        } else if matches_long_flag_prefix(s, "--directory") {
             match rest.get(index + 1).map(NormalizedWord::resolution) {
                 Some(Resolution::Resolved(value)) => (Some(value.clone()), index + 2),
                 Some(Resolution::Unresolvable(_)) => (None, index + 2),
                 None => (None, index + 1),
             }
         } else if let Some((name_part, value)) = s.split_once('=')
-            && (name_part == "--directory" || matches_long_flag_prefix(name_part, "--directory"))
+            && matches_long_flag_prefix(name_part, "--directory")
         {
             (Some(value.to_string()), index + 1)
         } else if let Some(location) = find_dash_c_in_cluster(s) {
