@@ -1816,23 +1816,12 @@ fn guardfall_ansi_c_quoted_comment_hiding_a_second_line_via_a_split_opener_fails
     assert_eq!(verdict.decision(), Decision::Ask);
 }
 
-/// A word made of nothing but repeated overflowing-tilde runs: the
-/// per-run remainder recursion this PR first shipped in
-/// `convert_word_text` overflowed the stack at ~2 MiB of input (well
-/// under the 10 MiB stdin cap), and a stack overflow aborts — no verdict
-/// on stdout, which fails OPEN in the hook. Pins the iterative rewrite.
-#[test]
-fn guardfall_repeated_overflowing_tilde_runs_do_not_overflow_the_stack() {
-    let word = "~41353561361542343807".repeat(100_000);
-    let verdict = shguard::analyze(&format!("echo {word}"));
-    assert_eq!(verdict.decision(), Decision::Allow);
-}
-
 /// A run of thousands of unclosed `a[` triggers unbounded recursion in
 /// brush-parser's array-subscript grammar (one stack frame per unclosed
 /// `[`) and overflows the stack well before this length — no verdict on
-/// stdout, which fails OPEN in the hook. Unlike the tilde case above, the
-/// raw pre-scan now rejects this outright, so the verdict here is a
+/// stdout, which fails OPEN in the hook. Unlike the overflowing-tilde case
+/// (`gate::tests::repeated_overflowing_tilde_runs_do_not_overflow_the_stack`),
+/// the raw pre-scan now rejects this outright, so the verdict here is a
 /// rejection (Ask), not an Allow.
 #[test]
 fn guardfall_repeated_unclosed_bracket_runs_do_not_overflow_the_stack() {
