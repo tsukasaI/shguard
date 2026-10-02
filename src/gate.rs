@@ -2961,11 +2961,15 @@ fn evaluate_simple_command_core(
     // present. Carries its own reason string (rather than a shared `bool`)
     // since the two shapes need different wording.
     let interpreter_code_floor: Option<String> = effective.and_then(|(name, rest_words)| {
-        // Case-folded only for the two membership checks below (issue
-        // #493) — `name` itself keeps its raw case in every message string
-        // that follows, matching `evaluate_dash_c`'s own precedent.
+        // Case-folded and version-stripped only for the two membership
+        // checks below (issues #493 and #346's `evaluate_dash_c`
+        // precedent: a versioned interpreter binary like `python3.12`
+        // must be recognized exactly like the unversioned name would) —
+        // `name` itself keeps its raw case and version suffix in every
+        // message string that follows.
         let lower_name = crate::rules::fold_command_name(name);
-        if let Some(flag) = inline_code_flag(&lower_name) {
+        let base_name = crate::rules::strip_version_suffix(&lower_name);
+        if let Some(flag) = inline_code_flag(base_name) {
             scan_for_flag(rest_words, |s| s == flag)
                 .possibly_found()
                 .then(|| {
@@ -2973,7 +2977,7 @@ fn evaluate_simple_command_core(
                      introspected"
                         .to_string()
                 })
-        } else if AWK_INTERPRETERS.contains(&lower_name.as_str()) {
+        } else if AWK_INTERPRETERS.contains(&base_name) {
             match scan_for_awk_script(rest_words) {
                 AwkScriptPosition::InlineScript => Some(format!(
                     "`{name}`'s script is a bare positional argument (no `-c`/`-e`-style flag) \
@@ -12403,6 +12407,30 @@ mod tests {
     #[test]
     fn node_dash_e_is_ask_floor() {
         assert_decision("node -e 'require(\"fs\").rmSync(\"/\")'", Decision::Ask);
+    }
+
+    // Issue #346's own precedent (a versioned shell binary must recurse its
+    // `-c` argument exactly like the unversioned name would) applies
+    // equally to rule 6b's inline-code floor, which previously case-folded
+    // the resolved command name but never stripped a version suffix —
+    // `python3.12 -c '...'` fell through both membership checks straight
+    // to Allow.
+    #[test]
+    fn versioned_python_dash_c_is_ask_floor() {
+        assert_decision(
+            "python3.12 -c 'import os; os.system(\"rm -rf /\")'",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn versioned_perl_dash_e_is_ask_floor() {
+        assert_decision("perl5.36 -e 'system(\"rm -rf /\")'", Decision::Ask);
+    }
+
+    #[test]
+    fn versioned_gawk_script_is_ask_floor() {
+        assert_decision("gawk5 'BEGIN{system(\"rm -rf /\")}'", Decision::Ask);
     }
 
     // ---- rule 6d: awk's script is a bare positional operand, not a

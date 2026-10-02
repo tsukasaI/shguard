@@ -64,9 +64,9 @@ use brush_parser::{Parser as BrushParser, ParserOptions as BrushParserOptions, a
 use crate::ast::{
     Assignment, AssignmentValue, Command, CommandLine, CompoundCommand, ElifClause, ExtendedTest,
     FileRedirectionKind, FunctionDefinition, MAX_BRACE_NESTING_DEPTH, MAX_KEYWORD_NESTING_COUNT,
-    MAX_RAW_BRACE_NESTING_DEPTH, MAX_RAW_BRACE_OPEN_COUNT, MAX_RAW_EXTENDED_TEST_COUNT,
-    MAX_RAW_PAREN_NESTING_DEPTH, MAX_RAW_PAREN_OPEN_COUNT, Pipeline, ProcessSubstitutionDirection,
-    Redirection, Separator, SimpleCommand, Word, WordPiece,
+    MAX_RAW_BRACE_NESTING_DEPTH, MAX_RAW_BRACE_OPEN_COUNT, MAX_RAW_BRACKET_OPENER_COUNT,
+    MAX_RAW_EXTENDED_TEST_COUNT, MAX_RAW_PAREN_NESTING_DEPTH, MAX_RAW_PAREN_OPEN_COUNT, Pipeline,
+    ProcessSubstitutionDirection, Redirection, Separator, SimpleCommand, Word, WordPiece,
 };
 
 /// Everything that can go wrong converting a raw command string into
@@ -507,12 +507,13 @@ fn reject_ansi_c_quote_with_line_continuation(
 /// [`MAX_RAW_BRACE_NESTING_DEPTH`], its total count of raw `{` bytes exceeds
 /// [`MAX_RAW_BRACE_OPEN_COUNT`], its `(`/`)` nesting depth exceeds
 /// [`MAX_RAW_PAREN_NESTING_DEPTH`], its total count of raw `(` bytes exceeds
-/// [`MAX_RAW_PAREN_OPEN_COUNT`], its total count of [`NESTING_KEYWORDS`]
-/// occurrences exceeds [`MAX_KEYWORD_NESTING_COUNT`], or its count of
-/// `!`/`&&`/`||` operators inside any single `[[ ... ]]` extended-test
-/// region exceeds [`MAX_RAW_EXTENDED_TEST_COUNT`], *before* any
-/// recursive-descent parser (brush-parser's PEG grammar, or this module's
-/// own brace/word conversion) ever sees the text.
+/// [`MAX_RAW_PAREN_OPEN_COUNT`], its total `[` count exceeds
+/// [`MAX_RAW_BRACKET_OPENER_COUNT`], its total count of
+/// [`NESTING_KEYWORDS`] occurrences exceeds [`MAX_KEYWORD_NESTING_COUNT`],
+/// or its count of `!`/`&&`/`||` operators inside any single `[[ ... ]]`
+/// extended-test region exceeds [`MAX_RAW_EXTENDED_TEST_COUNT`], *before*
+/// any recursive-descent parser (brush-parser's PEG grammar, or this
+/// module's own brace/word conversion) ever sees the text.
 ///
 /// This is the primary defense against issue #52's abort and issue #404's
 /// CPU-DoS: deeply nested `{`/`(` input (e.g. `{a,` repeated thousands of
@@ -538,18 +539,21 @@ fn reject_ansi_c_quote_with_line_continuation(
 /// `src/bin/shguard.rs`'s module docs) and unbounded backtracking simply
 /// never returns control to run them, so the only effective defense
 /// against either failure mode is a linear, non-recursive pre-scan that
-/// runs ahead of the parser and rejects the input outright. All six
+/// runs ahead of the parser and rejects the input outright. All seven
 /// counters are tracked in one pass (`{`/`}` alone would miss a `$(`-only
 /// attack, which was independently confirmed to abort even though it never
 /// touches shguard's AST-level brace cap at all; neither bracket alone
 /// catches a keyword-only attack like nested `if`/`then`/`fi` with no
-/// braces or parens at all; and none of the three catches a `[[ ]]`
-/// operator chain, which contains no `{`/`(`/keyword byte at all) — see
-/// [`MAX_RAW_BRACE_NESTING_DEPTH`]'s, [`MAX_RAW_BRACE_OPEN_COUNT`]'s,
+/// braces or parens at all; a `[[ ]]` operator chain contains no
+/// `{`/`(`/`[`/keyword byte at all; and a run of `a[` openers — brush's
+/// array-subscript grammar recurses once per `[` — contains no
+/// `{`/`(`/keyword byte either and is unaffected by the paren/brace caps)
+/// — see [`MAX_RAW_BRACE_NESTING_DEPTH`]'s, [`MAX_RAW_BRACE_OPEN_COUNT`]'s,
 /// [`MAX_RAW_PAREN_NESTING_DEPTH`]'s, [`MAX_RAW_PAREN_OPEN_COUNT`]'s,
-/// [`MAX_KEYWORD_NESTING_COUNT`]'s, and [`MAX_RAW_EXTENDED_TEST_COUNT`]'s
-/// docs for the chosen cap values, their measured cost curves, and their
-/// trade-offs — the depth counters use a raw cap far tighter than
+/// [`MAX_RAW_BRACKET_OPENER_COUNT`]'s, [`MAX_KEYWORD_NESTING_COUNT`]'s, and
+/// [`MAX_RAW_EXTENDED_TEST_COUNT`]'s docs for the chosen cap values, their
+/// measured cost curves, and their trade-offs — the depth counters and the
+/// `[` opener count use a raw cap far tighter than
 /// [`MAX_BRACE_NESTING_DEPTH`]'s stack-depth-sized 64, since PEG
 /// backtracking cost grows exponentially with nesting depth while stack
 /// depth grows only linearly. The open-count counters exist separately from
@@ -559,7 +563,7 @@ fn reject_ansi_c_quote_with_line_continuation(
 /// the aborting repros that slip past the depth counters alone.
 ///
 /// Scans bytes, not `char`s: every byte this function compares against
-/// (`{`, `}`, `(`, `)`, `[`, `]`, `&`, `|`, and every [`is_token_boundary`]
+/// (`{`, `}`, `(`, `)`, `[`, `&`, `|`, and every [`is_token_boundary`]
 /// delimiter) is single-byte ASCII, and no UTF-8 continuation byte
 /// (`0x80..=0xBF`) can equal one of them, so counting and slicing on raw
 /// bytes is exact for any valid UTF-8 input and avoids paying for UTF-8
@@ -569,6 +573,7 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
     let mut brace_open_count: usize = 0;
     let mut paren_depth: usize = 0;
     let mut paren_open_count: usize = 0;
+    let mut bracket_count: usize = 0;
     let mut keyword_count: usize = 0;
     let mut token_start: Option<usize> = None;
     let mut in_extended_test = false;
@@ -616,6 +621,18 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
                 }
             }
             b')' => paren_depth = paren_depth.saturating_sub(1),
+            // Counts every `[` and never decrements on `]`: brush hides a
+            // closing `]` inside quotes, backticks, `$(`, `$((`, `${` and
+            // `$[`, so no scan of `]` is sound, whereas its recursion depth
+            // is bounded by the opener count however those are closed.
+            b'[' => {
+                bracket_count += 1;
+                if bracket_count > MAX_RAW_BRACKET_OPENER_COUNT {
+                    return Err(ParseError::unsupported(
+                        "bracket opener count exceeds the raw cap",
+                    ));
+                }
+            }
             // `&&`/`||` are made entirely of `is_token_boundary` bytes, so
             // they never form a token the tokenizer below could match
             // whole — checked here, on raw adjacent bytes, instead.
@@ -726,7 +743,8 @@ fn check_extended_test_op_count(extended_test_op_count: &mut usize) -> Result<()
 /// `{`/`}` nesting past [`MAX_RAW_BRACE_NESTING_DEPTH`] or raw `{` count
 /// past [`MAX_RAW_BRACE_OPEN_COUNT`], `(`/`)` nesting past
 /// [`MAX_RAW_PAREN_NESTING_DEPTH`] or raw `(` count past
-/// [`MAX_RAW_PAREN_OPEN_COUNT`], [`NESTING_KEYWORDS`] nesting past
+/// [`MAX_RAW_PAREN_OPEN_COUNT`], `[` count past
+/// [`MAX_RAW_BRACKET_OPENER_COUNT`], [`NESTING_KEYWORDS`] nesting past
 /// [`MAX_KEYWORD_NESTING_COUNT`], `[[ ... ]]` `!`/`&&`/`||` operator
 /// count past [`MAX_RAW_EXTENDED_TEST_COUNT`]
 /// ([`reject_excessive_raw_nesting`]), or `$'...'` ANSI-C quoting combined
@@ -2488,6 +2506,54 @@ mod tests {
             ")".repeat(MAX_RAW_PAREN_NESTING_DEPTH + 1)
         );
         assert!(parse(&command).is_err());
+    }
+
+    #[test]
+    fn raw_bracket_count_at_the_cap_still_parses() {
+        let command = format!(
+            "echo {}0{}",
+            "a[".repeat(MAX_RAW_BRACKET_OPENER_COUNT),
+            "]".repeat(MAX_RAW_BRACKET_OPENER_COUNT)
+        );
+        assert!(parse(&command).is_ok());
+    }
+
+    #[test]
+    fn raw_bracket_count_one_past_the_cap_is_rejected() {
+        let command = format!("echo {}", "a[".repeat(MAX_RAW_BRACKET_OPENER_COUNT + 1));
+        assert_eq!(
+            unsupported_construct(&command),
+            "bracket opener count exceeds the raw cap"
+        );
+    }
+
+    #[test]
+    fn raw_bracket_count_is_not_reduced_by_any_closer_shape() {
+        // brush does not treat these `]` as closing the subscript, and the
+        // count never decrements on `]` anyway, so each must hit the cap.
+        for unit in [
+            "a[\"]\"",
+            "a[']'",
+            "a[\\]",
+            "a[$']\\']'",
+            "a[`]`",
+            "a[$(])",
+            "a[]",
+            "$[]",
+        ] {
+            let command = format!("echo {}", unit.repeat(MAX_RAW_BRACKET_OPENER_COUNT + 1));
+            // The `$(` unit trips the (tighter) paren opener cap first.
+            let expected = if unit.contains('(') {
+                "parenthesis opener count exceeds the raw count cap"
+            } else {
+                "bracket opener count exceeds the raw cap"
+            };
+            assert_eq!(unsupported_construct(&command), expected, "{unit}");
+        }
+        // False-positive guard: a realistic number of sequential, properly
+        // closed subscripts, up to the cap, must still parse.
+        let command = format!("echo {}", "a[\"k\"] ".repeat(MAX_RAW_BRACKET_OPENER_COUNT));
+        assert!(parse(&command).is_ok());
     }
 
     // issue #404: a leading run of unbalanced `(` (no matching `)`
