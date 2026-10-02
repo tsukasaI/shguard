@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-02
+
 ### Changed
 
 - The RSS-polling/timeout-bookkeeping loop behind `src/bin/shguard.rs`'s
