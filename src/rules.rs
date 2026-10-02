@@ -116,12 +116,17 @@ impl RulesError {
 // ---------------------------------------------------------------------
 
 /// How a rule identifies the command name (argv\[0\]).
+///
+/// Matching is case-folded (issue #536): callers fold the runtime argv name
+/// with [`fold_command_name`] before [`Self::matches`], and the rule-side
+/// names below are stored already folded (by `convert_command_rule`), so
+/// the comparison itself is a plain byte comparison.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CommandMatch {
-    /// The exact command name, e.g. `"rm"`.
+    /// The exact command name, e.g. `"rm"`; stored folded.
     Exact(String),
-    /// A command-name prefix, e.g. `"mkfs."` for the `mkfs.*` family. An
-    /// explicit field, not regex, per issue #11 scope.
+    /// A command-name prefix, e.g. `"mkfs."` for the `mkfs.*` family; stored
+    /// folded. An explicit field, not regex, per issue #11 scope.
     Prefix(String),
 }
 
@@ -2251,17 +2256,19 @@ impl CommandRule {
                 return None;
             };
             let base = basename(name);
-            if self.command.matches(base) {
-                let effective = effective_tail(base, tail);
+            // Issue #536: folded once and reused for the blocklist match
+            // itself, not just wrapper recognition — a re-cased binary
+            // name (`RM`, `/bin/Rm`) resolves to the same inode as its
+            // lowercase spelling on a case-insensitive filesystem (macOS
+            // APFS default), so blocklist matching must not depend on
+            // case any more than wrapper recognition already doesn't.
+            let folded_base = fold_command_name(base);
+            if self.command.matches(&folded_base) {
+                let effective = effective_tail(&folded_base, tail);
                 if self.constraints_match(&effective) {
                     return Some(effective);
                 }
             }
-            // Issue #493 follow-up: fold for wrapper recognition only —
-            // `self.command.matches`/`effective_tail` above keep the raw
-            // name, since general command-name matching case-sensitivity
-            // is a separate, broader concern this fix does not touch.
-            let folded_base = fold_command_name(base);
             if !TRANSPARENT_WRAPPERS.contains(&folded_base.as_str()) {
                 return None;
             }
@@ -2563,12 +2570,12 @@ impl CommandRule {
                 return None;
             };
             let base = basename(name);
-            if self.command.matches(base) {
-                return Some(effective_tail(base, tail));
-            }
-            // Issue #493 follow-up: fold for wrapper recognition only, see
-            // the sibling walk above.
+            // Issue #536: fold before the blocklist match, same as the
+            // sibling walk above.
             let folded_base = fold_command_name(base);
+            if self.command.matches(&folded_base) {
+                return Some(effective_tail(&folded_base, tail));
+            }
             if !TRANSPARENT_WRAPPERS.contains(&folded_base.as_str()) {
                 return None;
             }
@@ -5607,7 +5614,9 @@ fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesErr
                 ));
             }
             dto.required_tokens.splice(0..0, sugar_tokens);
-            CommandMatch::Exact(name)
+            // Folded after the sugar split: only the command name is
+            // case-folded; `required_tokens` (subcommands) stay case-sensitive.
+            CommandMatch::Exact(fold_command_name(&name))
         }
         (None, Some(prefix)) => {
             // An empty `command_prefix` produces `CommandMatch::Prefix("")`,
@@ -5628,7 +5637,7 @@ fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesErr
                      matching is only available via `command`, not `command_prefix`",
                 ));
             }
-            CommandMatch::Prefix(prefix)
+            CommandMatch::Prefix(fold_command_name(&prefix))
         }
         (None, None) => {
             return Err(RulesError::invalid(
@@ -13426,6 +13435,46 @@ mod tests {
             .map(|w| NormalizedWord::resolved(*w))
             .collect();
         assert!(rules.match_command(&words).is_none());
+    }
+
+    // Regression for the #542 review: runtime argv names are folded before
+    // matching, so a user rule's own `command`/`command_prefix` must be
+    // stored folded too, or an uppercase rule name never matches anything.
+    #[test]
+    fn user_deny_with_uppercase_command_matches_any_casing() {
+        let blocklist = Rules::embedded().unwrap();
+        let allowlist = Allowlist::embedded().unwrap();
+        let config = UserConfig::parse(
+            r#"
+            [[deny]]
+            id = "user-deny-rscript"
+            reason = "test"
+            command = "Rscript"
+
+            [[deny]]
+            id = "user-deny-prefix"
+            reason = "test"
+            command_prefix = "Mk"
+            required_tokens = ["Sub"]
+        "#,
+        )
+        .unwrap();
+        let (rules, _) = merge_user_config(blocklist, allowlist, config).unwrap();
+
+        let matches = |argv: &[&str]| {
+            let words: Vec<NormalizedWord> =
+                argv.iter().map(|w| NormalizedWord::resolved(*w)).collect();
+            rules.match_command(&words).is_some()
+        };
+
+        for name in ["Rscript", "rscript", "RSCRIPT", "/usr/bin/Rscript"] {
+            assert!(matches(&[name, "-e", "1"]), "{name}");
+        }
+        for name in ["Mkfoo", "mkfoo", "MKFOO"] {
+            assert!(matches(&[name, "Sub"]), "{name}");
+        }
+        // Required tokens (subcommands) stay case-sensitive.
+        assert!(!matches(&["mkfoo", "sub"]));
     }
 
     // Same case-folded comparison for `normalized` (`NormalizedExact`) —
