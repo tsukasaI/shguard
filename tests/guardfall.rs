@@ -1828,6 +1828,19 @@ fn guardfall_repeated_overflowing_tilde_runs_do_not_overflow_the_stack() {
     assert_eq!(verdict.decision(), Decision::Allow);
 }
 
+/// A run of thousands of unclosed `a[` triggers unbounded recursion in
+/// brush-parser's array-subscript grammar (one stack frame per unclosed
+/// `[`) and overflows the stack well before this length — no verdict on
+/// stdout, which fails OPEN in the hook. Unlike the tilde case above, the
+/// raw pre-scan now rejects this outright, so the verdict here is a
+/// rejection (Ask), not an Allow.
+#[test]
+fn guardfall_repeated_unclosed_bracket_runs_do_not_overflow_the_stack() {
+    let word = "a[".repeat(100_000);
+    let verdict = shguard::analyze(&format!("echo {word}"));
+    assert_ne!(verdict.decision(), Decision::Allow);
+}
+
 /// Issue #448: a same-invocation `alias NAME=VALUE` was never linked to a
 /// later bare-word call the way a same-line function definition already is
 /// (issue #75) — with `shopt -s expand_aliases` set and the call on a LATER
