@@ -140,7 +140,7 @@ const MAX_STDIN_BYTES: u64 = 10 * 1024 * 1024;
 const EVALUATION_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How often [`resolve_first_result`]'s watchdog polls the worker's actual
-/// memory use (via [`current_rss_bytes`]) while waiting on the result
+/// memory use (via [`shguard::watchdog::peak_rss_bytes`]) while waiting on the result
 /// channel, instead of blocking on a single [`EVALUATION_TIMEOUT`]-long
 /// `recv_timeout` the way the wall-clock-only watchdog used to. Short
 /// enough that the runaway-allocation repro (~4 GB/s, see
@@ -396,7 +396,7 @@ enum FirstResult {
 /// `shguard::watchdog::poll_with_budget`, shared with `src/watchdog.rs`'s
 /// own [`bounded_with_memory_limit`]-equivalent for the library entry
 /// points; this function only supplies the two things that differ here
-/// (an ABSOLUTE RSS cap rather than a delta, via [`current_rss_bytes`],
+/// (an ABSOLUTE RSS cap rather than a delta, via [`shguard::watchdog::peak_rss_bytes`],
 /// and the `FirstResult` shape `main`'s emit-and-exit arm expects instead
 /// of a fail-closed [`shguard::verdict::Verdict`] directly).
 fn resolve_first_result(
@@ -406,7 +406,7 @@ fn resolve_first_result(
 ) -> FirstResult {
     let deadline = Instant::now() + timeout;
     let outcome = poll_with_budget(rx, deadline, MEMORY_POLL_INTERVAL, || {
-        current_rss_bytes().filter(|&rss| rss > memory_limit)
+        shguard::watchdog::peak_rss_bytes().filter(|&rss| rss > memory_limit)
     });
     match outcome {
         PollOutcome::Received(output) => FirstResult::Output(output),
@@ -564,23 +564,6 @@ fn memory_limit_bytes() -> u64 {
         return mb.saturating_mul(1024 * 1024);
     }
     MEMORY_LIMIT_BYTES
-}
-
-/// Current process RSS in bytes, or `None` if the call fails or this
-/// platform doesn't support it — in either case [`resolve_first_result`]
-/// simply skips the memory-trip check for that poll; [`EVALUATION_TIMEOUT`]'s
-/// wall-clock bound still applies regardless.
-///
-/// Issue #518: the actual `getrusage`/`ru_maxrss` measurement (a *peak*,
-/// not current, reading — exactly what a one-shot process whose memory
-/// only grows in the pathological case wants to bound) moved into
-/// `shguard::watchdog::peak_rss_bytes`, per `coding-guidelines/languages/rust.md`'s
-/// "binaries MUST stay thin": that `unsafe` FFI is now reachable from
-/// `tests/` directly, not just through this binary's own `assert_cmd`
-/// integration tests. This function stays as a thin, binary-local alias so
-/// every call site here keeps its existing name.
-fn current_rss_bytes() -> Option<u64> {
-    shguard::watchdog::peak_rss_bytes()
 }
 
 /// Installs a one-line panic hook in place of the Rust default (which
@@ -1283,8 +1266,8 @@ mod tests {
     /// trip: `memory_limit: 0` guarantees the RSS check trips on the very
     /// first iteration (real RSS is never zero), but that must not discard
     /// the value `try_recv` finds waiting for it. `#[cfg(unix)]`: mirrors
-    /// `current_rss_bytes`'s own platform gating — on any other platform
-    /// there is no RSS check to trip in the first place. Paired with
+    /// `shguard::watchdog::peak_rss_bytes`'s own platform gating — on any
+    /// other platform there is no RSS check to trip in the first place. Paired with
     /// `memory_trip_fails_closed_when_the_channel_stays_empty` below: on its
     /// own, this test can't distinguish "the memory arm's `try_recv` won"
     /// from "the memory arm never ran and the ordinary `recv_timeout` path

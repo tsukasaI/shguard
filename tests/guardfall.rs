@@ -450,6 +450,37 @@ fn guardfall_rm_dot_targets() {
     }
 }
 
+/// `~/.*`/`.* ` is bash's dotglob spelling: unlike `~/*`/`~/**`, it DOES
+/// expand to leading-dot entries (`.ssh`, `.aws`, `.config/shguard`) even
+/// without `shopt -s dotglob`, so it is a strict superset of the already-
+/// Ask `~/.config` target and must be at least as strict, not Allow.
+#[test]
+fn guardfall_rm_dotglob_tilde_targets() {
+    let cases: &[(&str, Decision)] = &[
+        ("rm -rf ~/.*", Decision::Block),
+        ("rm -r ~/.*", Decision::Ask),
+        ("rm -fr ~/.*", Decision::Block),
+        ("rm --recursive --force ~/.*", Decision::Block),
+        ("mv ~/.* /tmp", Decision::Ask),
+        ("cd ~ && rm -rf .*", Decision::Block),
+        ("rm -rf .*", Decision::Block),
+        ("rm -rf ./.*", Decision::Block),
+        // Control: `~/.config` itself is unchanged by this fix.
+        ("rm -r ~/.config", Decision::Ask),
+        ("rm -rf ~/.config/shguard", Decision::Block),
+    ];
+
+    for (command, expected) in cases {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
 /// Issue #453: three filesystem-destruction shapes adjacent to existing
 /// Block rules were Allow — bare `mkfs <device>` (no `-t`), `rm -r` (no
 /// `-f`) against a root-level target, and `rm -rf ./*`/`rm -rf *`.
@@ -1783,6 +1814,20 @@ fn guardfall_ansi_c_quoted_comment_hiding_a_second_line_via_a_split_opener_fails
     let command = "bash -c $\\\n'echo x #\\\nrm -rf /'";
     let verdict = shguard::analyze(command);
     assert_eq!(verdict.decision(), Decision::Ask);
+}
+
+/// A run of thousands of unclosed `a[` triggers unbounded recursion in
+/// brush-parser's array-subscript grammar (one stack frame per unclosed
+/// `[`) and overflows the stack well before this length — no verdict on
+/// stdout, which fails OPEN in the hook. Unlike the overflowing-tilde case
+/// (`gate::tests::repeated_overflowing_tilde_runs_do_not_overflow_the_stack`),
+/// the raw pre-scan now rejects this outright, so the verdict here is a
+/// rejection (Ask), not an Allow.
+#[test]
+fn guardfall_repeated_unclosed_bracket_runs_do_not_overflow_the_stack() {
+    let word = "a[".repeat(100_000);
+    let verdict = shguard::analyze(&format!("echo {word}"));
+    assert_ne!(verdict.decision(), Decision::Allow);
 }
 
 /// Issue #448: a same-invocation `alias NAME=VALUE` was never linked to a

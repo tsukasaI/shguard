@@ -2961,11 +2961,15 @@ fn evaluate_simple_command_core(
     // present. Carries its own reason string (rather than a shared `bool`)
     // since the two shapes need different wording.
     let interpreter_code_floor: Option<String> = effective.and_then(|(name, rest_words)| {
-        // Case-folded only for the two membership checks below (issue
-        // #493) — `name` itself keeps its raw case in every message string
-        // that follows, matching `evaluate_dash_c`'s own precedent.
+        // Case-folded and version-stripped only for the two membership
+        // checks below (issues #493 and #346's `evaluate_dash_c`
+        // precedent: a versioned interpreter binary like `python3.12`
+        // must be recognized exactly like the unversioned name would) —
+        // `name` itself keeps its raw case and version suffix in every
+        // message string that follows.
         let lower_name = crate::rules::fold_command_name(name);
-        if let Some(flag) = inline_code_flag(&lower_name) {
+        let base_name = crate::rules::strip_version_suffix(&lower_name);
+        if let Some(flag) = inline_code_flag(base_name) {
             scan_for_flag(rest_words, |s| s == flag)
                 .possibly_found()
                 .then(|| {
@@ -2973,7 +2977,7 @@ fn evaluate_simple_command_core(
                      introspected"
                         .to_string()
                 })
-        } else if AWK_INTERPRETERS.contains(&lower_name.as_str()) {
+        } else if AWK_INTERPRETERS.contains(&base_name) {
             match scan_for_awk_script(rest_words) {
                 AwkScriptPosition::InlineScript => Some(format!(
                     "`{name}`'s script is a bare positional argument (no `-c`/`-e`-style flag) \
@@ -7951,7 +7955,8 @@ fn scan_for_dash_c_before_operand(words: &[NormalizedWord], interpreter: &str) -
 /// abbreviation matching ([`matches_long_flag_prefix`]). Still-open,
 /// narrower gaps tracked as their own follow-ups rather than re-opening
 /// #349: `lz4c` (Homebrew's legacy lz4 CLI alias) is not yet in the `lz4`
-/// arm below, and `lz4`'s own decompress-by-default-on-a-`.lz4`-extension
+/// pattern of the bzip2/lz4/brotli arm below, and `lz4`'s own
+/// decompress-by-default-on-a-`.lz4`-extension
 /// behavior (no flag needed when the input operand ends in `.lz4`) is
 /// filename-extension inference this crate's static model doesn't
 /// attempt.
@@ -7967,8 +7972,7 @@ fn is_decode_stage(stage: &[NormalizedWord]) -> bool {
         // `short_cluster_contains` itself case-insensitive, since other
         // commands (e.g. `tar -x`/`-X`) use case to mean different things.
         "base64" | "base32" => scan_for_flag(rest_words, |s| {
-            s == "--decode"
-                || matches_long_flag_prefix(s, "--decode")
+            matches_long_flag_prefix(s, "--decode")
                 || short_cluster_contains(s, 'd')
                 || short_cluster_contains(s, 'D')
         })
@@ -7976,9 +7980,7 @@ fn is_decode_stage(stage: &[NormalizedWord]) -> bool {
         // `basenc` (issue #121) is coreutils-only — GNU `-d`/`--decode`
         // only, no BSD `-D` variant to account for.
         "basenc" => scan_for_flag(rest_words, |s| {
-            s == "--decode"
-                || matches_long_flag_prefix(s, "--decode")
-                || short_cluster_contains(s, 'd')
+            matches_long_flag_prefix(s, "--decode") || short_cluster_contains(s, 'd')
         })
         .possibly_found(),
         "xxd" => scan_for_flag(rest_words, |s| s == "-r").possibly_found(),
@@ -8019,36 +8021,18 @@ fn is_decode_stage(stage: &[NormalizedWord]) -> bool {
         // surface.
         "gzip" | "xz" | "zstd" | "lzma" | "zstdmt" | "pigz" | "pzstd" => {
             scan_for_flag(rest_words, |s| {
-                s == "--decompress"
-                    || s == "--uncompress"
-                    || matches_long_flag_prefix(s, "--decompress")
+                matches_long_flag_prefix(s, "--decompress")
                     || matches_long_flag_prefix(s, "--uncompress")
                     || short_cluster_contains(s, 'd')
             })
             .possibly_found()
         }
-        // `bzip2`'s parallel implementation, `pbzip2` (issue #349), shares
-        // its exact flag surface.
-        "bzip2" | "pbzip2" => scan_for_flag(rest_words, |s| {
-            s == "--decompress"
-                || matches_long_flag_prefix(s, "--decompress")
-                || short_cluster_contains(s, 'd')
-        })
-        .possibly_found(),
-        // `lz4` (issue #349) compresses by default like gzip/xz/zstd, using
-        // the identical `-d`/`--decompress` spelling.
-        "lz4" => scan_for_flag(rest_words, |s| {
-            s == "--decompress"
-                || matches_long_flag_prefix(s, "--decompress")
-                || short_cluster_contains(s, 'd')
-        })
-        .possibly_found(),
-        // `brotli` (issue #349) compresses by default, using `-d`/
-        // `--decompress`.
-        "brotli" => scan_for_flag(rest_words, |s| {
-            s == "--decompress"
-                || matches_long_flag_prefix(s, "--decompress")
-                || short_cluster_contains(s, 'd')
+        // `bzip2` and its parallel implementation `pbzip2` (issue #349),
+        // `lz4`, and `brotli` (issue #349) all compress by default and
+        // decompress only with `-d`/`--decompress`. Unlike the gzip/xz
+        // family above, none of them spells the flag `--uncompress`.
+        "bzip2" | "pbzip2" | "lz4" | "brotli" => scan_for_flag(rest_words, |s| {
+            matches_long_flag_prefix(s, "--decompress") || short_cluster_contains(s, 'd')
         })
         .possibly_found(),
         // issue #349: decompress-only alias binaries, sharing their parent
@@ -9059,6 +9043,12 @@ fn evaluate_composed_cwd_redirects(
 /// from `Initial` rather than composing against any OUTER same-line
 /// `cd`'s own [`CwdContext`] — a lower-priority compounding of two
 /// already-narrow mechanisms this function deliberately doesn't attempt.
+///
+/// `long_names` entries are matched via [`matches_long_flag_prefix`] alone
+/// (no separate exact-equality check first — that function already matches
+/// `canonical` itself, not just a shortened prefix of it), so every entry
+/// must be `--`-prefixed and longer than two characters, the same
+/// contract [`matches_long_flag_prefix`]'s own callers already satisfy.
 fn chain_dash_c_targets(
     rest: &[NormalizedWord],
     long_names: &[&str],
@@ -9076,7 +9066,7 @@ fn chain_dash_c_targets(
         let raw: Option<String> = if s == "-C"
             || long_names
                 .iter()
-                .any(|name| *name == s || matches_long_flag_prefix(s, name))
+                .any(|name| matches_long_flag_prefix(s, name))
         {
             match words.next().map(NormalizedWord::resolution) {
                 Some(Resolution::Resolved(value)) => Some(value.clone()),
@@ -9085,7 +9075,7 @@ fn chain_dash_c_targets(
         } else if let Some((name_part, value)) = s.split_once('=')
             && long_names
                 .iter()
-                .any(|name| *name == name_part || matches_long_flag_prefix(name_part, name))
+                .any(|name| matches_long_flag_prefix(name_part, name))
         {
             Some(value.to_string())
         } else if short_can_attach
@@ -9332,14 +9322,14 @@ fn resolve_tar_dash_c(rest: &[NormalizedWord], env: &Env) -> Option<Vec<Normaliz
             && let Some((value, consumed)) = tar_dashless_leading_cluster_directory(rest, env)
         {
             (value, consumed)
-        } else if s == "--directory" || matches_long_flag_prefix(s, "--directory") {
+        } else if matches_long_flag_prefix(s, "--directory") {
             match rest.get(index + 1).map(NormalizedWord::resolution) {
                 Some(Resolution::Resolved(value)) => (Some(value.clone()), index + 2),
                 Some(Resolution::Unresolvable(_)) => (None, index + 2),
                 None => (None, index + 1),
             }
         } else if let Some((name_part, value)) = s.split_once('=')
-            && (name_part == "--directory" || matches_long_flag_prefix(name_part, "--directory"))
+            && matches_long_flag_prefix(name_part, "--directory")
         {
             (Some(value.to_string()), index + 1)
         } else if let Some(location) = find_dash_c_in_cluster(s) {
@@ -9494,7 +9484,11 @@ fn git_subcommand_operands<'a>(
     subcommand: &str,
 ) -> Option<&'a [NormalizedWord]> {
     let (name, rest) = crate::rules::effective_command(argv)?;
-    if name != "git" {
+    // Issue #536: fold before comparing — a re-cased `GIT`/`Git` binary
+    // name resolves to the same inode as `git` on a case-insensitive
+    // filesystem (macOS APFS default), so this check must not depend on
+    // case any more than wrapper recognition already doesn't.
+    if crate::rules::fold_command_name(name) != "git" {
         return None;
     }
     let globals = bound_git_global_options(rest);
@@ -9633,7 +9627,8 @@ const GIT_CONFIG_ALIAS_REASON: &str = "git -c alias.<name>=<value>/--config-env=
 /// property of a rule this function doesn't control, not a guarantee.
 fn git_config_smuggled_verdict(argv: &[NormalizedWord]) -> Option<Verdict> {
     let (name, rest) = crate::rules::effective_command(argv)?;
-    if name != "git" {
+    // Issue #536: fold before comparing, same as `git_subcommand_operands`.
+    if crate::rules::fold_command_name(name) != "git" {
         return None;
     }
     let globals = bound_git_global_options(rest);
@@ -9746,7 +9741,8 @@ fn git_config_smuggled_verdict(argv: &[NormalizedWord]) -> Option<Verdict> {
 /// un-introspectable-script floor, issue #451).
 fn git_config_env_var_verdict(argv: &[NormalizedWord], command: &SimpleCommand) -> Option<Verdict> {
     let (name, _) = crate::rules::effective_command(argv)?;
-    if name != "git" {
+    // Issue #536: fold before comparing, same as `git_subcommand_operands`.
+    if crate::rules::fold_command_name(name) != "git" {
         return None;
     }
     let smuggled = command
@@ -12428,6 +12424,30 @@ mod tests {
         assert_decision("node -e 'require(\"fs\").rmSync(\"/\")'", Decision::Ask);
     }
 
+    // Issue #346's own precedent (a versioned shell binary must recurse its
+    // `-c` argument exactly like the unversioned name would) applies
+    // equally to rule 6b's inline-code floor, which previously case-folded
+    // the resolved command name but never stripped a version suffix —
+    // `python3.12 -c '...'` fell through both membership checks straight
+    // to Allow.
+    #[test]
+    fn versioned_python_dash_c_is_ask_floor() {
+        assert_decision(
+            "python3.12 -c 'import os; os.system(\"rm -rf /\")'",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn versioned_perl_dash_e_is_ask_floor() {
+        assert_decision("perl5.36 -e 'system(\"rm -rf /\")'", Decision::Ask);
+    }
+
+    #[test]
+    fn versioned_gawk_script_is_ask_floor() {
+        assert_decision("gawk5 'BEGIN{system(\"rm -rf /\")}'", Decision::Ask);
+    }
+
     // ---- rule 6d: awk's script is a bare positional operand, not a
     // flag value (issue #195) ----
 
@@ -13403,6 +13423,55 @@ mod tests {
         // Regression: the new floor must not weaken the existing certain
         // bare-`~` case, which stays a hard Block via the rule itself.
         assert_decision("rm -rf ~", Decision::Block);
+    }
+
+    // ==== Issue #536: blocklist command-name matching must fold case, the
+    // same as wrapper recognition already does (issue #493) — a re-cased
+    // binary name (`RM`, `/bin/Rm`) resolves to the same inode as its
+    // lowercase spelling on a case-insensitive filesystem (macOS APFS
+    // default) ====
+
+    #[test]
+    fn uppercase_rm_rf_root_still_blocks() {
+        assert_decision("RM -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn absolute_path_uppercase_rm_rf_home_still_blocks() {
+        assert_decision("/bin/Rm -rf ~", Decision::Block);
+    }
+
+    #[test]
+    fn uppercase_dd_still_blocks() {
+        assert_decision("DD if=/dev/zero of=/dev/disk0", Decision::Block);
+    }
+
+    #[test]
+    fn uppercase_git_push_force_still_blocks() {
+        assert_decision("GIT push --force origin main", Decision::Block);
+    }
+
+    #[test]
+    fn uppercase_git_dash_c_still_strips_global_flags_before_matching() {
+        // Regression for the compound bug: an unfolded `base` would match
+        // the rule's own command name but skip `git_strip_global_flags`,
+        // still missing the `push --force` shape underneath `-C`.
+        assert_decision("GIT -C /tmp push --force", Decision::Block);
+    }
+
+    #[test]
+    fn uppercase_git_config_env_var_smuggling_still_asks() {
+        assert_decision("GIT_CONFIG_COUNT=1 GIT commit -m x", Decision::Ask);
+    }
+
+    #[test]
+    fn uppercase_rm_rf_unresolvable_target_still_asks() {
+        assert_decision("RM -rf $X", Decision::Ask);
+    }
+
+    #[test]
+    fn bare_uppercase_ls_still_allows() {
+        assert_decision("LS", Decision::Allow);
     }
 
     #[test]
