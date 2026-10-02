@@ -43,6 +43,15 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- `watchdog::tests::memory_budget_trip_fails_closed_to_ask` no longer
+  flakes under the parallel lib suite (#568): it asserted on real
+  process-wide RSS, so sibling tests freeing memory between the watchdog's
+  baseline sample and the worker's own could keep the watchdog's delta
+  under budget. `bounded_with_memory_limit` now takes the RSS reader as a
+  parameter (`bounded` passes the real `current_rss_bytes`, so production
+  behavior is unchanged) and the test drives a fake one. The real
+  `current_rss_bytes` keeps direct coverage via a nonzero-value test.
+
 - Rule 2's bare-`$VAR` command-position resolution now falls back to
   `value_history` even when the CURRENT value is missing because a later,
   command-scoped prefix assignment's own RHS was unresolvable (#516,

@@ -201,15 +201,17 @@ pub fn poll_with_budget<T>(
 /// for why `command`/`policy` are cloned before this is called rather than
 /// borrowed.
 pub(crate) fn bounded(pipeline: impl FnOnce() -> Verdict + Send + 'static) -> Verdict {
-    bounded_with_memory_limit(MEMORY_LIMIT_BYTES, pipeline)
+    bounded_with_memory_limit(MEMORY_LIMIT_BYTES, current_rss_bytes, pipeline)
 }
 
-/// Same as [`bounded`], with the memory budget as a parameter — split out
-/// so `tests` can pin the memory-trip branch deterministically with a
-/// tiny limit and a small, finite allocation, instead of only reaching it
-/// incidentally through a real unbounded-allocating repro (mirrors
+/// Same as [`bounded`], with the memory budget and the RSS source as
+/// parameters, split out so `tests` can pin the memory-trip branch
+/// deterministically with a tiny limit and a fake `rss` reader, instead of
+/// depending on process-wide RSS (issue #568; mirrors
 /// `src/bin/shguard.rs`'s `SHGUARD_TEST_MEM_LIMIT_MB` injection point,
-/// which exists for the same reason). Returns whatever `pipeline`
+/// which exists for the same reason). `rss` is sampled once for the
+/// baseline before the worker is spawned, then on every poll; `bounded`
+/// passes [`current_rss_bytes`]. Returns whatever `pipeline`
 /// produces on success, or a fail-closed [`Verdict::ask`] if either bound
 /// trips, the worker thread cannot be spawned, or it is lost (panics — an
 /// unwind mid-closure drops the sender, which surfaces here as
@@ -217,14 +219,15 @@ pub(crate) fn bounded(pipeline: impl FnOnce() -> Verdict + Send + 'static) -> Ve
 /// needed).
 fn bounded_with_memory_limit(
     memory_limit_bytes: u64,
+    rss: impl Fn() -> Option<u64>,
     pipeline: impl FnOnce() -> Verdict + Send + 'static,
 ) -> Verdict {
     // `None` (rather than defaulting to `0`) when the platform/call can't
     // measure RSS at all — a `0` fallback would silently turn the delta
-    // check into an absolute one against whatever `current_rss_bytes()`
+    // check into an absolute one against whatever `rss()`
     // next happens to return, tripping on every call in any host process
     // whose baseline already exceeds `memory_limit_bytes`.
-    let baseline_rss = current_rss_bytes();
+    let baseline_rss = rss();
     // Computed before `spawn`, not after: like the binary's own deadline
     // (started before stdin is even read), the budget covers everything
     // this call does, including thread-spawn latency — not just the time
@@ -245,8 +248,8 @@ fn bounded_with_memory_limit(
 
     let outcome = poll_with_budget(&result_rx, deadline, MEMORY_POLL_INTERVAL, || {
         let baseline = baseline_rss?;
-        let rss = current_rss_bytes()?;
-        let delta = rss.saturating_sub(baseline);
+        let now = rss()?;
+        let delta = now.saturating_sub(baseline);
         (delta > memory_limit_bytes).then_some(delta)
     });
     match outcome {
@@ -416,6 +419,8 @@ pub fn peak_rss_bytes() -> Option<u64> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     /// Issue #518: `peak_rss_bytes` moved here from `src/bin/shguard.rs`
     /// specifically so this `unsafe` FFI is reachable from `tests/` at all
@@ -427,6 +432,12 @@ mod tests {
     #[test]
     fn peak_rss_bytes_reports_a_nonzero_value_for_the_running_process() {
         assert!(peak_rss_bytes().is_some_and(|rss| rss > 0));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn current_rss_bytes_reports_a_nonzero_value_for_the_running_process() {
+        assert!(current_rss_bytes().is_some_and(|rss| rss > 0));
     }
 
     #[test]
@@ -543,84 +554,28 @@ mod tests {
         assert!(matches!(outcome, PollOutcome::Received(7)));
     }
 
-    /// Deterministic pin for the memory-trip branch itself (as opposed to
-    /// only reaching it incidentally through a real unbounded-allocating
-    /// repro, which may trip on time instead — see
-    /// `tests/fail_closed_exit_paths.rs`'s
-    /// `library_analyze_fails_closed_to_ask_on_the_same_heredoc_hang`).
-    /// `cfg`-gated to the two platforms with a real `current_rss_bytes()`
-    /// implementation above — on any other platform this would
-    /// deterministically fail (there is nothing for the worker to top up
-    /// against), which is a statement about the platform, not this test.
-    ///
-    /// The pipeline doesn't just allocate a fixed amount once and hope it
-    /// shows up as RSS growth against `current_rss_bytes()` — under a
-    /// large parallel test suite, RSS is process-wide and noisy in both
-    /// directions: a one-shot allocation can land in already-resident
-    /// freed pages (delta never crosses budget), or sibling threads can
-    /// free enough in the background that a delta which crossed budget a
-    /// moment ago dips back under it before the watchdog's next poll sees
-    /// it. A single point-in-time check of either condition isn't enough
-    /// to reliably line up with the watchdog's own 50ms polling. Instead
-    /// this holds a growing set of 1 MiB chunks (each filled with a
-    /// non-zero byte, so the allocator actually writes every page rather
-    /// than mapping a shared zero page) for a several-hundred-ms window,
-    /// re-checking its own growth against the same `current_rss_bytes()`
-    /// the watchdog polls every 20ms and topping up whenever the delta has
-    /// fallen back under `memory_limit_bytes` plus
-    /// [`BASELINE_DIVERGENCE_MARGIN_BYTES`] of headroom — keeping the
-    /// over-budget condition continuously true from the watchdog's own
-    /// point of view (not just the worker's — see "the margin exists
-    /// because" below) for long enough that at least one of the
-    /// watchdog's own polls will observe it, for any baseline divergence
-    /// up to the margin, rather than relying on one instant lining up
-    /// with one of the watchdog's polls. The 400ms window (not the
-    /// 256-chunk/256 MiB cap — unreachable at one push per 20ms iteration,
-    /// ~20 pushes over the window) is what bounds this test's own memory
-    /// use; the cap is a backstop against a future edit that removes or
-    /// lengthens the per-iteration sleep.
-    ///
-    /// The margin exists because the worker's own baseline (sampled here,
-    /// after the watchdog has already spawned this thread) and the
-    /// watchdog's baseline (sampled in [`bounded_with_memory_limit`],
-    /// before spawning) are two different instants — if sibling test
-    /// threads free memory in that gap, the watchdog's baseline (sampled
-    /// earlier, before those frees) sits *higher* than the worker's, so
-    /// the watchdog's own delta is *smaller* than the worker's own delta
-    /// by that gap. Maintaining extra headroom past `memory_limit_bytes`
-    /// on the worker's side absorbs a gap up to
-    /// [`BASELINE_DIVERGENCE_MARGIN_BYTES`] without needing to know its
-    /// exact size (unmeasurable from in here — the watchdog's baseline
-    /// sample isn't visible to this closure).
-    ///
-    /// A trip confirmed by this test isn't proof the watchdog observed
-    /// *this worker's own* allocation specifically, as opposed to
-    /// extrinsic growth elsewhere in the suite that happened to cross the
-    /// (deliberately tiny) budget first — but either way the memory-trip
-    /// branch itself is genuinely exercised end to end, which is what this
-    /// test pins.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    /// Deterministic pin for the memory-trip branch. The RSS source is
+    /// faked (issue #568): real process-wide RSS is noisy under the parallel
+    /// lib suite, so a real-RSS assertion can miss the trip. The worker
+    /// raises the fake past the budget, then blocks until the test releases
+    /// it, so it cannot return `Allow` before the watchdog polls.
     #[test]
     fn memory_budget_trip_fails_closed_to_ask() {
-        const BASELINE_DIVERGENCE_MARGIN_BYTES: u64 = 2 * 1024 * 1024;
         let memory_limit_bytes = 64 * 1024;
-        let worker_floor_bytes = memory_limit_bytes + BASELINE_DIVERGENCE_MARGIN_BYTES;
-        let verdict = bounded_with_memory_limit(memory_limit_bytes, move || {
-            let baseline = current_rss_bytes();
-            let mut held: Vec<Vec<u8>> = Vec::new();
-            let hold_until = Instant::now() + Duration::from_millis(400);
-            while Instant::now() < hold_until && held.len() < 256 {
-                let over_worker_floor = baseline
-                    .zip(current_rss_bytes())
-                    .is_some_and(|(base, now)| now.saturating_sub(base) > worker_floor_bytes);
-                if !over_worker_floor {
-                    held.push(vec![0xAAu8; 1024 * 1024]);
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            std::hint::black_box(&held);
-            Verdict::allow(Vec::new())
-        });
+        let fake_rss = Arc::new(AtomicU64::new(0));
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let worker_rss = Arc::clone(&fake_rss);
+        let reader_rss = Arc::clone(&fake_rss);
+        let verdict = bounded_with_memory_limit(
+            memory_limit_bytes,
+            move || Some(reader_rss.load(Ordering::SeqCst)),
+            move || {
+                worker_rss.store(memory_limit_bytes + 1, Ordering::SeqCst);
+                let _ = release_rx.recv_timeout(EVALUATION_TIMEOUT * 2);
+                Verdict::allow(Vec::new())
+            },
+        );
+        drop(release_tx);
         assert_eq!(verdict.decision(), crate::verdict::Decision::Ask);
         assert!(
             verdict
