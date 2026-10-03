@@ -16,6 +16,9 @@ Precedence when guides conflict: language guide > principles.
 
 - lefthook + gitleaks are the mandated pre-commit stack (`lefthook.yml` at
   repo root; `gitleaks git --staged --redact`).
+- There is no PR CI: lefthook `pre-push` (clippy, test, `cargo deny check`,
+  up-to-date-with-`origin/main` check) is the merge gate. Release and the
+  nightly fuzzer stay on GitHub Actions.
 - `git commit --no-verify` and `SKIP=` bypasses are banned except as a
   documented emergency recorded in the commit message.
 - `rustfmt.toml` is INTENTIONALLY ABSENT: rustfmt runs at defaults per

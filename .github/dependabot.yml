@@ -1,7 +1,7 @@
 version: 2
 
 updates:
-  # Keeps the SHA-pinned actions in ci.yaml, release.yaml, and
+  # Keeps the SHA-pinned actions in release.yaml and
   # fuzz-nightly.yaml current: Dependabot resolves the new tag's commit SHA
   # itself and updates both the pin and its trailing "# vX.Y.Z" comment, the
   # same renewal release.yaml's header currently describes as a manual
