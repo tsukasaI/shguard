@@ -14,3 +14,18 @@ pre-commit:
     rust-lint:
       glob: "*.rs"
       run: cargo clippy --all-targets -- -D warnings
+# No `glob` on the cargo jobs: a Cargo.toml/Cargo.lock-only change (e.g. a
+# Dependabot bump) must still be linted, tested, and license/advisory-checked.
+pre-push:
+  parallel: true
+  commands:
+    up-to-date:
+      run: bash scripts/check-up-to-date.sh
+    rust-lint:
+      run: cargo clippy --all-targets -- -D warnings
+    rust-test:
+      run: cargo test
+    cargo-deny:
+      run: cargo deny check
+    workflow-scripts-test:
+      run: node --test .claude/workflows/bypass-hunt.test.mjs

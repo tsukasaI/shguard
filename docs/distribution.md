@@ -11,7 +11,7 @@ Published via `cargo publish` after tagging a release. The `Cargo.toml` metadata
 
 ### Keeping current
 Run `cargo publish` after each tagged release, once the GitHub Release workflow
-completes and CI is green.
+completes.
 
 ## Homebrew
 

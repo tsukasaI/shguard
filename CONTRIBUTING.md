@@ -1,5 +1,17 @@
 # Contributing
 
+## Local gate (no PR CI)
+
+PRs have no GitHub Actions check: the lefthook `pre-push` hook is the merge
+gate (clippy, `cargo test`, `cargo deny check`, the bypass-hunt workflow
+script tests, and a check that the branch is based on the latest
+`origin/main`). One-time setup:
+
+```bash
+cargo install cargo-deny --locked
+lefthook install
+```
+
 ## The differential fuzzer (`tests/fuzz_differential.rs`)
 
 shguard's whole pitch (README "What it is") is that it decides by

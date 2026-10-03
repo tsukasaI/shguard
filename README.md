@@ -26,8 +26,8 @@ covers beyond the published GuardFall catalog — see [Attribution](#attribution
 ## Coverage
 
 Three deterministic, test-backed coverage numbers, checked against the
-actual test sources by `tests/coverage_metrics.rs` on every CI run: if
-any number below drifts from what the tests actually contain, CI fails
+actual test sources by `tests/coverage_metrics.rs` on every pre-push run: if
+any number below drifts from what the tests actually contain, the push fails
 rather than letting it go stale silently.
 
 - **Bypass classes closed:** 7 (GuardFall's five published classes A-E,
