@@ -1,5 +1,20 @@
 # Contributing
 
+## Local gate (no PR CI)
+
+Human-authored PRs have no GitHub Actions check: the lefthook `pre-push`
+hook is the merge gate (fmt, clippy, `cargo test`, `cargo deny check`, the
+bypass-hunt workflow script tests, and a check that the pushed branch is
+based on the latest `origin/main`). `.github/workflows/main-check.yaml` runs
+the same Rust checks only on pushes to `main` and on Dependabot PRs, which
+never pass through a local hook. One-time setup (also needs Node >= 24 on
+`PATH`):
+
+```bash
+cargo install cargo-deny --locked
+lefthook install
+```
+
 ## The differential fuzzer (`tests/fuzz_differential.rs`)
 
 shguard's whole pitch (README "What it is") is that it decides by

@@ -9303,7 +9303,7 @@ mod tests {
         );
     }
 
-    // ==== Embedded blocklist parses (malformed shipped file fails CI, not
+    // ==== Embedded blocklist parses (malformed shipped file fails `cargo test`, not
     // runtime) ====
 
     #[test]

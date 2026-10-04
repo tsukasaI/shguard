@@ -2,9 +2,10 @@
 //! (bypass classes closed, regression test count, benign corpus size).
 //! This test computes each mechanically from the actual test sources and
 //! asserts they match what README.md states, so a maintainer who adds a
-//! case without updating README (or vice versa) fails CI rather than
-//! silently drifting -- "sourced from CI, not hand-updated" per the
-//! issue's own acceptance criterion, without requiring dynamic badge
+//! case without updating README (or vice versa) fails `cargo test` (the
+//! lefthook pre-push gate) rather than silently drifting -- "sourced from
+//! CI, not hand-updated" per the issue's own acceptance criterion,
+//! without requiring dynamic badge
 //! infrastructure this project has nowhere to host.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
