@@ -525,6 +525,31 @@ except_targets = [
 ]
 ```
 
+`except_targets` matches the token's text, so a symlink at an excepted path
+(say a scratch `--body-file` that points at `~/.ssh/id_rsa`) still counts as
+excepted. A rule can opt in to `resolve_symlinks = true` to close that:
+
+```toml
+[[deny]]
+id = "upload-outside-scratch"
+reason = "uploads are limited to the scratch directory"
+command = "upload-tool"
+except_targets = [{ prefix = "/var/scratch/" }]
+resolve_symlinks = true
+```
+
+Each candidate is then canonicalized (`std::fs::canonicalize`, relative
+candidates against the hook payload's `cwd`) and the *canonical* path must
+match an alternative for the exception to apply. It fails closed: if
+canonicalization fails (missing or dangling path, permission error, a
+relative candidate with no usable absolute `cwd`, including after an in-line
+`cd` to a relative directory) the exception does not apply and the rule
+fires. That includes a file the same command creates later. Write
+`except_targets` entries in the canonical spelling (on macOS `/tmp` resolves
+to `/private/tmp`). Everything else stays lexical. The key is only valid on
+`deny`/`ask` rules with path-based (`exact`/`prefix`) `except_targets`;
+`allow` entries and `url_host` excepts reject it at load time.
+
 The rule fires unless *every* candidate target token matches an
 `except_targets` alternative — a mix of a local and a remote `rsync`
 argument still asks, since the remote one is never excepted. A token whose

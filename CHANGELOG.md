@@ -4,6 +4,15 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in per-rule `resolve_symlinks = true` for `except_targets` (#583): each
+  candidate is canonicalized (relative ones against the hook payload `cwd`)
+  before except matching, so a symlink at an excepted path no longer
+  suppresses the rule. Fails closed when canonicalization fails (missing or
+  dangling path, no usable cwd). Rejected at load without path-based
+  `except_targets` and on allow-side entries.
+
 ## [0.7.1] - 2026-10-02
 
 ### Changed
