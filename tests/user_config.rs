@@ -737,6 +737,68 @@ fn except_targets_covering_every_required_tokens_word_still_excepts_correctly() 
     assert!(permission_reason(&output).contains("user-ask-gh-repo-delete"));
 }
 
+// Issue #581: `target_flags` scopes except_targets candidates to one flag's
+// value, so `gh issue comment 123 --body-file <scratch path>` is excepted
+// even though the issue number is an unexceptable positional.
+#[test]
+fn except_targets_target_flags_scopes_candidates_to_the_flag_value() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[ask]]
+        id = "user-ask-gh-comment-body-file"
+        reason = "confirm gh issue comment unless the body file is in the scratchpad"
+        command = "gh issue comment"
+        target_flags = ["--body-file", "-F"]
+        except_targets = [{ prefix = "/private/tmp/claude-501/" }]
+    "#,
+    );
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+
+    for command in [
+        "gh issue comment 123 --body-file /private/tmp/claude-501/body.md",
+        "gh issue comment 123 --body-file=/private/tmp/claude-501/body.md",
+    ] {
+        let output = run_hook(&bash_command(command), &envs);
+        assert_eq!(permission_decision(&output), "allow", "{command}");
+    }
+
+    for command in [
+        "gh issue comment 123 --body-file /etc/passwd",
+        "gh issue comment 123 --body-file /private/tmp/claude-501/x.md -F /etc/passwd",
+        "gh issue comment 123 -F /etc/passwd --body-file /private/tmp/claude-501/x.md",
+        "gh issue comment 123 --body hello",
+        "gh issue comment 123 --body-file",
+        "gh issue comment 123 --body-file \"$F\"",
+    ] {
+        let output = run_hook(&bash_command(command), &envs);
+        assert_eq!(permission_decision(&output), "ask", "{command}");
+    }
+}
+
+#[test]
+fn except_targets_target_flags_invalid_spec_is_rejected_at_config_load() {
+    // Fail closed: a malformed key must make every command ask, not load a
+    // rule that silently ignores the key.
+    for bad in ["[]", "[\"body-file\"]", "[\"--\"]"] {
+        let (_dir, config_path) = write_config(&format!(
+            r#"
+            [[ask]]
+            id = "user-ask-bad-target-flags"
+            reason = "confirm gh issue comment"
+            command = "gh issue comment"
+            target_flags = {bad}
+            except_targets = [{{ prefix = "/private/tmp/claude-501/" }}]
+        "#
+        ));
+        let output = run_hook(
+            &bash_command("echo hi"),
+            &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+        );
+        assert_eq!(permission_decision(&output), "ask", "{bad}");
+        assert!(!permission_reason(&output).is_empty());
+    }
+}
+
 // ==== Adversarial ====
 
 #[test]

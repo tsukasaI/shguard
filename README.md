@@ -759,6 +759,57 @@ one meant to span every subcommand of a dispatched command — can turn a
 real flag into an accidentally-swallowed value on the subcommands where
 your declared flag doesn't actually take one.
 
+**Scoping candidates to one flag's value: `target_flags`.** Some rules
+only care about the value of one flag: `gh issue comment 123 --body-file
+/private/tmp/claude-501/body.md` has the issue number `123` (a positional
+no `exact`/`prefix` matcher can sensibly except) next to the one value
+that matters. `target_flags` lists the flags (written with their leading
+dashes, unlike `value_flags`) whose values are the ONLY except_targets
+candidates for that rule; positionals and every other flag's value stop
+being candidates:
+
+```toml
+[[ask]]
+id = "gh-comment-body-file"
+reason = "confirm gh issue comment unless the body file is in the scratchpad"
+command = "gh issue comment"
+target_flags = ["--body-file", "-F"]
+except_targets = [{ prefix = "/private/tmp/claude-501/" }]
+```
+
+Recognised shapes are `--flag value`, `--flag=value`, and, for a listed
+single-letter flag, `-f value` / `-fvalue` (also at the end of a short
+cluster, `-sf value`). It is fail-closed: the exception applies only when
+at least one listed flag is present, every listed-flag value matches an
+`except_targets` alternative (and has no `..` segment), and no word in the
+command's tail is unresolved (`$VAR`, `$(...)`). A listed flag with no
+value after it, or none of the listed flags at all, leaves the rule firing.
+Everything after a bare `--` is ignored. A candidate containing a `..`
+path segment is never excepted, rooted or not. The rule's `value_flags`
+stop the short-cluster scan, so a declared value-taking letter before a
+listed letter owns the rest of the cluster.
+
+`target_flags` only sees the flags it lists, so it is a trust decision:
+
+- List EVERY spelling of the option, short and long. In the example above
+  `gh` accepts both `--body-file` and `-F`; an unlisted alias's value is
+  invisible, so `gh issue comment 123 --body-file /private/tmp/claude-501/x.md
+  -F /etc/passwd` would be excepted if `-F` were left out.
+- No other flag is examined at all. A mode flag that changes what the
+  command does (`--delete-last`, `--attach`, ...) passes through, so pair
+  the rule with a separate `deny` entry for such flags.
+- Abbreviated long spellings (`--body-f`, accepted by `getopt_long` tools)
+  are NOT recognised, and prefix matching is deliberately not done
+  (`--body` is a real, different `gh` flag). For a tool that accepts
+  abbreviations, pair the rule with a `deny` or do not use `target_flags`.
+- `-F=value` is NOT recognised as an attached form (the glued value would
+  be `=value`), so it asks.
+
+`target_flags` needs a non-empty `except_targets` and an
+empty `targets`, cannot be combined with `attached_value_flags`, and an
+empty list or an entry that is not a flag (`"body-file"`, `"--"`, `"-ab"`)
+is a load-time error.
+
 Per-command policy can be scoped to a subcommand sequence: a multi-word
 `command` value matches a leading sequence of positional words, e.g.
 `command = "gh repo delete"` asks only before `gh repo delete ...`, while
