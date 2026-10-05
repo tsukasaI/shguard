@@ -140,8 +140,8 @@ const MAX_STDIN_BYTES: u64 = 10 * 1024 * 1024;
 const EVALUATION_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How often [`resolve_first_result`]'s watchdog polls the worker's actual
-/// memory use (via [`shguard::watchdog::peak_rss_bytes`]) while waiting on the result
-/// channel, instead of blocking on a single [`EVALUATION_TIMEOUT`]-long
+/// memory use (via [`shguard::watchdog::peak_rss_bytes`]) while waiting on
+/// the result channel, instead of blocking on a single [`EVALUATION_TIMEOUT`]-long
 /// `recv_timeout` the way the wall-clock-only watchdog used to. Short
 /// enough that the runaway-allocation repro (~4 GB/s, see
 /// [`EVALUATION_TIMEOUT`]) overshoots [`MEMORY_LIMIT_BYTES`] by at most
@@ -396,9 +396,15 @@ enum FirstResult {
 /// `shguard::watchdog::poll_with_budget`, shared with `src/watchdog.rs`'s
 /// own [`bounded_with_memory_limit`]-equivalent for the library entry
 /// points; this function only supplies the two things that differ here
-/// (an ABSOLUTE RSS cap rather than a delta, via [`shguard::watchdog::peak_rss_bytes`],
-/// and the `FirstResult` shape `main`'s emit-and-exit arm expects instead
-/// of a fail-closed [`shguard::verdict::Verdict`] directly).
+/// (an ABSOLUTE RSS cap rather than a delta, via
+/// [`shguard::watchdog::peak_rss_bytes`], and the `FirstResult` shape
+/// `main`'s emit-and-exit arm expects instead of a fail-closed
+/// [`shguard::verdict::Verdict`] directly).
+///
+/// A `None` RSS read (the platform or call cannot measure) only means this
+/// poll has no memory signal: it is not a trip, and the `timeout`
+/// wall-clock bound still applies. Do not turn `None` into a trip or skip
+/// the deadline check.
 fn resolve_first_result(
     rx: &Receiver<serde_json::Value>,
     memory_limit: u64,
@@ -1267,8 +1273,8 @@ mod tests {
     /// first iteration (real RSS is never zero), but that must not discard
     /// the value `try_recv` finds waiting for it. `#[cfg(unix)]`: mirrors
     /// `shguard::watchdog::peak_rss_bytes`'s own platform gating — on any
-    /// other platform there is no RSS check to trip in the first place. Paired with
-    /// `memory_trip_fails_closed_when_the_channel_stays_empty` below: on its
+    /// other platform there is no RSS check to trip in the first place.
+    /// Paired with `memory_trip_fails_closed_when_the_channel_stays_empty` below: on its
     /// own, this test can't distinguish "the memory arm's `try_recv` won"
     /// from "the memory arm never ran and the ordinary `recv_timeout` path
     /// won instead" — the sibling test pins that the arm genuinely trips

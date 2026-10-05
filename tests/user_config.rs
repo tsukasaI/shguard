@@ -2570,7 +2570,11 @@ fn dev_null_fix_does_not_weaken_self_protection_for_a_real_config_directory() {
 #[test]
 fn config_symlinked_to_dev_null_still_protects_its_own_literal_directory() {
     let home = tempdir().expect("tempdir should create");
-    let config_dir = home.path().join(".config").join("shguard");
+    // Discovered through `XDG_CONFIG_HOME` with `HOME` unset (not `HOME`
+    // itself): a `~`-spelled rule's `$HOME` twin would otherwise match this
+    // path first and mask which rule the literal-directory pin is about.
+    let xdg_config_home = home.path().join(".config");
+    let config_dir = xdg_config_home.join("shguard");
     fs::create_dir_all(&config_dir).expect("config dir should create");
     #[cfg(unix)]
     std::os::unix::fs::symlink("/dev/null", config_dir.join("config.toml"))
@@ -2584,14 +2588,14 @@ fn config_symlinked_to_dev_null_still_protects_its_own_literal_directory() {
                 .to_str()
                 .expect("path should be valid UTF-8")
         )),
-        &[("HOME", home.path().to_str().unwrap())],
+        &[("XDG_CONFIG_HOME", xdg_config_home.to_str().unwrap())],
     );
     assert_eq!(permission_decision(&deny_output), "deny");
     assert!(permission_reason(&deny_output).contains("shguard-self-protect-config-tee-literal"));
 
     let allow_output = run_hook(
         &bash_command("ls foo 2>/dev/null"),
-        &[("HOME", home.path().to_str().unwrap())],
+        &[("XDG_CONFIG_HOME", xdg_config_home.to_str().unwrap())],
     );
     assert_eq!(permission_decision(&allow_output), "allow");
 }
