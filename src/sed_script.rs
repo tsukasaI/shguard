@@ -11,7 +11,9 @@
 //! appear as data (`s/w/x/`, `s|a|b|g`) and `s` accepts any delimiter. It
 //! errs toward over-reporting: any command letter it does not recognise,
 //! any unresolved script word and any `-f script-file` (never read here)
-//! counts as "not proven free".
+//! counts as "not proven free". That includes harmless-looking cases:
+//! `w /dev/stdout` and a script built from an unresolved expansion
+//! (`sed "s/$a/$b/" f`) both Ask.
 //!
 //! GNU and BSD `sed` disagree on a few points that change where the script
 //! is and how it splits, so [`classify`] analyses every combination and a
@@ -62,8 +64,12 @@ impl Unproven {
 enum Outcome {
     Safe,
     Unsafe(Unproven),
-    /// A definite syntax error in this reading: the real sed would refuse
-    /// to run it, so it contributes nothing unless every reading is one.
+    /// A definite syntax error in this reading (unterminated `s`, unknown
+    /// `s` flag or command letter, missing option value, no script): the
+    /// real sed would refuse to run it, so it contributes nothing unless
+    /// every reading is one. Anything the lexer merely cannot classify is
+    /// `Unsafe(Unproven::Unlexable)` instead, because another dialect might
+    /// accept it.
     Unparseable,
 }
 
@@ -108,10 +114,10 @@ fn script_sources(args: &[NormalizedWord], bsd: bool) -> Result<Option<String>, 
         let word = &args[i];
         i += 1;
         let Resolution::Resolved(text) = word.resolution() else {
-            // Once a script source is known, a quoted single-word
-            // unresolved value is taken as a file operand; anything else
-            // might be an option or the script itself.
-            if (first_operand.is_some() || !expressions.is_empty()) && word.is_single_word() {
+            // Only past `--` (with the script already known) is an
+            // unresolved word certainly a file operand; before that GNU
+            // getopt may read its runtime value as an option.
+            if options_ended && (first_operand.is_some() || !expressions.is_empty()) {
                 continue;
             }
             return Err(Outcome::Unsafe(Unproven::Unresolved));
@@ -133,6 +139,9 @@ fn script_sources(args: &[NormalizedWord], bsd: bool) -> Result<Option<String>, 
                 Some((n, v)) => (n, Some(v)),
                 None => (long, None),
             };
+            let Some(name) = resolve_long_option(name) else {
+                return Err(Outcome::Unsafe(Unproven::Unlexable));
+            };
             match name {
                 "expression" => match value {
                     Some(v) => expressions.push(v.to_string()),
@@ -145,8 +154,7 @@ fn script_sources(args: &[NormalizedWord], bsd: bool) -> Result<Option<String>, 
                 "in-place" | "line-length" | "quiet" | "silent" | "regexp-extended" | "posix"
                 | "debug" | "sandbox" | "separate" | "unbuffered" | "null-data"
                 | "zero-terminated" | "binary" | "follow-symlinks" => {}
-                "version" | "help" => info_only = true,
-                _ => return Err(Outcome::Unparseable),
+                _ => info_only = true,
             }
             continue;
         }
@@ -182,7 +190,7 @@ fn script_sources(args: &[NormalizedWord], bsd: bool) -> Result<Option<String>, 
                     }
                     break;
                 }
-                _ => return Err(Outcome::Unparseable),
+                _ => return Err(Outcome::Unsafe(Unproven::Unlexable)),
             }
         }
     }
@@ -193,6 +201,44 @@ fn script_sources(args: &[NormalizedWord], bsd: bool) -> Result<Option<String>, 
         return Ok(Some(expressions.join("\n")));
     }
     first_operand.map(Some).ok_or(Outcome::Unparseable)
+}
+
+/// GNU `sed` long options. getopt_long accepts any unambiguous prefix, so
+/// `--expr=...` is `--expression=...`.
+const LONG_OPTIONS: &[&str] = &[
+    "expression",
+    "file",
+    "in-place",
+    "line-length",
+    "quiet",
+    "silent",
+    "regexp-extended",
+    "posix",
+    "debug",
+    "sandbox",
+    "separate",
+    "unbuffered",
+    "null-data",
+    "zero-terminated",
+    "binary",
+    "follow-symlinks",
+    "version",
+    "help",
+];
+
+/// The full option name `name` selects, or `None` when it is unknown or an
+/// ambiguous prefix. Both are treated as unlexable by the caller rather than
+/// as a syntax error: a dialect that rejects the word as an option would
+/// instead consume it as a value, hiding it from the other reading.
+fn resolve_long_option(name: &str) -> Option<&'static str> {
+    if let Some(exact) = LONG_OPTIONS.iter().find(|o| **o == name) {
+        return Some(exact);
+    }
+    let mut matches = LONG_OPTIONS.iter().filter(|o| o.starts_with(name));
+    match (matches.next(), matches.next()) {
+        (Some(only), None) => Some(only),
+        _ => None,
+    }
 }
 
 /// Consumes the next word as an option value. `needed` values (a script)
@@ -290,7 +336,7 @@ impl Lexer {
                 // of the line. Ending it early lexes more, never less.
                 ':' | 'b' | 't' | 'T' | 'v' => {
                     self.skip_blanks();
-                    self.skip_while(|c| !c.is_whitespace() && c != ';');
+                    self.skip_while(|c| !c.is_whitespace() && c != ';' && c != '}');
                 }
                 's' => self.substitute()?,
                 'y' => self.transliterate()?,
@@ -339,7 +385,7 @@ impl Lexer {
                 self.pos += 1;
                 let delim = self.next_or_err()?;
                 if delim == '\\' || delim == '\n' {
-                    return Err(Outcome::Unparseable);
+                    return Err(Outcome::Unsafe(Unproven::Unlexable));
                 }
                 self.address_regex(delim)?;
                 Ok(true)
@@ -400,7 +446,7 @@ impl Lexer {
     fn delimiter(&mut self) -> Result<char, Outcome> {
         let delim = self.next_or_err()?;
         if delim == '\\' || delim == '\n' {
-            Err(Outcome::Unparseable)
+            Err(Outcome::Unsafe(Unproven::Unlexable))
         } else {
             Ok(delim)
         }
@@ -530,7 +576,8 @@ mod tests {
         assert_eq!(verdict(&["q;k", "f"]), Some(Unproven::Unlexable));
         assert_eq!(verdict(&["s/a/b/x", "f"]), Some(Unproven::Unlexable));
         assert_eq!(verdict(&["s/a/b", "f"]), Some(Unproven::Unlexable));
-        assert_eq!(verdict(&["--expr=w out", "f"]), Some(Unproven::Unlexable));
+        assert_eq!(verdict(&["--expr=w out", "f"]), Some(Unproven::Write));
+        assert_eq!(verdict(&["--bogus=w out", "f"]), Some(Unproven::Unlexable));
         assert_eq!(verdict(&[]), Some(Unproven::Unlexable));
         assert_eq!(verdict(&["-n"]), Some(Unproven::Unlexable));
         let unresolved =
@@ -549,17 +596,38 @@ mod tests {
     }
 
     #[test]
-    fn quoted_unresolved_file_operand_after_the_script_is_tolerated() {
+    fn unresolved_word_after_the_script_is_tolerated_only_past_double_dash() {
         let quoted = NormalizedWord::unresolvable_single_word(
             crate::normalize::UnresolvableKind::ParameterExpansion,
         );
         let mut args = words(&["-n", "1,5p"]);
         args.push(quoted.clone());
+        assert_eq!(classify(&args), Some(Unproven::Unresolved));
+        let mut args = words(&["-n", "--", "1,5p"]);
+        args.push(quoted);
         assert_eq!(classify(&args), None);
         let unquoted =
             NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::ParameterExpansion);
-        let mut args = words(&["-n", "1,5p"]);
+        let mut args = words(&["-n", "--", "1,5p"]);
         args.push(unquoted);
-        assert_eq!(classify(&args), Some(Unproven::Unresolved));
+        assert_eq!(classify(&args), None);
+    }
+
+    #[test]
+    fn gnu_valid_words_a_bsd_reading_would_swallow_are_still_found() {
+        for args in [
+            &["-i", "--expr=w out", "s/x/y/", "f"][..],
+            &["-i", "--e=w out", "p", "f"],
+            &["-i", "--fi=script.sed", "p", "f"],
+            &["-i", "--fi=/dev/stdin", "p", "f"],
+            &["-i", "--bogus", "p", "f"],
+            &["-i", "--s", "p", "f"],
+            &["-i", "s\\a\\b\\w out", "p", "f"],
+            &["-i", "s\na\nb\nw out", "p", "f"],
+            &["-i", "\\\\a\\\\w out", "p", "f"],
+            &["-i", "b}w out", "p", "f"],
+        ] {
+            assert!(verdict(args).is_some(), "{args:?}");
+        }
     }
 }

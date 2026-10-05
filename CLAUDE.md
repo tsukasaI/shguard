@@ -14,7 +14,7 @@ Precedence when guides conflict: language guide > principles.
 
 ## Tooling facts
 
-- lefthook + gitleaks are the mandated pre-commit stack (`lefthook.yml` at
+- lefthook + gitleaks are the mandated pre-commit stack (`lefthook.yaml` at
   repo root; `gitleaks git --staged --redact`).
 - Human PRs get no CI: lefthook `pre-push` (fmt, clippy, test,
   `cargo deny check`, up-to-date-with-`origin/main` check) is the merge

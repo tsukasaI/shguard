@@ -17,7 +17,7 @@ fetched=0
 
 while read -r local_ref local_sha remote_ref _remote_sha; do
   [[ -n "${local_ref:-}" ]] || continue
-  [[ "$remote_ref" == refs/heads/* ]] || continue
+  [[ "${remote_ref:-}" == refs/heads/* ]] || continue
   [[ "$local_sha" != "$zero_sha" ]] || continue
 
   if [[ "$fetched" -eq 0 ]]; then
