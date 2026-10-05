@@ -7313,9 +7313,9 @@ const NODE_GRAMMAR: InlineGrammar = InlineGrammar {
 
 const PERL_GRAMMAR: InlineGrammar = InlineGrammar {
     code_chars: "eE",
-    plain_chars: "acfglnpsStTuUvwWXh0123456789",
+    plain_chars: "acdfglnpsStTuUvwWXh0123456789",
     value_chars: "I",
-    attached_chars: "xiCdDV",
+    attached_chars: "xiCDV",
     required_attached_chars: "MmF",
     operand_chars: "",
     cluster: true,
@@ -7327,9 +7327,9 @@ const PERL_GRAMMAR: InlineGrammar = InlineGrammar {
 
 const RUBY_GRAMMAR: InlineGrammar = InlineGrammar {
     code_chars: "e",
-    plain_chars: "acdlnpsSvwyh0123456789",
+    plain_chars: "acdlnpsSvwyhWTK0123456789",
     value_chars: "IrCXE",
-    attached_chars: "FKxiWT",
+    attached_chars: "Fxi",
     required_attached_chars: "",
     operand_chars: "",
     cluster: true,
@@ -12725,6 +12725,11 @@ mod tests {
             "ruby -e 'puts 1'",
             "ruby3.3 -e 'puts 1'",
             "ruby -ne 'puts 1'",
+            "ruby -We 'puts 1'",
+            "ruby -Te 'puts 1'",
+            "ruby -Kse 'puts 1'",
+            "perl -de 'print 1'",
+            "perl -pi -e 's/a/b/'",
             "php8.2 -r 'echo 1;'",
             "lua5.4 -e 'print(1)'",
         ] {
