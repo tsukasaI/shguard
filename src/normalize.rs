@@ -322,7 +322,7 @@ use crate::ast::{
 /// unset: space, tab, newline. This module never folds against any other
 /// `IFS` value (module docs) — a same-line `IFS=` reassignment is the
 /// structural gate's concern, not this stage's.
-const DEFAULT_IFS_WHITESPACE: &str = " \t\n";
+pub(crate) const DEFAULT_IFS_WHITESPACE: &str = " \t\n";
 
 /// Folds one [`Word`] into the normalised words it denotes.
 ///
