@@ -178,9 +178,13 @@ tooling per `coding-guidelines/patterns/tooling.md`."*
   `NormalizedWord` cannot be simultaneously resolved and unresolvable; a
   `Verdict::Block` without a reason is unconstructible.
 - **Dependencies point inward**: `rules`/`gate`/`normalize` depend on core AST
-  types, never on the parser crate or on serde/hook JSON.
-- **Wiring in one composition root**: `src/bin/shguard.rs` is the only place
-  that connects stdin → adapter → `analyze` → stdout.
+  types, never on the parser crate or on serde/hook JSON. `rules.rs` exposes
+  serde-free typed constructors; `config_loader.rs` owns the serde DTOs and
+  TOML loading. `gate.rs` does not import `parser`: the parse function is
+  injected from `lib.rs`.
+- **Wiring in one composition root**: `src/lib.rs` wires the stages together
+  (it hands `parser::parse` to `gate`), and `src/bin/shguard.rs` is the only
+  place that connects stdin → adapter → `analyze` → stdout.
 - **Tooling** (per `patterns/tooling.md`): rustfmt, clippy (deny warnings),
   pre-commit hooks, gitleaks — configured in the scaffolding issue.
 
@@ -194,12 +198,13 @@ shguard/
 ├── Cargo.toml                # lib + [[bin]] shguard
 ├── coding-guidelines/        # git submodule
 ├── src/
-│   ├── lib.rs                # analyze() — public API, composition of stages
+│   ├── lib.rs                # analyze() — public API, composition of stages (injects the parse fn into gate)
 │   ├── verdict.rs            # Decision, Verdict, reason types
 │   ├── parser.rs             # crate adapter → shguard AST
 │   ├── normalize.rs          # static folding → NormalizedWord
-│   ├── rules.rs              # TOML rule loading + argv matching
-│   ├── gate.rs               # structural routing
+│   ├── rules.rs              # typed rule sets + argv matching (no serde/TOML)
+│   ├── config_loader.rs      # serde DTOs + TOML loading → rules.rs specs
+│   ├── gate.rs               # structural routing (parse fn injected, never imports parser)
 │   ├── config.rs             # user config discovery + Policy::load (§6 item 8)
 │   └── bin/shguard.rs        # composition root + Claude Code adapter
 ├── rules/

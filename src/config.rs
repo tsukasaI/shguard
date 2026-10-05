@@ -1577,7 +1577,7 @@ fn random_u64() -> u64 {
 /// (discoverable/auditable, this issue's own stated goal) without
 /// implying an editable copy is possible.
 fn init_config_template() -> String {
-    let commented_blocklist: String = crate::rules::EMBEDDED_BLOCKLIST
+    let commented_blocklist: String = crate::config_loader::EMBEDDED_BLOCKLIST
         .lines()
         .map(|line| {
             if line.is_empty() {
@@ -2720,7 +2720,14 @@ mod tests {
     }
 
     fn decide(rules: &Rules, allowlist: &Allowlist, command: &str, cwd: Option<&str>) -> Decision {
-        crate::gate::analyze_with_policy_in_cwd(command, rules, allowlist, cwd).decision()
+        crate::gate::analyze_with_policy_in_cwd(
+            command,
+            rules,
+            allowlist,
+            cwd,
+            crate::parse_command,
+        )
+        .decision()
     }
 
     #[test]

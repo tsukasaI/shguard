@@ -7,6 +7,7 @@
 pub mod adapter;
 mod ast;
 pub mod config;
+mod config_loader;
 mod decision_log;
 mod gate;
 pub mod normalize;
@@ -229,7 +230,19 @@ impl HookContext {
 #[must_use]
 pub fn analyze(command: &str) -> Verdict {
     let command = command.to_string();
-    watchdog::bounded(move || gate::analyze(&command))
+    watchdog::bounded(move || gate::analyze(&command, parse_command))
+}
+
+/// The parse stage handed to `gate` (composition root, plan.md §1.3): the
+/// one place `gate` is wired to `parser`. Folds the parser's own error type
+/// into [`gate::ParseRejection`], so `gate` never names the parser.
+pub(crate) fn parse_command(command: &str) -> Result<ast::CommandLine, gate::ParseRejection> {
+    parser::parse(command).map_err(|err| {
+        gate::ParseRejection::new(
+            err.to_string(),
+            err.unsupported_construct().map(str::to_string),
+        )
+    })
 }
 
 /// Config-aware sibling of [`analyze`]: same pipeline, the same
@@ -332,6 +345,7 @@ pub fn analyze_with_policy(
             &policy_owned.rules,
             &policy_owned.allowlist,
             context_owned.cwd(),
+            parse_command,
         );
         let ask_outcome = policy_owned
             .ask_outcome
