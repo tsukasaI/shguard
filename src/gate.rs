@@ -3268,10 +3268,10 @@ fn escalation_floor_contribution(
 /// [`apply_redirect_ask_floor`], [`apply_named_user_home_floor`],
 /// [`apply_token_floor`], [`apply_dirstack_tilde_floor`]/
 /// [`apply_directory_equals_tilde_floor`]/[`apply_dirstack_equal_subst_floor`],
-/// and [`apply_unknown_cwd_floor`]. [`apply_substitution_floor`] (rule 3)
-/// and [`apply_opaque_kind_floor`] (rule 8) use the same max-lift mechanics
-/// but keep their own inlined copies rather than delegating here (see
-/// their own docs). Each keeps its own name and doc comment so its call
+/// [`apply_opaque_kind_floor`] (rule 8), and [`apply_unknown_cwd_floor`].
+/// [`apply_substitution_floor`] (rule 3) uses the same max-lift mechanics
+/// but keeps its own inlined copy rather than delegating here (see its own
+/// docs). Each keeps its own name and doc comment so its call
 /// site stays self-documenting; only the mechanics live here.
 fn apply_floor(
     verdict: Verdict,
@@ -3889,8 +3889,7 @@ fn apply_substitution_floor(
 }
 
 /// Applies rule 8's opaque-unresolvable-kind floor
-/// ([`is_opaque_unresolvable`]) to a verdict — the same max-lift mechanics
-/// as [`apply_floor`]. Like [`apply_substitution_floor`], this is applied
+/// ([`is_opaque_unresolvable`]) to a verdict via [`apply_floor`]. Like [`apply_substitution_floor`], this is applied
 /// at MULTIPLE call sites (issue #445: rules 1/2/6a/6c/6e's early returns
 /// and the ordinary blocklist match, plus [`fold_floors`] itself), since
 /// `evaluate_simple_command_core`'s `opaque_kind` binding must survive the
@@ -3902,18 +3901,15 @@ fn apply_opaque_kind_floor(verdict: Verdict, kind: Option<UnresolvableKind>) -> 
     let Some(kind) = kind else {
         return verdict;
     };
-    if verdict.decision() >= Decision::Ask {
-        return verdict;
-    }
-    let argv = verdict.normalized_argv().to_vec();
     let floor_reason = format!(
         "a word is unresolvable ({kind:?}) and is not covered by a more specific structural rule"
     );
-    let reason = match verdict.reason() {
-        Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
-        None => floor_reason,
-    };
-    Verdict::ask(Reason::new(reason), argv).with_deny_message(deny_msg_for_unresolvable_kind(kind))
+    apply_floor(
+        verdict,
+        Decision::Ask,
+        floor_reason,
+        deny_msg_for_unresolvable_kind(kind),
+    )
 }
 
 /// Rules 4 and 4b's argument-position-ambiguity floors, bundled into one
