@@ -1631,12 +1631,15 @@ fn convert_word_text(text: &str) -> Result<Vec<WordPiece>, ParseError> {
     let pieces = catch_parser_panic(|| bword::parse(rest, &parser_options()))?
         .map_err(|err| ParseError::syntax(format!("word parse of {rest:?}: {err}")))?;
     for piece in pieces {
-        converted.push(convert_word_piece(piece.piece)?);
+        converted.push(convert_word_piece(piece.piece, false)?);
     }
     Ok(converted)
 }
 
-fn convert_word_piece(piece: bword::WordPiece) -> Result<WordPiece, ParseError> {
+fn convert_word_piece(
+    piece: bword::WordPiece,
+    in_double_quotes: bool,
+) -> Result<WordPiece, ParseError> {
     match piece {
         bword::WordPiece::Text(text) => Ok(WordPiece::Literal(text)),
         bword::WordPiece::SingleQuotedText(text) => Ok(WordPiece::SingleQuoted(text)),
@@ -1645,12 +1648,14 @@ fn convert_word_piece(piece: bword::WordPiece) -> Result<WordPiece, ParseError> 
         | bword::WordPiece::GettextDoubleQuotedSequence(inner) => {
             let pieces = inner
                 .into_iter()
-                .map(|p| convert_word_piece(p.piece))
+                .map(|p| convert_word_piece(p.piece, true))
                 .collect::<Result<_, _>>()?;
             Ok(WordPiece::DoubleQuoted(pieces))
         }
         bword::WordPiece::TildeExpansion(tilde) => Ok(WordPiece::Tilde(convert_tilde(tilde))),
-        bword::WordPiece::ParameterExpansion(expr) => convert_parameter_expansion(expr),
+        bword::WordPiece::ParameterExpansion(expr) => {
+            convert_parameter_expansion(expr, in_double_quotes)
+        }
         bword::WordPiece::CommandSubstitution(inner) => Ok(WordPiece::CommandSubstitution(inner)),
         bword::WordPiece::BackquotedCommandSubstitution(inner) => {
             Ok(WordPiece::BackquotedSubstitution(inner))
@@ -1731,7 +1736,10 @@ fn describe_parameter_expr(expr: &bword::ParameterExpr) -> &'static str {
 /// (indirection, other array-indexed access, assigning defaults, …) is
 /// rejected instead — see [`describe_parameter_expr`] for the name attached
 /// to the rejection.
-fn convert_parameter_expansion(expr: bword::ParameterExpr) -> Result<WordPiece, ParseError> {
+fn convert_parameter_expansion(
+    expr: bword::ParameterExpr,
+    in_double_quotes: bool,
+) -> Result<WordPiece, ParseError> {
     match expr {
         bword::ParameterExpr::Parameter {
             parameter: bword::Parameter::Named(name),
@@ -1814,9 +1822,12 @@ fn convert_parameter_expansion(expr: bword::ParameterExpr) -> Result<WordPiece, 
             parameter,
             indirect: false,
             pattern: word,
-        } if plain_parameter_name(&parameter).is_some() => {
-            let name = plain_parameter_name(&parameter).unwrap_or_default();
-            Ok(modified(name, convert_operand(word.as_deref())?))
+        } => {
+            let name = modifiable_parameter_name(&parameter)?;
+            Ok(modified(
+                name,
+                convert_operand(word.as_deref(), in_double_quotes)?,
+            ))
         }
         bword::ParameterExpr::ReplaceSubstring {
             parameter,
@@ -1824,34 +1835,33 @@ fn convert_parameter_expansion(expr: bword::ParameterExpr) -> Result<WordPiece, 
             pattern,
             replacement,
             ..
-        } if plain_parameter_name(&parameter).is_some() => {
-            let name = plain_parameter_name(&parameter).unwrap_or_default();
-            let mut operand = convert_operand(Some(&pattern))?;
-            operand.extend(convert_operand(replacement.as_deref())?);
+        } => {
+            let name = modifiable_parameter_name(&parameter)?;
+            let mut operand = convert_operand(Some(&pattern), in_double_quotes)?;
+            operand.extend(convert_operand(replacement.as_deref(), in_double_quotes)?);
             Ok(modified(name, operand))
         }
         bword::ParameterExpr::ParameterLength {
             parameter,
             indirect: false,
-        } if plain_parameter_name(&parameter).is_some() => Ok(modified(
-            plain_parameter_name(&parameter).unwrap_or_default(),
-            Vec::new(),
-        )),
+        } => Ok(modified(modifiable_parameter_name(&parameter)?, Vec::new())),
         bword::ParameterExpr::Substring {
             parameter,
             indirect: false,
             offset,
             length,
-        } if plain_parameter_name(&parameter).is_some()
-            && !arithmetic_text_has_substitution(&offset.value)
-            && length
-                .as_ref()
-                .is_none_or(|len| !arithmetic_text_has_substitution(&len.value)) =>
-        {
-            Ok(modified(
-                plain_parameter_name(&parameter).unwrap_or_default(),
-                Vec::new(),
-            ))
+        } => {
+            let name = modifiable_parameter_name(&parameter)?;
+            let has_substitution = arithmetic_text_has_substitution(&offset.value)
+                || length
+                    .as_ref()
+                    .is_some_and(|len| arithmetic_text_has_substitution(&len.value));
+            if has_substitution {
+                return Err(ParseError::unsupported(
+                    "substring expansion with a substitution in its offset/length",
+                ));
+            }
+            Ok(modified(name, Vec::new()))
         }
         other => Err(unsupported_parameter_form(&other)),
     }
@@ -1869,14 +1879,17 @@ fn unsupported_parameter_form(expr: &bword::ParameterExpr) -> ParseError {
 }
 
 /// The "name" for a named/positional/special parameter (the same ones the
-/// bare arms above accept); `None` for any array-indexed form.
-fn plain_parameter_name(parameter: &bword::Parameter) -> Option<String> {
+/// bare arms above accept); array-indexed forms with a modifier are
+/// unsupported.
+fn modifiable_parameter_name(parameter: &bword::Parameter) -> Result<String, ParseError> {
     match parameter {
-        bword::Parameter::Named(name) => Some(name.clone()),
-        bword::Parameter::Positional(n) => Some(n.to_string()),
-        bword::Parameter::Special(special) => Some(special.to_string()),
+        bword::Parameter::Named(name) => Ok(name.clone()),
+        bword::Parameter::Positional(n) => Ok(n.to_string()),
+        bword::Parameter::Special(special) => Ok(special.to_string()),
         bword::Parameter::NamedWithIndex { .. } | bword::Parameter::NamedWithAllIndices { .. } => {
-            None
+            Err(ParseError::unsupported(
+                "array-indexed parameter expansion with a modifier (${arr[i]%p}/${arr[@]:-w})",
+            ))
         }
     }
 }
@@ -1913,7 +1926,18 @@ fn arithmetic_text_has_substitution(text: &str) -> bool {
 /// found. A process substitution cannot be built from a word-level parse
 /// (it would come back as inert text), so an operand containing `<(`/`>(`
 /// stays unsupported.
-fn convert_operand(raw: Option<&str>) -> Result<Vec<WordPiece>, ParseError> {
+///
+/// brush captures the operand with its unquoted word grammar whatever the
+/// context, but inside a double-quoted `${...}` bash treats `'` and `"` in
+/// the operand as literal characters, so re-parsing such a slice unquoted
+/// would let `'$(cmd)'` look inert while bash runs the substitution. A
+/// double-quoted operand is therefore parsed inside a synthetic `"..."`
+/// wrapper (where `'` is literal and `$(...)` stays live), and one that
+/// contains `"` stays unsupported.
+fn convert_operand(
+    raw: Option<&str>,
+    in_double_quotes: bool,
+) -> Result<Vec<WordPiece>, ParseError> {
     let Some(raw) = raw else {
         return Ok(Vec::new());
     };
@@ -1922,7 +1946,20 @@ fn convert_operand(raw: Option<&str>) -> Result<Vec<WordPiece>, ParseError> {
             "process substitution inside a parameter-expansion operand",
         ));
     }
-    convert_word_text(raw)
+    if !in_double_quotes {
+        return convert_word_text(raw);
+    }
+    if raw.contains('"') {
+        return Err(ParseError::unsupported(
+            "double quote inside a double-quoted parameter-expansion operand",
+        ));
+    }
+    match convert_word_text(&format!("\"{raw}\""))?.as_slice() {
+        [WordPiece::DoubleQuoted(inner)] => Ok(inner.clone()),
+        _ => Err(ParseError::unsupported(
+            "double-quoted parameter-expansion operand did not stay one quoted word",
+        )),
+    }
 }
 
 #[cfg(test)]

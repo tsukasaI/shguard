@@ -103,3 +103,40 @@ fn assigning_indirect_and_exotic_forms_stay_unsupported() {
         ("echo ${x:-$(", Decision::Ask),
     ]);
 }
+
+#[test]
+fn quotes_inside_double_quoted_operand_cannot_hide_a_substitution() {
+    check(&[
+        ("echo \"${x:-'$(rm -rf ~)'}\"", Decision::Block),
+        ("echo \"${x:-$'$(rm -rf ~)'}\"", Decision::Block),
+        ("echo \"${x%'$(rm -rf ~)'}\"", Decision::Block),
+        ("echo \"${x/a/'$(rm -rf ~)'}\"", Decision::Block),
+        ("echo \"${x//a/'$(rm -rf ~)'}\"", Decision::Block),
+        ("echo \"${x^^'$(rm -rf ~)'}\"", Decision::Block),
+        ("echo \"${x:?'$(rm -rf ~)'}\"", Decision::Block),
+        ("echo \"${x:+'$(rm -rf ~)'}\"", Decision::Block),
+        ("echo \"${x:-'`rm -rf ~`'}\"", Decision::Block),
+        ("echo \"${x:-${y:-'$(rm -rf ~)'}}\"", Decision::Block),
+        ("\"${x:-'$(rm -rf ~)'}\" foo", Decision::Block),
+        ("B=\"${x:-'$(rm -rf ~)'}\"", Decision::Block),
+        ("echo hi > \"${x:-'$(rm -rf ~)'}\"", Decision::Block),
+    ]);
+}
+
+#[test]
+fn quotes_in_unquoted_operand_are_still_honoured() {
+    check(&[
+        ("echo ${x:-'$(rm -rf ~)'}", Decision::Allow),
+        ("echo \"${x:-plain}\"", Decision::Allow),
+    ]);
+}
+
+#[test]
+fn issue_580_pins() {
+    check(&[
+        ("cd \"${HOME:-/tmp}\"", Decision::Allow),
+        // Stays Ask (not Block) until command-position resolution of
+        // `%`/`#` forms is added as a follow-up; never weaker than main.
+        ("B=rm; ${B%x} -rf ~", Decision::Ask),
+    ]);
+}
