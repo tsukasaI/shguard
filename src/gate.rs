@@ -6860,18 +6860,33 @@ fn collect_heredoc_substitutions(body: &str) -> HeredocScan<'_> {
     let mut unterminated = false;
 
     while i < n {
-        if !arithmetic_depths.is_empty() {
-            match consume_nested_token(bytes, body, i, &mut substitutions, &mut arithmetic_depths) {
-                Ok(Some(next)) => {
-                    i = next;
-                    continue;
-                }
-                Ok(None) => {}
-                Err(()) => {
-                    unterminated = true;
-                    break;
-                }
+        let in_arithmetic = !arithmetic_depths.is_empty();
+
+        // Top level: heredoc-body semantics — quotes are inert (a `'` or
+        // `"` here is just literal text, never a quote-protection
+        // boundary), and only `\$`/`` \` ``/`\\` are recognised escapes.
+        if !in_arithmetic
+            && i + 1 < n
+            && bytes[i] == b'\\'
+            && matches!(bytes[i + 1], b'$' | b'`' | b'\\')
+        {
+            i += 2;
+            continue;
+        }
+
+        match consume_nested_token(bytes, body, i, &mut substitutions, &mut arithmetic_depths) {
+            Ok(Some(next)) => {
+                i = next;
+                continue;
             }
+            Ok(None) => {}
+            Err(()) => {
+                unterminated = true;
+                break;
+            }
+        }
+
+        if in_arithmetic {
             match bytes[i] {
                 b'(' => {
                     if let Some(depth) = arithmetic_depths.last_mut() {
@@ -6887,28 +6902,6 @@ fn collect_heredoc_substitutions(body: &str) -> HeredocScan<'_> {
                     }
                 }
                 _ => {}
-            }
-            i += 1;
-            continue;
-        }
-
-        // Top level: heredoc-body semantics — quotes are inert (a `'` or
-        // `"` here is just literal text, never a quote-protection
-        // boundary), and only `\$`/`` \` ``/`\\` are recognised escapes.
-        if i + 1 < n && bytes[i] == b'\\' && matches!(bytes[i + 1], b'$' | b'`' | b'\\') {
-            i += 2;
-            continue;
-        }
-
-        match consume_nested_token(bytes, body, i, &mut substitutions, &mut arithmetic_depths) {
-            Ok(Some(next)) => {
-                i = next;
-                continue;
-            }
-            Ok(None) => {}
-            Err(()) => {
-                unterminated = true;
-                break;
             }
         }
 
