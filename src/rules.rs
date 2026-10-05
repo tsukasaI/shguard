@@ -3985,14 +3985,29 @@ pub(crate) fn fold_command_name(name: &str) -> String {
 /// Strips a trailing distro-style version suffix (`python3.12` -> `python`,
 /// `lua5.4` -> `lua`, `php8.2` -> `php`) so interpreter-name matching
 /// recognises versioned binaries (issue #346) without a hand-maintained list
-/// of every version. `trim_end_matches` (byte-index-unsafe alternatives like
-/// `rfind` + manual slicing panic on a multibyte name ending just past a
-/// non-ASCII character, e.g. `café`) only ever strips ASCII digits/`.`, so
-/// it never lands mid-character. Returns `name` unchanged if stripping would
-/// empty it (a name that is entirely digits/dots, or has no version suffix
-/// at all) — never reduced to an empty string.
+/// of every version. Also strips a `-dbg`/`-debug` suffix and the CPython ABI
+/// letters (`t` free-threaded, `m` pymalloc, `d` debug, `u` unicode) that
+/// follow the digits (`python3.13t`, `python3.7m`, `python3.12-dbg`); the ABI
+/// letters are stripped only when a digit precedes them, so a plain name
+/// ending in one of those letters (`sed`) is left alone. `trim_end_matches`
+/// (byte-index-unsafe alternatives like `rfind` + manual slicing panic on a
+/// multibyte name ending just past a non-ASCII character, e.g. `café`) only
+/// ever strips ASCII characters, so it never lands mid-character. Returns
+/// `name` unchanged if stripping would empty it (a name that is entirely
+/// digits/dots, or has no version suffix at all) — never reduced to an empty
+/// string.
 pub(crate) fn strip_version_suffix(name: &str) -> &str {
-    let stripped = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    let base = name
+        .strip_suffix("-dbg")
+        .or_else(|| name.strip_suffix("-debug"))
+        .unwrap_or(name);
+    let without_abi = base.trim_end_matches(['t', 'm', 'd', 'u']);
+    let base = if without_abi.ends_with(|c: char| c.is_ascii_digit()) {
+        without_abi
+    } else {
+        base
+    };
+    let stripped = base.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
     if stripped.is_empty() { name } else { stripped }
 }
 
@@ -7857,6 +7872,26 @@ mod tests {
         assert_eq!(strip_version_suffix("python3.12"), "python");
         assert_eq!(strip_version_suffix("lua5.4"), "lua");
         assert_eq!(strip_version_suffix("bash5"), "bash");
+    }
+
+    #[test]
+    fn strip_version_suffix_strips_abi_letters_and_debug_suffix() {
+        assert_eq!(strip_version_suffix("python3.13t"), "python");
+        assert_eq!(strip_version_suffix("python3.12t"), "python");
+        assert_eq!(strip_version_suffix("python3.7m"), "python");
+        assert_eq!(strip_version_suffix("python3.12-dbg"), "python");
+        assert_eq!(strip_version_suffix("python3-dbg"), "python");
+        assert_eq!(strip_version_suffix("python3.13td"), "python");
+        assert_eq!(strip_version_suffix("python-debug"), "python");
+        assert_eq!(strip_version_suffix("python3.12-debug"), "python");
+    }
+
+    #[test]
+    fn strip_version_suffix_keeps_abi_letter_without_preceding_digit() {
+        assert_eq!(strip_version_suffix("sed"), "sed");
+        assert_eq!(strip_version_suffix("mkfifo"), "mkfifo");
+        assert_eq!(strip_version_suffix("3d"), "3d");
+        assert_eq!(strip_version_suffix("-dbg"), "-dbg");
     }
 
     #[test]
