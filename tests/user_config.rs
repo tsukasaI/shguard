@@ -748,7 +748,7 @@ fn except_targets_target_flags_scopes_candidates_to_the_flag_value() {
         id = "user-ask-gh-comment-body-file"
         reason = "confirm gh issue comment unless the body file is in the scratchpad"
         command = "gh issue comment"
-        target_flags = ["--body-file"]
+        target_flags = ["--body-file", "-F"]
         except_targets = [{ prefix = "/private/tmp/claude-501/" }]
     "#,
     );
@@ -764,6 +764,8 @@ fn except_targets_target_flags_scopes_candidates_to_the_flag_value() {
 
     for command in [
         "gh issue comment 123 --body-file /etc/passwd",
+        "gh issue comment 123 --body-file /private/tmp/claude-501/x.md -F /etc/passwd",
+        "gh issue comment 123 -F /etc/passwd --body-file /private/tmp/claude-501/x.md",
         "gh issue comment 123 --body hello",
         "gh issue comment 123 --body-file",
         "gh issue comment 123 --body-file \"$F\"",

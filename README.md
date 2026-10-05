@@ -773,7 +773,7 @@ being candidates:
 id = "gh-comment-body-file"
 reason = "confirm gh issue comment unless the body file is in the scratchpad"
 command = "gh issue comment"
-target_flags = ["--body-file"]
+target_flags = ["--body-file", "-F"]
 except_targets = [{ prefix = "/private/tmp/claude-501/" }]
 ```
 
@@ -784,9 +784,28 @@ at least one listed flag is present, every listed-flag value matches an
 `except_targets` alternative (and has no `..` segment), and no word in the
 command's tail is unresolved (`$VAR`, `$(...)`). A listed flag with no
 value after it, or none of the listed flags at all, leaves the rule firing.
-Everything after a bare `--` is ignored. Because other flags' values are
-no longer checked, list every flag whose value carries the risk the rule
-guards against. `target_flags` needs a non-empty `except_targets` and an
+Everything after a bare `--` is ignored. A candidate containing a `..`
+path segment is never excepted, rooted or not. The rule's `value_flags`
+stop the short-cluster scan, so a declared value-taking letter before a
+listed letter owns the rest of the cluster.
+
+`target_flags` only sees the flags it lists, so it is a trust decision:
+
+- List EVERY spelling of the option, short and long. In the example above
+  `gh` accepts both `--body-file` and `-F`; an unlisted alias's value is
+  invisible, so `gh issue comment 123 --body-file /private/tmp/claude-501/x.md
+  -F /etc/passwd` would be excepted if `-F` were left out.
+- No other flag is examined at all. A mode flag that changes what the
+  command does (`--delete-last`, `--attach`, ...) passes through, so pair
+  the rule with a separate `deny` entry for such flags.
+- Abbreviated long spellings (`--body-f`, accepted by `getopt_long` tools)
+  are NOT recognised, and prefix matching is deliberately not done
+  (`--body` is a real, different `gh` flag). For a tool that accepts
+  abbreviations, pair the rule with a `deny` or do not use `target_flags`.
+- `-F=value` is NOT recognised as an attached form (the glued value would
+  be `=value`), so it asks.
+
+`target_flags` needs a non-empty `except_targets` and an
 empty `targets`, cannot be combined with `attached_value_flags`, and an
 empty list or an entry that is not a flag (`"body-file"`, `"--"`, `"-ab"`)
 is a load-time error.
