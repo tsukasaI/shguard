@@ -44,7 +44,12 @@
 #                        suffix appended (GNU long-option convention, e.g.
 #                        "--in-place" also matches "--in-place=.bak"; long
 #                        options and BSD-style single-dash long flags are
-#                        never letter-combinable).
+#                        never letter-combinable). For a rule whose command
+#                        is exactly "git" (deny/ask only, never allowlist
+#                        entries), a "--long" flag is also satisfied by any
+#                        non-empty prefix of it ("--mirr", "--upl=x"), since
+#                        git accepts unambiguous long-option abbreviations
+#                        (#582).
 #                      - a "|"-separated spec ("r|--recursive") means "any
 #                        one of these" (ORed) — use this so a rule can't be
 #                        dodged by swapping a short flag for its long-option

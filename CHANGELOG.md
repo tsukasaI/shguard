@@ -12,6 +12,14 @@ All notable changes to this project are documented in this file.
   excepted on the file path alone. Fail-closed on a missing, absent or
   unresolved flag value; invalid specs are rejected at load (#581).
 
+### Fixed
+
+- git long-option abbreviations (`--mirr`, `--upl=x`, `--exe=x`) no longer
+  bypass `required_flags` rules: for deny/ask rules whose command is exactly
+  `git`, a non-empty prefix of a required `--long` flag now counts as that
+  flag. Allowlist entries keep exact matching so an abbreviation can never
+  widen an Ask into an Allow (#582).
+
 ## [0.7.1] - 2026-10-02
 
 ### Changed

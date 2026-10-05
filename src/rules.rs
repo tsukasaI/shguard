@@ -160,7 +160,9 @@ enum FlagMatcher {
     /// A single short-option letter.
     Short(char),
     /// A `-`-prefixed argv token, matched verbatim or with a `=value`
-    /// suffix (GNU long-option convention, e.g. `--in-place=.bak`).
+    /// suffix (GNU long-option convention, e.g. `--in-place=.bak`). For
+    /// deny/ask rules whose command is `git`, a non-empty prefix of a
+    /// `--long` token also matches (issue #582, see [`Self::satisfied`]).
     Token(String),
     /// Satisfied if any one alternative is satisfied.
     AnyOf(Vec<FlagMatcher>),
@@ -209,7 +211,14 @@ impl FlagMatcher {
     /// Whether this flag is present anywhere in `argv` (already reduced to
     /// resolved strings — module docs on why unresolvable tokens never
     /// match).
-    fn satisfied(&self, argv: &[&str]) -> bool {
+    ///
+    /// With `long_abbrev` set (rules whose command is `git`, issue #582), a
+    /// `--`-prefixed [`Self::Token`] is also satisfied by any non-empty
+    /// prefix of it (`--mirr`, `--upl=x`): git's option parser accepts any
+    /// unambiguous prefix of a long option. No per-subcommand option table
+    /// is consulted, so an ambiguous prefix (which git itself rejects) is
+    /// over-matched to the rule's own verdict, never allowed.
+    fn satisfied(&self, argv: &[&str], long_abbrev: bool) -> bool {
         match self {
             Self::Short(c) => argv
                 .iter()
@@ -219,9 +228,31 @@ impl FlagMatcher {
                     || arg
                         .strip_prefix(token.as_str())
                         .is_some_and(|rest| rest.starts_with('='))
+                    || (long_abbrev && is_long_option_abbrev(arg, token))
             }),
-            Self::AnyOf(alternatives) => alternatives.iter().any(|alt| alt.satisfied(argv)),
+            Self::AnyOf(alternatives) => alternatives
+                .iter()
+                .any(|alt| alt.satisfied(argv, long_abbrev)),
         }
+    }
+}
+
+/// Whether `arg` (`--x` or `--x=value`) spells a non-empty prefix of the
+/// `--`-prefixed long option `token` — see [`FlagMatcher::satisfied`].
+fn is_long_option_abbrev(arg: &str, token: &str) -> bool {
+    let (Some(arg_rest), Some(full)) = (arg.strip_prefix("--"), token.strip_prefix("--")) else {
+        return false;
+    };
+    let (name, value) = match arg_rest.split_once('=') {
+        Some((name, value)) => (name, Some(value)),
+        None => (arg_rest, None),
+    };
+    if name.is_empty() {
+        return false;
+    }
+    match full.split_once('=') {
+        Some((full_name, full_value)) => full_name.starts_with(name) && value == Some(full_value),
+        None => full.starts_with(name),
     }
 }
 
@@ -2128,9 +2159,21 @@ pub(crate) struct CommandRule {
     /// restricted to the values of these flags (see [`target_flag_values`]).
     target_flags: Vec<ValueFlag>,
     deny_message: Option<DenyMessage>,
+    /// Whether `required_flags` long options also match their git-style
+    /// prefix abbreviations (issue #582). True only for deny/ask rules whose
+    /// command is exactly `git`; allowlist entries stay exact so an
+    /// abbreviation can never widen an Ask into an Allow.
+    long_abbrev: bool,
 }
 
 impl CommandRule {
+    /// Disables long-option abbreviation matching (see `long_abbrev`); used
+    /// for every allowlist entry.
+    fn exact_flags_only(mut self) -> Self {
+        self.long_abbrev = false;
+        self
+    }
+
     #[must_use]
     pub(crate) fn id(&self) -> &RuleId {
         &self.id
@@ -2208,7 +2251,12 @@ impl CommandRule {
     #[must_use]
     fn constraints_match(&self, rest_words: &[NormalizedWord]) -> bool {
         let rest = resolved_strings(rest_words);
-        if !self.required_flags.iter().all(|flag| flag.satisfied(&rest)) {
+        let long_abbrev = self.long_abbrev;
+        if !self
+            .required_flags
+            .iter()
+            .all(|flag| flag.satisfied(&rest, long_abbrev))
+        {
             return false;
         }
         let consumed = value_flag_consumed(rest_words, &self.value_flags);
@@ -3093,7 +3141,7 @@ impl PipelineRule {
         if !self
             .sink_required_flags
             .iter()
-            .all(|flag| flag.satisfied(&sink_args))
+            .all(|flag| flag.satisfied(&sink_args, false))
         {
             return false;
         }
@@ -6008,6 +6056,7 @@ fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesErr
         None => None,
     };
 
+    let long_abbrev = matches!(&command, CommandMatch::Exact(name) if name == "git");
     Ok(CommandRule {
         id: RuleId::new(dto.id),
         reason: Reason::new(dto.reason),
@@ -6021,6 +6070,7 @@ fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesErr
         attached_value_flags,
         target_flags,
         deny_message,
+        long_abbrev,
     })
 }
 
@@ -7162,6 +7212,7 @@ impl Allowlist {
             .entry
             .into_iter()
             .map(convert_command_rule)
+            .map(|rule| rule.map(CommandRule::exact_flags_only))
             .collect::<Result<Vec<_>, _>>()?;
         reject_duplicate_ids(entries.iter().map(|r| r.id.as_str()))?;
 
@@ -7629,7 +7680,12 @@ pub(crate) fn merge_user_config(
     ask_rules.extend(user_config.ask);
 
     let mut entries = allowlist.entries;
-    entries.extend(user_config.allow);
+    entries.extend(
+        user_config
+            .allow
+            .into_iter()
+            .map(CommandRule::exact_flags_only),
+    );
 
     // Append, never prepend: `match_redirect_target` folds worst-wins and
     // keeps the first-declared rule on a tie (issue #261), so appending is
@@ -7866,26 +7922,46 @@ mod tests {
     #[test]
     fn flag_matcher_token_matches_bare_flag() {
         let flag = FlagMatcher::parse("--in-place").unwrap();
-        assert!(flag.satisfied(&["--in-place"]));
+        assert!(flag.satisfied(&["--in-place"], false));
     }
 
     #[test]
     fn flag_matcher_token_matches_equals_suffix() {
         let flag = FlagMatcher::parse("--in-place").unwrap();
-        assert!(flag.satisfied(&["--in-place=.bak"]));
+        assert!(flag.satisfied(&["--in-place=.bak"], false));
     }
 
     #[test]
     fn flag_matcher_token_does_not_match_unrelated_suffix_without_equals() {
         let flag = FlagMatcher::parse("--in-place").unwrap();
-        assert!(!flag.satisfied(&["--in-placefoo"]));
+        assert!(!flag.satisfied(&["--in-placefoo"], false));
+    }
+
+    #[test]
+    fn flag_matcher_token_long_abbrev_is_opt_in_prefix_match() {
+        let flag = FlagMatcher::parse("--mirror").unwrap();
+        assert!(!flag.satisfied(&["--mirr"], false));
+        assert!(flag.satisfied(&["--mirr"], true));
+        assert!(flag.satisfied(&["--m=x"], true));
+        assert!(flag.satisfied(&["--mirror"], true));
+        assert!(!flag.satisfied(&["--"], true));
+        assert!(!flag.satisfied(&["--=x"], true));
+        assert!(!flag.satisfied(&["--mirrors"], true));
+        assert!(!flag.satisfied(&["-m"], true));
+        let alt = FlagMatcher::parse("f|--force").unwrap();
+        assert!(alt.satisfied(&["--forc"], true));
+        assert!(!alt.satisfied(&["--force-with-lease"], true));
+        let valued = FlagMatcher::parse("--push-option=ci.skip").unwrap();
+        assert!(valued.satisfied(&["--push-o=ci.skip"], true));
+        assert!(!valued.satisfied(&["--push-o=other"], true));
+        assert!(!valued.satisfied(&["--push-o"], true));
     }
 
     // ---- regression: --force-with-lease must not satisfy a --force token ----
     #[test]
     fn flag_matcher_token_force_with_lease_does_not_satisfy_force() {
         let flag = FlagMatcher::parse("--force").unwrap();
-        assert!(!flag.satisfied(&["--force-with-lease"]));
+        assert!(!flag.satisfied(&["--force-with-lease"], false));
     }
 
     #[test]
