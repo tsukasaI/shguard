@@ -9323,7 +9323,7 @@ fn evaluate_composed_argv_match(
     // operand is the target only once composed against the cwd. The raw
     // argv's own except-target probe cannot see that, and role counting
     // there must not turn the composed target into an Allow.
-    if let Some(rule) = rules.match_command_except_target(composed_argv) {
+    if let Some(rule) = rules.match_command_except_target_composed(composed_argv) {
         let reason = Reason::new(format!(
             "{describe} composes a relative target, and rule {:?} could not be fully checked because an argument is unresolved: {}",
             rule.id().as_str(),
@@ -13854,13 +13854,15 @@ mod tests {
     // tail pruning, tar's -C value), and must keep firing everywhere else ====
 
     #[test]
-    fn quoted_unresolved_word_alone_cannot_be_sed_flag_and_target() {
-        assert_decision(r#"sed -n 1,5p "$TMPDIR/x.ts""#, Decision::Allow);
-        assert_decision(r#"sed 's/x/y/' "$file""#, Decision::Allow);
-        assert_decision(r#"sed "$X""#, Decision::Allow);
-        // The one unresolved word can only be a flag; the resolved operand
-        // is a benign file.
-        assert_decision(r#"sed -n "$T" notes.txt"#, Decision::Allow);
+    fn quoted_unresolved_sed_word_is_floored_by_the_sed_script_floor_not_the_target_probe() {
+        // Issue #579's role counting clears the except-target probe for
+        // these (see the rules-level tests), but #584's sed-script floor
+        // (rule 6e) supersedes it by design: the word could be
+        // `--expression=w <file>`, so these stay Ask end to end.
+        assert_decision(r#"sed -n 1,5p "$TMPDIR/x.ts""#, Decision::Ask);
+        assert_decision(r#"sed 's/x/y/' "$file""#, Decision::Ask);
+        assert_decision(r#"sed "$X""#, Decision::Ask);
+        assert_decision(r#"sed -n "$T" notes.txt"#, Decision::Ask);
     }
 
     #[test]
@@ -13923,6 +13925,35 @@ mod tests {
             r#"sed "$T" ~/../bob/.config/shguard/config.toml"#,
             r#"env -C ~/.config/shguard sed "$T" config.toml"#,
             r#"cd "$X" && sed "$T" config.toml"#,
+        ] {
+            let verdict = decide(command);
+            assert_ne!(verdict.decision(), Decision::Allow, "{command:?}");
+        }
+    }
+
+    #[test]
+    fn composed_target_probe_catches_what_role_counting_would_drop() {
+        // sed is floored by #584's sed-script floor regardless, so these
+        // use unzip: the unresolved word can hide the flag, and the
+        // relative operand is a target only once the `cd` composes it.
+        assert_decision(r#"cd ~/.config && unzip "$X" . a.zip"#, Decision::Ask);
+        assert_decision(r#"cd ~ && unzip "$X" .config a.zip"#, Decision::Ask);
+    }
+
+    #[test]
+    fn a_cwd_anchor_keeps_the_home_target_even_with_a_literal_tail() {
+        // The anchor can be `~` (or its parent), so `$S/zzuser` may be the
+        // home directory itself. Without a cd the tail still prunes.
+        assert_decision(r#"tar -x -C "$S/zzuser" -f a.tar"#, Decision::Allow);
+        for command in [
+            r#"cd ~ && tar -x -C "$S/zzuser" -f a.tar"#,
+            r#"cd ~/.config && tar -x -C "$S/zzuser" -f a.tar"#,
+            r#"pushd ~ && tar -x -C "$S/zzuser" -f a.tar"#,
+            r#"env -C ~ tar -x -C "$S/zzuser" -f a.tar"#,
+            r#"cd ~ && tar -x -C x/"$S"/zzuser -f a.tar"#,
+            r#"cd ~ && unzip -d "$S/zzuser" a.zip"#,
+            r#"cd "$X" && tar -x -C "$S/zzuser" -f a.tar"#,
+            r#"cd ~ && tar -x -C "$S/p" -f a.tar"#,
         ] {
             let verdict = decide(command);
             assert_ne!(verdict.decision(), Decision::Allow, "{command:?}");
