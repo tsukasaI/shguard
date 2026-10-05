@@ -1361,36 +1361,20 @@ fn apply_attached_word_and_redirect_checks(
     // (`{ ...; } > ../../../../etc/passwd`) — a hard match above already
     // covers the certain case, this covers the plausible-but-unprovable
     // one, always capped at Ask.
-    if let Some((floor_decision, floor_reason)) =
-        scan_redirect_ascent_descent_floor(redirections, rules)
-    {
-        let argv = worst.normalized_argv().to_vec();
-        let floored = match floor_decision {
-            Decision::Ask => Verdict::ask(Reason::new(floor_reason), argv),
-            Decision::Block | Decision::Allow => {
-                unreachable!("scan_redirect_ascent_descent_floor only ever produces Ask")
-            }
-        };
-        worst = fold_worst(worst, floored);
-    }
+    worst = fold_ask_floor(
+        worst,
+        scan_redirect_ascent_descent_floor(redirections, rules),
+    );
 
     // Issue #341: the same directory-stack tilde floor
     // `evaluate_simple_command` applies to a command's own redirects,
     // extended to a compound command's/extended test's own attached
     // redirects, mirroring how issue #78's ascent-descent floor just above
     // is already shared between the two.
-    if let Some((floor_decision, floor_reason)) =
-        scan_redirect_dirstack_tilde_floor(redirections, rules)
-    {
-        let argv = worst.normalized_argv().to_vec();
-        let floored = match floor_decision {
-            Decision::Ask => Verdict::ask(Reason::new(floor_reason), argv),
-            Decision::Block | Decision::Allow => {
-                unreachable!("scan_redirect_dirstack_tilde_floor only ever produces Ask")
-            }
-        };
-        worst = fold_worst(worst, floored);
-    }
+    worst = fold_ask_floor(
+        worst,
+        scan_redirect_dirstack_tilde_floor(redirections, rules),
+    );
 
     // Issue #203: the same `$HOME`-vs-`~` correlation floor
     // `evaluate_simple_command` applies to a command's own redirects,
@@ -1399,35 +1383,17 @@ fn apply_attached_word_and_redirect_checks(
     // this, wrapping an otherwise-caught redirect in a brace group,
     // subshell, loop, or function definition would silently regain the
     // Allow this whole floor exists to close.
-    if let Some((floor_decision, floor_reason)) = scan_redirect_home_env_floor(redirections, rules)
-    {
-        let argv = worst.normalized_argv().to_vec();
-        let floored = match floor_decision {
-            Decision::Ask => Verdict::ask(Reason::new(floor_reason), argv),
-            Decision::Block | Decision::Allow => {
-                unreachable!("scan_redirect_home_env_floor only ever produces Ask")
-            }
-        };
-        worst = fold_worst(worst, floored);
-    }
+    worst = fold_ask_floor(worst, scan_redirect_home_env_floor(redirections, rules));
 
     // Issue #454: the same named-user-home floor `evaluate_simple_command`
     // applies to a command's own redirects, extended to a compound
     // command's/function definition's/extended test's own attached
     // redirects, mirroring how issue #203's `$HOME` floor just above is
     // already shared between the two.
-    if let Some((floor_decision, floor_reason)) =
-        scan_redirect_named_user_home_floor(redirections, rules)
-    {
-        let argv = worst.normalized_argv().to_vec();
-        let floored = match floor_decision {
-            Decision::Ask => Verdict::ask(Reason::new(floor_reason), argv),
-            Decision::Block | Decision::Allow => {
-                unreachable!("scan_redirect_named_user_home_floor only ever produces Ask")
-            }
-        };
-        worst = fold_worst(worst, floored);
-    }
+    worst = fold_ask_floor(
+        worst,
+        scan_redirect_named_user_home_floor(redirections, rules),
+    );
 
     worst
 }
@@ -1947,25 +1913,22 @@ fn is_redirect_write_applicable(kind: &FileRedirectionKind, normalized: &[Normal
 fn scan_redirect_ascent_descent_floor(
     redirections: &[Redirection],
     rules: &Rules,
-) -> Option<(Decision, String)> {
+) -> Option<String> {
     let rule = resolved_redirect_write_targets(redirections)
         .iter()
         .find_map(|target| rules.match_redirect_target_ascent_descent(target))?;
-    Some((
-        Decision::Ask,
-        format!(
-            "a redirect target starts at an unknown anchor — an unresolved `..` ascent, or a \
+    Some(format!(
+        "a redirect target starts at an unknown anchor — an unresolved `..` ascent, or a \
              `~+`/`~-`/`~N` directory-stack tilde shorthand (issue #133) — then descends into a \
              shape that would match redirect rule {:?} ({}) if the anchor bottomed out there; \
              shguard has no cwd or directory stack to resolve the anchor against, so this can't \
              be proven, only flagged",
-            rule.id().as_str(),
-            rule.reason().as_str(),
-        ),
+        rule.id().as_str(),
+        rule.reason().as_str(),
     ))
 }
 
-/// Issue #341: `Some(Ask, reason)` when any resolved redirect-write target
+/// Issue #341: `Some(reason)` (always an `Ask` floor) when any resolved redirect-write target
 /// in `redirections` (via [`resolved_redirect_write_targets`]) is a bare
 /// directory-stack tilde shorthand (`~+`/`~-`/`~N`) or a `..` step above one
 /// (`~+/..`) that would sit at or above the directory it denotes
@@ -1980,20 +1943,17 @@ fn scan_redirect_ascent_descent_floor(
 fn scan_redirect_dirstack_tilde_floor(
     redirections: &[Redirection],
     rules: &Rules,
-) -> Option<(Decision, String)> {
+) -> Option<String> {
     let rule = resolved_redirect_write_targets(redirections)
         .iter()
         .find_map(|target| rules.match_redirect_target_dirstack_tilde(target))?;
-    Some((
-        Decision::Ask,
-        format!(
-            "a redirect target is a directory-stack tilde shorthand (`~+`/`~-`/`~N`) or a `..` \
+    Some(format!(
+        "a redirect target is a directory-stack tilde shorthand (`~+`/`~-`/`~N`) or a `..` \
              step above one (`~+/..`) that would sit at or above the directory it denotes \
              ($PWD/$OLDPWD/a pushd-stack entry) if it expanded, matching redirect rule {:?} \
              ({}); shguard has no cwd or directory stack to resolve it against",
-            rule.id().as_str(),
-            rule.reason().as_str(),
-        ),
+        rule.id().as_str(),
+        rule.reason().as_str(),
     ))
 }
 
@@ -2009,7 +1969,7 @@ fn is_fd_or_close(s: &str) -> bool {
 /// redirect-write target ([`is_redirect_write_applicable`]), apply
 /// `substitute`'s piece-level tilde substitution, and if a resolved
 /// candidate from the substituted word matches one of `rules`' redirect
-/// rules, float `(Decision::Ask, reason(rule))` — always capped to `Ask`
+/// rules, float `reason(rule)` — always capped to `Ask`
 /// regardless of the matched rule's own decision, since neither caller can
 /// prove the substitution without an environment lookup or passwd lookup
 /// shguard never performs (see each caller's own docs for why).
@@ -2018,7 +1978,7 @@ fn scan_redirect_substituted_target_floor(
     rules: &Rules,
     substitute: impl Fn(&Word) -> Option<Word>,
     reason: impl Fn(&RedirectRule) -> String,
-) -> Option<(Decision, String)> {
+) -> Option<String> {
     for redir in redirections {
         let Redirection::File { kind, target } = redir else {
             continue;
@@ -2035,14 +1995,14 @@ fn scan_redirect_substituted_target_floor(
                 continue;
             };
             if let Some(rule) = rules.match_redirect_target(candidate) {
-                return Some((Decision::Ask, reason(rule)));
+                return Some(reason(rule));
             }
         }
     }
     None
 }
 
-/// Issue #203: `Some((Ask, reason))` when a redirect-write target begins
+/// Issue #203: `Some(reason)` (always an `Ask` floor) when a redirect-write target begins
 /// with `$HOME`/`${HOME}` (bare or inside one enclosing pair of double
 /// quotes) and substituting the literal text `~` for that piece — the same
 /// runtime value, since bash's own `~` expansion reads `$HOME` — resolves
@@ -2062,10 +2022,7 @@ fn scan_redirect_substituted_target_floor(
 /// only a *leading* `$HOME`/`${HOME}` piece is recognised — `$XDG_CONFIG_HOME/
 /// shguard/config.toml`, `${HOME}${HOME}/x`, and any variable other than
 /// `HOME` carrying the same practical risk are unaffected.
-fn scan_redirect_home_env_floor(
-    redirections: &[Redirection],
-    rules: &Rules,
-) -> Option<(Decision, String)> {
+fn scan_redirect_home_env_floor(redirections: &[Redirection], rules: &Rules) -> Option<String> {
     scan_redirect_substituted_target_floor(
         redirections,
         rules,
@@ -2123,7 +2080,7 @@ fn home_env_word_with_tilde_substituted(word: &Word) -> Option<Word> {
     None
 }
 
-/// Issue #454: `Some((Ask, reason))` when a redirect-write target begins
+/// Issue #454: `Some(reason)` (always an `Ask` floor) when a redirect-write target begins
 /// with `~user` — [`WordPiece::Tilde`] with a non-empty user, a named
 /// user's home shorthand — and substituting the bare `~` for that piece
 /// resolves to a string one of `rules`' redirect rules matches.
@@ -2140,7 +2097,7 @@ fn home_env_word_with_tilde_substituted(word: &Word) -> Option<Word> {
 fn scan_redirect_named_user_home_floor(
     redirections: &[Redirection],
     rules: &Rules,
-) -> Option<(Decision, String)> {
+) -> Option<String> {
     scan_redirect_substituted_target_floor(
         redirections,
         rules,
@@ -2411,13 +2368,10 @@ fn evaluate_simple_command(
     let redirect_rule_ask_floor = check_redirect_targets(&command.redirections, rules)
         .filter(|rule| rule.decision() == Decision::Ask)
         .map(|rule| {
-            (
-                Decision::Ask,
-                format!(
-                    "redirect target matches rule {:?}: {}",
-                    rule.id().as_str(),
-                    rule.reason().as_str()
-                ),
+            format!(
+                "redirect target matches rule {:?}: {}",
+                rule.id().as_str(),
+                rule.reason().as_str()
             )
         });
     // Issue #80: a `~username` token that would hit one of a matched
@@ -2496,11 +2450,11 @@ fn evaluate_simple_command(
     let verdict = apply_recursable_floor(verdict, alias_floor);
     let verdict = apply_tar_dashless_floor(verdict, tar_dashless_floor);
     let verdict = apply_command_ascent_descent_floor(verdict, ascent_descent_floor);
-    let verdict = apply_ascent_descent_floor(verdict, redirect_ascent_descent_floor);
-    let verdict = apply_ascent_descent_floor(verdict, redirect_dirstack_tilde_floor);
-    let verdict = apply_ascent_descent_floor(verdict, redirect_home_env_floor);
-    let verdict = apply_ascent_descent_floor(verdict, redirect_named_user_home_floor);
-    let verdict = apply_ascent_descent_floor(verdict, redirect_rule_ask_floor);
+    let verdict = apply_redirect_ask_floor(verdict, redirect_ascent_descent_floor);
+    let verdict = apply_redirect_ask_floor(verdict, redirect_dirstack_tilde_floor);
+    let verdict = apply_redirect_ask_floor(verdict, redirect_home_env_floor);
+    let verdict = apply_redirect_ask_floor(verdict, redirect_named_user_home_floor);
+    let verdict = apply_redirect_ask_floor(verdict, redirect_rule_ask_floor);
     let verdict = apply_named_user_home_floor(verdict, named_user_home_floor);
     let verdict = apply_dirstack_tilde_floor(verdict, dirstack_tilde_floor);
     let verdict = apply_directory_equals_tilde_floor(verdict, directory_equals_tilde_floor);
@@ -3311,7 +3265,7 @@ fn escalation_floor_contribution(
 /// helpers below delegate to — [`apply_escalation_floor`] (rule 10),
 /// [`apply_expansion_floor`] (rule 11), [`apply_recursable_floor`],
 /// [`apply_tar_dashless_floor`], [`apply_command_ascent_descent_floor`]/
-/// [`apply_ascent_descent_floor`], [`apply_named_user_home_floor`],
+/// [`apply_redirect_ask_floor`], [`apply_named_user_home_floor`],
 /// [`apply_token_floor`], [`apply_dirstack_tilde_floor`]/
 /// [`apply_directory_equals_tilde_floor`]/[`apply_dirstack_equal_subst_floor`],
 /// and [`apply_unknown_cwd_floor`]. [`apply_substitution_floor`] (rule 3)
@@ -3463,8 +3417,8 @@ fn scan_ascent_descent_floor(
 
 /// Applies [`scan_ascent_descent_floor`]'s floor to `verdict` — same
 /// max-lift mechanics as [`apply_floor`], but a distinct function from
-/// [`apply_ascent_descent_floor`] (which three sibling,
-/// `RedirectRule`-based floors also happen to share, since `RedirectRule`
+/// [`apply_redirect_ask_floor`] (which the `RedirectRule`-based floors
+/// share, since `RedirectRule`
 /// has no `deny_message` of its own to carry): [`scan_ascent_descent_floor`]
 /// matches a `CommandRule`, which does, so this attaches it (issue #202) to
 /// the replacement verdict — a fresh `Verdict::ask`/`Verdict::block` here
@@ -3480,20 +3434,21 @@ fn apply_command_ascent_descent_floor(
     apply_floor(verdict, floor_decision, floor_reason, deny_message)
 }
 
-/// Applies a `(Decision, reason)` floor to `verdict` — shared by
-/// [`scan_redirect_ascent_descent_floor`], [`scan_redirect_home_env_floor`],
+/// Applies an always-`Ask` redirect floor's reason to `verdict` — shared by
+/// [`scan_redirect_ascent_descent_floor`], [`scan_redirect_dirstack_tilde_floor`],
+/// [`scan_redirect_home_env_floor`], [`scan_redirect_named_user_home_floor`]
 /// and the redirect-rule ask-floor derived from [`check_redirect_targets`],
-/// all three of which match a [`crate::rules::RedirectRule`] rather than a
+/// all of which match a [`crate::rules::RedirectRule`] rather than a
 /// `CommandRule` (see [`apply_command_ascent_descent_floor`]'s docs for the
 /// sibling that carries a `CommandRule`'s `deny_message` instead) —
 /// `RedirectRule` has no `deny_message` field, so there is nothing to
 /// attach here. See [`apply_floor`]'s docs for the shared max-lift
 /// mechanics.
-fn apply_ascent_descent_floor(verdict: Verdict, floor: Option<(Decision, String)>) -> Verdict {
-    let Some((floor_decision, floor_reason)) = floor else {
+fn apply_redirect_ask_floor(verdict: Verdict, floor_reason: Option<String>) -> Verdict {
+    let Some(floor_reason) = floor_reason else {
         return verdict;
     };
-    apply_floor(verdict, floor_decision, floor_reason, None)
+    apply_floor(verdict, Decision::Ask, floor_reason, None)
 }
 
 /// Issue #80: `Some(Ask, reason)` when `argv` matches a rule's command+
@@ -6608,6 +6563,19 @@ fn fold_worst(current: Verdict, new: Verdict) -> Verdict {
         std::cmp::Ordering::Less => current,
         std::cmp::Ordering::Equal => current,
     }
+}
+
+/// Folds an always-`Ask` floor's reason (one of the `scan_redirect_*_floor`
+/// scanners) into `worst` via [`fold_worst`]: a tie keeps `worst`'s own
+/// reason rather than concatenating (unlike [`apply_redirect_ask_floor`]),
+/// matching how a compound command's attached-redirect checks have always
+/// combined. A `None` floor returns `worst` untouched.
+fn fold_ask_floor(worst: Verdict, floor_reason: Option<String>) -> Verdict {
+    let Some(floor_reason) = floor_reason else {
+        return worst;
+    };
+    let argv = worst.normalized_argv().to_vec();
+    fold_worst(worst, Verdict::ask(Reason::new(floor_reason), argv))
 }
 
 /// Whether `pieces` — one brace-alternation member's piece sequence —
