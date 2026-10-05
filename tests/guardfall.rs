@@ -465,10 +465,14 @@ fn guardfall_rm_dot_targets() {
     }
 }
 
-/// `~/.*`/`.* ` is bash's dotglob spelling: unlike `~/*`/`~/**`, it DOES
-/// expand to leading-dot entries (`.ssh`, `.aws`, `.config/shguard`) even
-/// without `shopt -s dotglob`, so it is a strict superset of the already-
-/// Ask `~/.config` target and must be at least as strict, not Allow.
+/// `~/.*`/`.*` is a leading-dot glob: unlike `~/*`/`~/**`, it DOES expand
+/// to leading-dot entries (`.ssh`, `.aws`, `.config/shguard`) even without
+/// `shopt -s dotglob`, so it is a strict superset of the already-Ask
+/// `~/.config` target and must be at least as strict, not Allow. The
+/// "safe" spellings (`.[!.]*`, `.??*`, `.[^.]*`, `.?*`) skip `.`/`..` but
+/// match the same entries. `~/.config/*` reaches shguard's own config
+/// directory too. `../build/.*` is a sibling-directory cleanup, not a
+/// re-anchoring risk, and must stay Allow like `../build/*`.
 #[test]
 fn guardfall_rm_dotglob_tilde_targets() {
     let cases: &[(&str, Decision)] = &[
@@ -480,6 +484,30 @@ fn guardfall_rm_dotglob_tilde_targets() {
         ("cd ~ && rm -rf .*", Decision::Block),
         ("rm -rf .*", Decision::Block),
         ("rm -rf ./.*", Decision::Block),
+        ("rm -rf ~/.[!.]*", Decision::Block),
+        ("rm -rf ~/.??*", Decision::Block),
+        ("rm -rf ~/.[^.]*", Decision::Block),
+        ("rm -rf ~/.?*", Decision::Block),
+        ("rm -r ~/.??*", Decision::Ask),
+        ("mv ~/.?* /tmp", Decision::Ask),
+        ("mv ~/.[!.]* /tmp", Decision::Ask),
+        ("cd ~ && rm -rf .??*", Decision::Block),
+        ("cd ~ && rm -rf .[!.]*", Decision::Block),
+        ("rm -rf ./.??*", Decision::Block),
+        ("rm -rf ~/.config/*", Decision::Ask),
+        ("rm -rf ~/.config/**", Decision::Ask),
+        ("rm -r ~/.config/*", Decision::Ask),
+        ("rm -r ~/.Config/*", Decision::Ask),
+        ("mv ~/.config/* /tmp", Decision::Ask),
+        // Sibling-directory leading-dot glob cleanups stay Allow, like `*`.
+        ("rm -rf ../build/.*", Decision::Allow),
+        ("rm -r ../build/.*", Decision::Allow),
+        ("rm -rf ../node_modules/.*", Decision::Allow),
+        ("mv ../build/.* /tmp", Decision::Allow),
+        ("rm -rf ../build/.??*", Decision::Allow),
+        ("rm -rf ../build/*", Decision::Allow),
+        // Control: a bare ascent-then-glob still asks.
+        ("rm -rf ../.*", Decision::Ask),
         // Control: `~/.config` itself is unchanged by this fix.
         ("rm -r ~/.config", Decision::Ask),
         ("rm -rf ~/.config/shguard", Decision::Block),

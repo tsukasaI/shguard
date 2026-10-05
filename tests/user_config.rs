@@ -2536,6 +2536,27 @@ fn config_symlinked_to_dev_null_still_protects_its_own_literal_directory() {
     assert_eq!(permission_decision(&allow_output), "allow");
 }
 
+// Issue #582 review: an allowlist entry must keep exact flag matching, or
+// `--ff` (a different real git option) would satisfy `--ff-only` and widen
+// an Ask into an Allow.
+#[test]
+fn git_long_option_abbreviation_does_not_widen_an_allow_entry() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[allow]]
+        id = "user-allow-git-merge-ff-only"
+        reason = "ff-only merges are fine"
+        command = "git"
+        required_tokens = ["merge"]
+        required_flags = ["--ff-only"]
+    "#,
+    );
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+
+    let output = run_hook(&bash_command("git merge --ff $BRANCH"), &envs);
+    assert_eq!(permission_decision(&output), "ask");
+}
+
 // Issue #582: git accepts any unambiguous prefix of a long option, so a
 // `required_flags` rule keyed on a spelled-out long flag must also match its
 // abbreviations (`--mirr`, `--upl=x`) -- but only for `git` rules.
