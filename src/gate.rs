@@ -79,7 +79,10 @@
 //!    6d", issue #195) get the same unconditional-Ask, non-introspected
 //!    posture as rule 6b, but their script has no `-c`/`-e`-style flag at
 //!    all — it's the first bare positional operand unless `-f`/`--file`
-//!    supplies it from a file instead ([`scan_for_awk_script`]). Rules 5b,
+//!    supplies it from a file instead ([`scan_for_awk_script`]). `sed`
+//!    ("rule 6e", issue #584) is Allow when its script is proven free of
+//!    `w`/`W`/`r`/`R`/`e` commands and `s///w`/`s///e` flags by a small
+//!    command lexer (`crate::sed_script`), and Ask otherwise. Rules 5b,
 //!    6a, and 6b all locate a flag by scanning argv positionally
 //!    ([`scan_for_flag`]); per issues #71/#53, an `Unresolvable` word at a
 //!    scanned position is treated as "might be the flag", never as
@@ -361,6 +364,7 @@ const DENY_MSG_BARE_VAR: &str =
     "Expand the variable yourself and re-issue the command with the literal path or binary name.";
 const DENY_MSG_INLINE_INTERPRETER: &str = "Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f \
      prog.awk`) — inline interpreter code is never inspected.";
+const DENY_MSG_SED_SCRIPT: &str = "Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected.";
 const DENY_MSG_COMMAND_SUBSTITUTION: &str =
     "Run the substitution first, then call the resulting binary literally.";
 const DENY_MSG_UNRESOLVED_TARGET: &str = "Resolve the target literally so the rule can check it.";
@@ -3070,6 +3074,31 @@ fn evaluate_simple_command_core(
         }
     });
 
+    // Rule 6e (issue #584): `sed`'s script can write (`w`/`W`/`s///w`), read
+    // (`r`/`R`) and, on GNU, execute (`e`/`s///e`); it floors to Ask unless
+    // [`crate::sed_script::classify`] proves it free of all of them. Folded
+    // into the interpreter-code floor with its own guidance message.
+    let interpreter_code_floor: Option<(String, &'static str)> = interpreter_code_floor
+        .map(|reason| (reason, DENY_MSG_INLINE_INTERPRETER))
+        .or_else(|| {
+            let (name, rest_words) = effective?;
+            let lower_name = crate::rules::fold_command_name(name);
+            SED_NAMES
+                .contains(&crate::rules::strip_version_suffix(&lower_name))
+                .then(|| crate::sed_script::classify(rest_words))
+                .flatten()
+                .map(|why| {
+                    (
+                        format!(
+                            "`{name}`'s script is not proven free of file-write, file-read and \
+                             command-execution commands: {}",
+                            why.describe()
+                        ),
+                        DENY_MSG_SED_SCRIPT,
+                    )
+                })
+        });
+
     // Rule 7: any `$IFS`-derived word floors to Ask on a blocklist miss.
     let ifs_floor = argv.iter().any(NormalizedWord::is_ifs_derived);
 
@@ -3985,7 +4014,7 @@ struct ExceptFloors<'a> {
 /// configured to `deny`.
 fn fold_floors(
     argv: Vec<NormalizedWord>,
-    interpreter_code_floor: Option<String>,
+    interpreter_code_floor: Option<(String, &'static str)>,
     ifs_floor: bool,
     escalation_floor: Option<(Decision, String)>,
     opaque_kind: Option<UnresolvableKind>,
@@ -4035,8 +4064,8 @@ fn fold_floors(
         .cloned()
         .or_else(|| {
             interpreter_code_floor
-                .is_some()
-                .then(|| DenyMessage::new(DENY_MSG_INLINE_INTERPRETER))
+                .as_ref()
+                .map(|(_, guidance)| DenyMessage::new(*guidance))
         })
         .or_else(|| {
             (except_floors.target.is_some() || except_floors.flags.is_some())
@@ -4050,7 +4079,7 @@ fn fold_floors(
         // specific than "some recursed substitution was worse than Allow".
         .or(substitution_deny_message);
 
-    if let Some(reason) = interpreter_code_floor {
+    if let Some((reason, _)) = interpreter_code_floor {
         decision = decision.max(Decision::Ask);
         reasons.push(reason);
     }
@@ -7329,6 +7358,10 @@ fn inline_code_flag(name: &str) -> Option<&'static str> {
         _ => None,
     }
 }
+
+/// `sed` command names checked by rule 6e, after case folding and
+/// version-suffix stripping (GNU sed is `gsed` under Homebrew).
+const SED_NAMES: &[&str] = &["sed", "gsed"];
 
 /// Result of [`scan_for_awk_script`]: where awk's script comes from,
 /// relative to its first non-option operand. Mirrors
