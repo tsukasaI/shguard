@@ -4,27 +4,142 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-05
+
 ### Added
 
-- Opt-in per-rule `resolve_symlinks = true` for `except_targets` (#583): each
-  candidate is canonicalized (relative ones against the hook payload `cwd`)
+- Opt-in per-rule `resolve_symlinks = true` for `except_targets` (#583,
+  PR #608): each candidate is canonicalized (relative ones against the hook
+  payload `cwd`, only when the folded gate cwd is an absolute known anchor)
   before except matching, so a symlink at an excepted path no longer
   suppresses the rule. Fails closed when canonicalization fails (missing or
-  dangling path, no usable cwd). Rejected at load without path-based
-  `except_targets` and on allow-side entries.
-- Per-rule `target_flags = ["--body-file", ...]` key: restricts a rule's
-  `except_targets` candidates to the values of the named flags, so a
-  command such as `gh issue comment 123 --body-file <path>` can be
-  excepted on the file path alone. Fail-closed on a missing, absent or
-  unresolved flag value; invalid specs are rejected at load (#581).
+  dangling path, not-yet-created file, no usable cwd), so except entries
+  must use the canonical spelling (macOS `/tmp` is `/private/tmp`).
+  Rejected at load without path-based `except_targets` and on allow-side
+  entries.
+- Per-rule `target_flags = ["--body-file", ...]` key (#581, PR #605):
+  restricts a rule's `except_targets` candidates to the values of the named
+  flags, so a command such as `gh issue comment 123 --body-file <path>` can
+  be excepted on the file path alone. Fail-closed on a listed flag with no
+  value, an unresolved flag value, or no listed flag present; invalid specs
+  are rejected at load. The flag list is explicit: unlisted aliases (`gh`
+  accepts `-F` as an alias of `--body-file`), abbreviations and `-F=value`
+  spellings are not guessed at, so list every spelling to except.
+- The parser now accepts non-assigning parameter-expansion forms (`${x%p}`,
+  `${x%%p}`, `${x#p}`, `${x##p}`, `${x:-w}`, `${x-w}`, `${x:+w}`, `${x:?w}`,
+  `${x:o:l}`, `${#x}`, `${x/a/b}`, case-modification forms) and
+  literal-index `${PIPESTATUS[n]}`/`${pipestatus[n]}` (#578, #580, PR #594)
+  instead of rejecting them as unsupported. They resolve as opaque words
+  (never substituted into command position), and their operands are
+  re-parsed so embedded substitutions are still analyzed; an operand inside
+  a double-quoted expansion is parsed as double-quoted, and one containing a
+  double quote fails closed to Ask. The assigning forms `${x:=w}`/`${x=w}`,
+  operands containing `<(`/`>(`, and substring offsets containing `$` or a
+  backtick stay unsupported.
+
+### Changed
+
+- Raw pre-scan recursion bounds (#603, #528, #553, #557, #558, #564): the
+  caps now never decrement, so a quoted or escaped closer can no longer
+  drive a stack-depth or backtracking guard back down. `$(`, `${`, `$[` and
+  `<(`/`>(` have never-decremented totals, a `[[` token no longer resets
+  the extended-test operator count, and the raw brace depth cap drops from
+  12 to 10. A combined, weighted stack budget (`MAX_RAW_STACK_BUDGET`)
+  covers bare `{` groups, bare `(` subshells, `if`/`case`/other nesting
+  keywords, `<(` and `[[ !`, since their depths add on one parse stack. The
+  nesting-keyword cap is now 10 and includes `coproc`. Very long or deeply
+  nested scripts that exceed any of these caps now Ask where they
+  previously passed the pre-scan; this over-Ask is accepted.
+- sed scripts that are not provably free of `w`/`W`/`r`/`R`/`e` commands and
+  of `s///w`/`s///e` flags now Ask, including sed invocations with an
+  unresolved script word (#584, PR #591). Previously these could write
+  files or run commands without `-i` and bypass self-protection. A small
+  sed command lexer (`src/sed_script.rs`) lexes the script under both the
+  GNU and BSD readings (`-i` suffix word, `-l` value, option permutation,
+  delimiter inside brackets) and any dangerous reading wins. Literal write
+  targets are not Blocked (left as a follow-up).
+- The inline-code floor (rule 6b) now scans each interpreter's own option
+  grammar and stops at the script operand (#560, #577, PR #590). Interpreter
+  names with ABI/debug suffixes and more interpreters and flag spellings are
+  recognized, so inline code that slipped past the old name/flag list now
+  Asks; an unresolved word or an option not in the grammar table before the
+  operand keeps the Ask floor, while arguments after the script operand no
+  longer floor to Ask. Clustered and attached option values are handled per
+  interpreter (for example perl `-de` is `-d -e`; `-W:cat`/`-d:Mod`-style
+  forms fail closed as unknown options).
+- Self-protection targets are matched under more spellings (#549, #585,
+  PR #592): a relative target now resolves against the hook payload `cwd`
+  (an absolute `cwd` seeds the top-level cwd context, reusing the same-line
+  `cd` composition; a missing or relative `cwd` stays unknown), and
+  `~`-anchored targets of deny/ask command and redirect rules gain
+  absolute-`$HOME` twins at policy load, never on `except_targets` or the
+  allowlist. An empty, relative, `~`-anchored or root `HOME` is rejected
+  with a stderr warning and gets no twins. Commands that spell a protected
+  path relative to the payload `cwd` or with the absolute home path now hit
+  the same rules as the `~` and absolute forms.
+- Fewer spurious Asks from the unresolved-argument floor (#579, PR #609):
+  it is skipped when role counting (one quoted word cannot be both a flag
+  and a target) or the literal tail of an unresolved word proves no
+  except-target match, for example `tar -x -C "$S/p" -f a.tar` now Allows
+  (`tar-absolute-names-ask` gained `value_flags` for `-C`/`--directory`).
+  Unquoted words, `required_tokens` rules, targets reachable from a
+  dash-leading token, plausibility-floor and `cd`/`env -C`-composed targets
+  keep the floor. `sed` with an unresolved word still Asks because of the
+  sed-script floor above.
+- `effective_command` now returns an already case-folded command name, and
+  `[[pipeline]]` sources/sinks are folded at parse time so user rules with
+  uppercase names still match (#562, PR #593).
+- Internal refactors with no intended behaviour change: the TOML DTOs now
+  live in `config_loader` and the gate takes the parser by injection
+  (PR #616); the behaviour-preserving cleanups from #555 (shared
+  `find -exec` terminator check, shared short-option-cluster recognition,
+  shared ask/deny parsing for `escalation_floor`/`ask_outcome`, a
+  `git_config_key` extraction, always-Ask redirect floors typed as
+  `Option<String>`, and similar) keep every reason string and error id
+  byte-identical (PR #613).
+- CI: the PR workflow is replaced by a lefthook `pre-push` gate (fmt,
+  clippy, test, `cargo deny check`, up-to-date-with-`origin/main`), and
+  `main-check.yaml` now covers only pushes to `main` and Dependabot PRs
+  (#572, #587). Follow-up test nits from #540, #545, #547, #548 and #568
+  were closed, including an isolated `current_rss_bytes` growth test that
+  re-execs the test binary (#588).
 
 ### Fixed
 
 - git long-option abbreviations (`--mirr`, `--upl=x`, `--exe=x`) no longer
   bypass `required_flags` rules: for deny/ask rules whose command is exactly
   `git`, a non-empty prefix of a required `--long` flag now counts as that
-  flag. Allowlist entries keep exact matching so an abbreviation can never
-  widen an Ask into an Allow (#582).
+  flag. An ambiguous prefix over-matches to the rule's own verdict, so it
+  fails closed. Allowlist entries keep exact matching so an abbreviation can
+  never widen an Ask into an Allow (#582, PR #597).
+- A Block verdict is no longer downgraded to Ask for git alias smuggling
+  (#552) and for a quoted command-position variable such as `"$B"`/`"${B}"`
+  (#576): the alias Block check runs before stage 3, and a quoted bare
+  variable is treated as one argv word with no IFS splitting. Mixed forms
+  such as `"$B$C"` and `"$B"x` still floor to the mixed-text Ask (PR #589).
+- A standalone assignment on the right of a short-circuitable `&&`/`||`, in
+  any stage of a multi-stage pipeline, or in a backgrounded chain no longer
+  poisons or clears the persisting-unresolvable state, so the value-history
+  fallback keeps a genuine Block; a possibly-skipped resolved reassignment
+  likewise no longer clears an earlier unconditional unknown value (#534,
+  PR #598). The persisting-unresolvable marker is now a map of
+  `value_history` cut indices, so post-poison resolved assignments stay live
+  candidates.
+- `lz4 --uncompress` is treated as a decode stage (#563, PR #593).
+- `rm -rf ../build/.*` (and `../node_modules/.*`, `mv ../build/.* /tmp`)
+  stays Allow like `../build/*`: the wildcard-only widening exclusion added
+  for #559 now covers leading-dot globs, fixing a regression (#559,
+  PR #586). The bare `rm -rf ../.*` still Asks.
+
+### Security
+
+- Raw command-name comparisons in the gate now use the case-folded name
+  (#551, #562, PR #593): re-cased spellings such as `ENV`, `TAR`, `BASE64`
+  and `CD` previously skipped those checks on case-insensitive filesystems.
+- The leading-dot glob family `.[!.]*`, `.??*`, `.[^.]*` and `.?*` is
+  treated like `.*` (PR #586): `rm -rf ~/.??*` and its siblings Block, `rm -r`
+  and `mv` Ask, and `~/.config/*`/`~/.config/**` now reach the
+  config-ancestor and config rules (Ask), which they previously did not.
 
 ## [0.7.1] - 2026-10-02
 
