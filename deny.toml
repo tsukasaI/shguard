@@ -1,5 +1,6 @@
 # cargo-deny configuration. Run locally with `cargo deny check`; runs as the
-# `cargo-deny` job of the lefthook pre-push gate (lefthook.yaml).
+# `cargo-deny` job of the lefthook pre-push gate (lefthook.yaml) and in
+# main-check.yaml (pushes to main, Dependabot PRs).
 # Ref: coding-guidelines/languages/rust.md "Tooling",
 # github.com/EmbarkStudios/cargo-deny.
 
