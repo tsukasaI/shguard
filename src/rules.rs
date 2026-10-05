@@ -160,7 +160,9 @@ enum FlagMatcher {
     /// A single short-option letter.
     Short(char),
     /// A `-`-prefixed argv token, matched verbatim or with a `=value`
-    /// suffix (GNU long-option convention, e.g. `--in-place=.bak`).
+    /// suffix (GNU long-option convention, e.g. `--in-place=.bak`). For
+    /// deny/ask rules whose command is `git`, a non-empty prefix of a
+    /// `--long` token also matches (issue #582, see [`Self::satisfied`]).
     Token(String),
     /// Satisfied if any one alternative is satisfied.
     AnyOf(Vec<FlagMatcher>),
@@ -209,7 +211,14 @@ impl FlagMatcher {
     /// Whether this flag is present anywhere in `argv` (already reduced to
     /// resolved strings — module docs on why unresolvable tokens never
     /// match).
-    fn satisfied(&self, argv: &[&str]) -> bool {
+    ///
+    /// With `long_abbrev` set (rules whose command is `git`, issue #582), a
+    /// `--`-prefixed [`Self::Token`] is also satisfied by any non-empty
+    /// prefix of it (`--mirr`, `--upl=x`): git's option parser accepts any
+    /// unambiguous prefix of a long option. No per-subcommand option table
+    /// is consulted, so an ambiguous prefix (which git itself rejects) is
+    /// over-matched to the rule's own verdict, never allowed.
+    fn satisfied(&self, argv: &[&str], long_abbrev: bool) -> bool {
         match self {
             Self::Short(c) => argv
                 .iter()
@@ -219,9 +228,31 @@ impl FlagMatcher {
                     || arg
                         .strip_prefix(token.as_str())
                         .is_some_and(|rest| rest.starts_with('='))
+                    || (long_abbrev && is_long_option_abbrev(arg, token))
             }),
-            Self::AnyOf(alternatives) => alternatives.iter().any(|alt| alt.satisfied(argv)),
+            Self::AnyOf(alternatives) => alternatives
+                .iter()
+                .any(|alt| alt.satisfied(argv, long_abbrev)),
         }
+    }
+}
+
+/// Whether `arg` (`--x` or `--x=value`) spells a non-empty prefix of the
+/// `--`-prefixed long option `token` — see [`FlagMatcher::satisfied`].
+fn is_long_option_abbrev(arg: &str, token: &str) -> bool {
+    let (Some(arg_rest), Some(full)) = (arg.strip_prefix("--"), token.strip_prefix("--")) else {
+        return false;
+    };
+    let (name, value) = match arg_rest.split_once('=') {
+        Some((name, value)) => (name, Some(value)),
+        None => (arg_rest, None),
+    };
+    if name.is_empty() {
+        return false;
+    }
+    match full.split_once('=') {
+        Some((full_name, full_value)) => full_name.starts_with(name) && value == Some(full_value),
+        None => full.starts_with(name),
     }
 }
 
@@ -2204,9 +2235,21 @@ pub(crate) struct CommandRule {
     value_flags: Vec<ValueFlag>,
     attached_value_flags: Vec<char>,
     deny_message: Option<DenyMessage>,
+    /// Whether `required_flags` long options also match their git-style
+    /// prefix abbreviations (issue #582). True only for deny/ask rules whose
+    /// command is exactly `git`; allowlist entries stay exact so an
+    /// abbreviation can never widen an Ask into an Allow.
+    long_abbrev: bool,
 }
 
 impl CommandRule {
+    /// Disables long-option abbreviation matching (see `long_abbrev`); used
+    /// for every allowlist entry.
+    fn exact_flags_only(mut self) -> Self {
+        self.long_abbrev = false;
+        self
+    }
+
     #[must_use]
     pub(crate) fn id(&self) -> &RuleId {
         &self.id
@@ -2284,7 +2327,12 @@ impl CommandRule {
     #[must_use]
     fn constraints_match(&self, rest_words: &[NormalizedWord]) -> bool {
         let rest = resolved_strings(rest_words);
-        if !self.required_flags.iter().all(|flag| flag.satisfied(&rest)) {
+        let long_abbrev = self.long_abbrev;
+        if !self
+            .required_flags
+            .iter()
+            .all(|flag| flag.satisfied(&rest, long_abbrev))
+        {
             return false;
         }
         let consumed = value_flag_consumed(rest_words, &self.value_flags);
@@ -3149,7 +3197,7 @@ fn dirstack_reachable_via_magic_equal_subst(remainder: &str) -> bool {
 
 /// A rule matching the shape of a whole pipeline: an earlier stage's
 /// command name in `sources`, and the final stage's command name in
-/// `sinks` — the literal ported `curl|wget → sh` installer-pipe pattern
+/// `sinks` (both stored case-folded, compared against the folded runtime name) — the literal ported `curl|wget → sh` installer-pipe pattern
 /// (plan.md §1.1 stage 3). The general decode-fed-pipe gate is a later
 /// issue (plan.md §4), out of scope here.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3208,7 +3256,7 @@ impl PipelineRule {
         if !self
             .sinks
             .iter()
-            .any(|sink| sink == sink_name || sink == strip_version_suffix(sink_name))
+            .any(|sink| sink == &sink_name || sink == strip_version_suffix(&sink_name))
         {
             return false;
         }
@@ -3220,13 +3268,13 @@ impl PipelineRule {
         if !self
             .sink_required_flags
             .iter()
-            .all(|flag| flag.satisfied(&sink_args))
+            .all(|flag| flag.satisfied(&sink_args, false))
         {
             return false;
         }
         source_stages.iter().any(|stage| {
             effective_command(stage)
-                .is_some_and(|(name, _)| self.sources.iter().any(|src| src == name))
+                .is_some_and(|(name, _)| self.sources.iter().any(|src| *src == name))
         })
     }
 }
@@ -4145,7 +4193,9 @@ fn is_env_assignment_shape(token: &str) -> bool {
 /// wrapper's own arguments consume the rest of the stage with no command
 /// left (`env` alone).
 #[must_use]
-pub(crate) fn effective_command(stage: &[NormalizedWord]) -> Option<(&str, &[NormalizedWord])> {
+pub(crate) fn effective_command(
+    stage: &[NormalizedWord],
+) -> Option<(Cow<'_, str>, &[NormalizedWord])> {
     effective_command_excluding(stage, &[])
 }
 
@@ -4166,7 +4216,7 @@ pub(crate) fn effective_command(stage: &[NormalizedWord]) -> Option<(&str, &[Nor
 pub(crate) fn effective_command_excluding<'a>(
     stage: &'a [NormalizedWord],
     excluded: &[&str],
-) -> Option<(&'a str, &'a [NormalizedWord])> {
+) -> Option<(Cow<'a, str>, &'a [NormalizedWord])> {
     let mut rest = stage;
     loop {
         let (first, tail) = rest.split_first()?;
@@ -4174,16 +4224,21 @@ pub(crate) fn effective_command_excluding<'a>(
             return None;
         };
         let base = basename(name);
-        // Issue #493 follow-up: fold for wrapper recognition and the
-        // caller-supplied `excluded` list only; the returned "resolved
-        // command name" stays raw for the caller's own display use.
         let folded_base = fold_command_name(base);
         if TRANSPARENT_WRAPPERS.contains(&folded_base.as_str())
             && !excluded.contains(&folded_base.as_str())
         {
             rest = skip_wrapper_arguments(&folded_base, tail);
         } else {
-            return Some((base, tail));
+            // Returned folded (issues #551, #562): callers compare this name
+            // against lowercase literals, so a raw re-cased spelling
+            // (`ENV`, `TAR`) would silently skip the check.
+            let name = if folded_base == base {
+                Cow::Borrowed(base)
+            } else {
+                Cow::Owned(folded_base)
+            };
+            return Some((name, tail));
         }
     }
 }
@@ -6018,6 +6073,7 @@ fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesErr
         None => None,
     };
 
+    let long_abbrev = matches!(&command, CommandMatch::Exact(name) if name == "git");
     Ok(CommandRule {
         id: RuleId::new(dto.id),
         reason: Reason::new(dto.reason),
@@ -6030,6 +6086,7 @@ fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesErr
         value_flags,
         attached_value_flags,
         deny_message,
+        long_abbrev,
     })
 }
 
@@ -6351,8 +6408,8 @@ fn convert_pipeline_rule(dto: PipelineRuleDto) -> Result<PipelineRule, RulesErro
         id: RuleId::new(dto.id),
         reason: Reason::new(dto.reason),
         decision,
-        sources: dto.sources,
-        sinks: dto.sinks,
+        sources: dto.sources.iter().map(|s| fold_command_name(s)).collect(),
+        sinks: dto.sinks.iter().map(|s| fold_command_name(s)).collect(),
         sink_required_flags,
     })
 }
@@ -6618,6 +6675,187 @@ fn worst_wins<R>(
         }
     }
     ask
+}
+
+/// The invoking process's `$HOME`, parsed once at policy load into the
+/// lexically normalized absolute path a `~`-anchored rule target's
+/// absolute spelling would take (issue #585). Parse, don't validate: the
+/// only way to get one is [`HomeDir::parse`], which rejects every shape
+/// that would make the derived twin targets over-broad or meaningless
+/// (empty, relative, `~`-anchored, or the filesystem root).
+///
+/// The root is rejected deliberately: a `/`-anchored twin of `~` would be
+/// `/` itself, and every `~/x` twin would become `/x`, so a container with
+/// `HOME=/` would silently turn each home-scoped rule into a root-scoped one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HomeDir {
+    comps: Vec<String>,
+}
+
+/// Why [`HomeDir::parse`] refused a `$HOME` value. Rendered into the
+/// stderr warning `crate::config::Policy::load` prints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HomeDirRejection {
+    Empty,
+    NotAbsolute,
+    Root,
+}
+
+impl std::fmt::Display for HomeDirRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Empty => "it is empty",
+            Self::NotAbsolute => "it is not an absolute path",
+            Self::Root => "it resolves to the filesystem root",
+        })
+    }
+}
+
+impl HomeDir {
+    /// Parses a raw `$HOME` value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HomeDirRejection`] for an empty or whitespace-only value, a
+    /// relative or `~`-anchored one, or one that normalizes to `/`.
+    pub(crate) fn parse(raw: &str) -> Result<Self, HomeDirRejection> {
+        if raw.trim().is_empty() {
+            return Err(HomeDirRejection::Empty);
+        }
+        match lexical_normalize(raw) {
+            PathForm::Abs(comps) if comps.is_empty() => Err(HomeDirRejection::Root),
+            PathForm::Abs(comps) => Ok(Self { comps }),
+            _ => Err(HomeDirRejection::NotAbsolute),
+        }
+    }
+
+    /// The absolute twins of a `~`-anchored target (none for any other
+    /// target shape).
+    fn twins_of(&self, target: &TargetMatcher, fold_case: bool) -> Vec<TargetMatcher> {
+        match target {
+            TargetMatcher::NormalizedExact {
+                strip,
+                target: PathForm::Home(tail),
+                case_insensitive,
+            } => {
+                let comps = self.comps.iter().chain(tail).cloned().collect();
+                vec![TargetMatcher::NormalizedExact {
+                    strip: strip.clone(),
+                    target: PathForm::Abs(comps),
+                    case_insensitive: *case_insensitive || fold_case,
+                }]
+            }
+            TargetMatcher::NormalizedPrefix {
+                strip,
+                canon,
+                case_insensitive,
+            } => {
+                // `canon` is `~` or `~/...` here (`canonical_render` only
+                // yields the anchor followed by a `/`-led tail).
+                let Some(rest) = canon.strip_prefix('~') else {
+                    return Vec::new();
+                };
+                let home = format!("/{}", self.comps.join("/"));
+                let case_insensitive = *case_insensitive || fold_case;
+                if rest.is_empty() {
+                    // A bare `~` prefix matches `~` and everything under
+                    // it. A plain string prefix of the absolute home would
+                    // also match a sibling (`/Users/mebob`), so split it
+                    // into the exact home plus a `/`-bounded prefix.
+                    vec![
+                        TargetMatcher::NormalizedExact {
+                            strip: strip.clone(),
+                            target: PathForm::Abs(self.comps.clone()),
+                            case_insensitive,
+                        },
+                        TargetMatcher::NormalizedPrefix {
+                            strip: strip.clone(),
+                            canon: format!("{home}/"),
+                            case_insensitive,
+                        },
+                    ]
+                } else {
+                    vec![TargetMatcher::NormalizedPrefix {
+                        strip: strip.clone(),
+                        canon: format!("{home}{rest}"),
+                        case_insensitive,
+                    }]
+                }
+            }
+            _ => Vec::new(),
+        }
+    }
+}
+
+/// Appends each `~`-anchored target's `$HOME`-absolute twin to `targets`
+/// (skipping any twin already present).
+fn push_home_twins(targets: &mut Vec<TargetMatcher>, home: &HomeDir, fold_case: bool) {
+    let mut twins: Vec<TargetMatcher> = targets
+        .iter()
+        .flat_map(|target| home.twins_of(target, fold_case))
+        .collect();
+    // A bare `~` target carries no `strip` form for an attached
+    // `-C~`/`--directory=~` (that spelling is left to the tilde floors,
+    // because `~` after `=` may not expand). The absolute home has no such
+    // ambiguity, so it inherits whichever `strip` forms the same rule
+    // already declares for the root target `/`.
+    let has_bare_home = targets.iter().any(|target| {
+        matches!(
+            target,
+            TargetMatcher::NormalizedExact {
+                strip: None,
+                target: PathForm::Home(tail),
+                ..
+            } if tail.is_empty()
+        )
+    });
+    if has_bare_home {
+        for target in targets.iter() {
+            if let TargetMatcher::NormalizedExact {
+                strip: Some(strip),
+                target: PathForm::Abs(root),
+                case_insensitive,
+            } = target
+                && root.is_empty()
+            {
+                twins.push(TargetMatcher::NormalizedExact {
+                    strip: Some(strip.clone()),
+                    target: PathForm::Abs(home.comps.clone()),
+                    case_insensitive: *case_insensitive || fold_case,
+                });
+            }
+        }
+    }
+    for twin in twins {
+        if !targets.contains(&twin) {
+            targets.push(twin);
+        }
+    }
+}
+
+impl Rules {
+    /// Issue #585: for every deny/ask command rule and redirect rule, adds
+    /// the `$HOME`-absolute spelling of each `~`-anchored `normalized`/
+    /// `normalized_prefix` target next to it, so `rm -rf /Users/me` matches
+    /// whatever `rm -rf ~` does. Only ever ADDS matches to a rule that
+    /// already denies or asks, so it can raise a verdict but never lower
+    /// one. Deliberately never touches `except_targets` (a twin there would
+    /// widen a carve-out) and has no counterpart on [`Allowlist`] (a twin
+    /// there would widen an allow).
+    ///
+    /// `fold_case` ORs into each twin's own `case_insensitive` flag, for
+    /// platforms whose default volume treats `/Users/Me` and `/users/me`
+    /// as one directory.
+    #[must_use]
+    pub(crate) fn with_home_twins(mut self, home: &HomeDir, fold_case: bool) -> Self {
+        for rule in self.command_rules.iter_mut().chain(&mut self.ask_rules) {
+            push_home_twins(&mut rule.targets, home, fold_case);
+        }
+        for rule in &mut self.redirect_rules {
+            push_home_twins(&mut rule.targets, home, fold_case);
+        }
+        self
+    }
 }
 
 impl Rules {
@@ -6964,6 +7202,7 @@ impl Allowlist {
             .entry
             .into_iter()
             .map(convert_command_rule)
+            .map(|rule| rule.map(CommandRule::exact_flags_only))
             .collect::<Result<Vec<_>, _>>()?;
         reject_duplicate_ids(entries.iter().map(|r| r.id.as_str()))?;
 
@@ -7431,7 +7670,12 @@ pub(crate) fn merge_user_config(
     ask_rules.extend(user_config.ask);
 
     let mut entries = allowlist.entries;
-    entries.extend(user_config.allow);
+    entries.extend(
+        user_config
+            .allow
+            .into_iter()
+            .map(CommandRule::exact_flags_only),
+    );
 
     // Append, never prepend: `match_redirect_target` folds worst-wins and
     // keeps the first-declared rule on a tie (issue #261), so appending is
@@ -7668,26 +7912,46 @@ mod tests {
     #[test]
     fn flag_matcher_token_matches_bare_flag() {
         let flag = FlagMatcher::parse("--in-place").unwrap();
-        assert!(flag.satisfied(&["--in-place"]));
+        assert!(flag.satisfied(&["--in-place"], false));
     }
 
     #[test]
     fn flag_matcher_token_matches_equals_suffix() {
         let flag = FlagMatcher::parse("--in-place").unwrap();
-        assert!(flag.satisfied(&["--in-place=.bak"]));
+        assert!(flag.satisfied(&["--in-place=.bak"], false));
     }
 
     #[test]
     fn flag_matcher_token_does_not_match_unrelated_suffix_without_equals() {
         let flag = FlagMatcher::parse("--in-place").unwrap();
-        assert!(!flag.satisfied(&["--in-placefoo"]));
+        assert!(!flag.satisfied(&["--in-placefoo"], false));
+    }
+
+    #[test]
+    fn flag_matcher_token_long_abbrev_is_opt_in_prefix_match() {
+        let flag = FlagMatcher::parse("--mirror").unwrap();
+        assert!(!flag.satisfied(&["--mirr"], false));
+        assert!(flag.satisfied(&["--mirr"], true));
+        assert!(flag.satisfied(&["--m=x"], true));
+        assert!(flag.satisfied(&["--mirror"], true));
+        assert!(!flag.satisfied(&["--"], true));
+        assert!(!flag.satisfied(&["--=x"], true));
+        assert!(!flag.satisfied(&["--mirrors"], true));
+        assert!(!flag.satisfied(&["-m"], true));
+        let alt = FlagMatcher::parse("f|--force").unwrap();
+        assert!(alt.satisfied(&["--forc"], true));
+        assert!(!alt.satisfied(&["--force-with-lease"], true));
+        let valued = FlagMatcher::parse("--push-option=ci.skip").unwrap();
+        assert!(valued.satisfied(&["--push-o=ci.skip"], true));
+        assert!(!valued.satisfied(&["--push-o=other"], true));
+        assert!(!valued.satisfied(&["--push-o"], true));
     }
 
     // ---- regression: --force-with-lease must not satisfy a --force token ----
     #[test]
     fn flag_matcher_token_force_with_lease_does_not_satisfy_force() {
         let flag = FlagMatcher::parse("--force").unwrap();
-        assert!(!flag.satisfied(&["--force-with-lease"]));
+        assert!(!flag.satisfied(&["--force-with-lease"], false));
     }
 
     #[test]
@@ -12818,9 +13082,10 @@ mod tests {
     fn merge_user_config_redirect_entry_never_shadows_a_builtin_redirect_rule() {
         // A user rule sharing the embedded config-directory redirect
         // rule's exact target must never win the match ahead of the
-        // embedded one: Rules::match_redirect_target is first-match-wins,
-        // so merge_user_config appending (not prepending) user redirect
-        // rules after the embedded ones is load-bearing here — the
+        // embedded one: Rules::match_redirect_target is worst-decision-wins
+        // with ties keeping the first-declared rule, so merge_user_config
+        // appending (not prepending) user redirect rules after the
+        // embedded ones is load-bearing here — the
         // reported rule id proves which one actually fired, not just that
         // *a* Block resulted (decision alone can't distinguish them, since
         // `decision = "ask"` on a user redirect entry is rejected at load
@@ -15738,5 +16003,31 @@ mod tests {
         let rule = rules.match_token(&["MY_SECRET=".to_string()]).unwrap();
         assert_eq!(rule.id().as_str(), "test-token");
         assert_eq!(rule.decision(), Decision::Ask);
+    }
+
+    /// `match_token` is worst-decision-wins: a Block rule declared AFTER an
+    /// Ask rule sharing a pattern must still win. Pins the shared
+    /// `worst_wins` loop against a regression to first-match-wins (the
+    /// embedded blocklist has only one `[[token]]`, so nothing else
+    /// exercises two token rules at once).
+    #[test]
+    fn match_token_block_outranks_an_earlier_declared_ask() {
+        let toml = r#"
+            [[token]]
+            id = "ask-first"
+            reason = "test"
+            decision = "ask"
+            patterns = ["_SECRET="]
+
+            [[token]]
+            id = "block-second"
+            reason = "test"
+            decision = "block"
+            patterns = ["_SECRET="]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        let rule = rules.match_token(&["MY_SECRET=".to_string()]).unwrap();
+        assert_eq!(rule.id().as_str(), "block-second");
+        assert_eq!(rule.decision(), Decision::Block);
     }
 }

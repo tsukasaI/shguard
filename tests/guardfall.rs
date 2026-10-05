@@ -406,6 +406,21 @@ fn guardfall_git_cases() {
         // -d alone (merged-only delete) must stay Allow — proves the new
         // rule's two `required_flags` entries are ANDed, not ORed.
         ("git branch -d feature", Decision::Allow),
+        // issue #582: git accepts any unambiguous long-option prefix, so an
+        // abbreviated spelling must hit the same built-in rules.
+        ("git push --forc origin main", Decision::Block),
+        ("git push --force=x origin main", Decision::Block),
+        ("git push --no-ver", Decision::Block),
+        ("git reset --har HEAD~1", Decision::Block),
+        ("git commit --no-ver -m x", Decision::Block),
+        ("git commit --amen", Decision::Block),
+        ("git tag --dele v1.0.0", Decision::Block),
+        ("git branch --del --for feature", Decision::Block),
+        // Ordinary full-spelled options keep their verdicts.
+        ("git push --set-upstream origin x", Decision::Allow),
+        ("git push --force-with-lease origin main", Decision::Allow),
+        ("git log --oneline", Decision::Allow),
+        ("git fetch origin", Decision::Allow),
     ];
 
     for (command, expected) in cases {
