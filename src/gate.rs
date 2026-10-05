@@ -2318,7 +2318,7 @@ fn evaluate_simple_command(
     alternates: &mut IfsAlternates,
 ) -> Verdict {
     let argv = normalize::normalize_argv(command);
-    let ask_match = rules.match_ask(&argv);
+    let ask_match = rules.match_ask_in(&argv, cwd.symlink_base());
     let has_argument_substitution = has_any_argument_position_substitution(command);
     // Issue #83's allowlist guard (module docs): a substitution living in
     // the command-position word's own non-winning brace alternative is
@@ -3185,7 +3185,7 @@ fn evaluate_simple_command_core(
             opaque_kind,
         );
     }
-    let toml_match = rules.match_command(&argv);
+    let toml_match = rules.match_command_in(&argv, cwd.symlink_base());
     // Worst-wins with the ordinary blocklist match (mirrors
     // `Rules::match_command`'s own Block-outranks-Ask contract, issue
     // #399): an embedded/user `[[command]]` rule that already matches
@@ -8302,6 +8302,19 @@ enum CwdContext {
     Initial,
     Known(String),
     Poisoned,
+}
+
+impl CwdContext {
+    /// The absolute directory a `resolve_symlinks` rule (issue #583)
+    /// resolves relative candidates against: only a `Known` anchor that is
+    /// itself absolute. A `~`-anchored or relative anchor, `Initial` and
+    /// `Poisoned` all yield `None`, so those candidates fail closed.
+    fn symlink_base(&self) -> Option<&str> {
+        match self {
+            Self::Known(anchor) if anchor.starts_with('/') => Some(anchor),
+            _ => None,
+        }
+    }
 }
 
 /// Cap on how many frames issue #210's directory-stack tracking
