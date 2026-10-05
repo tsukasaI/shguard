@@ -5331,11 +5331,24 @@ fn parse_decision(rule_id: &str, raw: Option<&str>) -> Result<Decision, RulesErr
 /// mechanism at all that turns the floor off.
 fn parse_escalation_floor(raw: Option<&str>) -> Result<Decision, RulesError> {
     match raw {
-        None | Some("ask") => Ok(Decision::Ask),
-        Some("deny") => Ok(Decision::Block),
-        Some(other) => Err(RulesError::invalid(
-            "escalation_floor",
-            format!("escalation_floor must be \"ask\" or \"deny\", got {other:?}"),
+        None => Ok(Decision::Ask),
+        Some(raw) => parse_ask_or_deny("escalation_floor", "escalation_floor", raw),
+    }
+}
+
+/// Maps `"ask"` to `Decision::Ask` and `"deny"` to `Decision::Block`; any
+/// other value (notably `"allow"`) is a load-time [`RulesError`] under
+/// `config_key`, worded as `{field} must be "ask" or "deny"`. The one copy of
+/// the rule shared by [`parse_escalation_floor`] and
+/// [`parse_ask_outcome_value`], which differ only in the error id and field
+/// name.
+fn parse_ask_or_deny(config_key: &str, field: &str, raw: &str) -> Result<Decision, RulesError> {
+    match raw {
+        "ask" => Ok(Decision::Ask),
+        "deny" => Ok(Decision::Block),
+        other => Err(RulesError::invalid(
+            config_key,
+            format!("{field} must be \"ask\" or \"deny\", got {other:?}"),
         )),
     }
 }
@@ -5346,14 +5359,7 @@ fn parse_escalation_floor(raw: Option<&str>) -> Result<Decision, RulesError> {
 /// rejects it for `escalation_floor`: there is no config mechanism that
 /// turns a genuine `Ask` into a silent `Allow`.
 fn parse_ask_outcome_value(key: &str, raw: &str) -> Result<Decision, RulesError> {
-    match raw {
-        "ask" => Ok(Decision::Ask),
-        "deny" => Ok(Decision::Block),
-        other => Err(RulesError::invalid(
-            "ask_outcome",
-            format!("{key} must be \"ask\" or \"deny\", got {other:?}"),
-        )),
-    }
+    parse_ask_or_deny("ask_outcome", key, raw)
 }
 
 /// A per-mode table key: absent keeps the built-in default `Decision::Ask`
