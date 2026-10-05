@@ -759,6 +759,38 @@ one meant to span every subcommand of a dispatched command — can turn a
 real flag into an accidentally-swallowed value on the subcommands where
 your declared flag doesn't actually take one.
 
+**Scoping candidates to one flag's value: `target_flags`.** Some rules
+only care about the value of one flag: `gh issue comment 123 --body-file
+/private/tmp/claude-501/body.md` has the issue number `123` (a positional
+no `exact`/`prefix` matcher can sensibly except) next to the one value
+that matters. `target_flags` lists the flags (written with their leading
+dashes, unlike `value_flags`) whose values are the ONLY except_targets
+candidates for that rule; positionals and every other flag's value stop
+being candidates:
+
+```toml
+[[ask]]
+id = "gh-comment-body-file"
+reason = "confirm gh issue comment unless the body file is in the scratchpad"
+command = "gh issue comment"
+target_flags = ["--body-file"]
+except_targets = [{ prefix = "/private/tmp/claude-501/" }]
+```
+
+Recognised shapes are `--flag value`, `--flag=value`, and, for a listed
+single-letter flag, `-f value` / `-fvalue` (also at the end of a short
+cluster, `-sf value`). It is fail-closed: the exception applies only when
+at least one listed flag is present, every listed-flag value matches an
+`except_targets` alternative (and has no `..` segment), and no word in the
+command's tail is unresolved (`$VAR`, `$(...)`). A listed flag with no
+value after it, or none of the listed flags at all, leaves the rule firing.
+Everything after a bare `--` is ignored. Because other flags' values are
+no longer checked, list every flag whose value carries the risk the rule
+guards against. `target_flags` needs a non-empty `except_targets` and an
+empty `targets`, cannot be combined with `attached_value_flags`, and an
+empty list or an entry that is not a flag (`"body-file"`, `"--"`, `"-ab"`)
+is a load-time error.
+
 Per-command policy can be scoped to a subcommand sequence: a multi-word
 `command` value matches a leading sequence of positional words, e.g.
 `command = "gh repo delete"` asks only before `gh repo delete ...`, while
