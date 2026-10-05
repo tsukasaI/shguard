@@ -6040,27 +6040,20 @@ fn scan_recursable_slots(
                     // terminator` alone can't tell the two apart, so `+`
                     // candidates here get an extra check against the
                     // immediately preceding word.
+                    // (`span_start >= 1`, so `span_start + offset - 1`
+                    // cannot underflow; for offset 0 the preceding word is
+                    // the `-exec` flag itself, which is never `{}`.)
                     let span_end = command.words[span_start..]
                         .iter()
                         .enumerate()
-                        .position(|(offset, word)| {
-                            if !is_find_exec_terminator(word, terminators) {
-                                return false;
+                        .position(|(offset, word)| match single_resolved(word) {
+                            Some(s) if terminators.contains(&s.as_str()) => {
+                                s != "+"
+                                    || single_resolved(&command.words[span_start + offset - 1])
+                                        .as_deref()
+                                        == Some("{}")
                             }
-                            let is_bare_plus = matches!(
-                                normalize::normalize_word(word).as_slice(),
-                                [nw] if matches!(nw.resolution(), Resolution::Resolved(s) if s == "+")
-                            );
-                            if !is_bare_plus {
-                                return true;
-                            }
-                            let candidate_index = span_start + offset;
-                            candidate_index > 0
-                                && matches!(
-                                    normalize::normalize_word(&command.words[candidate_index - 1])
-                                        .as_slice(),
-                                    [nw] if matches!(nw.resolution(), Resolution::Resolved(s) if s == "{}")
-                                )
+                            _ => false,
                         })
                         .map_or(command.words.len(), |offset| span_start + offset);
 
@@ -6563,24 +6556,29 @@ enum FindExecFlagKind {
     No,
 }
 
-/// Whether AST word `word` is one of `terminators` (`find`'s
-/// `-exec`/`-execdir`/`-ok`/`-okdir` clause terminator — a literal `;`,
+/// The word's single resolved string, if it normalises to exactly one
+/// resolved position; `None` for an unresolved or multi-word position.
+///
+/// [`scan_recursable_slots`] uses it to recognise `find`'s
+/// `-exec`/`-execdir`/`-ok`/`-okdir` clause terminator (a literal `;`,
 /// which reaches here as a plain resolved word since the parser's
 /// escape-sequence folding already consumed `\;`'s backslash before
 /// normalisation, see `crate::ast::WordPiece::EscapeSequence`, or `+`). An
 /// unresolved or multi-word position is never treated as a terminator
-/// (fail-closed the OTHER direction from [`find_exec_flag_kind`]: if this
-/// function can't positively confirm a terminator,
-/// [`scan_recursable_slots`]'s span keeps growing rather than stopping
-/// early — per issue #72's design, "no terminator found" already fails
-/// closed by consuming the rest of the command as the payload, so an
-/// ambiguous position must not be mistaken for the terminator that would
-/// cut that payload short).
-fn is_find_exec_terminator(word: &Word, terminators: &[&str]) -> bool {
-    matches!(
-        normalize::normalize_word(word).as_slice(),
-        [nw] if matches!(nw.resolution(), Resolution::Resolved(s) if terminators.contains(&s.as_str()))
-    )
+/// (fail-closed the OTHER direction from [`find_exec_flag_kind`]: if the
+/// terminator can't be positively confirmed, the span keeps growing rather
+/// than stopping early — per issue #72's design, "no terminator found"
+/// already fails closed by consuming the rest of the command as the
+/// payload, so an ambiguous position must not be mistaken for the
+/// terminator that would cut that payload short).
+fn single_resolved(word: &Word) -> Option<String> {
+    match normalize::normalize_word(word).as_slice() {
+        [nw] => match nw.resolution() {
+            Resolution::Resolved(s) => Some(s.clone()),
+            Resolution::Unresolvable(_) => None,
+        },
+        _ => None,
+    }
 }
 
 /// Whether any word in `argument_words` normalises to a bare, unresolvable
