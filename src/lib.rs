@@ -7,6 +7,7 @@
 pub mod adapter;
 mod ast;
 pub mod config;
+mod config_loader;
 mod decision_log;
 mod gate;
 pub mod normalize;

@@ -26,24 +26,23 @@
 //!
 //! # Parse, don't validate
 //!
-//! [`CommandRuleDto`]/[`PipelineRuleDto`]/[`RedirectRuleDto`]/[`RulesFileDto`]
-//! (and the other `*Dto`/`*File` types this module derives `Deserialize`
-//! for: `TargetDto`, `TokenRuleDto`, `AllowlistFileDto`, `UserConfigFileDto`,
-//! `AskOutcomeTableDto`) are the only serde-aware types in this module,
-//! private to it — the rest of the crate (and every other module) never
-//! sees a serde attribute or a TOML type
-//! (`coding-guidelines/principles.md`, "dependencies point inward"). Loading
-//! is a one-step boundary: [`Rules::parse`]/[`Allowlist::parse`] either
-//! return a fully-valid, typed rule set, or an [`RulesError`] — a duplicate
-//! id, an empty id/reason, or a matcher with no command identifier is a
-//! load-time `Err`, never a silently-skipped rule — security controls
-//! default to fail-closed.
+//! This module has no serde or TOML dependency: the serde DTOs and the TOML
+//! loading live in `crate::config_loader` (`coding-guidelines/principles.md`,
+//! "dependencies point inward"), which deserializes a file into its own DTOs
+//! and hands this module the plain [`RulesFileSpec`]/[`AllowlistFileSpec`]/
+//! [`UserConfigSpec`] values (and the `*RuleSpec`/[`TargetSpec`] types they
+//! carry). Loading is a one-step boundary: [`Rules::from_spec`]/
+//! [`Allowlist::from_spec`]/[`UserConfig::from_spec`] either return a
+//! fully-valid, typed rule set, or an [`RulesError`] — a duplicate id, an
+//! empty id/reason, or a matcher with no command identifier is a load-time
+//! `Err`, never a silently-skipped rule — security controls default to
+//! fail-closed.
 //!
 //! # File I/O stays out of this module
 //!
-//! Every constructor here takes TOML text (`&str`), never a path. The
-//! composition root (a later issue) reads `rules/blocklist.toml`/an
-//! operator-supplied override file and hands the contents in as strings.
+//! Nothing here takes a path or TOML text. The composition root reads
+//! `rules/blocklist.toml`/an operator-supplied override file and hands the
+//! contents to `crate::config_loader`, which builds the specs.
 //!
 //! `analyze()` (`src/lib.rs`) calls [`Rules::embedded`]/[`Rules::match_command`]/
 //! [`Rules::match_pipeline`] via `src/gate.rs`, always with an empty
@@ -56,22 +55,8 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 
-use serde::Deserialize;
-
 use crate::normalize::{FlagScan, NormalizedWord, Resolution, scan_for_flag};
 use crate::verdict::{Decision, DenyMessage, Reason, RuleId, Verdict};
-
-// ---------------------------------------------------------------------
-// Embedded defaults
-// ---------------------------------------------------------------------
-
-/// The default blocklist, embedded in the binary so the hook works with
-/// zero setup (plan.md §1.1 stage 3, issue #11 scope).
-pub(crate) const EMBEDDED_BLOCKLIST: &str = include_str!("../rules/blocklist.toml");
-
-/// The default allowlist, embedded the same way. Ships empty (no entries)
-/// per issue #11 scope — a commented example lives in the file itself.
-const EMBEDDED_ALLOWLIST: &str = include_str!("../rules/allowlist.toml");
 
 // ---------------------------------------------------------------------
 // Errors
@@ -84,10 +69,10 @@ const EMBEDDED_ALLOWLIST: &str = include_str!("../rules/allowlist.toml");
 pub(crate) enum RulesError {
     /// The input is not valid TOML at all. Carries `toml::de::Error`'s
     /// message as a `String`, not the error type itself — `toml` is a
-    /// parsing-driver detail of this module alone
+    /// parsing-driver detail of `crate::config_loader` alone
     /// (`coding-guidelines/principles.md`, "adapters return
-    /// domain-meaningful errors, not driver errors"); this module's own
-    /// docs (above) already claim no TOML type leaves it.
+    /// domain-meaningful errors, not driver errors"). Only the loader
+    /// constructs this variant.
     #[error("invalid TOML: {0}")]
     Syntax(String),
     /// A rule failed a semantic check (empty id, empty reason, a matcher
@@ -1031,7 +1016,7 @@ enum TargetMatcher {
         strip: Option<String>,
         target: PathForm,
         /// ASCII case-fold `target`/the token's normalized form before
-        /// comparing (issue #449) — see [`TargetDto::case_insensitive`].
+        /// comparing (issue #449) — see [`TargetSpec::case_insensitive`].
         case_insensitive: bool,
     },
     /// Path-aware prefix match: the token (after an optional `strip`) is
@@ -1042,7 +1027,7 @@ enum TargetMatcher {
         strip: Option<String>,
         canon: String,
         /// ASCII case-fold `canon`/the rendered token before comparing
-        /// (issue #449) — see [`TargetDto::case_insensitive`].
+        /// (issue #449) — see [`TargetSpec::case_insensitive`].
         case_insensitive: bool,
     },
     /// Path-aware basename match (issue #427): the token (after an
@@ -2046,7 +2031,7 @@ fn canonical_render(form: &PathForm) -> Option<String> {
 /// ASCII-lowercases every path component in `form`, preserving its shape
 /// (anchor kind, `ascent`) — used only by
 /// [`TargetMatcher::NormalizedExact`]'s case-insensitive comparison
-/// (issue #449, see [`TargetDto::case_insensitive`]). Folding only the
+/// (issue #449, see [`TargetSpec::case_insensitive`]). Folding only the
 /// component TEXT, never the shape, means a target and a token that
 /// normalize to different anchors (`Abs` vs `Home`) still correctly
 /// don't match just because folding happens to run on both.
@@ -5316,68 +5301,52 @@ pub(crate) fn su_username_matches_blocklisted_command<'a>(
 }
 
 // ---------------------------------------------------------------------
-// Serde DTOs (private to this module — parse, don't validate)
+// Typed rule-file specs (the serde-free input of this module's
+// constructors; `crate::config_loader` deserializes TOML into its own
+// DTOs and hands these in: parse, don't validate)
 // ---------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RulesFileDto {
-    #[serde(default)]
-    command: Vec<CommandRuleDto>,
-    #[serde(default)]
-    pipeline: Vec<PipelineRuleDto>,
-    #[serde(default)]
-    redirect: Vec<RedirectRuleDto>,
-    #[serde(default)]
-    token: Vec<TokenRuleDto>,
+#[derive(Debug)]
+pub(crate) struct RulesFileSpec {
+    pub(crate) command: Vec<CommandRuleSpec>,
+    pub(crate) pipeline: Vec<PipelineRuleSpec>,
+    pub(crate) redirect: Vec<RedirectRuleSpec>,
+    pub(crate) token: Vec<TokenRuleSpec>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AllowlistFileDto {
-    #[serde(default)]
-    entry: Vec<CommandRuleDto>,
+#[derive(Debug)]
+pub(crate) struct AllowlistFileSpec {
+    pub(crate) entry: Vec<CommandRuleSpec>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CommandRuleDto {
-    id: String,
-    reason: String,
-    #[serde(default)]
-    decision: Option<String>,
-    command: Option<String>,
-    command_prefix: Option<String>,
-    #[serde(default)]
-    required_flags: Vec<String>,
-    #[serde(default)]
-    required_tokens: Vec<String>,
-    #[serde(default)]
-    targets: Vec<TargetDto>,
-    #[serde(default)]
-    except_targets: Vec<TargetDto>,
-    #[serde(default)]
-    value_flags: Vec<String>,
-    #[serde(default)]
-    attached_value_flags: Vec<String>,
+#[derive(Debug)]
+pub(crate) struct CommandRuleSpec {
+    pub(crate) id: String,
+    pub(crate) reason: String,
+    pub(crate) decision: Option<String>,
+    pub(crate) command: Option<String>,
+    pub(crate) command_prefix: Option<String>,
+    pub(crate) required_flags: Vec<String>,
+    pub(crate) required_tokens: Vec<String>,
+    pub(crate) targets: Vec<TargetSpec>,
+    pub(crate) except_targets: Vec<TargetSpec>,
+    pub(crate) value_flags: Vec<String>,
+    pub(crate) attached_value_flags: Vec<String>,
     /// `None` when the key is absent; `Some(vec![])` (an explicit empty
     /// list) is rejected at load.
-    #[serde(default)]
-    target_flags: Option<Vec<String>>,
-    #[serde(default)]
-    deny_message: Option<String>,
+    pub(crate) target_flags: Option<Vec<String>>,
+    pub(crate) deny_message: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TargetDto {
-    exact: Option<String>,
-    prefix: Option<String>,
-    normalized: Option<String>,
-    normalized_prefix: Option<String>,
-    normalized_basename: Option<String>,
-    url_host: Option<String>,
-    strip: Option<String>,
+#[derive(Debug)]
+pub(crate) struct TargetSpec {
+    pub(crate) exact: Option<String>,
+    pub(crate) prefix: Option<String>,
+    pub(crate) normalized: Option<String>,
+    pub(crate) normalized_prefix: Option<String>,
+    pub(crate) normalized_basename: Option<String>,
+    pub(crate) url_host: Option<String>,
+    pub(crate) strip: Option<String>,
     /// Opt-in ASCII case-folded comparison for `normalized`/
     /// `normalized_prefix` (issue #449): used by `crate::config`'s
     /// generated self-protection rules AND `rules/blocklist.toml`'s own
@@ -5387,51 +5356,42 @@ struct TargetDto {
     /// on-disk file. Not documented as ordinary rule-authoring syntax in
     /// the README — a rule author reaching for this should know their own
     /// target path lives on a case-insensitive volume.
-    #[serde(default)]
-    case_insensitive: bool,
+    pub(crate) case_insensitive: bool,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PipelineRuleDto {
-    id: String,
-    reason: String,
-    #[serde(default)]
-    decision: Option<String>,
-    sources: Vec<String>,
-    sinks: Vec<String>,
+#[derive(Debug)]
+pub(crate) struct PipelineRuleSpec {
+    pub(crate) id: String,
+    pub(crate) reason: String,
+    pub(crate) decision: Option<String>,
+    pub(crate) sources: Vec<String>,
+    pub(crate) sinks: Vec<String>,
     /// `deny_unknown_fields` means a config using this field fails to load
     /// on an shguard built before issue #268 — fail-closed, so a rule
     /// author cannot get a silently unconstrained sink out of a version
     /// mismatch.
-    #[serde(default)]
-    sink_required_flags: Vec<String>,
+    pub(crate) sink_required_flags: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RedirectRuleDto {
-    id: String,
-    reason: String,
-    #[serde(default)]
-    decision: Option<String>,
-    targets: Vec<TargetDto>,
+#[derive(Debug)]
+pub(crate) struct RedirectRuleSpec {
+    pub(crate) id: String,
+    pub(crate) reason: String,
+    pub(crate) decision: Option<String>,
+    pub(crate) targets: Vec<TargetSpec>,
 }
 
 /// Issue #426: a rule matching a literal substring against every
 /// assignment name and resolved argv word of a simple command, independent
 /// of which command is being run — `AWS_SECRET_ACCESS_KEY=...` is
 /// credential-shaped whether it prefixes `ls` or stands alone.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TokenRuleDto {
-    id: String,
-    reason: String,
-    #[serde(default)]
-    decision: Option<String>,
-    patterns: Vec<String>,
-    #[serde(default)]
-    deny_message: Option<String>,
+#[derive(Debug)]
+pub(crate) struct TokenRuleSpec {
+    pub(crate) id: String,
+    pub(crate) reason: String,
+    pub(crate) decision: Option<String>,
+    pub(crate) patterns: Vec<String>,
+    pub(crate) deny_message: Option<String>,
 }
 
 /// Parses an optional `decision` string into a [`Decision`], defaulting to
@@ -5606,26 +5566,32 @@ impl AskOutcomeTable {
 }
 
 /// The `[ask_outcome]` table shape (issue #469's documented keys — exact
-/// stdin spellings, e.g. `default`, never `manual`). `deny_unknown_fields`
-/// fails config load closed on any other key, the same posture
-/// [`UserConfigFileDto`] already applies at the top level.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AskOutcomeTableDto {
-    #[serde(default)]
-    default: Option<String>,
-    #[serde(default)]
-    plan: Option<String>,
-    #[serde(default, rename = "acceptEdits")]
-    accept_edits: Option<String>,
-    #[serde(default)]
-    auto: Option<String>,
-    #[serde(default, rename = "dontAsk")]
-    dont_ask: Option<String>,
-    #[serde(default, rename = "bypassPermissions")]
-    bypass_permissions: Option<String>,
-    #[serde(default)]
-    subagent: Option<String>,
+/// stdin spellings, e.g. `default`, never `manual`). The loader
+/// (`crate::config_loader`) fails config load closed on any other key, the
+/// same posture it applies at the top level.
+#[derive(Debug)]
+pub(crate) struct AskOutcomeTableSpec {
+    pub(crate) default: Option<String>,
+    pub(crate) plan: Option<String>,
+    pub(crate) accept_edits: Option<String>,
+    pub(crate) auto: Option<String>,
+    pub(crate) dont_ask: Option<String>,
+    pub(crate) bypass_permissions: Option<String>,
+    pub(crate) subagent: Option<String>,
+}
+
+/// The raw `ask_outcome` user-config value, already told apart by kind by
+/// the loader (`crate::config_loader`): #467's bare string, #469's per-mode
+/// table, or a shape the loader could not accept (a table with an unknown
+/// key, or a value that is neither a string nor a table), carried as the
+/// problem text so it surfaces at the same point in
+/// [`UserConfig::from_spec`]'s validation order as every other
+/// `ask_outcome` error.
+#[derive(Debug)]
+pub(crate) enum AskOutcomeSpec {
+    Global(String),
+    Table(AskOutcomeTableSpec),
+    Invalid(String),
 }
 
 /// Parses the optional top-level `ask_outcome` user-config key (issues
@@ -5633,12 +5599,7 @@ struct AskOutcomeTableDto {
 /// `AskOutcome::Global(Decision::Ask)` — today's unmodified behavior —
 /// when absent. Accepts either #467's bare string or #469's per-mode
 /// table (see [`AskOutcome`]'s own docs for why these are not
-/// interchangeable) — dispatched on the raw [`toml::Value`]'s own kind
-/// rather than a `#[serde(untagged)]` enum, since an untagged enum's
-/// deserialize failure collapses every candidate variant's error into one
-/// generic "data did not match any variant" message, losing exactly the
-/// `unknown field \"foo\"` detail `deny_unknown_fields` exists to report
-/// for a mistyped table key.
+/// interchangeable).
 ///
 /// [`crate::analyze_with_policy`]/[`crate::adapter::respond`] resolve this
 /// against the hook call's actual `permission_mode`/`agent_id` (see
@@ -5656,16 +5617,13 @@ struct AskOutcomeTableDto {
 /// Allow-to-Ask floor) and rules 6b/6d's own "Ask floor" terminology —
 /// this key floors in the opposite direction (Ask-to-Block), after gate
 /// has already run, not during it.
-fn parse_ask_outcome(raw: Option<toml::Value>) -> Result<AskOutcome, RulesError> {
+fn parse_ask_outcome(raw: Option<AskOutcomeSpec>) -> Result<AskOutcome, RulesError> {
     match raw {
         None => Ok(AskOutcome::default()),
-        Some(toml::Value::String(raw)) => {
+        Some(AskOutcomeSpec::Global(raw)) => {
             parse_ask_outcome_value("ask_outcome", &raw).map(AskOutcome::Global)
         }
-        Some(table @ toml::Value::Table(_)) => {
-            let dto: AskOutcomeTableDto = table
-                .try_into()
-                .map_err(|err| RulesError::invalid("ask_outcome", err.to_string()))?;
+        Some(AskOutcomeSpec::Table(dto)) => {
             let subagent = dto
                 .subagent
                 .as_deref()
@@ -5687,13 +5645,7 @@ fn parse_ask_outcome(raw: Option<toml::Value>) -> Result<AskOutcome, RulesError>
                 subagent,
             }))
         }
-        Some(other) => Err(RulesError::invalid(
-            "ask_outcome",
-            format!(
-                "ask_outcome must be a string or a table, got {}",
-                other.type_str()
-            ),
-        )),
+        Some(AskOutcomeSpec::Invalid(problem)) => Err(RulesError::invalid("ask_outcome", problem)),
     }
 }
 
@@ -5755,7 +5707,7 @@ fn sugar_required_tokens_overlap(
         .find(|&k| sugar_tokens.ends_with(&required_tokens[..k]))
 }
 
-/// Converts a [`CommandRuleDto`] into a [`CommandRule`], rejecting every
+/// Converts a [`CommandRuleSpec`] into a [`CommandRule`], rejecting every
 /// semantically-invalid shape at this one boundary: empty id, empty
 /// reason, neither/both of `command`/`command_prefix` set, an empty
 /// `command`/`command_prefix` value, a `command_prefix` containing
@@ -5765,7 +5717,7 @@ fn sugar_required_tokens_overlap(
 /// set, or a malformed `value_flags` spec. A multi-word `command` (e.g.
 /// `"gh repo delete"`) desugars to the first word as the command name plus
 /// the remaining words prepended onto `required_tokens`.
-fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesError> {
+fn convert_command_rule(mut dto: CommandRuleSpec) -> Result<CommandRule, RulesError> {
     if dto.id.trim().is_empty() {
         return Err(RulesError::invalid(&dto.id, "id must not be empty"));
     }
@@ -6148,7 +6100,7 @@ fn parse_attached_value_flag(spec: &str) -> Result<char, String> {
 /// wrong TOML key.
 fn convert_target(
     rule_id: &str,
-    dto: TargetDto,
+    dto: TargetSpec,
     is_except_target: bool,
 ) -> Result<TargetMatcher, RulesError> {
     let set_count = usize::from(dto.exact.is_some())
@@ -6408,7 +6360,7 @@ fn reject_degenerate_normalized_target(
     Ok(())
 }
 
-fn convert_pipeline_rule(dto: PipelineRuleDto) -> Result<PipelineRule, RulesError> {
+fn convert_pipeline_rule(dto: PipelineRuleSpec) -> Result<PipelineRule, RulesError> {
     if dto.id.trim().is_empty() {
         return Err(RulesError::invalid(&dto.id, "id must not be empty"));
     }
@@ -6442,7 +6394,7 @@ fn convert_pipeline_rule(dto: PipelineRuleDto) -> Result<PipelineRule, RulesErro
     })
 }
 
-fn convert_redirect_rule(dto: RedirectRuleDto) -> Result<RedirectRule, RulesError> {
+fn convert_redirect_rule(dto: RedirectRuleSpec) -> Result<RedirectRule, RulesError> {
     if dto.id.trim().is_empty() {
         return Err(RulesError::invalid(&dto.id, "id must not be empty"));
     }
@@ -6472,7 +6424,7 @@ fn convert_redirect_rule(dto: RedirectRuleDto) -> Result<RedirectRule, RulesErro
     })
 }
 
-fn convert_token_rule(dto: TokenRuleDto) -> Result<TokenRule, RulesError> {
+fn convert_token_rule(dto: TokenRuleSpec) -> Result<TokenRule, RulesError> {
     if dto.id.trim().is_empty() {
         return Err(RulesError::invalid(&dto.id, "id must not be empty"));
     }
@@ -6659,7 +6611,7 @@ fn reject_duplicate_ids<'a>(ids: impl Iterator<Item = &'a str>) -> Result<(), Ru
 /// within the set.
 ///
 /// `ask_rules` is always empty for a [`Self::parse`]d/[`Self::embedded`]
-/// set — `RulesFileDto`/`rules/blocklist.toml` have no `[[ask]]` array of
+/// set — `RulesFileSpec`/`rules/blocklist.toml` have no `[[ask]]` array of
 /// their own. It is populated only by [`merge_user_config`], which is also
 /// the only place a user config's `[[ask]]` entries can reach a `Rules`
 /// value at all.
@@ -6887,18 +6839,16 @@ impl Rules {
 }
 
 impl Rules {
-    /// Parses `toml` into a validated [`Rules`] set.
+    /// Builds a validated [`Rules`] set from an already-deserialized
+    /// [`RulesFileSpec`] (`Rules::parse` in `crate::config_loader` is the
+    /// TOML-text entry point).
     ///
     /// # Errors
     ///
-    /// Returns [`RulesError`] for invalid TOML syntax, a semantically
-    /// invalid rule (empty id/reason, an empty/contradictory matcher, a
-    /// malformed flag spec), or a duplicate rule id — fail-closed, never a
-    /// silently-skipped rule.
-    pub(crate) fn parse(toml: &str) -> Result<Self, RulesError> {
-        let dto: RulesFileDto =
-            toml::from_str(toml).map_err(|e| RulesError::Syntax(e.to_string()))?;
-
+    /// Returns [`RulesError`] for a semantically invalid rule (empty
+    /// id/reason, an empty/contradictory matcher, a malformed flag spec),
+    /// or a duplicate rule id — fail-closed, never a silently-skipped rule.
+    pub(crate) fn from_spec(dto: RulesFileSpec) -> Result<Self, RulesError> {
         let command_rules = dto
             .command
             .into_iter()
@@ -6937,18 +6887,6 @@ impl Rules {
             ask_rules: Vec::new(),
             escalation_floor: Decision::Ask,
         })
-    }
-
-    /// Parses the embedded default blocklist (`rules/blocklist.toml`,
-    /// baked in via `include_str!` so the hook works with zero setup).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`RulesError`] if the embedded file itself is malformed —
-    /// a unit test below asserts this never happens, so this is a startup
-    /// error only if a future edit to `rules/blocklist.toml` breaks it.
-    pub(crate) fn embedded() -> Result<Self, RulesError> {
-        Self::parse(EMBEDDED_BLOCKLIST)
     }
 
     /// The embedded/user-config [`CommandRule`] declared with id `id`, if
@@ -7216,16 +7154,16 @@ pub(crate) struct Allowlist {
 }
 
 impl Allowlist {
-    /// Parses `toml` into a validated [`Allowlist`].
+    /// Builds a validated [`Allowlist`] from an already-deserialized
+    /// [`AllowlistFileSpec`] (`Allowlist::parse` in `crate::config_loader`
+    /// is the TOML-text entry point).
     ///
     /// # Errors
     ///
     /// Returns [`RulesError`] under the same conditions as
-    /// [`Rules::parse`] (invalid TOML, a semantically invalid entry, or a
-    /// duplicate id).
-    pub(crate) fn parse(toml: &str) -> Result<Self, RulesError> {
-        let dto: AllowlistFileDto =
-            toml::from_str(toml).map_err(|e| RulesError::Syntax(e.to_string()))?;
+    /// [`Rules::from_spec`] (a semantically invalid entry, or a duplicate
+    /// id).
+    pub(crate) fn from_spec(dto: AllowlistFileSpec) -> Result<Self, RulesError> {
         let entries = dto
             .entry
             .into_iter()
@@ -7250,17 +7188,6 @@ impl Allowlist {
         }
 
         Ok(Self { entries })
-    }
-
-    /// Parses the embedded default allowlist (`rules/allowlist.toml`).
-    /// Ships empty (issue #11 scope) — a startup error here would only
-    /// mean a future edit broke the (currently all-comment) file.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`RulesError`] if the embedded file fails to parse.
-    pub(crate) fn embedded() -> Result<Self, RulesError> {
-        Self::parse(EMBEDDED_ALLOWLIST)
     }
 
     /// The first allowlist entry that matches `argv`, if any.
@@ -7398,25 +7325,16 @@ fn matches_dangerous_allow_target(entry: &CommandRule) -> bool {
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct UserConfigFileDto {
-    #[serde(default)]
-    deny: Vec<CommandRuleDto>,
-    #[serde(default)]
-    ask: Vec<CommandRuleDto>,
-    #[serde(default)]
-    allow: Vec<CommandRuleDto>,
-    #[serde(default)]
-    redirect: Vec<RedirectRuleDto>,
-    #[serde(default)]
-    pipeline: Vec<PipelineRuleDto>,
-    #[serde(default)]
-    escalation_floor: Option<String>,
-    #[serde(default)]
-    decision_log_path: Option<String>,
-    #[serde(default)]
-    ask_outcome: Option<toml::Value>,
+#[derive(Debug)]
+pub(crate) struct UserConfigSpec {
+    pub(crate) deny: Vec<CommandRuleSpec>,
+    pub(crate) ask: Vec<CommandRuleSpec>,
+    pub(crate) allow: Vec<CommandRuleSpec>,
+    pub(crate) redirect: Vec<RedirectRuleSpec>,
+    pub(crate) pipeline: Vec<PipelineRuleSpec>,
+    pub(crate) escalation_floor: Option<String>,
+    pub(crate) decision_log_path: Option<String>,
+    pub(crate) ask_outcome: Option<AskOutcomeSpec>,
 }
 
 /// A user-supplied policy config, parsed and validated but not yet merged
@@ -7434,13 +7352,14 @@ pub(crate) struct UserConfig {
 }
 
 impl UserConfig {
-    /// Parses `toml` (never a path — this module's "file I/O stays out of
-    /// this module" convention) into a validated [`UserConfig`].
+    /// Builds a validated [`UserConfig`] from an already-deserialized
+    /// [`UserConfigSpec`] (`UserConfig::parse` in `crate::config_loader` is
+    /// the TOML-text entry point; this module never sees a path or TOML).
     ///
     /// # Errors
     ///
-    /// Returns [`RulesError`] for invalid TOML syntax, a semantically
-    /// invalid entry (same checks as [`Rules::parse`]/[`Allowlist::parse`]),
+    /// Returns [`RulesError`] for a semantically invalid entry (same
+    /// checks as [`Rules::from_spec`]/[`Allowlist::from_spec`]),
     /// a duplicate id — checked across all five of `deny`/`ask`/`allow`/
     /// `redirect`/`pipeline` together, one shared id-space, so an id can't
     /// dodge the check by moving arrays — an `allow` entry matching a shell
@@ -7459,10 +7378,7 @@ impl UserConfig {
     /// `"block"`/`"ask"` by [`convert_pipeline_rule`]/[`parse_decision`]
     /// the same way an embedded-blocklist pipeline entry's is — there is
     /// no `"allow"` value to reject here, unlike the command-rule arrays.
-    pub(crate) fn parse(toml: &str) -> Result<Self, RulesError> {
-        let dto: UserConfigFileDto =
-            toml::from_str(toml).map_err(|e| RulesError::Syntax(e.to_string()))?;
-
+    pub(crate) fn from_spec(dto: UserConfigSpec) -> Result<Self, RulesError> {
         let deny = dto
             .deny
             .into_iter()
@@ -7726,7 +7642,7 @@ pub(crate) fn merge_user_config(
             pipeline_rules,
             redirect_rules,
             // Issue #426: no user-config equivalent exists yet
-            // (`UserConfigFileDto` has no `token` field) — carried through
+            // (`UserConfigSpec` has no `token` field) — carried through
             // unchanged from the embedded blocklist.
             token_rules: blocklist.token_rules,
             ask_rules,
@@ -9834,104 +9750,6 @@ mod tests {
                 .any(|rule| rule.id.as_str() == "shell-init-redirect"),
             "the shell-init redirect rule must exist for the Ask arm above to mean anything"
         );
-    }
-
-    // The shell-init/persistence path list is duplicated across nine
-    // `[[command]]` rules and one `[[redirect]]` rule (issue #261's own
-    // tenth copy). Nothing in the schema ties them together, so this test
-    // is what keeps a path added to one mechanism from silently missing
-    // from the others.
-    #[test]
-    fn shell_init_target_lists_are_in_sync() {
-        let doc: toml::Value = toml::from_str(EMBEDDED_BLOCKLIST).unwrap();
-        let targets_of = |table: &toml::Value| -> Vec<(String, String)> {
-            table["targets"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|entry| {
-                    let table = entry.as_table().unwrap();
-                    // `strip` is per-mechanism (`shell-init-dd` carries
-                    // `of=`), so only the matcher kind and value are
-                    // compared.
-                    let (kind, value) = table
-                        .iter()
-                        .find(|(key, _)| key.as_str() != "strip")
-                        .unwrap();
-                    (kind.clone(), value.as_str().unwrap().to_string())
-                })
-                .collect()
-        };
-
-        let expected = doc["command"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|rule| rule["id"].as_str() == Some("shell-init-tee"))
-            .map(targets_of)
-            .unwrap();
-
-        let mut checked = 0;
-        for rule in doc["command"].as_array().unwrap() {
-            let id = rule["id"].as_str().unwrap();
-            if !id.starts_with("shell-init-") {
-                continue;
-            }
-            assert_eq!(targets_of(rule), expected, "rule {id:?} drifted");
-            checked += 1;
-        }
-        for rule in doc["redirect"].as_array().unwrap() {
-            let id = rule["id"].as_str().unwrap();
-            if !id.starts_with("shell-init-") {
-                continue;
-            }
-            assert_eq!(targets_of(rule), expected, "rule {id:?} drifted");
-            checked += 1;
-        }
-        assert_eq!(
-            checked, 11,
-            "expected eleven shell-init rules, found {checked}"
-        );
-    }
-
-    // Issue #446: `curl-wget-pipe-to-shell`'s `sinks` drifted from
-    // `SHELL_INTERPRETERS` twice (issue #55's fish/ksh/tcsh/csh/ash, then
-    // `dash`), each time silently downgrading `curl ... | <shell>` from
-    // Block to Ask. Enforces the comment's promise mechanically instead of
-    // relying on it being kept by hand, the same pattern
-    // `shell_init_target_lists_are_in_sync` already uses for a different
-    // duplicated list. `source`/`.` are checked separately: they are not
-    // `SHELL_INTERPRETERS` members (they need a stdin-alias operand, not
-    // just a bare name, to actually act as a sink — see
-    // `crate::gate`'s `is_interpreter_sink`), but belong in this rule's
-    // `sinks` the same way `pwsh` belongs in `EXTRA_PIPELINE_INTERPRETERS`.
-    #[test]
-    fn curl_wget_pipe_to_shell_sinks_cover_shell_interpreters() {
-        let doc: toml::Value = toml::from_str(EMBEDDED_BLOCKLIST).unwrap();
-        let rule = doc["pipeline"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|rule| rule["id"].as_str() == Some("curl-wget-pipe-to-shell"))
-            .unwrap();
-        let sinks: Vec<&str> = rule["sinks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_str().unwrap())
-            .collect();
-        for shell in SHELL_INTERPRETERS {
-            assert!(
-                sinks.contains(shell),
-                "curl-wget-pipe-to-shell's sinks is missing {shell:?} from SHELL_INTERPRETERS"
-            );
-        }
-        for extra in ["source", "."] {
-            assert!(
-                sinks.contains(&extra),
-                "curl-wget-pipe-to-shell's sinks is missing {extra:?}"
-            );
-        }
     }
 
     #[test]
