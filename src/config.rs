@@ -2720,7 +2720,14 @@ mod tests {
     }
 
     fn decide(rules: &Rules, allowlist: &Allowlist, command: &str, cwd: Option<&str>) -> Decision {
-        crate::gate::analyze_with_policy_in_cwd(command, rules, allowlist, cwd).decision()
+        crate::gate::analyze_with_policy_in_cwd(
+            command,
+            rules,
+            allowlist,
+            cwd,
+            crate::parse_command,
+        )
+        .decision()
     }
 
     #[test]
