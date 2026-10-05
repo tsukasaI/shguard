@@ -726,3 +726,141 @@ fn library_analyze_fails_closed_to_ask_on_the_same_heredoc_hang() {
         "expected a watchdog fail-closed reason, got: {stdout}"
     );
 }
+
+// ==== never-decremented per-opener raw caps (issues #557, #528, #553) ====
+//
+// Every payload below used to reach brush-parser's recursion (stack-overflow
+// abort, empty stdout, fail-open in hook mode) or its exponential
+// backtracking (a watchdog time-budget trip), because the raw pre-scan's
+// decrementing depth counters (or its `[[` count reset) could be driven back
+// down by a quoted or escaped closer. `run_hook` requires exit 0 with a
+// JSON decision on stdout, so a regression to an abort fails at that
+// assertion; each test then pins that the decision is an explicit raw-cap
+// `ask`, not a watchdog trip.
+
+fn assert_raw_cap_ask(command: &str, needle: &str) {
+    let output = run_hook(&bash_command(command));
+    assert_eq!(
+        permission_decision(&output),
+        "ask",
+        "command: {command:.80}"
+    );
+    let reason = permission_reason(&output);
+    assert!(
+        reason.contains(needle),
+        "expected the {needle:?} raw cap, got: {reason}"
+    );
+}
+
+#[test]
+fn legacy_arithmetic_nesting_fails_closed_closed_unclosed_and_double_quoted() {
+    let n = 2000;
+    assert_raw_cap_ask(
+        &format!("echo {}1{}", "$[".repeat(n), "]".repeat(n)),
+        "legacy arithmetic opener count",
+    );
+    assert_raw_cap_ask(
+        &format!("echo {}", "$[".repeat(n)),
+        "legacy arithmetic opener count",
+    );
+    assert_raw_cap_ask(
+        &format!("echo \"{}\"", "$[".repeat(n)),
+        "legacy arithmetic opener count",
+    );
+}
+
+#[test]
+fn command_substitution_with_hidden_closer_fails_closed() {
+    for unit in ["$( ')' ", "$( \")\" ", "$( \\) "] {
+        assert_raw_cap_ask(
+            &format!("echo {}", unit.repeat(2000)),
+            "command substitution opener count",
+        );
+    }
+    assert_raw_cap_ask(
+        &format!("echo \"{}", "$( \")\" ".repeat(2000)),
+        "command substitution opener count",
+    );
+    assert_raw_cap_ask(
+        &format!("echo {}{}", "$( ')' ".repeat(2000), ")".repeat(2000)),
+        "command substitution opener count",
+    );
+}
+
+#[test]
+fn parameter_expansion_with_hidden_closer_fails_closed() {
+    assert_raw_cap_ask(
+        &format!("echo {}", "${x:-'}' ".repeat(2530)),
+        "parameter expansion opener count",
+    );
+    assert_raw_cap_ask(
+        &format!("echo {}", "${x:-\\} ".repeat(8000)),
+        "parameter expansion opener count",
+    );
+    assert_raw_cap_ask(
+        &format!("echo {}{}", "${x:-'}'".repeat(2000), "}".repeat(2000)),
+        "parameter expansion opener count",
+    );
+}
+
+#[test]
+fn process_substitution_with_hidden_closer_fails_closed() {
+    assert_raw_cap_ask(
+        &format!("cat {}", "<( ')' ".repeat(485)),
+        "process substitution opener count",
+    );
+    assert_raw_cap_ask(
+        &format!("tee {}", ">( ')' ".repeat(500)),
+        "process substitution opener count",
+    );
+}
+
+/// Issue #528: a quoted `[[` repeated inside one real `[[ ... ]]` region
+/// used to reset the operator count before it reached the cap.
+#[test]
+fn quoted_double_bracket_does_not_reset_the_extended_test_count() {
+    let chunk = format!("{}' [[ ' && ", "a && ".repeat(60));
+    let command = format!("[[ {} a ]]", chunk.repeat(1500));
+    assert_raw_cap_ask(&command, "extended-test operator count");
+}
+
+/// Issue #553: each word's unclosed comma-ful `{` run is "closed" for the
+/// depth counter by a quoted `}`, so the per-word cost summed past the time
+/// budget. The never-reset `{` count now rejects it in the pre-scan.
+#[test]
+fn chained_unclosed_comma_brace_groups_fail_closed_without_a_time_budget_trip() {
+    let word = format!("{}'{}'", "{a,b,c,".repeat(12), "}".repeat(12));
+    for words in [4, 8] {
+        let command = format!("echo {}", vec![word.clone(); words].join(" "));
+        let output = run_hook(&bash_command(&command));
+        assert_eq!(permission_decision(&output), "ask");
+        let reason = permission_reason(&output);
+        assert!(
+            reason.contains("brace"),
+            "expected a raw brace cap, not a watchdog trip, got: {reason}"
+        );
+        assert!(!reason.contains("time budget"), "got: {reason}");
+    }
+}
+
+/// Ordinary scripts stay under every per-opener cap: whatever else the gate
+/// decides about them, the reason must not be a raw-cap rejection.
+#[test]
+fn ordinary_substitution_heavy_commands_stay_under_the_raw_caps() {
+    for command in [
+        "echo $(date) $(whoami) ${HOME} ${USER:-x} <(ls) >(cat)",
+        "diff <(sort a) <(sort b)",
+        "echo $(echo $(echo hi)) $((1 + 2))",
+        "[[ -f a && -f b || ! -d c ]] && echo ok",
+        "echo {a,b,c} {1..3}",
+    ] {
+        let output = run_hook(&bash_command(command));
+        let reason = permission_reason(&output);
+        assert!(
+            !reason.contains("exceeds the raw"),
+            "command {command:?} tripped a raw cap: {reason}"
+        );
+    }
+    let output = run_hook(&bash_command("echo $(date) ${HOME} $(echo $(echo hi))"));
+    assert_eq!(permission_decision(&output), "allow");
+}

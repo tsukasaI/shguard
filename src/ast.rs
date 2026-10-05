@@ -86,21 +86,42 @@ pub(crate) const MAX_BRACE_NESTING_DEPTH: usize = 64;
 /// limit here: depth 24 already extrapolates to over half an hour and
 /// depth 26 to hours, so a raw brace count sitting *below* 64 sails
 /// through unrejected while still taking unbounded wall-clock time. A
-/// real brace expansion containing at least one `,` at every level
+/// *closed* brace expansion containing at least one `,` at every level
 /// (`{a,{a,{a,x}}}`) does not backtrack this way — confirmed flat at
-/// ~0.004s regardless of depth — but the cap rejects *any* raw `{` depth
-/// past 12, comma or not: a comma-ful alternation nested deeper than 12,
-/// and quoted/heredoc text whose braces the scan over-counts (a >12-deep
-/// JSON literal, an awk body), now fail closed to `Ask` where 64
-/// tolerated them.
+/// ~0.004s regardless of depth. An *unclosed* comma-ful run
+/// (`{a,{a,{a,`, no `}`) does, because the failed alternation is retried
+/// at every level (release build, `shguard check` end to end, best of 2):
 ///
-/// 12 sits at the last depth still comfortably sub-30ms in the table
-/// above. Re-measure the same comma-less-nesting timing curve before
-/// raising this on any `brush-parser` version bump — unlike stack-depth
-/// caps, this one is not just "still safe", it can silently become
-/// "usable again" or "unusably slow one level earlier" depending on
-/// whether a new grammar version added memoization.
-pub(crate) const MAX_RAW_BRACE_NESTING_DEPTH: usize = 12;
+/// | unclosed units | `{a,` | `{a,b,` | `{a,b,c,` |
+/// |---|---|---|---|
+/// | 9 | 0.022s | 0.023s | 0.037s |
+/// | 10 | 0.037s | 0.068s | 0.134s |
+/// | 11 | 0.078s | 0.735s | 0.991s |
+/// | 12 | 0.763s | 2.013s (watchdog trip) | 1.02s |
+/// | 13 | 2.028s (watchdog trip) | 2.018s (watchdog trip) | 2.014s (watchdog trip) |
+///
+/// The cap rejects *any* raw `{` depth past 10, comma or not: a comma-ful
+/// alternation nested deeper than 10, and quoted/heredoc text whose braces
+/// the scan over-counts (a >10-deep JSON literal, an awk body), fail closed
+/// to `Ask` where 64 tolerated them.
+///
+/// # Why a depth cap alone is not enough
+///
+/// The depth counter decrements on every `}`, quoted or not, so each of
+/// several words can stay at depth <= 10 (`{a,b,c,`x10 + `'}'`x10, repeated)
+/// while their per-word costs add up. [`MAX_RAW_BRACE_OPEN_COUNT`], a total
+/// that closers can never reset, bounds the sum: at most three full-depth
+/// words fit under it (3 words of depth 10 measured 0.27s, 4 words 0.50s).
+///
+/// 10 is the deepest level where the worst measured unclosed shape
+/// (`{a,b,c,`, 0.134s) still leaves a >=3x margin below the 2s watchdog
+/// budget even summed over the words the open-count cap admits (about
+/// 0.4s, ~5x). Re-measure the same curves before raising this on any
+/// `brush-parser` version bump — unlike stack-depth caps, this one is not
+/// just "still safe", it can silently become "usable again" or "unusably
+/// slow one level earlier" depending on whether a new grammar version added
+/// memoization.
+pub(crate) const MAX_RAW_BRACE_NESTING_DEPTH: usize = 10;
 
 /// Cap on `(`/`)` nesting depth specifically for `src/parser.rs`'s raw
 /// pre-scan (`reject_excessive_raw_nesting`) — issue #404's tightening of
@@ -168,19 +189,22 @@ pub(crate) const MAX_RAW_PAREN_NESTING_DEPTH: usize = 16;
 ///
 /// # Why 32
 ///
-/// Bisected against a debug build (`cargo test`'s 2MiB thread stack, the
-/// tighter of the two budgets this crate ships against) with the cap lifted,
-/// smallest aborting count of raw `{` openers per shape. A bare brace group
-/// with a quoted or escaped closer (`{\}`, `{'}'`) aborts at 579, but
-/// parameter expansions recurse much deeper per `{`: `${a/'}'`, `${a//'}'`,
-/// `${a^^'}'`, `${a,,'}'` and an escaped `${a/\}` at 73, `${a/b/'}'` at 72
-/// (the lowest floor found), `${a:1:2'}'` at 76, `${a:-'}'`, `${a:+'}'`,
-/// `${a#'}'` and `${a:-\}` at 120, `${!a'}'` and `${a@'}'` at 168. Shapes
-/// that nest a bare `${` inside another (`${a:-${'}'`) never reach the
-/// count: their unhidden `{` drives [`MAX_RAW_BRACE_NESTING_DEPTH`] first.
-/// 32 sits ~2.25x below the 72 floor. Re-bisect every parameter-expansion
-/// operator form, not just the brace-group one, before raising this on any
-/// `brush-parser` version bump.
+/// Two independent bounds, both against the lowest measured floor:
+///
+/// - Stack depth, bare brace group with a quoted or escaped closer
+///   (`{'}'`, `{\}`), smallest aborting count with the cap lifted: 580
+///   (debug build, `cargo test`'s 2MiB thread stack, the tighter of the two
+///   budgets this crate ships against; at 2922 in a release build the 2s
+///   time budget trips first). 32 is ~18x below the debug figure.
+///   Parameter expansions recurse much deeper per `{` and are bounded by
+///   the tighter [`MAX_RAW_PARAM_EXPANSION_COUNT`] instead.
+/// - CPU time: this total is what bounds the number of full-depth unclosed
+///   comma-ful words that [`MAX_RAW_BRACE_NESTING_DEPTH`]'s per-word depth
+///   cap lets through, because a quoted `}` resets that depth counter
+///   (`{a,b,c,`x10 + `'}'`x10, repeated). 32 admits at most three depth-10
+///   words, ~0.4s against the 2s budget (~5x). The check counts every `{`,
+///   comma-ful or not, since a closer-proof comma-ful count would need the
+///   very quote awareness this scan lacks.
 ///
 /// # Known trade-off
 ///
@@ -188,8 +212,39 @@ pub(crate) const MAX_RAW_PAREN_NESTING_DEPTH: usize = 16;
 /// including ones inside quotes, heredoc bodies, and comments. Legitimate
 /// input with more than 32 `{` bytes anywhere in one command — a large
 /// inline JSON literal, an awk or jq body, a long run of `${...}`
-/// expansions — now fails closed to `Ask` where it previously did not.
+/// expansions — fails closed to `Ask`. That over-Ask is accepted: a count
+/// that quoting cannot reset is the only guard that does not depend on
+/// matching brush's quoting rules.
 pub(crate) const MAX_RAW_BRACE_OPEN_COUNT: usize = 32;
+
+/// Cap on the total count of `${` openers (a `{` immediately preceded by
+/// `$`) in one command, enforced by [`crate::parser::reject_excessive_raw_nesting`]
+/// on top of [`MAX_RAW_BRACE_OPEN_COUNT`]. Never decremented, so a quoted or
+/// escaped `}` (`${x:-'}'`, `${a/b/'}'`, `${x:-\}`) cannot reset it.
+///
+/// # Why 16
+///
+/// brush-parser recurses once per `${` however its closer is hidden.
+/// Smallest aborting count with the cap lifted, `echo ` + the unit repeated
+/// N times (+ `x` and N closing `}` for the "closed" column), debug build /
+/// release build:
+///
+/// | unit | unclosed | closed |
+/// |---|---|---|
+/// | `${a/b/'}'` (lowest floor; `/`, `//`, `^^`, `,,` forms 73) | 168 / 2530 | 72 / 1643 |
+/// | `${a:1:2'}'` | 168 / 2530 | 76 / 2434 |
+/// | `${a:-'}'` (`:+`, `#`, `%`, `:-\}` forms alike) | 168 / 2530 | 120 / 1643 |
+/// | `${!a'}'`, `${a@'}'` | 168 / 2530 | 168 / 2530 |
+///
+/// 16 is 4.5x below the lowest debug floor (72) and ~100x below the release
+/// one. Re-bisect every parameter-expansion operator form before raising
+/// this on any `brush-parser` version bump.
+///
+/// # Known trade-off
+///
+/// More than 16 `${...}` expansions in one command (a long generated
+/// script, a heredoc body that mentions many `${VAR}`) fail closed to `Ask`.
+pub(crate) const MAX_RAW_PARAM_EXPANSION_COUNT: usize = 16;
 
 /// Cap on the total count of raw `(` bytes [`crate::parser::reject_excessive_raw_nesting`]
 /// tolerates in one command, counted once per `(` byte and never decremented
@@ -203,23 +258,86 @@ pub(crate) const MAX_RAW_BRACE_OPEN_COUNT: usize = 32;
 ///
 /// # Why 32
 ///
-/// Bisected against a debug build (the tighter of shguard's two shipped
-/// stack budgets, same as [`MAX_RAW_BRACE_OPEN_COUNT`]) with the cap lifted:
-/// the quoted-closer `$(echo ")"` shape above aborts at 145 raw `(` bytes
-/// (the same at 145 for a single-quoted or backslash-escaped closer), and a
-/// process substitution `<(echo ")"` at 96, the lowest paren floor found.
-/// 32 sits a ~3x margin below that. Parameter-expansion `{` nesting is
-/// tighter per opener than either, which is why the brace counterpart is
-/// sized against its own floor. Re-bisect these shapes
-/// before raising this on any `brush-parser` version bump.
+/// This is the general bound on every `(`; the openers that recurse
+/// deepest per byte have their own, tighter caps
+/// ([`MAX_RAW_COMMAND_SUBST_COUNT`], [`MAX_RAW_PROCESS_SUBST_COUNT`]). What
+/// remains is a bare `(` (subshell, `$((` second paren, array literal),
+/// whose nesting needs real unquoted closers that
+/// [`MAX_RAW_PAREN_NESTING_DEPTH`] already bounds (a flat run of `( ')' `
+/// units is a syntax error at the first unit, so no hidden-closer shape
+/// reaches deep recursion through a bare `(`). Re-check this on a
+/// `brush-parser` bump.
 ///
 /// # Known trade-off
 ///
 /// Like [`MAX_RAW_BRACE_OPEN_COUNT`], this counts every raw `(` byte
 /// including ones inside quotes and nested substitutions. Legitimate input
-/// chaining more than 32 command substitutions or subshells in one line now
-/// fails closed to `Ask` where it previously did not.
+/// with more than 32 `(` bytes in one command (a long `case` pattern list,
+/// many subshells) fails closed to `Ask`.
 pub(crate) const MAX_RAW_PAREN_OPEN_COUNT: usize = 32;
+
+/// Cap on the total count of `$(` openers (command substitution, including
+/// the first two bytes of `$((`) in one command, enforced by
+/// [`crate::parser::reject_excessive_raw_nesting`] on top of
+/// [`MAX_RAW_PAREN_OPEN_COUNT`]. Never decremented, so a quoted or escaped
+/// `)` (`$( ')' `, `$( \) `) cannot reset it: brush recurses once per `$(`
+/// however its closer is hidden.
+///
+/// # Why 16
+///
+/// Smallest aborting count with the cap lifted, `echo ` + `$( ')' ` (or
+/// `$( \) `) repeated N times: 151 (debug build, 2MiB worker stack, the
+/// tighter of the two budgets this crate ships against) / 1709 (release).
+/// 16 is ~9x below the debug floor.
+///
+/// # Composed worst case (all caps at once)
+///
+/// The per-opener recursions nest in one chain, so their costs add. Filling
+/// every stack-depth cap at once ([`MAX_RAW_COMMAND_SUBST_COUNT`],
+/// [`MAX_RAW_PARAM_EXPANSION_COUNT`], [`MAX_RAW_PROCESS_SUBST_COUNT`],
+/// [`MAX_RAW_LEGACY_ARITH_COUNT`], [`MAX_KEYWORD_NESTING_COUNT`] and a
+/// [`MAX_RAW_EXTENDED_TEST_COUNT`] `!` chain, nested in several orders) with
+/// the caps lifted, then scaling the whole payload up: the debug build
+/// aborts at 4x the caps, and the release build does not abort up to 16x.
+/// So the composed margin is >=4x debug, >=16x release; every individual
+/// cap's own margin is 3.3x or more (the tightest being
+/// [`MAX_RAW_EXTENDED_TEST_COUNT`]'s `!` chain). Re-measure the composed
+/// payload, not just each shape alone, before raising any of these caps.
+///
+/// # Known trade-off
+///
+/// More than 16 command substitutions in one command (a generated script)
+/// fail closed to `Ask`.
+pub(crate) const MAX_RAW_COMMAND_SUBST_COUNT: usize = 16;
+
+/// Cap on the total count of `<(` and `>(` openers (process substitution,
+/// both directions together) in one command, enforced by
+/// [`crate::parser::reject_excessive_raw_nesting`] on top of
+/// [`MAX_RAW_PAREN_OPEN_COUNT`]. Never decremented, so a quoted or escaped
+/// `)` cannot reset it. Process substitution recurses through the program
+/// grammar and aborts at the lowest count of the paren openers.
+///
+/// # Why 8
+///
+/// Smallest aborting count with the cap lifted, `cat ` + `<( ')' ` (or
+/// `tee ` + `>( ')' `) repeated N times: 122 (debug) / 485 (release). 8 is
+/// ~15x below the debug floor and ~60x below the release one; it also keeps
+/// the composed worst case in [`MAX_RAW_COMMAND_SUBST_COUNT`]'s docs above
+/// 3x. A command with more than 8 process substitutions is rare.
+pub(crate) const MAX_RAW_PROCESS_SUBST_COUNT: usize = 8;
+
+/// Cap on the total count of `$[` openers (legacy arithmetic expansion) in
+/// one command, enforced by [`crate::parser::reject_excessive_raw_nesting`]
+/// on top of [`MAX_RAW_BRACKET_OPENER_COUNT`]. Never decremented, so a quoted
+/// or escaped `]` cannot reset it.
+///
+/// # Why 8
+///
+/// Smallest aborting count with the cap lifted, `echo ` + `$[` repeated N
+/// times (closed or unclosed): 151 (debug) / 1709 (release); 8 is ~19x below
+/// the debug floor. A `$[` already resolves to `Ask` (arithmetic expansion
+/// cannot be analyzed statically), so the cap adds no false-positive cost.
+pub(crate) const MAX_RAW_LEGACY_ARITH_COUNT: usize = 8;
 
 /// Cap on the total count of `[` bytes in one command, enforced by
 /// `src/parser.rs`'s raw pre-scan (`reject_excessive_raw_nesting`).
@@ -239,15 +357,24 @@ pub(crate) const MAX_RAW_PAREN_OPEN_COUNT: usize = 32;
 ///
 /// # Why 64
 ///
-/// Measured on a debug build, 2 MiB worker stack, `echo ` plus a unit
-/// repeated N times, smallest aborting N: `a[` 1282, `$[` 151 (the lowest
-/// per-`[` threshold; `$[$[` aborts at 76 units, the same ~151 openers).
-/// `$[` has no identifier prefix, so every `[` is counted rather than only
-/// `[` after an identifier byte. 64 leaves ~2.3x margin below the lowest
-/// measured boundary while tolerating ordinary commands (`[ -f x ]`,
-/// `[[ ... ]]`, globs). Re-measure before raising this on any
-/// `brush-parser` version bump, for the same reason
-/// [`MAX_RAW_BRACE_NESTING_DEPTH`]'s docs give.
+/// Smallest aborting N with the cap lifted, `echo ` plus a unit repeated N
+/// times, debug build (2 MiB worker stack) / release build: `a[` 1284 /
+/// 3749. The deeper-per-opener `$[` shape is bounded by its own, much
+/// tighter [`MAX_RAW_LEGACY_ARITH_COUNT`] (151 / 1709), so what this
+/// general cap governs is the `a[` array-subscript shape: 64 is ~20x below
+/// the debug floor, and also tolerates ordinary commands (`[ -f x ]`,
+/// `[[ ... ]]`, globs). Every `[` is counted rather than only `[` after an
+/// identifier byte, since the shapes that recurse deepest have no
+/// identifier prefix. Re-measure before raising this on any `brush-parser`
+/// version bump, for the same reason [`MAX_RAW_BRACE_NESTING_DEPTH`]'s docs
+/// give.
+///
+/// # Known trade-off
+///
+/// A count cap trips on volume, not nesting: a heredoc body or quoted
+/// literal with more than 64 `[` (a README with 65 markdown links, many
+/// `[[:alpha:]]` classes) fails closed to `Ask`. That is the safe direction
+/// and accepted.
 pub(crate) const MAX_RAW_BRACKET_OPENER_COUNT: usize = 64;
 
 /// Cap on the total count of reserved-word compound-command openers (`if`,
@@ -373,19 +500,31 @@ pub(crate) const MAX_KEYWORD_NESTING_COUNT: usize = 16;
 /// open bypass of the whole hook (see the module docs on
 /// [`crate::parser::reject_excessive_raw_nesting`]).
 ///
-/// Empirically confirmed thresholds: `!` alone overflows at parse time
-/// around 2052 repetitions; `&&` overflows at drop time around 65838
-/// repetitions (parsing itself succeeds). 64 sits ~30x below the tighter
-/// (parse-time) threshold — the same "far beyond any realistic operand
-/// count" margin [`crate::parser::collect_extended_test_words`]'s own
-/// AST-level depth cap already uses, which this raw cap now runs ahead of.
-/// Unlike [`MAX_KEYWORD_NESTING_COUNT`], the counter resets on each new
-/// `[[` — the recursion this bounds is a single boolean-expression tree
-/// built by one `[[ ... ]]` invocation, and independent `[[ ]]` blocks
-/// chained by `;`/`&&`/`||` at the top level parse and drop separately
-/// (flat, not recursive — same reason top-level `&&`/`||` chains between
-/// pipelines are unbounded and safe), so summing across blocks would only
-/// reject benign scripts without bounding anything real.
+/// Smallest aborting count with the cap lifted, debug build (2 MiB worker
+/// stack) / release build: a `!` chain (`[[ ! ! ! ... x ]]`) 209 / 2052
+/// (parse time); an `&&` chain 18770 / 65821 (drop time, parsing itself
+/// succeeds). 64 is ~3.3x below the tighter debug `!` threshold and ~32x
+/// below the release one; it is also the cap whose margin the composed
+/// worst case is sized around (see [`MAX_RAW_COMMAND_SUBST_COUNT`]'s docs).
+///
+/// # Why the count is never reset
+///
+/// The count covers the whole command, not one `[[ ... ]]` region: it is
+/// never reset by a `[[` token and tracking is never turned off by a `]]`
+/// token. The scan is quote-blind, so a quoted `' [[ '` inside a real,
+/// still-open region is indistinguishable from a genuinely new block, and
+/// resetting on it would let quoting drive the count back down while brush
+/// still builds one boolean-expression tree (and symmetrically for a quoted
+/// `]]` turning tracking off). Never-reset is the only rule that holds
+/// without quote awareness.
+///
+/// # Known trade-off
+///
+/// Independent `[[ ]]` blocks chained at the top level parse and drop
+/// separately, so summing their operators bounds nothing real there; the
+/// sum is accepted anyway. A command with more than 64 `!`/`&&`/`||`
+/// occurrences after its first `[[` (including ones outside any
+/// `[[ ]]`) fails closed to `Ask`.
 pub(crate) const MAX_RAW_EXTENDED_TEST_COUNT: usize = 64;
 
 /// A separator joining two [`Pipeline`]s in a [`CommandLine`].
