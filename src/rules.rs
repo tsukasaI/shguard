@@ -672,6 +672,13 @@ fn git_global_single_token_flag(text: &str) -> bool {
         })
 }
 
+/// The config key half of a `-c`/`--config-env` `key=value` pair (the whole
+/// text when there is no `=`). Shared by the `git_config_key_is_*` predicates
+/// so key parsing lives in one place.
+fn git_config_key(key_value: &str) -> &str {
+    key_value.split_once('=').map_or(key_value, |(key, _)| key)
+}
+
 /// Whether `key_value` — the text following `-c`/`--config-env`'s `=` or
 /// separator, e.g. `"core.hooksPath=/dev/null"` or bare `"core.hooksPath"`
 /// — names the `core.hooksPath` config variable. Git config section/key
@@ -686,7 +693,7 @@ fn git_global_single_token_flag(text: &str) -> bool {
 /// that would itself error is a harmless false positive, cheaper than
 /// special-casing it out.
 fn git_config_key_is_hooks_path(key_value: &str) -> bool {
-    let key = key_value.split_once('=').map_or(key_value, |(key, _)| key);
+    let key = git_config_key(key_value);
     key.eq_ignore_ascii_case("core.hookspath")
 }
 
@@ -714,7 +721,7 @@ fn git_config_key_is_hooks_path(key_value: &str) -> bool {
 /// effect, gated on a runtime condition this function doesn't evaluate) —
 /// a disclosed residual gap, not covered by the issue this fixes.
 pub(crate) fn git_config_key_is_include_path(key_value: &str) -> bool {
-    let key = key_value.split_once('=').map_or(key_value, |(key, _)| key);
+    let key = git_config_key(key_value);
     key.eq_ignore_ascii_case("include.path")
 }
 
@@ -731,7 +738,7 @@ pub(crate) fn git_config_key_is_include_path(key_value: &str) -> bool {
 /// [`git_config_key_is_include_path`]'s doc for why this is consulted
 /// structurally in `crate::gate` rather than via a `required_flags` rule.
 pub(crate) fn git_config_key_is_alias(key_value: &str) -> bool {
-    let key = key_value.split_once('=').map_or(key_value, |(key, _)| key);
+    let key = git_config_key(key_value);
     key.split_once('.')
         .is_some_and(|(section, name)| section.eq_ignore_ascii_case("alias") && !name.is_empty())
 }
