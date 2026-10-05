@@ -2602,6 +2602,143 @@ fn config_symlinked_to_dev_null_still_protects_its_own_literal_directory() {
     assert_eq!(permission_decision(&allow_output), "allow");
 }
 
+// ==== except_targets resolve_symlinks (issue #583) ====
+
+#[cfg(unix)]
+mod resolve_symlinks {
+    use super::{bash_command, fs, permission_decision, run_hook, tempdir, write_config};
+    use std::os::unix::fs::symlink;
+    use std::path::{Path, PathBuf};
+
+    struct Fixture {
+        _config_dir: tempfile::TempDir,
+        _work: tempfile::TempDir,
+        outside: tempfile::TempDir,
+        config: PathBuf,
+        excepted: PathBuf,
+    }
+
+    /// A deny rule for `upload-tool` whose only except is the canonical
+    /// `scratch` directory (canonical so the prefix matches the resolved
+    /// spelling on platforms where the temp dir sits behind a symlink).
+    fn fixture() -> Fixture {
+        let work = tempdir().expect("tempdir should create");
+        let excepted = work
+            .path()
+            .canonicalize()
+            .expect("tempdir should canonicalize")
+            .join("scratch");
+        fs::create_dir(&excepted).expect("scratch dir should create");
+        let outside = tempdir().expect("tempdir should create");
+        fs::write(outside.path().join("secret.txt"), "secret").expect("secret should write");
+        let (config_dir, config) = write_config(&format!(
+            r#"
+            [[deny]]
+            id = "user-deny-upload"
+            reason = "confirm uploads outside the scratch dir"
+            command = "upload-tool"
+            except_targets = [{{ prefix = "{}/" }}]
+            resolve_symlinks = true
+        "#,
+            excepted.display()
+        ));
+        Fixture {
+            _config_dir: config_dir,
+            _work: work,
+            outside,
+            config,
+            excepted,
+        }
+    }
+
+    fn payload(command: &str, cwd: Option<&Path>) -> String {
+        let mut value: serde_json::Value = serde_json::from_str(&bash_command(command))
+            .expect("bash_command should be valid JSON");
+        if let Some(cwd) = cwd {
+            value["cwd"] = serde_json::Value::String(cwd.to_str().unwrap().to_string());
+        }
+        value.to_string()
+    }
+
+    fn decide(fx: &Fixture, command: &str, cwd: Option<&Path>) -> String {
+        let output = run_hook(
+            &payload(command, cwd),
+            &[("SHGUARD_CONFIG", fx.config.to_str().unwrap())],
+        );
+        permission_decision(&output).to_string()
+    }
+
+    #[test]
+    fn regular_file_inside_the_excepted_prefix_is_excepted() {
+        let fx = fixture();
+        let file = fx.excepted.join("body.md");
+        fs::write(&file, "ok").unwrap();
+        let command = format!("upload-tool {}", file.display());
+        assert_eq!(decide(&fx, &command, None), "allow");
+    }
+
+    #[test]
+    fn symlink_inside_the_prefix_pointing_outside_still_fires() {
+        let fx = fixture();
+        let link = fx.excepted.join("body.md");
+        symlink(fx.outside.path().join("secret.txt"), &link).unwrap();
+        let command = format!("upload-tool {}", link.display());
+        assert_eq!(decide(&fx, &command, None), "deny");
+    }
+
+    #[test]
+    fn dangling_symlink_and_not_yet_created_file_fire() {
+        let fx = fixture();
+        let dangling = fx.excepted.join("dangling.md");
+        symlink(fx.outside.path().join("does-not-exist"), &dangling).unwrap();
+        let command = format!("upload-tool {}", dangling.display());
+        assert_eq!(decide(&fx, &command, None), "deny");
+        let missing = fx.excepted.join("not-created-yet.md");
+        let command = format!("upload-tool {}", missing.display());
+        assert_eq!(decide(&fx, &command, None), "deny");
+    }
+
+    #[test]
+    fn relative_candidates_resolve_against_the_payload_cwd() {
+        let fx = fixture();
+        fs::write(fx.excepted.join("body.md"), "ok").unwrap();
+        symlink(
+            fx.outside.path().join("secret.txt"),
+            fx.excepted.join("link.md"),
+        )
+        .unwrap();
+        assert_eq!(
+            decide(&fx, "upload-tool body.md", Some(&fx.excepted)),
+            "allow"
+        );
+        assert_eq!(
+            decide(&fx, "upload-tool link.md", Some(&fx.excepted)),
+            "deny"
+        );
+    }
+
+    #[test]
+    fn relative_candidate_without_a_usable_cwd_fires() {
+        let fx = fixture();
+        fs::write(fx.excepted.join("body.md"), "ok").unwrap();
+        assert_eq!(decide(&fx, "upload-tool body.md", None), "deny");
+        assert_eq!(
+            decide(&fx, "upload-tool body.md", Some(Path::new("relative/dir"))),
+            "deny"
+        );
+    }
+
+    #[test]
+    fn an_in_line_cd_to_a_relative_directory_fails_closed() {
+        let fx = fixture();
+        fs::write(fx.excepted.join("body.md"), "ok").unwrap();
+        assert_eq!(
+            decide(&fx, "cd sub && upload-tool body.md", Some(&fx.excepted)),
+            "deny"
+        );
+    }
+}
+
 // Issue #582 review: an allowlist entry must keep exact flag matching, or
 // `--ff` (a different real git option) would satisfy `--ff-only` and widen
 // an Ask into an Allow.

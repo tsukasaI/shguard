@@ -2146,6 +2146,32 @@ pub(crate) fn render_cwd_anchor(form: &PathForm) -> Option<String> {
     }
 }
 
+/// The canonical (symlink-resolved) spelling of an except-target candidate
+/// for a rule with `resolve_symlinks` (issue #583). `None` on any failure so
+/// the caller fails closed: an empty or NUL-bearing token, a relative token
+/// with no absolute `base`, a path that does not exist or cannot be read, or
+/// a canonical path that is not valid UTF-8.
+fn canonical_candidate(token: &str, base: Option<&str>) -> Option<String> {
+    if token.is_empty() {
+        return None;
+    }
+    let path = std::path::Path::new(token);
+    let full = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        let base = std::path::Path::new(base?);
+        if !base.is_absolute() {
+            return None;
+        }
+        base.join(path)
+    };
+    std::fs::canonicalize(full)
+        .ok()?
+        .into_os_string()
+        .into_string()
+        .ok()
+}
+
 /// A rule matching one simple command's resolved argv: a command name, a
 /// set of required flags (all must be present, ANDed — though a single
 /// entry may itself be a [`FlagMatcher::AnyOf`], ORing equivalent
@@ -2168,6 +2194,7 @@ pub(crate) struct CommandRule {
     required_tokens: Vec<String>,
     targets: Vec<TargetMatcher>,
     except_targets: Vec<TargetMatcher>,
+    resolve_symlinks: bool,
     value_flags: Vec<ValueFlag>,
     attached_value_flags: Vec<char>,
     /// Issue #581: when non-empty, the except_targets candidate set is
@@ -2396,6 +2423,25 @@ impl CommandRule {
     /// flag with no value fails closed (see [`target_flag_values`]).
     #[must_use]
     fn matches(&self, argv: &[NormalizedWord]) -> bool {
+        self.matches_in(argv, None)
+    }
+
+    /// [`Self::matches`] with `base`, the absolute directory a relative
+    /// candidate is resolved against when this rule sets `resolve_symlinks`
+    /// (issue #583). `None` (or a non-absolute `base`) means no usable cwd:
+    /// a relative candidate then fails closed.
+    ///
+    /// With `resolve_symlinks = true` every candidate is canonicalized
+    /// (`std::fs::canonicalize`) before `except_targets` matching, and the
+    /// canonical path must match an alternative for the exception to apply.
+    /// Any canonicalization failure (missing file, permission error,
+    /// relative candidate with no usable `base`) leaves the exception
+    /// unapplied, so the rule fires. A file that does not exist yet fails
+    /// closed the same way. Canonical paths are spelled as the OS resolves
+    /// them (on macOS `/tmp` is `/private/tmp`), so `except_targets` entries
+    /// must use that spelling.
+    #[must_use]
+    fn matches_in(&self, argv: &[NormalizedWord], base: Option<&str>) -> bool {
         let Some(rest_words) = self.matching_rest(argv) else {
             return false;
         };
@@ -2448,9 +2494,15 @@ impl CommandRule {
             && !candidates
                 .iter()
                 .any(|c| candidate_has_unresolved_ascent(c))
-            && candidates
-                .iter()
-                .all(|token| self.except_targets.iter().any(|e| e.matches(token)));
+            && candidates.iter().all(|token| {
+                if self.resolve_symlinks {
+                    canonical_candidate(token, base).is_some_and(|canonical| {
+                        self.except_targets.iter().any(|e| e.matches(&canonical))
+                    })
+                } else {
+                    self.except_targets.iter().any(|e| e.matches(token))
+                }
+            });
         !all_excepted
     }
 
@@ -3948,14 +4000,29 @@ pub(crate) fn fold_command_name(name: &str) -> String {
 /// Strips a trailing distro-style version suffix (`python3.12` -> `python`,
 /// `lua5.4` -> `lua`, `php8.2` -> `php`) so interpreter-name matching
 /// recognises versioned binaries (issue #346) without a hand-maintained list
-/// of every version. `trim_end_matches` (byte-index-unsafe alternatives like
-/// `rfind` + manual slicing panic on a multibyte name ending just past a
-/// non-ASCII character, e.g. `café`) only ever strips ASCII digits/`.`, so
-/// it never lands mid-character. Returns `name` unchanged if stripping would
-/// empty it (a name that is entirely digits/dots, or has no version suffix
-/// at all) — never reduced to an empty string.
+/// of every version. Also strips a `-dbg`/`-debug` suffix and the CPython ABI
+/// letters (`t` free-threaded, `m` pymalloc, `d` debug, `u` unicode) that
+/// follow the digits (`python3.13t`, `python3.7m`, `python3.12-dbg`); the ABI
+/// letters are stripped only when a digit precedes them, so a plain name
+/// ending in one of those letters (`sed`) is left alone. `trim_end_matches`
+/// (byte-index-unsafe alternatives like `rfind` + manual slicing panic on a
+/// multibyte name ending just past a non-ASCII character, e.g. `café`) only
+/// ever strips ASCII characters, so it never lands mid-character. Returns
+/// `name` unchanged if stripping would empty it (a name that is entirely
+/// digits/dots, or has no version suffix at all) — never reduced to an empty
+/// string.
 pub(crate) fn strip_version_suffix(name: &str) -> &str {
-    let stripped = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    let base = name
+        .strip_suffix("-dbg")
+        .or_else(|| name.strip_suffix("-debug"))
+        .unwrap_or(name);
+    let without_abi = base.trim_end_matches(['t', 'm', 'd', 'u']);
+    let base = if without_abi.ends_with(|c: char| c.is_ascii_digit()) {
+        without_abi
+    } else {
+        base
+    };
+    let stripped = base.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
     if stripped.is_empty() { name } else { stripped }
 }
 
@@ -5357,6 +5424,8 @@ struct CommandRuleDto {
     #[serde(default)]
     except_targets: Vec<TargetDto>,
     #[serde(default)]
+    resolve_symlinks: bool,
+    #[serde(default)]
     value_flags: Vec<String>,
     #[serde(default)]
     attached_value_flags: Vec<String>,
@@ -5896,6 +5965,17 @@ fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesErr
         .into_iter()
         .map(|t| convert_target(&dto.id, t, false))
         .collect::<Result<Vec<_>, _>>()?;
+    let resolve_symlinks = dto.resolve_symlinks;
+    if resolve_symlinks
+        && (dto.except_targets.is_empty()
+            || dto.except_targets.iter().any(|t| t.url_host.is_some()))
+    {
+        return Err(RulesError::invalid(
+            &dto.id,
+            "resolve_symlinks has no effect without path-based `except_targets` \
+             (`exact`/`prefix`; a `url_host` entry can never match a canonical filesystem path)",
+        ));
+    }
     let except_targets = dto
         .except_targets
         .into_iter()
@@ -6084,12 +6164,27 @@ fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesErr
         required_tokens,
         targets,
         except_targets,
+        resolve_symlinks,
         value_flags,
         attached_value_flags,
         target_flags,
         deny_message,
         long_abbrev,
     })
+}
+
+/// `resolve_symlinks` (issue #583) fails closed by leaving the exception
+/// unapplied, which on an allow-side entry would GRANT the allow instead of
+/// withholding it, so it is rejected there.
+fn reject_resolve_symlinks_on_allow(entry: &CommandRule) -> Result<(), RulesError> {
+    if entry.resolve_symlinks {
+        return Err(RulesError::invalid(
+            entry.id.as_str(),
+            "resolve_symlinks is not supported on an allow-side entry: its fail-closed \
+             direction (exception not applied) would grant the allow",
+        ));
+    }
+    Ok(())
 }
 
 /// Parses one `target_flags` TOML entry (issue #581): the flag exactly as
@@ -6971,8 +7066,20 @@ impl Rules {
     /// keep the first-declared rule.
     #[must_use]
     pub(crate) fn match_command(&self, argv: &[NormalizedWord]) -> Option<&CommandRule> {
+        self.match_command_in(argv, None)
+    }
+
+    /// [`Self::match_command`] with the absolute directory (`base`) that
+    /// `resolve_symlinks` rules resolve relative candidates against (issue
+    /// #583); see [`CommandRule::matches_in`].
+    #[must_use]
+    pub(crate) fn match_command_in(
+        &self,
+        argv: &[NormalizedWord],
+        base: Option<&str>,
+    ) -> Option<&CommandRule> {
         worst_wins(&self.command_rules, CommandRule::decision, |rule| {
-            rule.matches(argv)
+            rule.matches_in(argv, base)
         })
     }
 
@@ -7033,7 +7140,20 @@ impl Rules {
     /// docs) — only [`merge_user_config`] populates `ask_rules`.
     #[must_use]
     pub(crate) fn match_ask(&self, argv: &[NormalizedWord]) -> Option<&CommandRule> {
-        self.ask_rules.iter().find(|rule| rule.matches(argv))
+        self.match_ask_in(argv, None)
+    }
+
+    /// [`Self::match_ask`] with a `resolve_symlinks` base directory, as
+    /// [`Self::match_command_in`].
+    #[must_use]
+    pub(crate) fn match_ask_in(
+        &self,
+        argv: &[NormalizedWord],
+        base: Option<&str>,
+    ) -> Option<&CommandRule> {
+        self.ask_rules
+            .iter()
+            .find(|rule| rule.matches_in(argv, base))
     }
 
     /// The worst-decision [`TokenRule`] whose patterns match any of
@@ -7247,6 +7367,7 @@ impl Allowlist {
                      non-Allow verdict for the message to attach to",
                 ));
             }
+            reject_resolve_symlinks_on_allow(entry)?;
         }
 
         Ok(Self { entries })
@@ -7522,6 +7643,7 @@ impl UserConfig {
                      non-Allow verdict for the message to attach to",
                 ));
             }
+            reject_resolve_symlinks_on_allow(entry)?;
         }
 
         // A user-config `[[redirect]]` entry must be `decision = "block"`
@@ -7768,6 +7890,26 @@ mod tests {
         assert_eq!(strip_version_suffix("python3.12"), "python");
         assert_eq!(strip_version_suffix("lua5.4"), "lua");
         assert_eq!(strip_version_suffix("bash5"), "bash");
+    }
+
+    #[test]
+    fn strip_version_suffix_strips_abi_letters_and_debug_suffix() {
+        assert_eq!(strip_version_suffix("python3.13t"), "python");
+        assert_eq!(strip_version_suffix("python3.12t"), "python");
+        assert_eq!(strip_version_suffix("python3.7m"), "python");
+        assert_eq!(strip_version_suffix("python3.12-dbg"), "python");
+        assert_eq!(strip_version_suffix("python3-dbg"), "python");
+        assert_eq!(strip_version_suffix("python3.13td"), "python");
+        assert_eq!(strip_version_suffix("python-debug"), "python");
+        assert_eq!(strip_version_suffix("python3.12-debug"), "python");
+    }
+
+    #[test]
+    fn strip_version_suffix_keeps_abi_letter_without_preceding_digit() {
+        assert_eq!(strip_version_suffix("sed"), "sed");
+        assert_eq!(strip_version_suffix("mkfifo"), "mkfifo");
+        assert_eq!(strip_version_suffix("3d"), "3d");
+        assert_eq!(strip_version_suffix("-dbg"), "-dbg");
     }
 
     #[test]
@@ -12792,6 +12934,136 @@ mod tests {
             Rules::parse(toml),
             Err(RulesError::InvalidRule { .. })
         ));
+    }
+
+    // ==== except_targets resolve_symlinks (issue #583) ====
+
+    #[cfg(unix)]
+    mod resolve_symlinks {
+        use super::*;
+        use std::os::unix::fs::symlink;
+
+        fn rules_excepting(dir: &std::path::Path) -> Rules {
+            Rules::parse(&format!(
+                r#"
+                [[command]]
+                id = "upload"
+                reason = "ask unless uploading from the scratch dir"
+                decision = "ask"
+                command = "upload-tool"
+                except_targets = [{{ prefix = "{}/" }}]
+                resolve_symlinks = true
+            "#,
+                dir.display()
+            ))
+            .unwrap()
+        }
+
+        fn temp() -> (tempfile::TempDir, std::path::PathBuf) {
+            let dir = tempfile::tempdir().unwrap();
+            let canonical = dir.path().canonicalize().unwrap();
+            (dir, canonical)
+        }
+
+        #[test]
+        fn regular_file_under_the_prefix_is_excepted_and_a_symlink_out_is_not() {
+            let (_guard, root) = temp();
+            let scratch = root.join("scratch");
+            std::fs::create_dir(&scratch).unwrap();
+            std::fs::write(scratch.join("ok.md"), "x").unwrap();
+            std::fs::write(root.join("secret"), "x").unwrap();
+            symlink(root.join("secret"), scratch.join("link.md")).unwrap();
+            symlink(root.join("gone"), scratch.join("dangling.md")).unwrap();
+            let rules = rules_excepting(&scratch);
+            let hit = |name: &str| {
+                let path = scratch.join(name);
+                rules
+                    .match_command(&argv(&["upload-tool", path.to_str().unwrap()]))
+                    .is_some()
+            };
+            assert!(!hit("ok.md"));
+            assert!(hit("link.md"));
+            assert!(hit("dangling.md"));
+            assert!(hit("missing.md"));
+        }
+
+        #[test]
+        fn relative_candidate_resolves_against_base_and_fails_closed_without_one() {
+            let (_guard, root) = temp();
+            std::fs::write(root.join("ok.md"), "x").unwrap();
+            let rules = rules_excepting(&root);
+            let words = argv(&["upload-tool", "ok.md"]);
+            assert!(
+                rules
+                    .match_command_in(&words, Some(root.to_str().unwrap()))
+                    .is_none()
+            );
+            assert!(rules.match_command_in(&words, None).is_some());
+            assert!(rules.match_command_in(&words, Some("relative")).is_some());
+        }
+
+        #[test]
+        fn dotdot_candidate_still_fires_alongside_resolution() {
+            let (_guard, root) = temp();
+            let scratch = root.join("scratch");
+            std::fs::create_dir(&scratch).unwrap();
+            let rules = rules_excepting(&scratch);
+            let escaped = format!("{}/../scratch/x", scratch.display());
+            assert!(
+                rules
+                    .match_command(&argv(&["upload-tool", &escaped]))
+                    .is_some()
+            );
+        }
+
+        #[test]
+        fn without_the_key_matching_stays_lexical() {
+            let (_guard, root) = temp();
+            let rules = Rules::parse(&format!(
+                r#"
+                [[command]]
+                id = "upload"
+                reason = "r"
+                decision = "ask"
+                command = "upload-tool"
+                except_targets = [{{ prefix = "{}/" }}]
+            "#,
+                root.display()
+            ))
+            .unwrap();
+            let missing = format!("{}/missing", root.display());
+            assert!(
+                rules
+                    .match_command(&argv(&["upload-tool", &missing]))
+                    .is_none()
+            );
+        }
+
+        #[test]
+        fn rejected_without_path_except_targets_or_on_allow_side_entries() {
+            for toml in [
+                "[[command]]\nid = \"x\"\nreason = \"r\"\ncommand = \"c\"\nresolve_symlinks = true\n",
+                "[[command]]\nid = \"x\"\nreason = \"r\"\ncommand = \"c\"\n\
+                 except_targets = [{ url_host = \"localhost\" }]\nresolve_symlinks = true\n",
+            ] {
+                assert!(matches!(
+                    Rules::parse(toml),
+                    Err(RulesError::InvalidRule { .. })
+                ));
+            }
+            let allow_entry = "[[entry]]\nid = \"x\"\nreason = \"r\"\ncommand = \"c\"\n\
+                 except_targets = [{ prefix = \"/a/\" }]\nresolve_symlinks = true\n";
+            assert!(matches!(
+                Allowlist::parse(allow_entry),
+                Err(RulesError::InvalidRule { .. })
+            ));
+            let user_allow = "[[allow]]\nid = \"x\"\nreason = \"r\"\ncommand = \"c\"\n\
+                 except_targets = [{ prefix = \"/a/\" }]\nresolve_symlinks = true\n";
+            assert!(matches!(
+                UserConfig::parse(user_allow),
+                Err(RulesError::InvalidRule { .. })
+            ));
+        }
     }
 
     #[test]
