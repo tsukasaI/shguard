@@ -1388,18 +1388,24 @@ impl TargetMatcher {
                 // into the very `bob` this rule cares about), a
                 // coincidence specific enough to be worth flooring to Ask.
                 // A target made ENTIRELY of glob wildcard components
-                // (`*`/`**`, e.g. `~/*`) has no such specificity: `comps`'s
-                // own trailing component is a wildcard for essentially any
-                // benign relative path (`../build/*`, `../dist/*`, ...),
-                // so the same widening would flag nearly every sibling-
-                // directory glob cleanup, not a real re-anchoring risk.
+                // (`*`/`**`/the leading-dot globs `.*`, `.[!.]*`, `.??*`,
+                // `.[^.]*`, `.?*`, e.g. `~/*`, `~/.*`) has no such
+                // specificity: `comps`'s own trailing component is a
+                // wildcard for essentially any benign relative path
+                // (`../build/*`, `../build/.*`, ...), so the same
+                // widening would flag nearly every sibling-directory
+                // glob cleanup, not a real re-anchoring risk.
                 // Excluded from the widening arms only — the DIRECT `eq`
                 // just below is unaffected, so `rm -r ../*` (an unresolved
                 // ascent landing who-knows-where, then globbing
                 // everything there) still asks on its own, unwidened
                 // merit.
-                let widening_target_is_wildcard_only =
-                    target_comps.iter().all(|c| c == "*" || c == "**");
+                let widening_target_is_wildcard_only = target_comps.iter().all(|c| {
+                    matches!(
+                        c.as_str(),
+                        "*" | "**" | ".*" | ".[!.]*" | ".??*" | ".[^.]*" | ".?*"
+                    )
+                });
                 eq(target_comps, &comps)
                     // Issue #118: same re-anchoring as the prefix arm above,
                     // but only against a `~`-anchored target (an `Abs`
