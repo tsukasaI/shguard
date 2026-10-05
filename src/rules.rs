@@ -209,7 +209,14 @@ impl FlagMatcher {
     /// Whether this flag is present anywhere in `argv` (already reduced to
     /// resolved strings — module docs on why unresolvable tokens never
     /// match).
-    fn satisfied(&self, argv: &[&str]) -> bool {
+    ///
+    /// With `long_abbrev` set (rules whose command is `git`, issue #582), a
+    /// `--`-prefixed [`Self::Token`] is also satisfied by any non-empty
+    /// prefix of it (`--mirr`, `--upl=x`): git's option parser accepts any
+    /// unambiguous prefix of a long option. No per-subcommand option table
+    /// is consulted, so an ambiguous prefix (which git itself rejects) is
+    /// over-matched to the rule's own verdict, never allowed.
+    fn satisfied(&self, argv: &[&str], long_abbrev: bool) -> bool {
         match self {
             Self::Short(c) => argv
                 .iter()
@@ -219,10 +226,23 @@ impl FlagMatcher {
                     || arg
                         .strip_prefix(token.as_str())
                         .is_some_and(|rest| rest.starts_with('='))
+                    || (long_abbrev && is_long_option_abbrev(arg, token))
             }),
-            Self::AnyOf(alternatives) => alternatives.iter().any(|alt| alt.satisfied(argv)),
+            Self::AnyOf(alternatives) => alternatives
+                .iter()
+                .any(|alt| alt.satisfied(argv, long_abbrev)),
         }
     }
+}
+
+/// Whether `arg` (`--x` or `--x=value`) spells a non-empty prefix of the
+/// `--`-prefixed long option `token` — see [`FlagMatcher::satisfied`].
+fn is_long_option_abbrev(arg: &str, token: &str) -> bool {
+    let (Some(arg_rest), Some(full)) = (arg.strip_prefix("--"), token.strip_prefix("--")) else {
+        return false;
+    };
+    let name = arg_rest.split_once('=').map_or(arg_rest, |(name, _)| name);
+    !name.is_empty() && full.starts_with(name)
 }
 
 /// The characters of a short-option cluster token (`-rf` → `{'r', 'f'}`,
@@ -2199,7 +2219,12 @@ impl CommandRule {
     #[must_use]
     fn constraints_match(&self, rest_words: &[NormalizedWord]) -> bool {
         let rest = resolved_strings(rest_words);
-        if !self.required_flags.iter().all(|flag| flag.satisfied(&rest)) {
+        let long_abbrev = self.command.matches("git");
+        if !self
+            .required_flags
+            .iter()
+            .all(|flag| flag.satisfied(&rest, long_abbrev))
+        {
             return false;
         }
         let consumed = value_flag_consumed(rest_words, &self.value_flags);
@@ -3064,7 +3089,7 @@ impl PipelineRule {
         if !self
             .sink_required_flags
             .iter()
-            .all(|flag| flag.satisfied(&sink_args))
+            .all(|flag| flag.satisfied(&sink_args, false))
         {
             return false;
         }
@@ -7482,26 +7507,42 @@ mod tests {
     #[test]
     fn flag_matcher_token_matches_bare_flag() {
         let flag = FlagMatcher::parse("--in-place").unwrap();
-        assert!(flag.satisfied(&["--in-place"]));
+        assert!(flag.satisfied(&["--in-place"], false));
     }
 
     #[test]
     fn flag_matcher_token_matches_equals_suffix() {
         let flag = FlagMatcher::parse("--in-place").unwrap();
-        assert!(flag.satisfied(&["--in-place=.bak"]));
+        assert!(flag.satisfied(&["--in-place=.bak"], false));
     }
 
     #[test]
     fn flag_matcher_token_does_not_match_unrelated_suffix_without_equals() {
         let flag = FlagMatcher::parse("--in-place").unwrap();
-        assert!(!flag.satisfied(&["--in-placefoo"]));
+        assert!(!flag.satisfied(&["--in-placefoo"], false));
+    }
+
+    #[test]
+    fn flag_matcher_token_long_abbrev_is_opt_in_prefix_match() {
+        let flag = FlagMatcher::parse("--mirror").unwrap();
+        assert!(!flag.satisfied(&["--mirr"], false));
+        assert!(flag.satisfied(&["--mirr"], true));
+        assert!(flag.satisfied(&["--m=x"], true));
+        assert!(flag.satisfied(&["--mirror"], true));
+        assert!(!flag.satisfied(&["--"], true));
+        assert!(!flag.satisfied(&["--=x"], true));
+        assert!(!flag.satisfied(&["--mirrors"], true));
+        assert!(!flag.satisfied(&["-m"], true));
+        let alt = FlagMatcher::parse("f|--force").unwrap();
+        assert!(alt.satisfied(&["--forc"], true));
+        assert!(!alt.satisfied(&["--force-with-lease"], true));
     }
 
     // ---- regression: --force-with-lease must not satisfy a --force token ----
     #[test]
     fn flag_matcher_token_force_with_lease_does_not_satisfy_force() {
         let flag = FlagMatcher::parse("--force").unwrap();
-        assert!(!flag.satisfied(&["--force-with-lease"]));
+        assert!(!flag.satisfied(&["--force-with-lease"], false));
     }
 
     #[test]

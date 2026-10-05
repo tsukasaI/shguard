@@ -2535,3 +2535,81 @@ fn config_symlinked_to_dev_null_still_protects_its_own_literal_directory() {
     );
     assert_eq!(permission_decision(&allow_output), "allow");
 }
+
+// Issue #582: git accepts any unambiguous prefix of a long option, so a
+// `required_flags` rule keyed on a spelled-out long flag must also match its
+// abbreviations (`--mirr`, `--upl=x`) -- but only for `git` rules.
+#[test]
+fn git_long_option_abbreviations_match_required_flags_rules() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[deny]]
+        id = "user-deny-git-push-mirror"
+        reason = "no mirror push"
+        command = "git"
+        required_tokens = ["push"]
+        required_flags = ["--mirror"]
+
+        [[deny]]
+        id = "user-deny-git-push-delete"
+        reason = "no remote delete"
+        command = "git"
+        required_tokens = ["push"]
+        required_flags = ["--delete"]
+
+        [[deny]]
+        id = "user-deny-git-push-receive-pack"
+        reason = "no receive-pack"
+        command = "git"
+        required_tokens = ["push"]
+        required_flags = ["--receive-pack"]
+
+        [[deny]]
+        id = "user-deny-git-fetch-upload-pack"
+        reason = "no upload-pack"
+        command = "git"
+        required_tokens = ["fetch"]
+        required_flags = ["--upload-pack"]
+
+        [[deny]]
+        id = "user-deny-git-ls-remote-exec"
+        reason = "no exec"
+        command = "git"
+        required_tokens = ["ls-remote"]
+        required_flags = ["--exec"]
+
+        [[deny]]
+        id = "user-deny-nongit-mirror"
+        reason = "non-git tools keep exact matching"
+        command = "othertool"
+        required_flags = ["--mirror"]
+    "#,
+    );
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+
+    for command in [
+        "git push origin --mirror",
+        "git push origin --mirr",
+        "git push origin --dele main",
+        "git push --receive=x origin",
+        "git fetch --upload='sh -c x' origin",
+        "git ls-remote --exe=x origin",
+        "git -C /tmp push origin --mirr",
+        "env git push origin --mirr",
+    ] {
+        let output = run_hook(&bash_command(command), &envs);
+        assert_eq!(permission_decision(&output), "deny", "{command}");
+    }
+
+    for command in [
+        "git push origin main",
+        "git fetch origin",
+        "git push --set-upstream origin x",
+        "git log --oneline",
+        "git push origin --mirrors",
+        "othertool --mirr",
+    ] {
+        let output = run_hook(&bash_command(command), &envs);
+        assert_eq!(permission_decision(&output), "allow", "{command}");
+    }
+}
