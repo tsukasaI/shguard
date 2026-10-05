@@ -9247,6 +9247,18 @@ fn evaluate_composed_argv_match(
             .with_deny_message(rule.deny_message().cloned()),
         );
     }
+    // Issue #579: an unresolved word can hide the flag while a relative
+    // operand is the target only once composed against the cwd. The raw
+    // argv's own except-target probe cannot see that, and role counting
+    // there must not turn the composed target into an Allow.
+    if let Some(rule) = rules.match_command_except_target_composed(composed_argv) {
+        let reason = Reason::new(format!(
+            "{describe} composes a relative target, and rule {:?} could not be fully checked because an argument is unresolved: {}",
+            rule.id().as_str(),
+            rule.reason().as_str()
+        ));
+        raise(Verdict::ask(reason, original_argv.to_vec()));
+    }
     if let Some(rule) = rules.match_ask(composed_argv) {
         let reason = Reason::new(format!(
             "{describe} composes a relative target, matching user-configured ask rule {:?}: {}",
@@ -10200,7 +10212,9 @@ fn scan_unknown_cwd_floor(
     if !matches!(cwd, CwdContext::Poisoned) {
         return None;
     }
-    let rule = rules.match_command_unknown_cwd(argv)?;
+    let rule = rules
+        .match_command_unknown_cwd(argv)
+        .or_else(|| rules.match_command_except_target_unknown_cwd(argv))?;
     Some((
         Decision::Ask,
         format!(
@@ -13767,6 +13781,158 @@ mod tests {
         // must still reach Ask (via the separate, untouched
         // scan_tar_dashless_unmodeled_floor, independent of this fix).
         assert_decision("tar xbfC a.tar $(echo /)", Decision::Ask);
+    }
+
+    // ==== Issue #579: the unresolved-argument floor must not fire when a
+    // quoted unresolved word cannot satisfy the rule (role counting, literal
+    // tail pruning, tar's -C value), and must keep firing everywhere else ====
+
+    #[test]
+    fn quoted_unresolved_sed_word_is_floored_by_the_sed_script_floor_not_the_target_probe() {
+        // Issue #579's role counting clears the except-target probe for
+        // these (see the rules-level tests), but #584's sed-script floor
+        // (rule 6e) supersedes it by design: the word could be
+        // `--expression=w <file>`, so these stay Ask end to end.
+        assert_decision(r#"sed -n 1,5p "$TMPDIR/x.ts""#, Decision::Ask);
+        assert_decision(r#"sed 's/x/y/' "$file""#, Decision::Ask);
+        assert_decision(r#"sed "$X""#, Decision::Ask);
+        assert_decision(r#"sed -n "$T" notes.txt"#, Decision::Ask);
+    }
+
+    #[test]
+    fn sed_floor_survives_every_role_the_unresolved_words_could_fill() {
+        // unquoted: may split into the flag and the target
+        assert_decision("sed -n 1,5p $TMPDIR/x.ts", Decision::Ask);
+        assert_decision("sed $X", Decision::Ask);
+        assert_decision("sed 's/x/y/' $file", Decision::Ask);
+        // two words: one flag, one target
+        assert_decision(r#"sed -n 1,5p "$X" "$Y""#, Decision::Ask);
+        // flag resolved, target hidden (including attached-value spellings)
+        assert_decision(r#"sed -i "$X""#, Decision::Ask);
+        assert_decision(r#"sed -i.bak 1p "$X""#, Decision::Ask);
+        assert_decision(r#"sed --in-place=.bak 1p "$X""#, Decision::Ask);
+        // target resolved, flag hidden in the unresolved word
+        assert_decision(r#"sed "$X" ~/.config/shguard/config.toml"#, Decision::Ask);
+        assert_decision(
+            r#"sed -n "$T" ~/.config/shguard/config.toml"#,
+            Decision::Ask,
+        );
+        // quoted arithmetic is never guaranteed to be one word
+        assert_decision("sed -n 1,5p \"$((1+1))\"", Decision::Ask);
+    }
+
+    #[test]
+    fn tar_extract_into_a_literal_tail_directory_is_allowed() {
+        assert_decision(
+            r#"tar -x -C "$S/zz-literal-tail" -f a.tar"#,
+            Decision::Allow,
+        );
+        assert_decision(r#"tar -xf a.tar -C "$S/zz-literal-tail/""#, Decision::Allow);
+        assert_decision(
+            r#"tar -C "$S/zz-literal-tail" -cf a.tar ."#,
+            Decision::Allow,
+        );
+        assert_decision(
+            r#"tar -x --directory "$S/zz-literal-tail" -f a.tar"#,
+            Decision::Allow,
+        );
+        assert_decision(
+            r#"tar -x -C "$S"/zz-literal-tail -f a.tar"#,
+            Decision::Allow,
+        );
+    }
+
+    #[test]
+    fn role_counting_never_drops_a_target_reached_through_cwd_composition_or_a_plausibility_floor()
+    {
+        // The resolved operand is a target only after a same-line `cd`
+        // composes it, or only via an Ask-only plausibility floor.
+        for command in [
+            r#"cd ~/.config/shguard && sed "$T" config.toml"#,
+            r#"cd ~ && sed "$T" .config/shguard/config.toml"#,
+            r#"pushd ~ && sed "$T" .config/shguard/config.toml"#,
+            r#"cd /etc && sed "$T" crontab"#,
+            r#"cd ~ && sed "$T" ./.bashrc"#,
+            r#"sed "$T" ~/../inouetsukasa/.config/shguard/config.toml"#,
+            r#"sed "$T" ../inouetsukasa/.config/shguard/config.toml"#,
+            r#"sed "$T" ~+/.config/shguard/config.toml"#,
+            r#"sed "$T" ~/../bob/.config/shguard/config.toml"#,
+            r#"env -C ~/.config/shguard sed "$T" config.toml"#,
+            r#"cd "$X" && sed "$T" config.toml"#,
+        ] {
+            let verdict = decide(command);
+            assert_ne!(verdict.decision(), Decision::Allow, "{command:?}");
+        }
+    }
+
+    #[test]
+    fn composed_target_probe_catches_what_role_counting_would_drop() {
+        // sed is floored by #584's sed-script floor regardless, so these
+        // use unzip: the unresolved word can hide the flag, and the
+        // relative operand is a target only once the `cd` composes it.
+        assert_decision(r#"cd ~/.config && unzip "$X" . a.zip"#, Decision::Ask);
+        assert_decision(r#"cd ~ && unzip "$X" .config a.zip"#, Decision::Ask);
+    }
+
+    #[test]
+    fn a_cwd_anchor_keeps_the_home_target_even_with_a_literal_tail() {
+        // The anchor can be `~` (or its parent), so `$S/zzuser` may be the
+        // home directory itself. Without a cd the tail still prunes.
+        assert_decision(r#"tar -x -C "$S/zzuser" -f a.tar"#, Decision::Allow);
+        for command in [
+            r#"cd ~ && tar -x -C "$S/zzuser" -f a.tar"#,
+            r#"cd ~/.config && tar -x -C "$S/zzuser" -f a.tar"#,
+            r#"pushd ~ && tar -x -C "$S/zzuser" -f a.tar"#,
+            r#"env -C ~ tar -x -C "$S/zzuser" -f a.tar"#,
+            r#"cd ~ && tar -x -C x/"$S"/zzuser -f a.tar"#,
+            r#"cd ~ && unzip -d "$S/zzuser" a.zip"#,
+            r#"cd "$X" && tar -x -C "$S/zzuser" -f a.tar"#,
+            r#"cd ~ && tar -x -C "$S/p" -f a.tar"#,
+        ] {
+            let verdict = decide(command);
+            assert_ne!(verdict.decision(), Decision::Allow, "{command:?}");
+        }
+    }
+
+    #[test]
+    fn tar_extract_floor_survives_a_tilde_headed_word() {
+        // S=.. turns `~/"$S"/p` into the Blocked `~/../p`.
+        assert_decision(r#"tar -x -C ~/"$S"/p -f a.tar"#, Decision::Ask);
+        assert_decision(r#"tar -x -C "~/$S/p" -f a.tar"#, Decision::Ask);
+        assert_decision(r#"tar -x -C ~"$S"/p -f a.tar"#, Decision::Ask);
+    }
+
+    #[test]
+    fn tar_extract_floor_survives_a_tail_that_proves_nothing() {
+        // fully unknown target
+        assert_decision(r#"tar -x -C "$S" -f a.tar"#, Decision::Ask);
+        // unquoted: may split, an earlier field is unconstrained
+        assert_decision("tar -x -C $S/zz-literal-tail -f a.tar", Decision::Ask);
+        assert_decision("tar -x $S -f a.tar", Decision::Ask);
+        // the tail does not pin the final component
+        assert_decision(
+            r#"tar -x -C "$S/zz-literal-tail/.." -f a.tar"#,
+            Decision::Ask,
+        );
+        assert_decision(
+            r#"tar -x -C "$S/zz-literal-tail/." -f a.tar"#,
+            Decision::Ask,
+        );
+        assert_decision(r#"tar -x -C "$S/" -f a.tar"#, Decision::Ask);
+        assert_decision(r#"tar -x -C "$S"zz-literal-tail -f a.tar"#, Decision::Ask);
+        assert_decision(r#"tar -x -C "$S/zz*" -f a.tar"#, Decision::Ask);
+        // another unresolved word that could carry the target or `-P`
+        assert_decision(
+            r#"tar -x -C "$S/zz-literal-tail" "$T" -f a.tar"#,
+            Decision::Ask,
+        );
+        assert_decision(r#"tar -x -C "$S/zz-literal-tail" -f "$T""#, Decision::Ask);
+        assert_decision(
+            r#"tar -x -C "$S/zz-literal-tail" $T -f a.tar"#,
+            Decision::Ask,
+        );
+        // a resolved dangerous target keeps its decision
+        assert_decision(r#"tar -x -C / -f "$T""#, Decision::Block);
     }
 
     // ==== Issue #78: unresolved ascent-then-descent floors to Ask
