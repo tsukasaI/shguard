@@ -575,7 +575,7 @@ fn evaluate_command_line(
 ) -> Verdict {
     let mut env = Env::new();
     let mut isolated = chain_is_backgrounded(command_line, 0).then(|| cwd.clone());
-    let first_runs_in_parent_shell = isolated.is_none();
+    let first_runs_in_parent_shell = runs_in_parent_shell(None, isolated.is_some());
     let mut worst = evaluate_pipeline(
         &command_line.first,
         &mut env,
@@ -610,8 +610,7 @@ fn evaluate_command_line(
         if !matches!(separator, Separator::And | Separator::Or) {
             isolated = chain_is_backgrounded(command_line, index + 1).then(|| cwd.clone());
         }
-        let runs_in_parent_shell =
-            isolated.is_none() && !matches!(separator, Separator::And | Separator::Or);
+        let in_parent_shell = runs_in_parent_shell(Some(*separator), isolated.is_some());
         let verdict = evaluate_pipeline(
             pipeline,
             &mut env,
@@ -619,11 +618,19 @@ fn evaluate_command_line(
             allowlist,
             depth,
             isolated.as_mut().unwrap_or(cwd),
-            runs_in_parent_shell,
+            in_parent_shell,
         );
         worst = fold_worst(worst, verdict);
     }
     worst
+}
+
+/// Whether a pipeline is certain to run in the parent shell whenever the line
+/// reaches it (issue #534): not the right-hand side of an `&&`/`||` (which may
+/// short-circuit; `separator` is the one preceding it, `None` for the first
+/// pipeline) and not part of a backgrounded chain.
+fn runs_in_parent_shell(separator: Option<Separator>, backgrounded: bool) -> bool {
+    !backgrounded && !matches!(separator, Some(Separator::And | Separator::Or))
 }
 
 /// Whether the pipeline at `index` (0 = [`CommandLine::first`], `i` = the
@@ -692,7 +699,9 @@ type IfsAlternates = Vec<(Vec<NormalizedWord>, String)>;
 /// single-stage check here (every stage of a multi-stage pipeline is a
 /// subshell by default, and `lastpipe` is not modelled), it decides whether a
 /// simple command's assignments may be treated as persisting
-/// ([`Env::apply_assignments`]). Any uncertainty resolves to "not persisting".
+/// ([`Env::apply_assignments`]). Any uncertainty resolves to "not
+/// persisting": such an assignment's value still enters the history, but it
+/// can neither mark `$name` unknown nor clear an earlier unknown marker.
 ///
 /// `cwd` (issue #103): a `cd`/`pushd`/etc. only updates it when this
 /// pipeline has exactly one stage — every stage of a `|` pipeline runs in
@@ -4227,11 +4236,11 @@ fn evaluate_command_position_bare_var(
     // the `"ls"` current-value candidate is still tried below (it can only
     // ever raise the decision toward Ask/Block, never toward a false
     // Allow), but no STALE history entry may.
-    let name_history: &[String] = if env.is_persisting_unresolvable(name) {
-        &[]
-    } else {
-        env.value_history(name)
-    };
+    //
+    // Issue #534: only history recorded BEFORE that unresolvable assignment
+    // is stale; a value recorded after it by a possibly-skipped (or
+    // subshell-scoped) resolved assignment is still a reachable candidate.
+    let name_history: &[String] = env.live_value_history(name);
 
     // Every distinct IFS interpretation worth trying, most-specific first:
     // the current resolved value, then every earlier value a later
@@ -10015,11 +10024,11 @@ fn apply_unknown_cwd_floor(
 /// shadowing prefix assignment already doesn't, so `value_history` must
 /// still be tried when `map.get(name)` comes up empty, not only alongside
 /// an already-known current resolution — `evaluate_command_position_bare_var`
-/// consults `value_history` unless [`Self::is_persisting_unresolvable`]
-/// says the current absence (or a later prefix-scoped resolution on top of
-/// it) traces back to a genuinely persisting unresolvable reassignment,
-/// current-value candidates simply being absent from that scan when there
-/// is no current resolution to try.
+/// consults only [`Self::live_value_history`]: entries before a genuinely
+/// persisting unresolvable reassignment are dropped when the current
+/// absence (or a later prefix-scoped resolution on top of it) traces back
+/// to one, current-value candidates simply being absent from that scan
+/// when there is no current resolution to try.
 struct Env {
     map: HashMap<String, String>,
     assigned: std::collections::HashSet<String>,
@@ -10047,16 +10056,21 @@ struct Env {
     /// does take over) — a fallback there would be a genuine false Block,
     /// not a conservative over-approximation.
     ///
-    /// Only a PERSISTING assignment (`is_prefix_scoped == false` in
-    /// [`Self::apply_one`]) may ever insert into or remove from this set,
-    /// whether its own RHS resolves or not: a prefix-scoped assignment
-    /// cannot clear a genuinely unknown persisting value an earlier command
-    /// left behind either (`X=$(evil); X=ls true; $X` still has `$X`
-    /// holding `$(evil)`'s own unknown value once `true` exits — `"ls"`
-    /// never actually took over), so a prefix-scoped assignment must leave
-    /// this set entirely alone in both of its own branches, not just the
-    /// unresolvable one.
-    persisting_unresolvable: std::collections::HashSet<String>,
+    /// Each entry is a cut index: `value_history[name].len()` at the moment
+    /// of that assignment, so only history recorded before it is stale (a
+    /// later possibly-skipped resolved assignment is still a reachable
+    /// candidate, issue #534; [`Self::live_value_history`]).
+    ///
+    /// Only a CERTAINLY PERSISTING assignment (`is_prefix_scoped == false` in
+    /// [`Self::apply_one`]) may ever insert into (unresolvable RHS) or remove
+    /// from (resolved RHS) this map: a prefix-scoped, short-circuitable or
+    /// subshell-scoped assignment cannot clear a genuinely unknown persisting
+    /// value an earlier command left behind either (`X=$(evil); X=ls true;
+    /// $X` still has `$X` holding `$(evil)`'s own unknown value once `true`
+    /// exits — `"ls"` never actually took over), so it must leave the marker
+    /// alone in both of its own branches. Its resolved value still lands in
+    /// `value_history` after the cut.
+    persisting_unresolvable: HashMap<String, usize>,
 }
 
 impl Env {
@@ -10066,7 +10080,7 @@ impl Env {
             assigned: std::collections::HashSet::new(),
             value_history: HashMap::new(),
             ifs_append_floor: None,
-            persisting_unresolvable: std::collections::HashSet::new(),
+            persisting_unresolvable: HashMap::new(),
         }
     }
 
@@ -10097,16 +10111,18 @@ impl Env {
         self.assigned.contains(name)
     }
 
-    /// Issue #516: whether the most recent PERSISTING (non-prefix-scoped)
-    /// assignment to `name` had an unresolvable RHS, independent of what
-    /// `map` currently shows — a LATER prefix-scoped resolution updates
-    /// `map` (e.g. to `Some("ls")`) without ever clearing this (see
-    /// [`Self::persisting_unresolvable`]'s own docs for why). `true` means
-    /// `evaluate_command_position_bare_var` must NOT paper over the
-    /// genuinely unknown runtime value with a stale `value_history`
-    /// fallback, regardless of what `map` holds right now.
-    fn is_persisting_unresolvable(&self, name: &str) -> bool {
-        self.persisting_unresolvable.contains(name)
+    /// Issue #516: the part of `name`'s [`Self::value_history`] that is not
+    /// stale. When the most recent PERSISTING (non-prefix-scoped) assignment
+    /// to `name` had an unresolvable RHS, everything recorded before it is
+    /// dropped, independent of what `map` currently shows — a LATER
+    /// prefix-scoped resolution updates `map` (e.g. to `Some("ls")`) without
+    /// ever clearing this (see [`Self::persisting_unresolvable`]'s own docs
+    /// for why). `evaluate_command_position_bare_var` must NOT paper over
+    /// the genuinely unknown runtime value with those stale entries.
+    fn live_value_history(&self, name: &str) -> &[String] {
+        let history = self.value_history(name);
+        let cut = self.persisting_unresolvable.get(name).copied().unwrap_or(0);
+        history.get(cut..).unwrap_or(&[])
     }
 
     /// Folds `command`'s own assignments into the map. Must be called
@@ -10126,7 +10142,8 @@ impl Env {
     /// ([`evaluate_pipeline`]'s `runs_in_parent_shell`, plus single-stage).
     /// When it is not, the assignments are classified exactly like a
     /// command-scoped prefix: they may never reach later commands, so they
-    /// must neither poison nor clear [`Self::persisting_unresolvable`].
+    /// must neither poison nor clear [`Self::persisting_unresolvable`]
+    /// (their resolved values still enter `value_history`, past the cut).
     fn apply_assignments(&mut self, command: &SimpleCommand, persists_if_standalone: bool) {
         let is_prefix_scoped = !command.words.is_empty() || !persists_if_standalone;
         for assignment in &command.assignments {
@@ -10203,7 +10220,9 @@ impl Env {
             None => {
                 self.map.remove(&assignment.name);
                 if !is_prefix_scoped {
-                    self.persisting_unresolvable.insert(assignment.name.clone());
+                    let cut = self.value_history(&assignment.name).len();
+                    self.persisting_unresolvable
+                        .insert(assignment.name.clone(), cut);
                 }
             }
         }
@@ -10752,7 +10771,7 @@ mod tests {
     #[test]
     fn issue_516_a_resolved_prefix_scoped_current_value_does_not_reach_stale_history_either() {
         // Round 3: a fable code-reviewer pass on PR #532 found the round-2
-        // fix's guard (`value.is_none() && env.is_persisting_unresolvable`)
+        // fix's guard (`value.is_none() && <persisting-unresolvable marker>`)
         // didn't generalize -- it only suppressed history when the CURRENT
         // value was also missing. Here `X=ls true` is prefix-scoped and
         // resolved, so `env.get("X")` hits `Some("ls")`, but the true
@@ -10777,8 +10796,12 @@ mod tests {
     // pipeline context certainly runs it in the parent shell. A short-
     // circuitable `&&`/`||` right-hand side, any stage of a multi-stage
     // pipeline (`lastpipe` unmodelled) or a backgrounded chain is classified
-    // like a command-scoped prefix, so the history fallback stays available
-    // and the genuine Block is preserved.
+    // like a command-scoped prefix: it can neither mark the name unknown nor
+    // clear an earlier unknown marker, and a resolved value it records stays
+    // a live history candidate (the marker is a cut index into the history),
+    // so the genuine Block is preserved. The truly-subshell resolved rows
+    // (`X='rm -rf /' | true; ...`, `X='rm -rf /' & ...`) may stay Ask after
+    // an earlier unknown assignment; they are not pinned here.
 
     #[test]
     fn issue_534_or_list_rhs_assignment_does_not_poison_history() {
@@ -10842,6 +10865,29 @@ mod tests {
             Decision::Ask,
         );
         assert_decision("X='rm -rf /'; X=$(evil); $X", Decision::Ask);
+    }
+
+    #[test]
+    fn issue_534_possibly_skipped_resolved_assignment_survives_an_earlier_unknown_one() {
+        for command in [
+            "X=$(evil); true && X='rm -rf /'; X=ls true; $X",
+            "X=$(evil); true || X='rm -rf /'; X=ls true; $X",
+            "X=$(evil) || X='rm -rf /'; X=ls true; $X",
+            "X=$(evil); true && X='rm -rf /'; X=ls $X",
+            "X=$(evil); true && X='rm -rf /' && X=ls true; $X",
+            "X=$(evil); true | X='rm -rf /'; X=ls true; $X",
+        ] {
+            assert_decision(command, Decision::Block);
+        }
+    }
+
+    #[test]
+    fn issue_534_cut_index_keeps_516_behaviour() {
+        assert_decision("X='rm -rf /'; X=$(evil); X=ls true; $X", Decision::Ask);
+        assert_decision(
+            "X='rm -rf /'; X=$(evil); X=$(evil2) true; $X",
+            Decision::Ask,
+        );
     }
 
     #[test]
