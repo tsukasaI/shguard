@@ -5241,6 +5241,16 @@ struct ExpansionAccum<'a> {
     floor: &'a mut Option<(Decision, String)>,
 }
 
+impl ExpansionAccum<'_> {
+    /// Records that an expansion was seen (`has_any`) and folds `decision`
+    /// into the floor via [`raise_expansion_floor`]. `has_any` is set even
+    /// when `decision` is `Allow` (presence, not outcome).
+    fn raise(&mut self, decision: Decision, reason: String) {
+        *self.has_any = true;
+        raise_expansion_floor(self.floor, decision, reason);
+    }
+}
+
 /// Issue #424: how one candidate command relates to a heredoc it might be
 /// attached to. `Shell`/`Opaque` split apart because they need different
 /// treatment in [`scan_redirection_expansions`]: a plain shell invocation
@@ -5658,9 +5668,7 @@ fn scan_redirection_expansions(
         let mut sibling_scan = HeredocCandidateScan::default();
         scan_redirections_for_heredoc_candidates(redirections, &mut sibling_scan);
         if !sibling_scan.candidates.is_empty() || sibling_scan.uncertain {
-            *accum.has_any = true;
-            raise_expansion_floor(
-                accum.floor,
+            accum.raise(
                 Decision::Ask,
                 "a substitution in one of this command's own redirections forks a process \
                  that may inherit this command's heredoc on stdin once it is applied, and \
@@ -5714,9 +5722,7 @@ fn scan_redirection_expansions(
                     // command's own syntax would analyse text the actual
                     // reader never parses that way. Fail closed rather
                     // than resolving what the opaque argument runs.
-                    *accum.has_any = true;
-                    raise_expansion_floor(
-                        accum.floor,
+                    accum.raise(
                         Decision::Ask,
                         format!(
                             "the heredoc is attached to {desc}, whose own opaque argument (not \
@@ -5729,7 +5735,6 @@ fn scan_redirection_expansions(
                     HeredocCandidate::Shell(name) => Some(name.as_str()),
                     HeredocCandidate::Opaque(_) | HeredocCandidate::NonShell(_) => None,
                 }) {
-                    *accum.has_any = true;
                     // Bash dequotes `\$`/`` \` ``/`\\`/`\<newline>` (the
                     // only escapes an unquoted-delimiter body recognises,
                     // same as `collect_heredoc_substitutions`'s own docs)
@@ -5756,8 +5761,7 @@ fn scan_redirection_expansions(
                         .reason()
                         .map(|r| format!(": {}", r.as_str()))
                         .unwrap_or_default();
-                    raise_expansion_floor(
-                        accum.floor,
+                    accum.raise(
                         decision,
                         format!(
                             "the heredoc body is fed to shell interpreter `{name}` on stdin, \
@@ -5790,9 +5794,7 @@ fn scan_redirection_expansions(
                             }
                             HeredocCandidate::Opaque(desc) => *desc,
                         }) {
-                            *accum.has_any = true;
-                            raise_expansion_floor(
-                                accum.floor,
+                            accum.raise(
                                 Decision::Ask,
                                 format!(
                                     "the heredoc body invokes `{inner_name}`, itself a \
@@ -5801,9 +5803,7 @@ fn scan_redirection_expansions(
                                 ),
                             );
                         } else if inner_scan.uncertain {
-                            *accum.has_any = true;
-                            raise_expansion_floor(
-                                accum.floor,
+                            accum.raise(
                                 Decision::Ask,
                                 "the heredoc body contains a substitution whose own text could \
                                  not be statically parsed, and might invoke a stdin-reading \
@@ -5817,9 +5817,7 @@ fn scan_redirection_expansions(
                     HeredocCandidate::NonShell(name) => Some(name.as_str()),
                     HeredocCandidate::Shell(_) | HeredocCandidate::Opaque(_) => None,
                 }) {
-                    *accum.has_any = true;
-                    raise_expansion_floor(
-                        accum.floor,
+                    accum.raise(
                         Decision::Ask,
                         format!(
                             "{NONSHELL_HEREDOC_REASON_PREFIX} `{name}` on stdin, which cannot be introspected"
@@ -5830,9 +5828,7 @@ fn scan_redirection_expansions(
                 if *expand_body {
                     let scan = collect_heredoc_substitutions(body);
                     if scan.unterminated {
-                        *accum.has_any = true;
-                        raise_expansion_floor(
-                            accum.floor,
+                        accum.raise(
                             Decision::Ask,
                             "the heredoc body contains a `$(`/`` ` `` that never closes before \
                              the heredoc ends; refusing to allow with unknown content"
@@ -5840,7 +5836,6 @@ fn scan_redirection_expansions(
                         );
                     }
                     for inner in &scan.substitutions {
-                        *accum.has_any = true;
                         let decision = analyze_at_depth(
                             inner,
                             depth + 1,
@@ -5849,8 +5844,7 @@ fn scan_redirection_expansions(
                             CwdState::seed_unknown_stack(cwd.clone()),
                         )
                         .decision();
-                        raise_expansion_floor(
-                            accum.floor,
+                        accum.raise(
                             decision,
                             format!(
                                 "the heredoc body contains a command/backquote substitution \
@@ -5879,7 +5873,6 @@ fn scan_word_expansions(
     position_description: &str,
 ) {
     for inner in collect_substitutions(word) {
-        *accum.has_any = true;
         let decision = analyze_at_depth(
             inner,
             depth + 1,
@@ -5888,8 +5881,7 @@ fn scan_word_expansions(
             CwdState::seed_unknown_stack(cwd.clone()),
         )
         .decision();
-        raise_expansion_floor(
-            accum.floor,
+        accum.raise(
             decision,
             format!(
                 "{position_description} contains a command/backquote substitution whose inner \
@@ -5898,14 +5890,12 @@ fn scan_word_expansions(
         );
     }
     for inner in collect_process_substitutions(word) {
-        *accum.has_any = true;
         // Structural, not raw text — same-depth recursion (see
         // `evaluate_command_position_substitution`'s docs).
         let mut isolated = CwdState::seed_unknown_stack(cwd.clone());
         let decision =
             evaluate_command_line(inner, rules, allowlist, depth, &mut isolated).decision();
-        raise_expansion_floor(
-            accum.floor,
+        accum.raise(
             decision,
             format!(
                 "{position_description} contains a process substitution whose inner command is \
