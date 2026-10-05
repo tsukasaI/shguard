@@ -12638,9 +12638,10 @@ mod tests {
     fn merge_user_config_redirect_entry_never_shadows_a_builtin_redirect_rule() {
         // A user rule sharing the embedded config-directory redirect
         // rule's exact target must never win the match ahead of the
-        // embedded one: Rules::match_redirect_target is first-match-wins,
-        // so merge_user_config appending (not prepending) user redirect
-        // rules after the embedded ones is load-bearing here — the
+        // embedded one: Rules::match_redirect_target is worst-decision-wins
+        // with ties keeping the first-declared rule, so merge_user_config
+        // appending (not prepending) user redirect rules after the
+        // embedded ones is load-bearing here — the
         // reported rule id proves which one actually fired, not just that
         // *a* Block resulted (decision alone can't distinguish them, since
         // `decision = "ask"` on a user redirect entry is rejected at load
@@ -15343,5 +15344,31 @@ mod tests {
         let rule = rules.match_token(&["MY_SECRET=".to_string()]).unwrap();
         assert_eq!(rule.id().as_str(), "test-token");
         assert_eq!(rule.decision(), Decision::Ask);
+    }
+
+    /// `match_token` is worst-decision-wins: a Block rule declared AFTER an
+    /// Ask rule sharing a pattern must still win. Pins the shared
+    /// `worst_wins` loop against a regression to first-match-wins (the
+    /// embedded blocklist has only one `[[token]]`, so nothing else
+    /// exercises two token rules at once).
+    #[test]
+    fn match_token_block_outranks_an_earlier_declared_ask() {
+        let toml = r#"
+            [[token]]
+            id = "ask-first"
+            reason = "test"
+            decision = "ask"
+            patterns = ["_SECRET="]
+
+            [[token]]
+            id = "block-second"
+            reason = "test"
+            decision = "block"
+            patterns = ["_SECRET="]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        let rule = rules.match_token(&["MY_SECRET=".to_string()]).unwrap();
+        assert_eq!(rule.id().as_str(), "block-second");
+        assert_eq!(rule.decision(), Decision::Block);
     }
 }
