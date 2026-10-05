@@ -804,6 +804,10 @@ decision = "ask"
 reason = "tar -P/--absolute-names lets archive member paths carry an absolute destination, bypassing -C/--directory entirely"
 command = "tar"
 required_flags = ["x|--extract|--get", "P|--absolute-names"]
+# -C/--directory always takes the next argv word as its value, so a quoted
+# unresolved word there (`-C "$DIR"`) is a directory, never a hidden `-P`
+# (issue #579). Only the separated bare form is recognised.
+value_flags = ["C", "directory"]
 
 # =====================================================================
 # Git — destructive/bypass operations
