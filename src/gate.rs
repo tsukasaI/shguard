@@ -79,7 +79,10 @@
 //!    6d", issue #195) get the same unconditional-Ask, non-introspected
 //!    posture as rule 6b, but their script has no `-c`/`-e`-style flag at
 //!    all — it's the first bare positional operand unless `-f`/`--file`
-//!    supplies it from a file instead ([`scan_for_awk_script`]). Rules 5b,
+//!    supplies it from a file instead ([`scan_for_awk_script`]). `sed`
+//!    ("rule 6e", issue #584) is Allow when its script is proven free of
+//!    `w`/`W`/`r`/`R`/`e` commands and `s///w`/`s///e` flags by a small
+//!    command lexer (`crate::sed_script`), and Ask otherwise. Rules 5b,
 //!    6a, and 6b all locate a flag by scanning argv positionally
 //!    ([`scan_for_flag`]); per issues #71/#53, an `Unresolvable` word at a
 //!    scanned position is treated as "might be the flag", never as
@@ -361,6 +364,7 @@ const DENY_MSG_BARE_VAR: &str =
     "Expand the variable yourself and re-issue the command with the literal path or binary name.";
 const DENY_MSG_INLINE_INTERPRETER: &str = "Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f \
      prog.awk`) — inline interpreter code is never inspected.";
+const DENY_MSG_SED_SCRIPT: &str = "Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected.";
 const DENY_MSG_COMMAND_SUBSTITUTION: &str =
     "Run the substitution first, then call the resulting binary literally.";
 const DENY_MSG_UNRESOLVED_TARGET: &str = "Resolve the target literally so the rule can check it.";
@@ -608,6 +612,7 @@ fn evaluate_command_line(
 ) -> Verdict {
     let mut env = Env::new();
     let mut isolated = chain_is_backgrounded(command_line, 0).then(|| cwd.clone());
+    let first_runs_in_parent_shell = runs_in_parent_shell(None, isolated.is_some());
     let mut worst = evaluate_pipeline(
         &command_line.first,
         &mut env,
@@ -615,6 +620,7 @@ fn evaluate_command_line(
         allowlist,
         depth,
         isolated.as_mut().unwrap_or(cwd),
+        first_runs_in_parent_shell,
     );
     let mut prev_untrustworthy = pipeline_reported_success_is_untrustworthy(&command_line.first);
     for (index, (separator, pipeline)) in command_line.rest.iter().enumerate() {
@@ -641,6 +647,7 @@ fn evaluate_command_line(
         if !matches!(separator, Separator::And | Separator::Or) {
             isolated = chain_is_backgrounded(command_line, index + 1).then(|| cwd.clone());
         }
+        let in_parent_shell = runs_in_parent_shell(Some(*separator), isolated.is_some());
         let verdict = evaluate_pipeline(
             pipeline,
             &mut env,
@@ -648,10 +655,19 @@ fn evaluate_command_line(
             allowlist,
             depth,
             isolated.as_mut().unwrap_or(cwd),
+            in_parent_shell,
         );
         worst = fold_worst(worst, verdict);
     }
     worst
+}
+
+/// Whether a pipeline is certain to run in the parent shell whenever the line
+/// reaches it (issue #534): not the right-hand side of an `&&`/`||` (which may
+/// short-circuit; `separator` is the one preceding it, `None` for the first
+/// pipeline) and not part of a backgrounded chain.
+fn runs_in_parent_shell(separator: Option<Separator>, backgrounded: bool) -> bool {
+    !backgrounded && !matches!(separator, Some(Separator::And | Separator::Or))
 }
 
 /// Whether the pipeline at `index` (0 = [`CommandLine::first`], `i` = the
@@ -713,6 +729,17 @@ type IfsAlternates = Vec<(Vec<NormalizedWord>, String)>;
 /// 5: the ported `curl|sh` blocklist rule and the NEW decode/interpreter
 /// structural rules) into one worst-decision-wins [`Verdict`].
 ///
+/// `runs_in_parent_shell` (issue #534): whether this pipeline is certain to
+/// run, in the parent shell, whenever the line reaches it: it is not the
+/// right-hand side of an `&&`/`||` (which may short-circuit) and not part of
+/// a backgrounded chain (which runs in a subshell). Combined with a
+/// single-stage check here (every stage of a multi-stage pipeline is a
+/// subshell by default, and `lastpipe` is not modelled), it decides whether a
+/// simple command's assignments may be treated as persisting
+/// ([`Env::apply_assignments`]). Any uncertainty resolves to "not
+/// persisting": such an assignment's value still enters the history, but it
+/// can neither mark `$name` unknown nor clear an earlier unknown marker.
+///
 /// `cwd` (issue #103): a `cd`/`pushd`/etc. only updates it when this
 /// pipeline has exactly one stage — every stage of a `|` pipeline runs in
 /// its own subshell in bash, so a mutation in any stage (not just a `cd` —
@@ -731,6 +758,7 @@ fn evaluate_pipeline(
     allowlist: &Allowlist,
     depth: usize,
     cwd: &mut CwdState,
+    runs_in_parent_shell: bool,
 ) -> Verdict {
     let mut stages = Vec::with_capacity(1 + pipeline.rest.len());
     stages.push(&pipeline.first);
@@ -785,7 +813,7 @@ fn evaluate_pipeline(
         // attacker-choosable.
         let verdict = match command {
             Command::Simple(simple) => {
-                env.apply_assignments(simple);
+                env.apply_assignments(simple, runs_in_parent_shell && stage_count == 1);
                 let mut alternates = Vec::new();
                 let verdict = evaluate_simple_command(
                     simple,
@@ -2290,7 +2318,7 @@ fn evaluate_simple_command(
     alternates: &mut IfsAlternates,
 ) -> Verdict {
     let argv = normalize::normalize_argv(command);
-    let ask_match = rules.match_ask(&argv);
+    let ask_match = rules.match_ask_in(&argv, cwd.symlink_base());
     let has_argument_substitution = has_any_argument_position_substitution(command);
     // Issue #83's allowlist guard (module docs): a substitution living in
     // the command-position word's own non-winning brace alternative is
@@ -3046,6 +3074,31 @@ fn evaluate_simple_command_core(
         }
     });
 
+    // Rule 6e (issue #584): `sed`'s script can write (`w`/`W`/`s///w`), read
+    // (`r`/`R`) and, on GNU, execute (`e`/`s///e`); it floors to Ask unless
+    // [`crate::sed_script::classify`] proves it free of all of them. Folded
+    // into the interpreter-code floor with its own guidance message.
+    let interpreter_code_floor: Option<(String, &'static str)> = interpreter_code_floor
+        .map(|reason| (reason, DENY_MSG_INLINE_INTERPRETER))
+        .or_else(|| {
+            let (name, rest_words) = effective?;
+            let lower_name = crate::rules::fold_command_name(name);
+            SED_NAMES
+                .contains(&crate::rules::strip_version_suffix(&lower_name))
+                .then(|| crate::sed_script::classify(rest_words))
+                .flatten()
+                .map(|why| {
+                    (
+                        format!(
+                            "`{name}`'s script is not proven free of file-write, file-read and \
+                             command-execution commands: {}",
+                            why.describe()
+                        ),
+                        DENY_MSG_SED_SCRIPT,
+                    )
+                })
+        });
+
     // Rule 7: any `$IFS`-derived word floors to Ask on a blocklist miss.
     let ifs_floor = argv.iter().any(NormalizedWord::is_ifs_derived);
 
@@ -3132,7 +3185,7 @@ fn evaluate_simple_command_core(
             opaque_kind,
         );
     }
-    let toml_match = rules.match_command(&argv);
+    let toml_match = rules.match_command_in(&argv, cwd.symlink_base());
     // Worst-wins with the ordinary blocklist match (mirrors
     // `Rules::match_command`'s own Block-outranks-Ask contract, issue
     // #399): an embedded/user `[[command]]` rule that already matches
@@ -3580,6 +3633,7 @@ fn push_literal_skeleton(pieces: &[WordPiece], out: &mut String) {
             // impossible" case (its own docs: "rather than panic").
             WordPiece::BraceAlternation(_) => out.push(TOKEN_SCAN_SENTINEL),
             WordPiece::ParameterExpansion(_)
+            | WordPiece::ModifiedParameterExpansion { .. }
             | WordPiece::CommandSubstitution(_)
             | WordPiece::BackquotedSubstitution(_)
             | WordPiece::Tilde(_)
@@ -3960,7 +4014,7 @@ struct ExceptFloors<'a> {
 /// configured to `deny`.
 fn fold_floors(
     argv: Vec<NormalizedWord>,
-    interpreter_code_floor: Option<String>,
+    interpreter_code_floor: Option<(String, &'static str)>,
     ifs_floor: bool,
     escalation_floor: Option<(Decision, String)>,
     opaque_kind: Option<UnresolvableKind>,
@@ -4010,8 +4064,8 @@ fn fold_floors(
         .cloned()
         .or_else(|| {
             interpreter_code_floor
-                .is_some()
-                .then(|| DenyMessage::new(DENY_MSG_INLINE_INTERPRETER))
+                .as_ref()
+                .map(|(_, guidance)| DenyMessage::new(*guidance))
         })
         .or_else(|| {
             (except_floors.target.is_some() || except_floors.flags.is_some())
@@ -4025,7 +4079,7 @@ fn fold_floors(
         // specific than "some recursed substitution was worse than Allow".
         .or(substitution_deny_message);
 
-    if let Some(reason) = interpreter_code_floor {
+    if let Some((reason, _)) = interpreter_code_floor {
         decision = decision.max(Decision::Ask);
         reasons.push(reason);
     }
@@ -4200,8 +4254,9 @@ fn evaluate_command_position_bare_var(
     let Some((name, quoted)) = bare_parameter_name(first_word_ast) else {
         return Verdict::ask(
             Reason::new(
-                "command position word is a parameter expansion mixed with other text; which \
-                 command will run cannot be determined statically",
+                "command position word is a parameter expansion mixed with other text or \
+                 carrying a modifier (${x%p}, ${x:-w}, ${PIPESTATUS[0]}, ...); which command \
+                 will run cannot be determined statically",
             ),
             argv,
         )
@@ -4245,11 +4300,11 @@ fn evaluate_command_position_bare_var(
     // the `"ls"` current-value candidate is still tried below (it can only
     // ever raise the decision toward Ask/Block, never toward a false
     // Allow), but no STALE history entry may.
-    let name_history: &[String] = if env.is_persisting_unresolvable(name) {
-        &[]
-    } else {
-        env.value_history(name)
-    };
+    //
+    // Issue #534: only history recorded BEFORE that unresolvable assignment
+    // is stale; a value recorded after it by a possibly-skipped (or
+    // subshell-scoped) resolved assignment is still a reachable candidate.
+    let name_history: &[String] = env.live_value_history(name);
 
     // Every distinct IFS interpretation worth trying, most-specific first:
     // the current resolved value, then every earlier value a later
@@ -5477,6 +5532,9 @@ fn scan_word_pieces_for_heredoc_candidates(pieces: &[WordPiece], out: &mut Hered
                 }
             }
             WordPiece::DoubleQuoted(inner) => scan_word_pieces_for_heredoc_candidates(inner, out),
+            WordPiece::ModifiedParameterExpansion { operand, .. } => {
+                scan_word_pieces_for_heredoc_candidates(operand, out);
+            }
             WordPiece::BraceAlternation(members) => {
                 for member in members {
                     scan_word_pieces_for_heredoc_candidates(&member.0, out);
@@ -6680,6 +6738,9 @@ fn collect_substitutions_into<'a>(
                 out.extend(collect_heredoc_substitutions(raw).substitutions);
             }
             WordPiece::DoubleQuoted(inner) => collect_substitutions_into(inner, false, out),
+            WordPiece::ModifiedParameterExpansion { operand, .. } => {
+                collect_substitutions_into(operand, allow_split, out);
+            }
             WordPiece::BraceAlternation(members) => {
                 for member in members {
                     collect_substitutions_into(&member.0, allow_split, out);
@@ -6711,6 +6772,9 @@ fn collect_process_substitutions_into<'a>(pieces: &'a [WordPiece], out: &mut Vec
         match piece {
             WordPiece::ProcessSubstitution { body, .. } => out.push(body),
             WordPiece::DoubleQuoted(inner) => collect_process_substitutions_into(inner, out),
+            WordPiece::ModifiedParameterExpansion { operand, .. } => {
+                collect_process_substitutions_into(operand, out);
+            }
             WordPiece::BraceAlternation(members) => {
                 for member in members {
                     collect_process_substitutions_into(&member.0, out);
@@ -7294,6 +7358,10 @@ fn inline_code_flag(name: &str) -> Option<&'static str> {
         _ => None,
     }
 }
+
+/// `sed` command names checked by rule 6e, after case folding and
+/// version-suffix stripping (GNU sed is `gsed` under Homebrew).
+const SED_NAMES: &[&str] = &["sed", "gsed"];
 
 /// Result of [`scan_for_awk_script`]: where awk's script comes from,
 /// relative to its first non-option operand. Mirrors
@@ -8234,6 +8302,19 @@ enum CwdContext {
     Initial,
     Known(String),
     Poisoned,
+}
+
+impl CwdContext {
+    /// The absolute directory a `resolve_symlinks` rule (issue #583)
+    /// resolves relative candidates against: only a `Known` anchor that is
+    /// itself absolute. A `~`-anchored or relative anchor, `Initial` and
+    /// `Poisoned` all yield `None`, so those candidates fail closed.
+    fn symlink_base(&self) -> Option<&str> {
+        match self {
+            Self::Known(anchor) if anchor.starts_with('/') => Some(anchor),
+            _ => None,
+        }
+    }
 }
 
 /// Cap on how many frames issue #210's directory-stack tracking
@@ -10036,11 +10117,11 @@ fn apply_unknown_cwd_floor(
 /// shadowing prefix assignment already doesn't, so `value_history` must
 /// still be tried when `map.get(name)` comes up empty, not only alongside
 /// an already-known current resolution — `evaluate_command_position_bare_var`
-/// consults `value_history` unless [`Self::is_persisting_unresolvable`]
-/// says the current absence (or a later prefix-scoped resolution on top of
-/// it) traces back to a genuinely persisting unresolvable reassignment,
-/// current-value candidates simply being absent from that scan when there
-/// is no current resolution to try.
+/// consults only [`Self::live_value_history`]: entries before a genuinely
+/// persisting unresolvable reassignment are dropped when the current
+/// absence (or a later prefix-scoped resolution on top of it) traces back
+/// to one, current-value candidates simply being absent from that scan
+/// when there is no current resolution to try.
 struct Env {
     map: HashMap<String, String>,
     assigned: std::collections::HashSet<String>,
@@ -10068,16 +10149,21 @@ struct Env {
     /// does take over) — a fallback there would be a genuine false Block,
     /// not a conservative over-approximation.
     ///
-    /// Only a PERSISTING assignment (`is_prefix_scoped == false` in
-    /// [`Self::apply_one`]) may ever insert into or remove from this set,
-    /// whether its own RHS resolves or not: a prefix-scoped assignment
-    /// cannot clear a genuinely unknown persisting value an earlier command
-    /// left behind either (`X=$(evil); X=ls true; $X` still has `$X`
-    /// holding `$(evil)`'s own unknown value once `true` exits — `"ls"`
-    /// never actually took over), so a prefix-scoped assignment must leave
-    /// this set entirely alone in both of its own branches, not just the
-    /// unresolvable one.
-    persisting_unresolvable: std::collections::HashSet<String>,
+    /// Each entry is a cut index: `value_history[name].len()` at the moment
+    /// of that assignment, so only history recorded before it is stale (a
+    /// later possibly-skipped resolved assignment is still a reachable
+    /// candidate, issue #534; [`Self::live_value_history`]).
+    ///
+    /// Only a CERTAINLY PERSISTING assignment (`is_prefix_scoped == false` in
+    /// [`Self::apply_one`]) may ever insert into (unresolvable RHS) or remove
+    /// from (resolved RHS) this map: a prefix-scoped, short-circuitable or
+    /// subshell-scoped assignment cannot clear a genuinely unknown persisting
+    /// value an earlier command left behind either (`X=$(evil); X=ls true;
+    /// $X` still has `$X` holding `$(evil)`'s own unknown value once `true`
+    /// exits — `"ls"` never actually took over), so it must leave the marker
+    /// alone in both of its own branches. Its resolved value still lands in
+    /// `value_history` after the cut.
+    persisting_unresolvable: HashMap<String, usize>,
 }
 
 impl Env {
@@ -10087,7 +10173,7 @@ impl Env {
             assigned: std::collections::HashSet::new(),
             value_history: HashMap::new(),
             ifs_append_floor: None,
-            persisting_unresolvable: std::collections::HashSet::new(),
+            persisting_unresolvable: HashMap::new(),
         }
     }
 
@@ -10118,16 +10204,18 @@ impl Env {
         self.assigned.contains(name)
     }
 
-    /// Issue #516: whether the most recent PERSISTING (non-prefix-scoped)
-    /// assignment to `name` had an unresolvable RHS, independent of what
-    /// `map` currently shows — a LATER prefix-scoped resolution updates
-    /// `map` (e.g. to `Some("ls")`) without ever clearing this (see
-    /// [`Self::persisting_unresolvable`]'s own docs for why). `true` means
-    /// `evaluate_command_position_bare_var` must NOT paper over the
-    /// genuinely unknown runtime value with a stale `value_history`
-    /// fallback, regardless of what `map` holds right now.
-    fn is_persisting_unresolvable(&self, name: &str) -> bool {
-        self.persisting_unresolvable.contains(name)
+    /// Issue #516: the part of `name`'s [`Self::value_history`] that is not
+    /// stale. When the most recent PERSISTING (non-prefix-scoped) assignment
+    /// to `name` had an unresolvable RHS, everything recorded before it is
+    /// dropped, independent of what `map` currently shows — a LATER
+    /// prefix-scoped resolution updates `map` (e.g. to `Some("ls")`) without
+    /// ever clearing this (see [`Self::persisting_unresolvable`]'s own docs
+    /// for why). `evaluate_command_position_bare_var` must NOT paper over
+    /// the genuinely unknown runtime value with those stale entries.
+    fn live_value_history(&self, name: &str) -> &[String] {
+        let history = self.value_history(name);
+        let cut = self.persisting_unresolvable.get(name).copied().unwrap_or(0);
+        history.get(cut..).unwrap_or(&[])
     }
 
     /// Folds `command`'s own assignments into the map. Must be called
@@ -10141,8 +10229,16 @@ impl Env {
     /// divergence) removes any prior entry instead: a stale resolved value
     /// is worse than no resolution at all, since rule 2 only ever uses a
     /// resolution to *upgrade* Ask to Block.
-    fn apply_assignments(&mut self, command: &SimpleCommand) {
-        let is_prefix_scoped = !command.words.is_empty();
+    ///
+    /// `persists_if_standalone` (issue #534) is whether the enclosing list/
+    /// pipeline context certainly runs `command` in the parent shell
+    /// ([`evaluate_pipeline`]'s `runs_in_parent_shell`, plus single-stage).
+    /// When it is not, the assignments are classified exactly like a
+    /// command-scoped prefix: they may never reach later commands, so they
+    /// must neither poison nor clear [`Self::persisting_unresolvable`]
+    /// (their resolved values still enter `value_history`, past the cut).
+    fn apply_assignments(&mut self, command: &SimpleCommand, persists_if_standalone: bool) {
+        let is_prefix_scoped = !command.words.is_empty() || !persists_if_standalone;
         for assignment in &command.assignments {
             self.apply_one(assignment, is_prefix_scoped);
         }
@@ -10217,7 +10313,9 @@ impl Env {
             None => {
                 self.map.remove(&assignment.name);
                 if !is_prefix_scoped {
-                    self.persisting_unresolvable.insert(assignment.name.clone());
+                    let cut = self.value_history(&assignment.name).len();
+                    self.persisting_unresolvable
+                        .insert(assignment.name.clone(), cut);
                 }
             }
         }
@@ -10766,7 +10864,7 @@ mod tests {
     #[test]
     fn issue_516_a_resolved_prefix_scoped_current_value_does_not_reach_stale_history_either() {
         // Round 3: a fable code-reviewer pass on PR #532 found the round-2
-        // fix's guard (`value.is_none() && env.is_persisting_unresolvable`)
+        // fix's guard (`value.is_none() && <persisting-unresolvable marker>`)
         // didn't generalize -- it only suppressed history when the CURRENT
         // value was also missing. Here `X=ls true` is prefix-scoped and
         // resolved, so `env.get("X")` hits `Some("ls")`, but the true
@@ -10785,6 +10883,114 @@ mod tests {
         // (which only takes effect for a hypothetical command after this
         // one) and never the much-earlier `"rm -rf /"` either.
         assert_decision("X='rm -rf /'; X=$(evil); X=ls $X", Decision::Ask);
+    }
+
+    // Issue #534: a standalone assignment is only PERSISTING when its list/
+    // pipeline context certainly runs it in the parent shell. A short-
+    // circuitable `&&`/`||` right-hand side, any stage of a multi-stage
+    // pipeline (`lastpipe` unmodelled) or a backgrounded chain is classified
+    // like a command-scoped prefix: it can neither mark the name unknown nor
+    // clear an earlier unknown marker, and a resolved value it records stays
+    // a live history candidate (the marker is a cut index into the history),
+    // so the genuine Block is preserved. The truly-subshell resolved rows
+    // (`X='rm -rf /' | true; ...`, `X='rm -rf /' & ...`) may stay Ask after
+    // an earlier unknown assignment; they are not pinned here.
+
+    #[test]
+    fn issue_534_or_list_rhs_assignment_does_not_poison_history() {
+        assert_decision(
+            "X='rm -rf /'; true || X=$(evil); X=ls true; $X",
+            Decision::Block,
+        );
+        assert_decision("X='rm -rf /'; true || X=$(evil); $X", Decision::Block);
+    }
+
+    #[test]
+    fn issue_534_and_list_rhs_assignment_does_not_poison_history() {
+        assert_decision(
+            "X='rm -rf /'; true && X=$(evil); X=ls true; $X",
+            Decision::Block,
+        );
+        assert_decision("X='rm -rf /'; false && X=$(evil); $X", Decision::Block);
+    }
+
+    #[test]
+    fn issue_534_chained_list_rhs_assignment_does_not_poison_history() {
+        assert_decision(
+            "X='rm -rf /'; true && true && X=$(evil); X=ls true; $X",
+            Decision::Block,
+        );
+    }
+
+    #[test]
+    fn issue_534_pipeline_stage_assignment_does_not_poison_history() {
+        assert_decision(
+            "X='rm -rf /'; X=$(evil) | true; X=ls true; $X",
+            Decision::Block,
+        );
+    }
+
+    #[test]
+    fn issue_534_last_pipeline_stage_assignment_does_not_poison_history() {
+        // Without `lastpipe` the last stage is a subshell too; with it, the
+        // uncertainty must still resolve to the stricter verdict.
+        assert_decision(
+            "X='rm -rf /'; true | X=$(evil); X=ls true; $X",
+            Decision::Block,
+        );
+    }
+
+    #[test]
+    fn issue_534_backgrounded_assignment_does_not_poison_history() {
+        assert_decision("X='rm -rf /'; X=$(evil) & $X", Decision::Block);
+        assert_decision(
+            "X='rm -rf /'; true && X=$(evil) & X=ls true; $X",
+            Decision::Block,
+        );
+    }
+
+    #[test]
+    fn issue_534_unconditional_assignment_after_a_list_still_persists() {
+        // `;` ends the `||` chain, so this later standalone assignment runs
+        // for certain and still poisons history (Ask, not a false Block).
+        assert_decision(
+            "X='rm -rf /'; true || true; X=$(evil); X=ls true; $X",
+            Decision::Ask,
+        );
+        assert_decision("X='rm -rf /'; X=$(evil); $X", Decision::Ask);
+    }
+
+    #[test]
+    fn issue_534_possibly_skipped_resolved_assignment_survives_an_earlier_unknown_one() {
+        for command in [
+            "X=$(evil); true && X='rm -rf /'; X=ls true; $X",
+            "X=$(evil); true || X='rm -rf /'; X=ls true; $X",
+            "X=$(evil) || X='rm -rf /'; X=ls true; $X",
+            "X=$(evil); true && X='rm -rf /'; X=ls $X",
+            "X=$(evil); true && X='rm -rf /' && X=ls true; $X",
+            "X=$(evil); true | X='rm -rf /'; X=ls true; $X",
+        ] {
+            assert_decision(command, Decision::Block);
+        }
+    }
+
+    #[test]
+    fn issue_534_cut_index_keeps_516_behaviour() {
+        assert_decision("X='rm -rf /'; X=$(evil); X=ls true; $X", Decision::Ask);
+        assert_decision(
+            "X='rm -rf /'; X=$(evil); X=$(evil2) true; $X",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn issue_534_conditional_assignment_cannot_clear_persisting_state() {
+        // The earlier unconditional `X=$(evil)` poisons history; a possibly
+        // skipped resolved reassignment must not clear it.
+        assert_decision(
+            "X='rm -rf /'; X=$(evil); true || X=ls; X=ls true; $X",
+            Decision::Ask,
+        );
     }
 
     #[test]

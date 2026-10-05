@@ -989,6 +989,26 @@ pub(crate) enum WordPiece {
     DoubleQuoted(Vec<WordPiece>),
     /// `$NAME` / `${NAME}` — the parameter name only.
     ParameterExpansion(String),
+    /// `${NAME<op>operand}` (issue #580) and the literal-index
+    /// `${PIPESTATUS[n]}`/`${pipestatus[n]}` (issue #578): a parameter
+    /// expansion with a modifier whose value shguard never computes
+    /// (default/alternative/error words, prefix/suffix removal, substring,
+    /// substitution, case change, length). `operand` is the modifier's
+    /// word part, re-parsed, so command substitutions inside it are still
+    /// found and recursed into; it is empty for forms without one.
+    ///
+    /// Deliberately NOT a flag on [`WordPiece::ParameterExpansion`]: a bare
+    /// `${NAME}` is substituted by its same-line value in command position,
+    /// and a modified form must never reach that path (substituting the
+    /// unmodified value for `${B:0:1}` would be a guessed string). For the
+    /// subscripted `PIPESTATUS` forms, `name` is `PIPESTATUS`/`pipestatus`
+    /// plus `[@]` when the subscript is `@` (so the normalise stage knows
+    /// it can split into several words) and `operand` is empty. Never built
+    /// for assigning (`:=`/`=`), indirect or any other array form.
+    ModifiedParameterExpansion {
+        name: String,
+        operand: Vec<WordPiece>,
+    },
     /// `$(...)` — the raw, unparsed inner command string.
     CommandSubstitution(String),
     /// `` `...` `` — the raw, unparsed inner command string.
