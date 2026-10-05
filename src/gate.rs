@@ -7127,32 +7127,17 @@ fn bare_parameter_name(word: &Word) -> Option<(&str, bool)> {
     }
 }
 
-/// Splits `value` on bash's default-IFS whitespace (space/tab/newline),
-/// dropping empty fields — the same field-splitting behaviour an unquoted
-/// `$VAR` in command position undergoes at runtime. Used by rule 2 to
-/// substitute a resolved variable's value back into argv position 0:
-/// `X="rm -rf"; $X /` must produce `["rm", "-rf", "/"]`, not one token
-/// `"rm -rf"`.
-fn split_default_ifs(value: &str) -> Vec<String> {
-    value
-        .split([' ', '\t', '\n'])
-        .filter(|segment| !segment.is_empty())
-        .map(str::to_owned)
-        .collect()
-}
-
 /// Issue #139: splits `value` the way an unquoted `$VAR` actually splits at
 /// runtime when a same-line `IFS=` assignment has statically resolved to
-/// `ifs` — [`split_default_ifs`] only ever models the DEFAULT `" \t\n"`, so
-/// rule 2's substitution step silently kept guessing default-whitespace
-/// splitting even after a same-line `IFS=,` reassignment made a
+/// `ifs` — rule 2's substitution step used to model only the DEFAULT
+/// `" \t\n"`, silently guessing default-whitespace splitting even after a same-line `IFS=,` reassignment made a
 /// comma-joined value (`X=rm,-rf,/`) split into `rm`/`-rf`/`/` for real —
 /// one token that matched no blocklist rule, unlike the space-joined
 /// equivalent that already worked (issue #139's own repro).
 ///
 /// POSIX field splitting distinguishes IFS-whitespace characters (space,
 /// tab, newline — sequences of these collapse together and never produce
-/// an empty field, matching [`split_default_ifs`]'s own behaviour) from
+/// an empty field) from
 /// every OTHER `IFS` character. A non-whitespace delimiter, TOGETHER with
 /// any IFS-whitespace immediately bordering it on either side, is a
 /// SINGLE delimiter event (`IFS=", "; X="a , b"` → `a`, `b`, not `a`, ``,
@@ -7160,8 +7145,7 @@ fn split_default_ifs(value: &str) -> Vec<String> {
 /// at each such combined event, so adjacent non-whitespace delimiters
 /// with no separating whitespace still produce an empty field between
 /// them (`IFS=,; X=a,,b` → `a`, ``, `b`), and no field is produced after
-/// a trailing delimiter (matching [`split_default_ifs`]'s own trailing
-/// trim) — except a LEADING non-whitespace delimiter, which does still
+/// a trailing delimiter — except a LEADING non-whitespace delimiter, which does still
 /// yield an empty first field (`IFS=,; X=,a` → ``, `a`, matching real
 /// bash): only whitespace is stripped for free at the very start.
 ///
@@ -7225,9 +7209,11 @@ fn split_with_ifs(value: &str, ifs: &str) -> Vec<String> {
 /// Replaces `argv[0]` with `value`'s split tokens, keeping every later
 /// argv element as-is — rule 2's substitution step. `ifs` is the
 /// effective same-line `IFS` value — `None` (no same-line reassignment
-/// resolved) falls back to [`split_default_ifs`]'s exact default-`"
-/// \t\n"` behaviour, `Some` routes through [`split_with_ifs`] (issue
-/// #139). `quoted` (a `"$VAR"` command word) skips splitting: the whole
+/// resolved) falls back to bash's default-IFS whitespace
+/// ([`normalize::DEFAULT_IFS_WHITESPACE`]), the same field-splitting an
+/// unquoted `$VAR` in command position undergoes at runtime (`X="rm -rf";
+/// $X /` must produce `["rm", "-rf", "/"]`, not one token `"rm -rf"`), via
+/// [`split_with_ifs`] either way (issue #139). `quoted` (a `"$VAR"` command word) skips splitting: the whole
 /// value is the single command word.
 fn substitute_command_name(
     argv: &[NormalizedWord],
@@ -7237,8 +7223,7 @@ fn substitute_command_name(
 ) -> Vec<NormalizedWord> {
     let fields = match (quoted, ifs) {
         (true, _) => vec![value.to_owned()],
-        (false, Some(ifs)) => split_with_ifs(value, ifs),
-        (false, None) => split_default_ifs(value),
+        (false, ifs) => split_with_ifs(value, ifs.unwrap_or(normalize::DEFAULT_IFS_WHITESPACE)),
     };
     let mut substituted: Vec<NormalizedWord> =
         fields.into_iter().map(NormalizedWord::resolved).collect();
@@ -10176,7 +10161,7 @@ impl Env {
                         let base = self
                             .ifs_append_floor
                             .clone()
-                            .unwrap_or_else(|| " \t\n".to_string());
+                            .unwrap_or_else(|| normalize::DEFAULT_IFS_WHITESPACE.to_string());
                         let floor = format!("{base}{rhs}");
                         self.value_history
                             .entry(assignment.name.clone())
@@ -10906,10 +10891,16 @@ mod tests {
     }
 
     #[test]
-    fn issue_139_split_with_ifs_pure_whitespace_matches_split_default_ifs() {
+    fn issue_139_substitute_command_name_default_ifs_collapses_whitespace_runs() {
+        let argv = [NormalizedWord::resolved("$X")];
+        let words = substitute_command_name(&argv, "  rm  -rf\t/\n", None, false);
         assert_eq!(
-            split_with_ifs("rm  -rf  /", " \t\n"),
-            split_default_ifs("rm  -rf  /")
+            words,
+            vec![
+                NormalizedWord::resolved("rm"),
+                NormalizedWord::resolved("-rf"),
+                NormalizedWord::resolved("/"),
+            ]
         );
     }
 
