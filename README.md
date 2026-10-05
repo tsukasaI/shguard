@@ -35,14 +35,14 @@ rather than letting it go stale silently.
   regression table above, which covers A-D directly, plus class E via
   the destructive-commands suite in `tests/guardfall.rs`, and
   [Attribution](#attribution)).
-- **Regression test count:** 486 (481 pinned-decision literals across
+- **Regression test count:** 510 (505 pinned-decision literals across
   `tests/guardfall.rs`'s internally-discovered regression suite, plus 5
   externally-attributed cases in `tests/bypass_corpus.toml`). A lower
   bound, not an exact assertion count: some of `guardfall.rs`'s tests
   assert one literal per combinatorial loop iteration rather than one
   literal per case, so this undercounts the true number of individual
   assertions that actually run.
-- **Benign corpus size:** 59 (realistic agent-workflow commands in
+- **Benign corpus size:** 74 (realistic agent-workflow commands in
   `tests/benign_corpus.rs`, verified to `Allow` without friction).
 
 This is a different axis from an LLM-based agent's self-reported

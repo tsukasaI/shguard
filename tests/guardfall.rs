@@ -1905,3 +1905,54 @@ fn guardfall_alias_empty_value_argument_still_allows() {
     let verdict = shguard::analyze("alias x=\"\"");
     assert_eq!(verdict.decision(), Decision::Allow);
 }
+
+/// Issue #584: sed's `w`/`W`/`s///w` write files, `r`/`R` read them and GNU's
+/// `e`/`s///e` run commands, none of it visible to the in-place-flag sed
+/// rules. A script not proven free of them floors to Ask.
+#[test]
+fn guardfall_sed_script_write_exec_cases() {
+    let cases: &[(&str, Decision)] = &[
+        (
+            "sed -n 'w ~/.config/shguard/config.toml' /etc/passwd",
+            Decision::Ask,
+        ),
+        ("sed 's/a/b/w ~/.zshrc' x", Decision::Ask),
+        ("sed 's|a|b|gw out' x", Decision::Ask),
+        ("sed -e 'W ~/.zshrc' /etc/passwd", Decision::Ask),
+        ("sed --expression='w out' x", Decision::Ask),
+        ("sed -nes/a/b/w\\ out x", Decision::Ask),
+        ("sed p -e 'w out' x", Decision::Ask),
+        ("sed -n '/x/{p;w out}' x", Decision::Ask),
+        ("sed 'e rm -rf ~' a.txt", Decision::Ask),
+        ("sed 's/a/b/e' a.txt", Decision::Ask),
+        ("sed 'r /etc/passwd' a.txt", Decision::Ask),
+        ("sed -f script.sed a.txt", Decision::Ask),
+        ("sed -n \"$SCRIPT\" a.txt", Decision::Ask),
+        ("sed -n $SCRIPT a.txt", Decision::Ask),
+        ("sed 's/a/b/x' a.txt", Decision::Ask),
+        ("gsed 'w out' a.txt", Decision::Ask),
+        ("env sed 'w out' a.txt", Decision::Ask),
+        ("sed -i 'w out' a.txt", Decision::Ask),
+        // Existing in-place self-protection verdict is unchanged.
+        (
+            "sed -i 's/x/y/' ~/.config/shguard/config.toml",
+            Decision::Block,
+        ),
+        // Ordinary sed keeps its verdict.
+        ("sed -n 1,5p file", Decision::Allow),
+        ("sed 's/w/x/g' file", Decision::Allow),
+        ("sed -e 's|a|b|' file", Decision::Allow),
+        ("sed '/^#/d' file", Decision::Allow),
+        ("sed -i 's/x/y/' file", Decision::Allow),
+    ];
+
+    for (command, expected) in cases {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
