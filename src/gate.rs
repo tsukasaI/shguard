@@ -3084,6 +3084,21 @@ fn evaluate_simple_command_core(
     // that id) is pinned unreachable by
     // `rules::embedded_git_push_force_rule_id_exists_for_gate_reuse`
     // below, rather than left as a silently-accepted fail-open gap.
+    // Issue #552: the `-c alias.*` smuggling Block must not be shadowed by
+    // an Ask-tier rule match or the checkout-dot Ask below, so a Block from
+    // `git_config_smuggled_verdict` returns first. Its Ask outcomes stay at
+    // their original position further down (Ask vs Ask ordering is moot).
+    if let Some(verdict) =
+        git_config_smuggled_verdict(&argv).filter(|v| v.decision() == Decision::Block)
+    {
+        return apply_opaque_kind_floor(
+            apply_substitution_floor(
+                apply_escalation_floor(verdict, escalation_floor),
+                substitution_result,
+            ),
+            opaque_kind,
+        );
+    }
     let toml_match = rules.match_command(&argv);
     // Worst-wins with the ordinary blocklist match (mirrors
     // `Rules::match_command`'s own Block-outranks-Ask contract, issue
@@ -4149,7 +4164,7 @@ fn evaluate_command_position_bare_var(
     rules: &Rules,
     alternates: &mut IfsAlternates,
 ) -> Verdict {
-    let Some(name) = bare_parameter_name(first_word_ast) else {
+    let Some((name, quoted)) = bare_parameter_name(first_word_ast) else {
         return Verdict::ask(
             Reason::new(
                 "command position word is a parameter expansion mixed with other text; which \
@@ -4208,12 +4223,15 @@ fn evaluate_command_position_bare_var(
     // assignment/removal shadowed, then the plain default split — a
     // shared candidate list rather than duplicated match-and-Block arms
     // for "current" vs. "default".
-    let current_ifs = env.get("IFS");
+    // A quoted `"$name"` is never field-split, so no IFS interpretation
+    // applies: the only candidate is the unsplit value.
+    let current_ifs = if quoted { None } else { env.get("IFS") };
     let mut candidates: Vec<(Option<&str>, &'static str)> = Vec::new();
     if let Some(current) = current_ifs {
         candidates.push((Some(current), " under the same-line `IFS` reassignment"));
     }
-    for historical in env.ifs_history() {
+    let ifs_history: &[String] = if quoted { &[] } else { env.ifs_history() };
+    for historical in ifs_history {
         if Some(historical.as_str()) != current_ifs {
             candidates.push((
                 Some(historical.as_str()),
@@ -4233,7 +4251,7 @@ fn evaluate_command_position_bare_var(
     let mut primary_substituted = None;
     if let Some(value) = value {
         for &(ifs, splitting_note) in &candidates {
-            let substituted = substitute_command_name(&argv, value, ifs);
+            let substituted = substitute_command_name(&argv, value, ifs, quoted);
             if let Some(rule) = rules.match_command(&substituted) {
                 return Verdict::block(
                     Reason::new(format!(
@@ -4290,7 +4308,7 @@ fn evaluate_command_position_bare_var(
             continue;
         }
         for &(ifs, splitting_note) in &candidates {
-            let substituted = substitute_command_name(&argv, historical, ifs);
+            let substituted = substitute_command_name(&argv, historical, ifs, quoted);
             if let Some(rule) = rules.match_command(&substituted) {
                 return Verdict::block(
                     Reason::new(format!(
@@ -7076,9 +7094,18 @@ fn scan_backtick_span<'a>(bytes: &[u8], body: &'a str, start: usize) -> Option<(
 /// when it consists of exactly one [`WordPiece::ParameterExpansion`] piece
 /// and nothing else — `$X` qualifies, `pre$X` does not (mixed text has no
 /// single variable to resolve and substitute).
-fn bare_parameter_name(word: &Word) -> Option<&str> {
+///
+/// Also accepts a word whose only piece is a double-quoted region holding
+/// exactly one such expansion (`"$X"`, `"${X}"`), reported with `true`: the
+/// quotes only suppress field splitting, so it names one argv word rather
+/// than an IFS-split sequence. Returns `(name, quoted)`.
+fn bare_parameter_name(word: &Word) -> Option<(&str, bool)> {
     match word.0.as_slice() {
-        [WordPiece::ParameterExpansion(name)] => Some(name.as_str()),
+        [WordPiece::ParameterExpansion(name)] => Some((name.as_str(), false)),
+        [WordPiece::DoubleQuoted(inner)] => match inner.as_slice() {
+            [WordPiece::ParameterExpansion(name)] => Some((name.as_str(), true)),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -7183,15 +7210,18 @@ fn split_with_ifs(value: &str, ifs: &str) -> Vec<String> {
 /// effective same-line `IFS` value — `None` (no same-line reassignment
 /// resolved) falls back to [`split_default_ifs`]'s exact default-`"
 /// \t\n"` behaviour, `Some` routes through [`split_with_ifs`] (issue
-/// #139).
+/// #139). `quoted` (a `"$VAR"` command word) skips splitting: the whole
+/// value is the single command word.
 fn substitute_command_name(
     argv: &[NormalizedWord],
     value: &str,
     ifs: Option<&str>,
+    quoted: bool,
 ) -> Vec<NormalizedWord> {
-    let fields = match ifs {
-        Some(ifs) => split_with_ifs(value, ifs),
-        None => split_default_ifs(value),
+    let fields = match (quoted, ifs) {
+        (true, _) => vec![value.to_owned()],
+        (false, Some(ifs)) => split_with_ifs(value, ifs),
+        (false, None) => split_default_ifs(value),
     };
     let mut substituted: Vec<NormalizedWord> =
         fields.into_iter().map(NormalizedWord::resolved).collect();
@@ -15049,6 +15079,46 @@ mod tests {
         // now floors to Ask too via `git_config_smuggled_verdict` rather
         // than staying Allow.
         assert_decision(r#"git -c "$X" status"#, Decision::Ask);
+    }
+
+    #[test]
+    fn git_alias_smuggling_block_is_not_shadowed_by_ask_tier_matches() {
+        // Issue #552: Ask-tier git rules and the checkout-dot Ask used to
+        // return before the alias Block was computed.
+        assert_decision("git -c alias.x='!id' status", Decision::Block);
+        assert_decision("git -c alias.x='!id' checkout -f main", Decision::Block);
+        assert_decision("git -c alias.x='!id' checkout .", Decision::Block);
+        assert_decision("git -c alias.x='!id' restore foo", Decision::Block);
+        assert_decision("git -c include.path=/tmp/x checkout -f main", Decision::Ask);
+    }
+
+    #[test]
+    fn quoted_command_position_variable_resolves_like_the_unquoted_form() {
+        // Issue #576.
+        assert_decision("B=rm; $B -rf ~", Decision::Block);
+        assert_decision(r#"B=rm; "$B" -rf ~"#, Decision::Block);
+        assert_decision(r#"B=rm; "${B}" -rf ~"#, Decision::Block);
+        let unquoted = decide("B=./x; $B -v");
+        let quoted = decide(r#"B=./x; "$B" -v"#);
+        assert_eq!(quoted.decision(), Decision::Ask);
+        assert_eq!(
+            quoted.reason().map(super::Reason::as_str),
+            unquoted.reason().map(super::Reason::as_str)
+        );
+        // Quoted: no IFS splitting, so the whole value is one command word.
+        assert_decision(r#"B="rm -rf /"; "$B""#, Decision::Ask);
+        assert_decision(r#"B="rm -rf /"; $B"#, Decision::Block);
+        // Mixed text still floors to the mixed-with-other-text Ask.
+        for command in [r#"B=rm; C=x; "$B$C" -v"#, r#"B=rm; "$B"x -v"#] {
+            let verdict = decide(command);
+            assert_eq!(verdict.decision(), Decision::Ask, "{command}");
+            assert!(
+                verdict
+                    .reason()
+                    .is_some_and(|r| r.as_str().contains("mixed with other text")),
+                "{command}"
+            );
+        }
     }
 
     #[test]
