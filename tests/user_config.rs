@@ -737,6 +737,68 @@ fn except_targets_covering_every_required_tokens_word_still_excepts_correctly() 
     assert!(permission_reason(&output).contains("user-ask-gh-repo-delete"));
 }
 
+// Issue #581: `target_flags` scopes except_targets candidates to one flag's
+// value, so `gh issue comment 123 --body-file <scratch path>` is excepted
+// even though the issue number is an unexceptable positional.
+#[test]
+fn except_targets_target_flags_scopes_candidates_to_the_flag_value() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[ask]]
+        id = "user-ask-gh-comment-body-file"
+        reason = "confirm gh issue comment unless the body file is in the scratchpad"
+        command = "gh issue comment"
+        target_flags = ["--body-file", "-F"]
+        except_targets = [{ prefix = "/private/tmp/claude-501/" }]
+    "#,
+    );
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+
+    for command in [
+        "gh issue comment 123 --body-file /private/tmp/claude-501/body.md",
+        "gh issue comment 123 --body-file=/private/tmp/claude-501/body.md",
+    ] {
+        let output = run_hook(&bash_command(command), &envs);
+        assert_eq!(permission_decision(&output), "allow", "{command}");
+    }
+
+    for command in [
+        "gh issue comment 123 --body-file /etc/passwd",
+        "gh issue comment 123 --body-file /private/tmp/claude-501/x.md -F /etc/passwd",
+        "gh issue comment 123 -F /etc/passwd --body-file /private/tmp/claude-501/x.md",
+        "gh issue comment 123 --body hello",
+        "gh issue comment 123 --body-file",
+        "gh issue comment 123 --body-file \"$F\"",
+    ] {
+        let output = run_hook(&bash_command(command), &envs);
+        assert_eq!(permission_decision(&output), "ask", "{command}");
+    }
+}
+
+#[test]
+fn except_targets_target_flags_invalid_spec_is_rejected_at_config_load() {
+    // Fail closed: a malformed key must make every command ask, not load a
+    // rule that silently ignores the key.
+    for bad in ["[]", "[\"body-file\"]", "[\"--\"]"] {
+        let (_dir, config_path) = write_config(&format!(
+            r#"
+            [[ask]]
+            id = "user-ask-bad-target-flags"
+            reason = "confirm gh issue comment"
+            command = "gh issue comment"
+            target_flags = {bad}
+            except_targets = [{{ prefix = "/private/tmp/claude-501/" }}]
+        "#
+        ));
+        let output = run_hook(
+            &bash_command("echo hi"),
+            &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+        );
+        assert_eq!(permission_decision(&output), "ask", "{bad}");
+        assert!(!permission_reason(&output).is_empty());
+    }
+}
+
 // ==== Adversarial ====
 
 #[test]
@@ -2510,7 +2572,11 @@ fn dev_null_fix_does_not_weaken_self_protection_for_a_real_config_directory() {
 #[test]
 fn config_symlinked_to_dev_null_still_protects_its_own_literal_directory() {
     let home = tempdir().expect("tempdir should create");
-    let config_dir = home.path().join(".config").join("shguard");
+    // Discovered through `XDG_CONFIG_HOME` with `HOME` unset (not `HOME`
+    // itself): a `~`-spelled rule's `$HOME` twin would otherwise match this
+    // path first and mask which rule the literal-directory pin is about.
+    let xdg_config_home = home.path().join(".config");
+    let config_dir = xdg_config_home.join("shguard");
     fs::create_dir_all(&config_dir).expect("config dir should create");
     #[cfg(unix)]
     std::os::unix::fs::symlink("/dev/null", config_dir.join("config.toml"))
@@ -2524,14 +2590,250 @@ fn config_symlinked_to_dev_null_still_protects_its_own_literal_directory() {
                 .to_str()
                 .expect("path should be valid UTF-8")
         )),
-        &[("HOME", home.path().to_str().unwrap())],
+        &[("XDG_CONFIG_HOME", xdg_config_home.to_str().unwrap())],
     );
     assert_eq!(permission_decision(&deny_output), "deny");
     assert!(permission_reason(&deny_output).contains("shguard-self-protect-config-tee-literal"));
 
     let allow_output = run_hook(
         &bash_command("ls foo 2>/dev/null"),
-        &[("HOME", home.path().to_str().unwrap())],
+        &[("XDG_CONFIG_HOME", xdg_config_home.to_str().unwrap())],
     );
     assert_eq!(permission_decision(&allow_output), "allow");
+}
+
+// ==== except_targets resolve_symlinks (issue #583) ====
+
+#[cfg(unix)]
+mod resolve_symlinks {
+    use super::{bash_command, fs, permission_decision, run_hook, tempdir, write_config};
+    use std::os::unix::fs::symlink;
+    use std::path::{Path, PathBuf};
+
+    struct Fixture {
+        _config_dir: tempfile::TempDir,
+        _work: tempfile::TempDir,
+        outside: tempfile::TempDir,
+        config: PathBuf,
+        excepted: PathBuf,
+    }
+
+    /// A deny rule for `upload-tool` whose only except is the canonical
+    /// `scratch` directory (canonical so the prefix matches the resolved
+    /// spelling on platforms where the temp dir sits behind a symlink).
+    fn fixture() -> Fixture {
+        let work = tempdir().expect("tempdir should create");
+        let excepted = work
+            .path()
+            .canonicalize()
+            .expect("tempdir should canonicalize")
+            .join("scratch");
+        fs::create_dir(&excepted).expect("scratch dir should create");
+        let outside = tempdir().expect("tempdir should create");
+        fs::write(outside.path().join("secret.txt"), "secret").expect("secret should write");
+        let (config_dir, config) = write_config(&format!(
+            r#"
+            [[deny]]
+            id = "user-deny-upload"
+            reason = "confirm uploads outside the scratch dir"
+            command = "upload-tool"
+            except_targets = [{{ prefix = "{}/" }}]
+            resolve_symlinks = true
+        "#,
+            excepted.display()
+        ));
+        Fixture {
+            _config_dir: config_dir,
+            _work: work,
+            outside,
+            config,
+            excepted,
+        }
+    }
+
+    fn payload(command: &str, cwd: Option<&Path>) -> String {
+        let mut value: serde_json::Value = serde_json::from_str(&bash_command(command))
+            .expect("bash_command should be valid JSON");
+        if let Some(cwd) = cwd {
+            value["cwd"] = serde_json::Value::String(cwd.to_str().unwrap().to_string());
+        }
+        value.to_string()
+    }
+
+    fn decide(fx: &Fixture, command: &str, cwd: Option<&Path>) -> String {
+        let output = run_hook(
+            &payload(command, cwd),
+            &[("SHGUARD_CONFIG", fx.config.to_str().unwrap())],
+        );
+        permission_decision(&output).to_string()
+    }
+
+    #[test]
+    fn regular_file_inside_the_excepted_prefix_is_excepted() {
+        let fx = fixture();
+        let file = fx.excepted.join("body.md");
+        fs::write(&file, "ok").unwrap();
+        let command = format!("upload-tool {}", file.display());
+        assert_eq!(decide(&fx, &command, None), "allow");
+    }
+
+    #[test]
+    fn symlink_inside_the_prefix_pointing_outside_still_fires() {
+        let fx = fixture();
+        let link = fx.excepted.join("body.md");
+        symlink(fx.outside.path().join("secret.txt"), &link).unwrap();
+        let command = format!("upload-tool {}", link.display());
+        assert_eq!(decide(&fx, &command, None), "deny");
+    }
+
+    #[test]
+    fn dangling_symlink_and_not_yet_created_file_fire() {
+        let fx = fixture();
+        let dangling = fx.excepted.join("dangling.md");
+        symlink(fx.outside.path().join("does-not-exist"), &dangling).unwrap();
+        let command = format!("upload-tool {}", dangling.display());
+        assert_eq!(decide(&fx, &command, None), "deny");
+        let missing = fx.excepted.join("not-created-yet.md");
+        let command = format!("upload-tool {}", missing.display());
+        assert_eq!(decide(&fx, &command, None), "deny");
+    }
+
+    #[test]
+    fn relative_candidates_resolve_against_the_payload_cwd() {
+        let fx = fixture();
+        fs::write(fx.excepted.join("body.md"), "ok").unwrap();
+        symlink(
+            fx.outside.path().join("secret.txt"),
+            fx.excepted.join("link.md"),
+        )
+        .unwrap();
+        assert_eq!(
+            decide(&fx, "upload-tool body.md", Some(&fx.excepted)),
+            "allow"
+        );
+        assert_eq!(
+            decide(&fx, "upload-tool link.md", Some(&fx.excepted)),
+            "deny"
+        );
+    }
+
+    #[test]
+    fn relative_candidate_without_a_usable_cwd_fires() {
+        let fx = fixture();
+        fs::write(fx.excepted.join("body.md"), "ok").unwrap();
+        assert_eq!(decide(&fx, "upload-tool body.md", None), "deny");
+        assert_eq!(
+            decide(&fx, "upload-tool body.md", Some(Path::new("relative/dir"))),
+            "deny"
+        );
+    }
+
+    #[test]
+    fn an_in_line_cd_to_a_relative_directory_fails_closed() {
+        let fx = fixture();
+        fs::write(fx.excepted.join("body.md"), "ok").unwrap();
+        assert_eq!(
+            decide(&fx, "cd sub && upload-tool body.md", Some(&fx.excepted)),
+            "deny"
+        );
+    }
+}
+
+// Issue #582 review: an allowlist entry must keep exact flag matching, or
+// `--ff` (a different real git option) would satisfy `--ff-only` and widen
+// an Ask into an Allow.
+#[test]
+fn git_long_option_abbreviation_does_not_widen_an_allow_entry() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[allow]]
+        id = "user-allow-git-merge-ff-only"
+        reason = "ff-only merges are fine"
+        command = "git"
+        required_tokens = ["merge"]
+        required_flags = ["--ff-only"]
+    "#,
+    );
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+
+    let output = run_hook(&bash_command("git merge --ff $BRANCH"), &envs);
+    assert_eq!(permission_decision(&output), "ask");
+}
+
+// Issue #582: git accepts any unambiguous prefix of a long option, so a
+// `required_flags` rule keyed on a spelled-out long flag must also match its
+// abbreviations (`--mirr`, `--upl=x`) -- but only for `git` rules.
+#[test]
+fn git_long_option_abbreviations_match_required_flags_rules() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[deny]]
+        id = "user-deny-git-push-mirror"
+        reason = "no mirror push"
+        command = "git"
+        required_tokens = ["push"]
+        required_flags = ["--mirror"]
+
+        [[deny]]
+        id = "user-deny-git-push-delete"
+        reason = "no remote delete"
+        command = "git"
+        required_tokens = ["push"]
+        required_flags = ["--delete"]
+
+        [[deny]]
+        id = "user-deny-git-push-receive-pack"
+        reason = "no receive-pack"
+        command = "git"
+        required_tokens = ["push"]
+        required_flags = ["--receive-pack"]
+
+        [[deny]]
+        id = "user-deny-git-fetch-upload-pack"
+        reason = "no upload-pack"
+        command = "git"
+        required_tokens = ["fetch"]
+        required_flags = ["--upload-pack"]
+
+        [[deny]]
+        id = "user-deny-git-ls-remote-exec"
+        reason = "no exec"
+        command = "git"
+        required_tokens = ["ls-remote"]
+        required_flags = ["--exec"]
+
+        [[deny]]
+        id = "user-deny-nongit-mirror"
+        reason = "non-git tools keep exact matching"
+        command = "othertool"
+        required_flags = ["--mirror"]
+    "#,
+    );
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+
+    for command in [
+        "git push origin --mirror",
+        "git push origin --mirr",
+        "git push origin --dele main",
+        "git push --receive=x origin",
+        "git fetch --upload='sh -c x' origin",
+        "git ls-remote --exe=x origin",
+        "git -C /tmp push origin --mirr",
+        "env git push origin --mirr",
+    ] {
+        let output = run_hook(&bash_command(command), &envs);
+        assert_eq!(permission_decision(&output), "deny", "{command}");
+    }
+
+    for command in [
+        "git push origin main",
+        "git fetch origin",
+        "git push --set-upstream origin x",
+        "git log --oneline",
+        "git push origin --mirrors",
+        "othertool --mirr",
+    ] {
+        let output = run_hook(&bash_command(command), &envs);
+        assert_eq!(permission_decision(&output), "allow", "{command}");
+    }
 }

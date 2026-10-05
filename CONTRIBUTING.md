@@ -1,6 +1,6 @@
 # Contributing
 
-## Local gate (no PR CI)
+## Local gate (no CI for human PRs)
 
 Human-authored PRs have no GitHub Actions check: the lefthook `pre-push`
 hook is the merge gate (fmt, clippy, `cargo test`, `cargo deny check`, the

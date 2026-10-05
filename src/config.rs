@@ -115,7 +115,7 @@ use std::collections::HashSet;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::rules::{Allowlist, Rules, UserConfig, merge_user_config};
+use crate::rules::{Allowlist, HomeDir, Rules, UserConfig, merge_user_config};
 
 /// Everything that can go wrong loading a user policy. Every variant is a
 /// hard failure — [`Policy::load`] never falls back to "ignore the bad or
@@ -632,6 +632,24 @@ impl Policy {
             }
         }
 
+        // Issue #585: after every merge above, so user and self-protection
+        // rules get their `$HOME`-absolute twins too. A `$HOME` that is
+        // set but unusable yields no twins and a stderr warning; an unset
+        // one yields no twins silently (`~` rules still match as spelled).
+        let rules = match home.as_deref().map(HomeDir::parse) {
+            Some(Ok(home_dir)) => {
+                rules.with_home_twins(&home_dir, config_dir_is_case_insensitive())
+            }
+            Some(Err(reason)) => {
+                eprintln!(
+                    "shguard: warning: $HOME is unusable ({reason}); rules that name `~` will not \
+                     also match the absolute spelling of the home directory"
+                );
+                rules
+            }
+            None => rules,
+        };
+
         Ok(Self {
             rules: std::sync::Arc::new(rules),
             allowlist: std::sync::Arc::new(allowlist),
@@ -685,9 +703,9 @@ impl Policy {
     /// Scans the embedded blocklist/allowlist too, not just what a user
     /// config contributed — deliberately: no embedded rule uses `url_host`
     /// today (checked `rules/*.toml`), but if a future shipped rule ever
-    /// did mix the two shapes, this repo's own CI running
+    /// did mix the two shapes, a CI job running
     /// `shguard --check-config` against a `shguard init`-scaffolded config
-    /// is exactly what should catch that regression before it ships. A rule
+    /// would be what catches that regression before it ships. A rule
     /// id flagged this way isn't one a caller can act on themselves the
     /// way `--check-config`'s own "replace the old entry" remediation text
     /// assumes (a user can't edit or override an embedded rule — a
@@ -2673,5 +2691,208 @@ mod tests {
             leftovers.is_empty(),
             "unexpected leftover files: {leftovers:?}"
         );
+    }
+
+    // Issues #549/#585: the payload `cwd` and the `$HOME` twin.
+    const CFG_DIR: &str = "/Users/me/dotfiles/claude-code/shguard";
+
+    fn self_protected(config_dir: &str, home: Option<&str>) -> (crate::rules::Rules, Allowlist) {
+        let toml = self_protection_toml(
+            config_dir,
+            "literal",
+            false,
+            "config",
+            "config directory",
+            false,
+        );
+        let user_config = UserConfig::parse(&toml).unwrap();
+        let (rules, allowlist) = merge_user_config(
+            Rules::embedded().unwrap(),
+            Allowlist::embedded().unwrap(),
+            user_config,
+        )
+        .unwrap();
+        let rules = match home {
+            Some(home) => rules.with_home_twins(&HomeDir::parse(home).unwrap(), false),
+            None => rules,
+        };
+        (rules, allowlist)
+    }
+
+    fn decide(rules: &Rules, allowlist: &Allowlist, command: &str, cwd: Option<&str>) -> Decision {
+        crate::gate::analyze_with_policy_in_cwd(command, rules, allowlist, cwd).decision()
+    }
+
+    #[test]
+    fn relative_self_protection_targets_deny_under_a_matching_payload_cwd() {
+        let (rules, allowlist) = self_protected(CFG_DIR, None);
+        let cwd = Some("/Users/me/dotfiles");
+        for command in [
+            "sed -i.bak s/deny/allow/ claude-code/shguard/config.toml",
+            "tee claude-code/shguard/config.toml",
+            "cp evil.toml claude-code/shguard/config.toml",
+            "echo x > claude-code/shguard/config.toml",
+            "rm -rf claude-code/shguard",
+        ] {
+            assert_eq!(
+                decide(&rules, &allowlist, command, cwd),
+                Decision::Block,
+                "{command}"
+            );
+        }
+        // Renaming an ancestor directory is an Ask-level rule; the relative
+        // spelling must reach exactly the verdict the absolute one does.
+        for (relative, absolute) in [
+            (
+                "mv claude-code claude-code-x",
+                "mv /Users/me/dotfiles/claude-code /Users/me/dotfiles/claude-code-x",
+            ),
+            (
+                "mv claude-code-x claude-code",
+                "mv /Users/me/dotfiles/claude-code-x /Users/me/dotfiles/claude-code",
+            ),
+        ] {
+            let expected = decide(&rules, &allowlist, absolute, None);
+            assert_ne!(expected, Decision::Allow, "{absolute}");
+            assert_eq!(
+                decide(&rules, &allowlist, relative, cwd),
+                expected,
+                "{relative}"
+            );
+        }
+        // Parent-relative from a sibling directory resolves to the same place.
+        assert_eq!(
+            decide(
+                &rules,
+                &allowlist,
+                "tee ../claude-code/shguard/config.toml",
+                Some("/Users/me/dotfiles/other"),
+            ),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn relative_self_protection_targets_allow_under_an_unrelated_payload_cwd() {
+        let (rules, allowlist) = self_protected(CFG_DIR, None);
+        for command in [
+            "sed -i.bak s/deny/allow/ claude-code/shguard/config.toml",
+            "mv claude-code claude-code-x",
+        ] {
+            assert_eq!(
+                decide(&rules, &allowlist, command, Some("/tmp/elsewhere")),
+                Decision::Allow,
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_or_unusable_payload_cwd_leaves_relative_targets_unchanged() {
+        let (rules, allowlist) = self_protected(CFG_DIR, None);
+        let command = "mv claude-code claude-code-x";
+        for cwd in [None, Some(""), Some("relative/dir"), Some("~/dotfiles")] {
+            assert_eq!(
+                decide(&rules, &allowlist, command, cwd),
+                Decision::Allow,
+                "{cwd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn payload_cwd_is_the_start_of_an_in_line_cd() {
+        let (rules, allowlist) = self_protected(CFG_DIR, None);
+        assert_eq!(
+            decide(
+                &rules,
+                &allowlist,
+                "cd claude-code/shguard && tee config.toml",
+                Some("/Users/me/dotfiles"),
+            ),
+            Decision::Block
+        );
+        assert_eq!(
+            decide(
+                &rules,
+                &allowlist,
+                "cd claude-code/shguard && tee config.toml",
+                Some("/tmp"),
+            ),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn home_twin_blocks_the_absolute_spelling_of_tilde_targets() {
+        // The config lives outside HOME, so no self-protection rule can
+        // catch the home directory by accident.
+        let (rules, allowlist) = self_protected("/etc/shguard", Some("/Users/me"));
+        for command in [
+            "rm -rf ~",
+            "rm -rf /Users/me",
+            "rm -rf /Users/me/",
+            "rm -rf /Users/me/./",
+            "tar -x -C /Users/me -f a.tar",
+            "tar -x --directory=/Users/me -f a.tar",
+            "tar -x -C/Users/me -f a.tar",
+        ] {
+            assert_eq!(
+                decide(&rules, &allowlist, command, None),
+                Decision::Block,
+                "{command}"
+            );
+        }
+        // Without the twin the absolute spelling slips through.
+        let (untwinned, allowlist) = self_protected("/etc/shguard", None);
+        assert_eq!(
+            decide(&untwinned, &allowlist, "rm -rf /Users/me", None),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn home_twin_does_not_widen_to_children_or_siblings() {
+        let (rules, allowlist) = self_protected("/etc/shguard", Some("/Users/me"));
+        for command in ["rm -rf /Users/me/proj", "rm -rf /Users/mebob"] {
+            let (plain, plain_allow) = self_protected("/etc/shguard", None);
+            assert_eq!(
+                decide(&rules, &allowlist, command, None),
+                decide(&plain, &plain_allow, command, None),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn home_twin_composes_with_the_payload_cwd() {
+        let (rules, allowlist) = self_protected("/etc/shguard", Some("/Users/me"));
+        assert_eq!(
+            decide(&rules, &allowlist, "rm -rf .", Some("/Users/me")),
+            Decision::Block
+        );
+        assert_eq!(
+            decide(&rules, &allowlist, "rm -rf ..", Some("/Users/me/proj")),
+            Decision::Block
+        );
+        assert_eq!(
+            decide(&rules, &allowlist, "rm -rf build", Some("/Users/me/proj")),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn unusable_home_values_are_rejected_and_add_no_twins() {
+        use crate::rules::HomeDirRejection;
+        assert_eq!(HomeDir::parse(""), Err(HomeDirRejection::Empty));
+        assert_eq!(HomeDir::parse("  "), Err(HomeDirRejection::Empty));
+        assert_eq!(
+            HomeDir::parse("relative"),
+            Err(HomeDirRejection::NotAbsolute)
+        );
+        assert_eq!(HomeDir::parse("~"), Err(HomeDirRejection::NotAbsolute));
+        assert_eq!(HomeDir::parse("/"), Err(HomeDirRejection::Root));
+        assert_eq!(HomeDir::parse("/a/../.."), Err(HomeDirRejection::Root));
+        assert!(HomeDir::parse("/Users/me/").is_ok());
     }
 }

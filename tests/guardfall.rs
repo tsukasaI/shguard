@@ -406,6 +406,21 @@ fn guardfall_git_cases() {
         // -d alone (merged-only delete) must stay Allow — proves the new
         // rule's two `required_flags` entries are ANDed, not ORed.
         ("git branch -d feature", Decision::Allow),
+        // issue #582: git accepts any unambiguous long-option prefix, so an
+        // abbreviated spelling must hit the same built-in rules.
+        ("git push --forc origin main", Decision::Block),
+        ("git push --force=x origin main", Decision::Block),
+        ("git push --no-ver", Decision::Block),
+        ("git reset --har HEAD~1", Decision::Block),
+        ("git commit --no-ver -m x", Decision::Block),
+        ("git commit --amen", Decision::Block),
+        ("git tag --dele v1.0.0", Decision::Block),
+        ("git branch --del --for feature", Decision::Block),
+        // Ordinary full-spelled options keep their verdicts.
+        ("git push --set-upstream origin x", Decision::Allow),
+        ("git push --force-with-lease origin main", Decision::Allow),
+        ("git log --oneline", Decision::Allow),
+        ("git fetch origin", Decision::Allow),
     ];
 
     for (command, expected) in cases {
@@ -450,10 +465,14 @@ fn guardfall_rm_dot_targets() {
     }
 }
 
-/// `~/.*`/`.* ` is bash's dotglob spelling: unlike `~/*`/`~/**`, it DOES
-/// expand to leading-dot entries (`.ssh`, `.aws`, `.config/shguard`) even
-/// without `shopt -s dotglob`, so it is a strict superset of the already-
-/// Ask `~/.config` target and must be at least as strict, not Allow.
+/// `~/.*`/`.*` is a leading-dot glob: unlike `~/*`/`~/**`, it DOES expand
+/// to leading-dot entries (`.ssh`, `.aws`, `.config/shguard`) even without
+/// `shopt -s dotglob`, so it is a strict superset of the already-Ask
+/// `~/.config` target and must be at least as strict, not Allow. The
+/// "safe" spellings (`.[!.]*`, `.??*`, `.[^.]*`, `.?*`) skip `.`/`..` but
+/// match the same entries. `~/.config/*` reaches shguard's own config
+/// directory too. `../build/.*` is a sibling-directory cleanup, not a
+/// re-anchoring risk, and must stay Allow like `../build/*`.
 #[test]
 fn guardfall_rm_dotglob_tilde_targets() {
     let cases: &[(&str, Decision)] = &[
@@ -465,6 +484,30 @@ fn guardfall_rm_dotglob_tilde_targets() {
         ("cd ~ && rm -rf .*", Decision::Block),
         ("rm -rf .*", Decision::Block),
         ("rm -rf ./.*", Decision::Block),
+        ("rm -rf ~/.[!.]*", Decision::Block),
+        ("rm -rf ~/.??*", Decision::Block),
+        ("rm -rf ~/.[^.]*", Decision::Block),
+        ("rm -rf ~/.?*", Decision::Block),
+        ("rm -r ~/.??*", Decision::Ask),
+        ("mv ~/.?* /tmp", Decision::Ask),
+        ("mv ~/.[!.]* /tmp", Decision::Ask),
+        ("cd ~ && rm -rf .??*", Decision::Block),
+        ("cd ~ && rm -rf .[!.]*", Decision::Block),
+        ("rm -rf ./.??*", Decision::Block),
+        ("rm -rf ~/.config/*", Decision::Ask),
+        ("rm -rf ~/.config/**", Decision::Ask),
+        ("rm -r ~/.config/*", Decision::Ask),
+        ("rm -r ~/.Config/*", Decision::Ask),
+        ("mv ~/.config/* /tmp", Decision::Ask),
+        // Sibling-directory leading-dot glob cleanups stay Allow, like `*`.
+        ("rm -rf ../build/.*", Decision::Allow),
+        ("rm -r ../build/.*", Decision::Allow),
+        ("rm -rf ../node_modules/.*", Decision::Allow),
+        ("mv ../build/.* /tmp", Decision::Allow),
+        ("rm -rf ../build/.??*", Decision::Allow),
+        ("rm -rf ../build/*", Decision::Allow),
+        // Control: a bare ascent-then-glob still asks.
+        ("rm -rf ../.*", Decision::Ask),
         // Control: `~/.config` itself is unchanged by this fix.
         ("rm -r ~/.config", Decision::Ask),
         ("rm -rf ~/.config/shguard", Decision::Block),
@@ -1904,4 +1947,70 @@ fn guardfall_alias_definition_with_a_cd_poisons_cwd_like_a_function_definition_d
 fn guardfall_alias_empty_value_argument_still_allows() {
     let verdict = shguard::analyze("alias x=\"\"");
     assert_eq!(verdict.decision(), Decision::Allow);
+}
+
+/// Issue #584: sed's `w`/`W`/`s///w` write files, `r`/`R` read them and GNU's
+/// `e`/`s///e` run commands, none of it visible to the in-place-flag sed
+/// rules. A script not proven free of them floors to Ask.
+#[test]
+fn guardfall_sed_script_write_exec_cases() {
+    let cases: &[(&str, Decision)] = &[
+        (
+            "sed -n 'w ~/.config/shguard/config.toml' /etc/passwd",
+            Decision::Ask,
+        ),
+        ("sed 's/a/b/w ~/.zshrc' x", Decision::Ask),
+        ("sed 's|a|b|gw out' x", Decision::Ask),
+        ("sed -e 'W ~/.zshrc' /etc/passwd", Decision::Ask),
+        ("sed --expression='w out' x", Decision::Ask),
+        ("sed -nes/a/b/w\\ out x", Decision::Ask),
+        ("sed p -e 'w out' x", Decision::Ask),
+        ("sed -n '/x/{p;w out}' x", Decision::Ask),
+        ("sed 'e rm -rf ~' a.txt", Decision::Ask),
+        ("sed 's/a/b/e' a.txt", Decision::Ask),
+        ("sed 'r /etc/passwd' a.txt", Decision::Ask),
+        ("sed -f script.sed a.txt", Decision::Ask),
+        ("sed -n \"$SCRIPT\" a.txt", Decision::Ask),
+        ("sed -n $SCRIPT a.txt", Decision::Ask),
+        ("sed 's/a/b/x' a.txt", Decision::Ask),
+        ("gsed 'w out' a.txt", Decision::Ask),
+        ("env sed 'w out' a.txt", Decision::Ask),
+        ("sed -i 'w out' a.txt", Decision::Ask),
+        ("sed -i --expr='w out' 's/x/y/' f", Decision::Ask),
+        ("sed -i --e='w out' p f", Decision::Ask),
+        ("sed -i --fi=script.sed p f", Decision::Ask),
+        ("sed -i --fi=/dev/stdin p f", Decision::Ask),
+        ("sed -i 's\\a\\b\\w out' p f", Decision::Ask),
+        ("sed -i $'s\\na\\nb\\nw out' p f", Decision::Ask),
+        ("sed -i '\\\\a\\\\w out' p f", Decision::Ask),
+        ("sed -i 'b}w out' p f", Decision::Ask),
+        (
+            "F='--expression=w out'; sed -n p \"$F\" README.md",
+            Decision::Ask,
+        ),
+        ("sed -n p \"$(echo x)\" README.md", Decision::Ask),
+        ("sed -n 'w /dev/stdout' f", Decision::Ask),
+        ("sed \"s/$a/$b/\" f", Decision::Ask),
+        // Existing in-place self-protection verdict is unchanged.
+        (
+            "sed -i 's/x/y/' ~/.config/shguard/config.toml",
+            Decision::Block,
+        ),
+        // Ordinary sed keeps its verdict.
+        ("sed -n 1,5p file", Decision::Allow),
+        ("sed 's/w/x/g' file", Decision::Allow),
+        ("sed -e 's|a|b|' file", Decision::Allow),
+        ("sed '/^#/d' file", Decision::Allow),
+        ("sed -i 's/x/y/' file", Decision::Allow),
+    ];
+
+    for (command, expected) in cases {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
 }
