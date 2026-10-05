@@ -2999,7 +2999,7 @@ fn dirstack_reachable_via_magic_equal_subst(remainder: &str) -> bool {
 
 /// A rule matching the shape of a whole pipeline: an earlier stage's
 /// command name in `sources`, and the final stage's command name in
-/// `sinks` — the literal ported `curl|wget → sh` installer-pipe pattern
+/// `sinks` (both stored case-folded, compared against the folded runtime name) — the literal ported `curl|wget → sh` installer-pipe pattern
 /// (plan.md §1.1 stage 3). The general decode-fed-pipe gate is a later
 /// issue (plan.md §4), out of scope here.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3058,7 +3058,7 @@ impl PipelineRule {
         if !self
             .sinks
             .iter()
-            .any(|sink| sink == sink_name || sink == strip_version_suffix(sink_name))
+            .any(|sink| sink == &sink_name || sink == strip_version_suffix(&sink_name))
         {
             return false;
         }
@@ -3076,7 +3076,7 @@ impl PipelineRule {
         }
         source_stages.iter().any(|stage| {
             effective_command(stage)
-                .is_some_and(|(name, _)| self.sources.iter().any(|src| src == name))
+                .is_some_and(|(name, _)| self.sources.iter().any(|src| *src == name))
         })
     }
 }
@@ -3965,7 +3965,9 @@ fn is_env_assignment_shape(token: &str) -> bool {
 /// wrapper's own arguments consume the rest of the stage with no command
 /// left (`env` alone).
 #[must_use]
-pub(crate) fn effective_command(stage: &[NormalizedWord]) -> Option<(&str, &[NormalizedWord])> {
+pub(crate) fn effective_command(
+    stage: &[NormalizedWord],
+) -> Option<(Cow<'_, str>, &[NormalizedWord])> {
     effective_command_excluding(stage, &[])
 }
 
@@ -3986,7 +3988,7 @@ pub(crate) fn effective_command(stage: &[NormalizedWord]) -> Option<(&str, &[Nor
 pub(crate) fn effective_command_excluding<'a>(
     stage: &'a [NormalizedWord],
     excluded: &[&str],
-) -> Option<(&'a str, &'a [NormalizedWord])> {
+) -> Option<(Cow<'a, str>, &'a [NormalizedWord])> {
     let mut rest = stage;
     loop {
         let (first, tail) = rest.split_first()?;
@@ -3994,16 +3996,21 @@ pub(crate) fn effective_command_excluding<'a>(
             return None;
         };
         let base = basename(name);
-        // Issue #493 follow-up: fold for wrapper recognition and the
-        // caller-supplied `excluded` list only; the returned "resolved
-        // command name" stays raw for the caller's own display use.
         let folded_base = fold_command_name(base);
         if TRANSPARENT_WRAPPERS.contains(&folded_base.as_str())
             && !excluded.contains(&folded_base.as_str())
         {
             rest = skip_wrapper_arguments(&folded_base, tail);
         } else {
-            return Some((base, tail));
+            // Returned folded (issues #551, #562): callers compare this name
+            // against lowercase literals, so a raw re-cased spelling
+            // (`ENV`, `TAR`) would silently skip the check.
+            let name = if folded_base == base {
+                Cow::Borrowed(base)
+            } else {
+                Cow::Owned(folded_base)
+            };
+            return Some((name, tail));
         }
     }
 }
@@ -6171,8 +6178,8 @@ fn convert_pipeline_rule(dto: PipelineRuleDto) -> Result<PipelineRule, RulesErro
         id: RuleId::new(dto.id),
         reason: Reason::new(dto.reason),
         decision,
-        sources: dto.sources,
-        sinks: dto.sinks,
+        sources: dto.sources.iter().map(|s| fold_command_name(s)).collect(),
+        sinks: dto.sinks.iter().map(|s| fold_command_name(s)).collect(),
         sink_required_flags,
     })
 }
@@ -12638,9 +12645,10 @@ mod tests {
     fn merge_user_config_redirect_entry_never_shadows_a_builtin_redirect_rule() {
         // A user rule sharing the embedded config-directory redirect
         // rule's exact target must never win the match ahead of the
-        // embedded one: Rules::match_redirect_target is first-match-wins,
-        // so merge_user_config appending (not prepending) user redirect
-        // rules after the embedded ones is load-bearing here — the
+        // embedded one: Rules::match_redirect_target is worst-decision-wins
+        // with ties keeping the first-declared rule, so merge_user_config
+        // appending (not prepending) user redirect rules after the
+        // embedded ones is load-bearing here — the
         // reported rule id proves which one actually fired, not just that
         // *a* Block resulted (decision alone can't distinguish them, since
         // `decision = "ask"` on a user redirect entry is rejected at load
@@ -15343,5 +15351,31 @@ mod tests {
         let rule = rules.match_token(&["MY_SECRET=".to_string()]).unwrap();
         assert_eq!(rule.id().as_str(), "test-token");
         assert_eq!(rule.decision(), Decision::Ask);
+    }
+
+    /// `match_token` is worst-decision-wins: a Block rule declared AFTER an
+    /// Ask rule sharing a pattern must still win. Pins the shared
+    /// `worst_wins` loop against a regression to first-match-wins (the
+    /// embedded blocklist has only one `[[token]]`, so nothing else
+    /// exercises two token rules at once).
+    #[test]
+    fn match_token_block_outranks_an_earlier_declared_ask() {
+        let toml = r#"
+            [[token]]
+            id = "ask-first"
+            reason = "test"
+            decision = "ask"
+            patterns = ["_SECRET="]
+
+            [[token]]
+            id = "block-second"
+            reason = "test"
+            decision = "block"
+            patterns = ["_SECRET="]
+        "#;
+        let rules = Rules::parse(toml).unwrap();
+        let rule = rules.match_token(&["MY_SECRET=".to_string()]).unwrap();
+        assert_eq!(rule.id().as_str(), "block-second");
+        assert_eq!(rule.decision(), Decision::Block);
     }
 }
