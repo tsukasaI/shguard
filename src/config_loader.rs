@@ -75,6 +75,8 @@ struct CommandRuleDto {
     #[serde(default)]
     except_targets: Vec<TargetDto>,
     #[serde(default)]
+    resolve_symlinks: bool,
+    #[serde(default)]
     value_flags: Vec<String>,
     #[serde(default)]
     attached_value_flags: Vec<String>,
@@ -227,6 +229,7 @@ impl From<CommandRuleDto> for CommandRuleSpec {
             required_tokens: dto.required_tokens,
             targets: dto.targets.into_iter().map(Into::into).collect(),
             except_targets: dto.except_targets.into_iter().map(Into::into).collect(),
+            resolve_symlinks: dto.resolve_symlinks,
             value_flags: dto.value_flags,
             attached_value_flags: dto.attached_value_flags,
             target_flags: dto.target_flags,
