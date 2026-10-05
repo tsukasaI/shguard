@@ -4,6 +4,14 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Per-rule `target_flags = ["--body-file", ...]` key: restricts a rule's
+  `except_targets` candidates to the values of the named flags, so a
+  command such as `gh issue comment 123 --body-file <path>` can be
+  excepted on the file path alone. Fail-closed on a missing, absent or
+  unresolved flag value; invalid specs are rejected at load (#581).
+
 ### Fixed
 
 - git long-option abbreviations (`--mirr`, `--upl=x`, `--exe=x`) no longer

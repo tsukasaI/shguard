@@ -84,6 +84,24 @@ fn benign_corpus_no_false_positives() {
         "tar -czf backup.tar.gz src/",
         "tar -xf x.tar -C ./build",
         "tar -xf x.tar -C ~/projects/app",
+        // sed scripts with no write/read/exec command (issue #584): `w`/`e`
+        // appearing only as data, a delimiter or a label must not trip the
+        // script lexer.
+        "sed -n 1,5p file",
+        "sed -n '1,5p' file.txt",
+        "sed 's/a/b/g' file",
+        "sed 's/w/x/g' file",
+        "sed -e 's|a|b|' file",
+        "sed '/^#/d' file",
+        "sed -i 's/x/y/' file",
+        "sed -i '' 's/x/y/' file",
+        "sed -i.bak -e 's/x/y/' file",
+        "sed -E 's/(a|b)+/c/' file",
+        "sed -n '/start/,/end/{/start/n;/end/!p}' file",
+        "sed ':a;N;$!ba;s/\\n/ /g' file",
+        "sed 's/[^/]*$//' file",
+        "sed -n -e '$p' file",
+        "cat file | sed 's/a/b/' | sort",
     ];
 
     for command in commands {

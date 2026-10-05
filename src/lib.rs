@@ -12,6 +12,7 @@ mod gate;
 pub mod normalize;
 mod parser;
 mod rules;
+mod sed_script;
 pub mod verdict;
 #[doc(hidden)]
 pub mod watchdog;
