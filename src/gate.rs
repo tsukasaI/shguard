@@ -3530,6 +3530,7 @@ fn push_literal_skeleton(pieces: &[WordPiece], out: &mut String) {
             // impossible" case (its own docs: "rather than panic").
             WordPiece::BraceAlternation(_) => out.push(TOKEN_SCAN_SENTINEL),
             WordPiece::ParameterExpansion(_)
+            | WordPiece::ModifiedParameterExpansion { .. }
             | WordPiece::CommandSubstitution(_)
             | WordPiece::BackquotedSubstitution(_)
             | WordPiece::Tilde(_)
@@ -4150,8 +4151,9 @@ fn evaluate_command_position_bare_var(
     let Some(name) = bare_parameter_name(first_word_ast) else {
         return Verdict::ask(
             Reason::new(
-                "command position word is a parameter expansion mixed with other text; which \
-                 command will run cannot be determined statically",
+                "command position word is a parameter expansion mixed with other text or \
+                 carrying a modifier (${x%p}, ${x:-w}, ${PIPESTATUS[0]}, ...); which command \
+                 will run cannot be determined statically",
             ),
             argv,
         )
@@ -5423,6 +5425,9 @@ fn scan_word_pieces_for_heredoc_candidates(pieces: &[WordPiece], out: &mut Hered
                 }
             }
             WordPiece::DoubleQuoted(inner) => scan_word_pieces_for_heredoc_candidates(inner, out),
+            WordPiece::ModifiedParameterExpansion { operand, .. } => {
+                scan_word_pieces_for_heredoc_candidates(operand, out);
+            }
             WordPiece::BraceAlternation(members) => {
                 for member in members {
                     scan_word_pieces_for_heredoc_candidates(&member.0, out);
@@ -6626,6 +6631,9 @@ fn collect_substitutions_into<'a>(
                 out.extend(collect_heredoc_substitutions(raw).substitutions);
             }
             WordPiece::DoubleQuoted(inner) => collect_substitutions_into(inner, false, out),
+            WordPiece::ModifiedParameterExpansion { operand, .. } => {
+                collect_substitutions_into(operand, allow_split, out);
+            }
             WordPiece::BraceAlternation(members) => {
                 for member in members {
                     collect_substitutions_into(&member.0, allow_split, out);
@@ -6657,6 +6665,9 @@ fn collect_process_substitutions_into<'a>(pieces: &'a [WordPiece], out: &mut Vec
         match piece {
             WordPiece::ProcessSubstitution { body, .. } => out.push(body),
             WordPiece::DoubleQuoted(inner) => collect_process_substitutions_into(inner, out),
+            WordPiece::ModifiedParameterExpansion { operand, .. } => {
+                collect_process_substitutions_into(operand, out);
+            }
             WordPiece::BraceAlternation(members) => {
                 for member in members {
                     collect_process_substitutions_into(&member.0, out);
