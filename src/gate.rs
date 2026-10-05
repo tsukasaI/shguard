@@ -1367,36 +1367,20 @@ fn apply_attached_word_and_redirect_checks(
     // (`{ ...; } > ../../../../etc/passwd`) — a hard match above already
     // covers the certain case, this covers the plausible-but-unprovable
     // one, always capped at Ask.
-    if let Some((floor_decision, floor_reason)) =
-        scan_redirect_ascent_descent_floor(redirections, rules)
-    {
-        let argv = worst.normalized_argv().to_vec();
-        let floored = match floor_decision {
-            Decision::Ask => Verdict::ask(Reason::new(floor_reason), argv),
-            Decision::Block | Decision::Allow => {
-                unreachable!("scan_redirect_ascent_descent_floor only ever produces Ask")
-            }
-        };
-        worst = fold_worst(worst, floored);
-    }
+    worst = fold_ask_floor(
+        worst,
+        scan_redirect_ascent_descent_floor(redirections, rules),
+    );
 
     // Issue #341: the same directory-stack tilde floor
     // `evaluate_simple_command` applies to a command's own redirects,
     // extended to a compound command's/extended test's own attached
     // redirects, mirroring how issue #78's ascent-descent floor just above
     // is already shared between the two.
-    if let Some((floor_decision, floor_reason)) =
-        scan_redirect_dirstack_tilde_floor(redirections, rules)
-    {
-        let argv = worst.normalized_argv().to_vec();
-        let floored = match floor_decision {
-            Decision::Ask => Verdict::ask(Reason::new(floor_reason), argv),
-            Decision::Block | Decision::Allow => {
-                unreachable!("scan_redirect_dirstack_tilde_floor only ever produces Ask")
-            }
-        };
-        worst = fold_worst(worst, floored);
-    }
+    worst = fold_ask_floor(
+        worst,
+        scan_redirect_dirstack_tilde_floor(redirections, rules),
+    );
 
     // Issue #203: the same `$HOME`-vs-`~` correlation floor
     // `evaluate_simple_command` applies to a command's own redirects,
@@ -1405,35 +1389,17 @@ fn apply_attached_word_and_redirect_checks(
     // this, wrapping an otherwise-caught redirect in a brace group,
     // subshell, loop, or function definition would silently regain the
     // Allow this whole floor exists to close.
-    if let Some((floor_decision, floor_reason)) = scan_redirect_home_env_floor(redirections, rules)
-    {
-        let argv = worst.normalized_argv().to_vec();
-        let floored = match floor_decision {
-            Decision::Ask => Verdict::ask(Reason::new(floor_reason), argv),
-            Decision::Block | Decision::Allow => {
-                unreachable!("scan_redirect_home_env_floor only ever produces Ask")
-            }
-        };
-        worst = fold_worst(worst, floored);
-    }
+    worst = fold_ask_floor(worst, scan_redirect_home_env_floor(redirections, rules));
 
     // Issue #454: the same named-user-home floor `evaluate_simple_command`
     // applies to a command's own redirects, extended to a compound
     // command's/function definition's/extended test's own attached
     // redirects, mirroring how issue #203's `$HOME` floor just above is
     // already shared between the two.
-    if let Some((floor_decision, floor_reason)) =
-        scan_redirect_named_user_home_floor(redirections, rules)
-    {
-        let argv = worst.normalized_argv().to_vec();
-        let floored = match floor_decision {
-            Decision::Ask => Verdict::ask(Reason::new(floor_reason), argv),
-            Decision::Block | Decision::Allow => {
-                unreachable!("scan_redirect_named_user_home_floor only ever produces Ask")
-            }
-        };
-        worst = fold_worst(worst, floored);
-    }
+    worst = fold_ask_floor(
+        worst,
+        scan_redirect_named_user_home_floor(redirections, rules),
+    );
 
     worst
 }
@@ -1953,25 +1919,22 @@ fn is_redirect_write_applicable(kind: &FileRedirectionKind, normalized: &[Normal
 fn scan_redirect_ascent_descent_floor(
     redirections: &[Redirection],
     rules: &Rules,
-) -> Option<(Decision, String)> {
+) -> Option<String> {
     let rule = resolved_redirect_write_targets(redirections)
         .iter()
         .find_map(|target| rules.match_redirect_target_ascent_descent(target))?;
-    Some((
-        Decision::Ask,
-        format!(
-            "a redirect target starts at an unknown anchor — an unresolved `..` ascent, or a \
+    Some(format!(
+        "a redirect target starts at an unknown anchor — an unresolved `..` ascent, or a \
              `~+`/`~-`/`~N` directory-stack tilde shorthand (issue #133) — then descends into a \
              shape that would match redirect rule {:?} ({}) if the anchor bottomed out there; \
              shguard has no cwd or directory stack to resolve the anchor against, so this can't \
              be proven, only flagged",
-            rule.id().as_str(),
-            rule.reason().as_str(),
-        ),
+        rule.id().as_str(),
+        rule.reason().as_str(),
     ))
 }
 
-/// Issue #341: `Some(Ask, reason)` when any resolved redirect-write target
+/// Issue #341: `Some(reason)` (always an `Ask` floor) when any resolved redirect-write target
 /// in `redirections` (via [`resolved_redirect_write_targets`]) is a bare
 /// directory-stack tilde shorthand (`~+`/`~-`/`~N`) or a `..` step above one
 /// (`~+/..`) that would sit at or above the directory it denotes
@@ -1986,20 +1949,17 @@ fn scan_redirect_ascent_descent_floor(
 fn scan_redirect_dirstack_tilde_floor(
     redirections: &[Redirection],
     rules: &Rules,
-) -> Option<(Decision, String)> {
+) -> Option<String> {
     let rule = resolved_redirect_write_targets(redirections)
         .iter()
         .find_map(|target| rules.match_redirect_target_dirstack_tilde(target))?;
-    Some((
-        Decision::Ask,
-        format!(
-            "a redirect target is a directory-stack tilde shorthand (`~+`/`~-`/`~N`) or a `..` \
+    Some(format!(
+        "a redirect target is a directory-stack tilde shorthand (`~+`/`~-`/`~N`) or a `..` \
              step above one (`~+/..`) that would sit at or above the directory it denotes \
              ($PWD/$OLDPWD/a pushd-stack entry) if it expanded, matching redirect rule {:?} \
              ({}); shguard has no cwd or directory stack to resolve it against",
-            rule.id().as_str(),
-            rule.reason().as_str(),
-        ),
+        rule.id().as_str(),
+        rule.reason().as_str(),
     ))
 }
 
@@ -2015,7 +1975,7 @@ fn is_fd_or_close(s: &str) -> bool {
 /// redirect-write target ([`is_redirect_write_applicable`]), apply
 /// `substitute`'s piece-level tilde substitution, and if a resolved
 /// candidate from the substituted word matches one of `rules`' redirect
-/// rules, float `(Decision::Ask, reason(rule))` — always capped to `Ask`
+/// rules, float `reason(rule)` — always capped to `Ask`
 /// regardless of the matched rule's own decision, since neither caller can
 /// prove the substitution without an environment lookup or passwd lookup
 /// shguard never performs (see each caller's own docs for why).
@@ -2024,7 +1984,7 @@ fn scan_redirect_substituted_target_floor(
     rules: &Rules,
     substitute: impl Fn(&Word) -> Option<Word>,
     reason: impl Fn(&RedirectRule) -> String,
-) -> Option<(Decision, String)> {
+) -> Option<String> {
     for redir in redirections {
         let Redirection::File { kind, target } = redir else {
             continue;
@@ -2041,14 +2001,14 @@ fn scan_redirect_substituted_target_floor(
                 continue;
             };
             if let Some(rule) = rules.match_redirect_target(candidate) {
-                return Some((Decision::Ask, reason(rule)));
+                return Some(reason(rule));
             }
         }
     }
     None
 }
 
-/// Issue #203: `Some((Ask, reason))` when a redirect-write target begins
+/// Issue #203: `Some(reason)` (always an `Ask` floor) when a redirect-write target begins
 /// with `$HOME`/`${HOME}` (bare or inside one enclosing pair of double
 /// quotes) and substituting the literal text `~` for that piece — the same
 /// runtime value, since bash's own `~` expansion reads `$HOME` — resolves
@@ -2068,10 +2028,7 @@ fn scan_redirect_substituted_target_floor(
 /// only a *leading* `$HOME`/`${HOME}` piece is recognised — `$XDG_CONFIG_HOME/
 /// shguard/config.toml`, `${HOME}${HOME}/x`, and any variable other than
 /// `HOME` carrying the same practical risk are unaffected.
-fn scan_redirect_home_env_floor(
-    redirections: &[Redirection],
-    rules: &Rules,
-) -> Option<(Decision, String)> {
+fn scan_redirect_home_env_floor(redirections: &[Redirection], rules: &Rules) -> Option<String> {
     scan_redirect_substituted_target_floor(
         redirections,
         rules,
@@ -2129,7 +2086,7 @@ fn home_env_word_with_tilde_substituted(word: &Word) -> Option<Word> {
     None
 }
 
-/// Issue #454: `Some((Ask, reason))` when a redirect-write target begins
+/// Issue #454: `Some(reason)` (always an `Ask` floor) when a redirect-write target begins
 /// with `~user` — [`WordPiece::Tilde`] with a non-empty user, a named
 /// user's home shorthand — and substituting the bare `~` for that piece
 /// resolves to a string one of `rules`' redirect rules matches.
@@ -2146,7 +2103,7 @@ fn home_env_word_with_tilde_substituted(word: &Word) -> Option<Word> {
 fn scan_redirect_named_user_home_floor(
     redirections: &[Redirection],
     rules: &Rules,
-) -> Option<(Decision, String)> {
+) -> Option<String> {
     scan_redirect_substituted_target_floor(
         redirections,
         rules,
@@ -2417,13 +2374,10 @@ fn evaluate_simple_command(
     let redirect_rule_ask_floor = check_redirect_targets(&command.redirections, rules)
         .filter(|rule| rule.decision() == Decision::Ask)
         .map(|rule| {
-            (
-                Decision::Ask,
-                format!(
-                    "redirect target matches rule {:?}: {}",
-                    rule.id().as_str(),
-                    rule.reason().as_str()
-                ),
+            format!(
+                "redirect target matches rule {:?}: {}",
+                rule.id().as_str(),
+                rule.reason().as_str()
             )
         });
     // Issue #80: a `~username` token that would hit one of a matched
@@ -2502,11 +2456,11 @@ fn evaluate_simple_command(
     let verdict = apply_recursable_floor(verdict, alias_floor);
     let verdict = apply_tar_dashless_floor(verdict, tar_dashless_floor);
     let verdict = apply_command_ascent_descent_floor(verdict, ascent_descent_floor);
-    let verdict = apply_ascent_descent_floor(verdict, redirect_ascent_descent_floor);
-    let verdict = apply_ascent_descent_floor(verdict, redirect_dirstack_tilde_floor);
-    let verdict = apply_ascent_descent_floor(verdict, redirect_home_env_floor);
-    let verdict = apply_ascent_descent_floor(verdict, redirect_named_user_home_floor);
-    let verdict = apply_ascent_descent_floor(verdict, redirect_rule_ask_floor);
+    let verdict = apply_redirect_ask_floor(verdict, redirect_ascent_descent_floor);
+    let verdict = apply_redirect_ask_floor(verdict, redirect_dirstack_tilde_floor);
+    let verdict = apply_redirect_ask_floor(verdict, redirect_home_env_floor);
+    let verdict = apply_redirect_ask_floor(verdict, redirect_named_user_home_floor);
+    let verdict = apply_redirect_ask_floor(verdict, redirect_rule_ask_floor);
     let verdict = apply_named_user_home_floor(verdict, named_user_home_floor);
     let verdict = apply_dirstack_tilde_floor(verdict, dirstack_tilde_floor);
     let verdict = apply_directory_equals_tilde_floor(verdict, directory_equals_tilde_floor);
@@ -3340,13 +3294,13 @@ fn escalation_floor_contribution(
 /// helpers below delegate to — [`apply_escalation_floor`] (rule 10),
 /// [`apply_expansion_floor`] (rule 11), [`apply_recursable_floor`],
 /// [`apply_tar_dashless_floor`], [`apply_command_ascent_descent_floor`]/
-/// [`apply_ascent_descent_floor`], [`apply_named_user_home_floor`],
+/// [`apply_redirect_ask_floor`], [`apply_named_user_home_floor`],
 /// [`apply_token_floor`], [`apply_dirstack_tilde_floor`]/
 /// [`apply_directory_equals_tilde_floor`]/[`apply_dirstack_equal_subst_floor`],
-/// and [`apply_unknown_cwd_floor`]. [`apply_substitution_floor`] (rule 3)
-/// and [`apply_opaque_kind_floor`] (rule 8) use the same max-lift mechanics
-/// but keep their own inlined copies rather than delegating here (see
-/// their own docs). Each keeps its own name and doc comment so its call
+/// [`apply_opaque_kind_floor`] (rule 8), and [`apply_unknown_cwd_floor`].
+/// [`apply_substitution_floor`] (rule 3) uses the same max-lift mechanics
+/// but keeps its own inlined copy rather than delegating here (see its own
+/// docs). Each keeps its own name and doc comment so its call
 /// site stays self-documenting; only the mechanics live here.
 fn apply_floor(
     verdict: Verdict,
@@ -3492,8 +3446,8 @@ fn scan_ascent_descent_floor(
 
 /// Applies [`scan_ascent_descent_floor`]'s floor to `verdict` — same
 /// max-lift mechanics as [`apply_floor`], but a distinct function from
-/// [`apply_ascent_descent_floor`] (which three sibling,
-/// `RedirectRule`-based floors also happen to share, since `RedirectRule`
+/// [`apply_redirect_ask_floor`] (which the `RedirectRule`-based floors
+/// share, since `RedirectRule`
 /// has no `deny_message` of its own to carry): [`scan_ascent_descent_floor`]
 /// matches a `CommandRule`, which does, so this attaches it (issue #202) to
 /// the replacement verdict — a fresh `Verdict::ask`/`Verdict::block` here
@@ -3509,20 +3463,21 @@ fn apply_command_ascent_descent_floor(
     apply_floor(verdict, floor_decision, floor_reason, deny_message)
 }
 
-/// Applies a `(Decision, reason)` floor to `verdict` — shared by
-/// [`scan_redirect_ascent_descent_floor`], [`scan_redirect_home_env_floor`],
+/// Applies an always-`Ask` redirect floor's reason to `verdict` — shared by
+/// [`scan_redirect_ascent_descent_floor`], [`scan_redirect_dirstack_tilde_floor`],
+/// [`scan_redirect_home_env_floor`], [`scan_redirect_named_user_home_floor`]
 /// and the redirect-rule ask-floor derived from [`check_redirect_targets`],
-/// all three of which match a [`crate::rules::RedirectRule`] rather than a
+/// all of which match a [`crate::rules::RedirectRule`] rather than a
 /// `CommandRule` (see [`apply_command_ascent_descent_floor`]'s docs for the
 /// sibling that carries a `CommandRule`'s `deny_message` instead) —
 /// `RedirectRule` has no `deny_message` field, so there is nothing to
 /// attach here. See [`apply_floor`]'s docs for the shared max-lift
 /// mechanics.
-fn apply_ascent_descent_floor(verdict: Verdict, floor: Option<(Decision, String)>) -> Verdict {
-    let Some((floor_decision, floor_reason)) = floor else {
+fn apply_redirect_ask_floor(verdict: Verdict, floor_reason: Option<String>) -> Verdict {
+    let Some(floor_reason) = floor_reason else {
         return verdict;
     };
-    apply_floor(verdict, floor_decision, floor_reason, None)
+    apply_floor(verdict, Decision::Ask, floor_reason, None)
 }
 
 /// Issue #80: `Some(Ask, reason)` when `argv` matches a rule's command+
@@ -3963,8 +3918,7 @@ fn apply_substitution_floor(
 }
 
 /// Applies rule 8's opaque-unresolvable-kind floor
-/// ([`is_opaque_unresolvable`]) to a verdict — the same max-lift mechanics
-/// as [`apply_floor`]. Like [`apply_substitution_floor`], this is applied
+/// ([`is_opaque_unresolvable`]) to a verdict via [`apply_floor`]. Like [`apply_substitution_floor`], this is applied
 /// at MULTIPLE call sites (issue #445: rules 1/2/6a/6c/6e's early returns
 /// and the ordinary blocklist match, plus [`fold_floors`] itself), since
 /// `evaluate_simple_command_core`'s `opaque_kind` binding must survive the
@@ -3976,18 +3930,15 @@ fn apply_opaque_kind_floor(verdict: Verdict, kind: Option<UnresolvableKind>) -> 
     let Some(kind) = kind else {
         return verdict;
     };
-    if verdict.decision() >= Decision::Ask {
-        return verdict;
-    }
-    let argv = verdict.normalized_argv().to_vec();
     let floor_reason = format!(
         "a word is unresolvable ({kind:?}) and is not covered by a more specific structural rule"
     );
-    let reason = match verdict.reason() {
-        Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
-        None => floor_reason,
-    };
-    Verdict::ask(Reason::new(reason), argv).with_deny_message(deny_msg_for_unresolvable_kind(kind))
+    apply_floor(
+        verdict,
+        Decision::Ask,
+        floor_reason,
+        deny_msg_for_unresolvable_kind(kind),
+    )
 }
 
 /// Rules 4 and 4b's argument-position-ambiguity floors, bundled into one
@@ -5270,6 +5221,16 @@ struct ExpansionAccum<'a> {
     floor: &'a mut Option<(Decision, String)>,
 }
 
+impl ExpansionAccum<'_> {
+    /// Records that an expansion was seen (`has_any`) and folds `decision`
+    /// into the floor via [`raise_expansion_floor`]. `has_any` is set even
+    /// when `decision` is `Allow` (presence, not outcome).
+    fn raise(&mut self, decision: Decision, reason: String) {
+        *self.has_any = true;
+        raise_expansion_floor(self.floor, decision, reason);
+    }
+}
+
 /// Issue #424: how one candidate command relates to a heredoc it might be
 /// attached to. `Shell`/`Opaque` split apart because they need different
 /// treatment in [`scan_redirection_expansions`]: a plain shell invocation
@@ -5687,9 +5648,7 @@ fn scan_redirection_expansions(
         let mut sibling_scan = HeredocCandidateScan::default();
         scan_redirections_for_heredoc_candidates(redirections, &mut sibling_scan);
         if !sibling_scan.candidates.is_empty() || sibling_scan.uncertain {
-            *accum.has_any = true;
-            raise_expansion_floor(
-                accum.floor,
+            accum.raise(
                 Decision::Ask,
                 "a substitution in one of this command's own redirections forks a process \
                  that may inherit this command's heredoc on stdin once it is applied, and \
@@ -5743,9 +5702,7 @@ fn scan_redirection_expansions(
                     // command's own syntax would analyse text the actual
                     // reader never parses that way. Fail closed rather
                     // than resolving what the opaque argument runs.
-                    *accum.has_any = true;
-                    raise_expansion_floor(
-                        accum.floor,
+                    accum.raise(
                         Decision::Ask,
                         format!(
                             "the heredoc is attached to {desc}, whose own opaque argument (not \
@@ -5758,7 +5715,6 @@ fn scan_redirection_expansions(
                     HeredocCandidate::Shell(name) => Some(name.as_str()),
                     HeredocCandidate::Opaque(_) | HeredocCandidate::NonShell(_) => None,
                 }) {
-                    *accum.has_any = true;
                     // Bash dequotes `\$`/`` \` ``/`\\`/`\<newline>` (the
                     // only escapes an unquoted-delimiter body recognises,
                     // same as `collect_heredoc_substitutions`'s own docs)
@@ -5785,8 +5741,7 @@ fn scan_redirection_expansions(
                         .reason()
                         .map(|r| format!(": {}", r.as_str()))
                         .unwrap_or_default();
-                    raise_expansion_floor(
-                        accum.floor,
+                    accum.raise(
                         decision,
                         format!(
                             "the heredoc body is fed to shell interpreter `{name}` on stdin, \
@@ -5819,9 +5774,7 @@ fn scan_redirection_expansions(
                             }
                             HeredocCandidate::Opaque(desc) => *desc,
                         }) {
-                            *accum.has_any = true;
-                            raise_expansion_floor(
-                                accum.floor,
+                            accum.raise(
                                 Decision::Ask,
                                 format!(
                                     "the heredoc body invokes `{inner_name}`, itself a \
@@ -5830,9 +5783,7 @@ fn scan_redirection_expansions(
                                 ),
                             );
                         } else if inner_scan.uncertain {
-                            *accum.has_any = true;
-                            raise_expansion_floor(
-                                accum.floor,
+                            accum.raise(
                                 Decision::Ask,
                                 "the heredoc body contains a substitution whose own text could \
                                  not be statically parsed, and might invoke a stdin-reading \
@@ -5846,9 +5797,7 @@ fn scan_redirection_expansions(
                     HeredocCandidate::NonShell(name) => Some(name.as_str()),
                     HeredocCandidate::Shell(_) | HeredocCandidate::Opaque(_) => None,
                 }) {
-                    *accum.has_any = true;
-                    raise_expansion_floor(
-                        accum.floor,
+                    accum.raise(
                         Decision::Ask,
                         format!(
                             "{NONSHELL_HEREDOC_REASON_PREFIX} `{name}` on stdin, which cannot be introspected"
@@ -5859,9 +5808,7 @@ fn scan_redirection_expansions(
                 if *expand_body {
                     let scan = collect_heredoc_substitutions(body);
                     if scan.unterminated {
-                        *accum.has_any = true;
-                        raise_expansion_floor(
-                            accum.floor,
+                        accum.raise(
                             Decision::Ask,
                             "the heredoc body contains a `$(`/`` ` `` that never closes before \
                              the heredoc ends; refusing to allow with unknown content"
@@ -5869,7 +5816,6 @@ fn scan_redirection_expansions(
                         );
                     }
                     for inner in &scan.substitutions {
-                        *accum.has_any = true;
                         let decision = analyze_at_depth(
                             inner,
                             depth + 1,
@@ -5878,8 +5824,7 @@ fn scan_redirection_expansions(
                             CwdState::seed_unknown_stack(cwd.clone()),
                         )
                         .decision();
-                        raise_expansion_floor(
-                            accum.floor,
+                        accum.raise(
                             decision,
                             format!(
                                 "the heredoc body contains a command/backquote substitution \
@@ -5908,7 +5853,6 @@ fn scan_word_expansions(
     position_description: &str,
 ) {
     for inner in collect_substitutions(word) {
-        *accum.has_any = true;
         let decision = analyze_at_depth(
             inner,
             depth + 1,
@@ -5917,8 +5861,7 @@ fn scan_word_expansions(
             CwdState::seed_unknown_stack(cwd.clone()),
         )
         .decision();
-        raise_expansion_floor(
-            accum.floor,
+        accum.raise(
             decision,
             format!(
                 "{position_description} contains a command/backquote substitution whose inner \
@@ -5927,14 +5870,12 @@ fn scan_word_expansions(
         );
     }
     for inner in collect_process_substitutions(word) {
-        *accum.has_any = true;
         // Structural, not raw text — same-depth recursion (see
         // `evaluate_command_position_substitution`'s docs).
         let mut isolated = CwdState::seed_unknown_stack(cwd.clone());
         let decision =
             evaluate_command_line(inner, rules, allowlist, depth, &mut isolated).decision();
-        raise_expansion_floor(
-            accum.floor,
+        accum.raise(
             decision,
             format!(
                 "{position_description} contains a process substitution whose inner command is \
@@ -6069,27 +6010,20 @@ fn scan_recursable_slots(
                     // terminator` alone can't tell the two apart, so `+`
                     // candidates here get an extra check against the
                     // immediately preceding word.
+                    // (`span_start >= 1`, so `span_start + offset - 1`
+                    // cannot underflow; for offset 0 the preceding word is
+                    // the `-exec` flag itself, which is never `{}`.)
                     let span_end = command.words[span_start..]
                         .iter()
                         .enumerate()
-                        .position(|(offset, word)| {
-                            if !is_find_exec_terminator(word, terminators) {
-                                return false;
+                        .position(|(offset, word)| match single_resolved(word) {
+                            Some(s) if terminators.contains(&s.as_str()) => {
+                                s != "+"
+                                    || single_resolved(&command.words[span_start + offset - 1])
+                                        .as_deref()
+                                        == Some("{}")
                             }
-                            let is_bare_plus = matches!(
-                                normalize::normalize_word(word).as_slice(),
-                                [nw] if matches!(nw.resolution(), Resolution::Resolved(s) if s == "+")
-                            );
-                            if !is_bare_plus {
-                                return true;
-                            }
-                            let candidate_index = span_start + offset;
-                            candidate_index > 0
-                                && matches!(
-                                    normalize::normalize_word(&command.words[candidate_index - 1])
-                                        .as_slice(),
-                                    [nw] if matches!(nw.resolution(), Resolution::Resolved(s) if s == "{}")
-                                )
+                            _ => false,
                         })
                         .map_or(command.words.len(), |offset| span_start + offset);
 
@@ -6592,24 +6526,29 @@ enum FindExecFlagKind {
     No,
 }
 
-/// Whether AST word `word` is one of `terminators` (`find`'s
-/// `-exec`/`-execdir`/`-ok`/`-okdir` clause terminator — a literal `;`,
+/// The word's single resolved string, if it normalises to exactly one
+/// resolved position; `None` for an unresolved or multi-word position.
+///
+/// [`scan_recursable_slots`] uses it to recognise `find`'s
+/// `-exec`/`-execdir`/`-ok`/`-okdir` clause terminator (a literal `;`,
 /// which reaches here as a plain resolved word since the parser's
 /// escape-sequence folding already consumed `\;`'s backslash before
 /// normalisation, see `crate::ast::WordPiece::EscapeSequence`, or `+`). An
 /// unresolved or multi-word position is never treated as a terminator
-/// (fail-closed the OTHER direction from [`find_exec_flag_kind`]: if this
-/// function can't positively confirm a terminator,
-/// [`scan_recursable_slots`]'s span keeps growing rather than stopping
-/// early — per issue #72's design, "no terminator found" already fails
-/// closed by consuming the rest of the command as the payload, so an
-/// ambiguous position must not be mistaken for the terminator that would
-/// cut that payload short).
-fn is_find_exec_terminator(word: &Word, terminators: &[&str]) -> bool {
-    matches!(
-        normalize::normalize_word(word).as_slice(),
-        [nw] if matches!(nw.resolution(), Resolution::Resolved(s) if terminators.contains(&s.as_str()))
-    )
+/// (fail-closed the OTHER direction from [`find_exec_flag_kind`]: if the
+/// terminator can't be positively confirmed, the span keeps growing rather
+/// than stopping early — per issue #72's design, "no terminator found"
+/// already fails closed by consuming the rest of the command as the
+/// payload, so an ambiguous position must not be mistaken for the
+/// terminator that would cut that payload short).
+fn single_resolved(word: &Word) -> Option<String> {
+    match normalize::normalize_word(word).as_slice() {
+        [nw] => match nw.resolution() {
+            Resolution::Resolved(s) => Some(s.clone()),
+            Resolution::Unresolvable(_) => None,
+        },
+        _ => None,
+    }
 }
 
 /// Whether any word in `argument_words` normalises to a bare, unresolvable
@@ -6649,6 +6588,19 @@ fn fold_worst(current: Verdict, new: Verdict) -> Verdict {
         std::cmp::Ordering::Less => current,
         std::cmp::Ordering::Equal => current,
     }
+}
+
+/// Folds an always-`Ask` floor's reason (one of the `scan_redirect_*_floor`
+/// scanners) into `worst` via [`fold_worst`]: a tie keeps `worst`'s own
+/// reason rather than concatenating (unlike [`apply_redirect_ask_floor`]),
+/// matching how a compound command's attached-redirect checks have always
+/// combined. A `None` floor returns `worst` untouched.
+fn fold_ask_floor(worst: Verdict, floor_reason: Option<String>) -> Verdict {
+    let Some(floor_reason) = floor_reason else {
+        return worst;
+    };
+    let argv = worst.normalized_argv().to_vec();
+    fold_worst(worst, Verdict::ask(Reason::new(floor_reason), argv))
 }
 
 /// Whether `pieces` — one brace-alternation member's piece sequence —
@@ -6891,18 +6843,33 @@ fn collect_heredoc_substitutions(body: &str) -> HeredocScan<'_> {
     let mut unterminated = false;
 
     while i < n {
-        if !arithmetic_depths.is_empty() {
-            match consume_nested_token(bytes, body, i, &mut substitutions, &mut arithmetic_depths) {
-                Ok(Some(next)) => {
-                    i = next;
-                    continue;
-                }
-                Ok(None) => {}
-                Err(()) => {
-                    unterminated = true;
-                    break;
-                }
+        let in_arithmetic = !arithmetic_depths.is_empty();
+
+        // Top level: heredoc-body semantics — quotes are inert (a `'` or
+        // `"` here is just literal text, never a quote-protection
+        // boundary), and only `\$`/`` \` ``/`\\` are recognised escapes.
+        if !in_arithmetic
+            && i + 1 < n
+            && bytes[i] == b'\\'
+            && matches!(bytes[i + 1], b'$' | b'`' | b'\\')
+        {
+            i += 2;
+            continue;
+        }
+
+        match consume_nested_token(bytes, body, i, &mut substitutions, &mut arithmetic_depths) {
+            Ok(Some(next)) => {
+                i = next;
+                continue;
             }
+            Ok(None) => {}
+            Err(()) => {
+                unterminated = true;
+                break;
+            }
+        }
+
+        if in_arithmetic {
             match bytes[i] {
                 b'(' => {
                     if let Some(depth) = arithmetic_depths.last_mut() {
@@ -6918,28 +6885,6 @@ fn collect_heredoc_substitutions(body: &str) -> HeredocScan<'_> {
                     }
                 }
                 _ => {}
-            }
-            i += 1;
-            continue;
-        }
-
-        // Top level: heredoc-body semantics — quotes are inert (a `'` or
-        // `"` here is just literal text, never a quote-protection
-        // boundary), and only `\$`/`` \` ``/`\\` are recognised escapes.
-        if i + 1 < n && bytes[i] == b'\\' && matches!(bytes[i + 1], b'$' | b'`' | b'\\') {
-            i += 2;
-            continue;
-        }
-
-        match consume_nested_token(bytes, body, i, &mut substitutions, &mut arithmetic_depths) {
-            Ok(Some(next)) => {
-                i = next;
-                continue;
-            }
-            Ok(None) => {}
-            Err(()) => {
-                unterminated = true;
-                break;
             }
         }
 
@@ -7207,32 +7152,17 @@ fn bare_parameter_name(word: &Word) -> Option<(&str, bool)> {
     }
 }
 
-/// Splits `value` on bash's default-IFS whitespace (space/tab/newline),
-/// dropping empty fields — the same field-splitting behaviour an unquoted
-/// `$VAR` in command position undergoes at runtime. Used by rule 2 to
-/// substitute a resolved variable's value back into argv position 0:
-/// `X="rm -rf"; $X /` must produce `["rm", "-rf", "/"]`, not one token
-/// `"rm -rf"`.
-fn split_default_ifs(value: &str) -> Vec<String> {
-    value
-        .split([' ', '\t', '\n'])
-        .filter(|segment| !segment.is_empty())
-        .map(str::to_owned)
-        .collect()
-}
-
 /// Issue #139: splits `value` the way an unquoted `$VAR` actually splits at
 /// runtime when a same-line `IFS=` assignment has statically resolved to
-/// `ifs` — [`split_default_ifs`] only ever models the DEFAULT `" \t\n"`, so
-/// rule 2's substitution step silently kept guessing default-whitespace
-/// splitting even after a same-line `IFS=,` reassignment made a
+/// `ifs` — rule 2's substitution step used to model only the DEFAULT
+/// `" \t\n"`, silently guessing default-whitespace splitting even after a same-line `IFS=,` reassignment made a
 /// comma-joined value (`X=rm,-rf,/`) split into `rm`/`-rf`/`/` for real —
 /// one token that matched no blocklist rule, unlike the space-joined
 /// equivalent that already worked (issue #139's own repro).
 ///
 /// POSIX field splitting distinguishes IFS-whitespace characters (space,
 /// tab, newline — sequences of these collapse together and never produce
-/// an empty field, matching [`split_default_ifs`]'s own behaviour) from
+/// an empty field) from
 /// every OTHER `IFS` character. A non-whitespace delimiter, TOGETHER with
 /// any IFS-whitespace immediately bordering it on either side, is a
 /// SINGLE delimiter event (`IFS=", "; X="a , b"` → `a`, `b`, not `a`, ``,
@@ -7240,8 +7170,7 @@ fn split_default_ifs(value: &str) -> Vec<String> {
 /// at each such combined event, so adjacent non-whitespace delimiters
 /// with no separating whitespace still produce an empty field between
 /// them (`IFS=,; X=a,,b` → `a`, ``, `b`), and no field is produced after
-/// a trailing delimiter (matching [`split_default_ifs`]'s own trailing
-/// trim) — except a LEADING non-whitespace delimiter, which does still
+/// a trailing delimiter — except a LEADING non-whitespace delimiter, which does still
 /// yield an empty first field (`IFS=,; X=,a` → ``, `a`, matching real
 /// bash): only whitespace is stripped for free at the very start.
 ///
@@ -7305,9 +7234,11 @@ fn split_with_ifs(value: &str, ifs: &str) -> Vec<String> {
 /// Replaces `argv[0]` with `value`'s split tokens, keeping every later
 /// argv element as-is — rule 2's substitution step. `ifs` is the
 /// effective same-line `IFS` value — `None` (no same-line reassignment
-/// resolved) falls back to [`split_default_ifs`]'s exact default-`"
-/// \t\n"` behaviour, `Some` routes through [`split_with_ifs`] (issue
-/// #139). `quoted` (a `"$VAR"` command word) skips splitting: the whole
+/// resolved) falls back to bash's default-IFS whitespace
+/// ([`normalize::DEFAULT_IFS_WHITESPACE`]), the same field-splitting an
+/// unquoted `$VAR` in command position undergoes at runtime (`X="rm -rf";
+/// $X /` must produce `["rm", "-rf", "/"]`, not one token `"rm -rf"`), via
+/// [`split_with_ifs`] either way (issue #139). `quoted` (a `"$VAR"` command word) skips splitting: the whole
 /// value is the single command word.
 fn substitute_command_name(
     argv: &[NormalizedWord],
@@ -7317,8 +7248,7 @@ fn substitute_command_name(
 ) -> Vec<NormalizedWord> {
     let fields = match (quoted, ifs) {
         (true, _) => vec![value.to_owned()],
-        (false, Some(ifs)) => split_with_ifs(value, ifs),
-        (false, None) => split_default_ifs(value),
+        (false, ifs) => split_with_ifs(value, ifs.unwrap_or(normalize::DEFAULT_IFS_WHITESPACE)),
     };
     let mut substituted: Vec<NormalizedWord> =
         fields.into_iter().map(NormalizedWord::resolved).collect();
@@ -7975,9 +7905,7 @@ fn is_interpreter_sink(stage: &[NormalizedWord]) -> bool {
 /// Whether short-option cluster token `token` (e.g. `-rf`) includes flag
 /// letter `c`.
 fn short_cluster_contains(token: &str, c: char) -> bool {
-    token
-        .strip_prefix('-')
-        .is_some_and(|rest| !rest.is_empty() && !rest.starts_with('-') && rest.contains(c))
+    crate::rules::short_cluster_letters(token).is_some_and(|rest| rest.contains(c))
 }
 
 /// Whether `token` is `canonical` itself, or a `getopt_long`-style prefix
@@ -10531,7 +10459,7 @@ impl Env {
                         let base = self
                             .ifs_append_floor
                             .clone()
-                            .unwrap_or_else(|| " \t\n".to_string());
+                            .unwrap_or_else(|| normalize::DEFAULT_IFS_WHITESPACE.to_string());
                         let floor = format!("{base}{rhs}");
                         self.value_history
                             .entry(assignment.name.clone())
@@ -11261,10 +11189,16 @@ mod tests {
     }
 
     #[test]
-    fn issue_139_split_with_ifs_pure_whitespace_matches_split_default_ifs() {
+    fn issue_139_substitute_command_name_default_ifs_collapses_whitespace_runs() {
+        let argv = [NormalizedWord::resolved("$X")];
+        let words = substitute_command_name(&argv, "  rm  -rf\t/\n", None, false);
         assert_eq!(
-            split_with_ifs("rm  -rf  /", " \t\n"),
-            split_default_ifs("rm  -rf  /")
+            words,
+            vec![
+                NormalizedWord::resolved("rm"),
+                NormalizedWord::resolved("-rf"),
+                NormalizedWord::resolved("/"),
+            ]
         );
     }
 

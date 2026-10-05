@@ -256,14 +256,22 @@ fn is_long_option_abbrev(arg: &str, token: &str) -> bool {
     }
 }
 
+/// The body after the leading `-` of a short-option cluster token (`-rf` →
+/// `"rf"`), or `None` for anything that isn't one: a bare `-`, a
+/// `--`-prefixed long option, or a token with no leading `-` at all.
+pub(crate) fn short_cluster_letters(token: &str) -> Option<&str> {
+    token
+        .strip_prefix('-')
+        .filter(|rest| !rest.is_empty() && !rest.starts_with('-'))
+}
+
 /// The characters of a short-option cluster token (`-rf` → `{'r', 'f'}`,
-/// `-r` → `{'r'}`), or an empty set for anything that isn't one: a bare
-/// `-`, a `--`-prefixed long option, or a token with no leading `-` at all.
+/// `-r` → `{'r'}`), or an empty set for anything that isn't one — see
+/// [`short_cluster_letters`].
 fn short_cluster_chars(token: &str) -> HashSet<char> {
-    match token.strip_prefix('-') {
-        Some(rest) if !rest.is_empty() && !rest.starts_with('-') => rest.chars().collect(),
-        _ => HashSet::new(),
-    }
+    short_cluster_letters(token)
+        .map(|rest| rest.chars().collect())
+        .unwrap_or_default()
 }
 
 /// tar-specific single-letter options this crate's rules ever need to see
@@ -664,6 +672,13 @@ fn git_global_single_token_flag(text: &str) -> bool {
         })
 }
 
+/// The config key half of a `-c`/`--config-env` `key=value` pair (the whole
+/// text when there is no `=`). Shared by the `git_config_key_is_*` predicates
+/// so key parsing lives in one place.
+fn git_config_key(key_value: &str) -> &str {
+    key_value.split_once('=').map_or(key_value, |(key, _)| key)
+}
+
 /// Whether `key_value` — the text following `-c`/`--config-env`'s `=` or
 /// separator, e.g. `"core.hooksPath=/dev/null"` or bare `"core.hooksPath"`
 /// — names the `core.hooksPath` config variable. Git config section/key
@@ -678,7 +693,7 @@ fn git_global_single_token_flag(text: &str) -> bool {
 /// that would itself error is a harmless false positive, cheaper than
 /// special-casing it out.
 fn git_config_key_is_hooks_path(key_value: &str) -> bool {
-    let key = key_value.split_once('=').map_or(key_value, |(key, _)| key);
+    let key = git_config_key(key_value);
     key.eq_ignore_ascii_case("core.hookspath")
 }
 
@@ -706,7 +721,7 @@ fn git_config_key_is_hooks_path(key_value: &str) -> bool {
 /// effect, gated on a runtime condition this function doesn't evaluate) —
 /// a disclosed residual gap, not covered by the issue this fixes.
 pub(crate) fn git_config_key_is_include_path(key_value: &str) -> bool {
-    let key = key_value.split_once('=').map_or(key_value, |(key, _)| key);
+    let key = git_config_key(key_value);
     key.eq_ignore_ascii_case("include.path")
 }
 
@@ -723,7 +738,7 @@ pub(crate) fn git_config_key_is_include_path(key_value: &str) -> bool {
 /// [`git_config_key_is_include_path`]'s doc for why this is consulted
 /// structurally in `crate::gate` rather than via a `required_flags` rule.
 pub(crate) fn git_config_key_is_alias(key_value: &str) -> bool {
-    let key = key_value.split_once('=').map_or(key_value, |(key, _)| key);
+    let key = git_config_key(key_value);
     key.split_once('.')
         .is_some_and(|(section, name)| section.eq_ignore_ascii_case("alias") && !name.is_empty())
 }
@@ -5352,10 +5367,7 @@ fn collect_env_split_string_slots(tail: &[NormalizedWord], slots: &mut Vec<Scrip
             .map(|(_, value)| value.to_string())
         {
             Some(value)
-        } else if let Some(cluster) = token
-            .strip_prefix('-')
-            .filter(|rest| !rest.is_empty() && !rest.starts_with('-'))
-        {
+        } else if let Some(cluster) = short_cluster_letters(token) {
             let mut glued = None;
             let mut reached_s = false;
             for (offset, letter) in cluster.char_indices() {
@@ -5725,11 +5737,24 @@ fn parse_decision(rule_id: &str, raw: Option<&str>) -> Result<Decision, RulesErr
 /// mechanism at all that turns the floor off.
 fn parse_escalation_floor(raw: Option<&str>) -> Result<Decision, RulesError> {
     match raw {
-        None | Some("ask") => Ok(Decision::Ask),
-        Some("deny") => Ok(Decision::Block),
-        Some(other) => Err(RulesError::invalid(
-            "escalation_floor",
-            format!("escalation_floor must be \"ask\" or \"deny\", got {other:?}"),
+        None => Ok(Decision::Ask),
+        Some(raw) => parse_ask_or_deny("escalation_floor", "escalation_floor", raw),
+    }
+}
+
+/// Maps `"ask"` to `Decision::Ask` and `"deny"` to `Decision::Block`; any
+/// other value (notably `"allow"`) is a load-time [`RulesError`] under
+/// `config_key`, worded as `{field} must be "ask" or "deny"`. The one copy of
+/// the rule shared by [`parse_escalation_floor`] and
+/// [`parse_ask_outcome_value`], which differ only in the error id and field
+/// name.
+fn parse_ask_or_deny(config_key: &str, field: &str, raw: &str) -> Result<Decision, RulesError> {
+    match raw {
+        "ask" => Ok(Decision::Ask),
+        "deny" => Ok(Decision::Block),
+        other => Err(RulesError::invalid(
+            config_key,
+            format!("{field} must be \"ask\" or \"deny\", got {other:?}"),
         )),
     }
 }
@@ -5740,14 +5765,7 @@ fn parse_escalation_floor(raw: Option<&str>) -> Result<Decision, RulesError> {
 /// rejects it for `escalation_floor`: there is no config mechanism that
 /// turns a genuine `Ask` into a silent `Allow`.
 fn parse_ask_outcome_value(key: &str, raw: &str) -> Result<Decision, RulesError> {
-    match raw {
-        "ask" => Ok(Decision::Ask),
-        "deny" => Ok(Decision::Block),
-        other => Err(RulesError::invalid(
-            "ask_outcome",
-            format!("{key} must be \"ask\" or \"deny\", got {other:?}"),
-        )),
-    }
+    parse_ask_or_deny("ask_outcome", key, raw)
 }
 
 /// A per-mode table key: absent keeps the built-in default `Decision::Ask`
