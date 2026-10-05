@@ -575,6 +575,7 @@ fn evaluate_command_line(
 ) -> Verdict {
     let mut env = Env::new();
     let mut isolated = chain_is_backgrounded(command_line, 0).then(|| cwd.clone());
+    let first_runs_in_parent_shell = isolated.is_none();
     let mut worst = evaluate_pipeline(
         &command_line.first,
         &mut env,
@@ -582,6 +583,7 @@ fn evaluate_command_line(
         allowlist,
         depth,
         isolated.as_mut().unwrap_or(cwd),
+        first_runs_in_parent_shell,
     );
     let mut prev_untrustworthy = pipeline_reported_success_is_untrustworthy(&command_line.first);
     for (index, (separator, pipeline)) in command_line.rest.iter().enumerate() {
@@ -608,6 +610,8 @@ fn evaluate_command_line(
         if !matches!(separator, Separator::And | Separator::Or) {
             isolated = chain_is_backgrounded(command_line, index + 1).then(|| cwd.clone());
         }
+        let runs_in_parent_shell =
+            isolated.is_none() && !matches!(separator, Separator::And | Separator::Or);
         let verdict = evaluate_pipeline(
             pipeline,
             &mut env,
@@ -615,6 +619,7 @@ fn evaluate_command_line(
             allowlist,
             depth,
             isolated.as_mut().unwrap_or(cwd),
+            runs_in_parent_shell,
         );
         worst = fold_worst(worst, verdict);
     }
@@ -680,6 +685,15 @@ type IfsAlternates = Vec<(Vec<NormalizedWord>, String)>;
 /// 5: the ported `curl|sh` blocklist rule and the NEW decode/interpreter
 /// structural rules) into one worst-decision-wins [`Verdict`].
 ///
+/// `runs_in_parent_shell` (issue #534): whether this pipeline is certain to
+/// run, in the parent shell, whenever the line reaches it: it is not the
+/// right-hand side of an `&&`/`||` (which may short-circuit) and not part of
+/// a backgrounded chain (which runs in a subshell). Combined with a
+/// single-stage check here (every stage of a multi-stage pipeline is a
+/// subshell by default, and `lastpipe` is not modelled), it decides whether a
+/// simple command's assignments may be treated as persisting
+/// ([`Env::apply_assignments`]). Any uncertainty resolves to "not persisting".
+///
 /// `cwd` (issue #103): a `cd`/`pushd`/etc. only updates it when this
 /// pipeline has exactly one stage — every stage of a `|` pipeline runs in
 /// its own subshell in bash, so a mutation in any stage (not just a `cd` —
@@ -698,6 +712,7 @@ fn evaluate_pipeline(
     allowlist: &Allowlist,
     depth: usize,
     cwd: &mut CwdState,
+    runs_in_parent_shell: bool,
 ) -> Verdict {
     let mut stages = Vec::with_capacity(1 + pipeline.rest.len());
     stages.push(&pipeline.first);
@@ -752,7 +767,7 @@ fn evaluate_pipeline(
         // attacker-choosable.
         let verdict = match command {
             Command::Simple(simple) => {
-                env.apply_assignments(simple);
+                env.apply_assignments(simple, runs_in_parent_shell && stage_count == 1);
                 let mut alternates = Vec::new();
                 let verdict = evaluate_simple_command(
                     simple,
@@ -10077,8 +10092,15 @@ impl Env {
     /// divergence) removes any prior entry instead: a stale resolved value
     /// is worse than no resolution at all, since rule 2 only ever uses a
     /// resolution to *upgrade* Ask to Block.
-    fn apply_assignments(&mut self, command: &SimpleCommand) {
-        let is_prefix_scoped = !command.words.is_empty();
+    ///
+    /// `persists_if_standalone` (issue #534) is whether the enclosing list/
+    /// pipeline context certainly runs `command` in the parent shell
+    /// ([`evaluate_pipeline`]'s `runs_in_parent_shell`, plus single-stage).
+    /// When it is not, the assignments are classified exactly like a
+    /// command-scoped prefix: they may never reach later commands, so they
+    /// must neither poison nor clear [`Self::persisting_unresolvable`].
+    fn apply_assignments(&mut self, command: &SimpleCommand, persists_if_standalone: bool) {
+        let is_prefix_scoped = !command.words.is_empty() || !persists_if_standalone;
         for assignment in &command.assignments {
             self.apply_one(assignment, is_prefix_scoped);
         }
@@ -10658,6 +10680,87 @@ mod tests {
         // (which only takes effect for a hypothetical command after this
         // one) and never the much-earlier `"rm -rf /"` either.
         assert_decision("X='rm -rf /'; X=$(evil); X=ls $X", Decision::Ask);
+    }
+
+    // Issue #534: a standalone assignment is only PERSISTING when its list/
+    // pipeline context certainly runs it in the parent shell. A short-
+    // circuitable `&&`/`||` right-hand side, any stage of a multi-stage
+    // pipeline (`lastpipe` unmodelled) or a backgrounded chain is classified
+    // like a command-scoped prefix, so the history fallback stays available
+    // and the genuine Block is preserved.
+
+    #[test]
+    fn issue_534_or_list_rhs_assignment_does_not_poison_history() {
+        assert_decision(
+            "X='rm -rf /'; true || X=$(evil); X=ls true; $X",
+            Decision::Block,
+        );
+        assert_decision("X='rm -rf /'; true || X=$(evil); $X", Decision::Block);
+    }
+
+    #[test]
+    fn issue_534_and_list_rhs_assignment_does_not_poison_history() {
+        assert_decision(
+            "X='rm -rf /'; true && X=$(evil); X=ls true; $X",
+            Decision::Block,
+        );
+        assert_decision("X='rm -rf /'; false && X=$(evil); $X", Decision::Block);
+    }
+
+    #[test]
+    fn issue_534_chained_list_rhs_assignment_does_not_poison_history() {
+        assert_decision(
+            "X='rm -rf /'; true && true && X=$(evil); X=ls true; $X",
+            Decision::Block,
+        );
+    }
+
+    #[test]
+    fn issue_534_pipeline_stage_assignment_does_not_poison_history() {
+        assert_decision(
+            "X='rm -rf /'; X=$(evil) | true; X=ls true; $X",
+            Decision::Block,
+        );
+    }
+
+    #[test]
+    fn issue_534_last_pipeline_stage_assignment_does_not_poison_history() {
+        // Without `lastpipe` the last stage is a subshell too; with it, the
+        // uncertainty must still resolve to the stricter verdict.
+        assert_decision(
+            "X='rm -rf /'; true | X=$(evil); X=ls true; $X",
+            Decision::Block,
+        );
+    }
+
+    #[test]
+    fn issue_534_backgrounded_assignment_does_not_poison_history() {
+        assert_decision("X='rm -rf /'; X=$(evil) & $X", Decision::Block);
+        assert_decision(
+            "X='rm -rf /'; true && X=$(evil) & X=ls true; $X",
+            Decision::Block,
+        );
+    }
+
+    #[test]
+    fn issue_534_unconditional_assignment_after_a_list_still_persists() {
+        // `;` ends the `||` chain, so this later standalone assignment runs
+        // for certain and still poisons history (Ask, not a false Block).
+        assert_decision(
+            "X='rm -rf /'; true || true; X=$(evil); X=ls true; $X",
+            Decision::Ask,
+        );
+        assert_decision("X='rm -rf /'; X=$(evil); $X", Decision::Ask);
+    }
+
+    #[test]
+    fn issue_534_conditional_assignment_cannot_clear_persisting_state() {
+        // The earlier unconditional `X=$(evil)` poisons history; a possibly
+        // skipped resolved reassignment must not clear it.
+        assert_decision(
+            "X='rm -rf /'; X=$(evil); true || X=ls; X=ls true; $X",
+            Decision::Ask,
+        );
     }
 
     #[test]
