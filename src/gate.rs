@@ -470,15 +470,47 @@ pub(crate) fn analyze(command: &str) -> Verdict {
 /// instead of loaded from the embedded defaults. [`analyze`]'s own
 /// behavior is unaffected — it always loads `Rules::embedded()`/
 /// `Allowlist::embedded()` itself, never this function's arguments.
+#[cfg(test)]
 #[must_use]
 pub(crate) fn analyze_with_policy(command: &str, rules: &Rules, allowlist: &Allowlist) -> Verdict {
+    analyze_with_policy_in_cwd(command, rules, allowlist, None)
+}
+
+/// [`analyze_with_policy`] for a command that will run in `cwd` (the hook
+/// payload's working directory, issue #549). An absolute `cwd` seeds the
+/// top-level [`CwdContext::Known`], so every relative path token composes
+/// against it through the same machinery a same-line `cd /abs` uses. A
+/// missing, empty, relative, or `~`-anchored `cwd` seeds
+/// [`CwdContext::Initial`], exactly as before.
+#[must_use]
+pub(crate) fn analyze_with_policy_in_cwd(
+    command: &str,
+    rules: &Rules,
+    allowlist: &Allowlist,
+    cwd: Option<&str>,
+) -> Verdict {
     analyze_at_depth(
         command,
         0,
         rules,
         allowlist,
-        CwdState::seed(CwdContext::Initial),
+        CwdState::seed(payload_cwd_context(cwd)),
     )
+}
+
+/// The top-level [`CwdContext`] for a payload `cwd`: `Known` only for an
+/// absolute path, `Initial` otherwise (never `Poisoned`: an absent cwd is
+/// "never came up", not "became attacker-steerable").
+fn payload_cwd_context(cwd: Option<&str>) -> CwdContext {
+    let Some(cwd) = cwd else {
+        return CwdContext::Initial;
+    };
+    match lexical_normalize(cwd) {
+        form @ PathForm::Abs(_) => {
+            render_cwd_anchor(&form).map_or(CwdContext::Initial, CwdContext::Known)
+        }
+        _ => CwdContext::Initial,
+    }
 }
 
 /// The recursive core of [`analyze`]/[`analyze_with_policy`]: `depth`
@@ -491,7 +523,8 @@ pub(crate) fn analyze_with_policy(command: &str, rules: &Rules, allowlist: &Allo
 /// this recursed command string starts from — the CALLER builds it via
 /// [`CwdState::seed`] (a genuinely fresh process boundary: `bash -c`
 /// family/`fish -c`/`flock -c`/`su -c`/`env -S`, or the two top-level entry
-/// points, always seeded with [`CwdContext::Initial`] there) or
+/// points, seeded there by [`payload_cwd_context`]: `Initial` unless the
+/// hook payload carried an absolute `cwd`, then `Known`) or
 /// [`CwdState::seed_unknown_stack`] (a same-process boundary that really
 /// does inherit the live directory stack via fork: `$()`/backtick, a
 /// process substitution, a heredoc body substitution, `eval`'s joined
@@ -8190,6 +8223,9 @@ const OPENSSL_ENC_CIPHER_NAMES: &[&str] = &[
 ///   `Poisoned`** — they read the same to a naive "do we know the cwd?"
 ///   question, but only `Poisoned` means the cwd became attacker-steerable
 ///   within the analyzed string itself; `Initial` means it never came up.
+///   A hook payload carrying an absolute `cwd` (issue #549) seeds the top
+///   level as `Known(cwd)` instead, so `Initial` there means "no usable
+///   payload `cwd`".
 /// - `Known(anchor)`: some earlier `cd`/`pushd` target on this line
 ///   resolved to a lexically-certain string — `anchor` is that string,
 ///   already normalized (`"/tmp"`, `"~/.config/shguard"`, `"build"`,

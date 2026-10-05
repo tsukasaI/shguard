@@ -43,8 +43,10 @@
 //!   parse failure of the whole payload; `agent_id` differs — any present,
 //!   non-`null` value (not only a string) counts as present, since issue
 //!   #469's `subagent` `ask_outcome` override keys on that presence alone
-//!   (see [`crate::HookContext`]). Other context fields (`session_id`,
-//!   `cwd`, `hook_event_name`) may be present and are ignored here.
+//!   (see [`crate::HookContext`]). `cwd: string` (issue #549) is read into
+//!   [`crate::HookContext`] to resolve relative path targets; a wrong-type
+//!   value is treated as absent. Other context fields (`session_id`,
+//!   `hook_event_name`) may be present and are ignored here.
 //! - **stdout**: exit 0, plus
 //!   ```json
 //!   {
@@ -112,6 +114,8 @@ struct HookInput {
     agent_id: Value,
     #[serde(default)]
     agent_type: Value,
+    #[serde(default)]
+    cwd: Value,
 }
 
 /// The three `permissionDecision` values the hook contract defines.
@@ -286,7 +290,8 @@ fn extract_bash_command(
         input.permission_mode.as_str().map(PermissionMode::parse),
         subagent_id(&input.agent_id),
         input.agent_type.as_str().map(str::to_string),
-    );
+    )
+    .with_cwd(input.cwd.as_str().map(str::to_string));
 
     match input.tool_input.get("command").and_then(Value::as_str) {
         Some(command) => Ok(Some((command.to_string(), context))),
@@ -392,6 +397,26 @@ pub fn handle_with_policy(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn payload_cwd_is_carried_into_the_context_and_wrong_types_count_as_absent() {
+        let cwd_of = |cwd_field: &str| {
+            let stdin =
+                format!(r#"{{"tool_name":"Bash","tool_input":{{"command":"ls"}}{cwd_field}}}"#);
+            peek_bash_command(&stdin)
+                .unwrap()
+                .1
+                .cwd()
+                .map(str::to_string)
+        };
+        assert_eq!(
+            cwd_of(r#","cwd":"/Users/me/dotfiles""#).as_deref(),
+            Some("/Users/me/dotfiles")
+        );
+        assert_eq!(cwd_of(""), None);
+        assert_eq!(cwd_of(r#","cwd":null"#), None);
+        assert_eq!(cwd_of(r#","cwd":7"#), None);
+    }
 
     fn permission_decision(output: &Value) -> &str {
         output["hookSpecificOutput"]["permissionDecision"]
