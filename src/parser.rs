@@ -156,7 +156,7 @@ fn catch_parser_panic<T>(f: impl FnOnce() -> T) -> Result<T, ParseError> {
 /// into, counted (never decremented) by [`reject_excessive_raw_nesting`] —
 /// see [`MAX_KEYWORD_NESTING_COUNT`]'s docs for why a total count, and why
 /// this exact set.
-const NESTING_KEYWORDS: [&str; 5] = ["if", "while", "until", "for", "case"];
+const NESTING_KEYWORDS: [&str; 6] = ["if", "while", "until", "for", "case", "coproc"];
 
 /// Byte values [`reject_excessive_raw_nesting`] treats as ending a keyword
 /// token: whitespace and the shell metacharacters that can immediately
@@ -3185,6 +3185,15 @@ mod tests {
                 "expected the combined stack budget, got: {construct}"
             );
         }
+    }
+
+    #[test]
+    fn coproc_runs_count_toward_the_keyword_cap() {
+        let construct = unsupported_construct(&"coproc ".repeat(MAX_KEYWORD_NESTING_COUNT + 1));
+        assert!(
+            construct.contains("keyword nesting"),
+            "expected the keyword cap, got: {construct}"
+        );
     }
 
     // `[[&&` with no space: the first `&&` is adjacent to the `[[` token,

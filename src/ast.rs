@@ -294,9 +294,9 @@ pub(crate) const MAX_RAW_PAREN_OPEN_COUNT: usize = 32;
 /// tighter of the two budgets this crate ships against) / 1709 (release).
 /// 16 is ~9x below the debug floor.
 ///
-/// Per-opener caps alone do not compose: every grammar-level recursion
-/// shares one stack and their depths add, which [`MAX_RAW_STACK_BUDGET`]
-/// bounds.
+/// Per-opener caps alone do not compose: the grammar-level recursions
+/// listed in [`MAX_RAW_STACK_BUDGET`]'s docs share one stack and their
+/// depths add, which that budget bounds.
 ///
 /// # Known trade-off
 ///
@@ -373,7 +373,7 @@ pub(crate) const MAX_RAW_LEGACY_ARITH_COUNT: usize = 8;
 pub(crate) const MAX_RAW_BRACKET_OPENER_COUNT: usize = 64;
 
 /// Cap on the total count of reserved-word compound-command openers (`if`,
-/// `while`, `until`, `for`, `case`) `src/parser.rs`'s raw pre-scan tolerates
+/// `while`, `until`, `for`, `case`, and `coproc`) `src/parser.rs`'s raw pre-scan tolerates
 /// in one command, enforced by [`crate::parser::reject_excessive_raw_nesting`]
 /// (issue #52 follow-up: brush-parser's recursive-descent grammar recurses
 /// once per nested compound command exactly as unboundedly as it does per
@@ -550,6 +550,21 @@ pub(crate) const MAX_RAW_EXTENDED_TEST_COUNT: usize = 64;
 /// `( ')'; `x24, `cat <( ')'; `x8, `if true; then `x16, `[[ ` + `! `x64)
 /// aborts a debug build.
 ///
+/// Audit of brush-parser's recursions, and where each is charged: subshell
+/// `(` and process substitution `<(`/`>(` ([`STACK_COST_PAREN`]); `$(` and
+/// `$((` (the `(` weight, plus [`MAX_RAW_COMMAND_SUBST_COUNT`]); brace group
+/// and function body `{` ([`STACK_COST_BRACE`]); `${` (brace weight plus
+/// [`STACK_COST_PARAM_EXPANSION_EXTRA`]); `$[` and array subscripts `[`
+/// ([`STACK_COST_BRACKET`] plus [`STACK_COST_LEGACY_ARITH_EXTRA`]);
+/// `if`/`while`/`until`/`for`/`case` and `coproc` (`coproc_clause` takes
+/// any command as its body, and a compound command can itself be a
+/// `coproc_clause`; [`STACK_COST_KEYWORD`] via `NESTING_KEYWORDS`, floors
+/// ~200 debug / ~750 release, so the keyword weight is conservative for
+/// it); `[[ ! ... ]]` operators ([`STACK_COST_EXTENDED_TEST_OP`]). Not
+/// recursive: `time` (a prefix on a pipeline); `select` (brush rejects it
+/// with a syntax error). Re-audit the grammar's compound-command and
+/// word-expansion productions on any `brush-parser` bump.
+///
 /// # Weights and budget
 ///
 /// A weight is the opener's share of the debug worker stack in permille,
@@ -597,7 +612,7 @@ pub(crate) const STACK_COST_PAREN: usize = 9;
 pub(crate) const STACK_COST_BRACKET: usize = 1;
 /// Extra weight a `$[` adds on top of [`STACK_COST_BRACKET`].
 pub(crate) const STACK_COST_LEGACY_ARITH_EXTRA: usize = 6;
-/// Weight of a nesting keyword (`if`, `while`, `until`, `for`, `case`).
+/// Weight of a nesting keyword (`if`, `while`, `until`, `for`, `case`, `coproc`).
 pub(crate) const STACK_COST_KEYWORD: usize = 10;
 /// Weight of a `!`/`&&`/`||` counted inside an extended test.
 pub(crate) const STACK_COST_EXTENDED_TEST_OP: usize = 5;

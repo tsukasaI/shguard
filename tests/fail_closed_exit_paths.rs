@@ -873,6 +873,37 @@ fn grammar_composed_payload_at_the_budget_runs_and_one_past_it_is_rejected() {
     }
 }
 
+/// `coproc` takes any command as its body, so a run of bare `coproc`
+/// keywords nests one parse frame each with no brace, paren or other
+/// opener to count: it used to abort (release ~750, debug ~200) and stack
+/// on top of the budget. It is a counted nesting keyword now.
+#[test]
+fn coproc_runs_fail_closed_alone_and_with_an_at_budget_payload() {
+    assert_raw_cap_ask(&"coproc ".repeat(300), "keyword nesting");
+    assert_raw_cap_ask(
+        &format!("rm -rf / {}", "coproc ".repeat(1000)),
+        "keyword nesting",
+    );
+    let payload = format!(
+        "{}{}{}{}[[ {}x ]]",
+        "{ '}'; ".repeat(10),
+        "( ')'; ".repeat(8),
+        "cat <( ')'; ".repeat(4),
+        "coproc ".repeat(8),
+        "! ".repeat(10),
+    );
+    let output = run_hook(&bash_command(&payload));
+    assert!(
+        !permission_reason(&output).contains("exceeds the raw"),
+        "the at-budget payload must reach the parser, got: {}",
+        permission_reason(&output)
+    );
+    assert_raw_cap_ask(
+        &format!("{}{payload}", "coproc ".repeat(150)),
+        "keyword nesting",
+    );
+}
+
 /// Ordinary scripts stay under every per-opener cap: whatever else the gate
 /// decides about them, the reason must not be a raw-cap rejection.
 #[test]
