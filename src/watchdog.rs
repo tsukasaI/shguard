@@ -207,9 +207,10 @@ pub(crate) fn bounded(pipeline: impl FnOnce() -> Verdict + Send + 'static) -> Ve
 /// Same as [`bounded`], with the memory budget and the RSS source as
 /// parameters, split out so `tests` can pin the memory-trip branch
 /// deterministically with a tiny limit and a fake `rss` reader, instead of
-/// depending on process-wide RSS (issue #568; mirrors
+/// depending on process-wide RSS (issue #568). The limit parameter mirrors
 /// `src/bin/shguard.rs`'s `SHGUARD_TEST_MEM_LIMIT_MB` injection point,
-/// which exists for the same reason). `rss` is sampled once for the
+/// which exists for the same reason; the injectable `rss` reader has no
+/// counterpart there. `rss` is sampled once for the
 /// baseline before the worker is spawned, then on every poll; `bounded`
 /// passes [`current_rss_bytes`]. Returns whatever `pipeline`
 /// produces on success, or a fail-closed [`Verdict::ask`] if either bound
@@ -224,9 +225,9 @@ fn bounded_with_memory_limit(
 ) -> Verdict {
     // `None` (rather than defaulting to `0`) when the platform/call can't
     // measure RSS at all — a `0` fallback would silently turn the delta
-    // check into an absolute one against whatever `rss()`
-    // next happens to return, tripping on every call in any host process
-    // whose baseline already exceeds `memory_limit_bytes`.
+    // check into an absolute one against whatever `rss()` next happens to
+    // return, tripping on every call in any host process whose baseline
+    // already exceeds `memory_limit_bytes`.
     let baseline_rss = rss();
     // Computed before `spawn`, not after: like the binary's own deadline
     // (started before stdin is even read), the budget covers everything
@@ -419,7 +420,6 @@ pub fn peak_rss_bytes() -> Option<u64> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// Issue #518: `peak_rss_bytes` moved here from `src/bin/shguard.rs`
@@ -438,6 +438,61 @@ mod tests {
     #[test]
     fn current_rss_bytes_reports_a_nonzero_value_for_the_running_process() {
         assert!(current_rss_bytes().is_some_and(|rss| rss > 0));
+    }
+
+    /// Env var marking the re-exec'd child of
+    /// [`current_rss_bytes_tracks_growth`].
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    const RSS_TRACKING_CHILD_ENV: &str = "SHGUARD_TEST_RSS_TRACKING_CHILD";
+
+    /// Pins that `current_rss_bytes` tracks growth in resident size: it
+    /// rises by most of a large nonzero-filled block while that block is
+    /// held. The nonzero smoke test above would also pass for a constant.
+    /// A fall after the drop is deliberately not asserted: freed pages are
+    /// not reliably returned to the OS promptly (macOS observed to keep
+    /// them), so that would be flaky.
+    ///
+    /// Re-execs this test binary with `--exact` so the measurement runs in
+    /// a short-lived child with this one test as its only thread of
+    /// activity: other lib tests allocating and freeing in the parent
+    /// process concurrently would otherwise move process-wide RSS under
+    /// the assertions and make them flaky.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn current_rss_bytes_tracks_growth() {
+        const BLOCK: usize = 64 * 1024 * 1024;
+        const MIN_DELTA: u64 = 16 * 1024 * 1024;
+
+        if std::env::var_os(RSS_TRACKING_CHILD_ENV).is_some() {
+            let before = current_rss_bytes().unwrap();
+            // Nonzero fill so the pages are actually touched (a zeroed
+            // `vec!` can be lazily mapped and never become resident).
+            let block = std::hint::black_box(vec![1u8; BLOCK]);
+            let during = current_rss_bytes().unwrap();
+            assert!(
+                during >= before + MIN_DELTA,
+                "RSS did not grow while holding the block: before={before} during={during}"
+            );
+            drop(std::hint::black_box(block));
+            return;
+        }
+
+        let exe = std::env::current_exe().unwrap();
+        let output = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "watchdog::tests::current_rss_bytes_tracks_growth",
+                "--nocapture",
+            ])
+            .env(RSS_TRACKING_CHILD_ENV, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
@@ -556,21 +611,23 @@ mod tests {
 
     /// Deterministic pin for the memory-trip branch. The RSS source is
     /// faked (issue #568): real process-wide RSS is noisy under the parallel
-    /// lib suite, so a real-RSS assertion can miss the trip. The worker
-    /// raises the fake past the budget, then blocks until the test releases
-    /// it, so it cannot return `Allow` before the watchdog polls.
+    /// lib suite, so a real-RSS assertion can miss the trip. The fake
+    /// reader returns 0 for the baseline sample and past the budget on
+    /// every later one, so the trip fires on the first poll regardless of
+    /// when the worker is scheduled; the worker blocks until the test
+    /// releases it, so it cannot return `Allow` before the watchdog polls.
     #[test]
     fn memory_budget_trip_fails_closed_to_ask() {
         let memory_limit_bytes = 64 * 1024;
-        let fake_rss = Arc::new(AtomicU64::new(0));
+        let calls = AtomicU64::new(0);
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-        let worker_rss = Arc::clone(&fake_rss);
-        let reader_rss = Arc::clone(&fake_rss);
         let verdict = bounded_with_memory_limit(
             memory_limit_bytes,
-            move || Some(reader_rss.load(Ordering::SeqCst)),
             move || {
-                worker_rss.store(memory_limit_bytes + 1, Ordering::SeqCst);
+                let first = calls.fetch_add(1, Ordering::SeqCst) == 0;
+                Some(if first { 0 } else { memory_limit_bytes + 1 })
+            },
+            move || {
                 let _ = release_rx.recv_timeout(EVALUATION_TIMEOUT * 2);
                 Verdict::allow(Vec::new())
             },

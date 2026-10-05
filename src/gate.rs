@@ -1830,8 +1830,8 @@ fn is_network_pseudo_device(target: &str) -> bool {
 /// connection-establishing network-pseudo-device open via a plain `Input`
 /// redirect (issue #455, see [`is_network_pseudo_device`]), worth a path
 /// check at all — shared by [`resolved_redirect_write_targets`] and
-/// [`scan_redirect_home_env_floor`] (issue #203) so the two can never
-/// diverge on which redirect kinds count as a write.
+/// [`scan_redirect_substituted_target_floor`] (issues #203 and #454) so the
+/// two can never diverge on which redirect kinds count as a write.
 fn is_redirect_write_applicable(kind: &FileRedirectionKind, normalized: &[NormalizedWord]) -> bool {
     match kind {
         // Issue #425: `<>` opens its target for both reading and writing —
@@ -1947,6 +1947,44 @@ fn is_fd_or_close(s: &str) -> bool {
     s == "-" || (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
 }
 
+/// Shared core of [`scan_redirect_home_env_floor`] (issue #203) and
+/// [`scan_redirect_named_user_home_floor`] (issue #454): scan every
+/// redirect-write target ([`is_redirect_write_applicable`]), apply
+/// `substitute`'s piece-level tilde substitution, and if a resolved
+/// candidate from the substituted word matches one of `rules`' redirect
+/// rules, float `(Decision::Ask, reason(rule))` — always capped to `Ask`
+/// regardless of the matched rule's own decision, since neither caller can
+/// prove the substitution without an environment lookup or passwd lookup
+/// shguard never performs (see each caller's own docs for why).
+fn scan_redirect_substituted_target_floor(
+    redirections: &[Redirection],
+    rules: &Rules,
+    substitute: impl Fn(&Word) -> Option<Word>,
+    reason: impl Fn(&RedirectRule) -> String,
+) -> Option<(Decision, String)> {
+    for redir in redirections {
+        let Redirection::File { kind, target } = redir else {
+            continue;
+        };
+        let normalized = normalize::normalize_word(target);
+        if !is_redirect_write_applicable(kind, &normalized) {
+            continue;
+        }
+        let Some(substituted) = substitute(target) else {
+            continue;
+        };
+        for word in normalize::normalize_word(&substituted) {
+            let Resolution::Resolved(candidate) = word.resolution() else {
+                continue;
+            };
+            if let Some(rule) = rules.match_redirect_target(candidate) {
+                return Some((Decision::Ask, reason(rule)));
+            }
+        }
+    }
+    None
+}
+
 /// Issue #203: `Some((Ask, reason))` when a redirect-write target begins
 /// with `$HOME`/`${HOME}` (bare or inside one enclosing pair of double
 /// quotes) and substituting the literal text `~` for that piece — the same
@@ -1986,44 +2024,6 @@ fn scan_redirect_home_env_floor(
             )
         },
     )
-}
-
-/// Shared core of [`scan_redirect_home_env_floor`] (issue #203) and
-/// [`scan_redirect_named_user_home_floor`] (issue #454): scan every
-/// redirect-write target ([`is_redirect_write_applicable`]), apply
-/// `substitute`'s piece-level tilde substitution, and if a resolved
-/// candidate from the substituted word matches one of `rules`' redirect
-/// rules, float `(Decision::Ask, reason(rule))` — always capped to `Ask`
-/// regardless of the matched rule's own decision, since neither caller can
-/// prove the substitution without an environment lookup or passwd lookup
-/// shguard never performs (see each caller's own docs for why).
-fn scan_redirect_substituted_target_floor(
-    redirections: &[Redirection],
-    rules: &Rules,
-    substitute: fn(&Word) -> Option<Word>,
-    reason: impl Fn(&RedirectRule) -> String,
-) -> Option<(Decision, String)> {
-    for redir in redirections {
-        let Redirection::File { kind, target } = redir else {
-            continue;
-        };
-        let normalized = normalize::normalize_word(target);
-        if !is_redirect_write_applicable(kind, &normalized) {
-            continue;
-        }
-        let Some(substituted) = substitute(target) else {
-            continue;
-        };
-        for word in normalize::normalize_word(&substituted) {
-            let Resolution::Resolved(candidate) = word.resolution() else {
-                continue;
-            };
-            if let Some(rule) = rules.match_redirect_target(candidate) {
-                return Some((Decision::Ask, reason(rule)));
-            }
-        }
-    }
-    None
 }
 
 /// Piece-level substitution behind [`scan_redirect_home_env_floor`]: a
@@ -10193,13 +10193,76 @@ mod tests {
     /// tests or processes can consume, turning a stack-overflow regression
     /// pin into a flaky timeout. Deliberately not run on a thread with a
     /// larger explicit stack size: libtest's default test thread stack
-    /// matches the production `shguard-eval` worker's default
-    /// (`src/watchdog.rs`), which is exactly the condition this pin needs to
-    /// keep catching the recursion regression.
+    /// matches both production default-stack workers, the library's
+    /// `shguard-eval` thread (`src/watchdog.rs`) and the binary's outer one
+    /// (`src/bin/shguard.rs`), which is exactly the condition this pin needs
+    /// to keep catching the recursion regression.
+    ///
+    /// Asserts on the decision directly instead of via [`assert_decision`]:
+    /// its panic message interpolates the command, which would dump this
+    /// ~2 MB payload into the log on a wrong decision.
     #[test]
     fn repeated_overflowing_tilde_runs_do_not_overflow_the_stack() {
         let word = "~41353561361542343807".repeat(100_000);
-        assert_decision(&format!("echo {word}"), Decision::Allow);
+        let verdict = decide(&format!("echo {word}"));
+        assert_eq!(
+            verdict.decision(),
+            Decision::Allow,
+            "reason: {:?}",
+            verdict.reason().map(super::Reason::as_str)
+        );
+    }
+
+    fn reason_of(command: &str) -> String {
+        let verdict = decide(command);
+        assert_eq!(verdict.decision(), Decision::Ask, "{command:?}");
+        verdict
+            .reason()
+            .map(super::Reason::as_str)
+            .unwrap()
+            .to_string()
+    }
+
+    /// Pins the `$HOME` floor's wording (issue #203) so drift in either the
+    /// explanation or the matched-rule interpolation is caught: no other
+    /// test asserts on the reason text.
+    #[test]
+    fn home_env_redirect_floor_reason_is_pinned() {
+        let reason = reason_of("echo x >> $HOME/.zshrc");
+        assert!(
+            reason.starts_with(
+                "redirect target begins with `$HOME`, which expands to the same value as `~`; \
+                 substituting `~` would match redirect rule \""
+            ),
+            "{reason}"
+        );
+        assert!(
+            reason.ends_with(
+                "this can't be proven without an environment lookup shguard never performs, \
+                 so it's flagged, not blocked"
+            ),
+            "{reason}"
+        );
+    }
+
+    /// Same as above for the named-user floor (issue #454).
+    #[test]
+    fn named_user_home_redirect_floor_reason_is_pinned() {
+        let reason = reason_of("echo x >> ~root/.zshrc");
+        assert!(
+            reason.starts_with(
+                "redirect target is a named-user home shorthand (`~user`), which would match \
+                 redirect rule \""
+            ),
+            "{reason}"
+        );
+        assert!(
+            reason.ends_with(
+                "if `~user` expanded to an existing account's home directory; shguard cannot \
+                 verify that account exists or is reachable"
+            ),
+            "{reason}"
+        );
     }
 
     // ==== Issue #12 DoD: all 11 cases, exact decisions ====
