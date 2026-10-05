@@ -9029,6 +9029,18 @@ fn evaluate_composed_argv_match(
             .with_deny_message(rule.deny_message().cloned()),
         );
     }
+    // Issue #579: an unresolved word can hide the flag while a relative
+    // operand is the target only once composed against the cwd. The raw
+    // argv's own except-target probe cannot see that, and role counting
+    // there must not turn the composed target into an Allow.
+    if let Some(rule) = rules.match_command_except_target(composed_argv) {
+        let reason = Reason::new(format!(
+            "{describe} composes a relative target, and rule {:?} could not be fully checked because an argument is unresolved: {}",
+            rule.id().as_str(),
+            rule.reason().as_str()
+        ));
+        raise(Verdict::ask(reason, original_argv.to_vec()));
+    }
     if let Some(rule) = rules.match_ask(composed_argv) {
         let reason = Reason::new(format!(
             "{describe} composes a relative target, matching user-configured ask rule {:?}: {}",
@@ -9982,7 +9994,9 @@ fn scan_unknown_cwd_floor(
     if !matches!(cwd, CwdContext::Poisoned) {
         return None;
     }
-    let rule = rules.match_command_unknown_cwd(argv)?;
+    let rule = rules
+        .match_command_unknown_cwd(argv)
+        .or_else(|| rules.match_command_except_target_unknown_cwd(argv))?;
     Some((
         Decision::Ask,
         format!(
@@ -13459,19 +13473,6 @@ mod tests {
     // quoted unresolved word cannot satisfy the rule (role counting, literal
     // tail pruning, tar's -C value), and must keep firing everywhere else ====
 
-    /// A directory component no `$HOME` is plausibly named, so the bare-`~`
-    /// target stays prunable in these end-to-end pins. Skips (returns
-    /// `false`) in an environment where `$HOME` is unset or collides.
-    fn home_is_not(component: &str) -> bool {
-        std::env::var_os("HOME")
-            .and_then(|h| {
-                std::path::Path::new(&h)
-                    .file_name()
-                    .map(|n| !n.to_string_lossy().eq_ignore_ascii_case(component))
-            })
-            .unwrap_or(false)
-    }
-
     #[test]
     fn quoted_unresolved_word_alone_cannot_be_sed_flag_and_target() {
         assert_decision(r#"sed -n 1,5p "$TMPDIR/x.ts""#, Decision::Allow);
@@ -13506,9 +13507,6 @@ mod tests {
 
     #[test]
     fn tar_extract_into_a_literal_tail_directory_is_allowed() {
-        if !home_is_not("zz-literal-tail") {
-            return;
-        }
         assert_decision(
             r#"tar -x -C "$S/zz-literal-tail" -f a.tar"#,
             Decision::Allow,
@@ -13526,6 +13524,37 @@ mod tests {
             r#"tar -x -C "$S"/zz-literal-tail -f a.tar"#,
             Decision::Allow,
         );
+    }
+
+    #[test]
+    fn role_counting_never_drops_a_target_reached_through_cwd_composition_or_a_plausibility_floor()
+    {
+        // The resolved operand is a target only after a same-line `cd`
+        // composes it, or only via an Ask-only plausibility floor.
+        for command in [
+            r#"cd ~/.config/shguard && sed "$T" config.toml"#,
+            r#"cd ~ && sed "$T" .config/shguard/config.toml"#,
+            r#"pushd ~ && sed "$T" .config/shguard/config.toml"#,
+            r#"cd /etc && sed "$T" crontab"#,
+            r#"cd ~ && sed "$T" ./.bashrc"#,
+            r#"sed "$T" ~/../inouetsukasa/.config/shguard/config.toml"#,
+            r#"sed "$T" ../inouetsukasa/.config/shguard/config.toml"#,
+            r#"sed "$T" ~+/.config/shguard/config.toml"#,
+            r#"sed "$T" ~/../bob/.config/shguard/config.toml"#,
+            r#"env -C ~/.config/shguard sed "$T" config.toml"#,
+            r#"cd "$X" && sed "$T" config.toml"#,
+        ] {
+            let verdict = decide(command);
+            assert_ne!(verdict.decision(), Decision::Allow, "{command:?}");
+        }
+    }
+
+    #[test]
+    fn tar_extract_floor_survives_a_tilde_headed_word() {
+        // S=.. turns `~/"$S"/p` into the Blocked `~/../p`.
+        assert_decision(r#"tar -x -C ~/"$S"/p -f a.tar"#, Decision::Ask);
+        assert_decision(r#"tar -x -C "~/$S/p" -f a.tar"#, Decision::Ask);
+        assert_decision(r#"tar -x -C ~"$S"/p -f a.tar"#, Decision::Ask);
     }
 
     #[test]

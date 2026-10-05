@@ -181,6 +181,9 @@ pub struct NormalizedWord {
     /// Literal text after the last unresolved piece of this word's segment
     /// (`"$S/p"` carries `/p`); see [`Self::literal_tail`].
     literal_tail: Option<String>,
+    /// Whether the literal text before the first unresolved piece starts
+    /// with `~`; see [`Self::literal_head_tilde`].
+    literal_head_tilde: bool,
 }
 
 impl NormalizedWord {
@@ -198,6 +201,7 @@ impl NormalizedWord {
             ifs_derived: false,
             single_word: true,
             literal_tail: None,
+            literal_head_tilde: false,
         }
     }
 
@@ -212,6 +216,7 @@ impl NormalizedWord {
             ifs_derived: true,
             single_word: true,
             literal_tail: None,
+            literal_head_tilde: false,
         }
     }
 
@@ -230,6 +235,7 @@ impl NormalizedWord {
             ifs_derived: false,
             single_word: false,
             literal_tail: None,
+            literal_head_tilde: false,
         }
     }
 
@@ -253,6 +259,7 @@ impl NormalizedWord {
             ifs_derived: false,
             single_word: true,
             literal_tail: None,
+            literal_head_tilde: false,
         }
     }
 
@@ -273,6 +280,7 @@ impl NormalizedWord {
             ifs_derived: true,
             single_word: false,
             literal_tail: None,
+            literal_head_tilde: false,
         }
     }
 
@@ -285,6 +293,7 @@ impl NormalizedWord {
             ifs_derived: true,
             single_word: true,
             literal_tail: None,
+            literal_head_tilde: false,
         }
     }
 
@@ -297,6 +306,25 @@ impl NormalizedWord {
             self.literal_tail = Some(tail.to_string());
         }
         self
+    }
+
+    /// Marks that the literal text before this word's first unresolved
+    /// piece starts with `~`. Production code only calls this from
+    /// [`chunks_to_words`].
+    #[must_use]
+    pub(crate) fn with_literal_head_tilde(mut self, head_tilde: bool) -> Self {
+        self.literal_head_tilde = head_tilde;
+        self
+    }
+
+    /// For an unresolvable word, whether its literal head (text before the
+    /// first unresolved piece) starts with `~`. When it does not, no
+    /// expansion can make the runtime word a tilde form: expansion results
+    /// are never tilde-expanded, so a `~`-anchored matcher cannot see this
+    /// word as home-relative.
+    #[must_use]
+    pub(crate) fn literal_head_tilde(&self) -> bool {
+        self.literal_head_tilde
     }
 
     /// For an unresolvable word, the literal text that ends it (everything
@@ -496,7 +524,7 @@ enum Chunk {
     /// `DoubleQuoted` arm of [`resolve_piece`] and unpacked by
     /// [`chunks_to_words`], so the tail survives the collapse of the
     /// quoted sequence into one chunk.
-    UnresolvableTail(UnresolvableKind, bool, String),
+    UnresolvableTail(UnresolvableKind, bool, String, bool),
 }
 
 /// The shared brace-then-resolve fold for both [`normalize_word`]
@@ -1063,8 +1091,8 @@ fn resolve_piece(piece: &WordPiece, allow_split: bool) -> (Chunk, bool) {
                 }
             }
             match unresolvable {
-                Some((kind, single_word)) if !tail.is_empty() => (
-                    Chunk::UnresolvableTail(kind, single_word, tail),
+                Some((kind, single_word)) if !tail.is_empty() || buf.starts_with('~') => (
+                    Chunk::UnresolvableTail(kind, single_word, tail, buf.starts_with('~')),
                     ifs_derived,
                 ),
                 Some((kind, single_word)) => (Chunk::Unresolvable(kind, single_word), ifs_derived),
@@ -1294,8 +1322,9 @@ fn chunks_to_words(
     allow_split: bool,
 ) -> Vec<NormalizedWord> {
     let mut segments = Vec::new();
-    let mut tails: Vec<String> = Vec::new();
+    let mut tails: Vec<(String, bool)> = Vec::new();
     let mut tail = String::new();
+    let mut head_tilde = false;
     let mut current: Result<(String, bool), (UnresolvableKind, bool)> = Ok((String::new(), false));
     for chunk in chunks {
         // issue #138: a literal chunk containing an embedded NUL byte is
@@ -1303,15 +1332,16 @@ fn chunks_to_words(
         // here on — checked once, here, regardless of which `WordPiece`
         // (raw source text, ANSI-C decoding, …) the byte came from, rather
         // than at each producer individually.
-        let (chunk, own_tail) = match chunk {
+        let (chunk, own_tail, own_head_tilde) = match chunk {
             Chunk::Literal(text, _quoted) if text.contains('\0') => (
                 Chunk::Unresolvable(UnresolvableKind::EmbeddedNul, false),
                 String::new(),
+                false,
             ),
-            Chunk::UnresolvableTail(kind, single_word, own) => {
-                (Chunk::Unresolvable(kind, single_word), own)
+            Chunk::UnresolvableTail(kind, single_word, own, own_head) => {
+                (Chunk::Unresolvable(kind, single_word), own, own_head)
             }
-            other => (other, String::new()),
+            other => (other, String::new(), false),
         };
         match chunk {
             Chunk::Literal(text, quoted) => {
@@ -1325,7 +1355,10 @@ fn chunks_to_words(
             Chunk::Unresolvable(kind, single_word) => {
                 tail = own_tail;
                 current = match current {
-                    Ok(_) => Err((kind, single_word)),
+                    Ok((buf, _)) => {
+                        head_tilde = buf.starts_with('~') || (buf.is_empty() && own_head_tilde);
+                        Err((kind, single_word))
+                    }
                     // Keep the FIRST kind, but AND every chunk's
                     // single_word flag in — one splittable piece anywhere
                     // in the segment revokes the whole segment's guarantee.
@@ -1336,32 +1369,34 @@ fn chunks_to_words(
             }
             Chunk::Split => {
                 segments.push(std::mem::replace(&mut current, Ok((String::new(), false))));
-                tails.push(std::mem::take(&mut tail));
+                tails.push((std::mem::take(&mut tail), std::mem::take(&mut head_tilde)));
             }
             Chunk::UnresolvableTail(..) => unreachable!("normalized to Unresolvable above"),
         }
     }
     segments.push(current);
-    tails.push(tail);
+    tails.push((tail, head_tilde));
 
     segments
         .into_iter()
         .zip(tails)
-        .filter_map(|(segment, tail)| match segment {
+        .filter_map(|(segment, (tail, head_tilde))| match segment {
             // Issue #326: `ifs_derived` must reach an `Unresolvable` segment
             // exactly like it already reaches a `Resolved` one below — a
             // segment doesn't stop being "$IFS was involved here" just
             // because it also contains a chunk that couldn't be resolved.
-            Err((kind, true)) if ifs_derived => Some(
-                NormalizedWord::unresolvable_single_word_ifs_derived(kind).with_literal_tail(&tail),
-            ),
-            Err((kind, true)) => {
-                Some(NormalizedWord::unresolvable_single_word(kind).with_literal_tail(&tail))
+            Err((kind, single_word)) => {
+                let word = match (single_word, ifs_derived) {
+                    (true, true) => NormalizedWord::unresolvable_single_word_ifs_derived(kind),
+                    (true, false) => NormalizedWord::unresolvable_single_word(kind),
+                    (false, true) => NormalizedWord::unresolvable_ifs_derived(kind),
+                    (false, false) => NormalizedWord::unresolvable(kind),
+                };
+                Some(
+                    word.with_literal_tail(&tail)
+                        .with_literal_head_tilde(head_tilde),
+                )
             }
-            Err((kind, false)) if ifs_derived => {
-                Some(NormalizedWord::unresolvable_ifs_derived(kind).with_literal_tail(&tail))
-            }
-            Err((kind, false)) => Some(NormalizedWord::unresolvable(kind).with_literal_tail(&tail)),
             Ok((text, quoted)) if quoted || !text.is_empty() || !allow_split => {
                 Some(if ifs_derived {
                     NormalizedWord::resolved_ifs_derived(text)
