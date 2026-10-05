@@ -317,16 +317,25 @@ targets = [
     # bare `**` differs from `*` above.
     { normalized = "~/*" },
     { normalized = "~/**" },
-    # `~/.*` is bash's dotglob spelling: unlike `~/*`/`~/**` above, it DOES
+    # `~/.*` is a leading-dot glob: unlike `~/*`/`~/**` above, it DOES
     # expand to $HOME's leading-dot entries (`.ssh`, `.aws`, `.gnupg`,
     # `.config/shguard`) even without `shopt -s dotglob`, since a leading
     # `.` in the glob pattern itself always matches a leading-dot name.
-    # `rm -rf` non-interactively wipes every one of them; this is the one
-    # `~/.*` spelling that genuinely reaches shguard's own config directory
-    # (see `self-protect-config-ancestor-rm-tilde`/`-mv-tilde` below, which
-    # is Ask-tier and would otherwise be silently outranked to Allow by
-    # this Block-tier rule not having an entry here at all).
+    # `rm -rf` non-interactively wipes every one of them, and this is the
+    # one `~/*`-family spelling that genuinely reaches shguard's own
+    # config directory (see `self-protect-config-ancestor-rm-tilde`/
+    # `-mv-tilde` below, which are Ask-tier). Without this entry
+    # `rm -rf ~/.*` would only reach those Ask-tier self-protect rules,
+    # weaker than the Block `rm -rf ~/*` already gets. This is the
+    # authoritative explanation of the leading-dot glob family; the
+    # other entries below point back here. The `.[!.]*`/`.??*`/`.[^.]*`/
+    # `.?*` spellings are the "safe" variants that skip `.`/`..` but
+    # still match `.ssh`/`.gnupg`/`.config`, so they delete the same set.
     { normalized = "~/.*" },
+    { normalized = "~/.[!.]*" },
+    { normalized = "~/.??*" },
+    { normalized = "~/.[^.]*" },
+    { normalized = "~/.?*" },
     { normalized = "." },
     # issue #453: `./*` and bare `*` both lexically normalize to
     # `Rel{ascent:0, comps:["*"]}` — a different value from `.`'s
@@ -341,10 +350,15 @@ targets = [
     # its own entry at the same tier — `**`/`./**` both delete the current
     # directory's contents exactly like `*`/`./*` already do.
     { normalized = "**" },
-    # Same dotglob reasoning as `~/.*` above, for the cwd-relative spelling
-    # (`cd ~ && rm -rf .*`): `.*` matches every leading-dot entry in the
+    # Same leading-dot glob reasoning as `~/.*` above, for the cwd-relative
+    # spelling (`cd ~ && rm -rf .*`): `.*` and its `.[!.]*`/`.??*`/
+    # `.[^.]*`/`.?*` siblings match every leading-dot entry in the
     # current directory regardless of `dotglob`.
     { normalized = ".*" },
+    { normalized = ".[!.]*" },
+    { normalized = ".??*" },
+    { normalized = ".[^.]*" },
+    { normalized = ".?*" },
     # ".."/"../" (previously separate `exact` entries) are subsumed by
     # "/"'s pure-ascent widening (issue #65): `{ normalized = "/" }` also
     # matches any token that lexically normalizes to a pure relative
@@ -1330,12 +1344,20 @@ targets = [
     { normalized = "~/*" },
     { normalized = "~/**" },
     # Unlike `~/*`/`~/**` above, `~/.*` IS a genuine config self-protection
-    # claim: it is bash's dotglob spelling, matching leading-dot entries
-    # (including `~/.config/shguard`) even without `shopt -s dotglob`. Also
-    # caught at Block tier by `rm-recursive-force-dangerous-target`'s own
-    # `~/.*` entry when `-f` is present; this Ask-tier entry covers the
-    # flagless `rm -r ~/.*` case that rule does not.
+    # claim (see `rm-recursive-force-dangerous-target`'s `~/.*` entry for
+    # the leading-dot glob rationale). Also caught at Block tier there
+    # when `-f` is present; these Ask-tier entries cover the flagless
+    # `rm -r ~/.*` case that rule does not.
     { normalized = "~/.*" },
+    { normalized = "~/.[!.]*" },
+    { normalized = "~/.??*" },
+    { normalized = "~/.[^.]*" },
+    { normalized = "~/.?*" },
+    # `~/.config/*`/`~/.config/**` expand to the children of `~/.config`,
+    # including `shguard` itself; they normalize to a different value than
+    # `~/.config` so need their own entries.
+    { normalized = "~/.config/*", case_insensitive = true },
+    { normalized = "~/.config/**", case_insensitive = true },
 ]
 
 [[command]]
@@ -1346,9 +1368,16 @@ command = "mv"
 targets = [
     { normalized = "~/.config", case_insensitive = true },
     { normalized = "~" },
-    # Same dotglob reasoning as the sibling rm rule above: `mv ~/.* /tmp`
-    # relocates `~/.config/shguard` just as effectively as `rm` deletes it.
+    # Same leading-dot glob reasoning as the sibling rm rule above:
+    # `mv ~/.* /tmp` relocates `~/.config/shguard` just as effectively as
+    # `rm` deletes it.
     { normalized = "~/.*" },
+    { normalized = "~/.[!.]*" },
+    { normalized = "~/.??*" },
+    { normalized = "~/.[^.]*" },
+    { normalized = "~/.?*" },
+    { normalized = "~/.config/*", case_insensitive = true },
+    { normalized = "~/.config/**", case_insensitive = true },
 ]
 
 # Issue #127: `rsync --delete <src> <dst>` removes every file at `<dst>`
