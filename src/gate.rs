@@ -7632,9 +7632,7 @@ fn is_interpreter_sink(stage: &[NormalizedWord]) -> bool {
 /// Whether short-option cluster token `token` (e.g. `-rf`) includes flag
 /// letter `c`.
 fn short_cluster_contains(token: &str, c: char) -> bool {
-    token
-        .strip_prefix('-')
-        .is_some_and(|rest| !rest.is_empty() && !rest.starts_with('-') && rest.contains(c))
+    crate::rules::short_cluster_letters(token).is_some_and(|rest| rest.contains(c))
 }
 
 /// Whether `token` is `canonical` itself, or a `getopt_long`-style prefix

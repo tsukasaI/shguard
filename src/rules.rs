@@ -256,14 +256,22 @@ fn is_long_option_abbrev(arg: &str, token: &str) -> bool {
     }
 }
 
+/// The body after the leading `-` of a short-option cluster token (`-rf` →
+/// `"rf"`), or `None` for anything that isn't one: a bare `-`, a
+/// `--`-prefixed long option, or a token with no leading `-` at all.
+pub(crate) fn short_cluster_letters(token: &str) -> Option<&str> {
+    token
+        .strip_prefix('-')
+        .filter(|rest| !rest.is_empty() && !rest.starts_with('-'))
+}
+
 /// The characters of a short-option cluster token (`-rf` → `{'r', 'f'}`,
-/// `-r` → `{'r'}`), or an empty set for anything that isn't one: a bare
-/// `-`, a `--`-prefixed long option, or a token with no leading `-` at all.
+/// `-r` → `{'r'}`), or an empty set for anything that isn't one — see
+/// [`short_cluster_letters`].
 fn short_cluster_chars(token: &str) -> HashSet<char> {
-    match token.strip_prefix('-') {
-        Some(rest) if !rest.is_empty() && !rest.starts_with('-') => rest.chars().collect(),
-        _ => HashSet::new(),
-    }
+    short_cluster_letters(token)
+        .map(|rest| rest.chars().collect())
+        .unwrap_or_default()
 }
 
 /// tar-specific single-letter options this crate's rules ever need to see
@@ -4959,10 +4967,7 @@ fn collect_env_split_string_slots(tail: &[NormalizedWord], slots: &mut Vec<Scrip
             .map(|(_, value)| value.to_string())
         {
             Some(value)
-        } else if let Some(cluster) = token
-            .strip_prefix('-')
-            .filter(|rest| !rest.is_empty() && !rest.starts_with('-'))
-        {
+        } else if let Some(cluster) = short_cluster_letters(token) {
             let mut glued = None;
             let mut reached_s = false;
             for (offset, letter) in cluster.char_indices() {
