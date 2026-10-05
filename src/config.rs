@@ -703,9 +703,9 @@ impl Policy {
     /// Scans the embedded blocklist/allowlist too, not just what a user
     /// config contributed — deliberately: no embedded rule uses `url_host`
     /// today (checked `rules/*.toml`), but if a future shipped rule ever
-    /// did mix the two shapes, this repo's own CI running
+    /// did mix the two shapes, a CI job running
     /// `shguard --check-config` against a `shguard init`-scaffolded config
-    /// is exactly what should catch that regression before it ships. A rule
+    /// would be what catches that regression before it ships. A rule
     /// id flagged this way isn't one a caller can act on themselves the
     /// way `--check-config`'s own "replace the old entry" remediation text
     /// assumes (a user can't edit or override an embedded rule — a
