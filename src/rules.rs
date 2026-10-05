@@ -2182,6 +2182,9 @@ pub(crate) struct CommandRule {
     resolve_symlinks: bool,
     value_flags: Vec<ValueFlag>,
     attached_value_flags: Vec<char>,
+    /// Issue #581: when non-empty, the except_targets candidate set is
+    /// restricted to the values of these flags (see [`target_flag_values`]).
+    target_flags: Vec<ValueFlag>,
     deny_message: Option<DenyMessage>,
     /// Whether `required_flags` long options also match their git-style
     /// prefix abbreviations (issue #582). True only for deny/ask rules whose
@@ -2399,6 +2402,10 @@ impl CommandRule {
     /// [`target_candidate`]) as a new candidate — this can newly suppress
     /// a match that would otherwise fire, the same opt-in-loosening
     /// posture `except_targets` itself already has, not an accident.
+    /// A rule's `target_flags` (issue #581) replaces the candidate set
+    /// wholesale: only the values of the named flags are candidates
+    /// (positionals and every other flag's value are not), and a named
+    /// flag with no value fails closed (see [`target_flag_values`]).
     #[must_use]
     fn matches(&self, argv: &[NormalizedWord]) -> bool {
         self.matches_in(argv, None)
@@ -2444,7 +2451,23 @@ impl CommandRule {
             return true;
         }
 
-        let candidates: Vec<&str> = if self.targets.is_empty() {
+        let candidates: Vec<&str> = if !self.target_flags.is_empty() {
+            // Issue #581: only the declared flags' values are candidates.
+            // `None` (a listed flag with no value) fails closed: the rule
+            // keeps firing rather than excepting on a partial candidate set.
+            let Some(values) = target_flag_values(&rest, &self.target_flags, &self.value_flags)
+            else {
+                return true;
+            };
+            // Unlike the other walks, a `..` segment disqualifies a
+            // candidate whether or not it is rooted: a flag value like
+            // `scratch/../../etc/passwd` can textually start with an
+            // excepted prefix yet resolve outside it.
+            if values.iter().any(|v| v.split('/').any(|seg| seg == "..")) {
+                return true;
+            }
+            values
+        } else if self.targets.is_empty() {
             value_flag_free_candidates(&rest, &self.value_flags, &self.attached_value_flags)
         } else {
             rest.iter()
@@ -3527,6 +3550,99 @@ fn value_flag_free_candidates<'a>(
         }
     }
     candidates
+}
+
+/// The except_targets candidate set for a rule declaring `target_flags`
+/// (issue #581): exactly the values of the listed flags, nothing else.
+/// Recognised shapes: `--flag value`, `--flag=value`, a short flag's
+/// separated value (`-f value`), and a short flag's glued value (`-fvalue`,
+/// found via [`attached_value_candidate`]'s cluster scan). A bare `--`
+/// terminator turns recognition off for everything after it, as in
+/// [`value_flag_free_candidates`]. A listed flag that is the last token
+/// (no value follows) returns `None`: the caller must fail closed, since a
+/// value the command may take from elsewhere cannot be proven excepted.
+/// Like [`value_flag_free_candidates`], only reached once the caller has
+/// confirmed no tail token is unresolvable. A flag absent from the command
+/// yields no candidates, which is never "all excepted".
+///
+/// # Limits (the rule author's responsibility)
+///
+/// - Every spelling of the option must be listed: an alias (`--body-file`
+///   and `-F`) that is not listed is invisible, so its value is never
+///   checked and cannot stop the exception.
+/// - No other flag is examined at all: a mode flag that changes what the
+///   command does (`--delete-last`, `--attach`) passes through, so pair the
+///   rule with a separate `deny` for such flags.
+/// - Abbreviated long spellings (`--body-f`, as accepted by `getopt_long`
+///   tools) are not recognised; for such a tool pair the rule with a `deny`
+///   or do not use `target_flags`. Prefix matching is deliberately not
+///   done, since `--body` may be a different real flag.
+/// - `-F=value` is not recognised as an attached form: it is read as the
+///   glued value `=value`, which matches no loadable except alternative, so
+///   the rule fires.
+///
+/// The rule's `value_flags` stop the short-cluster scan: a declared
+/// value-taking letter that precedes a listed letter owns the rest of the
+/// cluster, so no candidate is produced from it.
+fn target_flag_values<'a>(
+    rest: &[&'a str],
+    target_flags: &[ValueFlag],
+    value_flags: &[ValueFlag],
+) -> Option<Vec<&'a str>> {
+    let shorts: Vec<char> = target_flags
+        .iter()
+        .filter_map(|f| match f {
+            ValueFlag::Short(c) => Some(*c),
+            ValueFlag::Long(_) => None,
+        })
+        .collect();
+    let mut values = Vec::new();
+    let mut iter = rest.iter();
+    while let Some(token) = iter.next() {
+        if *token == "--" {
+            break;
+        }
+        if target_flags.iter().any(|f| f.attached_value_token(token)) {
+            if let Some((_, value)) = token.split_once('=') {
+                values.push(value);
+            }
+            continue;
+        }
+        let separated = target_flags.iter().any(|f| f.is_bare(token))
+            || short_cluster_ends_with_declared(token, &shorts, value_flags);
+        if separated {
+            values.push(iter.next().copied()?);
+            continue;
+        }
+        if let Some(value) = attached_value_candidate(token, &shorts, value_flags) {
+            values.push(value);
+        }
+    }
+    Some(values)
+}
+
+/// Whether `token` is a single-dash short cluster (`-sf`) whose final
+/// character is a declared short flag with nothing glued after it, so the
+/// NEXT argv token is that flag's separated value per getopt. Only called
+/// from [`target_flag_values`], after the `--long` and bare forms.
+fn short_cluster_ends_with_declared(
+    token: &str,
+    shorts: &[char],
+    value_flags: &[ValueFlag],
+) -> bool {
+    let Some(cluster) = token.strip_prefix('-') else {
+        return false;
+    };
+    if cluster.starts_with('-') {
+        return false;
+    }
+    // The first declared letter (left to right) owns the rest of the
+    // cluster; it ends the cluster exactly when no value is glued on. A
+    // `value_flags` letter met first owns the rest instead.
+    cluster
+        .char_indices()
+        .find(|(_, c)| shorts.contains(c) || value_flags.contains(&ValueFlag::Short(*c)))
+        .is_some_and(|(i, c)| shorts.contains(&c) && i + c.len_utf8() == cluster.len())
 }
 
 /// `rest_words`, one `bool` per word, marking each word consumed as a
@@ -5286,6 +5402,10 @@ struct CommandRuleDto {
     value_flags: Vec<String>,
     #[serde(default)]
     attached_value_flags: Vec<String>,
+    /// `None` when the key is absent; `Some(vec![])` (an explicit empty
+    /// list) is rejected at load.
+    #[serde(default)]
+    target_flags: Option<Vec<String>>,
     #[serde(default)]
     deny_message: Option<String>,
 }
@@ -5882,6 +6002,48 @@ fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesErr
         ));
     }
 
+    // target_flags (issue #581) replaces the candidate walk wholesale, so it
+    // is only live on the `targets`-empty, `except_targets`-non-empty
+    // branch of CommandRule::matches; anywhere else it would silently do
+    // nothing. It also conflicts with attached_value_flags (whose glued
+    // short values it already covers by listing the short flag itself).
+    let target_flags = match dto.target_flags.as_deref() {
+        None => Vec::new(),
+        Some([]) => {
+            return Err(RulesError::invalid(
+                &dto.id,
+                "target_flags must not be an empty list (omit the key to disable it)",
+            ));
+        }
+        Some(specs) => specs
+            .iter()
+            .map(|spec| {
+                parse_target_flag(spec).map_err(|problem| RulesError::invalid(&dto.id, problem))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    };
+    if !target_flags.is_empty() {
+        if !targets.is_empty() {
+            return Err(RulesError::invalid(
+                &dto.id,
+                "target_flags has no effect when `targets` is non-empty",
+            ));
+        }
+        if except_targets.is_empty() {
+            return Err(RulesError::invalid(
+                &dto.id,
+                "target_flags has no effect without `except_targets`",
+            ));
+        }
+        if !attached_value_flags.is_empty() {
+            return Err(RulesError::invalid(
+                &dto.id,
+                "target_flags and attached_value_flags cannot be combined: list the short flag \
+                 in target_flags, which already recognises its glued value",
+            ));
+        }
+    }
+
     // value_flags narrows two candidate walks, both reachable only when
     // `targets` is empty (module docs on both consumers): the except_targets
     // walk in CommandRule::matches's `targets`-empty branch, and (issue
@@ -5924,6 +6086,7 @@ fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesErr
     if targets.is_empty()
         && !except_targets.is_empty()
         && value_flags.is_empty()
+        && target_flags.is_empty()
         && let Some(unexcepted) = required_tokens.iter().find(|t| {
             candidate_has_unresolved_ascent(t) || !except_targets.iter().any(|e| e.matches(t))
         })
@@ -5971,6 +6134,7 @@ fn convert_command_rule(mut dto: CommandRuleDto) -> Result<CommandRule, RulesErr
         resolve_symlinks,
         value_flags,
         attached_value_flags,
+        target_flags,
         deny_message,
         long_abbrev,
     })
@@ -5988,6 +6152,32 @@ fn reject_resolve_symlinks_on_allow(entry: &CommandRule) -> Result<(), RulesErro
         ));
     }
     Ok(())
+}
+
+/// Parses one `target_flags` TOML entry (issue #581): the flag exactly as
+/// written on the command line, WITH its leading dashes (unlike
+/// `value_flags`), because the key names flags whose values to check, not
+/// flags to skip. `-f` (one ASCII letter) is a short flag; `--name`
+/// (ASCII alphanumeric/hyphen, longer than one character) is a long flag.
+fn parse_target_flag(spec: &str) -> Result<ValueFlag, String> {
+    let invalid = || {
+        format!(
+            "invalid target_flags spec {spec:?}: expected a flag with its leading dashes, \
+             either a single-letter short flag (\"-f\") or a long flag (\"--body-file\")"
+        )
+    };
+    if let Some(name) = spec.strip_prefix("--") {
+        if name.chars().count() < 2 {
+            return Err(invalid());
+        }
+        return ValueFlag::parse(name).map_err(|_| invalid());
+    }
+    match spec.strip_prefix('-') {
+        Some(letter) if letter.chars().count() == 1 => {
+            ValueFlag::parse(letter).map_err(|_| invalid())
+        }
+        _ => Err(invalid()),
+    }
 }
 
 /// Parses one `attached_value_flags` TOML entry: a single ASCII letter
@@ -11784,6 +11974,389 @@ mod tests {
                 ]))
                 .is_none(),
             "known gap: a single-dash attached-value target is not recognised as a candidate"
+        );
+    }
+
+    // ==== target_flags (issue #581): candidates restricted to named flags'
+    // values ====
+
+    fn target_flags_rules(flags: &str) -> Rules {
+        Rules::parse(&format!(
+            r#"
+            [[command]]
+            id = "gh-comment-body-file"
+            reason = "ask unless the body file is under the scratchpad"
+            decision = "ask"
+            command = "gh issue comment"
+            target_flags = {flags}
+            except_targets = [{{ prefix = "/private/tmp/claude-501/" }}]
+        "#
+        ))
+        .unwrap()
+    }
+
+    fn fires(rules: &Rules, words: &[&str]) -> bool {
+        rules.match_command(&argv(words)).is_some()
+    }
+
+    #[test]
+    fn target_flags_ignores_positionals_and_other_flag_values() {
+        let rules = target_flags_rules(r#"["--body-file"]"#);
+        // The issue number and `--repo` value are not candidates, so only
+        // the --body-file value decides.
+        assert!(!fires(
+            &rules,
+            &[
+                "gh",
+                "issue",
+                "comment",
+                "123",
+                "--repo",
+                "o/r",
+                "--body-file",
+                "/private/tmp/claude-501/x.md"
+            ]
+        ));
+        assert!(!fires(
+            &rules,
+            &[
+                "gh",
+                "issue",
+                "comment",
+                "123",
+                "--body-file=/private/tmp/claude-501/x.md"
+            ]
+        ));
+    }
+
+    #[test]
+    fn target_flags_fires_when_flag_value_is_not_excepted() {
+        let rules = target_flags_rules(r#"["--body-file"]"#);
+        assert!(fires(
+            &rules,
+            &[
+                "gh",
+                "issue",
+                "comment",
+                "123",
+                "--body-file",
+                "/etc/passwd"
+            ]
+        ));
+        assert!(fires(
+            &rules,
+            &["gh", "issue", "comment", "123", "--body-file=/etc/passwd"]
+        ));
+        // One excepted and one unexcepted listed-flag value: ALL must be excepted.
+        assert!(fires(
+            &rules,
+            &[
+                "gh",
+                "issue",
+                "comment",
+                "1",
+                "--body-file=/private/tmp/claude-501/a",
+                "--body-file",
+                "/etc/passwd"
+            ]
+        ));
+    }
+
+    #[test]
+    fn target_flags_absent_flag_fails_closed() {
+        let rules = target_flags_rules(r#"["--body-file"]"#);
+        // No listed flag at all: no candidates, never "all excepted".
+        assert!(fires(
+            &rules,
+            &["gh", "issue", "comment", "123", "--body", "hi"]
+        ));
+        assert!(fires(
+            &rules,
+            &["gh", "issue", "comment", "/private/tmp/claude-501/x"]
+        ));
+    }
+
+    #[test]
+    fn target_flags_flag_without_value_fails_closed() {
+        let rules = target_flags_rules(r#"["--body-file"]"#);
+        assert!(fires(
+            &rules,
+            &["gh", "issue", "comment", "123", "--body-file"]
+        ));
+        // A terminator before the flag turns recognition off entirely.
+        assert!(fires(
+            &rules,
+            &[
+                "gh",
+                "issue",
+                "comment",
+                "--",
+                "--body-file=/private/tmp/claude-501/x"
+            ]
+        ));
+    }
+
+    #[test]
+    fn target_flags_unresolved_value_fails_closed() {
+        let rules = target_flags_rules(r#"["--body-file"]"#);
+        let mut words = argv(&["gh", "issue", "comment", "123", "--body-file"]);
+        words.push(NormalizedWord::unresolvable(
+            crate::normalize::UnresolvableKind::ParameterExpansion,
+        ));
+        assert!(rules.match_command(&words).is_some());
+    }
+
+    #[test]
+    fn target_flags_dotdot_candidate_is_never_excepted() {
+        let rules = target_flags_rules(r#"["--body-file"]"#);
+        assert!(fires(
+            &rules,
+            &[
+                "gh",
+                "issue",
+                "comment",
+                "1",
+                "--body-file",
+                "/private/tmp/claude-501/../../etc/passwd"
+            ]
+        ));
+    }
+
+    #[test]
+    fn target_flags_short_flag_forms() {
+        let rules = target_flags_rules(r#"["-F"]"#);
+        let ok = "/private/tmp/claude-501/x";
+        assert!(!fires(&rules, &["gh", "issue", "comment", "1", "-F", ok]));
+        assert!(!fires(
+            &rules,
+            &["gh", "issue", "comment", "1", "-F/private/tmp/claude-501/x"]
+        ));
+        assert!(!fires(&rules, &["gh", "issue", "comment", "1", "-sF", ok]));
+        assert!(fires(
+            &rules,
+            &["gh", "issue", "comment", "1", "-F", "/etc/passwd"]
+        ));
+        assert!(fires(
+            &rules,
+            &["gh", "issue", "comment", "1", "-F/etc/passwd"]
+        ));
+        assert!(fires(&rules, &["gh", "issue", "comment", "1", "-F"]));
+        assert!(fires(&rules, &["gh", "issue", "comment", "1", "-sF"]));
+    }
+
+    fn target_flags_rules_with(flags: &str, value_flags: &str, prefix: &str) -> Rules {
+        Rules::parse(&format!(
+            r#"
+            [[command]]
+            id = "gh-comment-body-file"
+            reason = "ask unless the body file is under the scratchpad"
+            decision = "ask"
+            command = "gh issue comment"
+            target_flags = {flags}
+            value_flags = {value_flags}
+            except_targets = [{{ prefix = "{prefix}" }}]
+        "#
+        ))
+        .unwrap()
+    }
+
+    const SCRATCH_FILE: &str = "/private/tmp/claude-501/x.md";
+
+    // Disclosed limit, not a guarantee: an alias that is not listed is
+    // invisible, so its value never stops the exception.
+    #[test]
+    fn target_flags_unlisted_alias_value_is_invisible_and_can_suppress() {
+        let rules = target_flags_rules(r#"["--body-file"]"#);
+        assert!(!fires(
+            &rules,
+            &[
+                "gh",
+                "issue",
+                "comment",
+                "1",
+                "--body-file",
+                SCRATCH_FILE,
+                "-F",
+                "/etc/passwd"
+            ]
+        ));
+        assert!(!fires(
+            &rules,
+            &[
+                "gh",
+                "issue",
+                "comment",
+                "1",
+                "-F",
+                "/etc/passwd",
+                "--body-file",
+                SCRATCH_FILE
+            ]
+        ));
+        let listed = target_flags_rules(r#"["--body-file", "-F"]"#);
+        assert!(fires(
+            &listed,
+            &[
+                "gh",
+                "issue",
+                "comment",
+                "1",
+                "--body-file",
+                SCRATCH_FILE,
+                "-F",
+                "/etc/passwd"
+            ]
+        ));
+        assert!(fires(
+            &listed,
+            &[
+                "gh",
+                "issue",
+                "comment",
+                "1",
+                "-F",
+                "/etc/passwd",
+                "--body-file",
+                SCRATCH_FILE
+            ]
+        ));
+    }
+
+    // Disclosed limit: no other flag is examined, so a mode flag passes
+    // through; a separate deny rule is the author's job.
+    #[test]
+    fn target_flags_mode_flag_passes_through() {
+        let rules = target_flags_rules(r#"["--body-file"]"#);
+        assert!(!fires(
+            &rules,
+            &[
+                "gh",
+                "issue",
+                "comment",
+                "1",
+                "--delete-last",
+                "--body-file",
+                SCRATCH_FILE
+            ]
+        ));
+    }
+
+    #[test]
+    fn target_flags_empty_attached_value_fails_closed() {
+        let rules = target_flags_rules(r#"["--body-file"]"#);
+        assert!(fires(
+            &rules,
+            &["gh", "issue", "comment", "1", "--body-file="]
+        ));
+    }
+
+    #[test]
+    fn target_flags_flag_followed_by_another_flag_takes_it_as_the_value() {
+        let rules = target_flags_rules(r#"["--body-file"]"#);
+        assert!(fires(
+            &rules,
+            &[
+                "gh",
+                "issue",
+                "comment",
+                "1",
+                "--body-file",
+                "--delete-last"
+            ]
+        ));
+    }
+
+    #[test]
+    fn target_flags_short_equals_form_is_not_recognised_and_fires() {
+        let rules = target_flags_rules(r#"["-F"]"#);
+        assert!(fires(
+            &rules,
+            &[
+                "gh",
+                "issue",
+                "comment",
+                "1",
+                "-F=/private/tmp/claude-501/x.md"
+            ]
+        ));
+    }
+
+    #[test]
+    fn target_flags_value_flags_stop_the_cluster_scan() {
+        let words = [
+            "gh",
+            "issue",
+            "comment",
+            "123",
+            "-Ro/rF/private/tmp/claude-501/x.md",
+        ];
+        let with = target_flags_rules_with(r#"["--body-file", "-F"]"#, r#"["R"]"#, "/private/tmp/");
+        assert!(fires(&with, &words));
+        // Without the declaration the scan mis-splits inside `-R`'s glued
+        // value and manufactures an excepted-looking candidate (disclosed).
+        let without = target_flags_rules(r#"["--body-file", "-F"]"#);
+        assert!(!fires(&without, &words));
+    }
+
+    #[test]
+    fn target_flags_unrooted_dotdot_candidate_is_never_excepted() {
+        let rules = target_flags_rules_with(r#"["--body-file"]"#, "[]", "scratch/");
+        assert!(!fires(
+            &rules,
+            &["gh", "issue", "comment", "1", "--body-file", "scratch/a.md"]
+        ));
+        assert!(fires(
+            &rules,
+            &[
+                "gh",
+                "issue",
+                "comment",
+                "1",
+                "--body-file",
+                "scratch/../../etc/passwd"
+            ]
+        ));
+    }
+
+    #[test]
+    fn target_flags_load_validation() {
+        let reject = |body: &str, needle: &str| {
+            let toml = format!(
+                r#"
+                [[command]]
+                id = "x"
+                reason = "r"
+                decision = "ask"
+                command = "gh"
+                {body}
+            "#
+            );
+            let err = Rules::parse(&toml).unwrap_err().to_string();
+            assert!(err.contains(needle), "{body}: {err}");
+        };
+        let ex = r#"except_targets = [{ prefix = "/p/" }]"#;
+        reject(&format!("target_flags = []\n{ex}"), "empty list");
+        reject(
+            &format!("target_flags = [\"body-file\"]\n{ex}"),
+            "target_flags",
+        );
+        reject(&format!("target_flags = [\"\"]\n{ex}"), "target_flags");
+        reject(&format!("target_flags = [\"-\"]\n{ex}"), "target_flags");
+        reject(&format!("target_flags = [\"--\"]\n{ex}"), "target_flags");
+        reject(&format!("target_flags = [\"--f\"]\n{ex}"), "target_flags");
+        reject(&format!("target_flags = [\"-ab\"]\n{ex}"), "target_flags");
+        reject(&format!("target_flags = [\"--a=b\"]\n{ex}"), "target_flags");
+        reject(
+            "target_flags = [\"--body-file\"]",
+            "without `except_targets`",
+        );
+        reject(
+            &format!("target_flags = [\"--body-file\"]\n{ex}\ntargets = [{{ prefix = \"/\" }}]"),
+            "`targets` is non-empty",
+        );
+        reject(
+            &format!("target_flags = [\"-x\"]\nattached_value_flags = [\"x\"]\n{ex}"),
+            "cannot be combined",
         );
     }
 
