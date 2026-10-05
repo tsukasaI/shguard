@@ -72,16 +72,21 @@
 //!    script string, if statically resolved, recurses through the full
 //!    pipeline exactly like a substitution. `python -c`/`perl -e`/`node -e`
 //!    ("rule 6b") are not shell — this module never introspects non-shell
-//!    code, so their presence is an unconditional Ask floor. `eval` ("rule
+//!    code, so an inline-code flag among the interpreter's own options
+//!    (before its script operand) is an unconditional Ask floor
+//!    ([`possibly_inline_code`]). `eval` ("rule
 //!    6c", issue #120) recurses the same way rule 6a does, but word-joins
 //!    every one of its own arguments into the script first, rather than
 //!    reading a single `-c VALUE` pair. `awk`/`gawk`/`mawk`/`nawk` ("rule
 //!    6d", issue #195) get the same unconditional-Ask, non-introspected
 //!    posture as rule 6b, but their script has no `-c`/`-e`-style flag at
 //!    all — it's the first bare positional operand unless `-f`/`--file`
-//!    supplies it from a file instead ([`scan_for_awk_script`]). Rules 5b,
+//!    supplies it from a file instead ([`scan_for_awk_script`]). `sed`
+//!    ("rule 6e", issue #584) is Allow when its script is proven free of
+//!    `w`/`W`/`r`/`R`/`e` commands and `s///w`/`s///e` flags by a small
+//!    command lexer (`crate::sed_script`), and Ask otherwise. Rules 5b,
 //!    6a, and 6b all locate a flag by scanning argv positionally
-//!    ([`scan_for_flag`]); per issues #71/#53, an `Unresolvable` word at a
+//!    ([`scan_for_flag`], or rule 6b's option-grammar walk); per issues #71/#53, an `Unresolvable` word at a
 //!    scanned position is treated as "might be the flag", never as
 //!    "definitely not" — fail-closed, per plan.md §4.
 //! 7. `$IFS`-derived words ("rule 7") — normalise.rs already folds against
@@ -361,6 +366,7 @@ const DENY_MSG_BARE_VAR: &str =
     "Expand the variable yourself and re-issue the command with the literal path or binary name.";
 const DENY_MSG_INLINE_INTERPRETER: &str = "Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f \
      prog.awk`) — inline interpreter code is never inspected.";
+const DENY_MSG_SED_SCRIPT: &str = "Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected.";
 const DENY_MSG_COMMAND_SUBSTITUTION: &str =
     "Run the substitution first, then call the resulting binary literally.";
 const DENY_MSG_UNRESOLVED_TARGET: &str = "Resolve the target literally so the rule can check it.";
@@ -2314,7 +2320,7 @@ fn evaluate_simple_command(
     alternates: &mut IfsAlternates,
 ) -> Verdict {
     let argv = normalize::normalize_argv(command);
-    let ask_match = rules.match_ask(&argv);
+    let ask_match = rules.match_ask_in(&argv, cwd.symlink_base());
     let has_argument_substitution = has_any_argument_position_substitution(command);
     // Issue #83's allowlist guard (module docs): a substitution living in
     // the command-position word's own non-winning brace alternative is
@@ -3022,8 +3028,8 @@ fn evaluate_simple_command_core(
     // script has no `-c`/`-e`-style flag at all — it's the first bare
     // positional operand unless `-f`/`--file` supplies it from a file
     // instead, so it gets its own position-aware scan
-    // ([`scan_for_awk_script`]) rather than [`inline_code_flag`]'s
-    // presence-only check, but folds into the same floor since awk isn't a
+    // ([`scan_for_awk_script`]) rather than [`possibly_inline_code`]'s
+    // option-grammar scan, but folds into the same floor since awk isn't a
     // shell either: its script text is not parsed here, only recognized as
     // present. Carries its own reason string (rather than a shared `bool`)
     // since the two shapes need different wording.
@@ -3035,14 +3041,12 @@ fn evaluate_simple_command_core(
         // so `name` keeps its version suffix in every message string that
         // follows.
         let base_name = crate::rules::strip_version_suffix(name);
-        if let Some(flag) = inline_code_flag(base_name) {
-            scan_for_flag(rest_words, |s| s == flag)
-                .possibly_found()
-                .then(|| {
-                    "an inline code argument (`-c`/`-e`) to a non-shell interpreter cannot be \
-                     introspected"
-                        .to_string()
-                })
+        if let Some(grammar) = inline_code_grammar(base_name) {
+            possibly_inline_code(grammar, rest_words).then(|| {
+                "an inline code argument (`-c`/`-e`) to a non-shell interpreter cannot be \
+                 introspected"
+                    .to_string()
+            })
         } else if AWK_INTERPRETERS.contains(&base_name) {
             match scan_for_awk_script(rest_words) {
                 AwkScriptPosition::InlineScript => Some(format!(
@@ -3069,6 +3073,31 @@ fn evaluate_simple_command_core(
             None
         }
     });
+
+    // Rule 6e (issue #584): `sed`'s script can write (`w`/`W`/`s///w`), read
+    // (`r`/`R`) and, on GNU, execute (`e`/`s///e`); it floors to Ask unless
+    // [`crate::sed_script::classify`] proves it free of all of them. Folded
+    // into the interpreter-code floor with its own guidance message.
+    let interpreter_code_floor: Option<(String, &'static str)> = interpreter_code_floor
+        .map(|reason| (reason, DENY_MSG_INLINE_INTERPRETER))
+        .or_else(|| {
+            let (name, rest_words) = effective?;
+            let lower_name = crate::rules::fold_command_name(name);
+            SED_NAMES
+                .contains(&crate::rules::strip_version_suffix(&lower_name))
+                .then(|| crate::sed_script::classify(rest_words))
+                .flatten()
+                .map(|why| {
+                    (
+                        format!(
+                            "`{name}`'s script is not proven free of file-write, file-read and \
+                             command-execution commands: {}",
+                            why.describe()
+                        ),
+                        DENY_MSG_SED_SCRIPT,
+                    )
+                })
+        });
 
     // Rule 7: any `$IFS`-derived word floors to Ask on a blocklist miss.
     let ifs_floor = argv.iter().any(NormalizedWord::is_ifs_derived);
@@ -3156,7 +3185,7 @@ fn evaluate_simple_command_core(
             opaque_kind,
         );
     }
-    let toml_match = rules.match_command(&argv);
+    let toml_match = rules.match_command_in(&argv, cwd.symlink_base());
     // Worst-wins with the ordinary blocklist match (mirrors
     // `Rules::match_command`'s own Block-outranks-Ask contract, issue
     // #399): an embedded/user `[[command]]` rule that already matches
@@ -3985,7 +4014,7 @@ struct ExceptFloors<'a> {
 /// configured to `deny`.
 fn fold_floors(
     argv: Vec<NormalizedWord>,
-    interpreter_code_floor: Option<String>,
+    interpreter_code_floor: Option<(String, &'static str)>,
     ifs_floor: bool,
     escalation_floor: Option<(Decision, String)>,
     opaque_kind: Option<UnresolvableKind>,
@@ -4035,8 +4064,8 @@ fn fold_floors(
         .cloned()
         .or_else(|| {
             interpreter_code_floor
-                .is_some()
-                .then(|| DenyMessage::new(DENY_MSG_INLINE_INTERPRETER))
+                .as_ref()
+                .map(|(_, guidance)| DenyMessage::new(*guidance))
         })
         .or_else(|| {
             (except_floors.target.is_some() || except_floors.flags.is_some())
@@ -4050,7 +4079,7 @@ fn fold_floors(
         // specific than "some recursed substitution was worse than Allow".
         .or(substitution_deny_message);
 
-    if let Some(reason) = interpreter_code_floor {
+    if let Some((reason, _)) = interpreter_code_floor {
         decision = decision.max(Decision::Ask);
         reasons.push(reason);
     }
@@ -7320,15 +7349,263 @@ fn is_opaque_unresolvable(kind: UnresolvableKind) -> bool {
     )
 }
 
-/// The inline-code flag a non-shell interpreter accepts (rule 6b), or
+/// Option grammar of a non-shell interpreter, as far as rule 6b needs it to
+/// find the point where option parsing ends (the script operand, `-m`
+/// module, `--`, or `-` for stdin): everything after that point belongs to
+/// the script, not the interpreter. Any resolved option this grammar does not
+/// list is treated as possibly supplying inline code (fail-closed), because
+/// an unknown option that takes a separate value would otherwise let that
+/// value be mistaken for the script operand.
+struct InlineGrammar {
+    /// Short-flag letters that supply inline code.
+    code_chars: &'static str,
+    /// Short-flag letters that take no value.
+    plain_chars: &'static str,
+    /// Short-flag letters whose value is the rest of the word, or the next
+    /// word when nothing follows the letter.
+    value_chars: &'static str,
+    /// Short-flag letters whose value is the rest of the word only.
+    attached_chars: &'static str,
+    /// Short-flag letters whose value is the rest of the word and must be
+    /// non-empty (an empty one is an invalid invocation, kept as Ask).
+    required_attached_chars: &'static str,
+    /// Short-flag letters naming the operand (python's `-m module`):
+    /// everything after belongs to it.
+    operand_chars: &'static str,
+    /// Whether several short flags may share one word (`-Ic`); otherwise the
+    /// first letter alone decides and any leftover is an unknown option.
+    cluster: bool,
+    /// Long options that supply inline code.
+    long_code: &'static [&'static str],
+    /// Long options that take no value.
+    long_plain: &'static [&'static str],
+    /// Long options that take the next word as their value (when not written
+    /// `--name=value`).
+    long_value: &'static [&'static str],
+    /// Prefixes of long options that take no value (`--disable-gems`).
+    long_plain_prefixes: &'static [&'static str],
+}
+
+const PYTHON_GRAMMAR: InlineGrammar = InlineGrammar {
+    code_chars: "c",
+    plain_chars: "BbdEhiIOPqsSuvVxR?",
+    value_chars: "WXQ",
+    attached_chars: "",
+    required_attached_chars: "",
+    operand_chars: "m",
+    cluster: true,
+    long_code: &[],
+    long_plain: &["help", "help-env", "help-xoptions", "help-all", "version"],
+    long_value: &["check-hash-based-pycs"],
+    long_plain_prefixes: &[],
+};
+
+const NODE_GRAMMAR: InlineGrammar = InlineGrammar {
+    code_chars: "ep",
+    plain_chars: "civh",
+    value_chars: "rC",
+    attached_chars: "",
+    required_attached_chars: "",
+    operand_chars: "",
+    cluster: false,
+    long_code: &["eval", "print"],
+    long_plain: &[
+        "check",
+        "interactive",
+        "version",
+        "help",
+        "no-warnings",
+        "no-deprecation",
+        "trace-warnings",
+        "trace-deprecation",
+        "throw-deprecation",
+        "enable-source-maps",
+        "experimental-vm-modules",
+        "experimental-strip-types",
+        "preserve-symlinks",
+        "expose-gc",
+        "use-strict",
+        "inspect",
+        "inspect-brk",
+    ],
+    long_value: &[
+        "require",
+        "import",
+        "loader",
+        "experimental-loader",
+        "input-type",
+        "conditions",
+        "env-file",
+        "title",
+    ],
+    long_plain_prefixes: &[],
+};
+
+const PERL_GRAMMAR: InlineGrammar = InlineGrammar {
+    code_chars: "eE",
+    plain_chars: "acdfglnpsStTuUvwWXh0123456789",
+    value_chars: "I",
+    attached_chars: "xiCDV",
+    required_attached_chars: "MmF",
+    operand_chars: "",
+    cluster: true,
+    long_code: &[],
+    long_plain: &["help", "version"],
+    long_value: &[],
+    long_plain_prefixes: &[],
+};
+
+const RUBY_GRAMMAR: InlineGrammar = InlineGrammar {
+    code_chars: "e",
+    plain_chars: "acdlnpsSvwyhWTK0123456789",
+    value_chars: "IrCXE",
+    attached_chars: "Fxi",
+    required_attached_chars: "",
+    operand_chars: "",
+    cluster: true,
+    long_code: &[],
+    long_plain: &[
+        "verbose",
+        "version",
+        "help",
+        "copyright",
+        "yjit",
+        "jit",
+        "debug",
+    ],
+    long_value: &[],
+    long_plain_prefixes: &["disable-", "enable-"],
+};
+
+const PHP_GRAMMAR: InlineGrammar = InlineGrammar {
+    code_chars: "rBRE",
+    plain_chars: "ahilmnqsvwHe",
+    value_chars: "cdfFtSz",
+    attached_chars: "",
+    required_attached_chars: "",
+    operand_chars: "",
+    cluster: true,
+    long_code: &[],
+    long_plain: &["version", "help", "ini"],
+    long_value: &["rf", "rc", "re", "rz", "ri"],
+    long_plain_prefixes: &[],
+};
+
+const LUA_GRAMMAR: InlineGrammar = InlineGrammar {
+    code_chars: "e",
+    plain_chars: "ivEW",
+    value_chars: "l",
+    attached_chars: "",
+    required_attached_chars: "",
+    operand_chars: "",
+    cluster: false,
+    long_code: &[],
+    long_plain: &[],
+    long_value: &[],
+    long_plain_prefixes: &[],
+};
+
+/// The option grammar of the non-shell interpreter `name` (rule 6b), or
 /// `None` if `name` is not one of the interpreters this module knows about.
-fn inline_code_flag(name: &str) -> Option<&'static str> {
+/// `name` must already be `strip_version_suffix(&fold_command_name(raw))`:
+/// versioned and ABI-suffixed spellings (`python3.12`, `python3.13t`) reach
+/// here as `python`.
+fn inline_code_grammar(name: &str) -> Option<&'static InlineGrammar> {
     match name {
-        "python" | "python3" => Some("-c"),
-        "perl" | "node" => Some("-e"),
+        "python" | "pypy" => Some(&PYTHON_GRAMMAR),
+        "node" | "nodejs" => Some(&NODE_GRAMMAR),
+        "perl" => Some(&PERL_GRAMMAR),
+        "ruby" => Some(&RUBY_GRAMMAR),
+        "php" => Some(&PHP_GRAMMAR),
+        "lua" => Some(&LUA_GRAMMAR),
         _ => None,
     }
 }
+
+/// Whether the remaining words of an interpreter invocation possibly carry
+/// inline code under `grammar` (rule 6b). Scans only the interpreter's own
+/// options: the scan ends, with no inline code, at the first operand (the
+/// script, or `-` for stdin), a `--`, or an operand-taking flag such as
+/// python's `-m`, since every later word is that program's own argument. An
+/// unresolvable word met before that point, or an option the grammar does
+/// not list, counts as possibly inline code (fail-closed): the word might
+/// itself be the flag, or the script operand's position is unknown.
+fn possibly_inline_code(grammar: &InlineGrammar, words: &[NormalizedWord]) -> bool {
+    let mut iter = words.iter();
+    while let Some(word) = iter.next() {
+        let Resolution::Resolved(text) = word.resolution() else {
+            return true;
+        };
+        if text == "--" {
+            return false;
+        }
+        let Some(flags) = text.strip_prefix('-').filter(|rest| !rest.is_empty()) else {
+            return false;
+        };
+        if let Some(long) = flags.strip_prefix('-') {
+            let (name, has_value) = match long.split_once('=') {
+                Some((name, _)) => (name, true),
+                None => (long, false),
+            };
+            if grammar.long_code.contains(&name) {
+                return true;
+            }
+            if has_value
+                || grammar.long_plain.contains(&name)
+                || grammar
+                    .long_plain_prefixes
+                    .iter()
+                    .any(|prefix| name.starts_with(prefix))
+            {
+                continue;
+            }
+            if grammar.long_value.contains(&name) {
+                if let Some(Resolution::Unresolvable(_)) =
+                    iter.next().map(NormalizedWord::resolution)
+                {
+                    return true;
+                }
+                continue;
+            }
+            return true;
+        }
+        for (index, letter) in flags.char_indices() {
+            let rest = &flags[index + letter.len_utf8()..];
+            if grammar.code_chars.contains(letter) {
+                return true;
+            }
+            if grammar.operand_chars.contains(letter) {
+                return false;
+            }
+            if grammar.value_chars.contains(letter) {
+                if rest.is_empty()
+                    && let Some(Resolution::Unresolvable(_)) =
+                        iter.next().map(NormalizedWord::resolution)
+                {
+                    return true;
+                }
+                break;
+            }
+            if grammar.attached_chars.contains(letter) {
+                break;
+            }
+            if grammar.required_attached_chars.contains(letter) {
+                if rest.is_empty() {
+                    return true;
+                }
+                break;
+            }
+            if !grammar.plain_chars.contains(letter) || (!grammar.cluster && !rest.is_empty()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// `sed` command names checked by rule 6e, after case folding and
+/// version-suffix stripping (GNU sed is `gsed` under Homebrew).
+const SED_NAMES: &[&str] = &["sed", "gsed"];
 
 /// Result of [`scan_for_awk_script`]: where awk's script comes from,
 /// relative to its first non-option operand. Mirrors
@@ -7336,8 +7613,8 @@ fn inline_code_flag(name: &str) -> Option<&'static str> {
 /// roles reversed for the `-f`-vs-operand case: finding `-f`/`-E`/`-i`
 /// first means the script is NOT inline (the same unfloored posture this
 /// module already gives a non-shell interpreter's script *file* argument,
-/// e.g. `python3 script.py` — [`inline_code_flag`] returns `None` for that
-/// shape too), while finding a bare operand first means it IS inline code.
+/// e.g. `python3 script.py` — [`possibly_inline_code`] returns `false` for
+/// that shape too), while finding a bare operand first means it IS inline code.
 /// `-e`/`--source` is unlike either: gawk documents it as always supplying
 /// inline program text regardless of what else is on the line, so
 /// [`scan_for_awk_script`] returns [`Self::InlineScriptFlag`] the instant
@@ -8269,6 +8546,19 @@ enum CwdContext {
     Initial,
     Known(String),
     Poisoned,
+}
+
+impl CwdContext {
+    /// The absolute directory a `resolve_symlinks` rule (issue #583)
+    /// resolves relative candidates against: only a `Known` anchor that is
+    /// itself absolute. A `~`-anchored or relative anchor, `Initial` and
+    /// `Poisoned` all yield `None`, so those candidates fail closed.
+    fn symlink_base(&self) -> Option<&str> {
+        match self {
+            Self::Known(anchor) if anchor.starts_with('/') => Some(anchor),
+            _ => None,
+        }
+    }
 }
 
 /// Cap on how many frames issue #210's directory-stack tracking
@@ -12732,18 +13022,108 @@ mod tests {
         assert_decision("node -e 'require(\"fs\").rmSync(\"/\")'", Decision::Ask);
     }
 
-    // Issue #346's own precedent (a versioned shell binary must recurse its
-    // `-c` argument exactly like the unversioned name would) applies
-    // equally to rule 6b's inline-code floor, which previously case-folded
-    // the resolved command name but never stripped a version suffix —
-    // `python3.12 -c '...'` fell through both membership checks straight
-    // to Allow.
+    // A versioned interpreter binary floors exactly like the unversioned name.
     #[test]
     fn versioned_python_dash_c_is_ask_floor() {
         assert_decision(
             "python3.12 -c 'import os; os.system(\"rm -rf /\")'",
             Decision::Ask,
         );
+    }
+
+    #[test]
+    fn abi_and_debug_suffixed_interpreters_are_ask_floor() {
+        for command in [
+            "python3.13t -c 'print(1)'",
+            "python3.12t -c 'print(1)'",
+            "python3.7m -c 'print(1)'",
+            "python3.12-dbg -c 'print(1)'",
+            "python3-dbg -c 'print(1)'",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+    }
+
+    #[test]
+    fn inline_code_flag_sibling_spellings_are_ask_floor() {
+        for command in [
+            "perl -E 'say 1'",
+            "perl -le 'print 1'",
+            "perl -0777ne 'print'",
+            "python3 -Ic 'print(1)'",
+            "python3.12 -uc 'print(1)'",
+            "python3 -W ignore -c 'print(1)'",
+            "node -p '1+1'",
+            "node --eval '1'",
+            "node --eval='1'",
+            "node --print 1",
+            "node -pe 1",
+            "node --require ./x.js -e 1",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+    }
+
+    #[test]
+    fn additional_interpreters_inline_code_is_ask_floor() {
+        for command in [
+            "nodejs -e 1",
+            "pypy3 -c 'print(1)'",
+            "pypy3.10 -c 'print(1)'",
+            "ruby -e 'puts 1'",
+            "ruby3.3 -e 'puts 1'",
+            "ruby -ne 'puts 1'",
+            "ruby -We 'puts 1'",
+            "ruby -Te 'puts 1'",
+            "ruby -Kse 'puts 1'",
+            "perl -de 'print 1'",
+            "perl -pi -e 's/a/b/'",
+            "php8.2 -r 'echo 1;'",
+            "lua5.4 -e 'print(1)'",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+    }
+
+    // Arguments after the script operand belong to the script (issue #577).
+    #[test]
+    fn args_after_script_operand_are_not_inline_code() {
+        for command in [
+            "python3 show.py foo",
+            "python3 show.py \"$p\"",
+            "python3 show.py -c",
+            "python3 -W ignore show.py -c",
+            "python3 -m mod -c",
+            "python3 -- -c",
+            "python3 -u -B show.py -c \"$x\"",
+            "node s.js -e",
+            "node --require ./x.js s.js -e \"$x\"",
+            "node -- -e",
+            "perl s.pl -e",
+            "perl -I lib s.pl -e",
+            "perl -Ilib s.pl -E",
+            "ruby s.rb -e \"$x\"",
+            "php s.php -r \"$x\"",
+            "lua s.lua -e \"$x\"",
+        ] {
+            assert_decision(command, Decision::Allow);
+        }
+    }
+
+    #[test]
+    fn unresolved_or_unknown_option_position_stays_ask() {
+        for command in [
+            "python3 \"$p\"",
+            "python3 -X \"$o\" s.py",
+            "python3 -W \"$o\" s.py",
+            "node --require \"$x\" s.js",
+            "python3 -Z s.py -c",
+            "node --unknown-opt value s.js -e",
+            "perl -M s.pl -e",
+            "python3 $(echo -c) x",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
     }
 
     #[test]
