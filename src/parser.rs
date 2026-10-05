@@ -67,8 +67,10 @@ use crate::ast::{
     MAX_RAW_BRACE_NESTING_DEPTH, MAX_RAW_BRACE_OPEN_COUNT, MAX_RAW_BRACKET_OPENER_COUNT,
     MAX_RAW_COMMAND_SUBST_COUNT, MAX_RAW_EXTENDED_TEST_COUNT, MAX_RAW_LEGACY_ARITH_COUNT,
     MAX_RAW_PARAM_EXPANSION_COUNT, MAX_RAW_PAREN_NESTING_DEPTH, MAX_RAW_PAREN_OPEN_COUNT,
-    MAX_RAW_PROCESS_SUBST_COUNT, Pipeline, ProcessSubstitutionDirection, Redirection, Separator,
-    SimpleCommand, Word, WordPiece,
+    MAX_RAW_PROCESS_SUBST_COUNT, MAX_RAW_STACK_BUDGET, Pipeline, ProcessSubstitutionDirection,
+    Redirection, STACK_COST_BRACE, STACK_COST_BRACKET, STACK_COST_EXTENDED_TEST_OP,
+    STACK_COST_KEYWORD, STACK_COST_LEGACY_ARITH_EXTRA, STACK_COST_PARAM_EXPANSION_EXTRA,
+    STACK_COST_PAREN, Separator, SimpleCommand, Word, WordPiece,
 };
 
 /// Everything that can go wrong converting a raw command string into
@@ -589,6 +591,7 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
     let mut param_expansion_count: usize = 0;
     let mut process_subst_count: usize = 0;
     let mut keyword_count: usize = 0;
+    let mut stack_cost: usize = 0;
     let mut token_start: Option<usize> = None;
     let mut in_extended_test = false;
     let mut extended_test_op_count: usize = 0;
@@ -598,6 +601,7 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
         let prev = i.checked_sub(1).map(|j| bytes[j]);
         match byte {
             b'{' => {
+                add_stack_cost(&mut stack_cost, STACK_COST_BRACE)?;
                 brace_depth += 1;
                 if brace_depth > MAX_RAW_BRACE_NESTING_DEPTH {
                     return Err(ParseError::unsupported(
@@ -620,6 +624,7 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
                 // than a bare brace group, so it has its own, tighter
                 // never-decremented cap, see `MAX_RAW_PARAM_EXPANSION_COUNT`.
                 if prev == Some(b'$') {
+                    add_stack_cost(&mut stack_cost, STACK_COST_PARAM_EXPANSION_EXTRA)?;
                     param_expansion_count += 1;
                     if param_expansion_count > MAX_RAW_PARAM_EXPANSION_COUNT {
                         return Err(ParseError::unsupported(
@@ -630,6 +635,7 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
             }
             b'}' => brace_depth = brace_depth.saturating_sub(1),
             b'(' => {
+                add_stack_cost(&mut stack_cost, STACK_COST_PAREN)?;
                 paren_depth += 1;
                 if paren_depth > MAX_RAW_PAREN_NESTING_DEPTH {
                     return Err(ParseError::unsupported(
@@ -676,6 +682,7 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
             // `$[`, so no scan of `]` is sound, whereas its recursion depth
             // is bounded by the opener count however those are closed.
             b'[' => {
+                add_stack_cost(&mut stack_cost, STACK_COST_BRACKET)?;
                 bracket_count += 1;
                 if bracket_count > MAX_RAW_BRACKET_OPENER_COUNT {
                     return Err(ParseError::unsupported(
@@ -686,6 +693,7 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
                 // resolves to `Ask` anyway, so its own cap costs nothing,
                 // see `MAX_RAW_LEGACY_ARITH_COUNT`.
                 if prev == Some(b'$') {
+                    add_stack_cost(&mut stack_cost, STACK_COST_LEGACY_ARITH_EXTRA)?;
                     legacy_arith_count += 1;
                     if legacy_arith_count > MAX_RAW_LEGACY_ARITH_COUNT {
                         return Err(ParseError::unsupported(
@@ -702,10 +710,14 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
             // position (e.g. inside a quoted operand) — both fine, same
             // "can only overestimate, never underestimate" safety direction
             // as `check_keyword_token`.
-            b'&' if in_extended_test && bytes.get(i + 1) == Some(&b'&') => {
-                check_extended_test_op_count(&mut extended_test_op_count)?;
-            }
-            b'|' if in_extended_test && bytes.get(i + 1) == Some(&b'|') => {
+            // A `[[` token still pending (`[[&&`, no space) has not yet set
+            // `in_extended_test`: that happens in the token block below,
+            // after this match, so look at the pending token here too.
+            b'&' | b'|'
+                if bytes.get(i + 1) == Some(&byte)
+                    && (in_extended_test || token_start.is_some_and(|s| &bytes[s..i] == b"[[")) =>
+            {
+                add_stack_cost(&mut stack_cost, STACK_COST_EXTENDED_TEST_OP)?;
                 check_extended_test_op_count(&mut extended_test_op_count)?;
             }
             _ => {}
@@ -714,7 +726,7 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
         if is_token_boundary(byte) {
             if let Some(start) = token_start.take() {
                 let token = &command[start..i];
-                check_keyword_token(token, &mut keyword_count)?;
+                check_keyword_token(token, &mut keyword_count, &mut stack_cost)?;
                 match token {
                     // Issues #489/#528: tracking is never turned off by a
                     // `]]` token and the count is never reset by a `[[`
@@ -726,6 +738,7 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
                     // sees one region. See `MAX_RAW_EXTENDED_TEST_COUNT`.
                     "[[" => in_extended_test = true,
                     "!" if in_extended_test => {
+                        add_stack_cost(&mut stack_cost, STACK_COST_EXTENDED_TEST_OP)?;
                         check_extended_test_op_count(&mut extended_test_op_count)?;
                     }
                     _ => {}
@@ -737,12 +750,25 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
     }
     if let Some(start) = token_start {
         let token = &command[start..];
-        check_keyword_token(token, &mut keyword_count)?;
+        check_keyword_token(token, &mut keyword_count, &mut stack_cost)?;
         if in_extended_test && token == "!" {
+            add_stack_cost(&mut stack_cost, STACK_COST_EXTENDED_TEST_OP)?;
             check_extended_test_op_count(&mut extended_test_op_count)?;
         }
     }
 
+    Ok(())
+}
+
+/// Adds `cost` to the running combined stack-cost total, rejecting once it
+/// exceeds [`MAX_RAW_STACK_BUDGET`] — see that constant's docs.
+fn add_stack_cost(stack_cost: &mut usize, cost: usize) -> Result<(), ParseError> {
+    *stack_cost += cost;
+    if *stack_cost > MAX_RAW_STACK_BUDGET {
+        return Err(ParseError::unsupported(
+            "combined grammar nesting exceeds the raw stack budget",
+        ));
+    }
     Ok(())
 }
 
@@ -751,8 +777,13 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
 /// Split out of [`reject_excessive_raw_nesting`] only to run once per
 /// completed token and once more for the trailing token at end-of-input,
 /// without duplicating the check-and-increment logic at both call sites.
-fn check_keyword_token(token: &str, keyword_count: &mut usize) -> Result<(), ParseError> {
+fn check_keyword_token(
+    token: &str,
+    keyword_count: &mut usize,
+    stack_cost: &mut usize,
+) -> Result<(), ParseError> {
     if NESTING_KEYWORDS.contains(&token) {
+        add_stack_cost(stack_cost, STACK_COST_KEYWORD)?;
         *keyword_count += 1;
         if *keyword_count > MAX_KEYWORD_NESTING_COUNT {
             return Err(ParseError::unsupported(
@@ -2886,23 +2917,81 @@ mod tests {
         }
     }
 
-    // Every stack-depth cap filled at once, with each closer hidden, nested
-    // in one chain (the shape whose costs add). Run on the test thread's
-    // default 2MiB stack, the tighter of the two shipped budgets: an
-    // overflow aborts the whole test binary, so passing pins the composed
-    // margin the caps' docs claim (measured: debug aborts at 4x the caps).
-    #[test]
-    fn all_stack_depth_caps_filled_at_once_do_not_overflow_the_stack() {
+    // The grammar-level recursions (bare `{` group, bare `(` subshell,
+    // `if`/`case`, `<(`, `[[ !`) share one stack and their depths add, so
+    // the per-opener caps alone do not compose; `MAX_RAW_STACK_BUDGET` does.
+    // Payload spending exactly the budget (330 of 333): the pre-scan admits
+    // it, and it is parsed on the test thread's default 2MiB stack, the
+    // tighter shipped budget (an overflow aborts the whole test binary).
+    fn budget_filling_payload(keyword_unit: &str) -> (String, usize) {
+        let (braces, parens, procs, keywords, bangs) = (10, 8, 4, 8, 10);
+        let cost = braces * STACK_COST_BRACE
+            + (parens + procs) * STACK_COST_PAREN
+            + keywords * STACK_COST_KEYWORD
+            + 2 * STACK_COST_BRACKET
+            + bangs * STACK_COST_EXTENDED_TEST_OP;
         let command = format!(
-            "echo {}{}{}{}{}[[ {}x ]]",
-            "$( ')' ".repeat(MAX_RAW_COMMAND_SUBST_COUNT),
-            "${a/b/'}'".repeat(MAX_RAW_PARAM_EXPANSION_COUNT),
-            "<( ')' ".repeat(MAX_RAW_PROCESS_SUBST_COUNT),
-            "$[".repeat(MAX_RAW_LEGACY_ARITH_COUNT),
-            "if true; then ".repeat(MAX_KEYWORD_NESTING_COUNT),
-            "! ".repeat(MAX_RAW_EXTENDED_TEST_COUNT),
+            "{}{}{}{}[[ {}x ]]",
+            "{ '}'; ".repeat(braces),
+            "( ')'; ".repeat(parens),
+            "cat <( ')'; ".repeat(procs),
+            keyword_unit.repeat(keywords),
+            "! ".repeat(bangs),
         );
-        drop(parse(&command));
+        (command, cost)
+    }
+
+    #[test]
+    fn grammar_composed_payload_at_the_budget_is_admitted_and_does_not_overflow() {
+        for keyword_unit in ["if true; then ", "case x in x) "] {
+            let (command, cost) = budget_filling_payload(keyword_unit);
+            assert!(cost <= MAX_RAW_STACK_BUDGET, "payload cost {cost}");
+            assert!(
+                cost + STACK_COST_BRACE > MAX_RAW_STACK_BUDGET,
+                "not at the budget"
+            );
+            if let Err(ParseError::Unsupported { construct }) = parse(&command) {
+                assert!(
+                    !construct.contains("exceeds the raw"),
+                    "the pre-scan must admit the at-budget payload, got: {construct}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn grammar_composed_payload_one_opener_past_the_budget_is_rejected() {
+        for keyword_unit in ["if true; then ", "case x in x) "] {
+            let (command, _) = budget_filling_payload(keyword_unit);
+            let construct = unsupported_construct(&format!("{{ '}}'; {command}"));
+            assert!(
+                construct.contains("raw stack budget"),
+                "expected the combined stack budget, got: {construct}"
+            );
+        }
+    }
+
+    // `[[&&` with no space: the first `&&` is adjacent to the `[[` token,
+    // which has not yet set `in_extended_test` when the `&` is scanned.
+    #[test]
+    fn extended_test_operator_adjacent_to_the_opener_is_counted() {
+        // cost bookkeeping: stay below the combined stack budget so only the
+        // operator-count cap can fire (64 ops x 5 = 320 + 2 brackets).
+        let command = format!("[[&& {}", "&& ".repeat(MAX_RAW_EXTENDED_TEST_COUNT));
+        let construct = unsupported_construct(&command);
+        assert!(
+            construct.contains("extended-test operator count"),
+            "the adjacent `&&` must count, got: {construct}"
+        );
+        let at_cap = format!("[[&& {}", "&& ".repeat(MAX_RAW_EXTENDED_TEST_COUNT - 1));
+        assert!(
+            !matches!(
+                parse(&at_cap),
+                Err(ParseError::Unsupported { ref construct })
+                    if construct.contains("extended-test operator count")
+            ),
+            "exactly the cap of operators, including the adjacent one, must pass"
+        );
     }
 
     /// Constructed programmatically, bypassing the raw pre-scan

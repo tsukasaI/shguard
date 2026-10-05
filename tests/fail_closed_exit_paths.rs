@@ -843,6 +843,36 @@ fn chained_unclosed_comma_brace_groups_fail_closed_without_a_time_budget_trip() 
     }
 }
 
+/// Grammar-level recursions (bare `{` group, bare `(` subshell, `if`/`case`,
+/// `<(`, `[[ !`) share one stack and add up, so the per-opener caps alone do
+/// not compose: filling every one at once used to abort a debug build
+/// (`run_hook` requires a JSON decision, so an abort fails there). The
+/// combined `MAX_RAW_STACK_BUDGET` (333; weights `{`/`(` 9, keyword 10,
+/// `[` 1, `[[` operator 5) admits this 330-cost payload without an abort and
+/// rejects it once one more `{` is added. The numbers mirror the constants
+/// in `src/ast.rs` (integration tests cannot see the crate-private consts;
+/// the unit tests in `src/parser.rs` pin the same boundary against them).
+#[test]
+fn grammar_composed_payload_at_the_budget_runs_and_one_past_it_is_rejected() {
+    for keyword_unit in ["if true; then ", "case x in x) "] {
+        let payload = format!(
+            "{}{}{}{}[[ {}x ]]",
+            "{ '}'; ".repeat(10),
+            "( ')'; ".repeat(8),
+            "cat <( ')'; ".repeat(4),
+            keyword_unit.repeat(8),
+            "! ".repeat(10),
+        );
+        let output = run_hook(&bash_command(&payload));
+        assert!(
+            !permission_reason(&output).contains("exceeds the raw"),
+            "the at-budget payload must reach the parser, got: {}",
+            permission_reason(&output)
+        );
+        assert_raw_cap_ask(&format!("{{ '}}'; {payload}"), "raw stack budget");
+    }
+}
+
 /// Ordinary scripts stay under every per-opener cap: whatever else the gate
 /// decides about them, the reason must not be a raw-cap rejection.
 #[test]

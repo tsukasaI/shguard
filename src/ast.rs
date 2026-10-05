@@ -191,13 +191,17 @@ pub(crate) const MAX_RAW_PAREN_NESTING_DEPTH: usize = 16;
 ///
 /// Two independent bounds, both against the lowest measured floor:
 ///
-/// - Stack depth, bare brace group with a quoted or escaped closer
-///   (`{'}'`, `{\}`), smallest aborting count with the cap lifted: 580
-///   (debug build, `cargo test`'s 2MiB thread stack, the tighter of the two
-///   budgets this crate ships against; at 2922 in a release build the 2s
-///   time budget trips first). 32 is ~18x below the debug figure.
-///   Parameter expansions recurse much deeper per `{` and are bounded by
-///   the tighter [`MAX_RAW_PARAM_EXPANSION_COUNT`] instead.
+/// - Stack depth. A bare brace *group* with a quoted closer
+///   (`{ '}'; `, one per command position) recurses through the program
+///   grammar and aborts at 115 openers (debug build, `cargo test`'s 2MiB
+///   thread stack, the tighter of the two budgets this crate ships against)
+///   / 403 (release): 32 is only ~3.6x below the debug figure. (A brace
+///   *word* `{'}'` aborts much later, 580 / 2922 with the 2s time budget
+///   tripping first, and is not the binding shape.) Parameter expansions
+///   recurse much deeper per `{` and are bounded by the tighter
+///   [`MAX_RAW_PARAM_EXPANSION_COUNT`] instead. Because grammar-level
+///   recursions of different kinds share one stack, the cap that actually
+///   guarantees the composed margin is [`MAX_RAW_STACK_BUDGET`].
 /// - CPU time: this total is what bounds the number of full-depth unclosed
 ///   comma-ful words that [`MAX_RAW_BRACE_NESTING_DEPTH`]'s per-word depth
 ///   cap lets through, because a quoted `}` resets that depth counter
@@ -290,19 +294,9 @@ pub(crate) const MAX_RAW_PAREN_OPEN_COUNT: usize = 32;
 /// tighter of the two budgets this crate ships against) / 1709 (release).
 /// 16 is ~9x below the debug floor.
 ///
-/// # Composed worst case (all caps at once)
-///
-/// The per-opener recursions nest in one chain, so their costs add. Filling
-/// every stack-depth cap at once ([`MAX_RAW_COMMAND_SUBST_COUNT`],
-/// [`MAX_RAW_PARAM_EXPANSION_COUNT`], [`MAX_RAW_PROCESS_SUBST_COUNT`],
-/// [`MAX_RAW_LEGACY_ARITH_COUNT`], [`MAX_KEYWORD_NESTING_COUNT`] and a
-/// [`MAX_RAW_EXTENDED_TEST_COUNT`] `!` chain, nested in several orders) with
-/// the caps lifted, then scaling the whole payload up: the debug build
-/// aborts at 4x the caps, and the release build does not abort up to 16x.
-/// So the composed margin is >=4x debug, >=16x release; every individual
-/// cap's own margin is 3.3x or more (the tightest being
-/// [`MAX_RAW_EXTENDED_TEST_COUNT`]'s `!` chain). Re-measure the composed
-/// payload, not just each shape alone, before raising any of these caps.
+/// Per-opener caps alone do not compose: every grammar-level recursion
+/// shares one stack and their depths add, which [`MAX_RAW_STACK_BUDGET`]
+/// bounds.
 ///
 /// # Known trade-off
 ///
@@ -321,9 +315,10 @@ pub(crate) const MAX_RAW_COMMAND_SUBST_COUNT: usize = 16;
 ///
 /// Smallest aborting count with the cap lifted, `cat ` + `<( ')' ` (or
 /// `tee ` + `>( ')' `) repeated N times: 122 (debug) / 485 (release). 8 is
-/// ~15x below the debug floor and ~60x below the release one; it also keeps
-/// the composed worst case in [`MAX_RAW_COMMAND_SUBST_COUNT`]'s docs above
-/// 3x. A command with more than 8 process substitutions is rare.
+/// ~15x below the debug floor (the program-grammar `cat <( ')'; ` shape
+/// aborts at the same 122 / 485) and ~60x below the release one. A command
+/// with more than 8 process substitutions is rare. The composed margin is
+/// [`MAX_RAW_STACK_BUDGET`]'s job.
 pub(crate) const MAX_RAW_PROCESS_SUBST_COUNT: usize = 8;
 
 /// Cap on the total count of `$[` openers (legacy arithmetic expansion) in
@@ -393,15 +388,28 @@ pub(crate) const MAX_RAW_BRACKET_OPENER_COUNT: usize = 64;
 /// (`ulimit -s 2048`, matching `cargo test`'s per-test thread budget, the
 /// same target [`MAX_BRACE_NESTING_DEPTH`] is sized against): `case` aborts
 /// there at 99 levels, `if` at 110. This value must clear the 2MiB budget,
-/// not just the main-thread one. 16 sits a
-/// ~6x margin below the lowest 2MiB threshold found (`case`'s 99), still
-/// comfortably exceeding [`MAX_BRACE_NESTING_DEPTH`]'s own ~10x bar; this is
-/// a *count*, not a *depth*, so 16 is also generous headroom over any
+/// not just the main-thread one. 10 sits a
+/// ~10x margin below the lowest 2MiB threshold found (`case`'s 99, 101 in
+/// the grammar-shaped `case x in x) ` probe); this is
+/// a *count*, not a *depth*, so 10 is also generous headroom over any
 /// realistic legitimate use of these keywords. Re-measure both the 8MiB and
 /// 2MiB thresholds before raising this on any `brush-parser` version bump,
 /// same as [`MAX_BRACE_NESTING_DEPTH`].
 ///
-/// # Why 16, not 8 (issue #75)
+/// # Why 10 (CPU time, not stack)
+///
+/// Nested `case x in x) ` backtracks exponentially, and trailing grammar
+/// constructs multiply the cost (`case x in x) `xN, then more groups).
+/// Measured `shguard` end to end, release build / debug build: 12 levels
+/// 0.011s / 0.077s; 14 levels 0.046s / 0.29s; 16 levels 0.099s / 1.06s,
+/// and 16 levels followed by 8 `{ '}'; ` and 8 `( ')'; ` 1.35s / the 2s
+/// watchdog trip (via the library API the detached worker keeps burning CPU
+/// after the verdict). Filling the rest of [`MAX_RAW_STACK_BUDGET`] after
+/// 12 levels costs at most 0.11s / 1.1s, after 10 levels at most
+/// 0.034s / 0.30s. 10 keeps the worst composed shape >=6x under the 2s
+/// budget in both builds, which 12 does not in debug.
+///
+/// # Why not 8 (issue #75)
 ///
 /// `for`/`while`/`until` are now modeled as real [`Command::Compound`]
 /// variants (issue #75) — a single occurrence of one of them no longer
@@ -417,7 +425,7 @@ pub(crate) const MAX_RAW_BRACKET_OPENER_COUNT: usize = 64;
 /// but it does raise the stakes of it: a real, legitimate one-liner chaining
 /// a couple of loops plus an `if` (still unmodeled, still hard-Asks on its
 /// own first use) can now sit closer to this budget than "always Ask
-/// anyway" made it matter before. Doubling to 16 keeps a healthy margin
+/// anyway" made it matter before. The cap was 16 here for that reason (now 10, see above)
 /// under the probed 2MiB-stack abort floor (`case`'s 99) while giving that
 /// realistic multi-loop one-liner — and the quoted-text false-count above —
 /// more headroom than 8 did.
@@ -487,7 +495,7 @@ pub(crate) const MAX_RAW_BRACKET_OPENER_COUNT: usize = 64;
 /// scan-only inputs to this counter — brush-parser itself always parses the
 /// untouched original text — see `strip_raw_line_continuations`'s docs on
 /// why.
-pub(crate) const MAX_KEYWORD_NESTING_COUNT: usize = 16;
+pub(crate) const MAX_KEYWORD_NESTING_COUNT: usize = 10;
 
 /// Cap on the total count of `!`/`&&`/`||` operators `src/parser.rs`'s raw
 /// pre-scan tolerates inside one `[[ ... ]]` extended-test region, enforced
@@ -504,8 +512,8 @@ pub(crate) const MAX_KEYWORD_NESTING_COUNT: usize = 16;
 /// stack) / release build: a `!` chain (`[[ ! ! ! ... x ]]`) 209 / 2052
 /// (parse time); an `&&` chain 18770 / 65821 (drop time, parsing itself
 /// succeeds). 64 is ~3.3x below the tighter debug `!` threshold and ~32x
-/// below the release one; it is also the cap whose margin the composed
-/// worst case is sized around (see [`MAX_RAW_COMMAND_SUBST_COUNT`]'s docs).
+/// below the release one. It composes with the other grammar-level
+/// recursions through [`MAX_RAW_STACK_BUDGET`].
 ///
 /// # Why the count is never reset
 ///
@@ -526,6 +534,73 @@ pub(crate) const MAX_KEYWORD_NESTING_COUNT: usize = 16;
 /// occurrences after its first `[[` (including ones outside any
 /// `[[ ]]`) fails closed to `Ask`.
 pub(crate) const MAX_RAW_EXTENDED_TEST_COUNT: usize = 64;
+
+/// Combined, never-decremented budget over every raw opener whose
+/// recursion shares brush-parser's one parse stack, enforced by
+/// [`crate::parser::reject_excessive_raw_nesting`] in addition to the
+/// per-opener caps. Each opener adds its `STACK_COST_*` weight; the command
+/// is rejected once the running total exceeds this budget.
+///
+/// # Why a combined budget
+///
+/// Per-opener caps bound each recursion alone, but a bare subshell
+/// (`( ')'; `), a bare brace group (`{ '}'; `), `if`/`case`, process
+/// substitution and a `[[ ! ! ... ]]` chain all recurse through the same
+/// grammar, so their depths add: every cap filled at once (`{ '}'; `x32,
+/// `( ')'; `x24, `cat <( ')'; `x8, `if true; then `x16, `[[ ` + `! `x64)
+/// aborts a debug build.
+///
+/// # Weights and budget
+///
+/// A weight is the opener's share of the debug worker stack in permille,
+/// rounded up, from the smallest aborting count with the caps lifted
+/// (debug build, 2MiB stack / release build): bare `{` group 115 / 403 ->
+/// 9; bare `(` subshell 115 / 403 -> 9 (`$(` 151 and `<(` 122 are covered
+/// by it); `if` 113 / 412 -> 10, `case` 101 / 411 -> 10; `[[ !` 208 / 2051
+/// -> 5; `[` (`a[`) 1284 -> 1. `${` (72 closed form) and `$[` (151) recurse
+/// deeper than the `{`/`[` they contain, so they add an extra 5 and 6.
+/// Measured on the grammar shapes, the costs are additive: filling the old
+/// per-opener caps at once summed to 1.00 of the debug stack and aborted
+/// at exactly 1x, and the same payload in a release build aborts at 4.5x.
+/// A budget of 333 permille therefore targets 3x on the debug 2MiB thread.
+/// Measured with every cap lifted, scaling budget-filling payloads (`{ '}'; `
+/// x37, `( ')'; ` x37, `case x in x) ` x33, `[[ ! `x66, and a mix of
+/// `{ '}'; `x10 + `( ')'; `x8 + `cat <( ')'; `x4 + `if true; then `x8 +
+/// `[[ ! `x10) up: the debug build aborts at 3.25x the budget for every one
+/// of them, the release build at 11x or more (`[[ !`: no abort up to 16x).
+/// The per-opener caps alone left the reviewed composed payload at 1.0x
+/// (a debug abort).
+///
+/// # Known trade-off
+///
+/// The budget is a total over the whole command, quoted text included, so
+/// e.g. about 37 `(` bytes, or a mix summing past 333, fail closed to `Ask`
+/// even when nothing is nested. Re-measure the weights (including the
+/// composed payload, not just each shape) on any `brush-parser` bump.
+///
+/// # Time, not just stack
+///
+/// Staying inside the budget does not bound CPU time by itself: nested
+/// `case` backtracks exponentially and trailing constructs multiply it, so
+/// [`MAX_KEYWORD_NESTING_COUNT`] is 10 (see its docs for the curves); the
+/// worst budget-filling shape after 10 `case` levels measured 0.034s
+/// release / 0.30s debug against the 2s watchdog.
+pub(crate) const MAX_RAW_STACK_BUDGET: usize = 333;
+
+/// Stack-cost weights for [`MAX_RAW_STACK_BUDGET`], one per raw opener.
+pub(crate) const STACK_COST_BRACE: usize = 9;
+/// Extra weight a `${` adds on top of [`STACK_COST_BRACE`].
+pub(crate) const STACK_COST_PARAM_EXPANSION_EXTRA: usize = 5;
+/// Weight of a raw `(` (subshell, `$(`, `<(`).
+pub(crate) const STACK_COST_PAREN: usize = 9;
+/// Weight of a raw `[`.
+pub(crate) const STACK_COST_BRACKET: usize = 1;
+/// Extra weight a `$[` adds on top of [`STACK_COST_BRACKET`].
+pub(crate) const STACK_COST_LEGACY_ARITH_EXTRA: usize = 6;
+/// Weight of a nesting keyword (`if`, `while`, `until`, `for`, `case`).
+pub(crate) const STACK_COST_KEYWORD: usize = 10;
+/// Weight of a `!`/`&&`/`||` counted inside an extended test.
+pub(crate) const STACK_COST_EXTENDED_TEST_OP: usize = 5;
 
 /// A separator joining two [`Pipeline`]s in a [`CommandLine`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
