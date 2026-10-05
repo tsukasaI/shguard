@@ -6447,6 +6447,187 @@ fn worst_wins<R>(
     ask
 }
 
+/// The invoking process's `$HOME`, parsed once at policy load into the
+/// lexically normalized absolute path a `~`-anchored rule target's
+/// absolute spelling would take (issue #585). Parse, don't validate: the
+/// only way to get one is [`HomeDir::parse`], which rejects every shape
+/// that would make the derived twin targets over-broad or meaningless
+/// (empty, relative, `~`-anchored, or the filesystem root).
+///
+/// The root is rejected deliberately: a `/`-anchored twin of `~` would be
+/// `/` itself, and every `~/x` twin would become `/x`, so a container with
+/// `HOME=/` would silently turn each home-scoped rule into a root-scoped one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HomeDir {
+    comps: Vec<String>,
+}
+
+/// Why [`HomeDir::parse`] refused a `$HOME` value. Rendered into the
+/// stderr warning `crate::config::Policy::load` prints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HomeDirRejection {
+    Empty,
+    NotAbsolute,
+    Root,
+}
+
+impl std::fmt::Display for HomeDirRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Empty => "it is empty",
+            Self::NotAbsolute => "it is not an absolute path",
+            Self::Root => "it resolves to the filesystem root",
+        })
+    }
+}
+
+impl HomeDir {
+    /// Parses a raw `$HOME` value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HomeDirRejection`] for an empty or whitespace-only value, a
+    /// relative or `~`-anchored one, or one that normalizes to `/`.
+    pub(crate) fn parse(raw: &str) -> Result<Self, HomeDirRejection> {
+        if raw.trim().is_empty() {
+            return Err(HomeDirRejection::Empty);
+        }
+        match lexical_normalize(raw) {
+            PathForm::Abs(comps) if comps.is_empty() => Err(HomeDirRejection::Root),
+            PathForm::Abs(comps) => Ok(Self { comps }),
+            _ => Err(HomeDirRejection::NotAbsolute),
+        }
+    }
+
+    /// The absolute twins of a `~`-anchored target (none for any other
+    /// target shape).
+    fn twins_of(&self, target: &TargetMatcher, fold_case: bool) -> Vec<TargetMatcher> {
+        match target {
+            TargetMatcher::NormalizedExact {
+                strip,
+                target: PathForm::Home(tail),
+                case_insensitive,
+            } => {
+                let comps = self.comps.iter().chain(tail).cloned().collect();
+                vec![TargetMatcher::NormalizedExact {
+                    strip: strip.clone(),
+                    target: PathForm::Abs(comps),
+                    case_insensitive: *case_insensitive || fold_case,
+                }]
+            }
+            TargetMatcher::NormalizedPrefix {
+                strip,
+                canon,
+                case_insensitive,
+            } => {
+                // `canon` is `~` or `~/...` here (`canonical_render` only
+                // yields the anchor followed by a `/`-led tail).
+                let Some(rest) = canon.strip_prefix('~') else {
+                    return Vec::new();
+                };
+                let home = format!("/{}", self.comps.join("/"));
+                let case_insensitive = *case_insensitive || fold_case;
+                if rest.is_empty() {
+                    // A bare `~` prefix matches `~` and everything under
+                    // it. A plain string prefix of the absolute home would
+                    // also match a sibling (`/Users/mebob`), so split it
+                    // into the exact home plus a `/`-bounded prefix.
+                    vec![
+                        TargetMatcher::NormalizedExact {
+                            strip: strip.clone(),
+                            target: PathForm::Abs(self.comps.clone()),
+                            case_insensitive,
+                        },
+                        TargetMatcher::NormalizedPrefix {
+                            strip: strip.clone(),
+                            canon: format!("{home}/"),
+                            case_insensitive,
+                        },
+                    ]
+                } else {
+                    vec![TargetMatcher::NormalizedPrefix {
+                        strip: strip.clone(),
+                        canon: format!("{home}{rest}"),
+                        case_insensitive,
+                    }]
+                }
+            }
+            _ => Vec::new(),
+        }
+    }
+}
+
+/// Appends each `~`-anchored target's `$HOME`-absolute twin to `targets`
+/// (skipping any twin already present).
+fn push_home_twins(targets: &mut Vec<TargetMatcher>, home: &HomeDir, fold_case: bool) {
+    let mut twins: Vec<TargetMatcher> = targets
+        .iter()
+        .flat_map(|target| home.twins_of(target, fold_case))
+        .collect();
+    // A bare `~` target carries no `strip` form for an attached
+    // `-C~`/`--directory=~` (that spelling is left to the tilde floors,
+    // because `~` after `=` may not expand). The absolute home has no such
+    // ambiguity, so it inherits whichever `strip` forms the same rule
+    // already declares for the root target `/`.
+    let has_bare_home = targets.iter().any(|target| {
+        matches!(
+            target,
+            TargetMatcher::NormalizedExact {
+                strip: None,
+                target: PathForm::Home(tail),
+                ..
+            } if tail.is_empty()
+        )
+    });
+    if has_bare_home {
+        for target in targets.iter() {
+            if let TargetMatcher::NormalizedExact {
+                strip: Some(strip),
+                target: PathForm::Abs(root),
+                case_insensitive,
+            } = target
+                && root.is_empty()
+            {
+                twins.push(TargetMatcher::NormalizedExact {
+                    strip: Some(strip.clone()),
+                    target: PathForm::Abs(home.comps.clone()),
+                    case_insensitive: *case_insensitive || fold_case,
+                });
+            }
+        }
+    }
+    for twin in twins {
+        if !targets.contains(&twin) {
+            targets.push(twin);
+        }
+    }
+}
+
+impl Rules {
+    /// Issue #585: for every deny/ask command rule and redirect rule, adds
+    /// the `$HOME`-absolute spelling of each `~`-anchored `normalized`/
+    /// `normalized_prefix` target next to it, so `rm -rf /Users/me` matches
+    /// whatever `rm -rf ~` does. Only ever ADDS matches to a rule that
+    /// already denies or asks, so it can raise a verdict but never lower
+    /// one. Deliberately never touches `except_targets` (a twin there would
+    /// widen a carve-out) and has no counterpart on [`Allowlist`] (a twin
+    /// there would widen an allow).
+    ///
+    /// `fold_case` ORs into each twin's own `case_insensitive` flag, for
+    /// platforms whose default volume treats `/Users/Me` and `/users/me`
+    /// as one directory.
+    #[must_use]
+    pub(crate) fn with_home_twins(mut self, home: &HomeDir, fold_case: bool) -> Self {
+        for rule in self.command_rules.iter_mut().chain(&mut self.ask_rules) {
+            push_home_twins(&mut rule.targets, home, fold_case);
+        }
+        for rule in &mut self.redirect_rules {
+            push_home_twins(&mut rule.targets, home, fold_case);
+        }
+        self
+    }
+}
+
 impl Rules {
     /// Parses `toml` into a validated [`Rules`] set.
     ///

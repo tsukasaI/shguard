@@ -97,7 +97,8 @@ impl PermissionMode {
 }
 
 /// A PreToolUse hook call's context beyond the command itself (issue #468):
-/// `permission_mode`, and, inside a subagent, `agent_id`/`agent_type`.
+/// `permission_mode`, `cwd` (issue #549, resolves relative path targets),
+/// and, inside a subagent, `agent_id`/`agent_type`.
 /// Constructed by `src/adapter.rs` from the hook stdin and passed inward to
 /// [`analyze_with_policy`], which hands it to `sink.append` for the
 /// decision log and — issue #469 — to `policy`'s `ask_outcome` table to
@@ -119,6 +120,7 @@ pub struct HookContext {
     permission_mode: Option<PermissionMode>,
     agent_id: Option<String>,
     agent_type: Option<String>,
+    cwd: Option<String>,
 }
 
 impl HookContext {
@@ -133,7 +135,18 @@ impl HookContext {
             permission_mode,
             agent_id,
             agent_type,
+            cwd: None,
         }
+    }
+
+    /// Attaches the hook payload's `cwd` (issue #549): the directory the
+    /// analyzed command will run in, used to resolve relative path targets.
+    /// Only an absolute value takes effect (see `gate`); anything else
+    /// behaves as if no `cwd` was supplied.
+    #[must_use]
+    pub fn with_cwd(mut self, cwd: Option<String>) -> Self {
+        self.cwd = cwd;
+        self
     }
 
     /// The context for a call with no hook stdin at all (`shguard check`).
@@ -155,6 +168,11 @@ impl HookContext {
     #[must_use]
     pub fn agent_type(&self) -> Option<&str> {
         self.agent_type.as_deref()
+    }
+
+    #[must_use]
+    pub fn cwd(&self) -> Option<&str> {
+        self.cwd.as_deref()
     }
 }
 
@@ -308,8 +326,12 @@ pub fn analyze_with_policy(
     // watchdog thread can't borrow `context` itself.
     let context_owned = context.clone();
     let verdict = watchdog::bounded(move || {
-        let verdict =
-            gate::analyze_with_policy(&command_owned, &policy_owned.rules, &policy_owned.allowlist);
+        let verdict = gate::analyze_with_policy_in_cwd(
+            &command_owned,
+            &policy_owned.rules,
+            &policy_owned.allowlist,
+            context_owned.cwd(),
+        );
         let ask_outcome = policy_owned
             .ask_outcome
             .resolve(context_owned.permission_mode(), context_owned.agent_id());
