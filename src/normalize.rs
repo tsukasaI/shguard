@@ -920,6 +920,22 @@ fn resolve_pieces(pieces: &[WordPiece], allow_split: bool) -> (Vec<Chunk>, bool)
     (chunks, ifs_derived)
 }
 
+/// Whether `$IFS`/`${IFS}` (plain or modified) appears anywhere in the
+/// operand of a [`WordPiece::ModifiedParameterExpansion`].
+fn operand_mentions_ifs(pieces: &[WordPiece]) -> bool {
+    pieces.iter().any(|piece| match piece {
+        WordPiece::ParameterExpansion(name) => name == "IFS",
+        WordPiece::ModifiedParameterExpansion { name, operand } => {
+            name == "IFS" || operand_mentions_ifs(operand)
+        }
+        WordPiece::DoubleQuoted(inner) => operand_mentions_ifs(inner),
+        WordPiece::BraceAlternation(members) => {
+            members.iter().any(|member| operand_mentions_ifs(&member.0))
+        }
+        _ => false,
+    })
+}
+
 /// Resolves one [`WordPiece`] into a single [`Chunk`] (issue #82: never more
 /// or fewer than one — see [`resolve_pieces`]'s docs on why that
 /// correspondence must hold exactly).
@@ -1059,6 +1075,19 @@ fn resolve_piece(piece: &WordPiece, allow_split: bool) -> (Chunk, bool) {
                 name != "@" && !allow_split,
             ),
             false,
+        ),
+        // Issues #578/#580: a modified expansion's value is never computed,
+        // so it is exactly as opaque as a plain `$x` (same kind, same
+        // single-word rule: `"${@:2}"` and `"${a[@]}"` stay multi-word).
+        // `ifs_derived` when the parameter is `IFS` or `$IFS` appears in
+        // the operand, so rule 7's `$IFS`-derived-word floor holds for
+        // `${IFS%x}` and `${x:-$IFS}` too.
+        WordPiece::ModifiedParameterExpansion { name, operand } => (
+            Chunk::Unresolvable(
+                UnresolvableKind::ParameterExpansion,
+                name != "@" && !name.ends_with("[@]") && !allow_split,
+            ),
+            name == "IFS" || operand_mentions_ifs(operand),
         ),
         // Both forms of command substitution carry the same static
         // unknowability; `UnresolvableKind::CommandSubstitution`'s own docs
@@ -1690,6 +1719,33 @@ mod tests {
             Resolution::Resolved(" \t\n".to_string())
         );
         assert!(words[0].is_ifs_derived());
+    }
+
+    // ---- issues #578/#580: modified expansions are opaque words ----
+    #[test]
+    fn modified_expansion_is_unresolvable_and_single_word_only_when_quoted() {
+        let unquoted = first_word_normalized("${x%.ts}");
+        assert_eq!(
+            *unquoted[0].resolution(),
+            Resolution::Unresolvable(UnresolvableKind::ParameterExpansion)
+        );
+        assert!(!unquoted[0].is_single_word());
+        let quoted = first_word_normalized("\"${x%.ts}\"");
+        assert!(quoted[0].is_single_word());
+    }
+
+    #[test]
+    fn quoted_all_positional_and_all_indices_forms_are_not_single_word() {
+        assert!(!first_word_normalized("\"${@:2}\"")[0].is_single_word());
+        assert!(!first_word_normalized("\"${PIPESTATUS[@]}\"")[0].is_single_word());
+        assert!(first_word_normalized("\"${PIPESTATUS[0]}\"")[0].is_single_word());
+    }
+
+    #[test]
+    fn modified_ifs_expansions_are_ifs_derived() {
+        assert!(first_word_normalized("${IFS%x}")[0].is_ifs_derived());
+        assert!(first_word_normalized("${x:-$IFS}")[0].is_ifs_derived());
+        assert!(!first_word_normalized("${x:-y}")[0].is_ifs_derived());
     }
 
     // ---- brace multiplication with a surrounding prefix ----
