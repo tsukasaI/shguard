@@ -1121,6 +1121,83 @@ impl TargetMatcher {
         }
     }
 
+    /// Whether a `-`-leading token (the only kind that can satisfy any
+    /// [`FlagMatcher`]) might ALSO satisfy this target, so that one word
+    /// could fill both the flag role and the target role (issue #579).
+    /// Conservative: `true` for everything except the two shapes proved
+    /// unreachable from a `-` token. A `normalized`/`normalized_prefix`
+    /// target anchored at `/` or `~` (no `strip`) never equals the form of
+    /// a `-`-leading token (`Rel`), except the bare-`/` target, which
+    /// `-x/../..` reaches through the pure-ascent widening in
+    /// [`Self::matches`].
+    fn may_double_as_flag(&self) -> bool {
+        match self {
+            Self::NormalizedExact {
+                strip: None,
+                target: PathForm::Abs(comps),
+                ..
+            } => comps.is_empty(),
+            Self::NormalizedExact {
+                strip: None,
+                target: PathForm::Home(_),
+                ..
+            } => false,
+            Self::NormalizedPrefix {
+                strip: None, canon, ..
+            } => !(canon.starts_with('/') || canon.starts_with('~')),
+            _ => true,
+        }
+    }
+
+    /// Whether a word that ENDS with the literal path component `last`
+    /// (preceded by a literal `/`, see [`literal_tail_component`]) can
+    /// provably never satisfy this target, whatever its unresolved part
+    /// expands to (issue #579). Fail-closed: `false` unless proven.
+    ///
+    /// The proof rests on `last` being the final component of the
+    /// normalized form of any such word (nothing follows it to cancel it,
+    /// and it is neither `.` nor `..`), and on every [`PathForm`] that
+    /// carries a component tail keeping it last. A bare-`~` target also
+    /// admits the tail-ignoring `EscapesHome` widening of [`Self::matches`],
+    /// reachable only by a word that starts with `~`. Expansion results are
+    /// never tilde-expanded, so when the word's literal head does not start
+    /// with `~` (`head_tilde == false`) no expansion can make it a `~` form
+    /// and that target is excluded; otherwise it is kept.
+    fn excluded_by_literal_tail(&self, last: &str, head_tilde: bool) -> bool {
+        match self {
+            Self::NormalizedExact {
+                strip,
+                target,
+                case_insensitive,
+            } => {
+                if strip.as_deref().is_some_and(|s| s.contains('/')) {
+                    return false;
+                }
+                let differs = |t: &str| {
+                    if *case_insensitive {
+                        !t.eq_ignore_ascii_case(last)
+                    } else {
+                        t != last
+                    }
+                };
+                match target {
+                    PathForm::Abs(comps) if comps.is_empty() => true,
+                    PathForm::Abs(comps) | PathForm::Home(comps) if !comps.is_empty() => {
+                        comps.last().is_some_and(|t| differs(t))
+                    }
+                    PathForm::Home(_) => !head_tilde,
+                    _ => false,
+                }
+            }
+            Self::NormalizedBasename { strip, base } => {
+                !strip.as_deref().is_some_and(|s| s.contains('/'))
+                    && last != base.as_str()
+                    && !last.starts_with(&format!("{base}."))
+            }
+            _ => false,
+        }
+    }
+
     fn matches(&self, token: &str) -> bool {
         match self {
             Self::Exact(exact) => token == exact,
@@ -2599,7 +2676,15 @@ impl CommandRule {
     /// blast radius: `sed 's/x/y/' "$file"` — an everyday pattern, not just
     /// an edge case like `$(cat unrelated-script)` — now also floors to
     /// `Ask` regardless of `$file`'s actual value, once `$file` itself is
-    /// unresolvable.
+    /// unresolvable. Since issue #579 this probe itself holds only for an
+    /// UNQUOTED `$file`: a quoted one is a single argv word that cannot be
+    /// both the in-place flag and the target (see
+    /// [`Self::one_word_cannot_fill_flag_and_target`]). End to end, `sed`
+    /// with a quoted unresolved word still reaches `Ask`, but through the
+    /// gate's separate sed-script floor (issue #584), not through this
+    /// probe. Likewise the strict branch no longer fires when every
+    /// unresolved word is provably not a target
+    /// ([`Self::unresolved_word_may_be_target`]).
     ///
     /// Residual gap (not fixed here): a SECOND resolved, non-flag-shaped
     /// operand still defeats this branch, e.g. `sed -f a.sed file $(evil)`
@@ -2613,6 +2698,33 @@ impl CommandRule {
     /// than fold into this narrower fix.
     #[must_use]
     pub(crate) fn matches_except_target(&self, argv: &[NormalizedWord]) -> bool {
+        self.matches_except_target_impl(argv, true, true)
+    }
+
+    /// [`Self::matches_except_target`] for an argv composed against a cwd
+    /// anchor (`cd`, `env -C`): the anchor can be `~` or a directory whose
+    /// children include the home directory, so a bare-`~` target must not
+    /// be pruned by a literal tail (`prune_home = false`, issue #579).
+    #[must_use]
+    pub(crate) fn matches_except_target_composed(&self, argv: &[NormalizedWord]) -> bool {
+        self.matches_except_target_impl(argv, true, false)
+    }
+
+    /// [`Self::matches_except_target`] without role counting or home
+    /// pruning: for a cwd that is entirely unknown, any bare relative
+    /// operand might be a target once the unknown directory is accounted
+    /// for, so a lone unresolved word must keep the floor (issue #579).
+    #[must_use]
+    pub(crate) fn matches_except_target_unknown_cwd(&self, argv: &[NormalizedWord]) -> bool {
+        self.matches_except_target_impl(argv, false, false)
+    }
+
+    fn matches_except_target_impl(
+        &self,
+        argv: &[NormalizedWord],
+        role_counting: bool,
+        prune_home: bool,
+    ) -> bool {
         if self.targets.is_empty() {
             return false;
         }
@@ -2626,13 +2738,23 @@ impl CommandRule {
             return false;
         }
         if self.constraints_match(&rest_words) {
-            return true;
+            return rest_words
+                .iter()
+                .any(|w| self.unresolved_word_may_be_target(w, prune_home));
         }
         if resolved_strings(&rest_words)
             .iter()
             .any(|token| self.matches_targets(token))
         {
             return true;
+        }
+        if role_counting {
+            if self.resolved_token_plausible_target(&rest_words) {
+                return true;
+            }
+            if self.one_word_cannot_fill_flag_and_target(&rest_words) {
+                return false;
+            }
         }
         if rest_words
             .iter()
@@ -2641,6 +2763,71 @@ impl CommandRule {
             return true;
         }
         self.command.matches("sed") && sed_tail_has_at_most_one_resolved_operand(&rest_words)
+    }
+
+    /// Whether `word` is an unresolvable word that might still be this
+    /// rule's target. `false` only when it is one guaranteed word
+    /// ([`NormalizedWord::is_single_word`]: an unquoted expansion can split,
+    /// and an earlier field is then unconstrained) whose literal tail proves
+    /// that no target can match, per
+    /// [`TargetMatcher::excluded_by_literal_tail`] (issue #579).
+    fn unresolved_word_may_be_target(&self, word: &NormalizedWord, prune_home: bool) -> bool {
+        if !matches!(word.resolution(), Resolution::Unresolvable(_)) {
+            return false;
+        }
+        let Some(last) = word
+            .is_single_word()
+            .then(|| word.literal_tail())
+            .flatten()
+            .and_then(literal_tail_component)
+        else {
+            return true;
+        };
+        !self
+            .targets
+            .iter()
+            .all(|t| t.excluded_by_literal_tail(last, word.literal_head_tilde() || !prune_home))
+    }
+
+    /// Whether a resolved token is tied to one of this rule's targets only
+    /// by the Ask-only plausibility floors (ascent-descent, `~user`,
+    /// dirstack). Those floors consult only a rule whose flags already
+    /// match, which is exactly what is missing when an unresolved word may
+    /// hide the flag, so the probe keeps the floor (issue #579). The
+    /// unknown-cwd floor is not folded in (it would match every bare
+    /// filename); the gate runs [`Self::matches_except_target_unknown_cwd`]
+    /// instead when the cwd is `Poisoned`.
+    fn resolved_token_plausible_target(&self, rest_words: &[NormalizedWord]) -> bool {
+        resolved_strings(rest_words).iter().any(|token| {
+            self.targets.iter().any(|t| {
+                t.ascent_descent_plausible(token)
+                    || t.named_user_home_plausible(token)
+                    || t.dirstack_plausible(token)
+            })
+        })
+    }
+
+    /// Role counting (issue #579), for the branches where the flag, the
+    /// target, or both are hidden in unresolved words: with the strict and
+    /// resolved-target branches already failed, the rule can only match if
+    /// one unresolved word supplies the missing flag AND another supplies
+    /// the target. So a lone unresolved word cannot satisfy it, provided
+    /// that word is one guaranteed argv word, the rule needs no
+    /// `required_tokens` (positionals are matched elsewhere), and no target
+    /// can double as a flag ([`TargetMatcher::may_double_as_flag`]).
+    ///
+    /// Callers first check [`Self::resolved_token_plausible_target`].
+    fn one_word_cannot_fill_flag_and_target(&self, rest_words: &[NormalizedWord]) -> bool {
+        let mut unresolved = rest_words
+            .iter()
+            .filter(|w| matches!(w.resolution(), Resolution::Unresolvable(_)));
+        let single_unresolved = match (unresolved.next(), unresolved.next()) {
+            (Some(only), None) => only.is_single_word(),
+            _ => false,
+        };
+        single_unresolved
+            && self.required_tokens.is_empty()
+            && !self.targets.iter().any(TargetMatcher::may_double_as_flag)
     }
 
     /// Same wrapper-unwrap walk as [`Self::matching_rest`], but stopping at
@@ -3311,6 +3498,29 @@ fn sed_tail_has_at_most_one_resolved_operand(rest_words: &[NormalizedWord]) -> b
         .filter(|s| !s.starts_with('-'))
         .count()
         <= 1
+}
+
+/// The final path component of `tail` (the literal text ending an
+/// unresolvable word, [`NormalizedWord::literal_tail`]) when that component
+/// is fully literal: preceded by a `/` inside `tail`, made only of
+/// `[A-Za-z0-9._-]`, not `.`/`..`, with no glob or extglob metacharacter
+/// anywhere in `tail`. Trailing slashes are skipped
+/// (`/p//` yields `p`). `None` when nothing can be proved (`p` alone would
+/// glue onto the unresolved part's own last component, `/..` and `/.` can
+/// cancel or vanish).
+fn literal_tail_component(tail: &str) -> Option<&str> {
+    if tail.contains(['*', '?', '[', '(', '\0']) {
+        return None;
+    }
+    let (idx, last) = tail
+        .split('/')
+        .enumerate()
+        .filter(|(_, comp)| !comp.is_empty())
+        .last()?;
+    let plain = last
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+    (idx >= 1 && plain && last != "." && last != "..").then_some(last)
 }
 
 /// [`CommandRule::matches`]'s except-suppression fail-closed guard (issue
@@ -7140,6 +7350,27 @@ impl Rules {
         argv: &[NormalizedWord],
     ) -> Option<&CommandRule> {
         self.find_command_or_ask_rule(|rule| rule.matches_except_target(argv))
+    }
+
+    /// [`Self::match_command_except_target`] for an argv composed against a
+    /// cwd anchor ([`CommandRule::matches_except_target_composed`]).
+    #[must_use]
+    pub(crate) fn match_command_except_target_composed(
+        &self,
+        argv: &[NormalizedWord],
+    ) -> Option<&CommandRule> {
+        self.find_command_or_ask_rule(|rule| rule.matches_except_target_composed(argv))
+    }
+
+    /// [`Self::match_command_except_target`] for a `Poisoned` cwd, without
+    /// role counting or home pruning
+    /// ([`CommandRule::matches_except_target_unknown_cwd`]).
+    #[must_use]
+    pub(crate) fn match_command_except_target_unknown_cwd(
+        &self,
+        argv: &[NormalizedWord],
+    ) -> Option<&CommandRule> {
+        self.find_command_or_ask_rule(|rule| rule.matches_except_target_unknown_cwd(argv))
     }
 
     /// The first [`CommandRule`] for which [`CommandRule::matches_except_flags`]
@@ -16073,6 +16304,263 @@ mod tests {
         ];
         let rule = rules.match_command_except_flags(&cmd).unwrap();
         assert_eq!(rule.id().as_str(), "git-p4-submit-no-verify");
+    }
+
+    // ==== Issue #579: role counting and literal-tail pruning ====
+
+    fn quoted_unresolved() -> NormalizedWord {
+        NormalizedWord::unresolvable_single_word(
+            crate::normalize::UnresolvableKind::ParameterExpansion,
+        )
+    }
+
+    fn quoted_with_tail(tail: &str) -> NormalizedWord {
+        quoted_unresolved().with_literal_tail(tail)
+    }
+
+    fn synthetic(flags: &str, target: &str) -> Rules {
+        Rules::parse(&format!(
+            r#"
+            [[command]]
+            id = "widget-rule"
+            reason = "synthetic"
+            decision = "ask"
+            command = "widget"
+            {flags}
+            targets = [{target}]
+        "#
+        ))
+        .unwrap()
+    }
+
+    fn except_target_fires(rules: &Rules, words: &[NormalizedWord]) -> bool {
+        let mut cmd = vec![NormalizedWord::resolved("widget")];
+        cmd.extend_from_slice(words);
+        rules
+            .command_rules
+            .iter()
+            .chain(rules.ask_rules.iter())
+            .any(|r| r.matches_except_target(&cmd))
+    }
+
+    #[test]
+    fn literal_tail_component_needs_a_slash_before_a_plain_last_component() {
+        assert_eq!(literal_tail_component("/p"), Some("p"));
+        assert_eq!(literal_tail_component("a/b/p//"), Some("p"));
+        assert_eq!(literal_tail_component("/p/"), Some("p"));
+        for unprovable in [
+            "", "p", "/", "//", "/p/.", "/p/..", "/..", "/.", "/p*", "/p?", "/[p]", "x/p\0",
+        ] {
+            assert_eq!(literal_tail_component(unprovable), None, "{unprovable:?}");
+        }
+    }
+
+    #[test]
+    fn sed_lone_quoted_word_cannot_fill_two_roles() {
+        let rules = Rules::embedded().unwrap();
+        for tail in [&["-n", "1,5p"][..], &["s/x/y/"][..], &[][..]] {
+            let mut cmd = argv(&["sed"]);
+            cmd.extend(argv(tail));
+            cmd.push(quoted_unresolved());
+            assert!(
+                rules.match_command_except_target(&cmd).is_none(),
+                "{tail:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sed_floor_keeps_firing_for_unquoted_two_word_and_resolved_role_shapes() {
+        let rules = Rules::embedded().unwrap();
+        let unquoted =
+            NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::ParameterExpansion);
+        let id = |cmd: &[NormalizedWord]| {
+            rules
+                .match_command_except_target(cmd)
+                .map(|r| r.id().as_str().to_string())
+        };
+        let sed = "self-protect-config-sed-tilde";
+        // unquoted twins
+        let mut cmd = argv(&["sed", "-n", "1,5p"]);
+        cmd.push(unquoted.clone());
+        assert_eq!(id(&cmd).as_deref(), Some(sed));
+        let mut cmd = argv(&["sed"]);
+        cmd.push(unquoted);
+        assert_eq!(id(&cmd).as_deref(), Some(sed));
+        // two quoted words: one flag, one target
+        let mut cmd = argv(&["sed", "-n", "1,5p"]);
+        cmd.extend([quoted_unresolved(), quoted_unresolved()]);
+        assert_eq!(id(&cmd).as_deref(), Some(sed));
+        // attached-value flag spellings, target hidden
+        for flag in ["-i", "-i.bak", "--in-place=.bak"] {
+            let mut cmd = argv(&["sed", flag, "1p"]);
+            cmd.push(quoted_unresolved());
+            assert_eq!(id(&cmd).as_deref(), Some(sed), "{flag}");
+        }
+        // target resolved, flag hidden
+        let mut cmd = argv(&["sed"]);
+        cmd.push(quoted_unresolved());
+        cmd.push(NormalizedWord::resolved("~/.config/shguard/config.toml"));
+        assert_eq!(id(&cmd).as_deref(), Some(sed));
+        // quoted arithmetic is not single_word by construction
+        let mut cmd = argv(&["sed", "-n", "1,5p"]);
+        cmd.push(NormalizedWord::unresolvable(
+            crate::normalize::UnresolvableKind::ArithmeticExpansion,
+        ));
+        assert_eq!(id(&cmd).as_deref(), Some(sed));
+    }
+
+    #[test]
+    fn role_counting_is_skipped_when_a_target_can_double_as_a_flag() {
+        // relative `.` target, bare `/` target (`-x/../..`), a strip target
+        // (`-C/`) and a basename target (`-x/.env`) can all be reached by
+        // a `-`-leading token, so one word may fill both roles.
+        for target in [
+            r#"{ normalized = "." }"#,
+            r#"{ normalized = "/" }"#,
+            r#"{ strip = "-C", normalized = "/" }"#,
+            r#"{ normalized_basename = ".env" }"#,
+        ] {
+            let rules = synthetic(r#"required_flags = ["x"]"#, target);
+            assert!(
+                except_target_fires(&rules, &[quoted_unresolved()]),
+                "{target}"
+            );
+        }
+        // an anchored target without strip cannot
+        let rules = synthetic(r#"required_flags = ["x"]"#, r#"{ normalized = "/etc" }"#);
+        assert!(!except_target_fires(&rules, &[quoted_unresolved()]));
+        let rules = synthetic(
+            r#"required_flags = ["x"]"#,
+            r#"{ normalized_prefix = "/etc/" }"#,
+        );
+        assert!(!except_target_fires(&rules, &[quoted_unresolved()]));
+        // required_tokens disable it
+        let rules = synthetic(
+            r#"required_tokens = ["go"]
+            required_flags = ["x"]"#,
+            r#"{ normalized = "/etc" }"#,
+        );
+        assert!(except_target_fires(&rules, &[quoted_unresolved()]));
+    }
+
+    #[test]
+    fn literal_tail_prunes_only_when_no_target_can_match() {
+        let rules = synthetic(
+            r#"required_flags = ["C"]"#,
+            r#"{ strip = "-C", normalized = "/" }, { normalized = "~" }, { normalized = "/etc/shadow" }"#,
+        );
+        let c = NormalizedWord::resolved("-C");
+        // provably not `/`, `~` or `/etc/shadow`
+        assert!(!except_target_fires(
+            &rules,
+            &[c.clone(), quoted_with_tail("/p")]
+        ));
+        assert!(!except_target_fires(
+            &rules,
+            &[c.clone(), quoted_with_tail("/a/b/p//")]
+        ));
+        // the final component equals a target's own last component
+        assert!(except_target_fires(
+            &rules,
+            &[c.clone(), quoted_with_tail("/shadow")]
+        ));
+        // a literal `~` head can still be the tilde-anchored `~/../p` form
+        let tilde_head = quoted_with_tail("/p").with_literal_head_tilde(true);
+        assert!(except_target_fires(&rules, &[c.clone(), tilde_head]));
+        // no slash before the component, `.`/`..`, glob and extglob
+        // characters, a non-plain component, no tail
+        for tail in [
+            "p", "/p/.", "/p/..", "/..", "/p*", "/", "/@(p)", "/+(p)", "/!(p)", "/p~", "/pé",
+        ] {
+            assert!(
+                except_target_fires(&rules, &[c.clone(), quoted_with_tail(tail)]),
+                "{tail}"
+            );
+        }
+        assert!(except_target_fires(
+            &rules,
+            &[c.clone(), quoted_unresolved()]
+        ));
+        // unquoted: an earlier split field is unconstrained
+        let unquoted =
+            NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::ParameterExpansion)
+                .with_literal_tail("/p");
+        assert!(except_target_fires(&rules, &[c.clone(), unquoted]));
+        // a second unresolved word with no tail keeps the floor
+        assert!(except_target_fires(
+            &rules,
+            &[c.clone(), quoted_with_tail("/p"), quoted_unresolved()]
+        ));
+    }
+
+    #[test]
+    fn role_counting_keeps_the_floor_for_a_plausibility_floor_target() {
+        let rules = synthetic(
+            r#"required_flags = ["x"]"#,
+            r#"{ normalized = "~/.config/x" }"#,
+        );
+        for operand in ["~/../alice/.config/x", "~+/.config/x", "../alice/.config/x"] {
+            assert!(
+                except_target_fires(
+                    &rules,
+                    &[quoted_unresolved(), NormalizedWord::resolved(operand)]
+                ),
+                "{operand}"
+            );
+        }
+        assert!(!except_target_fires(
+            &rules,
+            &[quoted_unresolved(), NormalizedWord::resolved("notes.txt")]
+        ));
+    }
+
+    #[test]
+    fn composed_and_unknown_cwd_probes_never_prune_the_home_target() {
+        let rules = synthetic(r#"required_flags = ["C"]"#, r#"{ normalized = "~" }"#);
+        let mut cmd = vec![NormalizedWord::resolved("widget")];
+        cmd.push(NormalizedWord::resolved("-C"));
+        cmd.push(quoted_with_tail("/p"));
+        let rule = rules
+            .command_rules
+            .iter()
+            .chain(rules.ask_rules.iter())
+            .next()
+            .unwrap();
+        assert!(!rule.matches_except_target(&cmd));
+        assert!(rule.matches_except_target_composed(&cmd));
+        assert!(rule.matches_except_target_unknown_cwd(&cmd));
+    }
+
+    #[test]
+    fn literal_tail_never_prunes_a_prefix_target() {
+        let rules = synthetic(
+            r#"required_flags = ["x"]"#,
+            r#"{ normalized_prefix = "/etc/" }"#,
+        );
+        let x = NormalizedWord::resolved("-x");
+        assert!(except_target_fires(&rules, &[x, quoted_with_tail("/p")]));
+    }
+
+    #[test]
+    fn literal_tail_basename_target_prunes_a_different_final_component() {
+        let rules = synthetic(
+            r#"required_flags = ["x"]"#,
+            r#"{ normalized_basename = ".env" }"#,
+        );
+        let x = NormalizedWord::resolved("-x");
+        assert!(!except_target_fires(
+            &rules,
+            &[x.clone(), quoted_with_tail("/notes")]
+        ));
+        assert!(except_target_fires(
+            &rules,
+            &[x.clone(), quoted_with_tail("/.env")]
+        ));
+        assert!(except_target_fires(
+            &rules,
+            &[x, quoted_with_tail("/.env.local")]
+        ));
     }
 
     #[test]
