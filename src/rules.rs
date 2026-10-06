@@ -3286,14 +3286,13 @@ impl CommandRule {
         let Some(rest_words) = self.matching_rest(argv) else {
             return false;
         };
-        let rest = resolved_strings(&rest_words);
-        self.target_match_candidates(&rest_words, &rest)
-            .iter()
-            .any(|token| {
-                attach_prefixes
-                    .iter()
-                    .any(|prefix| token.strip_prefix(*prefix).is_some_and(reachable))
-            })
+        // Unscoped on purpose: `target_flags` values arrive already split
+        // from their `--flag=` prefix, which `attach_prefixes` needs intact.
+        resolved_strings(&rest_words).iter().any(|token| {
+            attach_prefixes
+                .iter()
+                .any(|prefix| token.strip_prefix(*prefix).is_some_and(reachable))
+        })
     }
 }
 

@@ -102,7 +102,7 @@ All notable changes to this project are documented in this file.
   invocation of its command whenever the payload `cwd` is under that prefix
   (`gh issue create` composes `issue` into `<cwd>/issue`). Scope such a
   rule to the flag it is about with `target_flags`, which accepts `targets`
-  rules from the next release on (see [Unreleased]).
+  rules after 0.8.0 (#622).
 - Fewer spurious Asks from the unresolved-argument floor (#579, PR #609):
   it is skipped when role counting (one quoted word cannot be both a flag
   and a target) or the literal tail of an unresolved word proves no

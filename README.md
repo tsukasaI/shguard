@@ -850,7 +850,9 @@ Here the trust trade-off points the other way: a value passed through an
 unlisted spelling is never tested, so the rule does NOT fire for it. When
 the values can't be read reliably (a listed flag with no value after it, or
 an unresolved word anywhere in the tail), every word is tested, as without
-`target_flags`. A command with none of the listed flags does not match.
+`target_flags`. A command with none of the listed flags does not match. A
+relative value attached with `=` (`--body-file=notes.md`) is not resolved
+against the cwd, so it is only matched as written.
 With `except_targets` as well, the except candidates are the flag values
 that matched `targets`.
 

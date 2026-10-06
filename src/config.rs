@@ -2930,6 +2930,17 @@ mod tests {
                 "{command}"
             );
         }
+        // Disclosed limit: a dash-leading token is never composed, so a
+        // relative value attached with `=` is not resolved against the cwd.
+        assert_eq!(
+            decide(
+                &rules,
+                &allowlist,
+                "gh issue create --title x --body-file=notes.md",
+                Some("/Users/me/dotfiles"),
+            ),
+            Decision::Allow
+        );
     }
 
     #[test]
