@@ -830,10 +830,33 @@ listed letter owns the rest of the cluster.
 - `-F=value` is NOT recognised as an attached form (the glued value would
   be `=value`), so it asks.
 
-`target_flags` needs a non-empty `except_targets` and an
-empty `targets`, cannot be combined with `attached_value_flags`, and an
-empty list or an entry that is not a flag (`"body-file"`, `"--"`, `"-ab"`)
-is a load-time error.
+On a rule with `targets`, `target_flags` scopes the match itself: only the
+listed flags' values are tested against `targets`, so a subcommand or
+another flag's value never counts. That matters because a relative word is
+resolved against the hook payload `cwd` before matching: without
+`target_flags`, the rule below would match `gh issue create ...` whenever
+the cwd is under `/Users/`, since `issue` resolves to `<cwd>/issue`.
+
+```toml
+[[deny]]
+id = "gh-body-file-escape"
+reason = "gh --body-file outside the scratchpad"
+command = "gh"
+target_flags = ["--body-file", "-F"]
+targets = [{ normalized_prefix = "/Users/" }, { normalized_prefix = "/etc/" }]
+```
+
+Here the trust trade-off points the other way: a value passed through an
+unlisted spelling is never tested, so the rule does NOT fire for it. When
+the values can't be read reliably (a listed flag with no value after it, or
+an unresolved word anywhere in the tail), every word is tested, as without
+`target_flags`. A command with none of the listed flags does not match.
+With `except_targets` as well, the except candidates are the flag values
+that matched `targets`.
+
+`target_flags` needs a non-empty `targets` or `except_targets`, cannot be
+combined with `attached_value_flags`, and an empty list or an entry that is
+not a flag (`"body-file"`, `"--"`, `"-ab"`) is a load-time error.
 
 Per-command policy can be scoped to a subcommand sequence: a multi-word
 `command` value matches a leading sequence of positional words, e.g.

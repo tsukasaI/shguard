@@ -544,9 +544,12 @@ fn payload_cwd_context(cwd: Option<&str>) -> CwdContext {
         return CwdContext::Initial;
     };
     match lexical_normalize(cwd) {
-        form @ PathForm::Abs(_) => {
-            render_cwd_anchor(&form).map_or(CwdContext::Initial, CwdContext::Known)
-        }
+        form @ PathForm::Abs(_) => render_cwd_anchor(&form).map_or(CwdContext::Initial, |path| {
+            CwdContext::Known(CwdAnchor {
+                path,
+                origin: AnchorOrigin::Payload,
+            })
+        }),
         _ => CwdContext::Initial,
     }
 }
@@ -8586,9 +8589,10 @@ const OPENSSL_ENC_CIPHER_NAMES: &[&str] = &[
 ///   A hook payload carrying an absolute `cwd` (issue #549) seeds the top
 ///   level as `Known(cwd)` instead, so `Initial` there means "no usable
 ///   payload `cwd`".
-/// - `Known(anchor)`: some earlier `cd`/`pushd` target on this line
-///   resolved to a lexically-certain string — `anchor` is that string,
-///   already normalized (`"/tmp"`, `"~/.config/shguard"`, `"build"`,
+/// - `Known(anchor)`: some earlier `cd`/`pushd` target on this line, or
+///   the hook payload's absolute `cwd` (issue #549), resolved to a
+///   lexically-certain string — `anchor.path` is that string, already
+///   normalized (`"/tmp"`, `"~/.config/shguard"`, `"build"`,
 ///   `"../x"`; see [`render_cwd_anchor`]). Composing a later `Rel`-shaped
 ///   token against it (`anchor + "/" + token`, then ordinary rule matching
 ///   re-normalizes the join from scratch) is lexical CERTAINTY, the same
@@ -8625,19 +8629,55 @@ const OPENSSL_ENC_CIPHER_NAMES: &[&str] = &[
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CwdContext {
     Initial,
-    Known(String),
+    Known(CwdAnchor),
     Poisoned,
 }
 
 impl CwdContext {
+    /// `Known` for an anchor a `cd`/`pushd` on the analyzed line produced.
+    fn on_line(path: String) -> Self {
+        Self::Known(CwdAnchor {
+            path,
+            origin: AnchorOrigin::Line,
+        })
+    }
+
     /// The absolute directory a `resolve_symlinks` rule (issue #583)
     /// resolves relative candidates against: only a `Known` anchor that is
     /// itself absolute. A `~`-anchored or relative anchor, `Initial` and
     /// `Poisoned` all yield `None`, so those candidates fail closed.
     fn symlink_base(&self) -> Option<&str> {
         match self {
-            Self::Known(anchor) if anchor.starts_with('/') => Some(anchor),
+            Self::Known(anchor) if anchor.path.starts_with('/') => Some(&anchor.path),
             _ => None,
+        }
+    }
+}
+
+/// A [`CwdContext::Known`] directory and where it came from. The origin
+/// only shapes reason strings (issue #622): a composed match under the
+/// payload `cwd` must not be blamed on a `cd` the command line never ran.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CwdAnchor {
+    path: String,
+    origin: AnchorOrigin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnchorOrigin {
+    /// The hook payload's absolute `cwd`, untouched by the analyzed line.
+    Payload,
+    /// A `cd`/`pushd` on the analyzed line (possibly relative to the
+    /// payload `cwd`): the visible cause once one has run.
+    Line,
+}
+
+impl CwdAnchor {
+    /// What composed a relative target against this anchor, for a reason.
+    fn describe(&self) -> String {
+        match self.origin {
+            AnchorOrigin::Payload => format!("the hook payload cwd {:?}", self.path),
+            AnchorOrigin::Line => format!("a same-line folded `cd` to {:?}", self.path),
         }
     }
 }
@@ -8917,17 +8957,17 @@ fn resolve_cwd_outcome(current: &CwdContext, outcome: CwdOutcome) -> CwdContext 
     let form = lexical_normalize(&raw_target);
     match &form {
         PathForm::Abs(_) | PathForm::Home(_) => {
-            render_cwd_anchor(&form).map_or(CwdContext::Poisoned, CwdContext::Known)
+            render_cwd_anchor(&form).map_or(CwdContext::Poisoned, CwdContext::on_line)
         }
         PathForm::Rel { .. } => match current {
             CwdContext::Poisoned => CwdContext::Poisoned,
             CwdContext::Initial => {
-                render_cwd_anchor(&form).map_or(CwdContext::Poisoned, CwdContext::Known)
+                render_cwd_anchor(&form).map_or(CwdContext::Poisoned, CwdContext::on_line)
             }
             CwdContext::Known(anchor) => {
-                let composed = format!("{anchor}/{raw_target}");
+                let composed = format!("{}/{raw_target}", anchor.path);
                 let composed_form = lexical_normalize(&composed);
-                render_cwd_anchor(&composed_form).map_or(CwdContext::Poisoned, CwdContext::Known)
+                render_cwd_anchor(&composed_form).map_or(CwdContext::Poisoned, CwdContext::on_line)
             }
         },
         // Unreachable in practice — `cd_directive` already routes every
@@ -9334,12 +9374,11 @@ fn compose_argv_against_cwd(argv: &[NormalizedWord], anchor: &str) -> Vec<Normal
 fn evaluate_composed_cwd(
     argv: &[NormalizedWord],
     redirections: &[Redirection],
-    anchor: &str,
+    anchor: &CwdAnchor,
     rules: &Rules,
 ) -> Option<Verdict> {
-    let composed_argv = compose_argv_against_cwd(argv, anchor);
-    let mut worst =
-        evaluate_composed_argv_match(&composed_argv, argv, "a same-line folded `cd`", rules);
+    let composed_argv = compose_argv_against_cwd(argv, &anchor.path);
+    let mut worst = evaluate_composed_argv_match(&composed_argv, argv, &anchor.describe(), rules);
     if let Some(redirect_verdict) =
         evaluate_composed_cwd_redirects(argv, redirections, anchor, rules)
     {
@@ -9366,9 +9405,11 @@ fn evaluate_composed_cwd(
 /// really does change the shell's own cwd and correctly affects both.
 ///
 /// `describe` names what composed this argv in each verdict's reason
-/// string ("a same-line folded `cd`" vs. issue #209's own per-caller
-/// description) so the two callers' users never see a `cd`-attributed
-/// reason for something a `-C` flag actually caused, or vice versa.
+/// string ([`CwdAnchor::describe`] vs. issue #209's own per-caller
+/// description) so the callers' users never see a `cd`-attributed reason
+/// for something a `-C` flag or the payload `cwd` actually caused. The
+/// reason also names the relative token responsible when one composed
+/// token alone reproduces the match ([`composed_subject`]).
 fn evaluate_composed_argv_match(
     composed_argv: &[NormalizedWord],
     original_argv: &[NormalizedWord],
@@ -9384,8 +9425,13 @@ fn evaluate_composed_argv_match(
     };
 
     if let Some(rule) = rules.match_command(composed_argv) {
+        let subject = composed_subject(composed_argv, original_argv, describe, |probe| {
+            rules
+                .match_command(probe)
+                .is_some_and(|r| r.id() == rule.id())
+        });
         let reason = Reason::new(format!(
-            "{describe} composes a relative target, matching blocklist rule {:?}: {}",
+            "{subject}, matching blocklist rule {:?}: {}",
             rule.id().as_str(),
             rule.reason().as_str()
         ));
@@ -9405,16 +9451,24 @@ fn evaluate_composed_argv_match(
     // argv's own except-target probe cannot see that, and role counting
     // there must not turn the composed target into an Allow.
     if let Some(rule) = rules.match_command_except_target_composed(composed_argv) {
+        let subject = composed_subject(composed_argv, original_argv, describe, |probe| {
+            rules
+                .match_command_except_target_composed(probe)
+                .is_some_and(|r| r.id() == rule.id())
+        });
         let reason = Reason::new(format!(
-            "{describe} composes a relative target, and rule {:?} could not be fully checked because an argument is unresolved: {}",
+            "{subject}, and rule {:?} could not be fully checked because an argument is unresolved: {}",
             rule.id().as_str(),
             rule.reason().as_str()
         ));
         raise(Verdict::ask(reason, original_argv.to_vec()));
     }
     if let Some(rule) = rules.match_ask(composed_argv) {
+        let subject = composed_subject(composed_argv, original_argv, describe, |probe| {
+            rules.match_ask(probe).is_some_and(|r| r.id() == rule.id())
+        });
         let reason = Reason::new(format!(
-            "{describe} composes a relative target, matching user-configured ask rule {:?}: {}",
+            "{subject}, matching user-configured ask rule {:?}: {}",
             rule.id().as_str(),
             rule.reason().as_str()
         ));
@@ -9427,6 +9481,44 @@ fn evaluate_composed_argv_match(
     worst
 }
 
+/// The opening of a composed-match reason: names the relative token
+/// responsible when composing that one token alone (the rest of `original`
+/// left as written) still satisfies `still_matches`, so the user sees which
+/// word was resolved against which anchor (issue #622). Falls back to the
+/// generic `{describe} composes a relative target` when no single token
+/// reproduces the match (two composed tokens needed together) or the two
+/// argvs don't line up index by index. Only runs after a match was found,
+/// so the Allow path never pays for the probes.
+fn composed_subject(
+    composed: &[NormalizedWord],
+    original: &[NormalizedWord],
+    describe: &str,
+    still_matches: impl Fn(&[NormalizedWord]) -> bool,
+) -> String {
+    let token = (composed.len() == original.len())
+        .then(|| {
+            composed
+                .iter()
+                .zip(original)
+                .enumerate()
+                .filter(|(_, (c, o))| c != o)
+                .find_map(|(i, (c, o))| {
+                    let mut probe = original.to_vec();
+                    probe[i] = c.clone();
+                    still_matches(&probe).then_some(o)
+                })
+        })
+        .flatten()
+        .and_then(|word| match word.resolution() {
+            Resolution::Resolved(s) => Some(s),
+            Resolution::Unresolvable(_) => None,
+        });
+    match token {
+        Some(token) => format!("relative target {token:?} resolved against {describe}"),
+        None => format!("{describe} composes a relative target"),
+    }
+}
+
 /// The redirect-target half of [`evaluate_composed_cwd`], factored out so
 /// [`evaluate_compound_command`] (issue #103) can run the exact same check
 /// over a compound command's own attached redirections without needing a
@@ -9436,7 +9528,7 @@ fn evaluate_composed_argv_match(
 fn evaluate_composed_cwd_redirects(
     argv: &[NormalizedWord],
     redirections: &[Redirection],
-    anchor: &str,
+    anchor: &CwdAnchor,
     rules: &Rules,
 ) -> Option<Verdict> {
     let mut worst: Option<Verdict> = None;
@@ -9444,13 +9536,13 @@ fn evaluate_composed_cwd_redirects(
         if !matches!(lexical_normalize(&target), PathForm::Rel { .. }) {
             continue;
         }
-        let composed = format!("{anchor}/{target}");
+        let composed = format!("{}/{target}", anchor.path);
         let Some(rule) = rules.match_redirect_target(&composed) else {
             continue;
         };
         let reason = Reason::new(format!(
-            "a same-line folded `cd` composes a redirect target into {composed:?}, matching \
-             rule {:?}: {}",
+            "{} composes a redirect target {target:?} into {composed:?}, matching rule {:?}: {}",
+            anchor.describe(),
             rule.id().as_str(),
             rule.reason().as_str()
         ));
@@ -9600,7 +9692,7 @@ fn chain_dash_c_targets(
         return None;
     }
     match current {
-        CwdContext::Known(anchor) => Some(anchor),
+        CwdContext::Known(anchor) => Some(anchor.path),
         CwdContext::Initial | CwdContext::Poisoned => None,
     }
 }
@@ -9769,7 +9861,7 @@ fn tar_dashless_leading_cluster_directory(
         }
     }
     let anchor = match current {
-        CwdContext::Known(anchor) => Some(anchor),
+        CwdContext::Known(anchor) => Some(anchor.path),
         CwdContext::Initial | CwdContext::Poisoned => None,
     };
     Some((anchor, consumed))
@@ -9870,7 +9962,7 @@ fn resolve_tar_dash_c(rest: &[NormalizedWord], env: &Env) -> Option<Vec<Normaliz
         if let CwdContext::Known(anchor) = &current {
             let range = &rest[occurrence.after..range_end];
             composed[occurrence.after..range_end]
-                .clone_from_slice(&compose_argv_against_cwd(range, anchor));
+                .clone_from_slice(&compose_argv_against_cwd(range, &anchor.path));
             any_composed = true;
         }
     }

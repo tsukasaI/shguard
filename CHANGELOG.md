@@ -4,6 +4,26 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- `target_flags` now also scopes `targets` (#622): on a rule with
+  `targets`, only the listed flags' values are matched, so a subcommand or
+  title word can no longer be the target, including after it is composed
+  against the hook payload `cwd`. With `except_targets` too, the except
+  candidates are the flag values that matched `targets`. When the values
+  can't be read reliably (a listed flag with no value, an unresolved word in
+  the tail) every word is matched as before; a value passed through an
+  unlisted spelling is never matched, so list every alias. The load-time
+  rule is now "needs `targets` or `except_targets`".
+
+### Fixed
+
+- A relative target composed against a cwd anchor now names the cause
+  (#622): the reason says whether the anchor is the hook payload `cwd` or a
+  same-line `cd` (with its directory), and names the relative token
+  responsible when one token alone produces the match. Payload-`cwd`
+  matches were previously blamed on a nonexistent `cd`.
+
 ## [0.8.0] - 2026-10-05
 
 ### Added
@@ -76,7 +96,13 @@ All notable changes to this project are documented in this file.
   allowlist. An empty, relative, `~`-anchored or root `HOME` is rejected
   with a stderr warning and gets no twins. Commands that spell a protected
   path relative to the payload `cwd` or with the absolute home path now hit
-  the same rules as the `~` and absolute forms.
+  the same rules as the `~` and absolute forms. Upgrade note (#622): every
+  bare word composes, subcommands included, so a rule with absolute-prefix
+  `targets` (`/Users/`, `/opt/`) and no flag scoping now matches any
+  invocation of its command whenever the payload `cwd` is under that prefix
+  (`gh issue create` composes `issue` into `<cwd>/issue`). Scope such a
+  rule to the flag it is about with `target_flags`, which accepts `targets`
+  rules from the next release on (see [Unreleased]).
 - Fewer spurious Asks from the unresolved-argument floor (#579, PR #609):
   it is skipped when role counting (one quoted word cannot be both a flag
   and a target) or the literal tail of an unresolved word proves no
