@@ -2931,15 +2931,44 @@ mod tests {
             );
         }
         // Disclosed limit: a dash-leading token is never composed, so a
-        // relative value attached with `=` is not resolved against the cwd.
+        // relative value attached to its flag is not resolved against the cwd.
+        for command in [
+            "gh issue create --title x --body-file=notes.md",
+            "gh issue create --title x -Fnotes.md",
+        ] {
+            assert_eq!(
+                decide(&rules, &allowlist, command, Some("/Users/me/dotfiles")),
+                Decision::Allow,
+                "{command}"
+            );
+        }
+        // An unresolved title decides the same under any cwd.
+        let titled = "gh pr create --title \"$T\" --body-file /private/tmp/claude-501/b.md";
         assert_eq!(
-            decide(
-                &rules,
-                &allowlist,
-                "gh issue create --title x --body-file=notes.md",
-                Some("/Users/me/dotfiles"),
+            decide(&rules, &allowlist, titled, Some("/Users/me/dotfiles")),
+            decide(&rules, &allowlist, titled, Some("/tmp")),
+        );
+    }
+
+    #[test]
+    fn composed_reason_probing_is_bounded_on_long_argvs() {
+        let (rules, allowlist) = gh_body_file_escape(r#"target_flags = ["--body-file", "-F"]"#);
+        let padding: Vec<String> = (0..200).map(|i| format!("f{i}")).collect();
+        let command = format!("gh issue create {} --body-file notes.md", padding.join(" "));
+        let verdict = crate::gate::analyze_with_policy_in_cwd(
+            &command,
+            &rules,
+            &allowlist,
+            Some("/Users/me/dotfiles"),
+            crate::parse_command,
+        );
+        assert_eq!(verdict.decision(), Decision::Block);
+        let reason = verdict.reason().unwrap().as_str();
+        assert!(
+            reason.starts_with(
+                "the hook payload cwd \"/Users/me/dotfiles\" composes a relative target"
             ),
-            Decision::Allow
+            "{reason}"
         );
     }
 

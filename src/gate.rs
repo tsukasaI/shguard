@@ -9481,6 +9481,14 @@ fn evaluate_composed_argv_match(
     worst
 }
 
+/// Bounds on [`composed_subject`]'s probing: each probe re-runs a full
+/// rule match, so an unbounded loop is quadratic in argv length, and a
+/// padded command could push a rule's own Block past the evaluation
+/// watchdog into its generic Ask. Past either bound the reason falls back
+/// to the generic wording; the verdict itself never depends on probing.
+const MAX_SUBJECT_PROBE_ARGV: usize = 64;
+const MAX_SUBJECT_PROBES: usize = 16;
+
 /// The opening of a composed-match reason: names the relative token
 /// responsible when composing that one token alone (the rest of `original`
 /// left as written) still satisfies `still_matches`, so the user sees which
@@ -9495,17 +9503,20 @@ fn composed_subject(
     describe: &str,
     still_matches: impl Fn(&[NormalizedWord]) -> bool,
 ) -> String {
-    let token = (composed.len() == original.len())
+    let token = (composed.len() == original.len() && original.len() <= MAX_SUBJECT_PROBE_ARGV)
         .then(|| {
+            let mut probe = original.to_vec();
             composed
                 .iter()
                 .zip(original)
                 .enumerate()
                 .filter(|(_, (c, o))| c != o)
+                .take(MAX_SUBJECT_PROBES)
                 .find_map(|(i, (c, o))| {
-                    let mut probe = original.to_vec();
                     probe[i] = c.clone();
-                    still_matches(&probe).then_some(o)
+                    let hit = still_matches(&probe);
+                    probe[i] = o.clone();
+                    hit.then_some(o)
                 })
         })
         .flatten()

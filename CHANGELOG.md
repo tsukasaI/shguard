@@ -10,11 +10,12 @@ All notable changes to this project are documented in this file.
   `targets`, only the listed flags' values are matched, so a subcommand or
   title word can no longer be the target, including after it is composed
   against the hook payload `cwd`. With `except_targets` too, the except
-  candidates are the flag values that matched `targets`. When the values
-  can't be read reliably (a listed flag with no value, an unresolved word in
-  the tail) every word is matched as before; a value passed through an
-  unlisted spelling is never matched, so list every alias. The load-time
-  rule is now "needs `targets` or `except_targets`".
+  candidates are the flag values that matched `targets`. The value walk
+  reads past `--` and tests a glued `-F=value` as `value` too; an unresolved
+  flag value is left to the unresolved-argument floor (Ask), and a value
+  passed through an unlisted spelling is never matched, so list every
+  alias. The load-time rule is now "needs `targets` or `except_targets`",
+  and a `strip` target cannot be combined with `target_flags`.
 
 ### Fixed
 

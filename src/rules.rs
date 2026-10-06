@@ -1111,6 +1111,15 @@ fn is_home_container_dir(component: &str) -> bool {
 }
 
 impl TargetMatcher {
+    fn has_strip(&self) -> bool {
+        matches!(
+            self,
+            Self::NormalizedExact { strip: Some(_), .. }
+                | Self::NormalizedPrefix { strip: Some(_), .. }
+                | Self::NormalizedBasename { strip: Some(_), .. }
+        )
+    }
+
     fn except_target_shape(&self) -> ExceptTargetShape {
         match self {
             Self::UrlHost(_) => ExceptTargetShape::UrlHost,
@@ -2484,10 +2493,11 @@ impl CommandRule {
     /// A rule's `target_flags` (issue #581) replaces the candidate set
     /// wholesale: only the values of the named flags are candidates
     /// (positionals and every other flag's value are not), and a named
-    /// flag with no value fails closed (see [`target_flag_values`]). With
-    /// a non-empty `targets` (issue #622) it scopes the `targets` match
-    /// itself too ([`Self::target_match_candidates`]), and the except
-    /// candidates are the flag values that matched `targets`.
+    /// flag with no value keeps the except from applying (see
+    /// [`target_flag_values`]). With a non-empty `targets` (issue #622) it
+    /// scopes the `targets` match itself too
+    /// ([`Self::target_match_candidates`]), and the except candidates are
+    /// the flag values that matched `targets`.
     #[must_use]
     fn matches(&self, argv: &[NormalizedWord]) -> bool {
         self.matches_in(argv, None)
@@ -2517,7 +2527,7 @@ impl CommandRule {
         let matched = if self.targets.is_empty() {
             true
         } else {
-            self.target_match_candidates(&rest_words, &rest)
+            self.target_match_candidates(&rest_words)
                 .iter()
                 .any(|token| self.matches_targets(token))
         };
@@ -2588,33 +2598,21 @@ impl CommandRule {
     }
 
     /// The resolved tail tokens this rule's `targets` are tested against
-    /// (issue #622). Every token in `rest` without `target_flags`; with it,
-    /// only the listed flags' values ([`target_flag_values`]), so a
-    /// subcommand or another flag's value can never be the target. That
-    /// matters most once a relative word is composed against a cwd anchor
-    /// (`gh issue` under a payload cwd of `/Users/me` becomes
-    /// `/Users/me/issue`).
-    ///
-    /// Falls back to every token in `rest` (the unscoped walk) when the
-    /// flag values can't be read reliably: an unresolvable tail word can
-    /// hide a listed flag or shift which token follows it, and a listed
-    /// flag with no value ([`target_flag_values`]'s `None`) leaves the
-    /// target unknown. A listed flag that is simply absent yields no
-    /// candidates, so the rule does not match.
-    fn target_match_candidates<'a>(
-        &self,
-        rest_words: &[NormalizedWord],
-        rest: &[&'a str],
-    ) -> Vec<&'a str> {
-        if self.target_flags.is_empty()
-            || rest_words
-                .iter()
-                .any(|w| matches!(w.resolution(), Resolution::Unresolvable(_)))
-        {
-            return rest.to_vec();
+    /// (issue #622): every resolved tail token without `target_flags`; with
+    /// it, only the listed flags' readable values
+    /// ([`target_flag_match_values`]), so a subcommand or another flag's
+    /// value can never be the target. That matters most once a relative
+    /// word is composed against a cwd anchor (`gh issue` under a payload
+    /// cwd of `/Users/me` becomes `/Users/me/issue`). A value this walk
+    /// cannot read (unresolvable, or missing) is left to the
+    /// unresolved-argument floor ([`Self::matches_except_target`]), which
+    /// asks rather than matching an unrelated word.
+    fn target_match_candidates<'a>(&self, rest_words: &'a [NormalizedWord]) -> Vec<&'a str> {
+        if self.target_flags.is_empty() {
+            resolved_strings(rest_words)
+        } else {
+            target_flag_match_values(rest_words, &self.target_flags, &self.value_flags)
         }
-        target_flag_values(rest, &self.target_flags, &self.value_flags)
-            .unwrap_or_else(|| rest.to_vec())
     }
 
     /// Partial-match probe for the structural gate (plan.md §4 NEW rule,
@@ -2786,7 +2784,8 @@ impl CommandRule {
                 .iter()
                 .any(|w| self.unresolved_word_may_be_target(w, prune_home));
         }
-        if resolved_strings(&rest_words)
+        if self
+            .target_match_candidates(&rest_words)
             .iter()
             .any(|token| self.matches_targets(token))
         {
@@ -3131,7 +3130,7 @@ impl CommandRule {
         let Some(rest_words) = self.matching_rest(argv) else {
             return false;
         };
-        self.target_match_candidates(&rest_words, &resolved_strings(&rest_words))
+        self.target_match_candidates(&rest_words)
             .iter()
             .any(|token| self.targets.iter().any(|t| plausible(t, token)))
     }
@@ -3808,10 +3807,9 @@ fn value_flag_free_candidates<'a>(
     candidates
 }
 
-/// The candidate set for a rule declaring `target_flags`: exactly the
-/// values of the listed flags, nothing else. It scopes `except_targets`
-/// (issue #581) and, when the rule has `targets`, the `targets` match too
-/// (issue #622, [`CommandRule::target_match_candidates`]).
+/// The except_targets candidate set for a rule declaring `target_flags`
+/// (issue #581): exactly the values of the listed flags, nothing else. The
+/// `targets` match of such a rule uses [`target_flag_match_values`].
 /// Recognised shapes: `--flag value`, `--flag=value`, a short flag's
 /// separated value (`-f value`), and a short flag's glued value (`-fvalue`,
 /// found via [`attached_value_candidate`]'s cluster scan). A bare `--`
@@ -3835,9 +3833,6 @@ fn value_flag_free_candidates<'a>(
 ///   tools) are not recognised; for such a tool pair the rule with a `deny`
 ///   or do not use `target_flags`. Prefix matching is deliberately not
 ///   done, since `--body` may be a different real flag.
-/// - On a `targets` rule (issue #622) every such miss is a missed match,
-///   not a fail-closed one: a value passed through an unlisted spelling is
-///   never tested against `targets`, so the rule does not fire.
 /// - `-F=value` is not recognised as an attached form: it is read as the
 ///   glued value `=value`, which matches no loadable except alternative, so
 ///   the rule fires.
@@ -3880,6 +3875,68 @@ fn target_flag_values<'a>(
         }
     }
     Some(values)
+}
+
+/// The `targets` candidate set for a rule declaring `target_flags` (issue
+/// #622): the readable values of the listed flags, in the shapes
+/// [`target_flag_values`] recognises. Built to over-collect, since a value
+/// missed here is a missed match rather than a missed exception:
+///
+/// - A short flag's glued `=value` (`-F=/etc/passwd`, which pflag-based
+///   tools such as `gh` read as `/etc/passwd`) yields both `=value` and
+///   `value`.
+/// - A bare `--` does not stop the walk: not every tool honours it.
+/// - An unresolvable word yields nothing, and a listed flag followed by
+///   one (or by nothing) consumes it without a value. The word stays in
+///   the argv, so the unresolved-argument floor
+///   ([`CommandRule::matches_except_target`]) still asks.
+///
+/// A value passed through an unlisted spelling or an abbreviated long
+/// flag is never tested, so the rule does not fire for it: the author must
+/// list every spelling.
+fn target_flag_match_values<'a>(
+    rest_words: &'a [NormalizedWord],
+    target_flags: &[ValueFlag],
+    value_flags: &[ValueFlag],
+) -> Vec<&'a str> {
+    let shorts: Vec<char> = target_flags
+        .iter()
+        .filter_map(|f| match f {
+            ValueFlag::Short(c) => Some(*c),
+            ValueFlag::Long(_) => None,
+        })
+        .collect();
+    let mut values = Vec::new();
+    let mut iter = rest_words.iter().map(|w| match w.resolution() {
+        Resolution::Resolved(s) => Some(s.as_str()),
+        Resolution::Unresolvable(_) => None,
+    });
+    while let Some(token) = iter.next() {
+        let Some(token) = token else {
+            continue;
+        };
+        if target_flags.iter().any(|f| f.attached_value_token(token)) {
+            if let Some((_, value)) = token.split_once('=') {
+                values.push(value);
+            }
+            continue;
+        }
+        if target_flags.iter().any(|f| f.is_bare(token))
+            || short_cluster_ends_with_declared(token, &shorts, value_flags)
+        {
+            if let Some(Some(value)) = iter.next() {
+                values.push(value);
+            }
+            continue;
+        }
+        if let Some(value) = attached_value_candidate(token, &shorts, value_flags) {
+            values.push(value);
+            if let Some(stripped) = value.strip_prefix('=') {
+                values.push(stripped);
+            }
+        }
+    }
+    values
 }
 
 /// Whether `token` is a single-dash short cluster (`-sf`) whose final
@@ -6272,6 +6329,15 @@ fn convert_command_rule(mut dto: CommandRuleSpec) -> Result<CommandRule, RulesEr
             return Err(RulesError::invalid(
                 &dto.id,
                 "target_flags has no effect without `targets` or `except_targets`",
+            ));
+        }
+        // A flag value arrives already split from its `--flag=` prefix, so
+        // a `strip` target could never see the prefix it strips.
+        if targets.iter().any(TargetMatcher::has_strip) {
+            return Err(RulesError::invalid(
+                &dto.id,
+                "target_flags cannot be combined with a `strip` target: the flag values it \
+                 selects never carry the prefix",
             ));
         }
         if !attached_value_flags.is_empty() {
@@ -12551,18 +12617,57 @@ mod tests {
     }
 
     #[test]
-    fn target_flags_on_targets_fall_back_to_the_unscoped_walk_when_unreadable() {
+    fn target_flags_on_targets_stay_scoped_when_a_value_is_unreadable() {
         let rules = target_flags_deny_rules("");
-        // A listed flag with no value: every token is a candidate again.
-        assert!(fires(&rules, &["gh", "/etc/x", "--body-file"]));
-        assert!(!fires(&rules, &["gh", "issue", "--body-file"]));
-        // An unresolvable word can hide or shift the flag value.
+        // A listed flag with no value: nothing to match, and the other
+        // words still don't count.
+        assert!(!fires(&rules, &["gh", "/etc/x", "--body-file"]));
+        // An unresolvable flag value is consumed, never replaced by the
+        // next word; the unresolved-argument floor asks instead.
+        let unresolvable =
+            || NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::ParameterExpansion);
         let mut words = argv(&["gh", "/etc/x", "--body-file"]);
-        words.push(NormalizedWord::unresolvable(
-            crate::normalize::UnresolvableKind::ParameterExpansion,
-        ));
+        words.push(unresolvable());
         words.push(NormalizedWord::resolved("/private/tmp/x".to_string()));
+        assert!(rules.match_command(&words).is_none());
+        assert!(rules.match_command_except_target(&words).is_some());
+        // An unresolvable title leaves a readable value fully decidable.
+        let mut words = argv(&["gh", "pr", "create", "--title"]);
+        words.push(unresolvable());
+        words.extend(argv(&["--body-file", "/etc/passwd"]));
         assert!(rules.match_command(&words).is_some());
+    }
+
+    #[test]
+    fn target_flags_on_targets_read_past_a_terminator_and_strip_short_equals() {
+        let rules = target_flags_deny_rules("");
+        assert!(fires(
+            &rules,
+            &["gh", "issue", "create", "--", "--body-file", "/etc/passwd"]
+        ));
+        assert!(fires(&rules, &["gh", "issue", "create", "-F=/etc/passwd"]));
+        assert!(!fires(
+            &rules,
+            &["gh", "issue", "create", "-F=/private/tmp/x"]
+        ));
+    }
+
+    #[test]
+    fn target_flags_rejects_strip_targets() {
+        let err = Rules::parse(
+            r#"
+            [[command]]
+            id = "x"
+            reason = "r"
+            decision = "block"
+            command = "gh"
+            target_flags = ["--body-file"]
+            targets = [{ normalized_prefix = "/Users/", strip = "--body-file=" }]
+        "#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("`strip` target"), "{err}");
     }
 
     #[test]
