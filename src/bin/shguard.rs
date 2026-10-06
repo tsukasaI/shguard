@@ -25,9 +25,9 @@
 //!
 //! [`run`] executes on a dedicated worker thread ([`main`]) that sends its
 //! result back over a channel; [`main`] waits on that channel in a polling
-//! loop ([`resolve_first_result`], built on `shguard::watchdog::poll_with_budget`
-//! — issue #518, shared with `src/watchdog.rs`'s own library-facing
-//! watchdog), each iteration bounded by [`MEMORY_POLL_INTERVAL`] (or
+//! loop ([`resolve_first_result`], built on
+//! `shguard::watchdog::poll_with_budget` — issue #518, shared with
+//! `src/watchdog.rs`'s own library-facing watchdog), each iteration bounded by [`MEMORY_POLL_INTERVAL`] (or
 //! whatever's left of [`EVALUATION_TIMEOUT`], if shorter) so it can check
 //! the worker's actual memory use between polls without giving up
 //! wall-clock bounding. A trip on *either* bound —
@@ -141,8 +141,8 @@ const EVALUATION_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How often [`resolve_first_result`]'s watchdog polls the worker's actual
 /// memory use (via [`shguard::watchdog::peak_rss_bytes`]) while waiting on
-/// the result channel, instead of blocking on a single [`EVALUATION_TIMEOUT`]-long
-/// `recv_timeout` the way the wall-clock-only watchdog used to. Short
+/// the result channel, instead of blocking on a single
+/// [`EVALUATION_TIMEOUT`]-long `recv_timeout` the way the wall-clock-only watchdog used to. Short
 /// enough that the runaway-allocation repro (~4 GB/s, see
 /// [`EVALUATION_TIMEOUT`]) overshoots [`MEMORY_LIMIT_BYTES`] by at most
 /// ~200 MB (rate * interval) before a poll catches it; long enough that
@@ -556,8 +556,8 @@ fn log_trip_best_effort(
     }
 }
 
-/// Effective RSS budget used by [`resolve_first_result`] — [`MEMORY_LIMIT_BYTES`]
-/// in release builds. Debug builds additionally honour
+/// Effective RSS budget used by [`resolve_first_result`] —
+/// [`MEMORY_LIMIT_BYTES`] in release builds. Debug builds additionally honour
 /// `SHGUARD_TEST_MEM_LIMIT_MB`, mirroring `run`'s `SHGUARD_TEST_PANIC`
 /// injection pattern, so `tests/fail_closed_exit_paths.rs` can pin the
 /// memory-trip path against the test process's own baseline RSS instead
@@ -826,8 +826,8 @@ fn check_usage_error(json: bool, message: &str) -> i32 {
 /// needing to fail closed itself (except on `evaluate_with_timeout`'s own
 /// spawn-failure fallback, which runs the evaluation inline with no worker
 /// thread at all — a panic there DOES propagate as an ordinary process
-/// crash, same as this function's own reasoning above). It is NOT outside a wall-clock bound, though:
-/// [`evaluate_with_timeout`] wraps the [`shguard::analyze_with_policy`] call
+/// crash, same as this function's own reasoning above). It is NOT outside a
+/// wall-clock bound, though: [`evaluate_with_timeout`] wraps the [`shguard::analyze_with_policy`] call
 /// (which — issue #108 — may append to a user-configured
 /// `decision_log_path` after its own internal gate-evaluation watchdog
 /// already returned) in [`EVALUATION_TIMEOUT`] plus [`CHECK_TIMEOUT_GRACE`],
@@ -1274,8 +1274,8 @@ mod tests {
     /// the value `try_recv` finds waiting for it. `#[cfg(unix)]`: mirrors
     /// `shguard::watchdog::peak_rss_bytes`'s own platform gating — on any
     /// other platform there is no RSS check to trip in the first place.
-    /// Paired with `memory_trip_fails_closed_when_the_channel_stays_empty` below: on its
-    /// own, this test can't distinguish "the memory arm's `try_recv` won"
+    /// Paired with `memory_trip_fails_closed_when_the_channel_stays_empty`
+    /// below: on its own, this test can't distinguish "the memory arm's `try_recv` won"
     /// from "the memory arm never ran and the ordinary `recv_timeout` path
     /// won instead" — the sibling test pins that the arm genuinely trips
     /// under the same `memory_limit`.

@@ -216,7 +216,9 @@ All notable changes to this project are documented in this file.
   under budget. `bounded_with_memory_limit` now takes the RSS reader as a
   parameter (`bounded` passes the real `current_rss_bytes`, so production
   behavior is unchanged) and the test drives a fake one. The real
-  `current_rss_bytes` keeps direct coverage via a nonzero-value test.
+  `current_rss_bytes` keeps direct coverage via
+  `current_rss_bytes_reports_a_nonzero_value_for_the_running_process` and
+  `current_rss_bytes_tracks_growth`.
 
 - Rule 2's bare-`$VAR` command-position resolution now falls back to
   `value_history` even when the CURRENT value is missing because a later,

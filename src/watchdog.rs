@@ -210,10 +210,9 @@ pub(crate) fn bounded(pipeline: impl FnOnce() -> Verdict + Send + 'static) -> Ve
 /// depending on process-wide RSS (issue #568). The limit parameter mirrors
 /// `src/bin/shguard.rs`'s `SHGUARD_TEST_MEM_LIMIT_MB` injection point,
 /// which exists for the same reason; the injectable `rss` reader has no
-/// counterpart there. `rss` is sampled once for the
-/// baseline before the worker is spawned, then on every poll; `bounded`
-/// passes [`current_rss_bytes`]. Returns whatever `pipeline`
-/// produces on success, or a fail-closed [`Verdict::ask`] if either bound
+/// counterpart there. `rss` is sampled once for the baseline before the
+/// worker is spawned, then on every poll; `bounded` passes
+/// [`current_rss_bytes`]. Returns whatever `pipeline` produces on success, or a fail-closed [`Verdict::ask`] if either bound
 /// trips, the worker thread cannot be spawned, or it is lost (panics — an
 /// unwind mid-closure drops the sender, which surfaces here as
 /// [`RecvTimeoutError::Disconnected`] with no separate `catch_unwind`
@@ -478,20 +477,27 @@ mod tests {
         }
 
         let exe = std::env::current_exe().unwrap();
-        let output = std::process::Command::new(exe)
+        let output = assert_cmd::Command::new(exe)
             .args([
                 "--exact",
                 "watchdog::tests::current_rss_bytes_tracks_growth",
                 "--nocapture",
             ])
             .env(RSS_TRACKING_CHILD_ENV, "1")
+            .timeout(Duration::from_secs(30))
             .output()
             .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
             output.status.success(),
-            "child failed: {}{}",
-            String::from_utf8_lossy(&output.stdout),
+            "child failed: {stdout}{}",
             String::from_utf8_lossy(&output.stderr)
+        );
+        // Without this, a renamed or filtered-out child test runs zero
+        // tests and still exits 0, making the re-exec vacuous.
+        assert!(
+            stdout.contains("test watchdog::tests::current_rss_bytes_tracks_growth ... ok"),
+            "child did not run the growth test: {stdout}"
         );
     }
 
