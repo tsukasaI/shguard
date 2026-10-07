@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-07
+
 ### Changed
 
 - `target_flags` now also scopes `targets` (#622): on a rule with
