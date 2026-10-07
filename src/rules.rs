@@ -2784,8 +2784,10 @@ impl CommandRule {
                 .iter()
                 .any(|w| self.unresolved_word_may_be_target(w, prune_home));
         }
-        if self
-            .target_match_candidates(&rest_words)
+        // Not `target_match_candidates`: a listed flag hidden in an
+        // unresolvable word (`gh $X /Users/me/.ssh/id`) leaves its resolved
+        // value outside the scoped walk, so every resolved word counts here.
+        if resolved_strings(&rest_words)
             .iter()
             .any(|token| self.matches_targets(token))
         {
@@ -12629,6 +12631,13 @@ mod tests {
         let mut words = argv(&["gh", "/etc/x", "--body-file"]);
         words.push(unresolvable());
         words.push(NormalizedWord::resolved("/private/tmp/x".to_string()));
+        assert!(rules.match_command(&words).is_none());
+        assert!(rules.match_command_except_target(&words).is_some());
+        // A listed flag hidden in an unresolvable word: the resolved word
+        // after it may be its value, so the floor still asks.
+        let mut words = argv(&["gh", "issue", "create"]);
+        words.push(unresolvable());
+        words.push(NormalizedWord::resolved("/Users/me/.ssh/id".to_string()));
         assert!(rules.match_command(&words).is_none());
         assert!(rules.match_command_except_target(&words).is_some());
         // An unresolvable title leaves a readable value fully decidable.
