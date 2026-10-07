@@ -830,10 +830,39 @@ listed letter owns the rest of the cluster.
 - `-F=value` is NOT recognised as an attached form (the glued value would
   be `=value`), so it asks.
 
-`target_flags` needs a non-empty `except_targets` and an
-empty `targets`, cannot be combined with `attached_value_flags`, and an
-empty list or an entry that is not a flag (`"body-file"`, `"--"`, `"-ab"`)
-is a load-time error.
+On a rule with `targets`, `target_flags` scopes the match itself: only the
+listed flags' values are tested against `targets`, so a subcommand or
+another flag's value never counts. That matters because a relative word is
+resolved against the hook payload `cwd` before matching: without
+`target_flags`, the rule below would match `gh issue create ...` whenever
+the cwd is under `/Users/`, since `issue` resolves to `<cwd>/issue`.
+
+```toml
+[[deny]]
+id = "gh-body-file-escape"
+reason = "gh --body-file outside the scratchpad"
+command = "gh"
+target_flags = ["--body-file", "-F"]
+targets = [{ normalized_prefix = "/Users/" }, { normalized_prefix = "/etc/" }]
+```
+
+Here the trust trade-off points the other way: a value passed through an
+unlisted spelling or an abbreviated long flag is never tested, so the rule
+does NOT fire for it. The value walk over-collects instead: it reads past a
+bare `--`, and a glued `-F=/etc/passwd` is tested both as `=/etc/passwd`
+and as `/etc/passwd` (how `gh` reads it). A command with none of the listed
+flags does not match, and neither does a listed flag with no value. An
+unresolved flag value (`--body-file "$F"`) is not matched either; the
+unresolved-argument floor asks instead. With `except_targets` as well, the
+except candidates are the flag values that matched `targets`. A relative
+value glued to its flag (`--body-file=notes.md`, `-Fnotes.md`) is not
+resolved against the cwd, so it is only matched as written.
+
+`target_flags` needs a non-empty `targets` or `except_targets`, cannot be
+combined with `attached_value_flags` or with a `targets` entry that sets
+`strip` (the selected values never carry the prefix), and an empty list or
+an entry that is not a flag (`"body-file"`, `"--"`, `"-ab"`) is a load-time
+error.
 
 Per-command policy can be scoped to a subcommand sequence: a multi-word
 `command` value matches a leading sequence of positional words, e.g.
