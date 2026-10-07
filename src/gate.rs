@@ -6156,10 +6156,10 @@ fn scan_recursable_slots(
                     // clause when it immediately follows an argument
                     // containing exactly `{}` — any other `+` is an
                     // ordinary payload argument (e.g. GNU `rm`'s option
-                    // permutation, `-exec rm + -rf /`). `is_find_exec_
-                    // terminator` alone can't tell the two apart, so `+`
-                    // candidates here get an extra check against the
-                    // immediately preceding word.
+                    // permutation, `-exec rm + -rf /`). `single_resolved`
+                    // plus the terminator-list match alone can't tell the
+                    // two apart, so `+` candidates here get an extra check
+                    // against the immediately preceding word.
                     // (`span_start >= 1`, so `span_start + offset - 1`
                     // cannot underflow; for offset 0 the preceding word is
                     // the `-exec` flag itself, which is never `{}`.)
@@ -10830,9 +10830,9 @@ mod tests {
             .to_string()
     }
 
-    /// Pins the `$HOME` floor's wording (issue #203) so drift in either the
-    /// explanation or the matched-rule interpolation is caught: no other
-    /// test asserts on the reason text.
+    /// Pins the `$HOME` floor's wording (issue #203) so drift in the fixed
+    /// prefix and suffix of the explanation is caught: no other test
+    /// asserts on the reason text.
     #[test]
     fn home_env_redirect_floor_reason_is_pinned() {
         let reason = reason_of("echo x >> $HOME/.zshrc");
