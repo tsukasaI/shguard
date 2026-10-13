@@ -4143,8 +4143,42 @@ fn value_flag_consumed(rest_words: &[NormalizedWord], value_flags: &[ValueFlag])
 /// get. Not an [`ESCALATION_VECTORS`] entry — no privilege change, only a
 /// function/alias-shadowing bypass.
 pub(crate) const TRANSPARENT_WRAPPERS: &[&str] = &[
-    "env", "command", "nohup", "nice", "exec", "stdbuf", "setsid", "sudo", "xargs", "doas", "su",
-    "pkexec", "run0", "timeout", "ionice", "flock", "chrt", "taskset", "busybox", "builtin",
+    "env",
+    "command",
+    "nohup",
+    "nice",
+    "exec",
+    "stdbuf",
+    "setsid",
+    "sudo",
+    "xargs",
+    "doas",
+    "su",
+    "pkexec",
+    "run0",
+    "timeout",
+    "ionice",
+    "flock",
+    "chrt",
+    "taskset",
+    "busybox",
+    "builtin",
+    "time",
+    "caffeinate",
+    "chroot",
+    "unshare",
+    "runuser",
+    "strace",
+    "watch",
+    "setarch",
+    "prlimit",
+    "firejail",
+    "systemd-run",
+    "unbuffer",
+    "numactl",
+    // Not a real command: brush-parser strips the reserved word `time` and
+    // leaves its `--` terminator as the command name (`time -- rm -rf /`).
+    "--",
 ];
 
 /// The subset of [`TRANSPARENT_WRAPPERS`] that escalate privileges (issues
@@ -4157,7 +4191,7 @@ pub(crate) const TRANSPARENT_WRAPPERS: &[&str] = &[
 /// rejection in [`matches_dangerous_allow_target`] walks
 /// `TRANSPARENT_WRAPPERS`, not this list, so an escalation vector missing
 /// from `TRANSPARENT_WRAPPERS` would silently become allow-listable.
-pub(crate) const ESCALATION_VECTORS: &[&str] = &["sudo", "doas", "su", "pkexec", "run0"];
+pub(crate) const ESCALATION_VECTORS: &[&str] = &["sudo", "doas", "su", "pkexec", "run0", "runuser"];
 
 /// Shell interpreters whose `-c '<string>'` argument `crate::gate` recurses
 /// into as shell syntax (rule 6a). Lives here, next to
@@ -4996,6 +5030,144 @@ fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
             ValueFlag::Long("delimiter".to_string()),
             ValueFlag::Long("process-slot-var".to_string()),
         ],
+        // Issue #638: GNU `time` takes `-f`/`--format` and `-o`/`--output`;
+        // `-p`/`-a`/`-v`/`-q` and macOS `-l` are boolean.
+        "time" => vec![
+            ValueFlag::Short('f'),
+            ValueFlag::Long("format".to_string()),
+            ValueFlag::Short('o'),
+            ValueFlag::Long("output".to_string()),
+        ],
+        "caffeinate" => vec![ValueFlag::Short('t'), ValueFlag::Short('w')],
+        // The NEWROOT positional is in `wrapper_positional_args`.
+        "chroot" => vec![
+            ValueFlag::Long("userspec".to_string()),
+            ValueFlag::Long("groups".to_string()),
+        ],
+        // Required-argument options only: the namespace flags (`--mount[=file]`)
+        // take an optional `=`-joined value, and listing them would swallow
+        // the wrapped command.
+        "unshare" => vec![
+            ValueFlag::Short('S'),
+            ValueFlag::Long("setuid".to_string()),
+            ValueFlag::Short('G'),
+            ValueFlag::Long("setgid".to_string()),
+            ValueFlag::Short('R'),
+            ValueFlag::Long("root".to_string()),
+            ValueFlag::Short('w'),
+            ValueFlag::Long("wd".to_string()),
+            ValueFlag::Long("map-user".to_string()),
+            ValueFlag::Long("map-group".to_string()),
+            ValueFlag::Long("map-users".to_string()),
+            ValueFlag::Long("map-groups".to_string()),
+            ValueFlag::Long("setgroups".to_string()),
+            ValueFlag::Long("propagation".to_string()),
+            ValueFlag::Long("monotonic".to_string()),
+            ValueFlag::Long("boottime".to_string()),
+            ValueFlag::Long("load-interp".to_string()),
+        ],
+        "runuser" => vec![
+            ValueFlag::Short('u'),
+            ValueFlag::Long("user".to_string()),
+            ValueFlag::Short('g'),
+            ValueFlag::Long("group".to_string()),
+            ValueFlag::Short('G'),
+            ValueFlag::Long("supp-group".to_string()),
+            ValueFlag::Short('s'),
+            ValueFlag::Long("shell".to_string()),
+            ValueFlag::Short('w'),
+            ValueFlag::Long("whitelist-environment".to_string()),
+            ValueFlag::Short('c'),
+            ValueFlag::Long("command".to_string()),
+        ],
+        "strace" => vec![
+            ValueFlag::Short('o'),
+            ValueFlag::Short('e'),
+            ValueFlag::Short('p'),
+            ValueFlag::Short('s'),
+            ValueFlag::Short('u'),
+            ValueFlag::Short('E'),
+            ValueFlag::Short('a'),
+            ValueFlag::Short('b'),
+            ValueFlag::Short('I'),
+            ValueFlag::Short('O'),
+            ValueFlag::Short('P'),
+            ValueFlag::Short('S'),
+            ValueFlag::Short('X'),
+            ValueFlag::Long("output".to_string()),
+            ValueFlag::Long("trace".to_string()),
+            ValueFlag::Long("signal".to_string()),
+            ValueFlag::Long("status".to_string()),
+            ValueFlag::Long("env".to_string()),
+            ValueFlag::Long("user".to_string()),
+            ValueFlag::Long("string-limit".to_string()),
+        ],
+        // `-d`/`--differences` takes an optional `=`-joined value only.
+        "watch" => vec![
+            ValueFlag::Short('n'),
+            ValueFlag::Long("interval".to_string()),
+            ValueFlag::Short('q'),
+            ValueFlag::Long("equexit".to_string()),
+        ],
+        // Resource limits (`--nofile=...`) are optional-argument, `=`-joined.
+        "prlimit" => vec![
+            ValueFlag::Short('p'),
+            ValueFlag::Long("pid".to_string()),
+            ValueFlag::Short('o'),
+            ValueFlag::Long("output".to_string()),
+        ],
+        "systemd-run" => vec![
+            ValueFlag::Short('u'),
+            ValueFlag::Long("unit".to_string()),
+            ValueFlag::Short('p'),
+            ValueFlag::Long("property".to_string()),
+            ValueFlag::Short('E'),
+            ValueFlag::Long("setenv".to_string()),
+            ValueFlag::Short('M'),
+            ValueFlag::Long("machine".to_string()),
+            ValueFlag::Short('H'),
+            ValueFlag::Long("host".to_string()),
+            ValueFlag::Long("uid".to_string()),
+            ValueFlag::Long("gid".to_string()),
+            ValueFlag::Long("nice".to_string()),
+            ValueFlag::Long("working-directory".to_string()),
+            ValueFlag::Long("description".to_string()),
+            ValueFlag::Long("slice".to_string()),
+            ValueFlag::Long("service-type".to_string()),
+            ValueFlag::Long("on-active".to_string()),
+            ValueFlag::Long("on-boot".to_string()),
+            ValueFlag::Long("on-startup".to_string()),
+            ValueFlag::Long("on-unit-active".to_string()),
+            ValueFlag::Long("on-unit-inactive".to_string()),
+            ValueFlag::Long("on-calendar".to_string()),
+            ValueFlag::Long("on-clock-change".to_string()),
+            ValueFlag::Long("on-timezone-change".to_string()),
+            ValueFlag::Long("timer-property".to_string()),
+        ],
+        "numactl" => vec![
+            ValueFlag::Short('C'),
+            ValueFlag::Long("physcpubind".to_string()),
+            ValueFlag::Short('N'),
+            ValueFlag::Long("cpunodebind".to_string()),
+            ValueFlag::Short('m'),
+            ValueFlag::Long("membind".to_string()),
+            ValueFlag::Short('p'),
+            ValueFlag::Long("preferred".to_string()),
+            ValueFlag::Short('i'),
+            ValueFlag::Long("interleave".to_string()),
+            ValueFlag::Short('P'),
+            ValueFlag::Long("preferred-many".to_string()),
+            ValueFlag::Short('w'),
+            ValueFlag::Long("weighted-interleave".to_string()),
+            ValueFlag::Short('S'),
+            ValueFlag::Long("shm".to_string()),
+            ValueFlag::Short('f'),
+            ValueFlag::Long("file".to_string()),
+            ValueFlag::Short('o'),
+            ValueFlag::Long("offset".to_string()),
+            ValueFlag::Short('L'),
+            ValueFlag::Long("length".to_string()),
+        ],
         // Issue #209: `make`/`tar` aren't
         // `TRANSPARENT_WRAPPERS` (they don't exec an arbitrary wrapped
         // command), so these two entries are never reached by
@@ -5066,7 +5238,7 @@ fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
 /// follows.
 fn wrapper_positional_args(wrapper: &str) -> usize {
     match wrapper {
-        "timeout" | "flock" | "su" | "chrt" | "taskset" => 1,
+        "timeout" | "flock" | "su" | "chrt" | "taskset" | "chroot" | "setarch" => 1,
         _ => 0,
     }
 }

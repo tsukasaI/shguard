@@ -15231,6 +15231,55 @@ mod tests {
         }
     }
 
+    #[test]
+    fn time_and_exec_wrappers_do_not_hide_the_wrapped_command() {
+        // Issue #638: brush-parser strips only the leading reserved word
+        // `time`, so every other spelling reaches the gate as a command.
+        for command in [
+            "time time rm -rf /",
+            "! time rm -rf /",
+            "/usr/bin/time rm -rf /",
+            r"\time rm -rf /",
+            r#""time" rm -rf /"#,
+            "env time rm -rf /",
+            "time -- rm -rf /",
+            "true && time -- rm -rf /",
+            "/usr/bin/time -o x rm -rf /",
+            "/usr/bin/time -f %e rm -rf /",
+            "chroot / rm -rf /",
+            "chroot --userspec root / rm -rf /",
+            "caffeinate rm -rf /",
+            "caffeinate -t 5 rm -rf /",
+            "unshare rm -rf /",
+            "unshare -S 0 --mount rm -rf /",
+            "runuser -u root rm -rf /",
+            "strace rm -rf /",
+            "strace -o out -f rm -rf /",
+            "watch rm -rf /",
+            "watch -n 5 rm -rf /",
+            "setarch x86_64 rm -rf /",
+            "prlimit rm -rf /",
+            "prlimit --nofile=4 rm -rf /",
+            "firejail rm -rf /",
+            "firejail --net=none rm -rf /",
+            "systemd-run rm -rf /",
+            "systemd-run -u foo --uid root rm -rf /",
+            "unbuffer rm -rf /",
+            "numactl rm -rf /",
+            "numactl -C 0 rm -rf /",
+        ] {
+            assert_decision(command, Decision::Block);
+        }
+    }
+
+    #[test]
+    fn time_wrapped_escalation_vector_reaches_the_escalation_floor() {
+        // Issue #638: `time time sudo id` was Allow.
+        for command in ["time time sudo id", "true && time time sudo id"] {
+            assert_decision(command, Decision::Ask);
+        }
+    }
+
     // ==== Wrapper-argument regression pins (from the issue #32 session) ====
 
     #[test]
