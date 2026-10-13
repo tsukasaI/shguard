@@ -983,7 +983,11 @@ fn evaluate_pipeline(
                 // docs), so unlike `Compound`/`FunctionDefinition` above it
                 // never needs an isolated `cwd` clone even in a multi-stage
                 // pipeline: nothing here can mutate `cwd` regardless.
-                evaluate_extended_test(test, rules, allowlist, depth, &cwd.current, parse)
+                let verdict =
+                    evaluate_extended_test(test, rules, allowlist, depth, &cwd.current, parse);
+                // Its operands may hold substitutions that write.
+                cwd.earlier_writer.set(true);
+                verdict
             }
         };
         worst = if have_worst {
@@ -1179,6 +1183,58 @@ fn pipeline_shape_verdict(
 /// condition-plus-body pair applies here too, over more branches.
 #[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd`/`parse` context, see `apply_attached_word_and_redirect_checks`
 fn evaluate_compound_command(
+    compound: &CompoundCommand,
+    env: &mut Env,
+    parent_persists: bool,
+    rules: &Rules,
+    allowlist: &Allowlist,
+    depth: usize,
+    cwd: &mut CwdState,
+    parse: ParseFn,
+) -> Verdict {
+    // `resolve_symlinks` (issue #612): a redirection or a substitution in a
+    // `for` word list runs before the body, so it refuses the body's own
+    // exceptions; and any compound command may write, so it refuses
+    // whatever follows it on the line.
+    let (redirections, for_words): (&[Redirection], &[Word]) = match compound {
+        CompoundCommand::BraceGroup { redirections, .. }
+        | CompoundCommand::Subshell { redirections, .. }
+        | CompoundCommand::WhileClause { redirections, .. }
+        | CompoundCommand::UntilClause { redirections, .. }
+        | CompoundCommand::IfClause { redirections, .. } => (redirections, &[]),
+        CompoundCommand::ForClause {
+            words,
+            redirections,
+            ..
+        } => (redirections, words.as_deref().unwrap_or_default()),
+    };
+    if !redirections.is_empty()
+        || for_words.iter().any(|word| {
+            !collect_substitutions(word).is_empty()
+                || !collect_process_substitutions(word).is_empty()
+                || normalize::normalize_word(word)
+                    .iter()
+                    .any(|w| matches!(w.resolution(), Resolution::Unresolvable(_)))
+        })
+    {
+        cwd.earlier_writer.set(true);
+    }
+    let verdict = evaluate_compound_command_body(
+        compound,
+        env,
+        parent_persists,
+        rules,
+        allowlist,
+        depth,
+        cwd,
+        parse,
+    );
+    cwd.earlier_writer.set(true);
+    verdict
+}
+
+#[allow(clippy::too_many_arguments)] // same pass-through context as `evaluate_compound_command`
+fn evaluate_compound_command_body(
     compound: &CompoundCommand,
     env: &mut Env,
     parent_persists: bool,
@@ -8933,6 +8989,61 @@ const NO_WRITE_COMMANDS: &[&str] = &[
     "declare", "typeset", "true", "false", ":", "test", "[", "echo", "printf",
 ];
 
+/// Variables whose assignment changes how a later `cd` or command lookup
+/// resolves, so even a no-write builtin that sets one refuses what follows.
+const PATH_LIKE_VARIABLES: &[&str] = &["CDPATH", "HOME", "PATH"];
+
+/// Whether a simple command that ran earlier on the line may have written,
+/// replaced or re-linked a path (or changed how paths resolve), so a later
+/// `resolve_symlinks` exception cannot be trusted. True unless it is a
+/// cwd move or one of [`NO_WRITE_COMMANDS`], matched against the RAW first
+/// word (no case folding, no wrapper unwrapping; `builtin NAME` and
+/// `command NAME` are the only wrappers allowed), with no redirection,
+/// substitution, unresolved word, `PATH`/`HOME`/`CDPATH` operand, or `-v`/`-n`
+/// style flag on the builtins that take variable names.
+fn earlier_command_may_write(command: &SimpleCommand, argv: &[NormalizedWord]) -> bool {
+    if !command.redirections.is_empty() || has_prefix_or_redirect_substitution(command) {
+        return true;
+    }
+    let sets_path_like = command
+        .assignments
+        .iter()
+        .any(|assignment| PATH_LIKE_VARIABLES.contains(&assignment.name.as_str()));
+    if sets_path_like || (!command.assignments.is_empty() && !argv.is_empty()) {
+        return true;
+    }
+    let mut words: Vec<&str> = Vec::with_capacity(argv.len());
+    for word in argv {
+        match word.resolution() {
+            Resolution::Resolved(text) => words.push(text),
+            Resolution::Unresolvable(_) => return true,
+        }
+    }
+    let Some((&first, rest)) = words.split_first() else {
+        return false;
+    };
+    let (name, operands) = match first {
+        "builtin" | "command" => match rest.split_first() {
+            Some((&name, operands)) => (name, operands),
+            None => return true,
+        },
+        _ => (first, rest),
+    };
+    if !NO_WRITE_COMMANDS.contains(&name) {
+        return true;
+    }
+    if operands
+        .iter()
+        .any(|operand| PATH_LIKE_VARIABLES.iter().any(|var| operand.contains(var)))
+    {
+        return true;
+    }
+    let takes_variable_names = !matches!(name, "echo" | "test" | "[" | "true" | "false" | ":");
+    takes_variable_names
+        && operands.iter().any(|operand| {
+            operand.starts_with('-') && !operand.starts_with("--") && operand.contains(['v', 'n'])
+        })
+}
 impl CwdState {
     /// The clone a backgrounded chain runs with: it is not ordered against
     /// the rest of the line, so no `resolve_symlinks` exception applies in it.
@@ -8944,28 +9055,12 @@ impl CwdState {
     }
 
     /// Notes that `command` (already normalized to `argv`) ran earlier on the
-    /// line, refusing later `resolve_symlinks` exceptions unless it is one of
-    /// [`NO_WRITE_COMMANDS`] with no redirection, no substitution and no
-    /// unresolved word. A command name containing `/` always refuses.
+    /// line, refusing later `resolve_symlinks` exceptions when it may write
+    /// (see [`earlier_command_may_write`]).
     fn note_earlier_command(&self, command: &SimpleCommand, argv: &[NormalizedWord]) {
-        if self.earlier_writer.get() {
-            return;
+        if !self.earlier_writer.get() && earlier_command_may_write(command, argv) {
+            self.earlier_writer.set(true);
         }
-        let may_write = !command.redirections.is_empty()
-            || has_prefix_or_redirect_substitution(command)
-            || argv
-                .iter()
-                .any(|word| matches!(word.resolution(), Resolution::Unresolvable(_)))
-            || !match argv.first().map(NormalizedWord::resolution) {
-                None => true,
-                Some(Resolution::Resolved(first)) if first.contains('/') => false,
-                Some(_) => crate::rules::effective_command(argv)
-                    .is_some_and(|(name, _)| NO_WRITE_COMMANDS.contains(&name.as_ref())),
-            };
-        if !may_write {
-            return;
-        }
-        self.earlier_writer.set(true);
     }
     /// Marks the current anchor physical once physical mode is on, called
     /// after every `cd`-family command.
@@ -15847,6 +15942,70 @@ mod tests {
                 "pushd -P /scratch/sub && upload-tool rel.md",
             ] {
                 assert_ne!(decide(command), Decision::Allow, "{command}");
+            }
+        }
+
+        #[test]
+        fn earlier_compound_commands_refuse_the_rest_of_the_line() {
+            for command in [
+                "[[ $(touch ok.md) ]]; upload-tool ok.md",
+                "[[ -n $(touch ok.md) ]]; upload-tool ok.md",
+                "for x in $(touch ok.md); do :; done; upload-tool ok.md",
+                "for x in a; do :; done < <(touch ok.md); upload-tool ok.md",
+                "if [[ $(touch ok.md) ]]; then :; fi; upload-tool ok.md",
+                "{ :; } > ok.md; upload-tool ok.md",
+                "{ :; } > $(touch ok.md; echo /dev/null); upload-tool ok.md",
+                "( : ) > ok.md; upload-tool ok.md",
+                "while false; do :; done > ok.md; upload-tool ok.md",
+                "f() { :; } > $(touch ok.md; echo /dev/null); upload-tool ok.md",
+                "{ :; }; upload-tool ok.md",
+                "if [[ $(touch ok.md) ]]; then upload-tool ok.md; fi",
+                "{ upload-tool ok.md; } > $(touch ok.md; echo /dev/null)",
+            ] {
+                assert_eq!(decide(command), Decision::Block, "{command}");
+            }
+        }
+
+        #[test]
+        fn path_like_variables_set_through_builtins_refuse_the_rest_of_the_line() {
+            for command in [
+                "export CDPATH=/work; cd sub && upload-tool rel.md",
+                "declare CDPATH=/work; cd sub && upload-tool rel.md",
+                "typeset -g CDPATH=/work; cd sub && upload-tool rel.md",
+                "printf -v CDPATH /work; cd sub && upload-tool rel.md",
+                "declare -n ref=CDPATH; ref=/work; cd sub && upload-tool rel.md",
+                "export HOME=/work; cd && upload-tool ok.md",
+                "CDPATH=/work; cd sub && upload-tool rel.md",
+            ] {
+                assert_eq!(decide(command), Decision::Block, "{command}");
+            }
+            assert_eq!(
+                decide("export X=1; cd /scratch/sub && upload-tool rel.md"),
+                Decision::Allow
+            );
+        }
+
+        #[test]
+        fn allowlist_matches_the_raw_first_word_exactly() {
+            for command in [
+                "ECHO hi; upload-tool ok.md",
+                "True; upload-tool ok.md",
+                "Test -n x; upload-tool ok.md",
+                "env true; upload-tool ok.md",
+                "env True; upload-tool ok.md",
+                "nohup true; upload-tool ok.md",
+                "export PATH=/scratch/bin; env true; upload-tool ok.md",
+                "printf -v PATH /scratch/bin; nohup true; upload-tool ok.md",
+                "PATH=/scratch/bin env true; upload-tool ok.md",
+                "sudo true; upload-tool ok.md",
+            ] {
+                assert_eq!(decide(command), Decision::Block, "{command}");
+            }
+            for command in [
+                "builtin echo hi; upload-tool ok.md",
+                "command true; upload-tool ok.md",
+            ] {
+                assert_eq!(decide(command), Decision::Allow, "{command}");
             }
         }
 

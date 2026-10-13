@@ -567,7 +567,13 @@ The exception also does not apply (the rule fires) when:
   `cd`/`pushd`/`popd`/`dirs` and a few no-write builtins (`set`, `shopt`,
   `export`, `unset`, `readonly`, `local`, `declare`, `typeset`, `true`,
   `false`, `:`, `test`, `[`, `echo`, `printf`) runs before it, and those
-  have no redirection, substitution or unresolved word;
+  have no redirection, substitution or unresolved word, no `PATH`/`HOME`/
+  `CDPATH` operand and no `-v`/`-n` flag (the first word must match exactly,
+  so `ECHO` or `env true` refuse; `builtin NAME` and `command NAME` are
+  accepted). Any compound command earlier on the line (`{ }`, `( )`, `if`,
+  loops, `[[ ]]`, a function definition) refuses too. A function or alias
+  named like one of these builtins, defined in a previous shell call, can
+  shadow it, and shguard cannot see that;
 - the command runs inside a recursion (`bash -c`, `eval`, `$(...)`,
   `find -exec`), a function body, a loop, a multi-stage pipeline or a
   backgrounded (`&`) list, none of which can be ordered
