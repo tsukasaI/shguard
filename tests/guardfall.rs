@@ -2056,6 +2056,11 @@ fn guardfall_parameter_expansion_operand_cases() {
         ("echo ${ rm -rf ~; echo ,; }{c,d}", Decision::Ask),
         ("echo {c,d}${ rm -rf ~; echo ,; }", Decision::Ask),
         ("x='$(rm -rf ~)'; echo ${(e)x:-a,b}{c,d}", Decision::Ask),
+        // Issue #655: bash reads `$${` as the PID then `{`, so the body runs.
+        ("echo $${ x; touch /tmp/x; echo }", Decision::Ask),
+        ("echo $${x;touch /tmp/x;echo }", Decision::Ask),
+        ("echo $${ x\ntouch /tmp/x\necho }", Decision::Ask),
+        ("echo $$$${ x; touch /tmp/x; echo }", Decision::Ask),
     ];
 
     for (command, expected) in cases {

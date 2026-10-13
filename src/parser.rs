@@ -1468,6 +1468,11 @@ fn convert_heredoc(heredoc: &bast::IoHereDocument) -> Result<Redirection, ParseE
 /// docs/adr/0001-parser-crate.md's evidence for construct #15).
 fn convert_word(word: &bast::Word) -> Result<Word, ParseError> {
     let raw = word.value.as_str();
+    if has_pid_dollars_before_brace(raw) {
+        return Err(ParseError::unsupported(
+            "`$$` followed by `{` (brush reads the second `$` as a `${...}` opener, bash as the PID)",
+        ));
+    }
     // Cheap pre-check (E2-6, issue #59): a word with no `{` at all — the
     // common case — can never contain a brace expansion, so skip the
     // brace-expansion pre-pass entirely and fall straight through to the
@@ -1519,6 +1524,45 @@ fn convert_word(word: &bast::Word) -> Result<Word, ParseError> {
         brace_segments.into_iter().flatten(),
         0,
     )?))
+}
+
+/// True if `text` has an even run (>= 2) of unescaped, unsingle-quoted `$`
+/// directly before a `{` (issue #655). Double quotes are scanned like plain
+/// text: bash expands `$$` there too, and rejecting is fail-closed.
+fn has_pid_dollars_before_brace(text: &str) -> bool {
+    let mut chars = text.chars();
+    let mut run = 0usize;
+    let mut in_double = false;
+    while let Some(c) = chars.next() {
+        match c {
+            '$' => {
+                run += 1;
+                continue;
+            }
+            '{' if run >= 2 && run.is_multiple_of(2) => return true,
+            '\\' => {
+                chars.next();
+            }
+            '\'' if !in_double => {
+                // Not a plain skip to the next `'`: in `$'...'` a backslash
+                // escapes the quote, and mis-pairing would hide a payload.
+                let ansi_c = !run.is_multiple_of(2);
+                while let Some(q) = chars.next() {
+                    match q {
+                        '\\' if ansi_c => {
+                            chars.next();
+                        }
+                        '\'' => break,
+                        _ => {}
+                    }
+                }
+            }
+            '"' => in_double = !in_double,
+            _ => {}
+        }
+        run = 0;
+    }
+    false
 }
 
 /// Converts consecutive brace-pre-pass segments. A `Text` ending in an odd
@@ -2699,20 +2743,38 @@ mod tests {
         );
     }
 
-    // issue #640: `$${a,b}` goes to the brace pre-pass and is read as an
-    // alternation. That is a conservative over-approximation: bash may read
-    // it as `$` then `${a,b}` instead, but the alternation is the reading
-    // that exposes the members to the rules.
+    // issue #640, #655: bash reads `$${` as the PID then `{`, brush as a
+    // `${...}` opener, so the word is rejected rather than parsed.
     #[test]
-    fn double_dollar_before_a_brace_group_is_conservatively_a_brace_alternation() {
-        let cmd = parse_ok("echo $${a,b}");
-        let word = &simple(&cmd.first.first).words[1];
-        assert!(
-            word.0
-                .iter()
-                .any(|p| matches!(p, WordPiece::BraceAlternation(_))),
-            "{word:?}"
-        );
+    fn double_dollar_before_a_brace_is_unsupported() {
+        for cmd in [
+            "echo $${a,b}",
+            "echo $${ x; touch /tmp/x; echo }",
+            "echo $${x;touch /tmp/x;echo }",
+            "echo $${ x\ntouch /tmp/x\necho }",
+            "echo $$$${ x; touch /tmp/x; echo }",
+            "echo \"$${ x; touch /tmp/x; echo }\"",
+        ] {
+            assert!(
+                matches!(parse(cmd), Err(ParseError::Unsupported { .. })),
+                "{cmd:?}: {:?}",
+                parse(cmd)
+            );
+        }
+    }
+
+    #[test]
+    fn dollar_runs_that_are_not_an_unquoted_even_run_before_a_brace_parse() {
+        for cmd in ["echo $$", "echo '$${x}'", "echo $$${x}", "echo ${x}"] {
+            assert!(parse(cmd).is_ok(), "{cmd:?}: {:?}", parse(cmd));
+        }
+    }
+
+    #[test]
+    fn escaped_dollar_before_a_brace_is_not_rejected_as_pid_dollars() {
+        assert!(!has_pid_dollars_before_brace("\\$${a}"));
+        assert!(!has_pid_dollars_before_brace("$'\\'$${x}'"));
+        assert!(has_pid_dollars_before_brace("$'\\''$${x}'"));
     }
 
     // issue #640: a word whose only braces open `${...}` skips the brace
