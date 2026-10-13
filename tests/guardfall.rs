@@ -469,8 +469,9 @@ fn guardfall_rm_dot_targets() {
 /// to leading-dot entries (`.ssh`, `.aws`, `.config/shguard`) even without
 /// `shopt -s dotglob`, so it is a strict superset of the already-Ask
 /// `~/.config` target and must be at least as strict, not Allow. The
-/// "safe" spellings (`.[!.]*`, `.??*`, `.[^.]*`, `.?*`) skip `.`/`..` but
-/// match the same entries. `~/.config/*` reaches shguard's own config
+/// "safe" spellings (`.[!.]*`, `.??*`, `.[^.]*`) skip both `.` and `..`,
+/// `.?*` may match `..` (bash < 5.2); all match the same entries.
+/// `~/.config/*` reaches shguard's own config
 /// directory too. `../build/.*` is a sibling-directory cleanup, not a
 /// re-anchoring risk, and must stay Allow like `../build/*`.
 #[test]
@@ -511,6 +512,187 @@ fn guardfall_rm_dotglob_tilde_targets() {
         // Control: `~/.config` itself is unchanged by this fix.
         ("rm -r ~/.config", Decision::Ask),
         ("rm -rf ~/.config/shguard", Decision::Block),
+        // Issue #595: `.**`/`.*?`/`.[!.]**` are the same globs as
+        // `.*`/`.?*`/`.[!.]*` respectively.
+        ("rm -rf ~/.**", Decision::Block),
+        ("rm -rf ~/.*?", Decision::Block),
+        ("rm -rf ~/.[!.]**", Decision::Block),
+        ("rm -r ~/.**", Decision::Ask),
+        ("cd ~ && rm -rf .**", Decision::Block),
+        ("mv ~/.** /tmp", Decision::Ask),
+        ("rm -rf ../build/.**", Decision::Allow),
+        ("rm -rf ~/.config/*/*", Decision::Ask),
+        ("rm -r ~/.config/*/*", Decision::Ask),
+        ("rm -rf ../x/.config/*", Decision::Ask),
+        // Every glob-only spelling of `.*`/`*` is the same target.
+        ("rm -rf ~/.??**", Decision::Block),
+        ("rm -rf ~/.?**", Decision::Block),
+        ("rm -rf ~/.[^.]**", Decision::Block),
+        ("rm -rf ~/.**?", Decision::Block),
+        ("rm -rf ~/.***", Decision::Block),
+        ("rm -rf ~/.?*?", Decision::Block),
+        ("rm -rf ~/.*??", Decision::Block),
+        ("rm -rf ~/.[!.]*?", Decision::Block),
+        ("rm -rf ~/.[!.]?*", Decision::Block),
+        ("rm -rf ~/.?[!.]*", Decision::Block),
+        ("rm -rf ~/.[!.][!.]*", Decision::Block),
+        ("rm -rf ~/.*[!.]", Decision::Block),
+        ("rm -rf ~/.[!x]*", Decision::Block),
+        ("rm -rf ~/.[!.a]*", Decision::Block),
+        ("rm -rf ~/.[a-z]*", Decision::Block),
+        ("rm -rf ~/.[[:alnum:]]*", Decision::Block),
+        ("rm -rf ~/.[[:alpha:]]*", Decision::Block),
+        ("rm -r ~/.??**", Decision::Ask),
+        ("rm -r ~/.[[:alnum:]]*", Decision::Ask),
+        ("mv ~/.[!.]?* /tmp", Decision::Ask),
+        ("cd ~ && rm -rf .??**", Decision::Block),
+        ("cd ~ && rm -rf .[!.]?*", Decision::Block),
+        ("rm -rf .[!.]?*", Decision::Block),
+        ("rm -rf ~/?*", Decision::Block),
+        ("rm -rf ~/*?", Decision::Block),
+        ("rm -rf ~/[!.]*", Decision::Block),
+        ("rm -r ~/?*", Decision::Ask),
+        ("rm -rf /?*", Decision::Block),
+        ("rm -rf ?*", Decision::Block),
+        ("rm -rf ~/.config/*/**", Decision::Ask),
+        ("rm -rf ~/.config/**/**", Decision::Ask),
+        ("rm -rf ~/.config/**/*", Decision::Ask),
+        ("rm -rf ~/.config/?*/*", Decision::Ask),
+        ("rm -rf ~/.config/*/?*", Decision::Ask),
+        ("rm -rf ~/.config/[!.]*/*", Decision::Ask),
+        // A partial glob that could expand into a protected path floors to
+        // Ask (never Block, never Allow).
+        ("rm -rf ~/.*/*", Decision::Ask),
+        ("rm -rf ~/.*/shguard", Decision::Ask),
+        ("rm -rf ~/.c*/*", Decision::Ask),
+        ("rm -rf ~/.c*/s*", Decision::Ask),
+        ("rm -rf ~/.[!.]*/*", Decision::Ask),
+        ("rm -rf ~/.??*/*", Decision::Ask),
+        ("rm -rf ~/.config/s*", Decision::Ask),
+        ("rm -rf ~/.config/sh*", Decision::Ask),
+        ("rm -rf ~/.config/*guard", Decision::Ask),
+        ("rm -rf ~/.config/?hguard", Decision::Ask),
+        ("rm -rf ~/.config/[!A-Z]hguard", Decision::Ask),
+        ("rm -rf ~/.Config/[!A-Z]hguard", Decision::Ask),
+        ("cd ~/.config && rm -rf s*", Decision::Ask),
+        ("cd ~ && rm -rf .c*/s*", Decision::Ask),
+        ("cd ~ && rm -rf .config/s*", Decision::Ask),
+        ("cd ~/.config && echo x > s*/config.toml", Decision::Ask),
+        ("cd ~/.config && rm -rf nvim/*", Decision::Allow),
+        // zsh glob qualifiers, extglob and zsh `^` read as the glob they
+        // narrow (interim, #666).
+        ("rm -rf ~/*(/)", Decision::Block),
+        ("rm -rf ~/.*(/)", Decision::Block),
+        ("rm -rf ~/.config/*(/)", Decision::Ask),
+        ("rm -rf ~/.config/*(N)", Decision::Ask),
+        ("rm -rf ~/.config/*(.)", Decision::Ask),
+        ("rm -rf ~/.config/s*(/)", Decision::Ask),
+        ("rm -rf ~/.config/s?(/)", Decision::Ask),
+        ("rm -rf ~/.config/!(nvim)", Decision::Ask),
+        ("rm -rf ~/.config/@(shguard)", Decision::Ask),
+        ("rm -rf ~/.config/+(shguard)", Decision::Ask),
+        ("rm -rf ~/.config/^nvim", Decision::Ask),
+        ("rm -rf ~/.c@(onfig)/shguard", Decision::Ask),
+        ("rm -rf ./build/*(N)", Decision::Allow),
+        ("rm -rf build/!(keep)", Decision::Allow),
+        ("ls ~/.config/*(/)", Decision::Allow),
+        ("git log --format='%(refname)'", Decision::Allow),
+        ("echo \"f(x)\"", Decision::Allow),
+        ("rm -f 'notes(1).txt'", Decision::Allow),
+        // An unknown anchor (ascent, dirstack) followed by a partial glob
+        // asks like its literal spelling.
+        ("rm -rf ../.config/s*", Decision::Ask),
+        ("rm -rf ../../.config/s*", Decision::Ask),
+        ("rm -rf ~+/.config/s*", Decision::Ask),
+        ("rm -rf ~-/.config/s*", Decision::Ask),
+        ("rm -rf ../x/.config/s*", Decision::Ask),
+        ("rm -rf ../.c*/shguard", Decision::Ask),
+        ("rm -rf ../.c*", Decision::Ask),
+        ("rm -rf ../dist/**", Decision::Allow),
+        ("rm -rf ../build/.cache*", Decision::Allow),
+        ("rm -rf ../d*/sda", Decision::Ask),
+        ("rm -rf ../dev/*", Decision::Ask),
+        ("rm -rf ../*", Decision::Ask),
+        // A leading wildcard at an unknown anchor is every sibling, not a
+        // reappearing target name.
+        ("rm -rf ../*/node_modules", Decision::Allow),
+        ("rm -rf ../*/dist", Decision::Allow),
+        ("rm -rf ../*/dist/*", Decision::Allow),
+        ("rm -rf ../*/build", Decision::Allow),
+        ("rm -rf ../*/*", Decision::Allow),
+        ("rm -rf ../**/node_modules", Decision::Allow),
+        ("rm -rf ../../*/node_modules", Decision::Allow),
+        ("rm -r ../*/node_modules", Decision::Allow),
+        ("mv ../*/dist /tmp", Decision::Allow),
+        // A qualifier that rewrites the yielded paths or runs code asks
+        // whatever the command (interim, #666).
+        ("rm -rf ~/.config/n*(:s/nvim/shguard/)", Decision::Ask),
+        ("rm -rf ~/.config/nvim/*(:h:h)", Decision::Ask),
+        ("rm -rf /tmp/*(:h:h)", Decision::Ask),
+        ("rm -rf ~/proj/*(:a:h:h)", Decision::Ask),
+        ("ls *(e:'rm -rf ~':)", Decision::Ask),
+        ("ls *(+myfunc)", Decision::Ask),
+        ("ls *(oe:'x':)", Decision::Ask),
+        ("cat < *(e:'rm -rf ~':)", Decision::Ask),
+        ("ls *(om[1])", Decision::Allow),
+        ("ls *(e:x:)", Decision::Ask),
+        ("ls *(+f)", Decision::Ask),
+        ("cat < *(e:x:)", Decision::Ask),
+        ("ls $DIR/*(e:x:)", Decision::Ask),
+        ("ls \"$DIR\"/*(e:x:)", Decision::Ask),
+        ("cat $DIR/*(+f)", Decision::Ask),
+        ("ls $DIR/*(:h)", Decision::Ask),
+        ("ls ${DIR}/*(:h:h)", Decision::Ask),
+        ("ls ~/$X/*(:h)", Decision::Ask),
+        ("ls $(pwd)/*(:h)", Decision::Ask),
+        ("ls \"$HOME\"/*(:h)", Decision::Ask),
+        ("ls *(e:$X:)", Decision::Ask),
+        (
+            "git commit -m \"chore: bump deps (retest)\"",
+            Decision::Allow,
+        ),
+        (
+            "git commit -m \"docs: clarify wording (e.g.)\"",
+            Decision::Allow,
+        ),
+        (
+            "gh pr create -t \"feat: add floor (+func)\" -b x",
+            Decision::Allow,
+        ),
+        ("echo \"(:wq)\"", Decision::Allow),
+        ("echo \"(eee)\"", Decision::Allow),
+        ("echo \"x(:h)\"", Decision::Allow),
+        (
+            "git commit -m \"fix(rules): keep x (see: y)\"",
+            Decision::Allow,
+        ),
+        ("echo \"$X (see: y)\"", Decision::Allow),
+        ("git commit -m 'fix(rules): x (see: y)'", Decision::Allow),
+        // `^` and extglob only reach the Ask floor, never a hard match:
+        // `^foo` is a literal name in bash.
+        ("rm -rf ~/.config/^foo", Decision::Ask),
+        ("rm -rf ^foo", Decision::Ask),
+        ("rm -rf ~/^foo", Decision::Ask),
+        ("rm -rf ~/.config/*/config.toml", Decision::Ask),
+        ("rm -rf ~/*/*", Decision::Ask),
+        ("rm -rf ~/**/*", Decision::Ask),
+        ("rm -rf ~/.config*", Decision::Ask),
+        ("rm -rf ~/.conf*", Decision::Ask),
+        ("rm -rf ~/.[c]onfig", Decision::Ask),
+        ("rm -rf ~/.confi?", Decision::Ask),
+        ("rsync -a --delete x/ ~/.*", Decision::Ask),
+        ("rsync -a --delete x/ ~/.config/*", Decision::Ask),
+        ("echo x > /etc/passw?", Decision::Ask),
+        ("rm -rf ../build/.*?", Decision::Allow),
+        ("rm -rf ../build/.[!.]**", Decision::Allow),
+        ("rm -rf ../bob/.**", Decision::Allow),
+        ("rm -rf ./build/*", Decision::Allow),
+        ("rm -rf dist/**", Decision::Allow),
+        ("rm -rf target/debug/*", Decision::Allow),
+        ("rm -rf ~/proj/node_modules/*", Decision::Allow),
+        ("mv ~/Downloads/*.pdf ~/docs/", Decision::Allow),
+        ("rm -rf */node_modules", Decision::Allow),
+        ("rm -rf ~/.config/nvim/*", Decision::Allow),
     ];
 
     for (command, expected) in cases {
@@ -521,6 +703,14 @@ fn guardfall_rm_dotglob_tilde_targets() {
             "command {command:?}: expected {expected:?}, got {:?}",
             verdict.decision()
         );
+    }
+}
+
+#[test]
+fn guardfall_padded_globstar_keeps_the_rules_own_block() {
+    for padding_anchor in ["", "/Users/me/", "~/"] {
+        let command = format!("rm -rf / {padding_anchor}{}zzz", "**/".repeat(2000));
+        assert_eq!(shguard::analyze(&command).decision(), Decision::Block);
     }
 }
 

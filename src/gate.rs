@@ -345,8 +345,9 @@ use crate::normalize::{
 };
 use crate::rules::{
     AWK_INTERPRETERS, Allowlist, AllowlistOutcome, CommandRule, EVAL_BUILTIN, PathForm,
-    RedirectRule, Rules, SymlinkScope, WrapperChainEscalation, is_pipeline_interpreter,
-    lexical_normalize, render_cwd_anchor, wrapper_chain_changes_cwd,
+    RedirectRule, Rules, SymlinkScope, WrapperChainEscalation, has_expanding_glob_qualifier,
+    is_pipeline_interpreter, lexical_normalize, render_cwd_anchor,
+    unresolved_word_may_hide_glob_qualifier, wrapper_chain_changes_cwd,
 };
 use crate::verdict::{Decision, DenyMessage, Reason, RuleId, Verdict};
 
@@ -1566,6 +1567,8 @@ fn apply_attached_word_and_redirect_checks(
         worst,
         scan_redirect_ascent_descent_floor(redirections, rules),
     );
+    worst = fold_ask_floor(worst, scan_redirect_glob_floor(redirections, rules));
+    worst = fold_ask_floor(worst, scan_glob_qualifier_floor(&[], redirections));
 
     // Issue #341: the same directory-stack tilde floor
     // `evaluate_simple_command` applies to a command's own redirects,
@@ -2147,6 +2150,57 @@ fn scan_redirect_ascent_descent_floor(
     ))
 }
 
+fn scan_redirect_glob_floor(redirections: &[Redirection], rules: &Rules) -> Option<String> {
+    let rule = resolved_redirect_write_targets(redirections)
+        .iter()
+        .find_map(|target| rules.match_redirect_target_glob(target))?;
+    Some(redirect_glob_reason(rule))
+}
+
+// Any command and any redirect direction, not only rule targets: an
+// `e:...:` qualifier runs its code whatever the glob is passed to.
+fn scan_glob_qualifier_floor(
+    argv: &[NormalizedWord],
+    redirections: &[Redirection],
+) -> Option<String> {
+    let redirect_words = redirections.iter().flat_map(|redir| match redir {
+        Redirection::File { target, .. } => normalize::normalize_word(target),
+        _ => Vec::new(),
+    });
+    let word = argv
+        .iter()
+        .cloned()
+        .chain(redirect_words)
+        .find_map(|word| match word.resolution() {
+            Resolution::Resolved(s) => has_expanding_glob_qualifier(s).then(|| s.clone()),
+            Resolution::Unresolvable(_) => {
+                unresolved_word_may_hide_glob_qualifier(word.literal_head(), word.literal_tail())
+                    .then(|| {
+                        format!(
+                            "{}<unresolved>{}",
+                            word.literal_head().unwrap_or_default(),
+                            word.literal_tail().unwrap_or_default()
+                        )
+                    })
+            }
+        })?;
+    Some(format!(
+        "{word:?} ends in an unknown zsh qualifier expansion: a glob qualifier with a \
+         modifier, e:...:, +function or o/O by code rewrites the yielded paths or runs \
+         code, so what it expands to can't be checked statically"
+    ))
+}
+
+fn redirect_glob_reason(rule: &RedirectRule) -> String {
+    format!(
+        "a glob in a redirect target could expand to a protected path matching redirect rule \
+         {:?} ({}); what a glob expands to depends on the filesystem, so this can't be proven, \
+         only flagged",
+        rule.id().as_str(),
+        rule.reason().as_str(),
+    )
+}
+
 /// Issue #341: `Some(reason)` (always an `Ask` floor) when any resolved redirect-write target
 /// in `redirections` (via [`resolved_redirect_write_targets`]) is a bare
 /// directory-stack tilde shorthand (`~+`/`~-`/`~N`) or a `..` step above one
@@ -2590,6 +2644,11 @@ fn evaluate_simple_command(
     // hard match on the *unwidened* target set, so it doesn't see this).
     let redirect_ascent_descent_floor =
         scan_redirect_ascent_descent_floor(&command.redirections, rules);
+    // Issue #595: computed here so it survives `core`'s early returns, like
+    // the ascent-descent pair above.
+    let glob_floor = scan_glob_floor(&argv, rules);
+    let glob_qualifier_floor = scan_glob_qualifier_floor(&argv, &command.redirections);
+    let redirect_glob_floor = scan_redirect_glob_floor(&command.redirections, rules);
     // Issue #341: the same directory-stack tilde floor `scan_dirstack_tilde_floor`
     // applies to argv-based targets, extended to the command's own shell
     // redirect targets (`> ...`/`>> ...`) — a separate Rust type
@@ -2691,6 +2750,9 @@ fn evaluate_simple_command(
     let tar_dashless_floor_present = tar_dashless_floor.is_some();
     let ascent_descent_floor_present = ascent_descent_floor.is_some();
     let redirect_ascent_descent_floor_present = redirect_ascent_descent_floor.is_some();
+    let glob_floor_present = glob_floor.is_some();
+    let redirect_glob_floor_present = redirect_glob_floor.is_some();
+    let glob_qualifier_floor_present = glob_qualifier_floor.is_some();
     let redirect_dirstack_tilde_floor_present = redirect_dirstack_tilde_floor.is_some();
     let redirect_home_env_floor_present = redirect_home_env_floor.is_some();
     let redirect_named_user_home_floor_present = redirect_named_user_home_floor.is_some();
@@ -2708,6 +2770,9 @@ fn evaluate_simple_command(
     let verdict = apply_tar_dashless_floor(verdict, tar_dashless_floor);
     let verdict = apply_command_ascent_descent_floor(verdict, ascent_descent_floor);
     let verdict = apply_redirect_ask_floor(verdict, redirect_ascent_descent_floor);
+    let verdict = apply_glob_floor(verdict, glob_floor);
+    let verdict = apply_redirect_ask_floor(verdict, redirect_glob_floor);
+    let verdict = apply_redirect_ask_floor(verdict, glob_qualifier_floor);
     let verdict = apply_redirect_ask_floor(verdict, redirect_dirstack_tilde_floor);
     let verdict = apply_redirect_ask_floor(verdict, redirect_home_env_floor);
     let verdict = apply_redirect_ask_floor(verdict, redirect_named_user_home_floor);
@@ -2732,6 +2797,11 @@ fn evaluate_simple_command(
     // more: an allow entry for `dd`/`rm`/`tar`/etc. is not consent to an
     // ascent-then-descent token (argv-based or redirect-based) that
     // plausibly lands in that same rule's own dangerous namespace.
+    // `glob_floor_present`/`redirect_glob_floor_present` (issue #595)
+    // extend it the same way for a glob that could expand into it.
+    // `glob_qualifier_floor_present` (issue #595) extends it to a zsh
+    // qualifier that rewrites paths or runs code: an allow entry for `ls`
+    // is not consent to `*(e:...:)`.
     // `named_user_home_floor_present` (issue #80) extends it once more: an
     // allow entry for `rm`/`tar` is not consent to a `~username` token
     // that would hit that same rule's bare-`~` target if it expanded — the
@@ -2798,6 +2868,9 @@ fn evaluate_simple_command(
         || tar_dashless_floor_present
         || ascent_descent_floor_present
         || redirect_ascent_descent_floor_present
+        || glob_floor_present
+        || redirect_glob_floor_present
+        || glob_qualifier_floor_present
         || redirect_dirstack_tilde_floor_present
         || redirect_home_env_floor_present
         || redirect_named_user_home_floor_present
@@ -3729,6 +3802,34 @@ fn scan_ascent_descent_floor(
 /// always discards whatever `deny_message` `verdict` had anyway, so there
 /// is no existing message to weigh this one against.
 fn apply_command_ascent_descent_floor(
+    verdict: Verdict,
+    floor: Option<(Decision, String, Option<DenyMessage>)>,
+) -> Verdict {
+    let Some((floor_decision, floor_reason, deny_message)) = floor else {
+        return verdict;
+    };
+    apply_floor(verdict, floor_decision, floor_reason, deny_message)
+}
+
+fn scan_glob_floor(
+    argv: &[NormalizedWord],
+    rules: &Rules,
+) -> Option<(Decision, String, Option<DenyMessage>)> {
+    let rule = rules.match_command_glob(argv)?;
+    Some((
+        Decision::Ask,
+        format!(
+            "a glob in a target position could expand to a protected path matching rule {:?} \
+             ({}); what a glob expands to depends on the filesystem and shell options \
+             (dotglob, globstar), so this can't be proven, only flagged",
+            rule.id().as_str(),
+            rule.reason().as_str(),
+        ),
+        rule.deny_message().cloned(),
+    ))
+}
+
+fn apply_glob_floor(
     verdict: Verdict,
     floor: Option<(Decision, String, Option<DenyMessage>)>,
 ) -> Verdict {
@@ -9931,6 +10032,12 @@ fn evaluate_composed_argv_match_in(
                 .with_deny_message(rule.deny_message().cloned()),
         );
     }
+    if let Some((_, reason, deny_message)) = scan_glob_floor(composed_argv, rules) {
+        raise(
+            Verdict::ask(Reason::new(reason), original_argv.to_vec())
+                .with_deny_message(deny_message),
+        );
+    }
 
     worst
 }
@@ -10053,6 +10160,13 @@ fn evaluate_composed_cwd_redirects(
         }
         let composed = format!("{}/{target}", anchor.path);
         let Some(rule) = rules.match_redirect_target(&composed) else {
+            if let Some(rule) = rules.match_redirect_target_glob(&composed) {
+                let verdict = Verdict::ask(Reason::new(redirect_glob_reason(rule)), argv.to_vec());
+                worst = Some(match worst {
+                    Some(current) => fold_worst(current, verdict),
+                    None => verdict,
+                });
+            }
             continue;
         };
         let reason = Reason::new(format!(
@@ -15059,6 +15173,45 @@ mod tests {
         // if the ascent bottomed out there — the floor must survive the
         // allowlist downgrade.
         let verdict = analyze_with_policy("dd of=../../../../dev/sda", &rules, &allowlist);
+        assert_eq!(verdict.decision(), Decision::Ask);
+    }
+
+    #[test]
+    fn glob_floor_asks_with_its_own_reason() {
+        for (command, reason) in [
+            ("rm -rf ~/.config/s*", "a glob in a target position"),
+            ("echo x > /etc/passw?", "a glob in a redirect target"),
+        ] {
+            let verdict = decide(command);
+            assert_eq!(verdict.decision(), Decision::Ask, "{command}");
+            let text = verdict.reason().map(super::Reason::as_str);
+            assert!(text.is_some_and(|t| t.contains(reason)), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn allowlisted_rm_still_asks_on_glob_floor() {
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[allow]]
+            id = "user-allow-rm"
+            reason = "trust me"
+            command = "rm"
+        "#,
+        );
+        for command in ["rm -rf ~/.config/s*", "rm -rf ~/.c*/*"] {
+            let verdict = analyze_with_policy(command, &rules, &allowlist);
+            assert_eq!(verdict.decision(), Decision::Ask, "{command}");
+        }
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[allow]]
+            id = "user-allow-echo"
+            reason = "trust me"
+            command = "echo"
+        "#,
+        );
+        let verdict = analyze_with_policy("echo x > /etc/passw?", &rules, &allowlist);
         assert_eq!(verdict.decision(), Decision::Ask);
     }
 

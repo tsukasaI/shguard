@@ -1116,6 +1116,21 @@ fn is_home_container_dir(component: &str) -> bool {
 }
 
 impl TargetMatcher {
+    fn with_canonical_globs(self) -> Self {
+        match self {
+            Self::NormalizedExact {
+                strip,
+                target,
+                case_insensitive,
+            } => Self::NormalizedExact {
+                strip,
+                target: canonicalize_glob_form(target),
+                case_insensitive,
+            },
+            other => other,
+        }
+    }
+
     fn has_strip(&self) -> bool {
         matches!(
             self,
@@ -1225,12 +1240,17 @@ impl TargetMatcher {
                     return false;
                 };
                 let form = lexical_normalize(remainder);
-                let equal = if *case_insensitive {
-                    case_fold_path_form(&form) == case_fold_path_form(target)
-                } else {
-                    form == *target
+                let equal = |form: &PathForm| {
+                    if *case_insensitive {
+                        case_fold_path_form(form) == case_fold_path_form(target)
+                    } else {
+                        form == target
+                    }
                 };
-                if equal {
+                // Both spellings: an allowlist target keeps its literal
+                // glob (`TargetGlobs::Literal`), which only the raw form
+                // can equal.
+                if equal(&form) || equal(&glob_canonical_form(remainder)) {
                     return true;
                 }
                 // Fail-closed widenings (issue #65): shguard never knows
@@ -1399,7 +1419,7 @@ impl TargetMatcher {
         let Some(remainder) = strip_target(strip.as_deref(), token) else {
             return false;
         };
-        let comps = match lexical_normalize(remainder) {
+        let comps = match lexical_normalize(strip_filter_qualifier(remainder)) {
             PathForm::Rel { ascent, comps } if ascent >= 1 => comps,
             PathForm::EscapesHome(comps)
             | PathForm::NamedUserHomeEscapes(comps)
@@ -1504,14 +1524,16 @@ impl TargetMatcher {
                         a == b
                     }
                 };
+                // Same canonical spelling `Self::matches` compares.
+                let mut comps = comps;
+                canonicalize_glob_comps(&mut comps);
                 // Issue #506: the `comps[1..]`/`comps[2..]` widening arms
                 // below exist to catch a REAPPEARING NAME after an
                 // escaped/unresolved ascent (`~alice/../bob` re-descending
                 // into the very `bob` this rule cares about), a
                 // coincidence specific enough to be worth flooring to Ask.
                 // A target made ENTIRELY of glob wildcard components
-                // (`*`/`**`/the leading-dot globs `.*`, `.[!.]*`, `.??*`,
-                // `.[^.]*`, `.?*`, e.g. `~/*`, `~/.*`) has no such
+                // (see `is_glob_only_component`, e.g. `~/*`, `~/.*`) has no such
                 // specificity: `comps`'s own trailing component is a
                 // wildcard for essentially any benign relative path
                 // (`../build/*`, `../build/.*`, ...), so the same
@@ -1522,12 +1544,11 @@ impl TargetMatcher {
                 // ascent landing who-knows-where, then globbing
                 // everything there) still asks on its own, unwidened
                 // merit.
-                let widening_target_is_wildcard_only = target_comps.iter().all(|c| {
-                    matches!(
-                        c.as_str(),
-                        "*" | "**" | ".*" | ".[!.]*" | ".??*" | ".[^.]*" | ".?*"
-                    )
-                });
+                // Structural, not a spelling list: a list duplicating
+                // blocklist.toml's glob targets lets a new glob target
+                // silently reintroduce issue #559.
+                let widening_target_is_wildcard_only =
+                    target_comps.iter().all(|c| is_glob_only_component(c));
                 eq(target_comps, &comps)
                     // Issue #118: same re-anchoring as the prefix arm above,
                     // but only against a `~`-anchored target (an `Abs`
@@ -1557,6 +1578,650 @@ impl TargetMatcher {
             }
         }
     }
+
+    // Not folded into `Self::matches`: what a glob expands to depends on
+    // the filesystem, so this only feeds the Ask-capped
+    // `crate::gate::scan_glob_floor`. `*`/`?`/brackets may match a leading
+    // `.` (dotglob, zsh): assuming bash's default would be fail-open.
+    fn glob_plausible(&self, token: &str) -> bool {
+        let (strip, target, case_insensitive, beneath, partial_last) = match self {
+            Self::NormalizedExact {
+                strip,
+                target,
+                case_insensitive,
+            } => {
+                let glob_last = match target {
+                    PathForm::Abs(comps) | PathForm::Home(comps) | PathForm::Rel { comps, .. } => {
+                        comps.last().is_some_and(|last| is_canonical_glob(last))
+                    }
+                    _ => false,
+                };
+                let beneath = if glob_last {
+                    GlobBeneath::GlobOnly
+                } else {
+                    GlobBeneath::Nothing
+                };
+                (strip, target.clone(), *case_insensitive, beneath, false)
+            }
+            Self::NormalizedPrefix {
+                strip,
+                canon,
+                case_insensitive,
+            } => (
+                strip,
+                lexical_normalize(canon),
+                *case_insensitive,
+                GlobBeneath::Anything,
+                !canon.ends_with('/'),
+            ),
+            Self::Exact(_)
+            | Self::Prefix(_)
+            | Self::UrlHost(_)
+            | Self::NormalizedBasename { .. } => return false,
+        };
+        let Some(remainder) = strip_target(strip.as_deref(), token) else {
+            return false;
+        };
+        let form = superset_glob_form(lexical_normalize(&superset_glob_path(remainder)));
+        let (pattern, unknown_anchor) = match (&form, &target) {
+            (PathForm::Abs(pattern), PathForm::Abs(_))
+            | (PathForm::Home(pattern), PathForm::Home(_)) => (pattern, false),
+            (
+                PathForm::Rel {
+                    ascent: a,
+                    comps: pattern,
+                },
+                PathForm::Rel { ascent: b, .. },
+            ) if a == b => (pattern, false),
+            (PathForm::Rel { ascent, comps }, PathForm::Abs(_) | PathForm::Home(_))
+                if *ascent >= 1 =>
+            {
+                (comps, true)
+            }
+            (
+                PathForm::EscapesHome(comps)
+                | PathForm::NamedUserHomeEscapes(comps)
+                | PathForm::DirStack(comps),
+                PathForm::Abs(_) | PathForm::Home(_),
+            ) => (comps, true),
+            _ => return false,
+        };
+        let (PathForm::Abs(target_comps)
+        | PathForm::Home(target_comps)
+        | PathForm::Rel {
+            comps: target_comps,
+            ..
+        }) = &target
+        else {
+            return false;
+        };
+        if !pattern.iter().any(|c| c.contains(['*', '?', '['])) {
+            return false;
+        }
+        let how = GlobMatch {
+            beneath,
+            partial_last,
+            case_insensitive,
+        };
+        // At an unknown anchor a leading glob-only component (`../*/dist`,
+        // `../*/*`) names every sibling, not a reappearing target name:
+        // aligning it with `dev` or with `~/*` would ask on any sibling
+        // cleanup. A bare `../*` still asks through the ascent-descent floor.
+        let leading_wildcard =
+            unknown_anchor && pattern.first().is_some_and(|c| is_glob_only_component(c));
+        if !leading_wildcard && comps_glob_plausible(pattern, target_comps, how) {
+            return true;
+        }
+        if !unknown_anchor
+            || !matches!(target, PathForm::Home(_))
+            || target_comps.iter().all(|c| is_glob_only_component(c))
+        {
+            return false;
+        }
+        // The reappearing-name widening of `ascent_descent_plausible`. A
+        // glob-only rest (`../build/*`) is skipped for the reason it skips a
+        // glob-only target: it would flag every sibling-directory cleanup.
+        let widened = |skip: usize| {
+            let rest = &pattern[skip..];
+            !rest.iter().all(|c| is_glob_only_component(c))
+                && comps_glob_plausible(rest, target_comps, how)
+        };
+        (pattern.len() >= 2 && widened(1))
+            || (pattern.len() >= 3 && is_home_container_dir(&pattern[0]) && widened(2))
+    }
+}
+
+fn is_canonical_glob(comp: &str) -> bool {
+    comp == "*" || comp == ".*"
+}
+
+// Which pattern components may be left over once the target is consumed.
+// `GlobOnly` (an exact glob target such as `~/*`): `~/*/*` empties every
+// subdirectory, but `*/node_modules` is not the "every entry" claim `*` is.
+#[derive(Clone, Copy)]
+enum GlobBeneath {
+    Nothing,
+    GlobOnly,
+    Anything,
+}
+
+impl GlobBeneath {
+    // Indexed by where the leftover starts in `pattern`.
+    fn admits_suffixes(self, pattern: &[String]) -> Vec<bool> {
+        let mut admits = vec![true; pattern.len() + 1];
+        for p in (0..pattern.len()).rev() {
+            admits[p] = match self {
+                Self::Nothing => false,
+                Self::GlobOnly => admits[p + 1] && is_glob_only_component(&pattern[p]),
+                Self::Anything => true,
+            };
+        }
+        admits
+    }
+}
+
+#[derive(Clone, Copy)]
+struct GlobMatch {
+    beneath: GlobBeneath,
+    // The last target component is a string prefix
+    // (`normalized_prefix = "/dev/sd"`).
+    partial_last: bool,
+    case_insensitive: bool,
+}
+
+// Forward reachability over (pattern index, target index), not recursive
+// backtracking: a padded run of `**` components backtracks exponentially.
+fn comps_glob_plausible(pattern: &[String], target: &[String], how: GlobMatch) -> bool {
+    let width = target.len() + 1;
+    let admits = how.beneath.admits_suffixes(pattern);
+    let mut reached = vec![false; (pattern.len() + 1) * width];
+    reached[0] = true;
+    for p in 0..=pattern.len() {
+        for t in 0..width {
+            if !reached[p * width + t] {
+                continue;
+            }
+            let Some(comp) = pattern.get(p) else {
+                if t == target.len() {
+                    return true;
+                }
+                continue;
+            };
+            if comp == "**" {
+                reached[(p + 1) * width + t] = true;
+            }
+            let Some(target_comp) = target.get(t) else {
+                if admits[p] {
+                    return true;
+                }
+                continue;
+            };
+            if comp == "**" {
+                reached[p * width + t + 1] = true;
+                continue;
+            }
+            // Against a glob target (`~/*`), only another glob-only component is
+            // the same "every entry" claim; a literal `build` in `build/*` is not.
+            let component_matches = if is_canonical_glob(target_comp) {
+                is_glob_only_component(comp)
+            } else {
+                glob_component_matches(
+                    comp.as_bytes(),
+                    target_comp.as_bytes(),
+                    how.partial_last && t + 1 == target.len(),
+                    how.case_insensitive,
+                )
+            };
+            if component_matches {
+                reached[(p + 1) * width + t + 1] = true;
+            }
+        }
+    }
+    false
+}
+
+// Not lowercasing the pattern: that turns `[!A-Z]` into `[!a-z]` and
+// inverts what a negated bracket admits.
+fn glob_component_matches(
+    pattern: &[u8],
+    name: &[u8],
+    name_is_prefix: bool,
+    case_insensitive: bool,
+) -> bool {
+    let swapped = |c: u8| {
+        if c.is_ascii_lowercase() {
+            c.to_ascii_uppercase()
+        } else {
+            c.to_ascii_lowercase()
+        }
+    };
+    let (mut p, mut n) = (0, 0);
+    let mut star: Option<(usize, usize)> = None;
+    while n < name.len() {
+        let step = match pattern.get(p) {
+            Some(b'*') => {
+                star = Some((p + 1, n));
+                p += 1;
+                continue;
+            }
+            Some(b'?') => Some(p + 1),
+            Some(b'[') => match bracket_expr_end(pattern, p) {
+                Some(end) => {
+                    let expr = &pattern[p..end];
+                    (bracket_matches(expr, name[n])
+                        || (case_insensitive && bracket_matches(expr, swapped(name[n]))))
+                    .then_some(end)
+                }
+                None => (name[n] == b'[').then_some(p + 1),
+            },
+            Some(&literal) => (literal == name[n]
+                || (case_insensitive && literal.eq_ignore_ascii_case(&name[n])))
+            .then_some(p + 1),
+            None => None,
+        };
+        if let Some(next) = step {
+            p = next;
+            n += 1;
+            continue;
+        }
+        let Some((star_p, star_n)) = star else {
+            return false;
+        };
+        star = Some((star_p, star_n + 1));
+        p = star_p;
+        n = star_n + 1;
+    }
+    name_is_prefix || pattern[p..].iter().all(|&b| b == b'*')
+}
+
+fn bracket_matches(expr: &[u8], c: u8) -> bool {
+    let inner = &expr[1..expr.len() - 1];
+    let (negate, mut i) = match inner.first() {
+        Some(b'!' | b'^') => (true, 1),
+        _ => (false, 0),
+    };
+    let mut hit = false;
+    while i < inner.len() {
+        if inner[i] == b'['
+            && matches!(inner.get(i + 1), Some(b':' | b'=' | b'.'))
+            && let Some(end) = posix_bracket_term_end(inner, i)
+        {
+            let name = &inner[i + 2..end - 2];
+            if inner[i + 1] == b':' {
+                // An unknown class may match anything, negated or not.
+                let Some(matched) = posix_class_matches(name, c) else {
+                    return true;
+                };
+                hit |= matched;
+            } else {
+                hit |= name == [c];
+            }
+            i = end;
+        } else if inner.get(i + 1) == Some(&b'-') && i + 2 < inner.len() {
+            hit |= (inner[i]..=inner[i + 2]).contains(&c);
+            i += 3;
+        } else {
+            hit |= inner[i] == c;
+            i += 1;
+        }
+    }
+    hit != negate
+}
+
+fn posix_class_matches(class: &[u8], c: u8) -> Option<bool> {
+    Some(match class {
+        b"alnum" => c.is_ascii_alphanumeric(),
+        b"alpha" => c.is_ascii_alphabetic(),
+        b"ascii" => c.is_ascii(),
+        b"blank" => c == b' ' || c == b'\t',
+        b"cntrl" => c.is_ascii_control(),
+        b"digit" => c.is_ascii_digit(),
+        b"graph" => c.is_ascii_graphic(),
+        b"lower" => c.is_ascii_lowercase(),
+        b"print" => c.is_ascii_graphic() || c == b' ',
+        b"punct" => c.is_ascii_punctuation(),
+        b"space" => c.is_ascii_whitespace() || c == 0x0b,
+        b"upper" => c.is_ascii_uppercase(),
+        b"word" => c.is_ascii_alphanumeric() || c == b'_',
+        b"xdigit" => c.is_ascii_hexdigit(),
+        _ => return None,
+    })
+}
+
+// At least one metacharacter is required: `.` and `..` are path steps, not
+// globs.
+fn is_glob_only_component(comp: &str) -> bool {
+    let body = comp.strip_prefix('.').unwrap_or(comp).as_bytes();
+    if body.is_empty() {
+        return false;
+    }
+    let mut i = 0;
+    while i < body.len() {
+        match body[i] {
+            b'*' | b'?' => i += 1,
+            // An unclosed `[` is a literal character, so not glob-only.
+            b'[' => match bracket_expr_end(body, i) {
+                Some(end) => i = end,
+                None => return false,
+            },
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn bracket_expr_end(pat: &[u8], open: usize) -> Option<usize> {
+    let mut j = open + 1;
+    if matches!(pat.get(j), Some(b'!' | b'^')) {
+        j += 1;
+    }
+    if pat.get(j) == Some(&b']') {
+        j += 1;
+    }
+    while j < pat.len() {
+        match pat[j] {
+            b']' => return Some(j + 1),
+            // Not a plain member: the `]` inside `[:alpha:]` does not close
+            // the bracket.
+            b'[' if matches!(pat.get(j + 1), Some(b':' | b'=' | b'.')) => {
+                j = posix_bracket_term_end(pat, j).unwrap_or(j + 1);
+            }
+            _ => j += 1,
+        }
+    }
+    None
+}
+
+fn posix_bracket_term_end(pat: &[u8], open: usize) -> Option<usize> {
+    let delim = *pat.get(open + 1)?;
+    pat.get(open + 2..)?
+        .windows(2)
+        .position(|w| w == [delim, b']'])
+        .map(|off| open + 2 + off + 2)
+}
+
+fn canonical_glob_component(comp: &str) -> Option<&'static str> {
+    is_glob_only_component(comp).then(|| if comp.starts_with('.') { ".*" } else { "*" })
+}
+
+// No extglob or `^` reading here: this feeds hard matches, and `^foo` is
+// a literal name in bash and in zsh without EXTENDED_GLOB.
+fn canonicalize_glob_comps(comps: &mut [String]) {
+    for comp in comps {
+        if let Some(canon) = canonical_glob_component(comp) {
+            canon.clone_into(comp);
+        }
+    }
+}
+
+// A trailing group is split off on the whole path, not per component,
+// because a qualifier such as `(/)` contains the path separator.
+fn trailing_group(path: &str) -> Option<(&str, &str)> {
+    let body = path.strip_suffix(')')?;
+    let mut depth = 0usize;
+    for (open, byte) in body.bytes().enumerate().rev() {
+        match byte {
+            b')' => depth += 1,
+            b'(' if depth > 0 => depth -= 1,
+            b'(' => return Some((&path[..open], &body[open + 1..])),
+            _ => {}
+        }
+    }
+    None
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum QualifierGroup {
+    // Only narrows which names the glob yields.
+    Filter,
+    // Rewrites the yielded paths (`:h`, `P:x:`) or runs code (`e:..:`,
+    // `+func`, `oe`, `o+`).
+    Expands,
+    NotQualifier,
+}
+
+// zsh's glob qualifier list (zshexpn "Glob Qualifiers"), parsed rather
+// than keyword-matched: a parenthetical such as `(see: x)` is plain text,
+// while `(e:'rm x':)` holds spaces inside its delimited argument.
+fn classify_qualifier_group(group: &str) -> QualifierGroup {
+    let bytes = group.as_bytes();
+    let mut expands = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        i += 1;
+        let parsed = match c {
+            b'%' => Some(i + usize::from(matches!(bytes.get(i), Some(b'b' | b'c')))),
+            b'/' | b'.' | b'@' | b'=' | b'p' | b'*' | b'r' | b'w' | b'x' | b'A' | b'I' | b'E'
+            | b'R' | b'W' | b'X' | b's' | b'S' | b't' | b'F' | b'^' | b'-' | b'M' | b'T' | b'N'
+            | b'D' | b'n' | b'U' | b'G' | b',' => Some(i),
+            b'e' | b'P' => {
+                expands = true;
+                skip_delimited(bytes, i)
+            }
+            b'+' => {
+                expands = true;
+                skip_identifier(bytes, i)
+            }
+            b':' => {
+                expands = true;
+                bytes
+                    .get(i)
+                    .is_some_and(|m| b"aAcehlPqQrtuxXsgfFwW&".contains(m))
+                    .then_some(bytes.len())
+            }
+            b'o' | b'O' => match bytes.get(i) {
+                Some(b'e') => {
+                    expands = true;
+                    skip_delimited(bytes, i + 1)
+                }
+                Some(b'+') => {
+                    expands = true;
+                    skip_identifier(bytes, i + 1)
+                }
+                Some(b'n' | b'L' | b'l' | b'a' | b'm' | b'c' | b'd' | b'N') => Some(i + 1),
+                _ => None,
+            },
+            b'f' | b'u' | b'g' => match bytes.get(i) {
+                Some(d) if d.is_ascii_digit() => Some(skip_number(bytes, i)),
+                _ => skip_delimited(bytes, i),
+            },
+            b'a' | b'm' | b'c' | b'L' | b'l' | b'd' | b'Y' => {
+                let mut j = i;
+                if bytes.get(j).is_some_and(u8::is_ascii_alphabetic) {
+                    j += 1;
+                }
+                if matches!(bytes.get(j), Some(b'+' | b'-')) {
+                    j += 1;
+                }
+                bytes
+                    .get(j)
+                    .is_some_and(u8::is_ascii_digit)
+                    .then(|| skip_number(bytes, j))
+            }
+            b'[' => bytes[i..]
+                .iter()
+                .position(|&b| b == b']')
+                .map(|off| i + off + 1),
+            _ => None,
+        };
+        let Some(next) = parsed else {
+            return QualifierGroup::NotQualifier;
+        };
+        i = next;
+    }
+    match (bytes.is_empty(), expands) {
+        (true, _) => QualifierGroup::NotQualifier,
+        (false, true) => QualifierGroup::Expands,
+        (false, false) => QualifierGroup::Filter,
+    }
+}
+
+fn skip_number(bytes: &[u8], from: usize) -> usize {
+    from + bytes[from..]
+        .iter()
+        .take_while(|b| b.is_ascii_digit())
+        .count()
+}
+
+fn skip_identifier(bytes: &[u8], from: usize) -> Option<usize> {
+    if !bytes
+        .get(from)
+        .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
+    {
+        return None;
+    }
+    let len = bytes[from..]
+        .iter()
+        .take_while(|b| b.is_ascii_alphanumeric() || **b == b'_')
+        .count();
+    (len > 0).then_some(from + len)
+}
+
+// zsh's delimited argument: a bracket opener closes with its pair, any
+// other byte closes with itself.
+fn skip_delimited(bytes: &[u8], from: usize) -> Option<usize> {
+    let open = *bytes.get(from)?;
+    let close = match open {
+        b'[' => b']',
+        b'{' => b'}',
+        b'(' => b')',
+        b'<' => b'>',
+        other => other,
+    };
+    bytes[from + 1..]
+        .iter()
+        .position(|&b| b == close)
+        .map(|off| from + 1 + off + 1)
+}
+
+fn last_component_has_glob(head: &str) -> bool {
+    head.rsplit('/')
+        .next()
+        .is_some_and(|last| last.contains(['*', '?', '[']))
+}
+
+// Whether `word` carries a zsh glob qualifier that rewrites the paths a
+// glob yields or runs code, so no reading of it as a narrowed glob holds.
+// Gated on a glob before the group: an unquoted `name(:h)` is a parse
+// error, and a quoted parenthetical (`"bump deps (retest)"`) never globs.
+// `(#q...)` is the EXTENDED_GLOB inline spelling.
+pub(crate) fn has_expanding_glob_qualifier(word: &str) -> bool {
+    let trailing = trailing_group(word).is_some_and(|(head, group)| {
+        last_component_has_glob(head) && classify_qualifier_group(group) == QualifierGroup::Expands
+    });
+    trailing
+        || word.match_indices("(#q").any(|(at, _)| {
+            let rest = &word[at + 3..];
+            rest.find(')')
+                .is_none_or(|end| classify_qualifier_group(&rest[..end]) != QualifierGroup::Filter)
+        })
+}
+
+// The unresolved-word twin of `has_expanding_glob_qualifier`, from the
+// literal text before the first and after the last unresolved piece. A
+// group opened after a glob in the head and closed in the tail
+// (`*(e:$X:)`) holds an unknown piece, so it fails closed. A literal
+// piece between two unresolved pieces is not visible here.
+pub(crate) fn unresolved_word_may_hide_glob_qualifier(
+    head: Option<&str>,
+    tail: Option<&str>,
+) -> bool {
+    let Some(tail) = tail else {
+        return false;
+    };
+    has_expanding_glob_qualifier(tail)
+        || (tail.ends_with(')')
+            && trailing_group(tail).is_none()
+            && head.is_some_and(|head| {
+                head.match_indices('(')
+                    .any(|(at, _)| last_component_has_glob(&head[..at]))
+            }))
+}
+
+// Hard-match reading: a filter qualifier after a glob only narrows it, so
+// the glob alone stands in for it. `f(x)` stays a literal name, and so
+// does `s?(x)`: under bash extglob it matches `s`, which `s?` does not.
+fn strip_filter_qualifier(path: &str) -> &str {
+    match trailing_group(path) {
+        Some((head, group))
+            if classify_qualifier_group(group) == QualifierGroup::Filter
+                && !head.ends_with(['?', '@', '!', '+'])
+                && last_component_has_glob(head) =>
+        {
+            head
+        }
+        _ => path,
+    }
+}
+
+// Ask-floor reading, interim until #666 detects these as shell features:
+// a filter qualifier, extglob and zsh `^` each expand to a subset of the
+// glob read here. An extglob opener plus its group becomes `*`, not the
+// bare opener: `s?(x)` matches `s`, which `s?` would not. An expanding
+// qualifier is left alone; `has_expanding_glob_qualifier` floors it.
+fn superset_glob_path(path: &str) -> Cow<'_, str> {
+    if let Some((head, group)) = trailing_group(path)
+        && classify_qualifier_group(group) != QualifierGroup::Expands
+        && let Some(stem) = head.strip_suffix(['?', '@', '!', '+', '*'])
+    {
+        return Cow::Owned(format!("{stem}*"));
+    }
+    Cow::Borrowed(strip_filter_qualifier(path))
+}
+
+fn superset_glob_component(comp: &str) -> Option<&'static str> {
+    let extglob = ["@(", "!(", "?(", "+(", "*("]
+        .iter()
+        .any(|opener| comp.contains(opener));
+    if comp.starts_with('^') {
+        Some("*")
+    } else if extglob {
+        Some(if comp.starts_with('.') { ".*" } else { "*" })
+    } else {
+        None
+    }
+}
+
+fn superset_glob_comps(comps: &mut [String]) {
+    for comp in comps {
+        if let Some(glob) = superset_glob_component(comp) {
+            glob.clone_into(comp);
+        }
+    }
+}
+
+fn form_comps_mut(form: &mut PathForm) -> Option<&mut Vec<String>> {
+    match form {
+        PathForm::Abs(comps)
+        | PathForm::Home(comps)
+        | PathForm::EscapesHome(comps)
+        | PathForm::NamedUserHomeSub(comps)
+        | PathForm::NamedUserHomeEscapes(comps)
+        | PathForm::DirStack(comps)
+        | PathForm::Rel { comps, .. } => Some(comps),
+        PathForm::NamedUserHome | PathForm::DirStackEscapesEmpty | PathForm::Opaque => None,
+    }
+}
+
+fn superset_glob_form(mut form: PathForm) -> PathForm {
+    if let Some(comps) = form_comps_mut(&mut form) {
+        superset_glob_comps(comps);
+    }
+    form
+}
+
+// Partial patterns like `.[a-z]*` also become `.*`: fail-closed for a deny
+// target, so only deny/ask/redirect targets get this (see `TargetGlobs`).
+fn canonicalize_glob_form(mut form: PathForm) -> PathForm {
+    if let Some(comps) = form_comps_mut(&mut form) {
+        canonicalize_glob_comps(comps);
+    }
+    form
+}
+
+fn glob_canonical_form(path: &str) -> PathForm {
+    canonicalize_glob_form(lexical_normalize(strip_filter_qualifier(path)))
 }
 
 /// Renders `comps` as if it were the tail of an absolute path (`/` +
@@ -1730,10 +2395,11 @@ impl TargetMatcher {
                 let Some(remainder) = strip_target(strip.as_deref(), token) else {
                     return false;
                 };
-                let comps = match lexical_normalize(remainder) {
+                let mut comps = match lexical_normalize(strip_filter_qualifier(remainder)) {
                     PathForm::Rel { comps, .. } => comps,
                     _ => return false,
                 };
+                canonicalize_glob_comps(&mut comps);
                 !comps.is_empty() && is_suffix_of(&comps, target_comps, *case_insensitive)
             }
             Self::NormalizedPrefix {
@@ -3174,6 +3840,7 @@ impl CommandRule {
                 t.ascent_descent_plausible(token)
                     || t.named_user_home_plausible(token)
                     || t.dirstack_plausible(token)
+                    || t.glob_plausible(token)
             })
         })
     }
@@ -3372,6 +4039,11 @@ impl CommandRule {
     #[must_use]
     pub(crate) fn matches_ascent_descent_floor(&self, argv: &[NormalizedWord]) -> bool {
         self.matches_resolved_tail_floor(argv, TargetMatcher::ascent_descent_plausible)
+    }
+
+    #[must_use]
+    pub(crate) fn matches_glob_floor(&self, argv: &[NormalizedWord]) -> bool {
+        self.matches_resolved_tail_floor(argv, TargetMatcher::glob_plausible)
     }
 
     /// issue #80: true when this rule's command+flags match `argv` (via
@@ -6867,7 +7539,26 @@ fn sugar_required_tokens_overlap(
 /// set, or a malformed `value_flags` spec. A multi-word `command` (e.g.
 /// `"gh repo delete"`) desugars to the first word as the command name plus
 /// the remaining words prepended onto `required_tokens`.
-fn convert_command_rule(mut dto: CommandRuleSpec) -> Result<CommandRule, RulesError> {
+fn convert_command_rule(dto: CommandRuleSpec) -> Result<CommandRule, RulesError> {
+    convert_command_rule_with(dto, TargetGlobs::Canonical)
+}
+
+fn convert_allow_rule(dto: CommandRuleSpec) -> Result<CommandRule, RulesError> {
+    convert_command_rule_with(dto, TargetGlobs::Literal)
+}
+
+// Not canonical for an allow entry: `.[a-z]*` becoming `.*` would widen
+// what the entry allows.
+#[derive(Clone, Copy)]
+enum TargetGlobs {
+    Canonical,
+    Literal,
+}
+
+fn convert_command_rule_with(
+    mut dto: CommandRuleSpec,
+    globs: TargetGlobs,
+) -> Result<CommandRule, RulesError> {
     if dto.id.trim().is_empty() {
         return Err(RulesError::invalid(&dto.id, "id must not be empty"));
     }
@@ -6996,7 +7687,12 @@ fn convert_command_rule(mut dto: CommandRuleSpec) -> Result<CommandRule, RulesEr
     let targets = dto
         .targets
         .into_iter()
-        .map(|t| convert_target(&dto.id, t, false))
+        .map(|t| {
+            convert_target(&dto.id, t, false).map(|target| match globs {
+                TargetGlobs::Canonical => target.with_canonical_globs(),
+                TargetGlobs::Literal => target,
+            })
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let resolve_symlinks = dto.resolve_symlinks;
     if resolve_symlinks
@@ -7622,7 +8318,7 @@ fn convert_redirect_rule(dto: RedirectRuleSpec) -> Result<RedirectRule, RulesErr
     let targets = dto
         .targets
         .into_iter()
-        .map(|t| convert_target(&dto.id, t, false))
+        .map(|t| convert_target(&dto.id, t, false).map(TargetMatcher::with_canonical_globs))
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(RedirectRule {
@@ -7734,6 +8430,10 @@ impl RedirectRule {
         self.targets
             .iter()
             .any(|t| t.ascent_descent_plausible(target))
+    }
+
+    fn glob_plausible(&self, target: &str) -> bool {
+        self.targets.iter().any(|t| t.glob_plausible(target))
     }
 
     /// Issue #341: true when `target` (a redirect's resolved target word)
@@ -8222,6 +8922,13 @@ impl Rules {
             .find(|rule| rule.ascent_descent_plausible(target))
     }
 
+    #[must_use]
+    pub(crate) fn match_redirect_target_glob(&self, target: &str) -> Option<&RedirectRule> {
+        self.redirect_rules
+            .iter()
+            .find(|rule| rule.glob_plausible(target))
+    }
+
     /// The first [`RedirectRule`] for which
     /// [`RedirectRule::dirstack_tilde_plausible`] holds against `target`, if
     /// any — issue #341's floor, extending #88/#133's argv-side
@@ -8389,6 +9096,11 @@ impl Rules {
         self.find_command_or_ask_rule(|rule| rule.matches_ascent_descent_floor(argv))
     }
 
+    #[must_use]
+    pub(crate) fn match_command_glob(&self, argv: &[NormalizedWord]) -> Option<&CommandRule> {
+        self.find_command_or_ask_rule(|rule| rule.matches_glob_floor(argv))
+    }
+
     /// The first [`CommandRule`] for which
     /// [`CommandRule::matches_named_user_home_floor`] holds, if any —
     /// issue #80's `~username` floor (`src/gate.rs`). Like
@@ -8505,7 +9217,7 @@ impl Allowlist {
         let entries = dto
             .entry
             .into_iter()
-            .map(convert_command_rule)
+            .map(convert_allow_rule)
             .map(|rule| rule.map(CommandRule::exact_flags_only))
             .collect::<Result<Vec<_>, _>>()?;
         reject_duplicate_ids(entries.iter().map(|r| r.id.as_str()))?;
@@ -8731,7 +9443,7 @@ impl UserConfig {
         let allow = dto
             .allow
             .into_iter()
-            .map(convert_command_rule)
+            .map(convert_allow_rule)
             .collect::<Result<Vec<_>, _>>()?;
         let redirect = dto
             .redirect
@@ -9356,6 +10068,339 @@ mod tests {
                 .match_redirect_target_ascent_descent("../../../../dev/sda1")
                 .is_some()
         );
+    }
+
+    #[test]
+    fn glob_only_component_is_structural() {
+        for glob in [
+            "*",
+            "**",
+            "?",
+            ".*",
+            ".**",
+            ".*?",
+            ".?*",
+            ".??*",
+            ".[!.]*",
+            ".[!.]**",
+            ".[^.]*",
+            "[]a]*",
+            "[a-z]",
+            ".[[:alnum:]]*",
+            "[[:alpha:]]",
+            ".[![:space:]]?",
+            "[[=a=]]",
+            "[[.a.]]*",
+            "[[:]",
+        ] {
+            assert!(is_glob_only_component(glob), "{glob:?}");
+        }
+        for literal in [
+            "",
+            ".",
+            "..",
+            "build",
+            ".config",
+            "foo*",
+            ".*bak",
+            "[",
+            ".[!.",
+            "*[a",
+            "[]",
+            "[[:alpha:]",
+            ".[[:alnum:]x",
+            "[[:alpha:]]x",
+        ] {
+            assert!(!is_glob_only_component(literal), "{literal:?}");
+        }
+    }
+
+    #[test]
+    fn glob_only_deny_target_matches_every_glob_only_spelling() {
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "user-deny-dotglob"
+            reason = "test"
+            command = "rm"
+            targets = [{ normalized = "~/.[!.]*" }, { normalized = "build/**" }]
+        "#,
+        )
+        .unwrap();
+        for token in ["~/.*", "~/.??*", "~/.[a-z]*", "build/*", "./build/?*"] {
+            assert!(
+                rules.match_command(&argv(&["rm", token])).is_some(),
+                "{token:?}"
+            );
+        }
+        for token in ["~/.config", "~/.c*", "build/x", "build/*.o"] {
+            assert!(
+                rules.match_command(&argv(&["rm", token])).is_none(),
+                "{token:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn glob_component_matching_is_fnmatch_with_dotglob() {
+        for (pattern, name) in [
+            ("*", ".config"),
+            ("?config", ".config"),
+            (".c*", ".config"),
+            ("*guard", "shguard"),
+            ("[!.]hguard", "shguard"),
+            ("[[:alpha:]]hguard", "shguard"),
+            ("[a-z]h*", "shguard"),
+            ("[]s]hguard", "shguard"),
+            ("s[[:bogus:]]guard", "shguard"),
+        ] {
+            assert!(
+                glob_component_matches(pattern.as_bytes(), name.as_bytes(), false, false),
+                "{pattern:?} vs {name:?}"
+            );
+        }
+        for (pattern, name) in [
+            ("s*x", "shguard"),
+            ("[!s]hguard", "shguard"),
+            ("[[:digit:]]hguard", "shguard"),
+            ("?", "shguard"),
+            ("[a", "shguard"),
+        ] {
+            assert!(
+                !glob_component_matches(pattern.as_bytes(), name.as_bytes(), false, false),
+                "{pattern:?} vs {name:?}"
+            );
+        }
+        assert!(glob_component_matches(b"s?a1", b"sd", true, false));
+        assert!(!glob_component_matches(b"x?", b"sd", true, false));
+    }
+
+    #[test]
+    fn qualifier_and_extglob_read_as_the_glob_they_narrow() {
+        for (path, read_as) in [
+            ("~/.config/*(/)", "~/.config/*"),
+            ("~/.config/s*(N)", "~/.config/s*"),
+            ("~/.config/s[a-z](/)", "~/.config/s[a-z]"),
+            ("~/.config/s?(/)", "~/.config/s*"),
+            ("~/.config/!(nvim)", "~/.config/*"),
+            ("~/.config/x*(a)(/)", "~/.config/x*(a)"),
+            ("notes(1).txt", "notes(1).txt"),
+            ("f(x)", "f(x)"),
+            ("(x)", "(x)"),
+            ("%(refname)", "%(refname)"),
+            ("~/.config/nvim/*(:h:h)", "~/.config/nvim/*(:h:h)"),
+            ("*(e:rm -rf ~:)", "*(e:rm -rf ~:)"),
+        ] {
+            assert_eq!(superset_glob_path(path), read_as, "{path:?}");
+        }
+        for (path, hard) in [
+            ("~/*(/)", "~/*"),
+            ("~/.config/!(nvim)", "~/.config/!(nvim)"),
+            ("~/.config/s?(x)", "~/.config/s?(x)"),
+            ("/tmp/*(:h:h)", "/tmp/*(:h:h)"),
+        ] {
+            assert_eq!(strip_filter_qualifier(path), hard, "{path:?}");
+        }
+    }
+
+    #[test]
+    fn qualifier_groups_are_parsed_not_keyword_matched() {
+        for group in [
+            "/", "N", ".", "^/", "-/", "om[1]", "Lk+10", "m-1", "f:gu+w:", "u0", "%b",
+        ] {
+            assert_eq!(
+                classify_qualifier_group(group),
+                QualifierGroup::Filter,
+                "{group:?}"
+            );
+        }
+        for group in [
+            ":h:h",
+            ":s/nvim/shguard/",
+            ":a:h:h",
+            "e:rm -rf ~:",
+            "e{x}",
+            "+myfunc",
+            ".oe:x:",
+            "o+f",
+            "P:-rf:",
+        ] {
+            assert_eq!(
+                classify_qualifier_group(group),
+                QualifierGroup::Expands,
+                "{group:?}"
+            );
+        }
+        for group in ["see: x", "refname", "#595", "e.g. foo", "+1", "", "x y"] {
+            assert_eq!(
+                classify_qualifier_group(group),
+                QualifierGroup::NotQualifier,
+                "{group:?}"
+            );
+        }
+        assert!(has_expanding_glob_qualifier(
+            "~/.config/n*(:s/nvim/shguard/)"
+        ));
+        assert!(has_expanding_glob_qualifier("x(#qe:y:)z"));
+        assert!(!has_expanding_glob_qualifier("~/.config/*(/)"));
+        assert!(!has_expanding_glob_qualifier("fix(rules): x (see: y)"));
+        assert!(!has_expanding_glob_qualifier("x(:h)"));
+        assert!(unresolved_word_may_hide_glob_qualifier(
+            None,
+            Some("/*(:h)")
+        ));
+        assert!(unresolved_word_may_hide_glob_qualifier(
+            Some("*(e:"),
+            Some(":)")
+        ));
+        assert!(!unresolved_word_may_hide_glob_qualifier(
+            Some("("),
+            Some(")")
+        ));
+        assert!(!unresolved_word_may_hide_glob_qualifier(
+            None,
+            Some(" (see: y)")
+        ));
+        assert!(!unresolved_word_may_hide_glob_qualifier(Some("*(e:"), None));
+        for (comp, read_as) in [
+            ("^nvim", Some("*")),
+            ("@(shguard)", Some("*")),
+            (".c@(onfig)", Some(".*")),
+            ("x*(a)", Some("*")),
+            ("f(x)", None),
+            ("shguard", None),
+        ] {
+            assert_eq!(superset_glob_component(comp), read_as, "{comp:?}");
+        }
+    }
+
+    #[test]
+    fn padded_globstar_run_is_matched_without_backtracking() {
+        let how = GlobMatch {
+            beneath: GlobBeneath::Nothing,
+            partial_last: false,
+            case_insensitive: false,
+        };
+        let target: Vec<String> = ["a", "b", "c", "d"].map(String::from).to_vec();
+        let mut stars = vec!["**".to_string(); 2000];
+        stars.push("zzz".to_string());
+        assert!(!comps_glob_plausible(&stars, &target, how));
+        let mut alternating: Vec<String> = ["**", "*"]
+            .repeat(1000)
+            .into_iter()
+            .map(String::from)
+            .collect();
+        alternating.push("zzz".to_string());
+        assert!(!comps_glob_plausible(&alternating, &target, how));
+        let mut reaching = vec!["**".to_string(); 2000];
+        reaching.push("d".to_string());
+        assert!(comps_glob_plausible(&reaching, &target, how));
+    }
+
+    #[test]
+    fn case_insensitive_glob_matching_never_inverts_a_bracket() {
+        for (pattern, name) in [
+            ("[!A-Z]hguard", "shguard"),
+            ("[!a-z]hguard", "shguard"),
+            ("[A-Z]hguard", "shguard"),
+            ("[[:upper:]]hguard", "shguard"),
+            ("SH*", "shguard"),
+            ("s*", "SHGUARD"),
+        ] {
+            assert!(
+                glob_component_matches(pattern.as_bytes(), name.as_bytes(), false, true),
+                "{pattern:?} vs {name:?}"
+            );
+        }
+        assert!(!glob_component_matches(
+            b"[0-9]hguard",
+            b"shguard",
+            false,
+            true
+        ));
+        assert!(!glob_component_matches(
+            b"[A-Z]hguard",
+            b"shguard",
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn glob_plausible_lines_components_up_with_the_target() {
+        let exact = |target: &str| TargetMatcher::NormalizedExact {
+            strip: None,
+            target: canonicalize_glob_form(lexical_normalize(target)),
+            case_insensitive: false,
+        };
+        let prefix = |canon: &str| TargetMatcher::NormalizedPrefix {
+            strip: None,
+            canon: canon.to_string(),
+            case_insensitive: false,
+        };
+        let shguard = exact("~/.config/shguard");
+        let home_glob = exact("~/*");
+        let rel_glob = exact("*");
+        let config_dir = prefix("~/.config/shguard/");
+        let dev = prefix("/dev/sd");
+        for (matcher, token) in [
+            (&shguard, "~/.*/shguard"),
+            (&shguard, "~/.c*/s*"),
+            (&shguard, "~/**/shguard"),
+            (&home_glob, "~/*/*"),
+            (&home_glob, "~/**/*"),
+            (&rel_glob, "*/*"),
+            (&config_dir, "~/.config/*/config.toml"),
+            (&config_dir, "~/.config/sh*"),
+            (&dev, "/dev/s?a1"),
+            (&shguard, "../.config/s*"),
+            (&shguard, "~+/.c*/shguard"),
+            (&shguard, "../x/.config/s*"),
+            (&shguard, "~alice/../home/bob/.config/s*"),
+            (&dev, "../dev/s*"),
+        ] {
+            assert!(matcher.glob_plausible(token), "{token:?}");
+        }
+        for (matcher, token) in [
+            (&shguard, "~/.config/shguard"),
+            (&shguard, "~/.config/x*"),
+            (&shguard, "/Users/*/.config/shguard"),
+            (&shguard, "../build/.c*"),
+            (&config_dir, "../build/*"),
+            (&home_glob, "../x/*"),
+            (&dev, "../*/sda"),
+            (&home_glob, "../*/*"),
+            (&home_glob, "~/proj/*"),
+            (&rel_glob, "build/*"),
+            (&rel_glob, "*/node_modules"),
+            (&home_glob, "~/*/node_modules"),
+            (&rel_glob, "*.o"),
+            (&config_dir, "~/.conf*"),
+            (&dev, "/dev/x*"),
+        ] {
+            assert!(!matcher.glob_plausible(token), "{token:?}");
+        }
+    }
+
+    #[test]
+    fn glob_only_allow_target_stays_literal() {
+        let allowlist = Allowlist::parse(
+            r#"
+            [[entry]]
+            id = "allow-letter-dotfiles"
+            reason = "test"
+            command = "rm"
+            targets = [{ normalized = "~/.[a-z]*" }]
+        "#,
+        )
+        .unwrap();
+        assert!(allowlist.first_match(&argv(&["rm", "~/.[a-z]*"])).is_some());
+        for token in ["~/.*", "~/.??*", "~/.[!.]*"] {
+            assert!(
+                allowlist.first_match(&argv(&["rm", token])).is_none(),
+                "{token:?}"
+            );
+        }
     }
 
     #[test]
