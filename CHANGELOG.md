@@ -7,10 +7,10 @@ All notable changes to this project are documented in this file.
 ### Changed
 
 - `resolve_symlinks` (#583) fails closed in more cases (#612): a regular
-  file with more than one hard link, a candidate (or a parent of it) that an
-  earlier simple command on the same line names after lexical normalization
-  (any earlier command with an unnormalizable word, an interpreter or an
-  extractor refuses the rest of the line), a candidate inside a recursion,
+  file with more than one hard link, any candidate when an earlier command
+  on the line is anything but `cd`/`pushd`/`popd`/`dirs` or a no-write
+  builtin (`set`, `echo`, `true`, ... listed in the README), a candidate
+  inside a recursion,
   function body or loop, a command with a substitution in its assignment
   prefix or redirects, a relative candidate under `sudo -D`/`--chdir` (or
   `-R`/`--chroot`), and any candidate after `cd -P`, `set -P` or `set -o

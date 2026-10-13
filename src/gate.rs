@@ -899,30 +899,23 @@ fn evaluate_pipeline(
                 env.apply_assignments(simple, runs_in_parent_shell && stage_count == 1);
                 env.note_readonly_operands(&normalize::normalize_argv(simple));
                 let mut alternates = Vec::new();
-                let verdict = {
-                    let earlier = cwd.earlier.borrow();
-                    evaluate_simple_command(
-                        simple,
-                        env,
-                        rules,
-                        allowlist,
-                        depth,
-                        &cwd.current,
-                        &earlier.paths,
-                        cwd.symlink_untrusted || earlier.unresolved || stage_count > 1,
-                        &mut alternates,
-                        parse,
-                    )
-                };
+                let verdict = evaluate_simple_command(
+                    simple,
+                    env,
+                    rules,
+                    allowlist,
+                    depth,
+                    &cwd.current,
+                    cwd.symlink_untrusted || cwd.earlier_writer.get() || stage_count > 1,
+                    &mut alternates,
+                    parse,
+                );
                 stage_argvs.push(verdict.normalized_argv().to_vec());
                 if !alternates.is_empty() {
                     per_stage_alternates.push((index, alternates));
                 }
                 let argv = normalize::normalize_argv(simple);
-                cwd.record_writes(
-                    &argv,
-                    cwd.current.trusted_base(wrapper_chain_changes_cwd(&argv)),
-                );
+                cwd.note_earlier_command(simple, &argv);
                 // Issue #103: only a single-stage pipeline's own `cd`/
                 // `pushd`/etc. is allowed to mutate `cwd` for whatever
                 // comes after this pipeline — see this function's own docs.
@@ -2461,7 +2454,6 @@ fn evaluate_simple_command(
     allowlist: &Allowlist,
     depth: usize,
     cwd: &CwdContext,
-    earlier_words: &[String],
     refuse_symlinks: bool,
     alternates: &mut IfsAlternates,
     parse: ParseFn,
@@ -2474,7 +2466,7 @@ fn evaluate_simple_command(
     // before it: neither can be shown not to have replaced a candidate.
     let refuse_symlinks =
         refuse_symlinks || depth > 0 || has_prefix_or_redirect_substitution(command);
-    let symlink_scope = cwd.symlink_scope(earlier_words, wrapper_moves_cwd, refuse_symlinks);
+    let symlink_scope = cwd.symlink_scope(wrapper_moves_cwd, refuse_symlinks);
     let ask_match = rules.match_ask_in(&argv, symlink_scope);
     let ask_hint = ask_match
         .and_then(|rule| rules.unresolved_exception_hint(rule, &argv, symlink_scope))
@@ -2787,7 +2779,7 @@ fn evaluate_simple_command(
             &command.redirections,
             anchor,
             rules,
-            anchor.composed_symlink_scope(earlier_words, wrapper_moves_cwd, refuse_symlinks),
+            anchor.composed_symlink_scope(wrapper_moves_cwd, refuse_symlinks),
         ) {
         if composed_names_the_plain_floor_token(
             &verdict,
@@ -6704,7 +6696,6 @@ fn recurse_find_exec_payload(
         allowlist,
         depth + 1,
         cwd,
-        &[],
         true,
         &mut discarded_alternates,
         parse,
@@ -8797,15 +8788,10 @@ impl CwdContext {
     /// the real cwd: a `~`-anchored, relative or physical-mode anchor,
     /// `Initial` and `Poisoned` all yield no base, and so do commands whose
     /// wrapper moved the real cwd (`sudo -D`) — those relative candidates
-    /// fail closed. `earlier_words` are the resolved words of the simple
-    /// commands that ran before this one on the line.
-    fn symlink_scope<'a>(
-        &'a self,
-        earlier_words: &'a [String],
-        wrapper_moves_cwd: bool,
-        refuse: bool,
-    ) -> SymlinkScope<'a> {
-        let scope = SymlinkScope::new(self.trusted_base(wrapper_moves_cwd), earlier_words);
+    /// fail closed. `refuse` drops every exception (see
+    /// [`CwdState::earlier_writer`]).
+    fn symlink_scope<'a>(&'a self, wrapper_moves_cwd: bool, refuse: bool) -> SymlinkScope<'a> {
+        let scope = SymlinkScope::new(self.trusted_base(wrapper_moves_cwd));
         if refuse { scope.refusing_all() } else { scope }
     }
 
@@ -8860,11 +8846,10 @@ impl CwdAnchor {
     /// the real cwd (see [`CwdAnchor::physical`]) or a wrapper moved it.
     fn composed_symlink_scope<'a>(
         &'a self,
-        earlier_words: &'a [String],
         wrapper_moves_cwd: bool,
         refuse: bool,
     ) -> SymlinkScope<'a> {
-        let scope = SymlinkScope::new(Some(self.path.as_str()), earlier_words);
+        let scope = SymlinkScope::new(Some(self.path.as_str()));
         if self.physical || wrapper_moves_cwd || refuse {
             scope.refusing_all()
         } else {
@@ -8923,48 +8908,30 @@ struct CwdState {
     /// `set -P`/`set -o physical` or a `cd -P` has run on this line, so
     /// every anchor a later `cd` produces is marked [`CwdAnchor::physical`].
     physical_mode: bool,
-    /// What the simple commands already evaluated on this line may have
-    /// written (issue #612), for `resolve_symlinks` rules. Shared by every
-    /// clone of this state, so a subshell, a backgrounded chain or a loop
-    /// body that runs earlier on the line still counts for a later command.
-    /// A fresh recursion (`bash -c`, `$(...)`, `eval`) starts its own list
-    /// and is refused outright instead (`resolve_symlinks` at `depth > 0`).
-    earlier: std::rc::Rc<std::cell::RefCell<EarlierWrites>>,
+    /// Set once an earlier simple command on this line is anything but a
+    /// cwd move or a no-write builtin (issue #612), so it may have written,
+    /// replaced or re-linked any path: every later `resolve_symlinks`
+    /// exception on the line is refused. Shared by every clone of this state
+    /// so a subshell, a backgrounded chain or a loop body that runs earlier
+    /// counts for a later command. A fresh recursion (`bash -c`, `$(...)`,
+    /// `eval`) starts its own flag and is refused outright instead
+    /// (`resolve_symlinks` at `depth > 0`).
+    earlier_writer: std::rc::Rc<std::cell::Cell<bool>>,
     /// Set on the clone a function body or loop is evaluated with: the body
     /// can run before or repeatedly around the commands that precede it
     /// textually, so no `resolve_symlinks` exception applies inside it.
     symlink_untrusted: bool,
 }
 
-/// The paths earlier simple commands on a line named, as absolute lexically
-/// normalized strings, plus whether any of them wrote somewhere that cannot
-/// be enumerated.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct EarlierWrites {
-    paths: Vec<String>,
-    /// An earlier command had a word that does not name a definite path
-    /// (unresolved, a glob, a relative word with no trusted cwd, `~`) or is
-    /// an interpreter or extractor that writes paths it never names: every
-    /// later `resolve_symlinks` exception on the line is refused.
-    unresolved: bool,
-}
-
-/// Commands whose arguments do not enumerate what they write: interpreters
-/// and script runners (the script string is code), and extractors or tools
-/// that write under a directory they are pointed at.
-const OPAQUE_WRITERS: &[&str] = &[
-    "bash", "sh", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "eval", "source", ".", "exec",
-    "xargs", "find", "parallel", "env", "tar", "bsdtar", "unzip", "zip", "cpio", "pax", "7z",
-    "7za", "7zr", "git", "make", "rsync", "patch", "gunzip", "bunzip2", "unxz", "awk", "gawk",
-    "sed", "ssh", "su", "flock", "watch", "script", "timeout", "nohup",
+/// Commands an earlier position on the line may hold without refusing a
+/// later `resolve_symlinks` exception: they move the shell's own cwd or
+/// write nothing to the filesystem. Not a denylist of writers: any other
+/// command, found or not, may rewrite a path (`./setup.sh`, `npm run build`,
+/// `ln -sf X -t dir`), so the list has to stay closed.
+const NO_WRITE_COMMANDS: &[&str] = &[
+    "cd", "pushd", "popd", "dirs", "set", "shopt", "export", "unset", "readonly", "local",
+    "declare", "typeset", "true", "false", ":", "test", "[", "echo", "printf",
 ];
-
-/// Interpreter families matched by prefix (`python3.12`, `perl5`).
-const OPAQUE_WRITER_PREFIXES: &[&str] = &["python", "perl", "ruby", "node", "php", "lua", "pwsh"];
-
-/// Commands that only move the shell's own cwd: they write nothing, and
-/// their directory argument must not shadow every candidate beneath it.
-const CWD_ONLY_COMMANDS: &[&str] = &["cd", "pushd", "popd", "dirs", "set", "shopt"];
 
 impl CwdState {
     /// The clone a backgrounded chain runs with: it is not ordered against
@@ -8976,84 +8943,30 @@ impl CwdState {
         }
     }
 
-    /// Records what `argv` may have written, for later `resolve_symlinks`
-    /// candidates on the line. `base` is the trusted absolute cwd active
-    /// WHEN THIS COMMAND RAN ([`CwdContext::trusted_base`]); each path word
-    /// is composed against it and lexically normalized. Anything that cannot
-    /// be turned into a definite path sets [`EarlierWrites::unresolved`].
-    fn record_writes(&self, argv: &[NormalizedWord], base: Option<&str>) {
-        let mut earlier = self.earlier.borrow_mut();
-        if earlier.unresolved || argv.is_empty() {
+    /// Notes that `command` (already normalized to `argv`) ran earlier on the
+    /// line, refusing later `resolve_symlinks` exceptions unless it is one of
+    /// [`NO_WRITE_COMMANDS`] with no redirection, no substitution and no
+    /// unresolved word. A command name containing `/` always refuses.
+    fn note_earlier_command(&self, command: &SimpleCommand, argv: &[NormalizedWord]) {
+        if self.earlier_writer.get() {
             return;
         }
-        let Some((name, _)) = crate::rules::effective_command(argv) else {
-            earlier.unresolved = true;
-            return;
-        };
-        if CWD_ONLY_COMMANDS.contains(&name.as_ref()) {
-            return;
-        }
-        if OPAQUE_WRITERS.contains(&name.as_ref())
-            || OPAQUE_WRITER_PREFIXES
+        let may_write = !command.redirections.is_empty()
+            || has_prefix_or_redirect_substitution(command)
+            || argv
                 .iter()
-                .any(|prefix| name.starts_with(prefix))
-        {
-            earlier.unresolved = true;
+                .any(|word| matches!(word.resolution(), Resolution::Unresolvable(_)))
+            || !match argv.first().map(NormalizedWord::resolution) {
+                None => true,
+                Some(Resolution::Resolved(first)) if first.contains('/') => false,
+                Some(_) => crate::rules::effective_command(argv)
+                    .is_some_and(|(name, _)| NO_WRITE_COMMANDS.contains(&name.as_ref())),
+            };
+        if !may_write {
             return;
         }
-        for word in &argv[1..] {
-            let Resolution::Resolved(text) = word.resolution() else {
-                earlier.unresolved = true;
-                return;
-            };
-            let mut candidates: Vec<&str> = Vec::new();
-            if text.starts_with('-') {
-                // A cwd-changing flag points the command somewhere its other
-                // words are relative to.
-                if text.starts_with("-C")
-                    || text.starts_with("--directory")
-                    || text.starts_with("--chdir")
-                {
-                    earlier.unresolved = true;
-                    return;
-                }
-                if let Some((_, value)) = text.split_once('=') {
-                    candidates.push(value);
-                }
-            } else if text.contains(char::is_whitespace) {
-                candidates.push(text);
-                candidates.extend(text.split_whitespace());
-            } else {
-                candidates.push(text);
-            }
-            for candidate in candidates {
-                let candidate = candidate.trim_matches(['\'', '"']);
-                if candidate.is_empty() {
-                    continue;
-                }
-                if candidate.contains(['*', '?', '[']) || candidate.starts_with('~') {
-                    earlier.unresolved = true;
-                    return;
-                }
-                let composed = if candidate.starts_with('/') {
-                    candidate.to_string()
-                } else if let Some(base) = base {
-                    format!("{base}/{candidate}")
-                } else {
-                    earlier.unresolved = true;
-                    return;
-                };
-                match crate::rules::normalize_abs_path(&composed) {
-                    Some(path) => earlier.paths.push(path),
-                    None => {
-                        earlier.unresolved = true;
-                        return;
-                    }
-                }
-            }
-        }
+        self.earlier_writer.set(true);
     }
-
     /// Marks the current anchor physical once physical mode is on, called
     /// after every `cd`-family command.
     fn apply_physical_mode(&mut self, requested: bool) {
@@ -9079,7 +8992,7 @@ impl CwdState {
             current,
             stack: Vec::new(),
             physical_mode: false,
-            earlier: Default::default(),
+            earlier_writer: Default::default(),
             symlink_untrusted: false,
         }
     }
@@ -9108,7 +9021,7 @@ impl CwdState {
             current,
             stack: vec![CwdContext::Poisoned],
             physical_mode: false,
-            earlier: Default::default(),
+            earlier_writer: Default::default(),
             symlink_untrusted: false,
         }
     }
@@ -15694,7 +15607,8 @@ mod tests {
         fn candidate_written_by_an_earlier_command_on_the_line_fails_closed() {
             assert_eq!(
                 decide("touch /scratch/other && upload-tool /scratch/ok.md"),
-                Decision::Allow
+                Decision::Block,
+                "any writer before the guarded command refuses, not just one naming it"
             );
             assert_eq!(
                 decide("touch /scratch/ok.md && upload-tool /scratch/ok.md"),
@@ -15849,13 +15763,42 @@ mod tests {
         }
 
         #[test]
-        fn unrelated_earlier_commands_leave_the_exception_alone() {
+        fn cwd_moves_and_no_write_builtins_leave_the_exception_alone() {
             for command in [
                 "echo hello; upload-tool ok.md",
-                "ls /work; upload-tool ok.md",
                 "cd /scratch/sub && upload-tool rel.md",
+                "upload-tool ok.md && true",
+                "export X=1; set -e; test -n x; printf x; upload-tool ok.md",
             ] {
                 assert_eq!(decide(command), Decision::Allow, "{command}");
+            }
+        }
+
+        #[test]
+        fn any_other_earlier_command_refuses_the_rest_of_the_line() {
+            for command in [
+                // unknown programs and scripts
+                "./setup.sh; upload-tool ok.md",
+                "/bin/echo hi; upload-tool ok.md",
+                "npm run build; upload-tool ok.md",
+                "cargo run; upload-tool ok.md",
+                "docker run -v /scratch:/s img; upload-tool ok.md",
+                "f; upload-tool ok.md",
+                "make; upload-tool ok.md",
+                "ls /work; upload-tool ok.md",
+                // destinations that are not in argv
+                "ln -sf /elsewhere/private.txt; upload-tool private.txt",
+                "ln -sf /etc/hosts -t/scratch; upload-tool ok.md",
+                "cp -t/scratch -P /etc/hosts; upload-tool ok.md",
+                // case and normalization respellings
+                "touch OK.md; upload-tool ok.md",
+                "touch /SCRATCH/ok.md; upload-tool /scratch/ok.md",
+                // an allowed builtin with a redirection or substitution
+                "echo x > ok.md; upload-tool ok.md",
+                "echo $(touch ok.md); upload-tool ok.md",
+                "echo $UNSET; upload-tool ok.md",
+            ] {
+                assert_eq!(decide(command), Decision::Block, "{command}");
             }
         }
 

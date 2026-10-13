@@ -2760,12 +2760,7 @@ mod resolve_symlinks {
         let fx = fixture();
         let file = fx.excepted.join("body.md");
         fs::write(&file, "ok").unwrap();
-        let other = fx.excepted.join("other.md");
-        let control = format!(
-            "touch {} && upload-tool {}",
-            other.display(),
-            file.display()
-        );
+        let control = format!("echo {} && upload-tool {}", "unrelated", file.display());
         assert_eq!(decide(&fx, &control, None), "allow");
         let replaced = format!(
             "ln -sf {} {} && upload-tool {}",

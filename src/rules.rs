@@ -2323,20 +2323,14 @@ pub(crate) struct SymlinkScope<'a> {
     /// The absolute directory a relative candidate is resolved against.
     /// `None` (or a non-absolute value): a relative candidate fails closed.
     base: Option<&'a str>,
-    /// Absolute, lexically normalized paths the simple commands that ran
-    /// earlier on the line named. A candidate equal to, or under, one of
-    /// them may have been replaced by a symlink before this command runs, so
-    /// it is never excepted.
-    earlier_words: &'a [String],
     /// Nothing can be trusted to resolve: every candidate fails closed.
     refuse_all: bool,
 }
 
 impl<'a> SymlinkScope<'a> {
-    pub(crate) fn new(base: Option<&'a str>, earlier_words: &'a [String]) -> Self {
+    pub(crate) fn new(base: Option<&'a str>) -> Self {
         Self {
             base,
-            earlier_words,
             refuse_all: false,
         }
     }
@@ -2355,20 +2349,6 @@ impl<'a> SymlinkScope<'a> {
             .map(std::path::Path::new)
             .filter(|base| base.is_absolute())
     }
-
-    /// Whether `path` is, or lies under, a path an earlier command named.
-    fn written_earlier(&self, path: &str) -> bool {
-        let Some(path) = normalize_abs_path(path) else {
-            return true;
-        };
-        self.earlier_words.iter().any(|earlier| {
-            earlier == "/"
-                || path == *earlier
-                || path
-                    .strip_prefix(earlier.as_str())
-                    .is_some_and(|rest| rest.starts_with('/'))
-        })
-    }
 }
 
 /// Whether a candidate token is plausibly a filesystem path rather than a
@@ -2380,31 +2360,12 @@ fn looks_like_path(token: &str) -> bool {
             .any(|c| c.is_whitespace() || "=@*?[]{}$`\"'".contains(c))
 }
 
-/// Lexically normalizes an absolute path: collapses `//` and `.` and
-/// resolves `..` without touching the filesystem. `None` for a relative path.
-pub(crate) fn normalize_abs_path(path: &str) -> Option<String> {
-    if !path.starts_with('/') {
-        return None;
-    }
-    let mut components: Vec<&str> = Vec::new();
-    for component in path.split('/') {
-        match component {
-            "" | "." => {}
-            ".." => {
-                components.pop();
-            }
-            other => components.push(other),
-        }
-    }
-    Some(format!("/{}", components.join("/")))
-}
-
 /// How one `resolve_symlinks` candidate fared.
 enum CandidateResolution {
     /// Resolved to this canonical spelling, ready for `except_targets`.
     Canonical(String),
-    /// Deliberately not resolved: no usable cwd, an earlier command on the
-    /// line may have replaced it, or it is a hard-linked file.
+    /// Deliberately not resolved: no usable cwd, a scope that refuses
+    /// everything, or a hard-linked file.
     Refused,
     /// The filesystem could not resolve this absolute path.
     Unresolved(String),
@@ -2412,9 +2373,9 @@ enum CandidateResolution {
 
 /// Resolves an except-target candidate for a rule with `resolve_symlinks`
 /// (issue #583). Fails closed on every doubt: an empty token, a relative
-/// token with no absolute `scope.base`, a path an earlier command on the
-/// line mentions, one that does not exist or cannot be read, or a regular
-/// file with more than one hard link.
+/// token with no absolute `scope.base`, a refusing scope, a path that does
+/// not exist or cannot be read, or a regular file with more than one hard
+/// link.
 fn resolve_candidate(
     token: &str,
     scope: SymlinkScope<'_>,
@@ -2435,15 +2396,9 @@ fn resolve_candidate(
     let Some(full) = full.to_str() else {
         return CandidateResolution::Refused;
     };
-    if scope.written_earlier(full) {
-        return CandidateResolution::Refused;
-    }
     match canonicalizer.canonicalize(full) {
         None => CandidateResolution::Unresolved(full.to_string()),
-        Some(resolved)
-            if (!resolved.is_dir && resolved.link_count > 1)
-                || scope.written_earlier(&resolved.path) =>
-        {
+        Some(resolved) if !resolved.is_dir && resolved.link_count > 1 => {
             CandidateResolution::Refused
         }
         Some(resolved) => CandidateResolution::Canonical(resolved.path),
@@ -2722,8 +2677,8 @@ impl CommandRule {
     /// matching, and the canonical path must match an alternative for the
     /// exception to apply. Anything short of a clean resolution leaves the
     /// exception unapplied, so the rule fires: a missing file, a permission
-    /// error, a relative candidate with no usable base, a candidate an
-    /// earlier command on the line mentions, a hard-linked regular file. A
+    /// error, a relative candidate with no usable base, a refusing scope, a
+    /// hard-linked regular file. A
     /// file that does not exist yet fails closed the same way. Canonical
     /// paths are spelled as the OS resolves them (on macOS `/tmp` is
     /// `/private/tmp`), so `except_targets` entries must use that spelling.
@@ -14303,7 +14258,7 @@ mod tests {
         fn relative_candidate_resolves_against_base_and_fails_closed_without_one() {
             let rules = rules_excepting("/scratch");
             let words = argv(&["upload-tool", "ok.md"]);
-            let scope = |base| SymlinkScope::new(base, &[]);
+            let scope = |base| SymlinkScope::new(base);
             assert!(
                 rules
                     .match_command_in(&words, scope(Some("/scratch")))
@@ -14326,29 +14281,10 @@ mod tests {
         }
 
         #[test]
-        fn candidate_named_by_an_earlier_command_on_the_line_fails_closed() {
-            let rules = rules_excepting("/scratch");
-            let words = argv(&["upload-tool", "/scratch/ok.md"]);
-            let relative = argv(&["upload-tool", "ok.md"]);
-            let hit = |words: &[NormalizedWord], base, earlier: &[&str]| {
-                let earlier: Vec<String> = earlier.iter().map(|w| (*w).to_string()).collect();
-                rules
-                    .match_command_in(words, SymlinkScope::new(base, &earlier))
-                    .is_some()
-            };
-            assert!(!hit(&words, None, &["/other"]));
-            assert!(hit(&words, None, &["/scratch/ok.md"]));
-            assert!(hit(&relative, Some("/scratch"), &["/scratch/ok.md"]));
-            assert!(hit(&words, None, &["/scratch"]));
-            assert!(hit(&words, None, &["/"]));
-            assert!(!hit(&words, None, &["/scratch/ok"]));
-        }
-
-        #[test]
         fn a_refusing_scope_excepts_nothing() {
             let rules = rules_excepting("/scratch");
             let words = argv(&["upload-tool", "/scratch/ok.md"]);
-            let scope = SymlinkScope::new(Some("/scratch"), &[]).refusing_all();
+            let scope = SymlinkScope::new(Some("/scratch")).refusing_all();
             assert!(rules.match_command_in(&words, scope).is_some());
         }
 

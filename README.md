@@ -562,16 +562,12 @@ The exception also does not apply (the rule fires) when:
 
 - the candidate is a regular file with more than one hard link: a second name
   outside the excepted prefix would reach the same file;
-- an earlier simple command on the same line names the candidate or one of
-  its parent directories, since it could have replaced the file with a
-  symlink before this command runs. Every word of the earlier command is
-  composed against the cwd it ran in and lexically normalized (`//`, `.` and
-  `..` collapse), so respellings do not help. If an earlier command has a
-  word that does not name a definite path (an unresolved `$VAR`, a glob, a
-  `~` word, a relative word with no trusted cwd), is an interpreter or
-  extractor (`bash -c`, `python3 -c`, `eval`, `tar`, `git`, `make`, `find`,
-  `xargs`, ...) or takes `-C`/`--directory`/`--chdir`, every later
-  `resolve_symlinks` exception on the line is refused;
+- an earlier command runs on the same line: with `resolve_symlinks`, an
+  exception applies only when no earlier command on the line other than
+  `cd`/`pushd`/`popd`/`dirs` and a few no-write builtins (`set`, `shopt`,
+  `export`, `unset`, `readonly`, `local`, `declare`, `typeset`, `true`,
+  `false`, `:`, `test`, `[`, `echo`, `printf`) runs before it, and those
+  have no redirection, substitution or unresolved word;
 - the command runs inside a recursion (`bash -c`, `eval`, `$(...)`,
   `find -exec`), a function body, a loop, a multi-stage pipeline or a
   backgrounded (`&`) list, none of which can be ordered
