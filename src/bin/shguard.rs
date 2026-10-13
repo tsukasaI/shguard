@@ -421,7 +421,8 @@ fn resolve_first_result(
              evaluate (fail-closed)"
         )),
         PollOutcome::TimedOut => FirstResult::TimeTrip(
-            "shguard: evaluation exceeded its time budget; refusing to evaluate (fail-closed)"
+            "shguard: evaluation exceeded its outer time budget; refusing to evaluate \
+             (fail-closed)"
                 .to_string(),
         ),
         PollOutcome::Disconnected => FirstResult::Disconnected(
