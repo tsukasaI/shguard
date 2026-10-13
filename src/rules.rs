@@ -1623,33 +1623,65 @@ impl TargetMatcher {
             return false;
         };
         let form = superset_glob_form(lexical_normalize(&strip_glob_qualifier(remainder)));
-        let (pattern, target_comps) = match (&form, &target) {
-            (PathForm::Abs(pattern), PathForm::Abs(target))
-            | (PathForm::Home(pattern), PathForm::Home(target)) => (pattern, target),
+        let (pattern, unknown_anchor) = match (&form, &target) {
+            (PathForm::Abs(pattern), PathForm::Abs(_))
+            | (PathForm::Home(pattern), PathForm::Home(_)) => (pattern, false),
             (
                 PathForm::Rel {
                     ascent: a,
                     comps: pattern,
                 },
-                PathForm::Rel {
-                    ascent: b,
-                    comps: target,
-                },
-            ) if a == b => (pattern, target),
+                PathForm::Rel { ascent: b, .. },
+            ) if a == b => (pattern, false),
+            (PathForm::Rel { ascent, comps }, PathForm::Abs(_) | PathForm::Home(_))
+                if *ascent >= 1 =>
+            {
+                (comps, true)
+            }
+            (
+                PathForm::EscapesHome(comps)
+                | PathForm::NamedUserHomeEscapes(comps)
+                | PathForm::DirStack(comps),
+                PathForm::Abs(_) | PathForm::Home(_),
+            ) => (comps, true),
             _ => return false,
+        };
+        let (PathForm::Abs(target_comps)
+        | PathForm::Home(target_comps)
+        | PathForm::Rel {
+            comps: target_comps,
+            ..
+        }) = &target
+        else {
+            return false;
         };
         if !pattern.iter().any(|c| c.contains(['*', '?', '['])) {
             return false;
         }
-        comps_glob_plausible(
-            pattern,
-            target_comps,
-            GlobMatch {
-                beneath,
-                partial_last,
-                case_insensitive,
-            },
-        )
+        let how = GlobMatch {
+            beneath,
+            partial_last,
+            case_insensitive,
+        };
+        if comps_glob_plausible(pattern, target_comps, how) {
+            return true;
+        }
+        if !unknown_anchor
+            || !matches!(target, PathForm::Home(_))
+            || target_comps.iter().all(|c| is_glob_only_component(c))
+        {
+            return false;
+        }
+        // The reappearing-name widening of `ascent_descent_plausible`. A
+        // glob-only rest (`../build/*`) is skipped for the reason it skips a
+        // glob-only target: it would flag every sibling-directory cleanup.
+        let widened = |skip: usize| {
+            let rest = &pattern[skip..];
+            !rest.iter().all(|c| is_glob_only_component(c))
+                && comps_glob_plausible(rest, target_comps, how)
+        };
+        (pattern.len() >= 2 && widened(1))
+            || (pattern.len() >= 3 && is_home_container_dir(&pattern[0]) && widened(2))
     }
 }
 
@@ -10062,6 +10094,11 @@ mod tests {
             (&config_dir, "~/.config/*/config.toml"),
             (&config_dir, "~/.config/sh*"),
             (&dev, "/dev/s?a1"),
+            (&shguard, "../.config/s*"),
+            (&shguard, "~+/.c*/shguard"),
+            (&shguard, "../x/.config/s*"),
+            (&shguard, "~alice/../home/bob/.config/s*"),
+            (&dev, "../dev/s*"),
         ] {
             assert!(matcher.glob_plausible(token), "{token:?}");
         }
@@ -10069,7 +10106,9 @@ mod tests {
             (&shguard, "~/.config/shguard"),
             (&shguard, "~/.config/x*"),
             (&shguard, "/Users/*/.config/shguard"),
-            (&shguard, "../.config/s*"),
+            (&shguard, "../build/.c*"),
+            (&config_dir, "../build/*"),
+            (&home_glob, "../x/*"),
             (&home_glob, "~/proj/*"),
             (&rel_glob, "build/*"),
             (&rel_glob, "*/node_modules"),

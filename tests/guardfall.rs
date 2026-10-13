@@ -599,6 +599,17 @@ fn guardfall_rm_dotglob_tilde_targets() {
         ("git log --format='%(refname)'", Decision::Allow),
         ("echo \"f(x)\"", Decision::Allow),
         ("rm -f 'notes(1).txt'", Decision::Allow),
+        // An unknown anchor (ascent, dirstack) followed by a partial glob
+        // asks like its literal spelling.
+        ("rm -rf ../.config/s*", Decision::Ask),
+        ("rm -rf ../../.config/s*", Decision::Ask),
+        ("rm -rf ~+/.config/s*", Decision::Ask),
+        ("rm -rf ~-/.config/s*", Decision::Ask),
+        ("rm -rf ../x/.config/s*", Decision::Ask),
+        ("rm -rf ../.c*/shguard", Decision::Ask),
+        ("rm -rf ../.c*", Decision::Ask),
+        ("rm -rf ../dist/**", Decision::Allow),
+        ("rm -rf ../build/.cache*", Decision::Allow),
         ("rm -rf ~/.config/*/config.toml", Decision::Ask),
         ("rm -rf ~/*/*", Decision::Ask),
         ("rm -rf ~/**/*", Decision::Ask),
