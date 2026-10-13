@@ -1805,12 +1805,8 @@ fn posix_class_matches(class: &[u8], c: u8) -> Option<bool> {
     })
 }
 
-/// True for a path component made only of glob metacharacters: an optional
-/// leading `.`, then one or more of `*`, `?` and closed bracket expressions
-/// (`[...]`, `[!...]`/`[^...]` negation, a `]` right after the opener is a
-/// member, `[:class:]`/`[=c=]`/`[.c.]` are members). At least one
-/// metacharacter is required, so `.` and `..` are not glob-only, and any
-/// literal character (`.config`, `build`) disqualifies.
+// At least one metacharacter is required: `.` and `..` are path steps, not
+// globs.
 fn is_glob_only_component(comp: &str) -> bool {
     let body = comp.strip_prefix('.').unwrap_or(comp).as_bytes();
     if body.is_empty() {
