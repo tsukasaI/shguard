@@ -345,8 +345,8 @@ use crate::normalize::{
 };
 use crate::rules::{
     AWK_INTERPRETERS, Allowlist, AllowlistOutcome, CommandRule, EVAL_BUILTIN, PathForm,
-    RedirectRule, Rules, WrapperChainEscalation, is_pipeline_interpreter, lexical_normalize,
-    render_cwd_anchor,
+    RedirectRule, Rules, SymlinkScope, WrapperChainEscalation, is_pipeline_interpreter,
+    lexical_normalize, render_cwd_anchor, wrapper_chain_changes_cwd,
 };
 use crate::verdict::{Decision, DenyMessage, Reason, RuleId, Verdict};
 
@@ -548,6 +548,7 @@ fn payload_cwd_context(cwd: Option<&str>) -> CwdContext {
             CwdContext::Known(CwdAnchor {
                 path,
                 origin: AnchorOrigin::Payload,
+                physical: false,
             })
         }),
         _ => CwdContext::Initial,
@@ -686,7 +687,7 @@ fn evaluate_command_line_in(
     cwd: &mut CwdState,
     parse: ParseFn,
 ) -> Verdict {
-    let mut isolated = chain_is_backgrounded(command_line, 0).then(|| cwd.clone());
+    let mut isolated = chain_is_backgrounded(command_line, 0).then(|| cwd.clone_untrusted());
     let first_runs_in_parent_shell =
         parent_persists && runs_in_parent_shell(None, isolated.is_some());
     let mut worst = evaluate_pipeline(
@@ -722,7 +723,8 @@ fn evaluate_command_line_in(
         // progress; `;` and `&` both close it, so the next pipeline's chain
         // is recomputed fresh.
         if !matches!(separator, Separator::And | Separator::Or) {
-            isolated = chain_is_backgrounded(command_line, index + 1).then(|| cwd.clone());
+            isolated =
+                chain_is_backgrounded(command_line, index + 1).then(|| cwd.clone_untrusted());
         }
         let in_parent_shell =
             parent_persists && runs_in_parent_shell(Some(*separator), isolated.is_some());
@@ -904,6 +906,7 @@ fn evaluate_pipeline(
                     allowlist,
                     depth,
                     &cwd.current,
+                    cwd.symlink_untrusted || cwd.earlier_writer.get() || stage_count > 1,
                     &mut alternates,
                     parse,
                 );
@@ -911,11 +914,13 @@ fn evaluate_pipeline(
                 if !alternates.is_empty() {
                     per_stage_alternates.push((index, alternates));
                 }
+                let argv = normalize::normalize_argv(simple);
+                cwd.note_earlier_command(simple, &argv);
                 // Issue #103: only a single-stage pipeline's own `cd`/
                 // `pushd`/etc. is allowed to mutate `cwd` for whatever
                 // comes after this pipeline — see this function's own docs.
                 if stage_count == 1 {
-                    apply_cwd_effect(cwd, &normalize::normalize_argv(simple), env);
+                    apply_cwd_effect(cwd, &argv, env);
                 }
                 verdict
             }
@@ -978,7 +983,11 @@ fn evaluate_pipeline(
                 // docs), so unlike `Compound`/`FunctionDefinition` above it
                 // never needs an isolated `cwd` clone even in a multi-stage
                 // pipeline: nothing here can mutate `cwd` regardless.
-                evaluate_extended_test(test, rules, allowlist, depth, &cwd.current, parse)
+                let verdict =
+                    evaluate_extended_test(test, rules, allowlist, depth, &cwd.current, parse);
+                // Its operands may hold substitutions that write.
+                cwd.earlier_writer.set(true);
+                verdict
             }
         };
         worst = if have_worst {
@@ -1183,6 +1192,58 @@ fn evaluate_compound_command(
     cwd: &mut CwdState,
     parse: ParseFn,
 ) -> Verdict {
+    // `resolve_symlinks` (issue #612): a redirection or a substitution in a
+    // `for` word list runs before the body, so it refuses the body's own
+    // exceptions; and any compound command may write, so it refuses
+    // whatever follows it on the line.
+    let (redirections, for_words): (&[Redirection], &[Word]) = match compound {
+        CompoundCommand::BraceGroup { redirections, .. }
+        | CompoundCommand::Subshell { redirections, .. }
+        | CompoundCommand::WhileClause { redirections, .. }
+        | CompoundCommand::UntilClause { redirections, .. }
+        | CompoundCommand::IfClause { redirections, .. } => (redirections, &[]),
+        CompoundCommand::ForClause {
+            words,
+            redirections,
+            ..
+        } => (redirections, words.as_deref().unwrap_or_default()),
+    };
+    if !redirections.is_empty()
+        || for_words.iter().any(|word| {
+            !collect_substitutions(word).is_empty()
+                || !collect_process_substitutions(word).is_empty()
+                || normalize::normalize_word(word)
+                    .iter()
+                    .any(|w| matches!(w.resolution(), Resolution::Unresolvable(_)))
+        })
+    {
+        cwd.earlier_writer.set(true);
+    }
+    let verdict = evaluate_compound_command_body(
+        compound,
+        env,
+        parent_persists,
+        rules,
+        allowlist,
+        depth,
+        cwd,
+        parse,
+    );
+    cwd.earlier_writer.set(true);
+    verdict
+}
+
+#[allow(clippy::too_many_arguments)] // same pass-through context as `evaluate_compound_command`
+fn evaluate_compound_command_body(
+    compound: &CompoundCommand,
+    env: &mut Env,
+    parent_persists: bool,
+    rules: &Rules,
+    allowlist: &Allowlist,
+    depth: usize,
+    cwd: &mut CwdState,
+    parse: ParseFn,
+) -> Verdict {
     let redirect_anchor = cwd.current.clone();
     let (worst, redirections, extra_words): (Verdict, &[Redirection], &[Word]) = match compound {
         CompoundCommand::BraceGroup { body, redirections } => {
@@ -1213,6 +1274,7 @@ fn evaluate_compound_command(
             ..
         } => {
             let mut isolated = cwd.clone();
+            isolated.symlink_untrusted = true;
             let verdict =
                 evaluate_command_line(body, rules, allowlist, depth, &mut isolated, parse);
             if command_line_may_change_cwd(body) {
@@ -1235,6 +1297,7 @@ fn evaluate_compound_command(
             redirections,
         } => {
             let mut isolated = cwd.clone();
+            isolated.symlink_untrusted = true;
             let cond_verdict =
                 evaluate_command_line(condition, rules, allowlist, depth, &mut isolated, parse);
             let body_verdict =
@@ -1608,6 +1671,7 @@ fn evaluate_function_definition(
     parse: ParseFn,
 ) -> Verdict {
     let mut isolated = cwd.clone();
+    isolated.symlink_untrusted = true;
     let mut env = Env::new();
     let verdict = evaluate_compound_command(
         &func.body,
@@ -2336,6 +2400,28 @@ fn first_non_vanishing_word_idx(command: &SimpleCommand) -> Option<usize> {
 /// the full rule set, so [`evaluate_simple_command`] can decide
 /// allow-downgrade eligibility — see the module docs on why a command with
 /// an argument-position substitution is never eligible.
+fn has_prefix_or_redirect_substitution(command: &SimpleCommand) -> bool {
+    let word_has_substitution = |word: &Word| {
+        !collect_substitutions(word).is_empty() || !collect_process_substitutions(word).is_empty()
+    };
+    command
+        .assignments
+        .iter()
+        .any(|assignment| match &assignment.value {
+            AssignmentValue::Scalar(word) => word_has_substitution(word),
+            AssignmentValue::Array(words) => words.iter().any(word_has_substitution),
+        })
+        || command
+            .redirections
+            .iter()
+            .any(|redirection| match redirection {
+                Redirection::File { target, .. } => word_has_substitution(target),
+                Redirection::HereDoc {
+                    expand_body, body, ..
+                } => *expand_body && (body.contains("$(") || body.contains('`')),
+            })
+}
+
 fn has_any_argument_position_substitution(command: &SimpleCommand) -> bool {
     let Some(first_word_idx) = first_non_vanishing_word_idx(command) else {
         return false;
@@ -2390,11 +2476,11 @@ fn apply_allowlist_downgrade(verdict: Verdict, allowlist: &Allowlist) -> Verdict
 /// `Ask` only. A command that is already `Ask`/`Block` for its own reasons
 /// keeps that reason — an ask-rule match never replaces it, only ever
 /// raises a plain `Allow`.
-fn apply_ask_floor(verdict: Verdict, ask_match: Option<&CommandRule>) -> Verdict {
+fn apply_ask_floor(verdict: Verdict, ask_match: Option<&CommandRule>, hint: &str) -> Verdict {
     match (verdict.decision(), ask_match) {
         (Decision::Allow, Some(rule)) => Verdict::ask(
             Reason::new(format!(
-                "matches user-configured ask rule {:?}: {}",
+                "matches user-configured ask rule {:?}: {}{hint}",
                 rule.id().as_str(),
                 rule.reason().as_str()
             )),
@@ -2424,11 +2510,23 @@ fn evaluate_simple_command(
     allowlist: &Allowlist,
     depth: usize,
     cwd: &CwdContext,
+    refuse_symlinks: bool,
     alternates: &mut IfsAlternates,
     parse: ParseFn,
 ) -> Verdict {
     let argv = normalize::normalize_argv(command);
-    let ask_match = rules.match_ask_in(&argv, cwd.symlink_base());
+    let wrapper_moves_cwd = wrapper_chain_changes_cwd(&argv);
+    // A recursion (`depth > 0`: `bash -c`, `$(...)`, `eval`, `find -exec`)
+    // cannot see the earlier commands of the line it was spawned from, and a
+    // substitution in this command's own assignment prefix or redirects runs
+    // before it: neither can be shown not to have replaced a candidate.
+    let refuse_symlinks =
+        refuse_symlinks || depth > 0 || has_prefix_or_redirect_substitution(command);
+    let symlink_scope = cwd.symlink_scope(wrapper_moves_cwd, refuse_symlinks);
+    let ask_match = rules.match_ask_in(&argv, symlink_scope);
+    let ask_hint = ask_match
+        .and_then(|rule| rules.unresolved_exception_hint(rule, &argv, symlink_scope))
+        .unwrap_or_default();
     let has_argument_substitution = has_any_argument_position_substitution(command);
     // Issue #83's allowlist guard (module docs): a substitution living in
     // the command-position word's own non-winning brace alternative is
@@ -2584,6 +2682,7 @@ fn evaluate_simple_command(
             allowlist,
             depth,
             parse,
+            symlink_scope,
         },
         escalation_chain,
         cwd,
@@ -2715,7 +2814,7 @@ fn evaluate_simple_command(
     } else {
         apply_allowlist_downgrade(verdict, allowlist)
     };
-    let verdict = apply_ask_floor(verdict, ask_match);
+    let verdict = apply_ask_floor(verdict, ask_match, &ask_hint);
 
     // Issue #103's composed pass (see `evaluate_composed_cwd`'s own doc for
     // why the allowlist is never consulted here): when the folded cwd is
@@ -2731,9 +2830,13 @@ fn evaluate_simple_command(
     // module) pins that ordering — if this call is ever moved earlier in
     // the pipeline, that test is what would catch it.
     let verdict = if let CwdContext::Known(anchor) = cwd
-        && let Some(composed) =
-            evaluate_composed_cwd(&composed_pass_argv, &command.redirections, anchor, rules)
-    {
+        && let Some(composed) = evaluate_composed_cwd(
+            &composed_pass_argv,
+            &command.redirections,
+            anchor,
+            rules,
+            anchor.composed_symlink_scope(wrapper_moves_cwd, refuse_symlinks),
+        ) {
         if composed_names_the_plain_floor_token(
             &verdict,
             &composed,
@@ -2776,6 +2879,7 @@ struct SimpleCommandPolicy<'a> {
     allowlist: &'a Allowlist,
     depth: usize,
     parse: ParseFn,
+    symlink_scope: SymlinkScope<'a>,
 }
 
 /// Evaluates one [`SimpleCommand`] against every per-command gate rule (1,
@@ -2802,6 +2906,7 @@ fn evaluate_simple_command_core(
         allowlist,
         depth,
         parse,
+        symlink_scope,
     } = policy;
     // Redirect target check runs FIRST, before any early return —
     // a redirection-only command (`> /dev/sda`) has empty argv but still
@@ -3306,7 +3411,7 @@ fn evaluate_simple_command_core(
             opaque_kind,
         );
     }
-    let toml_match = rules.match_command_in(&argv, cwd.symlink_base());
+    let toml_match = rules.match_command_in(&argv, symlink_scope);
     // Worst-wins with the ordinary blocklist match (mirrors
     // `Rules::match_command`'s own Block-outranks-Ask contract, issue
     // #399): an embedded/user `[[command]]` rule that already matches
@@ -3323,8 +3428,11 @@ fn evaluate_simple_command_core(
             .or(toml_match),
     };
     if let Some(rule) = rule {
+        let hint = rules
+            .unresolved_exception_hint(rule, &argv, symlink_scope)
+            .unwrap_or_default();
         let reason = Reason::new(format!(
-            "matches blocklist rule {:?}: {}",
+            "matches blocklist rule {:?}: {}{hint}",
             rule.id().as_str(),
             rule.reason().as_str()
         ));
@@ -6644,6 +6752,7 @@ fn recurse_find_exec_payload(
         allowlist,
         depth + 1,
         cwd,
+        true,
         &mut discarded_alternates,
         parse,
     );
@@ -8725,16 +8834,32 @@ impl CwdContext {
         Self::Known(CwdAnchor {
             path,
             origin: AnchorOrigin::Line,
+            physical: false,
         })
     }
 
-    /// The absolute directory a `resolve_symlinks` rule (issue #583)
-    /// resolves relative candidates against: only a `Known` anchor that is
-    /// itself absolute. A `~`-anchored or relative anchor, `Initial` and
-    /// `Poisoned` all yield `None`, so those candidates fail closed.
-    fn symlink_base(&self) -> Option<&str> {
+    /// The [`SymlinkScope`] a `resolve_symlinks` rule (issues #583, #612)
+    /// resolves this command's relative candidates in. The base is only a
+    /// `Known` anchor that is absolute and whose lexical spelling still names
+    /// the real cwd: a `~`-anchored, relative or physical-mode anchor,
+    /// `Initial` and `Poisoned` all yield no base, and so do commands whose
+    /// wrapper moved the real cwd (`sudo -D`) — those relative candidates
+    /// fail closed. `refuse` drops every exception (see
+    /// [`CwdState::earlier_writer`]).
+    fn symlink_scope<'a>(&'a self, wrapper_moves_cwd: bool, refuse: bool) -> SymlinkScope<'a> {
+        let scope = SymlinkScope::new(self.trusted_base(wrapper_moves_cwd));
+        if refuse { scope.refusing_all() } else { scope }
+    }
+
+    /// The absolute directory relative paths of a command run now resolve
+    /// against, when this module's lexical cwd can be trusted to name it.
+    fn trusted_base(&self, wrapper_moves_cwd: bool) -> Option<&str> {
         match self {
-            Self::Known(anchor) if anchor.path.starts_with('/') => Some(&anchor.path),
+            Self::Known(anchor)
+                if anchor.path.starts_with('/') && !anchor.physical && !wrapper_moves_cwd =>
+            {
+                Some(anchor.path.as_str())
+            }
             _ => None,
         }
     }
@@ -8747,6 +8872,10 @@ impl CwdContext {
 struct CwdAnchor {
     path: String,
     origin: AnchorOrigin,
+    /// Set after a physical `cd -P` or under `set -P`: `path` is then the
+    /// lexical spelling, which can name a different directory than the real
+    /// cwd once a symlinked component is followed by `..`.
+    physical: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8764,6 +8893,23 @@ impl CwdAnchor {
         match self.origin {
             AnchorOrigin::Payload => format!("the hook payload cwd {:?}", self.path),
             AnchorOrigin::Line => format!("a same-line folded `cd` to {:?}", self.path),
+        }
+    }
+
+    /// The [`SymlinkScope`] for the composed pass, whose relative tokens were
+    /// already joined onto this anchor: no `resolve_symlinks` exception
+    /// applies when the anchor's lexical spelling cannot be trusted to name
+    /// the real cwd (see [`CwdAnchor::physical`]) or a wrapper moved it.
+    fn composed_symlink_scope<'a>(
+        &'a self,
+        wrapper_moves_cwd: bool,
+        refuse: bool,
+    ) -> SymlinkScope<'a> {
+        let scope = SymlinkScope::new(Some(self.path.as_str()));
+        if self.physical || wrapper_moves_cwd || refuse {
+            scope.refusing_all()
+        } else {
+            scope
         }
     }
 }
@@ -8815,9 +8961,118 @@ const MAX_CWD_STACK_DEPTH: usize = 64;
 struct CwdState {
     current: CwdContext,
     stack: Vec<CwdContext>,
+    /// `set -P`/`set -o physical` or a `cd -P` has run on this line, so
+    /// every anchor a later `cd` produces is marked [`CwdAnchor::physical`].
+    physical_mode: bool,
+    /// Set once an earlier simple command on this line is anything but a
+    /// cwd move or a no-write builtin (issue #612), so it may have written,
+    /// replaced or re-linked any path: every later `resolve_symlinks`
+    /// exception on the line is refused. Shared by every clone of this state
+    /// so a subshell, a backgrounded chain or a loop body that runs earlier
+    /// counts for a later command. A fresh recursion (`bash -c`, `$(...)`,
+    /// `eval`) starts its own flag and is refused outright instead
+    /// (`resolve_symlinks` at `depth > 0`).
+    earlier_writer: std::rc::Rc<std::cell::Cell<bool>>,
+    /// Set on the clone a function body or loop is evaluated with: the body
+    /// can run before or repeatedly around the commands that precede it
+    /// textually, so no `resolve_symlinks` exception applies inside it.
+    symlink_untrusted: bool,
 }
 
+/// Commands an earlier position on the line may hold without refusing a
+/// later `resolve_symlinks` exception: they move the shell's own cwd or
+/// write nothing to the filesystem. Not a denylist of writers: any other
+/// command, found or not, may rewrite a path (`./setup.sh`, `npm run build`,
+/// `ln -sf X -t dir`), so the list has to stay closed.
+const NO_WRITE_COMMANDS: &[&str] = &[
+    "cd", "pushd", "popd", "dirs", "set", "shopt", "export", "unset", "readonly", "local",
+    "declare", "typeset", "true", "false", ":", "test", "[", "echo", "printf",
+];
+
+/// Variables whose assignment changes how a later `cd` or command lookup
+/// resolves, so even a no-write builtin that sets one refuses what follows.
+const PATH_LIKE_VARIABLES: &[&str] = &["CDPATH", "HOME", "PATH"];
+
+/// Whether a simple command that ran earlier on the line may have written,
+/// replaced or re-linked a path (or changed how paths resolve), so a later
+/// `resolve_symlinks` exception cannot be trusted. True unless it is a
+/// cwd move or one of [`NO_WRITE_COMMANDS`], matched against the RAW first
+/// word (no case folding, no wrapper unwrapping; `builtin NAME` and
+/// `command NAME` are the only wrappers allowed), with no redirection,
+/// substitution, unresolved word, `PATH`/`HOME`/`CDPATH` operand, or `-v`/`-n`
+/// style flag on the builtins that take variable names.
+fn earlier_command_may_write(command: &SimpleCommand, argv: &[NormalizedWord]) -> bool {
+    if !command.redirections.is_empty() || has_prefix_or_redirect_substitution(command) {
+        return true;
+    }
+    let sets_path_like = command
+        .assignments
+        .iter()
+        .any(|assignment| PATH_LIKE_VARIABLES.contains(&assignment.name.as_str()));
+    if sets_path_like || (!command.assignments.is_empty() && !argv.is_empty()) {
+        return true;
+    }
+    let mut words: Vec<&str> = Vec::with_capacity(argv.len());
+    for word in argv {
+        match word.resolution() {
+            Resolution::Resolved(text) => words.push(text),
+            Resolution::Unresolvable(_) => return true,
+        }
+    }
+    let Some((&first, rest)) = words.split_first() else {
+        return false;
+    };
+    let (name, operands) = match first {
+        "builtin" | "command" => match rest.split_first() {
+            Some((&name, operands)) => (name, operands),
+            None => return true,
+        },
+        _ => (first, rest),
+    };
+    if !NO_WRITE_COMMANDS.contains(&name) {
+        return true;
+    }
+    if operands
+        .iter()
+        .any(|operand| PATH_LIKE_VARIABLES.iter().any(|var| operand.contains(var)))
+    {
+        return true;
+    }
+    let takes_variable_names = !matches!(name, "echo" | "test" | "[" | "true" | "false" | ":");
+    takes_variable_names
+        && operands.iter().any(|operand| {
+            operand.starts_with('-') && !operand.starts_with("--") && operand.contains(['v', 'n'])
+        })
+}
 impl CwdState {
+    /// The clone a backgrounded chain runs with: it is not ordered against
+    /// the rest of the line, so no `resolve_symlinks` exception applies in it.
+    fn clone_untrusted(&self) -> Self {
+        Self {
+            symlink_untrusted: true,
+            ..self.clone()
+        }
+    }
+
+    /// Notes that `command` (already normalized to `argv`) ran earlier on the
+    /// line, refusing later `resolve_symlinks` exceptions when it may write
+    /// (see [`earlier_command_may_write`]).
+    fn note_earlier_command(&self, command: &SimpleCommand, argv: &[NormalizedWord]) {
+        if !self.earlier_writer.get() && earlier_command_may_write(command, argv) {
+            self.earlier_writer.set(true);
+        }
+    }
+    /// Marks the current anchor physical once physical mode is on, called
+    /// after every `cd`-family command.
+    fn apply_physical_mode(&mut self, requested: bool) {
+        self.physical_mode |= requested;
+        if self.physical_mode
+            && let CwdContext::Known(anchor) = &mut self.current
+        {
+            anchor.physical = true;
+        }
+    }
+
     /// Seeds a fresh state from a recursion site's [`CwdContext`] (issue
     /// #103's cwd-seeding mechanism) with a genuinely EMPTY stack — only
     /// correct for a
@@ -8831,6 +9086,9 @@ impl CwdState {
         Self {
             current,
             stack: Vec::new(),
+            physical_mode: false,
+            earlier_writer: Default::default(),
+            symlink_untrusted: false,
         }
     }
 
@@ -8857,6 +9115,9 @@ impl CwdState {
         Self {
             current,
             stack: vec![CwdContext::Poisoned],
+            physical_mode: false,
+            earlier_writer: Default::default(),
+            symlink_untrusted: false,
         }
     }
 
@@ -9094,9 +9355,19 @@ fn apply_cwd_effect(cwd: &mut CwdState, argv: &[NormalizedWord], env: &Env) {
         return;
     };
     match name.as_ref() {
-        "cd" => cwd.current = resolve_cwd_outcome(&cwd.current, cd_directive(rest, env)),
-        "pushd" => apply_pushd(cwd, rest, env),
-        "popd" => apply_popd(cwd, rest),
+        "cd" => {
+            cwd.current = resolve_cwd_outcome(&cwd.current, cd_directive(rest, env));
+            cwd.apply_physical_mode(cd_requests_physical(rest));
+        }
+        "pushd" => {
+            apply_pushd(cwd, rest, env);
+            cwd.apply_physical_mode(cd_requests_physical(rest));
+        }
+        "popd" => {
+            apply_popd(cwd, rest);
+            cwd.apply_physical_mode(false);
+        }
+        "set" => cwd.apply_physical_mode(set_enables_physical(rest)),
         "source" | "eval" | "." => cwd.poison(),
         // Issue #448: an `alias NAME=VALUE` definition's value runs inline
         // in the current shell (same reasoning as `scan_alias_definition_
@@ -9114,6 +9385,52 @@ fn apply_cwd_effect(cwd: &mut CwdState, argv: &[NormalizedWord], env: &Env) {
         // neither touches cwd.
         _ => {}
     }
+}
+
+/// Whether a `cd`/`pushd` argument list asks for physical resolution: `-P`
+/// alone or in any short cluster (`-eP`, `-LP`), before `--`. An unresolvable
+/// word might be such a flag, so it counts.
+fn cd_requests_physical(rest: &[NormalizedWord]) -> bool {
+    for word in rest {
+        match word.resolution() {
+            Resolution::Unresolvable(_) => return true,
+            Resolution::Resolved(token) if token == "--" => return false,
+            Resolution::Resolved(token) => {
+                if token.starts_with('-') && !token.starts_with("--") && token.contains('P') {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Whether a `set` invocation's arguments switch on physical directory
+/// resolution (`-P`, a cluster containing `P`, `-o physical`): after it the
+/// lexical cwd this module tracks can diverge from the real one (issue
+/// #612). An unresolvable option word might be any of those, so it counts.
+/// Everything after `--` or the first non-option word is positional
+/// parameters, not options.
+fn set_enables_physical(rest: &[NormalizedWord]) -> bool {
+    let mut words = rest.iter();
+    while let Some(word) = words.next() {
+        let Resolution::Resolved(token) = word.resolution() else {
+            return true;
+        };
+        if token == "--" || !token.starts_with(['-', '+']) {
+            return false;
+        }
+        if token == "-o" {
+            match words.next().map(NormalizedWord::resolution) {
+                Some(Resolution::Resolved(option)) if option != "physical" => {}
+                None => {}
+                Some(_) => return true,
+            }
+        } else if token.starts_with('-') && !token.starts_with("--") && token.contains('P') {
+            return true;
+        }
+    }
+    false
 }
 
 /// Whether `word` is an `alias` argument that actually defines something
@@ -9485,9 +9802,11 @@ fn evaluate_composed_cwd(
     redirections: &[Redirection],
     anchor: &CwdAnchor,
     rules: &Rules,
+    scope: SymlinkScope<'_>,
 ) -> Option<Verdict> {
     let composed_argv = compose_argv_against_cwd(argv, &anchor.path, rules);
-    let mut worst = evaluate_composed_argv_match(&composed_argv, argv, &anchor.describe(), rules);
+    let mut worst =
+        evaluate_composed_argv_match_in(&composed_argv, argv, &anchor.describe(), rules, scope);
     if let Some(redirect_verdict) =
         evaluate_composed_cwd_redirects(argv, redirections, anchor, rules)
     {
@@ -9525,6 +9844,24 @@ fn evaluate_composed_argv_match(
     describe: &str,
     rules: &Rules,
 ) -> Option<Verdict> {
+    evaluate_composed_argv_match_in(
+        composed_argv,
+        original_argv,
+        describe,
+        rules,
+        SymlinkScope::default(),
+    )
+}
+
+/// [`evaluate_composed_argv_match`] with the [`SymlinkScope`] the composed
+/// argv's `resolve_symlinks` candidates resolve in (issue #612).
+fn evaluate_composed_argv_match_in(
+    composed_argv: &[NormalizedWord],
+    original_argv: &[NormalizedWord],
+    describe: &str,
+    rules: &Rules,
+    scope: SymlinkScope<'_>,
+) -> Option<Verdict> {
     let mut worst: Option<Verdict> = None;
     let mut raise = |verdict: Verdict| {
         worst = Some(match worst.take() {
@@ -9533,14 +9870,17 @@ fn evaluate_composed_argv_match(
         });
     };
 
-    if let Some(rule) = rules.match_command(composed_argv) {
+    if let Some(rule) = rules.match_command_in(composed_argv, scope) {
         let subject = composed_subject(composed_argv, original_argv, describe, |probe| {
             rules
-                .match_command(probe)
+                .match_command_in(probe, scope)
                 .is_some_and(|r| r.id() == rule.id())
         });
+        let hint = rules
+            .unresolved_exception_hint(rule, composed_argv, scope)
+            .unwrap_or_default();
         let reason = Reason::new(format!(
-            "{subject}, matching blocklist rule {:?}: {}",
+            "{subject}, matching blocklist rule {:?}: {}{hint}",
             rule.id().as_str(),
             rule.reason().as_str()
         ));
@@ -9572,12 +9912,17 @@ fn evaluate_composed_argv_match(
         ));
         raise(Verdict::ask(reason, original_argv.to_vec()));
     }
-    if let Some(rule) = rules.match_ask(composed_argv) {
+    if let Some(rule) = rules.match_ask_in(composed_argv, scope) {
         let subject = composed_subject(composed_argv, original_argv, describe, |probe| {
-            rules.match_ask(probe).is_some_and(|r| r.id() == rule.id())
+            rules
+                .match_ask_in(probe, scope)
+                .is_some_and(|r| r.id() == rule.id())
         });
+        let hint = rules
+            .unresolved_exception_hint(rule, composed_argv, scope)
+            .unwrap_or_default();
         let reason = Reason::new(format!(
-            "{subject}, matching user-configured ask rule {:?}: {}",
+            "{subject}, matching user-configured ask rule {:?}: {}{hint}",
             rule.id().as_str(),
             rule.reason().as_str()
         ));
@@ -15282,6 +15627,452 @@ mod tests {
         crate::rules::merge_user_config(blocklist, allowlist, config).unwrap()
     }
 
+    // ==== resolve_symlinks (issues #583, #612): same-line state, wrappers and
+    // physical cwd modes, against an in-memory filesystem ====
+
+    mod resolve_symlinks {
+        use super::*;
+        use crate::rules::{PathCanonicalizer, ResolvedPath};
+
+        fn file(path: &str) -> Option<ResolvedPath> {
+            Some(ResolvedPath {
+                path: path.to_string(),
+                is_dir: false,
+                link_count: 1,
+            })
+        }
+
+        /// `/scratch` holds regular files `ok.md` and `rel.md`, a `sub`
+        /// directory with its own `rel.md` and a symlinked `ok.md`
+        /// (pointing out of `/scratch`), and a symlinked `link.md`. `/work`
+        /// holds `ok.md`.
+        fn fake_fs(path: &str) -> Option<ResolvedPath> {
+            match path {
+                "/scratch/ok.md" | "/scratch/rel.md" | "/scratch/sub/rel.md" | "/work/ok.md" => {
+                    file(path)
+                }
+                "/scratch/sub/ok.md" | "/scratch/link.md" => file("/outside/secret"),
+                _ => None,
+            }
+        }
+
+        fn rules(kind: &str) -> (Rules, Allowlist) {
+            let (rules, allowlist) = policy_from_config(&format!(
+                r#"
+                [[{kind}]]
+                id = "user-{kind}-upload"
+                reason = "uploads are limited to the scratch directory"
+                command = "upload-tool"
+                except_targets = [{{ prefix = "/scratch/" }}]
+                resolve_symlinks = true
+            "#
+            ));
+            (
+                rules.with_path_canonicalizer(PathCanonicalizer::new(fake_fs)),
+                allowlist,
+            )
+        }
+
+        fn verdict_in(kind: &str, command: &str, cwd: Option<&str>) -> Verdict {
+            let (rules, allowlist) = rules(kind);
+            analyze_with_policy_in_cwd(command, &rules, &allowlist, cwd, crate::parse_command)
+        }
+
+        fn decide(command: &str) -> Decision {
+            verdict_in("deny", command, Some("/scratch")).decision()
+        }
+
+        #[test]
+        fn clean_regular_files_are_excepted_and_symlinks_are_not() {
+            assert_eq!(decide("upload-tool ok.md"), Decision::Allow);
+            assert_eq!(decide("upload-tool /scratch/ok.md"), Decision::Allow);
+            assert_eq!(decide("upload-tool link.md"), Decision::Block);
+            assert_eq!(decide("upload-tool missing.md"), Decision::Block);
+        }
+
+        #[test]
+        fn user_ask_rule_is_excepted_or_asks_end_to_end() {
+            let ask = |command| verdict_in("ask", command, Some("/scratch")).decision();
+            assert_eq!(ask("upload-tool ok.md"), Decision::Allow);
+            assert_eq!(ask("upload-tool link.md"), Decision::Ask);
+            assert_eq!(ask("upload-tool ok.md /scratch/link.md"), Decision::Ask);
+        }
+
+        #[test]
+        fn candidate_written_by_an_earlier_command_on_the_line_fails_closed() {
+            assert_eq!(
+                decide("touch /scratch/other && upload-tool /scratch/ok.md"),
+                Decision::Block,
+                "any writer before the guarded command refuses, not just one naming it"
+            );
+            assert_eq!(
+                decide("touch /scratch/ok.md && upload-tool /scratch/ok.md"),
+                Decision::Block
+            );
+            assert_eq!(decide("touch ok.md; upload-tool ok.md"), Decision::Block);
+            assert_eq!(
+                decide("touch /scratch/ok.md; upload-tool ok.md"),
+                Decision::Block
+            );
+            assert_eq!(
+                decide("(touch /scratch/ok.md); upload-tool /scratch/ok.md"),
+                Decision::Block
+            );
+            assert_eq!(
+                decide("touch /scratch/ok.md & upload-tool /scratch/ok.md"),
+                Decision::Block
+            );
+            assert_eq!(
+                decide("bash -c 'touch /scratch/ok.md'; upload-tool /scratch/ok.md"),
+                Decision::Block
+            );
+            assert_eq!(
+                decide("ln -s --target=/scratch/ok.md x; upload-tool /scratch/ok.md"),
+                Decision::Block
+            );
+        }
+
+        #[test]
+        fn sudo_chdir_flags_drop_the_base_for_relative_candidates() {
+            let sudo = |command: &str| verdict_in("deny", command, Some("/scratch")).decision();
+            // `sudo` itself floors to Ask; Block means the deny rule fired.
+            assert_eq!(sudo("sudo upload-tool ok.md"), Decision::Ask);
+            assert_eq!(sudo("sudo -D /work upload-tool ok.md"), Decision::Block);
+            assert_eq!(sudo("sudo -D/work upload-tool ok.md"), Decision::Block);
+            assert_eq!(
+                sudo("sudo -u root -D /work upload-tool ok.md"),
+                Decision::Block
+            );
+            assert_eq!(
+                sudo("sudo --chdir /work upload-tool ok.md"),
+                Decision::Block
+            );
+            assert_eq!(
+                sudo("sudo --chdir=/work upload-tool ok.md"),
+                Decision::Block
+            );
+            assert_eq!(sudo("sudo --chd=/work upload-tool ok.md"), Decision::Block);
+            // The composed pass cannot tell a composed token from an absolute
+            // one, so it refuses those too.
+            assert_eq!(
+                sudo("sudo -D /work upload-tool /scratch/ok.md"),
+                Decision::Block
+            );
+        }
+
+        #[test]
+        fn absolute_in_line_cd_canonicalizes_against_the_new_directory() {
+            assert_eq!(
+                decide("cd /scratch/sub && upload-tool rel.md"),
+                Decision::Allow
+            );
+            assert_eq!(
+                decide("cd /scratch/sub && upload-tool ok.md"),
+                Decision::Block
+            );
+        }
+
+        #[test]
+        fn physical_cd_and_set_p_drop_the_base() {
+            for command in [
+                "cd -P /scratch/sub && upload-tool rel.md",
+                "cd -P -- /scratch/sub && upload-tool rel.md",
+                "set -P; cd /scratch/sub && upload-tool rel.md",
+                "set -o physical; cd /scratch/sub && upload-tool rel.md",
+                "set -eP; cd /scratch/sub && upload-tool rel.md",
+                "cd -P /scratch/sub; cd /scratch/sub && upload-tool rel.md",
+            ] {
+                assert_eq!(decide(command), Decision::Block, "{command}");
+            }
+            for command in [
+                "set -e; cd /scratch/sub && upload-tool rel.md",
+                "set -o pipefail; cd /scratch/sub && upload-tool rel.md",
+                "set -- -P; cd /scratch/sub && upload-tool rel.md",
+                "cd -L /scratch/sub && upload-tool rel.md",
+            ] {
+                assert_eq!(decide(command), Decision::Allow, "{command}");
+            }
+        }
+
+        #[test]
+        fn physical_cwd_refuses_the_composed_pass_even_for_absolute_candidates() {
+            assert_eq!(
+                decide("cd -P /work && upload-tool /scratch/ok.md"),
+                Decision::Block,
+                "the composed pass cannot tell an absolute token from a composed one"
+            );
+        }
+
+        #[test]
+        fn env_chdir_composes_candidates_against_the_given_directory() {
+            // Control: both /scratch/rel.md and /scratch/sub/rel.md are clean.
+            assert_eq!(
+                decide("env -C /scratch/sub upload-tool rel.md"),
+                Decision::Allow
+            );
+            // /scratch/ok.md is clean but /scratch/sub/ok.md is a symlink out.
+            assert_eq!(
+                decide("env -C /scratch/sub upload-tool ok.md"),
+                Decision::Block
+            );
+            assert_eq!(
+                decide("env --chdir=/scratch/sub upload-tool ok.md"),
+                Decision::Block
+            );
+        }
+
+        #[test]
+        fn respelled_earlier_writes_to_the_candidate_fail_closed() {
+            for command in [
+                "touch /scratch//ok.md && upload-tool /scratch/ok.md",
+                "touch ./ok.md && upload-tool ok.md",
+                "touch sub/../ok.md && upload-tool ok.md",
+                "touch ok.m? && upload-tool ok.md",
+                "touch /scratch/ok.md && upload-tool /scratch/./ok.md",
+                "cd sub; touch ../ok.md; cd ..; upload-tool ok.md",
+                "touch ok.md; upload-tool /scratch/ok.md",
+                "mv /scratch /elsewhere; upload-tool /scratch/ok.md",
+                "ln -sf /etc/passwd /scratch//./ok.md; upload-tool ok.md",
+            ] {
+                assert_eq!(decide(command), Decision::Block, "{command}");
+            }
+        }
+
+        #[test]
+        fn earlier_commands_that_write_unnamed_paths_fail_closed() {
+            for command in [
+                "bash -c 'x'; upload-tool ok.md",
+                "sh -c x; upload-tool ok.md",
+                "python3 -c x; upload-tool ok.md",
+                "perl -e x; upload-tool ok.md",
+                "eval x; upload-tool ok.md",
+                "tar -xf a.tar; upload-tool ok.md",
+                "tar -C /scratch -xf a.tar; upload-tool ok.md",
+                "git -C /scratch checkout .; upload-tool ok.md",
+                "make -C /scratch; upload-tool ok.md",
+                "touch $UNSET; upload-tool ok.md",
+                "touch ~/x; upload-tool ok.md",
+            ] {
+                assert_eq!(decide(command), Decision::Block, "{command}");
+            }
+        }
+
+        #[test]
+        fn cwd_moves_and_no_write_builtins_leave_the_exception_alone() {
+            for command in [
+                "echo hello; upload-tool ok.md",
+                "cd /scratch/sub && upload-tool rel.md",
+                "upload-tool ok.md && true",
+                "export X=1; set -e; test -n x; printf x; upload-tool ok.md",
+            ] {
+                assert_eq!(decide(command), Decision::Allow, "{command}");
+            }
+        }
+
+        #[test]
+        fn any_other_earlier_command_refuses_the_rest_of_the_line() {
+            for command in [
+                // unknown programs and scripts
+                "./setup.sh; upload-tool ok.md",
+                "/bin/echo hi; upload-tool ok.md",
+                "npm run build; upload-tool ok.md",
+                "cargo run; upload-tool ok.md",
+                "docker run -v /scratch:/s img; upload-tool ok.md",
+                "f; upload-tool ok.md",
+                "make; upload-tool ok.md",
+                "ls /work; upload-tool ok.md",
+                // destinations that are not in argv
+                "ln -sf /elsewhere/private.txt; upload-tool private.txt",
+                "ln -sf /etc/hosts -t/scratch; upload-tool ok.md",
+                "cp -t/scratch -P /etc/hosts; upload-tool ok.md",
+                // case and normalization respellings
+                "touch OK.md; upload-tool ok.md",
+                "touch /SCRATCH/ok.md; upload-tool /scratch/ok.md",
+                // an allowed builtin with a redirection or substitution
+                "echo x > ok.md; upload-tool ok.md",
+                "echo $(touch ok.md); upload-tool ok.md",
+                "echo $UNSET; upload-tool ok.md",
+            ] {
+                assert_eq!(decide(command), Decision::Block, "{command}");
+            }
+        }
+
+        #[test]
+        fn substitution_in_the_guarded_commands_prefix_or_redirect_fails_closed() {
+            for command in [
+                "X=$(touch /scratch/ok.md) upload-tool /scratch/ok.md",
+                "upload-tool /scratch/ok.md 2>$(touch /scratch/ok.md; echo /dev/null)",
+                "upload-tool /scratch/ok.md <<EOF\n$(touch /scratch/ok.md)\nEOF",
+            ] {
+                assert_eq!(decide(command), Decision::Block, "{command}");
+            }
+        }
+
+        #[test]
+        fn recursions_never_resolve_through_a_parents_earlier_commands() {
+            for command in [
+                "touch /scratch/ok.md; bash -c 'upload-tool /scratch/ok.md'",
+                "touch /scratch/ok.md; sh -c 'upload-tool /scratch/ok.md'",
+                "touch /scratch/ok.md; eval 'upload-tool /scratch/ok.md'",
+                "touch /scratch/ok.md; echo $(upload-tool /scratch/ok.md)",
+                "touch /scratch/ok.md; find . -exec upload-tool /scratch/ok.md \\;",
+                "bash -c 'upload-tool /scratch/ok.md'",
+            ] {
+                assert_eq!(decide(command), Decision::Block, "{command}");
+            }
+        }
+
+        #[test]
+        fn function_bodies_and_loops_never_get_an_exception() {
+            for command in [
+                "f() { upload-tool /scratch/ok.md; }; touch /scratch/ok.md; f",
+                "f() { upload-tool /scratch/ok.md; }",
+                "for i in 1 2; do upload-tool /scratch/ok.md; touch /scratch/ok.md; done",
+                "while true; do upload-tool /scratch/ok.md; touch /scratch/ok.md; done",
+            ] {
+                assert_eq!(decide(command), Decision::Block, "{command}");
+            }
+        }
+
+        #[test]
+        fn physical_flag_in_any_cd_cluster_drops_the_base() {
+            for command in [
+                "cd -LP /scratch/sub && upload-tool rel.md",
+                "cd -eP /scratch/sub && upload-tool rel.md",
+                "pushd -P /scratch/sub && upload-tool rel.md",
+            ] {
+                assert_ne!(decide(command), Decision::Allow, "{command}");
+            }
+        }
+
+        #[test]
+        fn earlier_compound_commands_refuse_the_rest_of_the_line() {
+            for command in [
+                "[[ $(touch ok.md) ]]; upload-tool ok.md",
+                "[[ -n $(touch ok.md) ]]; upload-tool ok.md",
+                "for x in $(touch ok.md); do :; done; upload-tool ok.md",
+                "for x in a; do :; done < <(touch ok.md); upload-tool ok.md",
+                "if [[ $(touch ok.md) ]]; then :; fi; upload-tool ok.md",
+                "{ :; } > ok.md; upload-tool ok.md",
+                "{ :; } > $(touch ok.md; echo /dev/null); upload-tool ok.md",
+                "( : ) > ok.md; upload-tool ok.md",
+                "while false; do :; done > ok.md; upload-tool ok.md",
+                "f() { :; } > $(touch ok.md; echo /dev/null); upload-tool ok.md",
+                "{ :; }; upload-tool ok.md",
+                "if [[ $(touch ok.md) ]]; then upload-tool ok.md; fi",
+                "{ upload-tool ok.md; } > $(touch ok.md; echo /dev/null)",
+            ] {
+                assert_eq!(decide(command), Decision::Block, "{command}");
+            }
+        }
+
+        #[test]
+        fn path_like_variables_set_through_builtins_refuse_the_rest_of_the_line() {
+            for command in [
+                "export CDPATH=/work; cd sub && upload-tool rel.md",
+                "declare CDPATH=/work; cd sub && upload-tool rel.md",
+                "typeset -g CDPATH=/work; cd sub && upload-tool rel.md",
+                "printf -v CDPATH /work; cd sub && upload-tool rel.md",
+                "declare -n ref=CDPATH; ref=/work; cd sub && upload-tool rel.md",
+                "export HOME=/work; cd && upload-tool ok.md",
+                "CDPATH=/work; cd sub && upload-tool rel.md",
+            ] {
+                assert_eq!(decide(command), Decision::Block, "{command}");
+            }
+            assert_eq!(
+                decide("export X=1; cd /scratch/sub && upload-tool rel.md"),
+                Decision::Allow
+            );
+        }
+
+        #[test]
+        fn allowlist_matches_the_raw_first_word_exactly() {
+            for command in [
+                "ECHO hi; upload-tool ok.md",
+                "True; upload-tool ok.md",
+                "Test -n x; upload-tool ok.md",
+                "env true; upload-tool ok.md",
+                "env True; upload-tool ok.md",
+                "nohup true; upload-tool ok.md",
+                "export PATH=/scratch/bin; env true; upload-tool ok.md",
+                "printf -v PATH /scratch/bin; nohup true; upload-tool ok.md",
+                "PATH=/scratch/bin env true; upload-tool ok.md",
+                "sudo true; upload-tool ok.md",
+            ] {
+                assert_eq!(decide(command), Decision::Block, "{command}");
+            }
+            for command in [
+                "builtin echo hi; upload-tool ok.md",
+                "command true; upload-tool ok.md",
+            ] {
+                assert_eq!(decide(command), Decision::Allow, "{command}");
+            }
+        }
+
+        #[test]
+        fn parallel_pipeline_stages_and_background_lists_never_get_an_exception() {
+            for command in [
+                "upload-tool /scratch/ok.md | touch /scratch/ok.md",
+                "touch /scratch/ok.md | upload-tool /scratch/ok.md",
+                "upload-tool ok.md | cat",
+                "touch /scratch/ok.md & upload-tool /scratch/ok.md",
+                "upload-tool /scratch/ok.md & touch /scratch/ok.md",
+                "true && upload-tool /scratch/ok.md & touch /scratch/ok.md",
+            ] {
+                assert_eq!(decide(command), Decision::Block, "{command}");
+            }
+            assert_eq!(
+                decide("upload-tool /scratch/ok.md && true"),
+                Decision::Allow
+            );
+        }
+
+        #[test]
+        fn non_path_candidates_get_no_unresolved_hint() {
+            let reason = |command| {
+                verdict_in("deny", command, Some("/scratch"))
+                    .reason()
+                    .map(|r| r.as_str().to_string())
+                    .unwrap_or_default()
+            };
+            for command in [
+                "upload-tool /scratch/*.md",
+                "upload-tool body=@/scratch/x",
+                "upload-tool '/scratch/a b'",
+            ] {
+                let reason = reason(command);
+                assert!(
+                    !reason.contains("could not be resolved"),
+                    "{command}: {reason}"
+                );
+            }
+        }
+        #[test]
+        fn unresolved_candidate_under_an_excepted_prefix_names_the_path_in_the_reason() {
+            let hint = "could not be resolved (does it exist?)";
+            let reason = |command| {
+                verdict_in("deny", command, Some("/scratch"))
+                    .reason()
+                    .map(|r| r.as_str().to_string())
+                    .unwrap_or_default()
+            };
+            let missing = reason("upload-tool missing.md");
+            assert!(
+                missing.ends_with(
+                    "; except_targets could not be applied because /scratch/missing.md could not \
+                     be resolved (does it exist?)"
+                ),
+                "{missing}"
+            );
+            assert!(!reason("upload-tool link.md").contains(hint));
+            assert!(!reason("upload-tool /elsewhere/missing.md").contains(hint));
+            let ask_reason = verdict_in("ask", "upload-tool missing.md", Some("/scratch"))
+                .reason()
+                .map(|r| r.as_str().to_string())
+                .unwrap_or_default();
+            assert!(ask_reason.contains(hint), "{ask_reason}");
+        }
+    }
     #[test]
     fn config_ask_rule_upgrades_clean_command_to_ask() {
         let (rules, allowlist) = policy_from_config(
@@ -16649,6 +17440,7 @@ mod tests {
                 allowlist: &allowlist,
                 depth: 0,
                 parse,
+                symlink_scope: SymlinkScope::default(),
             },
             WrapperChainEscalation::Absent,
             &CwdContext::Initial,

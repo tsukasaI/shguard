@@ -2606,7 +2606,10 @@ fn config_symlinked_to_dev_null_still_protects_its_own_literal_directory() {
 
 #[cfg(unix)]
 mod resolve_symlinks {
-    use super::{bash_command, fs, permission_decision, run_hook, tempdir, write_config};
+    use super::{
+        Command, bash_command, fs, permission_decision, permission_reason, run_hook, tempdir,
+        write_config,
+    };
     use std::os::unix::fs::symlink;
     use std::path::{Path, PathBuf};
 
@@ -2735,6 +2738,185 @@ mod resolve_symlinks {
         assert_eq!(
             decide(&fx, "cd sub && upload-tool body.md", Some(&fx.excepted)),
             "deny"
+        );
+    }
+
+    #[test]
+    fn hard_link_to_a_file_outside_the_prefix_fires() {
+        let fx = fixture();
+        let secret = fx.outside.path().join("secret.txt");
+        let linked = fx.excepted.join("body.md");
+        fs::hard_link(&secret, &linked).unwrap();
+        let command = format!("upload-tool {}", linked.display());
+        assert_eq!(decide(&fx, &command, None), "deny");
+        let plain = fx.excepted.join("plain.md");
+        fs::write(&plain, "ok").unwrap();
+        let command = format!("upload-tool {}", plain.display());
+        assert_eq!(decide(&fx, &command, None), "allow");
+    }
+
+    #[test]
+    fn same_line_earlier_command_naming_the_candidate_fires() {
+        let fx = fixture();
+        let file = fx.excepted.join("body.md");
+        fs::write(&file, "ok").unwrap();
+        let control = format!("echo {} && upload-tool {}", "unrelated", file.display());
+        assert_eq!(decide(&fx, &control, None), "allow");
+        let replaced = format!(
+            "ln -sf {} {} && upload-tool {}",
+            fx.outside.path().join("secret.txt").display(),
+            file.display(),
+            file.display()
+        );
+        assert_eq!(decide(&fx, &replaced, None), "deny");
+        assert_eq!(
+            decide(
+                &fx,
+                "ln -sf /etc/hosts body.md && upload-tool body.md",
+                Some(&fx.excepted)
+            ),
+            "deny"
+        );
+    }
+
+    #[test]
+    fn sudo_chdir_with_a_relative_candidate_fires() {
+        let fx = fixture();
+        fs::write(fx.excepted.join("body.md"), "ok").unwrap();
+        let elsewhere = fx.outside.path().display().to_string();
+        assert_eq!(
+            decide(&fx, "sudo upload-tool body.md", Some(&fx.excepted)),
+            "ask"
+        );
+        for command in [
+            format!("sudo -D {elsewhere} upload-tool body.md"),
+            format!("sudo --chdir={elsewhere} upload-tool body.md"),
+        ] {
+            assert_eq!(
+                decide(&fx, &command, Some(&fx.excepted)),
+                "deny",
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn env_chdir_composes_candidates_against_the_given_directory() {
+        let fx = fixture();
+        fs::write(fx.excepted.join("body.md"), "ok").unwrap();
+        let sub = fx.excepted.join("sub");
+        fs::create_dir(&sub).unwrap();
+        symlink(fx.outside.path().join("secret.txt"), sub.join("body.md")).unwrap();
+        let clean = format!("env -C {} upload-tool body.md", fx.excepted.display());
+        assert_eq!(decide(&fx, &clean, Some(&fx.excepted)), "allow");
+        let linked = format!("env -C {} upload-tool body.md", sub.display());
+        assert_eq!(decide(&fx, &linked, Some(&fx.excepted)), "deny");
+    }
+
+    #[test]
+    fn physical_cd_with_a_relative_candidate_fires() {
+        let fx = fixture();
+        fs::write(fx.excepted.join("body.md"), "ok").unwrap();
+        let logical = format!("cd {} && upload-tool body.md", fx.excepted.display());
+        assert_eq!(decide(&fx, &logical, None), "allow");
+        let physical = format!("cd -P {} && upload-tool body.md", fx.excepted.display());
+        assert_eq!(decide(&fx, &physical, None), "deny");
+        let set_p = format!(
+            "set -P; cd {} && upload-tool body.md",
+            fx.excepted.display()
+        );
+        assert_eq!(decide(&fx, &set_p, None), "deny");
+    }
+
+    #[test]
+    fn unresolved_candidate_under_the_prefix_names_the_path_in_the_reason() {
+        let fx = fixture();
+        let missing = fx.excepted.join("not-created-yet.md");
+        let output = run_hook(
+            &payload(&format!("upload-tool {}", missing.display()), None),
+            &[("SHGUARD_CONFIG", fx.config.to_str().unwrap())],
+        );
+        assert!(
+            permission_reason(&output).ends_with(&format!(
+                "; except_targets could not be applied because {} could not be resolved \
+                 (does it exist?)",
+                missing.display()
+            )),
+            "{}",
+            permission_reason(&output)
+        );
+        let outside = fx.outside.path().join("secret.txt");
+        let output = run_hook(
+            &payload(&format!("upload-tool {}", outside.display()), None),
+            &[("SHGUARD_CONFIG", fx.config.to_str().unwrap())],
+        );
+        assert!(!permission_reason(&output).contains("could not be resolved"));
+    }
+
+    #[test]
+    fn user_ask_rule_with_resolve_symlinks_asks_for_symlinks_only() {
+        let work = tempdir().unwrap();
+        let scratch = work.path().canonicalize().unwrap().join("scratch");
+        fs::create_dir(&scratch).unwrap();
+        fs::write(scratch.join("ok.md"), "ok").unwrap();
+        symlink("/etc/hosts", scratch.join("link.md")).unwrap();
+        let (_config_dir, config) = write_config(&format!(
+            r#"
+            [[ask]]
+            id = "user-ask-upload"
+            reason = "confirm uploads outside the scratch dir"
+            command = "upload-tool"
+            except_targets = [{{ prefix = "{}/" }}]
+            resolve_symlinks = true
+        "#,
+            scratch.display()
+        ));
+        let decide = |command: String| {
+            let output = run_hook(
+                &payload(&command, None),
+                &[("SHGUARD_CONFIG", config.to_str().unwrap())],
+            );
+            permission_decision(&output).to_string()
+        };
+        assert_eq!(
+            decide(format!("upload-tool {}/ok.md", scratch.display())),
+            "allow"
+        );
+        assert_eq!(
+            decide(format!("upload-tool {}/link.md", scratch.display())),
+            "ask"
+        );
+    }
+
+    #[test]
+    fn except_entry_spelled_through_a_symlink_warns_on_stderr() {
+        let work = tempdir().unwrap();
+        let root = work.path().canonicalize().unwrap();
+        fs::create_dir(root.join("real")).unwrap();
+        symlink(root.join("real"), root.join("alias")).unwrap();
+        let (_config_dir, config) = write_config(&format!(
+            r#"
+            [[deny]]
+            id = "user-deny-upload"
+            reason = "r"
+            command = "upload-tool"
+            except_targets = [{{ prefix = "{}/alias/" }}]
+            resolve_symlinks = true
+        "#,
+            root.display()
+        ));
+        let assert = Command::cargo_bin("shguard")
+            .unwrap()
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("HOME")
+            .env("SHGUARD_CONFIG", &config)
+            .write_stdin(payload("ls", None))
+            .assert()
+            .success();
+        let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+        assert!(
+            stderr.contains(&format!("resolves to \"{}/real\"", root.display())),
+            "{stderr}"
         );
     }
 }

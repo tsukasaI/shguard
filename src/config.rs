@@ -115,7 +115,7 @@ use std::collections::HashSet;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::rules::{Allowlist, HomeDir, Rules, UserConfig, merge_user_config};
+use crate::rules::{Allowlist, HomeDir, PathCanonicalizer, Rules, UserConfig, merge_user_config};
 
 /// Everything that can go wrong loading a user policy. Every variant is a
 /// hard failure — [`Policy::load`] never falls back to "ignore the bad or
@@ -489,6 +489,13 @@ impl Policy {
     /// non-regular file, a missing parent directory, or an unreadable
     /// `lstat`).
     pub fn load() -> Result<Self, ConfigError> {
+        Self::load_with(crate::fs_path_canonicalizer())
+    }
+
+    /// [`Self::load`] with the symlink-resolution adapter (supplied by the
+    /// composition root, `src/lib.rs`) wired into the loaded rules, so
+    /// `resolve_symlinks` rules and the load-time spelling warning use it.
+    pub(crate) fn load_with(canonicalizer: PathCanonicalizer) -> Result<Self, ConfigError> {
         let (shguard_config, xdg_config_home, home) = Self::read_env_paths()?;
         let explicit = shguard_config.is_some();
 
@@ -649,6 +656,14 @@ impl Policy {
             }
             None => rules,
         };
+
+        // Issue #612: an `except_targets` entry spelled differently from its
+        // canonical form (`/tmp` vs `/private/tmp`) never matches a
+        // `resolve_symlinks` candidate, so say so at load.
+        let rules = rules.with_path_canonicalizer(canonicalizer);
+        for warning in rules.resolve_symlinks_spelling_warnings() {
+            eprintln!("shguard: warning: {warning}");
+        }
 
         Ok(Self {
             rules: std::sync::Arc::new(rules),

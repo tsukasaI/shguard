@@ -539,16 +539,63 @@ resolve_symlinks = true
 ```
 
 Each candidate is then canonicalized (`std::fs::canonicalize`, relative
-candidates against the hook payload's `cwd`) and the *canonical* path must
+candidates against the hook payload's `cwd` or a preceding absolute
+same-line `cd`) and the *canonical* path must
 match an alternative for the exception to apply. It fails closed: if
 canonicalization fails (missing or dangling path, permission error, a
 relative candidate with no usable absolute `cwd`, including after an in-line
 `cd` to a relative directory) the exception does not apply and the rule
 fires. That includes a file the same command creates later. Write
 `except_targets` entries in the canonical spelling (on macOS `/tmp` resolves
-to `/private/tmp`). Everything else stays lexical. The key is only valid on
+to `/private/tmp`); a rule whose entry canonicalizes to a different spelling
+prints a warning to stderr at load time, and every `exact`/`prefix` entry
+must start with `/`. Everything else stays lexical. The key is only valid on
 `deny`/`ask` rules with path-based (`exact`/`prefix`) `except_targets`;
 `allow` entries and `url_host` excepts reject it at load time.
+
+When the exception fails only because a candidate under an excepted prefix
+could not be resolved, the reason ends with `; except_targets could not be
+applied because <path> could not be resolved (does it exist?)`. The decision
+is unchanged.
+
+The exception also does not apply (the rule fires) when:
+
+- the candidate is a regular file with more than one hard link: a second name
+  outside the excepted prefix would reach the same file;
+- an earlier command runs on the same line: with `resolve_symlinks`, an
+  exception applies only when no earlier command on the line other than
+  `cd`/`pushd`/`popd`/`dirs` and a few no-write builtins (`set`, `shopt`,
+  `export`, `unset`, `readonly`, `local`, `declare`, `typeset`, `true`,
+  `false`, `:`, `test`, `[`, `echo`, `printf`) runs before it, and those
+  have no redirection, substitution or unresolved word, no `PATH`/`HOME`/
+  `CDPATH` operand and no `-v`/`-n` flag (the first word must match exactly,
+  so `ECHO` or `env true` refuse; `builtin NAME` and `command NAME` are
+  accepted). Any compound command earlier on the line (`{ }`, `( )`, `if`,
+  loops, `[[ ]]`, a function definition) refuses too. A function or alias
+  named like one of these builtins, defined in a previous shell call, can
+  shadow it, and shguard cannot see that;
+- the command runs inside a recursion (`bash -c`, `eval`, `$(...)`,
+  `find -exec`), a function body, a loop, a multi-stage pipeline or a
+  backgrounded (`&`) list, none of which can be ordered
+  against the rest of the line, or carries a substitution in its own
+  assignment prefix, redirect target or heredoc body: no exception applies;
+- the command runs through `sudo -D`/`--chdir` (or `-R`/`--chroot`), which
+  moves the working directory without shguard composing it, so relative
+  candidates are not resolved and absolute ones are refused too;
+- the line ran `cd -P` (or `-P` in any cluster), `set -P` or `set -o
+  physical`, after which shguard's lexical cwd can name a different
+  directory than the real one; relative and absolute candidates are both
+  refused for the rest of the line;
+- the candidate does not resolve to an existing path: the excepted
+  directory itself written with a trailing slash (`/var/scratch/`, which
+  canonicalizes to `/var/scratch` and no longer starts with the prefix), a
+  glob (`scratch/*.md`), or a non-path word such as the value of
+  `--title=hello` or `-F body=@file`. Rules that mix such arguments with
+  `resolve_symlinks` need `target_flags` to name the flags that carry paths.
+
+Resolving a candidate calls the filesystem (`stat`), so a path on a hung
+network mount blocks the check until shguard's evaluation time limit trips
+and the command asks.
 
 The rule fires unless *every* candidate target token matches an
 `except_targets` alternative — a mix of a local and a remote `rsync`

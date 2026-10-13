@@ -183,7 +183,8 @@ tooling per `coding-guidelines/patterns/tooling.md`."*
   TOML loading. `gate.rs` does not import `parser`: the parse function is
   injected from `lib.rs`.
 - **Wiring in one composition root**: `src/lib.rs` wires the stages together
-  (it hands `parser::parse` to `gate`), and `src/bin/shguard.rs` is the only
+  (it hands `parser::parse` to `gate` and the `fs_canonicalizer` adapter to
+  `rules`' symlink-resolution port), and `src/bin/shguard.rs` is the only
   place that connects stdin → adapter → `analyze` → stdout.
 - **Tooling** (per `patterns/tooling.md`): rustfmt, clippy (deny warnings),
   pre-commit hooks, gitleaks — configured in the scaffolding issue.
@@ -203,6 +204,7 @@ shguard/
 │   ├── parser.rs             # crate adapter → shguard AST
 │   ├── normalize.rs          # static folding → NormalizedWord
 │   ├── rules.rs              # typed rule sets + argv matching (no serde/TOML)
+│   ├── fs_canonicalizer.rs   # filesystem adapter for rules.rs's symlink-resolution port
 │   ├── config_loader.rs      # serde DTOs + TOML loading → rules.rs specs
 │   ├── gate.rs               # structural routing (parse fn injected, never imports parser)
 │   ├── config.rs             # user config discovery + Policy::load (§6 item 8)

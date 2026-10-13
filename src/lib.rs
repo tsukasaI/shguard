@@ -9,6 +9,7 @@ mod ast;
 pub mod config;
 mod config_loader;
 mod decision_log;
+mod fs_canonicalizer;
 mod gate;
 pub mod normalize;
 mod parser;
@@ -243,6 +244,13 @@ pub(crate) fn parse_command(command: &str) -> Result<ast::CommandLine, gate::Par
             err.unsupported_construct().map(str::to_string),
         )
     })
+}
+
+/// The symlink-resolution adapter handed to `rules` (composition root): the
+/// one place the port `rules` defines meets its filesystem implementation.
+/// [`config::Policy::load`] wires it into the rules it loads.
+pub(crate) fn fs_path_canonicalizer() -> rules::PathCanonicalizer {
+    rules::PathCanonicalizer::new(fs_canonicalizer::canonicalize)
 }
 
 /// Config-aware sibling of [`analyze`]: same pipeline, the same

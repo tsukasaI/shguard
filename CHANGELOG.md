@@ -6,6 +6,24 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- `resolve_symlinks` (#583) fails closed in more cases (#612): a regular
+  file with more than one hard link, any candidate when an earlier command
+  on the line is anything but `cd`/`pushd`/`popd`/`dirs` or a no-write
+  builtin (`set`, `echo`, `true`, ... listed in the README), a candidate
+  inside a recursion,
+  function body or loop, a command with a substitution in its assignment
+  prefix or redirects, a relative candidate under `sudo -D`/`--chdir` (or
+  `-R`/`--chroot`), and any candidate after `cd -P`, `set -P` or `set -o
+  physical` are no longer excepted. Candidates that
+  do not resolve to an existing path also keep firing: the excepted
+  directory itself with a trailing slash, globs, and non-path words such as
+  the value of `--title=hello` or `-F body=@file`. Resolution calls the
+  filesystem, so a hung network mount blocks the check until the evaluation
+  time limit trips.
+- `resolve_symlinks` rules now reject `exact`/`prefix` `except_targets`
+  entries that do not start with `/` at load time, and warn on stderr when
+  an entry canonicalizes to another spelling (`/tmp` vs `/private/tmp` on
+  macOS).
 - `target_flags` rules now fail closed on three shapes that were Allow
   (#625): a `~`-form flag value against an absolute target
   (`--body-file ~/.ssh/id` vs `/Users/`; `$HOME` is not consulted), an
@@ -35,6 +53,20 @@ All notable changes to this project are documented in this file.
   (`--body-f`) and unlisted aliases are invisible to it, and mode flags
   (`--delete-last`, `--attach`) pass through, so pair the rule with a
   separate `deny`.
+
+### Added
+
+- When a `resolve_symlinks` exception fails only because a candidate under
+  an excepted prefix could not be resolved, the reason now ends with
+  `; except_targets could not be applied because <path> could not be
+  resolved (does it exist?)`. The decision is unchanged.
+
+### Fixed
+
+- `resolve_symlinks` no longer performs file I/O inside `rules.rs` (#641):
+  symlink resolution is a port the rule module defines and the composition
+  root wires to a filesystem adapter (`src/fs_canonicalizer.rs`). No
+  behaviour change.
 
 ## [0.9.0] - 2026-10-07
 

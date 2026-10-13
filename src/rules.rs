@@ -40,6 +40,9 @@
 //!
 //! # File I/O stays out of this module
 //!
+//! The one place this module needs the filesystem, `resolve_symlinks`
+//! (issue #583), goes through the [`CanonicalizeFn`] port it defines; the
+//! composition root wires the adapter in ([`Rules::with_path_canonicalizer`]).
 //! Nothing here takes a path or TOML text. The composition root reads
 //! `rules/blocklist.toml`/an operator-supplied override file and hands the
 //! contents to `crate::config_loader`, which builds the specs.
@@ -1858,7 +1861,7 @@ fn strip_trailing_dot(host: url::Host<String>) -> url::Host<String> {
 /// `.`/`//`/trailing slashes and resolves `..` against components already
 /// seen in the same token — exactly what a shell does lexically, before
 /// ever touching the filesystem. No filesystem access, ever:
-/// `std::fs::canonicalize` would be wrong here — shguard does static/
+/// canonicalizing against the real filesystem would be wrong here — shguard does static/
 /// offline analysis (a target path may not exist yet, e.g. inside an
 /// unextracted tar archive) and never knows the invoking shell's cwd.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2255,30 +2258,151 @@ pub(crate) fn render_cwd_anchor(form: &PathForm) -> Option<String> {
     }
 }
 
-/// The canonical (symlink-resolved) spelling of an except-target candidate
-/// for a rule with `resolve_symlinks` (issue #583). `None` on any failure so
-/// the caller fails closed: an empty or NUL-bearing token, a relative token
-/// with no absolute `base`, a path that does not exist or cannot be read, or
-/// a canonical path that is not valid UTF-8.
-fn canonical_candidate(token: &str, base: Option<&str>) -> Option<String> {
-    if token.is_empty() {
-        return None;
+/// Symlink resolution as a port this module owns (`coding-guidelines/
+/// principles.md`: ports are defined next to the code that consumes them):
+/// what the filesystem says about an absolute path, or `None` when it
+/// cannot be produced (missing, unreadable, not valid UTF-8). The
+/// composition root (`src/lib.rs`) wires the filesystem adapter in through
+/// [`Rules::with_path_canonicalizer`], the way `gate` receives its parse
+/// function; this module never touches the filesystem itself.
+pub(crate) type CanonicalizeFn = fn(&str) -> Option<ResolvedPath>;
+
+/// A path as the filesystem spells it after symlink resolution, plus the
+/// two facts `resolve_symlinks` needs beyond the spelling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedPath {
+    /// The canonical spelling, matched against `except_targets`.
+    pub(crate) path: String,
+    pub(crate) is_dir: bool,
+    /// Hard-link count. A non-directory with more than one name can be
+    /// reached through a name outside the excepted prefix.
+    pub(crate) link_count: u64,
+}
+
+/// The injected [`CanonicalizeFn`]. Compares equal to every other value: it
+/// is a capability, not rule data, so it never takes part in rule-set
+/// equality.
+#[derive(Clone, Copy)]
+pub(crate) struct PathCanonicalizer(CanonicalizeFn);
+
+impl PathCanonicalizer {
+    pub(crate) fn new(canonicalize: CanonicalizeFn) -> Self {
+        Self(canonicalize)
+    }
+
+    /// The default for a [`Rules`] nobody wired a canonicalizer into:
+    /// resolves nothing, so every `resolve_symlinks` exception stays
+    /// unapplied (fail-closed).
+    fn unavailable() -> Self {
+        Self(|_| None)
+    }
+
+    fn canonicalize(self, path: &str) -> Option<ResolvedPath> {
+        (self.0)(path)
+    }
+}
+
+impl std::fmt::Debug for PathCanonicalizer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PathCanonicalizer")
+    }
+}
+
+impl PartialEq for PathCanonicalizer {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for PathCanonicalizer {}
+
+/// What a `resolve_symlinks` rule knows about the cwd and the command line
+/// when it resolves an except-target candidate (issues #583, #612).
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct SymlinkScope<'a> {
+    /// The absolute directory a relative candidate is resolved against.
+    /// `None` (or a non-absolute value): a relative candidate fails closed.
+    base: Option<&'a str>,
+    /// Nothing can be trusted to resolve: every candidate fails closed.
+    refuse_all: bool,
+}
+
+impl<'a> SymlinkScope<'a> {
+    pub(crate) fn new(base: Option<&'a str>) -> Self {
+        Self {
+            base,
+            refuse_all: false,
+        }
+    }
+
+    /// The same scope, except that no `resolve_symlinks` exception applies:
+    /// for a command whose real cwd differs from the lexical one the scope
+    /// was built from.
+    #[must_use]
+    pub(crate) fn refusing_all(mut self) -> Self {
+        self.refuse_all = true;
+        self
+    }
+
+    fn base_dir(&self) -> Option<&'a std::path::Path> {
+        self.base
+            .map(std::path::Path::new)
+            .filter(|base| base.is_absolute())
+    }
+}
+
+/// Whether a candidate token is plausibly a filesystem path rather than a
+/// glob, a `key=@file` word or other text the reason hint would mislead on.
+fn looks_like_path(token: &str) -> bool {
+    !token.is_empty()
+        && !token
+            .chars()
+            .any(|c| c.is_whitespace() || "=@*?[]{}$`\"'".contains(c))
+}
+
+/// How one `resolve_symlinks` candidate fared.
+enum CandidateResolution {
+    /// Resolved to this canonical spelling, ready for `except_targets`.
+    Canonical(String),
+    /// Deliberately not resolved: no usable cwd, a scope that refuses
+    /// everything, or a hard-linked file.
+    Refused,
+    /// The filesystem could not resolve this absolute path.
+    Unresolved(String),
+}
+
+/// Resolves an except-target candidate for a rule with `resolve_symlinks`
+/// (issue #583). Fails closed on every doubt: an empty token, a relative
+/// token with no absolute `scope.base`, a refusing scope, a path that does
+/// not exist or cannot be read, or a regular file with more than one hard
+/// link.
+fn resolve_candidate(
+    token: &str,
+    scope: SymlinkScope<'_>,
+    canonicalizer: PathCanonicalizer,
+) -> CandidateResolution {
+    if scope.refuse_all || token.is_empty() {
+        return CandidateResolution::Refused;
     }
     let path = std::path::Path::new(token);
     let full = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        let base = std::path::Path::new(base?);
-        if !base.is_absolute() {
-            return None;
-        }
+        let Some(base) = scope.base_dir() else {
+            return CandidateResolution::Refused;
+        };
         base.join(path)
     };
-    std::fs::canonicalize(full)
-        .ok()?
-        .into_os_string()
-        .into_string()
-        .ok()
+    let Some(full) = full.to_str() else {
+        return CandidateResolution::Refused;
+    };
+    match canonicalizer.canonicalize(full) {
+        None => CandidateResolution::Unresolved(full.to_string()),
+        Some(resolved) if !resolved.is_dir && resolved.link_count > 1 => {
+            CandidateResolution::Refused
+        }
+        Some(resolved) => CandidateResolution::Canonical(resolved.path),
+    }
 }
 
 /// A rule matching one simple command's resolved argv: a command name, a
@@ -2538,25 +2662,33 @@ impl CommandRule {
     /// the flag values that matched `targets`.
     #[must_use]
     fn matches(&self, argv: &[NormalizedWord]) -> bool {
-        self.matches_in(argv, None)
+        self.matches_in(
+            argv,
+            SymlinkScope::default(),
+            PathCanonicalizer::unavailable(),
+        )
     }
 
-    /// [`Self::matches`] with `base`, the absolute directory a relative
-    /// candidate is resolved against when this rule sets `resolve_symlinks`
-    /// (issue #583). `None` (or a non-absolute `base`) means no usable cwd:
-    /// a relative candidate then fails closed.
+    /// [`Self::matches`] with the [`SymlinkScope`] a `resolve_symlinks` rule
+    /// resolves its candidates in (issues #583, #612).
     ///
     /// With `resolve_symlinks = true` every candidate is canonicalized
-    /// (`std::fs::canonicalize`) before `except_targets` matching, and the
-    /// canonical path must match an alternative for the exception to apply.
-    /// Any canonicalization failure (missing file, permission error,
-    /// relative candidate with no usable `base`) leaves the exception
-    /// unapplied, so the rule fires. A file that does not exist yet fails
-    /// closed the same way. Canonical paths are spelled as the OS resolves
-    /// them (on macOS `/tmp` is `/private/tmp`), so `except_targets` entries
-    /// must use that spelling.
+    /// (through the injected [`PathCanonicalizer`]) before `except_targets`
+    /// matching, and the canonical path must match an alternative for the
+    /// exception to apply. Anything short of a clean resolution leaves the
+    /// exception unapplied, so the rule fires: a missing file, a permission
+    /// error, a relative candidate with no usable base, a refusing scope, a
+    /// hard-linked regular file. A
+    /// file that does not exist yet fails closed the same way. Canonical
+    /// paths are spelled as the OS resolves them (on macOS `/tmp` is
+    /// `/private/tmp`), so `except_targets` entries must use that spelling.
     #[must_use]
-    fn matches_in(&self, argv: &[NormalizedWord], base: Option<&str>) -> bool {
+    fn matches_in(
+        &self,
+        argv: &[NormalizedWord],
+        scope: SymlinkScope<'_>,
+        canonicalizer: PathCanonicalizer,
+    ) -> bool {
         let Some(rest_words) = self.matching_rest(argv) else {
             return false;
         };
@@ -2583,14 +2715,36 @@ impl CommandRule {
             return true;
         }
 
-        let candidates: Vec<&str> = if !self.target_flags.is_empty() {
+        let Some(candidates) = self.except_candidates(&rest) else {
+            return true;
+        };
+        let all_excepted = !candidates.is_empty()
+            && !candidates
+                .iter()
+                .any(|c| candidate_has_unresolved_ascent(c))
+            && candidates.iter().all(|token| {
+                if self.resolve_symlinks {
+                    match resolve_candidate(token, scope, canonicalizer) {
+                        CandidateResolution::Canonical(canonical) => {
+                            self.except_targets.iter().any(|e| e.matches(&canonical))
+                        }
+                        CandidateResolution::Refused | CandidateResolution::Unresolved(_) => false,
+                    }
+                } else {
+                    self.except_targets.iter().any(|e| e.matches(token))
+                }
+            });
+        !all_excepted
+    }
+
+    /// The tail tokens `except_targets` is checked against, or `None` when
+    /// the candidate set cannot be enumerated and the rule must keep firing.
+    fn except_candidates<'a>(&self, rest: &[&'a str]) -> Option<Vec<&'a str>> {
+        if !self.target_flags.is_empty() {
             // Issue #581: only the declared flags' values are candidates.
             // `None` (a listed flag with no value) fails closed: the rule
             // keeps firing rather than excepting on a partial candidate set.
-            let Some(values) = target_flag_values(&rest, &self.target_flags, &self.value_flags)
-            else {
-                return true;
-            };
+            let values = target_flag_values(rest, &self.target_flags, &self.value_flags)?;
             // Unlike the other walks ([`candidate_has_unresolved_ascent`],
             // which looks only at `/`- or `~`-rooted candidates), a `..`
             // segment disqualifies a candidate whether or not it is rooted:
@@ -2600,38 +2754,67 @@ impl CommandRule {
             // contains `/../` therefore also asks here. That false Ask is
             // deliberate and fail-closed.
             if values.iter().any(|v| v.split('/').any(|seg| seg == "..")) {
-                return true;
+                return None;
             }
-            if self.targets.is_empty() {
+            Some(if self.targets.is_empty() {
                 values
             } else {
                 values
                     .into_iter()
                     .filter(|token| self.matches_targets(token))
                     .collect()
-            }
+            })
         } else if self.targets.is_empty() {
-            value_flag_free_candidates(&rest, &self.value_flags, &self.attached_value_flags)
+            Some(value_flag_free_candidates(
+                rest,
+                &self.value_flags,
+                &self.attached_value_flags,
+            ))
         } else {
-            rest.iter()
-                .filter(|token| self.matches_targets(token))
-                .copied()
-                .collect()
-        };
-        let all_excepted = !candidates.is_empty()
-            && !candidates
-                .iter()
-                .any(|c| candidate_has_unresolved_ascent(c))
-            && candidates.iter().all(|token| {
-                if self.resolve_symlinks {
-                    canonical_candidate(token, base).is_some_and(|canonical| {
-                        self.except_targets.iter().any(|e| e.matches(&canonical))
-                    })
-                } else {
-                    self.except_targets.iter().any(|e| e.matches(token))
-                }
-            });
-        !all_excepted
+            Some(
+                rest.iter()
+                    .filter(|token| self.matches_targets(token))
+                    .copied()
+                    .collect(),
+            )
+        }
+    }
+
+    /// The path of the first candidate of a `resolve_symlinks` rule that
+    /// textually lies under an `except_targets` entry but could not be
+    /// resolved (missing, dangling, unreadable): the one case where the
+    /// fail-closed outcome has a cause the user can fix. `None` for every
+    /// other reason an exception did not apply.
+    fn unresolved_excepted_path(
+        &self,
+        argv: &[NormalizedWord],
+        scope: SymlinkScope<'_>,
+        canonicalizer: PathCanonicalizer,
+    ) -> Option<String> {
+        if !self.resolve_symlinks || self.except_targets.is_empty() {
+            return None;
+        }
+        let rest_words = self.matching_rest(argv)?;
+        if rest_words
+            .iter()
+            .any(|w| matches!(w.resolution(), Resolution::Unresolvable(_)))
+        {
+            return None;
+        }
+        let rest = resolved_strings(&rest_words);
+        self.except_candidates(&rest)?
+            .into_iter()
+            .filter(|token| looks_like_path(token))
+            .find_map(
+                |token| match resolve_candidate(token, scope, canonicalizer) {
+                    CandidateResolution::Unresolved(full)
+                        if self.except_targets.iter().any(|e| e.matches(&full)) =>
+                    {
+                        Some(full)
+                    }
+                    _ => None,
+                },
+            )
     }
 
     #[must_use]
@@ -5658,6 +5841,49 @@ pub(crate) fn wrapper_chain_escalation(stage: &[NormalizedWord]) -> WrapperChain
     }
 }
 
+/// Whether `stage`'s wrapper-unwrap chain passes a `sudo` flag that runs the
+/// wrapped command in another directory (`-D`/`--chdir`) or root
+/// (`-R`/`--chroot`) than the shell's own. Relative paths in the wrapped
+/// command then name different files than the lexical cwd suggests, and
+/// nothing composes them (unlike `env -C`, issue #209). Over-approximates on
+/// purpose: any short cluster containing `D`/`R` and any long option that is
+/// a prefix of `chdir`/`chroot` counts, because a false positive only makes
+/// a `resolve_symlinks` exception fail closed.
+#[must_use]
+pub(crate) fn wrapper_chain_changes_cwd(stage: &[NormalizedWord]) -> bool {
+    let mut rest = stage;
+    loop {
+        let Some((first, tail)) = rest.split_first() else {
+            return false;
+        };
+        let Resolution::Resolved(name) = first.resolution() else {
+            return false;
+        };
+        let folded_base = fold_command_name(basename(name));
+        if !TRANSPARENT_WRAPPERS.contains(&folded_base.as_str()) {
+            return false;
+        }
+        if folded_base == "sudo" {
+            let flags_end = skip_wrapper_flags(&folded_base, tail);
+            let changes = tail[..flags_end].iter().any(|word| {
+                matches!(word.resolution(), Resolution::Resolved(token) if sudo_flag_changes_cwd(token))
+            });
+            if changes {
+                return true;
+            }
+        }
+        rest = skip_wrapper_arguments(&folded_base, tail);
+    }
+}
+
+fn sudo_flag_changes_cwd(token: &str) -> bool {
+    if let Some(long) = token.strip_prefix("--") {
+        let name = long.split('=').next().unwrap_or(long);
+        return name.len() >= 2 && ("chdir".starts_with(name) || "chroot".starts_with(name));
+    }
+    token.starts_with('-') && token.contains(['D', 'R'])
+}
+
 /// [`builtin_loadable_library`]'s outcome for one `builtin` hop found in
 /// `stage`'s wrapper-unwrap chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6783,6 +7009,20 @@ fn convert_command_rule(mut dto: CommandRuleSpec) -> Result<CommandRule, RulesEr
              (`exact`/`prefix`; a `url_host` entry can never match a canonical filesystem path)",
         ));
     }
+    if resolve_symlinks
+        && dto
+            .except_targets
+            .iter()
+            .filter_map(|t| t.exact.as_deref().or(t.prefix.as_deref()))
+            .any(|entry| !entry.starts_with('/'))
+    {
+        return Err(RulesError::invalid(
+            &dto.id,
+            "resolve_symlinks matches the canonical (absolute) spelling of each candidate, so \
+             every `exact`/`prefix` entry in `except_targets` must start with `/`; a relative \
+             or `~` entry could never match",
+        ));
+    }
     let except_targets = dto
         .except_targets
         .into_iter()
@@ -7598,6 +7838,7 @@ pub(crate) struct Rules {
     token_rules: Vec<TokenRule>,
     ask_rules: Vec<CommandRule>,
     escalation_floor: Decision,
+    path_canonicalizer: PathCanonicalizer,
 }
 
 /// Shared scan behind every worst-decision-wins `match_*` method on
@@ -7805,6 +8046,54 @@ impl Rules {
         }
         self
     }
+
+    /// One warning per `resolve_symlinks` `except_targets` entry (issue
+    /// #612) whose canonical spelling differs from how it is written (on
+    /// macOS `/tmp` is `/private/tmp`): candidates are matched in canonical
+    /// form, so such an entry silently never applies. Entries that do not
+    /// resolve (not created yet) produce no warning.
+    #[must_use]
+    pub(crate) fn resolve_symlinks_spelling_warnings(&self) -> Vec<String> {
+        let canonicalizer = self.path_canonicalizer;
+        let mut warnings = Vec::new();
+        for rule in self
+            .command_rules
+            .iter()
+            .chain(&self.ask_rules)
+            .filter(|rule| rule.resolve_symlinks)
+        {
+            for target in &rule.except_targets {
+                let (TargetMatcher::Exact(entry) | TargetMatcher::Prefix(entry)) = target else {
+                    continue;
+                };
+                let written = match entry.trim_end_matches('/') {
+                    "" => "/",
+                    trimmed => trimmed,
+                };
+                if let Some(resolved) = canonicalizer.canonicalize(written)
+                    && resolved.path != written
+                {
+                    warnings.push(format!(
+                        "rule {:?}: resolve_symlinks matches canonical paths, but except_targets \
+                         entry {entry:?} resolves to {:?}; write that spelling or the exception \
+                         will never apply",
+                        rule.id.as_str(),
+                        resolved.path
+                    ));
+                }
+            }
+        }
+        warnings
+    }
+
+    /// Wires the symlink-resolution adapter (see [`CanonicalizeFn`]) that
+    /// `resolve_symlinks` rules canonicalize their candidates through. Called
+    /// once, from the composition root.
+    #[must_use]
+    pub(crate) fn with_path_canonicalizer(mut self, canonicalizer: PathCanonicalizer) -> Self {
+        self.path_canonicalizer = canonicalizer;
+        self
+    }
 }
 
 impl Rules {
@@ -7855,6 +8144,7 @@ impl Rules {
             token_rules,
             ask_rules: Vec::new(),
             escalation_floor: Decision::Ask,
+            path_canonicalizer: PathCanonicalizer::unavailable(),
         })
     }
 
@@ -7878,20 +8168,20 @@ impl Rules {
     /// keep the first-declared rule.
     #[must_use]
     pub(crate) fn match_command(&self, argv: &[NormalizedWord]) -> Option<&CommandRule> {
-        self.match_command_in(argv, None)
+        self.match_command_in(argv, SymlinkScope::default())
     }
 
-    /// [`Self::match_command`] with the absolute directory (`base`) that
-    /// `resolve_symlinks` rules resolve relative candidates against (issue
-    /// #583); see [`CommandRule::matches_in`].
+    /// [`Self::match_command`] with the [`SymlinkScope`] `resolve_symlinks`
+    /// rules resolve their candidates in (issues #583, #612); see
+    /// [`CommandRule::matches_in`].
     #[must_use]
     pub(crate) fn match_command_in(
         &self,
         argv: &[NormalizedWord],
-        base: Option<&str>,
+        scope: SymlinkScope<'_>,
     ) -> Option<&CommandRule> {
         worst_wins(&self.command_rules, CommandRule::decision, |rule| {
-            rule.matches_in(argv, base)
+            rule.matches_in(argv, scope, self.path_canonicalizer)
         })
     }
 
@@ -7947,25 +8237,45 @@ impl Rules {
             .find(|rule| rule.dirstack_tilde_plausible(target))
     }
 
-    /// The first user-configured `ask` [`CommandRule`] that matches `argv`,
-    /// if any. Always `None` for an embedded-only [`Rules`] (see the struct
-    /// docs) — only [`merge_user_config`] populates `ask_rules`.
+    /// The hint to append to `rule`'s reason when its `resolve_symlinks`
+    /// exception could not be applied because a candidate under an excepted
+    /// prefix did not resolve (issue #612). `None` for every other cause.
     #[must_use]
-    pub(crate) fn match_ask(&self, argv: &[NormalizedWord]) -> Option<&CommandRule> {
-        self.match_ask_in(argv, None)
+    pub(crate) fn unresolved_exception_hint(
+        &self,
+        rule: &CommandRule,
+        argv: &[NormalizedWord],
+        scope: SymlinkScope<'_>,
+    ) -> Option<String> {
+        rule.unresolved_excepted_path(argv, scope, self.path_canonicalizer)
+            .map(|path| {
+                format!(
+                    "; except_targets could not be applied because {path} could not be \
+                     resolved (does it exist?)"
+                )
+            })
     }
 
-    /// [`Self::match_ask`] with a `resolve_symlinks` base directory, as
-    /// [`Self::match_command_in`].
+    /// [`Self::match_ask_in`] without a `resolve_symlinks` scope.
+    #[must_use]
+    pub(crate) fn match_ask(&self, argv: &[NormalizedWord]) -> Option<&CommandRule> {
+        self.match_ask_in(argv, SymlinkScope::default())
+    }
+
+    /// The first user-configured `ask` [`CommandRule`] that matches `argv`,
+    /// if any, resolving `resolve_symlinks` candidates in `scope` as
+    /// [`Self::match_command_in`] does. Always `None` for an embedded-only
+    /// [`Rules`] (see the struct docs) — only [`merge_user_config`]
+    /// populates `ask_rules`.
     #[must_use]
     pub(crate) fn match_ask_in(
         &self,
         argv: &[NormalizedWord],
-        base: Option<&str>,
+        scope: SymlinkScope<'_>,
     ) -> Option<&CommandRule> {
         self.ask_rules
             .iter()
-            .find(|rule| rule.matches_in(argv, base))
+            .find(|rule| rule.matches_in(argv, scope, self.path_canonicalizer))
     }
 
     /// The worst-decision [`TokenRule`] whose patterns match any of
@@ -8677,6 +8987,7 @@ pub(crate) fn merge_user_config(
             token_rules: blocklist.token_rules,
             ask_rules,
             escalation_floor,
+            path_canonicalizer: blocklist.path_canonicalizer,
         },
         Allowlist { entries },
     ))
@@ -13889,12 +14200,35 @@ mod tests {
 
     // ==== except_targets resolve_symlinks (issue #583) ====
 
-    #[cfg(unix)]
     mod resolve_symlinks {
         use super::*;
-        use std::os::unix::fs::symlink;
 
-        fn rules_excepting(dir: &std::path::Path) -> Rules {
+        fn resolved(path: &str, is_dir: bool, link_count: u64) -> Option<ResolvedPath> {
+            Some(ResolvedPath {
+                path: path.to_string(),
+                is_dir,
+                link_count,
+            })
+        }
+
+        /// In-memory stand-in for the filesystem adapter: `/scratch/ok.md`
+        /// is a regular file, `/scratch/link.md` a symlink out of the
+        /// scratch directory, `/scratch/hard.md` a file with a second hard
+        /// link, `/tmp/scratch` a directory behind a symlinked `/tmp`, and
+        /// everything else (dangling links, files not created yet) fails to
+        /// resolve.
+        fn fake_canonicalize(path: &str) -> Option<ResolvedPath> {
+            match path {
+                "/scratch/ok.md" => resolved("/scratch/ok.md", false, 1),
+                "/scratch/link.md" => resolved("/outside/secret", false, 1),
+                "/scratch/hard.md" => resolved("/scratch/hard.md", false, 2),
+                "/scratch/sub" => resolved("/scratch/sub", true, 3),
+                "/tmp/scratch" => resolved("/private/tmp/scratch", true, 2),
+                _ => None,
+            }
+        }
+
+        fn rules_excepting(dir: &str) -> Rules {
             Rules::parse(&format!(
                 r#"
                 [[command]]
@@ -13902,91 +14236,156 @@ mod tests {
                 reason = "ask unless uploading from the scratch dir"
                 decision = "ask"
                 command = "upload-tool"
-                except_targets = [{{ prefix = "{}/" }}]
+                except_targets = [{{ prefix = "{dir}/" }}]
                 resolve_symlinks = true
-            "#,
-                dir.display()
+            "#
             ))
             .unwrap()
-        }
-
-        fn temp() -> (tempfile::TempDir, std::path::PathBuf) {
-            let dir = tempfile::tempdir().unwrap();
-            let canonical = dir.path().canonicalize().unwrap();
-            (dir, canonical)
+            .with_path_canonicalizer(PathCanonicalizer::new(fake_canonicalize))
         }
 
         #[test]
         fn regular_file_under_the_prefix_is_excepted_and_a_symlink_out_is_not() {
-            let (_guard, root) = temp();
-            let scratch = root.join("scratch");
-            std::fs::create_dir(&scratch).unwrap();
-            std::fs::write(scratch.join("ok.md"), "x").unwrap();
-            std::fs::write(root.join("secret"), "x").unwrap();
-            symlink(root.join("secret"), scratch.join("link.md")).unwrap();
-            symlink(root.join("gone"), scratch.join("dangling.md")).unwrap();
-            let rules = rules_excepting(&scratch);
-            let hit = |name: &str| {
-                let path = scratch.join(name);
-                rules
-                    .match_command(&argv(&["upload-tool", path.to_str().unwrap()]))
-                    .is_some()
-            };
-            assert!(!hit("ok.md"));
-            assert!(hit("link.md"));
-            assert!(hit("dangling.md"));
-            assert!(hit("missing.md"));
+            let rules = rules_excepting("/scratch");
+            let hit = |path: &str| rules.match_command(&argv(&["upload-tool", path])).is_some();
+            assert!(!hit("/scratch/ok.md"));
+            assert!(hit("/scratch/link.md"));
+            assert!(hit("/scratch/dangling.md"));
+            assert!(hit("/scratch/missing.md"));
         }
 
         #[test]
         fn relative_candidate_resolves_against_base_and_fails_closed_without_one() {
-            let (_guard, root) = temp();
-            std::fs::write(root.join("ok.md"), "x").unwrap();
-            let rules = rules_excepting(&root);
+            let rules = rules_excepting("/scratch");
             let words = argv(&["upload-tool", "ok.md"]);
+            let scope = |base| SymlinkScope::new(base);
             assert!(
                 rules
-                    .match_command_in(&words, Some(root.to_str().unwrap()))
+                    .match_command_in(&words, scope(Some("/scratch")))
                     .is_none()
             );
-            assert!(rules.match_command_in(&words, None).is_some());
-            assert!(rules.match_command_in(&words, Some("relative")).is_some());
+            assert!(rules.match_command_in(&words, scope(None)).is_some());
+            assert!(
+                rules
+                    .match_command_in(&words, scope(Some("relative")))
+                    .is_some()
+            );
+        }
+
+        #[test]
+        fn hard_linked_regular_file_fails_closed_but_a_directory_is_excepted() {
+            let rules = rules_excepting("/scratch");
+            let hit = |path: &str| rules.match_command(&argv(&["upload-tool", path])).is_some();
+            assert!(hit("/scratch/hard.md"));
+            assert!(!hit("/scratch/sub"));
+        }
+
+        #[test]
+        fn a_refusing_scope_excepts_nothing() {
+            let rules = rules_excepting("/scratch");
+            let words = argv(&["upload-tool", "/scratch/ok.md"]);
+            let scope = SymlinkScope::new(Some("/scratch")).refusing_all();
+            assert!(rules.match_command_in(&words, scope).is_some());
+        }
+
+        #[test]
+        fn relative_except_entries_are_rejected_at_load() {
+            for entry in [
+                "{ prefix = \"scratch/\" }",
+                "{ exact = \"scratch/ok.md\" }",
+                "{ prefix = \"~/scratch/\" }",
+                "{ prefix = \"/scratch/\" }, { exact = \"./ok.md\" }",
+            ] {
+                let toml = format!(
+                    "[[command]]\nid = \"x\"\nreason = \"r\"\ncommand = \"c\"\n\
+                     except_targets = [{entry}]\nresolve_symlinks = true\n"
+                );
+                assert!(matches!(
+                    Rules::parse(&toml),
+                    Err(RulesError::InvalidRule { .. })
+                ));
+            }
+            let relative_without_the_key = "[[command]]\nid = \"x\"\nreason = \"r\"\ncommand = \"c\"\n\
+                 except_targets = [{ prefix = \"scratch/\" }]\n";
+            assert!(Rules::parse(relative_without_the_key).is_ok());
+        }
+
+        #[test]
+        fn unresolved_candidate_under_an_excepted_prefix_gets_a_hint() {
+            let rules = rules_excepting("/scratch");
+            let hint = |path: &str| {
+                let words = argv(&["upload-tool", path]);
+                let rule = rules.match_command(&words)?;
+                rules.unresolved_exception_hint(rule, &words, SymlinkScope::default())
+            };
+            assert_eq!(
+                hint("/scratch/missing.md").as_deref(),
+                Some(
+                    "; except_targets could not be applied because /scratch/missing.md could not \
+                     be resolved (does it exist?)"
+                )
+            );
+            assert_eq!(hint("/scratch/link.md"), None);
+            assert_eq!(hint("/scratch/hard.md"), None);
+            assert_eq!(hint("/elsewhere/missing.md"), None);
+        }
+
+        #[test]
+        fn except_entry_that_canonicalizes_to_another_spelling_is_warned_about() {
+            let warnings = rules_excepting("/tmp/scratch").resolve_symlinks_spelling_warnings();
+            assert_eq!(warnings.len(), 1);
+            assert!(warnings[0].contains("\"/tmp/scratch/\""));
+            assert!(warnings[0].contains("\"/private/tmp/scratch\""));
+            assert!(
+                rules_excepting("/scratch/sub")
+                    .resolve_symlinks_spelling_warnings()
+                    .is_empty()
+            );
+            assert!(
+                rules_excepting("/not/created/yet")
+                    .resolve_symlinks_spelling_warnings()
+                    .is_empty()
+            );
         }
 
         #[test]
         fn dotdot_candidate_still_fires_alongside_resolution() {
-            let (_guard, root) = temp();
-            let scratch = root.join("scratch");
-            std::fs::create_dir(&scratch).unwrap();
-            let rules = rules_excepting(&scratch);
-            let escaped = format!("{}/../scratch/x", scratch.display());
+            let rules = rules_excepting("/scratch");
             assert!(
                 rules
-                    .match_command(&argv(&["upload-tool", &escaped]))
+                    .match_command(&argv(&["upload-tool", "/scratch/../scratch/ok.md"]))
                     .is_some()
             );
         }
 
         #[test]
         fn without_the_key_matching_stays_lexical() {
-            let (_guard, root) = temp();
-            let rules = Rules::parse(&format!(
+            let rules = Rules::parse(
                 r#"
                 [[command]]
                 id = "upload"
                 reason = "r"
                 decision = "ask"
                 command = "upload-tool"
-                except_targets = [{{ prefix = "{}/" }}]
+                except_targets = [{ prefix = "/scratch/" }]
             "#,
-                root.display()
-            ))
+            )
             .unwrap();
-            let missing = format!("{}/missing", root.display());
             assert!(
                 rules
-                    .match_command(&argv(&["upload-tool", &missing]))
+                    .match_command(&argv(&["upload-tool", "/scratch/missing"]))
                     .is_none()
+            );
+        }
+
+        #[test]
+        fn an_unwired_canonicalizer_fails_closed() {
+            let wired = rules_excepting("/scratch");
+            let unwired = wired.with_path_canonicalizer(PathCanonicalizer::unavailable());
+            assert!(
+                unwired
+                    .match_command(&argv(&["upload-tool", "/scratch/ok.md"]))
+                    .is_some()
             );
         }
 
@@ -16393,8 +16792,13 @@ mod tests {
         )
         .unwrap();
         let (merged, _) = merge_user_config(blocklist, allowlist, config).unwrap();
-        assert!(merged.match_ask(&argv(&["gh", "pr", "view"])).is_some());
-        assert!(merged.match_ask(&argv(&["ls"])).is_none());
+        let scope = SymlinkScope::default();
+        assert!(
+            merged
+                .match_ask_in(&argv(&["gh", "pr", "view"]), scope)
+                .is_some()
+        );
+        assert!(merged.match_ask_in(&argv(&["ls"]), scope).is_none());
     }
 
     // ==== required_tokens schema extension ====
