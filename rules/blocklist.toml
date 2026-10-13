@@ -1416,6 +1416,11 @@ required_flags = [
 targets = [
     { normalized = "~/.config", case_insensitive = true },
     { normalized = "~" },
+    # Same leading-dot glob family as `self-protect-config-ancestor-rm-tilde`
+    # (issue #595): `rsync --delete x/ ~/.*` syncs over every dot entry.
+    { normalized = "~/.*" },
+    { normalized = "~/.config/*", case_insensitive = true },
+    { normalized = "~/.config/*/*", case_insensitive = true },
 ]
 
 # Ordered after self-protect-config-ancestor-rsync-tilde above so its

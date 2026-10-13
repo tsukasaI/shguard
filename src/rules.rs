@@ -1578,6 +1578,231 @@ impl TargetMatcher {
             }
         }
     }
+
+    // Not folded into `Self::matches`: what a glob expands to depends on
+    // the filesystem, so this only feeds the Ask-capped
+    // `crate::gate::scan_glob_floor`. `*`/`?`/brackets may match a leading
+    // `.` (dotglob, zsh): assuming bash's default would be fail-open.
+    fn glob_plausible(&self, token: &str) -> bool {
+        let (strip, target, case_insensitive, beneath, partial_last) = match self {
+            Self::NormalizedExact {
+                strip,
+                target,
+                case_insensitive,
+            } => {
+                let glob_last = match target {
+                    PathForm::Abs(comps) | PathForm::Home(comps) | PathForm::Rel { comps, .. } => {
+                        comps.last().is_some_and(|last| is_canonical_glob(last))
+                    }
+                    _ => false,
+                };
+                let beneath = if glob_last {
+                    GlobBeneath::GlobOnly
+                } else {
+                    GlobBeneath::Nothing
+                };
+                (strip, target.clone(), *case_insensitive, beneath, false)
+            }
+            Self::NormalizedPrefix {
+                strip,
+                canon,
+                case_insensitive,
+            } => (
+                strip,
+                lexical_normalize(canon),
+                *case_insensitive,
+                GlobBeneath::Anything,
+                !canon.ends_with('/'),
+            ),
+            Self::Exact(_)
+            | Self::Prefix(_)
+            | Self::UrlHost(_)
+            | Self::NormalizedBasename { .. } => return false,
+        };
+        let Some(remainder) = strip_target(strip.as_deref(), token) else {
+            return false;
+        };
+        let form = lexical_normalize(remainder);
+        let (pattern, target_comps) = match (&form, &target) {
+            (PathForm::Abs(pattern), PathForm::Abs(target))
+            | (PathForm::Home(pattern), PathForm::Home(target)) => (pattern, target),
+            (
+                PathForm::Rel {
+                    ascent: a,
+                    comps: pattern,
+                },
+                PathForm::Rel {
+                    ascent: b,
+                    comps: target,
+                },
+            ) if a == b => (pattern, target),
+            _ => return false,
+        };
+        if !pattern.iter().any(|c| c.contains(['*', '?', '['])) {
+            return false;
+        }
+        let fold = |comps: &[String]| -> Vec<String> {
+            comps
+                .iter()
+                .map(|c| {
+                    if case_insensitive {
+                        c.to_ascii_lowercase()
+                    } else {
+                        c.clone()
+                    }
+                })
+                .collect()
+        };
+        comps_glob_plausible(&fold(pattern), &fold(target_comps), beneath, partial_last)
+    }
+}
+
+fn is_canonical_glob(comp: &str) -> bool {
+    comp == "*" || comp == ".*"
+}
+
+// Which pattern components may be left over once the target is consumed.
+// `GlobOnly` (an exact glob target such as `~/*`): `~/*/*` empties every
+// subdirectory, but `*/node_modules` is not the "every entry" claim `*` is.
+#[derive(Clone, Copy)]
+enum GlobBeneath {
+    Nothing,
+    GlobOnly,
+    Anything,
+}
+
+impl GlobBeneath {
+    fn admits(self, leftover: &[String]) -> bool {
+        match self {
+            Self::Nothing => leftover.is_empty(),
+            Self::GlobOnly => leftover.iter().all(|c| is_glob_only_component(c)),
+            Self::Anything => true,
+        }
+    }
+}
+
+// `partial_last`: the last target component is a string prefix
+// (`normalized_prefix = "/dev/sd"`).
+fn comps_glob_plausible(
+    pattern: &[String],
+    target: &[String],
+    beneath: GlobBeneath,
+    partial_last: bool,
+) -> bool {
+    let Some((first, pattern_rest)) = pattern.split_first() else {
+        return target.is_empty();
+    };
+    if first == "**" {
+        return comps_glob_plausible(pattern_rest, target, beneath, partial_last)
+            || match target.split_first() {
+                Some((_, target_rest)) => {
+                    comps_glob_plausible(pattern, target_rest, beneath, partial_last)
+                }
+                None => beneath.admits(pattern),
+            };
+    }
+    let Some((target_first, target_rest)) = target.split_first() else {
+        return beneath.admits(pattern);
+    };
+    // Against a glob target (`~/*`), only another glob-only component is
+    // the same "every entry" claim; a literal `build` in `build/*` is not.
+    let component_matches = if is_canonical_glob(target_first) {
+        is_glob_only_component(first)
+    } else {
+        glob_component_matches(
+            first.as_bytes(),
+            target_first.as_bytes(),
+            partial_last && target_rest.is_empty(),
+        )
+    };
+    component_matches && comps_glob_plausible(pattern_rest, target_rest, beneath, partial_last)
+}
+
+fn glob_component_matches(pattern: &[u8], name: &[u8], name_is_prefix: bool) -> bool {
+    let (mut p, mut n) = (0, 0);
+    let mut star: Option<(usize, usize)> = None;
+    while n < name.len() {
+        let step = match pattern.get(p) {
+            Some(b'*') => {
+                star = Some((p + 1, n));
+                p += 1;
+                continue;
+            }
+            Some(b'?') => Some(p + 1),
+            Some(b'[') => match bracket_expr_end(pattern, p) {
+                Some(end) => bracket_matches(&pattern[p..end], name[n]).then_some(end),
+                None => (name[n] == b'[').then_some(p + 1),
+            },
+            Some(&literal) => (literal == name[n]).then_some(p + 1),
+            None => None,
+        };
+        if let Some(next) = step {
+            p = next;
+            n += 1;
+            continue;
+        }
+        let Some((star_p, star_n)) = star else {
+            return false;
+        };
+        star = Some((star_p, star_n + 1));
+        p = star_p;
+        n = star_n + 1;
+    }
+    name_is_prefix || pattern[p..].iter().all(|&b| b == b'*')
+}
+
+fn bracket_matches(expr: &[u8], c: u8) -> bool {
+    let inner = &expr[1..expr.len() - 1];
+    let (negate, mut i) = match inner.first() {
+        Some(b'!' | b'^') => (true, 1),
+        _ => (false, 0),
+    };
+    let mut hit = false;
+    while i < inner.len() {
+        if inner[i] == b'['
+            && matches!(inner.get(i + 1), Some(b':' | b'=' | b'.'))
+            && let Some(end) = posix_bracket_term_end(inner, i)
+        {
+            let name = &inner[i + 2..end - 2];
+            if inner[i + 1] == b':' {
+                // An unknown class may match anything, negated or not.
+                let Some(matched) = posix_class_matches(name, c) else {
+                    return true;
+                };
+                hit |= matched;
+            } else {
+                hit |= name == [c];
+            }
+            i = end;
+        } else if inner.get(i + 1) == Some(&b'-') && i + 2 < inner.len() {
+            hit |= (inner[i]..=inner[i + 2]).contains(&c);
+            i += 3;
+        } else {
+            hit |= inner[i] == c;
+            i += 1;
+        }
+    }
+    hit != negate
+}
+
+fn posix_class_matches(class: &[u8], c: u8) -> Option<bool> {
+    Some(match class {
+        b"alnum" => c.is_ascii_alphanumeric(),
+        b"alpha" => c.is_ascii_alphabetic(),
+        b"ascii" => c.is_ascii(),
+        b"blank" => c == b' ' || c == b'\t',
+        b"cntrl" => c.is_ascii_control(),
+        b"digit" => c.is_ascii_digit(),
+        b"graph" => c.is_ascii_graphic(),
+        b"lower" => c.is_ascii_lowercase(),
+        b"print" => c.is_ascii_graphic() || c == b' ',
+        b"punct" => c.is_ascii_punctuation(),
+        b"space" => c.is_ascii_whitespace() || c == 0x0b,
+        b"upper" => c.is_ascii_uppercase(),
+        b"word" => c.is_ascii_alphanumeric() || c == b'_',
+        b"xdigit" => c.is_ascii_hexdigit(),
+        _ => return None,
+    })
 }
 
 /// True for a path component made only of glob metacharacters: an optional
@@ -3280,6 +3505,7 @@ impl CommandRule {
                 t.ascent_descent_plausible(token)
                     || t.named_user_home_plausible(token)
                     || t.dirstack_plausible(token)
+                    || t.glob_plausible(token)
             })
         })
     }
@@ -3478,6 +3704,11 @@ impl CommandRule {
     #[must_use]
     pub(crate) fn matches_ascent_descent_floor(&self, argv: &[NormalizedWord]) -> bool {
         self.matches_resolved_tail_floor(argv, TargetMatcher::ascent_descent_plausible)
+    }
+
+    #[must_use]
+    pub(crate) fn matches_glob_floor(&self, argv: &[NormalizedWord]) -> bool {
+        self.matches_resolved_tail_floor(argv, TargetMatcher::glob_plausible)
     }
 
     /// issue #80: true when this rule's command+flags match `argv` (via
@@ -7866,6 +8097,10 @@ impl RedirectRule {
             .any(|t| t.ascent_descent_plausible(target))
     }
 
+    fn glob_plausible(&self, target: &str) -> bool {
+        self.targets.iter().any(|t| t.glob_plausible(target))
+    }
+
     /// Issue #341: true when `target` (a redirect's resolved target word)
     /// is a directory-stack tilde shorthand (`~+`/`~-`/`~N`/`~+N`/`~-N`,
     /// [`PathForm::DirStack`]) or a `..` step above one
@@ -8352,6 +8587,13 @@ impl Rules {
             .find(|rule| rule.ascent_descent_plausible(target))
     }
 
+    #[must_use]
+    pub(crate) fn match_redirect_target_glob(&self, target: &str) -> Option<&RedirectRule> {
+        self.redirect_rules
+            .iter()
+            .find(|rule| rule.glob_plausible(target))
+    }
+
     /// The first [`RedirectRule`] for which
     /// [`RedirectRule::dirstack_tilde_plausible`] holds against `target`, if
     /// any — issue #341's floor, extending #88/#133's argv-side
@@ -8517,6 +8759,11 @@ impl Rules {
         argv: &[NormalizedWord],
     ) -> Option<&CommandRule> {
         self.find_command_or_ask_rule(|rule| rule.matches_ascent_descent_floor(argv))
+    }
+
+    #[must_use]
+    pub(crate) fn match_command_glob(&self, argv: &[NormalizedWord]) -> Option<&CommandRule> {
+        self.find_command_or_ask_rule(|rule| rule.matches_glob_floor(argv))
     }
 
     /// The first [`CommandRule`] for which
@@ -9556,6 +9803,87 @@ mod tests {
                 rules.match_command(&argv(&["rm", token])).is_none(),
                 "{token:?}"
             );
+        }
+    }
+
+    #[test]
+    fn glob_component_matching_is_fnmatch_with_dotglob() {
+        for (pattern, name) in [
+            ("*", ".config"),
+            ("?config", ".config"),
+            (".c*", ".config"),
+            ("*guard", "shguard"),
+            ("[!.]hguard", "shguard"),
+            ("[[:alpha:]]hguard", "shguard"),
+            ("[a-z]h*", "shguard"),
+            ("[]s]hguard", "shguard"),
+            ("s[[:bogus:]]guard", "shguard"),
+        ] {
+            assert!(
+                glob_component_matches(pattern.as_bytes(), name.as_bytes(), false),
+                "{pattern:?} vs {name:?}"
+            );
+        }
+        for (pattern, name) in [
+            ("s*x", "shguard"),
+            ("[!s]hguard", "shguard"),
+            ("[[:digit:]]hguard", "shguard"),
+            ("?", "shguard"),
+            ("[a", "shguard"),
+        ] {
+            assert!(
+                !glob_component_matches(pattern.as_bytes(), name.as_bytes(), false),
+                "{pattern:?} vs {name:?}"
+            );
+        }
+        assert!(glob_component_matches(b"s?a1", b"sd", true));
+        assert!(!glob_component_matches(b"x?", b"sd", true));
+    }
+
+    #[test]
+    fn glob_plausible_lines_components_up_with_the_target() {
+        let exact = |target: &str| TargetMatcher::NormalizedExact {
+            strip: None,
+            target: canonicalize_glob_form(lexical_normalize(target)),
+            case_insensitive: false,
+        };
+        let prefix = |canon: &str| TargetMatcher::NormalizedPrefix {
+            strip: None,
+            canon: canon.to_string(),
+            case_insensitive: false,
+        };
+        let shguard = exact("~/.config/shguard");
+        let home_glob = exact("~/*");
+        let rel_glob = exact("*");
+        let config_dir = prefix("~/.config/shguard/");
+        let dev = prefix("/dev/sd");
+        for (matcher, token) in [
+            (&shguard, "~/.*/shguard"),
+            (&shguard, "~/.c*/s*"),
+            (&shguard, "~/**/shguard"),
+            (&home_glob, "~/*/*"),
+            (&home_glob, "~/**/*"),
+            (&rel_glob, "*/*"),
+            (&config_dir, "~/.config/*/config.toml"),
+            (&config_dir, "~/.config/sh*"),
+            (&dev, "/dev/s?a1"),
+        ] {
+            assert!(matcher.glob_plausible(token), "{token:?}");
+        }
+        for (matcher, token) in [
+            (&shguard, "~/.config/shguard"),
+            (&shguard, "~/.config/x*"),
+            (&shguard, "/Users/*/.config/shguard"),
+            (&shguard, "../.config/s*"),
+            (&home_glob, "~/proj/*"),
+            (&rel_glob, "build/*"),
+            (&rel_glob, "*/node_modules"),
+            (&home_glob, "~/*/node_modules"),
+            (&rel_glob, "*.o"),
+            (&config_dir, "~/.conf*"),
+            (&dev, "/dev/x*"),
+        ] {
+            assert!(!matcher.glob_plausible(token), "{token:?}");
         }
     }
 

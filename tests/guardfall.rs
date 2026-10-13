@@ -559,6 +559,28 @@ fn guardfall_rm_dotglob_tilde_targets() {
         ("rm -rf ~/.config/?*/*", Decision::Ask),
         ("rm -rf ~/.config/*/?*", Decision::Ask),
         ("rm -rf ~/.config/[!.]*/*", Decision::Ask),
+        // A partial glob that could expand into a protected path floors to
+        // Ask (never Block, never Allow).
+        ("rm -rf ~/.*/*", Decision::Ask),
+        ("rm -rf ~/.*/shguard", Decision::Ask),
+        ("rm -rf ~/.c*/*", Decision::Ask),
+        ("rm -rf ~/.c*/s*", Decision::Ask),
+        ("rm -rf ~/.[!.]*/*", Decision::Ask),
+        ("rm -rf ~/.??*/*", Decision::Ask),
+        ("rm -rf ~/.config/s*", Decision::Ask),
+        ("rm -rf ~/.config/sh*", Decision::Ask),
+        ("rm -rf ~/.config/*guard", Decision::Ask),
+        ("rm -rf ~/.config/?hguard", Decision::Ask),
+        ("rm -rf ~/.config/*/config.toml", Decision::Ask),
+        ("rm -rf ~/*/*", Decision::Ask),
+        ("rm -rf ~/**/*", Decision::Ask),
+        ("rm -rf ~/.config*", Decision::Ask),
+        ("rm -rf ~/.conf*", Decision::Ask),
+        ("rm -rf ~/.[c]onfig", Decision::Ask),
+        ("rm -rf ~/.confi?", Decision::Ask),
+        ("rsync -a --delete x/ ~/.*", Decision::Ask),
+        ("rsync -a --delete x/ ~/.config/*", Decision::Ask),
+        ("echo x > /etc/passw?", Decision::Ask),
         ("rm -rf ../build/.*?", Decision::Allow),
         ("rm -rf ../build/.[!.]**", Decision::Allow),
         ("rm -rf ../bob/.**", Decision::Allow),
@@ -567,6 +589,8 @@ fn guardfall_rm_dotglob_tilde_targets() {
         ("rm -rf target/debug/*", Decision::Allow),
         ("rm -rf ~/proj/node_modules/*", Decision::Allow),
         ("mv ~/Downloads/*.pdf ~/docs/", Decision::Allow),
+        ("rm -rf */node_modules", Decision::Allow),
+        ("rm -rf ~/.config/nvim/*", Decision::Allow),
     ];
 
     for (command, expected) in cases {
