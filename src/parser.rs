@@ -934,7 +934,10 @@ fn convert_pipeline(pipeline: &bast::Pipeline) -> Result<Pipeline, ParseError> {
     let first = commands
         .next()
         .ok_or_else(|| ParseError::syntax("empty pipeline"))?;
-    let first = convert_command(first)?;
+    let mut first = convert_command(first)?;
+    if pipeline.timed.is_some() {
+        drop_time_option_terminator(&mut first);
+    }
     let rest = commands.map(convert_command).collect::<Result<_, _>>()?;
 
     Ok(Pipeline {
@@ -942,6 +945,24 @@ fn convert_pipeline(pipeline: &bast::Pipeline) -> Result<Pipeline, ParseError> {
         rest,
         bang: pipeline.bang,
     })
+}
+
+/// Bash's `time` reserved word accepts `-p` and `--` before the pipeline,
+/// but brush strips only `-p`, leaving `--` as the command name: `time --
+/// rm -rf /` would reach the rules as the command `--`. Narrow on purpose
+/// (timed pipelines only): an untimed `-- rm` (e.g. `eval -- -- rm -rf /`)
+/// really is the command `--`.
+fn drop_time_option_terminator(first: &mut Command) {
+    let Command::Simple(simple) = first else {
+        return;
+    };
+    let is_terminator = matches!(
+        simple.words.first(),
+        Some(Word(pieces)) if matches!(pieces.as_slice(), [WordPiece::Literal(text)] if text == "--")
+    );
+    if is_terminator && simple.words.len() > 1 {
+        simple.words.remove(0);
+    }
 }
 
 fn convert_command(command: &bast::Command) -> Result<Command, ParseError> {
@@ -3588,6 +3609,27 @@ mod tests {
         let timed = parse_ok("time rm -rf /");
         let untimed = parse_ok("rm -rf /");
         assert_eq!(timed, untimed);
+    }
+
+    #[test]
+    fn timed_pipeline_drops_the_leading_option_terminator() {
+        let untimed = parse_ok("rm -rf /");
+        for command in ["time -- rm -rf /", "time -p -- rm -rf /"] {
+            assert_eq!(
+                parse_ok(command),
+                untimed,
+                "{command}: `--` must not remain as the command name"
+            );
+        }
+    }
+
+    #[test]
+    fn untimed_or_quoted_option_terminator_is_kept_as_the_command() {
+        for command in ["-- rm -rf /", r#"time "--" rm -rf /"#] {
+            let parsed = parse_ok(command);
+            let words = &simple(&parsed.first.first).words;
+            assert_eq!(words.len(), 4, "{command}");
+        }
     }
 
     #[test]

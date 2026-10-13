@@ -84,6 +84,12 @@ source = "issue #638"
 note = "time behind env"
 
 [[case]]
+payload = "time -- rm -rf /"
+expected = "Block"
+source = "issue #638"
+note = "brush strips the reserved word `time` and leaves `--` as the command name; the parser drops it for timed pipelines"
+
+[[case]]
 payload = "/usr/bin/time -- rm -rf /"
 expected = "Block"
 source = "issue #638"
