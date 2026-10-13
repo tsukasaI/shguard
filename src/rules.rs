@@ -1668,12 +1668,17 @@ enum GlobBeneath {
 }
 
 impl GlobBeneath {
-    fn admits(self, leftover: &[String]) -> bool {
-        match self {
-            Self::Nothing => leftover.is_empty(),
-            Self::GlobOnly => leftover.iter().all(|c| is_glob_only_component(c)),
-            Self::Anything => true,
+    // Indexed by where the leftover starts in `pattern`.
+    fn admits_suffixes(self, pattern: &[String]) -> Vec<bool> {
+        let mut admits = vec![true; pattern.len() + 1];
+        for p in (0..pattern.len()).rev() {
+            admits[p] = match self {
+                Self::Nothing => false,
+                Self::GlobOnly => admits[p + 1] && is_glob_only_component(&pattern[p]),
+                Self::Anything => true,
+            };
         }
+        admits
     }
 }
 
@@ -1686,33 +1691,55 @@ struct GlobMatch {
     case_insensitive: bool,
 }
 
+// Forward reachability over (pattern index, target index), not recursive
+// backtracking: a padded run of `**` components backtracks exponentially.
 fn comps_glob_plausible(pattern: &[String], target: &[String], how: GlobMatch) -> bool {
-    let Some((first, pattern_rest)) = pattern.split_first() else {
-        return target.is_empty();
-    };
-    if first == "**" {
-        return comps_glob_plausible(pattern_rest, target, how)
-            || match target.split_first() {
-                Some((_, target_rest)) => comps_glob_plausible(pattern, target_rest, how),
-                None => how.beneath.admits(pattern),
+    let width = target.len() + 1;
+    let admits = how.beneath.admits_suffixes(pattern);
+    let mut reached = vec![false; (pattern.len() + 1) * width];
+    reached[0] = true;
+    for p in 0..=pattern.len() {
+        for t in 0..width {
+            if !reached[p * width + t] {
+                continue;
+            }
+            let Some(comp) = pattern.get(p) else {
+                if t == target.len() {
+                    return true;
+                }
+                continue;
             };
+            if comp == "**" {
+                reached[(p + 1) * width + t] = true;
+            }
+            let Some(target_comp) = target.get(t) else {
+                if admits[p] {
+                    return true;
+                }
+                continue;
+            };
+            if comp == "**" {
+                reached[p * width + t + 1] = true;
+                continue;
+            }
+            // Against a glob target (`~/*`), only another glob-only component is
+            // the same "every entry" claim; a literal `build` in `build/*` is not.
+            let component_matches = if is_canonical_glob(target_comp) {
+                is_glob_only_component(comp)
+            } else {
+                glob_component_matches(
+                    comp.as_bytes(),
+                    target_comp.as_bytes(),
+                    how.partial_last && t + 1 == target.len(),
+                    how.case_insensitive,
+                )
+            };
+            if component_matches {
+                reached[(p + 1) * width + t + 1] = true;
+            }
+        }
     }
-    let Some((target_first, target_rest)) = target.split_first() else {
-        return how.beneath.admits(pattern);
-    };
-    // Against a glob target (`~/*`), only another glob-only component is
-    // the same "every entry" claim; a literal `build` in `build/*` is not.
-    let component_matches = if is_canonical_glob(target_first) {
-        is_glob_only_component(first)
-    } else {
-        glob_component_matches(
-            first.as_bytes(),
-            target_first.as_bytes(),
-            how.partial_last && target_rest.is_empty(),
-            how.case_insensitive,
-        )
-    };
-    component_matches && comps_glob_plausible(pattern_rest, target_rest, how)
+    false
 }
 
 // Not lowercasing the pattern: that turns `[!A-Z]` into `[!a-z]` and
@@ -9852,6 +9879,29 @@ mod tests {
         }
         assert!(glob_component_matches(b"s?a1", b"sd", true, false));
         assert!(!glob_component_matches(b"x?", b"sd", true, false));
+    }
+
+    #[test]
+    fn padded_globstar_run_is_matched_without_backtracking() {
+        let how = GlobMatch {
+            beneath: GlobBeneath::Nothing,
+            partial_last: false,
+            case_insensitive: false,
+        };
+        let target: Vec<String> = ["a", "b", "c", "d"].map(String::from).to_vec();
+        let mut stars = vec!["**".to_string(); 2000];
+        stars.push("zzz".to_string());
+        assert!(!comps_glob_plausible(&stars, &target, how));
+        let mut alternating: Vec<String> = ["**", "*"]
+            .repeat(1000)
+            .into_iter()
+            .map(String::from)
+            .collect();
+        alternating.push("zzz".to_string());
+        assert!(!comps_glob_plausible(&alternating, &target, how));
+        let mut reaching = vec!["**".to_string(); 2000];
+        reaching.push("d".to_string());
+        assert!(comps_glob_plausible(&reaching, &target, how));
     }
 
     #[test]

@@ -607,6 +607,14 @@ fn guardfall_rm_dotglob_tilde_targets() {
     }
 }
 
+#[test]
+fn guardfall_padded_globstar_keeps_the_rules_own_block() {
+    for padding_anchor in ["", "/Users/me/", "~/"] {
+        let command = format!("rm -rf / {padding_anchor}{}zzz", "**/".repeat(2000));
+        assert_eq!(shguard::analyze(&command).decision(), Decision::Block);
+    }
+}
+
 /// Issue #453: three filesystem-destruction shapes adjacent to existing
 /// Block rules were Allow — bare `mkfs <device>` (no `-t`), `rm -r` (no
 /// `-f`) against a root-level target, and `rm -rf ./*`/`rm -rf *`.
