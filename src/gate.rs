@@ -895,6 +895,7 @@ fn evaluate_pipeline(
         let verdict = match command {
             Command::Simple(simple) => {
                 env.apply_assignments(simple, runs_in_parent_shell && stage_count == 1);
+                env.note_readonly_operands(&normalize::normalize_argv(simple));
                 let mut alternates = Vec::new();
                 let verdict = evaluate_simple_command(
                     simple,
@@ -1185,10 +1186,12 @@ fn evaluate_compound_command(
     let redirect_anchor = cwd.current.clone();
     let (worst, redirections, extra_words): (Verdict, &[Redirection], &[Word]) = match compound {
         CompoundCommand::BraceGroup { body, redirections } => {
+            // A failing redirection skips the body, so a redirected group
+            // never certainly persists its assignments.
             let verdict = evaluate_command_line_in(
                 body,
                 env,
-                parent_persists,
+                parent_persists && redirections.is_empty(),
                 rules,
                 allowlist,
                 depth,
@@ -10673,6 +10676,14 @@ struct Env {
     /// alone in both of its own branches. Its resolved value still lands in
     /// `value_history` after the cut.
     persisting_unresolvable: HashMap<String, usize>,
+    /// Names that appeared as an operand of a readonly-ish builtin
+    /// (`readonly`, or `declare`/`typeset`/`local`/`export` with an
+    /// `-r`-containing flag cluster) earlier on this line. A later assignment
+    /// to such a name may silently fail, so it must not advance the cut.
+    readonly_names: std::collections::HashSet<String>,
+    /// A readonly-ish builtin whose operands could not be resolved: no name
+    /// can be trusted to be writable, so no cut advances.
+    readonly_unknown: bool,
 }
 
 impl Env {
@@ -10683,6 +10694,49 @@ impl Env {
             value_history: HashMap::new(),
             ifs_append_floor: None,
             persisting_unresolvable: HashMap::new(),
+            readonly_names: std::collections::HashSet::new(),
+            readonly_unknown: false,
+        }
+    }
+
+    /// An assignment to a possibly-readonly name may fail in the real shell,
+    /// so it neither marks the name unknown nor advances its cut.
+    fn is_possibly_readonly(&self, name: &str) -> bool {
+        self.readonly_unknown || self.readonly_names.contains(name)
+    }
+
+    /// Conservatively records `readonly`-ish operands (see
+    /// [`Self::readonly_names`]); any such appearance is enough, whether or
+    /// not the builtin certainly runs.
+    fn note_readonly_operands(&mut self, argv: &[NormalizedWord]) {
+        let Some((first, rest)) = argv.split_first() else {
+            return;
+        };
+        let Resolution::Resolved(name) = first.resolution() else {
+            return;
+        };
+        let readonlyish = match name.as_str() {
+            "readonly" => true,
+            "declare" | "typeset" | "local" | "export" => {
+                rest.iter().any(|word| match word.resolution() {
+                    Resolution::Resolved(arg) => arg.starts_with('-') && arg.contains('r'),
+                    Resolution::Unresolvable(_) => true,
+                })
+            }
+            _ => false,
+        };
+        if !readonlyish {
+            return;
+        }
+        for word in rest {
+            match word.resolution() {
+                Resolution::Resolved(arg) if arg.starts_with('-') => {}
+                Resolution::Resolved(arg) => {
+                    let operand = arg.split('=').next().unwrap_or(arg);
+                    self.readonly_names.insert(operand.to_string());
+                }
+                Resolution::Unresolvable(_) => self.readonly_unknown = true,
+            }
         }
     }
 
@@ -10819,6 +10873,8 @@ impl Env {
                 // but keeping the marker), the same asymmetry `None`'s own
                 // branch below applies.
                 if !is_prefix_scoped
+                    && !assignment.append
+                    && !self.is_possibly_readonly(&assignment.name)
                     && let Some(cut) = self.persisting_unresolvable.get_mut(&assignment.name)
                 {
                     *cut = cut_before_this_value;
@@ -10826,7 +10882,7 @@ impl Env {
             }
             None => {
                 self.map.remove(&assignment.name);
-                if !is_prefix_scoped {
+                if !is_prefix_scoped && !self.is_possibly_readonly(&assignment.name) {
                     let cut = self.value_history(&assignment.name).len();
                     self.persisting_unresolvable
                         .insert(assignment.name.clone(), cut);
@@ -11555,6 +11611,50 @@ mod tests {
         // A resolved value recorded after the cut stays live.
         assert_decision(
             "X=$(evil); X=ls; true && X='rm -rf /'; X=ls true; $X",
+            Decision::Block,
+        );
+    }
+
+    #[test]
+    fn issue_534_redirected_brace_group_does_not_certainly_persist() {
+        for command in [
+            "X=\"rm -rf /\"; { X=$Y; } </nonexistent; $X",
+            "X=\"rm -rf /\"; { X=$Y; } >/nonexistent/f; $X",
+            "X=\"rm -rf /\"; { X=$Y; } >&9; $X",
+            "X=\"rm -rf /\"; { { X=$Y; } </nonexistent; }; $X",
+            "X=$Y; true && X=\"rm -rf /\"; { X=ls; } </nonexistent; $X",
+        ] {
+            assert_decision(command, Decision::Block);
+        }
+    }
+
+    #[test]
+    fn issue_534_append_assignment_does_not_advance_the_cut() {
+        for command in [
+            "X=$Y; true && X=\"rm -rf /\"; X=ls true; X+=\" /x\"; $X",
+            "X=$Y; true && X=\"rm -rf /\"; false && X=ls; X+=\" -l\"; $X",
+        ] {
+            assert_decision(command, Decision::Block);
+        }
+    }
+
+    #[test]
+    fn issue_534_readonly_name_does_not_advance_the_cut() {
+        for command in [
+            "X=$Y; true && X=\"rm -rf /\"; readonly X; X=ls; $X",
+            "X=\"rm -rf /\"; readonly X; X=$Y; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; declare -r X; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; typeset -rx X; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; readonly $Z; X=ls; $X",
+        ] {
+            assert_decision(command, Decision::Block);
+        }
+    }
+
+    #[test]
+    fn issue_534_headline_brace_group_row_is_block() {
+        assert_decision(
+            "X=$(evil); { X='rm -rf /'; }; X=ls true; $X",
             Decision::Block,
         );
     }
