@@ -687,7 +687,7 @@ fn evaluate_command_line_in(
     cwd: &mut CwdState,
     parse: ParseFn,
 ) -> Verdict {
-    let mut isolated = chain_is_backgrounded(command_line, 0).then(|| cwd.clone());
+    let mut isolated = chain_is_backgrounded(command_line, 0).then(|| cwd.clone_untrusted());
     let first_runs_in_parent_shell =
         parent_persists && runs_in_parent_shell(None, isolated.is_some());
     let mut worst = evaluate_pipeline(
@@ -723,7 +723,8 @@ fn evaluate_command_line_in(
         // progress; `;` and `&` both close it, so the next pipeline's chain
         // is recomputed fresh.
         if !matches!(separator, Separator::And | Separator::Or) {
-            isolated = chain_is_backgrounded(command_line, index + 1).then(|| cwd.clone());
+            isolated =
+                chain_is_backgrounded(command_line, index + 1).then(|| cwd.clone_untrusted());
         }
         let in_parent_shell =
             parent_persists && runs_in_parent_shell(Some(*separator), isolated.is_some());
@@ -908,7 +909,7 @@ fn evaluate_pipeline(
                         depth,
                         &cwd.current,
                         &earlier.paths,
-                        cwd.symlink_untrusted || earlier.unresolved,
+                        cwd.symlink_untrusted || earlier.unresolved || stage_count > 1,
                         &mut alternates,
                         parse,
                     )
@@ -2788,7 +2789,18 @@ fn evaluate_simple_command(
             rules,
             anchor.composed_symlink_scope(earlier_words, wrapper_moves_cwd, refuse_symlinks),
         ) {
-        fold_worst(verdict, composed)
+        if composed_names_the_plain_floor_token(
+            &verdict,
+            &composed,
+            &composed_pass_argv,
+            command,
+            anchor,
+            rules,
+        ) {
+            composed.with_deny_message(verdict.deny_message().cloned())
+        } else {
+            fold_worst(verdict, composed)
+        }
     } else {
         verdict
     };
@@ -3719,9 +3731,10 @@ fn scan_named_user_home_floor(
     Some((
         Decision::Ask,
         format!(
-            "a target token is a named-user home shorthand (`~user`) that would match rule \
-             {:?} ({}) if `~user` expanded to an existing account's home directory; shguard \
-             cannot verify that account exists or is reachable",
+            "a target token is a tilde home form (`~user`, or `~` against an absolute target of \
+             a `target_flags` rule) that would match rule {:?} ({}) if it expanded to a matching \
+             directory; shguard cannot verify that account exists or is reachable, and does not \
+             consult $HOME",
             rule.id().as_str(),
             rule.reason().as_str(),
         ),
@@ -4269,11 +4282,7 @@ fn fold_floors(
     }
     if let Some(rule) = except_floors.target {
         decision = decision.max(Decision::Ask);
-        reasons.push(format!(
-            "command matches rule {:?}, but its required flag(s) and/or target could not be \
-             fully checked because an argument is an unresolved $VAR or command substitution",
-            rule.id().as_str()
-        ));
+        reasons.push(except_target_floor_reason(rule.id().as_str()));
     }
     if let Some(rule) = except_floors.flags {
         decision = decision.max(Decision::Ask);
@@ -4300,6 +4309,14 @@ fn fold_floors(
         Decision::Block => Verdict::block(Reason::new(reasons.join("; ")), argv, None)
             .with_deny_message(deny_message),
     }
+}
+
+/// The reason of the plain unresolved-argument except-target floor.
+fn except_target_floor_reason(rule_id: &str) -> String {
+    format!(
+        "command matches rule {rule_id:?}, but its required flag(s) and/or target could not be \
+         fully checked because an argument is an unresolved $VAR or command substitution"
+    )
 }
 
 /// Rule 1: the first word of a simple command contains a command/backquote
@@ -8950,6 +8967,15 @@ const OPAQUE_WRITER_PREFIXES: &[&str] = &["python", "perl", "ruby", "node", "php
 const CWD_ONLY_COMMANDS: &[&str] = &["cd", "pushd", "popd", "dirs", "set", "shopt"];
 
 impl CwdState {
+    /// The clone a backgrounded chain runs with: it is not ordered against
+    /// the rest of the line, so no `resolve_symlinks` exception applies in it.
+    fn clone_untrusted(&self) -> Self {
+        Self {
+            symlink_untrusted: true,
+            ..self.clone()
+        }
+    }
+
     /// Records what `argv` may have written, for later `resolve_symlinks`
     /// candidates on the line. `base` is the trusted absolute cwd active
     /// WHEN THIS COMMAND RAN ([`CwdContext::trusted_base`]); each path word
@@ -9701,13 +9727,36 @@ fn compound_command_may_change_cwd(compound: &CompoundCommand) -> bool {
 /// `anchor/of=X` is a similar, accepted no-match gap for v1 (this pass can
 /// only under-widen from it, never over-widen — additive-only, see
 /// `CwdContext`'s own docs).
-fn compose_argv_against_cwd(argv: &[NormalizedWord], anchor: &str) -> Vec<NormalizedWord> {
+///
+/// The one exception to the dash rule is the glued value of a flag some rule
+/// lists in `target_flags` (`--body-file=notes.md`, `-Fnotes.md`): only the
+/// value part is composed, so the flag spelling a rule matches on survives
+/// (issue #625).
+fn compose_argv_against_cwd(
+    argv: &[NormalizedWord],
+    anchor: &str,
+    rules: &Rules,
+) -> Vec<NormalizedWord> {
     argv.iter()
         .map(|word| match word.resolution() {
             Resolution::Resolved(s)
                 if !s.starts_with('-') && matches!(lexical_normalize(s), PathForm::Rel { .. }) =>
             {
                 NormalizedWord::resolved(format!("{anchor}/{s}"))
+            }
+            Resolution::Resolved(s) if s.starts_with('-') => {
+                match rules
+                    .target_flag_glued_value_offset(s)
+                    .map(|at| s.split_at(at))
+                {
+                    Some((flag, value))
+                        if matches!(lexical_normalize(value), PathForm::Rel { .. })
+                            && value != "-" =>
+                    {
+                        NormalizedWord::resolved(format!("{flag}{anchor}/{value}"))
+                    }
+                    _ => word.clone(),
+                }
             }
             _ => word.clone(),
         })
@@ -9747,7 +9796,7 @@ fn evaluate_composed_cwd(
     rules: &Rules,
     scope: SymlinkScope<'_>,
 ) -> Option<Verdict> {
-    let composed_argv = compose_argv_against_cwd(argv, &anchor.path);
+    let composed_argv = compose_argv_against_cwd(argv, &anchor.path, rules);
     let mut worst =
         evaluate_composed_argv_match_in(&composed_argv, argv, &anchor.describe(), rules, scope);
     if let Some(redirect_verdict) =
@@ -9900,14 +9949,27 @@ fn composed_subject(
     describe: &str,
     still_matches: impl Fn(&[NormalizedWord]) -> bool,
 ) -> String {
-    let token = (composed.len() == original.len() && original.len() <= MAX_SUBJECT_PROBE_ARGV)
+    match composed_subject_token(composed, original, still_matches) {
+        Some(token) => format!("relative target {token:?} resolved against {describe}"),
+        None => format!("{describe} composes a relative target"),
+    }
+}
+
+/// The token [`composed_subject`] names, if any. Index 0 (the command word)
+/// is never named: composing it cannot change what a rule's target sees.
+fn composed_subject_token(
+    composed: &[NormalizedWord],
+    original: &[NormalizedWord],
+    still_matches: impl Fn(&[NormalizedWord]) -> bool,
+) -> Option<String> {
+    (composed.len() == original.len() && original.len() <= MAX_SUBJECT_PROBE_ARGV)
         .then(|| {
             let mut probe = original.to_vec();
             composed
                 .iter()
                 .zip(original)
                 .enumerate()
-                .filter(|(_, (c, o))| c != o)
+                .filter(|(i, (c, o))| *i != 0 && c != o)
                 .take(MAX_SUBJECT_PROBES)
                 .find_map(|(i, (c, o))| {
                     probe[i] = c.clone();
@@ -9918,13 +9980,50 @@ fn composed_subject(
         })
         .flatten()
         .and_then(|word| match word.resolution() {
-            Resolution::Resolved(s) => Some(s),
+            Resolution::Resolved(s) => Some(s.clone()),
             Resolution::Unresolvable(_) => None,
-        });
-    match token {
-        Some(token) => format!("relative target {token:?} resolved against {describe}"),
-        None => format!("{describe} composes a relative target"),
+        })
+}
+
+/// Whether the composed pass's Ask should replace the plain Ask on a tie:
+/// only when the plain except-target floor and the composed one come from the
+/// same rule and the composed reason can name one relative token (issue
+/// #625). Every other tie keeps the plain verdict, so the plain reason and
+/// its hints survive.
+fn composed_names_the_plain_floor_token(
+    verdict: &Verdict,
+    composed: &Verdict,
+    argv: &[NormalizedWord],
+    command: &SimpleCommand,
+    anchor: &CwdAnchor,
+    rules: &Rules,
+) -> bool {
+    if verdict.decision() != Decision::Ask || composed.decision() != Decision::Ask {
+        return false;
     }
+    let Some(plain) = rules.match_command_except_target(argv) else {
+        return false;
+    };
+    // Any other reason in the plain verdict (a sed-script floor, a hint)
+    // means the plain verdict says more than the floor alone: keep it.
+    if verdict.reason().map(Reason::as_str)
+        != Some(except_target_floor_reason(plain.id().as_str()).as_str())
+    {
+        return false;
+    }
+    let composed_argv = compose_argv_against_cwd(argv, &anchor.path, rules);
+    if rules.match_command(&composed_argv).is_some()
+        || rules.match_ask(&composed_argv).is_some()
+        || evaluate_composed_cwd_redirects(argv, &command.redirections, anchor, rules).is_some()
+    {
+        return false;
+    }
+    composed_subject_token(&composed_argv, argv, |probe| {
+        rules
+            .match_command_except_target_composed(probe)
+            .is_some_and(|rule| rule.id() == plain.id())
+    })
+    .is_some()
 }
 
 /// The redirect-target half of [`evaluate_composed_cwd`], factored out so
@@ -10299,7 +10398,11 @@ fn tar_dashless_leading_cluster_directory(
 /// single-occurrence version of this function used for the whole
 /// invocation. `None` only when there is no occurrence at all, or not one
 /// of them ever resolves to a known anchor.
-fn resolve_tar_dash_c(rest: &[NormalizedWord], env: &Env) -> Option<Vec<NormalizedWord>> {
+fn resolve_tar_dash_c(
+    rest: &[NormalizedWord],
+    env: &Env,
+    rules: &Rules,
+) -> Option<Vec<NormalizedWord>> {
     struct Occurrence {
         raw: Option<String>,
         flag_start: usize,
@@ -10369,8 +10472,11 @@ fn resolve_tar_dash_c(rest: &[NormalizedWord], env: &Env) -> Option<Vec<Normaliz
         };
         if let CwdContext::Known(anchor) = &current {
             let range = &rest[occurrence.after..range_end];
-            composed[occurrence.after..range_end]
-                .clone_from_slice(&compose_argv_against_cwd(range, &anchor.path));
+            composed[occurrence.after..range_end].clone_from_slice(&compose_argv_against_cwd(
+                range,
+                &anchor.path,
+                rules,
+            ));
             any_composed = true;
         }
     }
@@ -10417,7 +10523,7 @@ fn evaluate_env_dash_c_override(
     let env_prefix = &argv[env_prefix_start..env_prefix_end];
     let anchor = chain_dash_c_targets(env_prefix, &["--chdir"], true, Some("env"), env)?;
     let mut composed_argv = argv[..env_prefix_end].to_vec();
-    composed_argv.extend(compose_argv_against_cwd(wrapped_tail, &anchor));
+    composed_argv.extend(compose_argv_against_cwd(wrapped_tail, &anchor, rules));
     evaluate_composed_argv_match(
         &composed_argv,
         argv,
@@ -10827,11 +10933,11 @@ fn evaluate_dash_c_override(argv: &[NormalizedWord], env: &Env, rules: &Rules) -
                 cluster_wrapper,
                 env,
             )?;
-            let composed_argv = compose_argv_against_cwd(argv, &anchor);
+            let composed_argv = compose_argv_against_cwd(argv, &anchor, rules);
             evaluate_composed_argv_match(&composed_argv, argv, "this invocation's own `-C`", rules)
         }
         "tar" => {
-            let composed_rest = resolve_tar_dash_c(rest, env)?;
+            let composed_rest = resolve_tar_dash_c(rest, env, rules)?;
             let prefix_len = argv.len() - rest.len();
             let mut composed_argv = argv[..prefix_len].to_vec();
             composed_argv.extend(composed_rest);
@@ -15802,6 +15908,24 @@ mod tests {
         }
 
         #[test]
+        fn parallel_pipeline_stages_and_background_lists_never_get_an_exception() {
+            for command in [
+                "upload-tool /scratch/ok.md | touch /scratch/ok.md",
+                "touch /scratch/ok.md | upload-tool /scratch/ok.md",
+                "upload-tool ok.md | cat",
+                "touch /scratch/ok.md & upload-tool /scratch/ok.md",
+                "upload-tool /scratch/ok.md & touch /scratch/ok.md",
+                "true && upload-tool /scratch/ok.md & touch /scratch/ok.md",
+            ] {
+                assert_eq!(decide(command), Decision::Block, "{command}");
+            }
+            assert_eq!(
+                decide("upload-tool /scratch/ok.md && true"),
+                Decision::Allow
+            );
+        }
+
+        #[test]
         fn non_path_candidates_get_no_unresolved_hint() {
             let reason = |command| {
                 verdict_in("deny", command, Some("/scratch"))
@@ -20229,7 +20353,7 @@ done"#,
             NormalizedWord::resolved("./script.sh"),
             NormalizedWord::resolved("arg"),
         ];
-        let composed = compose_argv_against_cwd(&argv, "/tmp");
+        let composed = compose_argv_against_cwd(&argv, "/tmp", &Rules::embedded().unwrap());
         assert_eq!(
             composed[0].resolution(),
             &Resolution::Resolved("/tmp/./script.sh".to_string()),

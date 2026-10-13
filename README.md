@@ -573,7 +573,8 @@ The exception also does not apply (the rule fires) when:
   `xargs`, ...) or takes `-C`/`--directory`/`--chdir`, every later
   `resolve_symlinks` exception on the line is refused;
 - the command runs inside a recursion (`bash -c`, `eval`, `$(...)`,
-  `find -exec`), a function body or a loop, none of which can be ordered
+  `find -exec`), a function body, a loop, a multi-stage pipeline or a
+  backgrounded (`&`) list, none of which can be ordered
   against the rest of the line, or carries a substitution in its own
   assignment prefix, redirect target or heredoc body: no exception applies;
 - the command runs through `sudo -D`/`--chdir` (or `-R`/`--chroot`), which
@@ -854,9 +855,14 @@ at least one listed flag is present, every listed-flag value matches an
 command's tail is unresolved (`$VAR`, `$(...)`). A listed flag with no
 value after it, or none of the listed flags at all, leaves the rule firing.
 Everything after a bare `--` is ignored. A candidate containing a `..`
-path segment is never excepted, rooted or not. The rule's `value_flags`
-stop the short-cluster scan, so a declared value-taking letter before a
-listed letter owns the rest of the cluster.
+path segment is never excepted, rooted or not. This differs on purpose from
+the ordinary except walk, which only checks `/`- or `~`-rooted candidates:
+with `target_flags`, a `url_host` except candidate whose URL path contains
+`/../` also asks (a false Ask, kept because it is fail-closed). The rule's
+`value_flags` scope the short-cluster scan: a declared value-taking letter
+before a listed letter owns the rest of the cluster. A letter (or long
+name) listed in both `target_flags` and `value_flags` is a load-time error,
+since one selects the flag's value and the other excludes it.
 
 `target_flags` only sees the flags it lists, so it is a trust decision:
 
@@ -899,8 +905,15 @@ flags does not match, and neither does a listed flag with no value. An
 unresolved flag value (`--body-file "$F"`) is not matched either; the
 unresolved-argument floor asks instead. With `except_targets` as well, the
 except candidates are the flag values that matched `targets`. A relative
-value glued to its flag (`--body-file=notes.md`, `-Fnotes.md`) is not
-resolved against the cwd, so it is only matched as written.
+value glued to its flag (`--body-file=notes.md`, `-Fnotes.md`, `-F=notes.md`)
+is resolved against the cwd like a separated one. The rule also asks, never
+allows, for a `~`-form flag value against an absolute target (`$HOME` is not
+consulted), and for an unresolved value attached to its flag
+(`--body-file=$F`, `-F$F`), for a `~user` form against a `~`-anchored target,
+and for a word that may hide such a flag: an unquoted unresolved word
+(it can split into several), or a bare quoted one (`"$X"`). A quoted word
+whose literal head rules out every listed flag (`--title="$T"`) stays
+allowed; a separated `--title "$T"` asks.
 
 `target_flags` needs a non-empty `targets` or `except_targets`, cannot be
 combined with `attached_value_flags` or with a `targets` entry that sets

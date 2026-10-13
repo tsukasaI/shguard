@@ -2945,14 +2945,19 @@ mod tests {
                 "{command}"
             );
         }
-        // Disclosed limit: a dash-leading token is never composed, so a
-        // relative value attached to its flag is not resolved against the cwd.
+        // A relative value glued to its flag composes against the cwd too.
         for command in [
             "gh issue create --title x --body-file=notes.md",
             "gh issue create --title x -Fnotes.md",
+            "gh issue create --title x -F=notes.md",
         ] {
-            assert_eq!(
+            assert_ne!(
                 decide(&rules, &allowlist, command, Some("/Users/me/dotfiles")),
+                Decision::Allow,
+                "{command}"
+            );
+            assert_eq!(
+                decide(&rules, &allowlist, command, Some("/private/tmp/claude-501")),
                 Decision::Allow,
                 "{command}"
             );

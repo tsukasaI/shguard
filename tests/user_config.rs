@@ -3024,3 +3024,206 @@ fn git_long_option_abbreviations_match_required_flags_rules() {
         assert_eq!(permission_decision(&output), "allow", "{command}");
     }
 }
+
+// ==== Issue #625: target_flags gaps on a `targets` rule ====
+
+const TARGET_FLAGS_RULE: &str = r#"
+    [[deny]]
+    id = "user-deny-gh-body-file"
+    reason = "no body files from home or /etc"
+    command = "gh"
+    required_flags = ["F|--body-file"]
+    targets = [{ normalized_prefix = "/Users/" }, { normalized_prefix = "/etc/" }]
+    target_flags = ["--body-file", "-F"]
+"#;
+
+fn target_flags_decision(command: &str, cwd: &str) -> Value {
+    let (_dir, config_path) = write_config(TARGET_FLAGS_RULE);
+    let mut value: Value = serde_json::from_str(&bash_command(command)).unwrap();
+    value["cwd"] = Value::String(cwd.to_string());
+    run_hook(
+        &value.to_string(),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    )
+}
+
+#[test]
+fn target_flags_tilde_form_value_is_not_allowed_against_an_absolute_target() {
+    for command in [
+        "gh issue create --body-file ~/.ssh/id",
+        "gh issue create --body-file=~/.ssh/id",
+        "gh issue create -F ~/.ssh/id",
+        "gh issue create -F~/.ssh/id",
+    ] {
+        let output = target_flags_decision(command, "/tmp");
+        assert_ne!(permission_decision(&output), "allow", "{command}");
+    }
+}
+
+#[test]
+fn target_flags_attached_unresolved_value_is_not_allowed() {
+    for command in [
+        "gh issue create --body-file=$F",
+        "gh issue create -F$F",
+        "gh issue create --body-file=\"$F\"",
+    ] {
+        let output = target_flags_decision(command, "/tmp");
+        assert_ne!(permission_decision(&output), "allow", "{command}");
+    }
+}
+
+#[test]
+fn target_flags_quoted_unresolved_word_with_a_separate_resolved_target_is_not_allowed() {
+    let output = target_flags_decision("gh issue create \"$X\" /Users/me/.ssh/id", "/tmp");
+    assert_ne!(permission_decision(&output), "allow");
+}
+
+#[test]
+fn target_flags_glued_relative_values_compose_against_the_payload_cwd() {
+    for command in [
+        "gh issue create -Fnotes.md",
+        "gh issue create --body-file=notes.md",
+        "gh issue create -F notes.md",
+    ] {
+        let output = target_flags_decision(command, "/Users/me/dotfiles");
+        assert_eq!(permission_decision(&output), "deny", "{command}");
+    }
+}
+
+#[test]
+fn target_flags_composed_reason_names_the_payload_not_a_subcommand() {
+    let output = target_flags_decision(
+        "X=--body-file; gh issue create $X notes.md",
+        "/Users/me/dotfiles",
+    );
+    let reason = permission_reason(&output);
+    assert_ne!(permission_decision(&output), "allow", "{reason}");
+    assert!(reason.contains("\"notes.md\""), "{reason}");
+    assert!(!reason.contains("\"issue\""), "{reason}");
+}
+
+fn embedded_decision(command: &str, cwd: Option<&str>) -> Value {
+    let mut value: Value = serde_json::from_str(&bash_command(command)).unwrap();
+    if let Some(cwd) = cwd {
+        value["cwd"] = Value::String(cwd.to_string());
+    }
+    let (_dir, config_path) = write_config("");
+    run_hook(
+        &value.to_string(),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    )
+}
+
+fn additional_context(output: &Value) -> &str {
+    output["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .expect("additionalContext should be a string")
+}
+
+#[test]
+fn target_flags_payload_cwd_keeps_the_plain_reason_and_hint_for_rm() {
+    let command = r#"rm -rf "$X""#;
+    let output = embedded_decision(command, Some("/Users/me/dotfiles"));
+    assert_eq!(permission_decision(&output), "ask");
+    assert_eq!(
+        permission_reason(&output),
+        "command matches rule \"rm-recursive-force-dangerous-target\", but its required \
+         flag(s) and/or target could not be fully checked because an argument is an \
+         unresolved $VAR or command substitution"
+    );
+    assert_eq!(
+        additional_context(&output),
+        "Resolve the target literally so the rule can check it."
+    );
+    assert_eq!(output, embedded_decision(command, None));
+}
+
+#[test]
+fn target_flags_payload_cwd_keeps_the_plain_reason_and_hint_for_sed() {
+    let command = r#"sed -i s/a/b/ "$F""#;
+    let output = embedded_decision(command, Some("/Users/me/dotfiles"));
+    assert_eq!(permission_decision(&output), "ask");
+    let reason = permission_reason(&output);
+    assert!(
+        reason.starts_with("`sed`'s script is not proven free of file-write"),
+        "{reason}"
+    );
+    assert!(!reason.contains("relative target"), "{reason}");
+    assert!(
+        additional_context(&output).starts_with("Keep the sed script to read-and-print"),
+        "{output}"
+    );
+    assert_eq!(output, embedded_decision(command, None));
+}
+
+#[test]
+fn target_flags_splittable_or_hidden_flag_words_are_not_allowed() {
+    for command in [
+        "gh issue create x$(printf ' --body-file /Users/me/.ssh/id')",
+        "gh issue create --title=$T",
+        "gh issue create --title x$T",
+        "gh issue create -w$X",
+        "gh issue create -w\"$(echo F/Users/me/.ssh/id)\"",
+        "gh issue create -w\"F$X\"",
+        "gh issue create --title=$T foo /Users/me/.ssh/id",
+    ] {
+        let output = target_flags_decision(command, "/tmp");
+        assert_ne!(permission_decision(&output), "allow", "{command}");
+    }
+}
+
+#[test]
+fn target_flags_quoted_attached_unlisted_flag_value_stays_allowed() {
+    // The head `--title=` rules out every listed flag, and a quoted word is
+    // one argv word. A separated `--title "$T"` still asks: a bare quoted
+    // word could itself be `--body-file=...`.
+    let output = target_flags_decision("gh issue create --title=\"$T\"", "/tmp");
+    assert_eq!(permission_decision(&output), "allow");
+    let output = target_flags_decision("gh issue create --title \"$T\"", "/tmp");
+    assert_eq!(permission_decision(&output), "ask");
+}
+
+#[test]
+fn target_flags_named_user_home_value_is_not_allowed_against_a_home_anchored_target() {
+    let config = r#"
+        [[deny]]
+        id = "user-deny-gh-body-file-ssh"
+        reason = "no body files from ~/.ssh"
+        command = "gh"
+        required_flags = ["F|--body-file"]
+        targets = [{ normalized_prefix = "~/.ssh/" }]
+        target_flags = ["--body-file", "-F"]
+    "#;
+    for command in [
+        "gh issue create -F ~me/.ssh/id",
+        "gh issue create --body-file=~me/.ssh/id",
+        "gh issue create --body-file /tmp/x.md",
+    ] {
+        let (_dir, config_path) = write_config(config);
+        let output = run_hook(
+            &bash_command(command),
+            &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+        );
+        let expected = if command.contains("/tmp/") {
+            "allow"
+        } else {
+            "ask"
+        };
+        assert_eq!(permission_decision(&output), expected, "{command}");
+    }
+}
+
+#[test]
+fn target_flags_benign_forms_still_allow() {
+    let cases = [
+        ("gh issue create --body-file /tmp/x.md", "/tmp"),
+        ("gh issue create --body-file=/tmp/x.md", "/tmp"),
+        ("gh issue create -Fnotes.md", "/tmp"),
+        ("gh pr list", "/Users/me/dotfiles"),
+        ("gh issue create --title hi", "/Users/me/dotfiles"),
+    ];
+    for (command, cwd) in cases {
+        let output = target_flags_decision(command, cwd);
+        assert_eq!(permission_decision(&output), "allow", "{command}");
+    }
+}
