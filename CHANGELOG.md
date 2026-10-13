@@ -4,6 +4,34 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- `target_flags` rules now fail closed on three shapes that were Allow
+  (#625): a `~`-form flag value against an absolute target
+  (`--body-file ~/.ssh/id` vs `/Users/`; `$HOME` is not consulted), an
+  unresolved value attached to its flag (`--body-file=$F`, `-F$F`), and a
+  word that may hide such a flag (`"$X"`). The cost is that any unresolved
+  argument on a `target_flags` rule asks, since a word's expansion may be
+  `--body-file=...`.
+- A relative value glued to a listed `target_flags` flag (`--body-file=notes.md`,
+  `-Fnotes.md`, `-F=notes.md`) is now composed against the cwd anchor like a
+  separated one, and an unresolved flag no longer lets a subcommand stand in
+  for the target: the composed reason names the payload token (`notes.md`).
+- `target_flags` rejects a flag listed in `value_flags` too at load time
+  (#611): one selects the flag's value, the other excludes it.
+- The `target_flags` `..` check applies whether or not the candidate is
+  rooted, unlike the ordinary except walk (rooted candidates only). A
+  `url_host` except candidate whose URL path contains `/../` therefore asks
+  (a deliberate false Ask, fail-closed).
+
+### Documented
+
+- `value_flags` scopes the `target_flags` short-cluster scan.
+- Disclosed `target_flags` limitations (#611): abbreviated long spellings
+  (`--body-f`) and unlisted aliases are invisible to it, and mode flags
+  (`--delete-last`, `--attach`) pass through, so pair the rule with a
+  separate `deny`.
+
 ## [0.9.0] - 2026-10-07
 
 ### Changed

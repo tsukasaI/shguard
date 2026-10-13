@@ -2593,10 +2593,14 @@ impl CommandRule {
             else {
                 return true;
             };
-            // Unlike the other walks, a `..` segment disqualifies a
-            // candidate whether or not it is rooted: a flag value like
-            // `scratch/../../etc/passwd` can textually start with an
-            // excepted prefix yet resolve outside it.
+            // Unlike the other walks ([`candidate_has_unresolved_ascent`],
+            // which looks only at `/`- or `~`-rooted candidates), a `..`
+            // segment disqualifies a candidate whether or not it is rooted:
+            // a flag value like `scratch/../../etc/passwd` can textually
+            // start with an excepted prefix yet resolve outside it. Not
+            // rooted-only: a `url_host` except candidate whose URL path
+            // contains `/../` therefore also asks here. That false Ask is
+            // deliberate and fail-closed.
             if values.iter().any(|v| v.split('/').any(|seg| seg == "..")) {
                 return true;
             }
@@ -6481,6 +6485,22 @@ fn convert_command_rule(mut dto: CommandRuleSpec) -> Result<CommandRule, RulesEr
                 &dto.id,
                 "target_flags and attached_value_flags cannot be combined: list the short flag \
                  in target_flags, which already recognises its glued value",
+            ));
+        }
+        // value_flags excludes a flag's value from candidacy while
+        // target_flags selects it as the only candidate: opposite effects on
+        // the same flag, so a flag in both is dead, contradictory config.
+        if let Some(flag) = target_flags.iter().find(|f| value_flags.contains(f)) {
+            let spelling = match flag {
+                ValueFlag::Short(c) => format!("-{c}"),
+                ValueFlag::Long(name) => format!("--{name}"),
+            };
+            return Err(RulesError::invalid(
+                &dto.id,
+                format!(
+                    "{spelling} is listed in both target_flags and value_flags: target_flags \
+                     selects the flag's value as a candidate, value_flags excludes it, pick one"
+                ),
             ));
         }
     }
@@ -12714,6 +12734,48 @@ mod tests {
         reject(
             &format!("target_flags = [\"-x\"]\nattached_value_flags = [\"x\"]\n{ex}"),
             "cannot be combined",
+        );
+    }
+
+    #[test]
+    fn a_letter_in_both_target_flags_and_value_flags_fails_to_load() {
+        let reject = |target_flags: &str, value_flags: &str, needle: &str| {
+            let toml = format!(
+                r#"
+                [[command]]
+                id = "x"
+                reason = "r"
+                decision = "ask"
+                command = "gh"
+                target_flags = {target_flags}
+                value_flags = {value_flags}
+                except_targets = [{{ prefix = "/p/" }}]
+            "#
+            );
+            let err = Rules::parse(&toml).unwrap_err().to_string();
+            assert!(err.contains(needle), "{err}");
+        };
+        reject(r#"["-F"]"#, r#"["F"]"#, "-F is listed in both");
+        reject(
+            r#"["--body-file"]"#,
+            r#"["body-file"]"#,
+            "--body-file is listed in both",
+        );
+        // Different letters stay legal.
+        assert!(
+            Rules::parse(
+                r#"
+                [[command]]
+                id = "x"
+                reason = "r"
+                decision = "ask"
+                command = "gh"
+                target_flags = ["-F"]
+                value_flags = ["R"]
+                except_targets = [{ prefix = "/p/" }]
+            "#
+            )
+            .is_ok()
         );
     }
 
