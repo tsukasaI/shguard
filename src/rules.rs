@@ -1250,7 +1250,7 @@ impl TargetMatcher {
                 // Both spellings: an allowlist target keeps its literal
                 // glob (`TargetGlobs::Literal`), which only the raw form
                 // can equal.
-                if equal(&form) || equal(&canonicalize_glob_form(form.clone())) {
+                if equal(&form) || equal(&glob_canonical_form(remainder)) {
                     return true;
                 }
                 // Fail-closed widenings (issue #65): shguard never knows
@@ -1419,7 +1419,7 @@ impl TargetMatcher {
         let Some(remainder) = strip_target(strip.as_deref(), token) else {
             return false;
         };
-        let comps = match lexical_normalize(remainder) {
+        let comps = match lexical_normalize(&strip_glob_qualifier(remainder)) {
             PathForm::Rel { ascent, comps } if ascent >= 1 => comps,
             PathForm::EscapesHome(comps)
             | PathForm::NamedUserHomeEscapes(comps)
@@ -1622,7 +1622,7 @@ impl TargetMatcher {
         let Some(remainder) = strip_target(strip.as_deref(), token) else {
             return false;
         };
-        let form = lexical_normalize(remainder);
+        let form = superset_glob_form(lexical_normalize(&strip_glob_qualifier(remainder)));
         let (pattern, target_comps) = match (&form, &target) {
             (PathForm::Abs(pattern), PathForm::Abs(target))
             | (PathForm::Home(pattern), PathForm::Home(target)) => (pattern, target),
@@ -1907,6 +1907,7 @@ fn canonical_glob_component(comp: &str) -> Option<&'static str> {
 }
 
 fn canonicalize_glob_comps(comps: &mut [String]) {
+    superset_glob_comps(comps);
     for comp in comps {
         if let Some(canon) = canonical_glob_component(comp) {
             canon.clone_into(comp);
@@ -1914,20 +1915,93 @@ fn canonicalize_glob_comps(comps: &mut [String]) {
     }
 }
 
-// Partial patterns like `.[a-z]*` also become `.*`: fail-closed for a deny
-// target, so only deny/ask/redirect targets get this (see `TargetGlobs`).
-fn canonicalize_glob_form(mut form: PathForm) -> PathForm {
-    match &mut form {
+// Interim reading of zsh glob qualifiers, extglob and zsh `^` negation
+// until #666 detects them as shell features: each spelling expands to a
+// subset of the glob it is read as here, so this can only over-match.
+// A qualifier is stripped only after a glob: `f(x)` stays a literal name.
+// A trailing group is handled here, not per component, because a
+// qualifier such as `(/)` contains the path separator.
+// An extglob opener plus its group becomes `*`, not the bare opener:
+// `s?(x)` matches `s`, which `s?` would not.
+fn strip_glob_qualifier(path: &str) -> Cow<'_, str> {
+    let Some(body) = path.strip_suffix(')') else {
+        return Cow::Borrowed(path);
+    };
+    let mut depth = 0usize;
+    for (open, byte) in body.bytes().enumerate().rev() {
+        match byte {
+            b')' => depth += 1,
+            b'(' if depth > 0 => depth -= 1,
+            b'(' => {
+                let head = &path[..open];
+                if let Some(stem) = head.strip_suffix(['?', '@', '!', '+', '*']) {
+                    return Cow::Owned(format!("{stem}*"));
+                }
+                let last = head.rsplit('/').next().unwrap_or(head);
+                return Cow::Borrowed(if last.contains(['*', '?', '[']) {
+                    head
+                } else {
+                    path
+                });
+            }
+            _ => {}
+        }
+    }
+    Cow::Borrowed(path)
+}
+
+fn superset_glob_component(comp: &str) -> Option<&'static str> {
+    let extglob = ["@(", "!(", "?(", "+(", "*("]
+        .iter()
+        .any(|opener| comp.contains(opener));
+    if comp.starts_with('^') {
+        Some("*")
+    } else if extglob {
+        Some(if comp.starts_with('.') { ".*" } else { "*" })
+    } else {
+        None
+    }
+}
+
+fn superset_glob_comps(comps: &mut [String]) {
+    for comp in comps {
+        if let Some(glob) = superset_glob_component(comp) {
+            glob.clone_into(comp);
+        }
+    }
+}
+
+fn form_comps_mut(form: &mut PathForm) -> Option<&mut Vec<String>> {
+    match form {
         PathForm::Abs(comps)
         | PathForm::Home(comps)
         | PathForm::EscapesHome(comps)
         | PathForm::NamedUserHomeSub(comps)
         | PathForm::NamedUserHomeEscapes(comps)
         | PathForm::DirStack(comps)
-        | PathForm::Rel { comps, .. } => canonicalize_glob_comps(comps),
-        PathForm::NamedUserHome | PathForm::DirStackEscapesEmpty | PathForm::Opaque => {}
+        | PathForm::Rel { comps, .. } => Some(comps),
+        PathForm::NamedUserHome | PathForm::DirStackEscapesEmpty | PathForm::Opaque => None,
+    }
+}
+
+fn superset_glob_form(mut form: PathForm) -> PathForm {
+    if let Some(comps) = form_comps_mut(&mut form) {
+        superset_glob_comps(comps);
     }
     form
+}
+
+// Partial patterns like `.[a-z]*` also become `.*`: fail-closed for a deny
+// target, so only deny/ask/redirect targets get this (see `TargetGlobs`).
+fn canonicalize_glob_form(mut form: PathForm) -> PathForm {
+    if let Some(comps) = form_comps_mut(&mut form) {
+        canonicalize_glob_comps(comps);
+    }
+    form
+}
+
+fn glob_canonical_form(path: &str) -> PathForm {
+    canonicalize_glob_form(lexical_normalize(&strip_glob_qualifier(path)))
 }
 
 /// Renders `comps` as if it were the tail of an absolute path (`/` +
@@ -2101,7 +2175,7 @@ impl TargetMatcher {
                 let Some(remainder) = strip_target(strip.as_deref(), token) else {
                     return false;
                 };
-                let mut comps = match lexical_normalize(remainder) {
+                let mut comps = match lexical_normalize(&strip_glob_qualifier(remainder)) {
                     PathForm::Rel { comps, .. } => comps,
                     _ => return false,
                 };
@@ -9879,6 +9953,34 @@ mod tests {
         }
         assert!(glob_component_matches(b"s?a1", b"sd", true, false));
         assert!(!glob_component_matches(b"x?", b"sd", true, false));
+    }
+
+    #[test]
+    fn qualifier_and_extglob_read_as_the_glob_they_narrow() {
+        for (path, read_as) in [
+            ("~/.config/*(/)", "~/.config/*"),
+            ("~/.config/s*(N)", "~/.config/s*"),
+            ("~/.config/s[a-z](/)", "~/.config/s[a-z]"),
+            ("~/.config/s?(/)", "~/.config/s*"),
+            ("~/.config/!(nvim)", "~/.config/*"),
+            ("~/.config/x*(a)(/)", "~/.config/x*(a)"),
+            ("notes(1).txt", "notes(1).txt"),
+            ("f(x)", "f(x)"),
+            ("(x)", "(x)"),
+            ("%(refname)", "%(refname)"),
+        ] {
+            assert_eq!(strip_glob_qualifier(path), read_as, "{path:?}");
+        }
+        for (comp, read_as) in [
+            ("^nvim", Some("*")),
+            ("@(shguard)", Some("*")),
+            (".c@(onfig)", Some(".*")),
+            ("x*(a)", Some("*")),
+            ("f(x)", None),
+            ("shguard", None),
+        ] {
+            assert_eq!(superset_glob_component(comp), read_as, "{comp:?}");
+        }
     }
 
     #[test]
