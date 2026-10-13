@@ -6,12 +6,15 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
-- `resolve_symlinks` (#583) closes its remaining gaps and fails closed in
-  more cases (#612): a regular file with more than one hard link, a
-  candidate that an earlier simple command on the same line names (it may
-  have been replaced by a symlink), a relative candidate under `sudo
-  -D`/`--chdir` (or `-R`/`--chroot`), and any relative candidate after `cd
-  -P`, `set -P` or `set -o physical` are no longer excepted. Candidates that
+- `resolve_symlinks` (#583) fails closed in more cases (#612): a regular
+  file with more than one hard link, a candidate (or a parent of it) that an
+  earlier simple command on the same line names after lexical normalization
+  (any earlier command with an unnormalizable word, an interpreter or an
+  extractor refuses the rest of the line), a candidate inside a recursion,
+  function body or loop, a command with a substitution in its assignment
+  prefix or redirects, a relative candidate under `sudo -D`/`--chdir` (or
+  `-R`/`--chroot`), and any candidate after `cd -P`, `set -P` or `set -o
+  physical` are no longer excepted. Candidates that
   do not resolve to an existing path also keep firing: the excepted
   directory itself with a trailing slash, globs, and non-path words such as
   the value of `--title=hello` or `-F body=@file`. Resolution calls the

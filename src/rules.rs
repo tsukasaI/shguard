@@ -2287,9 +2287,10 @@ pub(crate) struct SymlinkScope<'a> {
     /// The absolute directory a relative candidate is resolved against.
     /// `None` (or a non-absolute value): a relative candidate fails closed.
     base: Option<&'a str>,
-    /// Resolved words of the simple commands that ran earlier on the same
-    /// line. A candidate that also appears there may have been replaced by a
-    /// symlink before this command runs, so it is never excepted.
+    /// Absolute, lexically normalized paths the simple commands that ran
+    /// earlier on the line named. A candidate equal to, or under, one of
+    /// them may have been replaced by a symlink before this command runs, so
+    /// it is never excepted.
     earlier_words: &'a [String],
     /// Nothing can be trusted to resolve: every candidate fails closed.
     refuse_all: bool,
@@ -2319,14 +2320,47 @@ impl<'a> SymlinkScope<'a> {
             .filter(|base| base.is_absolute())
     }
 
-    fn written_earlier(&self, token: &str, full: &str) -> bool {
-        let base = self.base_dir();
-        self.earlier_words.iter().any(|word| {
-            word == token
-                || word == full
-                || base.is_some_and(|base| base.join(word).to_str() == Some(full))
+    /// Whether `path` is, or lies under, a path an earlier command named.
+    fn written_earlier(&self, path: &str) -> bool {
+        let Some(path) = normalize_abs_path(path) else {
+            return true;
+        };
+        self.earlier_words.iter().any(|earlier| {
+            earlier == "/"
+                || path == *earlier
+                || path
+                    .strip_prefix(earlier.as_str())
+                    .is_some_and(|rest| rest.starts_with('/'))
         })
     }
+}
+
+/// Whether a candidate token is plausibly a filesystem path rather than a
+/// glob, a `key=@file` word or other text the reason hint would mislead on.
+fn looks_like_path(token: &str) -> bool {
+    !token.is_empty()
+        && !token
+            .chars()
+            .any(|c| c.is_whitespace() || "=@*?[]{}$`\"'".contains(c))
+}
+
+/// Lexically normalizes an absolute path: collapses `//` and `.` and
+/// resolves `..` without touching the filesystem. `None` for a relative path.
+pub(crate) fn normalize_abs_path(path: &str) -> Option<String> {
+    if !path.starts_with('/') {
+        return None;
+    }
+    let mut components: Vec<&str> = Vec::new();
+    for component in path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop();
+            }
+            other => components.push(other),
+        }
+    }
+    Some(format!("/{}", components.join("/")))
 }
 
 /// How one `resolve_symlinks` candidate fared.
@@ -2365,12 +2399,15 @@ fn resolve_candidate(
     let Some(full) = full.to_str() else {
         return CandidateResolution::Refused;
     };
-    if scope.written_earlier(token, full) {
+    if scope.written_earlier(full) {
         return CandidateResolution::Refused;
     }
     match canonicalizer.canonicalize(full) {
         None => CandidateResolution::Unresolved(full.to_string()),
-        Some(resolved) if !resolved.is_dir && resolved.link_count > 1 => {
+        Some(resolved)
+            if (!resolved.is_dir && resolved.link_count > 1)
+                || scope.written_earlier(&resolved.path) =>
+        {
             CandidateResolution::Refused
         }
         Some(resolved) => CandidateResolution::Canonical(resolved.path),
@@ -2772,6 +2809,7 @@ impl CommandRule {
         let rest = resolved_strings(&rest_words);
         self.except_candidates(&rest)?
             .into_iter()
+            .filter(|token| looks_like_path(token))
             .find_map(
                 |token| match resolve_candidate(token, scope, canonicalizer) {
                     CandidateResolution::Unresolved(full)
@@ -7882,10 +7920,8 @@ impl Rules {
     /// form, so such an entry silently never applies. Entries that do not
     /// resolve (not created yet) produce no warning.
     #[must_use]
-    pub(crate) fn resolve_symlinks_spelling_warnings(
-        &self,
-        canonicalizer: PathCanonicalizer,
-    ) -> Vec<String> {
+    pub(crate) fn resolve_symlinks_spelling_warnings(&self) -> Vec<String> {
+        let canonicalizer = self.path_canonicalizer;
         let mut warnings = Vec::new();
         for rule in self
             .command_rules
@@ -14055,34 +14091,18 @@ mod tests {
             let rules = rules_excepting("/scratch");
             let words = argv(&["upload-tool", "/scratch/ok.md"]);
             let relative = argv(&["upload-tool", "ok.md"]);
-            let earlier =
-                |words: &[&str]| words.iter().map(|w| (*w).to_string()).collect::<Vec<_>>();
-            let hit = |words: &[NormalizedWord], base, earlier: &[String]| {
+            let hit = |words: &[NormalizedWord], base, earlier: &[&str]| {
+                let earlier: Vec<String> = earlier.iter().map(|w| (*w).to_string()).collect();
                 rules
-                    .match_command_in(words, SymlinkScope::new(base, earlier))
+                    .match_command_in(words, SymlinkScope::new(base, &earlier))
                     .is_some()
             };
-            assert!(!hit(
-                &words,
-                None,
-                &earlier(&["ln", "-sf", "/etc/passwd", "/other"])
-            ));
-            assert!(hit(
-                &words,
-                None,
-                &earlier(&["ln", "-sf", "/etc/passwd", "/scratch/ok.md"])
-            ));
-            assert!(hit(
-                &relative,
-                Some("/scratch"),
-                &earlier(&["ln", "-sf", "/etc/passwd", "ok.md"])
-            ));
-            assert!(hit(
-                &relative,
-                Some("/scratch"),
-                &earlier(&["/scratch/ok.md"])
-            ));
-            assert!(hit(&words, Some("/scratch"), &earlier(&["ok.md"])));
+            assert!(!hit(&words, None, &["/other"]));
+            assert!(hit(&words, None, &["/scratch/ok.md"]));
+            assert!(hit(&relative, Some("/scratch"), &["/scratch/ok.md"]));
+            assert!(hit(&words, None, &["/scratch"]));
+            assert!(hit(&words, None, &["/"]));
+            assert!(!hit(&words, None, &["/scratch/ok"]));
         }
 
         #[test]
@@ -14137,20 +14157,18 @@ mod tests {
 
         #[test]
         fn except_entry_that_canonicalizes_to_another_spelling_is_warned_about() {
-            let canonicalizer = PathCanonicalizer::new(fake_canonicalize);
-            let warnings =
-                rules_excepting("/tmp/scratch").resolve_symlinks_spelling_warnings(canonicalizer);
+            let warnings = rules_excepting("/tmp/scratch").resolve_symlinks_spelling_warnings();
             assert_eq!(warnings.len(), 1);
             assert!(warnings[0].contains("\"/tmp/scratch/\""));
             assert!(warnings[0].contains("\"/private/tmp/scratch\""));
             assert!(
                 rules_excepting("/scratch/sub")
-                    .resolve_symlinks_spelling_warnings(canonicalizer)
+                    .resolve_symlinks_spelling_warnings()
                     .is_empty()
             );
             assert!(
                 rules_excepting("/not/created/yet")
-                    .resolve_symlinks_spelling_warnings(canonicalizer)
+                    .resolve_symlinks_spelling_warnings()
                     .is_empty()
             );
         }

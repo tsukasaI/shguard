@@ -562,16 +562,27 @@ The exception also does not apply (the rule fires) when:
 
 - the candidate is a regular file with more than one hard link: a second name
   outside the excepted prefix would reach the same file;
-- an earlier simple command on the same line names the candidate (the same
-  token, or the same path once resolved against the cwd), since it could
-  have replaced the file with a symlink before this command runs. Only
-  commands evaluated in the same shell scope count; a script passed to
-  `bash -c`/`eval` or a `$(...)` is checked with a line of its own;
+- an earlier simple command on the same line names the candidate or one of
+  its parent directories, since it could have replaced the file with a
+  symlink before this command runs. Every word of the earlier command is
+  composed against the cwd it ran in and lexically normalized (`//`, `.` and
+  `..` collapse), so respellings do not help. If an earlier command has a
+  word that does not name a definite path (an unresolved `$VAR`, a glob, a
+  `~` word, a relative word with no trusted cwd), is an interpreter or
+  extractor (`bash -c`, `python3 -c`, `eval`, `tar`, `git`, `make`, `find`,
+  `xargs`, ...) or takes `-C`/`--directory`/`--chdir`, every later
+  `resolve_symlinks` exception on the line is refused;
+- the command runs inside a recursion (`bash -c`, `eval`, `$(...)`,
+  `find -exec`), a function body or a loop, none of which can be ordered
+  against the rest of the line, or carries a substitution in its own
+  assignment prefix, redirect target or heredoc body: no exception applies;
 - the command runs through `sudo -D`/`--chdir` (or `-R`/`--chroot`), which
   moves the working directory without shguard composing it, so relative
   candidates are not resolved and absolute ones are refused too;
-- the line ran `cd -P`, `set -P` or `set -o physical`, after which shguard's
-  lexical cwd can name a different directory than the real one;
+- the line ran `cd -P` (or `-P` in any cluster), `set -P` or `set -o
+  physical`, after which shguard's lexical cwd can name a different
+  directory than the real one; relative and absolute candidates are both
+  refused for the rest of the line;
 - the candidate does not resolve to an existing path: the excepted
   directory itself written with a trailing slash (`/var/scratch/`, which
   canonicalizes to `/var/scratch` and no longer starts with the prefix), a

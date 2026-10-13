@@ -867,7 +867,7 @@ fn evaluate_pipeline(
                 env.apply_assignments(simple, runs_in_parent_shell && stage_count == 1);
                 let mut alternates = Vec::new();
                 let verdict = {
-                    let earlier_words = cwd.earlier_words.borrow();
+                    let earlier = cwd.earlier.borrow();
                     evaluate_simple_command(
                         simple,
                         env,
@@ -875,7 +875,8 @@ fn evaluate_pipeline(
                         allowlist,
                         depth,
                         &cwd.current,
-                        &earlier_words,
+                        &earlier.paths,
+                        cwd.symlink_untrusted || earlier.unresolved,
                         &mut alternates,
                         parse,
                     )
@@ -885,7 +886,10 @@ fn evaluate_pipeline(
                     per_stage_alternates.push((index, alternates));
                 }
                 let argv = normalize::normalize_argv(simple);
-                cwd.record_words(&argv);
+                cwd.record_writes(
+                    &argv,
+                    cwd.current.trusted_base(wrapper_chain_changes_cwd(&argv)),
+                );
                 // Issue #103: only a single-stage pipeline's own `cd`/
                 // `pushd`/etc. is allowed to mutate `cwd` for whatever
                 // comes after this pipeline — see this function's own docs.
@@ -1159,6 +1163,7 @@ fn evaluate_compound_command(
             ..
         } => {
             let mut isolated = cwd.clone();
+            isolated.symlink_untrusted = true;
             let verdict =
                 evaluate_command_line(body, rules, allowlist, depth, &mut isolated, parse);
             if command_line_may_change_cwd(body) {
@@ -1181,6 +1186,7 @@ fn evaluate_compound_command(
             redirections,
         } => {
             let mut isolated = cwd.clone();
+            isolated.symlink_untrusted = true;
             let cond_verdict =
                 evaluate_command_line(condition, rules, allowlist, depth, &mut isolated, parse);
             let body_verdict =
@@ -1554,6 +1560,7 @@ fn evaluate_function_definition(
     parse: ParseFn,
 ) -> Verdict {
     let mut isolated = cwd.clone();
+    isolated.symlink_untrusted = true;
     let verdict =
         evaluate_compound_command(&func.body, rules, allowlist, depth, &mut isolated, parse);
     if compound_command_may_change_cwd(&func.body) {
@@ -2273,6 +2280,28 @@ fn first_non_vanishing_word_idx(command: &SimpleCommand) -> Option<usize> {
 /// the full rule set, so [`evaluate_simple_command`] can decide
 /// allow-downgrade eligibility — see the module docs on why a command with
 /// an argument-position substitution is never eligible.
+fn has_prefix_or_redirect_substitution(command: &SimpleCommand) -> bool {
+    let word_has_substitution = |word: &Word| {
+        !collect_substitutions(word).is_empty() || !collect_process_substitutions(word).is_empty()
+    };
+    command
+        .assignments
+        .iter()
+        .any(|assignment| match &assignment.value {
+            AssignmentValue::Scalar(word) => word_has_substitution(word),
+            AssignmentValue::Array(words) => words.iter().any(word_has_substitution),
+        })
+        || command
+            .redirections
+            .iter()
+            .any(|redirection| match redirection {
+                Redirection::File { target, .. } => word_has_substitution(target),
+                Redirection::HereDoc {
+                    expand_body, body, ..
+                } => *expand_body && (body.contains("$(") || body.contains('`')),
+            })
+}
+
 fn has_any_argument_position_substitution(command: &SimpleCommand) -> bool {
     let Some(first_word_idx) = first_non_vanishing_word_idx(command) else {
         return false;
@@ -2362,12 +2391,19 @@ fn evaluate_simple_command(
     depth: usize,
     cwd: &CwdContext,
     earlier_words: &[String],
+    refuse_symlinks: bool,
     alternates: &mut IfsAlternates,
     parse: ParseFn,
 ) -> Verdict {
     let argv = normalize::normalize_argv(command);
     let wrapper_moves_cwd = wrapper_chain_changes_cwd(&argv);
-    let symlink_scope = cwd.symlink_scope(earlier_words, wrapper_moves_cwd);
+    // A recursion (`depth > 0`: `bash -c`, `$(...)`, `eval`, `find -exec`)
+    // cannot see the earlier commands of the line it was spawned from, and a
+    // substitution in this command's own assignment prefix or redirects runs
+    // before it: neither can be shown not to have replaced a candidate.
+    let refuse_symlinks =
+        refuse_symlinks || depth > 0 || has_prefix_or_redirect_substitution(command);
+    let symlink_scope = cwd.symlink_scope(earlier_words, wrapper_moves_cwd, refuse_symlinks);
     let ask_match = rules.match_ask_in(&argv, symlink_scope);
     let ask_hint = ask_match
         .and_then(|rule| rules.unresolved_exception_hint(rule, &argv, symlink_scope))
@@ -2680,7 +2716,7 @@ fn evaluate_simple_command(
             &command.redirections,
             anchor,
             rules,
-            anchor.composed_symlink_scope(earlier_words, wrapper_moves_cwd),
+            anchor.composed_symlink_scope(earlier_words, wrapper_moves_cwd, refuse_symlinks),
         ) {
         fold_worst(verdict, composed)
     } else {
@@ -6582,6 +6618,7 @@ fn recurse_find_exec_payload(
         depth + 1,
         cwd,
         &[],
+        true,
         &mut discarded_alternates,
         parse,
     );
@@ -8679,16 +8716,23 @@ impl CwdContext {
         &'a self,
         earlier_words: &'a [String],
         wrapper_moves_cwd: bool,
+        refuse: bool,
     ) -> SymlinkScope<'a> {
-        let base = match self {
+        let scope = SymlinkScope::new(self.trusted_base(wrapper_moves_cwd), earlier_words);
+        if refuse { scope.refusing_all() } else { scope }
+    }
+
+    /// The absolute directory relative paths of a command run now resolve
+    /// against, when this module's lexical cwd can be trusted to name it.
+    fn trusted_base(&self, wrapper_moves_cwd: bool) -> Option<&str> {
+        match self {
             Self::Known(anchor)
                 if anchor.path.starts_with('/') && !anchor.physical && !wrapper_moves_cwd =>
             {
                 Some(anchor.path.as_str())
             }
             _ => None,
-        };
-        SymlinkScope::new(base, earlier_words)
+        }
     }
 }
 
@@ -8731,9 +8775,10 @@ impl CwdAnchor {
         &'a self,
         earlier_words: &'a [String],
         wrapper_moves_cwd: bool,
+        refuse: bool,
     ) -> SymlinkScope<'a> {
         let scope = SymlinkScope::new(Some(self.path.as_str()), earlier_words);
-        if self.physical || wrapper_moves_cwd {
+        if self.physical || wrapper_moves_cwd || refuse {
             scope.refusing_all()
         } else {
             scope
@@ -8791,36 +8836,124 @@ struct CwdState {
     /// `set -P`/`set -o physical` or a `cd -P` has run on this line, so
     /// every anchor a later `cd` produces is marked [`CwdAnchor::physical`].
     physical_mode: bool,
-    /// Resolved words of the simple commands already evaluated on this line
-    /// (issue #612), for `resolve_symlinks` rules. Shared by every clone of
-    /// this state, so a subshell, a backgrounded chain or a loop body that
-    /// runs earlier on the line still counts for a later command. A fresh
-    /// recursion (`bash -c`, `$(...)`, `eval`) starts its own list.
-    earlier_words: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    /// What the simple commands already evaluated on this line may have
+    /// written (issue #612), for `resolve_symlinks` rules. Shared by every
+    /// clone of this state, so a subshell, a backgrounded chain or a loop
+    /// body that runs earlier on the line still counts for a later command.
+    /// A fresh recursion (`bash -c`, `$(...)`, `eval`) starts its own list
+    /// and is refused outright instead (`resolve_symlinks` at `depth > 0`).
+    earlier: std::rc::Rc<std::cell::RefCell<EarlierWrites>>,
+    /// Set on the clone a function body or loop is evaluated with: the body
+    /// can run before or repeatedly around the commands that precede it
+    /// textually, so no `resolve_symlinks` exception applies inside it.
+    symlink_untrusted: bool,
 }
 
+/// The paths earlier simple commands on a line named, as absolute lexically
+/// normalized strings, plus whether any of them wrote somewhere that cannot
+/// be enumerated.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct EarlierWrites {
+    paths: Vec<String>,
+    /// An earlier command had a word that does not name a definite path
+    /// (unresolved, a glob, a relative word with no trusted cwd, `~`) or is
+    /// an interpreter or extractor that writes paths it never names: every
+    /// later `resolve_symlinks` exception on the line is refused.
+    unresolved: bool,
+}
+
+/// Commands whose arguments do not enumerate what they write: interpreters
+/// and script runners (the script string is code), and extractors or tools
+/// that write under a directory they are pointed at.
+const OPAQUE_WRITERS: &[&str] = &[
+    "bash", "sh", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "eval", "source", ".", "exec",
+    "xargs", "find", "parallel", "env", "tar", "bsdtar", "unzip", "zip", "cpio", "pax", "7z",
+    "7za", "7zr", "git", "make", "rsync", "patch", "gunzip", "bunzip2", "unxz", "awk", "gawk",
+    "sed", "ssh", "su", "flock", "watch", "script", "timeout", "nohup",
+];
+
+/// Interpreter families matched by prefix (`python3.12`, `perl5`).
+const OPAQUE_WRITER_PREFIXES: &[&str] = &["python", "perl", "ruby", "node", "php", "lua", "pwsh"];
+
+/// Commands that only move the shell's own cwd: they write nothing, and
+/// their directory argument must not shadow every candidate beneath it.
+const CWD_ONLY_COMMANDS: &[&str] = &["cd", "pushd", "popd", "dirs", "set", "shopt"];
+
 impl CwdState {
-    /// Records `argv`'s resolved words as having run earlier on the line:
-    /// each whole word, the whitespace-separated pieces of a word holding
-    /// several (a `bash -c 'ln -sf a b'` script), and the value of a
-    /// `--flag=value` word.
-    fn record_words(&self, argv: &[NormalizedWord]) {
-        let mut words = self.earlier_words.borrow_mut();
-        for word in argv {
+    /// Records what `argv` may have written, for later `resolve_symlinks`
+    /// candidates on the line. `base` is the trusted absolute cwd active
+    /// WHEN THIS COMMAND RAN ([`CwdContext::trusted_base`]); each path word
+    /// is composed against it and lexically normalized. Anything that cannot
+    /// be turned into a definite path sets [`EarlierWrites::unresolved`].
+    fn record_writes(&self, argv: &[NormalizedWord], base: Option<&str>) {
+        let mut earlier = self.earlier.borrow_mut();
+        if earlier.unresolved || argv.is_empty() {
+            return;
+        }
+        let Some((name, _)) = crate::rules::effective_command(argv) else {
+            earlier.unresolved = true;
+            return;
+        };
+        if CWD_ONLY_COMMANDS.contains(&name.as_ref()) {
+            return;
+        }
+        if OPAQUE_WRITERS.contains(&name.as_ref())
+            || OPAQUE_WRITER_PREFIXES
+                .iter()
+                .any(|prefix| name.starts_with(prefix))
+        {
+            earlier.unresolved = true;
+            return;
+        }
+        for word in &argv[1..] {
             let Resolution::Resolved(text) = word.resolution() else {
-                continue;
+                earlier.unresolved = true;
+                return;
             };
-            words.push(text.to_string());
-            if text.contains(char::is_whitespace) {
-                words.extend(
-                    text.split_whitespace()
-                        .map(|piece| piece.trim_matches(['\'', '"']).to_string()),
-                );
+            let mut candidates: Vec<&str> = Vec::new();
+            if text.starts_with('-') {
+                // A cwd-changing flag points the command somewhere its other
+                // words are relative to.
+                if text.starts_with("-C")
+                    || text.starts_with("--directory")
+                    || text.starts_with("--chdir")
+                {
+                    earlier.unresolved = true;
+                    return;
+                }
+                if let Some((_, value)) = text.split_once('=') {
+                    candidates.push(value);
+                }
+            } else if text.contains(char::is_whitespace) {
+                candidates.push(text);
+                candidates.extend(text.split_whitespace());
+            } else {
+                candidates.push(text);
             }
-            if text.starts_with('-')
-                && let Some((_, value)) = text.split_once('=')
-            {
-                words.push(value.to_string());
+            for candidate in candidates {
+                let candidate = candidate.trim_matches(['\'', '"']);
+                if candidate.is_empty() {
+                    continue;
+                }
+                if candidate.contains(['*', '?', '[']) || candidate.starts_with('~') {
+                    earlier.unresolved = true;
+                    return;
+                }
+                let composed = if candidate.starts_with('/') {
+                    candidate.to_string()
+                } else if let Some(base) = base {
+                    format!("{base}/{candidate}")
+                } else {
+                    earlier.unresolved = true;
+                    return;
+                };
+                match crate::rules::normalize_abs_path(&composed) {
+                    Some(path) => earlier.paths.push(path),
+                    None => {
+                        earlier.unresolved = true;
+                        return;
+                    }
+                }
             }
         }
     }
@@ -8850,7 +8983,8 @@ impl CwdState {
             current,
             stack: Vec::new(),
             physical_mode: false,
-            earlier_words: Default::default(),
+            earlier: Default::default(),
+            symlink_untrusted: false,
         }
     }
 
@@ -8878,7 +9012,8 @@ impl CwdState {
             current,
             stack: vec![CwdContext::Poisoned],
             physical_mode: false,
-            earlier_words: Default::default(),
+            earlier: Default::default(),
+            symlink_untrusted: false,
         }
     }
 
@@ -9118,11 +9253,11 @@ fn apply_cwd_effect(cwd: &mut CwdState, argv: &[NormalizedWord], env: &Env) {
     match name.as_ref() {
         "cd" => {
             cwd.current = resolve_cwd_outcome(&cwd.current, cd_directive(rest, env));
-            cwd.apply_physical_mode(words_include(rest, "-P"));
+            cwd.apply_physical_mode(cd_requests_physical(rest));
         }
         "pushd" => {
             apply_pushd(cwd, rest, env);
-            cwd.apply_physical_mode(words_include(rest, "-P"));
+            cwd.apply_physical_mode(cd_requests_physical(rest));
         }
         "popd" => {
             apply_popd(cwd, rest);
@@ -9148,10 +9283,22 @@ fn apply_cwd_effect(cwd: &mut CwdState, argv: &[NormalizedWord], env: &Env) {
     }
 }
 
-fn words_include(words: &[NormalizedWord], wanted: &str) -> bool {
-    words
-        .iter()
-        .any(|word| matches!(word.resolution(), Resolution::Resolved(token) if token == wanted))
+/// Whether a `cd`/`pushd` argument list asks for physical resolution: `-P`
+/// alone or in any short cluster (`-eP`, `-LP`), before `--`. An unresolvable
+/// word might be such a flag, so it counts.
+fn cd_requests_physical(rest: &[NormalizedWord]) -> bool {
+    for word in rest {
+        match word.resolution() {
+            Resolution::Unresolvable(_) => return true,
+            Resolution::Resolved(token) if token == "--" => return false,
+            Resolution::Resolved(token) => {
+                if token.starts_with('-') && !token.starts_with("--") && token.contains('P') {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Whether a `set` invocation's arguments switch on physical directory
@@ -15326,6 +15473,121 @@ mod tests {
             );
         }
 
+        #[test]
+        fn respelled_earlier_writes_to_the_candidate_fail_closed() {
+            for command in [
+                "touch /scratch//ok.md && upload-tool /scratch/ok.md",
+                "touch ./ok.md && upload-tool ok.md",
+                "touch sub/../ok.md && upload-tool ok.md",
+                "touch ok.m? && upload-tool ok.md",
+                "touch /scratch/ok.md && upload-tool /scratch/./ok.md",
+                "cd sub; touch ../ok.md; cd ..; upload-tool ok.md",
+                "touch ok.md; upload-tool /scratch/ok.md",
+                "mv /scratch /elsewhere; upload-tool /scratch/ok.md",
+                "ln -sf /etc/passwd /scratch//./ok.md; upload-tool ok.md",
+            ] {
+                assert_eq!(decide(command), Decision::Block, "{command}");
+            }
+        }
+
+        #[test]
+        fn earlier_commands_that_write_unnamed_paths_fail_closed() {
+            for command in [
+                "bash -c 'x'; upload-tool ok.md",
+                "sh -c x; upload-tool ok.md",
+                "python3 -c x; upload-tool ok.md",
+                "perl -e x; upload-tool ok.md",
+                "eval x; upload-tool ok.md",
+                "tar -xf a.tar; upload-tool ok.md",
+                "tar -C /scratch -xf a.tar; upload-tool ok.md",
+                "git -C /scratch checkout .; upload-tool ok.md",
+                "make -C /scratch; upload-tool ok.md",
+                "touch $UNSET; upload-tool ok.md",
+                "touch ~/x; upload-tool ok.md",
+            ] {
+                assert_eq!(decide(command), Decision::Block, "{command}");
+            }
+        }
+
+        #[test]
+        fn unrelated_earlier_commands_leave_the_exception_alone() {
+            for command in [
+                "echo hello; upload-tool ok.md",
+                "ls /work; upload-tool ok.md",
+                "cd /scratch/sub && upload-tool rel.md",
+            ] {
+                assert_eq!(decide(command), Decision::Allow, "{command}");
+            }
+        }
+
+        #[test]
+        fn substitution_in_the_guarded_commands_prefix_or_redirect_fails_closed() {
+            for command in [
+                "X=$(touch /scratch/ok.md) upload-tool /scratch/ok.md",
+                "upload-tool /scratch/ok.md 2>$(touch /scratch/ok.md; echo /dev/null)",
+                "upload-tool /scratch/ok.md <<EOF\n$(touch /scratch/ok.md)\nEOF",
+            ] {
+                assert_eq!(decide(command), Decision::Block, "{command}");
+            }
+        }
+
+        #[test]
+        fn recursions_never_resolve_through_a_parents_earlier_commands() {
+            for command in [
+                "touch /scratch/ok.md; bash -c 'upload-tool /scratch/ok.md'",
+                "touch /scratch/ok.md; sh -c 'upload-tool /scratch/ok.md'",
+                "touch /scratch/ok.md; eval 'upload-tool /scratch/ok.md'",
+                "touch /scratch/ok.md; echo $(upload-tool /scratch/ok.md)",
+                "touch /scratch/ok.md; find . -exec upload-tool /scratch/ok.md \\;",
+                "bash -c 'upload-tool /scratch/ok.md'",
+            ] {
+                assert_eq!(decide(command), Decision::Block, "{command}");
+            }
+        }
+
+        #[test]
+        fn function_bodies_and_loops_never_get_an_exception() {
+            for command in [
+                "f() { upload-tool /scratch/ok.md; }; touch /scratch/ok.md; f",
+                "f() { upload-tool /scratch/ok.md; }",
+                "for i in 1 2; do upload-tool /scratch/ok.md; touch /scratch/ok.md; done",
+                "while true; do upload-tool /scratch/ok.md; touch /scratch/ok.md; done",
+            ] {
+                assert_eq!(decide(command), Decision::Block, "{command}");
+            }
+        }
+
+        #[test]
+        fn physical_flag_in_any_cd_cluster_drops_the_base() {
+            for command in [
+                "cd -LP /scratch/sub && upload-tool rel.md",
+                "cd -eP /scratch/sub && upload-tool rel.md",
+                "pushd -P /scratch/sub && upload-tool rel.md",
+            ] {
+                assert_ne!(decide(command), Decision::Allow, "{command}");
+            }
+        }
+
+        #[test]
+        fn non_path_candidates_get_no_unresolved_hint() {
+            let reason = |command| {
+                verdict_in("deny", command, Some("/scratch"))
+                    .reason()
+                    .map(|r| r.as_str().to_string())
+                    .unwrap_or_default()
+            };
+            for command in [
+                "upload-tool /scratch/*.md",
+                "upload-tool body=@/scratch/x",
+                "upload-tool '/scratch/a b'",
+            ] {
+                let reason = reason(command);
+                assert!(
+                    !reason.contains("could not be resolved"),
+                    "{command}: {reason}"
+                );
+            }
+        }
         #[test]
         fn unresolved_candidate_under_an_excepted_prefix_names_the_path_in_the_reason() {
             let hint = "could not be resolved (does it exist?)";

@@ -246,6 +246,13 @@ pub(crate) fn parse_command(command: &str) -> Result<ast::CommandLine, gate::Par
     })
 }
 
+/// The symlink-resolution adapter handed to `rules` (composition root): the
+/// one place the port `rules` defines meets its filesystem implementation.
+/// [`config::Policy::load`] wires it into the rules it loads.
+pub(crate) fn fs_path_canonicalizer() -> rules::PathCanonicalizer {
+    rules::PathCanonicalizer::new(fs_canonicalizer::canonicalize)
+}
+
 /// Config-aware sibling of [`analyze`]: same pipeline, the same
 /// error/fail-closed posture, and the same bounded-evaluation guarantee
 /// (see [`analyze`]'s "Bounded evaluation" section), but `policy` (loaded
@@ -341,14 +348,9 @@ pub fn analyze_with_policy(
     // watchdog thread can't borrow `context` itself.
     let context_owned = context.clone();
     let verdict = watchdog::bounded(move || {
-        // Composition root: the one place the symlink-resolution port
-        // `rules` defines meets its filesystem adapter.
-        let rules = policy_owned.rules.as_ref().clone().with_path_canonicalizer(
-            rules::PathCanonicalizer::new(fs_canonicalizer::canonicalize),
-        );
         let verdict = gate::analyze_with_policy_in_cwd(
             &command_owned,
-            &rules,
+            &policy_owned.rules,
             &policy_owned.allowlist,
             context_owned.cwd(),
             parse_command,
