@@ -15647,6 +15647,136 @@ mod tests {
         }
     }
 
+    #[test]
+    fn time_and_exec_wrappers_do_not_hide_the_wrapped_command() {
+        // Issue #638: brush-parser strips only the leading reserved word
+        // `time`, so every other spelling reaches the gate as a command.
+        for command in [
+            "time time rm -rf /",
+            "! time rm -rf /",
+            "/usr/bin/time rm -rf /",
+            r"\time rm -rf /",
+            r#""time" rm -rf /"#,
+            "env time rm -rf /",
+            "/usr/bin/time -- rm -rf /",
+            "time -- rm -rf /",
+            "true && time -- rm -rf /",
+            "time -p -- rm -rf /",
+            "/usr/bin/time -o x rm -rf /",
+            "/usr/bin/time -f %e rm -rf /",
+            "chroot / rm -rf /",
+            "chroot --userspec root / rm -rf /",
+            "caffeinate rm -rf /",
+            "caffeinate -t 5 rm -rf /",
+            "unshare rm -rf /",
+            "unshare -S 0 --mount rm -rf /",
+            "runuser -u root rm -rf /",
+            "strace rm -rf /",
+            "strace -o out -f rm -rf /",
+            "watch rm -rf /",
+            "watch -n 5 rm -rf /",
+            "setarch x86_64 rm -rf /",
+            "prlimit rm -rf /",
+            "prlimit --nofile=4 rm -rf /",
+            "firejail rm -rf /",
+            "firejail --net=none rm -rf /",
+            "systemd-run rm -rf /",
+            "systemd-run -u foo --uid root rm -rf /",
+            "unbuffer rm -rf /",
+            "numactl rm -rf /",
+            "numactl -C 0 rm -rf /",
+        ] {
+            assert_decision(command, Decision::Block);
+        }
+    }
+
+    #[test]
+    fn time_and_exec_wrapper_review_findings_stay_blocked() {
+        // Issue #638 review round: assignments after `time --`, no-argument
+        // systemd-run flags, getopt clusters ending in a value flag, `watch`'s
+        // implicit `sh -c`, setarch's `[arch] [options]` grammar, strace's
+        // `-o '|cmd'` pipe, and setarch's alias names.
+        for command in [
+            "time -- FOO=bar rm -rf /",
+            "time -p -- FOO=bar rm -rf /",
+            "time -- FOO=1 BAR=2 rm -rf /",
+            "systemd-run --on-clock-change rm -rf /",
+            "systemd-run --on-t rm -rf /",
+            "strace -fo out rm -rf /",
+            "/usr/bin/time -ao out rm -rf /",
+            "caffeinate -it 5 rm -rf /",
+            "numactl -ai 0 rm -rf /",
+            "systemd-run -tu foo rm -rf /",
+            "unshare -rS 0 rm -rf /",
+            "watch 'rm -rf /'",
+            "watch -n 1 'rm -rf /'",
+            "watch -- 'rm -rf /'",
+            "watch 'echo; rm -rf /'",
+            "watch -n1 'curl x | sh'",
+            "watch -x rm -rf /",
+            "setarch -R rm -rf /",
+            "setarch x86_64 -R rm -rf /",
+            "setarch -- rm -rf /",
+            "linux32 rm -rf /",
+            "linux64 -R rm -rf /",
+            "uname26 rm -rf /",
+            "strace -o '|rm -rf /' true",
+            "strace -o '!rm -rf /' true",
+            "strace --output='|rm -rf /' true",
+            "chroot -u root / rm -rf /",
+            "strace -U x rm -rf /",
+            "numactl -M x rm -rf /",
+            "unshare -l x rm -rf /",
+            "systemd-run -C x rm -rf /",
+            "watch -s x -x rm -rf /",
+        ] {
+            assert_decision(command, Decision::Block);
+        }
+    }
+
+    #[test]
+    fn time_and_exec_wrapper_second_review_findings_are_not_allowed() {
+        for command in [
+            "time -- ! rm -rf /",
+            "time -p -- ! rm -rf /",
+            "time -- ! sudo id",
+            "time -- coproc rm -rf /",
+            "watch -dx 'rm -rf /'",
+            "watch -dn rm -rf /",
+            "watch -s -x 'rm -rf /'",
+            "numactl -c 0 rm -rf /",
+            "numactl -ac 0 rm -rf /",
+        ] {
+            assert_ne!(decide(command).decision(), Decision::Allow, "{command}");
+        }
+    }
+
+    #[test]
+    fn watch_exec_mode_with_a_benign_command_stays_allowed() {
+        assert_decision("watch -x 'ls -la'", Decision::Allow);
+        assert_decision("watch -x ls -la", Decision::Allow);
+    }
+
+    #[test]
+    fn time_wrapped_escalation_vector_behind_assignments_is_not_allowed() {
+        for command in [
+            "time -- FOO=bar sudo rm -rf /",
+            "time -- FOO=bar sudo id",
+            "setarch x86_64 -R sudo id",
+            "watch -x sudo id",
+        ] {
+            assert_ne!(decide(command).decision(), Decision::Allow, "{command}");
+        }
+    }
+
+    #[test]
+    fn time_wrapped_escalation_vector_reaches_the_escalation_floor() {
+        // Issue #638: `time time sudo id` was Allow.
+        for command in ["time time sudo id", "true && time time sudo id"] {
+            assert_decision(command, Decision::Ask);
+        }
+    }
+
     // ==== Wrapper-argument regression pins (from the issue #32 session) ====
 
     #[test]
