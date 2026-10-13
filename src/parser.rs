@@ -40,8 +40,9 @@
 //!   contains `$`/a backtick, a modifier operand containing a process
 //!   substitution, a double quote inside a double-quoted parameter-expansion
 //!   operand, and the zsh expansion-flag forms (`${(e)x}`, `${=x}`, `${~x}`,
-//!   `${^x}`, `${+x}`, `${|x}`) in every shell, since brush would otherwise
-//!   read them as literal text
+//!   `${^x}`, `${+x}`, `${|x}`, `$=x`, `$~x`, `$^x`, `$+x`) and the
+//!   `${ cmd; }` funsub in every shell, since brush would otherwise read them
+//!   as literal text
 //! - brace-expansion ranges (`{1..5}`, `{a..z}`) — shguard's
 //!   `WordPiece::BraceAlternation` holds literal alternatives, not a range to
 //!   enumerate
@@ -1445,15 +1446,15 @@ fn convert_word(word: &bast::Word) -> Result<Word, ParseError> {
     Ok(Word(pieces))
 }
 
-/// True if `text` has no backslash or `'` and every `{` in it directly
-/// follows a `$`, so it holds no brace expansion for the pre-pass to find.
+/// True if every `{` in `text` follows an odd run of `$` (`${`, not the PID
+/// parameter `$$` before a real brace group). Backslash and `'` are excluded
+/// because `\${a,b}` is a real bash brace expansion.
 fn only_parameter_expansion_braces(text: &str) -> bool {
     let bytes = text.as_bytes();
     !text.contains(['\\', '\''])
-        && bytes
-            .iter()
-            .enumerate()
-            .all(|(i, &b)| b != b'{' || (i > 0 && bytes[i - 1] == b'$'))
+        && bytes.iter().enumerate().all(|(i, &b)| {
+            b != b'{' || bytes[..i].iter().rev().take_while(|&&c| c == b'$').count() % 2 == 1
+        })
 }
 
 fn is_brace_expr(segment: &bword::BraceExpressionOrText) -> bool {
@@ -1470,11 +1471,8 @@ fn is_brace_expr(segment: &bword::BraceExpressionOrText) -> bool {
 /// of `"`, `'`, `` ` ``, `$`, `\`. Pre-emption only exists to avoid the
 /// panic itself (the *decision* is `Ask` either way — pre-empted via
 /// `ParseError::unsupported` or contained via `catch_parser_panic`'s own
-/// `ParseError::Syntax` — so under-flagging here costs nothing). The one
-/// exception is a word whose only braces open `${...}`: the contained panic
-/// there would hide a later `Block` verdict on the same line, so
-/// [`only_parameter_expansion_braces`] diverts such words around the
-/// pre-pass in `convert_word` (issue #640). Every
+/// `ParseError::Syntax` — so under-flagging here costs nothing), except for
+/// words [`only_parameter_expansion_braces`] diverts in `convert_word`. Every
 /// one of these bytes can introduce quoting or a substitution, whose
 /// content brush's grammar may keep live (inside `"..."`) or treat as an
 /// opaque, independently-quoted sub-fragment (`$(...)`, `` `...` ``), and
@@ -1728,41 +1726,59 @@ fn convert_word_text(text: &str) -> Result<Vec<WordPiece>, ParseError> {
     }
     let pieces = catch_parser_panic(|| bword::parse(rest, &parser_options()))?
         .map_err(|err| ParseError::syntax(format!("word parse of {rest:?}: {err}")))?;
-    reject_zsh_expansion_flags(pieces.iter().map(|p| &p.piece))?;
+    reject_unresolved_dollar_forms(pieces.iter().map(|p| &p.piece))?;
     for piece in pieces {
         converted.push(convert_word_piece(piece.piece, false)?);
     }
     Ok(converted)
 }
 
-/// Rejects `${(flags)x}`, `${=x}`, `${~x}`, `${^x}`, `${+x}` and `${|...}` in
-/// every shell, not only zsh. brush fails the parameter-expansion rule on
-/// them and falls back to literal text (`$` then `{...}`), so a word like
-/// `${(e)x}` would otherwise read as a resolved literal while zsh evaluates
-/// it. A `$` that is quoted or escaped arrives as another piece type, so only
-/// an unquoted `$` followed by `{` and a flag character is rejected.
-fn reject_zsh_expansion_flags<'a>(
+/// Rejects, in every shell, the `$` forms brush does not parse as an
+/// expansion but zsh/mksh/bash 5.3 evaluate: a literal `${` (flags
+/// `${(e)x}`/`${=x}`/`${~x}`/`${^x}`, the funsub `${ cmd; }`) and the
+/// unbraced `$=x`/`$~x`/`$^x`/`$+x`. brush leaves `${` in a `Text` piece only
+/// when its parameter-expansion rule failed, and `$` is a lone literal only
+/// when no expansion follows it, so a `Text` run containing either would
+/// otherwise read as a resolved literal. Consecutive `Text` pieces are joined
+/// first so the split point cannot hide the pair; a quoted or escaped `$`
+/// arrives as another piece type and is not affected.
+fn reject_unresolved_dollar_forms<'a>(
     pieces: impl Iterator<Item = &'a bword::WordPiece>,
 ) -> Result<(), ParseError> {
-    let mut previous_text_ends_with_dollar = false;
+    let mut run = String::new();
     for piece in pieces {
-        let bword::WordPiece::Text(text) = piece else {
-            previous_text_ends_with_dollar = false;
-            continue;
-        };
-        let after_dollar_brace = text.split("${").skip(1);
-        let continued = previous_text_ends_with_dollar
-            .then(|| text.strip_prefix('{'))
-            .flatten();
-        if after_dollar_brace
-            .chain(continued)
-            .any(|rest| rest.starts_with(['(', '=', '~', '^', '+', '|']))
-        {
-            return Err(ParseError::unsupported(
-                "zsh parameter-expansion flag (${(flags)x} / ${=x} / ${~x} / ${^x})",
-            ));
+        if let bword::WordPiece::Text(text) = piece {
+            run.push_str(text);
+        } else {
+            reject_unresolved_dollar_run(&run)?;
+            run.clear();
         }
-        previous_text_ends_with_dollar = text.ends_with('$');
+    }
+    reject_unresolved_dollar_run(&run)
+}
+
+/// `rest` follows a `$`. A numeric `{N}` / `{-N}` (an overflowing positional
+/// parameter brush cannot parse) is only an unset parameter, not an
+/// evaluated form, so it stays literal.
+fn is_unresolved_brace(rest: &str) -> bool {
+    let Some(body) = rest.strip_prefix('{') else {
+        return false;
+    };
+    let digits = body.strip_prefix('-').unwrap_or(body);
+    let after_digits = digits.trim_start_matches(|c: char| c.is_ascii_digit());
+    let numeric = after_digits.len() < digits.len() && after_digits.starts_with('}');
+    !numeric
+}
+
+fn reject_unresolved_dollar_run(run: &str) -> Result<(), ParseError> {
+    let unresolved = run
+        .split('$')
+        .skip(1)
+        .any(|rest| rest.starts_with(['=', '~', '^', '+']) || is_unresolved_brace(rest));
+    if unresolved {
+        return Err(ParseError::unsupported(
+            "unresolved `$` expansion form (zsh flags/short forms such as ${(e)x}, ${=x}, $=x, $~x, or a ${ command; } substitution)",
+        ));
     }
     Ok(())
 }
@@ -1777,7 +1793,7 @@ fn convert_word_piece(
         bword::WordPiece::AnsiCQuotedText(text) => Ok(WordPiece::AnsiCQuoted(text)),
         bword::WordPiece::DoubleQuotedSequence(inner)
         | bword::WordPiece::GettextDoubleQuotedSequence(inner) => {
-            reject_zsh_expansion_flags(inner.iter().map(|p| &p.piece))?;
+            reject_unresolved_dollar_forms(inner.iter().map(|p| &p.piece))?;
             let pieces = inner
                 .into_iter()
                 .map(|p| convert_word_piece(p.piece, true))
@@ -2528,13 +2544,51 @@ mod tests {
             "echo ${~x}",
             "echo ${^x}",
             "echo \"${(e)x}\"",
+            "echo ${ rm -rf ~; }",
+            "echo ${\trm -rf ~; }",
+            "echo ${\nrm -rf ~; }",
+            "echo \"${ rm -rf ~; }\"",
+            "x=rm; $=x -rf ~",
+            "echo $~x",
+            "echo $^x",
+            "echo $+x",
+            "echo \"$=x\"",
         ] {
             assert!(
                 matches!(parse(command), Err(ParseError::Unsupported { .. })),
                 "{command}"
             );
         }
-        assert!(parse("echo '${(e)x}'").is_ok());
+        for command in ["echo '${(e)x}'", "a=b", "echo $", "echo 'x$=y'"] {
+            assert!(parse(command).is_ok(), "{command}");
+        }
+    }
+
+    // issue #640: the `\` exclusion keeps `\${a,b}` on the brace pre-pass.
+    #[test]
+    fn escaped_dollar_before_a_brace_group_is_still_a_brace_alternation() {
+        let cmd = parse_ok("echo \\${a,b}");
+        let word = &simple(&cmd.first.first).words[1];
+        assert!(
+            word.0
+                .iter()
+                .any(|p| matches!(p, WordPiece::BraceAlternation(_))),
+            "{word:?}"
+        );
+    }
+
+    // issue #640: `$$` is the PID parameter, so the `{a,b}` after it is a
+    // brace group and must still reach the brace pre-pass.
+    #[test]
+    fn pid_parameter_before_a_brace_group_is_still_a_brace_alternation() {
+        let cmd = parse_ok("echo $${a,b}");
+        let word = &simple(&cmd.first.first).words[1];
+        assert!(
+            word.0
+                .iter()
+                .any(|p| matches!(p, WordPiece::BraceAlternation(_))),
+            "{word:?}"
+        );
     }
 
     // issue #640: a word whose only braces open `${...}` skips the brace
@@ -2544,7 +2598,10 @@ mod tests {
     fn parser_overflowing_numeric_parameter_expansion_does_not_panic() {
         assert!(parse("echo ${99999999999999999999}").is_ok());
         assert!(parse("echo ${-9223372036854775809}").is_ok());
-        assert!(parse("echo ${99999999999999999999..1}").is_ok());
+        assert!(matches!(
+            parse("echo ${99999999999999999999..1}"),
+            Err(ParseError::Unsupported { .. })
+        ));
     }
 
     // crash-fuzzer finding (issue #405): brush-parser 0.4.0 panics on a

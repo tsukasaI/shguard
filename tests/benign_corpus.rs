@@ -119,6 +119,9 @@ fn benign_corpus_no_false_positives() {
         "echo \"${x:-plain}\"",
         "echo '${(e)x}'",
         "echo '${=x}'",
+        "a=b",
+        "echo $",
+        "echo 'x$=y'",
     ];
 
     for command in commands {

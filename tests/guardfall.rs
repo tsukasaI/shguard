@@ -2050,6 +2050,9 @@ fn guardfall_parameter_expansion_operand_cases() {
         ("x=rm; ${=x} -rf ~", Decision::Ask),
         ("echo ${~x}", Decision::Ask),
         ("echo ${^x}", Decision::Ask),
+        ("echo ${ rm -rf ~; }", Decision::Ask),
+        ("echo \"${ rm -rf ~; }\"", Decision::Ask),
+        ("x=rm; $=x -rf ~", Decision::Ask),
     ];
 
     for (command, expected) in cases {

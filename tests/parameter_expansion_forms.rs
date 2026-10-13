@@ -156,6 +156,14 @@ fn zsh_expansion_flag_forms_are_never_allowed() {
         ("echo ${x:-${(e)y}}", Decision::Ask),
         ("echo \"${x:-${(e)y}}\"", Decision::Ask),
         ("echo ${x}${=y}", Decision::Ask),
+        ("echo ${ rm -rf ~; }", Decision::Ask),
+        ("echo ${\trm -rf ~; }", Decision::Ask),
+        ("echo ${\nrm -rf ~; }", Decision::Ask),
+        ("echo \"${ rm -rf ~; }\"", Decision::Ask),
+        ("x=rm; $=x -rf ~", Decision::Ask),
+        ("echo $~x", Decision::Ask),
+        ("echo $^x", Decision::Ask),
+        ("echo $+x", Decision::Ask),
     ]);
 }
 
@@ -165,6 +173,9 @@ fn quoted_or_escaped_zsh_flag_text_is_not_rejected() {
         ("echo '${(e)x}'", Decision::Allow),
         ("echo '${=x}'", Decision::Allow),
         ("echo $'${~x}'", Decision::Allow),
+        ("a=b", Decision::Allow),
+        ("echo $", Decision::Allow),
+        ("echo 'x$=y'", Decision::Allow),
     ]);
 }
 
