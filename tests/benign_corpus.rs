@@ -102,6 +102,26 @@ fn benign_corpus_no_false_positives() {
         "sed 's/[^/]*$//' file",
         "sed -n -e '$p' file",
         "cat file | sed 's/a/b/' | sort",
+        // Non-assigning parameter-expansion forms (issues #578/#580) and
+        // quoted zsh-flag text (issue #606).
+        "echo \"exit=${PIPESTATUS[0]}\"",
+        "echo ${PIPESTATUS[@]}",
+        "for f in *.ts; do echo \"${f%.ts}\"; done",
+        "cd \"${HOME:-/tmp}\"",
+        "echo ${TMPDIR:-/tmp}",
+        "echo ${x%.ts}",
+        "echo ${x##*/}",
+        "echo ${x:0:3}",
+        "echo ${#x}",
+        "echo ${x/a/b}",
+        "echo ${x^^}",
+        "echo ${x:-'$(rm -rf ~)'}",
+        "echo \"${x:-plain}\"",
+        "echo '${(e)x}'",
+        "echo '${=x}'",
+        "a=b",
+        "echo $",
+        "echo 'x$=y'",
     ];
 
     for command in commands {

@@ -658,11 +658,41 @@ fn evaluate_command_line(
     parse: ParseFn,
 ) -> Verdict {
     let mut env = Env::new();
+    evaluate_command_line_in(
+        command_line,
+        &mut env,
+        true,
+        rules,
+        allowlist,
+        depth,
+        cwd,
+        parse,
+    )
+}
+
+/// [`evaluate_command_line`] over a caller-supplied [`Env`] (issue #607: a
+/// `BraceGroup` body shares its enclosing line's `Env`, the way `cwd` is
+/// already shared). `parent_persists` is whether the enclosing context
+/// certainly runs this line in the parent shell; when it does not (the group
+/// is an `&&`/`||` right-hand side, backgrounded, or a pipeline stage), every
+/// assignment inside is classified as non-persisting, exactly like #534.
+#[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd`/`parse` context, see `apply_attached_word_and_redirect_checks`
+fn evaluate_command_line_in(
+    command_line: &CommandLine,
+    env: &mut Env,
+    parent_persists: bool,
+    rules: &Rules,
+    allowlist: &Allowlist,
+    depth: usize,
+    cwd: &mut CwdState,
+    parse: ParseFn,
+) -> Verdict {
     let mut isolated = chain_is_backgrounded(command_line, 0).then(|| cwd.clone());
-    let first_runs_in_parent_shell = runs_in_parent_shell(None, isolated.is_some());
+    let first_runs_in_parent_shell =
+        parent_persists && runs_in_parent_shell(None, isolated.is_some());
     let mut worst = evaluate_pipeline(
         &command_line.first,
-        &mut env,
+        env,
         rules,
         allowlist,
         depth,
@@ -695,10 +725,11 @@ fn evaluate_command_line(
         if !matches!(separator, Separator::And | Separator::Or) {
             isolated = chain_is_backgrounded(command_line, index + 1).then(|| cwd.clone());
         }
-        let in_parent_shell = runs_in_parent_shell(Some(*separator), isolated.is_some());
+        let in_parent_shell =
+            parent_persists && runs_in_parent_shell(Some(*separator), isolated.is_some());
         let verdict = evaluate_pipeline(
             pipeline,
-            &mut env,
+            env,
             rules,
             allowlist,
             depth,
@@ -865,6 +896,7 @@ fn evaluate_pipeline(
         let verdict = match command {
             Command::Simple(simple) => {
                 env.apply_assignments(simple, runs_in_parent_shell && stage_count == 1);
+                env.note_readonly_operands(&normalize::normalize_argv(simple));
                 let mut alternates = Vec::new();
                 let verdict = {
                     let earlier = cwd.earlier.borrow();
@@ -904,11 +936,22 @@ fn evaluate_pipeline(
                 }
                 stage_argvs.push(Vec::new());
                 if stage_count == 1 {
-                    evaluate_compound_command(compound, rules, allowlist, depth, cwd, parse)
+                    evaluate_compound_command(
+                        compound,
+                        env,
+                        runs_in_parent_shell,
+                        rules,
+                        allowlist,
+                        depth,
+                        cwd,
+                        parse,
+                    )
                 } else {
                     let mut isolated = cwd.clone();
                     evaluate_compound_command(
                         compound,
+                        env,
+                        false,
                         rules,
                         allowlist,
                         depth,
@@ -1119,6 +1162,10 @@ fn pipeline_shape_verdict(
 /// [`evaluate_extended_test`] (issue #191) so the two never independently
 /// drift on how these security-critical checks are applied.
 ///
+/// `env` (issue #607) is threaded like `cwd` for a `BraceGroup` only; every
+/// other body gets a fresh `Env`. `parent_persists` is whether the group
+/// certainly runs in the parent shell (see [`evaluate_command_line_in`]).
+///
 /// `cwd` (issue #103) is threaded through per-variant, not uniformly, since
 /// this is the one place `BraceGroup` and `Subshell` diverge
 /// (`crate::ast::CompoundCommand`'s own docs): a `BraceGroup`'s body is
@@ -1136,8 +1183,11 @@ fn pipeline_shape_verdict(
 /// runs, but which one is unknowable statically, so the same
 /// evaluate-every-branch-and-fold stance already used for a loop's
 /// condition-plus-body pair applies here too, over more branches.
+#[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd`/`parse` context, see `apply_attached_word_and_redirect_checks`
 fn evaluate_compound_command(
     compound: &CompoundCommand,
+    env: &mut Env,
+    parent_persists: bool,
     rules: &Rules,
     allowlist: &Allowlist,
     depth: usize,
@@ -1147,7 +1197,18 @@ fn evaluate_compound_command(
     let redirect_anchor = cwd.current.clone();
     let (worst, redirections, extra_words): (Verdict, &[Redirection], &[Word]) = match compound {
         CompoundCommand::BraceGroup { body, redirections } => {
-            let verdict = evaluate_command_line(body, rules, allowlist, depth, cwd, parse);
+            // A failing redirection skips the body, so a redirected group
+            // never certainly persists its assignments.
+            let verdict = evaluate_command_line_in(
+                body,
+                env,
+                parent_persists && redirections.is_empty(),
+                rules,
+                allowlist,
+                depth,
+                cwd,
+                parse,
+            );
             (verdict, redirections.as_slice(), [].as_slice())
         }
         CompoundCommand::Subshell { body, redirections } => {
@@ -1561,8 +1622,17 @@ fn evaluate_function_definition(
 ) -> Verdict {
     let mut isolated = cwd.clone();
     isolated.symlink_untrusted = true;
-    let verdict =
-        evaluate_compound_command(&func.body, rules, allowlist, depth, &mut isolated, parse);
+    let mut env = Env::new();
+    let verdict = evaluate_compound_command(
+        &func.body,
+        &mut env,
+        true,
+        rules,
+        allowlist,
+        depth,
+        &mut isolated,
+        parse,
+    );
     if compound_command_may_change_cwd(&func.body) {
         cwd.poison();
     }
@@ -10924,8 +10994,8 @@ struct Env {
     /// candidate, issue #534; [`Self::live_value_history`]).
     ///
     /// Only a CERTAINLY PERSISTING assignment (`is_prefix_scoped == false` in
-    /// [`Self::apply_one`]) may ever insert into (unresolvable RHS) or remove
-    /// from (resolved RHS) this map: a prefix-scoped, short-circuitable or
+    /// [`Self::apply_one`]) may ever insert into (unresolvable RHS) or advance
+    /// the cut of (resolved RHS) this map: a prefix-scoped, short-circuitable or
     /// subshell-scoped assignment cannot clear a genuinely unknown persisting
     /// value an earlier command left behind either (`X=$(evil); X=ls true;
     /// $X` still has `$X` holding `$(evil)`'s own unknown value once `true`
@@ -10933,6 +11003,14 @@ struct Env {
     /// alone in both of its own branches. Its resolved value still lands in
     /// `value_history` after the cut.
     persisting_unresolvable: HashMap<String, usize>,
+    /// Names that appeared as an operand of a readonly-ish builtin
+    /// (`readonly`, or `declare`/`typeset`/`local`/`export` with an
+    /// `-r`-containing flag cluster) earlier on this line. A later assignment
+    /// to such a name may silently fail, so it must not advance the cut.
+    readonly_names: std::collections::HashSet<String>,
+    /// A readonly-ish builtin whose operands could not be resolved: no name
+    /// can be trusted to be writable, so no cut advances.
+    readonly_unknown: bool,
 }
 
 impl Env {
@@ -10943,6 +11021,49 @@ impl Env {
             value_history: HashMap::new(),
             ifs_append_floor: None,
             persisting_unresolvable: HashMap::new(),
+            readonly_names: std::collections::HashSet::new(),
+            readonly_unknown: false,
+        }
+    }
+
+    /// An assignment to a possibly-readonly name may fail in the real shell,
+    /// so it neither marks the name unknown nor advances its cut.
+    fn is_possibly_readonly(&self, name: &str) -> bool {
+        self.readonly_unknown || self.readonly_names.contains(name)
+    }
+
+    /// Conservatively records `readonly`-ish operands (see
+    /// [`Self::readonly_names`]); any such appearance is enough, whether or
+    /// not the builtin certainly runs.
+    fn note_readonly_operands(&mut self, argv: &[NormalizedWord]) {
+        let Some((first, rest)) = argv.split_first() else {
+            return;
+        };
+        let Resolution::Resolved(name) = first.resolution() else {
+            return;
+        };
+        let readonlyish = match name.as_str() {
+            "readonly" => true,
+            "declare" | "typeset" | "local" | "export" => {
+                rest.iter().any(|word| match word.resolution() {
+                    Resolution::Resolved(arg) => arg.starts_with('-') && arg.contains('r'),
+                    Resolution::Unresolvable(_) => true,
+                })
+            }
+            _ => false,
+        };
+        if !readonlyish {
+            return;
+        }
+        for word in rest {
+            match word.resolution() {
+                Resolution::Resolved(arg) if arg.starts_with('-') => {}
+                Resolution::Resolved(arg) => {
+                    let operand = arg.split('=').next().unwrap_or(arg);
+                    self.readonly_names.insert(operand.to_string());
+                }
+                Resolution::Unresolvable(_) => self.readonly_unknown = true,
+            }
         }
     }
 
@@ -11062,6 +11183,7 @@ impl Env {
         };
         match resolved {
             Some(value) => {
+                let cut_before_this_value = self.value_history(&assignment.name).len();
                 self.value_history
                     .entry(assignment.name.clone())
                     .or_default()
@@ -11073,15 +11195,21 @@ impl Env {
                 // command on this line left behind: `X=$(evil); X=ls true;
                 // $X` still has `$X` holding `$(evil)`'s own unknown value
                 // once `true` exits, `"ls"` never having actually taken
-                // over. Only a persisting resolution (no words) can clear
-                // it, the same asymmetry `None`'s own branch below applies.
-                if !is_prefix_scoped {
-                    self.persisting_unresolvable.remove(&assignment.name);
+                // over. Only a persisting resolution (no words) can move the
+                // cut up to itself (dropping the stale pre-poison history
+                // but keeping the marker), the same asymmetry `None`'s own
+                // branch below applies.
+                if !is_prefix_scoped
+                    && !assignment.append
+                    && !self.is_possibly_readonly(&assignment.name)
+                    && let Some(cut) = self.persisting_unresolvable.get_mut(&assignment.name)
+                {
+                    *cut = cut_before_this_value;
                 }
             }
             None => {
                 self.map.remove(&assignment.name);
-                if !is_prefix_scoped {
+                if !is_prefix_scoped && !self.is_possibly_readonly(&assignment.name) {
                     let cut = self.value_history(&assignment.name).len();
                     self.persisting_unresolvable
                         .insert(assignment.name.clone(), cut);
@@ -11662,9 +11790,9 @@ mod tests {
     // like a command-scoped prefix: it can neither mark the name unknown nor
     // clear an earlier unknown marker, and a resolved value it records stays
     // a live history candidate (the marker is a cut index into the history),
-    // so the genuine Block is preserved. The truly-subshell resolved rows
-    // (`X='rm -rf /' | true; ...`, `X='rm -rf /' & ...`) may stay Ask after
-    // an earlier unknown assignment; they are not pinned here.
+    // so the genuine Block is preserved. That includes the truly-subshell
+    // resolved rows (`X='rm -rf /' | true; ...`, `X='rm -rf /' & ...`) after
+    // an earlier unknown assignment: they are Block too, pinned below.
 
     #[test]
     fn issue_534_or_list_rhs_assignment_does_not_poison_history() {
@@ -11750,6 +11878,111 @@ mod tests {
         assert_decision(
             "X='rm -rf /'; X=$(evil); X=$(evil2) true; $X",
             Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn issue_534_truly_subshell_resolved_rows_are_block_after_an_earlier_unknown_one() {
+        for command in [
+            "X=$(evil); X='rm -rf /' | true; X=ls true; $X",
+            "X=$(evil); X='rm -rf /' & X=ls true; $X",
+        ] {
+            assert_decision(command, Decision::Block);
+        }
+    }
+
+    #[test]
+    fn issue_534_brace_group_assignment_is_visible_to_the_outer_line() {
+        assert_decision(
+            "X=$(evil); { X='rm -rf /'; }; X=ls true; $X",
+            Decision::Block,
+        );
+        assert_decision("{ X='rm -rf /'; }; $X", Decision::Block);
+        assert_decision("X=ls; { X='rm -rf /'; }; $X", Decision::Block);
+        assert_decision("{ X=ls; }; $X", Decision::Ask);
+    }
+
+    #[test]
+    fn issue_534_brace_group_unresolvable_persisting_assignment_poisons_history() {
+        assert_decision("X='rm -rf /'; { X=$(evil); }; $X", Decision::Ask);
+        assert_decision("X='rm -rf /'; { X=$(evil); }; X=ls true; $X", Decision::Ask);
+    }
+
+    #[test]
+    fn issue_534_brace_group_not_certain_to_run_in_parent_is_non_persisting() {
+        // A pipeline stage, `&&` right-hand side or backgrounded group is
+        // classified like a command-scoped prefix: its resolved value stays a
+        // live history candidate, but an unresolvable one cannot poison.
+        for command in [
+            "X=$(evil); { X='rm -rf /'; } | cat; X=ls true; $X",
+            "X=$(evil); true && { X='rm -rf /'; }; X=ls true; $X",
+            "X=$(evil); { X='rm -rf /'; } & X=ls true; $X",
+            "X='rm -rf /'; { X=$(evil); } | cat; X=ls true; $X",
+            "X='rm -rf /'; true && { X=$(evil); }; X=ls true; $X",
+            "X='rm -rf /'; { X=$(evil); } & X=ls true; $X",
+        ] {
+            assert_decision(command, Decision::Block);
+        }
+    }
+
+    #[test]
+    fn issue_534_persisting_resolved_assignment_cuts_stale_history() {
+        // Only `ls` is reachable once `X=ls` persists after `X=$(evil)`; the
+        // pre-poison `rm -rf /` must not resurface.
+        assert_decision("X='rm -rf /'; X=$(evil); X=ls; $X", Decision::Ask);
+        assert_decision(
+            "X='rm -rf /'; X=$(evil); X=ls; X=ls true; $X",
+            Decision::Ask,
+        );
+        assert_decision("X='rm -rf /'; X=$(evil); { X=ls; }; $X", Decision::Ask);
+        // A resolved value recorded after the cut stays live.
+        assert_decision(
+            "X=$(evil); X=ls; true && X='rm -rf /'; X=ls true; $X",
+            Decision::Block,
+        );
+    }
+
+    #[test]
+    fn issue_534_redirected_brace_group_does_not_certainly_persist() {
+        for command in [
+            "X=\"rm -rf /\"; { X=$Y; } </nonexistent; $X",
+            "X=\"rm -rf /\"; { X=$Y; } >/nonexistent/f; $X",
+            "X=\"rm -rf /\"; { X=$Y; } >&9; $X",
+            "X=\"rm -rf /\"; { { X=$Y; } </nonexistent; }; $X",
+            "X=$Y; true && X=\"rm -rf /\"; { X=ls; } </nonexistent; $X",
+        ] {
+            assert_decision(command, Decision::Block);
+        }
+    }
+
+    #[test]
+    fn issue_534_append_assignment_does_not_advance_the_cut() {
+        for command in [
+            "X=$Y; true && X=\"rm -rf /\"; X=ls true; X+=\" /x\"; $X",
+            "X=$Y; true && X=\"rm -rf /\"; false && X=ls; X+=\" -l\"; $X",
+        ] {
+            assert_decision(command, Decision::Block);
+        }
+    }
+
+    #[test]
+    fn issue_534_readonly_name_does_not_advance_the_cut() {
+        for command in [
+            "X=$Y; true && X=\"rm -rf /\"; readonly X; X=ls; $X",
+            "X=\"rm -rf /\"; readonly X; X=$Y; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; declare -r X; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; typeset -rx X; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; readonly $Z; X=ls; $X",
+        ] {
+            assert_decision(command, Decision::Block);
+        }
+    }
+
+    #[test]
+    fn issue_534_headline_brace_group_row_is_block() {
+        assert_decision(
+            "X=$(evil); { X='rm -rf /'; }; X=ls true; $X",
+            Decision::Block,
         );
     }
 
