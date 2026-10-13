@@ -6,6 +6,9 @@
 //! Table-driven so adding a new regression case is a one-line diff to the
 //! relevant `cases` array, not a new `#[test]` function.
 
+#[path = "common/golden.rs"]
+mod golden;
+
 use shguard::verdict::Decision;
 
 const HEADLINE_CASES: &[(&str, Decision)] = &[
@@ -2314,4 +2317,53 @@ fn guardfall_parameter_expansion_operand_cases() {
             verdict.decision()
         );
     }
+}
+
+const DECISION_TABLES: &[&[(&str, Decision)]] = &[
+    HEADLINE_CASES,
+    CLASS_E_CASES,
+    GIT_CASES,
+    RM_DOT_TARGETS,
+    RM_DOTGLOB_TILDE_TARGETS,
+    ISSUE_453_FILESYSTEM_GAPS,
+    TRANSPARENT_WRAPPER_CASES,
+    EVAL_CASES,
+    FIND_EXEC_BARE_INTERPRETER_CASES,
+    FIND_EXEC_RM_FORCE_PLACEHOLDER_CASES,
+    SELF_PROTECTION_NORMALIZATION_CASES,
+    ISSUE_77_BRACE_COMMAND_POSITION_CASES,
+    REDIRECT_AND_TEE_CASES,
+    SHELL_INIT_PERSISTENCE_CASES,
+    SHELL_INIT_SOURCE_DESTINATION_AMBIGUITY_CASES,
+    SHELL_INIT_PATH_PARITY_198_CASES,
+    FISH_OPTION_SURFACE_CASES,
+    FIND_PIPE_XARGS_RM_FORCE_CASES,
+    SHELL_INIT_REDIRECT_CASES,
+    BRUSH_PARSER_OVERFLOW_PANIC_CASES,
+    SED_SCRIPT_WRITE_EXEC_CASES,
+    PARAMETER_EXPANSION_OPERAND_CASES,
+];
+
+#[test]
+fn golden_snapshot_guardfall() {
+    let declared_tables = include_str!("guardfall.rs")
+        .lines()
+        .filter(|line| line.starts_with("const ") && line.contains("&[(&str, Decision)] = &["))
+        .count();
+    assert_eq!(
+        declared_tables,
+        DECISION_TABLES.len(),
+        "every case table must be listed in DECISION_TABLES so the golden snapshot covers it"
+    );
+
+    let commands = DECISION_TABLES
+        .iter()
+        .flat_map(|table| table.iter().map(|(command, _)| (*command).to_string()))
+        .chain(
+            SHELL_INIT_DOES_NOT_SHADOW_STRICTER_BLOCK_RULES
+                .iter()
+                .map(|(command, _)| (*command).to_string()),
+        )
+        .chain(shell_init_directory_token_commands());
+    golden::check("guardfall", commands);
 }

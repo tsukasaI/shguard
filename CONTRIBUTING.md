@@ -199,3 +199,25 @@ follow-ups, by root cause:
   that the epic's implementation must keep green.
 - Leave medium and low findings, refactor and doc nits for the epic.
 - Label false positives `false-positive` whichever epic they belong to.
+
+## The golden snapshot (RFC #658 stage-1 gate)
+
+`tests/golden/*.jsonl` record, for every command in the regression
+corpora, what `shguard::analyze()` returns today: `decision`,
+`matched_rule` and `deny_message`, one JSON object per line, sorted by
+command. They are the oracle for the stage-1 policy refactor (#659), which
+must not change any decision. `tests/golden_snapshot.rs` lists the corpora
+and where each one is checked.
+
+- `cargo test` compares and fails with a per-command diff on any
+  mismatch. It never rewrites the files.
+- To bless an intended change, run
+  `SHGUARD_GOLDEN_UPDATE=1 cargo test golden_snapshot` and commit the
+  rewritten files with the change that caused them.
+- A `DECISION` change in the snapshot diff must be justified in the PR
+  description, one line per command. `matched_rule` and `deny_message`
+  changes are expected during stage 1 (restoring the attribution that
+  `apply_floor` drops is one of its goals) and are reviewed in the diff.
+- Adding a case to `tests/guardfall.rs`, `tests/benign_corpus.rs` or
+  `tests/bypass_corpus.toml` adds a snapshot line too, so bless in the
+  same commit.

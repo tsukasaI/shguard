@@ -1,0 +1,1072 @@
+{"command":"$'\\x62\\x75\\x73\\x79\\x62\\x6f\\x78' rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"$'\\x62\\x75\\x73\\x79\\x62\\x6f\\x78' rm `printf '%s' '-rf'` $'\\x2f'","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"$'\\x62\\x75\\x73\\x79\\x62\\x6f\\x78'$IFSrm$IFS-rf$IFS''/","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"$'\\x63\\x61\\x74' fil''e","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"$'\\x63\\x61\\x74' file","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"$'\\x63\\x61\\x74'$IFS$'\\x66\\x69\\x6c\\x65'","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"$'\\x63\\x68\\x6d\\x6f\\x64' 777 /etc/passwd","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"$'\\x63\\x68\\x6d\\x6f\\x64' `printf '%s' '777'` ~-","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"$'\\x63\\x68\\x6d\\x6f\\x64' {,777} /e''tc/passwd","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"$'\\x63\\x68\\x6d\\x6f\\x64' ~ /etc/passwd","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"$'\\x63\\x68\\x6d\\x6f\\x64'$IFS777$IFS$'\\x2f\\x65\\x74\\x63\\x2f\\x70\\x61\\x73\\x73\\x77\\x64'","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"$'\\x63\\x68\\x72\\x74' -f 99 `printf '%s' 'rm'` -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"$'\\x63\\x68\\x72\\x74' -f 99 rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"$'\\x63\\x70'$IFSevil.toml$IFS`printf '%s' 'target.toml'`","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"$'\\x63\\x70'$IFSevil.toml$IFStarget.toml","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"$'\\x64\\x64' if=/dev/zero of=/dev/sda","decision":"Block","deny_message":null,"matched_rule":"dd-write-device"}
+{"command":"$'\\x64\\x64' if=/dev/zero {,of=/dev/sda}","decision":"Block","deny_message":null,"matched_rule":"dd-write-device"}
+{"command":"$'\\x64\\x64' if=/dev/zero ~+","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"$'\\x64\\x64' {,if=/dev/zero} of=/dev/sda","decision":"Block","deny_message":null,"matched_rule":"dd-write-device"}
+{"command":"$'\\x64\\x64' ~root $(printf '%s' 'of=/dev/sda')","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"$'\\x64\\x64'$IFSif=/dev/zero$IFS`printf '%s' 'of=/dev/sda'`","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"$'\\x64\\x64'$IFSif=/dev/zero$IFSof=/dev/sda","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"$'\\x64\\x64'$IFSif=/dev/zero$IFS~/.config/shguard/config.toml","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' $'\\x7e' | ba\"\"se64 {$(printf '%s' '-d'),} | $'\\x73\\x68'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' $'\\x7e\\x2f\\x2e\\x63\\x6f\\x6e\\x66\\x69\\x67\\x2f\\x73\\x68\\x67\\x75\\x61\\x72\\x64\\x2f\\x63\\x6f\\x6e\\x66\\x69\\x67\\x2e\\x74\\x6f\\x6d\\x6c' | $(printf '%s' 'base64')$IFS{,-d} | sh","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' $'\\x7e\\x72\\x6f\\x6f\\x74' | base64$IFS{,~/.config/shguard/config.toml} | sh","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' $(printf '%s' 'cm0gLXJmIC8=') | $'\\x62\\x61\\x73\\x65\\x36\\x34' -''d | $'\\x73\\x68'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' $(printf '%s' 'cm0gLXJmIC8=') | base6''4 ~+ | {{sh,},}","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' $(printf '%s' 'hello')","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' `printf '%s' 'cm0gLXJmIC8='` | $(printf '%s' 'base64') {,-d} | $'\\x73\\x68'","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' `printf '%s' 'cm0gLXJmIC8='` | base64$IFS-''d | {sh,}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' `printf '%s' '~+'` | {,base64} ~\"\"- | $(printf '%s' 's\"\"h')","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' cm0gLXJmIC8= | $'\\x62\\x61\\x73\\x65\\x36\\x34' $'\\x2d\\x64' | {,sh}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' cm0gLXJmIC8= | $'\\x62\\x61\\x73\\x65\\x36\\x34' $(printf '%s' '-d') | {,sh}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' cm0gLXJmIC8= | $'\\x62\\x61\\x73\\x65\\x36\\x34' -d | sh","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' cm0gLXJmIC8= | $(printf '%s' 'base64') -d | $'\\x73\\x68'","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' cm0gLXJmIC8= | $(printf '%s' 'base64') {~+,} | `printf '%s' 's\"\"h'`","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' cm0gLXJmIC8= | `printf '%s' 'base64'` -d | {sh,}","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' cm0gLXJmIC8= | b\"\"ase64 -d | {sh,}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' cm0gLXJmIC8= | base''64 -d | s\"\"h","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' cm0gLXJmIC8= | base6\"\"4 -d | sh","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' cm0gLXJmIC8= | base64 $'\\x2d\\x64' | sh","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' cm0gLXJmIC8= | base64 -\"\"d | {,sh}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' cm0gLXJmIC8= | base64 `printf '%s' '$(printf '%s' '$'\\x2d\\x64'')'` | s\"\"h","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' cm0gLXJmIC8= | base64 `printf '%s' '~-'` | `printf '%s' 'sh'`","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' cm0gLXJmIC8= | base64 {$'\\x2d\\x64',} | `printf '%s' 'sh'`","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' cm0gLXJmIC8= | base64 {,{-d,}} | `printf '%s' 'sh'`","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' cm0gLXJmIC8= | base64 {-d,} | sh","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' cm0gLXJmIC8= | base64 {{-d,},} | sh","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' cm0gLXJmIC8= | base64 ~/.config/shguard/config.toml | s''h","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' cm0gLXJmIC8= | base64 ~root | $(printf '%s' 'sh')","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' cm0gLXJmIC8= | base64$IFS-d | $'\\x73\\x68'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' cm0gLXJmIC8= | base64$IFS-d | `printf '%s' 'sh'`","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' cm0gLXJmIC8= | base64$IFS-d | s\"\"h","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' cm0gLXJmIC8= | base64$IFS~+ | s''h","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' cm0gLXJmIC8= | base64$IFS~- | `printf '%s' '`printf '%s' 's\"\"h'`'`","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' cm0gLXJmIC8= | {base64,} $'\\x2d\\x64' | $'\\x73\\x68'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' cm0gLXJmIC8= | {base64,} -d | s''h","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' cm0gLXJmIC8= | {base64,} -d | {,sh}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' hel''lo","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' hello","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' {,cm0gLXJmIC8=} | bas\"\"e64 $'\\x2d\\x64' | `printf '%s' 'sh'`","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' {cm0gLXJmIC8=,} | $'\\x62\\x61\\x73\\x65\\x36\\x34'$IFS$(printf '%s' '-d') | {{s\"\"h,},}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' ~ | `printf '%s' 'base64'` ~- | $'\\x73\\x68'","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' ~ | {base64,} $'\\x2d\\x64' | {{,sh},}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' ~+","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' ~+ | base64$IFS{,-d} | {$'\\x73\\x68',}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' ~- | `printf '%s' 'base64'` `printf '%s' '~/.config/shguard/config.toml'` | `printf '%s' '{,sh}'`","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' ~/.conf\"\"ig/shguard/config.toml | $'\\x62\\x61\\x73\\x65\\x36\\x34' ~ | `printf '%s' 'sh'`","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' ~/.config/shguard/config.toml | $(printf '%s' 'b\"\"ase64') {-d,} | {s\"\"h,}","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' ~/.config/shguard/config.toml | {base64,}$IFS-d | s\"\"h","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' ~/.config/shguard/config.toml | {{,{,base64}},} -d | {{$'\\x73\\x68',},}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' ~root | $(printf '%s' 'base64') {-d,} | $'\\x73\\x68'","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f' ~root | {,base64} ~/.config/shguard/config.toml | $(printf '%s' 's''h')","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f'$IFS`printf '%s' 'cm0gLXJmIC8='` | `printf '%s' '{,base64}'` `printf '%s' '-d'` | {,sh}","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f'$IFS`printf '%s' 'cm0gLXJmIC8='` | {,{,base64}} {-d,} | $(printf '%s' 's''h')","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f'$IFS`printf '%s' 'cm0gLXJmIC8='` | {{,base64},}$IFS-d | $(printf '%s' '`printf '%s' 's\"\"h'`')","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f'$IFScm0gLXJmIC8= | `printf '%s' 'base64'` -\"\"d | sh","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f'$IFScm0gLXJmIC8= | `printf '%s' 'base64'`$IFS-d | {,sh}","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f'$IFScm0gLXJmIC8= | base\"\"64 $'\\x2d\\x64' | $'\\x73\\x68'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f'$IFScm0gLXJmIC8= | base64 {,{-d,}} | s\"\"h","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f'$IFScm0gLXJmIC8= | base64 ~- | {,sh}","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f'$IFS{,cm0gLXJmIC8=} | $'\\x62\\x61\\x73\\x65\\x36\\x34' ~+ | $(printf '%s' '$(printf '%s' 's\"\"h')')","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f'$IFS{cm0gLXJmIC8=,} | {$'\\x62\\x61\\x73\\x65\\x36\\x34',} ~- | s\"\"h","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"$'\\x65\\x63\\x68\\x6f'$IFS~- | `printf '%s' 'base64'` `printf '%s' '~/.config/shguard/config.toml'` | {,$(printf '%s' '{,sh}')}","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"$'\\x67\\x69\\x74' clean ~","decision":"Block","deny_message":null,"matched_rule":"git-clean-any"}
+{"command":"$'\\x67\\x69\\x74' reset {,--hard} `printf '%s' 'HEAD'`","decision":"Block","deny_message":null,"matched_rule":"git-reset-hard"}
+{"command":"$'\\x67\\x69\\x74' {clean,} -fd","decision":"Block","deny_message":null,"matched_rule":"git-clean-any"}
+{"command":"$'\\x67\\x69\\x74'$IFSclean$IFS-fd","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"$'\\x67\\x69\\x74'$IFS~+$IFS--hard$IFSHEAD","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"$'\\x6d\\x76' $'\\x73\\x72\\x63' dst","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"$'\\x6d\\x76' sr\"\"c ~","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"$'\\x6d\\x76' src dst","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"$'\\x6d\\x76'$IFSsrc$IFSds''t","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"$'\\x72\\x6d' $'\\x2d\\x72\\x66' {/,}","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"$'\\x72\\x6d' $(printf '%s' '-rf') .","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"$'\\x72\\x6d' -''rf ''/","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"$'\\x72\\x6d' -''rf .","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"$'\\x72\\x6d' -r\"\"f ..","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"$'\\x72\\x6d' -rf .","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"$'\\x72\\x6d' -rf ..","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"$'\\x72\\x6d' -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"$'\\x72\\x6d' {`printf '%s' '-rf'`,} ..","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"$'\\x72\\x6d'$IFS-rf$IFS$'\\x2f'","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"$'\\x72\\x6d'$IFS-rf$IFS.\"\".","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"$'\\x73\\x65\\x64' -i ~/.config/shgu''ard/config.toml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-sed-tilde"}
+{"command":"$'\\x73\\x65\\x64' ~+ ~/.config/shguard/config.toml","decision":"Ask","deny_message":"Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected. A variable file operand (`sed -n p \"$file\"`) cannot be told apart from a script word, so expand it to a literal file path.","matched_rule":null}
+{"command":"$'\\x73\\x68\\x72\\x65\\x64' $(printf '%s' '/dev/sda')","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"$'\\x73\\x68\\x72\\x65\\x64' /dev/sda","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"$'\\x73\\x68\\x72\\x65\\x64' ~/.co\"\"nfig/shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"$'\\x73\\x68\\x72\\x65\\x64'$IFS/dev/sda","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"$'\\x73\\x68\\x72\\x65\\x64'$IFS~root","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"$'\\x74\\x61\\x72' -C $'\\x2f' -''x","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}
+{"command":"$'\\x74\\x61\\x72' -C / -x","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}
+{"command":"$'\\x74\\x61\\x72'$IFS$(printf '%s' '-C')$IFS/$IFS-x","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"$'\\x74\\x61\\x73\\x6b\\x73\\x65\\x74' 0x1 rm `printf '%s' '-rf'` /","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"$'\\x74\\x61\\x73\\x6b\\x73\\x65\\x74'$IFS0x1$IFSrm$IFS-rf$IFS/","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"$'\\x74\\x65\\x65' {~/.config/shguard/config.toml,}","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-tee-tilde"}
+{"command":"$'\\x74\\x65\\x65' ~''-","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"$'\\x74\\x65\\x65' ~-","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"$'\\x74\\x69\\x6d\\x65\\x6f\\x75\\x74' 5 $(printf '%s' 'rm') {-rf,} /","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"$'\\x74\\x69\\x6d\\x65\\x6f\\x75\\x74' 5 rm `printf '%s' '-rf'` /","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"$'\\x74\\x69\\x6d\\x65\\x6f\\x75\\x74'$IFS{,5}$IFSrm$IFS-rf$IFS/","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"$'\\x74\\x72\\x75\\x6e\\x63\\x61\\x74\\x65' -s ''0 /important","decision":"Block","deny_message":null,"matched_rule":"truncate-zero"}
+{"command":"$'\\x74\\x72\\x75\\x6e\\x63\\x61\\x74\\x65'$IFS-s$IFS0$IFS/important","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"$(echo cm0gLXJmIC8= | base64 -d)","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' '$'\\x65\\x63\\x68\\x6f'') cm0gLXJmIC8= | base64 {`printf '%s' '-d'`,} | {sh,}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"$(printf '%s' '$'\\x6d\\x76'') sr''c dst","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' '$(printf '%s' 'echo')') cm0gLXJmIC8= | $'\\x62\\x61\\x73\\x65\\x36\\x34' $(printf '%s' '-\"\"d') | {`printf '%s' 'sh'`,}","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' '`printf '%s' 'echo'`') ~+ | $'\\x62\\x61\\x73\\x65\\x36\\x34' ~/.config/shguard/config.toml | `printf '%s' '{sh,}'`","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'busybox') r\"\"m -rf /","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'busybox') rm -r\"\"f `printf '%s' '/'`","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'busybox') rm -rf /","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'cat') ~root","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'chmod') 777 /etc\"\"/passwd","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'chmod') 777 /etc/passwd","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'chmod')$IFS~-$IFS/etc/passwd","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'chrt') -f 99 rm -rf /","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'dd') if=/dev/zero of=/dev/sda","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'dd') if=/dev/zero ~/.config/shguard/config.toml","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'e\"\"cho')$IFScm0gLXJmIC8= | base''64 `printf '%s' '{-d,}'` | $'\\x73\\x68'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"$(printf '%s' 'echo') $(printf '%s' 'cm0gLXJmIC8=') | base64$IFS$(printf '%s' '-d') | `printf '%s' 'sh'`","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'echo') $(printf '%s' 'hello')","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'echo') cm0gLXJmIC8= | base64 -''d | $(printf '%s' 'sh')","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'echo') cm0gLXJmIC8= | base64$IFS-d | $(printf '%s' 'sh')","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'echo') cm0gLXJmIC8= | base64$IFS~root | $'\\x73\\x68'","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'echo') cm0gLXJmIC8= | {,{base64,}} -d | {,sh}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"$(printf '%s' 'echo') hello","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'echo') {{,cm0gLXJmIC8=},} | $'\\x62\\x61\\x73\\x65\\x36\\x34' ~/.config/shguard/config.toml | {$(printf '%s' '{sh,}'),}","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'echo') ~\"\"- | {,base64} `printf '%s' '$'\\x2d\\x64''` | {s\"\"h,}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"$(printf '%s' 'echo') ~/.config/shguard/config.toml | base6''4 $(printf '%s' '`printf '%s' '-d'`') | s\"\"h","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"$(printf '%s' 'echo') ~root","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'echo') ~root | {base64,} ''~ | {sh,}","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'echo')$IFS$(printf '%s' 'cm0gLXJmIC8=') | $(printf '%s' 'b''ase64') -''d | `printf '%s' '{,s\"\"h}'`","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'echo')$IFScm0gLXJmIC8= | $'\\x62\\x61\\x73\\x65\\x36\\x34' ~- | s''h","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'echo')$IFScm0gLXJmIC8= | base64 ~+ | sh","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'echo')$IFS~+ | `printf '%s' '$'\\x62\\x61\\x73\\x65\\x36\\x34''`$IFS-d | `printf '%s' '{sh,}'`","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'echo')$IFS~+ | `printf '%s' 'base64'` `printf '%s' '{-d,}'` | `printf '%s' 'sh'`","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'find') /x {$'\\x2d\\x64\\x65\\x6c\\x65\\x74\\x65',}","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'git') reset --hard HEAD","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'rm') -r''f {.,}","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'rm') -rf .","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'rm') -rf ..","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'rm') -rf /","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'rm') -rf {{,.},}","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'rm') ~/.config/shguard/config.toml {,..}","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'sed') -i ~/.config/shguard/config.toml","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'shred') `printf '%s' '{/dev/sda,}'`","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'shred')$IFS/dev/sda","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'taskset') 0x1 rm -rf /","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'te\"\"e') $'\\x7e\\x2f\\x2e\\x63\\x6f\\x6e\\x66\\x69\\x67\\x2f\\x73\\x68\\x67\\x75\\x61\\x72\\x64\\x2f\\x63\\x6f\\x6e\\x66\\x69\\x67\\x2e\\x74\\x6f\\x6d\\x6c'","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'tee') ~/.config/shguard/config.toml","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'tee')$IFS~/.config/shguard/config.to''ml","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'timeout') 5 rm -rf /","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' '{,echo}') cm0gLXJmIC8= | $(printf '%s' 'bas\"\"e64') -d | $'\\x73\\x68'","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' '{cat,}') file","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' '{echo,}') cm0gLXJmIC8= | $'\\x62\\x61\\x73\\x65\\x36\\x34' `printf '%s' '-d'` | `printf '%s' '$'\\x73\\x68''`","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"X=$'\\x63\\x61\\x74'; $X file","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=$'\\x63\\x68\\x72\\x74'; $X -f 99 rm -r''f /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"X=$'\\x63\\x68\\x72\\x74'; $X ~+ 99 rm -rf /","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=$'\\x65\\x63\\x68\\x6f'; $X hello","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=$'\\x6d\\x76'; $X$IFSsrc$IFSdst","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=$'\\x72\\x6d'; $X$IFS-rf$IFS/","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=$'\\x73\\x68\\x72\\x65\\x64'; $X ~+","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"X=$(printf '%s' 'dd'); $X if=/dev/zero of=/dev/sda","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=$(printf '%s' 'find'); $X$IFS/x$IFS-delete","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=$(printf '%s' 'tee'); $X$IFS~/.config/shguard/config.toml","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=`printf '%s' 'rm'`; $X -rf ..","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=`printf '%s' 'tar'`; $X -C ~root -x","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=busybox; $X r\"\"m -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"X=busybox; $X rm -rf ''/","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"X=busybox; $X rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"X=busybox; $X ~+ -rf ''/","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=busybox; $X$IFSrm$IFS-rf$IFS''/","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=c''p; $X evil.toml $'\\x74\\x61\\x72\\x67\\x65\\x74\\x2e\\x74\\x6f\\x6d\\x6c'","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=cat; $X `printf '%s' 'file'`","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=cat; $X file","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=cat; $X ~+","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=cat; $X ~-","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=cat; $X$IFS$(printf '%s' 'file')","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=cat; $X$IFSf''ile","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=cat; $X$IFSfile","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=cat; $X$IFS~","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=ch''mod; $X 777 ~+","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=chmod; $X 777 /etc/passwd","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=chmod; $X 777 `printf '%s' '{,/etc/passwd}'`","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=chmod; $X$IFS777$IFS/etc/passwd","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=chrt; $X -f $'\\x39\\x39' rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"X=chrt; $X -f $(printf '%s' '99') rm -rf /","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=chrt; $X -f 99 rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"X=chrt; $X -f 99 rm ~- /","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=chrt; $X ~ 99 rm -''rf /","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=chrt; $X$IFS-f$IFS99$IFSrm$IFS$(printf '%s' '-rf')$IFS/","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=chrt; $X$IFS-f$IFS99$IFSrm$IFS-rf$IFS/","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=cp; $X evil.toml $'\\x74\\x61\\x72\\x67\\x65\\x74\\x2e\\x74\\x6f\\x6d\\x6c'","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=cp; $X evil.toml target.toml","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=cp; $X {,evil.toml} target.toml","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=cp; $X ~- targ''et.toml","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=cp; $X$IFS$(printf '%s' 'evil.toml')$IFStarget.toml","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=cp; $X$IFSevil.toml$IFStarget.toml","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=d\"\"d; $X ~root of=/dev/sda","decision":"Block","deny_message":null,"matched_rule":"dd-write-device"}
+{"command":"X=dd; $X if=/dev/zero of=/dev/sda","decision":"Block","deny_message":null,"matched_rule":"dd-write-device"}
+{"command":"X=dd; $X if=/dev/zero {,of=/dev/sda}","decision":"Block","deny_message":null,"matched_rule":"dd-write-device"}
+{"command":"X=dd; $X if=/dev/zero {of=/dev/sda,}","decision":"Block","deny_message":null,"matched_rule":"dd-write-device"}
+{"command":"X=dd; $X ~+ $(printf '%s' 'of=/dev/sda')","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=dd; $X$IFSif=/dev/zero$IFS`printf '%s' 'of=/dev/sda'`","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=dd; $X$IFSif=/dev/zero$IFSof=/dev/sda","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=dd; $X$IFS{if=/dev/zero,}$IFSof=/dev/sda","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=e\"\"cho; $X hello","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=echo; $X he''llo","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=echo; $X hell\"\"o","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=echo; $X hello","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=echo; $X$IFShell''o","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=echo; $X$IFShello","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=echo; `printf '%s' '$X'` hello","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"X=echo; {,$X} hello","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=fin\"\"d; $X /x -dele''te","decision":"Block","deny_message":null,"matched_rule":"find-delete"}
+{"command":"X=find; $X $'\\x2f\\x78' $(printf '%s' '-delete')","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=find; $X /x -del\"\"ete","decision":"Block","deny_message":null,"matched_rule":"find-delete"}
+{"command":"X=find; $X /x -delete","decision":"Block","deny_message":null,"matched_rule":"find-delete"}
+{"command":"X=g\"\"it; $X reset --hard {,HEAD}","decision":"Block","deny_message":null,"matched_rule":"git-reset-hard"}
+{"command":"X=git; $X $'\\x70\\x75\\x73\\x68' --force origin $'\\x6d\\x61\\x69\\x6e'","decision":"Block","deny_message":null,"matched_rule":"git-push-force"}
+{"command":"X=git; $X $'\\x72\\x65\\x73\\x65\\x74' $'\\x2d\\x2d\\x68\\x61\\x72\\x64' HEAD","decision":"Block","deny_message":null,"matched_rule":"git-reset-hard"}
+{"command":"X=git; $X $'\\x72\\x65\\x73\\x65\\x74' --hard $'\\x48\\x45\\x41\\x44'","decision":"Block","deny_message":null,"matched_rule":"git-reset-hard"}
+{"command":"X=git; $X `printf '%s' 'reset'` --hard HEAD","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=git; $X clea''n -fd","decision":"Block","deny_message":null,"matched_rule":"git-clean-any"}
+{"command":"X=git; $X clean -fd","decision":"Block","deny_message":null,"matched_rule":"git-clean-any"}
+{"command":"X=git; $X pus\"\"h --force origin main","decision":"Block","deny_message":null,"matched_rule":"git-push-force"}
+{"command":"X=git; $X push -''-force origin main","decision":"Block","deny_message":null,"matched_rule":"git-push-force"}
+{"command":"X=git; $X push --force ori\"\"gin main","decision":"Block","deny_message":null,"matched_rule":"git-push-force"}
+{"command":"X=git; $X push --force origin $'\\x6d\\x61\\x69\\x6e'","decision":"Block","deny_message":null,"matched_rule":"git-push-force"}
+{"command":"X=git; $X push --force origin main","decision":"Block","deny_message":null,"matched_rule":"git-push-force"}
+{"command":"X=git; $X push --force origin ~/.config/shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"git-push-force"}
+{"command":"X=git; $X r\"\"eset --hard H''EAD","decision":"Block","deny_message":null,"matched_rule":"git-reset-hard"}
+{"command":"X=git; $X reset $'\\x2d\\x2d\\x68\\x61\\x72\\x64' HEAD","decision":"Block","deny_message":null,"matched_rule":"git-reset-hard"}
+{"command":"X=git; $X reset --hard $'\\x7e\\x2d'","decision":"Block","deny_message":null,"matched_rule":"git-reset-hard"}
+{"command":"X=git; $X reset --hard HEAD","decision":"Block","deny_message":null,"matched_rule":"git-reset-hard"}
+{"command":"X=git; $X {,push} --force {origin,} main","decision":"Block","deny_message":null,"matched_rule":"git-push-force"}
+{"command":"X=git; $X$IFS`printf '%s' 'push'`$IFS--force$IFSorigin$IFSmain","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=git; $X$IFSclean$IFS$'\\x2d\\x66\\x64'","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=git; $X$IFSclean$IFS-fd","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=git; $X$IFSreset$IFS--hard$IFSHEAD","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=git; {,$X}$IFSreset$IFS--hard$IFSHEAD","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=mv; $X src $'\\x64\\x73\\x74'","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=mv; $X src dst","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=mv; $X src {dst,}","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=mv; $X {,src} dst","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=mv; $X ~/.config/shguard/config.toml ds''t","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-mv-tilde"}
+{"command":"X=mv; $X$IFSsrc$IFS$'\\x64\\x73\\x74'","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=mv; `printf '%s' '$X'` src ~/.config/shguard/config.toml","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"X=r''m; $X -rf .","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"X=rm; $X $'\\x2d\\x72\\x66' $'\\x2f'","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"X=rm; $X $'\\x2d\\x72\\x66' /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"X=rm; $X $'\\x2d\\x72\\x66' {/,}","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"X=rm; $X $(printf '%s' '-rf') ~/.config/shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-rm-tilde"}
+{"command":"X=rm; $X $(printf '%s' '{,-rf}') .","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=rm; $X -''rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"X=rm; $X -rf $'\\x2e'","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"X=rm; $X -rf $'\\x2e\\x2e'","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"X=rm; $X -rf ''.","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"X=rm; $X -rf .","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"X=rm; $X -rf .\"\".","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"X=rm; $X -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"X=rm; $X -rf `printf '%s' '/'`","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=rm; $X -rf ~root","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=rm; $X `printf '%s' '-rf'` `printf '%s' '..'`","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=rm; $X `printf '%s' '~'` .","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=rm; $X {-rf,} ..","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"X=rm; $X ~/.config/shguard/config.toml .","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-rm-tilde"}
+{"command":"X=rm; $X$IFS-rf$IFS..","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=rm; $X$IFS-rf$IFS/","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=rm; $X$IFS-rf$IFS~-","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=rm; $X$IFS~$IFS/","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=rm; `printf '%s' '$X'` -rf .","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"X=rm; `printf '%s' '$X'` -rf {,..}","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"X=rm; {$X,} -rf ''/","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=sed; $X $'\\x2d\\x69' ~/.config/shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-sed-tilde"}
+{"command":"X=sed; $X -i ~/.config/shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-sed-tilde"}
+{"command":"X=sed; $X `printf '%s' '{,-i}'` ~/.config/shguard/config.toml","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=sed; $X$IFS-i$IFS$'\\x7e\\x2f\\x2e\\x63\\x6f\\x6e\\x66\\x69\\x67\\x2f\\x73\\x68\\x67\\x75\\x61\\x72\\x64\\x2f\\x63\\x6f\\x6e\\x66\\x69\\x67\\x2e\\x74\\x6f\\x6d\\x6c'","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=sed; {$X,} -i ~/.config/shguard/config.toml","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=shred; $X $'\\x2f\\x64\\x65\\x76\\x2f\\x73\\x64\\x61'","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"X=shred; $X /dev/\"\"sda","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"X=shred; $X /dev/sda","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"X=shred; $X `printf '%s' '$'\\x2f\\x64\\x65\\x76\\x2f\\x73\\x64\\x61''`","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"X=shred; $X `printf '%s' '/dev/sda'`","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"X=shred; $X {$'\\x2f\\x64\\x65\\x76\\x2f\\x73\\x64\\x61',}","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"X=shred; $X {~,}","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"X=shred; $X ~-","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"X=shred; $X$IFS$'\\x2f\\x64\\x65\\x76\\x2f\\x73\\x64\\x61'","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=shred; $X$IFS/dev/sda","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=shred; $X$IFS~root","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=tar; $X $'\\x2d\\x43' / -x","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}
+{"command":"X=tar; $X -C / -\"\"x","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}
+{"command":"X=tar; $X -C / -x","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}
+{"command":"X=tar; $X -C / {-x,}","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}
+{"command":"X=tar; $X -C / ~root","decision":"Block","deny_message":null,"matched_rule":"tar-directory-root-or-home"}
+{"command":"X=tar; $X {,$'\\x2d\\x43'} / -x","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}
+{"command":"X=tar; $X ~- / -x","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=tar; $X$IFS-C$IFS$(printf '%s' '/')$IFS-x","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=tar; $X$IFS-C$IFS/$IFS-''x","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=tar; $X$IFS-C$IFS/$IFS-x","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=taskset; $X $'\\x30\\x78\\x31' rm -rf $'\\x2f'","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"X=taskset; $X $'\\x30\\x78\\x31' rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"X=taskset; $X 0x1 $'\\x72\\x6d' -rf ~+","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=taskset; $X 0x1 `printf '%s' 'rm'` -rf /","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=taskset; $X 0x1 r\"\"m -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"X=taskset; $X 0x1 rm -rf ''/","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"X=taskset; $X 0x1 rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"X=taskset; $X 0x1 rm `printf '%s' '-rf'` /","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=taskset; $X 0x1 rm {,-rf} /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"X=taskset; $X 0x1 {,rm} $'\\x2d\\x72\\x66' /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"X=taskset; $X 0x1 ~/.config/shguard/config.toml -rf /","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=taskset; $X ~root rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"X=taskset; $X$IFS0x1$IFSrm$IFS-rf$IFS/","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=taskset; {,$X} 0x1 rm -rf {/,}","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=tee; $X $'\\x7e\\x2f\\x2e\\x63\\x6f\\x6e\\x66\\x69\\x67\\x2f\\x73\\x68\\x67\\x75\\x61\\x72\\x64\\x2f\\x63\\x6f\\x6e\\x66\\x69\\x67\\x2e\\x74\\x6f\\x6d\\x6c'","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-tee-tilde"}
+{"command":"X=tee; $X ~","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=tee; $X ~-","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=tee; $X ~/.config/shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-tee-tilde"}
+{"command":"X=tee; $X$IFS~-","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=tee; $X$IFS~/.config/shguard/config.toml","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=tee; {{$X,},} ~/.config/shguard/config.toml","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=ti''meout; $X 5 rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"X=timeout; $(printf '%s' '$X') 5 rm -rf $'\\x2f'","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"X=timeout; $X $'\\x35' rm ~root /","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=timeout; $X ''5 rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"X=timeout; $X 5 $(printf '%s' 'rm') -rf ''/","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=timeout; $X 5 rm -rf ''/","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"X=timeout; $X 5 rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"X=timeout; $X 5 ~ {-rf,} /","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=timeout; `printf '%s' '$X'`$IFS5$IFSrm$IFS-rf$IFS/","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"X=truncate; $X $(printf '%s' '-s') ''0 /important","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=truncate; $X -''s 0 /important","decision":"Block","deny_message":null,"matched_rule":"truncate-zero"}
+{"command":"X=truncate; $X -s 0 /important","decision":"Block","deny_message":null,"matched_rule":"truncate-zero"}
+{"command":"X=truncate; $X -s {,0} /important","decision":"Block","deny_message":null,"matched_rule":"truncate-zero"}
+{"command":"X=truncate; $X -s ~+ /important","decision":"Block","deny_message":null,"matched_rule":"truncate-zero"}
+{"command":"X=truncate; $X {-s,} 0 ~+","decision":"Block","deny_message":null,"matched_rule":"truncate-zero"}
+{"command":"X=truncate; $X ~- 0 /important","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X=truncate; $X$IFS~root$IFS0$IFS/important","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X={,chrt}; $X -f ~ rm -rf /","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X={,git}; $X {,reset} --hard HEAD","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X={,rm}; $X {-rf,} ..","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X={,tee}; $X$IFS~/.config/shguard/config.toml","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X={cat,}; {$X,} file","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X={echo,}; $X$IFShello","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X={find,}; $X /x -delete","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X={sed,}; $X -i ~/.config/shguard/config.toml","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X={tee,}; $X {~/.config/shguard/config.toml,}","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"X={tee,}; $X ~/.config/shguard/co\"\"nfig.toml","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"`printf '%s' '$'\\x63\\x61\\x74''` file","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' '$'\\x65\\x63\\x68\\x6f''` `printf '%s' 'cm0gLXJmIC8='` | `printf '%s' 'base64'`$IFS`printf '%s' '-d'` | $'\\x73\\x68'","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' '$'\\x65\\x63\\x68\\x6f''` cm0gLXJmIC8= | {,base64}$IFS-d | {sh,}","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' '$'\\x65\\x63\\x68\\x6f''` ~ | base''64 $'\\x7e\\x72\\x6f\\x6f\\x74' | {sh,}","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' '$'\\x74\\x72\\x75\\x6e\\x63\\x61\\x74\\x65''` -s 0 ~+","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' '`printf '%s' 'find'`'` /x $'\\x2d\\x64\\x65\\x6c\\x65\\x74\\x65'","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' '`printf '%s' '{echo,}'`'` hello","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' 'chmod'` 777 /etc/passwd","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' 'chmod'`$IFS777$IFS/etc/passwd","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' 'e\"\"cho'`$IFScm0gLXJmIC8= | ba\"\"se64 ~/.config/shguard/config.toml | `printf '%s' 's\"\"h'`","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' 'e''cho'` cm0gLXJmIC8= | base64$IFS$'\\x2d\\x64' | {s''h,}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"`printf '%s' 'ec\"\"ho'` cm0gLXJmIC8= | base64$IFS`printf '%s' '-d'` | s''h","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"`printf '%s' 'ec''ho'` cm0gLXJmIC8= | `printf '%s' 'base64'`$IFS-d | s\"\"h","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' 'echo'` `printf '%s' 'cm0gLXJmIC8='` | b\"\"ase64 ~/.config/shguard/config.toml | {,s''h}","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' 'echo'` `printf '%s' '~'` | base64$IFS$(printf '%s' '-d') | $(printf '%s' 'sh')","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' 'echo'` cm0gLXJmIC8= | base64 {,-\"\"d} | {,sh}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"`printf '%s' 'echo'` cm0gLXJmIC8= | base64 ~ | s''h","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' 'echo'` cm0gLXJmIC8= | base64 ~- | sh","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' 'echo'` cm0gLXJmIC8= | base64 ~root | $'\\x73\\x68'","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' 'echo'` ~ | $'\\x62\\x61\\x73\\x65\\x36\\x34' -\"\"d | {,s''h}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"`printf '%s' 'echo'` ~+ | $(printf '%s' 'base64')$IFS-d | {$'\\x73\\x68',}","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' 'echo'`$IFS$(printf '%s' 'cm0gLXJmIC8=') | base64$IFS{,~+} | s''h","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' 'echo'`$IFScm0gLXJmIC8= | `printf '%s' 'base64'` -\"\"d | {{,sh},}","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' 'echo'`$IFScm0gLXJmIC8= | {,base64} ~- | {,$'\\x73\\x68'}","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' 'find'` /''x -delete","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' 'git'` $'\\x70\\x75\\x73\\x68' --force origin {,main}","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' 'git'` clea\"\"n -fd","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' 'git'` clean {,-fd}","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' 'git'` reset --hard HEAD","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' 'git'`$IFSpush$IFS--force$IFSorigin$IFSmain","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' 'mv'` src $'\\x7e\\x2f\\x2e\\x63\\x6f\\x6e\\x66\\x69\\x67\\x2f\\x73\\x68\\x67\\x75\\x61\\x72\\x64\\x2f\\x63\\x6f\\x6e\\x66\\x69\\x67\\x2e\\x74\\x6f\\x6d\\x6c'","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' 'mv'` src dst","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' 'rm'` -r''f ''/","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' 'sed'` -i ~/.config/shguard/config.toml","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' 'shred'` {/dev/sda,}","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' 'shred'`$IFS/dev/''sda","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' 'taskset'`$IFS~/.config/shguard/config.toml$IFSrm$IFS-rf$IFS/","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' 'tee'` $'\\x7e\\x2f\\x2e\\x63\\x6f\\x6e\\x66\\x69\\x67\\x2f\\x73\\x68\\x67\\x75\\x61\\x72\\x64\\x2f\\x63\\x6f\\x6e\\x66\\x69\\x67\\x2e\\x74\\x6f\\x6d\\x6c'","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' 'tee'` ~/.config/shguard/config.toml","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' 'tee'`$IFS~/.config/shguard/config.toml","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"`printf '%s' 'truncate'` -s 0 /i''mportant","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"bus\"\"ybox rm -''rf $(printf '%s' '/')","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"busybox $'\\x72\\x6d' -rf $'\\x2f'","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"busybox $'\\x7e\\x72\\x6f\\x6f\\x74' -rf /","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"busybox $(printf '%s' 'rm') -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"busybox mkswap /dev/sda1","decision":"Block","deny_message":null,"matched_rule":"mkswap-any-device"}
+{"command":"busybox rm -\"\"rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"busybox rm -rf ~","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"busybox rm -rf ~/.config/shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-rm-tilde"}
+{"command":"busybox rm `printf '%s' '-rf'` /","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"busybox {rm,} -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"busybox$IFS$'\\x72\\x6d'$IFS-rf$IFS/","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"busybox$IFSr\"\"m$IFS$(printf '%s' '-rf')$IFS/","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"busybox$IFSr\"\"m$IFS-rf$IFS~/.config/shguard/config.toml","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"busybox$IFSrm$IFS$'\\x2d\\x72\\x66'$IFS''/","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"busybox$IFSrm$IFS-rf$IFS/","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"busybox$IFSrm$IFS-rf$IFS~-","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"busybox$IFSrm$IFS~$IFS$'\\x2f'","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"busybox$IFSrm$IFS~$IFS/","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"busybox$IFSrm$IFS~/.config/shguard/config.t''oml$IFS/","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"busybox$IFS{,rm}$IFS~+$IFS/","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"busybox$IFS~/.config/shguard/config.toml$IFS-rf$IFS/","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"c\"\"hmod 777 ~-","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"c\"\"p ~+ target.toml","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"c''at $(printf '%s' 'file')","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"c''at$IFS{,file}","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"c''p evil.toml $'\\x74\\x61\\x72\\x67\\x65\\x74\\x2e\\x74\\x6f\\x6d\\x6c'","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"c''p evil.toml target.toml","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"ca\"\"t$IFS~+","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"cat $'\\x66\\x69\\x6c\\x65'","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"cat $(printf '%s' '~')","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"cat f\"\"ile","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"cat {,file}","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"cat {file,}","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"cat$IFSfile","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"ch\"\"rt -f ~ rm $'\\x2d\\x72\\x66' /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"chmod $'\\x37\\x37\\x37' /etc/passwd","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"chmod 777 $'\\x2f\\x65\\x74\\x63\\x2f\\x70\\x61\\x73\\x73\\x77\\x64'","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"chmod 777 $'\\x7e\\x72\\x6f\\x6f\\x74'","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"chmod 777 $(printf '%s' '/etc/passwd')","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"chmod 777 /etc/pas''swd","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"chmod 777 `printf '%s' '/etc/passwd'`","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"chmod 777 ~+","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"chmod `printf '%s' '777'` $'\\x2f\\x65\\x74\\x63\\x2f\\x70\\x61\\x73\\x73\\x77\\x64'","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"chmod {,777} ~/.config/shguard/config.toml","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"chmod {777,} /etc/p''asswd","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"chmod ~+ /etc/passwd","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"chmod ~/.config/shguard/config.toml /etc/passwd","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"chmod ~/.config/shguard/config.toml `printf '%s' '/etc/passwd'`","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"chmod$IFS$'\\x37\\x37\\x37'$IFS/etc/passwd","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"chmod$IFS777$IFS/etc/passwd","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"chmod$IFS~-$IFS/et''c/passwd","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"chrt $(printf '%s' '-f') $(printf '%s' '99') ~ -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"chrt $(printf '%s' '-f') 99 rm -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"chrt $(printf '%s' '{-f,}') 99 `printf '%s' 'rm'` -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"chrt -''f 99 rm {,-rf} /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"chrt -f 9''9 rm `printf '%s' '-rf'` /","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"chrt -f 9''9 rm {,-rf} /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"chrt -f 99 rm -rf $'\\x2f'","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"chrt -f 99 rm -rf ~","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"chrt -f 99 ~ -rf /","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"chrt -f 99 ~+ -rf /","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"chrt -f {,99} rm -rf {/,}","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"chrt -f ~root rm -rf ''/","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"chrt `printf '%s' '-f'` 99 rm -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"chrt {-f,} 99 rm -rf ~-","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"chrt$IFS-''f$IFS9\"\"9$IFSrm$IFS-rf$IFS/","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"chrt$IFS-f$IFS99$IFSrm$IFS-rf$IFS''~","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"chrt$IFS-f$IFS99$IFSrm$IFS-rf$IFS/","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"chrt$IFS-f$IFS99$IFS~$IFS-rf$IFS~-","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"chrt$IFS-f$IFS99$IFS~-$IFS-rf$IFS$(printf '%s' '/')","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"chrt$IFS-f$IFS~-$IFSrm$IFS-rf$IFS/","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"cp $'\\x65\\x76\\x69\\x6c\\x2e\\x74\\x6f\\x6d\\x6c' target.toml","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"cp $'\\x65\\x76\\x69\\x6c\\x2e\\x74\\x6f\\x6d\\x6c' ~ro''ot","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"cp `printf '%s' 'evil.toml'` target.toml","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"cp evi''l.toml target.toml","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"cp evil.\"\"toml target.toml","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"cp evil.toml $'\\x74\\x61\\x72\\x67\\x65\\x74\\x2e\\x74\\x6f\\x6d\\x6c'","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"cp evil.toml `printf '%s' 'target.toml'`","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"cp evil.toml tar\"\"get.toml","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"cp ~ target.toml","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"cp ~+ target.toml","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"cp ~/.config/shguard/config.toml target.to\"\"ml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-cp-tilde"}
+{"command":"cp ~root $'\\x74\\x61\\x72\\x67\\x65\\x74\\x2e\\x74\\x6f\\x6d\\x6c'","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"cp ~root target.toml","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"cp$IFS$'\\x65\\x76\\x69\\x6c\\x2e\\x74\\x6f\\x6d\\x6c'$IFStarget.toml","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"cp$IFS$'\\x65\\x76\\x69\\x6c\\x2e\\x74\\x6f\\x6d\\x6c'$IFS~/.config/shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-cp-tilde"}
+{"command":"cp$IFSevil.toml$IFS$'\\x74\\x61\\x72\\x67\\x65\\x74\\x2e\\x74\\x6f\\x6d\\x6c'","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"cp$IFSevil.toml$IFStarget.toml","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"cp$IFSevil.toml$IFS~+","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"d\"\"d if=/dev/zero of=/dev/sda","decision":"Block","deny_message":null,"matched_rule":"dd-write-device"}
+{"command":"d\"\"d {if=/dev/zero,} of=/dev/sda","decision":"Block","deny_message":null,"matched_rule":"dd-write-device"}
+{"command":"d''d `printf '%s' 'if=/dev/zero'` of=/dev/sda","decision":"Block","deny_message":null,"matched_rule":"dd-write-device"}
+{"command":"d''d$IFSif=/dev/zero$IFSof=/dev/sda","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"dd $(printf '%s' 'if=/dev/zero') of=/dev/sda","decision":"Block","deny_message":null,"matched_rule":"dd-write-device"}
+{"command":"dd $(printf '%s' 'if=/dev/zero') ~''root","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"dd `printf '%s' 'if=/dev/zero'` of=/dev/sda","decision":"Block","deny_message":null,"matched_rule":"dd-write-device"}
+{"command":"dd if=/dev/zero $(printf '%s' 'of=/dev/sda')","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"dd if=/dev/zero `printf '%s' 'of=/dev/sda'`","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"dd if=/dev/zero ~/.config/shguard/config.toml","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"dd ~root ~+","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"dd$IFSif=/dev/zero$IFS$(printf '%s' 'of=/dev/sda')","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"dd$IFSif=/dev/zero$IFSof=/dev/sda","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"e\"\"cho cm0gLXJmIC8= | base64 $'\\x2d\\x64' | sh","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"e\"\"cho cm0gLXJmIC8= | base64 $(printf '%s' '{,-d}') | $(printf '%s' '$(printf '%s' 'sh')')","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"e\"\"cho cm0gLXJmIC8= | base64 ~root | s\"\"h","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
+{"command":"e\"\"cho {,cm0gLXJmIC8=} | $(printf '%s' 'base64')$IFS`printf '%s' '-d'` | $(printf '%s' 'sh')","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"e\"\"cho {cm0gLXJmIC8=,} | $'\\x62\\x61\\x73\\x65\\x36\\x34' $(printf '%s' '-d') | {sh,}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"e\"\"cho ~+ | base64$IFS`printf '%s' '-d'` | {sh,}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"e\"\"cho ~- | base64$IFS~ | `printf '%s' 'sh'`","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"e\"\"cho$IFScm0gLXJmIC8= | $'\\x62\\x61\\x73\\x65\\x36\\x34'$IFS-d | $(printf '%s' '$'\\x73\\x68'')","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"e\"\"cho$IFScm0gLXJmIC8= | $(printf '%s' '$'\\x62\\x61\\x73\\x65\\x36\\x34'') ~ | $(printf '%s' '{sh,}')","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"e\"\"cho$IFScm0gLXJmIC8= | $(printf '%s' 'base64') {{-d,},} | $(printf '%s' '$(printf '%s' 'sh')')","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"e\"\"cho$IFS~+ | base64 ~root | $(printf '%s' 'sh')","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"e''cho $'\\x7e\\x72\\x6f\\x6f\\x74' | {,base64} ~ | $'\\x73\\x68'","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
+{"command":"e''cho `printf '%s' 'cm0gLXJmIC8='` | base64$IFS-''d | `printf '%s' 'sh'`","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"e''cho cm0gLXJmIC8= | base64$IFS-d | sh","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"e''cho cm0gLXJmIC8= | base64$IFS-d | {,sh}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"e''cho ~/.config/shguard/config.toml | base64 ~/.config/shguard/config.toml | sh","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
+{"command":"e''cho$IFScm0gLXJmIC8= | b''ase64 ~/.config/shguard/config.toml | {,sh}","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"e''cho$IFScm0gLXJmIC8= | base64 {`printf '%s' '{-d,}'`,} | {,sh}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"e''cho$IFS~/.config/shguard/config.toml | base64 $'\\x7e' | {sh,}","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"ec\"\"ho cm0gLXJmIC8= | `printf '%s' 'base64'` {,-d} | sh","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"ec\"\"ho cm0gLXJmIC8= | `printf '%s' 'base64'` ~root | $(printf '%s' '$(printf '%s' 'sh')')","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"ec\"\"ho cm0gLXJmIC8= | bas\"\"e64 $(printf '%s' '-\"\"d') | `printf '%s' 'sh'`","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"ec\"\"ho {,cm0gLXJmIC8=} | base64$IFS{,-d} | s''h","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"ec\"\"ho {,cm0gLXJmIC8=} | base64$IFS~+ | `printf '%s' 'sh'`","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"ec\"\"ho ~ | ba\"\"se64 -''d | $(printf '%s' 'sh')","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"ec\"\"ho ~+ | $'\\x62\\x61\\x73\\x65\\x36\\x34' ~ | `printf '%s' 'sh'`","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"ec\"\"ho ~/.config/shguard/config.toml | base64 {,~root} | $'\\x73\\x68'","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
+{"command":"ec\"\"ho ~/.config/shguard/config.toml | {{,base64},} -d | $'\\x73\\x68'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"ec\"\"ho$IFS$(printf '%s' 'cm0gLXJmIC8=') | $'\\x62\\x61\\x73\\x65\\x36\\x34' {-d,} | {$'\\x73\\x68',}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"ec\"\"ho$IFScm0gLXJmIC8= | base64 ~ | {,sh}","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"ec\"\"ho$IFS{,hello}","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"ec\"\"ho$IFS{cm0gLXJmIC8=,} | b\"\"ase64$IFS~root | `printf '%s' 's''h'`","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"ec''ho cm0gLXJmIC8= | base64 ~/.config/shguard/config.toml | s\"\"h","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
+{"command":"ec''ho cm0gLXJmIC8= | base64$IFS-d | $(printf '%s' 'sh')","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"ec''ho ~ | base''64 $(printf '%s' '`printf '%s' '-d'`') | {,{sh,}}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"ec''ho ~+ | {,base64} {,-d} | sh","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"ec''ho ~/.config/shguard/config.toml | $'\\x62\\x61\\x73\\x65\\x36\\x34'$IFS-\"\"d | sh","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"ec''ho ~root | `printf '%s' 'base64'`$IFS`printf '%s' '-d'` | {,{,sh}}","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"ec''ho$IFScm0gLXJmIC8= | $(printf '%s' 'base64') ~+ | $'\\x73\\x68'","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"ec''ho$IFScm0gLXJmIC8= | base64 ~+ | $'\\x73\\x68'","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"ec''ho$IFScm0gLXJmIC8= | base64$IFS~+ | $(printf '%s' '$'\\x73\\x68'')","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"ec''ho$IFS~ | $'\\x62\\x61\\x73\\x65\\x36\\x34'$IFS$'\\x2d\\x64' | $'\\x73\\x68'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"ech\"\"o $'\\x7e\\x2d' | base64$IFS$'\\x2d\\x64' | s''h","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"ech\"\"o $(printf '%s' 'hello')","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"ech\"\"o cm0gLXJmIC8= | bas''e64 -d | $'\\x73\\x68'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"ech\"\"o cm0gLXJmIC8= | base64 {,-d} | $(printf '%s' 'sh')","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"ech\"\"o hel''lo","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"ech\"\"o ~ | $(printf '%s' '{,base64}') -\"\"d | $(printf '%s' 'sh')","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"ech\"\"o$IFScm0gLXJmIC8= | base64 ~roo\"\"t | {sh,}","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"ech\"\"o$IFS~+ | $'\\x62\\x61\\x73\\x65\\x36\\x34' ~''- | $'\\x73\\x68'","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"ech''o `printf '%s' '~root'` | $'\\x62\\x61\\x73\\x65\\x36\\x34' ~- | $'\\x73\\x68'","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
+{"command":"ech''o cm0gLXJmIC8= | $'\\x62\\x61\\x73\\x65\\x36\\x34' $'\\x2d\\x64' | `printf '%s' 'sh'`","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"ech''o cm0gLXJmIC8= | base64 -\"\"d | {,sh}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"ech''o cm0gLXJmIC8= | base64 ~ | sh","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
+{"command":"ech''o cm0gLXJmIC8= | base64$IFS-d | $(printf '%s' 'sh')","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"ech''o ~ | base64 {,$(printf '%s' '-d')} | {s''h,}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"ech''o$IFS~root | $(printf '%s' 'base64') ''~ | {,$'\\x73\\x68'}","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"echo $'\\x68\\x65\\x6c\\x6c\\x6f'","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo $'\\x7e\\x2f\\x2e\\x63\\x6f\\x6e\\x66\\x69\\x67\\x2f\\x73\\x68\\x67\\x75\\x61\\x72\\x64\\x2f\\x63\\x6f\\x6e\\x66\\x69\\x67\\x2e\\x74\\x6f\\x6d\\x6c' | $'\\x62\\x61\\x73\\x65\\x36\\x34'$IFS-d | {$(printf '%s' 'sh'),}","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"echo $'\\x7e\\x72\\x6f\\x6f\\x74' | base64 {~+,} | $'\\x73\\x68'","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
+{"command":"echo $(printf '%s' 'cm0gLXJmIC8=') | $(printf '%s' 'base64') -d | $'\\x73\\x68'","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"echo $(printf '%s' 'cm0gLXJmIC8=') | base64$IFS-d | `printf '%s' 'sh'`","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"echo $(printf '%s' '{,$'\\x68\\x65\\x6c\\x6c\\x6f'}')","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo $(printf '%s' '{,cm0gLXJmIC8=}') | base64 ~- | s\"\"h","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
+{"command":"echo $(printf '%s' '~-') | ba\"\"se64 -''d | s''h","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo $(printf '%s' '~root') | base\"\"64 -\"\"d | s\"\"h","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo `printf '%s' '`printf '%s' '{cm0gLXJmIC8=,}'`'` | {,base64} {-d,} | $'\\x73\\x68'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo `printf '%s' 'cm0gLXJmIC8='` | b\"\"ase64 -d | sh","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo `printf '%s' 'cm0gLXJmIC8='` | bas''e64 -d | {sh,}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo `printf '%s' 'cm0gLXJmIC8='` | base64 ~+ | `printf '%s' 'sh'`","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"echo `printf '%s' 'cm0gLXJmIC8='` | base64$IFS-d | sh","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo `printf '%s' 'hell\"\"o'`","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo `printf '%s' '~\"\"-'` | base64 {~root,} | {$'\\x73\\x68',}","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
+{"command":"echo `printf '%s' '~+'` | base\"\"64 ~ | {,s\"\"h}","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
+{"command":"echo cm0gLXJmIC8= | base64 -d | sh","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo {,$(printf '%s' 'cm0gLXJmIC8=')} | {,base64} `printf '%s' '-d'` | $'\\x73\\x68'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo {,cm0gLXJmIC8=} | base64 $'\\x2d\\x64' | `printf '%s' 'sh'`","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"echo {,cm0gLXJmIC8=} | base64 -\"\"d | sh","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo {,cm0gLXJmIC8=} | base64 `printf '%s' '-d'` | $'\\x73\\x68'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo {,cm0gLXJmIC8=} | base64 {,-d} | $'\\x73\\x68'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo {,cm0gLXJmIC8=} | base64 ~ | sh","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
+{"command":"echo {,cm0gLXJmIC8=} | base64$IFS-d | {sh,}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo {,~+}","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo {cm0gLXJmIC8=,} | `printf '%s' 'base64'` -d | sh","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"echo {cm0gLXJmIC8=,} | base64 {,-d} | {sh,}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo {cm0gLXJmIC8=,} | base64$IFS-d | $'\\x73\\x68'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo {~,} | {,$(printf '%s' '$(printf '%s' 'base64')')} -d | $(printf '%s' 'sh')","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"echo {~-,} | $'\\x62\\x61\\x73\\x65\\x36\\x34' -\"\"d | s''h","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo {~-,} | $'\\x62\\x61\\x73\\x65\\x36\\x34' {-d,} | {{sh,},}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo ~","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo ~ | $(printf '%s' 'base64') -d | sh","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"echo ~ | base64 ~ | `printf '%s' 'sh'`","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"echo ~ | base64 ~- | sh","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
+{"command":"echo ~ | {base64,} ~+ | $(printf '%s' 'sh')","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"echo ~''- | $'\\x62\\x61\\x73\\x65\\x36\\x34'$IFS-d | sh","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo ~+ | base64 {,-d} | sh","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo ~+ | base64 {-d,} | $(printf '%s' 'sh')","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"echo ~+ | base64 ~/.config/shguard/config.toml | $'\\x73\\x68'","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
+{"command":"echo ~-","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo ~- | base64 -''d | sh","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo ~/.config/shguard/config.toml | $'\\x62\\x61\\x73\\x65\\x36\\x34' `printf '%s' '-\"\"d'` | $(printf '%s' 'sh')","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"echo ~r\"\"oot | base64 ~- | $'\\x73\\x68'","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
+{"command":"echo ~root | base64 ~root | $'\\x73\\x68'","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
+{"command":"echo ~root | base64$IFS$(printf '%s' '-d') | $(printf '%s' '$(printf '%s' 'sh')')","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"echo ~root | base64$IFS-''d | s''h","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo ~root | base64$IFS`printf '%s' '-d'` | {,sh}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo$IFS$'\\x7e' | base64 {,~-} | {,sh}","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"echo$IFS$(printf '%s' 'cm0gLXJmIC8=') | $(printf '%s' 'base64') ~root | $'\\x73\\x68'","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"echo$IFS$(printf '%s' 'cm0gLXJmIC8=') | base64$IFS$'\\x2d\\x64' | `printf '%s' 'sh'`","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"echo$IFS$(printf '%s' '{cm0gLXJmIC8=,}') | base6''4 $'\\x2d\\x64' | $'\\x73\\x68'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo$IFS`printf '%s' 'cm0gLXJmIC8='` | $'\\x62\\x61\\x73\\x65\\x36\\x34' `printf '%s' '-d'` | $(printf '%s' 's''h')","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"echo$IFS`printf '%s' 'cm0gLXJmIC8='` | $'\\x62\\x61\\x73\\x65\\x36\\x34' {,-d} | `printf '%s' 'sh'`","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"echo$IFS`printf '%s' 'cm0gLXJmIC8='` | $'\\x62\\x61\\x73\\x65\\x36\\x34' ~/.config/shguard/config.toml | sh","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"echo$IFS`printf '%s' 'cm0gLXJmIC8='` | base64$IFS~ | sh","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"echo$IFS`printf '%s' 'cm0gLXJmIC8='` | {,base64} -''d | $(printf '%s' '$'\\x73\\x68'')","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"echo$IFS`printf '%s' 'cm0gLXJmIC8='` | {base64,}$IFS$(printf '%s' '-d') | $(printf '%s' '$'\\x73\\x68'')","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"echo$IFS`printf '%s' '~+'`","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"echo$IFScm0gLXJmIC8= | $'\\x62\\x61\\x73\\x65\\x36\\x34' -d | `printf '%s' 'sh'`","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"echo$IFScm0gLXJmIC8= | $'\\x62\\x61\\x73\\x65\\x36\\x34' `printf '%s' '$'\\x2d\\x64''` | {,s''h}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo$IFScm0gLXJmIC8= | $'\\x62\\x61\\x73\\x65\\x36\\x34' {-d,} | `printf '%s' 'sh'`","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"echo$IFScm0gLXJmIC8= | ba''se64 -d | sh","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo$IFScm0gLXJmIC8= | base\"\"64 -d | sh","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo$IFScm0gLXJmIC8= | base64 $'\\x2d\\x64' | sh","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo$IFScm0gLXJmIC8= | base64 $'\\x2d\\x64' | {sh,}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo$IFScm0gLXJmIC8= | base64 $(printf '%s' '-d') | s''h","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo$IFScm0gLXJmIC8= | base64 ~ | sh","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"echo$IFScm0gLXJmIC8= | base64$IFS-d | $(printf '%s' 'sh')","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"echo$IFScm0gLXJmIC8= | base64$IFS-d | s\"\"h","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo$IFScm0gLXJmIC8= | base64$IFS~/.config/shguard/c\"\"onfig.toml | `printf '%s' '{,sh}'`","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"echo$IFScm0gLXJmIC8= | {,base64} -d | $(printf '%s' 'sh')","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"echo$IFShello","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"echo$IFS{,cm0gLXJmIC8=} | base64$IFS{,-d} | {,$'\\x73\\x68'}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo$IFS{cm0gLXJmIC8=,} | $(printf '%s' 'base64')$IFS-d | `printf '%s' '`printf '%s' 'sh'`'`","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"echo$IFS{cm0gLXJmIC8=,} | base64$IFS{-d,} | sh","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo$IFS{~-,} | base64$IFS~/.config/shguar''d/config.toml | $'\\x73\\x68'","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"echo$IFS~''- | b''ase64$IFS-\"\"d | `printf '%s' 'sh'`","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"echo$IFS~+ | $(printf '%s' 'base64') $'\\x2d\\x64' | $'\\x73\\x68'","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"echo$IFS~+ | {,base64} {-d,} | sh","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo$IFS~+ | {,base64}$IFS{,-d} | {{sh,},}","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"echo$IFS~- | bas\"\"e64$IFS-\"\"d | `printf '%s' '`printf '%s' 'sh'`'`","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"echo$IFS~/\"\".config/shguard/config.toml | b''ase64 {-''d,} | {,sh}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo$IFS~/.config/shguard/config.toml | $'\\x62\\x61\\x73\\x65\\x36\\x34'$IFS-d | `printf '%s' '$'\\x73\\x68''`","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"echo$IFS~/.config/shguard/config.toml | {base64,} -''d | s\"\"h","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo$IFS~root","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"find $(printf '%s' '$'\\x2f\\x78'') `printf '%s' '-delete'`","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"find $(printf '%s' '/x') -delete","decision":"Block","deny_message":null,"matched_rule":"find-delete"}
+{"command":"find /\"\"x ~r''oot","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"find /x $(printf '%s' '-delete')","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"find /x ~-","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"find /x ~root","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"find {$'\\x2f\\x78',} -del\"\"ete","decision":"Block","deny_message":null,"matched_rule":"find-delete"}
+{"command":"find {$'\\x2f\\x78',} ~+","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"find {,/x} -delete","decision":"Block","deny_message":null,"matched_rule":"find-delete"}
+{"command":"find {/x,} -delete","decision":"Block","deny_message":null,"matched_rule":"find-delete"}
+{"command":"find {/x,} {,$(printf '%s' '-delete')}","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"find ~+ {,-delete}","decision":"Block","deny_message":null,"matched_rule":"find-delete"}
+{"command":"find ~/.config/shguard/config.toml -delete","decision":"Block","deny_message":null,"matched_rule":"find-delete"}
+{"command":"find$IFS$'\\x2f\\x78'$IFS{,-delete}","decision":"Block","deny_message":null,"matched_rule":"find-delete"}
+{"command":"find$IFS/x$IFS-de''lete","decision":"Block","deny_message":null,"matched_rule":"find-delete"}
+{"command":"find$IFS/x$IFS-delete","decision":"Block","deny_message":null,"matched_rule":"find-delete"}
+{"command":"find$IFS/x$IFS~","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"find$IFS{,$(printf '%s' '/x')}$IFS-delete","decision":"Block","deny_message":null,"matched_rule":"find-delete"}
+{"command":"find$IFS~-$IFS-delete","decision":"Block","deny_message":null,"matched_rule":"find-delete"}
+{"command":"g\"\"it ~root --force origin main","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"g\"\"it$IFSclean$IFS-fd","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"g\"\"it$IFSreset$IFS~root$IFSHEAD","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"g''it ~/.config/shguard/config.toml --force origin main","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"gi\"\"t $'\\x63\\x6c\\x65\\x61\\x6e' $'\\x2d\\x66\\x64'","decision":"Block","deny_message":null,"matched_rule":"git-clean-any"}
+{"command":"gi\"\"t $(printf '%s' 'clean') -fd","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"gi\"\"t clea\"\"n $(printf '%s' '-fd')","decision":"Block","deny_message":null,"matched_rule":"git-clean-any"}
+{"command":"gi\"\"t$IFSpush$IFS--force$IFSorigin$IFSmain","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"gi''t push --force ~/.config/shguard/config.toml main","decision":"Block","deny_message":null,"matched_rule":"git-push-force"}
+{"command":"gi''t reset -''-hard HEAD","decision":"Block","deny_message":null,"matched_rule":"git-reset-hard"}
+{"command":"gi''t reset --hard HEAD","decision":"Block","deny_message":null,"matched_rule":"git-reset-hard"}
+{"command":"git $'\\x63\\x6c\\x65\\x61\\x6e' -f''d","decision":"Block","deny_message":null,"matched_rule":"git-clean-any"}
+{"command":"git $'\\x63\\x6c\\x65\\x61\\x6e' -fd","decision":"Block","deny_message":null,"matched_rule":"git-clean-any"}
+{"command":"git $'\\x72\\x65\\x73\\x65\\x74' --h''ard $'\\x48\\x45\\x41\\x44'","decision":"Block","deny_message":null,"matched_rule":"git-reset-hard"}
+{"command":"git $(printf '%s' 'push') --force origin m\"\"ain","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"git $(printf '%s' '~+') -fd","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"git `printf '%s' '$(printf '%s' 'clean')'` -fd","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"git `printf '%s' 'push'` `printf '%s' '--force'` origin $(printf '%s' 'main')","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"git cle''an -fd","decision":"Block","deny_message":null,"matched_rule":"git-clean-any"}
+{"command":"git clean $(printf '%s' '-fd')","decision":"Block","deny_message":null,"matched_rule":"git-clean-any"}
+{"command":"git clean -f\"\"d","decision":"Block","deny_message":null,"matched_rule":"git-clean-any"}
+{"command":"git clean `printf '%s' '-fd'`","decision":"Block","deny_message":null,"matched_rule":"git-clean-any"}
+{"command":"git commit -m 'rm -rf /'","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git pu\"\"sh --force origin ~","decision":"Block","deny_message":null,"matched_rule":"git-push-force"}
+{"command":"git push $'\\x2d\\x2d\\x66\\x6f\\x72\\x63\\x65' origin main","decision":"Block","deny_message":null,"matched_rule":"git-push-force"}
+{"command":"git push --force $(printf '%s' 'origin') mai\"\"n","decision":"Block","deny_message":null,"matched_rule":"git-push-force"}
+{"command":"git push --force origin main","decision":"Block","deny_message":null,"matched_rule":"git-push-force"}
+{"command":"git push --force origin {main,}","decision":"Block","deny_message":null,"matched_rule":"git-push-force"}
+{"command":"git push --force origin ~-","decision":"Block","deny_message":null,"matched_rule":"git-push-force"}
+{"command":"git push --force {origin,} main","decision":"Block","deny_message":null,"matched_rule":"git-push-force"}
+{"command":"git push --force ~ main","decision":"Block","deny_message":null,"matched_rule":"git-push-force"}
+{"command":"git push `printf '%s' '--force'` origin ~+","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"git push ~ origin main","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git push ~+ origin main","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git r\"\"eset --hard HEAD","decision":"Block","deny_message":null,"matched_rule":"git-reset-hard"}
+{"command":"git rese''t {,--hard} HEAD","decision":"Block","deny_message":null,"matched_rule":"git-reset-hard"}
+{"command":"git reset $(printf '%s' '$'\\x2d\\x2d\\x68\\x61\\x72\\x64'') HEAD","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"git reset $(printf '%s' '--hard') $'\\x48\\x45\\x41\\x44'","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"git reset --h''ard $'\\x48\\x45\\x41\\x44'","decision":"Block","deny_message":null,"matched_rule":"git-reset-hard"}
+{"command":"git reset --hard HEA\"\"D","decision":"Block","deny_message":null,"matched_rule":"git-reset-hard"}
+{"command":"git reset --hard {,HEAD}","decision":"Block","deny_message":null,"matched_rule":"git-reset-hard"}
+{"command":"git reset --hard {~,}","decision":"Block","deny_message":null,"matched_rule":"git-reset-hard"}
+{"command":"git reset `printf '%s' '$(printf '%s' '--hard')'` HEAD","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"git reset `printf '%s' '--hard'` HEAD","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"git reset ~ HEAD","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git reset ~+ HEAD","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git reset ~root ~","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git {,clean} -fd","decision":"Block","deny_message":null,"matched_rule":"git-clean-any"}
+{"command":"git {,clean} ~+","decision":"Block","deny_message":null,"matched_rule":"git-clean-any"}
+{"command":"git {push,} --force origin $'\\x6d\\x61\\x69\\x6e'","decision":"Block","deny_message":null,"matched_rule":"git-push-force"}
+{"command":"git {push,} --force origin main","decision":"Block","deny_message":null,"matched_rule":"git-push-force"}
+{"command":"git {push,} ~+ $(printf '%s' 'origin') main","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"git ~ -fd","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git ~+ --force $'\\x6f\\x72\\x69\\x67\\x69\\x6e' main","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git ~+ --force origin main","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git ~- $'\\x2d\\x66\\x64'","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git ~- -fd","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git ~/.config/shguard/config.toml $'\\x2d\\x2d\\x68\\x61\\x72\\x64' HEAD","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git ~/.config/shguard/config.toml --force origin main","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git$IFS$'\\x63\\x6c\\x65\\x61\\x6e'$IFS-fd","decision":"Block","deny_message":null,"matched_rule":"git-clean-any"}
+{"command":"git$IFS$(printf '%s' 'push')$IFS--force$IFSorigi''n$IFSmain","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"git$IFS$(printf '%s' 'reset')$IFS--hard$IFS`printf '%s' 'HEAD'`","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"git$IFScl''ean$IFS-f''d","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"git$IFSclean$IFS-fd","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"git$IFSclean$IFS`printf '%s' '-fd'`","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"git$IFSpush$IFS--force$IFS$'\\x6f\\x72\\x69\\x67\\x69\\x6e'$IFSmain","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"git$IFSpush$IFS--force$IFSorigin$IFSmain","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"git$IFSreset$IFS--har\"\"d$IFSHEAD","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"git$IFSreset$IFS--hard$IFSHEAD","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"git$IFSreset$IFS{,--ha\"\"rd}$IFSHEAD","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"git$IFSreset$IFS{--hard,}$IFSHEAD","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"git$IFSreset$IFS~+$IFSHEAD","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"git$IFS~root$IFS$'\\x2d\\x2d\\x68\\x61\\x72\\x64'$IFSHEAD","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"git$IFS~root$IFS-fd","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"mv $'\\x7e\\x2d' {,dst}","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"mv $'\\x7e\\x72\\x6f\\x6f\\x74' dst","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"mv $(printf '%s' 'src') $(printf '%s' 'dst')","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"mv $(printf '%s' 'src') {dst,}","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"mv $(printf '%s' 'src') ~+","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"mv src $(printf '%s' 'dst')","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"mv src `printf '%s' 'dst'`","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"mv src d''st","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"mv src ~root","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"mv {,src} ds\"\"t","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"mv {,src} dst","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"mv {sr''c,} dst","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"mv ~ $'\\x64\\x73\\x74'","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"mv ~ dst","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"mv ~+ {dst,}","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"mv ~/.config/shguard/confi\"\"g.toml `printf '%s' 'dst'`","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-mv-tilde"}
+{"command":"mv ~/.config/shguard/config.toml `printf '%s' '~-'`","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-mv-tilde"}
+{"command":"mv ~/.config/shguard/config.toml dst","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-mv-tilde"}
+{"command":"mv$IFS$'\\x73\\x72\\x63'$IFS$'\\x64\\x73\\x74'","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"mv$IFSsrc$IFS$'\\x64\\x73\\x74'","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"mv$IFSsrc$IFSdst","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"mv$IFSsrc$IFS~/.config/shguard/config.toml","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"r\"\"m -rf ..","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"r\"\"m -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"r\"\"m ~root $'\\x2e'","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"r\"\"m ~root $(printf '%s' '/')","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"r''m $'\\x2d\\x72\\x66' ..","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"r''m $(printf '%s' '-rf') `printf '%s' '.'`","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"r''m -rf $'\\x2e\\x2e'","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"r''m -rf ..","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"r''m -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"r''m ~+ ..","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"r''m ~root `printf '%s' '..'`","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"r''m$IFS$(printf '%s' '-rf')$IFS.","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"rm $'\\x2d\\x72\\x66' .","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"rm $'\\x2d\\x72\\x66' .''.","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"rm -\"\"rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"rm -''rf ~","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"rm -r''f .","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"rm -rf $'\\x2e'","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"rm -rf $'\\x2e\\x2e'","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"rm -rf $'\\x2f'","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"rm -rf $(printf '%s' '.')","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"rm -rf ''/","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"rm -rf `printf '%s' '.'`","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"rm -rf ~","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"rm -rf ~''-","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"rm -rf ~-","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"rm -rf ~/.config/shguard/config.t\"\"oml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-rm-tilde"}
+{"command":"rm -rf ~/.config/shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-rm-tilde"}
+{"command":"rm -rf ~root","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"rm {~,} .","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"rm ~- .","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"rm ~- {,..}","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"rm ~root /","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"rm$IFS-rf$IFS''.","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"rm$IFS-rf$IFS''~","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"rm$IFS-rf$IFS.","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"rm$IFS-rf$IFS..","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"rm$IFS-rf$IFS/","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"rm$IFS-rf$IFS`printf '%s' '..'`","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"rm$IFS-rf$IFS{,..}","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"rm$IFS-rf$IFS{.,}","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"rm$IFS-rf$IFS~","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"rm$IFS-rf$IFS~/.config/shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-rm-tilde"}
+{"command":"rm$IFS{-rf,}$IFS.","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"rm$IFS{-rf,}$IFS/","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"rm$IFS~$IFS$'\\x2e'","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"rm$IFS~/.config/shguard/config.toml$IFS''/","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-rm-tilde"}
+{"command":"s\"\"hred ~-","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"s\"\"hred ~root","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"s''hred$IFS`printf '%s' '/dev/sda'`","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"se\"\"d$IFS-i$IFS~/.config/shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-sed-tilde"}
+{"command":"se''d -i ~/.config/shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-sed-tilde"}
+{"command":"se''d `printf '%s' '{-i,}'` ~/.config/shguard/config.toml","decision":"Ask","deny_message":"Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected. A variable file operand (`sed -n p \"$file\"`) cannot be told apart from a script word, so expand it to a literal file path.","matched_rule":null}
+{"command":"sed $'\\x2d\\x69' ~/.config/shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-sed-tilde"}
+{"command":"sed $'\\x7e\\x2f\\x2e\\x63\\x6f\\x6e\\x66\\x69\\x67\\x2f\\x73\\x68\\x67\\x75\\x61\\x72\\x64\\x2f\\x63\\x6f\\x6e\\x66\\x69\\x67\\x2e\\x74\\x6f\\x6d\\x6c' ~/.config/shguard/config.toml","decision":"Ask","deny_message":"Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected. A variable file operand (`sed -n p \"$file\"`) cannot be told apart from a script word, so expand it to a literal file path.","matched_rule":null}
+{"command":"sed $(printf '%s' '-i') ~/.config/shguard/config.toml","decision":"Ask","deny_message":"Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected. A variable file operand (`sed -n p \"$file\"`) cannot be told apart from a script word, so expand it to a literal file path.","matched_rule":null}
+{"command":"sed -''i ~/.config/shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-sed-tilde"}
+{"command":"sed -i `printf '%s' '~/.config/shguard/config.toml'`","decision":"Ask","deny_message":"Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected. A variable file operand (`sed -n p \"$file\"`) cannot be told apart from a script word, so expand it to a literal file path.","matched_rule":null}
+{"command":"sed -i ~+","decision":"Ask","deny_message":"Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected. A variable file operand (`sed -n p \"$file\"`) cannot be told apart from a script word, so expand it to a literal file path.","matched_rule":null}
+{"command":"sed -i ~/.config/shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-sed-tilde"}
+{"command":"sed -i ~root","decision":"Ask","deny_message":"Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected. A variable file operand (`sed -n p \"$file\"`) cannot be told apart from a script word, so expand it to a literal file path.","matched_rule":null}
+{"command":"sed {,-i} ~/.config/shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-sed-tilde"}
+{"command":"sed ~+ ~/.config/shguard/config.toml","decision":"Ask","deny_message":"Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected. A variable file operand (`sed -n p \"$file\"`) cannot be told apart from a script word, so expand it to a literal file path.","matched_rule":null}
+{"command":"sed ~- ~/.config/shguard/config.toml","decision":"Ask","deny_message":"Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected. A variable file operand (`sed -n p \"$file\"`) cannot be told apart from a script word, so expand it to a literal file path.","matched_rule":null}
+{"command":"sed$IFS-i$IFS{,~/.config/shguard/config.toml}","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-sed-tilde"}
+{"command":"sed$IFS-i$IFS~/.config/shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-sed-tilde"}
+{"command":"sed$IFS{-i,}$IFS{~/.config/shguard/config.toml,}","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-sed-tilde"}
+{"command":"sed$IFS~+$IFS$'\\x7e\\x2f\\x2e\\x63\\x6f\\x6e\\x66\\x69\\x67\\x2f\\x73\\x68\\x67\\x75\\x61\\x72\\x64\\x2f\\x63\\x6f\\x6e\\x66\\x69\\x67\\x2e\\x74\\x6f\\x6d\\x6c'","decision":"Ask","deny_message":"Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected. A variable file operand (`sed -n p \"$file\"`) cannot be told apart from a script word, so expand it to a literal file path.","matched_rule":null}
+{"command":"sed$IFS~/.config/shguard/config.toml$IFS~/.config/shguard/config.toml","decision":"Ask","deny_message":"Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected. A variable file operand (`sed -n p \"$file\"`) cannot be told apart from a script word, so expand it to a literal file path.","matched_rule":null}
+{"command":"sh\"\"red ~","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"shr\"\"ed $'\\x2f\\x64\\x65\\x76\\x2f\\x73\\x64\\x61'","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"shr\"\"ed /dev/sda","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"shre\"\"d /dev/sda","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"shre''d $(printf '%s' '$(printf '%s' '/dev/sda')')","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"shre''d /d''ev/sda","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"shred $'\\x2f\\x64\\x65\\x76\\x2f\\x73\\x64\\x61'","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"shred {,/dev/sda}","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"shred {~root,}","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"shred ~","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"shred ~+","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"shred ~/.config/shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"shred ~root","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"shred$IFS/dev\"\"/sda","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"shred$IFS/dev/sda","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"shred$IFS{,$(printf '%s' '/dev/sda')}","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"shred$IFS~root","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"t\"\"ar -C / $'\\x2d\\x78'","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}
+{"command":"t\"\"ar -C / -x","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}
+{"command":"t\"\"ee ~/''.config/shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-tee-tilde"}
+{"command":"t\"\"ee ~/.config/shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-tee-tilde"}
+{"command":"t''ar -C / $'\\x2d\\x78'","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}
+{"command":"t''askset 0x1 $'\\x72\\x6d' -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"t''ee $'\\x7e\\x2f\\x2e\\x63\\x6f\\x6e\\x66\\x69\\x67\\x2f\\x73\\x68\\x67\\x75\\x61\\x72\\x64\\x2f\\x63\\x6f\\x6e\\x66\\x69\\x67\\x2e\\x74\\x6f\\x6d\\x6c'","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-tee-tilde"}
+{"command":"t''ee ~/.config/shguard/config.tom\"\"l","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-tee-tilde"}
+{"command":"t''ee ~/.config/shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-tee-tilde"}
+{"command":"t''ee$IFS~/.config/shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-tee-tilde"}
+{"command":"t''runcate $(printf '%s' '-s') $'\\x30' /important","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"t''runcate$IFS~-$IFS0$IFS/important","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"ta''r -C / -x","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}
+{"command":"ta''skset 0x1 $(printf '%s' 'rm') -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"tar $'\\x2d\\x43' / -x","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}
+{"command":"tar $(printf '%s' '-C') / -x","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"tar -\"\"C / -x","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}
+{"command":"tar -''C / -x","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}
+{"command":"tar -C $'\\x2f' -x","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}
+{"command":"tar -C $(printf '%s' '/') -x","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"tar -C ''/ -''x","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}
+{"command":"tar -C ''/ `printf '%s' '-x'`","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"tar -C / $'\\x2d\\x78'","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}
+{"command":"tar -C / $(printf '%s' '-x')","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"tar -C / {-x,}","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}
+{"command":"tar -C / ~","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"tar -C `printf '%s' '/'` -''x","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"tar -C {''/,} -x","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}
+{"command":"tar -C {,~} -x","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}
+{"command":"tar -C {/,} -x","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}
+{"command":"tar -C ~ -xf evil.tar","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}
+{"command":"tar -C ~root -x","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"tar `printf '%s' '$(printf '%s' '-C')'` / -x","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"tar {,-C} / -x","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}
+{"command":"tar {`printf '%s' '-C'`,} / -x","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"tar ~/.config/shguard/config.toml $(printf '%s' '{,/}') -x","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"tar$IFS$'\\x2d\\x43'$IFS/$IFS-x","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}
+{"command":"tar$IFS-\"\"C$IFS/$IFS-x","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}
+{"command":"tar$IFS-C$IFS/$IFS-x","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}
+{"command":"tar$IFS-C$IFS/$IFS~+","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"tar$IFS{,-C}$IFS/$IFS-x","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}
+{"command":"tar$IFS~+$IFS/$IFS-x","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"taskset $'\\x30\\x78\\x31' rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"taskset $(printf '%s' '0x1') {,rm} -rf ''/","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"taskset 0\"\"x1 rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"taskset 0x1 $(printf '%s' 'rm') -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"taskset 0x1 rm -rf ~root","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"taskset 0x1 rm {,-rf} /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"taskset 0x1 ~root -rf /","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"taskset {,0x1} rm {-rf,} /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"taskset {0x1,} $'\\x72\\x6d' -rf ~-","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"taskset$IFS0x1$IFSr''m$IFS-rf$IFS/","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"taskset$IFS0x1$IFS{rm,}$IFS$'\\x2d\\x72\\x66'$IFS/","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"taskset$IFS0x1$IFS~-$IFS-rf$IFS/","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"te\"\"e$IFS~/.config/shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-tee-tilde"}
+{"command":"te''e ~/.config/shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-tee-tilde"}
+{"command":"tee $(printf '%s' '$'\\x7e\\x2f\\x2e\\x63\\x6f\\x6e\\x66\\x69\\x67\\x2f\\x73\\x68\\x67\\x75\\x61\\x72\\x64\\x2f\\x63\\x6f\\x6e\\x66\\x69\\x67\\x2e\\x74\\x6f\\x6d\\x6c'')","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"tee `printf '%s' '~/.config/shguard/config.toml'`","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"tee {,~/.config/shguard/config.toml}","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-tee-tilde"}
+{"command":"tee ~","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"tee ~-","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"tee$IFS$(printf '%s' '~/.config/shguard/config.toml')","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"tee$IFS{,~-}","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"tee$IFS{,~/.config/shguard/config.toml}","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-tee-tilde"}
+{"command":"tee$IFS~","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"tee$IFS~/.config/shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-tee-tilde"}
+{"command":"timeou''t 5 rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"timeout ''5 rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"timeout ''5 rm -rf {,/}","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"timeout ''5 rm -rf ~-","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"timeout ''5 rm ~ /","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"timeout 5 rm -rf `printf '%s' '/'`","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"timeout 5 rm -rf ~root","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"timeout 5 rm ~ $'\\x2f'","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"timeout 5 ~ -rf /","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"timeout 5 ~- -rf /","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"timeout `printf '%s' '5'` rm -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"timeout$IFS5$IFS$'\\x72\\x6d'$IFS-\"\"rf$IFS/","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"timeout$IFS5$IFSrm$IFS$'\\x2d\\x72\\x66'$IFS/","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"timeout$IFS5$IFSrm$IFS-rf$IFS/","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"timeout$IFS5$IFSrm$IFS{,-rf}$IFS`printf '%s' '/'`","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"timeout$IFS5$IFSrm$IFS~$IFS/","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"truncate $(printf '%s' '-s') ''0 /importan\"\"t","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"truncate $(printf '%s' '-s') 0 `printf '%s' '/important'`","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"truncate -s ''0 {,/important}","decision":"Block","deny_message":null,"matched_rule":"truncate-zero"}
+{"command":"truncate -s 0 /impo\"\"rtant","decision":"Block","deny_message":null,"matched_rule":"truncate-zero"}
+{"command":"truncate -s 0 `printf '%s' '/important'`","decision":"Block","deny_message":null,"matched_rule":"truncate-zero"}
+{"command":"truncate -s ~- /important","decision":"Block","deny_message":null,"matched_rule":"truncate-zero"}
+{"command":"truncate -s ~/.config/shguard/config.toml /i\"\"mportant","decision":"Block","deny_message":null,"matched_rule":"truncate-zero"}
+{"command":"truncate {,-s} ~root /important","decision":"Block","deny_message":null,"matched_rule":"truncate-zero"}
+{"command":"truncate {-s,} 0 ~-","decision":"Block","deny_message":null,"matched_rule":"truncate-zero"}
+{"command":"truncate ~ 0 `printf '%s' '`printf '%s' '/important'`'`","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"truncate$IFS-s$IFS0$IFS/importa\"\"nt","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"truncate$IFS-s$IFS0$IFS~-","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"truncate$IFS-s$IFS{,0}$IFS/important","decision":"Block","deny_message":null,"matched_rule":"truncate-zero"}
+{"command":"truncate$IFS~/.config/shguard/config.toml$IFS{,0}$IFS/important","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"{$'\\x64\\x64',} {,if=/dev/zero} of=/dev/sda","decision":"Block","deny_message":null,"matched_rule":"dd-write-device"}
+{"command":"{$'\\x65\\x63\\x68\\x6f',} {,cm0gLXJmIC8=} | base64 ~- | `printf '%s' 'sh'`","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"{$'\\x72\\x6d',} -r\"\"f /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"{$'\\x72\\x6d',} -rf .","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"{$(printf '%s' 'echo'),} hello","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"{,$'\\x64\\x64'} $(printf '%s' 'if=/dev/zero') of=/dev/sda","decision":"Block","deny_message":null,"matched_rule":"dd-write-device"}
+{"command":"{,$'\\x65\\x63\\x68\\x6f'} cm0gLXJmIC8= | {,ba\"\"se64} -d | $'\\x73\\x68'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"{,$'\\x65\\x63\\x68\\x6f'} {cm0gLXJmIC8=,} | $'\\x62\\x61\\x73\\x65\\x36\\x34' ~/.config/shguar\"\"d/config.toml | s''h","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
+{"command":"{,$(printf '%s' 'truncate')} {-s,} 0 /important","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"{,`printf '%s' 'cat'`} file","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"{,busybox} $'\\x72\\x6d' -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"{,busybox} rm ~root /","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"{,cat} file","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"{,cat}$IFS$(printf '%s' 'file')","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"{,chmod} $'\\x37\\x37\\x37' $(printf '%s' '/etc/passwd')","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"{,chmod} 777 /etc/passwd","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"{,cp} evil.toml target.toml","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"{,cp} evil.toml {~+,}","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"{,dd}$IFS{if=/dev/zero,}$IFSof=/dev/sda","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"{,ech\"\"o} cm0gLXJmIC8= | $(printf '%s' 'base64') $'\\x2d\\x64' | {sh,}","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"{,ech\"\"o} cm0gLXJmIC8= | `printf '%s' 'base64'` ~- | {`printf '%s' 'sh'`,}","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"{,echo} $(printf '%s' 'cm0gLXJmIC8=') | $'\\x62\\x61\\x73\\x65\\x36\\x34' $'\\x2d\\x64' | {s''h,}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"{,echo} $(printf '%s' 'cm0gLXJmIC8=') | {base64,} {,$'\\x2d\\x64'} | $'\\x73\\x68'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"{,echo} ''~ | {,base64}$IFS$'\\x2d\\x64' | {{,sh},}","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"{,echo} `printf '%s' 'cm0gLXJmIC8='` | $'\\x62\\x61\\x73\\x65\\x36\\x34' ~- | sh","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
+{"command":"{,echo} cm0gLXJmIC8= | ba''se64$IFS-d | $'\\x73\\x68'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"{,echo} cm0gLXJmIC8= | base64 {,-d} | s\"\"h","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"{,echo} cm0gLXJmIC8= | base64$IFS-d | {,sh}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"{,echo} {,cm0gLXJmIC8=} | `printf '%s' 'base64'` -\"\"d | $(printf '%s' '{sh,}')","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"{,echo} {,cm0gLXJmIC8=} | base64 {,~-} | `printf '%s' 'sh'`","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"{,echo} {,cm0gLXJmIC8=} | base64 {`printf '%s' '-d'`,} | {,sh}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"{,echo} {~,} | $'\\x62\\x61\\x73\\x65\\x36\\x34'$IFS-\"\"d | `printf '%s' '$'\\x73\\x68''`","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"{,echo} ~ | base64 {,~root} | `printf '%s' 'sh'`","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"{,echo} ~/.config/shguard/config.toml | base64 $'\\x7e' | s\"\"h","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
+{"command":"{,echo} ~root | $'\\x62\\x61\\x73\\x65\\x36\\x34' -\"\"d | {,{sh,}}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"{,echo} ~root | b\"\"ase64 $'\\x7e\\x72\\x6f\\x6f\\x74' | $(printf '%s' 'sh')","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"{,echo}$IFS$'\\x68\\x65\\x6c\\x6c\\x6f'","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"{,echo}$IFS`printf '%s' 'cm0gLXJmIC8='` | base6''4 $'\\x2d\\x64' | {,$'\\x73\\x68'}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"{,echo}$IFScm0gLXJmIC8= | base6''4$IFS$(printf '%s' '-d') | `printf '%s' '{sh,}'`","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"{,echo}$IFScm0gLXJmIC8= | base64 $(printf '%s' '$'\\x2d\\x64'') | `printf '%s' '{,sh}'`","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"{,fin\"\"d} /x -delete","decision":"Block","deny_message":null,"matched_rule":"find-delete"}
+{"command":"{,find} $'\\x2f\\x78' $'\\x2d\\x64\\x65\\x6c\\x65\\x74\\x65'","decision":"Block","deny_message":null,"matched_rule":"find-delete"}
+{"command":"{,find} /x -delete","decision":"Block","deny_message":null,"matched_rule":"find-delete"}
+{"command":"{,git} cl\"\"ean -\"\"fd","decision":"Block","deny_message":null,"matched_rule":"git-clean-any"}
+{"command":"{,git} clean $'\\x7e\\x72\\x6f\\x6f\\x74'","decision":"Block","deny_message":null,"matched_rule":"git-clean-any"}
+{"command":"{,git} push --force origin main","decision":"Block","deny_message":null,"matched_rule":"git-push-force"}
+{"command":"{,git}$IFSreset$IFS--hard$IFSHEAD","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"{,mv} src dst","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"{,mv}$IFSsrc$IFSdst","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"{,rm} $'\\x2d\\x72\\x66' $'\\x2e\\x2e'","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"{,rm} $'\\x2d\\x72\\x66' .","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"{,rm} -r\"\"f $(printf '%s' '..')","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"{,rm} -rf $(printf '%s' '.')","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"{,rm} -rf ..","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"{,rm} ~+ $(printf '%s' '/')","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"{,rm} ~+ .","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"{,rm} ~- /","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"{,sed} -i $'\\x7e\\x2f\\x2e\\x63\\x6f\\x6e\\x66\\x69\\x67\\x2f\\x73\\x68\\x67\\x75\\x61\\x72\\x64\\x2f\\x63\\x6f\\x6e\\x66\\x69\\x67\\x2e\\x74\\x6f\\x6d\\x6c'","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-sed-tilde"}
+{"command":"{,sed} -i `printf '%s' '~/.config/shguard/config.toml'`","decision":"Ask","deny_message":"Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected. A variable file operand (`sed -n p \"$file\"`) cannot be told apart from a script word, so expand it to a literal file path.","matched_rule":null}
+{"command":"{,sed} -i ~/.config/shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-sed-tilde"}
+{"command":"{,sed}$IFS-i$IFS~/.config/shguard/config.toml","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"{,shred} /dev/sda","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"{,shred} ~-","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"{,taskset} 0x1 rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"{,taskset} 0x1 {,rm} -rf $'\\x2f'","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"{,taskset}$IFS0x1$IFSrm$IFS-rf$IFS/","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"{,tee} ~/.config/shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-tee-tilde"}
+{"command":"{,timeout} 5 rm -r''f /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"{,timeout} 5 rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"{,{,chmod}} $(printf '%s' '777') /etc/passwd","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"{,{echo,}} `printf '%s' 'cm0gLXJmIC8='` | ba\"\"se64 {$'\\x2d\\x64',} | $(printf '%s' '`printf '%s' 'sh'`')","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"{busybox,} rm -rf $'\\x2f'","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"{busybox,} rm -rf {/,}","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"{cat,} $'\\x66\\x69\\x6c\\x65'","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"{cat,} ~+","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"{chmod,}$IFS777$IFS/etc/passwd","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"{cp,} $(printf '%s' 'evil.toml') target.toml","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"{cp,} e''vil.toml ~/.config/shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-cp-tilde"}
+{"command":"{cp,} {evil.toml,} target\"\".toml","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"{d\"\"d,} if=/dev/zero of=/dev/sda","decision":"Block","deny_message":null,"matched_rule":"dd-write-device"}
+{"command":"{e''cho,}$IFScm0gLXJmIC8= | $'\\x62\\x61\\x73\\x65\\x36\\x34' {~+,} | `printf '%s' 's\"\"h'`","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"{ech\"\"o,} cm0gLXJmIC8= | base64$IFS~ | {,sh}","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"{echo,} $(printf '%s' 'cm0gLXJmIC8=') | $'\\x62\\x61\\x73\\x65\\x36\\x34'$IFS~/.config/shguard/config.toml | s''h","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"{echo,} $(printf '%s' 'cm0gLXJmIC8=') | base64$IFS$(printf '%s' '-d') | {sh,}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"{echo,} `printf '%s' '~root'` | `printf '%s' 'ba''se64'` ~- | {,s\"\"h}","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"{echo,} cm0gLXJmIC8= | base64$IFS-d | $'\\x73\\x68'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"{echo,} cm0gLXJmIC8= | base64$IFS-d | sh","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"{echo,} hello","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"{echo,} {,cm0gLXJmIC8=} | `printf '%s' 'base64'`$IFS-d | s\"\"h","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"{echo,} ~roo''t | b''ase64$IFS$'\\x2d\\x64' | {sh,}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"{echo,}$IFScm0gLXJmIC8= | `printf '%s' '{base64,}'` -d | $'\\x73\\x68'","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
+{"command":"{echo,}$IFS{,cm0gLXJmIC8=} | bas\"\"e64$IFS-\"\"d | {,sh}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"{echo,}$IFS~+ | `printf '%s' 'base64'` -''d | {,s\"\"h}","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"{echo,}$IFS~- | b\"\"ase64 $'\\x2d\\x64' | {s\"\"h,}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"{find,} /x -delete","decision":"Block","deny_message":null,"matched_rule":"find-delete"}
+{"command":"{git,} push $(printf '%s' '--force') origin main","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"{git,} reset $'\\x2d\\x2d\\x68\\x61\\x72\\x64' $(printf '%s' 'HEAD')","decision":"Block","deny_message":null,"matched_rule":"git-reset-hard"}
+{"command":"{git,} reset --hard $'\\x48\\x45\\x41\\x44'","decision":"Block","deny_message":null,"matched_rule":"git-reset-hard"}
+{"command":"{git,} reset {,--hard} HEAD","decision":"Block","deny_message":null,"matched_rule":"git-reset-hard"}
+{"command":"{git,} {,clean} $'\\x2d\\x66\\x64'","decision":"Block","deny_message":null,"matched_rule":"git-clean-any"}
+{"command":"{git,} {reset,} --hard `printf '%s' 'HEAD'`","decision":"Block","deny_message":null,"matched_rule":"git-reset-hard"}
+{"command":"{git,} ~/.config/shguard/config.toml ~-","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"{mv,} src dst","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"{rm,} $'\\x2d\\x72\\x66' ~","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"{rm,} $(printf '%s' '-rf') ~+","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"{rm,} -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"{rm,} -rf {,$(printf '%s' '/')}","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"{rm,}$IFS{-rf,}$IFS..","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"{sed,} -i $'\\x7e\\x2f\\x2e\\x63\\x6f\\x6e\\x66\\x69\\x67\\x2f\\x73\\x68\\x67\\x75\\x61\\x72\\x64\\x2f\\x63\\x6f\\x6e\\x66\\x69\\x67\\x2e\\x74\\x6f\\x6d\\x6c'","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-sed-tilde"}
+{"command":"{shred,} /dev/sda","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"{shred,} {/dev/s''da,}","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"{shred,} ~-","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"{tar,} -C / -''x","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}
+{"command":"{taskset,} 0x1 r\"\"m ~root /","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"{tee,} ~/.config/shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-tee-tilde"}
+{"command":"{tee,}$IFS~/.co''nfig/shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-tee-tilde"}
+{"command":"{truncate,}$IFS-s$IFS0$IFS{,/important}","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
+{"command":"{{,echo},} ~/.config/shguard/config.toml | base64$IFS{`printf '%s' '-d'`,} | `printf '%s' '`printf '%s' '`printf '%s' 'sh'`'`'`","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}

@@ -116,6 +116,9 @@
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[path = "common/golden.rs"]
+mod golden;
+
 use std::fs;
 use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt;
@@ -1466,6 +1469,26 @@ fn env_u64(name: &str, default: u64) -> u64 {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(default)
+}
+
+// Not `DEFAULT_SEED` or the `SHGUARD_FUZZ_*` overrides: the nightly sweep
+// varies those, and the golden corpus must stay fixed.
+const GOLDEN_SEED: u64 = 659;
+const GOLDEN_CANDIDATES: usize = 1200;
+
+#[test]
+fn golden_snapshot_fuzz() {
+    let mut rng = Rng::new(GOLDEN_SEED);
+    let generated: Vec<String> = (0..GOLDEN_CANDIDATES)
+        .map(|_| generate_candidate(&mut rng).join(" | "))
+        .collect();
+    golden::check(
+        "fuzz",
+        LITERAL_SEEDS
+            .iter()
+            .copied()
+            .chain(generated.iter().map(String::as_str)),
+    );
 }
 
 /// Issue #326, now diagnosed and fixed: an unquoted `$IFS` reference

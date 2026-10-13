@@ -14,6 +14,9 @@
 
 #![allow(clippy::expect_used)]
 
+#[path = "common/golden.rs"]
+mod golden;
+
 use std::collections::HashSet;
 
 use serde::Deserialize;
@@ -108,4 +111,12 @@ fn bypass_corpus_regression() {
             verdict.decision()
         );
     }
+}
+
+#[test]
+fn golden_snapshot_bypass_corpus() {
+    golden::check(
+        "bypass_corpus",
+        parse_corpus().into_iter().map(|case| case.payload),
+    );
 }

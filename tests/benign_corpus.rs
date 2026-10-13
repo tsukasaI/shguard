@@ -6,6 +6,9 @@
 //! to catch the opposite failure mode: a rule change that starts flagging
 //! ordinary, non-dangerous commands as Ask/Block.
 
+#[path = "common/golden.rs"]
+mod golden;
+
 use shguard::verdict::Decision;
 
 const COMMANDS: &[&str] = &[
@@ -134,4 +137,9 @@ fn benign_corpus_no_false_positives() {
             verdict.reason().map(|r| r.as_str())
         );
     }
+}
+
+#[test]
+fn golden_snapshot_benign_corpus() {
+    golden::check("benign_corpus", COMMANDS);
 }
