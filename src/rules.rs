@@ -2095,19 +2095,48 @@ fn skip_delimited(bytes: &[u8], from: usize) -> Option<usize> {
         .map(|off| from + 1 + off + 1)
 }
 
+fn last_component_has_glob(head: &str) -> bool {
+    head.rsplit('/')
+        .next()
+        .is_some_and(|last| last.contains(['*', '?', '[']))
+}
+
 // Whether `word` carries a zsh glob qualifier that rewrites the paths a
 // glob yields or runs code, so no reading of it as a narrowed glob holds.
-// Not gated on a glob before the group: zsh treats `name(:h)` as a pattern
-// too. `(#q...)` is the EXTENDED_GLOB inline spelling.
+// Gated on a glob before the group: an unquoted `name(:h)` is a parse
+// error, and a quoted parenthetical (`"bump deps (retest)"`) never globs.
+// `(#q...)` is the EXTENDED_GLOB inline spelling.
 pub(crate) fn has_expanding_glob_qualifier(word: &str) -> bool {
-    let trailing = trailing_group(word)
-        .is_some_and(|(_, group)| classify_qualifier_group(group) == QualifierGroup::Expands);
+    let trailing = trailing_group(word).is_some_and(|(head, group)| {
+        last_component_has_glob(head) && classify_qualifier_group(group) == QualifierGroup::Expands
+    });
     trailing
         || word.match_indices("(#q").any(|(at, _)| {
             let rest = &word[at + 3..];
             rest.find(')')
                 .is_none_or(|end| classify_qualifier_group(&rest[..end]) != QualifierGroup::Filter)
         })
+}
+
+// The unresolved-word twin of `has_expanding_glob_qualifier`, from the
+// literal text before the first and after the last unresolved piece. A
+// group opened after a glob in the head and closed in the tail
+// (`*(e:$X:)`) holds an unknown piece, so it fails closed. A literal
+// piece between two unresolved pieces is not visible here.
+pub(crate) fn unresolved_word_may_hide_glob_qualifier(
+    head: Option<&str>,
+    tail: Option<&str>,
+) -> bool {
+    let Some(tail) = tail else {
+        return false;
+    };
+    has_expanding_glob_qualifier(tail)
+        || (tail.ends_with(')')
+            && trailing_group(tail).is_none()
+            && head.is_some_and(|head| {
+                head.match_indices('(')
+                    .any(|(at, _)| last_component_has_glob(&head[..at]))
+            }))
 }
 
 // Hard-match reading: a filter qualifier after a glob only narrows it, so
@@ -2118,10 +2147,7 @@ fn strip_filter_qualifier(path: &str) -> &str {
         Some((head, group))
             if classify_qualifier_group(group) == QualifierGroup::Filter
                 && !head.ends_with(['?', '@', '!', '+'])
-                && head
-                    .rsplit('/')
-                    .next()
-                    .is_some_and(|last| last.contains(['*', '?', '['])) =>
+                && last_component_has_glob(head) =>
         {
             head
         }
@@ -10218,6 +10244,24 @@ mod tests {
         assert!(has_expanding_glob_qualifier("x(#qe:y:)z"));
         assert!(!has_expanding_glob_qualifier("~/.config/*(/)"));
         assert!(!has_expanding_glob_qualifier("fix(rules): x (see: y)"));
+        assert!(!has_expanding_glob_qualifier("x(:h)"));
+        assert!(unresolved_word_may_hide_glob_qualifier(
+            None,
+            Some("/*(:h)")
+        ));
+        assert!(unresolved_word_may_hide_glob_qualifier(
+            Some("*(e:"),
+            Some(":)")
+        ));
+        assert!(!unresolved_word_may_hide_glob_qualifier(
+            Some("("),
+            Some(")")
+        ));
+        assert!(!unresolved_word_may_hide_glob_qualifier(
+            None,
+            Some(" (see: y)")
+        ));
+        assert!(!unresolved_word_may_hide_glob_qualifier(Some("*(e:"), None));
         for (comp, read_as) in [
             ("^nvim", Some("*")),
             ("@(shguard)", Some("*")),

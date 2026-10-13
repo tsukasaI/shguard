@@ -346,7 +346,8 @@ use crate::normalize::{
 use crate::rules::{
     AWK_INTERPRETERS, Allowlist, AllowlistOutcome, CommandRule, EVAL_BUILTIN, PathForm,
     RedirectRule, Rules, SymlinkScope, WrapperChainEscalation, has_expanding_glob_qualifier,
-    is_pipeline_interpreter, lexical_normalize, render_cwd_anchor, wrapper_chain_changes_cwd,
+    is_pipeline_interpreter, lexical_normalize, render_cwd_anchor,
+    unresolved_word_may_hide_glob_qualifier, wrapper_chain_changes_cwd,
 };
 use crate::verdict::{Decision, DenyMessage, Reason, RuleId, Verdict};
 
@@ -2171,8 +2172,17 @@ fn scan_glob_qualifier_floor(
         .cloned()
         .chain(redirect_words)
         .find_map(|word| match word.resolution() {
-            Resolution::Resolved(s) if has_expanding_glob_qualifier(s) => Some(s.clone()),
-            _ => None,
+            Resolution::Resolved(s) => has_expanding_glob_qualifier(s).then(|| s.clone()),
+            Resolution::Unresolvable(_) => {
+                unresolved_word_may_hide_glob_qualifier(word.literal_head(), word.literal_tail())
+                    .then(|| {
+                        format!(
+                            "{}<unresolved>{}",
+                            word.literal_head().unwrap_or_default(),
+                            word.literal_tail().unwrap_or_default()
+                        )
+                    })
+            }
         })?;
     Some(format!(
         "{word:?} ends in an unknown zsh qualifier expansion: a glob qualifier with a \

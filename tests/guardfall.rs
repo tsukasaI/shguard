@@ -635,6 +635,38 @@ fn guardfall_rm_dotglob_tilde_targets() {
         ("ls *(oe:'x':)", Decision::Ask),
         ("cat < *(e:'rm -rf ~':)", Decision::Ask),
         ("ls *(om[1])", Decision::Allow),
+        ("ls *(e:x:)", Decision::Ask),
+        ("ls *(+f)", Decision::Ask),
+        ("cat < *(e:x:)", Decision::Ask),
+        ("ls $DIR/*(e:x:)", Decision::Ask),
+        ("ls \"$DIR\"/*(e:x:)", Decision::Ask),
+        ("cat $DIR/*(+f)", Decision::Ask),
+        ("ls $DIR/*(:h)", Decision::Ask),
+        ("ls ${DIR}/*(:h:h)", Decision::Ask),
+        ("ls ~/$X/*(:h)", Decision::Ask),
+        ("ls $(pwd)/*(:h)", Decision::Ask),
+        ("ls \"$HOME\"/*(:h)", Decision::Ask),
+        ("ls *(e:$X:)", Decision::Ask),
+        (
+            "git commit -m \"chore: bump deps (retest)\"",
+            Decision::Allow,
+        ),
+        (
+            "git commit -m \"docs: clarify wording (e.g.)\"",
+            Decision::Allow,
+        ),
+        (
+            "gh pr create -t \"feat: add floor (+func)\" -b x",
+            Decision::Allow,
+        ),
+        ("echo \"(:wq)\"", Decision::Allow),
+        ("echo \"(eee)\"", Decision::Allow),
+        ("echo \"x(:h)\"", Decision::Allow),
+        (
+            "git commit -m \"fix(rules): keep x (see: y)\"",
+            Decision::Allow,
+        ),
+        ("echo \"$X (see: y)\"", Decision::Allow),
         ("git commit -m 'fix(rules): x (see: y)'", Decision::Allow),
         // `^` and extglob only reach the Ask floor, never a hard match:
         // `^foo` is a literal name in bash.
