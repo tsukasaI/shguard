@@ -104,6 +104,13 @@ our actual attack corpus correctly", empirically, against fixtures.
 
 ## 1. Architecture
 
+> **Superseded in direction by RFC #658** (`docs/rfc-658-architecture.md`).
+> §1.1 to §1.4 describe the layout as built. The target structure is
+> `syntax/`, `knowledge/`, `semantics/` and `policy/` modules plus the
+> existing adapters, with every decision made by one `policy::decide` over
+> typed `Evidence`. The RFC's stage plan (#659 to #662) migrates from this
+> layout to that one.
+
 ### 1.1 Four-stage pipeline
 
 ```
@@ -295,13 +302,16 @@ argument) and **legitimate-use frequency**.
 | Pipeline into an interpreter **without** a decode stage (`curl … \| sh`) | **Block** (ported rule) | Established installer-pipe rule; retained. |
 | Other pipe-to-interpreter (`cat script.sh \| bash`) | **Ask** | Content unknowable but shape is common in tutorials; human decides. |
 | Word containing `$IFS` | Normalise with default IFS, then: blocklist hit → **Block**; no hit → **Ask** | `$IFS` in a word has essentially no legitimate interactive use; a non-default IFS (reassigned earlier in a persistent session) defeats the default-IFS fold, so the residual uncertainty goes to the human. Responsibility split: the normalisation stage folds with the **default** IFS only; a **same-line** `IFS=` assignment is the structural gate's concern — it marks every `$IFS`-derived word untrusted, so the default-fold result is still blocklist-checked (hit → Block) but a miss routes to Ask, never Allow. |
+| Catalogued command (wrapper, interpreter, rule target) with an unmodelled option or spelling | **Ask** (RFC #658 invariant) | Missing knowledge fails closed exactly like unreadable syntax. Before RFC #658 an unknown wrapper flag fell through a generic dash-skip and an unknown long-option spelling read as an operand, which was the source of most fail-open bugs. Commands outside the catalog stay Allow. |
 | Parse failure / unsupported construct | **Ask** (fail-closed) | Never Allow what we could not read. Ask rather than Block keeps exotic-but-legitimate commands usable. A security control holds on every path — including the error path. |
 
 Principle: **Block** when either (a) the statically resolved argv matches a
 rule, or (b) the structure has near-zero legitimate use (decode-fed
 interpreter pipes). **Ask** when the structure is opaque but has real benign
 uses. **Allow** requires the full pipeline to have positively resolved and
-cleared every simple command, including recursed substitutions.
+cleared every simple command, including recursed substitutions, and, for
+every catalogued command, to have parsed every option against its
+declared grammar (RFC #658).
 
 ---
 
