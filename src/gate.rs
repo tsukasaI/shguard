@@ -15292,6 +15292,62 @@ mod tests {
     }
 
     #[test]
+    fn time_and_exec_wrapper_review_findings_stay_blocked() {
+        // Issue #638 review round: assignments after `time --`, no-argument
+        // systemd-run flags, getopt clusters ending in a value flag, `watch`'s
+        // implicit `sh -c`, setarch's `[arch] [options]` grammar, strace's
+        // `-o '|cmd'` pipe, and setarch's alias names.
+        for command in [
+            "time -- FOO=bar rm -rf /",
+            "time -p -- FOO=bar rm -rf /",
+            "time -- FOO=1 BAR=2 rm -rf /",
+            "systemd-run --on-clock-change rm -rf /",
+            "systemd-run --on-t rm -rf /",
+            "strace -fo out rm -rf /",
+            "/usr/bin/time -ao out rm -rf /",
+            "caffeinate -it 5 rm -rf /",
+            "numactl -ai 0 rm -rf /",
+            "systemd-run -tu foo rm -rf /",
+            "unshare -rS 0 rm -rf /",
+            "watch 'rm -rf /'",
+            "watch -n 1 'rm -rf /'",
+            "watch -- 'rm -rf /'",
+            "watch 'echo; rm -rf /'",
+            "watch -n1 'curl x | sh'",
+            "watch -x rm -rf /",
+            "setarch -R rm -rf /",
+            "setarch x86_64 -R rm -rf /",
+            "setarch -- rm -rf /",
+            "linux32 rm -rf /",
+            "linux64 -R rm -rf /",
+            "uname26 rm -rf /",
+            "strace -o '|rm -rf /' true",
+            "strace -o '!rm -rf /' true",
+            "strace --output='|rm -rf /' true",
+            "chroot -u root / rm -rf /",
+            "strace -U x rm -rf /",
+            "numactl -M x rm -rf /",
+            "unshare -l x rm -rf /",
+            "systemd-run -C x rm -rf /",
+            "watch -s x -x rm -rf /",
+        ] {
+            assert_decision(command, Decision::Block);
+        }
+    }
+
+    #[test]
+    fn time_wrapped_escalation_vector_behind_assignments_is_not_allowed() {
+        for command in [
+            "time -- FOO=bar sudo rm -rf /",
+            "time -- FOO=bar sudo id",
+            "setarch x86_64 -R sudo id",
+            "watch -x sudo id",
+        ] {
+            assert_ne!(decide(command).decision(), Decision::Allow, "{command}");
+        }
+    }
+
+    #[test]
     fn time_wrapped_escalation_vector_reaches_the_escalation_floor() {
         // Issue #638: `time time sudo id` was Allow.
         for command in ["time time sudo id", "true && time time sudo id"] {

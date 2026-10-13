@@ -934,10 +934,11 @@ fn convert_pipeline(pipeline: &bast::Pipeline) -> Result<Pipeline, ParseError> {
     let first = commands
         .next()
         .ok_or_else(|| ParseError::syntax("empty pipeline"))?;
-    let mut first = convert_command(first)?;
-    if pipeline.timed.is_some() {
-        drop_time_option_terminator(&mut first);
-    }
+    let rewritten = pipeline
+        .timed
+        .as_ref()
+        .and_then(|_| without_time_option_terminator(first));
+    let first = convert_command(rewritten.as_ref().unwrap_or(first))?;
     let rest = commands.map(convert_command).collect::<Result<_, _>>()?;
 
     Ok(Pipeline {
@@ -951,18 +952,50 @@ fn convert_pipeline(pipeline: &bast::Pipeline) -> Result<Pipeline, ParseError> {
 /// but brush strips only `-p`, leaving `--` as the command name: `time --
 /// rm -rf /` would reach the rules as the command `--`. Narrow on purpose
 /// (timed pipelines only): an untimed `-- rm` (e.g. `eval -- -- rm -rf /`)
-/// really is the command `--`.
-fn drop_time_option_terminator(first: &mut Command) {
-    let Command::Simple(simple) = first else {
-        return;
+/// really is the command `--`. Rewritten on brush's AST rather than
+/// shguard's: brush tags everything after the fake `--` command as suffix
+/// items, so `time -- FOO=bar rm` carries `FOO=bar` as a suffix word and a
+/// plain drop would make it the command name. Leading assignments and
+/// redirects move to the prefix and the first word becomes the command name,
+/// exactly as `FOO=bar rm` parses. `None` (command left untouched) unless a
+/// command word follows.
+fn without_time_option_terminator(command: &bast::Command) -> Option<bast::Command> {
+    let bast::Command::Simple(simple) = command else {
+        return None;
     };
-    let is_terminator = matches!(
-        simple.words.first(),
-        Some(Word(pieces)) if matches!(pieces.as_slice(), [WordPiece::Literal(text)] if text == "--")
-    );
-    if is_terminator && simple.words.len() > 1 {
-        simple.words.remove(0);
+    if simple.prefix.is_some() {
+        return None;
     }
+    let is_terminator = simple.word_or_name.as_ref().is_some_and(|word| {
+        matches!(
+            convert_word(word),
+            Ok(Word(pieces)) if matches!(pieces.as_slice(), [WordPiece::Literal(text)] if text == "--")
+        )
+    });
+    if !is_terminator {
+        return None;
+    }
+    let mut items = simple.suffix.as_ref()?.0.iter();
+    let mut prefix = Vec::new();
+    let mut name = None;
+    for item in items.by_ref() {
+        match item {
+            bast::CommandPrefixOrSuffixItem::AssignmentWord(..)
+            | bast::CommandPrefixOrSuffixItem::IoRedirect(_) => prefix.push(item.clone()),
+            bast::CommandPrefixOrSuffixItem::Word(word) => {
+                name = Some(word.clone());
+                break;
+            }
+            bast::CommandPrefixOrSuffixItem::ProcessSubstitution(..) => return None,
+        }
+    }
+    let name = name?;
+    let suffix: Vec<_> = items.cloned().collect();
+    Some(bast::Command::Simple(bast::SimpleCommand {
+        prefix: (!prefix.is_empty()).then_some(bast::CommandPrefix(prefix)),
+        word_or_name: Some(name),
+        suffix: (!suffix.is_empty()).then_some(bast::CommandSuffix(suffix)),
+    }))
 }
 
 fn convert_command(command: &bast::Command) -> Result<Command, ParseError> {
@@ -3620,6 +3653,18 @@ mod tests {
                 untimed,
                 "{command}: `--` must not remain as the command name"
             );
+        }
+    }
+
+    #[test]
+    fn timed_option_terminator_promotes_following_assignments_to_the_prefix() {
+        for (timed, plain) in [
+            ("time -- FOO=bar rm -rf /", "FOO=bar rm -rf /"),
+            ("time -p -- FOO=bar rm -rf /", "FOO=bar rm -rf /"),
+            ("time -- FOO=1 BAR=2 rm -rf /", "FOO=1 BAR=2 rm -rf /"),
+            ("time -- FOO=bar sudo rm -rf /", "FOO=bar sudo rm -rf /"),
+        ] {
+            assert_eq!(parse_ok(timed), parse_ok(plain), "{timed}");
         }
     }
 
