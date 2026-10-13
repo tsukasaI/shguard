@@ -9,6 +9,7 @@ mod ast;
 pub mod config;
 mod config_loader;
 mod decision_log;
+mod fs_canonicalizer;
 mod gate;
 pub mod normalize;
 mod parser;
@@ -340,9 +341,14 @@ pub fn analyze_with_policy(
     // watchdog thread can't borrow `context` itself.
     let context_owned = context.clone();
     let verdict = watchdog::bounded(move || {
+        // Composition root: the one place the symlink-resolution port
+        // `rules` defines meets its filesystem adapter.
+        let rules = policy_owned.rules.as_ref().clone().with_path_canonicalizer(
+            rules::PathCanonicalizer::new(fs_canonicalizer::canonicalize),
+        );
         let verdict = gate::analyze_with_policy_in_cwd(
             &command_owned,
-            &policy_owned.rules,
+            &rules,
             &policy_owned.allowlist,
             context_owned.cwd(),
             parse_command,

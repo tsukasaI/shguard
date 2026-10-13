@@ -40,6 +40,9 @@
 //!
 //! # File I/O stays out of this module
 //!
+//! The one place this module needs the filesystem, `resolve_symlinks`
+//! (issue #583), goes through the [`CanonicalizeFn`] port it defines; the
+//! composition root wires the adapter in ([`Rules::with_path_canonicalizer`]).
 //! Nothing here takes a path or TOML text. The composition root reads
 //! `rules/blocklist.toml`/an operator-supplied override file and hands the
 //! contents to `crate::config_loader`, which builds the specs.
@@ -1820,7 +1823,7 @@ fn strip_trailing_dot(host: url::Host<String>) -> url::Host<String> {
 /// `.`/`//`/trailing slashes and resolves `..` against components already
 /// seen in the same token — exactly what a shell does lexically, before
 /// ever touching the filesystem. No filesystem access, ever:
-/// `std::fs::canonicalize` would be wrong here — shguard does static/
+/// canonicalizing against the real filesystem would be wrong here — shguard does static/
 /// offline analysis (a target path may not exist yet, e.g. inside an
 /// unextracted tar archive) and never knows the invoking shell's cwd.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2217,12 +2220,62 @@ pub(crate) fn render_cwd_anchor(form: &PathForm) -> Option<String> {
     }
 }
 
+/// Symlink resolution as a port this module owns (`coding-guidelines/
+/// principles.md`: ports are defined next to the code that consumes them):
+/// the canonical spelling of an absolute path, or `None` when it cannot be
+/// produced (missing, unreadable, not valid UTF-8). The composition root
+/// (`src/lib.rs`) wires the filesystem adapter in through
+/// [`Rules::with_path_canonicalizer`], the way `gate` receives its parse
+/// function; this module never touches the filesystem itself.
+pub(crate) type CanonicalizeFn = fn(&str) -> Option<String>;
+
+/// The injected [`CanonicalizeFn`]. Compares equal to every other value: it
+/// is a capability, not rule data, so it never takes part in rule-set
+/// equality.
+#[derive(Clone, Copy)]
+pub(crate) struct PathCanonicalizer(CanonicalizeFn);
+
+impl PathCanonicalizer {
+    pub(crate) fn new(canonicalize: CanonicalizeFn) -> Self {
+        Self(canonicalize)
+    }
+
+    /// The default for a [`Rules`] nobody wired a canonicalizer into:
+    /// resolves nothing, so every `resolve_symlinks` exception stays
+    /// unapplied (fail-closed).
+    fn unavailable() -> Self {
+        Self(|_| None)
+    }
+
+    fn canonicalize(self, path: &str) -> Option<String> {
+        (self.0)(path)
+    }
+}
+
+impl std::fmt::Debug for PathCanonicalizer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PathCanonicalizer")
+    }
+}
+
+impl PartialEq for PathCanonicalizer {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for PathCanonicalizer {}
+
 /// The canonical (symlink-resolved) spelling of an except-target candidate
 /// for a rule with `resolve_symlinks` (issue #583). `None` on any failure so
 /// the caller fails closed: an empty or NUL-bearing token, a relative token
 /// with no absolute `base`, a path that does not exist or cannot be read, or
 /// a canonical path that is not valid UTF-8.
-fn canonical_candidate(token: &str, base: Option<&str>) -> Option<String> {
+fn canonical_candidate(
+    token: &str,
+    base: Option<&str>,
+    canonicalizer: PathCanonicalizer,
+) -> Option<String> {
     if token.is_empty() {
         return None;
     }
@@ -2236,11 +2289,7 @@ fn canonical_candidate(token: &str, base: Option<&str>) -> Option<String> {
         }
         base.join(path)
     };
-    std::fs::canonicalize(full)
-        .ok()?
-        .into_os_string()
-        .into_string()
-        .ok()
+    canonicalizer.canonicalize(full.to_str()?)
 }
 
 /// A rule matching one simple command's resolved argv: a command name, a
@@ -2500,7 +2549,7 @@ impl CommandRule {
     /// the flag values that matched `targets`.
     #[must_use]
     fn matches(&self, argv: &[NormalizedWord]) -> bool {
-        self.matches_in(argv, None)
+        self.matches_in(argv, None, PathCanonicalizer::unavailable())
     }
 
     /// [`Self::matches`] with `base`, the absolute directory a relative
@@ -2509,7 +2558,7 @@ impl CommandRule {
     /// a relative candidate then fails closed.
     ///
     /// With `resolve_symlinks = true` every candidate is canonicalized
-    /// (`std::fs::canonicalize`) before `except_targets` matching, and the
+    /// (through the injected [`PathCanonicalizer`]) before `except_targets` matching, and the
     /// canonical path must match an alternative for the exception to apply.
     /// Any canonicalization failure (missing file, permission error,
     /// relative candidate with no usable `base`) leaves the exception
@@ -2518,7 +2567,12 @@ impl CommandRule {
     /// them (on macOS `/tmp` is `/private/tmp`), so `except_targets` entries
     /// must use that spelling.
     #[must_use]
-    fn matches_in(&self, argv: &[NormalizedWord], base: Option<&str>) -> bool {
+    fn matches_in(
+        &self,
+        argv: &[NormalizedWord],
+        base: Option<&str>,
+        canonicalizer: PathCanonicalizer,
+    ) -> bool {
         let Some(rest_words) = self.matching_rest(argv) else {
             return false;
         };
@@ -2582,7 +2636,7 @@ impl CommandRule {
                 .any(|c| candidate_has_unresolved_ascent(c))
             && candidates.iter().all(|token| {
                 if self.resolve_symlinks {
-                    canonical_candidate(token, base).is_some_and(|canonical| {
+                    canonical_candidate(token, base, canonicalizer).is_some_and(|canonical| {
                         self.except_targets.iter().any(|e| e.matches(&canonical))
                     })
                 } else {
@@ -7050,6 +7104,7 @@ pub(crate) struct Rules {
     token_rules: Vec<TokenRule>,
     ask_rules: Vec<CommandRule>,
     escalation_floor: Decision,
+    path_canonicalizer: PathCanonicalizer,
 }
 
 /// Shared scan behind every worst-decision-wins `match_*` method on
@@ -7257,6 +7312,15 @@ impl Rules {
         }
         self
     }
+
+    /// Wires the symlink-resolution adapter (see [`CanonicalizeFn`]) that
+    /// `resolve_symlinks` rules canonicalize their candidates through. Called
+    /// once, from the composition root.
+    #[must_use]
+    pub(crate) fn with_path_canonicalizer(mut self, canonicalizer: PathCanonicalizer) -> Self {
+        self.path_canonicalizer = canonicalizer;
+        self
+    }
 }
 
 impl Rules {
@@ -7307,6 +7371,7 @@ impl Rules {
             token_rules,
             ask_rules: Vec::new(),
             escalation_floor: Decision::Ask,
+            path_canonicalizer: PathCanonicalizer::unavailable(),
         })
     }
 
@@ -7343,7 +7408,7 @@ impl Rules {
         base: Option<&str>,
     ) -> Option<&CommandRule> {
         worst_wins(&self.command_rules, CommandRule::decision, |rule| {
-            rule.matches_in(argv, base)
+            rule.matches_in(argv, base, self.path_canonicalizer)
         })
     }
 
@@ -7417,7 +7482,7 @@ impl Rules {
     ) -> Option<&CommandRule> {
         self.ask_rules
             .iter()
-            .find(|rule| rule.matches_in(argv, base))
+            .find(|rule| rule.matches_in(argv, base, self.path_canonicalizer))
     }
 
     /// The worst-decision [`TokenRule`] whose patterns match any of
@@ -8116,6 +8181,7 @@ pub(crate) fn merge_user_config(
             token_rules: blocklist.token_rules,
             ask_rules,
             escalation_floor,
+            path_canonicalizer: blocklist.path_canonicalizer,
         },
         Allowlist { entries },
     ))
@@ -13229,12 +13295,23 @@ mod tests {
 
     // ==== except_targets resolve_symlinks (issue #583) ====
 
-    #[cfg(unix)]
     mod resolve_symlinks {
         use super::*;
-        use std::os::unix::fs::symlink;
 
-        fn rules_excepting(dir: &std::path::Path) -> Rules {
+        /// In-memory stand-in for the filesystem adapter: `/scratch/ok.md`
+        /// is a regular file, `/scratch/link.md` a symlink out of the
+        /// scratch directory, and everything else (dangling links, files
+        /// not created yet) fails to resolve.
+        fn fake_canonicalize(path: &str) -> Option<String> {
+            match path {
+                "/scratch/ok.md" => Some("/scratch/ok.md"),
+                "/scratch/link.md" => Some("/outside/secret"),
+                _ => None,
+            }
+            .map(str::to_string)
+        }
+
+        fn rules_excepting(dir: &str) -> Rules {
             Rules::parse(&format!(
                 r#"
                 [[command]]
@@ -13242,91 +13319,71 @@ mod tests {
                 reason = "ask unless uploading from the scratch dir"
                 decision = "ask"
                 command = "upload-tool"
-                except_targets = [{{ prefix = "{}/" }}]
+                except_targets = [{{ prefix = "{dir}/" }}]
                 resolve_symlinks = true
-            "#,
-                dir.display()
+            "#
             ))
             .unwrap()
-        }
-
-        fn temp() -> (tempfile::TempDir, std::path::PathBuf) {
-            let dir = tempfile::tempdir().unwrap();
-            let canonical = dir.path().canonicalize().unwrap();
-            (dir, canonical)
+            .with_path_canonicalizer(PathCanonicalizer::new(fake_canonicalize))
         }
 
         #[test]
         fn regular_file_under_the_prefix_is_excepted_and_a_symlink_out_is_not() {
-            let (_guard, root) = temp();
-            let scratch = root.join("scratch");
-            std::fs::create_dir(&scratch).unwrap();
-            std::fs::write(scratch.join("ok.md"), "x").unwrap();
-            std::fs::write(root.join("secret"), "x").unwrap();
-            symlink(root.join("secret"), scratch.join("link.md")).unwrap();
-            symlink(root.join("gone"), scratch.join("dangling.md")).unwrap();
-            let rules = rules_excepting(&scratch);
-            let hit = |name: &str| {
-                let path = scratch.join(name);
-                rules
-                    .match_command(&argv(&["upload-tool", path.to_str().unwrap()]))
-                    .is_some()
-            };
-            assert!(!hit("ok.md"));
-            assert!(hit("link.md"));
-            assert!(hit("dangling.md"));
-            assert!(hit("missing.md"));
+            let rules = rules_excepting("/scratch");
+            let hit = |path: &str| rules.match_command(&argv(&["upload-tool", path])).is_some();
+            assert!(!hit("/scratch/ok.md"));
+            assert!(hit("/scratch/link.md"));
+            assert!(hit("/scratch/dangling.md"));
+            assert!(hit("/scratch/missing.md"));
         }
 
         #[test]
         fn relative_candidate_resolves_against_base_and_fails_closed_without_one() {
-            let (_guard, root) = temp();
-            std::fs::write(root.join("ok.md"), "x").unwrap();
-            let rules = rules_excepting(&root);
+            let rules = rules_excepting("/scratch");
             let words = argv(&["upload-tool", "ok.md"]);
-            assert!(
-                rules
-                    .match_command_in(&words, Some(root.to_str().unwrap()))
-                    .is_none()
-            );
+            assert!(rules.match_command_in(&words, Some("/scratch")).is_none());
             assert!(rules.match_command_in(&words, None).is_some());
             assert!(rules.match_command_in(&words, Some("relative")).is_some());
         }
 
         #[test]
         fn dotdot_candidate_still_fires_alongside_resolution() {
-            let (_guard, root) = temp();
-            let scratch = root.join("scratch");
-            std::fs::create_dir(&scratch).unwrap();
-            let rules = rules_excepting(&scratch);
-            let escaped = format!("{}/../scratch/x", scratch.display());
+            let rules = rules_excepting("/scratch");
             assert!(
                 rules
-                    .match_command(&argv(&["upload-tool", &escaped]))
+                    .match_command(&argv(&["upload-tool", "/scratch/../scratch/ok.md"]))
                     .is_some()
             );
         }
 
         #[test]
         fn without_the_key_matching_stays_lexical() {
-            let (_guard, root) = temp();
-            let rules = Rules::parse(&format!(
+            let rules = Rules::parse(
                 r#"
                 [[command]]
                 id = "upload"
                 reason = "r"
                 decision = "ask"
                 command = "upload-tool"
-                except_targets = [{{ prefix = "{}/" }}]
+                except_targets = [{ prefix = "/scratch/" }]
             "#,
-                root.display()
-            ))
+            )
             .unwrap();
-            let missing = format!("{}/missing", root.display());
             assert!(
                 rules
-                    .match_command(&argv(&["upload-tool", &missing]))
+                    .match_command(&argv(&["upload-tool", "/scratch/missing"]))
                     .is_none()
+            );
+        }
+
+        #[test]
+        fn an_unwired_canonicalizer_fails_closed() {
+            let wired = rules_excepting("/scratch");
+            let unwired = wired.with_path_canonicalizer(PathCanonicalizer::unavailable());
+            assert!(
+                unwired
+                    .match_command(&argv(&["upload-tool", "/scratch/ok.md"]))
+                    .is_some()
             );
         }
 
