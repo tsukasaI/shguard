@@ -1663,7 +1663,13 @@ impl TargetMatcher {
             partial_last,
             case_insensitive,
         };
-        if comps_glob_plausible(pattern, target_comps, how) {
+        // At an unknown anchor a leading glob-only component (`../*/dist`,
+        // `../*/*`) names every sibling, not a reappearing target name:
+        // aligning it with `dev` or with `~/*` would ask on any sibling
+        // cleanup. A bare `../*` still asks through the ascent-descent floor.
+        let leading_wildcard =
+            unknown_anchor && pattern.first().is_some_and(|c| is_glob_only_component(c));
+        if !leading_wildcard && comps_glob_plausible(pattern, target_comps, how) {
             return true;
         }
         if !unknown_anchor
@@ -10318,6 +10324,8 @@ mod tests {
             (&shguard, "../build/.c*"),
             (&config_dir, "../build/*"),
             (&home_glob, "../x/*"),
+            (&dev, "../*/sda"),
+            (&home_glob, "../*/*"),
             (&home_glob, "~/proj/*"),
             (&rel_glob, "build/*"),
             (&rel_glob, "*/node_modules"),

@@ -610,6 +610,20 @@ fn guardfall_rm_dotglob_tilde_targets() {
         ("rm -rf ../.c*", Decision::Ask),
         ("rm -rf ../dist/**", Decision::Allow),
         ("rm -rf ../build/.cache*", Decision::Allow),
+        ("rm -rf ../d*/sda", Decision::Ask),
+        ("rm -rf ../dev/*", Decision::Ask),
+        ("rm -rf ../*", Decision::Ask),
+        // A leading wildcard at an unknown anchor is every sibling, not a
+        // reappearing target name.
+        ("rm -rf ../*/node_modules", Decision::Allow),
+        ("rm -rf ../*/dist", Decision::Allow),
+        ("rm -rf ../*/dist/*", Decision::Allow),
+        ("rm -rf ../*/build", Decision::Allow),
+        ("rm -rf ../*/*", Decision::Allow),
+        ("rm -rf ../**/node_modules", Decision::Allow),
+        ("rm -rf ../../*/node_modules", Decision::Allow),
+        ("rm -r ../*/node_modules", Decision::Allow),
+        ("mv ../*/dist /tmp", Decision::Allow),
         // A qualifier that rewrites the yielded paths or runs code asks
         // whatever the command (interim, #666).
         ("rm -rf ~/.config/n*(:s/nvim/shguard/)", Decision::Ask),
