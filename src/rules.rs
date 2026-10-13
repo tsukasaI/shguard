@@ -4176,9 +4176,6 @@ pub(crate) const TRANSPARENT_WRAPPERS: &[&str] = &[
     "systemd-run",
     "unbuffer",
     "numactl",
-    // Not a real command: brush-parser strips the reserved word `time` and
-    // leaves its `--` terminator as the command name (`time -- rm -rf /`).
-    "--",
 ];
 
 /// The subset of [`TRANSPARENT_WRAPPERS`] that escalate privileges (issues
@@ -5237,6 +5234,9 @@ fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
 /// consumed first and the positional count applies to whatever token
 /// follows.
 fn wrapper_positional_args(wrapper: &str) -> usize {
+    // `setarch ARCH [-R ...] cmd`: its flags follow ARCH, but flags are
+    // skipped before positionals here, so `setarch x86_64 -R rm -rf /`
+    // resolves `-R` as the command (residual, issue #638).
     match wrapper {
         "timeout" | "flock" | "su" | "chrt" | "taskset" | "chroot" | "setarch" => 1,
         _ => 0,
