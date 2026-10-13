@@ -184,6 +184,10 @@ pub struct NormalizedWord {
     /// Whether the literal text before the first unresolved piece starts
     /// with `~`; see [`Self::literal_head_tilde`].
     literal_head_tilde: bool,
+    /// Literal text before the first unresolved piece of this word's
+    /// segment (`--body-file=$F` carries `--body-file=`); see
+    /// [`Self::literal_head`].
+    literal_head: Option<String>,
 }
 
 impl NormalizedWord {
@@ -202,6 +206,7 @@ impl NormalizedWord {
             single_word: true,
             literal_tail: None,
             literal_head_tilde: false,
+            literal_head: None,
         }
     }
 
@@ -217,6 +222,7 @@ impl NormalizedWord {
             single_word: true,
             literal_tail: None,
             literal_head_tilde: false,
+            literal_head: None,
         }
     }
 
@@ -236,6 +242,7 @@ impl NormalizedWord {
             single_word: false,
             literal_tail: None,
             literal_head_tilde: false,
+            literal_head: None,
         }
     }
 
@@ -260,6 +267,7 @@ impl NormalizedWord {
             single_word: true,
             literal_tail: None,
             literal_head_tilde: false,
+            literal_head: None,
         }
     }
 
@@ -281,6 +289,7 @@ impl NormalizedWord {
             single_word: false,
             literal_tail: None,
             literal_head_tilde: false,
+            literal_head: None,
         }
     }
 
@@ -294,6 +303,7 @@ impl NormalizedWord {
             single_word: true,
             literal_tail: None,
             literal_head_tilde: false,
+            literal_head: None,
         }
     }
 
@@ -315,6 +325,25 @@ impl NormalizedWord {
     pub(crate) fn with_literal_head_tilde(mut self, head_tilde: bool) -> Self {
         self.literal_head_tilde = head_tilde;
         self
+    }
+
+    /// Attaches the literal text before this unresolvable word's first
+    /// unresolved piece. Production code only calls this from
+    /// [`chunks_to_words`].
+    #[must_use]
+    pub(crate) fn with_literal_head(mut self, head: &str) -> Self {
+        if !head.is_empty() {
+            self.literal_head = Some(head.to_string());
+        }
+        self
+    }
+
+    /// For an unresolvable word, the literal text before its first
+    /// unresolved piece, when there is any: whatever the unresolved pieces
+    /// expand to, the runtime word starts with it.
+    #[must_use]
+    pub(crate) fn literal_head(&self) -> Option<&str> {
+        self.literal_head.as_deref()
     }
 
     /// For an unresolvable word, whether its literal head (text before the
@@ -1322,9 +1351,10 @@ fn chunks_to_words(
     allow_split: bool,
 ) -> Vec<NormalizedWord> {
     let mut segments = Vec::new();
-    let mut tails: Vec<(String, bool)> = Vec::new();
+    let mut tails: Vec<(String, bool, String)> = Vec::new();
     let mut tail = String::new();
     let mut head_tilde = false;
+    let mut head = String::new();
     let mut current: Result<(String, bool), (UnresolvableKind, bool)> = Ok((String::new(), false));
     for chunk in chunks {
         // issue #138: a literal chunk containing an embedded NUL byte is
@@ -1357,6 +1387,7 @@ fn chunks_to_words(
                 current = match current {
                     Ok((buf, _)) => {
                         head_tilde = buf.starts_with('~') || (buf.is_empty() && own_head_tilde);
+                        head.clone_from(&buf);
                         Err((kind, single_word))
                     }
                     // Keep the FIRST kind, but AND every chunk's
@@ -1369,18 +1400,22 @@ fn chunks_to_words(
             }
             Chunk::Split => {
                 segments.push(std::mem::replace(&mut current, Ok((String::new(), false))));
-                tails.push((std::mem::take(&mut tail), std::mem::take(&mut head_tilde)));
+                tails.push((
+                    std::mem::take(&mut tail),
+                    std::mem::take(&mut head_tilde),
+                    std::mem::take(&mut head),
+                ));
             }
             Chunk::UnresolvableTail(..) => unreachable!("normalized to Unresolvable above"),
         }
     }
     segments.push(current);
-    tails.push((tail, head_tilde));
+    tails.push((tail, head_tilde, head));
 
     segments
         .into_iter()
         .zip(tails)
-        .filter_map(|(segment, (tail, head_tilde))| match segment {
+        .filter_map(|(segment, (tail, head_tilde, head))| match segment {
             // Issue #326: `ifs_derived` must reach an `Unresolvable` segment
             // exactly like it already reaches a `Resolved` one below — a
             // segment doesn't stop being "$IFS was involved here" just
@@ -1394,7 +1429,8 @@ fn chunks_to_words(
                 };
                 Some(
                     word.with_literal_tail(&tail)
-                        .with_literal_head_tilde(head_tilde),
+                        .with_literal_head_tilde(head_tilde)
+                        .with_literal_head(&head),
                 )
             }
             Ok((text, quoted)) if quoted || !text.is_empty() || !allow_split => {

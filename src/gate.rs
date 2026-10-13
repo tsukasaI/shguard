@@ -2664,7 +2664,14 @@ fn evaluate_simple_command(
         && let Some(composed) =
             evaluate_composed_cwd(&composed_pass_argv, &command.redirections, anchor, rules)
     {
-        fold_worst(verdict, composed)
+        // On an Ask tie the composed reason wins: it names the relative
+        // token and the anchor, which an unresolved-argument floor reason
+        // does not.
+        if verdict.decision() == Decision::Ask && composed.decision() == Decision::Ask {
+            composed
+        } else {
+            fold_worst(verdict, composed)
+        }
     } else {
         verdict
     };
@@ -3590,9 +3597,10 @@ fn scan_named_user_home_floor(
     Some((
         Decision::Ask,
         format!(
-            "a target token is a named-user home shorthand (`~user`) that would match rule \
-             {:?} ({}) if `~user` expanded to an existing account's home directory; shguard \
-             cannot verify that account exists or is reachable",
+            "a target token is a tilde home form (`~user`, or `~` against an absolute target of \
+             a `target_flags` rule) that would match rule {:?} ({}) if it expanded to a matching \
+             directory; shguard cannot verify that account exists or is reachable, and does not \
+             consult $HOME",
             rule.id().as_str(),
             rule.reason().as_str(),
         ),
@@ -9332,13 +9340,36 @@ fn compound_command_may_change_cwd(compound: &CompoundCommand) -> bool {
 /// `anchor/of=X` is a similar, accepted no-match gap for v1 (this pass can
 /// only under-widen from it, never over-widen — additive-only, see
 /// `CwdContext`'s own docs).
-fn compose_argv_against_cwd(argv: &[NormalizedWord], anchor: &str) -> Vec<NormalizedWord> {
+///
+/// The one exception to the dash rule is the glued value of a flag some rule
+/// lists in `target_flags` (`--body-file=notes.md`, `-Fnotes.md`): only the
+/// value part is composed, so the flag spelling a rule matches on survives
+/// (issue #625).
+fn compose_argv_against_cwd(
+    argv: &[NormalizedWord],
+    anchor: &str,
+    rules: &Rules,
+) -> Vec<NormalizedWord> {
     argv.iter()
         .map(|word| match word.resolution() {
             Resolution::Resolved(s)
                 if !s.starts_with('-') && matches!(lexical_normalize(s), PathForm::Rel { .. }) =>
             {
                 NormalizedWord::resolved(format!("{anchor}/{s}"))
+            }
+            Resolution::Resolved(s) if s.starts_with('-') => {
+                match rules
+                    .target_flag_glued_value_offset(s)
+                    .map(|at| s.split_at(at))
+                {
+                    Some((flag, value))
+                        if matches!(lexical_normalize(value), PathForm::Rel { .. })
+                            && !value.starts_with('-') =>
+                    {
+                        NormalizedWord::resolved(format!("{flag}{anchor}/{value}"))
+                    }
+                    _ => word.clone(),
+                }
             }
             _ => word.clone(),
         })
@@ -9377,7 +9408,7 @@ fn evaluate_composed_cwd(
     anchor: &CwdAnchor,
     rules: &Rules,
 ) -> Option<Verdict> {
-    let composed_argv = compose_argv_against_cwd(argv, &anchor.path);
+    let composed_argv = compose_argv_against_cwd(argv, &anchor.path, rules);
     let mut worst = evaluate_composed_argv_match(&composed_argv, argv, &anchor.describe(), rules);
     if let Some(redirect_verdict) =
         evaluate_composed_cwd_redirects(argv, redirections, anchor, rules)
@@ -9902,7 +9933,11 @@ fn tar_dashless_leading_cluster_directory(
 /// single-occurrence version of this function used for the whole
 /// invocation. `None` only when there is no occurrence at all, or not one
 /// of them ever resolves to a known anchor.
-fn resolve_tar_dash_c(rest: &[NormalizedWord], env: &Env) -> Option<Vec<NormalizedWord>> {
+fn resolve_tar_dash_c(
+    rest: &[NormalizedWord],
+    env: &Env,
+    rules: &Rules,
+) -> Option<Vec<NormalizedWord>> {
     struct Occurrence {
         raw: Option<String>,
         flag_start: usize,
@@ -9972,8 +10007,11 @@ fn resolve_tar_dash_c(rest: &[NormalizedWord], env: &Env) -> Option<Vec<Normaliz
         };
         if let CwdContext::Known(anchor) = &current {
             let range = &rest[occurrence.after..range_end];
-            composed[occurrence.after..range_end]
-                .clone_from_slice(&compose_argv_against_cwd(range, &anchor.path));
+            composed[occurrence.after..range_end].clone_from_slice(&compose_argv_against_cwd(
+                range,
+                &anchor.path,
+                rules,
+            ));
             any_composed = true;
         }
     }
@@ -10020,7 +10058,7 @@ fn evaluate_env_dash_c_override(
     let env_prefix = &argv[env_prefix_start..env_prefix_end];
     let anchor = chain_dash_c_targets(env_prefix, &["--chdir"], true, Some("env"), env)?;
     let mut composed_argv = argv[..env_prefix_end].to_vec();
-    composed_argv.extend(compose_argv_against_cwd(wrapped_tail, &anchor));
+    composed_argv.extend(compose_argv_against_cwd(wrapped_tail, &anchor, rules));
     evaluate_composed_argv_match(
         &composed_argv,
         argv,
@@ -10430,11 +10468,11 @@ fn evaluate_dash_c_override(argv: &[NormalizedWord], env: &Env, rules: &Rules) -
                 cluster_wrapper,
                 env,
             )?;
-            let composed_argv = compose_argv_against_cwd(argv, &anchor);
+            let composed_argv = compose_argv_against_cwd(argv, &anchor, rules);
             evaluate_composed_argv_match(&composed_argv, argv, "this invocation's own `-C`", rules)
         }
         "tar" => {
-            let composed_rest = resolve_tar_dash_c(rest, env)?;
+            let composed_rest = resolve_tar_dash_c(rest, env, rules)?;
             let prefix_len = argv.len() - rest.len();
             let mut composed_argv = argv[..prefix_len].to_vec();
             composed_argv.extend(composed_rest);
@@ -19204,7 +19242,7 @@ done"#,
             NormalizedWord::resolved("./script.sh"),
             NormalizedWord::resolved("arg"),
         ];
-        let composed = compose_argv_against_cwd(&argv, "/tmp");
+        let composed = compose_argv_against_cwd(&argv, "/tmp", &Rules::embedded().unwrap());
         assert_eq!(
             composed[0].resolution(),
             &Resolution::Resolved("/tmp/./script.sh".to_string()),

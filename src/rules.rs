@@ -984,6 +984,23 @@ impl ValueFlag {
                 .is_some_and(|rest| rest.starts_with('=')),
         }
     }
+
+    /// Whether a word whose literal text before its first unresolved piece
+    /// is `head` could be this flag with its value attached: `--name=`
+    /// compatible for a long flag, a single-dash cluster holding the letter
+    /// for a short one. Fail-closed on a head that is merely a prefix of
+    /// the spelling (`--body` before `$X`).
+    fn may_begin_attached_value(&self, head: &str) -> bool {
+        match self {
+            Self::Short(c) => head.strip_prefix('-').is_some_and(|rest| {
+                !rest.starts_with('-') && (rest.is_empty() || rest.contains(*c))
+            }),
+            Self::Long(name) => {
+                let spelling = format!("--{name}=");
+                spelling.starts_with(head) || head.starts_with(&spelling)
+            }
+        }
+    }
 }
 
 /// One alternative shape a dangerous target may take. A [`CommandRule`]'s
@@ -1595,6 +1612,29 @@ impl TargetMatcher {
             lexical_normalize(remainder),
             PathForm::NamedUserHome | PathForm::NamedUserHomeEscapes(_)
         )
+    }
+
+    /// Whether `token` starts with `~` and this matcher is anchored at an
+    /// absolute path with no `strip` slot, so the tilde might expand to a
+    /// home directory under it. `$HOME` is deliberately not consulted: the
+    /// home directory is not known when the rule is evaluated, so any tilde
+    /// form is treated as possibly landing on any absolute target. Ask-only,
+    /// like the other plausibility floors, and used only for rules declaring
+    /// `target_flags` ([`CommandRule::matches_named_user_home_floor`]).
+    fn tilde_may_reach_absolute(&self, token: &str) -> bool {
+        let absolute = match self {
+            Self::NormalizedExact {
+                strip: None,
+                target: PathForm::Abs(_),
+                ..
+            } => true,
+            Self::NormalizedPrefix {
+                strip: None, canon, ..
+            } => canon.starts_with('/'),
+            Self::Exact(text) | Self::Prefix(text) => text.starts_with('/'),
+            _ => false,
+        };
+        absolute && token.starts_with('~')
     }
 
     /// issue #88's Ask-only floor check: true when this matcher declares
@@ -2786,10 +2826,30 @@ impl CommandRule {
         }
         // Not `target_match_candidates`: a listed flag hidden in an
         // unresolvable word (`gh $X /Users/me/.ssh/id`) leaves its resolved
-        // value outside the scoped walk, so every resolved word counts here.
-        if resolved_strings(&rest_words)
-            .iter()
-            .any(|token| self.matches_targets(token))
+        // value outside the scoped walk. With `target_flags`, only a
+        // resolved word right after an unresolved one can be that value, so
+        // a subcommand never stands in for the target.
+        let hidden_flag_candidates = if self.target_flags.is_empty() {
+            resolved_strings(&rest_words)
+        } else {
+            resolved_words_after_unresolved(&rest_words)
+        };
+        if hidden_flag_candidates.iter().any(|token| {
+            self.matches_targets(token)
+                || (!self.target_flags.is_empty()
+                    && self
+                        .targets
+                        .iter()
+                        .any(|t| t.tilde_may_reach_absolute(token)))
+        }) {
+            return true;
+        }
+        // Only the plain probe: an attached value hides regardless of the
+        // cwd, so the composed and unknown-cwd probes leaving it to the plain
+        // one keeps a composed reason about the token composition changed.
+        if role_counting
+            && prune_home
+            && self.unresolved_word_may_hide_attached_target_flag(&rest_words)
         {
             return true;
         }
@@ -2808,6 +2868,55 @@ impl CommandRule {
             return true;
         }
         self.command.matches("sed") && sed_tail_has_at_most_one_resolved_operand(&rest_words)
+    }
+
+    /// [`Rules::target_flag_glued_value_offset`] for this rule alone.
+    fn target_flag_glued_value_offset(&self, token: &str) -> Option<usize> {
+        if self.target_flags.is_empty() {
+            return None;
+        }
+        if self
+            .target_flags
+            .iter()
+            .any(|f| f.attached_value_token(token))
+        {
+            return token.find('=').map(|index| index + 1);
+        }
+        let shorts: Vec<char> = self
+            .target_flags
+            .iter()
+            .filter_map(|f| match f {
+                ValueFlag::Short(c) => Some(*c),
+                ValueFlag::Long(_) => None,
+            })
+            .collect();
+        let value = attached_value_candidate(token, &shorts, &self.value_flags)?;
+        let start = token.len() - value.len();
+        Some(start + usize::from(value.starts_with('=')))
+    }
+
+    /// Whether an unresolved word could be a listed `target_flags` flag with
+    /// its value attached (`--body-file=$F`, `-F$F`, or a bare `"$X"` that
+    /// expands to `--body-file=/etc/passwd`), so one word fills both the flag
+    /// and the target role and role counting cannot rule it out (issue #625).
+    /// A word the rule's `value_flags` consume as a value is skipped. Without
+    /// `target_flags` this is always `false`.
+    fn unresolved_word_may_hide_attached_target_flag(&self, rest_words: &[NormalizedWord]) -> bool {
+        if self.target_flags.is_empty() {
+            return false;
+        }
+        let consumed = value_flag_consumed(rest_words, &self.value_flags);
+        rest_words.iter().zip(consumed).any(|(word, consumed)| {
+            if consumed || !matches!(word.resolution(), Resolution::Unresolvable(_)) {
+                return false;
+            }
+            let Some(head) = word.literal_head() else {
+                return true;
+            };
+            self.target_flags
+                .iter()
+                .any(|flag| flag.may_begin_attached_value(head))
+        })
     }
 
     /// Whether `word` is an unresolvable word that might still be this
@@ -3058,7 +3167,15 @@ impl CommandRule {
     /// `crate::gate::scan_named_user_home_floor`).
     #[must_use]
     pub(crate) fn matches_named_user_home_floor(&self, argv: &[NormalizedWord]) -> bool {
-        self.matches_resolved_tail_floor(argv, TargetMatcher::named_user_home_plausible)
+        // Issue #625: a rule scoped by `target_flags` also floors any
+        // `~`-form flag value against its absolute targets (`--body-file
+        // ~/.ssh/id` vs `/Users/`), since the tilde never normalizes into
+        // an absolute path here.
+        let scoped = !self.target_flags.is_empty();
+        self.matches_resolved_tail_floor(argv, |target, token| {
+            target.named_user_home_plausible(token)
+                || (scoped && target.tilde_may_reach_absolute(token))
+        })
     }
 
     /// issue #88: true when this rule's command+flags match `argv` (via
@@ -3124,7 +3241,7 @@ impl CommandRule {
     fn matches_resolved_tail_floor(
         &self,
         argv: &[NormalizedWord],
-        plausible: fn(&TargetMatcher, &str) -> bool,
+        plausible: impl Fn(&TargetMatcher, &str) -> bool,
     ) -> bool {
         if self.targets.is_empty() {
             return false;
@@ -3939,6 +4056,19 @@ fn target_flag_match_values<'a>(
         }
     }
     values
+}
+
+/// The resolved words that directly follow an unresolved word, in order: the
+/// only places a flag hidden in that word can take a separated value from.
+fn resolved_words_after_unresolved(rest_words: &[NormalizedWord]) -> Vec<&str> {
+    rest_words
+        .windows(2)
+        .filter(|pair| matches!(pair[0].resolution(), Resolution::Unresolvable(_)))
+        .filter_map(|pair| match pair[1].resolution() {
+            Resolution::Resolved(s) => Some(s.as_str()),
+            Resolution::Unresolvable(_) => None,
+        })
+        .collect()
 }
 
 /// Whether `token` is a single-dash short cluster (`-sf`) whose final
@@ -7453,6 +7583,19 @@ impl Rules {
             .iter()
             .chain(self.ask_rules.iter())
             .find(|rule| predicate(rule))
+    }
+
+    /// Byte offset in `token` where the value starts, when `token` is a
+    /// listed `target_flags` flag of some rule with its value glued on
+    /// (`--body-file=v`, `-Fv`, `-F=v`; the `=` of the last form stays in the
+    /// flag part). The value of such a token is a path the rule tests, so
+    /// the cwd composition must reach it (issue #625).
+    #[must_use]
+    pub(crate) fn target_flag_glued_value_offset(&self, token: &str) -> Option<usize> {
+        self.command_rules
+            .iter()
+            .chain(self.ask_rules.iter())
+            .find_map(|rule| rule.target_flag_glued_value_offset(token))
     }
 
     /// The first [`CommandRule`] for which [`CommandRule::matches_except_target`]

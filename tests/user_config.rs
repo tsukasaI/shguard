@@ -2837,3 +2837,95 @@ fn git_long_option_abbreviations_match_required_flags_rules() {
         assert_eq!(permission_decision(&output), "allow", "{command}");
     }
 }
+
+// ==== Issue #625: target_flags gaps on a `targets` rule ====
+
+const TARGET_FLAGS_RULE: &str = r#"
+    [[deny]]
+    id = "user-deny-gh-body-file"
+    reason = "no body files from home or /etc"
+    command = "gh"
+    required_flags = ["F|--body-file"]
+    targets = [{ normalized_prefix = "/Users/" }, { normalized_prefix = "/etc/" }]
+    target_flags = ["--body-file", "-F"]
+"#;
+
+fn target_flags_decision(command: &str, cwd: &str) -> Value {
+    let (_dir, config_path) = write_config(TARGET_FLAGS_RULE);
+    let mut value: Value = serde_json::from_str(&bash_command(command)).unwrap();
+    value["cwd"] = Value::String(cwd.to_string());
+    run_hook(
+        &value.to_string(),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    )
+}
+
+#[test]
+fn target_flags_tilde_form_value_is_not_allowed_against_an_absolute_target() {
+    for command in [
+        "gh issue create --body-file ~/.ssh/id",
+        "gh issue create --body-file=~/.ssh/id",
+        "gh issue create -F ~/.ssh/id",
+        "gh issue create -F~/.ssh/id",
+    ] {
+        let output = target_flags_decision(command, "/tmp");
+        assert_ne!(permission_decision(&output), "allow", "{command}");
+    }
+}
+
+#[test]
+fn target_flags_attached_unresolved_value_is_not_allowed() {
+    for command in [
+        "gh issue create --body-file=$F",
+        "gh issue create -F$F",
+        "gh issue create --body-file=\"$F\"",
+    ] {
+        let output = target_flags_decision(command, "/tmp");
+        assert_ne!(permission_decision(&output), "allow", "{command}");
+    }
+}
+
+#[test]
+fn target_flags_quoted_unresolved_word_with_a_separate_resolved_target_is_not_allowed() {
+    let output = target_flags_decision("gh issue create \"$X\" /Users/me/.ssh/id", "/tmp");
+    assert_ne!(permission_decision(&output), "allow");
+}
+
+#[test]
+fn target_flags_glued_relative_values_compose_against_the_payload_cwd() {
+    for command in [
+        "gh issue create -Fnotes.md",
+        "gh issue create --body-file=notes.md",
+        "gh issue create -F notes.md",
+    ] {
+        let output = target_flags_decision(command, "/Users/me/dotfiles");
+        assert_eq!(permission_decision(&output), "deny", "{command}");
+    }
+}
+
+#[test]
+fn target_flags_composed_reason_names_the_payload_not_a_subcommand() {
+    let output = target_flags_decision(
+        "X=--body-file; gh issue create $X notes.md",
+        "/Users/me/dotfiles",
+    );
+    let reason = permission_reason(&output);
+    assert_ne!(permission_decision(&output), "allow", "{reason}");
+    assert!(reason.contains("\"notes.md\""), "{reason}");
+    assert!(!reason.contains("\"issue\""), "{reason}");
+}
+
+#[test]
+fn target_flags_benign_forms_still_allow() {
+    let cases = [
+        ("gh issue create --body-file /tmp/x.md", "/tmp"),
+        ("gh issue create --body-file=/tmp/x.md", "/tmp"),
+        ("gh issue create -Fnotes.md", "/tmp"),
+        ("gh pr list", "/Users/me/dotfiles"),
+        ("gh issue create --title hi", "/Users/me/dotfiles"),
+    ];
+    for (command, cwd) in cases {
+        let output = target_flags_decision(command, cwd);
+        assert_eq!(permission_decision(&output), "allow", "{command}");
+    }
+}
