@@ -197,7 +197,9 @@ impl FlagMatcher {
     /// resolved strings — module docs on why unresolvable tokens never
     /// match).
     ///
-    /// With `long_abbrev` set (rules whose command is `git`, issue #582), a
+    /// With `long_abbrev` set (deny/ask rules whose command is exactly `git`,
+    /// issue #582, and `[[pipeline]]` rules whose resolved sink is exactly
+    /// `git`, issue #604), a
     /// `--`-prefixed [`Self::Token`] is also satisfied by any non-empty
     /// prefix of it (`--mirr`, `--upl=x`): git's option parser accepts any
     /// unambiguous prefix of a long option. No per-subcommand option table
@@ -3424,10 +3426,11 @@ impl PipelineRule {
         // inherited from [`CommandRule::constraints_match`] deliberately:
         // the sink is the same argv shape those rules match on.
         let sink_args = resolved_strings(sink_tail);
+        let long_abbrev = sink_name == "git";
         if !self
             .sink_required_flags
             .iter()
-            .all(|flag| flag.satisfied(&sink_args, false))
+            .all(|flag| flag.satisfied(&sink_args, long_abbrev))
         {
             return false;
         }
@@ -10470,6 +10473,63 @@ mod tests {
                 .is_none(),
             "a flagless rm sink must not satisfy the rule"
         );
+    }
+
+    fn git_sink_flag_rule(flag: &str) -> Rules {
+        Rules::parse(&format!(
+            r#"
+            [[pipeline]]
+            id = "pipe-git-flag"
+            reason = "some reason"
+            sources = ["curl"]
+            sinks = ["git", "other"]
+            sink_required_flags = ["{flag}"]
+            "#
+        ))
+        .unwrap()
+    }
+
+    fn pipeline_hit(rules: &Rules, sink: &[&str]) -> bool {
+        rules
+            .match_pipeline(&[argv(&["curl", "x"]), argv(sink)])
+            .is_some()
+    }
+
+    #[test]
+    fn pipeline_rule_sink_required_flags_git_sink_matches_long_abbrev() {
+        let rules = git_sink_flag_rule("--no-verify");
+        assert!(pipeline_hit(&rules, &["git", "commit", "--no-verify"]));
+        assert!(pipeline_hit(
+            &rules,
+            &["git", "commit", "--no-ver", "-F", "-"]
+        ));
+        assert!(pipeline_hit(&rules, &["git", "commit", "--no-v"]));
+        assert!(pipeline_hit(
+            &rules,
+            &["/usr/bin/git", "commit", "--no-ver"]
+        ));
+        assert!(pipeline_hit(&rules, &["env", "git", "commit", "--no-ver"]));
+        assert!(!pipeline_hit(&rules, &["git", "commit"]));
+    }
+
+    #[test]
+    fn pipeline_rule_sink_required_flags_git_sink_abbrev_edge_prefixes() {
+        let rules = git_sink_flag_rule("--no-verify");
+        // Same policy as the deny path: any non-empty prefix of the full
+        // name counts; a bare `--`, an empty name, or a longer word does not.
+        assert!(pipeline_hit(&rules, &["git", "commit", "--n"]));
+        assert!(!pipeline_hit(&rules, &["git", "commit", "--"]));
+        assert!(!pipeline_hit(&rules, &["git", "commit", "--=x"]));
+        assert!(!pipeline_hit(&rules, &["git", "commit", "--no-verifyx"]));
+        assert!(!pipeline_hit(&rules, &["git", "commit", "-n"]));
+    }
+
+    #[test]
+    fn pipeline_rule_sink_required_flags_non_git_sink_stays_exact_only() {
+        let rules = git_sink_flag_rule("--no-verify");
+        assert!(pipeline_hit(&rules, &["other", "--no-verify"]));
+        assert!(!pipeline_hit(&rules, &["other", "--no-ver"]));
+        assert!(!pipeline_hit(&rules, &["other", "--no-v"]));
     }
 
     // ==== DoD 4: allowlist Block-immunity + Ask downgrade with audit trail ====
