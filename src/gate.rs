@@ -399,7 +399,7 @@ const DENY_MSG_BARE_VAR: &str =
     "Expand the variable yourself and re-issue the command with the literal path or binary name.";
 const DENY_MSG_INLINE_INTERPRETER: &str = "Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f \
      prog.awk`) — inline interpreter code is never inspected.";
-const DENY_MSG_SED_SCRIPT: &str = "Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected.";
+const DENY_MSG_SED_SCRIPT: &str = "Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected. A variable file operand (`sed -n p \"$file\"`) cannot be told apart from a script word, so expand it to a literal file path.";
 const DENY_MSG_COMMAND_SUBSTITUTION: &str =
     "Run the substitution first, then call the resulting binary literally.";
 const DENY_MSG_UNRESOLVED_TARGET: &str = "Resolve the target literally so the rule can check it.";
@@ -14076,6 +14076,23 @@ mod tests {
         );
         // quoted arithmetic is never guaranteed to be one word
         assert_decision("sed -n 1,5p \"$((1+1))\"", Decision::Ask);
+    }
+
+    #[test]
+    fn sed_under_posixly_correct_is_analysed_with_the_gnu_table_and_stop_at_operand() {
+        assert_decision("POSIXLY_CORRECT=1 sed -i 'w /tmp/x' -e p f", Decision::Ask);
+        assert_decision(
+            "POSIXLY_CORRECT=1 sed -l 5 'w /tmp/x' -e p f",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn busybox_and_toybox_sed_are_analysed_like_sed() {
+        for wrapper in ["busybox", "toybox"] {
+            assert_decision(&format!("{wrapper} sed -n 'w x' f"), Decision::Ask);
+            assert_decision(&format!("{wrapper} sed -n p f"), Decision::Allow);
+        }
     }
 
     #[test]

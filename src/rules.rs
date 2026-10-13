@@ -4125,6 +4125,9 @@ fn value_flag_consumed(rest_words: &[NormalizedWord], value_flags: &[ValueFlag])
 /// [`ESCALATION_VECTORS`] entry — busybox is a dispatcher, not a
 /// privilege-escalation mechanism.
 ///
+/// `toybox` (issue #610) is the same kind of multi-call dispatcher and
+/// takes the same handling as `busybox`.
+///
 /// `builtin` (issue #245) runs the next word as the shell's own builtin,
 /// bypassing any function/alias shadowing it — bash/zsh/ksh only, not
 /// POSIX and not in `dash`. Before this entry, `effective_command` stopped
@@ -4162,6 +4165,7 @@ pub(crate) const TRANSPARENT_WRAPPERS: &[&str] = &[
     "chrt",
     "taskset",
     "busybox",
+    "toybox",
     "builtin",
     "time",
     "caffeinate",
