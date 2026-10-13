@@ -1116,6 +1116,21 @@ fn is_home_container_dir(component: &str) -> bool {
 }
 
 impl TargetMatcher {
+    fn with_canonical_globs(self) -> Self {
+        match self {
+            Self::NormalizedExact {
+                strip,
+                target,
+                case_insensitive,
+            } => Self::NormalizedExact {
+                strip,
+                target: canonicalize_glob_form(target),
+                case_insensitive,
+            },
+            other => other,
+        }
+    }
+
     fn has_strip(&self) -> bool {
         matches!(
             self,
@@ -1225,12 +1240,17 @@ impl TargetMatcher {
                     return false;
                 };
                 let form = lexical_normalize(remainder);
-                let equal = if *case_insensitive {
-                    case_fold_path_form(&form) == case_fold_path_form(target)
-                } else {
-                    form == *target
+                let equal = |form: &PathForm| {
+                    if *case_insensitive {
+                        case_fold_path_form(form) == case_fold_path_form(target)
+                    } else {
+                        form == target
+                    }
                 };
-                if equal {
+                // Both spellings: an allowlist target keeps its literal
+                // glob (`TargetGlobs::Literal`), which only the raw form
+                // can equal.
+                if equal(&form) || equal(&canonicalize_glob_form(form.clone())) {
                     return true;
                 }
                 // Fail-closed widenings (issue #65): shguard never knows
@@ -1504,6 +1524,9 @@ impl TargetMatcher {
                         a == b
                     }
                 };
+                // Same canonical spelling `Self::matches` compares.
+                let mut comps = comps;
+                canonicalize_glob_comps(&mut comps);
                 // Issue #506: the `comps[1..]`/`comps[2..]` widening arms
                 // below exist to catch a REAPPEARING NAME after an
                 // escaped/unresolved ascent (`~alice/../bob` re-descending
@@ -1560,8 +1583,9 @@ impl TargetMatcher {
 /// True for a path component made only of glob metacharacters: an optional
 /// leading `.`, then one or more of `*`, `?` and closed bracket expressions
 /// (`[...]`, `[!...]`/`[^...]` negation, a `]` right after the opener is a
-/// member). At least one metacharacter is required, so `.` and `..` are not
-/// glob-only, and any literal character (`.config`, `build`) disqualifies.
+/// member, `[:class:]`/`[=c=]`/`[.c.]` are members). At least one
+/// metacharacter is required, so `.` and `..` are not glob-only, and any
+/// literal character (`.config`, `build`) disqualifies.
 fn is_glob_only_component(comp: &str) -> bool {
     let body = comp.strip_prefix('.').unwrap_or(comp).as_bytes();
     if body.is_empty() {
@@ -1571,24 +1595,73 @@ fn is_glob_only_component(comp: &str) -> bool {
     while i < body.len() {
         match body[i] {
             b'*' | b'?' => i += 1,
-            b'[' => {
-                let mut j = i + 1;
-                if matches!(body.get(j), Some(b'!' | b'^')) {
-                    j += 1;
-                }
-                if body.get(j) == Some(&b']') {
-                    j += 1;
-                }
-                // An unclosed `[` is a literal character, so not glob-only.
-                match body[j.min(body.len())..].iter().position(|&b| b == b']') {
-                    Some(off) => i = j + off + 1,
-                    None => return false,
-                }
-            }
+            // An unclosed `[` is a literal character, so not glob-only.
+            b'[' => match bracket_expr_end(body, i) {
+                Some(end) => i = end,
+                None => return false,
+            },
             _ => return false,
         }
     }
     true
+}
+
+fn bracket_expr_end(pat: &[u8], open: usize) -> Option<usize> {
+    let mut j = open + 1;
+    if matches!(pat.get(j), Some(b'!' | b'^')) {
+        j += 1;
+    }
+    if pat.get(j) == Some(&b']') {
+        j += 1;
+    }
+    while j < pat.len() {
+        match pat[j] {
+            b']' => return Some(j + 1),
+            // Not a plain member: the `]` inside `[:alpha:]` does not close
+            // the bracket.
+            b'[' if matches!(pat.get(j + 1), Some(b':' | b'=' | b'.')) => {
+                j = posix_bracket_term_end(pat, j).unwrap_or(j + 1);
+            }
+            _ => j += 1,
+        }
+    }
+    None
+}
+
+fn posix_bracket_term_end(pat: &[u8], open: usize) -> Option<usize> {
+    let delim = *pat.get(open + 1)?;
+    pat.get(open + 2..)?
+        .windows(2)
+        .position(|w| w == [delim, b']'])
+        .map(|off| open + 2 + off + 2)
+}
+
+fn canonical_glob_component(comp: &str) -> Option<&'static str> {
+    is_glob_only_component(comp).then(|| if comp.starts_with('.') { ".*" } else { "*" })
+}
+
+fn canonicalize_glob_comps(comps: &mut [String]) {
+    for comp in comps {
+        if let Some(canon) = canonical_glob_component(comp) {
+            canon.clone_into(comp);
+        }
+    }
+}
+
+// Partial patterns like `.[a-z]*` also become `.*`: fail-closed for a deny
+// target, so only deny/ask/redirect targets get this (see `TargetGlobs`).
+fn canonicalize_glob_form(mut form: PathForm) -> PathForm {
+    match &mut form {
+        PathForm::Abs(comps)
+        | PathForm::Home(comps)
+        | PathForm::EscapesHome(comps)
+        | PathForm::NamedUserHomeSub(comps)
+        | PathForm::NamedUserHomeEscapes(comps)
+        | PathForm::DirStack(comps)
+        | PathForm::Rel { comps, .. } => canonicalize_glob_comps(comps),
+        PathForm::NamedUserHome | PathForm::DirStackEscapesEmpty | PathForm::Opaque => {}
+    }
+    form
 }
 
 /// Renders `comps` as if it were the tail of an absolute path (`/` +
@@ -1762,10 +1835,11 @@ impl TargetMatcher {
                 let Some(remainder) = strip_target(strip.as_deref(), token) else {
                     return false;
                 };
-                let comps = match lexical_normalize(remainder) {
+                let mut comps = match lexical_normalize(remainder) {
                     PathForm::Rel { comps, .. } => comps,
                     _ => return false,
                 };
+                canonicalize_glob_comps(&mut comps);
                 !comps.is_empty() && is_suffix_of(&comps, target_comps, *case_insensitive)
             }
             Self::NormalizedPrefix {
@@ -6899,7 +6973,26 @@ fn sugar_required_tokens_overlap(
 /// set, or a malformed `value_flags` spec. A multi-word `command` (e.g.
 /// `"gh repo delete"`) desugars to the first word as the command name plus
 /// the remaining words prepended onto `required_tokens`.
-fn convert_command_rule(mut dto: CommandRuleSpec) -> Result<CommandRule, RulesError> {
+fn convert_command_rule(dto: CommandRuleSpec) -> Result<CommandRule, RulesError> {
+    convert_command_rule_with(dto, TargetGlobs::Canonical)
+}
+
+fn convert_allow_rule(dto: CommandRuleSpec) -> Result<CommandRule, RulesError> {
+    convert_command_rule_with(dto, TargetGlobs::Literal)
+}
+
+// Not canonical for an allow entry: `.[a-z]*` becoming `.*` would widen
+// what the entry allows.
+#[derive(Clone, Copy)]
+enum TargetGlobs {
+    Canonical,
+    Literal,
+}
+
+fn convert_command_rule_with(
+    mut dto: CommandRuleSpec,
+    globs: TargetGlobs,
+) -> Result<CommandRule, RulesError> {
     if dto.id.trim().is_empty() {
         return Err(RulesError::invalid(&dto.id, "id must not be empty"));
     }
@@ -7028,7 +7121,12 @@ fn convert_command_rule(mut dto: CommandRuleSpec) -> Result<CommandRule, RulesEr
     let targets = dto
         .targets
         .into_iter()
-        .map(|t| convert_target(&dto.id, t, false))
+        .map(|t| {
+            convert_target(&dto.id, t, false).map(|target| match globs {
+                TargetGlobs::Canonical => target.with_canonical_globs(),
+                TargetGlobs::Literal => target,
+            })
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let resolve_symlinks = dto.resolve_symlinks;
     if resolve_symlinks
@@ -7654,7 +7752,7 @@ fn convert_redirect_rule(dto: RedirectRuleSpec) -> Result<RedirectRule, RulesErr
     let targets = dto
         .targets
         .into_iter()
-        .map(|t| convert_target(&dto.id, t, false))
+        .map(|t| convert_target(&dto.id, t, false).map(TargetMatcher::with_canonical_globs))
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(RedirectRule {
@@ -8537,7 +8635,7 @@ impl Allowlist {
         let entries = dto
             .entry
             .into_iter()
-            .map(convert_command_rule)
+            .map(convert_allow_rule)
             .map(|rule| rule.map(CommandRule::exact_flags_only))
             .collect::<Result<Vec<_>, _>>()?;
         reject_duplicate_ids(entries.iter().map(|r| r.id.as_str()))?;
@@ -8763,7 +8861,7 @@ impl UserConfig {
         let allow = dto
             .allow
             .into_iter()
-            .map(convert_command_rule)
+            .map(convert_allow_rule)
             .collect::<Result<Vec<_>, _>>()?;
         let redirect = dto
             .redirect
@@ -9393,15 +9491,92 @@ mod tests {
     #[test]
     fn glob_only_component_is_structural() {
         for glob in [
-            "*", "**", "?", ".*", ".**", ".*?", ".?*", ".??*", ".[!.]*", ".[!.]**", ".[^.]*",
-            "[]a]*", "[a-z]",
+            "*",
+            "**",
+            "?",
+            ".*",
+            ".**",
+            ".*?",
+            ".?*",
+            ".??*",
+            ".[!.]*",
+            ".[!.]**",
+            ".[^.]*",
+            "[]a]*",
+            "[a-z]",
+            ".[[:alnum:]]*",
+            "[[:alpha:]]",
+            ".[![:space:]]?",
+            "[[=a=]]",
+            "[[.a.]]*",
+            "[[:]",
         ] {
             assert!(is_glob_only_component(glob), "{glob:?}");
         }
         for literal in [
-            "", ".", "..", "build", ".config", "foo*", ".*bak", "[", ".[!.", "*[a", "[]",
+            "",
+            ".",
+            "..",
+            "build",
+            ".config",
+            "foo*",
+            ".*bak",
+            "[",
+            ".[!.",
+            "*[a",
+            "[]",
+            "[[:alpha:]",
+            ".[[:alnum:]x",
+            "[[:alpha:]]x",
         ] {
             assert!(!is_glob_only_component(literal), "{literal:?}");
+        }
+    }
+
+    #[test]
+    fn glob_only_deny_target_matches_every_glob_only_spelling() {
+        let rules = Rules::parse(
+            r#"
+            [[command]]
+            id = "user-deny-dotglob"
+            reason = "test"
+            command = "rm"
+            targets = [{ normalized = "~/.[!.]*" }, { normalized = "build/**" }]
+        "#,
+        )
+        .unwrap();
+        for token in ["~/.*", "~/.??*", "~/.[a-z]*", "build/*", "./build/?*"] {
+            assert!(
+                rules.match_command(&argv(&["rm", token])).is_some(),
+                "{token:?}"
+            );
+        }
+        for token in ["~/.config", "~/.c*", "build/x", "build/*.o"] {
+            assert!(
+                rules.match_command(&argv(&["rm", token])).is_none(),
+                "{token:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn glob_only_allow_target_stays_literal() {
+        let allowlist = Allowlist::parse(
+            r#"
+            [[entry]]
+            id = "allow-letter-dotfiles"
+            reason = "test"
+            command = "rm"
+            targets = [{ normalized = "~/.[a-z]*" }]
+        "#,
+        )
+        .unwrap();
+        assert!(allowlist.first_match(&argv(&["rm", "~/.[a-z]*"])).is_some());
+        for token in ["~/.*", "~/.??*", "~/.[!.]*"] {
+            assert!(
+                allowlist.first_match(&argv(&["rm", token])).is_none(),
+                "{token:?}"
+            );
         }
     }
 

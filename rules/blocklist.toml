@@ -305,25 +305,24 @@ targets = [
     # Block too, exactly like `/dev/sda` and its `//dev/sda`/`/./dev/sda`/
     # `/tmp/../dev/sda` spellings already do below. `/tmp/*` collapses to
     # `Abs(["tmp","*"])`, a different value, and correctly stays unmatched.
+    # A `normalized` target component made only of glob metacharacters
+    # matches every glob-only spelling of the same component: one starting
+    # with `.` is the same target as `.*`, any other as `*` (issue #595,
+    # see `canonicalize_glob_form` in src/rules.rs). So `/*` below also
+    # covers the globstar `/**`, `~/*` covers `~/**`/`~/?*`/`~/[!.]*`, and
+    # `~/.*` covers `~/.??*`/`~/.[!.]*`/`~/.**`/`~/.[a-z]*`; a partial
+    # pattern counted as the whole glob is the fail-closed direction.
     { normalized = "/*" },
-    # issue #506: `/**` is the bash globstar spelling of the same root
-    # wipe `/*` above already Blocks -- a different normalized component,
-    # same reasoning as `**` vs. `*` for the cwd-relative targets below.
-    { normalized = "/**" },
     { normalized = "~" },
-    # issue #506: `~/*`/`~/**` wipe $HOME's writable contents exactly like
-    # bare `~` above (`rm -rf` removes everything under it non-
-    # interactively regardless of dotglob), so they belong at the same
-    # tier for the same reason -- NOT because of any config
-    # self-protection angle: bash's default (non-`dotglob`) `*`/`**` never
-    # match a leading-dot name, so this does not actually reach
-    # `~/.config` on its own. `~/**` needs its own entry: it lexically
-    # normalizes to a different single component than `~/*`, the same way
-    # bare `**` differs from `*` above.
+    # issue #506: `~/*` wipes $HOME's writable contents exactly like bare
+    # `~` above (`rm -rf` removes everything under it non-interactively
+    # regardless of dotglob), so it belongs at the same tier for the same
+    # reason -- NOT because of any config self-protection angle: bash's
+    # default (non-`dotglob`) `*`/`**` never match a leading-dot name, so
+    # this does not actually reach `~/.config` on its own.
     { normalized = "~/*" },
-    { normalized = "~/**" },
-    # `~/.*` is a leading-dot glob: unlike `~/*`/`~/**` above, it DOES
-    # expand to $HOME's leading-dot entries (`.ssh`, `.aws`, `.gnupg`,
+    # `~/.*` is a leading-dot glob: unlike `~/*` above, it DOES expand to
+    # $HOME's leading-dot entries (`.ssh`, `.aws`, `.gnupg`,
     # `.config/shguard`) even without `shopt -s dotglob`, since a leading
     # `.` in the glob pattern itself always matches a leading-dot name.
     # `rm -rf` non-interactively wipes every one of them, and this is the
@@ -333,19 +332,11 @@ targets = [
     # `rm -rf ~/.*` would only reach those Ask-tier self-protect rules,
     # weaker than the Block `rm -rf ~/*` already gets. This is the
     # authoritative explanation of the leading-dot glob family; the
-    # other entries below point back here. The `.[!.]*`/`.??*`/`.[^.]*`
-    # spellings skip both `.` and `..`; `.?*` skips only `.` (it matches
-    # `..`). All still match `.ssh`/`.gnupg`/`.config`, so they delete the
-    # same set. `.**`, `.*?` and `.[!.]**` are further spellings (issue
-    # #595): in bash `.**` is identical to `.*`, globstar or not.
+    # other entries below point back here. The "safe" spellings it also
+    # covers (`.[!.]*`, `.??*`, `.[^.]*` skip both `.` and `..`; `.?*` may
+    # match `..` (bash < 5.2)) still match `.ssh`/`.gnupg`/`.config`, so
+    # they delete the same set.
     { normalized = "~/.*" },
-    { normalized = "~/.[!.]*" },
-    { normalized = "~/.??*" },
-    { normalized = "~/.[^.]*" },
-    { normalized = "~/.?*" },
-    { normalized = "~/.**" },
-    { normalized = "~/.*?" },
-    { normalized = "~/.[!.]**" },
     { normalized = "." },
     # issue #453: `./*` and bare `*` both lexically normalize to
     # `Rel{ascent:0, comps:["*"]}` — a different value from `.`'s
@@ -353,25 +344,14 @@ targets = [
     # actually *refuses* `rm -rf .` ("refusing to remove '.'"), making
     # `./*`/`*` the spelling that really deletes the current directory's
     # contents; this keeps both at the same tier as `.`.
+    # The globstar `**`/`./**` deletes the current directory's contents
+    # exactly like `*`/`./*` (issue #506) and is covered by this entry.
     { normalized = "*" },
-    # issue #506: the bash globstar spelling (`shopt -s globstar`, or a
-    # shell where `**` is meaningful on its own) normalizes to its own
-    # single component `**`, a different value from `*` above, so it needs
-    # its own entry at the same tier — `**`/`./**` both delete the current
-    # directory's contents exactly like `*`/`./*` already do.
-    { normalized = "**" },
     # Same leading-dot glob reasoning as `~/.*` above, for the cwd-relative
-    # spelling (`cd ~ && rm -rf .*`): `.*` and its `.[!.]*`/`.??*`/
-    # `.[^.]*`/`.?*` siblings match every leading-dot entry in the
-    # current directory regardless of `dotglob`.
+    # spelling (`cd ~ && rm -rf .*`): `.*` and its glob-only siblings
+    # match every leading-dot entry in the current directory regardless
+    # of `dotglob`.
     { normalized = ".*" },
-    { normalized = ".[!.]*" },
-    { normalized = ".??*" },
-    { normalized = ".[^.]*" },
-    { normalized = ".?*" },
-    { normalized = ".**" },
-    { normalized = ".*?" },
-    { normalized = ".[!.]**" },
     # ".."/"../" (previously separate `exact` entries) are subsumed by
     # "/"'s pure-ascent widening (issue #65): `{ normalized = "/" }` also
     # matches any token that lexically normalizes to a pure relative
@@ -418,7 +398,7 @@ targets = [
 # for write-protected files, and only on a tty, so `rm -r /*` deletes every
 # writable file under `/` unattended. `~` is deliberately NOT included here:
 # `self-protect-config-ancestor-rm-tilde` below already floors bare
-# `rm -r ~` (and, since issue #506, `~/*`/`~/**`) to Ask. `.`/`*` are out of
+# `rm -r ~` (and, since issue #506, `~/*`) to Ask. `.`/`*` are out of
 # this issue's stated scope (root/device targets only) and stay Allow.
 # issue #506 extended this rule's own targets below with find's `{}`
 # placeholder family, the same unattended-destruction risk through a
@@ -432,9 +412,6 @@ required_flags = ["r|R|--recursive"]
 targets = [
     { normalized = "/" },
     { normalized = "/*" },
-    # issue #506: `/**`, the bash globstar spelling, same reasoning as
-    # `**` vs. `*` for the cwd-relative targets in the `-rf` sibling rule.
-    { normalized = "/**" },
     { normalized_prefix = "/dev/" },
     # issue #506: `find -exec rm -r {} \;`-style recursion achieves the
     # same unattended, writable-file-tree destruction as the root/device
@@ -1350,35 +1327,27 @@ required_flags = ["r|R|--recursive"]
 targets = [
     { normalized = "~/.config", case_insensitive = true },
     { normalized = "~" },
-    # issue #506: `~/*`/`~/**` each normalize to a different value than
-    # bare `~` (`Home(["*"])`/`Home(["**"])` vs. `Home([])`) so need their
-    # own entries, at the same tier as `~` for the same reason: `rm -r`
-    # (no `-f`) still non-interactively removes a directory's writable
-    # contents, GNU/BSD `rm` only prompts for write-protected files on a
-    # tty. Not a config self-protection claim: bash's default
-    # (non-`dotglob`) `*`/`**` never match a leading-dot name, so this
-    # does not on its own reach `~/.config` the way bare `~` does.
+    # issue #506: `~/*` (and every glob-only spelling of it, see
+    # `rm-recursive-force-dangerous-target`) normalizes to a different
+    # value than bare `~` (`Home(["*"])` vs. `Home([])`) so needs its own
+    # entry, at the same tier as `~` for the same reason: `rm -r` (no `-f`)
+    # still non-interactively removes a directory's writable contents,
+    # GNU/BSD `rm` only prompts for write-protected files on a tty. Not a
+    # config self-protection claim: bash's default (non-`dotglob`)
+    # `*`/`**` never match a leading-dot name, so this does not on its own
+    # reach `~/.config` the way bare `~` does.
     { normalized = "~/*" },
-    { normalized = "~/**" },
-    # Unlike `~/*`/`~/**` above, `~/.*` IS a genuine config self-protection
-    # claim (see `rm-recursive-force-dangerous-target`'s `~/.*` entry for
-    # the leading-dot glob rationale). Also caught at Block tier there
-    # when `-f` is present; these Ask-tier entries cover the flagless
-    # `rm -r ~/.*` case that rule does not.
+    # Unlike `~/*` above, `~/.*` IS a genuine config self-protection claim
+    # (see `rm-recursive-force-dangerous-target`'s `~/.*` entry for the
+    # leading-dot glob rationale). Also caught at Block tier there when
+    # `-f` is present; this Ask-tier entry covers the flagless `rm -r ~/.*`
+    # case that rule does not.
     { normalized = "~/.*" },
-    { normalized = "~/.[!.]*" },
-    { normalized = "~/.??*" },
-    { normalized = "~/.[^.]*" },
-    { normalized = "~/.?*" },
-    { normalized = "~/.**" },
-    { normalized = "~/.*?" },
-    { normalized = "~/.[!.]**" },
-    # `~/.config/*`/`~/.config/**` expand to the children of `~/.config`,
-    # including `shguard` itself; they normalize to a different value than
-    # `~/.config` so need their own entries. `~/.config/*/*` reaches the
+    # `~/.config/*` expands to the children of `~/.config`, including
+    # `shguard` itself; it normalizes to a different value than
+    # `~/.config` so needs its own entry. `~/.config/*/*` reaches the
     # contents of `~/.config/shguard/` (issue #595).
     { normalized = "~/.config/*", case_insensitive = true },
-    { normalized = "~/.config/**", case_insensitive = true },
     { normalized = "~/.config/*/*", case_insensitive = true },
 ]
 
@@ -1394,15 +1363,7 @@ targets = [
     # `mv ~/.* /tmp` relocates `~/.config/shguard` just as effectively as
     # `rm` deletes it.
     { normalized = "~/.*" },
-    { normalized = "~/.[!.]*" },
-    { normalized = "~/.??*" },
-    { normalized = "~/.[^.]*" },
-    { normalized = "~/.?*" },
-    { normalized = "~/.**" },
-    { normalized = "~/.*?" },
-    { normalized = "~/.[!.]**" },
     { normalized = "~/.config/*", case_insensitive = true },
-    { normalized = "~/.config/**", case_insensitive = true },
     { normalized = "~/.config/*/*", case_insensitive = true },
 ]
 

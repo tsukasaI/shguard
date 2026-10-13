@@ -3039,6 +3039,30 @@ mod tests {
     }
 
     #[test]
+    fn home_twin_matches_glob_only_spellings_of_dot_targets() {
+        // Issue #595: the twin inherits the canonical `~/.*`/`~/*` targets.
+        let (rules, allowlist) = self_protected("/etc/shguard", Some("/Users/me"));
+        for command in [
+            "rm -rf /Users/me/.*",
+            "rm -rf /Users/me/.??**",
+            "rm -rf /Users/me/.[!.]?*",
+            "rm -rf /Users/me/.[[:alnum:]]*",
+            "rm -rf /Users/me/?*",
+            "rm -rf /Users/me/[!.]*",
+        ] {
+            assert_eq!(
+                decide(&rules, &allowlist, command, None),
+                Decision::Block,
+                "{command}"
+            );
+        }
+        assert_eq!(
+            decide(&rules, &allowlist, "rm -r /Users/me/.??*", None),
+            Decision::Ask
+        );
+    }
+
+    #[test]
     fn home_twin_does_not_widen_to_children_or_siblings() {
         let (rules, allowlist) = self_protected("/etc/shguard", Some("/Users/me"));
         for command in ["rm -rf /Users/me/proj", "rm -rf /Users/mebob"] {
