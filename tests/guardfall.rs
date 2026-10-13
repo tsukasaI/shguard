@@ -572,6 +572,8 @@ fn guardfall_rm_dotglob_tilde_targets() {
         ("rm -rf ~/.config/sh*", Decision::Ask),
         ("rm -rf ~/.config/*guard", Decision::Ask),
         ("rm -rf ~/.config/?hguard", Decision::Ask),
+        ("rm -rf ~/.config/[!A-Z]hguard", Decision::Ask),
+        ("rm -rf ~/.Config/[!A-Z]hguard", Decision::Ask),
         ("rm -rf ~/.config/*/config.toml", Decision::Ask),
         ("rm -rf ~/*/*", Decision::Ask),
         ("rm -rf ~/**/*", Decision::Ask),

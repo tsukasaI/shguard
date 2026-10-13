@@ -1641,19 +1641,15 @@ impl TargetMatcher {
         if !pattern.iter().any(|c| c.contains(['*', '?', '['])) {
             return false;
         }
-        let fold = |comps: &[String]| -> Vec<String> {
-            comps
-                .iter()
-                .map(|c| {
-                    if case_insensitive {
-                        c.to_ascii_lowercase()
-                    } else {
-                        c.clone()
-                    }
-                })
-                .collect()
-        };
-        comps_glob_plausible(&fold(pattern), &fold(target_comps), beneath, partial_last)
+        comps_glob_plausible(
+            pattern,
+            target_comps,
+            GlobMatch {
+                beneath,
+                partial_last,
+                case_insensitive,
+            },
+        )
     }
 }
 
@@ -1681,28 +1677,28 @@ impl GlobBeneath {
     }
 }
 
-// `partial_last`: the last target component is a string prefix
-// (`normalized_prefix = "/dev/sd"`).
-fn comps_glob_plausible(
-    pattern: &[String],
-    target: &[String],
+#[derive(Clone, Copy)]
+struct GlobMatch {
     beneath: GlobBeneath,
+    // The last target component is a string prefix
+    // (`normalized_prefix = "/dev/sd"`).
     partial_last: bool,
-) -> bool {
+    case_insensitive: bool,
+}
+
+fn comps_glob_plausible(pattern: &[String], target: &[String], how: GlobMatch) -> bool {
     let Some((first, pattern_rest)) = pattern.split_first() else {
         return target.is_empty();
     };
     if first == "**" {
-        return comps_glob_plausible(pattern_rest, target, beneath, partial_last)
+        return comps_glob_plausible(pattern_rest, target, how)
             || match target.split_first() {
-                Some((_, target_rest)) => {
-                    comps_glob_plausible(pattern, target_rest, beneath, partial_last)
-                }
-                None => beneath.admits(pattern),
+                Some((_, target_rest)) => comps_glob_plausible(pattern, target_rest, how),
+                None => how.beneath.admits(pattern),
             };
     }
     let Some((target_first, target_rest)) = target.split_first() else {
-        return beneath.admits(pattern);
+        return how.beneath.admits(pattern);
     };
     // Against a glob target (`~/*`), only another glob-only component is
     // the same "every entry" claim; a literal `build` in `build/*` is not.
@@ -1712,13 +1708,28 @@ fn comps_glob_plausible(
         glob_component_matches(
             first.as_bytes(),
             target_first.as_bytes(),
-            partial_last && target_rest.is_empty(),
+            how.partial_last && target_rest.is_empty(),
+            how.case_insensitive,
         )
     };
-    component_matches && comps_glob_plausible(pattern_rest, target_rest, beneath, partial_last)
+    component_matches && comps_glob_plausible(pattern_rest, target_rest, how)
 }
 
-fn glob_component_matches(pattern: &[u8], name: &[u8], name_is_prefix: bool) -> bool {
+// Not lowercasing the pattern: that turns `[!A-Z]` into `[!a-z]` and
+// inverts what a negated bracket admits.
+fn glob_component_matches(
+    pattern: &[u8],
+    name: &[u8],
+    name_is_prefix: bool,
+    case_insensitive: bool,
+) -> bool {
+    let swapped = |c: u8| {
+        if c.is_ascii_lowercase() {
+            c.to_ascii_uppercase()
+        } else {
+            c.to_ascii_lowercase()
+        }
+    };
     let (mut p, mut n) = (0, 0);
     let mut star: Option<(usize, usize)> = None;
     while n < name.len() {
@@ -1730,10 +1741,17 @@ fn glob_component_matches(pattern: &[u8], name: &[u8], name_is_prefix: bool) -> 
             }
             Some(b'?') => Some(p + 1),
             Some(b'[') => match bracket_expr_end(pattern, p) {
-                Some(end) => bracket_matches(&pattern[p..end], name[n]).then_some(end),
+                Some(end) => {
+                    let expr = &pattern[p..end];
+                    (bracket_matches(expr, name[n])
+                        || (case_insensitive && bracket_matches(expr, swapped(name[n]))))
+                    .then_some(end)
+                }
                 None => (name[n] == b'[').then_some(p + 1),
             },
-            Some(&literal) => (literal == name[n]).then_some(p + 1),
+            Some(&literal) => (literal == name[n]
+                || (case_insensitive && literal.eq_ignore_ascii_case(&name[n])))
+            .then_some(p + 1),
             None => None,
         };
         if let Some(next) = step {
@@ -9816,7 +9834,7 @@ mod tests {
             ("s[[:bogus:]]guard", "shguard"),
         ] {
             assert!(
-                glob_component_matches(pattern.as_bytes(), name.as_bytes(), false),
+                glob_component_matches(pattern.as_bytes(), name.as_bytes(), false, false),
                 "{pattern:?} vs {name:?}"
             );
         }
@@ -9828,12 +9846,41 @@ mod tests {
             ("[a", "shguard"),
         ] {
             assert!(
-                !glob_component_matches(pattern.as_bytes(), name.as_bytes(), false),
+                !glob_component_matches(pattern.as_bytes(), name.as_bytes(), false, false),
                 "{pattern:?} vs {name:?}"
             );
         }
-        assert!(glob_component_matches(b"s?a1", b"sd", true));
-        assert!(!glob_component_matches(b"x?", b"sd", true));
+        assert!(glob_component_matches(b"s?a1", b"sd", true, false));
+        assert!(!glob_component_matches(b"x?", b"sd", true, false));
+    }
+
+    #[test]
+    fn case_insensitive_glob_matching_never_inverts_a_bracket() {
+        for (pattern, name) in [
+            ("[!A-Z]hguard", "shguard"),
+            ("[!a-z]hguard", "shguard"),
+            ("[A-Z]hguard", "shguard"),
+            ("[[:upper:]]hguard", "shguard"),
+            ("SH*", "shguard"),
+            ("s*", "SHGUARD"),
+        ] {
+            assert!(
+                glob_component_matches(pattern.as_bytes(), name.as_bytes(), false, true),
+                "{pattern:?} vs {name:?}"
+            );
+        }
+        assert!(!glob_component_matches(
+            b"[0-9]hguard",
+            b"shguard",
+            false,
+            true
+        ));
+        assert!(!glob_component_matches(
+            b"[A-Z]hguard",
+            b"shguard",
+            false,
+            false
+        ));
     }
 
     #[test]
