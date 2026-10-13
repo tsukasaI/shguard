@@ -934,7 +934,12 @@ fn convert_pipeline(pipeline: &bast::Pipeline) -> Result<Pipeline, ParseError> {
     let first = commands
         .next()
         .ok_or_else(|| ParseError::syntax("empty pipeline"))?;
-    let first = convert_command(first)?;
+    let rewritten = if pipeline.timed.is_some() {
+        without_time_option_terminator(first)?
+    } else {
+        None
+    };
+    let first = convert_command(rewritten.as_ref().unwrap_or(first))?;
     let rest = commands.map(convert_command).collect::<Result<_, _>>()?;
 
     Ok(Pipeline {
@@ -943,6 +948,77 @@ fn convert_pipeline(pipeline: &bast::Pipeline) -> Result<Pipeline, ParseError> {
         bang: pipeline.bang,
     })
 }
+
+/// Bash's `time` reserved word accepts `-p` and `--` before the pipeline,
+/// but brush strips only `-p`, leaving `--` as the command name: `time --
+/// rm -rf /` would reach the rules as the command `--`. Narrow on purpose
+/// (timed pipelines only): an untimed `-- rm` (e.g. `eval -- -- rm -rf /`)
+/// really is the command `--`. Rewritten on brush's AST rather than
+/// shguard's: brush tags everything after the fake `--` command as suffix
+/// items, so `time -- FOO=bar rm` carries `FOO=bar` as a suffix word and a
+/// plain drop would make it the command name. Leading assignments and
+/// redirects move to the prefix and the first word becomes the command name,
+/// exactly as `FOO=bar rm` parses. `None` (command left untouched) unless a
+/// command word follows. A promoted name that is a bare reserved word
+/// (`time -- ! rm -rf /`) is rejected: bash would parse it as grammar, not
+/// as a command, and a plain simple command named `!` would hide the rest.
+fn without_time_option_terminator(
+    command: &bast::Command,
+) -> Result<Option<bast::Command>, ParseError> {
+    let bast::Command::Simple(simple) = command else {
+        return Ok(None);
+    };
+    if simple.prefix.is_some() {
+        return Ok(None);
+    }
+    let is_terminator = simple.word_or_name.as_ref().is_some_and(|word| {
+        matches!(
+            convert_word(word),
+            Ok(Word(pieces)) if matches!(pieces.as_slice(), [WordPiece::Literal(text)] if text == "--")
+        )
+    });
+    if !is_terminator {
+        return Ok(None);
+    }
+    let Some(suffix) = simple.suffix.as_ref() else {
+        return Ok(None);
+    };
+    let mut items = suffix.0.iter();
+    let mut prefix = Vec::new();
+    let mut name = None;
+    for item in items.by_ref() {
+        match item {
+            bast::CommandPrefixOrSuffixItem::AssignmentWord(..)
+            | bast::CommandPrefixOrSuffixItem::IoRedirect(_) => prefix.push(item.clone()),
+            bast::CommandPrefixOrSuffixItem::Word(word) => {
+                name = Some(word.clone());
+                break;
+            }
+            bast::CommandPrefixOrSuffixItem::ProcessSubstitution(..) => return Ok(None),
+        }
+    }
+    let Some(name) = name else {
+        return Ok(None);
+    };
+    let Word(pieces) = convert_word(&name)?;
+    if let [WordPiece::Literal(text)] = pieces.as_slice()
+        && TIME_TERMINATOR_RESERVED_WORDS.contains(&text.as_str())
+    {
+        return Err(ParseError::syntax(format!(
+            "reserved word `{text}` after `time --`"
+        )));
+    }
+    let suffix: Vec<_> = items.cloned().collect();
+    Ok(Some(bast::Command::Simple(bast::SimpleCommand {
+        prefix: (!prefix.is_empty()).then_some(bast::CommandPrefix(prefix)),
+        word_or_name: Some(name),
+        suffix: (!suffix.is_empty()).then_some(bast::CommandSuffix(suffix)),
+    })))
+}
+
+const TIME_TERMINATOR_RESERVED_WORDS: &[&str] = &[
+    "!", "coproc", "{", "[[", "((", "if", "while", "until", "for", "select", "case", "function",
+];
 
 fn convert_command(command: &bast::Command) -> Result<Command, ParseError> {
     match command {
@@ -3588,6 +3664,52 @@ mod tests {
         let timed = parse_ok("time rm -rf /");
         let untimed = parse_ok("rm -rf /");
         assert_eq!(timed, untimed);
+    }
+
+    #[test]
+    fn timed_pipeline_drops_the_leading_option_terminator() {
+        let untimed = parse_ok("rm -rf /");
+        for command in ["time -- rm -rf /", "time -p -- rm -rf /"] {
+            assert_eq!(
+                parse_ok(command),
+                untimed,
+                "{command}: `--` must not remain as the command name"
+            );
+        }
+    }
+
+    #[test]
+    fn timed_option_terminator_promotes_following_assignments_to_the_prefix() {
+        for (timed, plain) in [
+            ("time -- FOO=bar rm -rf /", "FOO=bar rm -rf /"),
+            ("time -p -- FOO=bar rm -rf /", "FOO=bar rm -rf /"),
+            ("time -- FOO=1 BAR=2 rm -rf /", "FOO=1 BAR=2 rm -rf /"),
+            ("time -- FOO=bar sudo rm -rf /", "FOO=bar sudo rm -rf /"),
+        ] {
+            assert_eq!(parse_ok(timed), parse_ok(plain), "{timed}");
+        }
+    }
+
+    #[test]
+    fn timed_option_terminator_followed_by_a_reserved_word_is_a_parse_error() {
+        for command in [
+            "time -- ! rm -rf /",
+            "time -p -- ! rm -rf /",
+            "time -- ! sudo id",
+            "time -- coproc rm -rf /",
+            "time -- if true",
+        ] {
+            assert!(parse(command).is_err(), "{command}");
+        }
+    }
+
+    #[test]
+    fn untimed_or_quoted_option_terminator_is_kept_as_the_command() {
+        for command in ["-- rm -rf /", r#"time "--" rm -rf /"#] {
+            let parsed = parse_ok(command);
+            let words = &simple(&parsed.first.first).words;
+            assert_eq!(words.len(), 4, "{command}");
+        }
     }
 
     #[test]
