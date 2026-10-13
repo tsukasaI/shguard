@@ -37,8 +37,11 @@
 //!   `${PIPESTATUS[n]}`/`${pipestatus[n]}` (issue #578). Still rejected:
 //!   indirection, every other array-indexed access, assigning forms
 //!   (`${x:=w}`/`${x=w}`), `${x@op}`, a substring whose offset/length
-//!   contains `$`/a backtick, and a modifier operand containing a process
-//!   substitution
+//!   contains `$`/a backtick, a modifier operand containing a process
+//!   substitution, a double quote inside a double-quoted parameter-expansion
+//!   operand, and the zsh expansion-flag forms (`${(e)x}`, `${=x}`, `${~x}`,
+//!   `${^x}`, `${+x}`, `${|x}`) in every shell, since brush would otherwise
+//!   read them as literal text
 //! - brace-expansion ranges (`{1..5}`, `{a..z}`) — shguard's
 //!   `WordPiece::BraceAlternation` holds literal alternatives, not a range to
 //!   enumerate
@@ -1725,10 +1728,43 @@ fn convert_word_text(text: &str) -> Result<Vec<WordPiece>, ParseError> {
     }
     let pieces = catch_parser_panic(|| bword::parse(rest, &parser_options()))?
         .map_err(|err| ParseError::syntax(format!("word parse of {rest:?}: {err}")))?;
+    reject_zsh_expansion_flags(pieces.iter().map(|p| &p.piece))?;
     for piece in pieces {
         converted.push(convert_word_piece(piece.piece, false)?);
     }
     Ok(converted)
+}
+
+/// Rejects `${(flags)x}`, `${=x}`, `${~x}`, `${^x}`, `${+x}` and `${|...}` in
+/// every shell, not only zsh. brush fails the parameter-expansion rule on
+/// them and falls back to literal text (`$` then `{...}`), so a word like
+/// `${(e)x}` would otherwise read as a resolved literal while zsh evaluates
+/// it. A `$` that is quoted or escaped arrives as another piece type, so only
+/// an unquoted `$` followed by `{` and a flag character is rejected.
+fn reject_zsh_expansion_flags<'a>(
+    pieces: impl Iterator<Item = &'a bword::WordPiece>,
+) -> Result<(), ParseError> {
+    let mut previous_text_ends_with_dollar = false;
+    for piece in pieces {
+        let bword::WordPiece::Text(text) = piece else {
+            previous_text_ends_with_dollar = false;
+            continue;
+        };
+        let after_dollar_brace = text.split("${").skip(1);
+        let continued = previous_text_ends_with_dollar
+            .then(|| text.strip_prefix('{'))
+            .flatten();
+        if after_dollar_brace
+            .chain(continued)
+            .any(|rest| rest.starts_with(['(', '=', '~', '^', '+', '|']))
+        {
+            return Err(ParseError::unsupported(
+                "zsh parameter-expansion flag (${(flags)x} / ${=x} / ${~x} / ${^x})",
+            ));
+        }
+        previous_text_ends_with_dollar = text.ends_with('$');
+    }
+    Ok(())
 }
 
 fn convert_word_piece(
@@ -1741,6 +1777,7 @@ fn convert_word_piece(
         bword::WordPiece::AnsiCQuotedText(text) => Ok(WordPiece::AnsiCQuoted(text)),
         bword::WordPiece::DoubleQuotedSequence(inner)
         | bword::WordPiece::GettextDoubleQuotedSequence(inner) => {
+            reject_zsh_expansion_flags(inner.iter().map(|p| &p.piece))?;
             let pieces = inner
                 .into_iter()
                 .map(|p| convert_word_piece(p.piece, true))
@@ -2479,6 +2516,25 @@ mod tests {
             parse("echo ${x}{99999999999999999999..1}"),
             Err(ParseError::Syntax { .. })
         ));
+    }
+
+    // issue #606: zsh expansion-flag forms are rejected, not read as
+    // literal text; quoted or escaped copies stay ordinary text.
+    #[test]
+    fn parser_rejects_zsh_expansion_flag_forms() {
+        for command in [
+            "echo ${(e)x}",
+            "echo ${=x}",
+            "echo ${~x}",
+            "echo ${^x}",
+            "echo \"${(e)x}\"",
+        ] {
+            assert!(
+                matches!(parse(command), Err(ParseError::Unsupported { .. })),
+                "{command}"
+            );
+        }
+        assert!(parse("echo '${(e)x}'").is_ok());
     }
 
     // issue #640: a word whose only braces open `${...}` skips the brace

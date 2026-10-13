@@ -142,6 +142,33 @@ fn issue_580_pins() {
 }
 
 #[test]
+fn zsh_expansion_flag_forms_are_never_allowed() {
+    check(&[
+        ("x='$(rm -rf ~)'; echo ${(e)x}", Decision::Ask),
+        ("x=rm; ${=x} -rf ~", Decision::Ask),
+        ("echo ${(e)x}", Decision::Ask),
+        ("echo ${(@)x}", Decision::Ask),
+        ("echo ${~x}", Decision::Ask),
+        ("echo ${^x}", Decision::Ask),
+        ("echo ${+x}", Decision::Ask),
+        ("echo ${|x}", Decision::Ask),
+        ("echo \"${(e)x}\"", Decision::Ask),
+        ("echo ${x:-${(e)y}}", Decision::Ask),
+        ("echo \"${x:-${(e)y}}\"", Decision::Ask),
+        ("echo ${x}${=y}", Decision::Ask),
+    ]);
+}
+
+#[test]
+fn quoted_or_escaped_zsh_flag_text_is_not_rejected() {
+    check(&[
+        ("echo '${(e)x}'", Decision::Allow),
+        ("echo '${=x}'", Decision::Allow),
+        ("echo $'${~x}'", Decision::Allow),
+    ]);
+}
+
+#[test]
 fn overflowing_numeric_brace_after_dollar_does_not_hide_a_block() {
     check(&[
         ("rm -rf / ${99999999999999999999}", Decision::Block),
