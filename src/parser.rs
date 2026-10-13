@@ -1515,11 +1515,42 @@ fn convert_word(word: &bast::Word) -> Result<Word, ParseError> {
         return Ok(Word(convert_word_text(raw)?));
     }
 
+    Ok(Word(convert_brace_segments(
+        brace_segments.into_iter().flatten(),
+        0,
+    )?))
+}
+
+/// Converts consecutive brace-pre-pass segments. A `Text` ending in an odd
+/// run of `$` directly followed by an `Expr` is a `${...}` the pre-pass split
+/// at a top-level comma; no shell brace-expands `${`, and the real parse
+/// would never see the `${` text, so it is rejected here.
+fn convert_brace_segments(
+    segments: impl IntoIterator<Item = bword::BraceExpressionOrText>,
+    depth: usize,
+) -> Result<Vec<WordPiece>, ParseError> {
     let mut pieces = Vec::new();
-    for segment in brace_segments.into_iter().flatten() {
-        pieces.extend(convert_brace_segment(segment, 0)?);
+    let mut after_lone_dollar = false;
+    for segment in segments {
+        match &segment {
+            bword::BraceExpressionOrText::Expr(_) if after_lone_dollar => {
+                return Err(ParseError::unsupported(
+                    "unresolved `$` expansion form (a `${...}` split by a top-level comma)",
+                ));
+            }
+            bword::BraceExpressionOrText::Text(text) => {
+                let dollars = text.bytes().rev().take_while(|&b| b == b'$').count();
+                let before = &text[..text.len() - dollars];
+                let backslashes = before.bytes().rev().take_while(|&b| b == b'\\').count();
+                // `\$` is a literal dollar, so the run's first `$` is escaped.
+                let live = dollars.saturating_sub(usize::from(backslashes % 2 == 1));
+                after_lone_dollar = live % 2 == 1;
+            }
+            bword::BraceExpressionOrText::Expr(_) => after_lone_dollar = false,
+        }
+        pieces.extend(convert_brace_segment(segment, depth)?);
     }
-    Ok(Word(pieces))
+    Ok(pieces)
 }
 
 /// True if every `{` in `text` follows an odd run of `$` (`${`, not the PID
@@ -1737,11 +1768,7 @@ fn convert_brace_members(
         .into_iter()
         .map(|member| match member {
             bword::BraceExpressionMember::Child(inner) => {
-                let mut pieces = Vec::new();
-                for segment in inner {
-                    pieces.extend(convert_brace_segment(segment, depth + 1)?);
-                }
-                Ok(Word(pieces))
+                Ok(Word(convert_brace_segments(inner, depth + 1)?))
             }
             bword::BraceExpressionMember::NumberSequence { .. }
             | bword::BraceExpressionMember::CharSequence { .. } => Err(ParseError::unsupported(
@@ -2640,6 +2667,25 @@ mod tests {
         }
     }
 
+    // A `${...}` with a top-level comma beside a real brace group is split
+    // by the brace pre-pass into `$` plus an alternation; it must still be
+    // rejected.
+    #[test]
+    fn parser_rejects_comma_split_dollar_brace_beside_a_brace_group() {
+        for command in [
+            "echo ${ rm -rf ~; echo ,; }{c,d}",
+            "echo {c,d}${ rm -rf ~; echo ,; }",
+            "echo ${=x,y}{c,d}",
+            "echo {a,{b,${ rm -rf ~; echo ,; }}}",
+        ] {
+            assert!(
+                matches!(parse(command), Err(ParseError::Unsupported { .. })),
+                "{command}: {:?}",
+                parse(command)
+            );
+        }
+    }
+
     // issue #640: the `\` exclusion keeps `\${a,b}` on the brace pre-pass.
     #[test]
     fn escaped_dollar_before_a_brace_group_is_still_a_brace_alternation() {
@@ -2653,10 +2699,12 @@ mod tests {
         );
     }
 
-    // issue #640: `$$` is the PID parameter, so the `{a,b}` after it is a
-    // brace group and must still reach the brace pre-pass.
+    // issue #640: `$${a,b}` goes to the brace pre-pass and is read as an
+    // alternation. That is a conservative over-approximation: bash may read
+    // it as `$` then `${a,b}` instead, but the alternation is the reading
+    // that exposes the members to the rules.
     #[test]
-    fn pid_parameter_before_a_brace_group_is_still_a_brace_alternation() {
+    fn double_dollar_before_a_brace_group_is_conservatively_a_brace_alternation() {
         let cmd = parse_ok("echo $${a,b}");
         let word = &simple(&cmd.first.first).words[1];
         assert!(
