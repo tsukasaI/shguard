@@ -140,3 +140,12 @@ fn issue_580_pins() {
         ("B=rm; ${B%x} -rf ~", Decision::Ask),
     ]);
 }
+
+#[test]
+fn overflowing_numeric_brace_after_dollar_does_not_hide_a_block() {
+    check(&[
+        ("rm -rf / ${99999999999999999999}", Decision::Block),
+        ("rm -rf / ${-9223372036854775809}", Decision::Block),
+        ("rm -rf / ${x}{1..2}", Decision::Ask),
+    ]);
+}

@@ -1416,6 +1416,12 @@ fn convert_word(word: &bast::Word) -> Result<Word, ParseError> {
             "brace range expansion ({1..5} / {a..z})",
         ));
     }
+    // Not routed through `parse_brace_expansions`: its grammar reads the `{`
+    // after a `$` as a brace group and `number()` panics on
+    // `${99999999999999999999}` (issue #640), degrading the whole line to Ask.
+    if only_parameter_expansion_braces(raw) {
+        return Ok(Word(convert_word_text(raw)?));
+    }
     let brace_segments =
         catch_parser_panic(|| bword::parse_brace_expansions(raw, &parser_options()))?.map_err(
             |err| ParseError::syntax(format!("brace-expansion parse of {raw:?}: {err}")),
@@ -1436,6 +1442,17 @@ fn convert_word(word: &bast::Word) -> Result<Word, ParseError> {
     Ok(Word(pieces))
 }
 
+/// True if `text` has no backslash or `'` and every `{` in it directly
+/// follows a `$`, so it holds no brace expansion for the pre-pass to find.
+fn only_parameter_expansion_braces(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    !text.contains(['\\', '\''])
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(i, &b)| b != b'{' || (i > 0 && bytes[i - 1] == b'$'))
+}
+
 fn is_brace_expr(segment: &bword::BraceExpressionOrText) -> bool {
     matches!(segment, bword::BraceExpressionOrText::Expr(_))
 }
@@ -1450,7 +1467,11 @@ fn is_brace_expr(segment: &bword::BraceExpressionOrText) -> bool {
 /// of `"`, `'`, `` ` ``, `$`, `\`. Pre-emption only exists to avoid the
 /// panic itself (the *decision* is `Ask` either way — pre-empted via
 /// `ParseError::unsupported` or contained via `catch_parser_panic`'s own
-/// `ParseError::Syntax` — so under-flagging here costs nothing). Every
+/// `ParseError::Syntax` — so under-flagging here costs nothing). The one
+/// exception is a word whose only braces open `${...}`: the contained panic
+/// there would hide a later `Block` verdict on the same line, so
+/// [`only_parameter_expansion_braces`] diverts such words around the
+/// pre-pass in `convert_word` (issue #640). Every
 /// one of these bytes can introduce quoting or a substitution, whose
 /// content brush's grammar may keep live (inside `"..."`) or treat as an
 /// opaque, independently-quoted sub-fragment (`$(...)`, `` `...` ``), and
@@ -2447,22 +2468,27 @@ mod tests {
         );
     }
 
-    // issue #405: any word containing `$` bails, so `${...}` (parameter
-    // expansion) is never pre-empted either — unlike the shapes above,
-    // this one genuinely still panics in real brush (empirically
-    // confirmed), so the decision falls to `catch_parser_panic`'s
-    // pre-existing containment instead of the pre-emption path. Same
-    // eventual decision (`Ask`), different path — this pins that the
-    // parse still fails cleanly rather than panicking uncaught.
+    // issue #405: any word containing `$` bails, so a word mixing `${...}`
+    // with another brace group is never pre-empted either — this one
+    // genuinely still panics in real brush, so the decision falls to
+    // `catch_parser_panic`'s containment instead of the pre-emption path.
+    // Specifically `Syntax` (containment), not `Unsupported` (pre-emption).
     #[test]
-    fn overflowing_parameter_expansion_range_is_contained_not_pre_empted() {
-        // Specifically `Syntax` (catch_parser_panic's containment path),
-        // not `Unsupported` (the pre-emption path) — a bare `.is_err()`
-        // can't distinguish the two.
+    fn overflowing_brace_range_beside_parameter_expansion_is_contained_not_pre_empted() {
         assert!(matches!(
-            parse("echo ${99999999999999999999..1}"),
+            parse("echo ${x}{99999999999999999999..1}"),
             Err(ParseError::Syntax { .. })
         ));
+    }
+
+    // issue #640: a word whose only braces open `${...}` skips the brace
+    // pre-pass, so an overflowing digit run inside parses as a plain
+    // parameter expansion instead of panicking.
+    #[test]
+    fn parser_overflowing_numeric_parameter_expansion_does_not_panic() {
+        assert!(parse("echo ${99999999999999999999}").is_ok());
+        assert!(parse("echo ${-9223372036854775809}").is_ok());
+        assert!(parse("echo ${99999999999999999999..1}").is_ok());
     }
 
     // crash-fuzzer finding (issue #405): brush-parser 0.4.0 panics on a
