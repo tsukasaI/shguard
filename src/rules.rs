@@ -4149,9 +4149,45 @@ fn value_flag_consumed(rest_words: &[NormalizedWord], value_flags: &[ValueFlag])
 /// get. Not an [`ESCALATION_VECTORS`] entry — no privilege change, only a
 /// function/alias-shadowing bypass.
 pub(crate) const TRANSPARENT_WRAPPERS: &[&str] = &[
-    "env", "command", "nohup", "nice", "exec", "stdbuf", "setsid", "sudo", "xargs", "doas", "su",
-    "pkexec", "run0", "timeout", "ionice", "flock", "chrt", "taskset", "busybox", "toybox",
+    "env",
+    "command",
+    "nohup",
+    "nice",
+    "exec",
+    "stdbuf",
+    "setsid",
+    "sudo",
+    "xargs",
+    "doas",
+    "su",
+    "pkexec",
+    "run0",
+    "timeout",
+    "ionice",
+    "flock",
+    "chrt",
+    "taskset",
+    "busybox",
+    "toybox",
     "builtin",
+    "time",
+    "caffeinate",
+    "chroot",
+    "unshare",
+    "runuser",
+    "strace",
+    "watch",
+    "setarch",
+    "prlimit",
+    "firejail",
+    "systemd-run",
+    "unbuffer",
+    "numactl",
+    "linux32",
+    "linux64",
+    "i386",
+    "x86_64",
+    "uname26",
 ];
 
 /// The subset of [`TRANSPARENT_WRAPPERS`] that escalate privileges (issues
@@ -4164,7 +4200,7 @@ pub(crate) const TRANSPARENT_WRAPPERS: &[&str] = &[
 /// rejection in [`matches_dangerous_allow_target`] walks
 /// `TRANSPARENT_WRAPPERS`, not this list, so an escalation vector missing
 /// from `TRANSPARENT_WRAPPERS` would silently become allow-listable.
-pub(crate) const ESCALATION_VECTORS: &[&str] = &["sudo", "doas", "su", "pkexec", "run0"];
+pub(crate) const ESCALATION_VECTORS: &[&str] = &["sudo", "doas", "su", "pkexec", "run0", "runuser"];
 
 /// Shell interpreters whose `-c '<string>'` argument `crate::gate` recurses
 /// into as shell syntax (rule 6a). Lives here, next to
@@ -4623,6 +4659,27 @@ fn wrapper_cluster_booleans(wrapper: &str) -> Option<&'static [char]> {
             'b', 'm', 'B', 'd', 'e', 'i', 'k', 'L', 'n', 'p', 'q', 'r', 'R', 's', 'S', 't', 'v',
             'w',
         ]),
+        // Issue #638 wrappers. Every letter not listed here or in
+        // `wrapper_value_flags` makes a cluster unrecognized (the
+        // generic dash-skip then consumes it alone), so these are the
+        // complete short-option surfaces: strace's `-c`/`-C` are boolean.
+        "time" => Some(&['a', 'p', 'q', 'v', 'V', 'l', 'h']),
+        "caffeinate" => Some(&['d', 'i', 'm', 's', 'u']),
+        "chroot" => Some(&[]),
+        "unshare" => Some(&[
+            'm', 'u', 'i', 'n', 'p', 'U', 'C', 'T', 'f', 'r', 'c', 'h', 'V',
+        ]),
+        "runuser" => Some(&['f', 'l', 'm', 'p', 'P', 'h', 'V']),
+        "strace" => Some(&[
+            'A', 'C', 'c', 'd', 'D', 'f', 'F', 'h', 'i', 'k', 'n', 'q', 'r', 't', 'T', 'v', 'V',
+            'w', 'x', 'y', 'Y', 'z', 'Z',
+        ]),
+        // Not `d`: procps `-d` takes an optional glued argument, so
+        // `-dx` is `-d` with value `x`, not `-d -x`.
+        "watch" => Some(&['b', 'c', 'C', 'e', 'g', 'p', 'r', 't', 'w', 'x', 'h', 'v']),
+        "prlimit" => Some(&['h', 'V']),
+        "systemd-run" => Some(&['r', 'd', 't', 'P', 'q', 'G', 'S', 'h']),
+        "numactl" => Some(&['a', 'b', 's', 'H', 'l', 't', 'd', 'D', 'u', 'T', 'h']),
         // No `"tar"` entry (issue #209): tar's short-flag arity genuinely
         // differs across flavors for letters that matter (bsdtar's `-s` takes a value; GNU
         // tar's `-s`/`--same-order` is boolean), so a table built from
@@ -5003,6 +5060,177 @@ fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
             ValueFlag::Long("delimiter".to_string()),
             ValueFlag::Long("process-slot-var".to_string()),
         ],
+        // Issue #638: GNU `time` takes `-f`/`--format` and `-o`/`--output`;
+        // `-p`/`-a`/`-v`/`-q` and macOS `-l` are boolean.
+        "time" => vec![
+            ValueFlag::Short('f'),
+            ValueFlag::Long("format".to_string()),
+            ValueFlag::Short('o'),
+            ValueFlag::Long("output".to_string()),
+        ],
+        "caffeinate" => vec![ValueFlag::Short('t'), ValueFlag::Short('w')],
+        // The NEWROOT positional is in `wrapper_positional_args`.
+        "chroot" => vec![
+            ValueFlag::Long("userspec".to_string()),
+            ValueFlag::Long("groups".to_string()),
+            ValueFlag::Short('u'),
+            ValueFlag::Short('g'),
+            ValueFlag::Short('G'),
+        ],
+        // Required-argument options only: the namespace flags (`--mount[=file]`)
+        // take an optional `=`-joined value, and listing them would swallow
+        // the wrapped command.
+        "unshare" => vec![
+            ValueFlag::Short('S'),
+            ValueFlag::Long("setuid".to_string()),
+            ValueFlag::Short('G'),
+            ValueFlag::Long("setgid".to_string()),
+            ValueFlag::Short('R'),
+            ValueFlag::Long("root".to_string()),
+            ValueFlag::Short('w'),
+            ValueFlag::Long("wd".to_string()),
+            ValueFlag::Long("map-user".to_string()),
+            ValueFlag::Long("map-group".to_string()),
+            ValueFlag::Long("map-users".to_string()),
+            ValueFlag::Long("map-groups".to_string()),
+            ValueFlag::Long("setgroups".to_string()),
+            ValueFlag::Long("propagation".to_string()),
+            ValueFlag::Long("monotonic".to_string()),
+            ValueFlag::Long("boottime".to_string()),
+            ValueFlag::Long("load-interp".to_string()),
+            ValueFlag::Short('l'),
+        ],
+        "runuser" => vec![
+            ValueFlag::Short('u'),
+            ValueFlag::Long("user".to_string()),
+            ValueFlag::Short('g'),
+            ValueFlag::Long("group".to_string()),
+            ValueFlag::Short('G'),
+            ValueFlag::Long("supp-group".to_string()),
+            ValueFlag::Short('s'),
+            ValueFlag::Long("shell".to_string()),
+            ValueFlag::Short('w'),
+            ValueFlag::Long("whitelist-environment".to_string()),
+            ValueFlag::Short('c'),
+            ValueFlag::Long("command".to_string()),
+            ValueFlag::Long("session-command".to_string()),
+        ],
+        "strace" => vec![
+            ValueFlag::Short('o'),
+            ValueFlag::Short('e'),
+            ValueFlag::Short('p'),
+            ValueFlag::Short('s'),
+            ValueFlag::Short('u'),
+            ValueFlag::Short('E'),
+            ValueFlag::Short('a'),
+            ValueFlag::Short('b'),
+            ValueFlag::Short('I'),
+            ValueFlag::Short('O'),
+            ValueFlag::Short('P'),
+            ValueFlag::Short('S'),
+            ValueFlag::Short('X'),
+            ValueFlag::Long("output".to_string()),
+            ValueFlag::Long("trace".to_string()),
+            ValueFlag::Long("signal".to_string()),
+            ValueFlag::Long("status".to_string()),
+            ValueFlag::Long("env".to_string()),
+            ValueFlag::Long("user".to_string()),
+            ValueFlag::Long("string-limit".to_string()),
+            ValueFlag::Short('U'),
+            ValueFlag::Long("attach".to_string()),
+            ValueFlag::Long("trace-path".to_string()),
+            ValueFlag::Long("summary-sort-by".to_string()),
+            ValueFlag::Long("summary-columns".to_string()),
+            ValueFlag::Long("columns".to_string()),
+            ValueFlag::Long("detach-on".to_string()),
+            ValueFlag::Long("interruptible".to_string()),
+            ValueFlag::Long("const-print-style".to_string()),
+            ValueFlag::Long("abbrev".to_string()),
+            ValueFlag::Long("verbose".to_string()),
+            ValueFlag::Long("raw".to_string()),
+            ValueFlag::Long("read".to_string()),
+            ValueFlag::Long("write".to_string()),
+            ValueFlag::Long("inject".to_string()),
+            ValueFlag::Long("fault".to_string()),
+            ValueFlag::Long("syscall-limit".to_string()),
+            ValueFlag::Long("decode-pids".to_string()),
+        ],
+        // `-d`/`--differences` takes an optional `=`-joined value only.
+        "watch" => vec![
+            ValueFlag::Short('n'),
+            ValueFlag::Long("interval".to_string()),
+            ValueFlag::Short('q'),
+            ValueFlag::Long("equexit".to_string()),
+            ValueFlag::Short('s'),
+            ValueFlag::Long("shotsdir".to_string()),
+        ],
+        // Resource limits (`--nofile=...`) are optional-argument, `=`-joined.
+        "prlimit" => vec![
+            ValueFlag::Short('p'),
+            ValueFlag::Long("pid".to_string()),
+            ValueFlag::Short('o'),
+            ValueFlag::Long("output".to_string()),
+        ],
+        "systemd-run" => vec![
+            ValueFlag::Short('u'),
+            ValueFlag::Long("unit".to_string()),
+            ValueFlag::Short('p'),
+            ValueFlag::Long("property".to_string()),
+            ValueFlag::Short('E'),
+            ValueFlag::Long("setenv".to_string()),
+            ValueFlag::Short('M'),
+            ValueFlag::Long("machine".to_string()),
+            ValueFlag::Short('H'),
+            ValueFlag::Long("host".to_string()),
+            ValueFlag::Long("uid".to_string()),
+            ValueFlag::Long("gid".to_string()),
+            ValueFlag::Long("nice".to_string()),
+            ValueFlag::Long("working-directory".to_string()),
+            ValueFlag::Long("description".to_string()),
+            ValueFlag::Long("slice".to_string()),
+            ValueFlag::Long("service-type".to_string()),
+            ValueFlag::Long("on-active".to_string()),
+            ValueFlag::Long("on-boot".to_string()),
+            ValueFlag::Long("on-startup".to_string()),
+            ValueFlag::Long("on-unit-active".to_string()),
+            ValueFlag::Long("on-unit-inactive".to_string()),
+            ValueFlag::Long("on-calendar".to_string()),
+            ValueFlag::Long("timer-property".to_string()),
+            ValueFlag::Short('C'),
+            ValueFlag::Long("capsule".to_string()),
+            ValueFlag::Long("path-property".to_string()),
+            ValueFlag::Long("socket-property".to_string()),
+            ValueFlag::Long("job-mode".to_string()),
+        ],
+        "numactl" => vec![
+            ValueFlag::Short('C'),
+            ValueFlag::Long("physcpubind".to_string()),
+            ValueFlag::Short('N'),
+            ValueFlag::Long("cpunodebind".to_string()),
+            ValueFlag::Short('m'),
+            ValueFlag::Long("membind".to_string()),
+            ValueFlag::Short('p'),
+            ValueFlag::Long("preferred".to_string()),
+            ValueFlag::Short('i'),
+            ValueFlag::Long("interleave".to_string()),
+            ValueFlag::Short('P'),
+            ValueFlag::Long("preferred-many".to_string()),
+            ValueFlag::Short('w'),
+            ValueFlag::Long("weighted-interleave".to_string()),
+            ValueFlag::Short('S'),
+            ValueFlag::Long("shm".to_string()),
+            ValueFlag::Short('f'),
+            ValueFlag::Long("file".to_string()),
+            ValueFlag::Short('o'),
+            ValueFlag::Long("offset".to_string()),
+            ValueFlag::Short('L'),
+            ValueFlag::Long("length".to_string()),
+            ValueFlag::Short('M'),
+            ValueFlag::Long("shmmode".to_string()),
+            ValueFlag::Short('I'),
+            ValueFlag::Long("shmid".to_string()),
+            ValueFlag::Long("cpubind".to_string()),
+        ],
         // Issue #209: `make`/`tar` aren't
         // `TRANSPARENT_WRAPPERS` (they don't exec an arbitrary wrapped
         // command), so these two entries are never reached by
@@ -5072,8 +5300,10 @@ fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
 /// consumed first and the positional count applies to whatever token
 /// follows.
 fn wrapper_positional_args(wrapper: &str) -> usize {
+    // `setarch` is absent on purpose: its grammar is `[arch] [options]
+    // [program]`, handled by `skip_wrapper_arguments` itself.
     match wrapper {
-        "timeout" | "flock" | "su" | "chrt" | "taskset" => 1,
+        "timeout" | "flock" | "su" | "chrt" | "taskset" | "chroot" => 1,
         _ => 0,
     }
 }
@@ -5180,7 +5410,17 @@ fn skip_wrapper_flags(wrapper: &str, argv: &[NormalizedWord]) -> usize {
 /// never reaches this check — the flag-skipping loop above already
 /// consumes `--` itself, since it starts with `-`.
 fn skip_wrapper_arguments<'a>(wrapper: &str, argv: &'a [NormalizedWord]) -> &'a [NormalizedWord] {
-    let mut idx = skip_wrapper_flags(wrapper, argv);
+    let mut idx = 0;
+    // `setarch [arch] [options] [program]`: ARCH only when the first word
+    // is not an option, and the options come AFTER it (not before, like
+    // every other positional-taking wrapper here).
+    if wrapper == "setarch"
+        && let Some(Resolution::Resolved(arch)) = argv.first().map(NormalizedWord::resolution)
+        && !arch.starts_with('-')
+    {
+        idx = 1;
+    }
+    idx += skip_wrapper_flags(wrapper, &argv[idx..]);
     let mut positionals_remaining = wrapper_positional_args(wrapper);
     while positionals_remaining > 0 {
         let Some(Resolution::Resolved(_)) = argv.get(idx).map(NormalizedWord::resolution) else {
@@ -5619,9 +5859,136 @@ pub(crate) fn wrapper_shell_string_scripts(stage: &[NormalizedWord]) -> Vec<Scri
                 FlagScan::Absent => {}
             }
         }
+        match base.as_str() {
+            "watch" => collect_watch_shell_slots(tail, &mut slots),
+            "strace" => collect_strace_pipe_slots(tail, &mut slots),
+            "numactl" => collect_numactl_short_c_slot(tail, &mut slots),
+            _ => {}
+        }
         rest = skip_wrapper_arguments(&base, tail);
     }
     slots
+}
+
+/// `watch` runs its operands through `sh -c` (words joined by spaces)
+/// unless `-x`/`--exec` is given, so `watch 'echo; rm -rf /'` is a shell
+/// string, not a command named `echo; rm -rf /`. Any unresolved word in
+/// that tail floors to Ask.
+fn collect_watch_shell_slots(tail: &[NormalizedWord], slots: &mut Vec<ScriptSlot>) {
+    let end = skip_wrapper_flags("watch", tail);
+    // Same consumption rule as `skip_wrapper_flags`, so a value taken by a
+    // flag (`watch -s -x 'rm -rf /'`) is never read as the `-x` flag.
+    let value_flags = wrapper_value_flags("watch");
+    let mut exec_mode = false;
+    let mut index = 0;
+    while index < end {
+        let Resolution::Resolved(flag) = tail[index].resolution() else {
+            break;
+        };
+        if value_flag_bare_match(&value_flags, flag) || cluster_takes_separated_value("watch", flag)
+        {
+            index += 2;
+            continue;
+        }
+        if (flag.len() >= 4 && "--exec".starts_with(flag))
+            || (flag.starts_with('-')
+                && !flag.starts_with("--")
+                && cluster_has_letter("watch", flag, 'x'))
+        {
+            exec_mode = true;
+        }
+        index += 1;
+    }
+    if exec_mode || end >= tail.len() {
+        return;
+    }
+    let mut script = String::new();
+    for word in &tail[end..] {
+        let Resolution::Resolved(text) = word.resolution() else {
+            slots.push(ScriptSlot::Unresolvable);
+            return;
+        };
+        if !script.is_empty() {
+            script.push(' ');
+        }
+        script.push_str(text);
+    }
+    slots.push(ScriptSlot::Resolved(script));
+}
+
+/// numactl's short `-c` is not known to take a value or not, and either
+/// guess can expose the wrong word as the wrapped command, so any short
+/// flag token containing `c` floors to Ask.
+fn collect_numactl_short_c_slot(tail: &[NormalizedWord], slots: &mut Vec<ScriptSlot>) {
+    let end = skip_wrapper_flags("numactl", tail);
+    let uncertain = tail[..end].iter().any(|word| {
+        matches!(
+            word.resolution(),
+            Resolution::Resolved(flag)
+                if flag.starts_with('-') && !flag.starts_with("--") && flag.contains('c')
+        )
+    });
+    if uncertain {
+        slots.push(ScriptSlot::Unresolvable);
+    }
+}
+
+/// Whether `token` (a `-`-cluster) holds `letter` as one of its own flags
+/// rather than as part of a value glued to an earlier value-taking letter.
+fn cluster_has_letter(wrapper: &str, token: &str, letter: char) -> bool {
+    let Some(booleans) = wrapper_cluster_booleans(wrapper) else {
+        return false;
+    };
+    for c in token.trim_start_matches('-').chars() {
+        if c == letter {
+            return true;
+        }
+        if !booleans.contains(&c) {
+            return false;
+        }
+    }
+    false
+}
+
+/// `strace -o '|cmd'` / `-o '!cmd'` pipes the trace to `sh -c cmd`. The
+/// remainder is recursed as a shell string; an unresolved `-o` value floors
+/// to Ask because it could be such a pipe.
+fn collect_strace_pipe_slots(tail: &[NormalizedWord], slots: &mut Vec<ScriptSlot>) {
+    let end = skip_wrapper_flags("strace", tail);
+    // `end` can stop on an unresolved value token; include it in the scan.
+    let scanned = &tail[..end.saturating_add(1).min(tail.len())];
+    for (index, word) in scanned.iter().enumerate() {
+        let Resolution::Resolved(flag) = word.resolution() else {
+            continue;
+        };
+        let value = if flag == "-o" || flag == "--output" {
+            Some(scanned.get(index + 1))
+        } else if let Some(attached) = flag.strip_prefix("--output=") {
+            slots.extend(pipe_remainder(attached));
+            None
+        } else {
+            match locate_cluster_value("strace", flag, 'o') {
+                Some(ClusterValue::NextToken) => Some(scanned.get(index + 1)),
+                Some(ClusterValue::Glued(glued)) => {
+                    slots.extend(pipe_remainder(glued));
+                    None
+                }
+                None => None,
+            }
+        };
+        if let Some(Some(next)) = value {
+            match next.resolution() {
+                Resolution::Resolved(text) => slots.extend(pipe_remainder(text)),
+                Resolution::Unresolvable(_) => slots.push(ScriptSlot::Unresolvable),
+            }
+        }
+    }
+}
+
+fn pipe_remainder(value: &str) -> Option<ScriptSlot> {
+    value
+        .strip_prefix(['|', '!'])
+        .map(|script| ScriptSlot::Resolved(script.to_string()))
 }
 
 /// Whether `stage`'s wrapper-unwrap chain passes through `su` with a
