@@ -181,3 +181,21 @@ tests for the full reproducer and reasoning:
   yet.
 
 Run `cargo test --test fuzz_differential -- --ignored` to see both directly.
+
+## Triaging findings during the RFC #658 redesign
+
+While the redesign in `docs/rfc-658-architecture.md` is in progress
+(tracking issue #658), route every new finding, including review
+follow-ups, by root cause:
+
+- If it is an instance of a family an epic covers, add it to that epic's
+  task list instead of fixing it on its own:
+  - #659 policy: decision combining, reasons, deny messages, ask_outcome;
+  - #660 knowledge: wrappers, option parsing, per-tool grammars;
+  - #661 semantics: variables, readonly, cwd, path shapes;
+  - #662 syntax: bash parity, heredocs, parser shims.
+- Patch individually, ahead of the epic, only **critical or high
+  fail-open** findings. Keep the patch minimal and leave a regression test
+  that the epic's implementation must keep green.
+- Leave medium and low findings, refactor and doc nits for the epic.
+- Label false positives `false-positive` whichever epic they belong to.
