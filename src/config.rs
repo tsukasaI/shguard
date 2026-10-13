@@ -115,7 +115,7 @@ use std::collections::HashSet;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::rules::{Allowlist, HomeDir, Rules, UserConfig, merge_user_config};
+use crate::rules::{Allowlist, HomeDir, PathCanonicalizer, Rules, UserConfig, merge_user_config};
 
 /// Everything that can go wrong loading a user policy. Every variant is a
 /// hard failure — [`Policy::load`] never falls back to "ignore the bad or
@@ -649,6 +649,15 @@ impl Policy {
             }
             None => rules,
         };
+
+        // Issue #612: an `except_targets` entry spelled differently from its
+        // canonical form (`/tmp` vs `/private/tmp`) never matches a
+        // `resolve_symlinks` candidate, so say so at load.
+        for warning in rules.resolve_symlinks_spelling_warnings(PathCanonicalizer::new(
+            crate::fs_canonicalizer::canonicalize,
+        )) {
+            eprintln!("shguard: warning: {warning}");
+        }
 
         Ok(Self {
             rules: std::sync::Arc::new(rules),
