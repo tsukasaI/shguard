@@ -1510,8 +1510,7 @@ impl TargetMatcher {
                 // into the very `bob` this rule cares about), a
                 // coincidence specific enough to be worth flooring to Ask.
                 // A target made ENTIRELY of glob wildcard components
-                // (`*`/`**`/the leading-dot globs `.*`, `.[!.]*`, `.??*`,
-                // `.[^.]*`, `.?*`, e.g. `~/*`, `~/.*`) has no such
+                // (see `is_glob_only_component`, e.g. `~/*`, `~/.*`) has no such
                 // specificity: `comps`'s own trailing component is a
                 // wildcard for essentially any benign relative path
                 // (`../build/*`, `../build/.*`, ...), so the same
@@ -1522,12 +1521,11 @@ impl TargetMatcher {
                 // ascent landing who-knows-where, then globbing
                 // everything there) still asks on its own, unwidened
                 // merit.
-                let widening_target_is_wildcard_only = target_comps.iter().all(|c| {
-                    matches!(
-                        c.as_str(),
-                        "*" | "**" | ".*" | ".[!.]*" | ".??*" | ".[^.]*" | ".?*"
-                    )
-                });
+                // Structural, not a spelling list: a list duplicating
+                // blocklist.toml's glob targets lets a new glob target
+                // silently reintroduce issue #559.
+                let widening_target_is_wildcard_only =
+                    target_comps.iter().all(|c| is_glob_only_component(c));
                 eq(target_comps, &comps)
                     // Issue #118: same re-anchoring as the prefix arm above,
                     // but only against a `~`-anchored target (an `Abs`
@@ -1557,6 +1555,40 @@ impl TargetMatcher {
             }
         }
     }
+}
+
+/// True for a path component made only of glob metacharacters: an optional
+/// leading `.`, then one or more of `*`, `?` and closed bracket expressions
+/// (`[...]`, `[!...]`/`[^...]` negation, a `]` right after the opener is a
+/// member). At least one metacharacter is required, so `.` and `..` are not
+/// glob-only, and any literal character (`.config`, `build`) disqualifies.
+fn is_glob_only_component(comp: &str) -> bool {
+    let body = comp.strip_prefix('.').unwrap_or(comp).as_bytes();
+    if body.is_empty() {
+        return false;
+    }
+    let mut i = 0;
+    while i < body.len() {
+        match body[i] {
+            b'*' | b'?' => i += 1,
+            b'[' => {
+                let mut j = i + 1;
+                if matches!(body.get(j), Some(b'!' | b'^')) {
+                    j += 1;
+                }
+                if body.get(j) == Some(&b']') {
+                    j += 1;
+                }
+                // An unclosed `[` is a literal character, so not glob-only.
+                match body[j.min(body.len())..].iter().position(|&b| b == b']') {
+                    Some(off) => i = j + off + 1,
+                    None => return false,
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
 }
 
 /// Renders `comps` as if it were the tail of an absolute path (`/` +
@@ -9356,6 +9388,21 @@ mod tests {
                 .match_redirect_target_ascent_descent("../../../../dev/sda1")
                 .is_some()
         );
+    }
+
+    #[test]
+    fn glob_only_component_is_structural() {
+        for glob in [
+            "*", "**", "?", ".*", ".**", ".*?", ".?*", ".??*", ".[!.]*", ".[!.]**", ".[^.]*",
+            "[]a]*", "[a-z]",
+        ] {
+            assert!(is_glob_only_component(glob), "{glob:?}");
+        }
+        for literal in [
+            "", ".", "..", "build", ".config", "foo*", ".*bak", "[", ".[!.", "*[a", "[]",
+        ] {
+            assert!(!is_glob_only_component(literal), "{literal:?}");
+        }
     }
 
     #[test]

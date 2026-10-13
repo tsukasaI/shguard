@@ -333,14 +333,19 @@ targets = [
     # `rm -rf ~/.*` would only reach those Ask-tier self-protect rules,
     # weaker than the Block `rm -rf ~/*` already gets. This is the
     # authoritative explanation of the leading-dot glob family; the
-    # other entries below point back here. The `.[!.]*`/`.??*`/`.[^.]*`/
-    # `.?*` spellings are the "safe" variants that skip `.`/`..` but
-    # still match `.ssh`/`.gnupg`/`.config`, so they delete the same set.
+    # other entries below point back here. The `.[!.]*`/`.??*`/`.[^.]*`
+    # spellings skip both `.` and `..`; `.?*` skips only `.` (it matches
+    # `..`). All still match `.ssh`/`.gnupg`/`.config`, so they delete the
+    # same set. `.**`, `.*?` and `.[!.]**` are further spellings (issue
+    # #595): in bash `.**` is identical to `.*`, globstar or not.
     { normalized = "~/.*" },
     { normalized = "~/.[!.]*" },
     { normalized = "~/.??*" },
     { normalized = "~/.[^.]*" },
     { normalized = "~/.?*" },
+    { normalized = "~/.**" },
+    { normalized = "~/.*?" },
+    { normalized = "~/.[!.]**" },
     { normalized = "." },
     # issue #453: `./*` and bare `*` both lexically normalize to
     # `Rel{ascent:0, comps:["*"]}` — a different value from `.`'s
@@ -364,6 +369,9 @@ targets = [
     { normalized = ".??*" },
     { normalized = ".[^.]*" },
     { normalized = ".?*" },
+    { normalized = ".**" },
+    { normalized = ".*?" },
+    { normalized = ".[!.]**" },
     # ".."/"../" (previously separate `exact` entries) are subsumed by
     # "/"'s pure-ascent widening (issue #65): `{ normalized = "/" }` also
     # matches any token that lexically normalizes to a pure relative
@@ -1362,11 +1370,16 @@ targets = [
     { normalized = "~/.??*" },
     { normalized = "~/.[^.]*" },
     { normalized = "~/.?*" },
+    { normalized = "~/.**" },
+    { normalized = "~/.*?" },
+    { normalized = "~/.[!.]**" },
     # `~/.config/*`/`~/.config/**` expand to the children of `~/.config`,
     # including `shguard` itself; they normalize to a different value than
-    # `~/.config` so need their own entries.
+    # `~/.config` so need their own entries. `~/.config/*/*` reaches the
+    # contents of `~/.config/shguard/` (issue #595).
     { normalized = "~/.config/*", case_insensitive = true },
     { normalized = "~/.config/**", case_insensitive = true },
+    { normalized = "~/.config/*/*", case_insensitive = true },
 ]
 
 [[command]]
@@ -1385,8 +1398,12 @@ targets = [
     { normalized = "~/.??*" },
     { normalized = "~/.[^.]*" },
     { normalized = "~/.?*" },
+    { normalized = "~/.**" },
+    { normalized = "~/.*?" },
+    { normalized = "~/.[!.]**" },
     { normalized = "~/.config/*", case_insensitive = true },
     { normalized = "~/.config/**", case_insensitive = true },
+    { normalized = "~/.config/*/*", case_insensitive = true },
 ]
 
 # Issue #127: `rsync --delete <src> <dst>` removes every file at `<dst>`

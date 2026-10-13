@@ -469,8 +469,9 @@ fn guardfall_rm_dot_targets() {
 /// to leading-dot entries (`.ssh`, `.aws`, `.config/shguard`) even without
 /// `shopt -s dotglob`, so it is a strict superset of the already-Ask
 /// `~/.config` target and must be at least as strict, not Allow. The
-/// "safe" spellings (`.[!.]*`, `.??*`, `.[^.]*`, `.?*`) skip `.`/`..` but
-/// match the same entries. `~/.config/*` reaches shguard's own config
+/// "safe" spellings (`.[!.]*`, `.??*`, `.[^.]*`) skip both `.` and `..`,
+/// `.?*` skips only `.` (it matches `..`); all match the same entries.
+/// `~/.config/*` reaches shguard's own config
 /// directory too. `../build/.*` is a sibling-directory cleanup, not a
 /// re-anchoring risk, and must stay Allow like `../build/*`.
 #[test]
@@ -511,6 +512,17 @@ fn guardfall_rm_dotglob_tilde_targets() {
         // Control: `~/.config` itself is unchanged by this fix.
         ("rm -r ~/.config", Decision::Ask),
         ("rm -rf ~/.config/shguard", Decision::Block),
+        // Issue #595: `.**`/`.*?`/`.[!.]**` are the same glob as `.*`/`.??*`.
+        ("rm -rf ~/.**", Decision::Block),
+        ("rm -rf ~/.*?", Decision::Block),
+        ("rm -rf ~/.[!.]**", Decision::Block),
+        ("rm -r ~/.**", Decision::Ask),
+        ("cd ~ && rm -rf .**", Decision::Block),
+        ("mv ~/.** /tmp", Decision::Ask),
+        ("rm -rf ../build/.**", Decision::Allow),
+        ("rm -rf ~/.config/*/*", Decision::Ask),
+        ("rm -r ~/.config/*/*", Decision::Ask),
+        ("rm -rf ../x/.config/*", Decision::Ask),
     ];
 
     for (command, expected) in cases {
