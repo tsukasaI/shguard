@@ -610,6 +610,23 @@ fn guardfall_rm_dotglob_tilde_targets() {
         ("rm -rf ../.c*", Decision::Ask),
         ("rm -rf ../dist/**", Decision::Allow),
         ("rm -rf ../build/.cache*", Decision::Allow),
+        // A qualifier that rewrites the yielded paths or runs code asks
+        // whatever the command (interim, #666).
+        ("rm -rf ~/.config/n*(:s/nvim/shguard/)", Decision::Ask),
+        ("rm -rf ~/.config/nvim/*(:h:h)", Decision::Ask),
+        ("rm -rf /tmp/*(:h:h)", Decision::Ask),
+        ("rm -rf ~/proj/*(:a:h:h)", Decision::Ask),
+        ("ls *(e:'rm -rf ~':)", Decision::Ask),
+        ("ls *(+myfunc)", Decision::Ask),
+        ("ls *(oe:'x':)", Decision::Ask),
+        ("cat < *(e:'rm -rf ~':)", Decision::Ask),
+        ("ls *(om[1])", Decision::Allow),
+        ("git commit -m 'fix(rules): x (see: y)'", Decision::Allow),
+        // `^` and extglob only reach the Ask floor, never a hard match:
+        // `^foo` is a literal name in bash.
+        ("rm -rf ~/.config/^foo", Decision::Ask),
+        ("rm -rf ^foo", Decision::Ask),
+        ("rm -rf ~/^foo", Decision::Ask),
         ("rm -rf ~/.config/*/config.toml", Decision::Ask),
         ("rm -rf ~/*/*", Decision::Ask),
         ("rm -rf ~/**/*", Decision::Ask),

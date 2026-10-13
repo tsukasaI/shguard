@@ -1419,7 +1419,7 @@ impl TargetMatcher {
         let Some(remainder) = strip_target(strip.as_deref(), token) else {
             return false;
         };
-        let comps = match lexical_normalize(&strip_glob_qualifier(remainder)) {
+        let comps = match lexical_normalize(strip_filter_qualifier(remainder)) {
             PathForm::Rel { ascent, comps } if ascent >= 1 => comps,
             PathForm::EscapesHome(comps)
             | PathForm::NamedUserHomeEscapes(comps)
@@ -1622,7 +1622,7 @@ impl TargetMatcher {
         let Some(remainder) = strip_target(strip.as_deref(), token) else {
             return false;
         };
-        let form = superset_glob_form(lexical_normalize(&strip_glob_qualifier(remainder)));
+        let form = superset_glob_form(lexical_normalize(&superset_glob_path(remainder)));
         let (pattern, unknown_anchor) = match (&form, &target) {
             (PathForm::Abs(pattern), PathForm::Abs(_))
             | (PathForm::Home(pattern), PathForm::Home(_)) => (pattern, false),
@@ -1938,8 +1938,9 @@ fn canonical_glob_component(comp: &str) -> Option<&'static str> {
     is_glob_only_component(comp).then(|| if comp.starts_with('.') { ".*" } else { "*" })
 }
 
+// No extglob or `^` reading here: this feeds hard matches, and `^foo` is
+// a literal name in bash and in zsh without EXTENDED_GLOB.
 fn canonicalize_glob_comps(comps: &mut [String]) {
-    superset_glob_comps(comps);
     for comp in comps {
         if let Some(canon) = canonical_glob_component(comp) {
             canon.clone_into(comp);
@@ -1947,39 +1948,194 @@ fn canonicalize_glob_comps(comps: &mut [String]) {
     }
 }
 
-// Interim reading of zsh glob qualifiers, extglob and zsh `^` negation
-// until #666 detects them as shell features: each spelling expands to a
-// subset of the glob it is read as here, so this can only over-match.
-// A qualifier is stripped only after a glob: `f(x)` stays a literal name.
-// A trailing group is handled here, not per component, because a
-// qualifier such as `(/)` contains the path separator.
-// An extglob opener plus its group becomes `*`, not the bare opener:
-// `s?(x)` matches `s`, which `s?` would not.
-fn strip_glob_qualifier(path: &str) -> Cow<'_, str> {
-    let Some(body) = path.strip_suffix(')') else {
-        return Cow::Borrowed(path);
-    };
+// A trailing group is split off on the whole path, not per component,
+// because a qualifier such as `(/)` contains the path separator.
+fn trailing_group(path: &str) -> Option<(&str, &str)> {
+    let body = path.strip_suffix(')')?;
     let mut depth = 0usize;
     for (open, byte) in body.bytes().enumerate().rev() {
         match byte {
             b')' => depth += 1,
             b'(' if depth > 0 => depth -= 1,
-            b'(' => {
-                let head = &path[..open];
-                if let Some(stem) = head.strip_suffix(['?', '@', '!', '+', '*']) {
-                    return Cow::Owned(format!("{stem}*"));
-                }
-                let last = head.rsplit('/').next().unwrap_or(head);
-                return Cow::Borrowed(if last.contains(['*', '?', '[']) {
-                    head
-                } else {
-                    path
-                });
-            }
+            b'(' => return Some((&path[..open], &body[open + 1..])),
             _ => {}
         }
     }
-    Cow::Borrowed(path)
+    None
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum QualifierGroup {
+    // Only narrows which names the glob yields.
+    Filter,
+    // Rewrites the yielded paths (`:h`, `P:x:`) or runs code (`e:..:`,
+    // `+func`, `oe`, `o+`).
+    Expands,
+    NotQualifier,
+}
+
+// zsh's glob qualifier list (zshexpn "Glob Qualifiers"), parsed rather
+// than keyword-matched: a parenthetical such as `(see: x)` is plain text,
+// while `(e:'rm x':)` holds spaces inside its delimited argument.
+fn classify_qualifier_group(group: &str) -> QualifierGroup {
+    let bytes = group.as_bytes();
+    let mut expands = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        i += 1;
+        let parsed = match c {
+            b'%' => Some(i + usize::from(matches!(bytes.get(i), Some(b'b' | b'c')))),
+            b'/' | b'.' | b'@' | b'=' | b'p' | b'*' | b'r' | b'w' | b'x' | b'A' | b'I' | b'E'
+            | b'R' | b'W' | b'X' | b's' | b'S' | b't' | b'F' | b'^' | b'-' | b'M' | b'T' | b'N'
+            | b'D' | b'n' | b'U' | b'G' | b',' => Some(i),
+            b'e' | b'P' => {
+                expands = true;
+                skip_delimited(bytes, i)
+            }
+            b'+' => {
+                expands = true;
+                skip_identifier(bytes, i)
+            }
+            b':' => {
+                expands = true;
+                bytes
+                    .get(i)
+                    .is_some_and(|m| b"aAcehlPqQrtuxXsgfFwW&".contains(m))
+                    .then_some(bytes.len())
+            }
+            b'o' | b'O' => match bytes.get(i) {
+                Some(b'e') => {
+                    expands = true;
+                    skip_delimited(bytes, i + 1)
+                }
+                Some(b'+') => {
+                    expands = true;
+                    skip_identifier(bytes, i + 1)
+                }
+                Some(b'n' | b'L' | b'l' | b'a' | b'm' | b'c' | b'd' | b'N') => Some(i + 1),
+                _ => None,
+            },
+            b'f' | b'u' | b'g' => match bytes.get(i) {
+                Some(d) if d.is_ascii_digit() => Some(skip_number(bytes, i)),
+                _ => skip_delimited(bytes, i),
+            },
+            b'a' | b'm' | b'c' | b'L' | b'l' | b'd' | b'Y' => {
+                let mut j = i;
+                if bytes.get(j).is_some_and(u8::is_ascii_alphabetic) {
+                    j += 1;
+                }
+                if matches!(bytes.get(j), Some(b'+' | b'-')) {
+                    j += 1;
+                }
+                bytes
+                    .get(j)
+                    .is_some_and(u8::is_ascii_digit)
+                    .then(|| skip_number(bytes, j))
+            }
+            b'[' => bytes[i..]
+                .iter()
+                .position(|&b| b == b']')
+                .map(|off| i + off + 1),
+            _ => None,
+        };
+        let Some(next) = parsed else {
+            return QualifierGroup::NotQualifier;
+        };
+        i = next;
+    }
+    match (bytes.is_empty(), expands) {
+        (true, _) => QualifierGroup::NotQualifier,
+        (false, true) => QualifierGroup::Expands,
+        (false, false) => QualifierGroup::Filter,
+    }
+}
+
+fn skip_number(bytes: &[u8], from: usize) -> usize {
+    from + bytes[from..]
+        .iter()
+        .take_while(|b| b.is_ascii_digit())
+        .count()
+}
+
+fn skip_identifier(bytes: &[u8], from: usize) -> Option<usize> {
+    if !bytes
+        .get(from)
+        .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
+    {
+        return None;
+    }
+    let len = bytes[from..]
+        .iter()
+        .take_while(|b| b.is_ascii_alphanumeric() || **b == b'_')
+        .count();
+    (len > 0).then_some(from + len)
+}
+
+// zsh's delimited argument: a bracket opener closes with its pair, any
+// other byte closes with itself.
+fn skip_delimited(bytes: &[u8], from: usize) -> Option<usize> {
+    let open = *bytes.get(from)?;
+    let close = match open {
+        b'[' => b']',
+        b'{' => b'}',
+        b'(' => b')',
+        b'<' => b'>',
+        other => other,
+    };
+    bytes[from + 1..]
+        .iter()
+        .position(|&b| b == close)
+        .map(|off| from + 1 + off + 1)
+}
+
+// Whether `word` carries a zsh glob qualifier that rewrites the paths a
+// glob yields or runs code, so no reading of it as a narrowed glob holds.
+// Not gated on a glob before the group: zsh treats `name(:h)` as a pattern
+// too. `(#q...)` is the EXTENDED_GLOB inline spelling.
+pub(crate) fn has_expanding_glob_qualifier(word: &str) -> bool {
+    let trailing = trailing_group(word)
+        .is_some_and(|(_, group)| classify_qualifier_group(group) == QualifierGroup::Expands);
+    trailing
+        || word.match_indices("(#q").any(|(at, _)| {
+            let rest = &word[at + 3..];
+            rest.find(')')
+                .is_none_or(|end| classify_qualifier_group(&rest[..end]) != QualifierGroup::Filter)
+        })
+}
+
+// Hard-match reading: a filter qualifier after a glob only narrows it, so
+// the glob alone stands in for it. `f(x)` stays a literal name, and so
+// does `s?(x)`: under bash extglob it matches `s`, which `s?` does not.
+fn strip_filter_qualifier(path: &str) -> &str {
+    match trailing_group(path) {
+        Some((head, group))
+            if classify_qualifier_group(group) == QualifierGroup::Filter
+                && !head.ends_with(['?', '@', '!', '+'])
+                && head
+                    .rsplit('/')
+                    .next()
+                    .is_some_and(|last| last.contains(['*', '?', '['])) =>
+        {
+            head
+        }
+        _ => path,
+    }
+}
+
+// Ask-floor reading, interim until #666 detects these as shell features:
+// a filter qualifier, extglob and zsh `^` each expand to a subset of the
+// glob read here. An extglob opener plus its group becomes `*`, not the
+// bare opener: `s?(x)` matches `s`, which `s?` would not. An expanding
+// qualifier is left alone; `has_expanding_glob_qualifier` floors it.
+fn superset_glob_path(path: &str) -> Cow<'_, str> {
+    if let Some((head, group)) = trailing_group(path)
+        && classify_qualifier_group(group) != QualifierGroup::Expands
+        && let Some(stem) = head.strip_suffix(['?', '@', '!', '+', '*'])
+    {
+        return Cow::Owned(format!("{stem}*"));
+    }
+    Cow::Borrowed(strip_filter_qualifier(path))
 }
 
 fn superset_glob_component(comp: &str) -> Option<&'static str> {
@@ -2033,7 +2189,7 @@ fn canonicalize_glob_form(mut form: PathForm) -> PathForm {
 }
 
 fn glob_canonical_form(path: &str) -> PathForm {
-    canonicalize_glob_form(lexical_normalize(&strip_glob_qualifier(path)))
+    canonicalize_glob_form(lexical_normalize(strip_filter_qualifier(path)))
 }
 
 /// Renders `comps` as if it were the tail of an absolute path (`/` +
@@ -2207,7 +2363,7 @@ impl TargetMatcher {
                 let Some(remainder) = strip_target(strip.as_deref(), token) else {
                     return false;
                 };
-                let mut comps = match lexical_normalize(&strip_glob_qualifier(remainder)) {
+                let mut comps = match lexical_normalize(strip_filter_qualifier(remainder)) {
                     PathForm::Rel { comps, .. } => comps,
                     _ => return false,
                 };
@@ -10000,9 +10156,62 @@ mod tests {
             ("f(x)", "f(x)"),
             ("(x)", "(x)"),
             ("%(refname)", "%(refname)"),
+            ("~/.config/nvim/*(:h:h)", "~/.config/nvim/*(:h:h)"),
+            ("*(e:rm -rf ~:)", "*(e:rm -rf ~:)"),
         ] {
-            assert_eq!(strip_glob_qualifier(path), read_as, "{path:?}");
+            assert_eq!(superset_glob_path(path), read_as, "{path:?}");
         }
+        for (path, hard) in [
+            ("~/*(/)", "~/*"),
+            ("~/.config/!(nvim)", "~/.config/!(nvim)"),
+            ("~/.config/s?(x)", "~/.config/s?(x)"),
+            ("/tmp/*(:h:h)", "/tmp/*(:h:h)"),
+        ] {
+            assert_eq!(strip_filter_qualifier(path), hard, "{path:?}");
+        }
+    }
+
+    #[test]
+    fn qualifier_groups_are_parsed_not_keyword_matched() {
+        for group in [
+            "/", "N", ".", "^/", "-/", "om[1]", "Lk+10", "m-1", "f:gu+w:", "u0", "%b",
+        ] {
+            assert_eq!(
+                classify_qualifier_group(group),
+                QualifierGroup::Filter,
+                "{group:?}"
+            );
+        }
+        for group in [
+            ":h:h",
+            ":s/nvim/shguard/",
+            ":a:h:h",
+            "e:rm -rf ~:",
+            "e{x}",
+            "+myfunc",
+            ".oe:x:",
+            "o+f",
+            "P:-rf:",
+        ] {
+            assert_eq!(
+                classify_qualifier_group(group),
+                QualifierGroup::Expands,
+                "{group:?}"
+            );
+        }
+        for group in ["see: x", "refname", "#595", "e.g. foo", "+1", "", "x y"] {
+            assert_eq!(
+                classify_qualifier_group(group),
+                QualifierGroup::NotQualifier,
+                "{group:?}"
+            );
+        }
+        assert!(has_expanding_glob_qualifier(
+            "~/.config/n*(:s/nvim/shguard/)"
+        ));
+        assert!(has_expanding_glob_qualifier("x(#qe:y:)z"));
+        assert!(!has_expanding_glob_qualifier("~/.config/*(/)"));
+        assert!(!has_expanding_glob_qualifier("fix(rules): x (see: y)"));
         for (comp, read_as) in [
             ("^nvim", Some("*")),
             ("@(shguard)", Some("*")),

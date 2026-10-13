@@ -345,8 +345,8 @@ use crate::normalize::{
 };
 use crate::rules::{
     AWK_INTERPRETERS, Allowlist, AllowlistOutcome, CommandRule, EVAL_BUILTIN, PathForm,
-    RedirectRule, Rules, SymlinkScope, WrapperChainEscalation, is_pipeline_interpreter,
-    lexical_normalize, render_cwd_anchor, wrapper_chain_changes_cwd,
+    RedirectRule, Rules, SymlinkScope, WrapperChainEscalation, has_expanding_glob_qualifier,
+    is_pipeline_interpreter, lexical_normalize, render_cwd_anchor, wrapper_chain_changes_cwd,
 };
 use crate::verdict::{Decision, DenyMessage, Reason, RuleId, Verdict};
 
@@ -1567,6 +1567,7 @@ fn apply_attached_word_and_redirect_checks(
         scan_redirect_ascent_descent_floor(redirections, rules),
     );
     worst = fold_ask_floor(worst, scan_redirect_glob_floor(redirections, rules));
+    worst = fold_ask_floor(worst, scan_glob_qualifier_floor(&[], redirections));
 
     // Issue #341: the same directory-stack tilde floor
     // `evaluate_simple_command` applies to a command's own redirects,
@@ -2155,6 +2156,31 @@ fn scan_redirect_glob_floor(redirections: &[Redirection], rules: &Rules) -> Opti
     Some(redirect_glob_reason(rule))
 }
 
+// Any command and any redirect direction, not only rule targets: an
+// `e:...:` qualifier runs its code whatever the glob is passed to.
+fn scan_glob_qualifier_floor(
+    argv: &[NormalizedWord],
+    redirections: &[Redirection],
+) -> Option<String> {
+    let redirect_words = redirections.iter().flat_map(|redir| match redir {
+        Redirection::File { target, .. } => normalize::normalize_word(target),
+        _ => Vec::new(),
+    });
+    let word = argv
+        .iter()
+        .cloned()
+        .chain(redirect_words)
+        .find_map(|word| match word.resolution() {
+            Resolution::Resolved(s) if has_expanding_glob_qualifier(s) => Some(s.clone()),
+            _ => None,
+        })?;
+    Some(format!(
+        "{word:?} ends in an unknown zsh qualifier expansion: a glob qualifier with a \
+         modifier, e:...:, +function or o/O by code rewrites the yielded paths or runs \
+         code, so what it expands to can't be checked statically"
+    ))
+}
+
 fn redirect_glob_reason(rule: &RedirectRule) -> String {
     format!(
         "a glob in a redirect target could expand to a protected path matching redirect rule \
@@ -2611,6 +2637,7 @@ fn evaluate_simple_command(
     // Issue #595: computed here so it survives `core`'s early returns, like
     // the ascent-descent pair above.
     let glob_floor = scan_glob_floor(&argv, rules);
+    let glob_qualifier_floor = scan_glob_qualifier_floor(&argv, &command.redirections);
     let redirect_glob_floor = scan_redirect_glob_floor(&command.redirections, rules);
     // Issue #341: the same directory-stack tilde floor `scan_dirstack_tilde_floor`
     // applies to argv-based targets, extended to the command's own shell
@@ -2715,6 +2742,7 @@ fn evaluate_simple_command(
     let redirect_ascent_descent_floor_present = redirect_ascent_descent_floor.is_some();
     let glob_floor_present = glob_floor.is_some();
     let redirect_glob_floor_present = redirect_glob_floor.is_some();
+    let glob_qualifier_floor_present = glob_qualifier_floor.is_some();
     let redirect_dirstack_tilde_floor_present = redirect_dirstack_tilde_floor.is_some();
     let redirect_home_env_floor_present = redirect_home_env_floor.is_some();
     let redirect_named_user_home_floor_present = redirect_named_user_home_floor.is_some();
@@ -2734,6 +2762,7 @@ fn evaluate_simple_command(
     let verdict = apply_redirect_ask_floor(verdict, redirect_ascent_descent_floor);
     let verdict = apply_glob_floor(verdict, glob_floor);
     let verdict = apply_redirect_ask_floor(verdict, redirect_glob_floor);
+    let verdict = apply_redirect_ask_floor(verdict, glob_qualifier_floor);
     let verdict = apply_redirect_ask_floor(verdict, redirect_dirstack_tilde_floor);
     let verdict = apply_redirect_ask_floor(verdict, redirect_home_env_floor);
     let verdict = apply_redirect_ask_floor(verdict, redirect_named_user_home_floor);
@@ -2760,6 +2789,9 @@ fn evaluate_simple_command(
     // plausibly lands in that same rule's own dangerous namespace.
     // `glob_floor_present`/`redirect_glob_floor_present` (issue #595)
     // extend it the same way for a glob that could expand into it.
+    // `glob_qualifier_floor_present` (issue #595) extends it to a zsh
+    // qualifier that rewrites paths or runs code: an allow entry for `ls`
+    // is not consent to `*(e:...:)`.
     // `named_user_home_floor_present` (issue #80) extends it once more: an
     // allow entry for `rm`/`tar` is not consent to a `~username` token
     // that would hit that same rule's bare-`~` target if it expanded — the
@@ -2828,6 +2860,7 @@ fn evaluate_simple_command(
         || redirect_ascent_descent_floor_present
         || glob_floor_present
         || redirect_glob_floor_present
+        || glob_qualifier_floor_present
         || redirect_dirstack_tilde_floor_present
         || redirect_home_env_floor_present
         || redirect_named_user_home_floor_present
