@@ -21,7 +21,9 @@
 //! definite syntax error in that dialect (real sed would refuse to run it):
 //! - `-i` takes a separate suffix word on BSD only, `-l` a separate number
 //!   on GNU only;
-//! - GNU permutes options past operands, BSD stops at the first operand;
+//! - GNU permutes options past operands, BSD stops at the first operand,
+//!   and GNU under `POSIXLY_CORRECT` stops at the first operand too while
+//!   keeping the GNU option table;
 //! - GNU does not treat a delimiter inside a `[...]` bracket expression as
 //!   literal, while BSD/POSIX do (`s/[^/]*$//`).
 
@@ -73,13 +75,39 @@ enum Outcome {
     Unparseable,
 }
 
+/// One reading of the invocation: which option table applies and whether
+/// option parsing ends at the first operand.
+#[derive(Debug, Clone, Copy)]
+struct Dialect {
+    bsd_options: bool,
+    stop_at_operand: bool,
+}
+
+const DIALECTS: [Dialect; 3] = [
+    // GNU default.
+    Dialect {
+        bsd_options: false,
+        stop_at_operand: false,
+    },
+    // GNU under `POSIXLY_CORRECT`.
+    Dialect {
+        bsd_options: false,
+        stop_at_operand: true,
+    },
+    // BSD.
+    Dialect {
+        bsd_options: true,
+        stop_at_operand: true,
+    },
+];
+
 /// `None` when every reading of `args` (the words after the `sed` command
 /// name) is proven free of write/read/exec commands; otherwise the first
 /// reason it is not.
 pub(crate) fn classify(args: &[NormalizedWord]) -> Option<Unproven> {
     let mut any_safe = false;
-    for bsd in [false, true] {
-        match script_sources(args, bsd) {
+    for dialect in DIALECTS {
+        match script_sources(args, dialect) {
             Err(Outcome::Unsafe(why)) => return Some(why),
             Err(Outcome::Unparseable) => {}
             Err(Outcome::Safe) | Ok(None) => any_safe = true,
@@ -104,7 +132,7 @@ pub(crate) fn classify(args: &[NormalizedWord]) -> Option<Unproven> {
 /// The text sed would run under one dialect reading: every `-e` value
 /// joined by newlines, else the first operand. `Ok(None)` for
 /// `--version`/`--help` (nothing runs). `Err(Safe)` is never produced.
-fn script_sources(args: &[NormalizedWord], bsd: bool) -> Result<Option<String>, Outcome> {
+fn script_sources(args: &[NormalizedWord], dialect: Dialect) -> Result<Option<String>, Outcome> {
     let mut expressions: Vec<String> = Vec::new();
     let mut first_operand: Option<String> = None;
     let mut options_ended = false;
@@ -124,7 +152,7 @@ fn script_sources(args: &[NormalizedWord], bsd: bool) -> Result<Option<String>, 
         };
         let text = text.as_str();
         if options_ended || !text.starts_with('-') || text == "-" {
-            if bsd {
+            if dialect.stop_at_operand {
                 options_ended = true;
             }
             first_operand.get_or_insert_with(|| text.to_string());
@@ -154,7 +182,8 @@ fn script_sources(args: &[NormalizedWord], bsd: bool) -> Result<Option<String>, 
                 "in-place" | "line-length" | "quiet" | "silent" | "regexp-extended" | "posix"
                 | "debug" | "sandbox" | "separate" | "unbuffered" | "null-data"
                 | "zero-terminated" | "binary" | "follow-symlinks" => {}
-                _ => info_only = true,
+                "version" | "help" => info_only = true,
+                _ => return Err(Outcome::Unsafe(Unproven::Unlexable)),
             }
             continue;
         }
@@ -166,7 +195,7 @@ fn script_sources(args: &[NormalizedWord], bsd: bool) -> Result<Option<String>, 
             let glued: String = cluster[j..].iter().collect();
             match flag {
                 'n' | 's' | 'E' | 'r' | 'z' | 'u' | 'b' => {}
-                'a' | 'l' if bsd => {}
+                'a' | 'l' if dialect.bsd_options => {}
                 'f' => return Err(Outcome::Unsafe(Unproven::ScriptFile)),
                 'e' => {
                     expressions.push(if glued.is_empty() {
@@ -185,7 +214,7 @@ fn script_sources(args: &[NormalizedWord], bsd: bool) -> Result<Option<String>, 
                 // GNU: `-iSUFFIX` only. BSD: the suffix is a separate word.
                 // `-I` exists on BSD only; read it the BSD way in both.
                 'i' | 'I' => {
-                    if glued.is_empty() && (bsd || flag == 'I') {
+                    if glued.is_empty() && (dialect.bsd_options || flag == 'I') {
                         take_value(args, &mut i, false)?;
                     }
                     break;
@@ -611,6 +640,25 @@ mod tests {
         let mut args = words(&["-n", "--", "1,5p"]);
         args.push(unquoted);
         assert_eq!(classify(&args), None);
+    }
+
+    #[test]
+    fn sed_posixly_correct_reading_makes_later_expressions_file_names() {
+        assert_eq!(
+            verdict(&["-l", "5", "w out", "-e", "p", "f"]),
+            Some(Unproven::Write)
+        );
+        assert_eq!(
+            verdict(&["-i", "w out", "-e", "p", "f"]),
+            Some(Unproven::Write)
+        );
+    }
+
+    #[test]
+    fn sed_unknown_long_option_is_unlexable() {
+        assert_eq!(verdict(&["--bogus", "p", "f"]), Some(Unproven::Unlexable));
+        assert_eq!(verdict(&["--version"]), None);
+        assert_eq!(verdict(&["--help"]), None);
     }
 
     #[test]
