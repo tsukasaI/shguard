@@ -15336,6 +15336,29 @@ mod tests {
     }
 
     #[test]
+    fn time_and_exec_wrapper_second_review_findings_are_not_allowed() {
+        for command in [
+            "time -- ! rm -rf /",
+            "time -p -- ! rm -rf /",
+            "time -- ! sudo id",
+            "time -- coproc rm -rf /",
+            "watch -dx 'rm -rf /'",
+            "watch -dn rm -rf /",
+            "watch -s -x 'rm -rf /'",
+            "numactl -c 0 rm -rf /",
+            "numactl -ac 0 rm -rf /",
+        ] {
+            assert_ne!(decide(command).decision(), Decision::Allow, "{command}");
+        }
+    }
+
+    #[test]
+    fn watch_exec_mode_with_a_benign_command_stays_allowed() {
+        assert_decision("watch -x 'ls -la'", Decision::Allow);
+        assert_decision("watch -x ls -la", Decision::Allow);
+    }
+
+    #[test]
     fn time_wrapped_escalation_vector_behind_assignments_is_not_allowed() {
         for command in [
             "time -- FOO=bar sudo rm -rf /",

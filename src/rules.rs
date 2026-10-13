@@ -4671,9 +4671,9 @@ fn wrapper_cluster_booleans(wrapper: &str) -> Option<&'static [char]> {
             'A', 'C', 'c', 'd', 'D', 'f', 'F', 'h', 'i', 'k', 'n', 'q', 'r', 't', 'T', 'v', 'V',
             'w', 'x', 'y', 'Y', 'z', 'Z',
         ]),
-        "watch" => Some(&[
-            'b', 'c', 'C', 'd', 'e', 'g', 'p', 'r', 't', 'w', 'x', 'h', 'v',
-        ]),
+        // Not `d`: procps `-d` takes an optional glued argument, so
+        // `-dx` is `-d` with value `x`, not `-d -x`.
+        "watch" => Some(&['b', 'c', 'C', 'e', 'g', 'p', 'r', 't', 'w', 'x', 'h', 'v']),
         "prlimit" => Some(&['h', 'V']),
         "systemd-run" => Some(&['r', 'd', 't', 'P', 'q', 'G', 'S', 'h']),
         "numactl" => Some(&['a', 'b', 's', 'H', 'l', 't', 'd', 'D', 'u', 'T', 'h']),
@@ -5227,7 +5227,6 @@ fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
             ValueFlag::Short('I'),
             ValueFlag::Long("shmid".to_string()),
             ValueFlag::Long("cpubind".to_string()),
-            ValueFlag::Short('c'),
         ],
         // Issue #209: `make`/`tar` aren't
         // `TRANSPARENT_WRAPPERS` (they don't exec an arbitrary wrapped
@@ -5860,6 +5859,7 @@ pub(crate) fn wrapper_shell_string_scripts(stage: &[NormalizedWord]) -> Vec<Scri
         match base.as_str() {
             "watch" => collect_watch_shell_slots(tail, &mut slots),
             "strace" => collect_strace_pipe_slots(tail, &mut slots),
+            "numactl" => collect_numactl_short_c_slot(tail, &mut slots),
             _ => {}
         }
         rest = skip_wrapper_arguments(&base, tail);
@@ -5873,15 +5873,29 @@ pub(crate) fn wrapper_shell_string_scripts(stage: &[NormalizedWord]) -> Vec<Scri
 /// that tail floors to Ask.
 fn collect_watch_shell_slots(tail: &[NormalizedWord], slots: &mut Vec<ScriptSlot>) {
     let end = skip_wrapper_flags("watch", tail);
-    let exec_mode = tail[..end].iter().any(|word| match word.resolution() {
-        Resolution::Resolved(flag) => {
-            flag == "--exec"
-                || (flag.starts_with('-')
-                    && !flag.starts_with("--")
-                    && cluster_has_letter("watch", flag, 'x'))
+    // Same consumption rule as `skip_wrapper_flags`, so a value taken by a
+    // flag (`watch -s -x 'rm -rf /'`) is never read as the `-x` flag.
+    let value_flags = wrapper_value_flags("watch");
+    let mut exec_mode = false;
+    let mut index = 0;
+    while index < end {
+        let Resolution::Resolved(flag) = tail[index].resolution() else {
+            break;
+        };
+        if value_flag_bare_match(&value_flags, flag) || cluster_takes_separated_value("watch", flag)
+        {
+            index += 2;
+            continue;
         }
-        Resolution::Unresolvable(_) => false,
-    });
+        if (flag.len() >= 4 && "--exec".starts_with(flag))
+            || (flag.starts_with('-')
+                && !flag.starts_with("--")
+                && cluster_has_letter("watch", flag, 'x'))
+        {
+            exec_mode = true;
+        }
+        index += 1;
+    }
     if exec_mode || end >= tail.len() {
         return;
     }
@@ -5897,6 +5911,23 @@ fn collect_watch_shell_slots(tail: &[NormalizedWord], slots: &mut Vec<ScriptSlot
         script.push_str(text);
     }
     slots.push(ScriptSlot::Resolved(script));
+}
+
+/// numactl's short `-c` is not known to take a value or not, and either
+/// guess can expose the wrong word as the wrapped command, so any short
+/// flag token containing `c` floors to Ask.
+fn collect_numactl_short_c_slot(tail: &[NormalizedWord], slots: &mut Vec<ScriptSlot>) {
+    let end = skip_wrapper_flags("numactl", tail);
+    let uncertain = tail[..end].iter().any(|word| {
+        matches!(
+            word.resolution(),
+            Resolution::Resolved(flag)
+                if flag.starts_with('-') && !flag.starts_with("--") && flag.contains('c')
+        )
+    });
+    if uncertain {
+        slots.push(ScriptSlot::Unresolvable);
+    }
 }
 
 /// Whether `token` (a `-`-cluster) holds `letter` as one of its own flags

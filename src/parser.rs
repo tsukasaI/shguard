@@ -934,10 +934,11 @@ fn convert_pipeline(pipeline: &bast::Pipeline) -> Result<Pipeline, ParseError> {
     let first = commands
         .next()
         .ok_or_else(|| ParseError::syntax("empty pipeline"))?;
-    let rewritten = pipeline
-        .timed
-        .as_ref()
-        .and_then(|_| without_time_option_terminator(first));
+    let rewritten = if pipeline.timed.is_some() {
+        without_time_option_terminator(first)?
+    } else {
+        None
+    };
     let first = convert_command(rewritten.as_ref().unwrap_or(first))?;
     let rest = commands.map(convert_command).collect::<Result<_, _>>()?;
 
@@ -958,13 +959,17 @@ fn convert_pipeline(pipeline: &bast::Pipeline) -> Result<Pipeline, ParseError> {
 /// plain drop would make it the command name. Leading assignments and
 /// redirects move to the prefix and the first word becomes the command name,
 /// exactly as `FOO=bar rm` parses. `None` (command left untouched) unless a
-/// command word follows.
-fn without_time_option_terminator(command: &bast::Command) -> Option<bast::Command> {
+/// command word follows. A promoted name that is a bare reserved word
+/// (`time -- ! rm -rf /`) is rejected: bash would parse it as grammar, not
+/// as a command, and a plain simple command named `!` would hide the rest.
+fn without_time_option_terminator(
+    command: &bast::Command,
+) -> Result<Option<bast::Command>, ParseError> {
     let bast::Command::Simple(simple) = command else {
-        return None;
+        return Ok(None);
     };
     if simple.prefix.is_some() {
-        return None;
+        return Ok(None);
     }
     let is_terminator = simple.word_or_name.as_ref().is_some_and(|word| {
         matches!(
@@ -973,9 +978,12 @@ fn without_time_option_terminator(command: &bast::Command) -> Option<bast::Comma
         )
     });
     if !is_terminator {
-        return None;
+        return Ok(None);
     }
-    let mut items = simple.suffix.as_ref()?.0.iter();
+    let Some(suffix) = simple.suffix.as_ref() else {
+        return Ok(None);
+    };
+    let mut items = suffix.0.iter();
     let mut prefix = Vec::new();
     let mut name = None;
     for item in items.by_ref() {
@@ -986,17 +994,31 @@ fn without_time_option_terminator(command: &bast::Command) -> Option<bast::Comma
                 name = Some(word.clone());
                 break;
             }
-            bast::CommandPrefixOrSuffixItem::ProcessSubstitution(..) => return None,
+            bast::CommandPrefixOrSuffixItem::ProcessSubstitution(..) => return Ok(None),
         }
     }
-    let name = name?;
+    let Some(name) = name else {
+        return Ok(None);
+    };
+    let Word(pieces) = convert_word(&name)?;
+    if let [WordPiece::Literal(text)] = pieces.as_slice()
+        && TIME_TERMINATOR_RESERVED_WORDS.contains(&text.as_str())
+    {
+        return Err(ParseError::syntax(format!(
+            "reserved word `{text}` after `time --`"
+        )));
+    }
     let suffix: Vec<_> = items.cloned().collect();
-    Some(bast::Command::Simple(bast::SimpleCommand {
+    Ok(Some(bast::Command::Simple(bast::SimpleCommand {
         prefix: (!prefix.is_empty()).then_some(bast::CommandPrefix(prefix)),
         word_or_name: Some(name),
         suffix: (!suffix.is_empty()).then_some(bast::CommandSuffix(suffix)),
-    }))
+    })))
 }
+
+const TIME_TERMINATOR_RESERVED_WORDS: &[&str] = &[
+    "!", "coproc", "{", "[[", "((", "if", "while", "until", "for", "select", "case", "function",
+];
 
 fn convert_command(command: &bast::Command) -> Result<Command, ParseError> {
     match command {
@@ -3665,6 +3687,19 @@ mod tests {
             ("time -- FOO=bar sudo rm -rf /", "FOO=bar sudo rm -rf /"),
         ] {
             assert_eq!(parse_ok(timed), parse_ok(plain), "{timed}");
+        }
+    }
+
+    #[test]
+    fn timed_option_terminator_followed_by_a_reserved_word_is_a_parse_error() {
+        for command in [
+            "time -- ! rm -rf /",
+            "time -p -- ! rm -rf /",
+            "time -- ! sudo id",
+            "time -- coproc rm -rf /",
+            "time -- if true",
+        ] {
+            assert!(parse(command).is_err(), "{command}");
         }
     }
 
