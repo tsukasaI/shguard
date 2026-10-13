@@ -553,7 +553,9 @@ enum Chunk {
     /// `DoubleQuoted` arm of [`resolve_piece`] and unpacked by
     /// [`chunks_to_words`], so the tail survives the collapse of the
     /// quoted sequence into one chunk.
-    UnresolvableTail(UnresolvableKind, bool, String, bool),
+    /// It likewise carries the literal text before its first unresolved
+    /// part (`"F$X"` gives `F`).
+    UnresolvableTail(UnresolvableKind, bool, String, String),
 }
 
 /// The shared brace-then-resolve fold for both [`normalize_word`]
@@ -1120,8 +1122,8 @@ fn resolve_piece(piece: &WordPiece, allow_split: bool) -> (Chunk, bool) {
                 }
             }
             match unresolvable {
-                Some((kind, single_word)) if !tail.is_empty() || buf.starts_with('~') => (
-                    Chunk::UnresolvableTail(kind, single_word, tail, buf.starts_with('~')),
+                Some((kind, single_word)) if !tail.is_empty() || !buf.is_empty() => (
+                    Chunk::UnresolvableTail(kind, single_word, tail, buf),
                     ifs_derived,
                 ),
                 Some((kind, single_word)) => (Chunk::Unresolvable(kind, single_word), ifs_derived),
@@ -1362,16 +1364,16 @@ fn chunks_to_words(
         // here on — checked once, here, regardless of which `WordPiece`
         // (raw source text, ANSI-C decoding, …) the byte came from, rather
         // than at each producer individually.
-        let (chunk, own_tail, own_head_tilde) = match chunk {
+        let (chunk, own_tail, own_head) = match chunk {
             Chunk::Literal(text, _quoted) if text.contains('\0') => (
                 Chunk::Unresolvable(UnresolvableKind::EmbeddedNul, false),
                 String::new(),
-                false,
+                String::new(),
             ),
             Chunk::UnresolvableTail(kind, single_word, own, own_head) => {
                 (Chunk::Unresolvable(kind, single_word), own, own_head)
             }
-            other => (other, String::new(), false),
+            other => (other, String::new(), String::new()),
         };
         match chunk {
             Chunk::Literal(text, quoted) => {
@@ -1386,8 +1388,8 @@ fn chunks_to_words(
                 tail = own_tail;
                 current = match current {
                     Ok((buf, _)) => {
-                        head_tilde = buf.starts_with('~') || (buf.is_empty() && own_head_tilde);
-                        head.clone_from(&buf);
+                        head = format!("{buf}{own_head}");
+                        head_tilde = head.starts_with('~');
                         Err((kind, single_word))
                     }
                     // Keep the FIRST kind, but AND every chunk's

@@ -986,23 +986,6 @@ impl ValueFlag {
                 .is_some_and(|rest| rest.starts_with('=')),
         }
     }
-
-    /// Whether a word whose literal text before its first unresolved piece
-    /// is `head` could be this flag with its value attached: `--name=`
-    /// compatible for a long flag, a single-dash cluster holding the letter
-    /// for a short one. Fail-closed on a head that is merely a prefix of
-    /// the spelling (`--body` before `$X`).
-    fn may_begin_attached_value(&self, head: &str) -> bool {
-        match self {
-            Self::Short(c) => head.strip_prefix('-').is_some_and(|rest| {
-                !rest.starts_with('-') && (rest.is_empty() || rest.contains(*c))
-            }),
-            Self::Long(name) => {
-                let spelling = format!("--{name}=");
-                spelling.starts_with(head) || head.starts_with(&spelling)
-            }
-        }
-    }
 }
 
 /// One alternative shape a dangerous target may take. A [`CommandRule`]'s
@@ -1623,20 +1606,33 @@ impl TargetMatcher {
     /// form is treated as possibly landing on any absolute target. Ask-only,
     /// like the other plausibility floors, and used only for rules declaring
     /// `target_flags` ([`CommandRule::matches_named_user_home_floor`]).
-    fn tilde_may_reach_absolute(&self, token: &str) -> bool {
-        let absolute = match self {
+    /// A `~user` form is also plausible against a `~`-anchored target: it
+    /// never normalizes into the invoker's home.
+    fn tilde_may_reach_target(&self, token: &str) -> bool {
+        if !token.starts_with('~') {
+            return false;
+        }
+        let (absolute, home_anchored) = match self {
             Self::NormalizedExact {
                 strip: None,
                 target: PathForm::Abs(_),
                 ..
-            } => true,
+            } => (true, false),
+            Self::NormalizedExact {
+                strip: None,
+                target: PathForm::Home(_),
+                ..
+            } => (false, true),
             Self::NormalizedPrefix {
                 strip: None, canon, ..
-            } => canon.starts_with('/'),
-            Self::Exact(text) | Self::Prefix(text) => text.starts_with('/'),
-            _ => false,
+            } => (canon.starts_with('/'), canon.starts_with('~')),
+            Self::Exact(text) | Self::Prefix(text) => {
+                (text.starts_with('/'), text.starts_with('~'))
+            }
+            _ => (false, false),
         };
-        absolute && token.starts_with('~')
+        let named_user = token != "~" && !token.starts_with("~/");
+        absolute || (home_anchored && named_user)
     }
 
     /// issue #88's Ask-only floor check: true when this matcher declares
@@ -2843,10 +2839,7 @@ impl CommandRule {
         if hidden_flag_candidates.iter().any(|token| {
             self.matches_targets(token)
                 || (!self.target_flags.is_empty()
-                    && self
-                        .targets
-                        .iter()
-                        .any(|t| t.tilde_may_reach_absolute(token)))
+                    && self.targets.iter().any(|t| t.tilde_may_reach_target(token)))
         }) {
             return true;
         }
@@ -2905,24 +2898,59 @@ impl CommandRule {
     /// its value attached (`--body-file=$F`, `-F$F`, or a bare `"$X"` that
     /// expands to `--body-file=/etc/passwd`), so one word fills both the flag
     /// and the target role and role counting cannot rule it out (issue #625).
-    /// A word the rule's `value_flags` consume as a value is skipped. Without
-    /// `target_flags` this is always `false`.
+    /// A splittable word always counts (its expansion can add any number of
+    /// words, one of them the flag). A single word counts unless the rule's
+    /// `value_flags` consume it as a value or its literal head rules out a
+    /// listed flag. Without `target_flags` this is always `false`.
     fn unresolved_word_may_hide_attached_target_flag(&self, rest_words: &[NormalizedWord]) -> bool {
         if self.target_flags.is_empty() {
             return false;
         }
         let consumed = value_flag_consumed(rest_words, &self.value_flags);
         rest_words.iter().zip(consumed).any(|(word, consumed)| {
-            if consumed || !matches!(word.resolution(), Resolution::Unresolvable(_)) {
+            if !matches!(word.resolution(), Resolution::Unresolvable(_)) {
                 return false;
             }
-            let Some(head) = word.literal_head() else {
+            if !word.is_single_word() {
                 return true;
-            };
-            self.target_flags
-                .iter()
-                .any(|flag| flag.may_begin_attached_value(head))
+            }
+            if consumed {
+                return false;
+            }
+            word.literal_head()
+                .is_none_or(|head| self.head_may_begin_target_flag(head))
         })
+    }
+
+    /// Whether a single word whose literal text before its first unresolved
+    /// piece is `head` could be a listed flag with its value attached. A
+    /// long flag needs `--name=` compatibility (a head that is merely a
+    /// prefix of the spelling counts). Any single-dash head counts, since
+    /// the letter may sit in the unresolved part, unless a `value_flags`
+    /// letter comes first in the head and owns the rest of the cluster.
+    fn head_may_begin_target_flag(&self, head: &str) -> bool {
+        if head.starts_with("--") || head == "-" {
+            return head == "-"
+                || self.target_flags.iter().any(|flag| match flag {
+                    ValueFlag::Long(name) => {
+                        let spelling = format!("--{name}=");
+                        spelling.starts_with(head) || head.starts_with(&spelling)
+                    }
+                    ValueFlag::Short(_) => false,
+                });
+        }
+        let Some(cluster) = head.strip_prefix('-') else {
+            return false;
+        };
+        for letter in cluster.chars() {
+            if self.target_flags.contains(&ValueFlag::Short(letter)) {
+                return true;
+            }
+            if self.value_flags.contains(&ValueFlag::Short(letter)) {
+                return false;
+            }
+        }
+        true
     }
 
     /// Whether `word` is an unresolvable word that might still be this
@@ -3180,7 +3208,7 @@ impl CommandRule {
         let scoped = !self.target_flags.is_empty();
         self.matches_resolved_tail_floor(argv, |target, token| {
             target.named_user_home_plausible(token)
-                || (scoped && target.tilde_may_reach_absolute(token))
+                || (scoped && target.tilde_may_reach_target(token))
         })
     }
 

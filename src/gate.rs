@@ -2664,11 +2664,15 @@ fn evaluate_simple_command(
         && let Some(composed) =
             evaluate_composed_cwd(&composed_pass_argv, &command.redirections, anchor, rules)
     {
-        // On an Ask tie the composed reason wins: it names the relative
-        // token and the anchor, which an unresolved-argument floor reason
-        // does not.
-        if verdict.decision() == Decision::Ask && composed.decision() == Decision::Ask {
-            composed
+        if composed_names_the_plain_floor_token(
+            &verdict,
+            &composed,
+            &composed_pass_argv,
+            command,
+            anchor,
+            rules,
+        ) {
+            composed.with_deny_message(verdict.deny_message().cloned())
         } else {
             fold_worst(verdict, composed)
         }
@@ -4148,11 +4152,7 @@ fn fold_floors(
     }
     if let Some(rule) = except_floors.target {
         decision = decision.max(Decision::Ask);
-        reasons.push(format!(
-            "command matches rule {:?}, but its required flag(s) and/or target could not be \
-             fully checked because an argument is an unresolved $VAR or command substitution",
-            rule.id().as_str()
-        ));
+        reasons.push(except_target_floor_reason(rule.id().as_str()));
     }
     if let Some(rule) = except_floors.flags {
         decision = decision.max(Decision::Ask);
@@ -4179,6 +4179,14 @@ fn fold_floors(
         Decision::Block => Verdict::block(Reason::new(reasons.join("; ")), argv, None)
             .with_deny_message(deny_message),
     }
+}
+
+/// The reason of the plain unresolved-argument except-target floor.
+fn except_target_floor_reason(rule_id: &str) -> String {
+    format!(
+        "command matches rule {rule_id:?}, but its required flag(s) and/or target could not be \
+         fully checked because an argument is an unresolved $VAR or command substitution"
+    )
 }
 
 /// Rule 1: the first word of a simple command contains a command/backquote
@@ -9364,7 +9372,7 @@ fn compose_argv_against_cwd(
                 {
                     Some((flag, value))
                         if matches!(lexical_normalize(value), PathForm::Rel { .. })
-                            && !value.starts_with('-') =>
+                            && value != "-" =>
                     {
                         NormalizedWord::resolved(format!("{flag}{anchor}/{value}"))
                     }
@@ -9534,14 +9542,27 @@ fn composed_subject(
     describe: &str,
     still_matches: impl Fn(&[NormalizedWord]) -> bool,
 ) -> String {
-    let token = (composed.len() == original.len() && original.len() <= MAX_SUBJECT_PROBE_ARGV)
+    match composed_subject_token(composed, original, still_matches) {
+        Some(token) => format!("relative target {token:?} resolved against {describe}"),
+        None => format!("{describe} composes a relative target"),
+    }
+}
+
+/// The token [`composed_subject`] names, if any. Index 0 (the command word)
+/// is never named: composing it cannot change what a rule's target sees.
+fn composed_subject_token(
+    composed: &[NormalizedWord],
+    original: &[NormalizedWord],
+    still_matches: impl Fn(&[NormalizedWord]) -> bool,
+) -> Option<String> {
+    (composed.len() == original.len() && original.len() <= MAX_SUBJECT_PROBE_ARGV)
         .then(|| {
             let mut probe = original.to_vec();
             composed
                 .iter()
                 .zip(original)
                 .enumerate()
-                .filter(|(_, (c, o))| c != o)
+                .filter(|(i, (c, o))| *i != 0 && c != o)
                 .take(MAX_SUBJECT_PROBES)
                 .find_map(|(i, (c, o))| {
                     probe[i] = c.clone();
@@ -9552,13 +9573,50 @@ fn composed_subject(
         })
         .flatten()
         .and_then(|word| match word.resolution() {
-            Resolution::Resolved(s) => Some(s),
+            Resolution::Resolved(s) => Some(s.clone()),
             Resolution::Unresolvable(_) => None,
-        });
-    match token {
-        Some(token) => format!("relative target {token:?} resolved against {describe}"),
-        None => format!("{describe} composes a relative target"),
+        })
+}
+
+/// Whether the composed pass's Ask should replace the plain Ask on a tie:
+/// only when the plain except-target floor and the composed one come from the
+/// same rule and the composed reason can name one relative token (issue
+/// #625). Every other tie keeps the plain verdict, so the plain reason and
+/// its hints survive.
+fn composed_names_the_plain_floor_token(
+    verdict: &Verdict,
+    composed: &Verdict,
+    argv: &[NormalizedWord],
+    command: &SimpleCommand,
+    anchor: &CwdAnchor,
+    rules: &Rules,
+) -> bool {
+    if verdict.decision() != Decision::Ask || composed.decision() != Decision::Ask {
+        return false;
     }
+    let Some(plain) = rules.match_command_except_target(argv) else {
+        return false;
+    };
+    // Any other reason in the plain verdict (a sed-script floor, a hint)
+    // means the plain verdict says more than the floor alone: keep it.
+    if verdict.reason().map(Reason::as_str)
+        != Some(except_target_floor_reason(plain.id().as_str()).as_str())
+    {
+        return false;
+    }
+    let composed_argv = compose_argv_against_cwd(argv, &anchor.path, rules);
+    if rules.match_command(&composed_argv).is_some()
+        || rules.match_ask(&composed_argv).is_some()
+        || evaluate_composed_cwd_redirects(argv, &command.redirections, anchor, rules).is_some()
+    {
+        return false;
+    }
+    composed_subject_token(&composed_argv, argv, |probe| {
+        rules
+            .match_command_except_target_composed(probe)
+            .is_some_and(|rule| rule.id() == plain.id())
+    })
+    .is_some()
 }
 
 /// The redirect-target half of [`evaluate_composed_cwd`], factored out so

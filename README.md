@@ -864,8 +864,11 @@ value glued to its flag (`--body-file=notes.md`, `-Fnotes.md`, `-F=notes.md`)
 is resolved against the cwd like a separated one. The rule also asks, never
 allows, for a `~`-form flag value against an absolute target (`$HOME` is not
 consulted), and for an unresolved value attached to its flag
-(`--body-file=$F`, `-F$F`) or a word that may hide such a flag (`"$X"`),
-so an unrelated unresolved argument on such a rule also asks.
+(`--body-file=$F`, `-F$F`), for a `~user` form against a `~`-anchored target,
+and for a word that may hide such a flag: an unquoted unresolved word
+(it can split into several), or a bare quoted one (`"$X"`). A quoted word
+whose literal head rules out every listed flag (`--title="$T"`) stays
+allowed; a separated `--title "$T"` asks.
 
 `target_flags` needs a non-empty `targets` or `except_targets`, cannot be
 combined with `attached_value_flags` or with a `targets` entry that sets
