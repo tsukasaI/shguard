@@ -221,3 +221,7 @@ and where each one is checked.
 - Adding a case to `tests/guardfall.rs`, `tests/benign_corpus.rs` or
   `tests/bypass_corpus.toml` adds a snapshot line too, so bless in the
   same commit.
+- `fuzz.jsonl` is generated from the mutator in `tests/fuzz_differential.rs`
+  with a pinned seed, so editing its seed templates or mechanisms rewrites
+  most of the file. Bless that in a commit of its own, with no policy
+  change alongside, so the diff cannot hide a decision change.
