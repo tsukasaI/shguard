@@ -348,20 +348,20 @@ fn watchdog_trip_verdict_is_still_logged() {
 ///
 /// Uses `SHGUARD_TEST_MEM_LIMIT_MB=64` (debug-only, same injection point
 /// `tests/fail_closed_exit_paths.rs`'s own
-/// `memory_budget_trip_fails_closed_to_ask` pins) rather than the plain
-/// wall-clock trip: the binary's outer memory arm and
-/// `analyze_with_policy`'s internal one poll RSS independently and can, in
-/// principle, race each other for a plain unbounded-allocation trip.
-/// `LogState` (`src/bin/shguard.rs`) resolves that race in the outer trip's
-/// favor whenever it gets there first (claiming ownership of the log
-/// before it even emits stdout), but the worker can still occasionally
-/// claim it a few microseconds earlier, in which case the logged reason is
-/// the worker's own rather than the one this trip prints to stdout — a
-/// disclosed, narrow tie, not this test's concern. Forcing the outer arm's
-/// 64 MiB threshold far below the internal watchdog's 256 MiB one removes
-/// that race entirely, so this test pins the intended code path (the outer
-/// trip's own `log_trip_best_effort`) deterministically instead of
-/// depending on which side happens to win.
+/// `memory_budget_trip_fails_closed_to_ask` pins, which is where the
+/// memory-limit trip itself is pinned) so the binary's outer memory arm
+/// fires far below the internal watchdog's 256 MiB threshold, keeping the
+/// outer trip ahead of the library one.
+///
+/// This is not fully deterministic: the outer 2s wall-clock timeout runs
+/// concurrently with the 64 MiB RSS poll, and under heavy parallel load
+/// (a full `cargo test` suite) the time arm can win before RSS crosses the
+/// limit. Both outer trips go through the same `log_trip_best_effort` path
+/// under test, so either is accepted. They are told apart from the library
+/// watchdog's reasons by wording: the outer memory reason reports "bytes
+/// RSS" where the library one says "RSS growth", and the outer time reason
+/// says "outer time budget" where the library one says plain "time budget".
+/// A library reason is still rejected.
 #[cfg_attr(
     not(debug_assertions),
     ignore = "SHGUARD_TEST_MEM_LIMIT_MB injection point is compiled out in release builds"
@@ -392,9 +392,12 @@ fn hook_path_watchdog_trip_is_still_logged() {
     let reason = lines[0]["reason"]
         .as_str()
         .expect("reason should be a string");
+    let outer_memory = reason.contains("memory budget") && !reason.contains("growth");
+    let outer_time = reason.contains("outer time budget");
     assert!(
-        reason.contains("memory budget") && !reason.contains("growth"),
-        "expected the binary's own outer-watchdog memory-trip reason to be logged, got: {reason}"
+        outer_memory || outer_time,
+        "expected the binary's own outer-watchdog (memory or time) trip reason to be logged, \
+         got: {reason}"
     );
 }
 
