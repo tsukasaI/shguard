@@ -2152,13 +2152,17 @@ fn scan_redirect_glob_floor(redirections: &[Redirection], rules: &Rules) -> Opti
     let rule = resolved_redirect_write_targets(redirections)
         .iter()
         .find_map(|target| rules.match_redirect_target_glob(target))?;
-    Some(format!(
+    Some(redirect_glob_reason(rule))
+}
+
+fn redirect_glob_reason(rule: &RedirectRule) -> String {
+    format!(
         "a glob in a redirect target could expand to a protected path matching redirect rule \
          {:?} ({}); what a glob expands to depends on the filesystem, so this can't be proven, \
          only flagged",
         rule.id().as_str(),
         rule.reason().as_str(),
-    ))
+    )
 }
 
 /// Issue #341: `Some(reason)` (always an `Ask` floor) when any resolved redirect-write target
@@ -9985,6 +9989,12 @@ fn evaluate_composed_argv_match_in(
                 .with_deny_message(rule.deny_message().cloned()),
         );
     }
+    if let Some((_, reason, deny_message)) = scan_glob_floor(composed_argv, rules) {
+        raise(
+            Verdict::ask(Reason::new(reason), original_argv.to_vec())
+                .with_deny_message(deny_message),
+        );
+    }
 
     worst
 }
@@ -10107,6 +10117,13 @@ fn evaluate_composed_cwd_redirects(
         }
         let composed = format!("{}/{target}", anchor.path);
         let Some(rule) = rules.match_redirect_target(&composed) else {
+            if let Some(rule) = rules.match_redirect_target_glob(&composed) {
+                let verdict = Verdict::ask(Reason::new(redirect_glob_reason(rule)), argv.to_vec());
+                worst = Some(match worst {
+                    Some(current) => fold_worst(current, verdict),
+                    None => verdict,
+                });
+            }
             continue;
         };
         let reason = Reason::new(format!(

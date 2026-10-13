@@ -35,7 +35,7 @@ rather than letting it go stale silently.
   regression table above, which covers A-D directly, plus class E via
   the destructive-commands suite in `tests/guardfall.rs`, and
   [Attribution](#attribution)).
-- **Regression test count:** 691 (665 pinned-decision literals across
+- **Regression test count:** 697 (671 pinned-decision literals across
   `tests/guardfall.rs`'s internally-discovered regression suite, plus 26
   externally-attributed cases in `tests/bypass_corpus.toml`). A lower
   bound, not an exact assertion count: some of `guardfall.rs`'s tests
