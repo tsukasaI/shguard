@@ -2014,3 +2014,57 @@ fn guardfall_sed_script_write_exec_cases() {
         );
     }
 }
+
+#[test]
+fn guardfall_parameter_expansion_operand_cases() {
+    let cases: &[(&str, Decision)] = &[
+        // Issues #578/#580: substitutions inside a modified expansion's
+        // operand are still analyzed.
+        ("echo ${x:-$(rm -rf ~)}", Decision::Block),
+        ("echo \"${x:-$(rm -rf ~)}\"", Decision::Block),
+        ("echo ${x%$(rm -rf ~)}", Decision::Block),
+        ("echo ${x:-`rm -rf ~`}", Decision::Block),
+        ("${x:-$(rm -rf ~)} foo", Decision::Block),
+        ("echo ${x:-${y:-$(rm -rf ~)}}", Decision::Block),
+        ("echo ${x/$(rm -rf ~)/b}", Decision::Block),
+        // Quotes inside a double-quoted operand cannot hide a substitution.
+        ("echo \"${x:-'$(rm -rf ~)'}\"", Decision::Block),
+        ("echo \"${x:-$'$(rm -rf ~)'}\"", Decision::Block),
+        ("echo \"${x%'$(rm -rf ~)'}\"", Decision::Block),
+        ("echo \"${x/a/'$(rm -rf ~)'}\"", Decision::Block),
+        ("echo \"${x//a/'$(rm -rf ~)'}\"", Decision::Block),
+        ("echo \"${x^^'$(rm -rf ~)'}\"", Decision::Block),
+        ("echo \"${x:?'$(rm -rf ~)'}\"", Decision::Block),
+        ("echo \"${x:+'$(rm -rf ~)'}\"", Decision::Block),
+        ("echo \"${x:-'`rm -rf ~`'}\"", Decision::Block),
+        ("echo \"${x:-${y:-'$(rm -rf ~)'}}\"", Decision::Block),
+        ("\"${x:-'$(rm -rf ~)'}\" foo", Decision::Block),
+        ("B=\"${x:-'$(rm -rf ~)'}\"", Decision::Block),
+        ("echo hi > \"${x:-'$(rm -rf ~)'}\"", Decision::Block),
+        // Issue #640: an overflowing `${N}` must not degrade the line to Ask.
+        ("rm -rf / ${99999999999999999999}", Decision::Block),
+        ("rm -rf / ${-9223372036854775809}", Decision::Block),
+        ("rm -rf / ${x}{1..2}", Decision::Ask),
+        // Issue #606: zsh expansion-flag forms never read as literals.
+        ("x='$(rm -rf ~)'; echo ${(e)x}", Decision::Ask),
+        ("x=rm; ${=x} -rf ~", Decision::Ask),
+        ("echo ${~x}", Decision::Ask),
+        ("echo ${^x}", Decision::Ask),
+        ("echo ${ rm -rf ~; }", Decision::Ask),
+        ("echo \"${ rm -rf ~; }\"", Decision::Ask),
+        ("x=rm; $=x -rf ~", Decision::Ask),
+        ("echo ${ rm -rf ~; echo ,; }{c,d}", Decision::Ask),
+        ("echo {c,d}${ rm -rf ~; echo ,; }", Decision::Ask),
+        ("x='$(rm -rf ~)'; echo ${(e)x:-a,b}{c,d}", Decision::Ask),
+    ];
+
+    for (command, expected) in cases {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
