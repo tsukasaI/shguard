@@ -141,8 +141,10 @@ crate, each with a public API and typed seams.
 
 Dependency direction:
 
-- `policy` owns `Evidence`, because the consumer owns the port. It
-  depends on nothing but its own types and its typed config.
+- `policy` owns `Evidence`, because the consumer owns the port. Besides
+  its own types and its typed config, it may import only pure vocabulary
+  types from `syntax` and `knowledge` (`RuleId`, `UnresolvableKind`,
+  `CommandName`). It never imports their logic or anything that does I/O.
 - `semantics` imports `syntax`, `knowledge` and policy's types, and
   produces `Evidence`.
 - `knowledge` has no I/O and no serde. `config_loader.rs` stays an adapter
@@ -166,7 +168,9 @@ pub enum Evidence {
     DecodePipeToInterpreter,
     TokenHit { id: RuleId },
     Recursed { inner: Box<Outcome> },
-    ParseFailure { construct: Option<String> },
+    ParseFailure { construct: Option<String> },          // shell syntax shguard cannot read
+    InputRejected { stage: InputStage },                 // malformed hook JSON, stdin read error, stdin over the cap
+    ConfigUnavailable { path: ConfigPath, error: String }, // #630: the reason names the path
     ResourceLimit { kind: LimitKind },
     AllowlistMatch { id: RuleId },
     UserAskMatch { id: RuleId },
@@ -192,10 +196,11 @@ pub fn decide(evidence: &[Evidence], config: &PolicyConfig, ctx: &HookContext) -
 - **Fail-closed exit paths** build evidence at the composition root and go
   through the same `decide`, so there is a single decision site rather
   than two:
-  - parse failure;
-  - config-load failure;
-  - stdin over `MAX_STDIN_BYTES`;
-  - watchdog trip.
+  - parse failure (`ParseFailure`);
+  - config-load failure (`ConfigUnavailable`);
+  - malformed hook JSON, a stdin read error, or stdin over
+    `MAX_STDIN_BYTES` (`InputRejected`);
+  - watchdog trip (`ResourceLimit`).
 - **`AnalysisCtx`** `{ parse, rules, depth, env, cwd }` replaces threading
   `parse: ParseFn` through 36 signatures. The injected parse function is
   a genuine seam (semantics must not import brush). Only its delivery
@@ -211,8 +216,13 @@ snapshot**:
    from `main` for every command in these corpora, under `tests/golden/`:
    - `tests/guardfall.rs`, `tests/bypass_corpus.rs` and
      `tests/benign_corpus.rs`;
-   - the fuzz seed corpus;
+   - the fuzz corpus, generated with a pinned `SHGUARD_FUZZ_SEED` so it is
+     reproducible;
    - the #632 denial corpus, if it is still available.
+
+   The recorded Decision is `analyze()`'s, which is before `ask_outcome`
+   is applied. Per-permission-mode outcomes stay covered by the
+   `tests/ask_outcome_per_mode.rs` fixtures.
 2. Every later stage-1 PR must match the snapshot exactly on Decision.
    Changes to `matched_rule` and `deny_message` must be intentional and
    reviewed in the snapshot diff. Some are expected, because restoring the
@@ -256,11 +266,13 @@ pub struct CommandSpec {
   It returns `Result<ParsedArgv, Unmodeled>`, and `Unmodeled` converts
   only into `Evidence::UnmodeledOption`. Invariant B is enforced at this
   type.
-- **An exhaustive exec-wrapper catalog**, pinned by a test against
-  reference lists. The lists are coreutils, util-linux and busybox applets
-  that take a command operand. A wrapper that exists upstream but is
-  missing from the catalog fails the test instead of silently falling
-  through (#638 class).
+- **An exec-wrapper catalog pinned against a committed reference list.**
+  The list is hand-curated from the coreutils, util-linux and busybox
+  commands that take a command operand, and committed as
+  `rules/reference/exec-wrappers.txt`. A test fails when a listed command
+  has no `CommandSpec`, which closes the #638 class for every command on
+  the list. The test cannot discover new upstream wrappers, so the list is
+  re-audited at each release and whenever a wrapper bypass is filed.
 - **Migration order inside the stage:**
   1. wrappers;
   2. the tar and git tables;
@@ -308,8 +320,11 @@ re-recorded at the end of stage 1:
   This makes the #607 cut index a property of the model rather than a
   patch.
 - **False positives expected to move Ask → Allow:** #632 (same-line
-  literal bindings), #629 (a `while read` final stage) and #628 (process
-  substitution). These are approved benign-side deltas.
+  literal bindings), #629 (a `while read` final stage) and the
+  input-process-substitution half of #628. These are approved benign-side
+  deltas. #628's other half goes the other way: output process
+  substitution into an interpreter becomes a pipe-to-interpreter sink, so
+  it can tighten.
 
 ## Stage 4: Syntax (#662); investigation runs in parallel
 
@@ -322,9 +337,10 @@ re-recorded at the end of stage 1:
   in parser.rs is quote-blind, which is a disclosed limitation. The panic catch stays as the last line of
   defence for the panics inside brush's PEG grammar (brace sequence,
   tilde dirstack, io-number).
-- **Parser strategy:** brush-parser is pinned at `=0.4.0`, which is still
-  the latest stable `brush-parser`. A `brush-ocap-*` rc line exists on
-  crates.io and has not been evaluated. Stage 4 opens with a short ADR
+- **Parser strategy:** brush-parser is pinned at `=0.4.0`, the latest
+  stable version known when ADR 0001 was written. A `brush-ocap-*` rc line
+  also appears on crates.io and has not been evaluated. The stage-4 ADR
+  re-checks both against crates.io at the time it is written. Stage 4 opens with a short ADR
   (`docs/adr/0003-...`) choosing between staying on 0.4.0, upgrading, or
   forking with the panic fixes. The `src/parser.rs` fixture corpus remains
   the upgrade gate.
