@@ -236,11 +236,41 @@ pub fn analyze(command: &str) -> Verdict {
     let command = command.to_string();
     watchdog::bounded(move || {
         policy::decide(
-            &[Evidence::GateVerdict(gate::analyze(&command))],
+            &[Evidence::GateVerdict(analyze_embedded(&command))],
             &PolicyConfig::none(),
             &HookContext::none(),
         )
     })
+}
+
+/// Loads the embedded blocklist and allowlist (the composition root's job,
+/// not the gate's) and hands them to [`gate::analyze`]. A load failure is a
+/// fail-closed `Ask`: every command is refused until the embedded files are
+/// fixed.
+fn analyze_embedded(command: &str) -> Verdict {
+    let rules = match rules::Rules::embedded() {
+        Ok(rules) => rules,
+        Err(err) => {
+            return Verdict::ask(
+                verdict::Reason::new(format!(
+                    "the embedded blocklist failed to load ({err}); refusing to evaluate any command until this is fixed"
+                )),
+                Vec::new(),
+            );
+        }
+    };
+    let allowlist = match rules::Allowlist::embedded() {
+        Ok(allowlist) => allowlist,
+        Err(err) => {
+            return Verdict::ask(
+                verdict::Reason::new(format!(
+                    "the embedded allowlist failed to load ({err}); refusing to evaluate any command until this is fixed"
+                )),
+                Vec::new(),
+            );
+        }
+    };
+    gate::analyze(command, &rules, &allowlist)
 }
 
 /// The symlink-resolution adapter handed to `rules` (composition root): the

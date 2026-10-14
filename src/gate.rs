@@ -418,6 +418,41 @@ fn deny_msg_for_unresolvable_kind(kind: UnresolvableKind) -> Option<DenyMessage>
     Some(deny_msg_unsupported_construct(name))
 }
 
+/// The policy-and-recursion context every evaluation stage in this file
+/// threads through unchanged: the blocklist and allowlist (loaded once by
+/// the caller so a deeply-nested command line never re-parses the TOML per
+/// level) and the substitution-recursion `depth` (0 at the top call).
+/// `Copy`, so a stage passes it by value and a recursion boundary builds
+/// its inner context with [`Self::deeper`].
+///
+/// `cwd` and [`Env`] are deliberately not members: they are mutated as the
+/// walk proceeds (or re-seeded per recursion), while these three never
+/// change within one stage.
+#[derive(Clone, Copy)]
+struct AnalysisCtx<'a> {
+    rules: &'a Rules,
+    allowlist: &'a Allowlist,
+    depth: usize,
+}
+
+impl<'a> AnalysisCtx<'a> {
+    fn new(rules: &'a Rules, allowlist: &'a Allowlist) -> Self {
+        Self {
+            rules,
+            allowlist,
+            depth: 0,
+        }
+    }
+
+    /// The context for a recursion boundary: same policy, one level deeper.
+    fn deeper(self) -> Self {
+        Self {
+            depth: self.depth + 1,
+            ..self
+        }
+    }
+}
+
 /// Analyzes a raw shell command line: parse -> per-simple-command normalise
 /// -> rules -> structural gate -> worst-decision-wins fold across every
 /// simple command on the line (`crate::verdict::Decision`'s `Ord`).
@@ -427,51 +462,23 @@ fn deny_msg_for_unresolvable_kind(kind: UnresolvableKind) -> Option<DenyMessage>
 /// carrying a specific reason; this function never panics on any input and
 /// never returns an `Allow` it has not positively earned (see the module
 /// docs for the full rule set).
+///
+/// `rules`/`allowlist` are supplied by the caller: the composition root
+/// (`crate::analyze`) hands in the embedded defaults, `crate::config::Policy`
+/// the merged user policy.
 #[must_use]
-pub(crate) fn analyze(command: &str) -> Verdict {
-    let rules = match Rules::embedded() {
-        Ok(rules) => rules,
-        Err(err) => {
-            return Verdict::ask(
-                Reason::new(format!(
-                    "the embedded blocklist failed to load ({err}); refusing to evaluate any command until this is fixed"
-                )),
-                Vec::new(),
-            );
-        }
-    };
-    let allowlist = match Allowlist::embedded() {
-        Ok(allowlist) => allowlist,
-        Err(err) => {
-            return Verdict::ask(
-                Reason::new(format!(
-                    "the embedded allowlist failed to load ({err}); refusing to evaluate any command until this is fixed"
-                )),
-                Vec::new(),
-            );
-        }
-    };
-    analyze_at_depth(
-        command,
-        0,
-        &rules,
-        &allowlist,
-        CwdState::seed(CwdContext::Initial),
-    )
-}
-
-/// Config-aware sibling of [`analyze`]: same pipeline, but `rules`/
-/// `allowlist` are supplied by the caller (`crate::config::Policy`)
-/// instead of loaded from the embedded defaults. [`analyze`]'s own
-/// behavior is unaffected — it always loads `Rules::embedded()`/
-/// `Allowlist::embedded()` itself, never this function's arguments.
-#[cfg(test)]
-#[must_use]
-pub(crate) fn analyze_with_policy(command: &str, rules: &Rules, allowlist: &Allowlist) -> Verdict {
+pub(crate) fn analyze(command: &str, rules: &Rules, allowlist: &Allowlist) -> Verdict {
     analyze_with_policy_in_cwd(command, rules, allowlist, None)
 }
 
-/// [`analyze_with_policy`] for a command that will run in `cwd` (the hook
+/// Alias of [`analyze`], kept for the unit tests' spelling.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn analyze_with_policy(command: &str, rules: &Rules, allowlist: &Allowlist) -> Verdict {
+    analyze(command, rules, allowlist)
+}
+
+/// [`analyze`] for a command that will run in `cwd` (the hook
 /// payload's working directory, issue #549). An absolute `cwd` seeds the
 /// top-level [`CwdContext::Known`], so every relative path token composes
 /// against it through the same machinery a same-line `cd /abs` uses. A
@@ -486,9 +493,7 @@ pub(crate) fn analyze_with_policy_in_cwd(
 ) -> Verdict {
     analyze_at_depth(
         command,
-        0,
-        rules,
-        allowlist,
+        AnalysisCtx::new(rules, allowlist),
         CwdState::seed(payload_cwd_context(cwd)),
     )
 }
@@ -512,11 +517,8 @@ fn payload_cwd_context(cwd: Option<&str>) -> CwdContext {
     }
 }
 
-/// The recursive core of [`analyze`]/[`analyze_with_policy`]: `depth`
-/// counts substitution-recursion levels (0 at the top call), and `rules`/
-/// `allowlist` are loaded once by the caller and threaded through every
-/// recursive call so a deeply-nested command line never re-parses the
-/// blocklist TOML per level.
+/// The recursive core of [`analyze`]/[`analyze_with_policy_in_cwd`]: `ctx`
+/// carries the policy and the substitution-recursion depth.
 ///
 /// `cwd` (issue #103, extended by #210) is the already-seeded [`CwdState`]
 /// this recursed command string starts from — the CALLER builds it via
@@ -533,21 +535,15 @@ fn payload_cwd_context(cwd: Option<&str>) -> CwdContext {
 /// recursion starts its own fresh [`Env`] too (`evaluate_command_line`'s
 /// docs) and gets its own independent, mutable cwd state that can never
 /// write back to the caller's.
-fn analyze_at_depth(
-    command: &str,
-    depth: usize,
-    rules: &Rules,
-    allowlist: &Allowlist,
-    mut cwd: CwdState,
-) -> Verdict {
-    if depth > MAX_SUBSTITUTION_DEPTH {
+fn analyze_at_depth(command: &str, ctx: AnalysisCtx<'_>, mut cwd: CwdState) -> Verdict {
+    if ctx.depth > MAX_SUBSTITUTION_DEPTH {
         return decide_structural(Evidence::ResourceLimit {
             kind: LimitKind::RecursionDepth(MAX_SUBSTITUTION_DEPTH),
         });
     }
 
     match parser::parse(command) {
-        Ok(command_line) => evaluate_command_line(&command_line, rules, allowlist, depth, &mut cwd),
+        Ok(command_line) => evaluate_command_line(&command_line, ctx, &mut cwd),
         Err(err) => decide_structural(Evidence::ParseFailure {
             message: err.to_string(),
             construct: err.unsupported_construct().map(str::to_string),
@@ -602,13 +598,11 @@ fn decide_structural(evidence: Evidence) -> Verdict {
 /// `popd` inside the very chain the isolation was supposed to make opaque.
 fn evaluate_command_line(
     command_line: &CommandLine,
-    rules: &Rules,
-    allowlist: &Allowlist,
-    depth: usize,
+    ctx: AnalysisCtx<'_>,
     cwd: &mut CwdState,
 ) -> Verdict {
     let mut env = Env::new();
-    evaluate_command_line_in(command_line, &mut env, true, rules, allowlist, depth, cwd)
+    evaluate_command_line_in(command_line, &mut env, true, ctx, cwd)
 }
 
 /// [`evaluate_command_line`] over a caller-supplied [`Env`] (issue #607: a
@@ -617,14 +611,11 @@ fn evaluate_command_line(
 /// certainly runs this line in the parent shell; when it does not (the group
 /// is an `&&`/`||` right-hand side, backgrounded, or a pipeline stage), every
 /// assignment inside is classified as non-persisting, exactly like #534.
-#[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd` context, see `apply_attached_word_and_redirect_checks`
 fn evaluate_command_line_in(
     command_line: &CommandLine,
     env: &mut Env,
     parent_persists: bool,
-    rules: &Rules,
-    allowlist: &Allowlist,
-    depth: usize,
+    ctx: AnalysisCtx<'_>,
     cwd: &mut CwdState,
 ) -> Verdict {
     let mut isolated = chain_is_backgrounded(command_line, 0).then(|| cwd.clone_untrusted());
@@ -633,9 +624,7 @@ fn evaluate_command_line_in(
     let mut worst = evaluate_pipeline(
         &command_line.first,
         env,
-        rules,
-        allowlist,
-        depth,
+        ctx,
         isolated.as_mut().unwrap_or(cwd),
         first_runs_in_parent_shell,
     );
@@ -670,9 +659,7 @@ fn evaluate_command_line_in(
         let verdict = evaluate_pipeline(
             pipeline,
             env,
-            rules,
-            allowlist,
-            depth,
+            ctx,
             isolated.as_mut().unwrap_or(cwd),
             in_parent_shell,
         );
@@ -770,16 +757,14 @@ type IfsAlternates = Vec<(Vec<NormalizedWord>, String)>;
 /// (`cd /tmp | (cd /elsewhere; true) | rm rel`) can't leak out either; a
 /// single-stage pipeline recurses with the real `cwd`, exactly like
 /// [`evaluate_command_line`] does for its own pipelines.
-#[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd` context, see `apply_attached_word_and_redirect_checks`
 fn evaluate_pipeline(
     pipeline: &Pipeline,
     env: &mut Env,
-    rules: &Rules,
-    allowlist: &Allowlist,
-    depth: usize,
+    ctx: AnalysisCtx<'_>,
     cwd: &mut CwdState,
     runs_in_parent_shell: bool,
 ) -> Verdict {
+    let rules = ctx.rules;
     let mut stages = Vec::with_capacity(1 + pipeline.rest.len());
     stages.push(&pipeline.first);
     stages.extend(pipeline.rest.iter());
@@ -839,9 +824,7 @@ fn evaluate_pipeline(
                 let verdict = evaluate_simple_command(
                     simple,
                     env,
-                    rules,
-                    allowlist,
-                    depth,
+                    ctx,
                     &cwd.current,
                     cwd.symlink_untrusted || cwd.earlier_writer.get() || stage_count > 1,
                     &mut alternates,
@@ -866,26 +849,10 @@ fn evaluate_pipeline(
                 }
                 stage_argvs.push(Vec::new());
                 if stage_count == 1 {
-                    evaluate_compound_command(
-                        compound,
-                        env,
-                        runs_in_parent_shell,
-                        rules,
-                        allowlist,
-                        depth,
-                        cwd,
-                    )
+                    evaluate_compound_command(compound, env, runs_in_parent_shell, ctx, cwd)
                 } else {
                     let mut isolated = cwd.clone();
-                    evaluate_compound_command(
-                        compound,
-                        env,
-                        false,
-                        rules,
-                        allowlist,
-                        depth,
-                        &mut isolated,
-                    )
+                    evaluate_compound_command(compound, env, false, ctx, &mut isolated)
                 }
             }
             Command::FunctionDefinition(func) => {
@@ -894,10 +861,10 @@ fn evaluate_pipeline(
                 }
                 stage_argvs.push(Vec::new());
                 if stage_count == 1 {
-                    evaluate_function_definition(func, rules, allowlist, depth, cwd)
+                    evaluate_function_definition(func, ctx, cwd)
                 } else {
                     let mut isolated = cwd.clone();
-                    evaluate_function_definition(func, rules, allowlist, depth, &mut isolated)
+                    evaluate_function_definition(func, ctx, &mut isolated)
                 }
             }
             Command::ExtendedTest(test) => {
@@ -910,7 +877,7 @@ fn evaluate_pipeline(
                 // docs), so unlike `Compound`/`FunctionDefinition` above it
                 // never needs an isolated `cwd` clone even in a multi-stage
                 // pipeline: nothing here can mutate `cwd` regardless.
-                let verdict = evaluate_extended_test(test, rules, allowlist, depth, &cwd.current);
+                let verdict = evaluate_extended_test(test, ctx, &cwd.current);
                 // Its operands may hold substitutions that write.
                 cwd.earlier_writer.set(true);
                 verdict
@@ -1107,14 +1074,11 @@ fn pipeline_shape_verdict(
 /// runs, but which one is unknowable statically, so the same
 /// evaluate-every-branch-and-fold stance already used for a loop's
 /// condition-plus-body pair applies here too, over more branches.
-#[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd` context, see `apply_attached_word_and_redirect_checks`
 fn evaluate_compound_command(
     compound: &CompoundCommand,
     env: &mut Env,
     parent_persists: bool,
-    rules: &Rules,
-    allowlist: &Allowlist,
-    depth: usize,
+    ctx: AnalysisCtx<'_>,
     cwd: &mut CwdState,
 ) -> Verdict {
     // `resolve_symlinks` (issue #612): a redirection or a substitution in a
@@ -1144,27 +1108,16 @@ fn evaluate_compound_command(
     {
         cwd.earlier_writer.set(true);
     }
-    let verdict = evaluate_compound_command_body(
-        compound,
-        env,
-        parent_persists,
-        rules,
-        allowlist,
-        depth,
-        cwd,
-    );
+    let verdict = evaluate_compound_command_body(compound, env, parent_persists, ctx, cwd);
     cwd.earlier_writer.set(true);
     verdict
 }
 
-#[allow(clippy::too_many_arguments)] // same pass-through context as `evaluate_compound_command`
 fn evaluate_compound_command_body(
     compound: &CompoundCommand,
     env: &mut Env,
     parent_persists: bool,
-    rules: &Rules,
-    allowlist: &Allowlist,
-    depth: usize,
+    ctx: AnalysisCtx<'_>,
     cwd: &mut CwdState,
 ) -> Verdict {
     let redirect_anchor = cwd.current.clone();
@@ -1176,16 +1129,14 @@ fn evaluate_compound_command_body(
                 body,
                 env,
                 parent_persists && redirections.is_empty(),
-                rules,
-                allowlist,
-                depth,
+                ctx,
                 cwd,
             );
             (verdict, redirections.as_slice(), [].as_slice())
         }
         CompoundCommand::Subshell { body, redirections } => {
             let mut isolated = cwd.clone();
-            let verdict = evaluate_command_line(body, rules, allowlist, depth, &mut isolated);
+            let verdict = evaluate_command_line(body, ctx, &mut isolated);
             (verdict, redirections.as_slice(), [].as_slice())
         }
         CompoundCommand::ForClause {
@@ -1196,7 +1147,7 @@ fn evaluate_compound_command_body(
         } => {
             let mut isolated = cwd.clone();
             isolated.symlink_untrusted = true;
-            let verdict = evaluate_command_line(body, rules, allowlist, depth, &mut isolated);
+            let verdict = evaluate_command_line(body, ctx, &mut isolated);
             if command_line_may_change_cwd(body) {
                 cwd.poison();
             }
@@ -1218,9 +1169,8 @@ fn evaluate_compound_command_body(
         } => {
             let mut isolated = cwd.clone();
             isolated.symlink_untrusted = true;
-            let cond_verdict =
-                evaluate_command_line(condition, rules, allowlist, depth, &mut isolated);
-            let body_verdict = evaluate_command_line(body, rules, allowlist, depth, &mut isolated);
+            let cond_verdict = evaluate_command_line(condition, ctx, &mut isolated);
+            let body_verdict = evaluate_command_line(body, ctx, &mut isolated);
             if command_line_may_change_cwd(condition) || command_line_may_change_cwd(body) {
                 cwd.poison();
             }
@@ -1238,32 +1188,19 @@ fn evaluate_compound_command_body(
             redirections,
         } => {
             let mut isolated = cwd.clone();
-            let mut worst =
-                evaluate_command_line(condition, rules, allowlist, depth, &mut isolated);
-            worst = fold_worst(
-                worst,
-                evaluate_command_line(then_body, rules, allowlist, depth, &mut isolated),
-            );
+            let mut worst = evaluate_command_line(condition, ctx, &mut isolated);
+            worst = fold_worst(worst, evaluate_command_line(then_body, ctx, &mut isolated));
             let mut may_change_cwd =
                 command_line_may_change_cwd(condition) || command_line_may_change_cwd(then_body);
             for ElifClause { condition, body } in elifs {
-                worst = fold_worst(
-                    worst,
-                    evaluate_command_line(condition, rules, allowlist, depth, &mut isolated),
-                );
-                worst = fold_worst(
-                    worst,
-                    evaluate_command_line(body, rules, allowlist, depth, &mut isolated),
-                );
+                worst = fold_worst(worst, evaluate_command_line(condition, ctx, &mut isolated));
+                worst = fold_worst(worst, evaluate_command_line(body, ctx, &mut isolated));
                 may_change_cwd = may_change_cwd
                     || command_line_may_change_cwd(condition)
                     || command_line_may_change_cwd(body);
             }
             if let Some(else_body) = else_body {
-                worst = fold_worst(
-                    worst,
-                    evaluate_command_line(else_body, rules, allowlist, depth, &mut isolated),
-                );
+                worst = fold_worst(worst, evaluate_command_line(else_body, ctx, &mut isolated));
                 may_change_cwd = may_change_cwd || command_line_may_change_cwd(else_body);
             }
             if may_change_cwd {
@@ -1295,9 +1232,7 @@ fn evaluate_compound_command_body(
         "a `for` clause's `in` word list",
         redirections,
         &interpreters,
-        depth,
-        rules,
-        allowlist,
+        ctx,
         &redirect_anchor,
     )
 }
@@ -1333,28 +1268,16 @@ fn evaluate_compound_command_body(
 /// `extra_words` carries no structural distinction between a comparison
 /// operand and an ordinary one, and scanning every operand uniformly is
 /// what makes the `for`-list case (a real exposure) work at all.
-///
-/// `#[allow(clippy::too_many_arguments)]`: unlike `evaluate_simple_command_core`
-/// (`SimpleCommandPolicy`) or the expansion-scan helpers (`ExpansionAccum`,
-/// `ExceptFloors`), these parameters are not one cohesive group with its
-/// own identity — they're the caller-specific pieces (`extra_words`, its
-/// description, `redirections`, `interpreters`) plus the ordinary
-/// pass-through context (`depth`, `rules`, `allowlist`, `redirect_anchor`)
-/// every recursive check in this file already threads through, so bundling
-/// them into a struct would just relocate the count rather than group
-/// anything meaningful.
-#[allow(clippy::too_many_arguments)]
 fn apply_attached_word_and_redirect_checks(
     mut worst: Verdict,
     extra_words: &[Word],
     extra_words_description: &str,
     redirections: &[Redirection],
     interpreters: &[HeredocCandidate],
-    depth: usize,
-    rules: &Rules,
-    allowlist: &Allowlist,
+    ctx: AnalysisCtx<'_>,
     redirect_anchor: &CwdContext,
 ) -> Verdict {
+    let rules = ctx.rules;
     // `scan_word_expansions`/`scan_redirection_expansions` both write a
     // `has_any` presence flag (`scan_expansion_positions`'s callers use it
     // to decide rule-3 allow-downgrade eligibility) — this caller has no
@@ -1369,23 +1292,13 @@ fn apply_attached_word_and_redirect_checks(
     for word in extra_words {
         scan_word_expansions(
             word,
-            depth,
-            rules,
-            allowlist,
+            ctx,
             redirect_anchor,
             &mut accum,
             extra_words_description,
         );
     }
-    scan_redirection_expansions(
-        redirections,
-        interpreters,
-        depth,
-        rules,
-        allowlist,
-        redirect_anchor,
-        &mut accum,
-    );
+    scan_redirection_expansions(redirections, interpreters, ctx, redirect_anchor, &mut accum);
     if let Some((floor_decision, floor_reason)) = floor {
         let argv = worst.normalized_argv().to_vec();
         let floored = match floor_decision {
@@ -1527,13 +1440,7 @@ fn apply_attached_word_and_redirect_checks(
 /// implementation. Defaults to `Allow` (an ordinary test with nothing
 /// dangerous inside it is inert) rather than recursing through
 /// [`evaluate_simple_command`] at all.
-fn evaluate_extended_test(
-    test: &ExtendedTest,
-    rules: &Rules,
-    allowlist: &Allowlist,
-    depth: usize,
-    cwd: &CwdContext,
-) -> Verdict {
+fn evaluate_extended_test(test: &ExtendedTest, ctx: AnalysisCtx<'_>, cwd: &CwdContext) -> Verdict {
     // Issue #424 round 5: `[[ ]]` is itself a compound command (bash's own
     // "Compound Commands" docs) — bash applies its own redirections before
     // expanding its operands, so `[[ $(perl) ]] <<EOF` forks `perl` AFTER
@@ -1553,9 +1460,7 @@ fn evaluate_extended_test(
         "an extended test ([[ ]]) operand",
         &test.redirections,
         &interpreters,
-        depth,
-        rules,
-        allowlist,
+        ctx,
         cwd,
     )
 }
@@ -1579,23 +1484,13 @@ fn evaluate_extended_test(
 /// stays untracked by name — the existing #75 stance this mirrors).
 fn evaluate_function_definition(
     func: &FunctionDefinition,
-    rules: &Rules,
-    allowlist: &Allowlist,
-    depth: usize,
+    ctx: AnalysisCtx<'_>,
     cwd: &mut CwdState,
 ) -> Verdict {
     let mut isolated = cwd.clone();
     isolated.symlink_untrusted = true;
     let mut env = Env::new();
-    let verdict = evaluate_compound_command(
-        &func.body,
-        &mut env,
-        true,
-        rules,
-        allowlist,
-        depth,
-        &mut isolated,
-    );
+    let verdict = evaluate_compound_command(&func.body, &mut env, true, ctx, &mut isolated);
     if compound_command_may_change_cwd(&func.body) {
         cwd.poison();
     }
@@ -2429,17 +2324,19 @@ fn has_command_position_leftover_substitution(command: &SimpleCommand) -> bool {
 /// through (see its docs) — [`evaluate_pipeline`] is the only caller that
 /// reads it; [`recurse_find_exec_payload`] passes a throwaway `Vec` since a
 /// directly-recursed `find -exec` payload is not itself a pipeline stage.
-#[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd` context, see `apply_attached_word_and_redirect_checks`
 fn evaluate_simple_command(
     command: &SimpleCommand,
     env: &Env,
-    rules: &Rules,
-    allowlist: &Allowlist,
-    depth: usize,
+    ctx: AnalysisCtx<'_>,
     cwd: &CwdContext,
     refuse_symlinks: bool,
     alternates: &mut IfsAlternates,
 ) -> Verdict {
+    let AnalysisCtx {
+        rules,
+        allowlist,
+        depth,
+    } = ctx;
     let argv = normalize::normalize_argv(command);
     let wrapper_moves_cwd = wrapper_chain_changes_cwd(&argv);
     // A recursion (`depth > 0`: `bash -c`, `$(...)`, `eval`, `find -exec`)
@@ -2480,7 +2377,7 @@ fn evaluate_simple_command(
     // returns (rule 6a's inner-Allow chief among them) that bypass
     // `fold_floors` entirely, and a floor placed inside `core` would vanish
     // on exactly those paths (module docs, rule 11).
-    let expansion = scan_expansion_positions(command, &argv, depth, rules, allowlist, cwd);
+    let expansion = scan_expansion_positions(command, &argv, ctx, cwd);
     // Issues #64/#66/#72: the flock/su `-c` shell-string floor and the
     // `find -exec`/`-execdir`/`-ok`/`-okdir` direct-argv floor. Computed
     // here, in the wrapper layer, for the same reason rule 11's `expansion`
@@ -2488,11 +2385,11 @@ fn evaluate_simple_command(
     // them) that bypass `fold_floors` entirely, and a floor placed inside
     // `core` would vanish on exactly those paths. Needs `&argv` before it
     // is moved into `evaluate_simple_command_core` below.
-    let recursable = scan_recursable_slots(command, &argv, rules, allowlist, depth, cwd);
+    let recursable = scan_recursable_slots(command, &argv, ctx, cwd);
     // Issue #448: an `alias NAME=VALUE` argument's own value, recursed
     // unconditionally the same way a same-line function definition's body
     // already is (issue #75) — see `scan_alias_definition_floor`'s own docs.
-    let alias_floor = scan_alias_definition_floor(&argv, rules, allowlist, depth, cwd);
+    let alias_floor = scan_alias_definition_floor(&argv, ctx, cwd);
     // Tar's dash-less option cluster (issue #67) fails
     // closed on any letter this crate doesn't model, rather than silently
     // falling through to `Allow` the way the whole cluster used to when a
@@ -2608,12 +2505,7 @@ fn evaluate_simple_command(
         command,
         argv,
         env,
-        SimpleCommandPolicy {
-            rules,
-            allowlist,
-            depth,
-            symlink_scope,
-        },
+        SimpleCommandPolicy { ctx, symlink_scope },
         escalation_chain,
         cwd,
         alternates,
@@ -2813,15 +2705,11 @@ fn evaluate_simple_command(
     }
 }
 
-/// `rules`/`allowlist`/`depth` bundled into one parameter purely to keep
-/// [`evaluate_simple_command_core`] under clippy's `too_many_arguments`
-/// threshold once issue #103 added a `cwd` parameter alongside them —
-/// immediately destructured back into the same local bindings the
-/// function's own body already used, so nothing else about it changes.
+/// The per-command policy inputs [`evaluate_simple_command_core`] takes
+/// beyond the command itself: the shared [`AnalysisCtx`] and the symlink
+/// scope for this command's path resolution.
 struct SimpleCommandPolicy<'a> {
-    rules: &'a Rules,
-    allowlist: &'a Allowlist,
-    depth: usize,
+    ctx: AnalysisCtx<'a>,
     symlink_scope: SymlinkScope<'a>,
 }
 
@@ -2844,12 +2732,8 @@ fn evaluate_simple_command_core(
     cwd: &CwdContext,
     alternates: &mut IfsAlternates,
 ) -> Verdict {
-    let SimpleCommandPolicy {
-        rules,
-        allowlist,
-        depth,
-        symlink_scope,
-    } = policy;
+    let SimpleCommandPolicy { ctx, symlink_scope } = policy;
+    let AnalysisCtx { rules, .. } = ctx;
     // Redirect target check runs FIRST, before any early return —
     // a redirection-only command (`> /dev/sda`) has empty argv but still
     // carries dangerous redirections that must not slip through rule 9.
@@ -2927,13 +2811,8 @@ fn evaluate_simple_command_core(
     // leftover substitution must still be able to escalate a verdict
     // returned on any of them (issue #77) — not only the blocklist-miss path
     // `fold_floors`'s own `substitution_result` already covers.
-    let leftover_floor = evaluate_leftover_alternative_substitutions(
-        &leftover_alternatives,
-        depth,
-        rules,
-        allowlist,
-        cwd,
-    );
+    let leftover_floor =
+        evaluate_leftover_alternative_substitutions(&leftover_alternatives, ctx, cwd);
     // Issue #368: a sibling brace alternative that folds cleanly to a
     // resolved, dangerous command must not be invisible to the blocklist
     // just because the winning alternative resolves to something else
@@ -2967,7 +2846,7 @@ fn evaluate_simple_command_core(
     // since `argument_words` alone (everything after `first_word_ast`)
     // never sees content embedded in that same AST word.
     let substitution_result = fold_optional_decision(
-        evaluate_argument_substitutions(argument_words, depth, rules, allowlist, cwd),
+        evaluate_argument_substitutions(argument_words, ctx, cwd),
         leftover_floor,
     );
     let mut command_position_subs = Vec::new();
@@ -2984,9 +2863,7 @@ fn evaluate_simple_command_core(
                         &command_position_subs,
                         &command_position_proc_subs,
                         argv,
-                        rules,
-                        allowlist,
-                        depth,
+                        ctx,
                         cwd,
                     ),
                     leftover_command_floor.clone(),
@@ -3111,8 +2988,7 @@ fn evaluate_simple_command_core(
     // script exactly like a substitution.
     if let Some((name, rest_words)) = effective
         && crate::rules::is_shell_interpreter(name)
-        && let Some(outcome) =
-            evaluate_dash_c(&argv, rest_words, name, rules, allowlist, depth, cwd)
+        && let Some(outcome) = evaluate_dash_c(&argv, rest_words, name, ctx, cwd)
     {
         return apply_opaque_kind_floor(
             apply_substitution_floor(
@@ -3127,7 +3003,7 @@ fn evaluate_simple_command_core(
     // script and recurses it the same way rule 6a does.
     if let Some((name, rest_words)) = effective
         && EVAL_BUILTIN.contains(&name)
-        && let Some(outcome) = evaluate_eval(&argv, rest_words, rules, allowlist, depth, cwd)
+        && let Some(outcome) = evaluate_eval(&argv, rest_words, ctx, cwd)
     {
         return apply_opaque_kind_floor(
             apply_substitution_floor(
@@ -3476,7 +3352,7 @@ const UNRESOLVED_ESCALATION_REASON: &str = "a transparent wrapper's wrapped comm
 /// [`apply_escalation_floor`] (the rule 6a early-return path) and
 /// [`fold_floors`], so the two can never diverge, and so neither function
 /// needs both `escalation_chain` and `floor_decision` as separate
-/// parameters (`clippy::too_many_arguments`).
+/// parameters.
 fn escalation_floor_contribution(
     escalation_chain: WrapperChainEscalation,
     floor_decision: Decision,
@@ -4068,8 +3944,7 @@ fn apply_opaque_kind_floor(verdict: Verdict, kind: Option<UnresolvableKind>) -> 
 }
 
 /// Rules 4 and 4b's argument-position-ambiguity floors, bundled into one
-/// parameter so [`fold_floors`] doesn't cross clippy's
-/// `too_many_arguments` threshold — see each field's own doc for what it
+/// parameter for [`fold_floors`] — see each field's own doc for what it
 /// floors.
 struct ExceptFloors<'a> {
     /// Rule 4: command+flags/tokens already strictly match via resolved
@@ -4225,23 +4100,18 @@ fn except_target_floor_reason(rule_id: &str) -> String {
 /// the SAME `depth` rather than `analyze_at_depth`'s `depth + 1` — its
 /// payload is already a parsed `CommandLine`, not raw text to re-parse (see
 /// `crate::ast::WordPiece::ProcessSubstitution`'s docs).
-#[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd` context, see `apply_attached_word_and_redirect_checks`
 fn evaluate_command_position_substitution(
     inner_commands: &[&str],
     inner_process_substitutions: &[&CommandLine],
     argv: Vec<NormalizedWord>,
-    rules: &Rules,
-    allowlist: &Allowlist,
-    depth: usize,
+    ctx: AnalysisCtx<'_>,
     cwd: &CwdContext,
 ) -> Verdict {
     let mut blocked = false;
     for inner in inner_commands {
         if analyze_at_depth(
             inner,
-            depth + 1,
-            rules,
-            allowlist,
+            ctx.deeper(),
             CwdState::seed_unknown_stack(cwd.clone()),
         )
         .decision()
@@ -4252,9 +4122,7 @@ fn evaluate_command_position_substitution(
     }
     for inner in inner_process_substitutions {
         let mut isolated = CwdState::seed_unknown_stack(cwd.clone());
-        if evaluate_command_line(inner, rules, allowlist, depth, &mut isolated).decision()
-            == Decision::Block
-        {
+        if evaluate_command_line(inner, ctx, &mut isolated).decision() == Decision::Block {
             blocked = true;
         }
     }
@@ -4544,14 +4412,11 @@ fn evaluate_command_position_bare_var(
 /// first, treating the *interpreter name* as the script and never
 /// recursing into the real one. `argv` itself is kept
 /// only for `outer_argv`, the verdict's reported argv.
-#[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd` context, see `apply_attached_word_and_redirect_checks`
 fn evaluate_dash_c(
     argv: &[NormalizedWord],
     rest_words: &[NormalizedWord],
     interpreter: &str,
-    rules: &Rules,
-    allowlist: &Allowlist,
-    depth: usize,
+    ctx: AnalysisCtx<'_>,
     cwd: &CwdContext,
 ) -> Option<Verdict> {
     // Issue #346 follow-up: a versioned shell binary (`ksh93`, `bash5`)
@@ -4563,7 +4428,7 @@ fn evaluate_dash_c(
     let lower_interpreter = crate::rules::fold_command_name(interpreter);
     let normalized_interpreter = crate::rules::strip_version_suffix(&lower_interpreter);
     if normalized_interpreter == "fish" {
-        return evaluate_fish(argv, rest_words, rules, allowlist, depth, cwd);
+        return evaluate_fish(argv, rest_words, ctx, cwd);
     }
     let outer_argv = argv.to_vec();
     let flag_index = match scan_for_flag(rest_words, is_dash_c_token) {
@@ -4579,9 +4444,7 @@ fn evaluate_dash_c(
                                 "`{interpreter}`'s `-c` flag position could not be statically \
                                  resolved, but a trailing word"
                             ),
-                            depth,
-                            rules,
-                            allowlist,
+                            ctx,
                             CwdState::seed(cwd.clone()),
                         );
                         match recursed.decision() {
@@ -4655,9 +4518,7 @@ fn evaluate_dash_c(
             script,
             outer_argv,
             &format!("`{interpreter} -c` argument"),
-            depth,
-            rules,
-            allowlist,
+            ctx,
             CwdState::seed(cwd.clone()),
         )),
         Resolution::Unresolvable(_) => Some(Verdict::ask(
@@ -4755,9 +4616,7 @@ fn find_posix_dash_c_script(
 fn evaluate_fish(
     argv: &[NormalizedWord],
     rest_words: &[NormalizedWord],
-    rules: &Rules,
-    allowlist: &Allowlist,
-    depth: usize,
+    ctx: AnalysisCtx<'_>,
     cwd: &CwdContext,
 ) -> Option<Verdict> {
     let outer_argv = argv.to_vec();
@@ -4772,9 +4631,7 @@ fn evaluate_fish(
                 code,
                 outer_argv.clone(),
                 "`fish -c`/`-C` argument",
-                depth,
-                rules,
-                allowlist,
+                ctx,
                 CwdState::seed(cwd.clone()),
             )
         })
@@ -4787,13 +4644,7 @@ fn evaluate_fish(
         // instead of demoting the whole shape to the bare Ask floor.
         let trailing = match rest_words.get(index + 1).map(NormalizedWord::resolution) {
             Some(Resolution::Resolved(script)) => {
-                let inner = analyze_at_depth(
-                    script,
-                    depth + 1,
-                    rules,
-                    allowlist,
-                    CwdState::seed(cwd.clone()),
-                );
+                let inner = analyze_at_depth(script, ctx.deeper(), CwdState::seed(cwd.clone()));
                 let reason = format!(
                     "`fish`'s option list could not be statically resolved, but a trailing word \
                      recurses through the full pipeline; inner decision: {:?}{}",
@@ -4888,9 +4739,7 @@ fn evaluate_fish(
 fn evaluate_eval(
     argv: &[NormalizedWord],
     rest_words: &[NormalizedWord],
-    rules: &Rules,
-    allowlist: &Allowlist,
-    depth: usize,
+    ctx: AnalysisCtx<'_>,
     cwd: &CwdContext,
 ) -> Option<Verdict> {
     let rest_words = match rest_words.split_first() {
@@ -4920,9 +4769,7 @@ fn evaluate_eval(
         &script,
         outer_argv,
         "`eval`'s argument",
-        depth,
-        rules,
-        allowlist,
+        ctx,
         CwdState::seed_unknown_stack(cwd.clone()),
     ))
 }
@@ -4976,17 +4823,14 @@ fn evaluate_eval(
 /// so it needs the poisoned-stack seed rather than the fresh-empty one (see
 /// [`CwdState`]'s own docs for why conflating the two was a confirmed
 /// Ask/Block→Allow bypass).
-#[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd` context, see `apply_attached_word_and_redirect_checks`
 fn recurse_shell_string(
     script: &str,
     outer_argv: Vec<NormalizedWord>,
     label: &str,
-    depth: usize,
-    rules: &Rules,
-    allowlist: &Allowlist,
+    ctx: AnalysisCtx<'_>,
     seed: CwdState,
 ) -> Verdict {
-    let inner = analyze_at_depth(script, depth + 1, rules, allowlist, seed);
+    let inner = analyze_at_depth(script, ctx.deeper(), seed);
     let reason = format!(
         "{label} recurses through the full pipeline; inner decision: {:?}{}",
         inner.decision(),
@@ -5018,9 +4862,7 @@ fn recurse_shell_string(
 /// outer command non-Allow (plan.md §4's `echo $(date)` example).
 fn evaluate_argument_substitutions(
     argument_words: &[Word],
-    depth: usize,
-    rules: &Rules,
-    allowlist: &Allowlist,
+    ctx: AnalysisCtx<'_>,
     cwd: &CwdContext,
 ) -> Option<(Decision, Option<DenyMessage>)> {
     let mut worst: Option<(Decision, Option<DenyMessage>)> = None;
@@ -5044,9 +4886,7 @@ fn evaluate_argument_substitutions(
         for inner in collect_substitutions(word) {
             let verdict = analyze_at_depth(
                 inner,
-                depth + 1,
-                rules,
-                allowlist,
+                ctx.deeper(),
                 CwdState::seed_unknown_stack(cwd.clone()),
             );
             raise(verdict.decision(), verdict.deny_message().cloned());
@@ -5056,7 +4896,7 @@ fn evaluate_argument_substitutions(
         // distinction).
         for inner in collect_process_substitutions(word) {
             let mut isolated = CwdState::seed_unknown_stack(cwd.clone());
-            let verdict = evaluate_command_line(inner, rules, allowlist, depth, &mut isolated);
+            let verdict = evaluate_command_line(inner, ctx, &mut isolated);
             raise(verdict.decision(), verdict.deny_message().cloned());
         }
     }
@@ -5126,9 +4966,7 @@ fn evaluate_argument_substitutions(
 /// argument-position substitution slot.
 fn evaluate_leftover_alternative_substitutions(
     leftover_alternatives: &[normalize::LeftoverAlternative],
-    depth: usize,
-    rules: &Rules,
-    allowlist: &Allowlist,
+    ctx: AnalysisCtx<'_>,
     cwd: &CwdContext,
 ) -> Option<Decision> {
     let mut worst: Option<Decision> = None;
@@ -5173,9 +5011,7 @@ fn evaluate_leftover_alternative_substitutions(
             raise(
                 analyze_at_depth(
                     inner,
-                    depth + 1,
-                    rules,
-                    allowlist,
+                    ctx.deeper(),
                     CwdState::seed_unknown_stack(cwd.clone()),
                 )
                 .decision(),
@@ -5183,7 +5019,7 @@ fn evaluate_leftover_alternative_substitutions(
         }
         for inner in proc_subs {
             let mut isolated = CwdState::seed_unknown_stack(cwd.clone());
-            raise(evaluate_command_line(inner, rules, allowlist, depth, &mut isolated).decision());
+            raise(evaluate_command_line(inner, ctx, &mut isolated).decision());
         }
     }
     worst
@@ -5319,9 +5155,7 @@ struct ExpansionPositionScan {
 
 /// The two mutable outputs [`scan_word_expansions`]/[`scan_redirection_expansions`]
 /// accumulate into across every position they scan, bundled into one
-/// parameter purely to keep [`scan_word_expansions`] under clippy's
-/// `too_many_arguments` threshold once issue #103 added a `cwd` parameter
-/// alongside them — see [`ExpansionPositionScan`]'s own docs for what each
+/// parameter — see [`ExpansionPositionScan`]'s own docs for what each
 /// field means.
 struct ExpansionAccum<'a> {
     has_any: &'a mut bool,
@@ -5658,9 +5492,7 @@ fn scan_substitution_text_for_heredoc_candidates(text: &str, out: &mut HeredocCa
 fn scan_expansion_positions(
     command: &SimpleCommand,
     argv: &[crate::normalize::NormalizedWord],
-    depth: usize,
-    rules: &Rules,
-    allowlist: &Allowlist,
+    ctx: AnalysisCtx<'_>,
     cwd: &CwdContext,
 ) -> ExpansionPositionScan {
     let mut has_any = false;
@@ -5674,9 +5506,7 @@ fn scan_expansion_positions(
         match &assignment.value {
             AssignmentValue::Scalar(word) => scan_word_expansions(
                 word,
-                depth,
-                rules,
-                allowlist,
+                ctx,
                 cwd,
                 &mut accum,
                 &format!("assignment `{}`'s value", assignment.name),
@@ -5688,9 +5518,7 @@ fn scan_expansion_positions(
                 for word in words {
                     scan_word_expansions(
                         word,
-                        depth,
-                        rules,
-                        allowlist,
+                        ctx,
                         cwd,
                         &mut accum,
                         &format!("assignment `{}`'s array value", assignment.name),
@@ -5702,15 +5530,7 @@ fn scan_expansion_positions(
 
     let interpreters: Vec<HeredocCandidate> =
         classify_heredoc_candidate(argv).into_iter().collect();
-    scan_redirection_expansions(
-        &command.redirections,
-        &interpreters,
-        depth,
-        rules,
-        allowlist,
-        cwd,
-        &mut accum,
-    );
+    scan_redirection_expansions(&command.redirections, &interpreters, ctx, cwd, &mut accum);
 
     ExpansionPositionScan { has_any, floor }
 }
@@ -5725,13 +5545,10 @@ fn scan_expansion_positions(
 /// caller passes here — issue #424's heredoc-as-stdin floor below needs it,
 /// the pre-existing
 /// `$()`/backtick scan does not.
-#[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd` context, see `apply_attached_word_and_redirect_checks`
 fn scan_redirection_expansions(
     redirections: &[Redirection],
     interpreters: &[HeredocCandidate],
-    depth: usize,
-    rules: &Rules,
-    allowlist: &Allowlist,
+    ctx: AnalysisCtx<'_>,
     cwd: &CwdContext,
     accum: &mut ExpansionAccum<'_>,
 ) {
@@ -5769,15 +5586,7 @@ fn scan_redirection_expansions(
     for redirection in redirections {
         match redirection {
             Redirection::File { target, .. } => {
-                scan_word_expansions(
-                    target,
-                    depth,
-                    rules,
-                    allowlist,
-                    cwd,
-                    accum,
-                    "a redirection target",
-                );
+                scan_word_expansions(target, ctx, cwd, accum, "a redirection target");
             }
             Redirection::HereDoc {
                 expand_body, body, ..
@@ -5839,9 +5648,7 @@ fn scan_redirection_expansions(
                     };
                     let inner = analyze_at_depth(
                         &script,
-                        depth + 1,
-                        rules,
-                        allowlist,
+                        ctx.deeper(),
                         CwdState::seed_unknown_stack(cwd.clone()),
                     );
                     let decision = inner.decision();
@@ -5926,9 +5733,7 @@ fn scan_redirection_expansions(
                     for inner in &scan.substitutions {
                         let decision = analyze_at_depth(
                             inner,
-                            depth + 1,
-                            rules,
-                            allowlist,
+                            ctx.deeper(),
                             CwdState::seed_unknown_stack(cwd.clone()),
                         )
                         .decision();
@@ -5951,12 +5756,9 @@ fn scan_redirection_expansions(
 /// and (issue #75) process substitutions, raising `floor` for each recursed
 /// inner decision that is not `Allow`. `position_description` names the
 /// position in the raised reason (e.g. `"a redirection target"`).
-#[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd` context, see `apply_attached_word_and_redirect_checks`
 fn scan_word_expansions(
     word: &Word,
-    depth: usize,
-    rules: &Rules,
-    allowlist: &Allowlist,
+    ctx: AnalysisCtx<'_>,
     cwd: &CwdContext,
     accum: &mut ExpansionAccum<'_>,
     position_description: &str,
@@ -5964,9 +5766,7 @@ fn scan_word_expansions(
     for inner in collect_substitutions(word) {
         let decision = analyze_at_depth(
             inner,
-            depth + 1,
-            rules,
-            allowlist,
+            ctx.deeper(),
             CwdState::seed_unknown_stack(cwd.clone()),
         )
         .decision();
@@ -5982,8 +5782,7 @@ fn scan_word_expansions(
         // Structural, not raw text — same-depth recursion (see
         // `evaluate_command_position_substitution`'s docs).
         let mut isolated = CwdState::seed_unknown_stack(cwd.clone());
-        let decision =
-            evaluate_command_line(inner, rules, allowlist, depth, &mut isolated).decision();
+        let decision = evaluate_command_line(inner, ctx, &mut isolated).decision();
         accum.raise(
             decision,
             format!(
@@ -6045,9 +5844,7 @@ struct RecursableScan {
 fn scan_recursable_slots(
     command: &SimpleCommand,
     argv: &[NormalizedWord],
-    rules: &Rules,
-    allowlist: &Allowlist,
-    depth: usize,
+    ctx: AnalysisCtx<'_>,
     cwd: &CwdContext,
 ) -> RecursableScan {
     let mut has_any = false;
@@ -6069,9 +5866,7 @@ fn scan_recursable_slots(
                     &script,
                     argv.to_vec(),
                     "a transparent wrapper's shell-string argument (`-c`/`--command`/`-S`)",
-                    depth,
-                    rules,
-                    allowlist,
+                    ctx,
                     CwdState::seed(cwd.clone()),
                 );
                 raise_expansion_floor(
@@ -6167,9 +5962,7 @@ fn scan_recursable_slots(
                             words: command.words[span_start..span_end].to_vec(),
                             redirections: Vec::new(),
                         };
-                        recurse_find_exec_payload(
-                            &synthetic, "", depth, rules, allowlist, cwd, &mut floor,
-                        );
+                        recurse_find_exec_payload(&synthetic, "", ctx, cwd, &mut floor);
                     }
 
                     // Fail-closed (design note, issue #72): when no
@@ -6300,9 +6093,7 @@ fn scan_recursable_slots(
                             &synthetic,
                             " (the whole clause fused into one word by $IFS splitting or brace \
                               alternation)",
-                            depth,
-                            rules,
-                            allowlist,
+                            ctx,
                             cwd,
                             &mut floor,
                         );
@@ -6356,9 +6147,7 @@ fn scan_recursable_slots(
 /// only ever raise a verdict above what it already was, never lower one.
 fn scan_alias_definition_floor(
     argv: &[NormalizedWord],
-    rules: &Rules,
-    allowlist: &Allowlist,
-    depth: usize,
+    ctx: AnalysisCtx<'_>,
     cwd: &CwdContext,
 ) -> Option<(Decision, String)> {
     let (name, rest) = crate::rules::effective_command(argv)?;
@@ -6392,9 +6181,7 @@ fn scan_alias_definition_floor(
             value,
             argv.to_vec(),
             "an `alias` definition's own value",
-            depth,
-            rules,
-            allowlist,
+            ctx,
             CwdState::seed_unknown_stack(cwd.clone()),
         );
         raise_expansion_floor(
@@ -6434,16 +6221,14 @@ fn scan_alias_definition_floor(
 /// `depth > MAX_SUBSTITUTION_DEPTH` check exactly (that function is entered
 /// with `depth + 1`, so checking `depth >= MAX_SUBSTITUTION_DEPTH` here,
 /// before incrementing, is equivalent).
-#[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd` context, see `apply_attached_word_and_redirect_checks`
 fn recurse_find_exec_payload(
     synthetic: &SimpleCommand,
     fused_note: &str,
-    depth: usize,
-    rules: &Rules,
-    allowlist: &Allowlist,
+    ctx: AnalysisCtx<'_>,
     cwd: &CwdContext,
     floor: &mut Option<(Decision, String)>,
 ) {
+    let depth = ctx.depth;
     if depth >= MAX_SUBSTITUTION_DEPTH {
         raise_expansion_floor(
             floor,
@@ -6509,9 +6294,7 @@ fn recurse_find_exec_payload(
     let inner = evaluate_simple_command(
         synthetic,
         &Env::new(),
-        rules,
-        allowlist,
-        depth + 1,
+        ctx.deeper(),
         cwd,
         true,
         &mut discarded_alternates,
@@ -11077,6 +10860,14 @@ impl Env {
 mod tests {
     use super::*;
     use crate::verdict::Decision;
+
+    fn analyze(command: &str) -> Verdict {
+        super::analyze(
+            command,
+            &Rules::embedded().unwrap(),
+            &Allowlist::embedded().unwrap(),
+        )
+    }
 
     fn decide(command: &str) -> Verdict {
         analyze(command)
@@ -17213,9 +17004,7 @@ mod tests {
             argv,
             &env,
             SimpleCommandPolicy {
-                rules: &rules,
-                allowlist: &allowlist,
-                depth: 0,
+                ctx: AnalysisCtx::new(&rules, &allowlist),
                 symlink_scope: SymlinkScope::default(),
             },
             WrapperChainEscalation::Absent,
