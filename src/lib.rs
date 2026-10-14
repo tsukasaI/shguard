@@ -236,24 +236,9 @@ pub fn analyze(command: &str) -> Verdict {
     let command = command.to_string();
     watchdog::bounded(move || {
         policy::decide(
-            &[Evidence::GateVerdict(gate::analyze(
-                &command,
-                parse_command,
-            ))],
+            &[Evidence::GateVerdict(gate::analyze(&command))],
             &PolicyConfig::none(),
             &HookContext::none(),
-        )
-    })
-}
-
-/// The parse stage handed to `gate` (composition root, plan.md §1.3): the
-/// one place `gate` is wired to `parser`. Folds the parser's own error type
-/// into [`gate::ParseRejection`], so `gate` never names the parser.
-pub(crate) fn parse_command(command: &str) -> Result<ast::CommandLine, gate::ParseRejection> {
-    parser::parse(command).map_err(|err| {
-        gate::ParseRejection::new(
-            err.to_string(),
-            err.unsupported_construct().map(str::to_string),
         )
     })
 }
@@ -365,7 +350,6 @@ pub fn analyze_with_policy(
             &policy_owned.rules,
             &policy_owned.allowlist,
             context_owned.cwd(),
-            parse_command,
         );
         policy::decide(
             &[Evidence::GateVerdict(verdict)],

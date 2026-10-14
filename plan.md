@@ -187,11 +187,11 @@ tooling per `coding-guidelines/patterns/tooling.md`."*
 - **Dependencies point inward**: `rules`/`gate`/`normalize` depend on core AST
   types, never on the parser crate or on serde/hook JSON. `rules.rs` exposes
   serde-free typed constructors; `config_loader.rs` owns the serde DTOs and
-  TOML loading. `gate.rs` does not import `parser`: the parse function is
-  injected from `lib.rs`.
+  TOML loading. `gate.rs` calls `parser::parse` directly; the brush
+  parser stays sealed inside the parser module.
 - **Wiring in one composition root**: `src/lib.rs` wires the stages together
-  (it hands `parser::parse` to `gate` and the `fs_canonicalizer` adapter to
-  `rules`' symlink-resolution port), and `src/bin/shguard.rs` is the only
+  (it hands the `fs_canonicalizer` adapter to `rules`' symlink-resolution
+  port; `gate` calls `parser::parse` directly), and `src/bin/shguard.rs` is the only
   place that connects stdin → adapter → `analyze` → stdout.
 - **Tooling** (per `patterns/tooling.md`): rustfmt, clippy (deny warnings),
   pre-commit hooks, gitleaks — configured in the scaffolding issue.
@@ -206,14 +206,13 @@ shguard/
 ├── Cargo.toml                # lib + [[bin]] shguard
 ├── coding-guidelines/        # git submodule
 ├── src/
-│   ├── lib.rs                # analyze() — public API, composition of stages (injects the parse fn into gate)
-│   ├── verdict.rs            # Decision, Verdict, reason types
+│   ├── lib.rs                # analyze() — public API, composition of stages│   ├── verdict.rs            # Decision, Verdict, reason types
 │   ├── parser.rs             # crate adapter → shguard AST
 │   ├── normalize.rs          # static folding → NormalizedWord
 │   ├── rules.rs              # typed rule sets + argv matching (no serde/TOML)
 │   ├── fs_canonicalizer.rs   # filesystem adapter for rules.rs's symlink-resolution port
 │   ├── config_loader.rs      # serde DTOs + TOML loading → rules.rs specs
-│   ├── gate.rs               # structural routing (parse fn injected, never imports parser)
+│   ├── gate.rs               # structural routing (calls parser::parse directly)
 │   ├── config.rs             # user config discovery + Policy::load (§6 item 8)
 │   └── bin/shguard.rs        # composition root + Claude Code adapter
 ├── rules/

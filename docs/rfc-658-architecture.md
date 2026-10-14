@@ -201,10 +201,11 @@ pub fn decide(evidence: &[Evidence], config: &PolicyConfig, ctx: &HookContext) -
   - malformed hook JSON, a stdin read error, or stdin over
     `MAX_STDIN_BYTES` (`InputRejected`);
   - watchdog trip (`ResourceLimit`).
-- **`AnalysisCtx`** `{ parse, rules, depth, env, cwd }` replaces threading
-  `parse: ParseFn` through 36 signatures. The injected parse function is
-  a genuine seam (semantics must not import brush). Only its delivery
-  changes, which settles the first half of #636 and #619's
+- **`AnalysisCtx`** `{ rules, depth, env, cwd }` carries no parse
+  function. The injected parse function (a `ParseFn` type threaded through
+  36 signatures) was deleted per #636: `gate` calls `parser::parse`
+  directly, and brush stays sealed inside the parser module, so the
+  injection was over-abstraction. The context struct addresses #619's
   `too_many_arguments` item.
 
 ### Gate for stage 1

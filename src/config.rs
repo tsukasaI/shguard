@@ -2733,14 +2733,7 @@ mod tests {
     }
 
     fn decide(rules: &Rules, allowlist: &Allowlist, command: &str, cwd: Option<&str>) -> Decision {
-        crate::gate::analyze_with_policy_in_cwd(
-            command,
-            rules,
-            allowlist,
-            cwd,
-            crate::parse_command,
-        )
-        .decision()
+        crate::gate::analyze_with_policy_in_cwd(command, rules, allowlist, cwd).decision()
     }
 
     #[test]
@@ -2874,7 +2867,6 @@ mod tests {
             &rules,
             &allowlist,
             Some("/Users/me/dotfiles"),
-            crate::parse_command,
         );
         // Unscoped `targets` still match a composed subcommand: the default
         // composition is unchanged.
@@ -2894,7 +2886,6 @@ mod tests {
             &rules,
             &allowlist,
             Some("/tmp"),
-            crate::parse_command,
         );
         let reason = verdict.reason().unwrap().as_str();
         assert!(
@@ -2911,7 +2902,6 @@ mod tests {
             &rules,
             &allowlist,
             Some("/Users/me/dotfiles"),
-            crate::parse_command,
         );
         assert_eq!(verdict.decision(), Decision::Block);
         let reason = verdict.reason().unwrap().as_str();
@@ -2996,7 +2986,6 @@ mod tests {
             &rules,
             &allowlist,
             Some("/Users/me/dotfiles"),
-            crate::parse_command,
         );
         assert_eq!(verdict.decision(), Decision::Block);
         let reason = verdict.reason().unwrap().as_str();
