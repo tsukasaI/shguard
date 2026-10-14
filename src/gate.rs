@@ -344,6 +344,7 @@ use crate::ast::{
 use crate::normalize::{
     self, FlagScan, NormalizedWord, Resolution, UnresolvableKind, scan_for_flag,
 };
+use crate::parser;
 use crate::policy::combine::{
     SUBSTITUTION_FLOOR_ASK_REASON, SUBSTITUTION_FLOOR_BLOCK_REASON, apply_allowlist_downgrade,
     apply_ask_floor, apply_floor, apply_substitution_floor, fold_ask_floor, fold_optional_decision,
@@ -357,40 +358,6 @@ use crate::rules::{
     wrapper_chain_changes_cwd,
 };
 use crate::verdict::{Decision, DenyMessage, Reason, RuleId, Verdict};
-
-/// Why the injected [`ParseFn`] rejected a command string: the parser's own
-/// human-readable message (its `Display` text, surfaced in the `Ask`
-/// reason) plus, for a construct the parser recognises but cannot
-/// represent, that construct's name (the category-3 guidance, see
-/// [`deny_msg_unsupported_construct`]). The composition root
-/// (`crate::parse_command`) builds it from the parser's own error type, so
-/// this module never names the parser.
-#[derive(Debug)]
-pub(crate) struct ParseRejection {
-    message: String,
-    unsupported_construct: Option<String>,
-}
-
-impl ParseRejection {
-    pub(crate) fn new(message: String, unsupported_construct: Option<String>) -> Self {
-        Self {
-            message,
-            unsupported_construct,
-        }
-    }
-}
-
-impl std::fmt::Display for ParseRejection {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-/// The parse stage as a value: gate receives it from the composition root
-/// (`src/lib.rs`) instead of importing the parser (plan.md §1.3,
-/// "dependencies point inward"), and threads it through every recursion
-/// level and re-parse site.
-pub(crate) type ParseFn = fn(&str) -> Result<CommandLine, ParseRejection>;
 
 /// Cap on how many levels deep a command/backquote substitution (or a
 /// resolved `bash -c` script) may recurse before this module fails closed —
@@ -461,7 +428,7 @@ fn deny_msg_for_unresolvable_kind(kind: UnresolvableKind) -> Option<DenyMessage>
 /// never returns an `Allow` it has not positively earned (see the module
 /// docs for the full rule set).
 #[must_use]
-pub(crate) fn analyze(command: &str, parse: ParseFn) -> Verdict {
+pub(crate) fn analyze(command: &str) -> Verdict {
     let rules = match Rules::embedded() {
         Ok(rules) => rules,
         Err(err) => {
@@ -490,7 +457,6 @@ pub(crate) fn analyze(command: &str, parse: ParseFn) -> Verdict {
         &rules,
         &allowlist,
         CwdState::seed(CwdContext::Initial),
-        parse,
     )
 }
 
@@ -502,7 +468,7 @@ pub(crate) fn analyze(command: &str, parse: ParseFn) -> Verdict {
 #[cfg(test)]
 #[must_use]
 pub(crate) fn analyze_with_policy(command: &str, rules: &Rules, allowlist: &Allowlist) -> Verdict {
-    analyze_with_policy_in_cwd(command, rules, allowlist, None, crate::parse_command)
+    analyze_with_policy_in_cwd(command, rules, allowlist, None)
 }
 
 /// [`analyze_with_policy`] for a command that will run in `cwd` (the hook
@@ -517,7 +483,6 @@ pub(crate) fn analyze_with_policy_in_cwd(
     rules: &Rules,
     allowlist: &Allowlist,
     cwd: Option<&str>,
-    parse: ParseFn,
 ) -> Verdict {
     analyze_at_depth(
         command,
@@ -525,7 +490,6 @@ pub(crate) fn analyze_with_policy_in_cwd(
         rules,
         allowlist,
         CwdState::seed(payload_cwd_context(cwd)),
-        parse,
     )
 }
 
@@ -575,7 +539,6 @@ fn analyze_at_depth(
     rules: &Rules,
     allowlist: &Allowlist,
     mut cwd: CwdState,
-    parse: ParseFn,
 ) -> Verdict {
     if depth > MAX_SUBSTITUTION_DEPTH {
         return decide_structural(Evidence::ResourceLimit {
@@ -583,13 +546,11 @@ fn analyze_at_depth(
         });
     }
 
-    match parse(command) {
-        Ok(command_line) => {
-            evaluate_command_line(&command_line, rules, allowlist, depth, &mut cwd, parse)
-        }
+    match parser::parse(command) {
+        Ok(command_line) => evaluate_command_line(&command_line, rules, allowlist, depth, &mut cwd),
         Err(err) => decide_structural(Evidence::ParseFailure {
             message: err.to_string(),
-            construct: err.unsupported_construct,
+            construct: err.unsupported_construct().map(str::to_string),
         }),
     }
 }
@@ -645,19 +606,9 @@ fn evaluate_command_line(
     allowlist: &Allowlist,
     depth: usize,
     cwd: &mut CwdState,
-    parse: ParseFn,
 ) -> Verdict {
     let mut env = Env::new();
-    evaluate_command_line_in(
-        command_line,
-        &mut env,
-        true,
-        rules,
-        allowlist,
-        depth,
-        cwd,
-        parse,
-    )
+    evaluate_command_line_in(command_line, &mut env, true, rules, allowlist, depth, cwd)
 }
 
 /// [`evaluate_command_line`] over a caller-supplied [`Env`] (issue #607: a
@@ -666,7 +617,7 @@ fn evaluate_command_line(
 /// certainly runs this line in the parent shell; when it does not (the group
 /// is an `&&`/`||` right-hand side, backgrounded, or a pipeline stage), every
 /// assignment inside is classified as non-persisting, exactly like #534.
-#[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd`/`parse` context, see `apply_attached_word_and_redirect_checks`
+#[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd` context, see `apply_attached_word_and_redirect_checks`
 fn evaluate_command_line_in(
     command_line: &CommandLine,
     env: &mut Env,
@@ -675,7 +626,6 @@ fn evaluate_command_line_in(
     allowlist: &Allowlist,
     depth: usize,
     cwd: &mut CwdState,
-    parse: ParseFn,
 ) -> Verdict {
     let mut isolated = chain_is_backgrounded(command_line, 0).then(|| cwd.clone_untrusted());
     let first_runs_in_parent_shell =
@@ -688,7 +638,6 @@ fn evaluate_command_line_in(
         depth,
         isolated.as_mut().unwrap_or(cwd),
         first_runs_in_parent_shell,
-        parse,
     );
     let mut prev_untrustworthy = pipeline_reported_success_is_untrustworthy(&command_line.first);
     for (index, (separator, pipeline)) in command_line.rest.iter().enumerate() {
@@ -726,7 +675,6 @@ fn evaluate_command_line_in(
             depth,
             isolated.as_mut().unwrap_or(cwd),
             in_parent_shell,
-            parse,
         );
         worst = fold_worst(worst, verdict);
     }
@@ -822,7 +770,7 @@ type IfsAlternates = Vec<(Vec<NormalizedWord>, String)>;
 /// (`cd /tmp | (cd /elsewhere; true) | rm rel`) can't leak out either; a
 /// single-stage pipeline recurses with the real `cwd`, exactly like
 /// [`evaluate_command_line`] does for its own pipelines.
-#[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd`/`parse` context, see `apply_attached_word_and_redirect_checks`
+#[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd` context, see `apply_attached_word_and_redirect_checks`
 fn evaluate_pipeline(
     pipeline: &Pipeline,
     env: &mut Env,
@@ -831,7 +779,6 @@ fn evaluate_pipeline(
     depth: usize,
     cwd: &mut CwdState,
     runs_in_parent_shell: bool,
-    parse: ParseFn,
 ) -> Verdict {
     let mut stages = Vec::with_capacity(1 + pipeline.rest.len());
     stages.push(&pipeline.first);
@@ -898,7 +845,6 @@ fn evaluate_pipeline(
                     &cwd.current,
                     cwd.symlink_untrusted || cwd.earlier_writer.get() || stage_count > 1,
                     &mut alternates,
-                    parse,
                 );
                 stage_argvs.push(verdict.normalized_argv().to_vec());
                 if !alternates.is_empty() {
@@ -928,7 +874,6 @@ fn evaluate_pipeline(
                         allowlist,
                         depth,
                         cwd,
-                        parse,
                     )
                 } else {
                     let mut isolated = cwd.clone();
@@ -940,7 +885,6 @@ fn evaluate_pipeline(
                         allowlist,
                         depth,
                         &mut isolated,
-                        parse,
                     )
                 }
             }
@@ -950,17 +894,10 @@ fn evaluate_pipeline(
                 }
                 stage_argvs.push(Vec::new());
                 if stage_count == 1 {
-                    evaluate_function_definition(func, rules, allowlist, depth, cwd, parse)
+                    evaluate_function_definition(func, rules, allowlist, depth, cwd)
                 } else {
                     let mut isolated = cwd.clone();
-                    evaluate_function_definition(
-                        func,
-                        rules,
-                        allowlist,
-                        depth,
-                        &mut isolated,
-                        parse,
-                    )
+                    evaluate_function_definition(func, rules, allowlist, depth, &mut isolated)
                 }
             }
             Command::ExtendedTest(test) => {
@@ -973,8 +910,7 @@ fn evaluate_pipeline(
                 // docs), so unlike `Compound`/`FunctionDefinition` above it
                 // never needs an isolated `cwd` clone even in a multi-stage
                 // pipeline: nothing here can mutate `cwd` regardless.
-                let verdict =
-                    evaluate_extended_test(test, rules, allowlist, depth, &cwd.current, parse);
+                let verdict = evaluate_extended_test(test, rules, allowlist, depth, &cwd.current);
                 // Its operands may hold substitutions that write.
                 cwd.earlier_writer.set(true);
                 verdict
@@ -1171,7 +1107,7 @@ fn pipeline_shape_verdict(
 /// runs, but which one is unknowable statically, so the same
 /// evaluate-every-branch-and-fold stance already used for a loop's
 /// condition-plus-body pair applies here too, over more branches.
-#[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd`/`parse` context, see `apply_attached_word_and_redirect_checks`
+#[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd` context, see `apply_attached_word_and_redirect_checks`
 fn evaluate_compound_command(
     compound: &CompoundCommand,
     env: &mut Env,
@@ -1180,7 +1116,6 @@ fn evaluate_compound_command(
     allowlist: &Allowlist,
     depth: usize,
     cwd: &mut CwdState,
-    parse: ParseFn,
 ) -> Verdict {
     // `resolve_symlinks` (issue #612): a redirection or a substitution in a
     // `for` word list runs before the body, so it refuses the body's own
@@ -1217,7 +1152,6 @@ fn evaluate_compound_command(
         allowlist,
         depth,
         cwd,
-        parse,
     );
     cwd.earlier_writer.set(true);
     verdict
@@ -1232,7 +1166,6 @@ fn evaluate_compound_command_body(
     allowlist: &Allowlist,
     depth: usize,
     cwd: &mut CwdState,
-    parse: ParseFn,
 ) -> Verdict {
     let redirect_anchor = cwd.current.clone();
     let (worst, redirections, extra_words): (Verdict, &[Redirection], &[Word]) = match compound {
@@ -1247,14 +1180,12 @@ fn evaluate_compound_command_body(
                 allowlist,
                 depth,
                 cwd,
-                parse,
             );
             (verdict, redirections.as_slice(), [].as_slice())
         }
         CompoundCommand::Subshell { body, redirections } => {
             let mut isolated = cwd.clone();
-            let verdict =
-                evaluate_command_line(body, rules, allowlist, depth, &mut isolated, parse);
+            let verdict = evaluate_command_line(body, rules, allowlist, depth, &mut isolated);
             (verdict, redirections.as_slice(), [].as_slice())
         }
         CompoundCommand::ForClause {
@@ -1265,8 +1196,7 @@ fn evaluate_compound_command_body(
         } => {
             let mut isolated = cwd.clone();
             isolated.symlink_untrusted = true;
-            let verdict =
-                evaluate_command_line(body, rules, allowlist, depth, &mut isolated, parse);
+            let verdict = evaluate_command_line(body, rules, allowlist, depth, &mut isolated);
             if command_line_may_change_cwd(body) {
                 cwd.poison();
             }
@@ -1289,9 +1219,8 @@ fn evaluate_compound_command_body(
             let mut isolated = cwd.clone();
             isolated.symlink_untrusted = true;
             let cond_verdict =
-                evaluate_command_line(condition, rules, allowlist, depth, &mut isolated, parse);
-            let body_verdict =
-                evaluate_command_line(body, rules, allowlist, depth, &mut isolated, parse);
+                evaluate_command_line(condition, rules, allowlist, depth, &mut isolated);
+            let body_verdict = evaluate_command_line(body, rules, allowlist, depth, &mut isolated);
             if command_line_may_change_cwd(condition) || command_line_may_change_cwd(body) {
                 cwd.poison();
             }
@@ -1310,21 +1239,21 @@ fn evaluate_compound_command_body(
         } => {
             let mut isolated = cwd.clone();
             let mut worst =
-                evaluate_command_line(condition, rules, allowlist, depth, &mut isolated, parse);
+                evaluate_command_line(condition, rules, allowlist, depth, &mut isolated);
             worst = fold_worst(
                 worst,
-                evaluate_command_line(then_body, rules, allowlist, depth, &mut isolated, parse),
+                evaluate_command_line(then_body, rules, allowlist, depth, &mut isolated),
             );
             let mut may_change_cwd =
                 command_line_may_change_cwd(condition) || command_line_may_change_cwd(then_body);
             for ElifClause { condition, body } in elifs {
                 worst = fold_worst(
                     worst,
-                    evaluate_command_line(condition, rules, allowlist, depth, &mut isolated, parse),
+                    evaluate_command_line(condition, rules, allowlist, depth, &mut isolated),
                 );
                 worst = fold_worst(
                     worst,
-                    evaluate_command_line(body, rules, allowlist, depth, &mut isolated, parse),
+                    evaluate_command_line(body, rules, allowlist, depth, &mut isolated),
                 );
                 may_change_cwd = may_change_cwd
                     || command_line_may_change_cwd(condition)
@@ -1333,7 +1262,7 @@ fn evaluate_compound_command_body(
             if let Some(else_body) = else_body {
                 worst = fold_worst(
                     worst,
-                    evaluate_command_line(else_body, rules, allowlist, depth, &mut isolated, parse),
+                    evaluate_command_line(else_body, rules, allowlist, depth, &mut isolated),
                 );
                 may_change_cwd = may_change_cwd || command_line_may_change_cwd(else_body);
             }
@@ -1357,7 +1286,7 @@ fn evaluate_compound_command_body(
     // review), is checked, fail-closed — see
     // [`scan_compound_for_heredoc_candidates`].
     let mut scan = HeredocCandidateScan::default();
-    scan_compound_for_heredoc_candidates(compound, &mut scan, parse);
+    scan_compound_for_heredoc_candidates(compound, &mut scan);
     let interpreters = scan.into_candidates();
 
     apply_attached_word_and_redirect_checks(
@@ -1370,7 +1299,6 @@ fn evaluate_compound_command_body(
         rules,
         allowlist,
         &redirect_anchor,
-        parse,
     )
 }
 
@@ -1426,7 +1354,6 @@ fn apply_attached_word_and_redirect_checks(
     rules: &Rules,
     allowlist: &Allowlist,
     redirect_anchor: &CwdContext,
-    parse: ParseFn,
 ) -> Verdict {
     // `scan_word_expansions`/`scan_redirection_expansions` both write a
     // `has_any` presence flag (`scan_expansion_positions`'s callers use it
@@ -1448,7 +1375,6 @@ fn apply_attached_word_and_redirect_checks(
             redirect_anchor,
             &mut accum,
             extra_words_description,
-            parse,
         );
     }
     scan_redirection_expansions(
@@ -1459,7 +1385,6 @@ fn apply_attached_word_and_redirect_checks(
         allowlist,
         redirect_anchor,
         &mut accum,
-        parse,
     );
     if let Some((floor_decision, floor_reason)) = floor {
         let argv = worst.normalized_argv().to_vec();
@@ -1471,7 +1396,7 @@ fn apply_attached_word_and_redirect_checks(
         worst = fold_worst(worst, floored);
     }
 
-    if let Some(rule) = check_redirect_targets(redirections, rules, parse) {
+    if let Some(rule) = check_redirect_targets(redirections, rules) {
         let argv = worst.normalized_argv().to_vec();
         let reason = Reason::new(format!(
             "redirect target matches rule {:?}: {}",
@@ -1608,7 +1533,6 @@ fn evaluate_extended_test(
     allowlist: &Allowlist,
     depth: usize,
     cwd: &CwdContext,
-    parse: ParseFn,
 ) -> Verdict {
     // Issue #424 round 5: `[[ ]]` is itself a compound command (bash's own
     // "Compound Commands" docs) — bash applies its own redirections before
@@ -1620,7 +1544,7 @@ fn evaluate_extended_test(
     // — only the top-level `[[ ]] <<EOF` case was missing it.
     let mut scan = HeredocCandidateScan::default();
     for word in &test.words {
-        scan_word_for_heredoc_candidates(word, &mut scan, parse);
+        scan_word_for_heredoc_candidates(word, &mut scan);
     }
     let interpreters = scan.into_candidates();
     apply_attached_word_and_redirect_checks(
@@ -1633,7 +1557,6 @@ fn evaluate_extended_test(
         rules,
         allowlist,
         cwd,
-        parse,
     )
 }
 
@@ -1660,7 +1583,6 @@ fn evaluate_function_definition(
     allowlist: &Allowlist,
     depth: usize,
     cwd: &mut CwdState,
-    parse: ParseFn,
 ) -> Verdict {
     let mut isolated = cwd.clone();
     isolated.symlink_untrusted = true;
@@ -1673,7 +1595,6 @@ fn evaluate_function_definition(
         allowlist,
         depth,
         &mut isolated,
-        parse,
     );
     if compound_command_may_change_cwd(&func.body) {
         cwd.poison();
@@ -1744,7 +1665,6 @@ fn evaluate_pipeline_shape(stages: &[Vec<NormalizedWord>]) -> Option<Verdict> {
 fn check_redirect_targets<'a>(
     redirections: &[Redirection],
     rules: &'a Rules,
-    parse: ParseFn,
 ) -> Option<&'a crate::rules::RedirectRule> {
     // Worst-wins across BOTH target channels (issue #261): with the
     // literal channel checked first and `or_else`-chained, an Ask matched
@@ -1754,7 +1674,7 @@ fn check_redirect_targets<'a>(
     let mut ask = None;
     for target in resolved_redirect_write_targets(redirections)
         .iter()
-        .chain(resolved_redirect_substitution_targets(redirections, parse).iter())
+        .chain(resolved_redirect_substitution_targets(redirections).iter())
     {
         match rules.match_redirect_target(target) {
             Some(rule) if rule.decision() == Decision::Block => return Some(rule),
@@ -1805,10 +1725,7 @@ fn check_redirect_targets<'a>(
 /// `DuplicateInput` (`<&`) stays excluded even for a network target: bash
 /// rejects `cat <&$(echo /dev/tcp/host/port)` as an ambiguous redirect
 /// and opens no socket.
-fn resolved_redirect_substitution_targets(
-    redirections: &[Redirection],
-    parse: ParseFn,
-) -> Vec<String> {
+fn resolved_redirect_substitution_targets(redirections: &[Redirection]) -> Vec<String> {
     let mut targets = Vec::new();
     for redir in redirections {
         let Redirection::File { kind, target } = redir else {
@@ -1820,7 +1737,7 @@ fn resolved_redirect_substitution_targets(
         let Some((quoted, inner)) = single_command_substitution_text(target) else {
             continue;
         };
-        let Some(resolved) = resolve_static_substitution_output(inner, parse) else {
+        let Some(resolved) = resolve_static_substitution_output(inner) else {
             continue;
         };
         // `$()`/backtick substitution always strips every trailing newline
@@ -1912,8 +1829,8 @@ fn single_command_substitution_text(word: &Word) -> Option<(bool, &str)> {
 /// from resolving at all (`effective_command_excluding`'s `xargs`
 /// exclusion, below) precisely because xargs's real output depends on
 /// stdin-derived operands this function cannot see.
-fn resolve_static_substitution_output(inner: &str, parse: ParseFn) -> Option<String> {
-    let command_line = parse(inner).ok()?;
+fn resolve_static_substitution_output(inner: &str) -> Option<String> {
+    let command_line = parser::parse(inner).ok()?;
     if !command_line.rest.is_empty() || !command_line.first.rest.is_empty() {
         return None;
     }
@@ -2512,7 +2429,7 @@ fn has_command_position_leftover_substitution(command: &SimpleCommand) -> bool {
 /// through (see its docs) — [`evaluate_pipeline`] is the only caller that
 /// reads it; [`recurse_find_exec_payload`] passes a throwaway `Vec` since a
 /// directly-recursed `find -exec` payload is not itself a pipeline stage.
-#[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd`/`parse` context, see `apply_attached_word_and_redirect_checks`
+#[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd` context, see `apply_attached_word_and_redirect_checks`
 fn evaluate_simple_command(
     command: &SimpleCommand,
     env: &Env,
@@ -2522,7 +2439,6 @@ fn evaluate_simple_command(
     cwd: &CwdContext,
     refuse_symlinks: bool,
     alternates: &mut IfsAlternates,
-    parse: ParseFn,
 ) -> Verdict {
     let argv = normalize::normalize_argv(command);
     let wrapper_moves_cwd = wrapper_chain_changes_cwd(&argv);
@@ -2564,7 +2480,7 @@ fn evaluate_simple_command(
     // returns (rule 6a's inner-Allow chief among them) that bypass
     // `fold_floors` entirely, and a floor placed inside `core` would vanish
     // on exactly those paths (module docs, rule 11).
-    let expansion = scan_expansion_positions(command, &argv, depth, rules, allowlist, cwd, parse);
+    let expansion = scan_expansion_positions(command, &argv, depth, rules, allowlist, cwd);
     // Issues #64/#66/#72: the flock/su `-c` shell-string floor and the
     // `find -exec`/`-execdir`/`-ok`/`-okdir` direct-argv floor. Computed
     // here, in the wrapper layer, for the same reason rule 11's `expansion`
@@ -2572,11 +2488,11 @@ fn evaluate_simple_command(
     // them) that bypass `fold_floors` entirely, and a floor placed inside
     // `core` would vanish on exactly those paths. Needs `&argv` before it
     // is moved into `evaluate_simple_command_core` below.
-    let recursable = scan_recursable_slots(command, &argv, rules, allowlist, depth, cwd, parse);
+    let recursable = scan_recursable_slots(command, &argv, rules, allowlist, depth, cwd);
     // Issue #448: an `alias NAME=VALUE` argument's own value, recursed
     // unconditionally the same way a same-line function definition's body
     // already is (issue #75) — see `scan_alias_definition_floor`'s own docs.
-    let alias_floor = scan_alias_definition_floor(&argv, rules, allowlist, depth, cwd, parse);
+    let alias_floor = scan_alias_definition_floor(&argv, rules, allowlist, depth, cwd);
     // Tar's dash-less option cluster (issue #67) fails
     // closed on any letter this crate doesn't model, rather than silently
     // falling through to `Allow` the way the whole cluster used to when a
@@ -2635,7 +2551,7 @@ fn evaluate_simple_command(
     // arrives — computed here for the same reason every floor above is:
     // it must survive `core`'s early returns, including rule 9's Allow
     // for a redirection-only command (`>> ~/.zshrc` has empty argv).
-    let redirect_rule_ask_floor = check_redirect_targets(&command.redirections, rules, parse)
+    let redirect_rule_ask_floor = check_redirect_targets(&command.redirections, rules)
         .filter(|rule| rule.decision() == Decision::Ask)
         .map(|rule| {
             format!(
@@ -2696,7 +2612,6 @@ fn evaluate_simple_command(
             rules,
             allowlist,
             depth,
-            parse,
             symlink_scope,
         },
         escalation_chain,
@@ -2898,7 +2813,7 @@ fn evaluate_simple_command(
     }
 }
 
-/// `rules`/`allowlist`/`depth`/`parse` bundled into one parameter purely to keep
+/// `rules`/`allowlist`/`depth` bundled into one parameter purely to keep
 /// [`evaluate_simple_command_core`] under clippy's `too_many_arguments`
 /// threshold once issue #103 added a `cwd` parameter alongside them —
 /// immediately destructured back into the same local bindings the
@@ -2907,7 +2822,6 @@ struct SimpleCommandPolicy<'a> {
     rules: &'a Rules,
     allowlist: &'a Allowlist,
     depth: usize,
-    parse: ParseFn,
     symlink_scope: SymlinkScope<'a>,
 }
 
@@ -2934,7 +2848,6 @@ fn evaluate_simple_command_core(
         rules,
         allowlist,
         depth,
-        parse,
         symlink_scope,
     } = policy;
     // Redirect target check runs FIRST, before any early return —
@@ -2949,7 +2862,7 @@ fn evaluate_simple_command_core(
     // below (`rm -rf / >> ~/.bashrc` is still a Block). An Ask-level
     // redirect match instead arrives as `redirect_rule_ask_floor` in
     // [`evaluate_simple_command`], which survives every early return here.
-    if let Some(rule) = check_redirect_targets(&command.redirections, rules, parse)
+    if let Some(rule) = check_redirect_targets(&command.redirections, rules)
         && rule.decision() == Decision::Block
     {
         let reason = Reason::new(format!(
@@ -3020,7 +2933,6 @@ fn evaluate_simple_command_core(
         rules,
         allowlist,
         cwd,
-        parse,
     );
     // Issue #368: a sibling brace alternative that folds cleanly to a
     // resolved, dangerous command must not be invisible to the blocklist
@@ -3055,7 +2967,7 @@ fn evaluate_simple_command_core(
     // since `argument_words` alone (everything after `first_word_ast`)
     // never sees content embedded in that same AST word.
     let substitution_result = fold_optional_decision(
-        evaluate_argument_substitutions(argument_words, depth, rules, allowlist, cwd, parse),
+        evaluate_argument_substitutions(argument_words, depth, rules, allowlist, cwd),
         leftover_floor,
     );
     let mut command_position_subs = Vec::new();
@@ -3076,7 +2988,6 @@ fn evaluate_simple_command_core(
                         allowlist,
                         depth,
                         cwd,
-                        parse,
                     ),
                     leftover_command_floor.clone(),
                 ),
@@ -3201,7 +3112,7 @@ fn evaluate_simple_command_core(
     if let Some((name, rest_words)) = effective
         && crate::rules::is_shell_interpreter(name)
         && let Some(outcome) =
-            evaluate_dash_c(&argv, rest_words, name, rules, allowlist, depth, cwd, parse)
+            evaluate_dash_c(&argv, rest_words, name, rules, allowlist, depth, cwd)
     {
         return apply_opaque_kind_floor(
             apply_substitution_floor(
@@ -3216,7 +3127,7 @@ fn evaluate_simple_command_core(
     // script and recurses it the same way rule 6a does.
     if let Some((name, rest_words)) = effective
         && EVAL_BUILTIN.contains(&name)
-        && let Some(outcome) = evaluate_eval(&argv, rest_words, rules, allowlist, depth, cwd, parse)
+        && let Some(outcome) = evaluate_eval(&argv, rest_words, rules, allowlist, depth, cwd)
     {
         return apply_opaque_kind_floor(
             apply_substitution_floor(
@@ -4314,7 +4225,7 @@ fn except_target_floor_reason(rule_id: &str) -> String {
 /// the SAME `depth` rather than `analyze_at_depth`'s `depth + 1` — its
 /// payload is already a parsed `CommandLine`, not raw text to re-parse (see
 /// `crate::ast::WordPiece::ProcessSubstitution`'s docs).
-#[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd`/`parse` context, see `apply_attached_word_and_redirect_checks`
+#[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd` context, see `apply_attached_word_and_redirect_checks`
 fn evaluate_command_position_substitution(
     inner_commands: &[&str],
     inner_process_substitutions: &[&CommandLine],
@@ -4323,7 +4234,6 @@ fn evaluate_command_position_substitution(
     allowlist: &Allowlist,
     depth: usize,
     cwd: &CwdContext,
-    parse: ParseFn,
 ) -> Verdict {
     let mut blocked = false;
     for inner in inner_commands {
@@ -4333,7 +4243,6 @@ fn evaluate_command_position_substitution(
             rules,
             allowlist,
             CwdState::seed_unknown_stack(cwd.clone()),
-            parse,
         )
         .decision()
             == Decision::Block
@@ -4343,7 +4252,7 @@ fn evaluate_command_position_substitution(
     }
     for inner in inner_process_substitutions {
         let mut isolated = CwdState::seed_unknown_stack(cwd.clone());
-        if evaluate_command_line(inner, rules, allowlist, depth, &mut isolated, parse).decision()
+        if evaluate_command_line(inner, rules, allowlist, depth, &mut isolated).decision()
             == Decision::Block
         {
             blocked = true;
@@ -4635,7 +4544,7 @@ fn evaluate_command_position_bare_var(
 /// first, treating the *interpreter name* as the script and never
 /// recursing into the real one. `argv` itself is kept
 /// only for `outer_argv`, the verdict's reported argv.
-#[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd`/`parse` context, see `apply_attached_word_and_redirect_checks`
+#[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd` context, see `apply_attached_word_and_redirect_checks`
 fn evaluate_dash_c(
     argv: &[NormalizedWord],
     rest_words: &[NormalizedWord],
@@ -4644,7 +4553,6 @@ fn evaluate_dash_c(
     allowlist: &Allowlist,
     depth: usize,
     cwd: &CwdContext,
-    parse: ParseFn,
 ) -> Option<Verdict> {
     // Issue #346 follow-up: a versioned shell binary (`ksh93`, `bash5`)
     // must recurse its `-c` argument exactly like the unversioned name
@@ -4655,7 +4563,7 @@ fn evaluate_dash_c(
     let lower_interpreter = crate::rules::fold_command_name(interpreter);
     let normalized_interpreter = crate::rules::strip_version_suffix(&lower_interpreter);
     if normalized_interpreter == "fish" {
-        return evaluate_fish(argv, rest_words, rules, allowlist, depth, cwd, parse);
+        return evaluate_fish(argv, rest_words, rules, allowlist, depth, cwd);
     }
     let outer_argv = argv.to_vec();
     let flag_index = match scan_for_flag(rest_words, is_dash_c_token) {
@@ -4675,7 +4583,6 @@ fn evaluate_dash_c(
                             rules,
                             allowlist,
                             CwdState::seed(cwd.clone()),
-                            parse,
                         );
                         match recursed.decision() {
                             // An inner Allow does not clear the outer
@@ -4752,7 +4659,6 @@ fn evaluate_dash_c(
             rules,
             allowlist,
             CwdState::seed(cwd.clone()),
-            parse,
         )),
         Resolution::Unresolvable(_) => Some(Verdict::ask(
             Reason::new(format!(
@@ -4853,7 +4759,6 @@ fn evaluate_fish(
     allowlist: &Allowlist,
     depth: usize,
     cwd: &CwdContext,
-    parse: ParseFn,
 ) -> Option<Verdict> {
     let outer_argv = argv.to_vec();
     let scan = scan_fish_invocation(rest_words);
@@ -4871,7 +4776,6 @@ fn evaluate_fish(
                 rules,
                 allowlist,
                 CwdState::seed(cwd.clone()),
-                parse,
             )
         })
         .reduce(fold_worst);
@@ -4889,7 +4793,6 @@ fn evaluate_fish(
                     rules,
                     allowlist,
                     CwdState::seed(cwd.clone()),
-                    parse,
                 );
                 let reason = format!(
                     "`fish`'s option list could not be statically resolved, but a trailing word \
@@ -4989,7 +4892,6 @@ fn evaluate_eval(
     allowlist: &Allowlist,
     depth: usize,
     cwd: &CwdContext,
-    parse: ParseFn,
 ) -> Option<Verdict> {
     let rest_words = match rest_words.split_first() {
         Some((first, tail)) if matches!(first.resolution(), Resolution::Resolved(v) if v == "--") => {
@@ -5022,7 +4924,6 @@ fn evaluate_eval(
         rules,
         allowlist,
         CwdState::seed_unknown_stack(cwd.clone()),
-        parse,
     ))
 }
 
@@ -5075,7 +4976,7 @@ fn evaluate_eval(
 /// so it needs the poisoned-stack seed rather than the fresh-empty one (see
 /// [`CwdState`]'s own docs for why conflating the two was a confirmed
 /// Ask/Block→Allow bypass).
-#[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd`/`parse` context, see `apply_attached_word_and_redirect_checks`
+#[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd` context, see `apply_attached_word_and_redirect_checks`
 fn recurse_shell_string(
     script: &str,
     outer_argv: Vec<NormalizedWord>,
@@ -5084,9 +4985,8 @@ fn recurse_shell_string(
     rules: &Rules,
     allowlist: &Allowlist,
     seed: CwdState,
-    parse: ParseFn,
 ) -> Verdict {
-    let inner = analyze_at_depth(script, depth + 1, rules, allowlist, seed, parse);
+    let inner = analyze_at_depth(script, depth + 1, rules, allowlist, seed);
     let reason = format!(
         "{label} recurses through the full pipeline; inner decision: {:?}{}",
         inner.decision(),
@@ -5122,7 +5022,6 @@ fn evaluate_argument_substitutions(
     rules: &Rules,
     allowlist: &Allowlist,
     cwd: &CwdContext,
-    parse: ParseFn,
 ) -> Option<(Decision, Option<DenyMessage>)> {
     let mut worst: Option<(Decision, Option<DenyMessage>)> = None;
     // Issue #495: threads each recursed verdict's OWN `deny_message` along
@@ -5149,7 +5048,6 @@ fn evaluate_argument_substitutions(
                 rules,
                 allowlist,
                 CwdState::seed_unknown_stack(cwd.clone()),
-                parse,
             );
             raise(verdict.decision(), verdict.deny_message().cloned());
         }
@@ -5158,8 +5056,7 @@ fn evaluate_argument_substitutions(
         // distinction).
         for inner in collect_process_substitutions(word) {
             let mut isolated = CwdState::seed_unknown_stack(cwd.clone());
-            let verdict =
-                evaluate_command_line(inner, rules, allowlist, depth, &mut isolated, parse);
+            let verdict = evaluate_command_line(inner, rules, allowlist, depth, &mut isolated);
             raise(verdict.decision(), verdict.deny_message().cloned());
         }
     }
@@ -5233,7 +5130,6 @@ fn evaluate_leftover_alternative_substitutions(
     rules: &Rules,
     allowlist: &Allowlist,
     cwd: &CwdContext,
-    parse: ParseFn,
 ) -> Option<Decision> {
     let mut worst: Option<Decision> = None;
     let mut raise = |decision: Decision| {
@@ -5281,17 +5177,13 @@ fn evaluate_leftover_alternative_substitutions(
                     rules,
                     allowlist,
                     CwdState::seed_unknown_stack(cwd.clone()),
-                    parse,
                 )
                 .decision(),
             );
         }
         for inner in proc_subs {
             let mut isolated = CwdState::seed_unknown_stack(cwd.clone());
-            raise(
-                evaluate_command_line(inner, rules, allowlist, depth, &mut isolated, parse)
-                    .decision(),
-            );
+            raise(evaluate_command_line(inner, rules, allowlist, depth, &mut isolated).decision());
         }
     }
     worst
@@ -5568,19 +5460,18 @@ impl HeredocCandidateScan {
 fn scan_compound_for_heredoc_candidates(
     compound: &CompoundCommand,
     out: &mut HeredocCandidateScan,
-    parse: ParseFn,
 ) {
     match compound {
         CompoundCommand::BraceGroup { body, .. } | CompoundCommand::Subshell { body, .. } => {
-            scan_command_line_for_heredoc_candidates(body, out, parse);
+            scan_command_line_for_heredoc_candidates(body, out);
         }
         CompoundCommand::ForClause { words, body, .. } => {
             if let Some(words) = words {
                 for word in words {
-                    scan_word_for_heredoc_candidates(word, out, parse);
+                    scan_word_for_heredoc_candidates(word, out);
                 }
             }
-            scan_command_line_for_heredoc_candidates(body, out, parse);
+            scan_command_line_for_heredoc_candidates(body, out);
         }
         CompoundCommand::WhileClause {
             condition, body, ..
@@ -5588,8 +5479,8 @@ fn scan_compound_for_heredoc_candidates(
         | CompoundCommand::UntilClause {
             condition, body, ..
         } => {
-            scan_command_line_for_heredoc_candidates(condition, out, parse);
-            scan_command_line_for_heredoc_candidates(body, out, parse);
+            scan_command_line_for_heredoc_candidates(condition, out);
+            scan_command_line_for_heredoc_candidates(body, out);
         }
         CompoundCommand::IfClause {
             condition,
@@ -5598,14 +5489,14 @@ fn scan_compound_for_heredoc_candidates(
             else_body,
             ..
         } => {
-            scan_command_line_for_heredoc_candidates(condition, out, parse);
-            scan_command_line_for_heredoc_candidates(then_body, out, parse);
+            scan_command_line_for_heredoc_candidates(condition, out);
+            scan_command_line_for_heredoc_candidates(then_body, out);
             for ElifClause { condition, body } in elifs {
-                scan_command_line_for_heredoc_candidates(condition, out, parse);
-                scan_command_line_for_heredoc_candidates(body, out, parse);
+                scan_command_line_for_heredoc_candidates(condition, out);
+                scan_command_line_for_heredoc_candidates(body, out);
             }
             if let Some(else_body) = else_body {
-                scan_command_line_for_heredoc_candidates(else_body, out, parse);
+                scan_command_line_for_heredoc_candidates(else_body, out);
             }
         }
     }
@@ -5614,53 +5505,43 @@ fn scan_compound_for_heredoc_candidates(
 /// [`CommandLine`] half of [`scan_compound_for_heredoc_candidates`]'s walk:
 /// every [`Command`] across every pipeline stage and every `;`/`&&`/`||`
 /// separated pipeline.
-fn scan_command_line_for_heredoc_candidates(
-    line: &CommandLine,
-    out: &mut HeredocCandidateScan,
-    parse: ParseFn,
-) {
+fn scan_command_line_for_heredoc_candidates(line: &CommandLine, out: &mut HeredocCandidateScan) {
     for pipeline in std::iter::once(&line.first).chain(line.rest.iter().map(|(_, p)| p)) {
         for command in std::iter::once(&pipeline.first).chain(pipeline.rest.iter()) {
-            scan_command_for_heredoc_candidates(command, out, parse);
+            scan_command_for_heredoc_candidates(command, out);
         }
     }
 }
 
-fn scan_command_for_heredoc_candidates(
-    command: &Command,
-    out: &mut HeredocCandidateScan,
-    parse: ParseFn,
-) {
+fn scan_command_for_heredoc_candidates(command: &Command, out: &mut HeredocCandidateScan) {
     match command {
         Command::Simple(simple) => {
             let argv = normalize::normalize_argv(simple);
             out.record(&argv);
             for assignment in &simple.assignments {
                 match &assignment.value {
-                    AssignmentValue::Scalar(word) => {
-                        scan_word_for_heredoc_candidates(word, out, parse)
-                    }
+                    AssignmentValue::Scalar(word) => scan_word_for_heredoc_candidates(word, out),
                     AssignmentValue::Array(words) => {
                         for word in words {
-                            scan_word_for_heredoc_candidates(word, out, parse);
+                            scan_word_for_heredoc_candidates(word, out);
                         }
                     }
                 }
             }
             for word in &simple.words {
-                scan_word_for_heredoc_candidates(word, out, parse);
+                scan_word_for_heredoc_candidates(word, out);
             }
-            scan_redirections_for_heredoc_candidates(&simple.redirections, out, parse);
+            scan_redirections_for_heredoc_candidates(&simple.redirections, out);
         }
-        Command::Compound(nested) => scan_compound_for_heredoc_candidates(nested, out, parse),
+        Command::Compound(nested) => scan_compound_for_heredoc_candidates(nested, out),
         Command::FunctionDefinition(FunctionDefinition { body, .. }) => {
-            scan_compound_for_heredoc_candidates(body, out, parse);
+            scan_compound_for_heredoc_candidates(body, out);
         }
         Command::ExtendedTest(test) => {
             for word in &test.words {
-                scan_word_for_heredoc_candidates(word, out, parse);
+                scan_word_for_heredoc_candidates(word, out);
             }
-            scan_redirections_for_heredoc_candidates(&test.redirections, out, parse);
+            scan_redirections_for_heredoc_candidates(&test.redirections, out);
         }
     }
 }
@@ -5672,13 +5553,10 @@ fn scan_command_for_heredoc_candidates(
 fn scan_redirections_for_heredoc_candidates(
     redirections: &[Redirection],
     out: &mut HeredocCandidateScan,
-    parse: ParseFn,
 ) {
     for redirection in redirections {
         match redirection {
-            Redirection::File { target, .. } => {
-                scan_word_for_heredoc_candidates(target, out, parse)
-            }
+            Redirection::File { target, .. } => scan_word_for_heredoc_candidates(target, out),
             Redirection::HereDoc {
                 expand_body: true,
                 body,
@@ -5689,7 +5567,7 @@ fn scan_redirections_for_heredoc_candidates(
                     out.uncertain = true;
                 }
                 for inner in &scan.substitutions {
-                    scan_substitution_text_for_heredoc_candidates(inner, out, parse);
+                    scan_substitution_text_for_heredoc_candidates(inner, out);
                 }
             }
             Redirection::HereDoc {
@@ -5699,22 +5577,18 @@ fn scan_redirections_for_heredoc_candidates(
     }
 }
 
-fn scan_word_for_heredoc_candidates(word: &Word, out: &mut HeredocCandidateScan, parse: ParseFn) {
-    scan_word_pieces_for_heredoc_candidates(&word.0, out, parse);
+fn scan_word_for_heredoc_candidates(word: &Word, out: &mut HeredocCandidateScan) {
+    scan_word_pieces_for_heredoc_candidates(&word.0, out);
 }
 
-fn scan_word_pieces_for_heredoc_candidates(
-    pieces: &[WordPiece],
-    out: &mut HeredocCandidateScan,
-    parse: ParseFn,
-) {
+fn scan_word_pieces_for_heredoc_candidates(pieces: &[WordPiece], out: &mut HeredocCandidateScan) {
     for piece in pieces {
         match piece {
             WordPiece::CommandSubstitution(raw) | WordPiece::BackquotedSubstitution(raw) => {
-                scan_substitution_text_for_heredoc_candidates(raw, out, parse);
+                scan_substitution_text_for_heredoc_candidates(raw, out);
             }
             WordPiece::ProcessSubstitution { body, .. } => {
-                scan_command_line_for_heredoc_candidates(body, out, parse);
+                scan_command_line_for_heredoc_candidates(body, out);
             }
             WordPiece::ArithmeticExpansion(raw) => {
                 let scan = collect_heredoc_substitutions(raw);
@@ -5722,18 +5596,16 @@ fn scan_word_pieces_for_heredoc_candidates(
                     out.uncertain = true;
                 }
                 for inner in &scan.substitutions {
-                    scan_substitution_text_for_heredoc_candidates(inner, out, parse);
+                    scan_substitution_text_for_heredoc_candidates(inner, out);
                 }
             }
-            WordPiece::DoubleQuoted(inner) => {
-                scan_word_pieces_for_heredoc_candidates(inner, out, parse)
-            }
+            WordPiece::DoubleQuoted(inner) => scan_word_pieces_for_heredoc_candidates(inner, out),
             WordPiece::ModifiedParameterExpansion { operand, .. } => {
-                scan_word_pieces_for_heredoc_candidates(operand, out, parse);
+                scan_word_pieces_for_heredoc_candidates(operand, out);
             }
             WordPiece::BraceAlternation(members) => {
                 for member in members {
-                    scan_word_pieces_for_heredoc_candidates(&member.0, out, parse);
+                    scan_word_pieces_for_heredoc_candidates(&member.0, out);
                 }
             }
             WordPiece::Literal(_)
@@ -5753,13 +5625,9 @@ fn scan_word_pieces_for_heredoc_candidates(
 /// failure sets `uncertain` (fail-closed) rather than being silently
 /// skipped: the caller cannot prove the inner text does NOT invoke an
 /// interpreter just because shguard's own parser rejected it.
-fn scan_substitution_text_for_heredoc_candidates(
-    text: &str,
-    out: &mut HeredocCandidateScan,
-    parse: ParseFn,
-) {
-    match parse(text) {
-        Ok(line) => scan_command_line_for_heredoc_candidates(&line, out, parse),
+fn scan_substitution_text_for_heredoc_candidates(text: &str, out: &mut HeredocCandidateScan) {
+    match parser::parse(text) {
+        Ok(line) => scan_command_line_for_heredoc_candidates(&line, out),
         Err(_) => out.uncertain = true,
     }
 }
@@ -5794,7 +5662,6 @@ fn scan_expansion_positions(
     rules: &Rules,
     allowlist: &Allowlist,
     cwd: &CwdContext,
-    parse: ParseFn,
 ) -> ExpansionPositionScan {
     let mut has_any = false;
     let mut floor: Option<(Decision, String)> = None;
@@ -5813,7 +5680,6 @@ fn scan_expansion_positions(
                 cwd,
                 &mut accum,
                 &format!("assignment `{}`'s value", assignment.name),
-                parse,
             ),
             // Issue #75: each element (index and value alike, see
             // `src/parser.rs`'s `convert_assignment` docs) is scanned the
@@ -5828,7 +5694,6 @@ fn scan_expansion_positions(
                         cwd,
                         &mut accum,
                         &format!("assignment `{}`'s array value", assignment.name),
-                        parse,
                     );
                 }
             }
@@ -5845,7 +5710,6 @@ fn scan_expansion_positions(
         allowlist,
         cwd,
         &mut accum,
-        parse,
     );
 
     ExpansionPositionScan { has_any, floor }
@@ -5861,7 +5725,7 @@ fn scan_expansion_positions(
 /// caller passes here — issue #424's heredoc-as-stdin floor below needs it,
 /// the pre-existing
 /// `$()`/backtick scan does not.
-#[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd`/`parse` context, see `apply_attached_word_and_redirect_checks`
+#[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd` context, see `apply_attached_word_and_redirect_checks`
 fn scan_redirection_expansions(
     redirections: &[Redirection],
     interpreters: &[HeredocCandidate],
@@ -5870,7 +5734,6 @@ fn scan_redirection_expansions(
     allowlist: &Allowlist,
     cwd: &CwdContext,
     accum: &mut ExpansionAccum<'_>,
-    parse: ParseFn,
 ) {
     // Issue #424 round 4: bash processes a command's own redirections left
     // to right, expanding each word — command/process substitution
@@ -5891,7 +5754,7 @@ fn scan_redirection_expansions(
         .any(|r| matches!(r, Redirection::HereDoc { .. }))
     {
         let mut sibling_scan = HeredocCandidateScan::default();
-        scan_redirections_for_heredoc_candidates(redirections, &mut sibling_scan, parse);
+        scan_redirections_for_heredoc_candidates(redirections, &mut sibling_scan);
         if !sibling_scan.candidates.is_empty() || sibling_scan.uncertain {
             accum.raise(
                 Decision::Ask,
@@ -5914,7 +5777,6 @@ fn scan_redirection_expansions(
                     cwd,
                     accum,
                     "a redirection target",
-                    parse,
                 );
             }
             Redirection::HereDoc {
@@ -5981,7 +5843,6 @@ fn scan_redirection_expansions(
                         rules,
                         allowlist,
                         CwdState::seed_unknown_stack(cwd.clone()),
-                        parse,
                     );
                     let decision = inner.decision();
                     let inner_reason = inner
@@ -6012,13 +5873,9 @@ fn scan_redirection_expansions(
                     // surfaced — `inner`'s own `analyze_at_depth` call
                     // above already floored the identical text to `Ask` on
                     // that same failure.
-                    if let Ok(inner_line) = parse(&script) {
+                    if let Ok(inner_line) = parser::parse(&script) {
                         let mut inner_scan = HeredocCandidateScan::default();
-                        scan_command_line_for_heredoc_candidates(
-                            &inner_line,
-                            &mut inner_scan,
-                            parse,
-                        );
+                        scan_command_line_for_heredoc_candidates(&inner_line, &mut inner_scan);
                         if let Some(inner_name) = inner_scan.candidates.first().map(|c| match c {
                             HeredocCandidate::Shell(n) | HeredocCandidate::NonShell(n) => {
                                 n.as_str()
@@ -6073,7 +5930,6 @@ fn scan_redirection_expansions(
                             rules,
                             allowlist,
                             CwdState::seed_unknown_stack(cwd.clone()),
-                            parse,
                         )
                         .decision();
                         accum.raise(
@@ -6095,7 +5951,7 @@ fn scan_redirection_expansions(
 /// and (issue #75) process substitutions, raising `floor` for each recursed
 /// inner decision that is not `Allow`. `position_description` names the
 /// position in the raised reason (e.g. `"a redirection target"`).
-#[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd`/`parse` context, see `apply_attached_word_and_redirect_checks`
+#[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd` context, see `apply_attached_word_and_redirect_checks`
 fn scan_word_expansions(
     word: &Word,
     depth: usize,
@@ -6104,7 +5960,6 @@ fn scan_word_expansions(
     cwd: &CwdContext,
     accum: &mut ExpansionAccum<'_>,
     position_description: &str,
-    parse: ParseFn,
 ) {
     for inner in collect_substitutions(word) {
         let decision = analyze_at_depth(
@@ -6113,7 +5968,6 @@ fn scan_word_expansions(
             rules,
             allowlist,
             CwdState::seed_unknown_stack(cwd.clone()),
-            parse,
         )
         .decision();
         accum.raise(
@@ -6129,7 +5983,7 @@ fn scan_word_expansions(
         // `evaluate_command_position_substitution`'s docs).
         let mut isolated = CwdState::seed_unknown_stack(cwd.clone());
         let decision =
-            evaluate_command_line(inner, rules, allowlist, depth, &mut isolated, parse).decision();
+            evaluate_command_line(inner, rules, allowlist, depth, &mut isolated).decision();
         accum.raise(
             decision,
             format!(
@@ -6195,7 +6049,6 @@ fn scan_recursable_slots(
     allowlist: &Allowlist,
     depth: usize,
     cwd: &CwdContext,
-    parse: ParseFn,
 ) -> RecursableScan {
     let mut has_any = false;
     let mut floor: Option<(Decision, String)> = None;
@@ -6220,7 +6073,6 @@ fn scan_recursable_slots(
                     rules,
                     allowlist,
                     CwdState::seed(cwd.clone()),
-                    parse,
                 );
                 raise_expansion_floor(
                     &mut floor,
@@ -6316,7 +6168,7 @@ fn scan_recursable_slots(
                             redirections: Vec::new(),
                         };
                         recurse_find_exec_payload(
-                            &synthetic, "", depth, rules, allowlist, cwd, &mut floor, parse,
+                            &synthetic, "", depth, rules, allowlist, cwd, &mut floor,
                         );
                     }
 
@@ -6453,7 +6305,6 @@ fn scan_recursable_slots(
                             allowlist,
                             cwd,
                             &mut floor,
-                            parse,
                         );
                     }
                     i += 1;
@@ -6509,7 +6360,6 @@ fn scan_alias_definition_floor(
     allowlist: &Allowlist,
     depth: usize,
     cwd: &CwdContext,
-    parse: ParseFn,
 ) -> Option<(Decision, String)> {
     let (name, rest) = crate::rules::effective_command(argv)?;
     if name != "alias" {
@@ -6546,7 +6396,6 @@ fn scan_alias_definition_floor(
             rules,
             allowlist,
             CwdState::seed_unknown_stack(cwd.clone()),
-            parse,
         );
         raise_expansion_floor(
             &mut floor,
@@ -6585,7 +6434,7 @@ fn scan_alias_definition_floor(
 /// `depth > MAX_SUBSTITUTION_DEPTH` check exactly (that function is entered
 /// with `depth + 1`, so checking `depth >= MAX_SUBSTITUTION_DEPTH` here,
 /// before incrementing, is equivalent).
-#[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd`/`parse` context, see `apply_attached_word_and_redirect_checks`
+#[allow(clippy::too_many_arguments)] // the pass-through `rules`/`allowlist`/`depth`/`cwd` context, see `apply_attached_word_and_redirect_checks`
 fn recurse_find_exec_payload(
     synthetic: &SimpleCommand,
     fused_note: &str,
@@ -6594,7 +6443,6 @@ fn recurse_find_exec_payload(
     allowlist: &Allowlist,
     cwd: &CwdContext,
     floor: &mut Option<(Decision, String)>,
-    parse: ParseFn,
 ) {
     if depth >= MAX_SUBSTITUTION_DEPTH {
         raise_expansion_floor(
@@ -6667,7 +6515,6 @@ fn recurse_find_exec_payload(
         cwd,
         true,
         &mut discarded_alternates,
-        parse,
     );
     raise_expansion_floor(
         floor,
@@ -11229,11 +11076,10 @@ impl Env {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::parse_command as parse;
     use crate::verdict::Decision;
 
     fn decide(command: &str) -> Verdict {
-        analyze(command, parse)
+        analyze(command)
     }
 
     fn assert_decision(command: &str, expected: Decision) {
@@ -14590,7 +14436,7 @@ mod tests {
         // tar-absolute-names-ask rule's reason showed (naming a flag this
         // command doesn't have); now tar-extract-over-root-or-home's own,
         // accurate reason is present too.
-        let verdict = analyze("tar xfC a.tar $(echo /)", parse);
+        let verdict = analyze("tar xfC a.tar $(echo /)");
         assert_eq!(verdict.decision(), Decision::Ask);
         let reason = verdict.reason().unwrap().as_str();
         assert!(reason.contains("tar-extract-over-root-or-home"), "{reason}");
@@ -15606,7 +15452,7 @@ mod tests {
 
         fn verdict_in(kind: &str, command: &str, cwd: Option<&str>) -> Verdict {
             let (rules, allowlist) = rules(kind);
-            analyze_with_policy_in_cwd(command, &rules, &allowlist, cwd, crate::parse_command)
+            analyze_with_policy_in_cwd(command, &rules, &allowlist, cwd)
         }
 
         fn decide(command: &str) -> Decision {
@@ -16174,7 +16020,7 @@ mod tests {
         let allowlist = Allowlist::embedded().unwrap();
         for command in ["rm -rf /", "echo hi", "gh pr view", "cat a.sh | bash"] {
             assert_eq!(
-                analyze(command, parse).decision(),
+                analyze(command).decision(),
                 analyze_with_policy(command, &rules, &allowlist).decision(),
                 "{command:?}"
             );
@@ -17370,7 +17216,6 @@ mod tests {
                 rules: &rules,
                 allowlist: &allowlist,
                 depth: 0,
-                parse,
                 symlink_scope: SymlinkScope::default(),
             },
             WrapperChainEscalation::Absent,
