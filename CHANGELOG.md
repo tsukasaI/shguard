@@ -6,6 +6,13 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- The config-load failure reason now names the config file the loader
+  consulted (`SHGUARD_CONFIG`, `XDG_CONFIG_HOME` or the `$HOME` default) on
+  one line, and `additionalContext` tells the agent that every Bash call is
+  refused until the file is fixed and to fix it with a non-Bash tool such
+  as Edit or Write (#630). Text only: the decision is unchanged (`ask`, or
+  `deny` under `SHGUARD_STRICT_CONFIG`). `Policy::load` now returns the new
+  `config::LoadError`, which carries the resolved path.
 - `resolve_symlinks` (#583) fails closed in more cases (#612): a regular
   file with more than one hard link, any candidate when an earlier command
   on the line is anything but `cd`/`pushd`/`popd`/`dirs` or a no-write

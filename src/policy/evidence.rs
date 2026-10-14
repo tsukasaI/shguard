@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use crate::verdict::Verdict;
 
 /// One finding that bears on the final decision. The enum is closed and
@@ -17,7 +19,10 @@ pub enum Evidence {
     InputRejected {
         stage: InputStage,
     },
+    /// The user config failed to load. `path` is the config path the loader
+    /// resolved (issue #630), `None` when it resolved none.
     ConfigUnavailable {
+        path: Option<PathBuf>,
         error: String,
     },
     ResourceLimit {
