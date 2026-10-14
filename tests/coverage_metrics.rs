@@ -52,7 +52,7 @@ fn count_bypass_corpus_cases() -> usize {
 
 /// Counts benign-command entries in `tests/benign_corpus.rs`: every line
 /// whose first non-whitespace character is `"`, but ONLY within the
-/// `commands: &[&str] = &[ ... ];` array literal itself -- scoped this
+/// `COMMANDS: &[&str] = &[ ... ];` array literal itself -- scoped this
 /// way (not a bare whole-file scan) because the test body below the
 /// array also has a `"`-first line (its `assert_eq!` format string),
 /// which a whole-file scan would miscount as a 60th command when the
@@ -63,7 +63,7 @@ fn count_benign_corpus_commands() -> usize {
     let mut count = 0;
     for line in source.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("let commands") {
+        if trimmed.starts_with("const COMMANDS") {
             in_array = true;
             continue;
         }

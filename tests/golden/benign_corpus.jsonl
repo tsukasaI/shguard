@@ -1,0 +1,92 @@
+{"command":"X=$(date)","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"a=b","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"cargo build --release","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"cargo clippy","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"cargo fmt -- --check","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"cargo test","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"cargo test 2> errors.log","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"cat <<EOF\n$(pwd)\nEOF","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"cat README.md","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"cat file | sed 's/a/b/' | sort","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"cd \"${HOME:-/tmp}\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"cd $HOME","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"cp file1 file2","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"curl -s https://api.example.com/health","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"du -sh target/","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo \"${x:-plain}\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo \"exit=${PIPESTATUS[0]}\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo $","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo $(date)","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo $(whoami)","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo $PATH","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo ${#x}","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo ${PIPESTATUS[@]}","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo ${TMPDIR:-/tmp}","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo ${x##*/}","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo ${x%.ts}","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo ${x/a/b}","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo ${x:-'$(rm -rf ~)'}","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo ${x:0:3}","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo ${x^^}","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo '${(e)x}'","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo '${=x}'","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo 'x$=y'","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo hi > /dev/null","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"for f in *.ts; do echo \"${f%.ts}\"; done","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git add .","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git branch -d merged-branch","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git checkout -b feature/x","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git checkout -b push","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git commit -m \"fix: normalize output\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git commit -m 'rm -rf /'","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git commit -m clean","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git diff HEAD~1","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git log --grep rebase","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git log --oneline -20","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git pull --rebase","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git push --force-with-lease origin main","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git push origin main","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git show rebase","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git stash","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git stash list","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git status","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git tag -a v2.0.0 -m \"release\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git tag v1.0.0","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"go build ./...","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"go test ./...","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"less file.txt","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"ls $PWD","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"ls -la","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"make","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"make build > build.log","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"mkdir -p src/test","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"mvn clean install","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"npm install","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"npm run build","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"ping -c 1 localhost","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"python -m pytest","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"rg \"rm -rf\" src/","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"rm -rf ./build-output","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"rm -rf target/debug","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"sed '/^#/d' file","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"sed ':a;N;$!ba;s/\\n/ /g' file","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"sed 's/[^/]*$//' file","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"sed 's/a/b/g' file","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"sed 's/w/x/g' file","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"sed -E 's/(a|b)+/c/' file","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"sed -e 's|a|b|' file","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"sed -i '' 's/x/y/' file","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"sed -i 's/x/y/' file","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"sed -i.bak -e 's/x/y/' file","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"sed -n '/start/,/end/{/start/n;/end/!p}' file","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"sed -n '1,5p' file.txt","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"sed -n -e '$p' file","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"sed -n 1,5p file","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"tar -czf backup.tar.gz src/","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"tar -xf x.tar -C ./build","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"tar -xf x.tar -C ~/projects/app","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"tar -xzf node.tar.gz","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"tee /tmp/build.log","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"tee output.log","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"touch newfile.txt","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"wc -l src/*.rs","decision":"Allow","deny_message":null,"matched_rule":null}

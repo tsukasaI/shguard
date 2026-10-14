@@ -6,125 +6,128 @@
 //! to catch the opposite failure mode: a rule change that starts flagging
 //! ordinary, non-dangerous commands as Ask/Block.
 
+#[path = "common/golden.rs"]
+mod golden;
+
 use shguard::verdict::Decision;
+
+const COMMANDS: &[&str] = &[
+    // Build/test invocations.
+    "cargo test",
+    "cargo build --release",
+    "cargo clippy",
+    "cargo fmt -- --check",
+    "npm run build",
+    "npm install",
+    "make",
+    "go build ./...",
+    "go test ./...",
+    "python -m pytest",
+    "mvn clean install",
+    // Git commands — safe operations that must not trip git rules.
+    "git status",
+    "git log --oneline -20",
+    "git diff HEAD~1",
+    "git add .",
+    "git checkout -b feature/x",
+    "git push origin main",
+    "git push --force-with-lease origin main",
+    "git stash",
+    "git stash list",
+    "git pull --rebase",
+    "git branch -d merged-branch",
+    "git commit -m \"fix: normalize output\"",
+    "git tag v1.0.0",
+    "git tag -a v2.0.0 -m \"release\"",
+    // These MUST NOT false-positive — token appears as data, not subcommand.
+    "git commit -m clean",
+    "git show rebase",
+    "git log --grep rebase",
+    "git checkout -b push",
+    // Text searches mentioning dangerous strings as DATA, not commands.
+    "rg \"rm -rf\" src/",
+    "git commit -m 'rm -rf /'",
+    // Argument-position substitutions with benign inner commands.
+    "echo $(date)",
+    "echo $(whoami)",
+    // Issue #51: expansion-position substitutions with benign inner
+    // commands (assignment RHS, heredoc body) must stay Allow too.
+    "X=$(date)",
+    "cat <<EOF\n$(pwd)\nEOF",
+    // $VAR arguments (argument-position bare $VAR).
+    "cd $HOME",
+    "ls $PWD",
+    "echo $PATH",
+    // File operations — rm on non-dangerous targets.
+    "cat README.md",
+    "ls -la",
+    "mkdir -p src/test",
+    "cp file1 file2",
+    "touch newfile.txt",
+    "rm -rf ./build-output",
+    "rm -rf target/debug",
+    // Network.
+    "curl -s https://api.example.com/health",
+    "ping -c 1 localhost",
+    // Editors/tools.
+    "less file.txt",
+    "wc -l src/*.rs",
+    "du -sh target/",
+    // Redirections to safe targets.
+    "echo hi > /dev/null",
+    "make build > build.log",
+    "cargo test 2> errors.log",
+    // tee to safe targets.
+    "tee output.log",
+    "tee /tmp/build.log",
+    // tar — extraction/creation against non-root/home targets.
+    "tar -xzf node.tar.gz",
+    "tar -czf backup.tar.gz src/",
+    "tar -xf x.tar -C ./build",
+    "tar -xf x.tar -C ~/projects/app",
+    // sed scripts with no write/read/exec command (issue #584): `w`/`e`
+    // appearing only as data, a delimiter or a label must not trip the
+    // script lexer.
+    "sed -n 1,5p file",
+    "sed -n '1,5p' file.txt",
+    "sed 's/a/b/g' file",
+    "sed 's/w/x/g' file",
+    "sed -e 's|a|b|' file",
+    "sed '/^#/d' file",
+    "sed -i 's/x/y/' file",
+    "sed -i '' 's/x/y/' file",
+    "sed -i.bak -e 's/x/y/' file",
+    "sed -E 's/(a|b)+/c/' file",
+    "sed -n '/start/,/end/{/start/n;/end/!p}' file",
+    "sed ':a;N;$!ba;s/\\n/ /g' file",
+    "sed 's/[^/]*$//' file",
+    "sed -n -e '$p' file",
+    "cat file | sed 's/a/b/' | sort",
+    // Non-assigning parameter-expansion forms (issues #578/#580) and
+    // quoted zsh-flag text (issue #606).
+    "echo \"exit=${PIPESTATUS[0]}\"",
+    "echo ${PIPESTATUS[@]}",
+    "for f in *.ts; do echo \"${f%.ts}\"; done",
+    "cd \"${HOME:-/tmp}\"",
+    "echo ${TMPDIR:-/tmp}",
+    "echo ${x%.ts}",
+    "echo ${x##*/}",
+    "echo ${x:0:3}",
+    "echo ${#x}",
+    "echo ${x/a/b}",
+    "echo ${x^^}",
+    "echo ${x:-'$(rm -rf ~)'}",
+    "echo \"${x:-plain}\"",
+    "echo '${(e)x}'",
+    "echo '${=x}'",
+    "a=b",
+    "echo $",
+    "echo 'x$=y'",
+];
 
 #[test]
 fn benign_corpus_no_false_positives() {
-    let commands: &[&str] = &[
-        // Build/test invocations.
-        "cargo test",
-        "cargo build --release",
-        "cargo clippy",
-        "cargo fmt -- --check",
-        "npm run build",
-        "npm install",
-        "make",
-        "go build ./...",
-        "go test ./...",
-        "python -m pytest",
-        "mvn clean install",
-        // Git commands — safe operations that must not trip git rules.
-        "git status",
-        "git log --oneline -20",
-        "git diff HEAD~1",
-        "git add .",
-        "git checkout -b feature/x",
-        "git push origin main",
-        "git push --force-with-lease origin main",
-        "git stash",
-        "git stash list",
-        "git pull --rebase",
-        "git branch -d merged-branch",
-        "git commit -m \"fix: normalize output\"",
-        "git tag v1.0.0",
-        "git tag -a v2.0.0 -m \"release\"",
-        // These MUST NOT false-positive — token appears as data, not subcommand.
-        "git commit -m clean",
-        "git show rebase",
-        "git log --grep rebase",
-        "git checkout -b push",
-        // Text searches mentioning dangerous strings as DATA, not commands.
-        "rg \"rm -rf\" src/",
-        "git commit -m 'rm -rf /'",
-        // Argument-position substitutions with benign inner commands.
-        "echo $(date)",
-        "echo $(whoami)",
-        // Issue #51: expansion-position substitutions with benign inner
-        // commands (assignment RHS, heredoc body) must stay Allow too.
-        "X=$(date)",
-        "cat <<EOF\n$(pwd)\nEOF",
-        // $VAR arguments (argument-position bare $VAR).
-        "cd $HOME",
-        "ls $PWD",
-        "echo $PATH",
-        // File operations — rm on non-dangerous targets.
-        "cat README.md",
-        "ls -la",
-        "mkdir -p src/test",
-        "cp file1 file2",
-        "touch newfile.txt",
-        "rm -rf ./build-output",
-        "rm -rf target/debug",
-        // Network.
-        "curl -s https://api.example.com/health",
-        "ping -c 1 localhost",
-        // Editors/tools.
-        "less file.txt",
-        "wc -l src/*.rs",
-        "du -sh target/",
-        // Redirections to safe targets.
-        "echo hi > /dev/null",
-        "make build > build.log",
-        "cargo test 2> errors.log",
-        // tee to safe targets.
-        "tee output.log",
-        "tee /tmp/build.log",
-        // tar — extraction/creation against non-root/home targets.
-        "tar -xzf node.tar.gz",
-        "tar -czf backup.tar.gz src/",
-        "tar -xf x.tar -C ./build",
-        "tar -xf x.tar -C ~/projects/app",
-        // sed scripts with no write/read/exec command (issue #584): `w`/`e`
-        // appearing only as data, a delimiter or a label must not trip the
-        // script lexer.
-        "sed -n 1,5p file",
-        "sed -n '1,5p' file.txt",
-        "sed 's/a/b/g' file",
-        "sed 's/w/x/g' file",
-        "sed -e 's|a|b|' file",
-        "sed '/^#/d' file",
-        "sed -i 's/x/y/' file",
-        "sed -i '' 's/x/y/' file",
-        "sed -i.bak -e 's/x/y/' file",
-        "sed -E 's/(a|b)+/c/' file",
-        "sed -n '/start/,/end/{/start/n;/end/!p}' file",
-        "sed ':a;N;$!ba;s/\\n/ /g' file",
-        "sed 's/[^/]*$//' file",
-        "sed -n -e '$p' file",
-        "cat file | sed 's/a/b/' | sort",
-        // Non-assigning parameter-expansion forms (issues #578/#580) and
-        // quoted zsh-flag text (issue #606).
-        "echo \"exit=${PIPESTATUS[0]}\"",
-        "echo ${PIPESTATUS[@]}",
-        "for f in *.ts; do echo \"${f%.ts}\"; done",
-        "cd \"${HOME:-/tmp}\"",
-        "echo ${TMPDIR:-/tmp}",
-        "echo ${x%.ts}",
-        "echo ${x##*/}",
-        "echo ${x:0:3}",
-        "echo ${#x}",
-        "echo ${x/a/b}",
-        "echo ${x^^}",
-        "echo ${x:-'$(rm -rf ~)'}",
-        "echo \"${x:-plain}\"",
-        "echo '${(e)x}'",
-        "echo '${=x}'",
-        "a=b",
-        "echo $",
-        "echo 'x$=y'",
-    ];
-
-    for command in commands {
+    for command in COMMANDS {
         let verdict = shguard::analyze(command);
         assert_eq!(
             verdict.decision(),
@@ -134,4 +137,9 @@ fn benign_corpus_no_false_positives() {
             verdict.reason().map(|r| r.as_str())
         );
     }
+}
+
+#[test]
+fn golden_snapshot_benign_corpus() {
+    golden::check("benign_corpus", COMMANDS);
 }
