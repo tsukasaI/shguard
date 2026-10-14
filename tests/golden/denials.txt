@@ -1,0 +1,279 @@
+$TMPDIR/shg-target/release/shguard --help 2>&1 | head -30
+/bin/bash --norc --noprofile -s < /tmp/x/scratchpad/probe.sh
+/bin/zsh /tmp/x/scratchpad/probe.sh
+/run/current-system/sw/bin/bash -c 'echo "[${99999999999999999999}]"; echo "[${9223372036854775808}]"; echo rc=$?'; /run/current-system/sw/bin/bash --version | head -1
+B=$TMPDIR/proj8-target/debug/proj8; D=$(mktemp -d); mkdir -p $D/d/sub $D/locked; printf 'a\r\n' > $D/d/a.txt; printf 'xy\n' > $D/d/sub/b.txt; chmod 000 $D/locked; cd $D; $B locked; echo "rc=$?"; $B --json locked; echo "rc=$?"; $B -v locked; echo rc=$?; $B --json d/ ; $B --exclude sub d; $B --exclude 'sub' --json ./d; chmod 755 locked; echo $D
+B=$TMPDIR/proj8-target/debug/proj8; D=$TMPDIR/ewct; rm -rf $D; mkdir -p $D/d/sub $D/locked; printf 'a\r\n' > $D/d/a.txt; printf 'xy\n' > $D/d/sub/b.txt; chmod 000 $D/locked; cd $D; $B locked; echo "rc=$?"; $B --json locked; echo "rc=$?"; $B -v locked; echo rc=$?; $B --json d/ ; $B --exclude sub d; $B --exclude 'sub' --json ./d; $B --json -v d 2>&1; chmod 755 locked
+B=$TMPDIR/proj8-target/debug/proj8; ls -ld /private/var/root; $B /private/var/root; echo "rc=$?"; $B --json /private/var/root; echo "rc=$?"; $B --json /private/var/root /nonexistent; echo rc=$?
+B=/tmp/x/scratchpad/target-prune/debug/shguard; $B check --help 2>&1 | head -20; for c in 'sed -n 1,5p "$TMPDIR/x.ts"' 'tar -x -C "$S/p" -f a.tar' 'tar -x -C "$S" -f a.tar' 'tar -C "$S/p" -xf a.tar' 'rm -rf "$S/p"' ; do echo "== $c"; $B check "$c" 2>&1 | head -6; done
+B=/tmp/x/scratchpad/target-rawscan/release/shguard; ls -la $B; python3 -c "print('echo '+'\$['*3000+'1'+']'*3000)" > $TMPDIR/a.txt; $B check --json "$(cat $TMPDIR/a.txt)" | head -c 300; echo rc=$?
+B=/tmp/x/scratchpad/target/debug/deps/integration-ed7d7abc47c438cb; fail=0; for i in $(seq 1 300); do $B --test-threads 16 -q >/tmp/x/scratchpad/out.txt 2>&1 || { fail=$((fail+1)); rg -n "panicked|left|right|FAILED" /tmp/x/scratchpad/out.txt | head -8; }; done; echo "failures=$fail/300"
+B=/tmp/x/scratchpad/target/debug/deps/shguard-f91e6c56c9c4c00b; for i in 1 2 3 4 5 6 7 8; do $B -q 2>&1 | rg "test result|panicked|FAILED|^    [a-z_:]+$" ; done
+B=/tmp/x/shguard; while IFS= read -r cmd; do j=$(jq -cn --arg c "$cmd" '{tool_name:"Bash",tool_input:{command:$c}}'); d=$(printf '%s' "$j" | SHGUARD_CONFIG=/dev/null HOME=/Users/me $B 2>/dev/null | jq -r '.hookSpecificOutput.permissionDecision // "allow?"' 2>/dev/null); printf '%-6s %s\n' "${d:-none}" "$cmd"; done < /tmp/x/cmds.txt
+CARGO_TARGET_DIR=$TMPDIR/shg-target perl -e 'alarm shift; exec @ARGV' 600 cargo build --release --examples 2>&1 | tail -5; cat examples/probe.rs | head -40
+CARGO_TARGET_DIR=$TMPDIR/shg-target perl -e 'alarm shift; exec @ARGV' 600 cargo build --release 2>&1 | tail -3
+CARGO_TARGET_DIR=/tmp/x/proj7-tgt sh -c 'cargo fmt -- --check && cargo clippy --all-targets -- -D warnings && cargo test' 2>&1 | grep -E "test result|error|warning|FAILED"
+CARGO_TARGET_DIR=/tmp/x/scratchpad/cargo-out cargo build -q --offline --example probe 2>&1 | tail -20; echo "exit=${PIPESTATUS[0]}"
+CARGO_TARGET_DIR=/tmp/x/scratchpad/target perl -e 'alarm shift; exec @ARGV' 580 cargo build --offline 2>&1 | tail -5
+CARGO_TARGET_DIR=/tmp/x/scratchpad/target-ci cargo fmt -- --check && CARGO_TARGET_DIR=/tmp/x/scratchpad/target-ci cargo clippy --all-targets -- -D warnings 2>&1 | tail -3; bash -n scripts/check-up-to-date.sh && echo ok; git diff --stat
+CARGO_TARGET_DIR=/tmp/x/scratchpad/tgt perl -e 'alarm shift; exec @ARGV' 580 cargo build --release --offline 2>&1 | tail -5
+D=/tmp/x/scratchpad; for i in $(seq 1 15); do $D/target/debug/deps/proj7-a80a911034038c99 -q 2>&1 | grep -E "FAILED|failed|panicked" ; $D/target/debug/deps/integration-4e9d682bcaeec3e3 -q 2>&1 | grep -E "FAILED|failed|panicked|test result"; done | sort | uniq -c
+F=/tmp/x/tasks/w22jpcu8w.output; D=/tmp/x/scratchpad/sweep; mkdir -p $D; n=$(jq '.result.triage.issues|length' $F); for i in $(seq 0 $((n-1))); do jq -r ".result.triage.issues[$i].body" $F > $D/body$i.md; jq -r ".result.triage.issues[$i].title" $F > $D/title$i.txt; done; ls $D; cat $D/title*.txt
+HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_FROM_API= brew info --cask --json=v2 raycast 2>&1 | python3 -I -c 'import json,sys; d=json.load(sys.stdin); c=d["casks"][0]; print(json.dumps(c.get("artifacts"), indent=1))' 2>&1 | head -80
+M=/tmp/x/scratchpad/m8.py; for p in "[('case',33)]" "[('brace',37)]" "[('paren',37)]" "[('brace',10),('paren',8),('ps',4),('if',8),('bang',11)]" "[('bang',66)]"; do python3 $M "$p" debug release; done
+O=/tmp/x/scratchpad/stress; for c in 1 2 3; do rg -n 'FAILED|^    [a-z_:]+$' $O/c${c}_declog.log; done; sed -n '/^failures:/,/^test result/p' $O/c1_declog.log | head -60
+P=/tmp/x/examples/probe; $P "X=\$(evil); { X='rm -rf /'; }; X=ls true; \$X" 2>&1 | head -4; echo ==; $P "X='rm -rf /'; X=\$(evil); X=ls; \$X" 2>&1 | head -4; echo ==; $P "X=ls; { X=ls; }; \$X" 2>&1|head -3; echo ==; $P "{ X='rm -rf /'; } | cat; \$X" 2>&1|head -3; echo ==; $P "X=\$(evil); { X='rm -rf /'; } | cat; X=ls true; \$X" 2>&1|head -3;  echo ==; $P "{ X='rm -rf /'; }; \$X" 2>&1|head -3
+P=/tmp/x/scratchpad/probe.sh; for n in 1000 3000 3700 3800 6000 20000; do echo "a[ $n: $(bash $P 'a[' $n)"; done; for n in 3000 20000; do echo "bare [\` \`: $n $(bash $P '[`]`' $n)"; echo "bare [: $n $(bash $P '[' $n)"; done
+P=/tmp/x/scratchpad/probe586 && cp /Users/me/engineer/shguard/.claude/worktrees/agent-af5f2e0290ae20408/Cargo.lock "$P/Cargo.lock" && cd "$P" && export CARGO_TARGET_DIR=/tmp/x/scratchpad/target-review586 && cargo run -q --offline 2>&1 | tail -40
+P=/tmp/x/scratchpad/scan2.py && sed -i '' 's/if c==.\\\\.: cur+=s\[i+1\]; i+=1/if c=="\\\\" and i+1<len(s): cur+=s[i+1]; i+=1/' $P && sed -n 8p $P && python3 $P
+PYTHONDONTWRITEBYTECODE=1 python3 -c "import ast,sys; [ast.parse(open(p).read()) for p in sys.argv[1:]]; print('ok')" scripts/analyze_models.py scripts/analyze_subagents.py; PYTHONDONTWRITEBYTECODE=1 python3 scripts/analyze_models.py 2>&1 | sed -n 1,6p
+S=/tmp/x/release/shguard; for c in 'RM -rf /' 'rm -rf /' 'Rm -rf ~' 'DD if=/dev/zero of=/dev/disk0' 'GIT push --force origin main' 'GIT reset --hard' 'SUDO ls' 'Find / -delete' 'MKFS.ext4 /dev/sda' 'CHMOD -R 777 /'; do printf '%-40s ' "$c"; "$S" check "$c" | head -1; done
+S=/tmp/x/scratchpad && mkdir -p $S && rm -rf $S/main-wt && git worktree add -f $S/main-wt main >/dev/null 2>&1 && cd $S/main-wt && CARGO_TARGET_DIR=/tmp/x/proj7-tgt-main cargo build 2>&1 | tail -1 && ls -la /tmp/x/proj7 /tmp/x/proj7
+S=/tmp/x/scratchpad && mkdir -p $S/main-src && git archive origin/main | tar -x -C $S/main-src && ls $S/main-src && cp Cargo.lock $S/main-src/Cargo.lock 2>/dev/null; git diff --stat origin/main HEAD -- Cargo.lock Cargo.toml
+S=/tmp/x/scratchpad/70; mkdir -p $S/claude-code/hooks; cp /Users/me/dotfiles/claude-code/hooks/block-config-edit.sh $S/claude-code/hooks/block-config-edit.sh; ls -l $S/claude-code/hooks
+S=/tmp/x/scratchpad/70; { sed '$d' $S/PR_BODY.md; printf '\nNote: this branch also carries an unrelated `nix-darwin/flake.lock` bump (herdr input) that was pending in the working tree when the guard change was committed by hand.\n\n'; tail -n 1 $S/PR_BODY.md; } > $S/PR_BODY2.md; tail -n 5 $S/PR_BODY2.md; rg -n 'Closes #70' $S/PR_BODY2.md
+S=/tmp/x/scratchpad/mock3cal; mkdir -p $S/id $S/nn $S/ref; cp main.go $S/id/; cp main.go $S/nn/; cp main.go $S/ref/; cp ../../../../../../tmp/x/scratchpad/mock3ref/ref.go $S/ref/ 2>/dev/null; ls $S/*
+S=/tmp/x/scratchpad; N=$(getconf _NPROCESSORS_ONLN); echo ncpu=$N; for j in $(seq 1 $((N*2))); do (perl -e 'my $e=time+420; 1 while time<$e' &) ; done; for i in 1 2 3; do CARGO_TARGET_DIR=$S/tgt cargo test --no-fail-fast > $S/load$i.log 2>&1; echo "load run $i exit $?"; rg -n 'test result: FAILED|^    [a-z_:]+$|panicked at' $S/load$i.log | head -20; done
+S=/tmp/x/scratchpad; N=$(getconf _NPROCESSORS_ONLN); echo ncpu=$N; for j in $(seq 1 $((N*2))); do (timeout 400 yes > /dev/null &) ; done; for i in 1 2 3; do CARGO_TARGET_DIR=$S/tgt cargo test --no-fail-fast > $S/load$i.log 2>&1; echo "load run $i exit $?"; rg -n 'test result: FAILED|^    [a-z_:]+$|panicked at' $S/load$i.log | head -20; done; pkill -f '^yes$'; true
+S=/tmp/x/scratchpad; for b in $S/tgt/debug/deps/shguard-*; do [ -x $b ] && [ -f $b ] && echo "$b $($b --list 2>/dev/null | wc -l)"; done; ls $S/tgt/debug/deps | rg -v '\.d$|\.rlib|\.rmeta|\.o$|dSYM|^lib'| rg -- '-[0-9a-f]{16}$' | head -40
+S=/tmp/x/scratchpad; mkdir -p "$S/pr538" && rsync -a --exclude .git --exclude target /Users/me/engineer/shguard/ "$S/pr538/" && cd "$S/pr538" && gh pr diff 538 > "$S/pr538.diff"; patch -p1 < "$S/pr538.diff" && echo PATCHED
+S=/tmp/x/scratchpad; mkdir -p "$S/pr540" && git -C /Users/me/engineer/shguard archive main | tar -x -C "$S/pr540" && gh pr diff 540 > "$S/pr540.diff" && git -C "$S/pr540" apply "$S/pr540.diff" && echo APPLIED && rg -c "current_rss_bytes" "$S/pr540/src/bin/shguard.rs" || echo "no remaining refs"
+S=/tmp/x/scratchpad; mkdir -p $S/dc && cd /Users/me/engineer/shguard && git archive HEAD | tar -x -C $S/dc && cd $S/dc && ls && which cargo && cargo --version
+S=/tmp/x/scratchpad; mkdir -p $S/modcopy && cp -R /Users/me/dotfiles/claude-code/mod/. $S/modcopy/ && ls -a $S/modcopy; ls -la $S/modcopy/.claude-plugin | head
+S=/tmp/x/scratchpad; mkdir -p $S; printf '%s\n' '/^(pub(\(crate\))? )?fn [a-z_0-9]+/ { if (name) print NR-start, name, FILENAME":"start; name=$0; start=NR }' '/^mod tests/ { if (name) print NR-start, name, FILENAME":"start; name=""; nextfile }' > $S/fnlen.awk; for f in src/gate.rs src/rules.rs src/parser.rs src/normalize.rs src/config.rs; do awk -E $S/fnlen.awk $f; done | sort -rn | head -30
+S=/tmp/x/scratchpad; python3 -I $S/mk_heredoc.py > $S/hd.json; shguard < $S/hd.json; echo "exit=$?"
+S=/tmp/x/scratchpad; rg -n "ask_outcome|^\[\[|^id = |^command = |required_tokens|required_flags|except_targets|^targets|normalized|unresolved_var|^\[" $S/c4.toml | head -400
+S=/tmp/x/scratchpad; sed -n 820,960p $S/c4.toml
+S=/tmp/x/scratchpad; wc -l $S/denies.jsonl; head -c 1500 $S/denies.jsonl; echo; head -c 600 $S/issues.json; ls $S
+awk '/^## \[0.7.0\]/{exit} /^##/{print NR": "$0}' CHANGELOG.md; git show 76cd71a --format=%B -s | head -20; sed -n 1,60p flake.nix | rg -n "buildRustPackage|doCheck|check"
+awk 'NR==1240,NR==1260' src/rules.rs | head -25; echo ---; sed -n '1230,1260p' src/rules.rs
+awk 'NR>=2850 && NR<=3320 && /effective/' src/gate.rs | head -40; echo ----; rg -n 'sinks|sources' README.md | head -20
+awk 'length>80{print FNR": "$0}' src/bin/shguard.rs | grep '//' 
+bash -c 'X=a; readonly X; X=b; echo "readonly: $X"; Y=a; { Y=b; } </nonexistent; echo "group-redir: $Y"; Z=a; Z=b </nonexistent; echo "simple-redir: $Z"; echo "$BASH_VERSION"' 2>&1
+bash -c 'echo $BASH_VERSION'
+bash -c 'set -euo pipefail; while read -r a b c d; do echo "a=[$a] b=[$b] c=[$c] d=[$d] c-set=${c+yes}"; done <<< "onlyone"; echo "exit=$?"'; echo ---; bash -c 'set -euo pipefail; while read -r a b c d; do [[ "$c" == refs/heads/* ]] || echo skip; done <<< "onlyone"; echo "exit=$?"'; bash --version | head -1
+bash /tmp/x/scratchpad/alone.sh all 20
+bash /tmp/x/scratchpad/alone.sh alone 20
+bash /tmp/x/scratchpad/bis.sh
+bash /tmp/x/scratchpad/run.sh /tmp/x/scratchpad/cases.txt
+bash /tmp/x/scratchpad/stress.sh /tmp/x/scratchpad/target/debug/deps/shguard-f91e6c56c9c4c00b 4 5 lib
+bash /tmp/x/scratchpad/stress.sh 1 3; echo done
+bash /tmp/x/scratchpad/t1.sh /tmp/x/scratchpad/t1.toml; echo ===CURRENT; bash /tmp/x/scratchpad/t1.sh /Users/me/dotfiles/claude-code/shguard/config.toml
+cargo build -q 2>&1 | tail -3; B=$(cargo metadata --format-version 1 --no-deps 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin)["target_directory"])')/debug/proj7; echo $B; ls -la $B
+cargo test 2>&1 > /tmp/full_test_output.txt; grep -E "^test result|FAILED|error\[" /tmp/full_test_output.txt
+cargo test 2>&1 | tail -40; echo "EXIT=${PIPESTATUS[0]}"
+cat claude-code/mod/tsconfig.json && bash tests/shguard-parity-check.sh 2>&1 | tail -3
+cd "$TMPDIR"; echo "-- -xv --"; /usr/bin/perl -xv /dev/null 2>&1 | head -1; echo "-- -iv --"; /usr/bin/perl -iv /dev/null 2>&1 | head -1; echo "-- -dv --"; /usr/bin/perl -dv /dev/null 2>&1 | head -1
+cd "$TMPDIR"\nfor f in Cv dv Dv Vv xv iv; do echo "-- perl -$f /dev/null --"; /usr/bin/perl -$f /dev/null 2>&1 | head -1; done\necho "== perl -v alone (baseline, prints version) =="; /usr/bin/perl -v 2>&1 | head -1
+cd $TMPDIR && bzip2 -k -f lz4probe.txt && bzip2 --uncompress -c lz4probe.txt.bz2; echo "bzip2 --uncompress exit=$?"; bzip2 --decompress -c lz4probe.txt.bz2; echo "bzip2 --decompress exit=$?"; rm -f lz4probe.txt lz4probe.txt.lz4 lz4probe.txt.bz2
+cd /Users/me/dotfiles && git rm -q claude-code/agents/maintenance-implementer.md && rg -n "maintenance-implementer|implementer" claude-code CLAUDE.md; echo "rc=$?"
+cd /Users/me/dotfiles/claude-code/mod/.claude-plugin/types/claude-code; F=index.d.ts; rg -n "clock" $F | head -50; sed -n 795,830p $F
+cd /Users/me/dotfiles/claude-code/mod/hooks && cat > blocked-band.tsx <<'EOF'\nimport { read } from 'claude-code'\nimport { atom } from 'claude-code'\nEOF\ngit checkout blocked-band.tsx
+cd /Users/me/dotfiles/claude-code/mod/hooks && ls; cat hooks.json register.tsx; for f in $(ls | rg -v test); do echo "=== $f"; done; cat rule-guards.ts review-state.ts blocked-band.tsx; ls | rg -v 'test|register|blocked|review|rule|hooks.json' | xargs cat
+cd /Users/me/dotfiles/claude-code/mod/hooks && python3 - <<'EOF'\nEOF\necho ok
+cd /Users/me/dotfiles/claude-code/rules && for f in surgical-changes security comments code-review prompt-style go rust; do echo "=== $f"; cat $f.md; done
+cd /Users/me/engineer/shguard/.claude/worktrees/agent-a2f60d73843fa38d5 && B=/tmp/x/scratchpad/target-review588/debug/deps/shguard-903cdf71a8a445c7; $B watchdog::tests:: rules::tests::match_token_block_outranks gate::tests::home_env_redirect_floor gate::tests::named_user_home_redirect_floor gate::tests::repeated_overflowing_tilde 2>&1 | tail -25
+cd /Users/me/engineer/shguard/.claude/worktrees/agent-a7d0dd9ff60c201d0 && export CARGO_TARGET_DIR=/tmp/x/scratchpad/target-review589 && cargo build -q 2>&1 | tail -3; rg -n "SHGUARD_CONFIG|fn check" src/bin/shguard.rs | head -5; $CARGO_TARGET_DIR/debug/shguard check --help 2>&1 | head -20
+cd /Users/me/engineer/shguard/.claude/worktrees/agent-ab32685c602cca7ab && ls /opt/homebrew/bin/bash /usr/local/bin/bash 2>&1; /opt/homebrew/bin/bash --version 2>/dev/null | head -1; which zsh mksh; grep -n "fn convert_brace_segment\b\|fn convert_brace_segment(" -A40 src/parser.rs | head -80
+cd /Users/me/engineer/shguard/.claude/worktrees/agent-afa421d3bd8f7eb14 && B=/tmp/x/scratchpad/target-review591/debug/shguard; $B check "sed -n 'w out' f" ; echo "---"; $B check "sed -n 'w out' f" --json; echo; which gsed sed; sed --version 2>&1 | head -1; ls /opt/homebrew/bin/gsed /opt/homebrew/opt/gnu-sed/libexec/gnubin/sed 2>&1
+cd /Users/me/engineer/shguard; for n in 638 653 656 632; do echo "=== $n"; gh issue view $n --repo tsukasaI/shguard --json title,body --jq '.title+"\n"+.body' | head -c 2200; done
+cd /Users/me/engineer/shguard; grep -n "^\(pub \)\?\(pub(crate) \)\?\(fn\|struct\|enum\|const\|static\|type\|impl\|trait\)" src/gate.rs | awk -F: '$1<9000' | cut -c1-140
+cd /Users/me/engineer/shguard; grep -n "match_command\|match_ask\|fn evaluate_simple_command_core" src/gate.rs | awk -F: '$1>3000 && $1<3500'; sed -n 5360,5372p src/gate.rs; grep -n "gh_issue_body_file\|body-file" tests/user_config.rs | head -3; cat lefthook.yaml | head -60; ls -l scripts; ls docs
+cd /Users/me/engineer/shguard; grep -nE "^(pub )?(pub\(crate\) )?(fn|struct|enum|const|static|type|impl|trait|mod) " src/gate.rs | grep -vE "^(1[1-9]|20)[0-9]{3}:" | awk -F: '{print $1": "substr($0,index($0,$2),110)}' | head -400
+cd /Users/me/engineer/shguard; sed -n 138,150p CHANGELOG.md; grep -n "^## \[" CHANGELOG.md | head -4; sed -n 5380,5394p src/gate.rs; sed -n 8345,8353p src/gate.rs; grep -n "match_command(&argv)" src/gate.rs | sed -n 1,10p; awk 'length>100{print FILENAME":"FNR": "length}' src/rules.rs | awk -F: '$2>3340 && $2<3380'; grep -n "pub(crate) struct PipelineRule" -B12 src/rules.rs | head -30
+cd /private/tmp && printf '%s\n' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 | xargs -P 16 -I{} /tmp/x/scratchpad/tgt-probe/debug/probe 2>&1 | rg "n=100000" 
+cd /tmp/x/ && export DEVELOPER_DIR=/Library/Developer/CommandLineTools SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk CARGO_TARGET_DIR=/tmp/x/ && cargo fmt --check 2>&1 | tail -5; echo "fmt_exit=${PIPESTATUS[0]}"; cargo clippy --offline --all-targets -- -D warnings 2>&1 | tail -5; echo "clippy_exit=${PIPESTATUS[0]}"
+cd /tmp/x/ && for bin in proj7-tgt-main proj7-tgt; do for inp in '\xEF\xBB\xBF' '\xEF\xBB\xBF\n' '\xEF\xBB\xBF\n\n' '\xEF\xBB\xBF \n' '\xEF\xBB\xBF\r\n\r\nfoo\r\n' '\xEF\xBB\xBF\r\n'; do printf '%s %-28s ' "$bin" "$inp"; printf "$inp" | ./$bin/debug/proj7 --stdin 2>&1 | head -1 | od -An -c | tr -s ' \n' ' '; echo; done; done
+cd /tmp/x/ && for r in 1690,1720 2818,2840 2960,2975 3310,3325 5190,5210 6300,6320 7560,7575 7955,7970 8490,8510 8718,8735 9420,9440 9805,9860; do echo "----- gate.rs $r"; sed -n "${r}p" src/gate.rs; done
+cd /tmp/x/ && git checkout -- src/parser.rs && git merge --no-commit --no-ff origin/main 2>&1 | tail -5; git status --short | head
+cd /tmp/x/scratchpad && cat demote_fns.txt && rg -r 's/pub fn ${0}(/pub(crate) fn ${0}(/' '.+' demote_fns.txt > demote.sed && head -2 demote.sed && sed -i '' -f demote.sed dc3/src/*.rs && rg -c 'pub\(crate\) fn' dc3/src/*.rs | head -3; cd dc3 && CARGO_TARGET_DIR=/tmp/x/scratchpad/tgt3 cargo check --offline --lib --bins --examples --message-format short 2>&1 | rg 'warning|error|Finished'
+cd /tmp/x/scratchpad && comm -23 pub_items.txt ext_ids.txt; echo ---; cd dc && git -C . status >/dev/null 2>&1; rm -rf src && tar -xf ../head.tar -C . src && CARGO_TARGET_DIR=/tmp/x/scratchpad/tgt cargo check --offline --lib --bins --examples --message-format short 2>&1 | rg 'warning|error'
+cd /tmp/x/scratchpad && for k in 0 8 16 24 32; do bash run.sh pr debug check grammar_composed 1 $k; bash run.sh pr debug hook grammar_composed 1 $k; done
+cd /tmp/x/scratchpad && for m in a b c d e f i; do echo "=== $m"; python3 -I /tmp/x/scratchpad/triage_grep.py $m; done
+cd /tmp/x/scratchpad && for m in j g h k m; do echo "=== $m"; python3 -I /tmp/x/scratchpad/triage_grep.py $m; done
+cd /tmp/x/scratchpad && for n in 100 122 150; do bash run.sh lifted debug check procsub_chain $n; done; for n in 90 99 110; do bash run.sh lifted debug check case_chain $n; done; for n in 150 151 160; do bash run.sh lifted debug check cmdsubst_chain $n; done; for n in 200 209 220; do bash run.sh lifted debug check bang_chain $n; done
+cd /tmp/x/scratchpad && for n in 60 90 120 150 200; do bash run.sh lifted debug check subshell_chain $n; done; for n in 60 90 120 150 200; do bash run.sh lifted debug check brace_chain $n; done
+cd /tmp/x/scratchpad && for op in '${a[' '${a:' '${a#' '${a/' '${a-' '${' '$((' '${a[$(('; do echo "== $op"; python3 to.py 60 python3 scale.py x "$op" '}' 'echo ' '' 3,4,5; done 2>&1 | cut -c1-200
+cd /tmp/x/scratchpad && for s in 11 12 13 14 15 16; do python3 -W ignore fz.py $s 150 > out_$s.log 2>&1 & done; wait; tail -n 3 out_*.log
+cd /tmp/x/scratchpad && mkdir -p cfg/shguard && cp /Users/me/dotfiles/claude-code/shguard/config.toml cfg/shguard/config.toml && XDG_CONFIG_HOME=$PWD/cfg shguard check 'grep foo bar' ; echo; SHGUARD_CONFIG=$PWD/cfg/shguard/config.toml shguard check 'grep foo bar'
+cd /tmp/x/scratchpad && mkdir -p gl/.config && print -l gl/@(.config) 2>&1; print -l gl/(.config) 2>&1; setopt kshglob; print -l gl/@(.config) 2>&1; print -l gl/+(.config) 2>&1
+cd /tmp/x/scratchpad && tr '\n' '\0' < cases.txt | xargs -0 -I{} /tmp/x/scratchpad/target-base598/debug/shguard check --json --permission-mode default {} > base.out 2>&1; tr '\n' '\0' < cases.txt | xargs -0 -I{} /tmp/x/scratchpad/target-review598/debug/shguard check --json --permission-mode default {} > pr.out 2>&1; wc -l base.out pr.out; head -3 base.out
+cd /tmp/x/scratchpad/dummyrepo && git reset -q && mkdir -p .git/hooks && printf '#!/bin/sh\nenv | grep ^GIT_ >&2\nexit 1\n' > .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit && echo x > f && git add f && git -c user.name=a -c user.email=a@b commit -m c 2>&1 | head
+cd /tmp/x/scratchpad/fz && python3 -c "\nimport json\nfor l in open('found_1.jsonl'):\n    d=json.loads(l); print(repr(d['cmd'][:300])); print(d['res']); print('---')\n" | cut -c1-1500
+cd /tmp/x/scratchpad/pr540 && CARGO_TARGET_DIR=/tmp/x/scratchpad/pr540-target cargo doc --offline --no-deps --bin shguard 2>&1 | rg -n -B2 -A8 "src/bin/shguard.rs" | head -80; echo "---- exit: ${PIPESTATUS[0]}"
+cd /tmp/x/scratchpad/pr542 && rg -n "^\s*(pub(\(super\))? )?mod \w+|^\s*use super|^\s*use crate" src/gate.rs | awk -F: '$1 > 10160 && $1 < 13800' 
+cd /tmp/x/scratchpad/sedprobe; /usr/bin/sed 'y/[/x/' in.txt; echo rc=$?; /usr/bin/sed 'y/[/]/xyz/' in.txt; echo rc=$?; /usr/bin/sed 'y/[/]/#xy/' in.txt; echo rc=$?; /usr/bin/sed 's/[/]/X/' in.txt; echo rc=$?
+cd /tmp/x/scratchpad; for p in 'python3-c' 'file-rm' 'code-node-e' 'code-bash' 'secret-read' 'awk' 'tool-policy-grep'; do echo "##### $p"; python3 -I a5.py "$p" 6 engineer-shguard; done 2>&1 | cut -c1-330
+cd /tmp/x/scratchpad; python3 - 2>/dev/null <<'EOF' || true\nEOF\nsed -n 1p a7.py >/dev/null; echo
+cd /tmp/x/scratchpad; rg -N '"session": "1aa854e1[^"]*"' denies.jsonl | rg 'folded' | head -2 | python3 -I -c 'import sys,json\nfor l in sys.stdin:\n    r=json.loads(l);print(r["ts"],r["command"][:700]);print(r["reason"][:600])'
+cd ~/.claude && rg -N -m4 '^(---|name:|description:)' agents/*.md | rg -c 'name:' ; rg -N -c '^description:' agents/*.md | rg -v ':1$'; rg -N -m1 '^name:' agents/*.md | sed 's/.*name: *//' | sort | uniq -d; for d in skills/*/ ../dotfiles/.claude/skills/*/; do echo "$d: $(rg -N -m1 -c '^name:' "$d/SKILL.md" 2>&1 | head -1) / $(rg -N -m1 -c '^description:' "$d/SKILL.md" 2>&1 | head -1)"; done
+cd ~/engineer && ls; for d in */ */*/; do [ -d "$d.git" ] && echo "== $d: $(ls -d $d/CLAUDE.md $d/.claude $d/AGENTS.md 2>/dev/null | xargs -n1 basename 2>/dev/null | tr '\n' ' ')"; done 2>/dev/null
+chmod +x .githooks/_lib.sh .githooks/commit-msg .githooks/pre-commit .githooks/pre-push && ls -l .githooks | head; node --check scripts/check-static.mjs && node --check scripts/check-commit-msg.mjs && echo syntax-ok
+chmod +x scripts/check-up-to-date.sh && git rm -q .github/workflows/ci.yaml && sed -n 1,3p deny.toml && sed -n 1,2p CONTRIBUTING.md
+cp /Users/me/dotfiles/claude-code/shguard/config.toml /tmp/x/scratchpad/config.toml && wc -l /tmp/x/scratchpad/config.toml
+cp /tmp/x/scratchpad/68/claude-code/lib/redact.test.ts $TMPDIR/68check/claude-code/lib/ && cd $TMPDIR/68check/claude-code/lib && bun test redact.test.ts 2>&1 | tail -6\nsed 's/^const B = .*/const B = String.raw`\\b`;/' redact.ts > $TMPDIR/68check/old.ts && sed 's#"./redact"#"../../old"#' redact.test.ts > $TMPDIR/68check/neg.test.ts && cd $TMPDIR/68check && bun test neg.test.ts 2>&1 | tail -4
+cp claude-code/shguard/config.toml /tmp/x/scratchpad/sg/config.toml && rg -n 'except_targets = \[\{ prefix = "/tmp/x/" \}\]' /tmp/x/scratchpad/sg/config.toml
+curl -s -A 'proj7-release-check' https://crates.io/api/v1/crates/proj7 | head -c 400
+curl -s -m 10 https://api.github.com/repos/tsukasaI/proj6/issues/38 | head -c 3000
+echo "== bash"; /bin/bash /tmp/x/scratchpad/probe.sh; echo "== zsh"; /bin/zsh /tmp/x/scratchpad/probe.sh
+echo "TMPDIR=$TMPDIR"; ls -la "$TMPDIR/empty.toml"; cat "$TMPDIR/empty.toml" | head
+echo '{"tool_name":"Bash","tool_input":{"command":"echo '"'"'x'"'"'"},"hook_event_name":"PreToolUse"}' >/dev/null; python3 - <<'EOF' 2>&1 | head\nEOF\necho skip
+export CARGO_TARGET_DIR=$TMPDIR/proj7-tgt; cargo build -q 2>/dev/null; for s in '\xEF\xBB\xBF' '\xEF\xBB\xBF\n' '\xEF\xBB\xBF\n\n' '\xEF\xBB\xBF\r\n'; do printf "$s" | $TMPDIR/proj7-tgt/debug/proj7 --stdin | od -c | head -1; done; printf '\xEF\xBB\xBF```\n' | $TMPDIR/proj7-tgt/debug/proj7 --stdin --fix-code-blocks | od -c | head -1
+export CARGO_TARGET_DIR=$TMPDIR/shg-target && cargo build -q 2>&1 | tail -5; ls $CARGO_TARGET_DIR/debug/shguard && $CARGO_TARGET_DIR/debug/shguard --help 2>&1 | head -30
+export CARGO_TARGET_DIR=$TMPDIR/shguard-target DEVELOPER_DIR=/Library/Developer/CommandLineTools && touch src/watchdog.rs && cargo clippy --all-targets -- -D warnings 2>&1 | rg -n -B2 -A12 '^warning|^error' | head -80; echo "exit=${PIPESTATUS[0]}"
+export CARGO_TARGET_DIR=$TMPDIR/shguard-target DEVELOPER_DIR=/Library/Developer/CommandLineTools && touch src/watchdog.rs && cargo clippy --all-targets -- -D warnings > $TMPDIR/clippy.log 2>&1; echo "exit=$?"; rg -n -A12 '^(warning|error)' $TMPDIR/clippy.log | head -80
+export CARGO_TARGET_DIR=/tmp/x/scratchpad/target-review609 && cargo build 2>&1 | tail -3 && ls $CARGO_TARGET_DIR/debug/shguard && $CARGO_TARGET_DIR/debug/shguard --help 2>&1 | head -30
+export CARGO_TARGET_DIR=/tmp/x/scratchpad/tgt; for j in $(seq 1 $(sysctl -n hw.ncpu)); do (yes > /dev/null &) ; done; fails=0; for i in $(seq 1 25); do out=$(cargo test -q -- --test-threads=32 2>&1); if echo "$out" | rg -q 'FAILED|panicked'; then fails=$((fails+1)); echo "=== run $i"; echo "$out" | rg -A15 'failures:' | head -40; fi; done; pkill yes; echo "fails=$fails"
+fd -e ts -e tsx -e py -e sh . | xargs wc -l | sort -n
+for b in python3 python node nodejs perl ruby php lua pypy3; do printf '%s: ' "$b"; command -v "$b" || echo "(absent)"; done
+for f in $(git ls-files 'claude-code/*.ts' 'claude-code/*.tsx' | rg -v test); do rg -o --no-filename --pcre2 '^\s*(?:export\s+)?(?:async\s+)?function\s+\K\w+|^\s*(?:export\s+)?(?:const|let)\s+\K[A-Za-z_]\w*' "$f" | sort -u | while read -r n; do c=$(rg -c "\b$n\b" "$f"); [ "$c" -le 1 ] && echo "$f: $n ($c)"; done; done
+for f in $(git ls-files src dash/worker dash/src scripts | rg '\.(ts|mjs|js|svelte)$' | rg -v 'schema.d.ts'); do rg -n '^\s*(?:async )?(?:function|const|let|type|interface) (\w+)' -o -r '$1' --no-heading "$f" | while IFS=: read l name; do c=$(rg -wc "$name" "$f"); if [ "$c" = "1" ]; then echo "$f:$l $name"; fi; done; done
+for f in adapter config normalize verdict watchdog; do echo "== $f"; rg -n '^\s*pub (const |static |fn |struct |enum |trait |type |mod )|^\s*pub fn|^\s*pub\(crate\) fn|^\s*pub const fn' src/$f.rs | rg -v 'pub\(crate\)|pub\(super\)'; done; echo == lib; rg -n '^pub ' src/lib.rs
+for f in claude-code/mod/hooks/*.test.ts*; do echo "=== $f"; cat "$f"; done
+for f in cloudflare.config.ts wrangler.config.ts dash/cloudflare.config.ts dash/wrangler.config.ts; do echo "=== $f"; cat $f; done; git diff pnpm-workspace.yaml package.json dash/package.json
+for f in db/migrations/*.sql; do echo "=== $f"; cat "$f"; done; echo "=== db/schema.sql"; cat db/schema.sql
+for f in first_word resolved_strings resolve peak_rss_bytes current_rss_bytes fail_closed embedded decision_log_path unsupported_construct simple ascent_descent_plausible ids_with_mixed_except_targets parse_ok; do rg -n "fn $f\b" src; done
+for f in gate:10161 rules:7305 normalize:1509 parser:1700 ast:99999 verdict:383 watchdog:417; do n=${f%%:*}; l=${f##*:}; echo "== $n"; head -$l src/$n.rs | rg -n 'crate::(config|adapter|decision_log|watchdog|HookContext|PermissionMode|DecisionLogSink|analyze)|serde_json|brush_parser' | rg -v '^\d+:\s*//'; done
+for f in package.json vite.config.ts vitest.setup.ts tsconfig.json .github/workflows/run_vitest.yaml index.html src/main.tsx src/App.tsx src/api/*.ts src/components/*.tsx src/features/Recommend.ts src/mock/*.ts src/models/*.ts src/pages/*.tsx src/store/atom.ts test/sample.test.tsx; do echo "=== $f"; cat "$f"; done
+for f in rules:8124 gate:509 normalize:1635 parser:2039 config:1652 sed_script:487 verdict:381 adapter:396; do n=${f%%:*}; l=${f##*:}; echo "== $n"; head -n $l src/$n.rs | rg -n '^ {24,}\S' | awk -F: '{print $1}' | awk 'NR==1{s=$1;p=$1;next} $1==p+1||$1<=p+3{p=$1;next} {if(p-s>4)print s"-"p; s=$1;p=$1} END{if(p-s>4)print s"-"p}' | head -15; done
+for f in src/*.rs src/bin/*.rs; do awk -v F=$f 'BEGIN{t=0} /^#\[cfg\(test\)\]/{t=1} !t && match($0,/^ +/) && RLENGTH>=32 && $0 !~ /^ *\/\// {c[NR]=1; n++} END{print n, F}' $f; done | sort -rn
+for f in src/gate.rs src/config.rs src/rules.rs src/lib.rs src/adapter.rs; do echo "== $f"; git show 9f89d75e:$f | rg -n 'ask\.is_none\(\)|let mut ask = None|Decision::Block => return Some' ; done; echo "== main rules.rs"; git show origin/main:src/rules.rs | rg -n 'ask\.is_none\(\)|let mut ask = None'
+for f in src/lib.rs src/output.rs src/colors.rs src/config/*.rs; do n=$(rg -n '#\[cfg\(test\)\]' $f | head -1 | cut -d: -f1); echo "=== $f from $n"; tail -n +$n $f; done
+for i in 121 104 101 123; do echo "== #$i"; gh issue view $i --comments | tail -n 25; done
+for i in 157 170 161 165 159 162 166 171 163 158 173 177 164 160 172 176; do echo "=== #$i"; gh issue view $i --json title,comments --jq '.title, (.comments[] | select(.body|contains("triage:v1")) | .body)'; done
+for k in 2 3 4 5 6 7; do p=$(python3 -c "print('\${a['*$k + '}'*$k)" 2>/dev/null); echo "k=$k"; done 2>&1 | head -1
+for l in 10817 12590 14058; do awk -v L=$l 'NR<=L && /^    fn [a-z_]+\(/ {name=NR": "$0} NR==L {print name; exit}' src/rules.rs; done
+for l in 120 154 262 1046 1699 3829 4632 4690 4799; do sed -n "${l},$((l+30))p" src/rules.rs | awk 'NR==1{print "== '"$l"' " $0} /^}/{exit} NR>1 && /^    [A-Z][A-Za-z]*[ ({,]|^    [A-Z][A-Za-z]*$/{print}'; done
+for l in 1690:1705 3320:3335 5200:5215 6205:6220 6315:6330 7570:7590 7965:8000 8485:8500 8710:8725 9420:9432 9805:9825 5925:5935; do echo "--- $l"; sed -n "${l%:*},${l#*:}p" src/gate.rs; done; sed -n 3035,3085p src/rules.rs; sed -n 395,415p src/rules.rs; sed -n 545,555p src/rules.rs; sed -n 760,775p src/rules.rs; sed -n 5005,5016p src/rules.rs
+for l in 2125 3018 6274 6340; do sed -n "${l},$((l+22))p" src/rules.rs; echo ----; done
+for n in 100 101 102 103; do echo "=== #$n"; gh issue view $n --json body -q .body; done
+for n in 131 129 128 118 116 115 114 110 108 106 104 103; do echo "=========== #$n"; gh issue view $n --comments | head -120; done
+for n in 537 538 539 540 541 542 543 544 545 546 547 548; do gh pr view $n --json number,state; done
+for n in 587 588 589 590; do gh pr view $n --json number,headRefName,commits,body --jq '"\(.number) \(.headRefName) commits=\(.commits|length) closes=\([.body|scan("Closes #[0-9]+")]|join(","))"'; done
+for n in 604 606 607 610 611 612; do echo "=== #$n"; gh issue view $n 2>&1 | head -120; done
+for n in 614 615 617 618 619; do echo "=== #$n"; gh issue view $n 2>&1 | head -120; done
+for n in 79 83 82 81 76 80; do echo "=== #$n"; gh issue view $n --json title,body,comments --jq '.title, .body, (.comments[] | "--- comment:\n" + .body)'; done
+for r in 1360,1372 1408,1420 3240,3256 9436,9450; do sed -n "${r}p" src/gate.rs; echo ----; done; rg -n 'Decision::Block => Verdict::block\(' src/gate.rs | rg -v 'gate.rs:(1[1-9]\d{3}|10[89]\d\d|107[7-9]\d|2\d{4})'
+for r in 26,32 142,148 557,563 826,833 1275,1282; do sed -n ${r}p src/bin/shguard.rs; echo ----; done
+for s in 77da99a 4c8891d 63d415c 778289c e1880bb 18fd2ab c5bae2d e86a282 ecfd131; do echo "=========== $s"; git show $s --stat --format=%B | head -60; done
+for s in tests/init_command.rs:30 src/config.rs:2530 tests/decision_log.rs:315 tests/fail_closed_exit_paths.rs:425 tests/ask_outcome.rs:320; do f=${s%:*}; l=${s#*:}; echo "== $f"; sed -n "${l},$((l+30))p" $f; done
+for t in lz4 brotli bzip2 pbzip2; do echo "== $t: $(command -v $t || echo not-installed)"; done; echo; lz4 --help 2>&1 | rg -i "uncompress|decompress"; echo "--- brotli"; brotli --help 2>&1 | rg -i "uncompress|decompress"; echo "--- bzip2"; bzip2 --help 2>&1 | rg -i "uncompress|decompress"
+gh api --help 2>&1 | rg -n -i '@|--input|raw-field|-F, --field' | head -20; echo ---; env | rg -o '^(GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN)=' ; env | rg '^TMPDIR='; echo ---; gh --version $(ls /Users/me/.claude/ide) ; echo "exit=$?"
+gh api repos/nodejs/Release/contents/schedule.json --jq '.content' | base64 -d | node -e 'const j=JSON.parse(require("fs").readFileSync(0));for(const v of ["v19","v20","v22","v24"])console.log(v,j[v]?.lts||"-",j[v]?.end)'
+gh issue comment 132 --body-file /tmp/x/scratchpad/issue-comment.md
+gh issue comment 580 --repo tsukasaI/shguard --body-file /tmp/x/scratchpad/c580.md
+gh issue comment 581 -R tsukasaI/shguard --body-file /tmp/x/scratchpad/comment-581.md
+gh issue create -R tsukasaI/shguard --title "0.8.0: payload-cwd composition makes bare positionals match normalized_prefix targets; deny reason blames a nonexistent cd" --body-file /tmp/x/scratchpad/issues/shguard.md
+gh issue edit 2 --body-file /tmp/x/scratchpad/issue-1.md
+gh issue list --repo tsukasaI/shguard --state all --limit 600 --json number,title,state --jq '.[] | "#\(.number) [\(.state)] \(.title)"' > $TMPDIR/issues.txt; wc -l $TMPDIR/issues.txt; rg -i 'case|\$\[|legacy arith|quoted|stack|flak|STRICT_CONFIG|alias|agent_type|suppressed_by|serde|layer|short.?cluster|dup|unif|MemoryTripped|brace' $TMPDIR/issues.txt
+gh issue list --repo tsukasaI/shguard --state all --limit 700 --search "home absolute OR \"/Users\" OR \"$HOME\" in:title" --json number,title,state --jq '.[] | "#\(.number) [\(.state)] \(.title)"'
+gh pr checks 11
+gh pr comment 541 --body-file "/tmp/x/scratchpad/review-541.md"
+gh pr comment 542 --body-file /tmp/x/scratchpad/review-542.md
+gh pr create --base main --head chore/deps-update --title "chore(deps): migrate to pnpm and upgrade to current majors" --body-file /tmp/x/scratchpad/pr1.md
+gh pr create --base main --head ci/test-and-lint --title "ci: add oxlint, type check and build to a pinned CI workflow" --body-file /tmp/x/scratchpad/pr2.md
+gh pr edit 587 --body-file /tmp/x/scratchpad/pr573.md
+gh secret list; gh secret list --env crates-io 2>&1 | head; gh run list --workflow release.yaml --limit 4 --json headBranch,conclusion; gh release view v0.7.0 --json assets --jq '.assets[].name'
+git add lefthook.yaml && git commit -q --amend --no-edit >/dev/null 2>&1; git show --stat HEAD | tail -4; git status --short
+git branch --show-current; git log --oneline -1 main; W=/Users/me/engineer/shguard/.claude/worktrees/agent-aed90e63c04625cf3; git -C $W status --short | head; git -C $W rebase main 2>&1 | tail -3; git -C $W log --oneline -4
+git branch --show-current; git switch fix/learnings-render-hot-facts && git rebase --onto main 46f07c7 2>&1 | tail -3; git log --oneline -3; git diff --stat main...HEAD
+git branch -D fix/flaky-memory-budget-test 2>&1; git log --oneline -2; rg -n "^## \[" CHANGELOG.md | head -3; rg -n '^name = "shguard"' -A1 Cargo.lock
+git branch -D pr-544-review
+git branch -D worktree-agent-a8c20d5aed7078438 worktree-agent-a8d05f9a85b719e9f worktree-agent-ab32685c602cca7ab worktree-agent-ac2c23e73d187769f worktree-agent-aed90e63c04625cf3
+git checkout -q docs/615-599-followups && git branch -d worktree-agent-a1c4fa2c234a4af1f; git status | head -2; sed -n 6162,6185p src/gate.rs; sed -n 6690,6700p src/gate.rs
+git checkout main && git pull --ff-only origin main 2>&1 | tail -2; git branch -D refactor/g5-run-skip-stdin-gates; git checkout -b test/g6-walker-git-env && git log --oneline -1
+git checkout origin/fix/low-roundup-77 -- claude-code/mod/hooks/blocked-band.test.tsx claude-code/statusline.ts setup.sh
+git diff > /tmp/x/scratchpad/probe.patch && git stash -q && git checkout -q main && git apply /tmp/x/scratchpad/probe.patch && CARGO_TARGET_DIR=/tmp/x/scratchpad/target cargo test --lib tmp_review_tests 2>&1 | rg "^test |test result"; git checkout -q -- src && git checkout -q pr-542 && git stash drop -q; git status --short
+git fetch origin main && git checkout -b test/follow-up-nits origin/main 2>&1 | tail -1; for n in 554 561 565 566 567 570; do echo "=== $n"; gh issue view $n --json title,body,comments; done
+git fetch origin main 2>&1 | tail -1; git status | head -3; for n in 557 528 553 558 564; do echo "=== $n"; gh issue view $n --json title,body,comments; done
+git grep -n "overflowing_tilde_runs" dd092409 -- . ':!src/gate.rs' | cat; echo "---main:"; git grep -n "overflowing_tilde_runs" origin/main -- . ':!tests/guardfall.rs' | cat
+git grep -n 'matches_\(ascent_descent\|named_user_home\|dirstack_tilde\|unknown_cwd\)_floor(' 41903a45 -- src | rg -v '^\S+:src/rules.rs:(26|27)' ; echo --- PRED CONTEXT; for n in 1257 1451 1491 1550; do git show 41903a45:src/rules.rs | sed -n "${n}p"; done; echo --- IMPL; git show 41903a45:src/rules.rs | rg -n '^impl TargetMatcher|^impl CommandRule|^impl RedirectRule|^}$' | sed -n '1,40p'
+git grep -n -i -E '(lz4|brotli|bzip2|pbzip2).{0,40}\barm\b' origin/refactor/merge-decode-stage-arms -- ':!target'
+git log --oneline --diff-filter=D -- tests/hooks-regression.sh | head; for i in $(seq 1 30); do bash tests/rules-paths-sync.sh >/dev/null 2>&1; echo -n "$? "; done; echo; command -v shguard; for i in $(seq 1 30); do bash tests/shguard-parity-check.sh > "$TMPDIR/p$i.txt" 2>&1; echo -n "$? "; done; echo; tail -2 "$TMPDIR/p1.txt"
+git log --oneline | head -3 && for n in 595 596 599 600 601 602; do echo "=== #$n"; gh issue view $n 2>&1 | head -120; done
+git ls-files | grep -v '^coding-guidelines' | xargs wc -l 2>/dev/null | sort -rn | head -45; ls coding-guidelines
+git ls-tree -r --name-only dd092409 | rg -v '^(coding-guidelines|fuzz/corpus)' > /tmp/x/scratchpad/files.txt; while IFS= read -r f; do if git show "dd092409:$f" 2>/dev/null | rg -q "overflowing_tilde_runs"; then echo "$f"; fi; done < /tmp/x/scratchpad/files.txt
+git merge-tree --write-tree origin/main 9f89d75e; echo "exit=$?"; echo ---; git merge-base origin/main 9f89d75e; echo ---; git log --oneline $(git merge-base origin/main 9f89d75e)..origin/main; echo ---; git log --oneline $(git merge-base origin/main 9f89d75e)..9f89d75e
+git rebase FETCH_HEAD && git log --oneline -2
+git rebase origin/main
+git restore --source=HEAD --staged --worktree . && git status --short && git log --oneline -1
+git rm -q .github/workflows/ci.yaml && sed -n 1,3p deny.toml && sed -n 1,2p CONTRIBUTING.md
+git show 5e02a6e -- README.md CLAUDE.md .claude/skills/deploy/SKILL.md; echo ---BUNX; git grep -n -i -E 'bunx|\bbun\b' -- . ':!pnpm-lock.yaml'; echo ---CURRENT-README; sed -n 150,200p README.md
+git show 9f89d75e:src/decision.rs 2>/dev/null | rg -n -A12 'enum Decision' ; rg -n -A12 'enum Decision' <(git show 9f89d75e:src/rules.rs) ; git show 9f89d75e --stat | head; git ls-tree --name-only 9f89d75e src/
+git show origin/fix/bracket-nesting-cap:src/ast.rs | grep -n "MAX_RAW_BRACKET_NESTING_DEPTH"
+git show origin/fix/bracket-nesting-cap:src/parser.rs | grep -n "bracket_depth\|b'\['\|b']'" 
+git status && git branch -a | grep -i redundant && git log --oneline -3 refactor/redundant-flag-equality-check
+git status --short && git diff --stat && git diff src/parser.rs | head -120; bash -c 'x=1; echo "$${x}"' 
+git status | head -3; for i in 551 562 563; do gh issue view $i; done
+git switch -c chore/deps-update && git rm -q yarn.lock && git status -s
+git switch docs/615-599-followups && git rebase main
+git tag -d vtest; git tag -l; git status --short; git config --get remote.origin.url
+git worktree remove /tmp/x/scratchpad/wt && rm -r /tmp/x/scratchpad/d103 && git worktree list && git status --short
+grep -n 'current_rss_bytes_tracks_growth' -r src tests CHANGELOG.md; awk 'length>80{print FILENAME":"FNR": "length}' src/bin/shguard.rs | head; sed -n 195,235p src/watchdog.rs
+grep -n dotfiles-mod CLAUDE.md
+head -4 CHANGELOG.md > ../cl.tmp && cat /tmp/x/scratchpad/sec.md >> ../cl.tmp && tail -n +29 CHANGELOG.md >> ../cl.tmp && cp ../cl.tmp CHANGELOG.md && rm ../cl.tmp && sed -i '' 's/^version = "0.7.1"/version = "0.8.0"/' Cargo.toml && git branch --show-current && rg -n '^version' Cargo.toml; rg -n -B2 -A2 '^## \[0.7.1' CHANGELOG.md
+head -7303 src/rules.rs | rg -n "^\s*(pub(\(crate\))? )?(const )?fn \w+" -o | sed 's/^\s*//' | tr '\n' ' '; echo; for f in normalize parser config verdict adapter ast decision_log watchdog lib bin/shguard; do echo "== $f"; rg -n "^\s*(pub(\(crate\))? )?(const )?fn \w+" -o src/$f.rs | tr '\n' ' '; echo; done
+ls && tokei src 2>/dev/null | tail -5 && fd -e rs . src | xargs wc -l | sort -n | tail -40
+ls && tokei src 2>/dev/null | tail -5; fd -e rs . src | xargs wc -l | sort -n | tail -40
+ls -a && ls .github .github/workflows 2>/dev/null && cat lefthook.yml && for f in .github/workflows/*; do echo "=== $f"; cat "$f"; done; ls .github/*.yml 2>/dev/null; cat .github/dependabot.yml 2>/dev/null
+ls -l .githooks | awk '{print $1, $NF}'; rg -n 'Local git hooks' CLAUDE.md | cut -c1-80
+ls .venv/lib/python*/site-packages 2>/dev/null | rg -i 'pypdf|fitz|pymupdf|pdfminer|pdfplumber'; command -v mutool qpdf python3; python3 -c "import pypdf; print('pypdf ok')" 2>&1 | tail -1; python3 -c "import fitz; print('fitz ok')" 2>&1 | tail -1; ls -d ~/.cache/uv 2>/dev/null
+ls ~/.cargo/registry/src/*/ | rg brush; f=$(fd -t f word.rs ~/.cargo/registry/src --full-path brush-parser-0.4 | head -1); echo $f; rg -n "pub enum ParameterExpr" -A 200 $f | head -300
+mkdir -p "$TMPDIR/globprobe/.ssh" "$TMPDIR/globprobe/.config" && cd "$TMPDIR/globprobe" && for p in '.*' '.?*' '.??*' '.[!.]*' '.[^.]*' '.**' '.*?' '.[!.]**'; do printf '%-9s -> ' "$p"; bash -c "shopt -u dotglob; echo $p"; done; echo '--- with globstar ---'; bash -c 'shopt -s globstar; echo .**'
+mkdir -p /tmp/x/scratchpad/globprobe/.ssh /tmp/x/scratchpad/globprobe/.config && cd /tmp/x/scratchpad/globprobe && bash -c 'shopt -u dotglob; echo ".?*     ->" .?*; echo ".??*    ->" .??*; echo ".[!.]*  ->" .[!.]*; echo ".**     ->" .**; echo ".*?     ->" .*?; echo ".[!.]** ->" .[!.]**; shopt -s globstar; echo "globstar .** ->" .**'
+mkdir -p /tmp/x/scratchpad/sedprobe && cd /tmp/x/scratchpad/sedprobe && printf 'a[/]b\n' > in.txt; for s in 'y/[/]/xyz/' 'y/[/]/xyz/;p' 'y/[/x/' 'y/a/b/;p' 'y/[/]/#xy/' 's/[/]/X/' ; do echo "== $s"; /usr/bin/sed "$s" in.txt; echo "rc=$?"; done 2>&1
+node --check scripts/check-static.mjs && node --check scripts/check-commit-msg.mjs && sh -n .githooks/_lib.sh && sh -n .githooks/commit-msg && sh -n .githooks/pre-commit && sh -n .githooks/pre-push && echo syntax-ok
+node -e 'try{JSON.parse(require("fs").readFileSync(".claude/settings.json","utf8"));console.log("valid")}catch(e){console.log(e.message)}'; git diff HEAD --stat -- .claude/settings.json; git log --oneline -2 -- .claude/settings.json
+perl -e 'alarm 180; exec @ARGV' pnpm test:unit 2>&1 | tail -20
+perl -e 'alarm shift; exec @ARGV' 5 echo ok
+perl -pi -e 's/^(            single_word: (?:true|false),)$/$1\n            literal_tail: None,/' src/normalize.rs && rg -n "literal_tail" src/normalize.rs
+pkill -f "tasks/bwl990f6p" ; cat /tmp/x/tasks/bwl990f6p.output
+printenv CLAUDE_CODE_SESSION_ID; sed -n 45,66p claude-code/settings.json
+rg --files -g '*.test.*' -g '!node_modules' -g '!.pnpm-store' | xargs wc -l
+rg -c 'mupdf|md-to-pdf' bun.lock; rm pnpm-lock.yaml pnpm-workspace.yaml && echo removed
+rg -n "B=rm; \\$B|fn .*bare_var|alias\.x|alias\.co=" src/gate.rs | head -20; rg -n "fn ifs_history" -A3 src/
+rg -n "^    fn [a-z_]+\(.*\) -> " src/rules.rs | sed -n 1,400p | awk -F: '$1>9000' | head -30
+rg -n "^(export )?(async )?function \w+|^(export )?const \w+ = (async )?\(" src dash/src dash/worker scripts | awk -F: '{print $3" @ "$1":"$2}' | sed -E 's/^(export )?(async )?(function|const) //' | sort | head -250
+rg -n "^\s*fn fires\b|fires\(" src/rules.rs | awk -F: '$1>=16400' | head -40; rg -n "^    mod |^mod |^}" src/rules.rs | awk -F: '$1>=12100' | head
+rg -n "enum Resolution|Unresolvable\(|pub(crate)? fn resolution|pub(crate)? fn raw|pub(crate)? fn text" src/normalize.rs | head -12 && rg -n "Unresolvable" src/normalize.rs | head -5 && sed -n "$(rg -n 'enum Resolution' src/normalize.rs | head -1 | cut -d: -f1),+25p" src/normalize.rs
+rg -n "pub(\(crate\))? fn decision|fn is_block" src/verdict.rs src/*.rs | head; rg -n "bare_parameter_name|\"\\$B\"|\\\\\"\\$[A-Z]\\\\\"" src/gate.rs | head -30; sed -n 2760,2800p src/gate.rs
+rg -n "thread::Builder|shguard-eval|fn resolve_first_result" src/bin/shguard.rs | head; awk 'length>78 {print FILENAME": "FNR": "length}' src/bin/shguard.rs | head -40
+rg -n '#\[cfg\(test\)\]' src/verdict.rs src/decision_log.rs src/adapter.rs src/config_loader.rs src/bin/shguard.rs; sed -n "$(rg -n '#\[cfg\(test\)\]' src/verdict.rs | cut -d: -f1),\$p" src/verdict.rs
+rg -n '^\s{24,}(if|match|for|while) ' src --glob '!**/tests*' | awk -F: '{print $1}' | sort | uniq -c; rg -n '^(mod tests|#\[cfg\(test\)\])' src/gate.rs src/rules.rs src/parser.rs src/normalize.rs src/config.rs
+rg -n 'normalized = "~[^"]*[*?\[]' rules/ | awk -F'"' '{print $2}' | sort | uniq -c; rg -n 'normalized(_prefix)? = "~' rules/*.toml | rg -v 'blocklist.toml' | head; ls rules
+rg -n --no-heading -o '\([^\n]*' -g '*.rs' -g '*.toml' -g '*.md' -g '*.json' -g '*.sh' src tests rules 2>/dev/null | awk -F: '{ line=$0; sub(/^[^:]*:[^:]*:/, "", line); n=gsub(/\(/, "(", line); if (n > 24) print $1":"$2": "n" opens" }' | head -40
+rg -o --no-filename "^\s*(pub(\([a-z]+\))? )?(const )?fn (\w+)" -r '$4' src | sort -u > $TMPDIR/allfns.txt; wc -l < $TMPDIR/allfns.txt; while read f; do n=$(rg -w --count-matches "$f" src tests examples | awk -F: '{s+=$2} END{print s}'); if [ "$n" -le 1 ]; then echo "$f $n"; fi; done < $TMPDIR/allfns.txt
+rg -o --no-filename -r '$2' '^\s*pub(\(crate\))? (?:fn|struct|enum|const|static|type) ([A-Za-z_0-9]+)' src | sort -u | while read n; do c=$(rg -w -c "$n" src tests | awk -F: '{s+=$2} END{print s}'); echo "$c $n"; done | sort -n | head -40
+rm -r /tmp/x/.local
+rm -rf .playwright-mcp && git status --short
+rm -rf /tmp/x/ && git worktree add --detach /tmp/x/ FETCH_HEAD >/dev/null 2>&1 && cd /tmp/x/ && git log --oneline -1 && git submodule update --init --quiet 2>&1 | tail -2; DEVELOPER_DIR=/Library/Developer/CommandLineTools SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk CARGO_TARGET_DIR=/tmp/x/ cargo build -q --example probe 2>&1 | tail -5; echo BUILD_DONE
+rm .tmp_new_tests.rs
+rm /tmp/x/parity-body.MIz5kk; sed -n 295,320p /Users/me/dotfiles/tests/shguard-parity-check.sh
+rm src/ast.rs-E; sed -i '' -E 's/^(pub\(crate\) const MAX_(RAW_[A-Z_]+|KEYWORD_NESTING_COUNT): usize) = [0-9]+;/\1 = 100000000;/' src/ast.rs; git status --short; export CARGO_TARGET_DIR=/tmp/x/scratchpad/target-rawscan && (cargo build --release --bin shguard 2>&1 | tail -1) && (cargo build --bin shguard 2>&1 | tail -1)
+rm src/rules.rs-E
+rm tests/zz_probe.rs && git status --short && echo clean
+rustc --version; S=$(rustc --print sysroot); echo $S; ls $S/lib/rustlib/src/rust/library/std/src/sys/pal/unix/ 2>/dev/null | head -50; rg -n "fn anon_pipe|pipe2|FIOCLEX|set_cloexec|libc::pipe\(" $S/lib/rustlib/src/rust/library/std/src/sys/ 2>/dev/null | head -20
+sed -i '' '13298,13398d' src/rules.rs && sed -i '' '13297r .tmp_new_tests.rs' src/rules.rs && rm .tmp_new_tests.rs && sed -n 13290,13300p src/rules.rs && sed -n 13372,13392p src/rules.rs
+sed -i '' '13298,13398d' src/rules.rs && sed -i '' '13297r .tmp_new_tests.rs' src/rules.rs && sed -n 13290,13300p src/rules.rs && sed -n 13372,13392p src/rules.rs
+sed -i '' '676,722d' src/parser.rs && sed -n 670,680p src/parser.rs && sed -i '' 's/MAX_RAW_BRACKET_OPENER_COUNT: usize = 10_000_000;/MAX_RAW_BRACKET_OPENER_COUNT: usize = 64;/' src/ast.rs && rm tests/zz_probe.rs; ls tests | head -30
+sed -i.bak '507d' src/sed_script.rs && rm src/sed_script.rs.bak && sed -n 505,509p src/sed_script.rs
+sed -n '/\[dependencies\]/,/^\[/p' Cargo.toml; for f in ast verdict normalize rules gate parser lib watchdog config decision_log; do echo "== $f"; rg -n "^\s*use |serde|brush|yash|conch|tree_sitter|std::env|env::var|std::fs|adapter::|crate::parser|crate::config|crate::adapter|crate::decision_log|FileDecisionLog|HookContext" src/$f.rs | rg -v "^\d+:\s*///|^\d+:\s*//!" | head -40; done
+sed -n '1019,1032p' claude-code/shguard/config.toml; git diff --stat
+sed -n 1812,1835p /Users/me/engineer/shguard/rules/blocklist.toml; echo '----'; rg -n "strip" /Users/me/engineer/shguard/rules/blocklist.toml | awk -F: '$1 > 1767 && $1 < 1840'
+sed -n 2736,2775p "$TMPDIR/rules_pr.rs"; echo ----; sed -n 2885,2935p "$TMPDIR/rules_pr.rs"; echo ----; sed -n 3150,3165p "$TMPDIR/rules_pr.rs"
+sed -n 38,44p docs/adr/0019-test-vitest-pool-workers.md; git rm -q .github/workflows/ci.yml .github/dependabot.yml && ls .github 2>&1 | head
+sh /tmp/x/scratchpad/check.sh
+sh /tmp/x/scratchpad/sg/run.sh /tmp/x/scratchpad/sg/test.toml /tmp/x/scratchpad/sg/cases.txt
+ssh -V
+tail -5 /tmp/x/tasks/bmf7oexcz.output; S=/tmp/x/scratchpad; T=$S/target-review603; cd $S && for k in 0 8 16 24 32; do python3 gen.py grammar_composed 1 $k > p.txt; echo "k=$k debug/check:"; python3 probe.py $T/pr/debug/shguard check p.txt; echo "k=$k debug/hook:"; python3 probe.py $T/pr/debug/shguard hook p.txt; done
+tokei . 2>/dev/null | head -15; fd -e rs . src -x wc -l | sort -n | tail -30
+tokei src 2>/dev/null | head -20; fd -e rs . src | xargs wc -l | sort -n | tail -25
+tokei src 2>/dev/null | tail -5; fd -e rs . src | xargs wc -l | sort -n | tail -40
+tr '\n' '\0' < /tmp/x/p2.txt | xargs -0 /tmp/x/examples/probe | sed -E 's/^\{"command":"(.*)","decision":"([A-Za-z]+)".*/\2\t\1/' > /tmp/x/b2.out; tr '\n' '\0' < /tmp/x/p2.txt | xargs -0 /tmp/x/examples/probe | sed -E 's/^\{"command":"(.*)","decision":"([A-Za-z]+)".*/\2/' > /tmp/x/m2.out; paste /tmp/x/m2.out /tmp/x/b2.out
+tr '\n' '\0' < /tmp/x/scratchpad/c1.txt | SHGUARD_CONFIG=/tmp/x/scratchpad/empty.toml xargs -0 -n1 /tmp/x/shguard check --json | jq -r '"\(.decision)\t\(.command)"'
+tr '\n' '\0' < /tmp/x/scratchpad/p1.txt | xargs -0 /tmp/x/examples/probe 2>&1; echo; ls -d /tmp/x/tgt-g3 2>&1
+wc -l src/*.rs src/bin/*.rs && rg -n '^\s*(pub(\(crate\))? )?fn ' src --no-heading | awk -F: '{print $1": "$3}' | sed 's/(.*//' | sort -t: -k2 | head -400 | wc -l
+wc -l src/*.rs src/bin/*.rs && rg -n '^\s*(pub(\(crate\))? )?fn ' src | awk -F'fn ' '{print $2}' | cut -d'(' -f1 | sort | uniq -c | sort -rn | head -30
+wc -l src/*.rs src/bin/*.rs; rg -n '^\s*(pub(\([a-z]+\))? )?fn ' src | awk -F: '{print $1": "$3}' | sed 's/{.*//' | head -400
+which perl python3 node nodejs ruby php lua 2>/dev/null; echo "---perl -I separate test---"; perl -I /tmp -e 'print "perl_I_separate_ok\n"' 2>&1; echo "---perl -I attached-only? try perl -I -e code---"; perl -I -e 'print "INLINE_RAN\n"' 2>&1 | head -5
+zsh --version; zsh -fc 'echo $${a,b}; echo ${=a}x'
