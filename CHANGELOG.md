@@ -63,6 +63,16 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- `git -c alias.*` / `--config-env=alias.*` smuggling now stays Block when an
+  Ask-tier rule or the `git checkout .` Ask also matches (#552), and a quoted
+  single-expansion command word (`"$B"`, `"${B}"`) now resolves like the
+  unquoted `$B` instead of falling to an Ask (#576). Quoted values are still
+  never IFS-split.
+- A command that is both an alias smuggle and a blocklist rule match
+  (`git -c alias.x='!id' push --force`) now reports the rule's `matched_rule`
+  and `deny_message` (#600). The decision is unchanged (Block): the alias
+  verdict is folded worst-wins with the rule verdict instead of
+  short-circuiting it, and the rule wins a tie.
 - `resolve_symlinks` no longer performs file I/O inside `rules.rs` (#641):
   symlink resolution is a port the rule module defines and the composition
   root wires to a filesystem adapter (`src/fs_canonicalizer.rs`). No
