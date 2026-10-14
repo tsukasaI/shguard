@@ -5,7 +5,7 @@
 //! This module owns every Claude-Code-specific field name (`tool_name`,
 //! `tool_input.command`, `hookSpecificOutput`, …). The composition root
 //! (`src/bin/shguard.rs`) calls [`handle_with_policy`] on the hook path
-//! plus [`fail_closed`]/[`fail_closed_deny`]/[`fail_closed_with`] on its
+//! plus [`render`] on the verdicts [`crate::policy::decide`] returns for its
 //! various fail-closed exits — never bare [`handle`], which exists for
 //! callers with no [`crate::config::Policy`] to hand it; nothing else in
 //! the crate depends on this module, and this module never depends on
@@ -78,7 +78,7 @@
 //!   never an undocumented silent allow. [`handle_with_policy`] instead
 //!   emits `deny` for this same failure when its `policy`'s `ask_outcome`
 //!   key resolves to `deny` for the failure's own context (issues
-//!   #467/#469, see [`fail_closed_with`]); [`handle`] has no `policy` to
+//!   #467/#469, see [`crate::policy::decide`]); [`handle`] has no `policy` to
 //!   read that key from, so it always stays `ask`.
 //! - `tool_name != "Bash"` → [`no_decision_json`]'s no-`permissionDecision`
 //!   output: shguard only analyses shell commands run through the Bash
@@ -90,7 +90,8 @@
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::verdict::Decision;
+use crate::policy::{Evidence, InputStage, PolicyConfig, decide};
+use crate::verdict::{Decision, DenyMessage, Verdict};
 use crate::{HookContext, PermissionMode};
 
 /// The subset of the Claude Code PreToolUse stdin payload shguard reads.
@@ -192,45 +193,20 @@ fn no_decision_json() -> Value {
     })
 }
 
-/// The fail-closed `ask` output, for I/O failures the composition root
-/// encounters before it even has stdin text to hand to [`handle`] (e.g. a
-/// stdin read error). Never carries `additionalContext` — there is no
-/// matched rule to have declared one.
+/// Renders a decided [`Verdict`] as the `hookSpecificOutput` JSON the
+/// composition root writes to stdout — the one place a verdict becomes a
+/// `permissionDecision`. `additionalContext` is present only when the
+/// verdict carries a [`DenyMessage`], so the fail-closed verdicts
+/// [`crate::policy::decide`] builds from non-rule evidence never emit one.
 #[must_use]
-pub fn fail_closed(reason: &str) -> Value {
-    output_json(PermissionDecision::Ask, reason, None)
-}
+pub fn render(verdict: &Verdict) -> Value {
+    let decision = PermissionDecision::from(verdict.decision());
+    let reason = verdict
+        .reason()
+        .map_or("shguard: command cleared all checks", |r| r.as_str());
+    let additional_context = verdict.deny_message().map(DenyMessage::as_str);
 
-/// The stricter fail-closed `deny` output (issue #440's `SHGUARD_STRICT_CONFIG`):
-/// same shape as [`fail_closed`], used only for a config-load failure under
-/// strict mode. See README's "Discovery" section for why this is opt-in
-/// and scoped to config-load failure alone.
-#[must_use]
-pub fn fail_closed_deny(reason: &str) -> Value {
-    output_json(PermissionDecision::Deny, reason, None)
-}
-
-/// Fail-closed output honoring a loaded [`crate::config::Policy`]'s
-/// `ask_outcome` key resolved for the caller's context (issues #467/#469):
-/// `Decision::Block` emits `deny`, anything else (`Decision::Ask`, the
-/// default — `Decision::Allow` never reaches here) emits `ask`, same as
-/// [`fail_closed`]. Used by every composition-root fail-closed path that
-/// already has a `Policy` in hand when it hits a condition it cannot
-/// evaluate a command through — malformed/oversized stdin, a missing or
-/// non-string `command` field, a stdin read error — so those paths floor
-/// the same way a structural `Ask` from [`crate::analyze_with_policy`]
-/// itself would. Distinct from [`fail_closed_deny`]: that one is
-/// `SHGUARD_STRICT_CONFIG`'s own opt-in, reachable only when config load
-/// itself fails — before any `Policy` (and thus any `ask_outcome`) exists
-/// to read.
-#[must_use]
-pub fn fail_closed_with(outcome: Decision, reason: &str) -> Value {
-    let decision = if outcome == Decision::Block {
-        PermissionDecision::Deny
-    } else {
-        PermissionDecision::Ask
-    };
-    output_json(decision, reason, None)
+    output_json(decision, reason, additional_context)
 }
 
 /// Extracts `agent_id` for [`HookContext`] from the stdin's raw JSON value,
@@ -259,8 +235,8 @@ fn subagent_id(agent_id: &Value) -> Option<String> {
 /// decision an extraction error here becomes).
 ///
 /// `Ok(None)` means `tool_name != "Bash"` (out of scope by design, the
-/// caller should emit the no-decision output). `Err((reason, context))` is a
-/// human-readable failure description — malformed JSON, or a `Bash`
+/// caller should emit the no-decision output). `Err` ([`Rejection`]) names
+/// why the payload was rejected — malformed JSON, or a `Bash`
 /// payload whose `tool_input.command` is missing or not a string — left
 /// for the caller to turn into a fail-closed output (issue #467; see
 /// [`respond`]). `context` in the `Err` case is [`HookContext::none`] only
@@ -272,14 +248,12 @@ fn subagent_id(agent_id: &Value) -> Option<String> {
 /// resolved into the real `context` by that point, so issue #469's
 /// per-mode `ask_outcome` table resolves against it rather than
 /// discarding it as if it were unreadable.
-fn extract_bash_command(
-    stdin: &str,
-) -> Result<Option<(String, HookContext)>, (String, HookContext)> {
+fn extract_bash_command(stdin: &str) -> Result<Option<(String, HookContext)>, Box<Rejection>> {
     let input: HookInput = serde_json::from_str(stdin).map_err(|err| {
-        (
-            format!("shguard: could not parse PreToolUse stdin as JSON: {err}"),
-            HookContext::none(),
-        )
+        Box::new(Rejection {
+            stage: InputStage::MalformedJson(err.to_string()),
+            context: HookContext::none(),
+        })
     })?;
 
     if input.tool_name != "Bash" {
@@ -295,11 +269,18 @@ fn extract_bash_command(
 
     match input.tool_input.get("command").and_then(Value::as_str) {
         Some(command) => Ok(Some((command.to_string(), context))),
-        None => Err((
-            "shguard: Bash tool_input is missing a string \"command\" field".to_string(),
+        None => Err(Box::new(Rejection {
+            stage: InputStage::MissingCommand,
             context,
-        )),
+        })),
     }
+}
+
+/// A refused payload: why, plus whatever [`HookContext`] could be read.
+/// Boxed in [`extract_bash_command`]'s `Err` to keep the `Result` small.
+struct Rejection {
+    stage: InputStage,
+    context: HookContext,
 }
 
 /// Best-effort peek at the Bash command and [`HookContext`] a stdin payload
@@ -330,37 +311,35 @@ pub fn peek_bash_command(stdin: &str) -> Option<(String, HookContext)> {
 /// the same "single fold point, never crash, never silently allow" posture
 /// `crate::analyze` documents for its own internal failure modes.
 ///
-/// `ask_outcome` (issues #467/#469) governs which fail-closed decision
-/// these adapter-level failures emit: [`handle`] always resolves to
-/// `Decision::Ask` (it has no `Policy`, so no key to read), while
-/// [`handle_with_policy`] resolves its `policy`'s own `ask_outcome` table
-/// against whatever [`HookContext`] the failure carries (see
-/// [`extract_bash_command`]'s own docs for when that is a real,
+/// `config` (issues #467/#469) governs which fail-closed decision these
+/// adapter-level failures emit: [`handle`] passes [`PolicyConfig::none`]
+/// (it has no `Policy`, so no key to read, always `Ask`), while
+/// [`handle_with_policy`] passes its `policy`'s own config, which
+/// [`decide`] resolves against whatever [`HookContext`] the failure carries
+/// (see [`extract_bash_command`]'s own docs for when that is a real,
 /// stdin-derived context versus [`HookContext::none`]) — the same key
 /// [`crate::analyze_with_policy`] floors every terminal `Ask` verdict
 /// through, applied here too so a malformed/oversized stdin payload floors
 /// exactly like a structural `Ask` would.
 fn respond(
     stdin: &str,
-    ask_outcome: impl Fn(&HookContext) -> crate::verdict::Decision,
-    analyze: impl FnOnce(&str, &HookContext) -> crate::verdict::Verdict,
+    config: &PolicyConfig,
+    analyze: impl FnOnce(&str, &HookContext) -> Verdict,
 ) -> Value {
     let (command, context) = match extract_bash_command(stdin) {
         Ok(Some(command_and_context)) => command_and_context,
         Ok(None) => return no_decision_json(),
-        Err((reason, context)) => return fail_closed_with(ask_outcome(&context), &reason),
+        Err(rejection) => {
+            let Rejection { stage, context } = *rejection;
+            return render(&decide(
+                &[Evidence::InputRejected { stage }],
+                config,
+                &context,
+            ));
+        }
     };
 
-    let verdict = analyze(&command, &context);
-    let decision = PermissionDecision::from(verdict.decision());
-    let reason = verdict
-        .reason()
-        .map_or("shguard: command cleared all checks", |r| r.as_str());
-    let additional_context = verdict
-        .deny_message()
-        .map(crate::verdict::DenyMessage::as_str);
-
-    output_json(decision, reason, additional_context)
+    render(&analyze(&command, &context))
 }
 
 /// Reads and analyses one Claude Code PreToolUse stdin payload against the
@@ -368,11 +347,9 @@ fn respond(
 /// JSON the composition root writes to stdout.
 #[must_use]
 pub fn handle(stdin: &str) -> Value {
-    respond(
-        stdin,
-        |_context| Decision::Ask,
-        |command, _context| crate::analyze(command),
-    )
+    respond(stdin, &PolicyConfig::none(), |command, _context| {
+        crate::analyze(command)
+    })
 }
 
 /// Config-aware sibling of [`handle`]: same stdin/stdout contract, but
@@ -386,11 +363,9 @@ pub fn handle_with_policy(
     policy: &crate::config::Policy,
     sink: &dyn crate::DecisionLogSink,
 ) -> Value {
-    respond(
-        stdin,
-        |context| policy.ask_outcome(context),
-        |command, context| crate::analyze_with_policy(command, policy, context, sink),
-    )
+    respond(stdin, &policy.policy_config(), |command, context| {
+        crate::analyze_with_policy(command, policy, context, sink)
+    })
 }
 
 #[cfg(test)]

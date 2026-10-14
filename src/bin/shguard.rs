@@ -99,8 +99,10 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
-use shguard::DecisionLogSink;
+use shguard::policy::{Evidence, InputStage, LimitKind, PolicyConfig, decide};
+use shguard::verdict::Verdict;
 use shguard::watchdog::{PollOutcome, poll_with_budget};
+use shguard::{DecisionLogSink, HookContext};
 
 /// The fail-closed output written when even producing JSON fails — a
 /// hand-written literal, not `serde_json`, so it cannot itself fail to
@@ -343,10 +345,7 @@ fn main() {
         .spawn(move || {
             let output = std::panic::catch_unwind(move || run(&early_tx, worker_log_state))
                 .unwrap_or_else(|_| {
-                    shguard::adapter::fail_closed(
-                        "shguard: internal panic while evaluating the command; refusing to \
-                         evaluate (fail-closed)",
-                    )
+                    shguard::adapter::render(&decide_resource_limit(LimitKind::Panic))
                 });
             // A closed receiver means `main` already timed out and moved
             // on (see below) — nothing left to send to.
@@ -358,9 +357,9 @@ fn main() {
         // a reason to fail closed, not to fall through and evaluate on the
         // main thread — that would silently drop the watchdog this whole
         // boundary exists to provide.
-        emit(shguard::adapter::fail_closed(
-            "shguard: could not start command evaluation; refusing to evaluate (fail-closed)",
-        ));
+        emit(shguard::adapter::render(&decide_resource_limit(
+            LimitKind::SpawnFailed,
+        )));
         return;
     };
 
@@ -372,8 +371,19 @@ fn main() {
     let _ = worker.join();
 }
 
+/// The fail-closed verdict for a trip or internal failure of this binary's
+/// own: a [`LimitKind`] is never floored by `ask_outcome`, so no policy or
+/// hook context is needed.
+fn decide_resource_limit(kind: LimitKind) -> Verdict {
+    decide(
+        &[Evidence::ResourceLimit { kind }],
+        &PolicyConfig::none(),
+        &HookContext::none(),
+    )
+}
+
 /// What [`resolve_first_result`] found: either the worker's own result, or
-/// a reason one of the fail-closed trips fired. Splitting the decision
+/// which fail-closed trip fired. Splitting the decision
 /// (pure, no I/O) from emitting it and exiting the process lets
 /// `resolve_first_result` be unit-tested directly — including the
 /// try-the-channel-first race below — without a test ever calling
@@ -381,9 +391,9 @@ fn main() {
 #[derive(Debug)]
 enum FirstResult {
     Output(serde_json::Value),
-    MemoryTrip(String),
-    TimeTrip(String),
-    Disconnected(String),
+    MemoryTrip(LimitKind),
+    TimeTrip(LimitKind),
+    Disconnected(LimitKind),
 }
 
 /// Waits up to `timeout` for `rx` to produce a result, polling the
@@ -416,20 +426,9 @@ fn resolve_first_result(
     });
     match outcome {
         PollOutcome::Received(output) => FirstResult::Output(output),
-        PollOutcome::MemoryTripped(rss) => FirstResult::MemoryTrip(format!(
-            "shguard: evaluation exceeded its memory budget ({rss} bytes RSS); refusing to \
-             evaluate (fail-closed)"
-        )),
-        PollOutcome::TimedOut => FirstResult::TimeTrip(
-            "shguard: evaluation exceeded its outer time budget; refusing to evaluate \
-             (fail-closed)"
-                .to_string(),
-        ),
-        PollOutcome::Disconnected => FirstResult::Disconnected(
-            "shguard: evaluation worker stopped without producing a result; refusing to \
-             evaluate (fail-closed)"
-                .to_string(),
-        ),
+        PollOutcome::MemoryTripped(rss) => FirstResult::MemoryTrip(LimitKind::OuterMemory(rss)),
+        PollOutcome::TimedOut => FirstResult::TimeTrip(LimitKind::OuterTime),
+        PollOutcome::Disconnected => FirstResult::Disconnected(LimitKind::Disconnected),
     }
 }
 
@@ -448,20 +447,21 @@ fn emit_first_result(
 ) {
     match resolve_first_result(rx, memory_limit_bytes(), EVALUATION_TIMEOUT) {
         FirstResult::Output(output) => emit(output),
-        FirstResult::MemoryTrip(reason)
-        | FirstResult::TimeTrip(reason)
-        | FirstResult::Disconnected(reason) => {
+        FirstResult::MemoryTrip(kind)
+        | FirstResult::TimeTrip(kind)
+        | FirstResult::Disconnected(kind) => {
             // Claimed before anything else in this arm, including `emit`
             // below — see `LogState`'s own docs for why the decision this
             // arm is about to emit must win ownership of the log ahead of
             // the worker's own, possibly different, in-flight write.
             let prior_state = log_state.swap(LOG_MAIN, Ordering::SeqCst);
-            emit(shguard::adapter::fail_closed(&reason));
+            let verdict = decide_resource_limit(kind);
+            emit(shguard::adapter::render(&verdict));
             // Emitted to stdout first, deliberately: the decision Claude
             // Code actually waits on must never be delayed by this
             // best-effort log write (see `log_trip_best_effort`'s own
             // docs for its bound).
-            log_trip_best_effort(early_rx.try_recv().ok(), &reason, prior_state, log_state);
+            log_trip_best_effort(early_rx.try_recv().ok(), &verdict, prior_state, log_state);
             std::process::exit(0);
         }
     }
@@ -514,7 +514,7 @@ fn emit_first_result(
 /// same risk whenever it reaches `analyze_with_policy`'s own logging call.
 fn log_trip_best_effort(
     early_info: Option<EarlyInfo>,
-    reason: &str,
+    verdict: &Verdict,
     prior_state: u8,
     log_state: &LogState,
 ) {
@@ -539,7 +539,7 @@ fn log_trip_best_effort(
     let Some(path) = early_info.decision_log_path else {
         return;
     };
-    let verdict = shguard::verdict::Verdict::ask(shguard::verdict::Reason::new(reason), Vec::new());
+    let verdict = verdict.clone();
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     let spawned = std::thread::Builder::new()
         .name("shguard-trip-log".to_string())
@@ -1168,15 +1168,14 @@ fn run(early_tx: &Sender<EarlyInfo>, log_state: Arc<LogState>) -> serde_json::Va
     let policy = match shguard::config::Policy::load() {
         Ok(policy) => policy,
         Err(err) => {
-            let reason = format!(
-                "shguard: user config failed to load ({err}); refusing to evaluate any command \
-                 until this is fixed"
-            );
-            return if strict_config_requested() {
-                shguard::adapter::fail_closed_deny(&reason)
-            } else {
-                shguard::adapter::fail_closed(&reason)
-            };
+            let config = PolicyConfig::none().with_strict_config(strict_config_requested());
+            return shguard::adapter::render(&decide(
+                &[Evidence::ConfigUnavailable {
+                    error: err.to_string(),
+                }],
+                &config,
+                &HookContext::none(),
+            ));
         }
     };
 
@@ -1194,10 +1193,9 @@ fn run(early_tx: &Sender<EarlyInfo>, log_state: Arc<LogState>) -> serde_json::Va
         .take(MAX_STDIN_BYTES + 1)
         .read_to_string(&mut stdin)
     {
-        Ok(_) if stdin.len() as u64 > MAX_STDIN_BYTES => shguard::adapter::fail_closed_with(
-            policy.ask_outcome(&shguard::HookContext::none()),
-            &format!("shguard: stdin exceeds {MAX_STDIN_BYTES} bytes; refusing to evaluate"),
-        ),
+        Ok(_) if stdin.len() as u64 > MAX_STDIN_BYTES => {
+            reject_input(&policy, InputStage::StdinOverCap(MAX_STDIN_BYTES))
+        }
         Ok(_) => {
             // Issue #459: sent before `handle_with_policy`'s own call into
             // `analyze_with_policy` — the one call in this function that
@@ -1232,11 +1230,19 @@ fn run(early_tx: &Sender<EarlyInfo>, log_state: Arc<LogState>) -> serde_json::Va
         // #467: `ask_outcome` applies to every composition-root
         // fail-closed path that has a `Policy` in hand, not only
         // `analyze_with_policy`'s own structural `Ask`s).
-        Err(err) => shguard::adapter::fail_closed_with(
-            policy.ask_outcome(&shguard::HookContext::none()),
-            &format!("shguard: could not read stdin: {err}"),
-        ),
+        Err(err) => reject_input(&policy, InputStage::StdinReadError(err.to_string())),
     }
+}
+
+/// The fail-closed output for stdin the composition root refused before any
+/// command reached the adapter. `HookContext::none()`: none of these paths
+/// has a readable `permission_mode` to resolve `ask_outcome` against.
+fn reject_input(policy: &shguard::config::Policy, stage: InputStage) -> serde_json::Value {
+    shguard::adapter::render(&decide(
+        &[Evidence::InputRejected { stage }],
+        &policy.policy_config(),
+        &HookContext::none(),
+    ))
 }
 
 /// Serialises `output` and writes it to stdout, falling back to the

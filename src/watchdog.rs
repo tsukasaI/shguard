@@ -73,7 +73,9 @@
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
-use crate::verdict::{Reason, Verdict};
+use crate::HookContext;
+use crate::policy::{Evidence, LimitKind, PolicyConfig, decide};
+use crate::verdict::Verdict;
 
 /// Wall-clock budget given to one evaluation before it's abandoned as
 /// hung. Same value as `src/bin/shguard.rs::EVALUATION_TIMEOUT`, whose
@@ -241,9 +243,7 @@ fn bounded_with_memory_limit(
         });
 
     let Ok(worker) = spawned else {
-        return fail_closed(
-            "shguard: could not start command evaluation; refusing to evaluate (fail-closed)",
-        );
+        return fail_closed(LimitKind::SpawnFailed);
     };
 
     let outcome = poll_with_budget(&result_rx, deadline, MEMORY_POLL_INTERVAL, || {
@@ -260,22 +260,20 @@ fn bounded_with_memory_limit(
         // `worker` is dropped here without joining — deliberately: joining
         // would block on the exact hang this function exists to bound. See
         // the module docs' "No std::process::exit" section.
-        PollOutcome::MemoryTripped(delta) => fail_closed(&format!(
-            "shguard: evaluation exceeded its memory budget ({delta} bytes RSS growth); \
-             refusing to evaluate (fail-closed)"
-        )),
-        PollOutcome::TimedOut => fail_closed(
-            "shguard: evaluation exceeded its time budget; refusing to evaluate (fail-closed)",
-        ),
-        PollOutcome::Disconnected => fail_closed(
-            "shguard: evaluation worker stopped without producing a result; refusing to \
-             evaluate (fail-closed)",
-        ),
+        PollOutcome::MemoryTripped(delta) => fail_closed(LimitKind::InnerMemory(delta)),
+        PollOutcome::TimedOut => fail_closed(LimitKind::InnerTime),
+        PollOutcome::Disconnected => fail_closed(LimitKind::Disconnected),
     }
 }
 
-fn fail_closed(reason: &str) -> Verdict {
-    Verdict::ask(Reason::new(reason), Vec::new())
+/// Exempt from `ask_outcome` flooring by construction: a `ResourceLimit` is
+/// never floored by [`decide`] (tests/ask_outcome.rs pins this).
+fn fail_closed(kind: LimitKind) -> Verdict {
+    decide(
+        &[Evidence::ResourceLimit { kind }],
+        &PolicyConfig::none(),
+        &HookContext::none(),
+    )
 }
 
 /// Current (not peak) process RSS in bytes, or `None` if the underlying
