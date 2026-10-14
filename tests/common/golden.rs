@@ -5,6 +5,7 @@
 #![allow(clippy::expect_used)]
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -28,6 +29,45 @@ struct Record {
     decision: String,
     deny_message: Option<String>,
     matched_rule: Option<String>,
+}
+
+/// Resolve the checkout this test binary was built from.
+///
+/// The snapshots are read (and, when blessing, written) at run time, so a
+/// binary reused from a shared `CARGO_TARGET_DIR` by a checkout that did not
+/// rebuild would otherwise compare against the OTHER checkout's snapshots and
+/// pass falsely. `cargo test` sets `CARGO_MANIFEST_DIR` at run time to the
+/// checkout being tested; it must match the one compiled in.
+pub fn resolve(compile: &Path, runtime: Option<&OsStr>) -> Result<PathBuf, String> {
+    let runtime = runtime.map(PathBuf::from).ok_or_else(|| {
+        "CARGO_MANIFEST_DIR is not set at run time; run the golden tests via `cargo test`"
+            .to_string()
+    })?;
+    let same = match (compile.canonicalize(), runtime.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => compile == runtime,
+    };
+    if same {
+        Ok(runtime)
+    } else {
+        Err(format!(
+            "this test binary was built for {} but is running for {}: it was reused from a \
+             shared CARGO_TARGET_DIR without a rebuild, so it would check the wrong \
+             checkout's snapshots; rebuild, or use a per-checkout CARGO_TARGET_DIR",
+            compile.display(),
+            runtime.display()
+        ))
+    }
+}
+
+/// `tests/golden` of the checkout under test (see [`resolve`]).
+pub fn golden_dir() -> PathBuf {
+    let manifest_dir = resolve(
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        std::env::var_os("CARGO_MANIFEST_DIR").as_deref(),
+    )
+    .unwrap_or_else(|err| panic!("{err}"));
+    manifest_dir.join("tests/golden")
 }
 
 fn decision_label(decision: Decision) -> &'static str {
@@ -179,9 +219,7 @@ pub fn check<S: AsRef<str>>(corpus: &str, commands: impl IntoIterator<Item = S>)
         watchdog_trips.join("\n")
     );
 
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/golden")
-        .join(format!("{corpus}.jsonl"));
+    let path = golden_dir().join(format!("{corpus}.jsonl"));
     let rendered = render(&actual);
 
     if std::env::var(UPDATE_ENV).as_deref() == Ok("1") {

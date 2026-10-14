@@ -26,17 +26,23 @@
 //! that variable the tests only compare. `analyze()` reads only the
 //! embedded rules and never the filesystem, `HOME`, or cwd, so the
 //! snapshot reproduces on any machine.
+//!
+//! The snapshot directory comes from the run-time `CARGO_MANIFEST_DIR` and
+//! must equal the compile-time one, so a binary reused from another
+//! checkout's shared `CARGO_TARGET_DIR` fails loudly instead of passing
+//! against (or blessing into) that checkout's snapshots.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 #[path = "common/golden.rs"]
 mod golden;
 
-use std::path::PathBuf;
+use std::ffi::OsStr;
+use std::path::Path;
 
 #[test]
 fn golden_snapshot_denials() {
-    let golden_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
+    let golden_dir = golden::golden_dir();
     let input = golden_dir.join("denials.txt");
     match std::fs::read_to_string(&input) {
         Ok(text) => golden::check("denials", text.lines().filter(|line| !line.is_empty())),
@@ -49,4 +55,16 @@ fn golden_snapshot_denials() {
         }
         Err(err) => panic!("failed to read {}: {err}", input.display()),
     }
+}
+
+#[test]
+fn golden_snapshot_dir_resolution_detects_a_foreign_build() {
+    let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+    assert_eq!(
+        golden::resolve(here, Some(here.as_os_str())),
+        Ok(here.to_path_buf())
+    );
+    assert!(golden::resolve(here, None).is_err());
+    let other = golden::resolve(here, Some(OsStr::new("/nonexistent/other-checkout")));
+    assert!(other.is_err_and(|msg| msg.contains("per-checkout CARGO_TARGET_DIR")));
 }
