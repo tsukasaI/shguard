@@ -190,7 +190,7 @@ tooling per `coding-guidelines/patterns/tooling.md`."*
   serde-free typed constructors; `config_loader.rs` owns the serde DTOs and
   TOML loading. `gate.rs` calls `parser::parse` directly; the brush
   parser stays sealed inside the parser module.
-- **Wiring in two composition roots, one per concern**: `src/lib.rs` wires
+- **Wiring in one composition root**: `src/lib.rs` wires
   the stages together (it loads the embedded policy and hands it to
   `gate::analyze`, and hands the `fs_canonicalizer` adapter to `rules`'
   symlink-resolution port), and `src/bin/shguard.rs` is the only

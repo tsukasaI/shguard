@@ -201,8 +201,9 @@ pub fn decide(evidence: &[Evidence], config: &PolicyConfig, ctx: &HookContext) -
   - malformed hook JSON, a stdin read error, or stdin over
     `MAX_STDIN_BYTES` (`InputRejected`);
   - watchdog trip (`ResourceLimit`).
-- **`AnalysisCtx`** `{ rules, depth, env, cwd }` carries no parse
-  function. The injected parse function (a `ParseFn` type threaded through
+- **`AnalysisCtx`** `{ rules, allowlist, depth }` (`Copy`; `cwd` and `Env`
+  stay parameters because they are re-seeded or mutated per recursion)
+  carries no parse function. The injected parse function (a `ParseFn` type threaded through
   38 signatures) was deleted per #636: `gate` calls `parser::parse`
   directly, and brush stays sealed inside the parser module, so the
   injection was over-abstraction. The context struct addresses #619's

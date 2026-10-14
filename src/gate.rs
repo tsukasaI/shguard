@@ -464,8 +464,9 @@ impl<'a> AnalysisCtx<'a> {
 /// docs for the full rule set).
 ///
 /// `rules`/`allowlist` are supplied by the caller: the composition root
-/// (`crate::analyze`) hands in the embedded defaults, `crate::config::Policy`
-/// the merged user policy.
+/// (`crate::analyze`) hands in the embedded defaults or, via
+/// [`analyze_with_policy_in_cwd`], the merged user policy
+/// (`crate::analyze_with_policy`).
 #[must_use]
 pub(crate) fn analyze(command: &str, rules: &Rules, allowlist: &Allowlist) -> Verdict {
     analyze_with_policy_in_cwd(command, rules, allowlist, None)

@@ -354,7 +354,7 @@ pub(crate) fn fs_path_canonicalizer() -> rules::PathCanonicalizer {
 /// — either #467's single bare-string value, unconditionally, or #469's
 /// per-`permission_mode` table. When that resolves to `Block` (default
 /// `Ask`, a no-op), the verdict this function returns is never `Ask`: any
-/// `Ask` [`gate::analyze_with_policy`] would have produced is floored to
+/// `Ask` [`gate::analyze_with_policy_in_cwd`] would have produced is floored to
 /// `Block` first (see `policy::decide`'s own docs for the full
 /// reasoning and its interaction with the bounded-evaluation watchdog
 /// above), before logging and before this function returns to its

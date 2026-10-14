@@ -49,7 +49,7 @@
 //!
 //! `analyze()` (`src/lib.rs`) loads [`Rules::embedded`] and hands it to
 //! `src/gate.rs`, which calls [`Rules::match_command`]/
-//! [`Rules::match_pipeline`], always with an empty
+//! [`Rules::match_pipeline`], with the embedded (currently empty)
 //! `Allowlist`/no `ask_rules`. `analyze_with_policy()` additionally
 //! threads [`Rules::match_ask`], the [allowlist](#allowlist) section, and
 //! whatever [`UserConfig`]/[`merge_user_config`] contributed — see
