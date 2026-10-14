@@ -337,7 +337,7 @@ impl DecisionLogPath {
 /// whatever a user config contributed, plus this invocation's
 /// self-protection rules. Opaque to callers outside this crate — the only
 /// public operations are [`Policy::load`], [`Policy::rules_with_mixed_except_targets`],
-/// [`Policy::ask_outcome`], and passing a `&Policy` to
+/// [`Policy::policy_config`], and passing a `&Policy` to
 /// [`crate::analyze_with_policy`].
 ///
 /// `Clone` exists primarily so [`crate::analyze_with_policy`] can hand an
@@ -368,7 +368,7 @@ pub struct Policy {
     /// form or #469's per-`permission_mode` table. Read the same way
     /// `decision_log_path` is: off the real config-file parse alone, never
     /// the self-protection-only merges below. Consulted by
-    /// [`crate::analyze_with_policy`] (`src/lib.rs`) to floor every
+    /// `policy::decide` (via [`Policy::policy_config`]) to floor every
     /// terminal `Ask` verdict to `Block` for the resolved mode —
     /// `crate::gate` never reads this field itself (issue #467's design: a
     /// terminal remap, not a per-command floor threaded through gate's own
@@ -742,25 +742,23 @@ impl Policy {
         ids
     }
 
-    /// The effective `ask_outcome` config key resolved for `context`
-    /// (issues #467/#469) — see this struct's own field docs and
-    /// [`crate::rules::AskOutcome::resolve`]. Public so `src/bin/shguard.rs`'s
+    /// The [`crate::policy::PolicyConfig`] this policy resolved (issues
+    /// #467/#469): its `ask_outcome` key, which `policy::decide` applies to
+    /// every terminal `Ask`. Public so `src/bin/shguard.rs`'s
     /// composition-root fail-closed paths (oversized/unreadable stdin, hit
-    /// before any command reaches [`crate::analyze_with_policy`]) can
-    /// honor the same key `adapter::fail_closed_with` applies elsewhere;
-    /// those paths pass `&HookContext::none()` since none of them have a
-    /// readable `permission_mode` to resolve against, which is exactly the
-    /// "unreadable" fallback #469 documents (a `PerMode` table's
-    /// `None`/`Unknown` handling already resolves this to `Ask` unless the
-    /// bare-string `Global` form is configured).
+    /// before any command reaches [`crate::analyze_with_policy`]) decide
+    /// through the same key; those paths pass `&HookContext::none()` since
+    /// none of them have a readable `permission_mode` to resolve against,
+    /// which is exactly the "unreadable" fallback #469 documents (a
+    /// `PerMode` table's `None`/`Unknown` handling already resolves this to
+    /// `Ask` unless the bare-string `Global` form is configured).
     #[must_use]
-    pub fn ask_outcome(&self, context: &crate::HookContext) -> crate::verdict::Decision {
-        self.ask_outcome
-            .resolve(context.permission_mode(), context.agent_id())
+    pub fn policy_config(&self) -> crate::policy::PolicyConfig {
+        crate::policy::PolicyConfig::new(self.ask_outcome)
     }
 
     /// The `decision_log_path` this policy resolved, if any (issue #459).
-    /// Public for the same reason [`Self::ask_outcome`] is: `src/bin/shguard.rs`'s
+    /// Public for the same reason [`Self::policy_config`] is: `src/bin/shguard.rs`'s
     /// composition root needs it outside [`crate::analyze_with_policy`]'s
     /// own call — specifically, to hand a decision-log target to its
     /// outer watchdog's trip arms, which run on a path that never reaches

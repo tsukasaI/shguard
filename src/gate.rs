@@ -335,6 +335,7 @@
 
 use std::collections::HashMap;
 
+use crate::HookContext;
 use crate::ast::{
     Assignment, AssignmentValue, Command, CommandLine, CompoundCommand, ElifClause, ExtendedTest,
     FileRedirectionKind, FunctionDefinition, Pipeline, Redirection, Separator, SimpleCommand, Word,
@@ -343,11 +344,17 @@ use crate::ast::{
 use crate::normalize::{
     self, FlagScan, NormalizedWord, Resolution, UnresolvableKind, scan_for_flag,
 };
+use crate::policy::combine::{
+    SUBSTITUTION_FLOOR_ASK_REASON, SUBSTITUTION_FLOOR_BLOCK_REASON, apply_allowlist_downgrade,
+    apply_ask_floor, apply_floor, apply_substitution_floor, fold_ask_floor, fold_optional_decision,
+    fold_worst,
+};
+use crate::policy::{self, Evidence, LimitKind, PolicyConfig, deny_msg_unsupported_construct};
 use crate::rules::{
-    AWK_INTERPRETERS, Allowlist, AllowlistOutcome, CommandRule, EVAL_BUILTIN, PathForm,
-    RedirectRule, Rules, SymlinkScope, WrapperChainEscalation, has_expanding_glob_qualifier,
-    is_pipeline_interpreter, lexical_normalize, render_cwd_anchor,
-    unresolved_word_may_hide_glob_qualifier, wrapper_chain_changes_cwd,
+    AWK_INTERPRETERS, Allowlist, EVAL_BUILTIN, PathForm, RedirectRule, Rules, SymlinkScope,
+    WrapperChainEscalation, has_expanding_glob_qualifier, is_pipeline_interpreter,
+    lexical_normalize, render_cwd_anchor, unresolved_word_may_hide_glob_qualifier,
+    wrapper_chain_changes_cwd,
 };
 use crate::verdict::{Decision, DenyMessage, Reason, RuleId, Verdict};
 
@@ -422,21 +429,6 @@ const DENY_MSG_IFS: &str =
 /// for the same effect. Kept as one `const` (not duplicated at each of the
 /// two use sites) so the raise and the match can't drift apart.
 const NONSHELL_HEREDOC_REASON_PREFIX: &str = "the heredoc body is fed to non-shell interpreter";
-
-/// Category-3 guidance (issue #471): a construct this module cannot
-/// statically resolve at all. Names the specific construct — the issue's
-/// own "name the construct" requirement — via whichever description is
-/// already available at the call site: [`ParseRejection::unsupported_construct`]'s
-/// text for a construct the parser itself rejects, or a human-readable
-/// name for [`UnresolvableKind`]'s own variant (see
-/// [`deny_msg_for_unresolvable_kind`]) for one that parses but that
-/// `crate::normalize` could not fold to a value.
-fn deny_msg_unsupported_construct(construct: &str) -> DenyMessage {
-    DenyMessage::new(format!(
-        "shguard cannot statically analyze this construct ({construct}); use its literal form, \
-         or split the command across separate lines so each piece is inspectable."
-    ))
-}
 
 /// Category-3 guidance for the subset of [`UnresolvableKind`] that names an
 /// actual shell construct the agent could rewrite (`$((...))`, a process
@@ -586,31 +578,28 @@ fn analyze_at_depth(
     parse: ParseFn,
 ) -> Verdict {
     if depth > MAX_SUBSTITUTION_DEPTH {
-        return Verdict::ask(
-            Reason::new(format!(
-                "nested substitution exceeds the recursion depth cap ({MAX_SUBSTITUTION_DEPTH}); \
-                 refusing to keep unwinding (fail-closed denial-of-service guard, see gate.rs module docs)"
-            )),
-            Vec::new(),
-        );
+        return decide_structural(Evidence::ResourceLimit {
+            kind: LimitKind::RecursionDepth(MAX_SUBSTITUTION_DEPTH),
+        });
     }
 
     match parse(command) {
         Ok(command_line) => {
             evaluate_command_line(&command_line, rules, allowlist, depth, &mut cwd, parse)
         }
-        Err(err) => {
-            let deny_message = err
-                .unsupported_construct
-                .as_deref()
-                .map(deny_msg_unsupported_construct);
-            Verdict::ask(
-                Reason::new(format!("could not parse command: {err}")),
-                Vec::new(),
-            )
-            .with_deny_message(deny_message)
-        }
+        Err(err) => decide_structural(Evidence::ParseFailure {
+            message: err.to_string(),
+            construct: err.unsupported_construct,
+        }),
     }
+}
+
+/// Routes one structural fail-closed finding through [`policy::decide`]
+/// with no `ask_outcome` and no hook context: the terminal `ask_outcome`
+/// floor is applied once, over the whole line's final verdict, by the
+/// composition root (see `policy::decide`'s `GateVerdict` arm).
+fn decide_structural(evidence: Evidence) -> Verdict {
+    policy::decide(&[evidence], &PolicyConfig::none(), &HookContext::none())
 }
 
 /// Folds every pipeline of a [`CommandLine`] (joined by `;`/`&&`/`||`/`&`,
@@ -2512,39 +2501,6 @@ fn has_command_position_leftover_substitution(command: &SimpleCommand) -> bool {
         .any(|(_, pieces)| alternative_has_substitution(pieces))
 }
 
-/// Applies a user-configured allowlist match to `verdict`: `Ask` -> `Allow`
-/// only, via the existing Block-immune `crate::rules::apply_allowlist` — a
-/// `Block` verdict is untouched by that function's own first guard clause,
-/// and an `Allow` verdict has nothing to downgrade from.
-fn apply_allowlist_downgrade(verdict: Verdict, allowlist: &Allowlist) -> Verdict {
-    match crate::rules::apply_allowlist(&verdict, allowlist) {
-        AllowlistOutcome::Unchanged => verdict,
-        AllowlistOutcome::Downgraded {
-            suppressed_by,
-            reason,
-        } => Verdict::allow_suppressed(verdict.normalized_argv().to_vec(), suppressed_by, reason),
-    }
-}
-
-/// Applies a user-configured `ask` rule match to `verdict`: `Allow` ->
-/// `Ask` only. A command that is already `Ask`/`Block` for its own reasons
-/// keeps that reason — an ask-rule match never replaces it, only ever
-/// raises a plain `Allow`.
-fn apply_ask_floor(verdict: Verdict, ask_match: Option<&CommandRule>, hint: &str) -> Verdict {
-    match (verdict.decision(), ask_match) {
-        (Decision::Allow, Some(rule)) => Verdict::ask(
-            Reason::new(format!(
-                "matches user-configured ask rule {:?}: {}{hint}",
-                rule.id().as_str(),
-                rule.reason().as_str()
-            )),
-            verdict.normalized_argv().to_vec(),
-        )
-        .with_deny_message(rule.deny_message().cloned()),
-        _ => verdict,
-    }
-}
-
 /// Evaluates one [`SimpleCommand`]: [`evaluate_simple_command_core`]'s
 /// per-command gate rules and blocklist match, then the user-config
 /// allowlist-downgrade and ask-floor steps (module docs, "User config
@@ -3625,52 +3581,6 @@ fn escalation_floor_contribution(
     Some((floor_decision, reason))
 }
 
-/// Raises `verdict` to at least `floor_decision`, folding via
-/// `decision.max(floor_decision)`, the same as [`fold_floors`]'s own
-/// handling: a verdict already at or above `floor_decision` passes through
-/// completely untouched (keeping its own reason/matched-rule audit trail);
-/// one below it is replaced with a new verdict at the floor's decision,
-/// combining `floor_reason` with the verdict's own reason when it had one
-/// (an `Allow` verdict has none to combine). `deny_message` is
-/// unconditionally attached to a replacement verdict via
-/// [`Verdict::with_deny_message`] — a no-op for the many callers that never
-/// have one (issue #202's callers do; see [`apply_command_ascent_descent_floor`]'s
-/// docs for why those attach one at all) — and left untouched (not cleared)
-/// on the pass-through path.
-///
-/// The shared core about a dozen otherwise-unrelated `apply_*_floor`
-/// helpers below delegate to — [`apply_escalation_floor`] (rule 10),
-/// [`apply_expansion_floor`] (rule 11), [`apply_recursable_floor`],
-/// [`apply_tar_dashless_floor`], [`apply_command_ascent_descent_floor`]/
-/// [`apply_redirect_ask_floor`], [`apply_named_user_home_floor`],
-/// [`apply_token_floor`], [`apply_dirstack_tilde_floor`]/
-/// [`apply_directory_equals_tilde_floor`]/[`apply_dirstack_equal_subst_floor`],
-/// [`apply_opaque_kind_floor`] (rule 8), and [`apply_unknown_cwd_floor`].
-/// [`apply_substitution_floor`] (rule 3) uses the same max-lift mechanics
-/// but keeps its own inlined copy rather than delegating here (see its own
-/// docs). Each keeps its own name and doc comment so its call
-/// site stays self-documenting; only the mechanics live here.
-fn apply_floor(
-    verdict: Verdict,
-    floor_decision: Decision,
-    floor_reason: String,
-    deny_message: Option<DenyMessage>,
-) -> Verdict {
-    if verdict.decision() >= floor_decision {
-        return verdict;
-    }
-    let argv = verdict.normalized_argv().to_vec();
-    let reason = match verdict.reason() {
-        Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
-        None => floor_reason,
-    };
-    match floor_decision {
-        Decision::Block => Verdict::block(Reason::new(reason), argv, None),
-        Decision::Ask | Decision::Allow => Verdict::ask(Reason::new(reason), argv),
-    }
-    .with_deny_message(deny_message)
-}
-
 /// Applies the escalation floor (rule 10) to a verdict produced on an
 /// early-return path that can yield `Allow` — or, under a `deny`-configured
 /// `escalation_floor`, a mere `Ask` — before [`fold_floors`] runs; today
@@ -4220,78 +4130,6 @@ fn apply_dirstack_equal_subst_floor(
         return verdict;
     };
     apply_floor(verdict, floor_decision, floor_reason, deny_message)
-}
-
-/// Applies rule 3's argument-position substitution floor to a verdict — the
-/// same max-lift mechanics as [`apply_floor`]. The floor passed in is
-/// [`evaluate_simple_command_core`]'s `substitution_result` binding, which
-/// already folds together [`evaluate_argument_substitutions`]'s own result
-/// (a `$()`/backtick/process substitution in ordinary argument position)
-/// with issue #77's leftover-alternative substitution floor
-/// (`evaluate_leftover_alternative_substitutions`'s result, a substitution
-/// living in a brace alternative other than the one determining the
-/// command name) via `fold_optional_decision` — the two are Allow-
-/// transparent/Ask/Block-propagating in exactly the same way, so one floor
-/// serves both. Unlike the other floors here, this one is applied at
-/// MULTIPLE call sites (rules 1/2/6a/6c/6e's early returns and the ordinary
-/// blocklist match, plus [`fold_floors`] itself) rather than just once
-/// before `fold_floors` — see [`evaluate_simple_command_core`]'s
-/// `substitution_result` binding for why (issue #445): this function has
-/// several early returns that would otherwise never see an argument-
-/// position substitution at all (`bash -c 'ls' $(rm -rf /)` was silently
-/// Allowed before this floor existed). Reason text mirrors [`fold_floors`]'s
-/// own `substitution_result` messaging so a floored verdict reads the same
-/// regardless of which return path triggered it.
-const SUBSTITUTION_FLOOR_BLOCK_REASON: &str = "an argument-position command/backquote or \
-    process substitution recurses to a command that is itself blocked";
-const SUBSTITUTION_FLOOR_ASK_REASON: &str = "an argument-position command/backquote or process \
-    substitution's inner command could not be resolved to Allow";
-
-fn apply_substitution_floor(
-    verdict: Verdict,
-    floor: Option<(Decision, Option<DenyMessage>)>,
-) -> Verdict {
-    let Some((floor_decision, floor_deny_message)) = floor else {
-        return verdict;
-    };
-    if verdict.decision() >= floor_decision {
-        return verdict;
-    }
-    // Issue #495 review (round 2): captured before `verdict` is consumed
-    // below. Preferring the PRE-FLOOR verdict's own message when it has
-    // one, falling back to the floor's own message only when it doesn't --
-    // the opposite priority from an earlier round of this fix, corrected
-    // after review proved it backwards: `fold_floors` (the sibling path
-    // that also consumes this same substitution_result data, its own
-    // `substitution_deny_message`) ranks the substitution floor's own
-    // message LOWEST priority, below every other structural message, and
-    // this site's STRICT-lift path (the only path where this function
-    // ever actually swaps in the floor's message — see the early return
-    // just above) must match that priority for the same reason. This does
-    // NOT claim every apply_*_floor call site in this file shares this
-    // exact contract: a same-decision TIE (`verdict.decision() ==
-    // floor_decision`, returned unmodified by the early check above,
-    // never reaching this line at all) is a distinct, pre-existing
-    // question this fix doesn't touch. `reason` below still folds the
-    // pre-floor verdict's reason text in first (`"{existing}; {floor_reason}"`), consistent
-    // with the pre-floor verdict's message also taking priority: the
-    // governing DECISION comes from the floor, but the more specific,
-    // already-reported reason/message pair is the pre-floor verdict's own.
-    let verdict_deny_message = verdict.deny_message().cloned();
-    let argv = verdict.normalized_argv().to_vec();
-    let floor_reason = match floor_decision {
-        Decision::Block => SUBSTITUTION_FLOOR_BLOCK_REASON,
-        Decision::Ask | Decision::Allow => SUBSTITUTION_FLOOR_ASK_REASON,
-    };
-    let reason = match verdict.reason() {
-        Some(existing) => format!("{}; {floor_reason}", existing.as_str()),
-        None => floor_reason.to_string(),
-    };
-    match floor_decision {
-        Decision::Block => Verdict::block(Reason::new(reason), argv, None),
-        Decision::Ask | Decision::Allow => Verdict::ask(Reason::new(reason), argv),
-    }
-    .with_deny_message(verdict_deny_message.or(floor_deny_message))
 }
 
 /// Applies rule 8's opaque-unresolvable-kind floor
@@ -5572,32 +5410,6 @@ fn apply_leftover_command_floor(
         None => floor_reason,
     };
     Verdict::block(Reason::new(reason), argv, Some(rule_id)).with_deny_message(deny_message)
-}
-
-/// Combines two rule-3-shaped floors (issue #77:
-/// [`evaluate_argument_substitutions`]'s and
-/// [`evaluate_leftover_alternative_substitutions`]'s) into one, the same
-/// worst-of-`Some` semantics [`fold_worst`] uses for [`Verdict`]s — `None`
-/// means "nothing to recurse", not "Allow", so it must never win over a
-/// `Some` from the other side, and on a same-decision tie the first
-/// (`a`) wins, mirroring `fold_worst`'s own tie contract. Only `a`
-/// ([`evaluate_argument_substitutions`]) carries a `deny_message` (issue
-/// #495); `b` ([`evaluate_leftover_alternative_substitutions`]) is still
-/// flattened to a bare `Decision` at its own call site — a separate,
-/// still-open instance of `Verdict::with_deny_message`'s "Known remaining
-/// gaps" — so it's paired with `None` here rather than widening this
-/// fix's scope to a site issue #495 doesn't cover.
-fn fold_optional_decision(
-    a: Option<(Decision, Option<DenyMessage>)>,
-    b: Option<Decision>,
-) -> Option<(Decision, Option<DenyMessage>)> {
-    let b = b.map(|decision| (decision, None));
-    match (a, b) {
-        (None, None) => None,
-        (Some(a), None) => Some(a),
-        (None, Some(b)) => Some(b),
-        (Some(a), Some(b)) => Some(if a.0 >= b.0 { a } else { b }),
-    }
 }
 
 /// The result of [`scan_expansion_positions`] (rule 11): whether any
@@ -7020,40 +6832,6 @@ fn has_argument_position_bare_var(argument_words: &[Word]) -> bool {
 // ---------------------------------------------------------------------
 // Small pure helpers
 // ---------------------------------------------------------------------
-
-/// Picks the worse of two [`Verdict`]s by [`Decision`] (rule: worst-wins,
-/// plan.md §6 item 7). On a tie, keeps `current`'s argv/reason/deny_message —
-/// the earlier-encountered simple command's, per this module's documented
-/// "normalized_argv = the simple command that produced the worst decision"
-/// contract (first one wins a tie, not the last). A `current` with no
-/// `deny_message` of its own does NOT borrow `new`'s: borrowing across two
-/// verdicts risks pairing one verdict's reason/matched_rule with a
-/// DIFFERENT verdict's remediation hint, which is unsafe both for
-/// rule-matched Asks (no rule-origin tracking exists on `VerdictDetail::Ask`
-/// to guard against it) and structural Asks (the messages describe
-/// different simple commands). See issue #495's follow-up for a
-/// message-preserving fix at the actual origin
-/// (`evaluate_argument_substitutions`) instead of at this fold.
-fn fold_worst(current: Verdict, new: Verdict) -> Verdict {
-    match new.decision().cmp(&current.decision()) {
-        std::cmp::Ordering::Greater => new,
-        std::cmp::Ordering::Less => current,
-        std::cmp::Ordering::Equal => current,
-    }
-}
-
-/// Folds an always-`Ask` floor's reason (one of the `scan_redirect_*_floor`
-/// scanners) into `worst` via [`fold_worst`]: a tie keeps `worst`'s own
-/// reason rather than concatenating (unlike [`apply_redirect_ask_floor`]),
-/// matching how a compound command's attached-redirect checks have always
-/// combined. A `None` floor returns `worst` untouched.
-fn fold_ask_floor(worst: Verdict, floor_reason: Option<String>) -> Verdict {
-    let Some(floor_reason) = floor_reason else {
-        return worst;
-    };
-    let argv = worst.normalized_argv().to_vec();
-    fold_worst(worst, Verdict::ask(Reason::new(floor_reason), argv))
-}
 
 /// Whether `pieces` — one brace-alternation member's piece sequence —
 /// contains a command/backquote or process substitution anywhere in its
