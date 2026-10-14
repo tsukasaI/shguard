@@ -47,8 +47,9 @@
 //! `rules/blocklist.toml`/an operator-supplied override file and hands the
 //! contents to `crate::config_loader`, which builds the specs.
 //!
-//! `analyze()` (`src/lib.rs`) calls [`Rules::embedded`]/[`Rules::match_command`]/
-//! [`Rules::match_pipeline`] via `src/gate.rs`, always with an empty
+//! `analyze()` (`src/lib.rs`) loads [`Rules::embedded`] and hands it to
+//! `src/gate.rs`, which calls [`Rules::match_command`]/
+//! [`Rules::match_pipeline`], with the embedded (currently empty)
 //! `Allowlist`/no `ask_rules`. `analyze_with_policy()` additionally
 //! threads [`Rules::match_ask`], the [allowlist](#allowlist) section, and
 //! whatever [`UserConfig`]/[`merge_user_config`] contributed — see
@@ -7188,10 +7189,6 @@ pub(crate) struct PipelineRuleSpec {
     pub(crate) decision: Option<String>,
     pub(crate) sources: Vec<String>,
     pub(crate) sinks: Vec<String>,
-    /// `deny_unknown_fields` means a config using this field fails to load
-    /// on an shguard built before issue #268 — fail-closed, so a rule
-    /// author cannot get a silently unconstrained sink out of a version
-    /// mismatch.
     pub(crate) sink_required_flags: Vec<String>,
 }
 

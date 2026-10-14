@@ -190,9 +190,10 @@ tooling per `coding-guidelines/patterns/tooling.md`."*
   serde-free typed constructors; `config_loader.rs` owns the serde DTOs and
   TOML loading. `gate.rs` calls `parser::parse` directly; the brush
   parser stays sealed inside the parser module.
-- **Wiring in one composition root**: `src/lib.rs` wires the stages together
-  (it hands the `fs_canonicalizer` adapter to `rules`' symlink-resolution
-  port), and `src/bin/shguard.rs` is the only
+- **Wiring in one composition root**: `src/lib.rs` wires
+  the stages together (it loads the embedded policy and hands it to
+  `gate::analyze`, and hands the `fs_canonicalizer` adapter to `rules`'
+  symlink-resolution port), and `src/bin/shguard.rs` is the only
   place that connects stdin → adapter → `analyze` → stdout.
 - **Tooling** (per `patterns/tooling.md`): rustfmt, clippy (deny warnings),
   pre-commit hooks, gitleaks — configured in the scaffolding issue.

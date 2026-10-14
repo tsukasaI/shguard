@@ -80,8 +80,7 @@ struct CommandRuleDto {
     value_flags: Vec<String>,
     #[serde(default)]
     attached_value_flags: Vec<String>,
-    /// `None` when the key is absent; `Some(vec![])` (an explicit empty
-    /// list) is rejected at load.
+    /// See [`CommandRuleSpec::target_flags`].
     #[serde(default)]
     target_flags: Option<Vec<String>>,
     #[serde(default)]
@@ -98,15 +97,7 @@ struct TargetDto {
     normalized_basename: Option<String>,
     url_host: Option<String>,
     strip: Option<String>,
-    /// Opt-in ASCII case-folded comparison for `normalized`/
-    /// `normalized_prefix` (issue #449): used by `crate::config`'s
-    /// generated self-protection rules AND `rules/blocklist.toml`'s own
-    /// static `~/.config/shguard`-literal self-protection rules, on a
-    /// case-insensitive filesystem (macOS APFS by default), where a
-    /// re-cased spelling of the config path resolves to the exact same
-    /// on-disk file. Not documented as ordinary rule-authoring syntax in
-    /// the README — a rule author reaching for this should know their own
-    /// target path lives on a case-insensitive volume.
+    /// See [`TargetSpec::case_insensitive`].
     #[serde(default)]
     case_insensitive: bool,
 }
