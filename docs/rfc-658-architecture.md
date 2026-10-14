@@ -203,7 +203,7 @@ pub fn decide(evidence: &[Evidence], config: &PolicyConfig, ctx: &HookContext) -
   - watchdog trip (`ResourceLimit`).
 - **`AnalysisCtx`** `{ rules, depth, env, cwd }` carries no parse
   function. The injected parse function (a `ParseFn` type threaded through
-  36 signatures) was deleted per #636: `gate` calls `parser::parse`
+  38 signatures) was deleted per #636: `gate` calls `parser::parse`
   directly, and brush stays sealed inside the parser module, so the
   injection was over-abstraction. The context struct addresses #619's
   `too_many_arguments` item.

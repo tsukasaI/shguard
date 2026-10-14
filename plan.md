@@ -185,13 +185,14 @@ tooling per `coding-guidelines/patterns/tooling.md`."*
   `NormalizedWord` cannot be simultaneously resolved and unresolvable; a
   `Verdict::Block` without a reason is unconstructible.
 - **Dependencies point inward**: `rules`/`gate`/`normalize` depend on core AST
-  types, never on the parser crate or on serde/hook JSON. `rules.rs` exposes
+  types and on `parser.rs`'s `parse`/`ParseError` surface, never on the brush
+  crate or on serde/hook JSON. `rules.rs` exposes
   serde-free typed constructors; `config_loader.rs` owns the serde DTOs and
   TOML loading. `gate.rs` calls `parser::parse` directly; the brush
   parser stays sealed inside the parser module.
 - **Wiring in one composition root**: `src/lib.rs` wires the stages together
   (it hands the `fs_canonicalizer` adapter to `rules`' symlink-resolution
-  port; `gate` calls `parser::parse` directly), and `src/bin/shguard.rs` is the only
+  port), and `src/bin/shguard.rs` is the only
   place that connects stdin → adapter → `analyze` → stdout.
 - **Tooling** (per `patterns/tooling.md`): rustfmt, clippy (deny warnings),
   pre-commit hooks, gitleaks — configured in the scaffolding issue.
@@ -206,7 +207,8 @@ shguard/
 ├── Cargo.toml                # lib + [[bin]] shguard
 ├── coding-guidelines/        # git submodule
 ├── src/
-│   ├── lib.rs                # analyze() — public API, composition of stages│   ├── verdict.rs            # Decision, Verdict, reason types
+│   ├── lib.rs                # analyze() — public API, composition of stages
+│   ├── verdict.rs            # Decision, Verdict, reason types
 │   ├── parser.rs             # crate adapter → shguard AST
 │   ├── normalize.rs          # static folding → NormalizedWord
 │   ├── rules.rs              # typed rule sets + argv matching (no serde/TOML)
