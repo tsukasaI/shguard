@@ -6985,8 +6985,10 @@ fn scan_backtick_span<'a>(bytes: &[u8], body: &'a str, start: usize) -> Option<(
 /// Also accepts a word whose only piece is a double-quoted region holding
 /// exactly one such expansion (`"$X"`, `"${X}"`), reported with `true`: the
 /// quotes only suppress field splitting, so it names one argv word rather
-/// than an IFS-split sequence. `"$@"` is the exception: it expands to zero or
-/// many words, so it is never a single-word expansion. Returns
+/// than an IFS-split sequence. `"$@"` is reported like any other name even
+/// though it expands to zero or many words; that is harmless here only because
+/// no same-line value can ever be recorded for `@`, so it floors to Ask
+/// downstream. Returns
 /// `(name, quoted)`.
 fn bare_parameter_name(word: &Word) -> Option<(&str, bool)> {
     match word.0.as_slice() {
@@ -16882,17 +16884,21 @@ mod tests {
 
     #[test]
     fn git_alias_smuggling_through_quoted_variables_is_not_allowed() {
-        // Issue #600: quoted and unquoted spellings of a variable-carried
-        // `-c` value must agree.
+        // Issue #600: a variable-carried `-c` value is unresolvable to the
+        // alias scan (Ask), quoted or not; only the literal spelling Blocks.
         for command in [
             r#"A='alias.x=!id'; git -c "$A" status"#,
             r#"A='alias.x=!id'; git -c $A status"#,
             r#"A='alias.x=!id'; git -c "${A}" status"#,
             r#"K=alias.x; git -c "$K=!id" status"#,
-            r#"git -c "alias.x=!id" status"#,
         ] {
-            assert_ne!(decide(command).decision(), Decision::Allow, "{command}");
+            assert_decision(command, Decision::Ask);
         }
+        assert_eq!(
+            decide(r#"A='alias.x=!id'; git -c "$A" status"#).decision(),
+            decide("A='alias.x=!id'; git -c $A status").decision()
+        );
+        assert_decision(r#"git -c "alias.x=!id" status"#, Decision::Block);
     }
 
     #[test]
