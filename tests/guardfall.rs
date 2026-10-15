@@ -2463,6 +2463,46 @@ fn guardfall_git_config_command_key_cases() {
     }
 }
 
+/// Issue #696: osascript inline code (rule 6b), and `script` / GNU
+/// `parallel`, which exec their arguments.
+const OSASCRIPT_SCRIPT_PARALLEL_CASES: &[(&str, Decision)] = &[
+    ("osascript -e 'do shell script \"rm -rf ~\"'", Decision::Ask),
+    ("osascript -l JavaScript -e 1", Decision::Ask),
+    ("osascript -s o -e 1", Decision::Ask),
+    ("osascript -x script.scpt", Decision::Ask),
+    ("osascript script.scpt", Decision::Allow),
+    ("osascript -l JavaScript script.js", Decision::Allow),
+    ("script -q /dev/null rm -rf /", Decision::Block),
+    ("script -c 'rm -rf /'", Decision::Block),
+    ("script -qc 'rm -rf /' /dev/null", Decision::Block),
+    ("script --command='rm -rf /' /dev/null", Decision::Block),
+    ("script -t 0 -q out.txt rm -rf /", Decision::Block),
+    ("script -q out.txt", Decision::Allow),
+    ("script -q /dev/null ls", Decision::Allow),
+    ("script -c 'ls' out.txt", Decision::Allow),
+    // An unmodeled flag could swallow the typescript operand.
+    ("script -Z val out.txt rm -rf /", Decision::Ask),
+    ("script -F out.txt ls", Decision::Ask),
+    ("parallel rm -rf ::: /", Decision::Ask),
+    ("parallel ::: 'rm -rf /'", Decision::Ask),
+    ("parallel -j4 echo ::: a b", Decision::Ask),
+    ("parallel --version", Decision::Allow),
+    ("parallel --help", Decision::Allow),
+];
+
+#[test]
+fn guardfall_osascript_script_parallel_cases() {
+    for (command, expected) in OSASCRIPT_SCRIPT_PARALLEL_CASES {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
 const DECISION_TABLES: &[&[(&str, Decision)]] = &[
     HEADLINE_CASES,
     CLASS_E_CASES,
@@ -2488,6 +2528,7 @@ const DECISION_TABLES: &[&[(&str, Decision)]] = &[
     SED_SCRIPT_WRITE_EXEC_CASES,
     PARAMETER_EXPANSION_OPERAND_CASES,
     GIT_CONFIG_COMMAND_KEY_CASES,
+    OSASCRIPT_SCRIPT_PARALLEL_CASES,
 ];
 
 #[test]

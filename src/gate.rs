@@ -375,6 +375,7 @@ const DENY_MSG_BARE_VAR: &str =
 const DENY_MSG_INLINE_INTERPRETER: &str = "Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f \
      prog.awk`) — inline interpreter code is never inspected.";
 const DENY_MSG_SED_SCRIPT: &str = "Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected. A variable file operand (`sed -n p \"$file\"`) cannot be told apart from a script word, so expand it to a literal file path.";
+const DENY_MSG_PARALLEL: &str = "Run the commands directly or with a shell loop (`for x in ...; do cmd \"$x\"; done`) so each argv is inspectable; GNU `parallel` builds its command lines from templates and `:::` sources that are never inspected.";
 const DENY_MSG_COMMAND_SUBSTITUTION: &str =
     "Run the substitution first, then call the resulting binary literally.";
 const DENY_MSG_UNRESOLVED_TARGET: &str = "Resolve the target literally so the rule can check it.";
@@ -3184,6 +3185,33 @@ fn evaluate_simple_command_core(
                         DENY_MSG_SED_SCRIPT,
                     )
                 })
+        });
+
+    // Issue #696: GNU `parallel` execs the command template it is given
+    // (`parallel rm -rf ::: /`), and the template and `:::` sources are
+    // not modeled, so anything beyond the version/help probes floors to Ask.
+    let interpreter_code_floor: Option<(String, &'static str)> =
+        interpreter_code_floor.or_else(|| {
+            let (name, rest_words) = effective?;
+            // Bare `parallel` reads its command lines from stdin, so an
+            // empty argument list is not a probe.
+            let probe_only = !rest_words.is_empty()
+                && rest_words.iter().all(|word| {
+                    matches!(
+                        word.resolution(),
+                        Resolution::Resolved(text)
+                            if matches!(text.as_str(), "--version" | "-V" | "--help" | "-h")
+                    )
+                });
+            (crate::rules::strip_version_suffix(name) == "parallel" && !probe_only).then(|| {
+                (
+                    format!(
+                        "`{name}` runs the command template and `:::` arguments it is given, \
+                         which cannot be introspected"
+                    ),
+                    DENY_MSG_PARALLEL,
+                )
+            })
         });
 
     // Rule 7: any `$IFS`-derived word floors to Ask on a blocklist miss.
@@ -7425,6 +7453,21 @@ const LUA_GRAMMAR: InlineGrammar = InlineGrammar {
     long_plain_prefixes: &[],
 };
 
+/// `osascript [-l language] [-i] [-s flags] [-e statement | programfile]`.
+const OSASCRIPT_GRAMMAR: InlineGrammar = InlineGrammar {
+    code_chars: "e",
+    plain_chars: "i",
+    value_chars: "ls",
+    attached_chars: "",
+    required_attached_chars: "",
+    operand_chars: "",
+    cluster: false,
+    long_code: &[],
+    long_plain: &[],
+    long_value: &[],
+    long_plain_prefixes: &[],
+};
+
 /// The option grammar of the non-shell interpreter `name` (rule 6b), or
 /// `None` if `name` is not one of the interpreters this module knows about.
 /// `name` must already be `strip_version_suffix` of an `effective_command`
@@ -7439,6 +7482,7 @@ fn inline_code_grammar(name: &str) -> Option<&'static InlineGrammar> {
         "ruby" => Some(&RUBY_GRAMMAR),
         "php" => Some(&PHP_GRAMMAR),
         "lua" => Some(&LUA_GRAMMAR),
+        "osascript" => Some(&OSASCRIPT_GRAMMAR),
         _ => None,
     }
 }
@@ -13790,6 +13834,25 @@ mod tests {
             "ruby -I \"$d\" -e 'x'",
         ] {
             assert_interpreter_floor(command, INLINE_FLAG_REASON, DENY_MSG_INLINE_INTERPRETER);
+        }
+    }
+
+    // Issue #696: osascript's `-e` floors like the other interpreters, and
+    // GNU `parallel` carries its own deny message.
+    #[test]
+    fn interpreter_code_osascript_and_parallel_floors_carry_deny_messages() {
+        for (command, deny_message) in [
+            ("osascript -e 'beep'", DENY_MSG_INLINE_INTERPRETER),
+            ("osascript -l JavaScript -e 1", DENY_MSG_INLINE_INTERPRETER),
+            ("parallel rm -rf ::: /", super::DENY_MSG_PARALLEL),
+        ] {
+            let verdict = decide(command);
+            assert_eq!(verdict.decision(), Decision::Ask, "{command:?}");
+            assert_eq!(
+                verdict.deny_message().map(super::DenyMessage::as_str),
+                Some(deny_message),
+                "{command:?}"
+            );
         }
     }
 

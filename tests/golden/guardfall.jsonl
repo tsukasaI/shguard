@@ -501,6 +501,17 @@
 {"command":"mv ~/.[!.]?* /tmp","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"mv ~/.config/* /tmp","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"mv ~/Downloads/*.pdf ~/docs/","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"osascript -e 'do shell script \"rm -rf ~\"'","decision":"Ask","deny_message":"Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f prog.awk`) — inline interpreter code is never inspected.","matched_rule":null}
+{"command":"osascript -l JavaScript -e 1","decision":"Ask","deny_message":"Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f prog.awk`) — inline interpreter code is never inspected.","matched_rule":null}
+{"command":"osascript -l JavaScript script.js","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"osascript -s o -e 1","decision":"Ask","deny_message":"Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f prog.awk`) — inline interpreter code is never inspected.","matched_rule":null}
+{"command":"osascript -x script.scpt","decision":"Ask","deny_message":"Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f prog.awk`) — inline interpreter code is never inspected.","matched_rule":null}
+{"command":"osascript script.scpt","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"parallel --help","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"parallel --version","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"parallel -j4 echo ::: a b","decision":"Ask","deny_message":"Run the commands directly or with a shell loop (`for x in ...; do cmd \"$x\"; done`) so each argv is inspectable; GNU `parallel` builds its command lines from templates and `:::` sources that are never inspected.","matched_rule":null}
+{"command":"parallel ::: 'rm -rf /'","decision":"Ask","deny_message":"Run the commands directly or with a shell loop (`for x in ...; do cmd \"$x\"; done`) so each argv is inspectable; GNU `parallel` builds its command lines from templates and `:::` sources that are never inspected.","matched_rule":null}
+{"command":"parallel rm -rf ::: /","decision":"Ask","deny_message":"Run the commands directly or with a shell loop (`for x in ...; do cmd \"$x\"; done`) so each argv is inspectable; GNU `parallel` builds its command lines from templates and `:::` sources that are never inspected.","matched_rule":null}
 {"command":"r''m -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"rm --recursive --force ~/.*","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"rm -Rf .","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
@@ -727,6 +738,16 @@
 {"command":"rsync -a src/ /dev/sda","decision":"Block","deny_message":null,"matched_rule":"rsync-write-device"}
 {"command":"rsync -a src/ /dev/shm/../sda","decision":"Block","deny_message":null,"matched_rule":"rsync-write-device"}
 {"command":"rsync -a src/ /dev/shm/scratch","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"script --command='rm -rf /' /dev/null","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"script -F out.txt ls","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"script -Z val out.txt rm -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"script -c 'ls' out.txt","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"script -c 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"script -q /dev/null ls","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"script -q /dev/null rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"script -q out.txt","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"script -qc 'rm -rf /' /dev/null","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"script -t 0 -q out.txt rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"sed \"s/$a/$b/\" f","decision":"Ask","deny_message":"Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected. A variable file operand (`sed -n p \"$file\"`) cannot be told apart from a script word, so expand it to a literal file path.","matched_rule":null}
 {"command":"sed $(echo -i ~/.config/shguard/config.toml)","decision":"Ask","deny_message":"Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected. A variable file operand (`sed -n p \"$file\"`) cannot be told apart from a script word, so expand it to a literal file path.","matched_rule":null}
 {"command":"sed $(printf -- \"-i /home/user/.config/shguard/config.toml\")","decision":"Ask","deny_message":"Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected. A variable file operand (`sed -n p \"$file\"`) cannot be told apart from a script word, so expand it to a literal file path.","matched_rule":null}
