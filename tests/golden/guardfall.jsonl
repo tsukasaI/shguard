@@ -796,11 +796,13 @@
 {"command":"trap 'rm -rf /' EXIT","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"trap 'rm -rf /' INT TERM EXIT","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"trap 'rm -rf ~' EXIT","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"trap 'ñ; rm -rf ~' EXIT","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"trap - EXIT","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"trap -- 'rm -rf /' INT","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"trap -l","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"trap -p","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"trap -p 'rm -rf /' EXIT","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"trap é EXIT","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"truncate --reference /dev/null /important","decision":"Block","deny_message":null,"matched_rule":"truncate-reference"}
 {"command":"truncate --reference=/dev/null /important","decision":"Block","deny_message":null,"matched_rule":"truncate-reference"}
 {"command":"truncate --reference=somefile /important","decision":"Block","deny_message":null,"matched_rule":"truncate-reference"}

@@ -4880,9 +4880,9 @@ fn trap_action_index(rest_words: &[NormalizedWord]) -> Option<usize> {
             // Not any `-`-prefixed word: zsh's `trap` has no options, so
             // `trap '-x; rm -rf ~' EXIT` installs `-x; rm -rf ~` as the action.
             Resolution::Resolved(v)
-                if v.len() > 1
-                    && v[1..].chars().all(|c| matches!(c, 'l' | 'p' | 'P' | 'a'))
-                    && v.starts_with('-') =>
+                if v.strip_prefix('-').is_some_and(|flags| {
+                    !flags.is_empty() && flags.chars().all(|c| matches!(c, 'l' | 'p' | 'P' | 'a'))
+                }) =>
             {
                 index += 1;
             }
@@ -8071,6 +8071,8 @@ struct FishScan {
     command_values: Vec<String>,
     /// Resolved `-C`/`--init-command` values, in order.
     init_values: Vec<String>,
+    /// Indices (into the scanned words) of the words carrying `-c`/`-C` code.
+    code_words: Vec<usize>,
     /// A `-c` flag was present, even if its value was missing or unreadable.
     has_command_flag: bool,
     /// A non-option operand (script file) was seen.
@@ -8174,6 +8176,7 @@ fn scan_fish_invocation(words: &[NormalizedWord]) -> FishScan {
         // The value is the attached part, or else the next word — taken
         // unconditionally, even when it looks like another flag: `fish
         // --command -c` really runs the code string `-c`.
+        let value_word = if attached.is_some() { idx } else { idx + 1 };
         let value = match attached {
             Some(value) => {
                 idx += 1;
@@ -8200,13 +8203,17 @@ fn scan_fish_invocation(words: &[NormalizedWord]) -> FishScan {
         match kind {
             FishOptKind::InlineCode => {
                 scan.has_command_flag = true;
+                scan.code_words.push(value_word);
                 match value {
                     Some(code) => scan.command_values.push(code),
                     None => scan.unreadable_code_value = true,
                 }
             }
             FishOptKind::InitCode => match value {
-                Some(code) => scan.init_values.push(code),
+                Some(code) => {
+                    scan.code_words.push(value_word);
+                    scan.init_values.push(code);
+                }
                 None => scan.unreadable_code_value = true,
             },
             FishOptKind::TakesValue | FishOptKind::Boolean => {}
@@ -9492,22 +9499,7 @@ fn recursed_script_slot(argv: &[NormalizedWord]) -> Vec<usize> {
                 return (start..end).collect();
             }
             // Only the words carrying code, so trailing operands still compose.
-            let mut values: Vec<&str> = scan
-                .command_values
-                .iter()
-                .chain(&scan.init_values)
-                .map(String::as_str)
-                .collect();
-            return (start..end)
-                .filter(|&i| match argv[i].resolution() {
-                    Resolution::Resolved(s) => values
-                        .iter()
-                        .position(|v| *v == s.as_str())
-                        .map(|at| values.swap_remove(at))
-                        .is_some(),
-                    Resolution::Unresolvable(_) => false,
-                })
-                .collect();
+            return scan.code_words.iter().map(|i| start + i).collect();
         }
         return match scan_for_flag(rest, is_dash_c_token) {
             FlagScan::Found(flag_index) => match locate_dash_c_script(rest, normalized, flag_index)
@@ -11140,6 +11132,8 @@ mod tests {
         assert_eq!(slot(&["trap", "-p", "x", "EXIT"]), vec![2]);
         assert_eq!(slot(&["trap", "-x; y", "EXIT"]), vec![1]);
         assert_eq!(slot(&["fish", "-c", "x", "rel"]), vec![2]);
+        assert_eq!(slot(&["fish", "-d", "x", "-c", "x"]), vec![4]);
+        assert_eq!(slot(&["trap", "ñ; y", "EXIT"]), vec![1]);
         assert!(slot(&["ls", "-c", "x"]).is_empty());
     }
 

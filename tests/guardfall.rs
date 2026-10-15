@@ -924,6 +924,9 @@ const TRAP_CASES: &[(&str, Decision)] = &[
     ("trap -p 'rm -rf /' EXIT", Decision::Block),
     ("trap 'rm -rf /' INT TERM EXIT", Decision::Block),
     ("trap $'rm -rf /' EXIT", Decision::Block),
+    // Non-ASCII second byte must not be byte-sliced.
+    ("trap 'ñ; rm -rf ~' EXIT", Decision::Block),
+    ("trap é EXIT", Decision::Allow),
 ];
 
 /// Issue #693: `trap`'s action string is shell code, recursed like `eval`.
