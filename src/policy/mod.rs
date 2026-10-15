@@ -131,9 +131,10 @@ fn resolve_ask_outcome(config: &PolicyConfig, ctx: &HookContext) -> Decision {
 /// The reason line and the agent-facing guidance for a config-load failure
 /// (issue #630). The path is `Debug`-quoted and sits on the reason's first
 /// line, ahead of the loader's error (which can itself span lines), so it
-/// stays on one line whatever the path contains. The guidance steers the
-/// agent to a non-Bash tool: every Bash call is refused or held until the
-/// file is fixed, so Bash cannot be the way to fix it.
+/// stays on one line whatever the path contains. The guidance points the
+/// agent to the user first: every call shguard gates is refused or held until
+/// the file is fixed, so Bash cannot be the way to fix it, and the agent must
+/// not rewrite shguard's own config unprompted.
 fn config_unavailable_messages(path: Option<&Path>, error: &str) -> (String, String) {
     match path {
         Some(path) => (
@@ -142,9 +143,11 @@ fn config_unavailable_messages(path: Option<&Path>, error: &str) -> (String, Str
                  evaluate any command until this is fixed: {error}"
             ),
             format!(
-                "shguard cannot load its config file {path:?}, so every Bash call is refused or \
-                 held for confirmation until that file is fixed. Fix it with a non-Bash tool \
-                 such as Edit or Write; Bash cannot repair it."
+                "shguard cannot load its config file {path:?} (or a file it references), so \
+                 every call shguard gates is refused or held for confirmation until it is \
+                 fixed. Bash cannot repair it: ask the user to fix it (for a missing file, run \
+                 `shguard init` in their own terminal); only if the user asks you to edit it, \
+                 use a non-Bash tool such as Edit or Write."
             ),
         ),
         None => (
@@ -152,10 +155,10 @@ fn config_unavailable_messages(path: Option<&Path>, error: &str) -> (String, Str
                 "shguard: user config failed to load (no config file path could be resolved); \
                  refusing to evaluate any command until this is fixed: {error}"
             ),
-            "shguard cannot load its config, so every Bash call is refused or held for \
-             confirmation until that is fixed. No config file path could be resolved; check \
-             SHGUARD_CONFIG, XDG_CONFIG_HOME and HOME. Fix the problem with a non-Bash tool \
-             such as Edit or Write; Bash cannot repair it."
+            "shguard cannot load its config, so every call shguard gates is refused or held \
+             for confirmation until that is fixed. No config file path could be resolved. \
+             Bash cannot repair it: ask the user to set SHGUARD_CONFIG, XDG_CONFIG_HOME and \
+             HOME to valid UTF-8 values and restart the session."
                 .to_string(),
         ),
     }
@@ -359,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn config_unavailable_names_the_path_and_points_to_a_non_bash_fix() {
+    fn config_unavailable_names_the_path_and_points_to_the_user() {
         let verdict = decide_one_item(
             Evidence::ConfigUnavailable {
                 path: Some(PathBuf::from("/cfg/shguard/config.toml")),
@@ -373,8 +376,10 @@ mod tests {
         assert!(!reason.contains('\n'), "{reason}");
         let guidance = verdict.deny_message().map_or("", DenyMessage::as_str);
         assert!(guidance.contains("/cfg/shguard/config.toml"), "{guidance}");
-        assert!(guidance.contains("non-Bash tool"), "{guidance}");
-        assert!(guidance.contains("every Bash call"), "{guidance}");
+        assert!(guidance.contains("Bash cannot repair it"), "{guidance}");
+        assert!(guidance.contains("ask the user"), "{guidance}");
+        assert!(guidance.contains("`shguard init`"), "{guidance}");
+        assert!(guidance.contains("every call shguard gates"), "{guidance}");
     }
 
     #[test]
@@ -390,7 +395,10 @@ mod tests {
         let reason = verdict.reason().map_or("", Reason::as_str);
         assert!(reason.contains("no config file path"), "{reason}");
         let guidance = verdict.deny_message().map_or("", DenyMessage::as_str);
-        assert!(guidance.contains("non-Bash tool"), "{guidance}");
+        assert!(guidance.contains("Bash cannot repair it"), "{guidance}");
+        assert!(guidance.contains("ask the user"), "{guidance}");
+        assert!(guidance.contains("valid UTF-8"), "{guidance}");
+        assert!(!guidance.contains("Edit or Write"), "{guidance}");
     }
 
     #[test]
