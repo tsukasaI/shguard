@@ -873,6 +873,93 @@ fn shguard_config_pointing_at_invalid_toml_fails_closed() {
     assert!(!permission_reason(&output).is_empty());
 }
 
+/// Issue #630: a config-load failure names the consulted file on one line
+/// and tells the agent that Bash cannot repair it and to ask the user.
+fn assert_names_config_path_and_asks_the_user(output: &Value, path: &std::path::Path) {
+    let reason = permission_reason(output);
+    let path = path.to_str().expect("test path should be UTF-8");
+    let first_line = reason.lines().next().unwrap_or_default();
+    assert!(
+        first_line.contains(&format!("config file: {path:?}")),
+        "the reason's first line should name the consulted config path: {reason}"
+    );
+    let guidance = additional_context(output);
+    assert!(
+        guidance.contains(path),
+        "guidance should name the path: {guidance}"
+    );
+    assert!(guidance.contains("Bash cannot repair it"), "{guidance}");
+    assert!(guidance.contains("ask the user"), "{guidance}");
+    assert!(guidance.contains("every call shguard gates"), "{guidance}");
+}
+
+#[test]
+fn config_failure_via_shguard_config_names_the_path_and_asks_the_user() {
+    let (_dir, config_path) = write_config("this is not [valid toml");
+
+    let output = run_hook(
+        &bash_command("echo hi"),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "ask");
+    assert_names_config_path_and_asks_the_user(&output, &config_path);
+    assert!(permission_reason(&output).contains("invalid user config"));
+}
+
+#[test]
+fn config_failure_under_strict_config_denies_with_the_same_guidance() {
+    let (_dir, config_path) = write_config("this is not [valid toml");
+
+    let output = run_hook(
+        &bash_command("echo hi"),
+        &[
+            ("SHGUARD_CONFIG", config_path.to_str().unwrap()),
+            ("SHGUARD_STRICT_CONFIG", "1"),
+        ],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+    assert_names_config_path_and_asks_the_user(&output, &config_path);
+}
+
+#[test]
+fn config_failure_via_xdg_config_home_names_the_xdg_path() {
+    let xdg = tempdir().expect("tempdir should create");
+    let home = tempdir().expect("tempdir should create");
+    let config_dir = xdg.path().join("shguard");
+    fs::create_dir_all(&config_dir).expect("config dir should create");
+    let config_path = config_dir.join("config.toml");
+    fs::write(&config_path, "this is not [valid toml").expect("config file should write");
+
+    let output = run_hook(
+        &bash_command("echo hi"),
+        &[
+            ("XDG_CONFIG_HOME", xdg.path().to_str().unwrap()),
+            ("HOME", home.path().to_str().unwrap()),
+        ],
+    );
+    assert_eq!(permission_decision(&output), "ask");
+    assert_names_config_path_and_asks_the_user(&output, &config_path);
+}
+
+#[test]
+fn config_failure_via_default_home_path_names_the_default_path() {
+    let home = tempdir().expect("tempdir should create");
+    let config_path = home
+        .path()
+        .join(".config")
+        .join("shguard")
+        .join("config.toml");
+
+    let output = run_hook(
+        &bash_command("echo hi"),
+        &[("HOME", home.path().to_str().unwrap())],
+    );
+    assert_eq!(permission_decision(&output), "ask");
+    assert_names_config_path_and_asks_the_user(&output, &config_path);
+    assert!(permission_reason(&output).contains("shguard init"));
+    assert!(additional_context(&output).contains("`shguard init`"));
+}
+
 #[test]
 fn shguard_config_pointing_at_missing_file_fails_closed() {
     let dir = tempdir().expect("tempdir should create");
@@ -889,6 +976,7 @@ fn shguard_config_pointing_at_missing_file_fails_closed() {
     // "never configured, run shguard init" case.
     assert!(permission_reason(&output).contains("could not read"));
     assert!(!permission_reason(&output).contains("shguard init"));
+    assert_names_config_path_and_asks_the_user(&output, &missing_path);
 }
 
 /// Issue #440: `SHGUARD_STRICT_CONFIG` upgrades a config-load failure from
@@ -1038,6 +1126,12 @@ fn home_non_utf8_fails_closed() {
     assert_eq!(permission_decision(&output), "ask");
     assert!(permission_reason(&output).contains("HOME"));
     assert!(permission_reason(&output).contains("UTF-8"));
+    // No path was resolved (issue #630): same decision, guidance asks the
+    // user and never suggests editing a file.
+    assert!(permission_reason(&output).contains("no config file path"));
+    let guidance = additional_context(&output);
+    assert!(guidance.contains("ask the user"), "{guidance}");
+    assert!(!guidance.contains("Edit or Write"), "{guidance}");
 }
 
 // Same as above but for `XDG_CONFIG_HOME` (issue #28 item 1).

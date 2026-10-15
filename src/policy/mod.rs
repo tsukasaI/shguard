@@ -15,6 +15,8 @@ mod evidence;
 
 pub use evidence::{Evidence, InputStage, LimitKind};
 
+use std::path::Path;
+
 use crate::HookContext;
 use crate::rules::AskOutcome;
 use crate::verdict::{Decision, DenyMessage, Reason, Verdict};
@@ -104,15 +106,14 @@ fn decide_one(evidence: &Evidence, config: &PolicyConfig, ctx: &HookContext) -> 
                 Decision::Ask | Decision::Allow => Verdict::ask(reason, Vec::new()),
             }
         }
-        Evidence::ConfigUnavailable { error } => {
-            let reason = Reason::new(format!(
-                "shguard: user config failed to load ({error}); refusing to evaluate any command \
-                 until this is fixed"
-            ));
+        Evidence::ConfigUnavailable { path, error } => {
+            let (reason, guidance) = config_unavailable_messages(path.as_deref(), error);
+            let reason = Reason::new(reason);
+            let guidance = Some(DenyMessage::new(guidance));
             if config.strict_config {
-                Verdict::block(reason, Vec::new(), None)
+                Verdict::block(reason, Vec::new(), None).with_deny_message(guidance)
             } else {
-                Verdict::ask(reason, Vec::new())
+                Verdict::ask(reason, Vec::new()).with_deny_message(guidance)
             }
         }
         Evidence::ResourceLimit { kind } => {
@@ -125,6 +126,42 @@ fn resolve_ask_outcome(config: &PolicyConfig, ctx: &HookContext) -> Decision {
     config
         .ask_outcome
         .resolve(ctx.permission_mode(), ctx.agent_id())
+}
+
+/// The reason line and the agent-facing guidance for a config-load failure
+/// (issue #630). The path is `Debug`-quoted and sits on the reason's first
+/// line, ahead of the loader's error (which can itself span lines), so it
+/// stays on one line whatever the path contains. The guidance points the
+/// agent to the user first: every call shguard gates is refused or held until
+/// the file is fixed, so Bash cannot be the way to fix it, and the agent must
+/// not rewrite shguard's own config unprompted.
+fn config_unavailable_messages(path: Option<&Path>, error: &str) -> (String, String) {
+    match path {
+        Some(path) => (
+            format!(
+                "shguard: user config failed to load (config file: {path:?}); refusing to \
+                 evaluate any command until this is fixed: {error}"
+            ),
+            format!(
+                "shguard cannot load its config file {path:?} (or a file it references), so \
+                 every call shguard gates is refused or held for confirmation until it is \
+                 fixed. Bash cannot repair it: ask the user to fix it (for a missing file, run \
+                 `shguard init` in their own terminal); only if the user asks you to edit it, \
+                 use a non-Bash tool such as Edit or Write."
+            ),
+        ),
+        None => (
+            format!(
+                "shguard: user config failed to load (no config file path could be resolved); \
+                 refusing to evaluate any command until this is fixed: {error}"
+            ),
+            "shguard cannot load its config, so every call shguard gates is refused or held \
+             for confirmation until that is fixed. No config file path could be resolved. \
+             Bash cannot repair it: ask the user to set SHGUARD_CONFIG, XDG_CONFIG_HOME and \
+             HOME to valid UTF-8 values and restart the session."
+                .to_string(),
+        ),
+    }
 }
 
 fn input_rejected_reason(stage: &InputStage) -> String {
@@ -270,6 +307,7 @@ fn floor_ask(verdict: Verdict, ask_outcome: Decision) -> Verdict {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn decide_one_item(evidence: Evidence, config: &PolicyConfig) -> Verdict {
         decide(&[evidence], config, &HookContext::none())
@@ -312,6 +350,7 @@ mod tests {
     #[test]
     fn config_unavailable_blocks_only_under_strict_config() {
         let evidence = Evidence::ConfigUnavailable {
+            path: Some(PathBuf::from("/cfg/shguard/config.toml")),
             error: "boom".to_string(),
         };
         let lenient = decide_one_item(evidence.clone(), &PolicyConfig::none());
@@ -319,12 +358,54 @@ mod tests {
         assert_eq!(lenient.decision(), Decision::Ask);
         assert_eq!(strict.decision(), Decision::Block);
         assert_eq!(lenient.reason(), strict.reason());
+        assert_eq!(lenient.deny_message(), strict.deny_message());
+    }
+
+    #[test]
+    fn config_unavailable_names_the_path_and_points_to_the_user() {
+        let verdict = decide_one_item(
+            Evidence::ConfigUnavailable {
+                path: Some(PathBuf::from("/cfg/shguard/config.toml")),
+                error: "boom".to_string(),
+            },
+            &PolicyConfig::none(),
+        );
+        let reason = verdict.reason().map_or("", Reason::as_str);
+        assert!(reason.contains("boom"), "{reason}");
+        assert!(reason.contains("\"/cfg/shguard/config.toml\""), "{reason}");
+        assert!(!reason.contains('\n'), "{reason}");
+        let guidance = verdict.deny_message().map_or("", DenyMessage::as_str);
+        assert!(guidance.contains("/cfg/shguard/config.toml"), "{guidance}");
+        assert!(guidance.contains("Bash cannot repair it"), "{guidance}");
+        assert!(guidance.contains("ask the user"), "{guidance}");
+        assert!(guidance.contains("`shguard init`"), "{guidance}");
+        assert!(guidance.contains("every call shguard gates"), "{guidance}");
+    }
+
+    #[test]
+    fn config_unavailable_without_a_path_still_fails_closed_with_guidance() {
+        let verdict = decide_one_item(
+            Evidence::ConfigUnavailable {
+                path: None,
+                error: "boom".to_string(),
+            },
+            &PolicyConfig::none(),
+        );
+        assert_eq!(verdict.decision(), Decision::Ask);
+        let reason = verdict.reason().map_or("", Reason::as_str);
+        assert!(reason.contains("no config file path"), "{reason}");
+        let guidance = verdict.deny_message().map_or("", DenyMessage::as_str);
+        assert!(guidance.contains("Bash cannot repair it"), "{guidance}");
+        assert!(guidance.contains("ask the user"), "{guidance}");
+        assert!(guidance.contains("valid UTF-8"), "{guidance}");
+        assert!(!guidance.contains("Edit or Write"), "{guidance}");
     }
 
     #[test]
     fn config_unavailable_ignores_ask_outcome() {
         let verdict = decide_one_item(
             Evidence::ConfigUnavailable {
+                path: None,
                 error: "boom".to_string(),
             },
             &deny_config(),
