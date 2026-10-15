@@ -3093,7 +3093,7 @@ fn evaluate_simple_command_core(
                             .to_string(),
                         DENY_MSG_INLINE_INTERPRETER,
                     ),
-                    // Issue #633: the agent did not write inline code here; an
+                    // Issue #633: no literal inline-code flag was written; an
                     // unresolved word merely sits where the flag could be, so
                     // "write it to a file" would be misleading guidance.
                     InlineCodeTrigger::UnresolvedWord => (
@@ -7326,11 +7326,64 @@ fn possibly_inline_code(
     grammar: &InlineGrammar,
     words: &[NormalizedWord],
 ) -> Option<InlineCodeTrigger> {
+    let trigger = scan_inline_code(grammar, words)?;
+    // A literal code flag after the unresolved word (`python3 $OPTS -c x`) is
+    // still a flag the agent wrote.
+    if trigger == InlineCodeTrigger::UnresolvedWord
+        && words
+            .iter()
+            .any(|word| starts_with_code_flag(grammar, word))
+    {
+        return Some(InlineCodeTrigger::Literal);
+    }
+    Some(trigger)
+}
+
+/// Whether `word` literally begins with an inline-code flag of `grammar`,
+/// reading an unresolvable word through its literal head (`-c"$code"`,
+/// `--eval=$x`): whatever the expansion adds, the flag is already written.
+/// For short flags only plain letters may precede the code letter.
+fn starts_with_code_flag(grammar: &InlineGrammar, word: &NormalizedWord) -> bool {
+    let text = match word.resolution() {
+        Resolution::Resolved(text) => text.as_str(),
+        _ => match word.literal_head() {
+            Some(head) => head,
+            None => return false,
+        },
+    };
+    let Some(flags) = text.strip_prefix('-') else {
+        return false;
+    };
+    if let Some(long) = flags.strip_prefix('-') {
+        let name = long.split_once('=').map_or(long, |(name, _)| name);
+        return grammar.long_code.contains(&name);
+    }
+    for letter in flags.chars() {
+        if grammar.code_chars.contains(letter) {
+            return true;
+        }
+        if !grammar.cluster || !grammar.plain_chars.contains(letter) {
+            return false;
+        }
+    }
+    false
+}
+
+/// The option scan behind [`possibly_inline_code`], before its late
+/// literal-flag relabel.
+fn scan_inline_code(
+    grammar: &InlineGrammar,
+    words: &[NormalizedWord],
+) -> Option<InlineCodeTrigger> {
     use InlineCodeTrigger::{Literal, UnresolvedWord};
     let mut iter = words.iter();
     while let Some(word) = iter.next() {
         let Resolution::Resolved(text) = word.resolution() else {
-            return Some(UnresolvedWord);
+            return Some(if starts_with_code_flag(grammar, word) {
+                Literal
+            } else {
+                UnresolvedWord
+            });
         };
         if text == "--" {
             return None;
@@ -13444,6 +13497,12 @@ mod tests {
             got_reason.contains(reason),
             "{command:?}: reason {got_reason:?} lacks {reason:?}"
         );
+        for other in [INLINE_FLAG_REASON, UNRESOLVED_ARG_REASON] {
+            assert!(
+                other == reason || !got_reason.contains(other),
+                "{command:?}: reason {got_reason:?} also carries {other:?}"
+            );
+        }
         assert_eq!(
             verdict.deny_message().map(super::DenyMessage::as_str),
             Some(deny_message),
@@ -13460,6 +13519,8 @@ mod tests {
             "node \"$p\"",
             "perl \"$p\"",
             "S=/tmp/x; python3 -I \"$S/x.py\"",
+            "python3 -X \"$o\" s.py",
+            "node --require \"$m\" app.js",
         ] {
             assert_interpreter_floor(command, UNRESOLVED_ARG_REASON, DENY_MSG_UNRESOLVED_TARGET);
         }
@@ -13472,8 +13533,43 @@ mod tests {
             "node -e x",
             "perl -e x",
             "python3 -c'print(1)'",
+            "python3 -c\"$code\"",
+            "python3 -c\"print($x)\"",
+            "node -e\"$js\"",
+            "perl -e\"print $x\"",
+            "perl -le\"$x\"",
+            "node --eval\"$x\"",
+            "node --eval=\"$x\"",
+            "node \"--eval=$x\"",
+            "python3 $OPTS -c 'print(1)'",
+            "python3 \"$f\" -c 'import os'",
+            "python3 -W \"$w\" -c 'import os'",
+            "ruby -I \"$d\" -e 'x'",
         ] {
             assert_interpreter_floor(command, INLINE_FLAG_REASON, DENY_MSG_INLINE_INTERPRETER);
+        }
+    }
+
+    // The awk and sed arms of the same floor carry their own reasons, never
+    // either interpreter-flag wording.
+    #[test]
+    fn interpreter_code_awk_and_sed_floors_keep_their_own_reasons() {
+        for (command, deny_message) in [
+            ("awk '{print}' f", DENY_MSG_INLINE_INTERPRETER),
+            ("sed \"s/$a/$b/\" f", DENY_MSG_SED_SCRIPT),
+        ] {
+            let verdict = decide(command);
+            assert_eq!(verdict.decision(), Decision::Ask, "{command:?}");
+            let reason = verdict.reason().map(super::Reason::as_str).unwrap_or("");
+            assert!(
+                !reason.contains(INLINE_FLAG_REASON) && !reason.contains(UNRESOLVED_ARG_REASON),
+                "{command:?}: {reason:?}"
+            );
+            assert_eq!(
+                verdict.deny_message().map(super::DenyMessage::as_str),
+                Some(deny_message),
+                "{command:?}"
+            );
         }
     }
 
