@@ -3316,3 +3316,68 @@ fn target_flags_benign_forms_still_allow() {
         assert_eq!(permission_decision(&output), "allow", "{command}");
     }
 }
+
+// ==== Issue #695: a deny on the recursing command survives rules 6a/6c/6d ====
+
+fn decision_with_optional_cwd(config: &str, command: &str, cwd: Option<&str>) -> Value {
+    let (_dir, config_path) = write_config(config);
+    let mut value: Value = serde_json::from_str(&bash_command(command)).unwrap();
+    if let Some(cwd) = cwd {
+        value["cwd"] = Value::String(cwd.to_string());
+    }
+    run_hook(
+        &value.to_string(),
+        &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+    )
+}
+
+fn assert_reason_does_not_call_the_script_a_path(output: &Value) {
+    let reason = permission_reason(output);
+    assert!(!reason.contains("resolved against"), "{reason}");
+    assert!(!reason.contains("composes a relative target"), "{reason}");
+}
+
+#[test]
+fn deny_on_eval_holds_with_and_without_payload_cwd_and_is_not_weaker_than_ask() {
+    let deny = "[[deny]]\nid = \"no-eval\"\nreason = \"no eval\"\ncommand = \"eval\"\n";
+    let ask = "[[ask]]\nid = \"ask-eval\"\nreason = \"ask eval\"\ncommand = \"eval\"\n";
+    for command in ["eval 'echo hi'", "cd /tmp && eval 'echo hi'"] {
+        let plain = decision_with_optional_cwd(deny, command, None);
+        let anchored = decision_with_optional_cwd(deny, command, Some("/tmp"));
+        assert_eq!(permission_decision(&plain), "deny", "{command}");
+        assert_eq!(permission_decision(&anchored), "deny", "{command}");
+        assert!(permission_reason(&plain).contains("no-eval"), "{command}");
+        assert_reason_does_not_call_the_script_a_path(&plain);
+        assert_reason_does_not_call_the_script_a_path(&anchored);
+        let asked = decision_with_optional_cwd(ask, command, None);
+        assert_eq!(permission_decision(&asked), "ask", "{command}");
+    }
+}
+
+#[test]
+fn deny_on_bash_holds_for_dash_c_with_and_without_a_preceding_cd() {
+    let deny = "[[deny]]\nid = \"no-bash\"\nreason = \"no bash\"\ncommand = \"bash\"\n";
+    for (command, cwd) in [
+        ("bash -c 'echo hi'", None),
+        ("bash -c 'echo hi'", Some("/tmp")),
+        ("cd /tmp && bash -c 'echo hi'", None),
+        ("cd /tmp && bash -c 'echo hi'", Some("/tmp")),
+        ("sudo bash -c 'echo hi'", None),
+    ] {
+        let output = decision_with_optional_cwd(deny, command, cwd);
+        assert_eq!(permission_decision(&output), "deny", "{command} {cwd:?}");
+        assert!(permission_reason(&output).contains("no-bash"), "{command}");
+        assert_reason_does_not_call_the_script_a_path(&output);
+    }
+}
+
+#[test]
+fn deny_on_trap_holds_with_and_without_payload_cwd() {
+    let deny = "[[deny]]\nid = \"no-trap\"\nreason = \"no trap\"\ncommand = \"trap\"\n";
+    for cwd in [None, Some("/tmp")] {
+        let output = decision_with_optional_cwd(deny, "trap 'echo hi' EXIT", cwd);
+        assert_eq!(permission_decision(&output), "deny", "{cwd:?}");
+        assert!(permission_reason(&output).contains("no-trap"));
+        assert_reason_does_not_call_the_script_a_path(&output);
+    }
+}

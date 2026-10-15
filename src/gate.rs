@@ -2993,7 +2993,10 @@ fn evaluate_simple_command_core(
     {
         return apply_opaque_kind_floor(
             apply_substitution_floor(
-                apply_escalation_floor(outcome, escalation_floor),
+                apply_escalation_floor(
+                    apply_outer_rule_block(outcome, rules, &argv, symlink_scope),
+                    escalation_floor,
+                ),
                 substitution_result,
             ),
             opaque_kind,
@@ -3008,7 +3011,10 @@ fn evaluate_simple_command_core(
     {
         return apply_opaque_kind_floor(
             apply_substitution_floor(
-                apply_escalation_floor(outcome, escalation_floor),
+                apply_escalation_floor(
+                    apply_outer_rule_block(outcome, rules, &argv, symlink_scope),
+                    escalation_floor,
+                ),
                 substitution_result,
             ),
             opaque_kind,
@@ -3023,7 +3029,10 @@ fn evaluate_simple_command_core(
     {
         return apply_opaque_kind_floor(
             apply_substitution_floor(
-                apply_escalation_floor(outcome, escalation_floor),
+                apply_escalation_floor(
+                    apply_outer_rule_block(outcome, rules, &argv, symlink_scope),
+                    escalation_floor,
+                ),
                 substitution_result,
             ),
             opaque_kind,
@@ -3378,6 +3387,38 @@ fn escalation_floor_contribution(
         WrapperChainEscalation::Absent => return None,
     };
     Some((floor_decision, reason))
+}
+
+/// Folds a `Block`-decision rule matching the outer `argv` itself (a user
+/// `[[deny]] command = "eval"`/`"bash"`) into `outcome`, worst-wins. Rules
+/// 6a/6c/6d return before the ordinary blocklist match, so without this a
+/// deny on the recursing command is skipped while the same entry as an
+/// `[[ask]]` (applied by the caller) still holds.
+fn apply_outer_rule_block(
+    outcome: Verdict,
+    rules: &Rules,
+    argv: &[NormalizedWord],
+    scope: SymlinkScope<'_>,
+) -> Verdict {
+    let Some(rule) = rules
+        .match_command_in(argv, scope)
+        .filter(|rule| rule.decision() == Decision::Block)
+    else {
+        return outcome;
+    };
+    let hint = rules
+        .unresolved_exception_hint(rule, argv, scope)
+        .unwrap_or_default();
+    let reason = Reason::new(format!(
+        "matches blocklist rule {:?}: {}{hint}",
+        rule.id().as_str(),
+        rule.reason().as_str()
+    ));
+    fold_worst(
+        outcome,
+        Verdict::block(reason, argv.to_vec(), Some(rule.id().clone()))
+            .with_deny_message(rule.deny_message().cloned()),
+    )
 }
 
 /// Applies the escalation floor (rule 10) to a verdict produced on an
@@ -4496,32 +4537,28 @@ fn evaluate_dash_c(
         FlagScan::Absent => return None,
     };
 
-    let script_index = if POSIX_STYLE_DASH_C_INTERPRETERS.contains(&normalized_interpreter) {
-        match find_posix_dash_c_script(rest_words, flag_index + 1) {
-            Ok(Some(index)) => index,
-            // Ran out of `rest_words` without finding an operand (e.g. a
-            // bare trailing `-c`, or `-c` followed only by other options)
-            // — matches the pre-existing "no script at all" behavior of
-            // the plain index lookup this replaces: not this shape.
-            Ok(None) => return None,
-            // An option between `-c` and the script did not resolve to a
-            // concrete value, so its text — and therefore whether it
-            // consumes a following word as its own value — cannot be
-            // determined. Guessing either way could walk past the real
-            // script; fail closed instead.
-            Err(()) => {
-                return Some(Verdict::ask(
-                    Reason::new(format!(
-                        "`{interpreter} -c`'s script operand could not be statically located: \
-                         an option between `-c` and the script did not resolve to a concrete \
-                         value"
-                    )),
-                    outer_argv,
-                ));
-            }
+    let script_index = match locate_dash_c_script(rest_words, normalized_interpreter, flag_index) {
+        Ok(Some(index)) => index,
+        // Ran out of `rest_words` without finding an operand (e.g. a
+        // bare trailing `-c`, or `-c` followed only by other options)
+        // — matches the pre-existing "no script at all" behavior of
+        // the plain index lookup this replaces: not this shape.
+        Ok(None) => return None,
+        // An option between `-c` and the script did not resolve to a
+        // concrete value, so its text — and therefore whether it
+        // consumes a following word as its own value — cannot be
+        // determined. Guessing either way could walk past the real
+        // script; fail closed instead.
+        Err(()) => {
+            return Some(Verdict::ask(
+                Reason::new(format!(
+                    "`{interpreter} -c`'s script operand could not be statically located: \
+                     an option between `-c` and the script did not resolve to a concrete \
+                     value"
+                )),
+                outer_argv,
+            ));
         }
-    } else {
-        flag_index + 1
     };
     let script_word = rest_words.get(script_index)?;
 
@@ -4539,6 +4576,21 @@ fn evaluate_dash_c(
             )),
             outer_argv,
         )),
+    }
+}
+
+/// The index in `rest_words` of the script operand for a `-c` found at
+/// `flag_index`: [`find_posix_dash_c_script`] for POSIX-style shells, the
+/// very next word otherwise.
+fn locate_dash_c_script(
+    rest_words: &[NormalizedWord],
+    normalized_interpreter: &str,
+    flag_index: usize,
+) -> Result<Option<usize>, ()> {
+    if POSIX_STYLE_DASH_C_INTERPRETERS.contains(&normalized_interpreter) {
+        find_posix_dash_c_script(rest_words, flag_index + 1)
+    } else {
+        Ok(Some(flag_index + 1))
     }
 }
 
@@ -4799,15 +4851,7 @@ fn evaluate_trap(
     ctx: AnalysisCtx<'_>,
     cwd: &CwdContext,
 ) -> Option<Verdict> {
-    let mut words = rest_words.iter();
-    let action = loop {
-        let word = words.next()?;
-        match word.resolution() {
-            Resolution::Resolved(v) if v == "--" => break words.next()?,
-            Resolution::Resolved(v) if v.len() > 1 && v.starts_with('-') => {}
-            _ => break word,
-        }
-    };
+    let action = rest_words.get(trap_action_index(rest_words)?)?;
     match action.resolution() {
         Resolution::Resolved(v) if v.is_empty() || v == "-" => None,
         Resolution::Resolved(script) => Some(recurse_shell_string(
@@ -4821,6 +4865,21 @@ fn evaluate_trap(
             Reason::new("`trap`'s action could not be statically resolved".to_string()),
             argv.to_vec(),
         )),
+    }
+}
+
+/// The index in `rest_words` of `trap`'s action word, skipping leading
+/// option words (`-p`, `-l`, `--`); `None` when there is none.
+fn trap_action_index(rest_words: &[NormalizedWord]) -> Option<usize> {
+    let mut index = 0;
+    loop {
+        match rest_words.get(index)?.resolution() {
+            Resolution::Resolved(v) if v == "--" => {
+                return (index + 1 < rest_words.len()).then_some(index + 1);
+            }
+            Resolution::Resolved(v) if v.len() > 1 && v.starts_with('-') => index += 1,
+            _ => return Some(index),
+        }
     }
 }
 
@@ -9370,13 +9429,19 @@ fn compound_command_may_change_cwd(compound: &CompoundCommand) -> bool {
 /// lists in `target_flags` (`--body-file=notes.md`, `-Fnotes.md`): only the
 /// value part is composed, so the flag spelling a rule matches on survives
 /// (issue #625).
+///
+/// The shell-code slot of a rule 6a/6c/6d command ([`recursed_script_slot`])
+/// is never composed: it is code the plain pass recursed into, not a path.
 fn compose_argv_against_cwd(
     argv: &[NormalizedWord],
     anchor: &str,
     rules: &Rules,
 ) -> Vec<NormalizedWord> {
+    let script_slot = recursed_script_slot(argv);
     argv.iter()
-        .map(|word| match word.resolution() {
+        .enumerate()
+        .map(|(i, word)| match word.resolution() {
+            _ if script_slot.contains(&i) => word.clone(),
             Resolution::Resolved(s)
                 if !s.starts_with('-') && matches!(lexical_normalize(s), PathForm::Rel { .. }) =>
             {
@@ -9399,6 +9464,52 @@ fn compose_argv_against_cwd(
             _ => word.clone(),
         })
         .collect()
+}
+
+/// The `argv` positions rules 6a/6c/6d hand to `recurse_shell_string` as
+/// shell code (`bash -c` script, `eval` arguments, `trap` action); empty when
+/// the command is none of those. Uses the same locators those rules do.
+fn recursed_script_slot(argv: &[NormalizedWord]) -> std::ops::Range<usize> {
+    let end = argv.len();
+    let Some((name, rest)) = crate::rules::effective_command(argv) else {
+        return 0..0;
+    };
+    let start = end - rest.len();
+    let name = name.as_ref();
+    if crate::rules::is_shell_interpreter(name) {
+        let normalized = crate::rules::strip_version_suffix(name);
+        if normalized == "fish" {
+            let scan = scan_fish_invocation(rest);
+            return if scan.has_command_flag
+                || !scan.init_values.is_empty()
+                || scan.unreadable_code_value
+                || scan.uncertain.is_some()
+            {
+                start..end
+            } else {
+                0..0
+            };
+        }
+        return match scan_for_flag(rest, is_dash_c_token) {
+            FlagScan::Found(flag_index) => match locate_dash_c_script(rest, normalized, flag_index)
+            {
+                Ok(Some(index)) => (start + index)..(start + index + 1),
+                Ok(None) => 0..0,
+                Err(()) => (start + flag_index + 1)..end,
+            },
+            FlagScan::Uncertain(index) => (start + index + 1)..end.min(start + index + 2),
+            FlagScan::Absent => 0..0,
+        };
+    }
+    if EVAL_BUILTIN.contains(&name) {
+        return start..end;
+    }
+    if TRAP_BUILTIN.contains(&name)
+        && let Some(index) = trap_action_index(rest)
+    {
+        return (start + index)..(start + index + 1);
+    }
+    0..0
 }
 
 /// Issue #103's composed pass: checks `argv` (with every eligible `Rel`-
