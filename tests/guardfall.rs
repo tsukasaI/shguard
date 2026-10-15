@@ -917,6 +917,13 @@ const TRAP_CASES: &[(&str, Decision)] = &[
     ("trap -p", Decision::Allow),
     ("trap -l", Decision::Allow),
     ("trap", Decision::Allow),
+    // zsh's `trap` has no options: a dash-prefixed word is the action.
+    ("trap '-x; rm -rf ~' EXIT", Decision::Block),
+    ("trap '-x; echo hi' EXIT", Decision::Allow),
+    // Documented over-block: options are skipped, the action still recursed.
+    ("trap -p 'rm -rf /' EXIT", Decision::Block),
+    ("trap 'rm -rf /' INT TERM EXIT", Decision::Block),
+    ("trap $'rm -rf /' EXIT", Decision::Block),
 ];
 
 /// Issue #693: `trap`'s action string is shell code, recursed like `eval`.

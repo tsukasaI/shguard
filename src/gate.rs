@@ -4877,7 +4877,15 @@ fn trap_action_index(rest_words: &[NormalizedWord]) -> Option<usize> {
             Resolution::Resolved(v) if v == "--" => {
                 return (index + 1 < rest_words.len()).then_some(index + 1);
             }
-            Resolution::Resolved(v) if v.len() > 1 && v.starts_with('-') => index += 1,
+            // Not any `-`-prefixed word: zsh's `trap` has no options, so
+            // `trap '-x; rm -rf ~' EXIT` installs `-x; rm -rf ~` as the action.
+            Resolution::Resolved(v)
+                if v.len() > 1
+                    && v[1..].chars().all(|c| matches!(c, 'l' | 'p' | 'P' | 'a'))
+                    && v.starts_with('-') =>
+            {
+                index += 1;
+            }
             _ => return Some(index),
         }
     }
@@ -9469,10 +9477,10 @@ fn compose_argv_against_cwd(
 /// The `argv` positions rules 6a/6c/6d hand to `recurse_shell_string` as
 /// shell code (`bash -c` script, `eval` arguments, `trap` action); empty when
 /// the command is none of those. Uses the same locators those rules do.
-fn recursed_script_slot(argv: &[NormalizedWord]) -> std::ops::Range<usize> {
+fn recursed_script_slot(argv: &[NormalizedWord]) -> Vec<usize> {
     let end = argv.len();
     let Some((name, rest)) = crate::rules::effective_command(argv) else {
-        return 0..0;
+        return Vec::new();
     };
     let start = end - rest.len();
     let name = name.as_ref();
@@ -9480,36 +9488,49 @@ fn recursed_script_slot(argv: &[NormalizedWord]) -> std::ops::Range<usize> {
         let normalized = crate::rules::strip_version_suffix(name);
         if normalized == "fish" {
             let scan = scan_fish_invocation(rest);
-            return if scan.has_command_flag
-                || !scan.init_values.is_empty()
-                || scan.unreadable_code_value
-                || scan.uncertain.is_some()
-            {
-                start..end
-            } else {
-                0..0
-            };
+            if scan.unreadable_code_value || scan.uncertain.is_some() {
+                return (start..end).collect();
+            }
+            // Only the words carrying code, so trailing operands still compose.
+            let mut values: Vec<&str> = scan
+                .command_values
+                .iter()
+                .chain(&scan.init_values)
+                .map(String::as_str)
+                .collect();
+            return (start..end)
+                .filter(|&i| match argv[i].resolution() {
+                    Resolution::Resolved(s) => values
+                        .iter()
+                        .position(|v| *v == s.as_str())
+                        .map(|at| values.swap_remove(at))
+                        .is_some(),
+                    Resolution::Unresolvable(_) => false,
+                })
+                .collect();
         }
         return match scan_for_flag(rest, is_dash_c_token) {
             FlagScan::Found(flag_index) => match locate_dash_c_script(rest, normalized, flag_index)
             {
-                Ok(Some(index)) => (start + index)..(start + index + 1),
-                Ok(None) => 0..0,
-                Err(()) => (start + flag_index + 1)..end,
+                Ok(Some(index)) => vec![start + index],
+                Ok(None) => Vec::new(),
+                Err(()) => ((start + flag_index + 1)..end).collect(),
             },
-            FlagScan::Uncertain(index) => (start + index + 1)..end.min(start + index + 2),
-            FlagScan::Absent => 0..0,
+            FlagScan::Uncertain(index) => {
+                ((start + index + 1)..end.min(start + index + 2)).collect()
+            }
+            FlagScan::Absent => Vec::new(),
         };
     }
     if EVAL_BUILTIN.contains(&name) {
-        return start..end;
+        return (start..end).collect();
     }
     if TRAP_BUILTIN.contains(&name)
         && let Some(index) = trap_action_index(rest)
     {
-        return (start + index)..(start + index + 1);
+        return vec![start + index];
     }
-    0..0
+    Vec::new()
 }
 
 /// Issue #103's composed pass: checks `argv` (with every eligible `Rel`-
@@ -11103,6 +11124,23 @@ mod tests {
 
     fn decide(command: &str) -> Verdict {
         analyze(command)
+    }
+
+    #[test]
+    fn recursed_script_slot_names_the_words_the_evaluators_recurse() {
+        let slot = |words: &[&str]| {
+            let argv: Vec<NormalizedWord> =
+                words.iter().map(|w| NormalizedWord::resolved(*w)).collect();
+            recursed_script_slot(&argv)
+        };
+        assert_eq!(slot(&["bash", "-c", "x"]), vec![2]);
+        assert_eq!(slot(&["eval", "a", "b"]), vec![1, 2]);
+        assert_eq!(slot(&["trap", "x", "EXIT"]), vec![1]);
+        assert_eq!(slot(&["trap", "--", "x", "EXIT"]), vec![2]);
+        assert_eq!(slot(&["trap", "-p", "x", "EXIT"]), vec![2]);
+        assert_eq!(slot(&["trap", "-x; y", "EXIT"]), vec![1]);
+        assert_eq!(slot(&["fish", "-c", "x", "rel"]), vec![2]);
+        assert!(slot(&["ls", "-c", "x"]).is_empty());
     }
 
     fn assert_decision(command: &str, expected: Decision) {
