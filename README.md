@@ -436,10 +436,10 @@ sinks = ["python3"]
 for a pipeline entry, unlike `command`/`command_prefix` rules. `sources`/
 `sinks` are whole command names (no `command_prefix`-style prefix
 matching). Command names in rules (`sources`, `sinks`, `command`,
-`command_prefix`) are matched case-insensitively: they are case-folded
-when the config is parsed and compared against the folded runtime name,
-so `sinks = ["SH"]` also catches `sh`. Each pipeline stage is resolved to its own command name the
-same way a `command`-matched rule resolves argv[0] — basename, with any
+`command_prefix`) are matched case-insensitively against the folded
+runtime name, so `sinks = ["SH"]` also catches `sh`. Each pipeline
+stage is resolved to its own command name the same way a
+`command`-matched rule resolves argv[0] — basename, with any
 transparent wrapper (`env`, `nohup`, `timeout`, ...) skipped — so
 `/bin/sh` or `env sh` as a sink is caught exactly like a bare `sh` would
 be. The rule matches when *any* earlier stage's resolved name is in
