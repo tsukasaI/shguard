@@ -61,9 +61,12 @@
 //!   `permissionDecision` maps directly from [`crate::verdict::Decision`]:
 //!   `Allow` → `"allow"`, `Ask` → `"ask"`, `Block` → `"deny"`.
 //!   `additionalContext` is omitted entirely (not emitted as `null`/`""`)
-//!   unless the matched rule declared a `deny_message` (issue #99,
-//!   `crate::verdict::Verdict::deny_message`) — it carries guidance for the
-//!   *agent*, distinct from `permissionDecisionReason`'s "why" explanation.
+//!   unless the verdict carries a `deny_message` (issue #99,
+//!   `crate::verdict::Verdict::deny_message`) — a matched rule's own, or the
+//!   guidance `crate::policy::decide` generates for a config-load failure
+//!   (`ConfigUnavailable`), a `ParseFailure`, or an `Ask` floored to a deny.
+//!   It carries guidance for the *agent*, distinct from
+//!   `permissionDecisionReason`'s "why" explanation.
 //!   For `tool_name != "Bash"` (see [`no_decision_json`]), the output instead
 //!   omits `permissionDecision` (and `permissionDecisionReason`/
 //!   `additionalContext` with it) entirely — still valid, non-empty JSON,
@@ -196,8 +199,9 @@ fn no_decision_json() -> Value {
 /// Renders a decided [`Verdict`] as the `hookSpecificOutput` JSON the
 /// composition root writes to stdout — the one place a verdict becomes a
 /// `permissionDecision`. `additionalContext` is present only when the
-/// verdict carries a [`DenyMessage`], so the fail-closed verdicts
-/// [`crate::policy::decide`] builds from non-rule evidence never emit one.
+/// verdict carries a [`DenyMessage`]: a matched rule's, or the guidance
+/// [`crate::policy::decide`] generates for `ConfigUnavailable`,
+/// `ParseFailure` and a floored `Ask`.
 #[must_use]
 pub fn render(verdict: &Verdict) -> Value {
     let decision = PermissionDecision::from(verdict.decision());

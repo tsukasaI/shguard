@@ -167,6 +167,33 @@ pub enum ConfigError {
     SymlinkChain { path: PathBuf, reason: String },
 }
 
+/// A [`ConfigError`] together with the config path [`Policy::load`]
+/// resolved when it failed (issue #630), so the fail-closed reason can name
+/// the file to fix. `path` is `None` only when no path was resolved at all
+/// (an env var that is not valid UTF-8, or nothing configured and no usable
+/// `$HOME`). Displays as the underlying error.
+#[derive(Debug, thiserror::Error)]
+#[error("{source}")]
+pub struct LoadError {
+    path: Option<PathBuf>,
+    #[source]
+    source: ConfigError,
+}
+
+impl LoadError {
+    /// The config path the loader consulted, if it resolved one.
+    #[must_use]
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    /// The underlying failure.
+    #[must_use]
+    pub fn error(&self) -> &ConfigError {
+        &self.source
+    }
+}
+
 impl From<crate::rules::RulesError> for ConfigError {
     fn from(err: crate::rules::RulesError) -> Self {
         Self::InvalidConfig(err.to_string())
@@ -488,15 +515,20 @@ impl Policy {
     /// trailing-slash/relative-component path, a symlink, an existing
     /// non-regular file, a missing parent directory, or an unreadable
     /// `lstat`).
-    pub fn load() -> Result<Self, ConfigError> {
+    ///
+    /// Every error is a [`LoadError`] carrying the config path the loader
+    /// resolved (issue #630), so a caller reports the file to fix without
+    /// recomputing the discovery.
+    pub fn load() -> Result<Self, LoadError> {
         Self::load_with(crate::fs_path_canonicalizer())
     }
 
     /// [`Self::load`] with the symlink-resolution adapter (supplied by the
     /// composition root, `src/lib.rs`) wired into the loaded rules, so
     /// `resolve_symlinks` rules and the load-time spelling warning use it.
-    pub(crate) fn load_with(canonicalizer: PathCanonicalizer) -> Result<Self, ConfigError> {
-        let (shguard_config, xdg_config_home, home) = Self::read_env_paths()?;
+    pub(crate) fn load_with(canonicalizer: PathCanonicalizer) -> Result<Self, LoadError> {
+        let (shguard_config, xdg_config_home, home) =
+            Self::read_env_paths().map_err(|source| LoadError { path: None, source })?;
         let explicit = shguard_config.is_some();
 
         let path = Self::resolve_config_path(
@@ -505,6 +537,19 @@ impl Policy {
             home.as_deref(),
         );
 
+        Self::load_resolved(path.clone(), explicit, home, canonicalizer)
+            .map_err(|source| LoadError { path, source })
+    }
+
+    /// The load proper, once discovery has resolved `path` (`None`: nothing
+    /// configured and no usable `$HOME`) and whether `SHGUARD_CONFIG` named
+    /// it (`explicit`).
+    fn load_resolved(
+        path: Option<PathBuf>,
+        explicit: bool,
+        home: Option<String>,
+        canonicalizer: PathCanonicalizer,
+    ) -> Result<Self, ConfigError> {
         let blocklist = Rules::embedded()?;
         let allowlist = Allowlist::embedded()?;
 

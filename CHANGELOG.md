@@ -13,6 +13,16 @@ All notable changes to this project are documented in this file.
   inline-code flag could appear, and the deny message is the
   unresolved-target one instead of "write the program to a file". A literal
   `-c`/`-e` (including glued `-c'print(1)'`) keeps the old reason and message.
+- The config-load failure reason now names the config file the loader
+  consulted (`SHGUARD_CONFIG`, `XDG_CONFIG_HOME` or the `$HOME` default) on
+  one line, and `additionalContext` is now emitted on a config failure for
+  both `ask` and `deny`: it tells the agent that every call shguard gates is
+  refused or held until the file is fixed, that Bash cannot repair it, and to
+  ask the user to fix it (`shguard init` in their own terminal for a missing
+  file), using a non-Bash tool such as Edit or Write only if the user asks
+  (#630). Text only: the decision is unchanged (`ask`, or
+  `deny` under `SHGUARD_STRICT_CONFIG`). `Policy::load` now returns the new
+  `config::LoadError`, which carries the resolved path.
 - `resolve_symlinks` (#583) fails closed in more cases (#612): a regular
   file with more than one hard link, any candidate when an earlier command
   on the line is anything but `cd`/`pushd`/`popd`/`dirs` or a no-write
@@ -70,6 +80,11 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- A command that is both an alias smuggle and a blocklist rule match
+  (`git -c alias.x='!id' push --force`) now reports the rule's `matched_rule`
+  and `deny_message` (#600). The decision is unchanged (Block): the alias
+  verdict is folded worst-wins with the rule verdict instead of
+  short-circuiting it, and the rule wins a tie.
 - `resolve_symlinks` no longer performs file I/O inside `rules.rs` (#641):
   symlink resolution is a port the rule module defines and the composition
   root wires to a filesystem adapter (`src/fs_canonicalizer.rs`). No

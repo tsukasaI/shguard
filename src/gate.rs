@@ -3226,21 +3226,11 @@ fn evaluate_simple_command_core(
     // that id) is pinned unreachable by
     // `rules::embedded_git_push_force_rule_id_exists_for_gate_reuse`
     // below, rather than left as a silently-accepted fail-open gap.
-    // Issue #552: the `-c alias.*` smuggling Block must not be shadowed by
-    // an Ask-tier rule match or the checkout-dot Ask below, so a Block from
-    // `git_config_smuggled_verdict` returns first. Its Ask outcomes stay at
-    // their original position further down (Ask vs Ask ordering is moot).
-    if let Some(verdict) =
-        git_config_smuggled_verdict(&argv).filter(|v| v.decision() == Decision::Block)
-    {
-        return apply_opaque_kind_floor(
-            apply_substitution_floor(
-                apply_escalation_floor(verdict, escalation_floor),
-                substitution_result,
-            ),
-            opaque_kind,
-        );
-    }
+    // Issues #499/#552/#600: the `-c alias.*`/`include.path` smuggling
+    // verdict is folded worst-wins with the rule/checkout-dot verdict below
+    // instead of returning early, so a Block cannot be shadowed by an
+    // Ask-tier match and a same-argv rule Block keeps its own attribution.
+    let smuggled = git_config_smuggled_verdict(&argv);
     let toml_match = rules.match_command_in(&argv, symlink_scope);
     // Worst-wins with the ordinary blocklist match (mirrors
     // `Rules::match_command`'s own Block-outranks-Ask contract, issue
@@ -3257,7 +3247,7 @@ fn evaluate_simple_command_core(
             .flatten()
             .or(toml_match),
     };
-    if let Some(rule) = rule {
+    let rule_verdict = rule.map(|rule| {
         let hint = rules
             .unresolved_exception_hint(rule, &argv, symlink_scope)
             .unwrap_or_default();
@@ -3266,20 +3256,13 @@ fn evaluate_simple_command_core(
             rule.id().as_str(),
             rule.reason().as_str()
         ));
-        let verdict = match rule.decision() {
-            Decision::Block => Verdict::block(reason, argv, Some(rule.id().clone())),
-            Decision::Ask => Verdict::ask(reason, argv),
+        match rule.decision() {
+            Decision::Block => Verdict::block(reason, argv.clone(), Some(rule.id().clone())),
+            Decision::Ask => Verdict::ask(reason, argv.clone()),
             Decision::Allow => unreachable!("rules never carry Decision::Allow"),
         }
-        .with_deny_message(rule.deny_message().cloned());
-        return apply_opaque_kind_floor(
-            apply_substitution_floor(
-                apply_escalation_floor(verdict, escalation_floor),
-                substitution_result,
-            ),
-            opaque_kind,
-        );
-    }
+        .with_deny_message(rule.deny_message().cloned())
+    });
 
     // Issue #452, fix 2: `git checkout <path>` with no `--` separator is
     // positionally indistinguishable from `git checkout <branch>` for pure
@@ -3289,33 +3272,34 @@ fn evaluate_simple_command_core(
     // Block: the issue's expected column reserves Block for the
     // unambiguous `--` spelling, already handled above by
     // `git-checkout-dashdash`.
-    if git_checkout_dot(&argv) {
-        let verdict = Verdict::ask(
-            Reason::new(
-                "git checkout <path> with a resolved operand normalizing to a bare, no-descent \
-                 path (`.`, `..`, or an equivalent respelling) discards every uncommitted \
-                 working-tree change reachable from this invocation's cwd — the same intent as \
-                 `git checkout -- .` (Block), but without the `--` separator a rule-data match \
-                 can key off of",
-            ),
-            argv,
-        );
-        return apply_opaque_kind_floor(
-            apply_substitution_floor(
-                apply_escalation_floor(verdict, escalation_floor),
-                substitution_result,
-            ),
-            opaque_kind,
-        );
-    }
+    let rule_or_checkout_verdict = rule_verdict.or_else(|| {
+        git_checkout_dot(&argv).then(|| {
+            Verdict::ask(
+                Reason::new(
+                    "git checkout <path> with a resolved operand normalizing to a bare, \
+                     no-descent path (`.`, `..`, or an equivalent respelling) discards every \
+                     uncommitted working-tree change reachable from this invocation's cwd — the \
+                     same intent as `git checkout -- .` (Block), but without the `--` separator \
+                     a rule-data match can key off of",
+                ),
+                argv.clone(),
+            )
+        })
+    });
 
     // Issue #499: `git -c include.path=...`/`-c alias.<name>=...` smuggle
     // in equivalent no-verify/hook-disabling (or, for `alias`, arbitrary
     // shell) behavior through the same `-c` conduit #498's own
     // `core.hooksPath` detection uses — see `git_config_smuggled_verdict`'s
     // own doc for why this is a hand-verdict structural check rather than
-    // a `required_flags` rule.
-    if let Some(verdict) = git_config_smuggled_verdict(&argv) {
+    // a `required_flags` rule. Rule verdict goes first: `fold_worst` keeps
+    // the first verdict on a decision tie, so a same-argv rule Block keeps
+    // its matched_rule/deny_message (issue #600).
+    let structural_verdict = match (rule_or_checkout_verdict, smuggled) {
+        (Some(rule), Some(smuggled)) => Some(fold_worst(rule, smuggled)),
+        (rule, smuggled) => rule.or(smuggled),
+    };
+    if let Some(verdict) = structural_verdict {
         return apply_opaque_kind_floor(
             apply_substitution_floor(
                 apply_escalation_floor(verdict, escalation_floor),
@@ -7014,7 +6998,11 @@ fn scan_backtick_span<'a>(bytes: &[u8], body: &'a str, start: usize) -> Option<(
 /// Also accepts a word whose only piece is a double-quoted region holding
 /// exactly one such expansion (`"$X"`, `"${X}"`), reported with `true`: the
 /// quotes only suppress field splitting, so it names one argv word rather
-/// than an IFS-split sequence. Returns `(name, quoted)`.
+/// than an IFS-split sequence. `"$@"` is reported like any other name even
+/// though it expands to zero or many words; that is harmless here only because
+/// no same-line value can ever be recorded for `@`, so it floors to Ask
+/// downstream. Returns
+/// `(name, quoted)`.
 fn bare_parameter_name(word: &Word) -> Option<(&str, bool)> {
     match word.0.as_slice() {
         [WordPiece::ParameterExpansion(name)] => Some((name.as_str(), false)),
@@ -16934,6 +16922,58 @@ mod tests {
     }
 
     #[test]
+    fn git_alias_smuggling_keeps_the_matched_rule_attribution() {
+        // Issue #600: a same-argv rule Block wins the decision tie, so the
+        // verdict reports the rule's id and deny_message.
+        for command in [
+            r#"git -c alias.x='!id' push --force"#,
+            r#"git -c alias.x="!id" push --force"#,
+            r#"git --config-env=alias.x=ENV push --force"#,
+        ] {
+            let verdict = decide(command);
+            assert_eq!(verdict.decision(), Decision::Block, "{command}");
+            assert_eq!(
+                verdict.matched_rule().map(RuleId::as_str),
+                Some("git-push-force"),
+                "{command}"
+            );
+            assert_eq!(
+                verdict.deny_message(),
+                decide("git push --force").deny_message(),
+                "{command}"
+            );
+        }
+        // No rule matches: the smuggling Block keeps its own reason.
+        let verdict = decide("git -c alias.x='!id' status");
+        assert_eq!(verdict.decision(), Decision::Block);
+        assert!(verdict.matched_rule().is_none());
+        // A smuggling Block still outranks a rule/checkout-dot Ask.
+        assert_eq!(
+            decide("git -c alias.x='!id' checkout .").decision(),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn git_alias_smuggling_through_quoted_variables_is_not_allowed() {
+        // Issue #600: a variable-carried `-c` value is unresolvable to the
+        // alias scan (Ask), quoted or not; only the literal spelling Blocks.
+        for command in [
+            r#"A='alias.x=!id'; git -c "$A" status"#,
+            r#"A='alias.x=!id'; git -c $A status"#,
+            r#"A='alias.x=!id'; git -c "${A}" status"#,
+            r#"K=alias.x; git -c "$K=!id" status"#,
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+        assert_eq!(
+            decide(r#"A='alias.x=!id'; git -c "$A" status"#).decision(),
+            decide("A='alias.x=!id'; git -c $A status").decision()
+        );
+        assert_decision(r#"git -c "alias.x=!id" status"#, Decision::Block);
+    }
+
+    #[test]
     fn quoted_command_position_variable_resolves_like_the_unquoted_form() {
         // Issue #576.
         assert_decision("B=rm; $B -rf ~", Decision::Block);
@@ -16960,6 +17000,15 @@ mod tests {
                 "{command}"
             );
         }
+    }
+
+    #[test]
+    fn quoted_command_position_variable_ifs_and_value_history() {
+        // Issue #600: quoted never IFS-splits, unquoted does.
+        assert_decision(r#"IFS=x; B=rmx-rf; "$B" ~"#, Decision::Ask);
+        assert_decision("IFS=x; B=rmx-rf; $B ~", Decision::Block);
+        // The quoted form resolves through the value history too.
+        assert_decision(r#"B=rm; B=ls true; "$B" -rf ~"#, Decision::Block);
     }
 
     #[test]
