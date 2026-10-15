@@ -2424,6 +2424,21 @@ const GIT_CONFIG_COMMAND_KEY_CASES: &[(&str, Decision)] = &[
     ("git -c core.pager=x log", Decision::Ask),
     ("git --config-env core.pager=ENVVAR log", Decision::Ask),
     ("git --config-env=core.pager=ENVVAR log", Decision::Ask),
+    ("git -c core.fsmonitor=\"$X\" status", Decision::Ask),
+    ("git -c core.fsmonitor status", Decision::Block),
+    ("git -c core.fsmonitor= status", Decision::Block),
+    (
+        "git -C /tmp --no-pager -c core.fsmonitor=x status",
+        Decision::Block,
+    ),
+    ("git $X -c core.fsmonitor=x status", Decision::Block),
+    ("env git -c core.fsmonitor=x status", Decision::Block),
+    ("bash -c 'git -c core.fsmonitor=x status'", Decision::Block),
+    (
+        "git -c include.path=y -c core.fsmonitor=x status",
+        Decision::Block,
+    ),
+    ("git -c core.x.fsmonitor=y status", Decision::Allow),
     // Block outranks Ask when both appear on one line, in either order.
     (
         "git -c core.pager=less -c core.fsmonitor=x status",

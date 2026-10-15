@@ -2391,6 +2391,9 @@ fn evaluate_simple_command(
     // unconditionally the same way a same-line function definition's body
     // already is (issue #75) — see `scan_alias_definition_floor`'s own docs.
     let alias_floor = scan_alias_definition_floor(&argv, ctx, cwd);
+    // Computed before `argv` is moved into the core evaluation; consulted
+    // only by the allowlist guard below.
+    let git_config_smuggled_present = git_config_smuggled_verdict(&argv).is_some();
     // Tar's dash-less option cluster (issue #67) fails
     // closed on any letter this crate doesn't model, rather than silently
     // falling through to `Allow` the way the whole cluster used to when a
@@ -2624,6 +2627,10 @@ fn evaluate_simple_command(
     // entry for `alias` is not consent to whatever a `NAME=VALUE` argument's
     // own value would do once evaluated — the entry was written about
     // running `alias`, not about the expansion it defines.
+    // `git_config_smuggled_present` (issues #499/#694) extends it once more:
+    // an allow entry for `git` is not consent to a `-c`/`--config-env`
+    // value that injects a config file, defines an alias, or sets a key
+    // whose value git runs as a shell command.
     let verdict = if has_argument_substitution
         || has_leftover_substitution
         || expansion.has_any
@@ -2646,6 +2653,7 @@ fn evaluate_simple_command(
         || unknown_cwd_floor_present
         || token_floor_present
         || alias_floor_present
+        || git_config_smuggled_present
     {
         verdict
     } else {
@@ -3249,8 +3257,8 @@ fn evaluate_simple_command_core(
     // that id) is pinned unreachable by
     // `rules::embedded_git_push_force_rule_id_exists_for_gate_reuse`
     // below, rather than left as a silently-accepted fail-open gap.
-    // Issues #499/#552/#600: the `-c alias.*`/`include.path` smuggling
-    // verdict is folded worst-wins with the rule/checkout-dot verdict below
+    // Issues #499/#552/#600/#694: the `-c` smuggling verdict (`alias.*`,
+    // `include.path`, command-running keys such as `core.fsmonitor`) is folded worst-wins with the rule/checkout-dot verdict below
     // instead of returning early, so a Block cannot be shadowed by an
     // Ask-tier match and a same-argv rule Block keeps its own attribution.
     let smuggled = git_config_smuggled_verdict(&argv);
@@ -3310,8 +3318,9 @@ fn evaluate_simple_command_core(
         })
     });
 
-    // Issue #499: `git -c include.path=...`/`-c alias.<name>=...` smuggle
-    // in equivalent no-verify/hook-disabling (or, for `alias`, arbitrary
+    // Issues #499/#694: `git -c include.path=...`/`-c alias.<name>=...`/
+    // `-c core.fsmonitor=...` smuggle in equivalent no-verify/hook-disabling
+    // (or, for `alias` and the command-running keys, arbitrary
     // shell) behavior through the same `-c` conduit #498's own
     // `core.hooksPath` detection uses — see `git_config_smuggled_verdict`'s
     // own doc for why this is a hand-verdict structural check rather than
@@ -10460,17 +10469,17 @@ const GIT_CONFIG_RUNS_COMMAND_BLOCK_REASON: &str = "git -c/--config-env sets cor
      during an ordinary subcommand (e.g. `git status` runs core.fsmonitor)";
 
 const GIT_CONFIG_RUNS_COMMAND_ASK_REASON: &str = "git -c/--config-env sets credential.helper, \
-     core.editor or core.pager, whose value git runs as a shell command; the value is not \
-     statically inspectable";
+     core.editor or core.pager, whose value git runs as a shell command; these keys also \
+     have routine benign values (less, osxkeychain), so the gate asks rather than blocks";
 
 /// Issue #499, follow-up from #447/#498: whether `argv`'s `git`
 /// `-c`/`--config-env` global options carry an `include.path` (Ask) or
 /// `alias.<name>` (Block) value, or a command-running key (issue #694:
 /// Block for `core.fsmonitor`/`core.sshCommand`/`diff.external`/
-/// `gpg.program`, Ask for `credential.helper`/`core.editor`/`core.pager`) — the same `-c` conduit #498's own
-/// `core.hooksPath`-equals-`--no-verify` detection uses, but for two
-/// shapes that need their own Verdict rather than being folded into that
-/// rewrite: see `crate::rules::git_config_key_is_include_path`'s doc for
+/// `gpg.program`, Ask for `credential.helper`/`core.editor`/`core.pager`)
+/// — the same `-c` conduit #498's own `core.hooksPath`-equals-`--no-verify`
+/// detection uses, but for shapes that need their own Verdict rather than
+/// being folded into that rewrite: see `crate::rules::git_config_key_is_include_path`'s doc for
 /// why a `required_flags`-keyed rule isn't used here (a synthetic marker
 /// flag can't be told apart from a genuinely unresolvable one by
 /// `crate::rules::CommandRule`'s except-flags floor). Structural,
@@ -10598,8 +10607,9 @@ fn git_config_smuggled_verdict(argv: &[NormalizedWord]) -> Option<Verdict> {
         Verdict::ask(
             Reason::new(
                 "git -c/--config-env's value could not be statically resolved; it could name \
-                 alias.<name> or include.path just as easily as an ordinary config key, and \
-                 neither is inspectable through an unresolved $VAR/command substitution",
+                 alias.<name>, include.path, or a command-running key such as core.fsmonitor \
+                 or core.sshCommand just as easily as an ordinary config key, and none is \
+                 inspectable through an unresolved $VAR/command substitution",
             ),
             argv.to_vec(),
         )
@@ -16104,6 +16114,30 @@ mod tests {
         // ordinary case apply_allowlist exists to handle.
         let verdict = analyze_with_policy("rm -rf $HOME", &rules, &allowlist);
         assert_eq!(verdict.decision(), Decision::Allow);
+    }
+
+    #[test]
+    fn config_allow_rule_cannot_downgrade_git_config_smuggled_verdict() {
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[allow]]
+            id = "user-allow-git"
+            reason = "trust me"
+            command = "git"
+        "#,
+        );
+        for command in [
+            r#"git -c core.fsmonitor="$X" status"#,
+            "git -c core.editor='!rm -rf ~' commit",
+            "git -c include.path=evil.conf status",
+        ] {
+            let verdict = analyze_with_policy(command, &rules, &allowlist);
+            assert_ne!(
+                verdict.decision(),
+                Decision::Allow,
+                "allow entry must not downgrade {command:?}"
+            );
+        }
     }
 
     #[test]
