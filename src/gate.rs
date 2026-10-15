@@ -10455,9 +10455,19 @@ const GIT_CONFIG_ALIAS_REASON: &str = "git -c alias.<name>=<value>/--config-env=
      git alias for this invocation, structurally closer to inline shell execution than to a \
      config toggle (a value beginning with `!` runs as an arbitrary shell command)";
 
+const GIT_CONFIG_RUNS_COMMAND_BLOCK_REASON: &str = "git -c/--config-env sets core.fsmonitor, \
+     core.sshCommand, diff.external or gpg.program, whose value git runs as a shell command \
+     during an ordinary subcommand (e.g. `git status` runs core.fsmonitor)";
+
+const GIT_CONFIG_RUNS_COMMAND_ASK_REASON: &str = "git -c/--config-env sets credential.helper, \
+     core.editor or core.pager, whose value git runs as a shell command; the value is not \
+     statically inspectable";
+
 /// Issue #499, follow-up from #447/#498: whether `argv`'s `git`
 /// `-c`/`--config-env` global options carry an `include.path` (Ask) or
-/// `alias.<name>` (Block) value — the same `-c` conduit #498's own
+/// `alias.<name>` (Block) value, or a command-running key (issue #694:
+/// Block for `core.fsmonitor`/`core.sshCommand`/`diff.external`/
+/// `gpg.program`, Ask for `credential.helper`/`core.editor`/`core.pager`) — the same `-c` conduit #498's own
 /// `core.hooksPath`-equals-`--no-verify` detection uses, but for two
 /// shapes that need their own Verdict rather than being folded into that
 /// rewrite: see `crate::rules::git_config_key_is_include_path`'s doc for
@@ -10504,6 +10514,7 @@ fn git_config_smuggled_verdict(argv: &[NormalizedWord]) -> Option<Verdict> {
     let globals = bound_git_global_options(rest);
     let mut index = 0;
     let mut include_path_seen = false;
+    let mut runs_command_ask_seen = false;
     let mut unresolvable_value_seen = false;
     while index < globals.len() {
         let Resolution::Resolved(s) = globals[index].resolution() else {
@@ -10520,8 +10531,18 @@ fn git_config_smuggled_verdict(argv: &[NormalizedWord]) -> Option<Verdict> {
                             None,
                         ));
                     }
+                    if crate::rules::git_config_key_runs_command_block(value) {
+                        return Some(Verdict::block(
+                            Reason::new(GIT_CONFIG_RUNS_COMMAND_BLOCK_REASON),
+                            argv.to_vec(),
+                            None,
+                        ));
+                    }
                     if crate::rules::git_config_key_is_include_path(value) {
                         include_path_seen = true;
+                    }
+                    if crate::rules::git_config_key_runs_command_ask(value) {
+                        runs_command_ask_seen = true;
                     }
                 }
                 Some(Resolution::Unresolvable(_)) => {
@@ -10537,8 +10558,18 @@ fn git_config_smuggled_verdict(argv: &[NormalizedWord]) -> Option<Verdict> {
                     None,
                 ));
             }
+            if crate::rules::git_config_key_runs_command_block(kv) {
+                return Some(Verdict::block(
+                    Reason::new(GIT_CONFIG_RUNS_COMMAND_BLOCK_REASON),
+                    argv.to_vec(),
+                    None,
+                ));
+            }
             if crate::rules::git_config_key_is_include_path(kv) {
                 include_path_seen = true;
+            }
+            if crate::rules::git_config_key_runs_command_ask(kv) {
+                runs_command_ask_seen = true;
             }
         }
         index += if crate::rules::git_global_takes_separated_value(s) {
@@ -10554,6 +10585,12 @@ fn git_config_smuggled_verdict(argv: &[NormalizedWord]) -> Option<Verdict> {
                  arbitrary config file; its contents are not statically inspectable and could \
                  set core.hooksPath or any other security-relevant setting indirectly",
             ),
+            argv.to_vec(),
+        ));
+    }
+    if runs_command_ask_seen {
+        return Some(Verdict::ask(
+            Reason::new(GIT_CONFIG_RUNS_COMMAND_ASK_REASON),
             argv.to_vec(),
         ));
     }

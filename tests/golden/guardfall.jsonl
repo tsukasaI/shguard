@@ -301,14 +301,44 @@
 {"command":"fish script.fish -c 'rm -rf /'","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"gfind . -print0 | xargs -0 rm -f","decision":"Block","deny_message":null,"matched_rule":"find-pipe-rm-force"}
 {"command":"gh pr create -t \"feat: add floor (+func)\" -b x","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git --config-env core.editor=ENVVAR commit","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"git --config-env core.fsmonitor=ENVVAR status","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"git --config-env core.hooksPath=ENVVAR commit -m x","decision":"Block","deny_message":null,"matched_rule":"git-commit-no-verify-short"}
+{"command":"git --config-env core.pager=ENVVAR log","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"git --config-env core.sshCommand=ENVVAR fetch","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"git --config-env credential.helper=ENVVAR fetch","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"git --config-env diff.external=ENVVAR diff","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"git --config-env gpg.program=ENVVAR commit -m x","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"git --config-env=core.editor=ENVVAR commit","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"git --config-env=core.fsmonitor=ENVVAR status","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"git --config-env=core.hooksPath=ENVVAR commit -m x","decision":"Block","deny_message":null,"matched_rule":"git-commit-no-verify-short"}
+{"command":"git --config-env=core.pager=ENVVAR log","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"git --config-env=core.sshCommand=ENVVAR fetch","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"git --config-env=credential.helper=ENVVAR fetch","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"git --config-env=diff.external=ENVVAR diff","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"git --config-env=gpg.program=ENVVAR commit -m x","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"git -C /tmp push origin +main","decision":"Block","deny_message":null,"matched_rule":"git-push-force"}
+{"command":"git -c CORE.FSMONITOR=x status","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"git -c Core.HooksPath=/dev/null commit -m x","decision":"Block","deny_message":null,"matched_rule":"git-commit-no-verify-short"}
+{"command":"git -c Core.Pager=less log","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"git -c Core.SshCommand=x fetch","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"git -c Credential.Helper=x fetch","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"git -c core.autocrlf=false status","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git -c core.editor=x commit","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"git -c core.fsmonitor='rm -rf ~' status","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"git -c core.fsmonitor=x -c core.pager=less status","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"git -c core.fsmonitor=x status","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"git -c core.hooksPath= commit -m x","decision":"Block","deny_message":null,"matched_rule":"git-commit-no-verify-short"}
 {"command":"git -c core.hooksPath=/dev/null commit -m x","decision":"Block","deny_message":null,"matched_rule":"git-commit-no-verify-short"}
 {"command":"git -c core.hooksPath=/dev/null merge other","decision":"Block","deny_message":null,"matched_rule":"git-merge-no-verify"}
 {"command":"git -c core.hooksPath=/dev/null push","decision":"Block","deny_message":null,"matched_rule":"git-push-no-verify"}
+{"command":"git -c core.pager=less -c core.fsmonitor=x status","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"git -c core.pager=less log","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"git -c core.pager=x log","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"git -c core.sshCommand=x fetch","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"git -c credential.helper=x fetch","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"git -c diff.external=x diff","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"git -c gpg.program=x commit -m x","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"git branch --del --for feature","decision":"Block","deny_message":null,"matched_rule":"git-branch-force-delete-flags"}
 {"command":"git branch --delete --force feature","decision":"Block","deny_message":null,"matched_rule":"git-branch-force-delete-flags"}
 {"command":"git branch -D feature","decision":"Block","deny_message":null,"matched_rule":"git-branch-force-delete"}

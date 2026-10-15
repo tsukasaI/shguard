@@ -2364,6 +2364,90 @@ fn guardfall_parameter_expansion_operand_cases() {
     }
 }
 
+// Issue #694: config keys whose value git runs as a shell command.
+const GIT_CONFIG_COMMAND_KEY_CASES: &[(&str, Decision)] = &[
+    ("git -c core.fsmonitor='rm -rf ~' status", Decision::Block),
+    ("git -c core.pager=less log", Decision::Ask),
+    ("git -c core.autocrlf=false status", Decision::Allow),
+    ("git -c CORE.FSMONITOR=x status", Decision::Block),
+    ("git -c Core.Pager=less log", Decision::Ask),
+    ("git -c Core.SshCommand=x fetch", Decision::Block),
+    ("git -c Credential.Helper=x fetch", Decision::Ask),
+    ("git -c core.fsmonitor=x status", Decision::Block),
+    (
+        "git --config-env core.fsmonitor=ENVVAR status",
+        Decision::Block,
+    ),
+    (
+        "git --config-env=core.fsmonitor=ENVVAR status",
+        Decision::Block,
+    ),
+    ("git -c core.sshCommand=x fetch", Decision::Block),
+    (
+        "git --config-env core.sshCommand=ENVVAR fetch",
+        Decision::Block,
+    ),
+    (
+        "git --config-env=core.sshCommand=ENVVAR fetch",
+        Decision::Block,
+    ),
+    ("git -c diff.external=x diff", Decision::Block),
+    (
+        "git --config-env diff.external=ENVVAR diff",
+        Decision::Block,
+    ),
+    (
+        "git --config-env=diff.external=ENVVAR diff",
+        Decision::Block,
+    ),
+    ("git -c gpg.program=x commit -m x", Decision::Block),
+    (
+        "git --config-env gpg.program=ENVVAR commit -m x",
+        Decision::Block,
+    ),
+    (
+        "git --config-env=gpg.program=ENVVAR commit -m x",
+        Decision::Block,
+    ),
+    ("git -c credential.helper=x fetch", Decision::Ask),
+    (
+        "git --config-env credential.helper=ENVVAR fetch",
+        Decision::Ask,
+    ),
+    (
+        "git --config-env=credential.helper=ENVVAR fetch",
+        Decision::Ask,
+    ),
+    ("git -c core.editor=x commit", Decision::Ask),
+    ("git --config-env core.editor=ENVVAR commit", Decision::Ask),
+    ("git --config-env=core.editor=ENVVAR commit", Decision::Ask),
+    ("git -c core.pager=x log", Decision::Ask),
+    ("git --config-env core.pager=ENVVAR log", Decision::Ask),
+    ("git --config-env=core.pager=ENVVAR log", Decision::Ask),
+    // Block outranks Ask when both appear on one line, in either order.
+    (
+        "git -c core.pager=less -c core.fsmonitor=x status",
+        Decision::Block,
+    ),
+    (
+        "git -c core.fsmonitor=x -c core.pager=less status",
+        Decision::Block,
+    ),
+];
+
+#[test]
+fn guardfall_git_config_command_key_cases() {
+    for (command, expected) in GIT_CONFIG_COMMAND_KEY_CASES {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
 const DECISION_TABLES: &[&[(&str, Decision)]] = &[
     HEADLINE_CASES,
     CLASS_E_CASES,
@@ -2388,6 +2472,7 @@ const DECISION_TABLES: &[&[(&str, Decision)]] = &[
     BRUSH_PARSER_OVERFLOW_PANIC_CASES,
     SED_SCRIPT_WRITE_EXEC_CASES,
     PARAMETER_EXPANSION_OPERAND_CASES,
+    GIT_CONFIG_COMMAND_KEY_CASES,
 ];
 
 #[test]

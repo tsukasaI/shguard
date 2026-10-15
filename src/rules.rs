@@ -734,6 +734,34 @@ pub(crate) fn git_config_key_is_alias(key_value: &str) -> bool {
         .is_some_and(|(section, name)| section.eq_ignore_ascii_case("alias") && !name.is_empty())
 }
 
+/// Whether `key_value` names a config variable whose value git runs as a
+/// shell command or execs unconditionally, so a `-c` override is inline
+/// command execution: `core.fsmonitor`, `core.sshCommand`, `diff.external`,
+/// `gpg.program` (issue #694). Whole-key match, not a prefix: section and
+/// key are case-insensitive and these have no subsection.
+pub(crate) fn git_config_key_runs_command_block(key_value: &str) -> bool {
+    let key = git_config_key(key_value);
+    [
+        "core.fsmonitor",
+        "core.sshcommand",
+        "diff.external",
+        "gpg.program",
+    ]
+    .iter()
+    .any(|known| key.eq_ignore_ascii_case(known))
+}
+
+/// Like [`git_config_key_runs_command_block`] but for keys that also have
+/// ordinary non-command values in routine use (`core.pager=less`), so the
+/// verdict is Ask rather than Block: `credential.helper`, `core.editor`,
+/// `core.pager` (issue #694).
+pub(crate) fn git_config_key_runs_command_ask(key_value: &str) -> bool {
+    let key = git_config_key(key_value);
+    ["credential.helper", "core.editor", "core.pager"]
+        .iter()
+        .any(|known| key.eq_ignore_ascii_case(known))
+}
+
 /// Strips a leading run of `git`'s own global value-taking options (and
 /// their separated values) from `tail`. Returns `None` — no rewrite
 /// needed — for every non-`git` command, and for a `git` invocation with
