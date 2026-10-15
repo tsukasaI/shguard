@@ -6,6 +6,13 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- The interpreter inline-code floor (rule 6b) no longer claims an inline
+  `-c`/`-e` argument when the trigger is an unresolved word in option
+  position (`python3 "$p"`, `node "$p"`, `perl "$p"`, #633). The decision
+  stays Ask, but the reason now says an unresolved argument sits where an
+  inline-code flag could appear, and the deny message is the
+  unresolved-target one instead of "write the program to a file". A literal
+  `-c`/`-e` (including glued `-c'print(1)'`) keeps the old reason and message.
 - `resolve_symlinks` (#583) fails closed in more cases (#612): a regular
   file with more than one hard link, any candidate when an earlier command
   on the line is anything but `cd`/`pushd`/`popd`/`dirs` or a no-write
