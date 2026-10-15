@@ -4363,7 +4363,8 @@ fn dirstack_reachable_via_magic_equal_subst(remainder: &str) -> bool {
 
 /// A rule matching the shape of a whole pipeline: an earlier stage's
 /// command name in `sources`, and the final stage's command name in
-/// `sinks` (both stored case-folded, compared against the folded runtime name) — the literal ported `curl|wget → sh` installer-pipe pattern
+/// `sinks` (both stored case-folded, compared against the folded runtime
+/// name) — the literal ported `curl|wget → sh` installer-pipe pattern
 /// (plan.md §1.1 stage 3). The general decode-fed-pipe gate is a later
 /// issue (plan.md §4), out of scope here.
 #[derive(Debug, Clone, PartialEq, Eq)]

