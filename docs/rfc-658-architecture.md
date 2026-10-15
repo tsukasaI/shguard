@@ -170,7 +170,7 @@ pub enum Evidence {
     Recursed { inner: Box<Outcome> },
     ParseFailure { construct: Option<String> },          // shell syntax shguard cannot read
     InputRejected { stage: InputStage },                 // malformed hook JSON, stdin read error, stdin over the cap
-    ConfigUnavailable { path: ConfigPath, error: String }, // #630: the reason names the path
+    ConfigUnavailable { path: Option<PathBuf>, error: String }, // #630: the reason names the path (None: no path could be resolved)
     ResourceLimit { kind: LimitKind },
     AllowlistMatch { id: RuleId },
     UserAskMatch { id: RuleId },

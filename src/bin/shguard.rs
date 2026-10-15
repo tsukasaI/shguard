@@ -1171,6 +1171,7 @@ fn run(early_tx: &Sender<EarlyInfo>, log_state: Arc<LogState>) -> serde_json::Va
             let config = PolicyConfig::none().with_strict_config(strict_config_requested());
             return shguard::adapter::render(&decide(
                 &[Evidence::ConfigUnavailable {
+                    path: err.path().map(std::path::Path::to_path_buf),
                     error: err.to_string(),
                 }],
                 &config,

@@ -3076,54 +3076,67 @@ fn evaluate_simple_command_core(
     // shell either: its script text is not parsed here, only recognized as
     // present. Carries its own reason string (rather than a shared `bool`)
     // since the two shapes need different wording.
-    let interpreter_code_floor: Option<String> = effective.and_then(|(name, rest_words)| {
-        // `name` is already case-folded; strip the version suffix only for
-        // the two membership checks below (issue #346's `evaluate_dash_c`
-        // precedent: a versioned interpreter binary like `python3.12`
-        // must be recognized exactly like the unversioned name would),
-        // so `name` keeps its version suffix in every message string that
-        // follows.
-        let base_name = crate::rules::strip_version_suffix(name);
-        if let Some(grammar) = inline_code_grammar(base_name) {
-            possibly_inline_code(grammar, rest_words).then(|| {
-                "an inline code argument (`-c`/`-e`) to a non-shell interpreter cannot be \
-                 introspected"
-                    .to_string()
-            })
-        } else if AWK_INTERPRETERS.contains(&base_name) {
-            match scan_for_awk_script(rest_words) {
-                AwkScriptPosition::InlineScript => Some(format!(
-                    "`{name}`'s script is a bare positional argument (no `-c`/`-e`-style flag) \
+    let interpreter_code_floor: Option<(String, &'static str)> =
+        effective.and_then(|(name, rest_words)| {
+            // `name` is already case-folded; strip the version suffix only for
+            // the two membership checks below (issue #346's `evaluate_dash_c`
+            // precedent: a versioned interpreter binary like `python3.12`
+            // must be recognized exactly like the unversioned name would),
+            // so `name` keeps its version suffix in every message string that
+            // follows.
+            let base_name = crate::rules::strip_version_suffix(name);
+            if let Some(grammar) = inline_code_grammar(base_name) {
+                possibly_inline_code(grammar, rest_words).map(|trigger| match trigger {
+                    InlineCodeTrigger::Literal => (
+                        "an inline code argument (`-c`/`-e`) to a non-shell interpreter cannot be \
+                     introspected"
+                            .to_string(),
+                        DENY_MSG_INLINE_INTERPRETER,
+                    ),
+                    // Issue #633: no literal inline-code flag was written; an
+                    // unresolved word merely sits where the flag could be, so
+                    // "write it to a file" would be misleading guidance.
+                    InlineCodeTrigger::UnresolvedWord => (
+                        "an unresolved argument sits where an inline-code flag (`-c`/`-e`) could \
+                     appear, so inline code cannot be ruled out"
+                            .to_string(),
+                        DENY_MSG_UNRESOLVED_TARGET,
+                    ),
+                })
+            } else if AWK_INTERPRETERS.contains(&base_name) {
+                let awk_reason = match scan_for_awk_script(rest_words) {
+                    AwkScriptPosition::InlineScript => Some(format!(
+                        "`{name}`'s script is a bare positional argument (no `-c`/`-e`-style flag) \
                      and cannot be introspected"
-                )),
-                AwkScriptPosition::InlineScriptFlag(flag) => Some(format!(
-                    "`{name}`'s `{flag}` flag supplies inline script text directly and cannot \
+                    )),
+                    AwkScriptPosition::InlineScriptFlag(flag) => Some(format!(
+                        "`{name}`'s `{flag}` flag supplies inline script text directly and cannot \
                      be introspected"
-                )),
-                AwkScriptPosition::FileFlagStdin => Some(format!(
-                    "`{name}`'s `-f`/`-E`/`-i`-style flag reads its program from stdin (`-`, \
+                    )),
+                    AwkScriptPosition::FileFlagStdin => Some(format!(
+                        "`{name}`'s `-f`/`-E`/`-i`-style flag reads its program from stdin (`-`, \
                      `/dev/stdin`, `/proc/self/fd/0`, or `/dev/fd/0`), which is \
                      unintrospectable and attacker-controllable through the same pipe"
-                )),
-                AwkScriptPosition::Uncertain => Some(format!(
-                    "`{name}`'s `-f`/`--file` flag position could not be statically resolved, \
+                    )),
+                    AwkScriptPosition::Uncertain => Some(format!(
+                        "`{name}`'s `-f`/`--file` flag position could not be statically resolved, \
                      so whether its script comes from a file or an inline positional argument \
                      is unknown"
-                )),
-                AwkScriptPosition::FileFlag | AwkScriptPosition::Absent => None,
+                    )),
+                    AwkScriptPosition::FileFlag | AwkScriptPosition::Absent => None,
+                };
+                awk_reason.map(|reason| (reason, DENY_MSG_INLINE_INTERPRETER))
+            } else {
+                None
             }
-        } else {
-            None
-        }
-    });
+        });
 
     // Rule 6e (issue #584): `sed`'s script can write (`w`/`W`/`s///w`), read
     // (`r`/`R`) and, on GNU, execute (`e`/`s///e`); it floors to Ask unless
     // [`crate::sed_script::classify`] proves it free of all of them. Folded
     // into the interpreter-code floor with its own guidance message.
-    let interpreter_code_floor: Option<(String, &'static str)> = interpreter_code_floor
-        .map(|reason| (reason, DENY_MSG_INLINE_INTERPRETER))
-        .or_else(|| {
+    let interpreter_code_floor: Option<(String, &'static str)> =
+        interpreter_code_floor.or_else(|| {
             let (name, rest_words) = effective?;
             let lower_name = crate::rules::fold_command_name(name);
             SED_NAMES
@@ -7309,25 +7322,80 @@ fn inline_code_grammar(name: &str) -> Option<&'static InlineGrammar> {
 /// unresolvable word met before that point, or an option the grammar does
 /// not list, counts as possibly inline code (fail-closed): the word might
 /// itself be the flag, or the script operand's position is unknown.
-fn possibly_inline_code(grammar: &InlineGrammar, words: &[NormalizedWord]) -> bool {
+fn possibly_inline_code(
+    grammar: &InlineGrammar,
+    words: &[NormalizedWord],
+) -> Option<InlineCodeTrigger> {
+    let trigger = scan_inline_code(grammar, words)?;
+    // A literal code flag after the unresolved word (`python3 $OPTS -c x`) is
+    // still a flag the agent wrote.
+    if trigger == InlineCodeTrigger::UnresolvedWord
+        && words
+            .iter()
+            .any(|word| starts_with_code_flag(grammar, word))
+    {
+        return Some(InlineCodeTrigger::Literal);
+    }
+    Some(trigger)
+}
+
+/// Whether `word` literally begins with an inline-code flag of `grammar`,
+/// reading an unresolvable word through its literal head (`-c"$code"`,
+/// `--eval=$x`): whatever the expansion adds, the flag is already written.
+/// For short flags only plain letters may precede the code letter.
+fn starts_with_code_flag(grammar: &InlineGrammar, word: &NormalizedWord) -> bool {
+    let text = match word.resolution() {
+        Resolution::Resolved(text) => text.as_str(),
+        _ => match word.literal_head() {
+            Some(head) => head,
+            None => return false,
+        },
+    };
+    let Some(flags) = text.strip_prefix('-') else {
+        return false;
+    };
+    if let Some(long) = flags.strip_prefix('-') {
+        let name = long.split_once('=').map_or(long, |(name, _)| name);
+        return grammar.long_code.contains(&name);
+    }
+    for letter in flags.chars() {
+        if grammar.code_chars.contains(letter) {
+            return true;
+        }
+        if !grammar.cluster || !grammar.plain_chars.contains(letter) {
+            return false;
+        }
+    }
+    false
+}
+
+/// The option scan behind [`possibly_inline_code`], before its late
+/// literal-flag relabel.
+fn scan_inline_code(
+    grammar: &InlineGrammar,
+    words: &[NormalizedWord],
+) -> Option<InlineCodeTrigger> {
+    use InlineCodeTrigger::{Literal, UnresolvedWord};
     let mut iter = words.iter();
     while let Some(word) = iter.next() {
         let Resolution::Resolved(text) = word.resolution() else {
-            return true;
+            return Some(if starts_with_code_flag(grammar, word) {
+                Literal
+            } else {
+                UnresolvedWord
+            });
         };
         if text == "--" {
-            return false;
+            return None;
         }
-        let Some(flags) = text.strip_prefix('-').filter(|rest| !rest.is_empty()) else {
-            return false;
-        };
+        let flags = text.strip_prefix('-').filter(|rest| !rest.is_empty())?;
         if let Some(long) = flags.strip_prefix('-') {
             let (name, has_value) = match long.split_once('=') {
                 Some((name, _)) => (name, true),
                 None => (long, false),
             };
             if grammar.long_code.contains(&name) {
-                return true;
+                return Some(Literal);
             }
             if has_value
                 || grammar.long_plain.contains(&name)
@@ -7342,26 +7410,26 @@ fn possibly_inline_code(grammar: &InlineGrammar, words: &[NormalizedWord]) -> bo
                 if let Some(Resolution::Unresolvable(_)) =
                     iter.next().map(NormalizedWord::resolution)
                 {
-                    return true;
+                    return Some(UnresolvedWord);
                 }
                 continue;
             }
-            return true;
+            return Some(Literal);
         }
         for (index, letter) in flags.char_indices() {
             let rest = &flags[index + letter.len_utf8()..];
             if grammar.code_chars.contains(letter) {
-                return true;
+                return Some(Literal);
             }
             if grammar.operand_chars.contains(letter) {
-                return false;
+                return None;
             }
             if grammar.value_chars.contains(letter) {
                 if rest.is_empty()
                     && let Some(Resolution::Unresolvable(_)) =
                         iter.next().map(NormalizedWord::resolution)
                 {
-                    return true;
+                    return Some(UnresolvedWord);
                 }
                 break;
             }
@@ -7370,16 +7438,27 @@ fn possibly_inline_code(grammar: &InlineGrammar, words: &[NormalizedWord]) -> bo
             }
             if grammar.required_attached_chars.contains(letter) {
                 if rest.is_empty() {
-                    return true;
+                    return Some(Literal);
                 }
                 break;
             }
             if !grammar.plain_chars.contains(letter) || (!grammar.cluster && !rest.is_empty()) {
-                return true;
+                return Some(Literal);
             }
         }
     }
-    false
+    None
+}
+
+/// Why [`possibly_inline_code`] could not rule out inline code (issue
+/// #633). Selects the reason and deny message: a literal flag the agent
+/// wrote gets "write it to a file" guidance, an unresolved word does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InlineCodeTrigger {
+    /// A literal inline-code flag, or an option the grammar cannot place.
+    Literal,
+    /// An unresolvable word where the flag (or its value) could be.
+    UnresolvedWord,
 }
 
 /// `sed` command names checked by rule 6e, after case folding and
@@ -7392,7 +7471,7 @@ const SED_NAMES: &[&str] = &["sed", "gsed"];
 /// roles reversed for the `-f`-vs-operand case: finding `-f`/`-E`/`-i`
 /// first means the script is NOT inline (the same unfloored posture this
 /// module already gives a non-shell interpreter's script *file* argument,
-/// e.g. `python3 script.py` — [`possibly_inline_code`] returns `false` for
+/// e.g. `python3 script.py` — [`possibly_inline_code`] returns `None` for
 /// that shape too), while finding a bare operand first means it IS inline code.
 /// `-e`/`--source` is unlike either: gawk documents it as always supplying
 /// inline program text regardless of what else is on the line, so
@@ -13403,6 +13482,95 @@ mod tests {
     #[test]
     fn node_dash_e_is_ask_floor() {
         assert_decision("node -e 'require(\"fs\").rmSync(\"/\")'", Decision::Ask);
+    }
+
+    const INLINE_FLAG_REASON: &str =
+        "an inline code argument (`-c`/`-e`) to a non-shell interpreter cannot be introspected";
+    const UNRESOLVED_ARG_REASON: &str = "an unresolved argument sits where an inline-code flag \
+         (`-c`/`-e`) could appear, so inline code cannot be ruled out";
+
+    fn assert_interpreter_floor(command: &str, reason: &str, deny_message: &str) {
+        let verdict = decide(command);
+        assert_eq!(verdict.decision(), Decision::Ask, "{command:?}");
+        let got_reason = verdict.reason().map(super::Reason::as_str).unwrap_or("");
+        assert!(
+            got_reason.contains(reason),
+            "{command:?}: reason {got_reason:?} lacks {reason:?}"
+        );
+        for other in [INLINE_FLAG_REASON, UNRESOLVED_ARG_REASON] {
+            assert!(
+                other == reason || !got_reason.contains(other),
+                "{command:?}: reason {got_reason:?} also carries {other:?}"
+            );
+        }
+        assert_eq!(
+            verdict.deny_message().map(super::DenyMessage::as_str),
+            Some(deny_message),
+            "{command:?}"
+        );
+    }
+
+    // Issue #633: an unresolved word where the flag could sit keeps the Ask
+    // floor but must not be reported as an inline code argument.
+    #[test]
+    fn interpreter_code_unresolved_script_word_reports_unresolved_reason() {
+        for command in [
+            "python3 \"$p\"",
+            "node \"$p\"",
+            "perl \"$p\"",
+            "S=/tmp/x; python3 -I \"$S/x.py\"",
+            "python3 -X \"$o\" s.py",
+            "node --require \"$m\" app.js",
+        ] {
+            assert_interpreter_floor(command, UNRESOLVED_ARG_REASON, DENY_MSG_UNRESOLVED_TARGET);
+        }
+    }
+
+    #[test]
+    fn interpreter_code_literal_flag_keeps_inline_reason() {
+        for command in [
+            "python3 -c x",
+            "node -e x",
+            "perl -e x",
+            "python3 -c'print(1)'",
+            "python3 -c\"$code\"",
+            "python3 -c\"print($x)\"",
+            "node -e\"$js\"",
+            "perl -e\"print $x\"",
+            "perl -le\"$x\"",
+            "node --eval\"$x\"",
+            "node --eval=\"$x\"",
+            "node \"--eval=$x\"",
+            "python3 $OPTS -c 'print(1)'",
+            "python3 \"$f\" -c 'import os'",
+            "python3 -W \"$w\" -c 'import os'",
+            "ruby -I \"$d\" -e 'x'",
+        ] {
+            assert_interpreter_floor(command, INLINE_FLAG_REASON, DENY_MSG_INLINE_INTERPRETER);
+        }
+    }
+
+    // The awk and sed arms of the same floor carry their own reasons, never
+    // either interpreter-flag wording.
+    #[test]
+    fn interpreter_code_awk_and_sed_floors_keep_their_own_reasons() {
+        for (command, deny_message) in [
+            ("awk '{print}' f", DENY_MSG_INLINE_INTERPRETER),
+            ("sed \"s/$a/$b/\" f", DENY_MSG_SED_SCRIPT),
+        ] {
+            let verdict = decide(command);
+            assert_eq!(verdict.decision(), Decision::Ask, "{command:?}");
+            let reason = verdict.reason().map(super::Reason::as_str).unwrap_or("");
+            assert!(
+                !reason.contains(INLINE_FLAG_REASON) && !reason.contains(UNRESOLVED_ARG_REASON),
+                "{command:?}: {reason:?}"
+            );
+            assert_eq!(
+                verdict.deny_message().map(super::DenyMessage::as_str),
+                Some(deny_message),
+                "{command:?}"
+            );
+        }
     }
 
     // A versioned interpreter binary floors exactly like the unversioned name.
