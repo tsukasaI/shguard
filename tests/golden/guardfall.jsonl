@@ -505,7 +505,7 @@
 {"command":"osascript -l JavaScript -e 1","decision":"Ask","deny_message":"Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f prog.awk`) — inline interpreter code is never inspected.","matched_rule":null}
 {"command":"osascript -l JavaScript script.js","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"osascript -s o -e 1","decision":"Ask","deny_message":"Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f prog.awk`) — inline interpreter code is never inspected.","matched_rule":null}
-{"command":"osascript -x script.scpt","decision":"Ask","deny_message":"Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f prog.awk`) — inline interpreter code is never inspected.","matched_rule":null}
+{"command":"osascript -x script.scpt","decision":"Ask","deny_message":"Remove the option or respell it as one the interpreter documents (attach a value where one is required), or write the program to a file and run that file; shguard can only inspect options it can place.","matched_rule":null}
 {"command":"osascript script.scpt","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"parallel --help","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"parallel --version","decision":"Allow","deny_message":null,"matched_rule":null}
