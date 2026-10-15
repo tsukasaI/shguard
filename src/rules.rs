@@ -5243,6 +5243,13 @@ pub(crate) const SHELL_INTERPRETERS: &[&str] = &[
 /// `eval` the same way it already rejects one naming `bash`/`sh`.
 pub(crate) const EVAL_BUILTIN: &[&str] = &["eval"];
 
+/// The `trap` builtin (issue #693): its action string is shell code run
+/// later in the CURRENT shell (`trap 'rm -rf ~' EXIT`), so it recurses like
+/// [`EVAL_BUILTIN`] (`crate::gate`'s `evaluate_trap`). Listed separately
+/// because only its first non-option argument is the script, and kept here
+/// so [`matches_dangerous_allow_target`] rejects an `allow` entry naming it.
+pub(crate) const TRAP_BUILTIN: &[&str] = &["trap"];
+
 /// Non-shell interpreters a pipeline's final stage may additionally be
 /// (`crate::gate` rule 5b/5c), beyond every shell already named in
 /// [`SHELL_INTERPRETERS`]. Kept as a *separate* small list, rather than a
@@ -9317,8 +9324,8 @@ pub(crate) fn apply_allowlist(verdict: &Verdict, allowlist: &Allowlist) -> Allow
 // ---------------------------------------------------------------------
 
 /// Whether `entry`'s matcher would match any known shell interpreter,
-/// `eval`, awk variant, or transparent wrapper name (`SHELL_INTERPRETERS`/
-/// `EVAL_BUILTIN`/`EXTRA_PIPELINE_INTERPRETERS`/`AWK_INTERPRETERS`/
+/// `eval`/`trap`, awk variant, or transparent wrapper name (`SHELL_INTERPRETERS`/
+/// `EVAL_BUILTIN`/`TRAP_BUILTIN`/`EXTRA_PIPELINE_INTERPRETERS`/`AWK_INTERPRETERS`/
 /// `TRANSPARENT_WRAPPERS`) —
 /// used to reject `allow` config entries that would suppress every
 /// recursion-derived `Ask` involving one of those names (`bash -c`
@@ -9352,6 +9359,7 @@ fn matches_dangerous_allow_target(entry: &CommandRule) -> bool {
         SHELL_INTERPRETERS
             .iter()
             .chain(EVAL_BUILTIN.iter())
+            .chain(TRAP_BUILTIN.iter())
             .chain(EXTRA_PIPELINE_INTERPRETERS.iter())
             .chain(AWK_INTERPRETERS.iter())
             .chain(TRANSPARENT_WRAPPERS.iter())

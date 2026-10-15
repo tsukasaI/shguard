@@ -353,7 +353,7 @@ use crate::policy::combine::{
 use crate::policy::{self, Evidence, LimitKind, PolicyConfig, deny_msg_unsupported_construct};
 use crate::rules::{
     AWK_INTERPRETERS, Allowlist, EVAL_BUILTIN, PathForm, RedirectRule, Rules, SymlinkScope,
-    WrapperChainEscalation, has_expanding_glob_qualifier, is_pipeline_interpreter,
+    TRAP_BUILTIN, WrapperChainEscalation, has_expanding_glob_qualifier, is_pipeline_interpreter,
     lexical_normalize, render_cwd_anchor, unresolved_word_may_hide_glob_qualifier,
     wrapper_chain_changes_cwd,
 };
@@ -3015,6 +3015,21 @@ fn evaluate_simple_command_core(
         );
     }
 
+    // Rule 6d (issue #693): `trap '<action>' SIGSPEC` stores shell code the
+    // current shell runs later (`EXIT` on shell exit), so recurse it.
+    if let Some((name, rest_words)) = effective
+        && TRAP_BUILTIN.contains(&name)
+        && let Some(outcome) = evaluate_trap(&argv, rest_words, ctx, cwd)
+    {
+        return apply_opaque_kind_floor(
+            apply_substitution_floor(
+                apply_escalation_floor(outcome, escalation_floor),
+                substitution_result,
+            ),
+            opaque_kind,
+        );
+    }
+
     // Rule 6e (issue #365): ksh93's `builtin -f <libname> ...` dlopen()s an
     // arbitrary shared object the same way `enable -f` does (rules/
     // blocklist.toml's `enable-loadable-builtin`) — checked against the raw
@@ -4769,6 +4784,44 @@ fn evaluate_eval(
         ctx,
         CwdState::seed_unknown_stack(cwd.clone()),
     ))
+}
+
+/// Rule 6d (issue #693): recurses `trap`'s action string like
+/// [`evaluate_eval`]. Leading option words (`-p`, `-l`, `--`) are skipped;
+/// the next word is the action. Returns `None` when there is no action
+/// (`trap`, `trap -p`, `trap -l`), or for `-`/empty (reset/ignore), which
+/// run nothing. An unresolvable action fails closed to Ask. Options are
+/// skipped even with `-p` so `trap -p 'rm -rf /' EXIT` over-blocks rather
+/// than relying on shell-specific print-only semantics.
+fn evaluate_trap(
+    argv: &[NormalizedWord],
+    rest_words: &[NormalizedWord],
+    ctx: AnalysisCtx<'_>,
+    cwd: &CwdContext,
+) -> Option<Verdict> {
+    let mut words = rest_words.iter();
+    let action = loop {
+        let word = words.next()?;
+        match word.resolution() {
+            Resolution::Resolved(v) if v == "--" => break words.next()?,
+            Resolution::Resolved(v) if v.len() > 1 && v.starts_with('-') => {}
+            _ => break word,
+        }
+    };
+    match action.resolution() {
+        Resolution::Resolved(v) if v.is_empty() || v == "-" => None,
+        Resolution::Resolved(script) => Some(recurse_shell_string(
+            script,
+            argv.to_vec(),
+            "`trap`'s action",
+            ctx,
+            CwdState::seed_unknown_stack(cwd.clone()),
+        )),
+        Resolution::Unresolvable(_) => Some(Verdict::ask(
+            Reason::new("`trap`'s action could not be statically resolved".to_string()),
+            argv.to_vec(),
+        )),
+    }
 }
 
 /// Recurses a statically-resolved shell-command string through the full
