@@ -23,6 +23,9 @@ pub mod watchdog;
 
 use std::path::Path;
 
+#[doc(hidden)]
+pub const BUILD_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
+
 pub use decision_log::FileDecisionLog;
 use policy::{Evidence, PolicyConfig};
 use verdict::Verdict;

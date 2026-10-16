@@ -28,16 +28,16 @@
 //! snapshot reproduces on any machine.
 //!
 //! The snapshot directory comes from the run-time `CARGO_MANIFEST_DIR` and
-//! must equal the compile-time one, so a binary reused from another
-//! checkout's shared `CARGO_TARGET_DIR` fails loudly instead of passing
-//! against (or blessing into) that checkout's snapshots.
+//! must equal the compile-time one of both this test crate and the linked
+//! `shguard` lib (`shguard::BUILD_MANIFEST_DIR`), so a binary or lib reused
+//! from another checkout's shared `CARGO_TARGET_DIR` fails loudly instead of
+//! passing against (or blessing into) that checkout's snapshots.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 #[path = "common/golden.rs"]
 mod golden;
 
-use std::ffi::OsStr;
 use std::path::Path;
 
 #[test]
@@ -57,14 +57,73 @@ fn golden_snapshot_denials() {
     }
 }
 
+const FOREIGN: &str = "/nonexistent/other-checkout";
+
 #[test]
-fn golden_snapshot_dir_resolution_detects_a_foreign_build() {
+fn golden_snapshot_dir_resolution_accepts_the_same_checkout() {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
     assert_eq!(
-        golden::resolve(here, Some(here.as_os_str())),
+        golden::resolve(here, here, Some(here.as_os_str())),
         Ok(here.to_path_buf())
     );
-    assert!(golden::resolve(here, None).is_err());
-    let other = golden::resolve(here, Some(OsStr::new("/nonexistent/other-checkout")));
-    assert!(other.is_err_and(|msg| msg.contains("per-checkout CARGO_TARGET_DIR")));
+    assert_eq!(golden::golden_dir(), here.join("tests/golden"));
+}
+
+#[test]
+fn golden_snapshot_dir_resolution_names_the_direct_run_cases_when_unset() {
+    let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let err = golden::resolve(here, here, None).unwrap_err();
+    assert!(err.contains("CARGO_MANIFEST_DIR is not set at run time"));
+    assert!(err.contains("directly"));
+    assert!(err.contains("nextest"));
+}
+
+#[test]
+fn golden_snapshot_dir_resolution_rejects_a_foreign_test_binary() {
+    let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let err = golden::resolve(Path::new(FOREIGN), here, Some(here.as_os_str())).unwrap_err();
+    assert!(err.contains("this test binary was built for"));
+    assert!(err.contains("per-checkout CARGO_TARGET_DIR"));
+}
+
+#[test]
+fn golden_snapshot_dir_resolution_rejects_a_foreign_lib() {
+    let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let err = golden::resolve(here, Path::new(FOREIGN), Some(here.as_os_str())).unwrap_err();
+    assert!(err.contains("this shguard lib was built for"));
+    assert!(err.contains("per-checkout CARGO_TARGET_DIR"));
+}
+
+#[test]
+fn golden_snapshot_dir_resolution_rejects_when_both_builds_differ_from_runtime() {
+    let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let err = golden::resolve(
+        Path::new(FOREIGN),
+        Path::new(FOREIGN),
+        Some(here.as_os_str()),
+    )
+    .unwrap_err();
+    assert!(err.contains("this test binary was built for"));
+}
+
+#[test]
+fn golden_snapshot_dir_resolution_rejects_two_existing_distinct_checkouts() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    assert!(golden::resolve(a.path(), a.path(), Some(b.path().as_os_str())).is_err());
+    assert!(golden::resolve(b.path(), a.path(), Some(b.path().as_os_str())).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn golden_snapshot_dir_resolution_treats_a_symlinked_checkout_as_the_same() {
+    let real = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let link = scratch.path().join("link");
+    std::os::unix::fs::symlink(real.path(), &link).unwrap();
+    assert_eq!(
+        golden::resolve(real.path(), &link, Some(link.as_os_str())),
+        Ok(link.clone())
+    );
+    assert!(golden::resolve(&link, real.path(), Some(real.path().as_os_str())).is_ok());
 }

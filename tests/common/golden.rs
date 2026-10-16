@@ -31,43 +31,71 @@ struct Record {
     matched_rule: Option<String>,
 }
 
-/// Resolve the checkout this test binary was built from.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// Resolve the checkout this test binary AND the `shguard` lib it links were
+/// built from.
 ///
 /// The snapshots are read (and, when blessing, written) at run time, so a
 /// binary reused from a shared `CARGO_TARGET_DIR` by a checkout that did not
 /// rebuild would otherwise compare against the OTHER checkout's snapshots and
 /// pass falsely. `cargo test` sets `CARGO_MANIFEST_DIR` at run time to the
-/// checkout being tested; it must match the one compiled in.
-pub fn resolve(compile: &Path, runtime: Option<&OsStr>) -> Result<PathBuf, String> {
+/// checkout being tested; it must match the test crate's compiled-in one and
+/// the lib's, because Cargo decides freshness per unit and can relink another
+/// checkout's stale lib into a rebuilt test binary.
+///
+/// Fails closed on any difference. Paths are compared canonicalized, so a
+/// symlinked checkout is the same checkout; on a case-insensitive filesystem
+/// two spellings of one directory that canonicalize differently are rejected,
+/// which is the safe side.
+pub fn resolve(
+    test_build: &Path,
+    lib_build: &Path,
+    runtime: Option<&OsStr>,
+) -> Result<PathBuf, String> {
     let runtime = runtime.map(PathBuf::from).ok_or_else(|| {
-        "CARGO_MANIFEST_DIR is not set at run time; run the golden tests via `cargo test`"
+        "CARGO_MANIFEST_DIR is not set at run time; run the golden tests via `cargo test` \
+         (running the binary directly, e.g. from a debugger or IDE, or through \
+         `cargo nextest --workspace-remap`, is not supported)"
             .to_string()
     })?;
-    let same = match (compile.canonicalize(), runtime.canonicalize()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => compile == runtime,
-    };
-    if same {
-        Ok(runtime)
-    } else {
-        Err(format!(
-            "this test binary was built for {} but is running for {}: it was reused from a \
-             shared CARGO_TARGET_DIR without a rebuild, so it would check the wrong \
-             checkout's snapshots; rebuild, or use a per-checkout CARGO_TARGET_DIR",
-            compile.display(),
-            runtime.display()
-        ))
+    for (what, built_for) in [("test binary", test_build), ("shguard lib", lib_build)] {
+        if !same_dir(built_for, &runtime) {
+            return Err(format!(
+                "this {what} was built for {} but is running for {}: it was reused from a \
+                 shared CARGO_TARGET_DIR without a rebuild, so it would check the wrong \
+                 checkout's snapshots; rebuild, or use a per-checkout CARGO_TARGET_DIR",
+                built_for.display(),
+                runtime.display()
+            ));
+        }
     }
+    Ok(runtime)
+}
+
+/// The checkout under test (see [`resolve`]).
+///
+/// # Panics
+///
+/// When the test binary or the linked lib was built for another checkout.
+#[allow(dead_code)] // not every test crate that includes this module reads snapshots
+pub fn checkout_dir() -> PathBuf {
+    resolve(
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        Path::new(shguard::BUILD_MANIFEST_DIR),
+        std::env::var_os("CARGO_MANIFEST_DIR").as_deref(),
+    )
+    .unwrap_or_else(|err| panic!("{err}"))
 }
 
 /// `tests/golden` of the checkout under test (see [`resolve`]).
 pub fn golden_dir() -> PathBuf {
-    let manifest_dir = resolve(
-        Path::new(env!("CARGO_MANIFEST_DIR")),
-        std::env::var_os("CARGO_MANIFEST_DIR").as_deref(),
-    )
-    .unwrap_or_else(|err| panic!("{err}"));
-    manifest_dir.join("tests/golden")
+    checkout_dir().join("tests/golden")
 }
 
 fn decision_label(decision: Decision) -> &'static str {
@@ -198,6 +226,8 @@ fn diff_report(expected: &BTreeMap<String, Record>, actual: &BTreeMap<String, Re
 /// On any mismatch, a missing or malformed snapshot, or a command whose
 /// verdict came from the evaluation watchdog rather than the pipeline.
 pub fn check<S: AsRef<str>>(corpus: &str, commands: impl IntoIterator<Item = S>) {
+    // Resolved before the corpus is evaluated so a stale binary fails fast.
+    let path = golden_dir().join(format!("{corpus}.jsonl"));
     let mut actual = BTreeMap::new();
     let mut watchdog_trips = Vec::new();
     for command in commands {
@@ -219,7 +249,6 @@ pub fn check<S: AsRef<str>>(corpus: &str, commands: impl IntoIterator<Item = S>)
         watchdog_trips.join("\n")
     );
 
-    let path = golden_dir().join(format!("{corpus}.jsonl"));
     let rendered = render(&actual);
 
     if std::env::var(UPDATE_ENV).as_deref() == Ok("1") {
