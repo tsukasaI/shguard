@@ -292,22 +292,18 @@ pub(crate) const MAX_RAW_PAREN_OPEN_COUNT: usize = 32;
 ///
 /// # Primary control and scope
 ///
-/// This budget is defense in depth, not the primary control. The slow shapes
-/// all sit in one malformed carrier: a double-quoted `${`, a name, then a
-/// quote directly after it (`"${x'...'}"`, `"${x$'...'}"`), where brush's
-/// word parser re-scans the rest of the input on every backtracking step, so
-/// the suffix length multiplies the cost below (`$(` x9 + `(` x1, exactly at
-/// this budget, with 300 bytes after it trips the 2s watchdog in release; 120
-/// bytes take ~1s). The primary control is `quote_follows_param_name` in
-/// `src/parser.rs`, which rejects that carrier structurally; bash itself calls
-/// it a bad substitution. This budget bounds the opener counts of shapes that
-/// carrier reject does not see: well-formed input, whose cost does not scale
-/// with the suffix (11 `$(` plus 1MiB of text parse in ~30ms) and so
-/// stays linear. A residual shape remains: `"${x:-'` + openers + `'}"` (a
-/// legitimate operator) measures ~1.2s in release at the budget with a
-/// 300-byte suffix; the carrier reject does not match it and it only fails
-/// closed via the watchdog. The other operators (`-`, `+`, `#`, `%`, `/`, `^`,
-/// `,`, `?` and their doubled or colon forms) measured under 1ms there.
+/// This budget is defense in depth, not the primary control. Every slow shape
+/// measured sits behind a `'` or `$'` inside a `${...}` body (`"${x'...'}"`,
+/// `"${x:-'...'}"`, whatever precedes the quote), where brush's word parser
+/// re-scans the rest of the input on every backtracking step, so the suffix
+/// length multiplies the cost below (`$(` x9 + `(` x1, exactly at this
+/// budget, with 300 bytes after it trips the 2s watchdog in release). The
+/// primary control is [`MAX_RAW_QUOTED_OPENER_COUNT`]: no `$(` or extglob
+/// opener may follow such a quote. This budget bounds the opener counts of
+/// everything else, where the cost does not scale with the suffix (openers
+/// after a closed `${x:-'d'}` body, or with no `${` at all: 9 `$(` plus 10MiB
+/// of text parse in 139ms, linear) and the weights below keep the product
+/// bounded.
 ///
 /// # Why a combined budget
 ///
@@ -342,9 +338,10 @@ pub(crate) const MAX_RAW_PAREN_OPEN_COUNT: usize = 32;
 /// for the rest, and every split of that 28-29 across `$(`, `+(` and plain
 /// `(` in front, behind or around the openers measures at most 146ms (the
 /// worst, `$(` x9 + `(` x1, trailing); each further 2 of budget would
-/// multiply that by about 2x. That bound holds for a short suffix only (see
-/// the scope section), which is why it is not the primary control. A cost of
-/// 3 also keeps the stack safe: at most 11
+/// multiply that by about 2x. That bound holds for a short suffix after a
+/// quote in a `${` body only (see the scope section), which is why the quote
+/// trigger is the primary control. A cost of 3 also keeps the stack safe: at
+/// most 11
 /// `$(` fit, against the 151 (debug) smallest aborting count measured for
 /// `echo ` + `$( ')' ` x N, and [`MAX_RAW_STACK_BUDGET`] still bounds the
 /// grammar-level recursions that share the stack.
@@ -358,6 +355,55 @@ pub(crate) const MAX_RAW_PAREN_OPEN_COUNT: usize = 32;
 /// globs and substitutions use one to five (`ls +(a|b)`, `rm !(keep).txt`).
 /// Re-measure on any `brush-parser` bump.
 pub(crate) const MAX_RAW_BACKTRACK_BUDGET: usize = 34;
+
+/// Number of `$(` or extglob openers (`+(` `@(` `!(` `*(` `?(`) allowed
+/// after a `'` or `$'` inside a `${...}` body, enforced by
+/// [`crate::parser::reject_excessive_raw_nesting`]; any more rejects the
+/// command, and so does any plain `(` next to an opener after that quote.
+/// This is the primary control for issue #692's carrier, ahead of
+/// [`MAX_RAW_BACKTRACK_BUDGET`]. Quote-blind and sticky: the body counts as
+/// open from its `${` until a `}` that nothing could hide (no backslash,
+/// quote, backtick or open `$(` since the `${`), so a body holding a quote
+/// stays open to the end of the command, which is fail-closed.
+///
+/// # Why 1
+///
+/// Behind such a quote the cost of an opener scales with the length of the
+/// rest of the input, so [`MAX_RAW_BACKTRACK_BUDGET`]'s exponent bound is
+/// not enough. Bounding the exponent to a constant makes the cost linear.
+/// Release build, `echo "${x$'` + openers + `e` x length + `'}"`, wall time
+/// of `shguard::analyze` (a plain 10MiB `echo "eee..."` takes 293ms on its
+/// own, so that is the floor at 10MiB):
+///
+/// | openers after the quote | 300 | 10k | 100k | 1MiB | 10MiB |
+/// |---|---|---|---|---|---|
+/// | none | 6ms | 3ms | 10ms | 63ms | 395ms |
+/// | `+(` x1 | 0 | 1ms | 4ms | 40ms | 398ms |
+/// | `$(` x1 | 0 | 1ms | 9ms | 97ms | 983ms |
+/// | `$((` (opener + plain) | 0 | 2ms | 20ms | 205ms | 2006ms (watchdog) |
+/// | `$(` + 12 plain `(` | 75ms | 2005ms (watchdog) | - | - | - |
+/// | `$($(` | 0 | 3ms | 27ms | 281ms | 2005ms (watchdog) |
+/// | `$($($(` | 1ms | 8ms | 79ms | 829ms | 2005ms (watchdog) |
+///
+/// One opener stays linear (2.5x the floor at 10MiB for `$(`, the floor for
+/// `+(`); a second opener, or one opener with any plain `(`, goes superlinear
+/// and trips the watchdog by 10MiB (or 10k with 12 plain `(`). A cap of 0
+/// would be cheaper but also rejects `"${x:-'$(rm -rf ~)'}"`, whose inner
+/// substitution the gate has to see to Block it, so the cap is the largest
+/// value that is still linear. Plain `(`, `<(` and `>(` after the quote
+/// alone stay linear (42ms and 394ms at 1MiB and 10MiB), and so do openers
+/// before the quote or after a clean `}` (132ms at 10MiB for `$(` x9 + `(`),
+/// so only the pairing after the quote is limited. A `$(` whose own body is
+/// megabytes long is slow with or without any quote (409ms at 1MiB, the
+/// watchdog at 10MiB) and is not this control's concern.
+///
+/// # Known trade-off
+///
+/// A command holding a quote in a `${...}` body (`"${x:-'d'}"`,
+/// `${f#'./'}`, a literal `'${'`) and then two or more `$(` or extglob
+/// openers, or one plus a subshell (`echo "${x:-'d'}" $(a) $(b)`), fails
+/// closed to `Ask`.
+pub(crate) const MAX_RAW_QUOTED_OPENER_COUNT: usize = 1;
 
 /// Cost of one `$(` or extglob opener against [`MAX_RAW_BACKTRACK_BUDGET`].
 pub(crate) const BACKTRACK_COST_OPENER: usize = 3;

@@ -2584,7 +2584,7 @@ fn assert_flood_rejected(command: &str, needle: &str) {
     assert!(!reason.contains("time budget"), "got: {reason}");
 }
 
-const CARRIER_REASON: &str = "quote directly after its name";
+const CARRIER_REASON: &str = "inside a parameter expansion";
 const BUDGET_REASON: &str = "backtracking budget";
 
 #[test]
@@ -2637,6 +2637,66 @@ fn guardfall_extglob_carrier_flood_with_a_long_suffix_is_rejected_before_the_wat
     // No `$((` and no extglob: 11 `$(` and a suffix reached 1.6s.
     let no_arithmetic = format!("echo \"${{x$'{}e{}'}}\"", "$(".repeat(11), "e".repeat(300));
     assert_flood_rejected(&no_arithmetic, CARRIER_REASON);
+}
+
+#[test]
+fn guardfall_extglob_quote_in_a_parameter_body_rejects_openers_whatever_precedes_it() {
+    // Issue #692: what sits between `${` and the quote is irrelevant, and so
+    // is the operator; a hidden `}` must not end the body early either.
+    let payload = format!("$(({}(", "$(".repeat(9));
+    let suffix = "e".repeat(300);
+    for prefix in [
+        "x$",
+        "x\n",
+        "\u{e9}",
+        "x.",
+        "x[",
+        "x#",
+        "x//",
+        "x^",
+        "x:-",
+        "x\\}",
+        "x#\\}",
+        "x:-`echo }`",
+        "x:-'}'",
+        "x:-$(echo })",
+        "x:-${y}",
+    ] {
+        for quote in ["'", "$'"] {
+            let command = format!("echo \"${{{prefix}{quote}{payload}{suffix}'}}\"");
+            assert_flood_rejected(&command, CARRIER_REASON);
+        }
+    }
+}
+
+#[test]
+fn guardfall_extglob_quote_in_a_parameter_body_false_positive_checks() {
+    assert_eq!(
+        shguard::analyze("grep -rn '${' .").decision(),
+        Decision::Allow
+    );
+    assert_eq!(
+        shguard::analyze("echo \"${x:-'d'}\"").decision(),
+        Decision::Allow
+    );
+    // A `}` nothing can hide closes the body, so a later quote is outside it.
+    for command in [
+        "echo \"${HOME}\" 'y' $(date) $(pwd)",
+        "echo \"${x:-d}\" 'y' $(date)",
+        "echo ${x} 'y' +(a|b)",
+    ] {
+        let verdict = shguard::analyze(command);
+        let reason = verdict.reason().map_or("", |r| r.as_str());
+        assert!(!reason.contains(CARRIER_REASON), "{command}: {reason}");
+    }
+    // One opener after the quote is allowed (the Block decisions for
+    // `${x:-'$(rm -rf ~)'}` depend on it).
+    let verdict = shguard::analyze("echo \"${x:-'d'}\" $(date)");
+    assert_eq!(verdict.decision(), Decision::Allow);
+    // Known trade-off: a quote in the body keeps it open to the end, so a
+    // second opener, or a plain `(` next to the first, is rejected.
+    assert_flood_rejected("echo \"${x:-'d'}\" $(date) $(pwd)", CARRIER_REASON);
+    assert_flood_rejected("echo \"${x:-'d'}\" $(date) (cd /)", CARRIER_REASON);
 }
 
 #[test]
