@@ -5235,6 +5235,7 @@ pub(crate) const TRANSPARENT_WRAPPERS: &[&str] = &[
     "i386",
     "x86_64",
     "uname26",
+    "script",
 ];
 
 /// The subset of [`TRANSPARENT_WRAPPERS`] that escalate privileges (issues
@@ -5542,6 +5543,16 @@ pub(crate) const RECURSABLE_SLOTS: &[RecursableSlot] = &[
         mode: RecurseMode::ShellString,
     },
     RecursableSlot {
+        command: "script",
+        flag: "-c",
+        mode: RecurseMode::ShellString,
+    },
+    RecursableSlot {
+        command: "script",
+        flag: "--command",
+        mode: RecurseMode::ShellString,
+    },
+    RecursableSlot {
         command: "find",
         flag: "-exec",
         mode: RecurseMode::DirectArgv {
@@ -5732,6 +5743,11 @@ fn wrapper_cluster_booleans(wrapper: &str) -> Option<&'static [char]> {
         // `-dx` is `-d` with value `x`, not `-d -x`.
         "watch" => Some(&['b', 'c', 'C', 'e', 'g', 'p', 'r', 't', 'w', 'x', 'h', 'v']),
         "prlimit" => Some(&['h', 'V']),
+        // Union of BSD and util-linux booleans. BSD `-F` is deliberately
+        // absent: it is a boolean on macOS but takes a pipe path on older
+        // FreeBSD, so it stays unmodeled and floors via
+        // `collect_script_slots`.
+        "script" => Some(&['a', 'd', 'e', 'f', 'k', 'p', 'q', 'r', 'h', 'V']),
         "systemd-run" => Some(&['r', 'd', 't', 'P', 'q', 'G', 'S', 'h']),
         "numactl" => Some(&['a', 'b', 's', 'H', 'l', 't', 'd', 'D', 'u', 'T', 'h']),
         // No `"tar"` entry (issue #209): tar's short-flag arity genuinely
@@ -6218,6 +6234,31 @@ fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
             ValueFlag::Short('s'),
             ValueFlag::Long("shotsdir".to_string()),
         ],
+        // BSD `-t time`/`-T fmt`, util-linux `-c`/`-E`/`-I`/`-O`/`-B`/`-m`/
+        // `-o`/`-T`. util-linux `-t` takes only a glued value, so a bare
+        // `-t` swallowing the next word is BSD-correct, except a
+        // dash-prefixed word (`script_t_value_is_dash_word`); the bare
+        // `-t -c cmd` shape is also found by `-c`'s whole-tail scan, and
+        // `collect_script_slots` covers `-qc`/`--command=`.
+        "script" => vec![
+            ValueFlag::Short('c'),
+            ValueFlag::Short('t'),
+            ValueFlag::Short('T'),
+            ValueFlag::Short('E'),
+            ValueFlag::Short('I'),
+            ValueFlag::Short('O'),
+            ValueFlag::Short('B'),
+            ValueFlag::Short('m'),
+            ValueFlag::Short('o'),
+            ValueFlag::Long("command".to_string()),
+            ValueFlag::Long("echo".to_string()),
+            ValueFlag::Long("log-in".to_string()),
+            ValueFlag::Long("log-out".to_string()),
+            ValueFlag::Long("log-io".to_string()),
+            ValueFlag::Long("log-timing".to_string()),
+            ValueFlag::Long("logging-format".to_string()),
+            ValueFlag::Long("output-limit".to_string()),
+        ],
         // Resource limits (`--nofile=...`) are optional-argument, `=`-joined.
         "prlimit" => vec![
             ValueFlag::Short('p'),
@@ -6357,7 +6398,9 @@ fn wrapper_positional_args(wrapper: &str) -> usize {
     // `setarch` is absent on purpose: its grammar is `[arch] [options]
     // [program]`, handled by `skip_wrapper_arguments` itself.
     match wrapper {
-        "timeout" | "flock" | "su" | "chrt" | "taskset" | "chroot" => 1,
+        // BSD `script [file [command ...]]`: the typescript file precedes
+        // the command.
+        "timeout" | "flock" | "su" | "chrt" | "taskset" | "chroot" | "script" => 1,
         _ => 0,
     }
 }
@@ -6396,8 +6439,9 @@ fn skip_wrapper_flags(wrapper: &str, argv: &[NormalizedWord]) -> usize {
         // them as "value comes from the next token" consumed the real
         // wrapped command (`rm`) as if it were the flag's value — a
         // regression an earlier `ends_with('a')` version of this check had.
-        if value_flag_bare_match(&value_flags, token)
-            || cluster_takes_separated_value(wrapper, token)
+        if (value_flag_bare_match(&value_flags, token)
+            || cluster_takes_separated_value(wrapper, token))
+            && !script_t_value_is_dash_word(wrapper, token, argv.get(idx + 1))
         {
             // The flag token itself is always consumed; its separated
             // value is consumed too only when resolved: advancing past an
@@ -6425,6 +6469,21 @@ fn skip_wrapper_flags(wrapper: &str, argv: &[NormalizedWord]) -> usize {
         idx += 1;
     }
     idx
+}
+
+/// Whether `token` ends in `script`'s `-t` and the next word starts with `-`.
+/// BSD's `-t time` is a non-negative count and util-linux's `-t` takes only a
+/// glued value, so a dash-prefixed next word is a flag, never `-t`'s value
+/// (`script -t -qc 'rm -rf /'`).
+fn script_t_value_is_dash_word(wrapper: &str, token: &str, next: Option<&NormalizedWord>) -> bool {
+    wrapper == "script"
+        && token.starts_with('-')
+        && !token.starts_with("--")
+        && token.ends_with('t')
+        && matches!(
+            next.map(NormalizedWord::resolution),
+            Some(Resolution::Resolved(word)) if word.starts_with('-')
+        )
 }
 
 /// Skips a transparent wrapper's own leading arguments (see
@@ -6960,6 +7019,7 @@ pub(crate) fn wrapper_shell_string_scripts(stage: &[NormalizedWord]) -> Vec<Scri
             "watch" => collect_watch_shell_slots(tail, &mut slots),
             "strace" => collect_strace_pipe_slots(tail, &mut slots),
             "numactl" => collect_numactl_short_c_slot(tail, &mut slots),
+            "script" => collect_script_slots(tail, &mut slots),
             _ => {}
         }
         rest = skip_wrapper_arguments(&base, tail);
@@ -7011,6 +7071,107 @@ fn collect_watch_shell_slots(tail: &[NormalizedWord], slots: &mut Vec<ScriptSlot
         script.push_str(text);
     }
     slots.push(ScriptSlot::Resolved(script));
+}
+
+/// `script`'s flag surface differs between BSD and util-linux, so a flag
+/// outside the modeled union could swallow the file operand (BSD) and shift
+/// the command word; any unmodeled flag floors to Ask. Also finds util-linux's
+/// clustered (`-qc cmd`) and `=`-joined (`--command=cmd`) command string,
+/// which `RECURSABLE_SLOTS`' exact-spelling scan does not.
+fn collect_script_slots(tail: &[NormalizedWord], slots: &mut Vec<ScriptSlot>) {
+    const LONG_BOOLEANS: &[&str] = &[
+        "append", "return", "flush", "force", "quiet", "help", "version",
+    ];
+    let end = skip_wrapper_flags("script", tail);
+    let value_flags = wrapper_value_flags("script");
+    let booleans = wrapper_cluster_booleans("script").unwrap_or(&[]);
+    let value_takers: Vec<char> = value_flags
+        .iter()
+        .filter_map(|flag| match flag {
+            ValueFlag::Short(letter) => Some(*letter),
+            ValueFlag::Long(_) => None,
+        })
+        .collect();
+    // util-linux permutes options, so `script out.txt -qc cmd` honors `-qc`
+    // after the typescript operand: look for the command string over the
+    // whole tail, as `RECURSABLE_SLOTS` does for a bare `-c`.
+    for (index, word) in tail.iter().enumerate() {
+        let Resolution::Resolved(token) = word.resolution() else {
+            continue;
+        };
+        let command_string = if let Some(glued) = token.strip_prefix("--command=") {
+            Some(Some(glued.to_string()))
+        } else if token != "-c"
+            && let Some(location) = locate_cluster_value("script", token, 'c')
+        {
+            Some(match location {
+                ClusterValue::Glued(glued) => Some(glued.to_string()),
+                ClusterValue::NextToken => None,
+            })
+        } else {
+            None
+        };
+        match command_string {
+            Some(Some(script)) => slots.push(ScriptSlot::Resolved(script)),
+            Some(None) => match tail.get(index + 1).map(NormalizedWord::resolution) {
+                Some(Resolution::Resolved(script)) => {
+                    slots.push(ScriptSlot::Resolved(script.clone()));
+                }
+                Some(Resolution::Unresolvable(_)) => slots.push(ScriptSlot::Unresolvable),
+                None => {}
+            },
+            None => {}
+        }
+    }
+    // A dash-prefixed word left in command position is an option shguard
+    // did not place (`script out.txt -ac cmd`).
+    if let Some(Resolution::Resolved(word)) = skip_wrapper_arguments("script", tail)
+        .first()
+        .map(NormalizedWord::resolution)
+        && word.starts_with('-')
+    {
+        slots.push(ScriptSlot::Unresolvable);
+    }
+    let mut index = 0;
+    while index < end {
+        let Resolution::Resolved(token) = tail[index].resolution() else {
+            return;
+        };
+        let consumes_next = (value_flag_bare_match(&value_flags, token)
+            || cluster_takes_separated_value("script", token))
+            && !script_t_value_is_dash_word("script", token, tail.get(index + 1));
+        if consumes_next {
+            index += 2;
+            continue;
+        }
+        let known = if let Some(long) = token.strip_prefix("--") {
+            let name = long.split('=').next().unwrap_or(long);
+            long.is_empty()
+                || LONG_BOOLEANS.contains(&name)
+                || value_flags
+                    .iter()
+                    .any(|flag| matches!(flag, ValueFlag::Long(l) if l == name))
+        } else if let Some(letters) = short_cluster_letters(token) {
+            let mut known = true;
+            for letter in letters.chars() {
+                if value_takers.contains(&letter) {
+                    break;
+                }
+                if !booleans.contains(&letter) {
+                    known = false;
+                    break;
+                }
+            }
+            known
+        } else {
+            true
+        };
+        if !known {
+            slots.push(ScriptSlot::Unresolvable);
+            return;
+        }
+        index += 1;
+    }
 }
 
 /// numactl's short `-c` is not known to take a value or not, and either

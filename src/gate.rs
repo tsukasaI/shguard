@@ -374,7 +374,9 @@ const DENY_MSG_BARE_VAR: &str =
     "Expand the variable yourself and re-issue the command with the literal path or binary name.";
 const DENY_MSG_INLINE_INTERPRETER: &str = "Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f \
      prog.awk`) — inline interpreter code is never inspected.";
+const DENY_MSG_UNPLACED_OPTION: &str = "Remove the option or respell it as one the interpreter documents (attach a value where one is required), or write the program to a file and run that file; shguard can only inspect options it can place.";
 const DENY_MSG_SED_SCRIPT: &str = "Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected. A variable file operand (`sed -n p \"$file\"`) cannot be told apart from a script word, so expand it to a literal file path.";
+const DENY_MSG_PARALLEL: &str = "Run the commands directly or with a shell loop (`for x in ...; do cmd \"$x\"; done`) so each argv is inspectable; GNU `parallel` builds its command lines from templates and `:::` sources that are never inspected.";
 const DENY_MSG_COMMAND_SUBSTITUTION: &str =
     "Run the substitution first, then call the resulting binary literally.";
 const DENY_MSG_UNRESOLVED_TARGET: &str = "Resolve the target literally so the rule can check it.";
@@ -3108,6 +3110,10 @@ fn evaluate_simple_command_core(
     // shell either: its script text is not parsed here, only recognized as
     // present. Carries its own reason string (rather than a shared `bool`)
     // since the two shapes need different wording.
+    let inline_trigger: Option<InlineCodeTrigger> = effective.and_then(|(name, rest_words)| {
+        let grammar = inline_code_grammar(crate::rules::strip_version_suffix(name))?;
+        possibly_inline_code(grammar, rest_words)
+    });
     let interpreter_code_floor: Option<(String, &'static str)> =
         effective.and_then(|(name, rest_words)| {
             // `name` is already case-folded; strip the version suffix only for
@@ -3117,8 +3123,8 @@ fn evaluate_simple_command_core(
             // so `name` keeps its version suffix in every message string that
             // follows.
             let base_name = crate::rules::strip_version_suffix(name);
-            if let Some(grammar) = inline_code_grammar(base_name) {
-                possibly_inline_code(grammar, rest_words).map(|trigger| match trigger {
+            if inline_code_grammar(base_name).is_some() {
+                inline_trigger.map(|trigger| match trigger {
                     InlineCodeTrigger::Literal => (
                         "an inline code argument (`-c`/`-e`) to a non-shell interpreter cannot be \
                      introspected"
@@ -3128,11 +3134,19 @@ fn evaluate_simple_command_core(
                     // Issue #633: no literal inline-code flag was written; an
                     // unresolved word merely sits where the flag could be, so
                     // "write it to a file" would be misleading guidance.
-                    InlineCodeTrigger::UnresolvedWord => (
+                    InlineCodeTrigger::UnresolvedWord(_) => (
                         "an unresolved argument sits where an inline-code flag (`-c`/`-e`) could \
                      appear, so inline code cannot be ruled out"
                             .to_string(),
                         DENY_MSG_UNRESOLVED_TARGET,
+                    ),
+                    // Issue #686: an option the grammar cannot place is not
+                    // known to be inline code, so say that instead.
+                    InlineCodeTrigger::UnplacedOption => (
+                        "an option that shguard cannot place was found on a non-shell \
+                     interpreter, so inline code cannot be ruled out"
+                            .to_string(),
+                        DENY_MSG_UNPLACED_OPTION,
                     ),
                 })
             } else if AWK_INTERPRETERS.contains(&base_name) {
@@ -3182,6 +3196,35 @@ fn evaluate_simple_command_core(
                             why.describe()
                         ),
                         DENY_MSG_SED_SCRIPT,
+                    )
+                })
+        });
+
+    // Issue #696: GNU `parallel` execs the command template it is given
+    // (`parallel rm -rf ::: /`), and the template and `:::` sources are
+    // not modeled, so anything beyond the version/help probes floors to Ask.
+    let interpreter_code_floor: Option<(String, &'static str)> =
+        interpreter_code_floor.or_else(|| {
+            let (name, rest_words) = effective?;
+            // Bare `parallel` reads its command lines from stdin, so an
+            // empty argument list is not a probe.
+            let probe_only = !rest_words.is_empty()
+                && rest_words.iter().all(|word| {
+                    matches!(
+                        word.resolution(),
+                        Resolution::Resolved(text)
+                            if matches!(text.as_str(), "--version" | "-V" | "--help" | "-h")
+                    )
+                });
+            // `sem` is GNU parallel's `--semaphore` entry point.
+            (matches!(crate::rules::strip_version_suffix(name), "parallel" | "sem") && !probe_only)
+                .then(|| {
+                    (
+                        format!(
+                            "`{name}` runs the command template and `:::` arguments it is \
+                             given, which cannot be introspected"
+                        ),
+                        DENY_MSG_PARALLEL,
                     )
                 })
         });
@@ -3358,7 +3401,10 @@ fn evaluate_simple_command_core(
 
     fold_floors(
         argv,
-        interpreter_code_floor,
+        InterpreterFloor {
+            floor: interpreter_code_floor,
+            trigger: inline_trigger,
+        },
         ifs_floor,
         escalation_floor,
         opaque_kind,
@@ -4005,6 +4051,13 @@ fn apply_opaque_kind_floor(verdict: Verdict, kind: Option<UnresolvableKind>) -> 
     )
 }
 
+/// Rule 6b/6d/6e's interpreter-code floor (reason and deny message) with the
+/// [`InlineCodeTrigger`] that raised it, if it was the option scan.
+struct InterpreterFloor {
+    floor: Option<(String, &'static str)>,
+    trigger: Option<InlineCodeTrigger>,
+}
+
 /// Rules 4 and 4b's argument-position-ambiguity floors, bundled into one
 /// parameter for [`fold_floors`] — see each field's own doc for what it
 /// floors.
@@ -4028,7 +4081,7 @@ struct ExceptFloors<'a> {
 /// configured to `deny`.
 fn fold_floors(
     argv: Vec<NormalizedWord>,
-    interpreter_code_floor: Option<(String, &'static str)>,
+    interpreter: InterpreterFloor,
     ifs_floor: bool,
     escalation_floor: Option<(Decision, String)>,
     opaque_kind: Option<UnresolvableKind>,
@@ -4060,13 +4113,26 @@ fn fold_floors(
     // that only matters when more than one of these floors fires on the
     // same command; whichever comes first here is what a caller sees, the
     // same "one slot, priority order" shape the rule-authored branch above
-    // already established.
+    // already established. Exception (issue #686): when the interpreter
+    // floor came from an unresolved word merely sitting where the
+    // inline-code flag could be, its generic "resolve the target" message
+    // moves to the very end of the chain, below `$IFS`, the opaque-kind
+    // floor, the substitution message and the command-substitution message,
+    // since each of those names something more specific.
     // Issue #495: captured before the priority chain below consumes it,
     // since the chain needs the message half now but `substitution_result`
     // itself (its decision half) is still needed, unconsumed, further down.
     let substitution_deny_message = substitution_result
         .as_ref()
         .and_then(|(_, message)| message.clone());
+    let interpreter_deny_message = interpreter
+        .floor
+        .as_ref()
+        .map(|(_, guidance)| DenyMessage::new(*guidance));
+    let unresolved_word_trigger = matches!(
+        interpreter.trigger,
+        Some(InlineCodeTrigger::UnresolvedWord(_))
+    );
     let deny_message = except_floors
         .target
         .and_then(crate::rules::CommandRule::deny_message)
@@ -4077,9 +4143,9 @@ fn fold_floors(
         })
         .cloned()
         .or_else(|| {
-            interpreter_code_floor
-                .as_ref()
-                .map(|(_, guidance)| DenyMessage::new(*guidance))
+            interpreter_deny_message
+                .clone()
+                .filter(|_| !unresolved_word_trigger)
         })
         .or_else(|| {
             (except_floors.target.is_some() || except_floors.flags.is_some())
@@ -4091,9 +4157,20 @@ fn fold_floors(
         // position as the last decision folded in below — a rule-authored
         // or other structural message here already reflects something more
         // specific than "some recursed substitution was worse than Allow".
-        .or(substitution_deny_message);
+        .or(substitution_deny_message)
+        // Not `opaque_kind`: that excludes `CommandSubstitution` (rule 3
+        // recurses it instead). Scoped to the interpreter slot because an
+        // argument-position substitution carries no message elsewhere.
+        .or_else(|| {
+            (interpreter.trigger
+                == Some(InlineCodeTrigger::UnresolvedWord(
+                    UnresolvableKind::CommandSubstitution,
+                )))
+            .then(|| DenyMessage::new(DENY_MSG_COMMAND_SUBSTITUTION))
+        })
+        .or(interpreter_deny_message);
 
-    if let Some((reason, _)) = interpreter_code_floor {
+    if let Some((reason, _)) = interpreter.floor {
         decision = decision.max(Decision::Ask);
         reasons.push(reason);
     }
@@ -7425,6 +7502,21 @@ const LUA_GRAMMAR: InlineGrammar = InlineGrammar {
     long_plain_prefixes: &[],
 };
 
+/// `osascript [-l language] [-i] [-s flags] [-e statement | programfile]`.
+const OSASCRIPT_GRAMMAR: InlineGrammar = InlineGrammar {
+    code_chars: "e",
+    plain_chars: "i",
+    value_chars: "ls",
+    attached_chars: "",
+    required_attached_chars: "",
+    operand_chars: "",
+    cluster: false,
+    long_code: &[],
+    long_plain: &[],
+    long_value: &[],
+    long_plain_prefixes: &[],
+};
+
 /// The option grammar of the non-shell interpreter `name` (rule 6b), or
 /// `None` if `name` is not one of the interpreters this module knows about.
 /// `name` must already be `strip_version_suffix` of an `effective_command`
@@ -7439,6 +7531,7 @@ fn inline_code_grammar(name: &str) -> Option<&'static InlineGrammar> {
         "ruby" => Some(&RUBY_GRAMMAR),
         "php" => Some(&PHP_GRAMMAR),
         "lua" => Some(&LUA_GRAMMAR),
+        "osascript" => Some(&OSASCRIPT_GRAMMAR),
         _ => None,
     }
 }
@@ -7458,7 +7551,7 @@ fn possibly_inline_code(
     let trigger = scan_inline_code(grammar, words)?;
     // A literal code flag after the unresolved word (`python3 $OPTS -c x`) is
     // still a flag the agent wrote.
-    if trigger == InlineCodeTrigger::UnresolvedWord
+    if matches!(trigger, InlineCodeTrigger::UnresolvedWord(_))
         && words
             .iter()
             .any(|word| starts_with_code_flag(grammar, word))
@@ -7504,15 +7597,18 @@ fn scan_inline_code(
     grammar: &InlineGrammar,
     words: &[NormalizedWord],
 ) -> Option<InlineCodeTrigger> {
-    use InlineCodeTrigger::{Literal, UnresolvedWord};
+    use InlineCodeTrigger::{Literal, UnplacedOption, UnresolvedWord};
     let mut iter = words.iter();
     while let Some(word) = iter.next() {
-        let Resolution::Resolved(text) = word.resolution() else {
-            return Some(if starts_with_code_flag(grammar, word) {
-                Literal
-            } else {
-                UnresolvedWord
-            });
+        let text = match word.resolution() {
+            Resolution::Resolved(text) => text,
+            Resolution::Unresolvable(kind) => {
+                return Some(if starts_with_code_flag(grammar, word) {
+                    Literal
+                } else {
+                    UnresolvedWord(*kind)
+                });
+            }
         };
         if text == "--" {
             return None;
@@ -7536,14 +7632,14 @@ fn scan_inline_code(
                 continue;
             }
             if grammar.long_value.contains(&name) {
-                if let Some(Resolution::Unresolvable(_)) =
+                if let Some(Resolution::Unresolvable(kind)) =
                     iter.next().map(NormalizedWord::resolution)
                 {
-                    return Some(UnresolvedWord);
+                    return Some(UnresolvedWord(*kind));
                 }
                 continue;
             }
-            return Some(Literal);
+            return Some(UnplacedOption);
         }
         for (index, letter) in flags.char_indices() {
             let rest = &flags[index + letter.len_utf8()..];
@@ -7555,10 +7651,10 @@ fn scan_inline_code(
             }
             if grammar.value_chars.contains(letter) {
                 if rest.is_empty()
-                    && let Some(Resolution::Unresolvable(_)) =
+                    && let Some(Resolution::Unresolvable(kind)) =
                         iter.next().map(NormalizedWord::resolution)
                 {
-                    return Some(UnresolvedWord);
+                    return Some(UnresolvedWord(*kind));
                 }
                 break;
             }
@@ -7567,12 +7663,12 @@ fn scan_inline_code(
             }
             if grammar.required_attached_chars.contains(letter) {
                 if rest.is_empty() {
-                    return Some(Literal);
+                    return Some(UnplacedOption);
                 }
                 break;
             }
             if !grammar.plain_chars.contains(letter) || (!grammar.cluster && !rest.is_empty()) {
-                return Some(Literal);
+                return Some(UnplacedOption);
             }
         }
     }
@@ -7581,13 +7677,18 @@ fn scan_inline_code(
 
 /// Why [`possibly_inline_code`] could not rule out inline code (issue
 /// #633). Selects the reason and deny message: a literal flag the agent
-/// wrote gets "write it to a file" guidance, an unresolved word does not.
+/// wrote gets "write it to a file" guidance, an unresolved word or an
+/// unplaceable option does not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InlineCodeTrigger {
-    /// A literal inline-code flag, or an option the grammar cannot place.
+    /// A literal inline-code flag.
     Literal,
-    /// An unresolvable word where the flag (or its value) could be.
-    UnresolvedWord,
+    /// An unresolvable word where the flag (or its value) could be, with the
+    /// kind of that word so its deny message names the right cause.
+    UnresolvedWord(UnresolvableKind),
+    /// An option the grammar cannot place (unknown, or missing a required
+    /// attached value), so what follows it is unknown.
+    UnplacedOption,
 }
 
 /// `sed` command names checked by rule 6e, after case folding and
@@ -13732,6 +13833,9 @@ mod tests {
     const UNRESOLVED_ARG_REASON: &str = "an unresolved argument sits where an inline-code flag \
          (`-c`/`-e`) could appear, so inline code cannot be ruled out";
 
+    const UNPLACED_OPTION_REASON: &str = "an option that shguard cannot place was found on a \
+         non-shell interpreter, so inline code cannot be ruled out";
+
     fn assert_interpreter_floor(command: &str, reason: &str, deny_message: &str) {
         let verdict = decide(command);
         assert_eq!(verdict.decision(), Decision::Ask, "{command:?}");
@@ -13740,7 +13844,11 @@ mod tests {
             got_reason.contains(reason),
             "{command:?}: reason {got_reason:?} lacks {reason:?}"
         );
-        for other in [INLINE_FLAG_REASON, UNRESOLVED_ARG_REASON] {
+        for other in [
+            INLINE_FLAG_REASON,
+            UNRESOLVED_ARG_REASON,
+            UNPLACED_OPTION_REASON,
+        ] {
             assert!(
                 other == reason || !got_reason.contains(other),
                 "{command:?}: reason {got_reason:?} also carries {other:?}"
@@ -13790,6 +13898,82 @@ mod tests {
             "ruby -I \"$d\" -e 'x'",
         ] {
             assert_interpreter_floor(command, INLINE_FLAG_REASON, DENY_MSG_INLINE_INTERPRETER);
+        }
+    }
+
+    // Issue #686: an option the grammar cannot place gets its own reason, not
+    // the inline-code one.
+    #[test]
+    fn inline_code_unplaced_option_reports_unplaced_reason() {
+        for command in [
+            "perl -M \"$m\" x.pl",
+            "python3 --unknown x.py",
+            "python3 -Z x.py",
+            "osascript -x foo",
+        ] {
+            assert_interpreter_floor(command, UNPLACED_OPTION_REASON, DENY_MSG_UNPLACED_OPTION);
+        }
+    }
+
+    // Issue #686: a more specific opaque-kind message outranks the
+    // interpreter slot's generic unresolved-target message.
+    #[test]
+    fn inline_code_unresolved_word_yields_to_opaque_kind_message() {
+        let substitution = decide("python3 $(curl x)");
+        assert_eq!(substitution.decision(), Decision::Ask);
+        assert_eq!(
+            substitution.deny_message().map(super::DenyMessage::as_str),
+            Some(DENY_MSG_COMMAND_SUBSTITUTION)
+        );
+        for (command, kind) in [
+            (
+                "python3 <(curl x)",
+                super::UnresolvableKind::ProcessSubstitution,
+            ),
+            (
+                "python3 $((1+2))",
+                super::UnresolvableKind::ArithmeticExpansion,
+            ),
+        ] {
+            let verdict = decide(command);
+            assert_eq!(verdict.decision(), Decision::Ask, "{command:?}");
+            assert_eq!(
+                verdict.deny_message(),
+                super::deny_msg_for_unresolvable_kind(kind).as_ref(),
+                "{command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn inline_code_literal_flag_keeps_inline_message_over_opaque_kind() {
+        assert_interpreter_floor(
+            "python3 -c 'x'",
+            INLINE_FLAG_REASON,
+            DENY_MSG_INLINE_INTERPRETER,
+        );
+    }
+
+    // Issue #696: osascript's `-e` floors like the other interpreters, and
+    // GNU `parallel` carries its own deny message.
+    #[test]
+    fn interpreter_code_osascript_and_parallel_floors_carry_deny_messages() {
+        for (command, deny_message) in [
+            ("osascript -e 'beep'", DENY_MSG_INLINE_INTERPRETER),
+            ("osascript -l JavaScript -e 1", DENY_MSG_INLINE_INTERPRETER),
+            ("parallel rm -rf ::: /", super::DENY_MSG_PARALLEL),
+            ("sem 'rm -rf /'", super::DENY_MSG_PARALLEL),
+            // The triggering word is `$x`, not the later substitution.
+            ("python3 \"$x\" $(y)", DENY_MSG_UNRESOLVED_TARGET),
+            ("python3 $(curl x)", super::DENY_MSG_COMMAND_SUBSTITUTION),
+        ] {
+            let verdict = decide(command);
+            assert_eq!(verdict.decision(), Decision::Ask, "{command:?}");
+            assert_eq!(
+                verdict.deny_message().map(super::DenyMessage::as_str),
+                Some(deny_message),
+                "{command:?}"
+            );
         }
     }
 
