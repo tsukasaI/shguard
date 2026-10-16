@@ -2049,6 +2049,22 @@ fn guardfall_brush_parser_overflow_panic_cases() {
     }
 }
 
+const SPLIT_IO_NUMBER_COMMAND: &str = "rm -rf /; echo 21474836\\\n48>/dev/null";
+const SPLIT_BEFORE_OPERATOR_COMMAND: &str = "rm -rf /; echo 2147483648\\\n>/dev/null";
+const SPLIT_COMMENT_COMMAND: &str = "echo hi # \\\nrm -rf /";
+const ESCAPED_BACKSLASH_NEWLINE_COMMAND: &str = "echo hi\\\\\nrm -rf /";
+const ANSI_C_SPLIT_COMMENT_COMMAND: &str = "bash -c $'echo x #\\\nrm -rf /'";
+const ANSI_C_NO_CONTINUATION_COMMAND: &str = "echo $'hello\\nworld'";
+const ANSI_C_SPLIT_OPENER_COMMAND: &str = "bash -c $\\\n'echo x #\\\nrm -rf /'";
+const EXPAND_ALIASES_TWO_LINE_COMMAND: &str = "shopt -s expand_aliases; alias x=\"rm -rf /\"\nx";
+const ALIAS_SAME_LINE_COMMAND: &str = "alias x=\"rm -rf /\"; x";
+const ALIAS_BASH_IC_COMMAND: &str = "alias x=\"rm -rf /\"; bash -ic x";
+const FUNCTION_DEFINITION_CD_COMMAND: &str =
+    "f() { cd ~/.config/shguard; }; cp evil.toml config.toml";
+const ALIAS_DEFINITION_CD_COMMAND: &str =
+    "alias x=\"cd ~/.config/shguard\"; cp evil.toml config.toml";
+const ALIAS_EMPTY_VALUE_COMMAND: &str = "alias x=\"\"";
+
 /// Issue #443: the io-number digit run panic case above, but with the
 /// overflowing run split across a `\`+newline line continuation
 /// (`21474836\<newline>48`). Before the fix, `neutralize_overflowing_io_redirect_numbers`
@@ -2060,8 +2076,7 @@ fn guardfall_brush_parser_overflow_panic_cases() {
 /// stay `Block`, matching the unsplit control case above.
 #[test]
 fn guardfall_backslash_newline_split_io_number_overflow_stays_blocked() {
-    let command = "rm -rf /; echo 21474836\\\n48>/dev/null";
-    let verdict = shguard::analyze(command);
+    let verdict = shguard::analyze(SPLIT_IO_NUMBER_COMMAND);
     assert_eq!(verdict.decision(), Decision::Block);
 }
 
@@ -2071,8 +2086,7 @@ fn guardfall_backslash_newline_split_io_number_overflow_stays_blocked() {
 /// must also recognize (`crate::parser::skip_raw_continuations`).
 #[test]
 fn guardfall_backslash_newline_split_between_io_number_and_operator_stays_blocked() {
-    let command = "rm -rf /; echo 2147483648\\\n>/dev/null";
-    let verdict = shguard::analyze(command);
+    let verdict = shguard::analyze(SPLIT_BEFORE_OPERATOR_COMMAND);
     assert_eq!(verdict.decision(), Decision::Block);
 }
 
@@ -2084,8 +2098,7 @@ fn guardfall_backslash_newline_split_between_io_number_and_operator_stays_blocke
 /// comment and returning `Allow` instead of ever analyzing it.
 #[test]
 fn guardfall_command_hidden_behind_a_split_comment_is_still_analyzed() {
-    let command = "echo hi # \\\nrm -rf /";
-    let verdict = shguard::analyze(command);
+    let verdict = shguard::analyze(SPLIT_COMMENT_COMMAND);
     assert_eq!(verdict.decision(), Decision::Block);
 }
 
@@ -2095,8 +2108,7 @@ fn guardfall_command_hidden_behind_a_split_comment_is_still_analyzed() {
 /// keeps intact must still end the preceding statement.
 #[test]
 fn guardfall_command_after_an_escaped_backslash_and_real_newline_is_still_analyzed() {
-    let command = "echo hi\\\\\nrm -rf /";
-    let verdict = shguard::analyze(command);
+    let verdict = shguard::analyze(ESCAPED_BACKSLASH_NEWLINE_COMMAND);
     assert_eq!(verdict.decision(), Decision::Block);
 }
 
@@ -2110,8 +2122,7 @@ fn guardfall_command_after_an_escaped_backslash_and_real_newline_is_still_analyz
 /// line's command entirely. Must fail closed to `Ask` rather than `Allow`.
 #[test]
 fn guardfall_ansi_c_quoted_comment_hiding_a_second_line_fails_closed_to_ask() {
-    let command = "bash -c $'echo x #\\\nrm -rf /'";
-    let verdict = shguard::analyze(command);
+    let verdict = shguard::analyze(ANSI_C_SPLIT_COMMENT_COMMAND);
     assert_eq!(verdict.decision(), Decision::Ask);
 }
 
@@ -2120,7 +2131,7 @@ fn guardfall_ansi_c_quoted_comment_hiding_a_second_line_fails_closed_to_ask() {
 /// scoped to the ambiguous combination, not to ANSI-C quoting itself.
 #[test]
 fn guardfall_ansi_c_quoting_without_a_line_continuation_still_allows() {
-    let verdict = shguard::analyze("echo $'hello\\nworld'");
+    let verdict = shguard::analyze(ANSI_C_NO_CONTINUATION_COMMAND);
     assert_eq!(verdict.decision(), Decision::Allow);
 }
 
@@ -2132,8 +2143,7 @@ fn guardfall_ansi_c_quoting_without_a_line_continuation_still_allows() {
 /// output, not just the raw command text, to catch this.
 #[test]
 fn guardfall_ansi_c_quoted_comment_hiding_a_second_line_via_a_split_opener_fails_closed_to_ask() {
-    let command = "bash -c $\\\n'echo x #\\\nrm -rf /'";
-    let verdict = shguard::analyze(command);
+    let verdict = shguard::analyze(ANSI_C_SPLIT_OPENER_COMMAND);
     assert_eq!(verdict.decision(), Decision::Ask);
 }
 
@@ -2160,8 +2170,7 @@ fn guardfall_repeated_unclosed_bracket_runs_do_not_overflow_the_stack() {
 /// definition` already does for a function body.
 #[test]
 fn guardfall_shopt_expand_aliases_two_line_alias_call_blocks() {
-    let command = "shopt -s expand_aliases; alias x=\"rm -rf /\"\nx";
-    let verdict = shguard::analyze(command);
+    let verdict = shguard::analyze(EXPAND_ALIASES_TWO_LINE_COMMAND);
     assert_eq!(verdict.decision(), Decision::Block);
 }
 
@@ -2175,8 +2184,7 @@ fn guardfall_shopt_expand_aliases_two_line_alias_call_blocks() {
 /// too, regardless of the trailing call ever running.
 #[test]
 fn guardfall_alias_same_line_no_expand_aliases_still_blocks_on_definition_alone() {
-    let command = "alias x=\"rm -rf /\"; x";
-    let verdict = shguard::analyze(command);
+    let verdict = shguard::analyze(ALIAS_SAME_LINE_COMMAND);
     assert_eq!(verdict.decision(), Decision::Block);
 }
 
@@ -2187,8 +2195,7 @@ fn guardfall_alias_same_line_no_expand_aliases_still_blocks_on_definition_alone(
 /// itself would ever expand it.
 #[test]
 fn guardfall_alias_bash_ic_call_still_blocks_on_definition_alone() {
-    let command = "alias x=\"rm -rf /\"; bash -ic x";
-    let verdict = shguard::analyze(command);
+    let verdict = shguard::analyze(ALIAS_BASH_IC_COMMAND);
     assert_eq!(verdict.decision(), Decision::Block);
 }
 
@@ -2204,8 +2211,8 @@ fn guardfall_alias_bash_ic_call_still_blocks_on_definition_alone() {
 /// `self-protect-config-cp-tilde`.
 #[test]
 fn guardfall_alias_definition_with_a_cd_poisons_cwd_like_a_function_definition_does() {
-    let function_definition = "f() { cd ~/.config/shguard; }; cp evil.toml config.toml";
-    let alias_definition = "alias x=\"cd ~/.config/shguard\"; cp evil.toml config.toml";
+    let function_definition = FUNCTION_DEFINITION_CD_COMMAND;
+    let alias_definition = ALIAS_DEFINITION_CD_COMMAND;
     assert_eq!(
         shguard::analyze(function_definition).decision(),
         shguard::analyze(alias_definition).decision(),
@@ -2223,7 +2230,7 @@ fn guardfall_alias_definition_with_a_cd_poisons_cwd_like_a_function_definition_d
 /// otherwise wrongly floor this benign shape to `Ask`.
 #[test]
 fn guardfall_alias_empty_value_argument_still_allows() {
-    let verdict = shguard::analyze("alias x=\"\"");
+    let verdict = shguard::analyze(ALIAS_EMPTY_VALUE_COMMAND);
     assert_eq!(verdict.decision(), Decision::Allow);
 }
 
@@ -2506,55 +2513,85 @@ fn guardfall_osascript_script_parallel_cases() {
     }
 }
 
-const DECISION_TABLES: &[&[(&str, Decision)]] = &[
-    HEADLINE_CASES,
-    CLASS_E_CASES,
-    GIT_CASES,
-    RM_DOT_TARGETS,
-    RM_DOTGLOB_TILDE_TARGETS,
-    ISSUE_453_FILESYSTEM_GAPS,
-    TRANSPARENT_WRAPPER_CASES,
-    EVAL_CASES,
-    TRAP_CASES,
-    FIND_EXEC_BARE_INTERPRETER_CASES,
-    FIND_EXEC_RM_FORCE_PLACEHOLDER_CASES,
-    SELF_PROTECTION_NORMALIZATION_CASES,
-    ISSUE_77_BRACE_COMMAND_POSITION_CASES,
-    REDIRECT_AND_TEE_CASES,
-    SHELL_INIT_PERSISTENCE_CASES,
-    SHELL_INIT_SOURCE_DESTINATION_AMBIGUITY_CASES,
-    SHELL_INIT_PATH_PARITY_198_CASES,
-    FISH_OPTION_SURFACE_CASES,
-    FIND_PIPE_XARGS_RM_FORCE_CASES,
-    SHELL_INIT_REDIRECT_CASES,
-    BRUSH_PARSER_OVERFLOW_PANIC_CASES,
-    SED_SCRIPT_WRITE_EXEC_CASES,
-    PARAMETER_EXPANSION_OPERAND_CASES,
-    GIT_CONFIG_COMMAND_KEY_CASES,
-    OSASCRIPT_SCRIPT_PARALLEL_CASES,
+const INLINE_COMMANDS: &[&str] = &[
+    SPLIT_IO_NUMBER_COMMAND,
+    SPLIT_BEFORE_OPERATOR_COMMAND,
+    SPLIT_COMMENT_COMMAND,
+    ESCAPED_BACKSLASH_NEWLINE_COMMAND,
+    ANSI_C_SPLIT_COMMENT_COMMAND,
+    ANSI_C_NO_CONTINUATION_COMMAND,
+    ANSI_C_SPLIT_OPENER_COMMAND,
+    EXPAND_ALIASES_TWO_LINE_COMMAND,
+    ALIAS_SAME_LINE_COMMAND,
+    ALIAS_BASH_IC_COMMAND,
+    FUNCTION_DEFINITION_CD_COMMAND,
+    ALIAS_DEFINITION_CD_COMMAND,
+    ALIAS_EMPTY_VALUE_COMMAND,
+];
+
+// `stringify!` keeps the registered name and the table in one token, so the
+// registry cannot name one table and list another.
+macro_rules! named_table {
+    ($table:ident) => {
+        (stringify!($table), $table)
+    };
+}
+
+const DECISION_TABLES: &[(&str, &[(&str, Decision)])] = &[
+    named_table!(HEADLINE_CASES),
+    named_table!(CLASS_E_CASES),
+    named_table!(GIT_CASES),
+    named_table!(RM_DOT_TARGETS),
+    named_table!(RM_DOTGLOB_TILDE_TARGETS),
+    named_table!(ISSUE_453_FILESYSTEM_GAPS),
+    named_table!(TRANSPARENT_WRAPPER_CASES),
+    named_table!(EVAL_CASES),
+    named_table!(TRAP_CASES),
+    named_table!(FIND_EXEC_BARE_INTERPRETER_CASES),
+    named_table!(FIND_EXEC_RM_FORCE_PLACEHOLDER_CASES),
+    named_table!(SELF_PROTECTION_NORMALIZATION_CASES),
+    named_table!(ISSUE_77_BRACE_COMMAND_POSITION_CASES),
+    named_table!(REDIRECT_AND_TEE_CASES),
+    named_table!(SHELL_INIT_PERSISTENCE_CASES),
+    named_table!(SHELL_INIT_SOURCE_DESTINATION_AMBIGUITY_CASES),
+    named_table!(SHELL_INIT_PATH_PARITY_198_CASES),
+    named_table!(FISH_OPTION_SURFACE_CASES),
+    named_table!(FIND_PIPE_XARGS_RM_FORCE_CASES),
+    named_table!(SHELL_INIT_REDIRECT_CASES),
+    named_table!(BRUSH_PARSER_OVERFLOW_PANIC_CASES),
+    named_table!(SED_SCRIPT_WRITE_EXEC_CASES),
+    named_table!(PARAMETER_EXPANSION_OPERAND_CASES),
+    named_table!(GIT_CONFIG_COMMAND_KEY_CASES),
+    named_table!(OSASCRIPT_SCRIPT_PARALLEL_CASES),
+];
+
+// Case-table-shaped consts that are deliberately not in DECISION_TABLES: the
+// registry itself, and a table whose expectations are rule ids rather than
+// decisions (chained into the snapshot by name below).
+const EXEMPT_TABLES: &[&str] = &[
+    "DECISION_TABLES",
+    "SHELL_INIT_DOES_NOT_SHADOW_STRICTER_BLOCK_RULES",
 ];
 
 #[test]
 fn golden_snapshot_guardfall() {
-    let declared_tables = include_str!("guardfall.rs")
-        .lines()
-        .filter(|line| line.starts_with("const ") && line.contains("&[(&str, Decision)] = &["))
-        .count();
-    assert_eq!(
-        declared_tables,
-        DECISION_TABLES.len(),
-        "every case table must be listed in DECISION_TABLES so the golden snapshot covers it"
-    );
+    let registered: Vec<&str> = DECISION_TABLES.iter().map(|(name, _)| *name).collect();
+    if let Err(problems) =
+        golden::check_table_registry(include_str!("guardfall.rs"), &registered, EXEMPT_TABLES)
+    {
+        panic!("tests/guardfall.rs case tables and DECISION_TABLES disagree:\n{problems}");
+    }
 
     let commands = DECISION_TABLES
         .iter()
-        .flat_map(|table| table.iter().map(|(command, _)| (*command).to_string()))
+        .flat_map(|(_, table)| table.iter().map(|(command, _)| (*command).to_string()))
         .chain(
             SHELL_INIT_DOES_NOT_SHADOW_STRICTER_BLOCK_RULES
                 .iter()
                 .map(|(command, _)| (*command).to_string()),
         )
-        .chain(shell_init_directory_token_commands());
+        .chain(shell_init_directory_token_commands())
+        .chain(INLINE_COMMANDS.iter().map(|command| (*command).to_string()));
     golden::check("guardfall", commands);
 }
 
