@@ -280,6 +280,45 @@ pub(crate) const MAX_RAW_PARAM_EXPANSION_COUNT: usize = 16;
 /// many subshells) fails closed to `Ask`.
 pub(crate) const MAX_RAW_PAREN_OPEN_COUNT: usize = 32;
 
+/// Cap on the total count of extglob openers (`+(`, `@(`, `!(`, `*(`, `?(`:
+/// a `(` immediately preceded by one of those bytes) in one command, enforced
+/// by [`crate::parser::reject_excessive_raw_nesting`] on top of
+/// [`MAX_RAW_PAREN_OPEN_COUNT`]. Never decremented and quote-blind, like the
+/// other raw counters.
+///
+/// # Why 6
+///
+/// Inside `$((` in a double-quoted `${x'...}` (`echo "${x$'$((` + opener x N +
+/// `e'}"`, or with a plain `'`), brush's word parser backtracks about 3x per
+/// opener, while the paren caps ([`MAX_RAW_PAREN_NESTING_DEPTH`] 16,
+/// [`MAX_RAW_PAREN_OPEN_COUNT`] 32) admit 14 of them: 46 bytes tripped the 2s
+/// watchdog. `shguard::analyze`, unloaded, `+(`/`@(`/`!(`/`*(`/`?(` and both
+/// carriers measure the same within noise:
+///
+/// | N | release | debug |
+/// |---|---|---|
+/// | 4 | 3ms | 11ms |
+/// | 6 | 2-5ms | 28ms |
+/// | 8 | 12-21ms | 185ms |
+/// | 9 | 34-39ms | 540ms |
+/// | 10 | 99ms | 1.6-1.7s |
+/// | 11 | 295ms | trips 2s |
+///
+/// Filling the rest of [`MAX_RAW_PAREN_NESTING_DEPTH`] with plain `(` in
+/// front (`$((` + `(` x (14 - N) + opener x N) is the binding shape, since
+/// each opener then adds ~1.4x on a base that already costs 47-74ms release:
+/// N=0 74ms, N=4 136ms, N=6 303ms, N=8 690ms. 6 leaves ~6x under the 2s
+/// budget there and ~400x in the unpadded shape. The padded base alone
+/// (N=0..2, ~1s debug) is not bounded by this cap. Realistic globs use one or
+/// two openers (`ls +(a|b)`, `rm !(keep).txt`). Re-measure on any
+/// `brush-parser` bump.
+///
+/// # Known trade-off
+///
+/// More than 6 such `(` in one command, including non-glob text like
+/// arithmetic `2*(3+4)` in a long awk script, fails closed to `Ask`.
+pub(crate) const MAX_RAW_EXTGLOB_OPEN_COUNT: usize = 6;
+
 /// Cap on the total count of `$(` openers (command substitution, including
 /// the first two bytes of `$((`) in one command, enforced by
 /// [`crate::parser::reject_excessive_raw_nesting`] on top of

@@ -73,12 +73,12 @@ use crate::ast::{
     Assignment, AssignmentValue, Command, CommandLine, CompoundCommand, ElifClause, ExtendedTest,
     FileRedirectionKind, FunctionDefinition, MAX_BRACE_NESTING_DEPTH, MAX_KEYWORD_NESTING_COUNT,
     MAX_RAW_BRACE_NESTING_DEPTH, MAX_RAW_BRACE_OPEN_COUNT, MAX_RAW_BRACKET_OPENER_COUNT,
-    MAX_RAW_COMMAND_SUBST_COUNT, MAX_RAW_EXTENDED_TEST_COUNT, MAX_RAW_LEGACY_ARITH_COUNT,
-    MAX_RAW_PARAM_EXPANSION_COUNT, MAX_RAW_PAREN_NESTING_DEPTH, MAX_RAW_PAREN_OPEN_COUNT,
-    MAX_RAW_PROCESS_SUBST_COUNT, MAX_RAW_STACK_BUDGET, Pipeline, ProcessSubstitutionDirection,
-    Redirection, STACK_COST_BRACE, STACK_COST_BRACKET, STACK_COST_EXTENDED_TEST_OP,
-    STACK_COST_KEYWORD, STACK_COST_LEGACY_ARITH_EXTRA, STACK_COST_PARAM_EXPANSION_EXTRA,
-    STACK_COST_PAREN, Separator, SimpleCommand, Word, WordPiece,
+    MAX_RAW_COMMAND_SUBST_COUNT, MAX_RAW_EXTENDED_TEST_COUNT, MAX_RAW_EXTGLOB_OPEN_COUNT,
+    MAX_RAW_LEGACY_ARITH_COUNT, MAX_RAW_PARAM_EXPANSION_COUNT, MAX_RAW_PAREN_NESTING_DEPTH,
+    MAX_RAW_PAREN_OPEN_COUNT, MAX_RAW_PROCESS_SUBST_COUNT, MAX_RAW_STACK_BUDGET, Pipeline,
+    ProcessSubstitutionDirection, Redirection, STACK_COST_BRACE, STACK_COST_BRACKET,
+    STACK_COST_EXTENDED_TEST_OP, STACK_COST_KEYWORD, STACK_COST_LEGACY_ARITH_EXTRA,
+    STACK_COST_PARAM_EXPANSION_EXTRA, STACK_COST_PAREN, Separator, SimpleCommand, Word, WordPiece,
 };
 
 /// Everything that can go wrong converting a raw command string into
@@ -598,6 +598,7 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
     let mut command_subst_count: usize = 0;
     let mut param_expansion_count: usize = 0;
     let mut process_subst_count: usize = 0;
+    let mut extglob_open_count: usize = 0;
     let mut keyword_count: usize = 0;
     let mut stack_cost: usize = 0;
     let mut token_start: Option<usize> = None;
@@ -678,6 +679,17 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
                         if process_subst_count > MAX_RAW_PROCESS_SUBST_COUNT {
                             return Err(ParseError::unsupported(
                                 "process substitution opener count exceeds the raw count cap",
+                            ));
+                        }
+                    }
+                    // Extglob openers backtrack exponentially in brush's
+                    // word parser inside `$((`, which the paren caps above
+                    // do not see, see `MAX_RAW_EXTGLOB_OPEN_COUNT`.
+                    Some(b'+' | b'@' | b'!' | b'*' | b'?') => {
+                        extglob_open_count += 1;
+                        if extglob_open_count > MAX_RAW_EXTGLOB_OPEN_COUNT {
+                            return Err(ParseError::unsupported(
+                                "extglob opener count exceeds the raw count cap",
                             ));
                         }
                     }

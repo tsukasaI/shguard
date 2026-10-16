@@ -2565,3 +2565,55 @@ fn golden_snapshot_guardfall() {
         .chain(shell_init_directory_token_commands());
     golden::check("guardfall", commands);
 }
+
+/// Issue #692: extglob openers inside `$((` in a double-quoted `${x'...}`
+/// slip under the raw paren caps (16 `(` total) while brush's word parser
+/// backtracks ~3x per opener; 46 bytes used to trip the 2s watchdog. The
+/// probe depth is fixed (not derived from the cap) so a cap raised back into
+/// the vulnerable range fails here.
+fn assert_extglob_flood_rejected_fast(command: &str) {
+    let start = std::time::Instant::now();
+    let verdict = shguard::analyze(command);
+    let elapsed = start.elapsed();
+    assert_eq!(verdict.decision(), Decision::Ask, "command {command:?}");
+    let reason = verdict.reason().map_or("", |r| r.as_str());
+    assert!(
+        reason.contains("extglob opener count"),
+        "expected the extglob raw cap, got: {reason}"
+    );
+    assert!(!reason.contains("time budget"), "got: {reason}");
+    assert!(
+        elapsed < std::time::Duration::from_millis(500),
+        "rejection took {elapsed:?}, expected well under the 2s budget"
+    );
+}
+
+#[test]
+fn guardfall_extglob_opener_flood_in_arithmetic_is_rejected_before_the_watchdog() {
+    let n = 14;
+    assert_extglob_flood_rejected_fast(&format!("echo \"${{x$'$(({}e'}}\"", "+(".repeat(n)));
+    assert_extglob_flood_rejected_fast(&format!("echo \"${{x'$(({}e'}}\"", "+(".repeat(n)));
+    assert_extglob_flood_rejected_fast(&format!("echo \"${{x$'$(({}e'}}\"", "@(".repeat(n)));
+    assert_extglob_flood_rejected_fast(&format!("echo \"${{x'$(({}e'}}\"", "!(".repeat(n)));
+}
+
+#[test]
+fn guardfall_extglob_realistic_usage_is_not_rejected_by_the_opener_cap() {
+    for command in [
+        "ls +(a|b)",
+        "rm !(keep).txt",
+        "shopt -s extglob; ls @(x|y)",
+        "ls ?(a)*(b)+(c)@(d)!(e)",
+        "ls !(a|b) +(c|d) @(e|f)",
+    ] {
+        let verdict = shguard::analyze(command);
+        if let Some(reason) = verdict.reason() {
+            assert!(
+                !reason.as_str().contains("extglob opener count"),
+                "command {command:?} hit the extglob cap: {}",
+                reason.as_str()
+            );
+        }
+    }
+    assert_eq!(shguard::analyze("ls +(a|b)").decision(), Decision::Allow);
+}
