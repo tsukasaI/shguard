@@ -423,6 +423,45 @@ fn oversized_stdin_denies_when_ask_outcome_is_deny() {
     assert!(permission_reason(&output).contains("exceeds"));
 }
 
+/// A stdin producer slower than the 2s evaluation budget (issue #689) must
+/// still get the size-cap verdict: the budget starts after the stdin read,
+/// so a contended writer cannot turn "exceeds" into the outer-time-budget
+/// reason.
+#[test]
+fn oversized_stdin_from_a_slow_producer_still_reports_the_size_cap() {
+    use std::io::Write;
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    const MAX_STDIN_BYTES: usize = 10 * 1024 * 1024;
+    let (_dir, config_path) = write_config("");
+    let mut cmd = std::process::Command::new(isolated_command(&config_path).get_program());
+    cmd.env_remove("XDG_CONFIG_HOME")
+        .env_remove("HOME")
+        .env_remove("SHGUARD_TEST_PANIC")
+        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
+        .env("SHGUARD_CONFIG", &config_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped());
+    let mut child = cmd.spawn().expect("shguard should spawn");
+    let mut stdin = child.stdin.take().expect("stdin should be piped");
+    let writer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(2500));
+        // A broken pipe just means the binary already answered.
+        let _ = stdin.write_all(&vec![b'a'; MAX_STDIN_BYTES + 1]);
+    });
+    let output = child.wait_with_output().expect("shguard should exit");
+    writer.join().expect("writer thread should not panic");
+    let output: Value =
+        serde_json::from_slice(&output.stdout).expect("hook stdout should be valid JSON");
+    assert_eq!(permission_decision(&output), "ask");
+    assert!(
+        permission_reason(&output).contains("exceeds"),
+        "{}",
+        permission_reason(&output)
+    );
+}
+
 /// Invalid UTF-8 on stdin makes `read_to_string` fail with `InvalidData`
 /// regardless of length (`src/bin/shguard.rs`'s own "A read error also
 /// covers..." comment) — the genuine stdin-read-error path, distinct from

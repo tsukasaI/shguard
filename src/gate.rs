@@ -11330,6 +11330,26 @@ mod tests {
         );
     }
 
+    /// A ~6 KB padded-globstar tail must not displace the rules' own Block
+    /// of `rm -rf /`. Calls this module's watchdog-free `analyze` rather
+    /// than `shguard::analyze`: the public entry wraps the same call in
+    /// `watchdog::bounded`'s 2s budget, and three ~0.1-0.4s debug-build
+    /// calls leave headroom that CPU contention can consume, turning the
+    /// rules' Block into the watchdog's fail-closed Ask (issue #689).
+    #[test]
+    fn padded_globstar_keeps_the_rules_own_block() {
+        for padding_anchor in ["", "/Users/me/", "~/"] {
+            let command = format!("rm -rf / {padding_anchor}{}zzz", "**/".repeat(2000));
+            let verdict = decide(&command);
+            assert_eq!(
+                verdict.decision(),
+                Decision::Block,
+                "anchor {padding_anchor:?}, reason: {:?}",
+                verdict.reason().map(super::Reason::as_str)
+            );
+        }
+    }
+
     fn reason_of(command: &str) -> String {
         let verdict = decide(command);
         assert_eq!(verdict.decision(), Decision::Ask, "{command:?}");
