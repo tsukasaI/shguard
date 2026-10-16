@@ -774,16 +774,16 @@ fn command_substitution_with_hidden_closer_fails_closed() {
     for unit in ["$( ')' ", "$( \")\" ", "$( \\) "] {
         assert_raw_cap_ask(
             &format!("echo {}", unit.repeat(2000)),
-            "command substitution opener count",
+            "backtracking budget",
         );
     }
     assert_raw_cap_ask(
         &format!("echo \"{}", "$( \")\" ".repeat(2000)),
-        "command substitution opener count",
+        "backtracking budget",
     );
     assert_raw_cap_ask(
         &format!("echo {}{}", "$( ')' ".repeat(2000), ")".repeat(2000)),
-        "command substitution opener count",
+        "backtracking budget",
     );
 }
 

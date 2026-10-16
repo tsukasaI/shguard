@@ -264,7 +264,7 @@ pub(crate) const MAX_RAW_PARAM_EXPANSION_COUNT: usize = 16;
 ///
 /// This is the general bound on every `(`; the openers that recurse
 /// deepest per byte have their own, tighter caps
-/// ([`MAX_RAW_COMMAND_SUBST_COUNT`], [`MAX_RAW_PROCESS_SUBST_COUNT`]). What
+/// ([`MAX_RAW_BACKTRACK_BUDGET`], [`MAX_RAW_PROCESS_SUBST_COUNT`]). What
 /// remains is a bare `(` (subshell, `$((` second paren, array literal),
 /// whose nesting needs real unquoted closers that
 /// [`MAX_RAW_PAREN_NESTING_DEPTH`] already bounds (a flat run of `( ')' `
@@ -280,68 +280,70 @@ pub(crate) const MAX_RAW_PARAM_EXPANSION_COUNT: usize = 16;
 /// many subshells) fails closed to `Ask`.
 pub(crate) const MAX_RAW_PAREN_OPEN_COUNT: usize = 32;
 
-/// Cap on the total count of extglob openers (`+(`, `@(`, `!(`, `*(`, `?(`:
-/// a `(` immediately preceded by one of those bytes) in one command, enforced
-/// by [`crate::parser::reject_excessive_raw_nesting`] on top of
-/// [`MAX_RAW_PAREN_OPEN_COUNT`]. Never decremented and quote-blind, like the
-/// other raw counters.
+/// Budget for the CPU cost of brush's word parser backtracking through `(`,
+/// enforced by [`crate::parser::reject_excessive_raw_nesting`]. Each `$(`
+/// and each extglob opener (`+(`, `@(`, `!(`, `*(`, `?(`: a `(` right after
+/// one of those bytes) costs [`BACKTRACK_COST_OPENER`]; each other `(`
+/// (`$((`'s second paren, subshell, `<(`/`>(`) costs [`BACKTRACK_COST_PAREN`],
+/// but only once the command holds at least one opener, so a command with no
+/// `$(` or extglob is bounded by the paren caps alone. Never decremented and
+/// quote-blind, like the other raw counters. This replaces the former
+/// per-kind `$(` count cap of 16, which the budget makes unreachable.
 ///
-/// # Why 6
+/// # Why a combined budget
 ///
-/// Inside `$((` in a double-quoted `${x'...}` (`echo "${x$'$((` + opener x N +
-/// `e'}"`, or with a plain `'`), brush's word parser backtracks about 3x per
-/// opener, while the paren caps ([`MAX_RAW_PAREN_NESTING_DEPTH`] 16,
-/// [`MAX_RAW_PAREN_OPEN_COUNT`] 32) admit 14 of them: 46 bytes tripped the 2s
-/// watchdog. `shguard::analyze`, unloaded, `+(`/`@(`/`!(`/`*(`/`?(` and both
-/// carriers measure the same within noise:
+/// Inside `$((` in a double-quoted `${x'...}` (`echo "${x$'$((` + INNER +
+/// `e'}"`, or with a plain `'`), the backtracking multipliers of the
+/// opener kinds compound, so a cap per kind does not bound the product: 49
+/// bytes (`$(` x7 + `+(` x6) tripped the 2s watchdog while sitting under
+/// every per-kind cap. Release build, `shguard::analyze`, unloaded:
 ///
-/// | N | release | debug |
-/// |---|---|---|
-/// | 4 | 3ms | 11ms |
-/// | 6 | 2-5ms | 28ms |
-/// | 8 | 12-21ms | 185ms |
-/// | 9 | 34-39ms | 540ms |
-/// | 10 | 99ms | 1.6-1.7s |
-/// | 11 | 295ms | trips 2s |
+/// | INNER | ms |
+/// |---|---|
+/// | `$(` x6 / x8 / x9 / x10 / x11 / x12 | 7 / 32 / 74 / 216 / 661 / 2000 (watchdog) |
+/// | `+(` x6 / x8 / x9 / x10 / x11 / x12 | 1 / 11 / 33 / 97 / 289 / 892 |
+/// | `(` x10 / x12 / x14 | 3 / 10 / 40 |
+/// | `<(` or `>(` up to x8 (their own cap) | under 2 |
+/// | `$(` x4 + `+(` x6 | 146 |
+/// | `$(` x5 + `+(` x6, `$(` x6 + `+(` x5 | 440, 436 |
+/// | `$(` x6 + `+(` x6 | 1305 |
+/// | `$(` x4 + `(` x4 + `+(` x6 | 2000 (watchdog) |
 ///
-/// Filling the rest of [`MAX_RAW_PAREN_NESTING_DEPTH`] with plain `(` in
-/// front (`$((` + `(` x (14 - N) + opener x N) is the binding shape, since
-/// each opener then adds ~1.4x on a base that already costs 47-74ms release:
-/// N=0 74ms, N=4 136ms, N=6 303ms, N=8 690ms. 6 leaves ~6x under the 2s
-/// budget there and ~400x in the unpadded shape. The padded base alone
-/// (N=0..2, ~1s debug) is not bounded by this cap. Realistic globs use one or
-/// two openers (`ls +(a|b)`, `rm !(keep).txt`). Re-measure on any
-/// `brush-parser` bump.
+/// The other `(` compound too, since [`MAX_RAW_PAREN_NESTING_DEPTH`] admits
+/// 14 of them after `$((`. Filling the depth with `(` in front of N openers
+/// (N openers, 14 - N plain), the range over `$(`/`+(` mixes and placements:
+/// N=5 232-420ms, N=6 303-637ms, N=7 455-954ms, N=8 678-1442ms, N=9
+/// 1028-2004ms. Fitting these, time is about `0.0024ms * 2^plain *
+/// 3^openers`, hence the 3:2 costs.
+///
+/// # Why 34
+///
+/// The carrier's own `$((` costs 5, so 29 is left for the rest. Every
+/// split of that 28-29 across `$(`, `+(` and plain `(` in front, behind or
+/// around the openers measures at most 146ms (the worst, `$(` x9 + `(` x1,
+/// trailing), about 14x under the 2s watchdog, the target being at most
+/// ~200ms; each further 2 of budget would multiply the worst case by about
+/// 2x, so 36 is not safe. A cost of 3 also keeps the stack safe: at most 11
+/// `$(` fit, against the 151 (debug) smallest aborting count measured for
+/// `echo ` + `$( ')' ` x N, and [`MAX_RAW_STACK_BUDGET`] still bounds the
+/// grammar-level recursions that share the stack.
 ///
 /// # Known trade-off
 ///
-/// More than 6 such `(` in one command, including non-glob text like
-/// arithmetic `2*(3+4)` in a long awk script, fails closed to `Ask`.
-pub(crate) const MAX_RAW_EXTGLOB_OPEN_COUNT: usize = 6;
+/// More than 11 command substitutions in one command, 11 extglob openers, or
+/// a mix such as 4 `$(` plus 4 extglob plus 7 other `(`, fails closed to
+/// `Ask`. Non-glob text counts: `awk` arithmetic like `2*(3+4)` and regexes
+/// containing `+(` or `?(` are indistinguishable from extglob here. Realistic
+/// globs and substitutions use one to five (`ls +(a|b)`, `rm !(keep).txt`).
+/// Re-measure on any `brush-parser` bump.
+pub(crate) const MAX_RAW_BACKTRACK_BUDGET: usize = 34;
 
-/// Cap on the total count of `$(` openers (command substitution, including
-/// the first two bytes of `$((`) in one command, enforced by
-/// [`crate::parser::reject_excessive_raw_nesting`] on top of
-/// [`MAX_RAW_PAREN_OPEN_COUNT`]. Never decremented, so a quoted or escaped
-/// `)` (`$( ')' `, `$( \) `) cannot reset it: brush recurses once per `$(`
-/// however its closer is hidden.
-///
-/// # Why 16
-///
-/// Smallest aborting count with the cap lifted, `echo ` + `$( ')' ` (or
-/// `$( \) `) repeated N times: 151 (debug build, 2MiB worker stack, the
-/// tighter of the two budgets this crate ships against) / 1709 (release).
-/// 16 is ~9x below the debug floor.
-///
-/// Per-opener caps alone do not compose: the grammar-level recursions
-/// listed in [`MAX_RAW_STACK_BUDGET`]'s docs share one stack and their
-/// depths add, which that budget bounds.
-///
-/// # Known trade-off
-///
-/// More than 16 command substitutions in one command (a generated script)
-/// fail closed to `Ask`.
-pub(crate) const MAX_RAW_COMMAND_SUBST_COUNT: usize = 16;
+/// Cost of one `$(` or extglob opener against [`MAX_RAW_BACKTRACK_BUDGET`].
+pub(crate) const BACKTRACK_COST_OPENER: usize = 3;
+
+/// Cost of one other `(` against [`MAX_RAW_BACKTRACK_BUDGET`], charged only
+/// once an opener is present.
+pub(crate) const BACKTRACK_COST_PAREN: usize = 2;
 
 /// Cap on the total count of `<(` and `>(` openers (process substitution,
 /// both directions together) in one command, enforced by
@@ -591,7 +593,7 @@ pub(crate) const MAX_RAW_EXTENDED_TEST_COUNT: usize = 64;
 ///
 /// Audit of brush-parser's recursions, and where each is charged: subshell
 /// `(` and process substitution `<(`/`>(` ([`STACK_COST_PAREN`]); `$(` and
-/// `$((` (the `(` weight, plus [`MAX_RAW_COMMAND_SUBST_COUNT`]); brace group
+/// `$((` (the `(` weight, plus [`MAX_RAW_BACKTRACK_BUDGET`]); brace group
 /// and function body `{` ([`STACK_COST_BRACE`]); `${` (brace weight plus
 /// [`STACK_COST_PARAM_EXPANSION_EXTRA`]); `$[` and array subscripts `[`
 /// ([`STACK_COST_BRACKET`] plus [`STACK_COST_LEGACY_ARITH_EXTRA`]);
