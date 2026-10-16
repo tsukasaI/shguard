@@ -10,10 +10,12 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::path::Path;
+#[path = "common/golden.rs"]
+#[allow(dead_code)]
+mod golden;
 
 fn read_repo_file(relative_path: &str) -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path);
+    let path = golden::checkout_dir().join(relative_path);
     std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("failed to read {path:?}: {err}"))
 }
 

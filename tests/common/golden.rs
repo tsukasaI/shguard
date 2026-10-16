@@ -5,7 +5,7 @@
 #![allow(clippy::expect_used)]
 
 use std::collections::BTreeMap;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -31,43 +31,199 @@ struct Record {
     matched_rule: Option<String>,
 }
 
-/// Resolve the checkout this test binary was built from.
+/// Whether the run blesses the snapshots.
+///
+/// An exported `SHGUARD_GOLDEN_UPDATE=1` must not turn a gate into a rewrite,
+/// so blessing under lefthook or CI is an error rather than a quiet pass.
+pub fn update_requested(var: impl Fn(&str) -> Option<OsString>) -> Result<bool, String> {
+    if var(UPDATE_ENV).as_deref() != Some(OsStr::new("1")) {
+        return Ok(false);
+    }
+    for guard in ["LEFTHOOK", "CI"] {
+        if var(guard).is_some() {
+            return Err(format!(
+                "{UPDATE_ENV}=1 is set while {guard} is set: refusing to bless snapshots from a \
+                 hook or CI run; unset {UPDATE_ENV} (an exported value is the usual cause)"
+            ));
+        }
+    }
+    Ok(true)
+}
+
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// Resolve the checkout this test binary AND the `shguard` lib it links were
+/// built from.
 ///
 /// The snapshots are read (and, when blessing, written) at run time, so a
 /// binary reused from a shared `CARGO_TARGET_DIR` by a checkout that did not
 /// rebuild would otherwise compare against the OTHER checkout's snapshots and
 /// pass falsely. `cargo test` sets `CARGO_MANIFEST_DIR` at run time to the
-/// checkout being tested; it must match the one compiled in.
-pub fn resolve(compile: &Path, runtime: Option<&OsStr>) -> Result<PathBuf, String> {
+/// checkout being tested; it must match the test crate's compiled-in one and
+/// the lib's, because Cargo decides freshness per unit and can relink another
+/// checkout's stale lib into a rebuilt test binary.
+///
+/// Fails closed on any difference. Paths are compared canonicalized, so a
+/// symlinked checkout is the same checkout; on a case-insensitive filesystem
+/// two spellings of one directory that canonicalize differently are rejected,
+/// which is the safe side.
+pub fn resolve(
+    test_build: &Path,
+    lib_build: &Path,
+    runtime: Option<&OsStr>,
+) -> Result<PathBuf, String> {
     let runtime = runtime.map(PathBuf::from).ok_or_else(|| {
-        "CARGO_MANIFEST_DIR is not set at run time; run the golden tests via `cargo test`"
+        "CARGO_MANIFEST_DIR is not set at run time; run the golden tests via `cargo test` \
+         (running the binary directly, e.g. from a debugger or IDE, or through \
+         `cargo nextest --workspace-remap`, is not supported)"
             .to_string()
     })?;
-    let same = match (compile.canonicalize(), runtime.canonicalize()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => compile == runtime,
-    };
-    if same {
-        Ok(runtime)
-    } else {
-        Err(format!(
-            "this test binary was built for {} but is running for {}: it was reused from a \
-             shared CARGO_TARGET_DIR without a rebuild, so it would check the wrong \
-             checkout's snapshots; rebuild, or use a per-checkout CARGO_TARGET_DIR",
-            compile.display(),
-            runtime.display()
-        ))
+    for (what, built_for) in [("test binary", test_build), ("shguard lib", lib_build)] {
+        if !same_dir(built_for, &runtime) {
+            return Err(format!(
+                "this {what} was built for {} but is running for {}: it was reused from a \
+                 shared CARGO_TARGET_DIR without a rebuild, so it would check the wrong \
+                 checkout's snapshots; rebuild, or use a per-checkout CARGO_TARGET_DIR",
+                built_for.display(),
+                runtime.display()
+            ));
+        }
     }
+    Ok(runtime)
+}
+
+/// The checkout under test (see [`resolve`]).
+///
+/// # Panics
+///
+/// When the test binary or the linked lib was built for another checkout.
+#[allow(dead_code)] // not every test crate that includes this module reads snapshots
+pub fn checkout_dir() -> PathBuf {
+    resolve(
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        Path::new(shguard::BUILD_MANIFEST_DIR),
+        std::env::var_os("CARGO_MANIFEST_DIR").as_deref(),
+    )
+    .unwrap_or_else(|err| panic!("{err}"))
 }
 
 /// `tests/golden` of the checkout under test (see [`resolve`]).
 pub fn golden_dir() -> PathBuf {
-    let manifest_dir = resolve(
-        Path::new(env!("CARGO_MANIFEST_DIR")),
-        std::env::var_os("CARGO_MANIFEST_DIR").as_deref(),
-    )
-    .unwrap_or_else(|err| panic!("{err}"));
-    manifest_dir.join("tests/golden")
+    checkout_dir().join("tests/golden")
+}
+
+fn declaration_name(line: &str) -> Option<&str> {
+    let line = line.trim_start();
+    let line = line.strip_prefix("pub ").unwrap_or(line);
+    let rest = line
+        .strip_prefix("const ")
+        .or_else(|| line.strip_prefix("static "))?;
+    let end = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))?;
+    Some(&rest[..end])
+}
+
+fn without_whitespace(text: &str) -> String {
+    text.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// Names of the `const`/`static` items in `source` whose type is a case
+/// table (a tuple holding a `&str` command), and the `let` bindings that
+/// build one inline. The type may wrap across lines.
+fn case_tables(source: &str) -> (Vec<String>, Vec<String>) {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut declared = Vec::new();
+    let mut local = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        if let Some(name) = declaration_name(line) {
+            let header: String = lines[index..]
+                .iter()
+                .map(|l| without_whitespace(l))
+                .collect::<Vec<_>>()
+                .join("");
+            let header = header.split('=').next().unwrap_or_default();
+            if header.contains("(&str,") {
+                declared.push(name.to_string());
+            }
+        } else if let Some(binding) = line.trim_start().strip_prefix("let ") {
+            let window: String = std::iter::once(binding)
+                .chain(lines[index + 1..].iter().copied())
+                .map(without_whitespace)
+                .collect::<Vec<_>>()
+                .join("")
+                .chars()
+                .take(80)
+                .collect();
+            if window.contains("[(\"") || window.contains("(&str,") {
+                local.push(binding.trim_end().to_string());
+            }
+        }
+    }
+    (declared, local)
+}
+
+fn duplicates<'a>(names: &[&'a str]) -> Vec<&'a str> {
+    let mut seen = std::collections::BTreeSet::new();
+    names
+        .iter()
+        .copied()
+        .filter(|name| !seen.insert(*name))
+        .collect()
+}
+
+/// Compares the case tables declared in `source` with the set of names in
+/// `registered` plus `exempt`.
+///
+/// # Errors
+///
+/// Lists every table that is declared but neither registered nor exempt,
+/// every registered or exempt name that is not declared, every name listed
+/// twice (or both registered and exempt), and every case table built inside a
+/// function with `let` rather than declared as a module `const`.
+#[allow(dead_code)] // only tests/guardfall.rs checks a table registry
+pub fn check_table_registry(
+    source: &str,
+    registered: &[&str],
+    exempt: &[&str],
+) -> Result<(), String> {
+    let (declared, local) = case_tables(source);
+    let mut problems = Vec::new();
+    for binding in local {
+        problems.push(format!(
+            "  case table built inline, not a module const: `let {binding}`"
+        ));
+    }
+    for name in &declared {
+        if !registered.contains(&name.as_str()) && !exempt.contains(&name.as_str()) {
+            problems.push(format!(
+                "  {name} is declared but neither registered nor exempt"
+            ));
+        }
+    }
+    for (what, names) in [("registered", registered), ("exempt", exempt)] {
+        for name in names {
+            if !declared.iter().any(|declared| declared == name) {
+                problems.push(format!("  {what} name {name} is not a declared case table"));
+            }
+        }
+        for name in duplicates(names) {
+            problems.push(format!("  {name} is {what} more than once"));
+        }
+    }
+    for name in registered {
+        if exempt.contains(name) {
+            problems.push(format!("  {name} is both registered and exempt"));
+        }
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join("\n"))
+    }
 }
 
 fn decision_label(decision: Decision) -> &'static str {
@@ -198,6 +354,8 @@ fn diff_report(expected: &BTreeMap<String, Record>, actual: &BTreeMap<String, Re
 /// On any mismatch, a missing or malformed snapshot, or a command whose
 /// verdict came from the evaluation watchdog rather than the pipeline.
 pub fn check<S: AsRef<str>>(corpus: &str, commands: impl IntoIterator<Item = S>) {
+    // Resolved before the corpus is evaluated so a stale binary fails fast.
+    let path = golden_dir().join(format!("{corpus}.jsonl"));
     let mut actual = BTreeMap::new();
     let mut watchdog_trips = Vec::new();
     for command in commands {
@@ -219,10 +377,12 @@ pub fn check<S: AsRef<str>>(corpus: &str, commands: impl IntoIterator<Item = S>)
         watchdog_trips.join("\n")
     );
 
-    let path = golden_dir().join(format!("{corpus}.jsonl"));
     let rendered = render(&actual);
 
-    if std::env::var(UPDATE_ENV).as_deref() == Ok("1") {
+    if update_requested(|name| std::env::var_os(name)).unwrap_or_else(|err| panic!("{err}")) {
+        let previous = std::fs::read_to_string(&path)
+            .ok()
+            .map(|text| parse(&path, &text));
         std::fs::create_dir_all(path.parent().expect("the snapshot path has a parent"))
             .expect("tests/golden should be creatable");
         std::fs::write(&path, rendered)
@@ -232,6 +392,10 @@ pub fn check<S: AsRef<str>>(corpus: &str, commands: impl IntoIterator<Item = S>)
             actual.len(),
             path.display()
         );
+        match previous {
+            Some(previous) => eprint!("{}", diff_report(&previous, &actual)),
+            None => eprintln!("  there was no previous snapshot"),
+        }
         return;
     }
 
