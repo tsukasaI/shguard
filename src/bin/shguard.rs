@@ -62,6 +62,10 @@
 //! the normal `recv_timeout` or by one of the trip arms' last-chance
 //! `try_recv`) exactly once no matter which path is taken.
 //!
+//! The worker reads stdin first and signals when done; [`main`] bounds that
+//! phase by [`STDIN_READ_TIMEOUT`] and starts [`EVALUATION_TIMEOUT`] only
+//! afterwards, so a slow producer cannot consume the evaluation budget.
+//!
 //! [`EVALUATION_TIMEOUT`]'s value and the measurements behind it, and
 //! [`MEMORY_LIMIT_BYTES`]'s value and the measurements behind it, live on
 //! the respective constants themselves.
@@ -122,8 +126,18 @@ const SERIALIZATION_FAILURE_OUTPUT: &str = concat!(
 /// memory/CPU cost, which scales with bytes read regardless of encoding.
 const MAX_STDIN_BYTES: u64 = 10 * 1024 * 1024;
 
-/// Wall-clock budget given to one [`run`] before [`main`] gives up on it
-/// and fails closed (crash-fuzzer finding: a heredoc operator whose
+/// Wall-clock budget for the worker's stdin read alone, before [`main`]
+/// fails closed. Deliberately separate from [`EVALUATION_TIMEOUT`]: the
+/// read is I/O the producer (Claude Code) paces, not evaluation work, so a
+/// contended writer must not consume the evaluation budget (issue #689),
+/// but a producer that never finishes must still not hang the hook. Not
+/// tuned against measurements: a real payload arrives in milliseconds, so
+/// this only needs to be far above any contended-host stall and below
+/// Claude Code's own hook timeout.
+const STDIN_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Wall-clock budget given to one [`run`], measured from the end of its
+/// stdin read, before [`main`] gives up on it and fails closed (crash-fuzzer finding: a heredoc operator whose
 /// delimiter-word parsing recurses into an unterminated `$(...)` drives
 /// brush-parser's tokenizer into an unbounded allocating loop — no panic,
 /// no return, ~4 GB/s sustained (measured release build) until the OS
@@ -333,6 +347,7 @@ fn main() {
 
     let (result_tx, result_rx) = std::sync::mpsc::channel();
     let (early_tx, early_rx) = std::sync::mpsc::channel();
+    let (read_done_tx, read_done_rx) = std::sync::mpsc::channel();
     // Shared with `DedupSink` (built inside `run`, on the worker thread) so
     // a watchdog trip's `log_trip_best_effort` and the worker's own
     // ordinary logging can never both write for the same invocation — see
@@ -343,10 +358,11 @@ fn main() {
     let worker = std::thread::Builder::new()
         .name("shguard-eval".to_string())
         .spawn(move || {
-            let output = std::panic::catch_unwind(move || run(&early_tx, worker_log_state))
-                .unwrap_or_else(|_| {
-                    shguard::adapter::render(&decide_resource_limit(LimitKind::Panic))
-                });
+            let output =
+                std::panic::catch_unwind(move || run(&early_tx, &read_done_tx, worker_log_state))
+                    .unwrap_or_else(|_| {
+                        shguard::adapter::render(&decide_resource_limit(LimitKind::Panic))
+                    });
             // A closed receiver means `main` already timed out and moved
             // on (see below) — nothing left to send to.
             let _ = result_tx.send(output);
@@ -363,7 +379,7 @@ fn main() {
         return;
     };
 
-    emit_first_result(&result_rx, &early_rx, &log_state);
+    emit_first_result(&result_rx, &read_done_rx, &early_rx, &log_state);
     // The worker already sent (or the process is about to exit on a
     // watchdog-trip path — time, memory, or disconnect — in which case
     // this line is never reached) — join to avoid leaving a detached
@@ -432,6 +448,17 @@ fn resolve_first_result(
     }
 }
 
+/// Waits up to `timeout` for the worker to finish reading stdin. `false`
+/// only on a timeout; a worker that dropped its sender without signalling
+/// (a panic, which leaves its result in the channel) counts as finished so
+/// [`resolve_first_result`] picks that result up.
+fn stdin_read_finished(read_done_rx: &Receiver<()>, timeout: Duration) -> bool {
+    !matches!(
+        read_done_rx.recv_timeout(timeout),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    )
+}
+
 /// The only caller of [`resolve_first_result`], invoked from [`main`]: applies
 /// [`MEMORY_LIMIT_BYTES`] (or its debug-only test override) and
 /// [`EVALUATION_TIMEOUT`], then emits whatever it resolved to. On either
@@ -442,10 +469,16 @@ fn resolve_first_result(
 /// returning, is required.
 fn emit_first_result(
     rx: &Receiver<serde_json::Value>,
+    read_done_rx: &Receiver<()>,
     early_rx: &Receiver<EarlyInfo>,
     log_state: &LogState,
 ) {
-    match resolve_first_result(rx, memory_limit_bytes(), EVALUATION_TIMEOUT) {
+    let first = if stdin_read_finished(read_done_rx, STDIN_READ_TIMEOUT) {
+        resolve_first_result(rx, memory_limit_bytes(), EVALUATION_TIMEOUT)
+    } else {
+        FirstResult::TimeTrip(LimitKind::OuterTime)
+    };
+    match first {
         FirstResult::Output(output) => emit(output),
         FirstResult::MemoryTrip(kind)
         | FirstResult::TimeTrip(kind)
@@ -1116,15 +1149,16 @@ fn evaluate_with_timeout(
     }
 }
 
-/// The composition root's actual work — config load, stdin read, hand-off
+/// The composition root's actual work — stdin read, config load, hand-off
 /// to the adapter — as a plain fn item, not a closure passed to
 /// [`std::panic::catch_unwind`] in [`main`]: `main` calls it as `move ||
-/// run(&early_tx, worker_log_state)`, so `catch_unwind`'s `UnwindSafe` bound
-/// falls on that thin closure rather than on this function's own body,
-/// which stays a capture-free fn item taking its two dependencies
-/// ([`EarlyInfo`]'s sender, [`DedupSink`]'s shared [`LogState`]) as explicit
+/// run(&early_tx, &read_done_tx, worker_log_state)`, so `catch_unwind`'s
+/// `UnwindSafe` bound falls on that thin closure rather than on this
+/// function's own body, which stays a capture-free fn item taking its
+/// dependencies ([`EarlyInfo`]'s and the read-done signal's senders,
+/// [`DedupSink`]'s shared [`LogState`]) as explicit
 /// parameters instead of reaching for `AssertUnwindSafe` or closing over
-/// shared state. Neither `Sender<EarlyInfo>` nor `Arc<LogState>` carries
+/// shared state. None of `Sender<EarlyInfo>`, `Sender<()>`, `Arc<LogState>` carries
 /// unwind-unsafe interior state — a panic mid-`send` either lands before or
 /// after the message is queued, never partway through a value the receiver
 /// could observe half-mutated, and an atomic `swap`/`compare_exchange` has
@@ -1135,9 +1169,9 @@ fn evaluate_with_timeout(
 /// including [`shguard::config::Policy::load`] — a panic inside TOML
 /// parsing is exactly as fail-open as one anywhere else in this function.
 /// So does the watchdog timeout: `run` executes entirely on the worker
-/// thread `main` spawns, so a hang anywhere in here (stdin read, config
-/// load, or command evaluation) is bounded by [`EVALUATION_TIMEOUT`] the
-/// same way. The `--version`/`--check-config`/`check`/`init` branches in
+/// thread `main` spawns, so a hang anywhere in here is bounded: the stdin
+/// read by [`STDIN_READ_TIMEOUT`], config load and command evaluation by
+/// [`EVALUATION_TIMEOUT`], which starts once the read finishes. The `--version`/`--check-config`/`check`/`init` branches in
 /// `main` are all deliberately outside both boundaries: `--version` never
 /// touches config, stdin, or command evaluation, so there is nothing there
 /// for the fail-closed guarantee to protect; `--check-config`
@@ -1149,7 +1183,11 @@ fn evaluate_with_timeout(
 /// panic boundary or the watchdog (`run_check` does still bound its own
 /// evaluation call separately, via `evaluate_with_timeout` — see that
 /// function's docs).
-fn run(early_tx: &Sender<EarlyInfo>, log_state: Arc<LogState>) -> serde_json::Value {
+fn run(
+    early_tx: &Sender<EarlyInfo>,
+    read_done_tx: &Sender<()>,
+    log_state: Arc<LogState>,
+) -> serde_json::Value {
     // Test-only panic injection (issue #52): there is no currently-known
     // reachable panic in this binary to regression-test the `catch_unwind`
     // boundary against directly, and leaving "prevents fail-open on a
@@ -1162,9 +1200,28 @@ fn run(early_tx: &Sender<EarlyInfo>, log_state: Arc<LogState>) -> serde_json::Va
         panic!("shguard: SHGUARD_TEST_PANIC injected panic (test-only)");
     }
 
-    // Config read once, at the composition root, before stdin — a broken
-    // user config must fail closed before any command is ever evaluated,
-    // not partway through.
+    // B-2 (issue #52): read at most `MAX_STDIN_BYTES + 1` bytes — one byte
+    // *past* the cap, not the cap itself — so an oversized input can be
+    // told apart from one that lands exactly at the boundary; `Take` alone
+    // would silently truncate an oversized stream to exactly `n` bytes,
+    // making it indistinguishable from legitimate input of that exact
+    // size. `stdin.len()` after the read is the actual byte count actually
+    // read; only `> MAX_STDIN_BYTES` (not `>=`) rejects, so input of
+    // exactly the cap size is still accepted.
+    let mut stdin = String::new();
+    let read_result = io::stdin()
+        .lock()
+        .take(MAX_STDIN_BYTES + 1)
+        .read_to_string(&mut stdin);
+    // Ends `main`'s stdin-read phase and starts its `EVALUATION_TIMEOUT`
+    // (issue #689). A closed receiver means `main` already tripped the read
+    // phase and is on its way out.
+    let _ = read_done_tx.send(());
+
+    // Config is still loaded before any command is evaluated — a broken
+    // user config must fail closed before evaluation, not partway through.
+    // Read first only so a slow stdin producer cannot eat the evaluation
+    // budget; a config failure still wins over any stdin outcome.
     let policy = match shguard::config::Policy::load() {
         Ok(policy) => policy,
         Err(err) => {
@@ -1180,20 +1237,7 @@ fn run(early_tx: &Sender<EarlyInfo>, log_state: Arc<LogState>) -> serde_json::Va
         }
     };
 
-    // B-2 (issue #52): read at most `MAX_STDIN_BYTES + 1` bytes — one byte
-    // *past* the cap, not the cap itself — so an oversized input can be
-    // told apart from one that lands exactly at the boundary; `Take` alone
-    // would silently truncate an oversized stream to exactly `n` bytes,
-    // making it indistinguishable from legitimate input of that exact
-    // size. `stdin.len()` after the read is the actual byte count actually
-    // read; only `> MAX_STDIN_BYTES` (not `>=`) rejects, so input of
-    // exactly the cap size is still accepted.
-    let mut stdin = String::new();
-    match io::stdin()
-        .lock()
-        .take(MAX_STDIN_BYTES + 1)
-        .read_to_string(&mut stdin)
-    {
+    match read_result {
         Ok(_) if stdin.len() as u64 > MAX_STDIN_BYTES => {
             reject_input(&policy, InputStage::StdinOverCap(MAX_STDIN_BYTES))
         }

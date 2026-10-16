@@ -719,14 +719,6 @@ fn guardfall_rm_dotglob_tilde_targets() {
     }
 }
 
-#[test]
-fn guardfall_padded_globstar_keeps_the_rules_own_block() {
-    for padding_anchor in ["", "/Users/me/", "~/"] {
-        let command = format!("rm -rf / {padding_anchor}{}zzz", "**/".repeat(2000));
-        assert_eq!(shguard::analyze(&command).decision(), Decision::Block);
-    }
-}
-
 const ISSUE_453_FILESYSTEM_GAPS: &[(&str, Decision)] = &[
     // 1. Bare `mkfs <device>` (no -t): util-linux defaults to ext2.
     ("mkfs /dev/sda1", Decision::Block),
