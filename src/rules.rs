@@ -6236,8 +6236,10 @@ fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
         ],
         // BSD `-t time`/`-T fmt`, util-linux `-c`/`-E`/`-I`/`-O`/`-B`/`-m`/
         // `-o`/`-T`. util-linux `-t` takes only a glued value, so a bare
-        // `-t` swallowing the next word is BSD-correct; the util-linux
-        // `-t -c cmd` shape is still found by `-c`'s whole-tail scan.
+        // `-t` swallowing the next word is BSD-correct, except a
+        // dash-prefixed word (`script_t_value_is_dash_word`); the bare
+        // `-t -c cmd` shape is also found by `-c`'s whole-tail scan, and
+        // `collect_script_slots` covers `-qc`/`--command=`.
         "script" => vec![
             ValueFlag::Short('c'),
             ValueFlag::Short('t'),
@@ -6437,8 +6439,9 @@ fn skip_wrapper_flags(wrapper: &str, argv: &[NormalizedWord]) -> usize {
         // them as "value comes from the next token" consumed the real
         // wrapped command (`rm`) as if it were the flag's value — a
         // regression an earlier `ends_with('a')` version of this check had.
-        if value_flag_bare_match(&value_flags, token)
-            || cluster_takes_separated_value(wrapper, token)
+        if (value_flag_bare_match(&value_flags, token)
+            || cluster_takes_separated_value(wrapper, token))
+            && !script_t_value_is_dash_word(wrapper, token, argv.get(idx + 1))
         {
             // The flag token itself is always consumed; its separated
             // value is consumed too only when resolved: advancing past an
@@ -6466,6 +6469,21 @@ fn skip_wrapper_flags(wrapper: &str, argv: &[NormalizedWord]) -> usize {
         idx += 1;
     }
     idx
+}
+
+/// Whether `token` ends in `script`'s `-t` and the next word starts with `-`.
+/// BSD's `-t time` is a non-negative count and util-linux's `-t` takes only a
+/// glued value, so a dash-prefixed next word is a flag, never `-t`'s value
+/// (`script -t -qc 'rm -rf /'`).
+fn script_t_value_is_dash_word(wrapper: &str, token: &str, next: Option<&NormalizedWord>) -> bool {
+    wrapper == "script"
+        && token.starts_with('-')
+        && !token.starts_with("--")
+        && token.ends_with('t')
+        && matches!(
+            next.map(NormalizedWord::resolution),
+            Some(Resolution::Resolved(word)) if word.starts_with('-')
+        )
 }
 
 /// Skips a transparent wrapper's own leading arguments (see
@@ -7074,13 +7092,13 @@ fn collect_script_slots(tail: &[NormalizedWord], slots: &mut Vec<ScriptSlot>) {
             ValueFlag::Long(_) => None,
         })
         .collect();
-    let mut index = 0;
-    while index < end {
-        let Resolution::Resolved(token) = tail[index].resolution() else {
-            return;
+    // util-linux permutes options, so `script out.txt -qc cmd` honors `-qc`
+    // after the typescript operand: look for the command string over the
+    // whole tail, as `RECURSABLE_SLOTS` does for a bare `-c`.
+    for (index, word) in tail.iter().enumerate() {
+        let Resolution::Resolved(token) = word.resolution() else {
+            continue;
         };
-        let consumes_next = value_flag_bare_match(&value_flags, token)
-            || cluster_takes_separated_value("script", token);
         let command_string = if let Some(glued) = token.strip_prefix("--command=") {
             Some(Some(glued.to_string()))
         } else if token != "-c"
@@ -7104,6 +7122,24 @@ fn collect_script_slots(tail: &[NormalizedWord], slots: &mut Vec<ScriptSlot>) {
             },
             None => {}
         }
+    }
+    // A dash-prefixed word left in command position is an option shguard
+    // did not place (`script out.txt -ac cmd`).
+    if let Some(Resolution::Resolved(word)) = skip_wrapper_arguments("script", tail)
+        .first()
+        .map(NormalizedWord::resolution)
+        && word.starts_with('-')
+    {
+        slots.push(ScriptSlot::Unresolvable);
+    }
+    let mut index = 0;
+    while index < end {
+        let Resolution::Resolved(token) = tail[index].resolution() else {
+            return;
+        };
+        let consumes_next = (value_flag_bare_match(&value_flags, token)
+            || cluster_takes_separated_value("script", token))
+            && !script_t_value_is_dash_word("script", token, tail.get(index + 1));
         if consumes_next {
             index += 2;
             continue;

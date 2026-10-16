@@ -2480,6 +2480,17 @@ const OSASCRIPT_SCRIPT_PARALLEL_CASES: &[(&str, Decision)] = &[
     ("script -q out.txt", Decision::Allow),
     ("script -q /dev/null ls", Decision::Allow),
     ("script -c 'ls' out.txt", Decision::Allow),
+    // util-linux permutes options, so a command string after the typescript
+    // operand is still run.
+    ("script out.txt -qc 'rm -rf /'", Decision::Block),
+    ("script out.txt --command='rm -rf /'", Decision::Block),
+    ("script -q out.txt -ac 'rm -rf /'", Decision::Block),
+    ("script -q out.txt -e -qc 'rm -rf /'", Decision::Block),
+    ("script -t -qc 'rm -rf /' out.txt", Decision::Block),
+    ("script out.txt -c 'rm -rf /'", Decision::Block),
+    // A dash-prefixed word in command position is an unplaced option.
+    ("script -q out.txt -qc 'echo hi'", Decision::Ask),
+    ("sem 'rm -rf /'", Decision::Ask),
     // An unmodeled flag could swallow the typescript operand.
     ("script -Z val out.txt rm -rf /", Decision::Ask),
     ("script -F out.txt ls", Decision::Ask),

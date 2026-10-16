@@ -746,8 +746,15 @@
 {"command":"script -q /dev/null ls","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"script -q /dev/null rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"script -q out.txt","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"script -q out.txt -ac 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"script -q out.txt -e -qc 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"script -q out.txt -qc 'echo hi'","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"script -qc 'rm -rf /' /dev/null","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"script -t -qc 'rm -rf /' out.txt","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"script -t 0 -q out.txt rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"script out.txt --command='rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"script out.txt -c 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"script out.txt -qc 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"sed \"s/$a/$b/\" f","decision":"Ask","deny_message":"Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected. A variable file operand (`sed -n p \"$file\"`) cannot be told apart from a script word, so expand it to a literal file path.","matched_rule":null}
 {"command":"sed $(echo -i ~/.config/shguard/config.toml)","decision":"Ask","deny_message":"Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected. A variable file operand (`sed -n p \"$file\"`) cannot be told apart from a script word, so expand it to a literal file path.","matched_rule":null}
 {"command":"sed $(printf -- \"-i /home/user/.config/shguard/config.toml\")","decision":"Ask","deny_message":"Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected. A variable file operand (`sed -n p \"$file\"`) cannot be told apart from a script word, so expand it to a literal file path.","matched_rule":null}
@@ -797,6 +804,7 @@
 {"command":"sed{,$IFS-i$IFS$(true)$IFS~/.config/shguard/config.toml}","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-sed-tilde"}
 {"command":"sed{,-i$*$(true)~/.config/shguard/config.toml}","decision":"Ask","deny_message":"Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected. A variable file operand (`sed -n p \"$file\"`) cannot be told apart from a script word, so expand it to a literal file path.","matched_rule":null}
 {"command":"sed{,-i$@$(true)~/.config/shguard/config.toml}","decision":"Ask","deny_message":"Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected. A variable file operand (`sed -n p \"$file\"`) cannot be told apart from a script word, so expand it to a literal file path.","matched_rule":null}
+{"command":"sem 'rm -rf /'","decision":"Ask","deny_message":"Run the commands directly or with a shell loop (`for x in ...; do cmd \"$x\"; done`) so each argv is inspectable; GNU `parallel` builds its command lines from templates and `:::` sources that are never inspected.","matched_rule":null}
 {"command":"sh","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"sh -c 'echo hi' > /dev/sda","decision":"Block","deny_message":null,"matched_rule":"redirect-overwrite-device-or-critical-file"}
 {"command":"shred /dev/sda","decision":"Block","deny_message":null,"matched_rule":"shred"}
