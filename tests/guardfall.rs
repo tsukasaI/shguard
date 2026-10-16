@@ -2568,43 +2568,75 @@ fn golden_snapshot_guardfall() {
 
 /// Issue #692: `$(` and extglob openers inside `$((` in a double-quoted
 /// `${x'...}` slip under the per-kind raw caps while brush's word parser
-/// backtracks ~3x per opener and the factors multiply across kinds. These
-/// shapes used to trip the 2s watchdog; the reason check proves the raw
-/// pre-scan rejected them instead. The inputs are fixed (not derived from
-/// the budget) so a budget raised back into the vulnerable range fails here.
-fn assert_backtrack_flood_rejected(command: &str) {
+/// backtracks ~3x per opener, the factors multiply across kinds, and each
+/// step re-scans the rest of the input. These shapes used to trip the 2s
+/// watchdog; the reason check proves the raw pre-scan rejected them instead.
+/// The inputs are fixed (not derived from the caps) so a cap raised back into
+/// the vulnerable range fails here.
+fn assert_flood_rejected(command: &str, needle: &str) {
     let verdict = shguard::analyze(command);
     assert_eq!(verdict.decision(), Decision::Ask, "command {command:?}");
     let reason = verdict.reason().map_or("", |r| r.as_str());
     assert!(
-        reason.contains("backtracking budget"),
-        "expected the raw backtracking budget, got: {reason}"
+        reason.contains(needle),
+        "expected {needle:?}, got: {reason}"
     );
     assert!(!reason.contains("time budget"), "got: {reason}");
 }
 
+const CARRIER_REASON: &str = "quote directly after its name";
+const BUDGET_REASON: &str = "backtracking budget";
+
 #[test]
 fn guardfall_extglob_opener_flood_in_arithmetic_is_rejected_before_the_watchdog() {
     let n = 14;
-    assert_backtrack_flood_rejected(&format!("echo \"${{x$'$(({}e'}}\"", "+(".repeat(n)));
-    assert_backtrack_flood_rejected(&format!("echo \"${{x'$(({}e'}}\"", "+(".repeat(n)));
-    assert_backtrack_flood_rejected(&format!("echo \"${{x$'$(({}e'}}\"", "@(".repeat(n)));
-    assert_backtrack_flood_rejected(&format!("echo \"${{x'$(({}e'}}\"", "!(".repeat(n)));
+    for command in [
+        format!("echo \"${{x$'$(({}e'}}\"", "+(".repeat(n)),
+        format!("echo \"${{x'$(({}e'}}\"", "+(".repeat(n)),
+        format!("echo \"${{x$'$(({}e'}}\"", "@(".repeat(n)),
+        format!("echo \"${{x'$(({}e'}}\"", "!(".repeat(n)),
+    ] {
+        assert_flood_rejected(&command, CARRIER_REASON);
+    }
+    // The same flood without the carrier is bounded by the budget alone.
+    assert_flood_rejected(&format!("echo \"$(({}e\"", "+(".repeat(n)), BUDGET_REASON);
 }
 
 #[test]
 fn guardfall_extglob_and_command_substitution_openers_compound_across_kinds() {
     // 49 bytes, under every per-kind cap: `$(` x7 + `+(` x6.
-    assert_backtrack_flood_rejected("echo \"${x$'$(($($($($($($($(+(+(+(+(+(+(e'}\"");
+    let forty_nine = "$(($($($($($($($(+(+(+(+(+(+(e";
+    assert_flood_rejected(&format!("echo \"${{x$'{forty_nine}'}}\""), CARRIER_REASON);
+    assert_flood_rejected(&format!("echo \"{forty_nine}\""), BUDGET_REASON);
     // Plain `(` in between compounds too.
-    assert_backtrack_flood_rejected(&format!(
-        "echo \"${{x$'$(({}{}{}e'}}\"",
-        "$(".repeat(4),
-        "(".repeat(4),
-        "+(".repeat(6)
-    ));
+    let mixed = format!("$(({}{}{}e", "$(".repeat(4), "(".repeat(4), "+(".repeat(6));
+    assert_flood_rejected(&format!("echo \"${{x$'{mixed}'}}\""), CARRIER_REASON);
+    assert_flood_rejected(&format!("echo \"{mixed}\""), BUDGET_REASON);
     // No extglob at all: `$(` alone reached the watchdog at 13.
-    assert_backtrack_flood_rejected(&format!("echo \"${{x$'$(({}e'}}\"", "$(".repeat(13)));
+    let subst = format!("$(({}e", "$(".repeat(13));
+    assert_flood_rejected(&format!("echo \"${{x$'{subst}'}}\""), CARRIER_REASON);
+    assert_flood_rejected(&format!("echo \"{subst}\""), BUDGET_REASON);
+}
+
+#[test]
+fn guardfall_extglob_carrier_flood_with_a_long_suffix_is_rejected_before_the_watchdog() {
+    // The budget bounds the openers, not the suffix each backtracking step
+    // re-scans: `$(` x9 + `(` x1 is exactly at the budget and still tripped
+    // the 2s watchdog with 300 bytes after it.
+    let at_budget = format!(
+        "echo \"${{x$'$(({}(e{}'}}\"",
+        "$(".repeat(9),
+        "e".repeat(300)
+    );
+    assert_flood_rejected(&at_budget, CARRIER_REASON);
+    let pinned = format!(
+        "echo \"${{x$'$(($($($($($($($($($(({}'}}\"",
+        "e".repeat(300)
+    );
+    assert_flood_rejected(&pinned, CARRIER_REASON);
+    // No `$((` and no extglob: 11 `$(` and a suffix reached 1.6s.
+    let no_arithmetic = format!("echo \"${{x$'{}e{}'}}\"", "$(".repeat(11), "e".repeat(300));
+    assert_flood_rejected(&no_arithmetic, CARRIER_REASON);
 }
 
 #[test]

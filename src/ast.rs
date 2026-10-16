@@ -290,13 +290,33 @@ pub(crate) const MAX_RAW_PAREN_OPEN_COUNT: usize = 32;
 /// quote-blind, like the other raw counters. This replaces the former
 /// per-kind `$(` count cap of 16, which the budget makes unreachable.
 ///
+/// # Primary control and scope
+///
+/// This budget is defense in depth, not the primary control. The slow shapes
+/// all sit in one malformed carrier: a double-quoted `${`, a name, then a
+/// quote directly after it (`"${x'...'}"`, `"${x$'...'}"`), where brush's
+/// word parser re-scans the rest of the input on every backtracking step, so
+/// the suffix length multiplies the cost below (`$(` x9 + `(` x1, exactly at
+/// this budget, with 300 bytes after it trips the 2s watchdog in release; 120
+/// bytes take ~1s). The primary control is `quote_follows_param_name` in
+/// `src/parser.rs`, which rejects that carrier structurally; bash itself calls
+/// it a bad substitution. This budget bounds the opener counts of shapes that
+/// carrier reject does not see: well-formed input, whose cost does not scale
+/// with the suffix (11 `$(` plus 1MiB of text parse in ~30ms) and so
+/// stays linear. A residual shape remains: `"${x:-'` + openers + `'}"` (a
+/// legitimate operator) measures ~1.2s in release at the budget with a
+/// 300-byte suffix; the carrier reject does not match it and it only fails
+/// closed via the watchdog. The other operators (`-`, `+`, `#`, `%`, `/`, `^`,
+/// `,`, `?` and their doubled or colon forms) measured under 1ms there.
+///
 /// # Why a combined budget
 ///
 /// Inside `$((` in a double-quoted `${x'...}` (`echo "${x$'$((` + INNER +
 /// `e'}"`, or with a plain `'`), the backtracking multipliers of the
 /// opener kinds compound, so a cap per kind does not bound the product: 49
 /// bytes (`$(` x7 + `+(` x6) tripped the 2s watchdog while sitting under
-/// every per-kind cap. Release build, `shguard::analyze`, unloaded:
+/// every per-kind cap. Release build, `shguard::analyze`, unloaded, one-byte
+/// suffix:
 ///
 /// | INNER | ms |
 /// |---|---|
@@ -318,12 +338,13 @@ pub(crate) const MAX_RAW_PAREN_OPEN_COUNT: usize = 32;
 ///
 /// # Why 34
 ///
-/// The carrier's own `$((` costs 5, so 29 is left for the rest. Every
-/// split of that 28-29 across `$(`, `+(` and plain `(` in front, behind or
-/// around the openers measures at most 146ms (the worst, `$(` x9 + `(` x1,
-/// trailing), about 14x under the 2s watchdog, the target being at most
-/// ~200ms; each further 2 of budget would multiply the worst case by about
-/// 2x, so 36 is not safe. A cost of 3 also keeps the stack safe: at most 11
+/// With a one-byte suffix, the carrier's own `$((` costs 5, so 29 is left
+/// for the rest, and every split of that 28-29 across `$(`, `+(` and plain
+/// `(` in front, behind or around the openers measures at most 146ms (the
+/// worst, `$(` x9 + `(` x1, trailing); each further 2 of budget would
+/// multiply that by about 2x. That bound holds for a short suffix only (see
+/// the scope section), which is why it is not the primary control. A cost of
+/// 3 also keeps the stack safe: at most 11
 /// `$(` fit, against the 151 (debug) smallest aborting count measured for
 /// `echo ` + `$( ')' ` x N, and [`MAX_RAW_STACK_BUDGET`] still bounds the
 /// grammar-level recursions that share the stack.

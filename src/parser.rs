@@ -642,6 +642,11 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
                             "parameter expansion opener count exceeds the raw count cap",
                         ));
                     }
+                    if quote_follows_param_name(&bytes[i + 1..]) {
+                        return Err(ParseError::unsupported(
+                            "parameter expansion with a quote directly after its name",
+                        ));
+                    }
                 }
             }
             b'}' => brace_depth = brace_depth.saturating_sub(1),
@@ -776,6 +781,56 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
     }
 
     Ok(())
+}
+
+/// Whether `rest`, the bytes after a `${`, put a `'` or `$'` directly after
+/// the parameter name: `${x'`, `${!x$'`, `${x[1] '`, `${'`, and the same with
+/// a stray `@`, `!` or `~` before the quote. Bash rejects every one of these
+/// as a bad substitution, so no working command contains them, while a
+/// double-quoted `${x'...'}` with `$(`/extglob openers inside the quotes makes
+/// brush's word parser re-scan the rest of the input once per backtracking
+/// step (issue #692). Nothing but blanks, a subscript or one stray byte may
+/// sit between the name and the quote, so `${x:-'d'}`, `${x//'a'/'b'}`,
+/// `${x['k']}`, `${x#'p'}` and `"${x}'"` are not matched.
+fn quote_follows_param_name(rest: &[u8]) -> bool {
+    let blanks = |from: usize| {
+        from + rest[from..]
+            .iter()
+            .take_while(|b| matches!(b, b' ' | b'\t'))
+            .count()
+    };
+    let mut i = blanks(0);
+    if matches!(rest.get(i), Some(b'!' | b'#')) {
+        i += 1;
+    }
+    match rest.get(i) {
+        Some(b) if b.is_ascii_alphabetic() || *b == b'_' => {
+            i += rest[i..]
+                .iter()
+                .take_while(|b| b.is_ascii_alphanumeric() || **b == b'_')
+                .count();
+        }
+        Some(b) if b.is_ascii_digit() => {
+            i += rest[i..].iter().take_while(|b| b.is_ascii_digit()).count();
+        }
+        Some(b'@' | b'*' | b'?' | b'$' | b'-' | b'!' | b'#') => i += 1,
+        _ => {}
+    }
+    if rest.get(i) == Some(&b'[') {
+        let inside = rest[i + 1..]
+            .iter()
+            .take_while(|b| !matches!(b, b']' | b'\'' | b'"'))
+            .count();
+        if rest.get(i + 1 + inside) != Some(&b']') {
+            return false;
+        }
+        i += inside + 2;
+    }
+    i = blanks(i);
+    if matches!(rest.get(i), Some(b'@' | b'!' | b'~')) {
+        i += 1;
+    }
+    matches!(rest[i.min(rest.len())..], [b'\'', ..] | [b'$', b'\'', ..])
 }
 
 /// Adds `cost` to the running combined stack-cost total, rejecting once it
@@ -3136,6 +3191,57 @@ mod tests {
             unsupported_construct(&command),
             "parenthesis nesting exceeds the raw depth cap"
         );
+    }
+
+    const QUOTE_AFTER_NAME: &str = "parameter expansion with a quote directly after its name";
+
+    #[test]
+    fn quote_directly_after_a_parameter_name_is_rejected() {
+        for command in [
+            "echo \"${x'a'}\"",
+            "echo \"${x$'a'}\"",
+            "echo ${!x'a'}",
+            "echo ${#x'a'}",
+            "echo ${12'a'}",
+            "echo ${@'a'}",
+            "echo ${x[1]'a'}",
+            "echo ${ x 'a'}",
+            "echo ${x@'a'}",
+            "echo ${x!'a'}",
+            "echo ${x~'a'}",
+            "echo ${'a'}",
+            "echo ${$'a'}",
+        ] {
+            assert_eq!(
+                unsupported_construct(command),
+                QUOTE_AFTER_NAME,
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn quotes_after_a_parameter_operator_or_subscript_are_not_the_carrier() {
+        for command in [
+            "echo \"${x:-'d'}\"",
+            "echo ${x//'a'/'b'}",
+            "echo ${x['k']}",
+            "echo ${x#'p'}",
+            "echo ${x%'p'}",
+            "echo ${x:+'p'}",
+            "echo ${x@Q}",
+            "echo \"${x}'\"",
+            "echo \"${x}\" 'y'",
+            "echo ${#x} ${!x} ${@} ${x[@]}",
+        ] {
+            if let Err(err) = parse(command) {
+                assert_ne!(
+                    err.unsupported_construct(),
+                    Some(QUOTE_AFTER_NAME),
+                    "{command}"
+                );
+            }
+        }
     }
 
     #[test]
