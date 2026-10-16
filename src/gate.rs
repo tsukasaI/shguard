@@ -19514,6 +19514,27 @@ done"#,
             reason.contains("case clause"),
             "expected the reason to name the still-unsupported construct, got: {reason:?}"
         );
+        // Issue #679: the deny message of the unsupported-construct path
+        // names the construct too, not just the reason.
+        let deny_message = verdict.deny_message().map(DenyMessage::as_str);
+        assert!(
+            deny_message.is_some_and(|message| message.contains("case clause")),
+            "expected the deny message to name the unsupported construct, got: {deny_message:?}"
+        );
+    }
+
+    #[test]
+    fn syntax_error_reason_is_pinned_and_carries_no_deny_message() {
+        // Issue #679: a genuine syntax failure (`ParseError::Syntax`) is
+        // reported as `could not parse command: syntax error: ...` and,
+        // unlike an unsupported construct, has no deny message to attach.
+        let verdict = analyze("'");
+        let reason = verdict.reason().map(Reason::as_str).unwrap_or_default();
+        assert!(
+            reason.starts_with("could not parse command: syntax error:"),
+            "expected the parse-failure `syntax error:` reason, got: {reason:?}"
+        );
+        assert_eq!(verdict.deny_message(), None);
     }
 
     // ==== A pipeline's final stage
