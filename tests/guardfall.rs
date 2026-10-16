@@ -2565,3 +2565,158 @@ fn golden_snapshot_guardfall() {
         .chain(shell_init_directory_token_commands());
     golden::check("guardfall", commands);
 }
+
+/// Issue #692: `$(` and extglob openers inside `$((` in a double-quoted
+/// `${x'...}` slip under the per-kind raw caps while brush's word parser
+/// backtracks ~3x per opener, the factors multiply across kinds, and each
+/// step re-scans the rest of the input. These shapes used to trip the 2s
+/// watchdog; the reason check proves the raw pre-scan rejected them instead.
+/// The inputs are fixed (not derived from the caps) so a cap raised back into
+/// the vulnerable range fails here.
+fn assert_flood_rejected(command: &str, needle: &str) {
+    let verdict = shguard::analyze(command);
+    assert_eq!(verdict.decision(), Decision::Ask, "command {command:?}");
+    let reason = verdict.reason().map_or("", |r| r.as_str());
+    assert!(
+        reason.contains(needle),
+        "expected {needle:?}, got: {reason}"
+    );
+    assert!(!reason.contains("time budget"), "got: {reason}");
+}
+
+const CARRIER_REASON: &str = "inside a parameter expansion";
+const BUDGET_REASON: &str = "backtracking budget";
+
+#[test]
+fn guardfall_extglob_opener_flood_in_arithmetic_is_rejected_before_the_watchdog() {
+    let n = 14;
+    for command in [
+        format!("echo \"${{x$'$(({}e'}}\"", "+(".repeat(n)),
+        format!("echo \"${{x'$(({}e'}}\"", "+(".repeat(n)),
+        format!("echo \"${{x$'$(({}e'}}\"", "@(".repeat(n)),
+        format!("echo \"${{x'$(({}e'}}\"", "!(".repeat(n)),
+    ] {
+        assert_flood_rejected(&command, CARRIER_REASON);
+    }
+    // The same flood without the carrier is bounded by the budget alone.
+    assert_flood_rejected(&format!("echo \"$(({}e\"", "+(".repeat(n)), BUDGET_REASON);
+}
+
+#[test]
+fn guardfall_extglob_and_command_substitution_openers_compound_across_kinds() {
+    // 49 bytes, under every per-kind cap: `$(` x7 + `+(` x6.
+    let forty_nine = "$(($($($($($($($(+(+(+(+(+(+(e";
+    assert_flood_rejected(&format!("echo \"${{x$'{forty_nine}'}}\""), CARRIER_REASON);
+    assert_flood_rejected(&format!("echo \"{forty_nine}\""), BUDGET_REASON);
+    // Plain `(` in between compounds too.
+    let mixed = format!("$(({}{}{}e", "$(".repeat(4), "(".repeat(4), "+(".repeat(6));
+    assert_flood_rejected(&format!("echo \"${{x$'{mixed}'}}\""), CARRIER_REASON);
+    assert_flood_rejected(&format!("echo \"{mixed}\""), BUDGET_REASON);
+    // No extglob at all: `$(` alone reached the watchdog at 13.
+    let subst = format!("$(({}e", "$(".repeat(13));
+    assert_flood_rejected(&format!("echo \"${{x$'{subst}'}}\""), CARRIER_REASON);
+    assert_flood_rejected(&format!("echo \"{subst}\""), BUDGET_REASON);
+}
+
+#[test]
+fn guardfall_extglob_carrier_flood_with_a_long_suffix_is_rejected_before_the_watchdog() {
+    // The budget bounds the openers, not the suffix each backtracking step
+    // re-scans: `$(` x9 + `(` x1 is exactly at the budget and still tripped
+    // the 2s watchdog with 300 bytes after it.
+    let at_budget = format!(
+        "echo \"${{x$'$(({}(e{}'}}\"",
+        "$(".repeat(9),
+        "e".repeat(300)
+    );
+    assert_flood_rejected(&at_budget, CARRIER_REASON);
+    let pinned = format!(
+        "echo \"${{x$'$(($($($($($($($($($(({}'}}\"",
+        "e".repeat(300)
+    );
+    assert_flood_rejected(&pinned, CARRIER_REASON);
+    // No `$((` and no extglob: 11 `$(` and a suffix reached 1.6s.
+    let no_arithmetic = format!("echo \"${{x$'{}e{}'}}\"", "$(".repeat(11), "e".repeat(300));
+    assert_flood_rejected(&no_arithmetic, CARRIER_REASON);
+}
+
+#[test]
+fn guardfall_extglob_quote_in_a_parameter_body_rejects_openers_whatever_precedes_it() {
+    // Issue #692: what sits between `${` and the quote is irrelevant, and so
+    // is the operator; a hidden `}` must not end the body early either.
+    let payload = format!("$(({}(", "$(".repeat(9));
+    let suffix = "e".repeat(300);
+    for prefix in [
+        "x$",
+        "x\n",
+        "\u{e9}",
+        "x.",
+        "x[",
+        "x#",
+        "x//",
+        "x^",
+        "x:-",
+        "x\\}",
+        "x#\\}",
+        "x:-`echo }`",
+        "x:-'}'",
+        "x:-$(echo })",
+        "x:-${y}",
+    ] {
+        for quote in ["'", "$'"] {
+            let command = format!("echo \"${{{prefix}{quote}{payload}{suffix}'}}\"");
+            assert_flood_rejected(&command, CARRIER_REASON);
+        }
+    }
+}
+
+#[test]
+fn guardfall_extglob_quote_in_a_parameter_body_false_positive_checks() {
+    assert_eq!(
+        shguard::analyze("grep -rn '${' .").decision(),
+        Decision::Allow
+    );
+    assert_eq!(
+        shguard::analyze("echo \"${x:-'d'}\"").decision(),
+        Decision::Allow
+    );
+    // A `}` nothing can hide closes the body, so a later quote is outside it.
+    for command in [
+        "echo \"${HOME}\" 'y' $(date) $(pwd)",
+        "echo \"${x:-d}\" 'y' $(date)",
+        "echo ${x} 'y' +(a|b)",
+    ] {
+        let verdict = shguard::analyze(command);
+        let reason = verdict.reason().map_or("", |r| r.as_str());
+        assert!(!reason.contains(CARRIER_REASON), "{command}: {reason}");
+    }
+    // One opener after the quote is allowed (the Block decisions for
+    // `${x:-'$(rm -rf ~)'}` depend on it).
+    let verdict = shguard::analyze("echo \"${x:-'d'}\" $(date)");
+    assert_eq!(verdict.decision(), Decision::Allow);
+    // Known trade-off: a quote in the body keeps it open to the end, so a
+    // second opener, or a plain `(` next to the first, is rejected.
+    assert_flood_rejected("echo \"${x:-'d'}\" $(date) $(pwd)", CARRIER_REASON);
+    assert_flood_rejected("echo \"${x:-'d'}\" $(date) (cd /)", CARRIER_REASON);
+}
+
+#[test]
+fn guardfall_extglob_realistic_usage_is_not_rejected_by_the_backtrack_budget() {
+    for command in [
+        "ls +(a|b)",
+        "rm !(keep).txt",
+        "shopt -s extglob; ls @(x|y)",
+        "ls ?(a)*(b)+(c)@(d)!(e)",
+        "ls !(a|b) +(c|d) @(e|f)",
+        "echo $(date) $(pwd) $(whoami) $(hostname) $(id)",
+    ] {
+        let verdict = shguard::analyze(command);
+        if let Some(reason) = verdict.reason() {
+            assert!(
+                !reason.as_str().contains("backtracking budget"),
+                "command {command:?} hit the backtracking budget: {}",
+                reason.as_str()
+            );
+        }
+    }
+    assert_eq!(shguard::analyze("ls +(a|b)").decision(), Decision::Allow);
+}

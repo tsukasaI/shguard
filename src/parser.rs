@@ -70,12 +70,13 @@ use brush_parser::word::{self as bword};
 use brush_parser::{Parser as BrushParser, ParserOptions as BrushParserOptions, ast as bast};
 
 use crate::ast::{
-    Assignment, AssignmentValue, Command, CommandLine, CompoundCommand, ElifClause, ExtendedTest,
-    FileRedirectionKind, FunctionDefinition, MAX_BRACE_NESTING_DEPTH, MAX_KEYWORD_NESTING_COUNT,
+    Assignment, AssignmentValue, BACKTRACK_COST_OPENER, BACKTRACK_COST_PAREN, Command, CommandLine,
+    CompoundCommand, ElifClause, ExtendedTest, FileRedirectionKind, FunctionDefinition,
+    MAX_BRACE_NESTING_DEPTH, MAX_KEYWORD_NESTING_COUNT, MAX_RAW_BACKTRACK_BUDGET,
     MAX_RAW_BRACE_NESTING_DEPTH, MAX_RAW_BRACE_OPEN_COUNT, MAX_RAW_BRACKET_OPENER_COUNT,
-    MAX_RAW_COMMAND_SUBST_COUNT, MAX_RAW_EXTENDED_TEST_COUNT, MAX_RAW_LEGACY_ARITH_COUNT,
-    MAX_RAW_PARAM_EXPANSION_COUNT, MAX_RAW_PAREN_NESTING_DEPTH, MAX_RAW_PAREN_OPEN_COUNT,
-    MAX_RAW_PROCESS_SUBST_COUNT, MAX_RAW_STACK_BUDGET, Pipeline, ProcessSubstitutionDirection,
+    MAX_RAW_EXTENDED_TEST_COUNT, MAX_RAW_LEGACY_ARITH_COUNT, MAX_RAW_PARAM_EXPANSION_COUNT,
+    MAX_RAW_PAREN_NESTING_DEPTH, MAX_RAW_PAREN_OPEN_COUNT, MAX_RAW_PROCESS_SUBST_COUNT,
+    MAX_RAW_QUOTED_OPENER_COUNT, MAX_RAW_STACK_BUDGET, Pipeline, ProcessSubstitutionDirection,
     Redirection, STACK_COST_BRACE, STACK_COST_BRACKET, STACK_COST_EXTENDED_TEST_OP,
     STACK_COST_KEYWORD, STACK_COST_LEGACY_ARITH_EXTRA, STACK_COST_PARAM_EXPANSION_EXTRA,
     STACK_COST_PAREN, Separator, SimpleCommand, Word, WordPiece,
@@ -520,10 +521,11 @@ fn reject_ansi_c_quote_with_line_continuation(
 /// [`MAX_RAW_BRACE_OPEN_COUNT`], its `(`/`)` nesting depth exceeds
 /// [`MAX_RAW_PAREN_NESTING_DEPTH`], its total count of raw `(` bytes exceeds
 /// [`MAX_RAW_PAREN_OPEN_COUNT`], its total `[` count exceeds
-/// [`MAX_RAW_BRACKET_OPENER_COUNT`], its total count of `$(`, `${`, `$[` or
-/// `<(`/`>(` openers exceeds [`MAX_RAW_COMMAND_SUBST_COUNT`],
-/// [`MAX_RAW_PARAM_EXPANSION_COUNT`], [`MAX_RAW_LEGACY_ARITH_COUNT`] or
-/// [`MAX_RAW_PROCESS_SUBST_COUNT`] respectively, its total count of
+/// [`MAX_RAW_BRACKET_OPENER_COUNT`], its total count of `${`, `$[` or
+/// `<(`/`>(` openers exceeds [`MAX_RAW_PARAM_EXPANSION_COUNT`],
+/// [`MAX_RAW_LEGACY_ARITH_COUNT`] or
+/// [`MAX_RAW_PROCESS_SUBST_COUNT`] respectively, its `$(` and extglob
+/// openers plus other `(` exceed [`MAX_RAW_BACKTRACK_BUDGET`], its total count of
 /// [`NESTING_KEYWORDS`] occurrences exceeds [`MAX_KEYWORD_NESTING_COUNT`],
 /// or its count of `!`/`&&`/`||` operators after the first `[[` exceeds
 /// [`MAX_RAW_EXTENDED_TEST_COUNT`], *before*
@@ -565,7 +567,7 @@ fn reject_ansi_c_quote_with_line_continuation(
 /// `{`/`(`/keyword byte either and is unaffected by the paren/brace caps)
 /// — see [`MAX_RAW_BRACE_NESTING_DEPTH`]'s, [`MAX_RAW_BRACE_OPEN_COUNT`]'s,
 /// [`MAX_RAW_PAREN_NESTING_DEPTH`]'s, [`MAX_RAW_PAREN_OPEN_COUNT`]'s,
-/// [`MAX_RAW_BRACKET_OPENER_COUNT`]'s, [`MAX_RAW_COMMAND_SUBST_COUNT`]'s,
+/// [`MAX_RAW_BRACKET_OPENER_COUNT`]'s, [`MAX_RAW_BACKTRACK_BUDGET`]'s,
 /// [`MAX_RAW_PARAM_EXPANSION_COUNT`]'s, [`MAX_RAW_LEGACY_ARITH_COUNT`]'s,
 /// [`MAX_RAW_PROCESS_SUBST_COUNT`]'s, [`MAX_KEYWORD_NESTING_COUNT`]'s, and
 /// [`MAX_RAW_EXTENDED_TEST_COUNT`]'s docs for the chosen cap values, their
@@ -578,7 +580,7 @@ fn reject_ansi_c_quote_with_line_continuation(
 /// `brush-parser` but still decrements them. Every stack-depth guard here is
 /// therefore a never-decremented per-opener total, and the caps are sized
 /// together so that all of them filled at once still leaves a >=3x margin
-/// (see [`MAX_RAW_COMMAND_SUBST_COUNT`]'s docs). Backtick command
+/// (see [`MAX_RAW_STACK_BUDGET`]'s docs). Backtick command
 /// substitution has no opener byte pair to count and was not a measured
 /// overflow vector; re-check it on a `brush-parser` bump.
 ///
@@ -595,7 +597,14 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
     let mut paren_open_count: usize = 0;
     let mut bracket_count: usize = 0;
     let mut legacy_arith_count: usize = 0;
-    let mut command_subst_count: usize = 0;
+    let mut backtrack_opener_count: usize = 0;
+    let mut backtrack_paren_count: usize = 0;
+    let mut param_start_depth: Option<usize> = None;
+    let mut param_start_paren_depth: usize = 0;
+    let mut param_dirty = false;
+    let mut quote_in_param = false;
+    let mut quoted_opener_count: usize = 0;
+    let mut quoted_paren_count: usize = 0;
     let mut param_expansion_count: usize = 0;
     let mut process_subst_count: usize = 0;
     let mut keyword_count: usize = 0;
@@ -639,9 +648,28 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
                             "parameter expansion opener count exceeds the raw count cap",
                         ));
                     }
+                    if param_start_depth.is_none() {
+                        param_start_depth = Some(brace_depth);
+                        param_start_paren_depth = paren_depth;
+                    }
                 }
             }
-            b'}' => brace_depth = brace_depth.saturating_sub(1),
+            b'}' => {
+                brace_depth = brace_depth.saturating_sub(1);
+                // A `}` closes the body only when nothing in it could hide
+                // the closer from brush (a backslash, quote, backtick or an
+                // open `$(`): otherwise the body stays open to the end of the
+                // command, fail-closed, see `MAX_RAW_QUOTED_OPENER_COUNT`.
+                if param_start_depth.is_some_and(|start| brace_depth < start)
+                    && !param_dirty
+                    && paren_depth <= param_start_paren_depth
+                {
+                    param_start_depth = None;
+                    quote_in_param = false;
+                    quoted_opener_count = 0;
+                    quoted_paren_count = 0;
+                }
+            }
             b'(' => {
                 add_stack_cost(&mut stack_cost, STACK_COST_PAREN)?;
                 paren_depth += 1;
@@ -659,31 +687,60 @@ fn reject_excessive_raw_nesting(command: &str) -> Result<(), ParseError> {
                         "parenthesis opener count exceeds the raw count cap",
                     ));
                 }
-                // `$(` command substitution and `<(`/`>(` process
-                // substitution each have their own, tighter never-
-                // decremented cap: a quoted/escaped `)` hides the closer
-                // from brush while its stack keeps growing, see
-                // `MAX_RAW_COMMAND_SUBST_COUNT`/`MAX_RAW_PROCESS_SUBST_COUNT`.
-                match prev {
-                    Some(b'$') => {
-                        command_subst_count += 1;
-                        if command_subst_count > MAX_RAW_COMMAND_SUBST_COUNT {
-                            return Err(ParseError::unsupported(
-                                "command substitution opener count exceeds the raw count cap",
-                            ));
-                        }
+                // `<(`/`>(` process substitution has its own, tighter
+                // never-decremented cap: a quoted/escaped `)` hides the
+                // closer from brush while its stack keeps growing, see
+                // `MAX_RAW_PROCESS_SUBST_COUNT`.
+                if matches!(prev, Some(b'<' | b'>')) {
+                    process_subst_count += 1;
+                    if process_subst_count > MAX_RAW_PROCESS_SUBST_COUNT {
+                        return Err(ParseError::unsupported(
+                            "process substitution opener count exceeds the raw count cap",
+                        ));
                     }
-                    Some(b'<' | b'>') => {
-                        process_subst_count += 1;
-                        if process_subst_count > MAX_RAW_PROCESS_SUBST_COUNT {
-                            return Err(ParseError::unsupported(
-                                "process substitution opener count exceeds the raw count cap",
-                            ));
-                        }
+                }
+                // `$(` and extglob openers backtrack exponentially in
+                // brush's word parser and compound with every other `(`, see
+                // `MAX_RAW_BACKTRACK_BUDGET`. Plain `(` only charges once an
+                // exponential opener is present, so a command without one
+                // keeps the depth and count caps above as its only limit.
+                if matches!(prev, Some(b'$' | b'+' | b'@' | b'!' | b'*' | b'?')) {
+                    backtrack_opener_count += 1;
+                } else {
+                    backtrack_paren_count += 1;
+                }
+                if backtrack_opener_count > 0
+                    && backtrack_opener_count * BACKTRACK_COST_OPENER
+                        + backtrack_paren_count * BACKTRACK_COST_PAREN
+                        > MAX_RAW_BACKTRACK_BUDGET
+                {
+                    return Err(ParseError::unsupported(
+                        "`$(` and `+(` `@(` `!(` `*(` `?(` openers plus other `(` exceed the raw backtracking budget",
+                    ));
+                }
+                // After a quote inside `${...}` the same openers cost time
+                // linear in the rest of the input, see
+                // `MAX_RAW_QUOTED_OPENER_COUNT`.
+                if quote_in_param {
+                    if matches!(prev, Some(b'$' | b'+' | b'@' | b'!' | b'*' | b'?')) {
+                        quoted_opener_count += 1;
+                    } else {
+                        quoted_paren_count += 1;
                     }
-                    _ => {}
+                    if quoted_opener_count > MAX_RAW_QUOTED_OPENER_COUNT
+                        || (quoted_opener_count > 0 && quoted_paren_count > 0)
+                    {
+                        return Err(ParseError::unsupported(
+                            "a quote inside a parameter expansion followed by `$(` or `+(` `@(` `!(` `*(` `?(` openers",
+                        ));
+                    }
                 }
             }
+            b'\'' if param_start_depth.is_some() => {
+                quote_in_param = true;
+                param_dirty = true;
+            }
+            b'"' | b'`' | b'\\' if param_start_depth.is_some() => param_dirty = true,
             b')' => paren_depth = paren_depth.saturating_sub(1),
             // Counts every `[` and never decrements on `]`: brush hides a
             // closing `]` inside quotes, backticks, `$(`, `$((`, `${` and
@@ -3105,10 +3162,12 @@ mod tests {
 
     #[test]
     fn raw_paren_nesting_at_the_cap_still_parses() {
+        // Plain subshells: `$(` openers are bounded by the tighter
+        // `MAX_RAW_BACKTRACK_BUDGET` before the depth cap matters.
         let command = format!(
             "{}echo hi{}",
-            "$(".repeat(MAX_RAW_PAREN_NESTING_DEPTH),
-            ")".repeat(MAX_RAW_PAREN_NESTING_DEPTH)
+            "( echo; ".repeat(MAX_RAW_PAREN_NESTING_DEPTH),
+            " )".repeat(MAX_RAW_PAREN_NESTING_DEPTH)
         );
         assert!(parse(&command).is_ok());
     }
@@ -3117,10 +3176,13 @@ mod tests {
     fn raw_paren_nesting_one_past_the_cap_is_rejected() {
         let command = format!(
             "{}echo hi{}",
-            "$(".repeat(MAX_RAW_PAREN_NESTING_DEPTH + 1),
-            ")".repeat(MAX_RAW_PAREN_NESTING_DEPTH + 1)
+            "( echo; ".repeat(MAX_RAW_PAREN_NESTING_DEPTH + 1),
+            " )".repeat(MAX_RAW_PAREN_NESTING_DEPTH + 1)
         );
-        assert!(parse(&command).is_err());
+        assert_eq!(
+            unsupported_construct(&command),
+            "parenthesis nesting exceeds the raw depth cap"
+        );
     }
 
     #[test]
@@ -3159,7 +3221,7 @@ mod tests {
             let command = format!("echo {}", unit.repeat(MAX_RAW_BRACKET_OPENER_COUNT + 1));
             // The `$(` and `$[` units trip their own (tighter) caps first.
             let expected = if unit.contains('(') {
-                "command substitution opener count exceeds the raw count cap"
+                "`$(` and `+(` `@(` `!(` `*(` `?(` openers plus other `(` exceed the raw backtracking budget"
             } else if unit.starts_with("$[") {
                 "legacy arithmetic opener count exceeds the raw count cap"
             } else {
@@ -3368,13 +3430,13 @@ mod tests {
     }
 
     #[test]
-    fn command_substitution_count_cap_is_not_defeated_by_a_hidden_closer() {
+    fn command_substitution_count_is_bounded_by_the_backtrack_budget_despite_a_hidden_closer() {
         for unit in ["$( ')' ", "$( \")\" ", "$( \\) ", "$(echo ) "] {
             assert_cap_boundary(
                 unit,
-                MAX_RAW_COMMAND_SUBST_COUNT,
+                MAX_RAW_BACKTRACK_BUDGET / BACKTRACK_COST_OPENER,
                 "echo ",
-                "command substitution opener count",
+                "backtracking budget",
             );
         }
     }
