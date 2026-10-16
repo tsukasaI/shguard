@@ -332,8 +332,9 @@ fn watchdog_trip_verdict_is_still_logged() {
 }
 
 /// Issue #459: unlike `check`, the PreToolUse hook path's own outer
-/// watchdog (`src/bin/shguard.rs`'s `EVALUATION_TIMEOUT`, started before
-/// config load and stdin read) always wins the wall-clock race against
+/// watchdog (`src/bin/shguard.rs`'s `EVALUATION_TIMEOUT`, started once the
+/// worker has finished reading stdin, so config load and evaluation both run
+/// inside it) normally wins the wall-clock race against
 /// `analyze_with_policy`'s internal watchdog for a genuine hang — see
 /// `tests/fail_closed_exit_paths.rs`'s
 /// `heredoc_inside_unterminated_command_substitution_fails_closed_to_ask`
@@ -350,18 +351,30 @@ fn watchdog_trip_verdict_is_still_logged() {
 /// `tests/fail_closed_exit_paths.rs`'s own
 /// `memory_budget_trip_fails_closed_to_ask` pins, which is where the
 /// memory-limit trip itself is pinned) so the binary's outer memory arm
-/// fires far below the internal watchdog's 256 MiB threshold, keeping the
-/// outer trip ahead of the library one.
+/// fires far below the internal watchdog's 256 MiB threshold, which makes
+/// the outer trip the likely, but not guaranteed, first one.
 ///
-/// This is not fully deterministic: the outer 2s wall-clock timeout runs
-/// concurrently with the 64 MiB RSS poll, and under heavy parallel load
-/// (a full `cargo test` suite) the time arm can win before RSS crosses the
-/// limit. Both outer trips go through the same `log_trip_best_effort` path
-/// under test, so either is accepted. They are told apart from the library
-/// watchdog's reasons by wording: the outer memory reason reports "bytes
-/// RSS" where the library one says "RSS growth", and the outer time reason
-/// says "outer time budget" where the library one says plain "time budget".
-/// A library reason is still rejected.
+/// This is not fully deterministic. The outer 2s wall-clock timeout runs
+/// concurrently with the 64 MiB RSS poll, and under heavy parallel load (a
+/// full `cargo test` suite) the time arm can win before RSS crosses the
+/// limit; both outer trips go through the same `log_trip_best_effort` path
+/// under test, so either is accepted. The library watchdog can also still
+/// win in rarer ways, which would log a library reason and fail this test:
+/// (a) its deadline is only worker-setup later than the outer one, so a late
+/// `recv_timeout` wake in `main` can let the library time reason log first;
+/// (b) under roughly 1s of main-thread starvation the library's 256 MiB
+/// check can win; (c) a time trip before `early_tx` is sent logs nothing at
+/// all. If these show up in practice, a test-only time-budget override is
+/// the next step.
+///
+/// The reasons are told apart by wording (`resource_limit_reason` in
+/// `src/policy/mod.rs`). The outer memory reason is "memory budget (N bytes
+/// RSS); ...", whereas the library one is "memory budget (N bytes RSS
+/// growth); ..." and so also contains "bytes RSS": the distinguishing word
+/// is "growth". The outer time reason says "outer time budget" where the
+/// library one says plain "time budget". The assertion matches the outer
+/// time reason exactly and the outer memory reason by its "bytes RSS);"
+/// tail, which the library reason lacks.
 #[cfg_attr(
     not(debug_assertions),
     ignore = "SHGUARD_TEST_MEM_LIMIT_MB injection point is compiled out in release builds"
@@ -392,8 +405,9 @@ fn hook_path_watchdog_trip_is_still_logged() {
     let reason = lines[0]["reason"]
         .as_str()
         .expect("reason should be a string");
-    let outer_memory = reason.contains("memory budget") && !reason.contains("growth");
-    let outer_time = reason.contains("outer time budget");
+    let outer_memory = reason.contains("memory budget") && reason.contains("bytes RSS);");
+    let outer_time = reason
+        == "shguard: evaluation exceeded its outer time budget; refusing to evaluate (fail-closed)";
     assert!(
         outer_memory || outer_time,
         "expected the binary's own outer-watchdog (memory or time) trip reason to be logged, \
