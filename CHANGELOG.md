@@ -4,12 +4,96 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-10-16
+
+### Added
+
+- `osascript -e '...'` now Asks with the inline-interpreter deny message,
+  like `python3 -c` (#696); `osascript script.scpt` gets no floor. GNU
+  `parallel` and `sem` with any argument other than `--version`/`--help`
+  (including bare `parallel`, which reads commands from stdin) now Ask.
+  `script` is a transparent wrapper with one typescript operand, so
+  `script -q /dev/null rm -rf /` Blocks and `script -q out.txt` Allows;
+  its `-c`/`--command` (`-qc`, `--command=`) value is analyzed as a shell
+  string, and an unmodelled leading flag fails closed to Ask.
+- `trap` actions are analyzed like `eval` (#693), also behind `builtin` and
+  `command`. A resolved action is analyzed as a shell string (`trap 'rm -rf
+  /' EXIT` Blocks), an unresolved one (`trap "$X" EXIT`) Asks, and reset,
+  ignore and print-only forms (`trap - EXIT`, `trap -p`) stay Allow.
+
 ### Changed
 
-- CI: `scripts/check-up-to-date.sh` (the lefthook `pre-push` up-to-date
-  guard) is now committed executable (mode 100755), and a `Policy` doc
-  comment points at the `scaffolded_config_loads_cleanly_via_check_config`
-  test instead of a hypothetical CI job (#596).
+- BREAKING: a user `[[deny]]` on `eval`, `bash`, `sh`, `zsh` or `trap` is
+  no longer skipped when shguard analyzes the script itself (#695). It
+  used to fire only on `bash script.sh`; a blanket `[[deny]] command =
+  "bash"` or `"eval"` entry now also denies every `bash -c '...'` and
+  `eval '...'`. Migration: narrow such entries with `targets`, or remove
+  them, before upgrading (for example entries whose reason says `bash -c`
+  is handled by shguard's own recursion). The verdict also no longer
+  depends on whether the hook payload carries a `cwd`, and the deny reason
+  no longer calls the script a path.
+- `git -c` / `--config-env` with a config key whose value git runs as a
+  shell command is no longer an Allow (#694): `core.fsmonitor`,
+  `core.sshCommand`, `diff.external` and `gpg.program` Block;
+  `credential.helper`, `core.editor` and `core.pager` Ask. Section and key
+  match case-insensitively, as git does, and a Block key wins over an Ask
+  key on the same line. Behaviour change for `[[allow]] command = "git"`
+  users: these verdicts, and the existing `alias.*` and `include.path`
+  ones, can no longer be downgraded by the allowlist, so `git -c
+  core.pager=cat log` and `git -c "$KV" status` now Ask.
+- An interpreter Ask whose trigger is an unresolved word now reports the
+  more specific reason and deny message first (#686): `python3 $(curl x)`
+  gets the command-substitution message, and `python3 <(curl x)` and
+  `python3 $((1+2))` their opaque-kind messages, instead of the
+  interpreter's generic one. Unknown options and empty required-attached
+  options (`perl -M "$m" x.pl`, `python3 --unknown x.py`) get their own
+  reason and deny message. No decision changes.
+- The binary's 2s evaluation budget now starts after stdin is read (#689),
+  so a slow producer no longer trips it: a 10 MiB stream that arrives
+  slowly gets the size-cap reason ("stdin exceeds 10485760 bytes") instead
+  of "evaluation exceeded its outer time budget". The read itself is bound
+  by the new `STDIN_READ_TIMEOUT` (30s); a read-phase stall fails closed
+  with the outer-time-budget reason and writes no decision-log entry. The
+  2s `EVALUATION_TIMEOUT` is unchanged. Note: a hook `"timeout"` below
+  about 35s is unsafe, since the hook can then be cut off before these
+  bounds fire (#709).
+- The raw pre-scan clamps command-substitution and extglob openers (see
+  Fixed below): a command with 12 or more `$(` now Asks (previously 17
+  or more), and `MAX_RAW_COMMAND_SUBST_COUNT` is retired in favour of a
+  weighted backtracking budget. `echo "${x:-'d'}" $((1+2))` now Asks.
+  `grep -rn '${' .` stays Allow.
+- CI and tests: `scripts/check-up-to-date.sh` (the lefthook `pre-push`
+  up-to-date guard) is now committed executable (mode 100755), and a
+  `Policy` doc comment points at the
+  `scaffolded_config_loads_cleanly_via_check_config` test instead of a
+  hypothetical CI job (#596). The golden snapshot gate now also checks the
+  checkout the test binary's lib was built from and takes its denials input
+  from `tests/golden/denials_input.jsonl` (#675, #668; the stale
+  `denials.txt` is gone), and test-only pins were tightened for the
+  watchdog trip reasons (#650) and the parse-failure reason (#679).
+
+### Fixed
+
+- A CPU denial of service in the shell word parser (#692, #707): inside a
+  double-quoted word, a `${` body containing `'` or `$'` followed by `$(`
+  or extglob openers (`+(`, `@(`, `!(`, `*(`, `?(`) made parsing
+  backtrack exponentially, so short inputs burned the whole 2s budget (and
+  a library caller's worker kept running after the verdict). A `'` or `$'`
+  inside an open `${` body now clamps the rest of the command to one such
+  opener with no plain `(` alongside it, which makes the cost linear in
+  length; a command that exceeds the clamp Asks. A weighted raw
+  backtracking budget (`MAX_RAW_BACKTRACK_BUDGET`) backs it up for
+  well-formed input.
+
+### Security
+
+- Closes the `trap` action bypass (#693): `trap 'rm -rf /' EXIT` ran an
+  arbitrary string that the gate never analyzed.
+- Closes the `git -c` command-running key bypass (#694):
+  `git -c core.fsmonitor='rm -rf ~' status` was an Allow.
+- Closes the user-deny bypass on `eval`, `bash -c` and `trap` (#695): a
+  `[[deny]]` rule on the outer command was weaker than the same `[[ask]]`
+  rule.
 
 ## [0.9.1] - 2026-10-15
 
