@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- CI: `scripts/check-up-to-date.sh` (the lefthook `pre-push` up-to-date
+  guard) is now committed executable (mode 100755), and a `Policy` doc
+  comment points at the `scaffolded_config_loads_cleanly_via_check_config`
+  test instead of a hypothetical CI job (#596).
+
 ## [0.9.1] - 2026-10-15
 
 ### Changed

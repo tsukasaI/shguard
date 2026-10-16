@@ -763,9 +763,11 @@ impl Policy {
     /// Scans the embedded blocklist/allowlist too, not just what a user
     /// config contributed — deliberately: no embedded rule uses `url_host`
     /// today (checked `rules/*.toml`), but if a future shipped rule ever
-    /// did mix the two shapes, a CI job running
-    /// `shguard --check-config` against a `shguard init`-scaffolded config
-    /// would be what catches that regression before it ships. A rule
+    /// did mix the two shapes, the
+    /// `scaffolded_config_loads_cleanly_via_check_config` test in
+    /// `tests/init_command.rs` (which runs `shguard --check-config` against
+    /// a `shguard init`-scaffolded config) would be what catches that
+    /// regression before it ships. A rule
     /// id flagged this way isn't one a caller can act on themselves the
     /// way `--check-config`'s own "replace the old entry" remediation text
     /// assumes (a user can't edit or override an embedded rule — a
