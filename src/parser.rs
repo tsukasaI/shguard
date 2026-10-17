@@ -1455,12 +1455,11 @@ fn convert_assignment(assignment: &bast::Assignment) -> Result<Assignment, Parse
 
 fn convert_redirect(redirect: &bast::IoRedirect) -> Result<Redirection, ParseError> {
     match redirect {
-        bast::IoRedirect::File(fd, kind, target) => Ok(Redirection::File {
-            fd: *fd,
+        bast::IoRedirect::File(_fd, kind, target) => Ok(Redirection::File {
             kind: convert_file_redirect_kind(kind)?,
             target: convert_redirect_target(target)?,
         }),
-        bast::IoRedirect::HereDocument(fd, heredoc) => convert_heredoc(*fd, heredoc),
+        bast::IoRedirect::HereDocument(_fd, heredoc) => convert_heredoc(heredoc),
         bast::IoRedirect::HereString(_, _) => Err(ParseError::unsupported("here-string (<<<)")),
         bast::IoRedirect::OutputAndError(_, _) => Err(ParseError::unsupported(
             "combined stdout/stderr redirection (&>, &>>)",
@@ -1511,12 +1510,8 @@ fn convert_redirect_target(target: &bast::IoFileRedirectTarget) -> Result<Word, 
     }
 }
 
-fn convert_heredoc(
-    fd: Option<i32>,
-    heredoc: &bast::IoHereDocument,
-) -> Result<Redirection, ParseError> {
+fn convert_heredoc(heredoc: &bast::IoHereDocument) -> Result<Redirection, ParseError> {
     Ok(Redirection::HereDoc {
-        fd,
         strip_leading_tabs: heredoc.remove_tabs,
         expand_body: heredoc.requires_expansion,
         body: heredoc.doc.value.clone(),
@@ -2427,7 +2422,6 @@ mod tests {
                 strip_leading_tabs,
                 expand_body,
                 body,
-                ..
             } => {
                 assert!(!strip_leading_tabs);
                 assert!(expand_body);
@@ -2873,7 +2867,7 @@ mod tests {
             vec![WordPiece::Literal("2147483648".to_string())]
         );
         match &simple.redirections[0] {
-            Redirection::File { kind, target, .. } => {
+            Redirection::File { kind, target } => {
                 assert_eq!(*kind, FileRedirectionKind::Output);
                 assert_eq!(target.0, vec![WordPiece::Literal("f".to_string())]);
             }
@@ -2979,7 +2973,7 @@ mod tests {
         let redirections = &simple(&cmd.first.first).redirections;
         assert_eq!(redirections.len(), 1);
         match &redirections[0] {
-            Redirection::File { kind, target, .. } => {
+            Redirection::File { kind, target } => {
                 assert_eq!(*kind, FileRedirectionKind::Output);
                 assert_eq!(target.0, vec![WordPiece::Literal("/dev/null".to_string())]);
             }
@@ -4033,7 +4027,7 @@ mod tests {
     fn fd_duplication_redirect_parses_as_duplicate_output_with_numeric_target() {
         let cmd = parse_ok("rm -rf /tmp/x 2>&1");
         match &simple(&cmd.first.first).redirections[0] {
-            Redirection::File { kind, target, .. } => {
+            Redirection::File { kind, target } => {
                 assert_eq!(*kind, FileRedirectionKind::DuplicateOutput);
                 assert_eq!(target.0, vec![WordPiece::Literal("1".to_string())]);
             }

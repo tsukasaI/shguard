@@ -1170,14 +1170,13 @@ struct StdinSinks {
 }
 
 /// Finds what `compound`'s body does with the pipe it is the final stage of.
-/// A command whose own stdin is redirected does not read the pipe, nor does
-/// anything in a body whose compound redirects stdin.
+/// Fail-closed: the fd a `<`/`<<`/`<>` redirection targets is not known, so
+/// no redirection is taken as proof that a body command's stdin is replaced;
+/// every interpreter-shaped body command remains a stdin reader.
 fn compound_stdin_sinks(compound: &CompoundCommand, env: &Env) -> StdinSinks {
     let mut scan = HeredocCandidateScan::default();
     let redirections = compound_redirections(compound);
-    if !redirects_stdin(redirections) {
-        scan_compound_for_heredoc_candidates(compound, &mut scan);
-    }
+    scan_compound_for_heredoc_candidates(compound, &mut scan);
     scan_redirections_for_heredoc_candidates(redirections, &mut scan);
     let calls_function = scan.stdin_commands.iter().flatten().any(|word| {
         matches!(word.resolution(), Resolution::Resolved(name) if env.defines_function(name))
@@ -1196,48 +1195,6 @@ fn compound_redirections(compound: &CompoundCommand) -> &[Redirection] {
         | CompoundCommand::UntilClause { redirections, .. }
         | CompoundCommand::IfClause { redirections, .. }
         | CompoundCommand::ForClause { redirections, .. } => redirections,
-    }
-}
-
-/// Whether `redirections` replace the command's stdin with something other
-/// than the inherited pipe. Any `<&` onto stdin, a procsub/expansion target
-/// and the `/dev`/`/proc` aliases of stdin (`/dev/fd/0`, `/proc/1/fd/0`) all
-/// leave the pipe reachable.
-fn redirects_stdin(redirections: &[Redirection]) -> bool {
-    let targets_stdin = |fd: &Option<i32>| matches!(fd, None | Some(0));
-    let mut replaced = false;
-    for redirection in redirections {
-        match redirection {
-            Redirection::HereDoc { fd, .. } if targets_stdin(fd) => replaced = true,
-            Redirection::File { fd, kind, target } if targets_stdin(fd) => match kind {
-                FileRedirectionKind::Input | FileRedirectionKind::ReadAndWrite
-                    if is_plain_file_target(target) =>
-                {
-                    replaced = true;
-                }
-                FileRedirectionKind::DuplicateInput => return false,
-                _ => {}
-            },
-            _ => {}
-        }
-    }
-    replaced
-}
-
-fn is_plain_file_target(target: &Word) -> bool {
-    let words = normalize::normalize_word(target);
-    let [word] = words.as_slice() else {
-        return false;
-    };
-    let Resolution::Resolved(path) = word.resolution() else {
-        return false;
-    };
-    match lexical_normalize(path) {
-        PathForm::Abs(comps) => {
-            comps.iter().map(String::as_str).eq(["dev", "null"])
-                || !matches!(comps.first().map(String::as_str), Some("dev" | "proc"))
-        }
-        _ => true,
     }
 }
 
@@ -5915,18 +5872,14 @@ fn classify_heredoc_candidate(argv: &[NormalizedWord]) -> Option<HeredocCandidat
 struct HeredocCandidateScan {
     candidates: Vec<HeredocCandidate>,
     uncertain: bool,
-    /// Some command that does not redirect its own stdin may read the
-    /// inherited one as code ([`is_stdin_reader`]).
+    /// Some command may read the inherited stdin as code ([`is_stdin_reader`]).
     stdin_reader: bool,
-    /// The argv of every command that does not redirect its own stdin.
+    /// The argv of every command in the body.
     stdin_commands: Vec<Vec<NormalizedWord>>,
 }
 
 impl HeredocCandidateScan {
-    fn record_stdin_use(&mut self, command: &SimpleCommand, argv: &[NormalizedWord]) {
-        if redirects_stdin(&command.redirections) {
-            return;
-        }
+    fn record_stdin_use(&mut self, argv: &[NormalizedWord]) {
         self.stdin_reader |= is_stdin_reader(argv);
         self.stdin_commands.push(argv.to_vec());
     }
@@ -6019,7 +5972,7 @@ fn scan_command_for_heredoc_candidates(command: &Command, out: &mut HeredocCandi
         Command::Simple(simple) => {
             let argv = normalize::normalize_argv(simple);
             out.record(&argv);
-            out.record_stdin_use(simple, &argv);
+            out.record_stdin_use(&argv);
             for assignment in &simple.assignments {
                 match &assignment.value {
                     AssignmentValue::Scalar(word) => scan_word_for_heredoc_candidates(word, out),
@@ -19981,11 +19934,6 @@ done"#,
             "ls | while read -r x; do wc -l < \"$x\"; done",
             "ls | { cat; }",
             "ls | for x in a b; do echo $x; done",
-            "ls | while read l; do bash script.sh < /dev/null; done",
-            "ls | while read l; do bash < input.sh; done",
-            "ls | while read l; do bash <<'EOF'\necho hi\nEOF\ndone",
-            "ls | while read l; do sh 0< input.sh; done",
-            "ls | while read l; do bash; done < list.txt",
             "ls | while read l; do x=1; done",
         ] {
             assert_decision(command, Decision::Allow);
@@ -20006,6 +19954,7 @@ done"#,
             "ls | while read l; do . \"$l\"; done",
             "ls | while read l; do if true; then bash; fi; done",
             "ls | while read l; do echo $(bash); done",
+            "ls | while read l; do bash < f; done",
             "ls | while read l; do bash < /dev/stdin; done",
             "ls | while read l; do bash < /dev/fd/0; done",
             "ls | while read l; do bash < \"$l\"; done",
@@ -20045,7 +19994,7 @@ done"#,
         );
         assert_decision(
             "find . | while read l; do xargs rm -f < list; done",
-            Decision::Allow,
+            Decision::Block,
         );
     }
 
