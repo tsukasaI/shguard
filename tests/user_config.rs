@@ -2052,6 +2052,34 @@ fn user_config_pipeline_rule_sink_required_flags_constrains_the_sink() {
     assert_eq!(permission_decision(&output), "allow");
 }
 
+// issue #652: the sink check accepts a version-suffixed spelling (`git2`),
+// so the git long-option abbreviation matching must apply to it too.
+#[test]
+fn user_config_pipeline_rule_sink_required_flags_matches_abbrev_on_versioned_git_sink() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[pipeline]]
+        id = "user-forbid-tar-git-no-verify"
+        reason = "forbid piping tar into a git commit that skips hooks"
+        decision = "block"
+        sources = ["tar"]
+        sinks = ["git"]
+        sink_required_flags = ["--no-verify"]
+    "#,
+    );
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+
+    let output = run_hook(
+        &bash_command("tar cf - /src | git2 commit --no-ver -F -"),
+        &envs,
+    );
+    assert_eq!(permission_decision(&output), "deny");
+    assert!(permission_reason(&output).contains("user-forbid-tar-git-no-verify"));
+
+    let output = run_hook(&bash_command("tar cf - /src | git2 commit -F -"), &envs);
+    assert_eq!(permission_decision(&output), "allow");
+}
+
 // issue #268: a malformed sink_required_flags spec is a load-time error,
 // which fails shguard closed for every command rather than silently
 // leaving the sink unconstrained.
