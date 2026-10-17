@@ -135,6 +135,20 @@ impl Env {
         Self::default()
     }
 
+    /// A body's environment: no variable values (which branch or iteration
+    /// ran is unknown), but the functions and readonly facts the enclosing
+    /// line already established.
+    pub(crate) fn child_of(parent: &Self) -> Self {
+        Self {
+            functions: parent.functions.clone(),
+            readonly: ReadonlyFacts {
+                names: parent.readonly.names.clone(),
+                all: parent.readonly.all,
+            },
+            ..Self::default()
+        }
+    }
+
     /// An assignment to a possibly-readonly name may fail in the real shell,
     /// so it is never a certain overwrite.
     fn is_possibly_readonly(&self, name: &str) -> bool {
@@ -165,6 +179,7 @@ impl Env {
             return;
         };
         let Resolution::Resolved(name) = first.resolution() else {
+            self.readonly.all = true;
             return;
         };
         // Wrappers and sourced code can run a `readonly` this scan cannot

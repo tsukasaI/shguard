@@ -1121,7 +1121,7 @@ fn evaluate_child_body(
     ctx: AnalysisCtx<'_>,
     cwd: &mut CwdState,
 ) -> Verdict {
-    let mut child = Env::isolated();
+    let mut child = Env::child_of(parent);
     let verdict = evaluate_command_line_in(body, &mut child, ExecScope::Parent, ctx, cwd);
     parent.absorb_body(&child);
     verdict
@@ -1138,11 +1138,14 @@ fn evaluate_compound_command_body(
     let (worst, redirections, extra_words): (Verdict, &[Redirection], &[Word]) = match compound {
         CompoundCommand::BraceGroup { body, redirections } => {
             // A failing redirection skips the body, so a redirected group
-            // never certainly persists its assignments.
+            // never certainly persists its assignments. Not even `/dev/null`
+            // or `>&2` is infallible: `exec 2>&-` fails the duplication,
+            // `ulimit -n 3` fails the open, and the parser drops an
+            // unparsed fd number.
             let verdict = evaluate_command_line_in(
                 body,
                 env,
-                scope.group_with_redirections(redirections.iter().any(redirection_can_fail)),
+                scope.group_with_redirections(!redirections.is_empty()),
                 ctx,
                 cwd,
             );
@@ -1486,28 +1489,6 @@ fn evaluate_extended_test(test: &ExtendedTest, ctx: AnalysisCtx<'_>, cwd: &CwdCo
         ctx,
         cwd,
     )
-}
-
-/// Whether opening `redirection` can fail and so skip the group's body. Only
-/// a `/dev/null` target and a duplication of the standard fds are taken as
-/// infallible.
-fn redirection_can_fail(redirection: &Redirection) -> bool {
-    let Redirection::File { kind, target } = redirection else {
-        return true;
-    };
-    let words = normalize::normalize_word(target);
-    let [word] = words.as_slice() else {
-        return true;
-    };
-    let Resolution::Resolved(target) = word.resolution() else {
-        return true;
-    };
-    match kind {
-        FileRedirectionKind::DuplicateInput | FileRedirectionKind::DuplicateOutput => {
-            !matches!(target.as_str(), "0" | "1" | "2")
-        }
-        _ => target != "/dev/null",
-    }
 }
 
 /// Evaluates a function definition (issue #75) by evaluating its body
@@ -11618,15 +11599,40 @@ mod tests {
     }
 
     #[test]
-    fn issue_653_readonly_group_with_infallible_redirections_keeps_parent_scope() {
+    fn issue_653_readonly_redirected_group_never_keeps_parent_scope() {
         for command in [
             "X=\"rm -rf /\"; { X=$Y; } 2>/dev/null; $X",
-            "X=\"rm -rf /\"; { X=$Y; } >/dev/null 2>&1; $X",
             "X=\"rm -rf /\"; { X=$Y; } >&2; $X",
+            "X=\"rm -rf /\"; { X=$Y; } >&9; $X",
+            "X=\"rm -rf /\"; exec 2>&-; { X=$Y; X=ls; } >&2; $X",
+            "X=\"rm -rf /\"; ulimit -n 3; { X=$Y; X=ls; } 2>/dev/null; $X",
         ] {
-            assert_decision(command, Decision::Ask);
+            assert_decision(command, Decision::Block);
         }
-        assert_decision("X=\"rm -rf /\"; { X=$Y; } >&9; $X", Decision::Block);
+    }
+
+    #[test]
+    fn issue_653_readonly_function_called_in_a_body_does_not_advance_the_cut() {
+        for command in [
+            "X=$Y; true && X=\"rm -rf /\"; f() { readonly X; }; if true; then f; fi; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; f() { readonly X; }; for i in 1; do f; done; X=ls; $X",
+        ] {
+            assert_decision(command, Decision::Block);
+        }
+    }
+
+    #[test]
+    fn issue_653_readonly_name_is_never_allowed_inside_a_body() {
+        let verdict = decide("X=\"rm -rf /\"; readonly X; if true; then X=ls; $X; fi");
+        assert_ne!(verdict.decision(), Decision::Allow);
+    }
+
+    #[test]
+    fn issue_653_readonly_unresolvable_command_word_does_not_advance_the_cut() {
+        assert_decision(
+            "X=$Y; true && X=\"rm -rf /\"; R=readonly; $R X; X=ls; $X",
+            Decision::Block,
+        );
     }
 
     #[test]
