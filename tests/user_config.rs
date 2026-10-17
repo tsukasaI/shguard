@@ -3409,3 +3409,432 @@ fn deny_on_trap_holds_with_and_without_payload_cwd() {
         assert_reason_does_not_call_the_script_a_path(&output);
     }
 }
+
+// ==== Issue #632: same-line literal bindings ====
+
+const LITERAL_BINDING_RULES: &str = r#"
+    [[ask]]
+    id = "user-ask-cat-secrets"
+    reason = "cat of a secret"
+    command = "cat"
+    targets = [{ normalized_basename = ".env" }, { prefix = "/etc" }]
+
+    [[ask]]
+    id = "user-ask-gh-issue-view"
+    reason = "gh issue view without a body file"
+    command = "gh issue view"
+    required_flags = ["--body-file"]
+
+    [[deny]]
+    id = "user-deny-head-etc"
+    reason = "head of /etc"
+    command = "head"
+    targets = [{ prefix = "/etc" }]
+"#;
+
+fn assert_literal_binding_decision(commands: &[&str], expected: &str) {
+    let (_dir, config_path) = write_config(LITERAL_BINDING_RULES);
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+    for command in commands {
+        let output = run_hook(&bash_command(command), &envs);
+        assert_eq!(permission_decision(&output), expected, "{command}");
+    }
+}
+
+#[test]
+fn literal_for_lists_substitute_into_the_rule_check() {
+    assert_literal_binding_decision(
+        &[
+            r#"for f in a.txt b.txt; do cat "$f"; done"#,
+            "for f in a b; do cat $f; done",
+            "for n in 100 101; do gh issue view $n --json body; done",
+            "for n in 100 101; do echo $n; done",
+            r#"for m in j g h; do cat "/abs/drafts/$m.md"; done"#,
+            "for f in 'a b'; do cat \"$f\"; done",
+        ],
+        "allow",
+    );
+}
+
+#[test]
+fn literal_for_lists_are_rule_checked_per_element() {
+    assert_literal_binding_decision(
+        &[
+            "for f in a /etc/passwd; do cat $f; done",
+            "for f in a .env; do cat \"$f\"; done",
+            "for f in /etc; do cat $f/passwd; done",
+        ],
+        "ask",
+    );
+    assert_literal_binding_decision(&["for d in /; do rm -rf \"$d\"; done"], "deny");
+}
+
+#[test]
+fn non_literal_for_lists_keep_the_unresolved_floor() {
+    assert_literal_binding_decision(
+        &[
+            "for f in *; do cat $f; done",
+            "for f in *.txt; do cat \"$f\"; done",
+            "for f in $(ls); do cat \"$f\"; done",
+            "for f in a $(ls); do cat \"$f\"; done",
+            "for f in a $X; do cat \"$f\"; done",
+            "for f in ~/x; do cat \"$f\"; done",
+            "for f in a{1,2}; do cat \"$f\"; done",
+            "for f; do cat \"$f\"; done",
+            "for f in; do cat \"$f\"; done",
+        ],
+        "ask",
+    );
+}
+
+#[test]
+fn for_variable_the_body_rewrites_stays_unresolved() {
+    assert_literal_binding_decision(
+        &[
+            "for f in a b; do read f; cat \"$f\"; done",
+            "for f in a b; do f=$(x); cat \"$f\"; done",
+            "for f in a b; do printf -v f %s x; cat \"$f\"; done",
+            "for f in a b; do eval 'f=/etc'; cat \"$f\"; done",
+            "for f in a b; do unset f; cat \"$f\"; done",
+            "for f in a b; do declare -n f=Y; cat \"$f\"; done",
+            "for f in a b; do echo $((f=1)); cat \"$f\"; done",
+            "for f in a b; do cat \"$f\"; trap 'f=/etc' DEBUG; done",
+            "for f in a b; do cat \"$f\"; g() { f=/etc; }; done",
+        ],
+        "ask",
+    );
+}
+
+#[test]
+fn for_variable_is_unresolved_outside_its_loop() {
+    assert_literal_binding_decision(
+        &[
+            "for f in a b; do :; done; cat \"$f\"",
+            "f=safe; for f in a b; do :; done; cat \"$f\"",
+            "for f in a b; do cat $f; done; cat $f",
+        ],
+        "ask",
+    );
+}
+
+#[test]
+fn for_variable_unquoted_split_or_glob_values_stay_unresolved() {
+    assert_literal_binding_decision(
+        &[
+            "for f in 'a b'; do cat $f; done",
+            "for f in 'a*'; do cat $f; done",
+            "for f in '~'; do cat $f; done",
+            "for f in ''; do cat $f; done",
+            "IFS=,; for f in a,b; do cat $f; done",
+        ],
+        "ask",
+    );
+}
+
+#[test]
+fn for_special_variable_names_are_never_bound() {
+    assert_literal_binding_decision(
+        &[
+            "for IFS in ,; do for f in a,b; do cat $f; done; done",
+            "for HOME in x; do cat \"$HOME/y\"; done",
+            "for PATH in x; do cat \"$PATH\"; done",
+            "for UID in x; do cat \"$UID\"; done",
+            "for BASH_ENV in x; do cat \"$BASH_ENV\"; done",
+        ],
+        "ask",
+    );
+}
+
+#[test]
+fn for_command_position_stays_unresolved() {
+    assert_literal_binding_decision(
+        &[
+            "for b in ls; do $b -la; done",
+            "for t in /tmp/t; do \"$t/debug/shguard\" --help; done",
+        ],
+        "ask",
+    );
+}
+
+#[test]
+fn nested_for_loops_share_one_evaluation_budget() {
+    let sixteen = "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16";
+    let within = format!("for a in 1 2; do for b in {sixteen}; do cat $b; done; done");
+    let beyond = format!("for a in {sixteen}; do for b in {sixteen}; do cat $b; done; done");
+    let too_long = format!("for a in {sixteen} 17; do cat $a; done");
+    assert_literal_binding_decision(&[within.as_str()], "allow");
+    assert_literal_binding_decision(&[beyond.as_str(), too_long.as_str()], "ask");
+}
+
+#[test]
+fn literal_assignments_substitute_into_the_rule_check() {
+    assert_literal_binding_decision(
+        &[
+            r#"S=/private/tmp/claude-501/x/scratchpad; cat "$S/a.txt""#,
+            r#"S=/private/tmp/claude-501/x/scratchpad && cat "$S/a.txt""#,
+            "S=/private/tmp/claude-501/x/scratchpad\ncat \"$S/a.txt\"",
+            "S=/private/tmp/claude-501/x/scratchpad; cat $S/a.txt",
+            "S=/private/tmp/claude-501/x/scratchpad; rg -n foo \"$S\"",
+            "X=/tmp; X+=/more; cat \"$X/a\"",
+            "X='a b'; cat \"$X\"",
+            "S=/tmp/x; { cat \"$S/a\"; }",
+            "S=/tmp/x; if true; then :; fi; cat \"$S/a\"",
+            "S=/tmp/x; printf '%s\\n' hi; cat \"$S/a\"",
+        ],
+        "allow",
+    );
+}
+
+#[test]
+fn literal_assignments_are_rule_checked_after_substitution() {
+    assert_literal_binding_decision(
+        &[
+            "S=/etc; cat \"$S/passwd\"",
+            "S=/etc/; S+=passwd; cat \"$S\"",
+            "S=/tmp; S=/etc; cat \"$S/passwd\"",
+            "S=.env; cat $S",
+            "S=/etc; { cat \"$S/passwd\"; }",
+        ],
+        "ask",
+    );
+    assert_literal_binding_decision(&["X=/; rm -rf \"$X\""], "deny");
+}
+
+#[test]
+fn a_prefix_assignment_does_not_reach_its_own_command_words() {
+    assert_literal_binding_decision(
+        &[
+            "S=/private/tmp/claude-501/x cat \"$S/a.txt\"",
+            "S=/tmp/x; S=/etc cat \"$S/passwd\"; cat \"$S/passwd\"",
+        ],
+        "ask",
+    );
+    // The earlier binding is the one bash expands.
+    assert_literal_binding_decision(&["S=/tmp/x; S=/etc cat \"$S/a\""], "allow");
+}
+
+#[test]
+fn literal_bindings_do_not_cross_subshell_pipeline_or_branch_boundaries() {
+    assert_literal_binding_decision(
+        &[
+            "X=/safe | cat $X/..",
+            "X=/tmp/x | cat \"$X/a\"",
+            "(X=/tmp/x); cat \"$X/a\"",
+            "X=/tmp/x & cat \"$X/a\"",
+            "true && X=/tmp/x; cat \"$X/a\"",
+            "false || X=/tmp/x; cat \"$X/a\"",
+            "X=/tmp/x > /dev/null; cat \"$X/a\"",
+            "X=/tmp/x true; cat \"$X/a\"",
+            "{ X=/tmp/x; } > /dev/null; cat \"$X/a\"",
+            "if c; then X=/tmp/x; fi; cat \"$X/a\"",
+            "while c; do X=/tmp/x; done; cat \"$X/a\"",
+            "X=/tmp/x; (X=/etc); (cat \"$X/a\")",
+            "X=/tmp/x; (cat \"$X/a\")",
+            "X=/tmp/x; cat <(cat \"$X/a\")",
+        ],
+        "ask",
+    );
+}
+
+#[test]
+fn literal_bindings_are_dropped_by_anything_that_may_rewrite_them() {
+    assert_literal_binding_decision(
+        &[
+            "X=/tmp; read X; cat \"$X/a\"",
+            "X=/tmp; read -r Y X; cat \"$X/a\"",
+            "X=/tmp; builtin read X; cat \"$X/a\"",
+            "X=/tmp; command read X; cat \"$X/a\"",
+            "X=/tmp; mapfile X; cat \"$X/a\"",
+            "X=/tmp; readarray X; cat \"$X/a\"",
+            "X=/tmp; getopts ab X; cat \"$X/a\"",
+            "X=/tmp; printf -v X %s /etc; cat \"$X/a\"",
+            "X=/tmp; printf $f X; cat \"$X/a\"",
+            "X=/tmp; declare X=/etc; cat \"$X/a\"",
+            "X=/tmp; declare -i X; cat \"$X/a\"",
+            "X=/tmp; typeset -u X; cat \"$X/a\"",
+            "X=/tmp; local X=/etc; cat \"$X/a\"",
+            "X=/tmp; readonly X=/etc; cat \"$X/a\"",
+            "X=/tmp; export X=/etc; cat \"$X/a\"",
+            "X=/tmp; unset X; cat \"$X/a\"",
+            "X=/tmp; wait -p X; cat \"$X/a\"",
+            "X=/tmp; let X=5; cat \"$X/a\"",
+            "X=/tmp; echo $((X=5)); cat \"$X/a\"",
+            "X=/tmp; cat <<EOF\n$((X=5))\nEOF\ncat \"$X/a\"",
+            "X=/tmp; [[ 1 -eq X=5 ]]; cat \"$X/a\"",
+            "X=/tmp; eval 'X=/etc'; cat \"$X/a\"",
+            "X=/tmp; source ./f; cat \"$X/a\"",
+            "X=/tmp; . ./f; cat \"$X/a\"",
+            "X=/tmp; declare -n X=Y; cat \"$X/a\"",
+            "declare -n R=X; X=/tmp; R=/etc; cat \"$X/a\"",
+            "X=/tmp; trap 'X=/etc' DEBUG; cat \"$X/a\"",
+            "X=/tmp; alias cat='read X'; cat \"$X/a\"",
+            "X=/tmp; f() { X=/etc; }; f; cat \"$X/a\"",
+            "f() { X=/etc; }; X=/tmp; ( f; cat \"$X/a\" )",
+            "X=/tmp; $c X; cat \"$X/a\"",
+            "X=/tmp; builtin $c X; cat \"$X/a\"",
+            "X=/tmp; exec {X}>/dev/null; cat \"$X/a\"",
+            "X=/tmp; X=$(echo /etc); cat \"$X/a\"",
+            "X=/tmp; X=$Y; cat \"$X/a\"",
+            "X=/tmp; X+=$Y; cat \"$X/a\"",
+            "X=/tmp; X=(a); cat \"$X/a\"",
+            "X=/tmp; while read X; do :; done; cat \"$X/a\"",
+            "X=/tmp; for X in $(ls); do :; done; cat \"$X/a\"",
+            "X=/tmp; for X in /x; do :; done; cat \"$X/a\"",
+            "X=/tmp; if read X; then :; fi; cat \"$X/a\"",
+        ],
+        "ask",
+    );
+}
+
+#[test]
+fn ps4_under_xtrace_is_a_write_channel_that_drops_every_binding() {
+    assert_literal_binding_decision(
+        &[
+            "X=; PS4='${X:=/etc}'; set -x; :; cat \"$X/passwd\"",
+            "X=; PS4='${X:=/etc}'; set -o xtrace; :; cat \"$X/passwd\"",
+            "X=; PS4='${X:=/etc}'; shopt -o -s xtrace; :; cat \"$X/passwd\"",
+            "X=; PS4='${X:=/etc}'; set -ex; :; cat \"$X/passwd\"",
+            "X=; PS4='${X:=/etc}'; set -xv; :; cat \"$X/passwd\"",
+            "X=; set -x; PS4='${X:=/etc}'; :; cat \"$X/passwd\"",
+            "X=; export PS4='${X:=/etc}'; set -x; :; cat \"$X/passwd\"",
+            "X=; declare PS4='${X:=/etc}'; set -x; :; cat \"$X/passwd\"",
+            "X=; typeset PS4='${X:=/etc}'; set -x; :; cat \"$X/passwd\"",
+            "X=; printf -v PS4 '%s' '${X:=/etc}'; set -x; :; cat \"$X/passwd\"",
+            "X=; read PS4; set -x; :; cat \"$X/passwd\"",
+            "X=; mapfile a; set -x; :; cat \"$X/passwd\"",
+            "PS4='${X:=/etc}' X=; set -x; :; cat \"$X/passwd\"",
+            "X=/safe; PS4='$((X=5))'; set -x; :; cat \"$X/passwd\"",
+            "X=/safe; PS4='$((X=5))'; builtin set -x; :; cat \"$X/passwd\"",
+            "X=/safe; for i in 1 2; do cat \"$X/passwd\"; PS4='$((X=5))'; set -x; done",
+        ],
+        "ask",
+    );
+    assert_literal_binding_decision(
+        &["X=; PS4='${X:=/etc}'; set -x; :; head \"$X/passwd\""],
+        "ask",
+    );
+    assert_literal_binding_decision(
+        &[
+            "X=/safe; PS4='> '; set -e; cat \"$X/passwd\"",
+            "X=/safe; set -x; cat \"$X/passwd\"",
+        ],
+        "allow",
+    );
+}
+
+#[test]
+fn literal_binding_in_a_loop_is_dropped_by_a_later_poisoning_statement() {
+    assert_literal_binding_decision(
+        &[
+            "while c; do X=/tmp; cat \"$X/a\"; trap 'X=/etc' DEBUG; done",
+            "while c; do X=/tmp; cat \"$X/a\"; g() { X=/etc; }; done",
+            "for i in 1 2; do X=/tmp; cat \"$X/a\"; eval 'X=/etc'; done",
+            "g() { X=/etc; }; for i in 1 2; do X=/tmp; cat \"$X/a\"; g; done",
+        ],
+        "ask",
+    );
+    assert_literal_binding_decision(&["for i in 1 2; do X=/tmp; cat \"$X/a\"; done"], "allow");
+}
+
+#[test]
+fn special_variable_names_are_never_bound_by_an_assignment() {
+    assert_literal_binding_decision(
+        &[
+            "UID=/etc; cat $UID/passwd",
+            "UID=/etc; cat \"$UID/passwd\"",
+            "EUID=/tmp/x; cat \"$EUID/a\"",
+            "HOME=/tmp/x; cat \"$HOME/a\"",
+            "PATH=/tmp/x; cat \"$PATH/a\"",
+            "IFS=/tmp/x; cat \"$IFS/a\"",
+            "CDPATH=/tmp/x; cat \"$CDPATH/a\"",
+            "BASH_ENV=/tmp/x; cat \"$BASH_ENV/a\"",
+            "BASHPID=/tmp/x; cat \"$BASHPID/a\"",
+            "EPOCHSECONDS=/tmp/x; cat \"$EPOCHSECONDS/a\"",
+            "RANDOM=/tmp/x; cat \"$RANDOM/a\"",
+            "PPID=/tmp/x; cat \"$PPID/a\"",
+            "PWD=/tmp/x; cat \"$PWD/a\"",
+            "OLDPWD=/tmp/x; cat \"$OLDPWD/a\"",
+            "SECONDS=/tmp/x; cat \"$SECONDS/a\"",
+            "LINENO=/tmp/x; cat \"$LINENO/a\"",
+            "SHELLOPTS=/tmp/x; cat \"$SHELLOPTS/a\"",
+        ],
+        "ask",
+    );
+}
+
+#[test]
+fn unquoted_split_or_glob_values_and_ifs_changes_stay_unresolved() {
+    assert_literal_binding_decision(
+        &[
+            "X='a b'; cat $X",
+            "X='a\tb'; cat $X",
+            "X='*'; cat $X",
+            "X='a?'; cat $X",
+            "X='[a]'; cat $X",
+            "X='~'; cat $X",
+            "X='{a,b}'; cat $X",
+            "X=; cat $X",
+            "X=a; IFS=,; cat $X",
+            "IFS=,; X=a; cat $X",
+            "X=a; IFS=, cat $X",
+            "X=~/.ssh; cat \"$X/id\"",
+            "X=a:~/b; cat \"$X\"",
+        ],
+        "ask",
+    );
+}
+
+#[test]
+fn command_position_words_stay_unresolved() {
+    assert_literal_binding_decision(
+        &[
+            "B=ls; $B -la",
+            "B=ls; \"$B\" -la",
+            "T=/private/tmp/claude-501/x/target; \"$T/debug/shguard\" --help",
+            "T=/tmp; $T/debug/shguard --help",
+            "B=ls; env $B -la",
+            "B=ls; command $B",
+            "B=ls; builtin $B",
+            "B=ls; exec $B",
+            "B=ls; xargs $B",
+            "B=ls; nohup $B",
+            "B=ls; nice $B -la",
+        ],
+        "ask",
+    );
+    // A substituted effective command may still upgrade to a Block.
+    assert_literal_binding_decision(&["B=rm; nice $B -rf /"], "deny");
+}
+
+#[test]
+fn only_the_effective_command_word_gets_builtin_treatment() {
+    assert_literal_binding_decision(
+        &[
+            "X=/safe; git add .; cat \"$X/passwd\"",
+            "X=/safe; ls .; cat \"$X/passwd\"",
+            "X=/safe; rg eval src; cat \"$X/passwd\"",
+            "X=/safe; echo export X; cat \"$X/passwd\"",
+            "X=/safe; grep -n source README; cat \"$X/passwd\"",
+        ],
+        "allow",
+    );
+    assert_literal_binding_decision(
+        &[
+            "X=/safe; command eval 'X=/etc'; cat \"$X/passwd\"",
+            "X=/safe; builtin source f; cat \"$X/passwd\"",
+        ],
+        "ask",
+    );
+}
+
+#[test]
+fn expansions_with_modifiers_are_not_substituted() {
+    assert_literal_binding_decision(
+        &[
+            "X=/tmp; cat \"${X:-/etc}/a\"",
+            "X=/tmp; cat \"${X%/*}/a\"",
+            "X=/tmp; cat \"${#X}\"",
+        ],
+        "ask",
+    );
+}
