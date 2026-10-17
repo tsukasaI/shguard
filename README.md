@@ -918,7 +918,9 @@ consulted), and for an unresolved value attached to its flag
 and for a word that may hide such a flag: an unquoted unresolved word
 (it can split into several), or a bare quoted one (`"$X"`). A quoted word
 whose literal head rules out every listed flag (`--title="$T"`) stays
-allowed; a separated `--title "$T"` asks.
+allowed; a separated `--title "$T"` asks. A quoted word with a single-dash
+head (`-t"$T"`) asks, since any single-dash head may hide a listed short
+flag (`-F`).
 
 `target_flags` needs a non-empty `targets` or `except_targets`, cannot be
 combined with `attached_value_flags` or with a `targets` entry that sets

@@ -2511,15 +2511,21 @@ fn evaluate_simple_command(
     // cloned here rather than re-running `normalize_argv` twice more.
     let composed_pass_argv = argv.clone();
 
+    let mut sole_target_floor = false;
     let verdict = evaluate_simple_command_core(
         command,
         argv,
         env,
-        SimpleCommandPolicy { ctx, symlink_scope },
+        SimpleCommandPolicy {
+            ctx,
+            symlink_scope,
+            sole_target_floor: &mut sole_target_floor,
+        },
         escalation_chain,
         cwd,
         alternates,
     );
+    let plain_floor_only = sole_target_floor.then(|| verdict.clone());
     let tar_dashless_floor_present = tar_dashless_floor.is_some();
     let unmodeled_option_floor_present = unmodeled_option_floor.is_some();
     let ascent_descent_floor_present = ascent_descent_floor.is_some();
@@ -2692,6 +2698,7 @@ fn evaluate_simple_command(
             anchor.composed_symlink_scope(wrapper_moves_cwd, refuse_symlinks),
         ) {
         if composed_names_the_plain_floor_token(
+            plain_floor_only.as_ref() == Some(&verdict),
             &verdict,
             &composed,
             &composed_pass_argv,
@@ -2725,10 +2732,13 @@ fn evaluate_simple_command(
 
 /// The per-command policy inputs [`evaluate_simple_command_core`] takes
 /// beyond the command itself: the shared [`AnalysisCtx`] and the symlink
-/// scope for this command's path resolution.
+/// scope for this command's path resolution. `sole_target_floor` is an
+/// out-parameter: set when the returned verdict's only reason is the plain
+/// except-target floor.
 struct SimpleCommandPolicy<'a> {
     ctx: AnalysisCtx<'a>,
     symlink_scope: SymlinkScope<'a>,
+    sole_target_floor: &'a mut bool,
 }
 
 /// Evaluates one [`SimpleCommand`] against every per-command gate rule (1,
@@ -2750,7 +2760,11 @@ fn evaluate_simple_command_core(
     cwd: &CwdContext,
     alternates: &mut IfsAlternates,
 ) -> Verdict {
-    let SimpleCommandPolicy { ctx, symlink_scope } = policy;
+    let SimpleCommandPolicy {
+        ctx,
+        symlink_scope,
+        sole_target_floor,
+    } = policy;
     let AnalysisCtx { rules, .. } = ctx;
     // Redirect target check runs FIRST, before any early return —
     // a redirection-only command (`> /dev/sda`) has empty argv but still
@@ -3406,7 +3420,7 @@ fn evaluate_simple_command_core(
         );
     }
 
-    fold_floors(
+    let (verdict, sole_target) = fold_floors(
         argv,
         InterpreterFloor {
             floor: interpreter_code_floor,
@@ -3417,7 +3431,9 @@ fn evaluate_simple_command_core(
         opaque_kind,
         except_floors,
         substitution_result,
-    )
+    );
+    *sole_target_floor = sole_target;
+    verdict
 }
 
 /// Reason attached by the escalation floor's fail-closed arm — the chain
@@ -4117,7 +4133,7 @@ fn fold_floors(
     opaque_kind: Option<UnresolvableKind>,
     except_floors: ExceptFloors<'_>,
     substitution_result: Option<(Decision, Option<DenyMessage>)>,
-) -> Verdict {
+) -> (Verdict, bool) {
     let mut decision = Decision::Allow;
     let mut reasons: Vec<String> = Vec::new();
     // Issue #202: the except-target/except-flags floors are the only two
@@ -4243,14 +4259,16 @@ fn fold_floors(
         }
     }
 
-    match decision {
+    let sole_target_floor = except_floors.target.is_some() && reasons.len() == 1;
+    let verdict = match decision {
         Decision::Allow => Verdict::allow(argv),
         Decision::Ask => {
             Verdict::ask(Reason::new(reasons.join("; ")), argv).with_deny_message(deny_message)
         }
         Decision::Block => Verdict::block(Reason::new(reasons.join("; ")), argv, None)
             .with_deny_message(deny_message),
-    }
+    };
+    (verdict, sole_target_floor)
 }
 
 /// The reason of the plain unresolved-argument except-target floor.
@@ -9586,6 +9604,19 @@ fn compose_argv_against_cwd(
     anchor: &str,
     rules: &Rules,
 ) -> Vec<NormalizedWord> {
+    let command = crate::rules::effective_command(argv).map(|(name, _)| name.into_owned());
+    compose_argv_for_command(argv, command.as_deref().unwrap_or(""), anchor, rules)
+}
+
+/// [`compose_argv_against_cwd`] for an `argv` slice that does not itself
+/// start at the command (a tail after a `-C` operand): `command` names the
+/// command whose `target_flags` the glued-value composition may consult.
+fn compose_argv_for_command(
+    argv: &[NormalizedWord],
+    command: &str,
+    anchor: &str,
+    rules: &Rules,
+) -> Vec<NormalizedWord> {
     let script_slot = recursed_script_slot(argv);
     argv.iter()
         .enumerate()
@@ -9598,7 +9629,7 @@ fn compose_argv_against_cwd(
             }
             Resolution::Resolved(s) if s.starts_with('-') => {
                 match rules
-                    .target_flag_glued_value_offset(s)
+                    .target_flag_glued_value_offset(command, s)
                     .map(|at| s.split_at(at))
                 {
                     Some((flag, value))
@@ -9893,6 +9924,7 @@ fn composed_subject_token(
 /// #625). Every other tie keeps the plain verdict, so the plain reason and
 /// its hints survive.
 fn composed_names_the_plain_floor_token(
+    plain_floor_only: bool,
     verdict: &Verdict,
     composed: &Verdict,
     argv: &[NormalizedWord],
@@ -9908,9 +9940,7 @@ fn composed_names_the_plain_floor_token(
     };
     // Any other reason in the plain verdict (a sed-script floor, a hint)
     // means the plain verdict says more than the floor alone: keep it.
-    if verdict.reason().map(Reason::as_str)
-        != Some(except_target_floor_reason(plain.id().as_str()).as_str())
-    {
+    if !plain_floor_only {
         return false;
     }
     let composed_argv = compose_argv_against_cwd(argv, &anchor.path, rules);
@@ -10379,8 +10409,9 @@ fn resolve_tar_dash_c(
         };
         if let CwdContext::Known(anchor) = &current {
             let range = &rest[occurrence.after..range_end];
-            composed[occurrence.after..range_end].clone_from_slice(&compose_argv_against_cwd(
+            composed[occurrence.after..range_end].clone_from_slice(&compose_argv_for_command(
                 range,
+                "tar",
                 &anchor.path,
                 rules,
             ));
@@ -10424,13 +10455,18 @@ fn evaluate_env_dash_c_override(
     if name != "env" {
         return None;
     }
-    let (_, wrapped_tail) = crate::rules::effective_command(argv)?;
+    let (wrapped_name, wrapped_tail) = crate::rules::effective_command(argv)?;
     let env_prefix_start = argv.len() - env_and_rest.len();
     let env_prefix_end = argv.len() - wrapped_tail.len();
     let env_prefix = &argv[env_prefix_start..env_prefix_end];
     let anchor = chain_dash_c_targets(env_prefix, &["--chdir"], true, Some("env"), env)?;
     let mut composed_argv = argv[..env_prefix_end].to_vec();
-    composed_argv.extend(compose_argv_against_cwd(wrapped_tail, &anchor, rules));
+    composed_argv.extend(compose_argv_for_command(
+        wrapped_tail,
+        &wrapped_name,
+        &anchor,
+        rules,
+    ));
     evaluate_composed_argv_match(
         &composed_argv,
         argv,
@@ -17771,6 +17807,7 @@ mod tests {
             SimpleCommandPolicy {
                 ctx: AnalysisCtx::new(&rules, &allowlist),
                 symlink_scope: SymlinkScope::default(),
+                sole_target_floor: &mut false,
             },
             WrapperChainEscalation::Absent,
             &CwdContext::Initial,
