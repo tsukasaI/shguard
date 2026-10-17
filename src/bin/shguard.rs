@@ -929,9 +929,13 @@ fn run_check(args: &[std::ffi::OsString]) -> i32 {
                     &format!("shguard check: --cwd given more than once ({CHECK_USAGE})"),
                 );
             }
-            // A path may legitimately start with `-`, so only a missing
-            // value is an error here, unlike `--permission-mode` above.
-            let Some(value) = iter.next() else {
+            // A single `-` may start a path, but a `--`-led value is the
+            // next flag swallowed (`--cwd --json`), as for `--permission-mode`.
+            let value = iter.next().filter(|v| match v.to_str() {
+                Some(v) => !v.starts_with("--"),
+                None => true,
+            });
+            let Some(value) = value else {
                 return check_usage_error(
                     json,
                     &format!("shguard check: --cwd requires a value ({CHECK_USAGE})"),
@@ -991,7 +995,16 @@ fn run_check(args: &[std::ffi::OsString]) -> i32 {
     let cwd = match cwd {
         None => None,
         Some(value) => match value.to_str() {
-            Some(value) => Some(value.to_string()),
+            Some(value) => {
+                if !value.starts_with(['/', '~']) {
+                    let _ = writeln!(
+                        io::stderr(),
+                        "shguard check: note: --cwd {value:?} is neither absolute nor `~`-led, so \
+                         it is treated as no cwd"
+                    );
+                }
+                Some(value.to_string())
+            }
             None => {
                 return check_usage_error(json, "shguard check: --cwd value must be valid UTF-8");
             }

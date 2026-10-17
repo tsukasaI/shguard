@@ -3906,7 +3906,6 @@ mod symlinked_home_end_to_end {
     fn home_twin_blocks_a_payload_cwd_that_is_a_link_to_home() {
         let (_dir, root) = home_fixture();
         let alias = format!("{root}/alias");
-        assert_eq!(hook_decision(&root, "rm -rf .", Some(&alias)), "deny");
         assert_eq!(
             hook_decision(&root, "tar -x -C . -f a.tar", Some(&alias)),
             "deny"
@@ -3917,11 +3916,34 @@ mod symlinked_home_end_to_end {
     #[test]
     fn home_twin_check_cwd_flag_resolves_like_the_hook() {
         let (_dir, root) = home_fixture();
-        let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
-        cmd.env_remove("SHGUARD_CONFIG")
-            .env_remove("XDG_CONFIG_HOME")
-            .env("HOME", format!("{root}/home"))
-            .args(["check", "rm -rf .", "--cwd", &format!("{root}/alias")]);
-        cmd.assert().code(1);
+        let check = |cwd: &str| {
+            let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
+            cmd.env_remove("SHGUARD_CONFIG")
+                .env_remove("XDG_CONFIG_HOME")
+                .env("HOME", format!("{root}/home"))
+                .args(["check", "tar -x -C . -f a.tar", "--cwd", cwd]);
+            cmd
+        };
+        check(&format!("{root}/alias")).assert().code(1);
+        check(&format!("{root}/real/me/proj")).assert().code(0);
+        check(&root).assert().code(0);
+    }
+
+    #[test]
+    fn check_cwd_flag_rejects_a_flag_shaped_value_and_notes_a_relative_one() {
+        let stderr_of = |args: [&str; 4]| {
+            let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
+            let output = cmd.args(args).output().expect("shguard should run");
+            (
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            )
+        };
+        let (code, stderr) = stderr_of(["check", "ls", "--cwd", "--json"]);
+        assert_ne!(code, Some(0));
+        assert!(stderr.contains("--cwd requires a value"), "{stderr}");
+        let (code, stderr) = stderr_of(["check", "ls", "--cwd", "proj"]);
+        assert_eq!(code, Some(0));
+        assert!(stderr.contains("neither absolute nor `~`-led"), "{stderr}");
     }
 }

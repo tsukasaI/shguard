@@ -7684,9 +7684,10 @@ impl Rules {
     }
 }
 
-/// Most distinct path operands one command may have probed on the
-/// filesystem; a command with more asks instead of probing a prefix of them
-/// (a skipped operand would be an unchecked one).
+/// Most distinct paths one simple command (operands, their ancestors and
+/// redirect targets together) may have looked up on the filesystem; a command
+/// needing more asks instead of probing a prefix of them (a skipped operand
+/// would be an unchecked one).
 const MAX_FS_PROBES: usize = 32;
 
 /// Id prefix of the rules `crate::config` generates to protect shguard's own
@@ -7744,6 +7745,16 @@ pub(crate) struct FsTwin {
     pub(crate) operand: String,
     /// The spelling it was replaced by.
     pub(crate) spelling: String,
+    /// The spelling is the lexical `$HOME` form of the resolved path, not
+    /// what the filesystem itself calls it.
+    pub(crate) via_home: bool,
+}
+
+/// A spelling [`Rules::fs_twin_spellings`] found, and which kind it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FsSpelling {
+    pub(crate) path: String,
+    pub(crate) via_home: bool,
 }
 
 /// A path the filesystem twin probe could not check.
@@ -7751,6 +7762,14 @@ pub(crate) struct FsTwin {
 pub(crate) struct FsProbeFailure {
     pub(crate) subject: String,
     pub(crate) why: String,
+}
+
+/// The filesystem lookups one simple command has made so far, shared by its
+/// path operands and redirect targets so [`MAX_FS_PROBES`] bounds them
+/// together.
+#[derive(Debug, Default)]
+pub(crate) struct FsProbeBudget {
+    lookups: std::collections::HashMap<String, Result<ResolvedPath, ProbeError>>,
 }
 
 /// What [`Rules::fs_twin_probe`] found: spellings to match in addition to the
@@ -7799,12 +7818,19 @@ impl Rules {
     /// blocked.
     ///
     /// `base` is the absolute directory relative operands resolve against,
-    /// when it is trustworthy. A path that does not exist leaves the lexical
-    /// result standing; a loop, a permission error or any other failure
+    /// when it is trustworthy. The longest existing ancestor of an operand
+    /// that is a glob or does not exist yet stands in for it; with none, the
+    /// lexical result stands. A loop, a permission error or any other failure
     /// is reported in [`FsTwinProbe::failures`] for the caller to Ask on. Only
-    /// the operands themselves are looked up, never a directory's contents.
+    /// the operands and their ancestors are looked up, never a directory's
+    /// contents.
     #[must_use]
-    pub(crate) fn fs_twin_probe(&self, argv: &[NormalizedWord], base: Option<&str>) -> FsTwinProbe {
+    pub(crate) fn fs_twin_probe(
+        &self,
+        argv: &[NormalizedWord],
+        base: Option<&str>,
+        budget: &mut FsProbeBudget,
+    ) -> FsTwinProbe {
         let mut probe = FsTwinProbe::default();
         let applies = self
             .command_rules
@@ -7820,8 +7846,6 @@ impl Rules {
             return probe;
         };
         let start = argv.len() - rest.len();
-        let mut spellings: std::collections::HashMap<String, Result<Vec<String>, FsProbeFailure>> =
-            std::collections::HashMap::new();
         for (index, word) in argv.iter().enumerate().skip(start) {
             let Resolution::Resolved(token) = word.resolution() else {
                 continue;
@@ -7830,31 +7854,22 @@ impl Rules {
             let Some(full) = self.probe_path(value, base) else {
                 continue;
             };
-            if !spellings.contains_key(&full) && spellings.len() >= MAX_FS_PROBES {
-                probe.failures.push(FsProbeFailure {
-                    subject: "the command".to_string(),
-                    why: format!("it has more than {MAX_FS_PROBES} path operands to resolve"),
-                });
-                break;
-            }
-            let found = spellings
-                .entry(full.clone())
-                .or_insert_with(|| self.fs_twin_spellings(&full));
-            match found {
+            match self.fs_twin_spellings(&full, budget) {
                 Ok(found) => {
-                    for spelling in found {
+                    for found in found {
                         let mut twin = argv.to_vec();
-                        twin[index] = NormalizedWord::resolved(format!("{prefix}{spelling}"));
+                        twin[index] = NormalizedWord::resolved(format!("{prefix}{}", found.path));
                         probe.twins.push(FsTwin {
                             argv: twin,
                             operand: token.clone(),
-                            spelling: spelling.clone(),
+                            spelling: found.path,
+                            via_home: found.via_home,
                         });
                     }
                 }
                 Err(failure) => {
-                    if !probe.failures.contains(failure) {
-                        probe.failures.push(failure.clone());
+                    if !probe.failures.contains(&failure) {
+                        probe.failures.push(failure);
                     }
                 }
             }
@@ -7863,17 +7878,20 @@ impl Rules {
     }
 
     /// [`Self::fs_twin_probe`] for a redirect target: the extra spellings to
-    /// match against the redirect rules.
+    /// match against the redirect rules. Draws on the same `budget` as the
+    /// command's operands.
     ///
     /// # Errors
     ///
     /// Returns the [`FsProbeFailure`] when the target (or `$HOME`) could not
-    /// be resolved for a reason other than not existing.
+    /// be resolved for a reason other than not existing, or the budget ran
+    /// out.
     pub(crate) fn fs_twin_redirect_spellings(
         &self,
         target: &str,
         base: Option<&str>,
-    ) -> Result<Vec<String>, FsProbeFailure> {
+        budget: &mut FsProbeBudget,
+    ) -> Result<Vec<FsSpelling>, FsProbeFailure> {
         if !self
             .redirect_rules
             .iter()
@@ -7882,16 +7900,17 @@ impl Rules {
             return Ok(Vec::new());
         }
         match self.probe_path(target, base) {
-            Some(full) => self.fs_twin_spellings(&full),
+            Some(full) => self.fs_twin_spellings(&full, budget),
             None => Ok(Vec::new()),
         }
     }
 
-    /// The absolute path an operand value names, when it can be looked up:
+    /// The absolute path an operand value names, when it can be located:
     /// absolute, `~`-led under a known `$HOME`, or relative under `base`.
-    /// Globs are not paths.
+    /// It may carry glob characters or name a file that does not exist yet;
+    /// [`Self::fs_twin_spellings`] resolves the part that does.
     fn probe_path(&self, value: &str, base: Option<&str>) -> Option<String> {
-        if value.is_empty() || value.contains(['*', '?', '[', '{']) {
+        if value.is_empty() {
             return None;
         }
         if value.starts_with('/') {
@@ -7908,20 +7927,69 @@ impl Rules {
             .map(|base| format!("{base}/{value}"))
     }
 
-    fn fs_twin_spellings(&self, full: &str) -> Result<Vec<String>, FsProbeFailure> {
-        let resolved = match self.path_canonicalizer.canonicalize(full) {
-            Ok(resolved) => resolved,
-            Err(ProbeError::NotFound) => return Ok(Vec::new()),
-            Err(error) => {
-                return Err(FsProbeFailure {
-                    subject: full.to_string(),
-                    why: error.to_string(),
-                });
+    /// One filesystem lookup, answered from `budget` when this command
+    /// already made it; a new one past [`MAX_FS_PROBES`] is refused.
+    fn probe_lookup(
+        &self,
+        path: &str,
+        budget: &mut FsProbeBudget,
+    ) -> Result<Result<ResolvedPath, ProbeError>, FsProbeFailure> {
+        if let Some(known) = budget.lookups.get(path) {
+            return Ok(known.clone());
+        }
+        if budget.lookups.len() >= MAX_FS_PROBES {
+            return Err(FsProbeFailure {
+                subject: "the command".to_string(),
+                why: format!("it has more than {MAX_FS_PROBES} path operands to resolve"),
+            });
+        }
+        let found = self.path_canonicalizer.canonicalize(path);
+        budget.lookups.insert(path.to_string(), found.clone());
+        Ok(found)
+    }
+
+    /// The spellings the filesystem gives `full`: its longest glob-free
+    /// ancestor that exists, resolved, with the rest of the operand (a glob,
+    /// or a name not created yet) reattached. Walks up the operand's own
+    /// components, one lookup per prefix, never listing a directory.
+    fn fs_twin_spellings(
+        &self,
+        full: &str,
+        budget: &mut FsProbeBudget,
+    ) -> Result<Vec<FsSpelling>, FsProbeFailure> {
+        let comps: Vec<&str> = full.split('/').filter(|comp| !comp.is_empty()).collect();
+        let mut keep = comps
+            .iter()
+            .position(|comp| comp.contains(['*', '?', '[', '{']))
+            .unwrap_or(comps.len());
+        let resolved = loop {
+            if keep == 0 {
+                return Ok(Vec::new());
+            }
+            let head = format!("/{}", comps[..keep].join("/"));
+            match self.probe_lookup(&head, budget)? {
+                Ok(resolved) => break resolved,
+                Err(ProbeError::NotFound) => keep -= 1,
+                Err(error) => {
+                    return Err(FsProbeFailure {
+                        subject: head,
+                        why: error.to_string(),
+                    });
+                }
             }
         };
+        let tail = comps[keep..].join("/");
+        let resolved_full = if tail.is_empty() {
+            resolved.path.clone()
+        } else {
+            format!("{}/{tail}", resolved.path.trim_end_matches('/'))
+        };
         let mut spellings = Vec::new();
-        if resolved.path != full {
-            spellings.push(resolved.path.clone());
+        if resolved_full != full {
+            spellings.push(FsSpelling {
+                path: resolved_full.clone(),
+                via_home: false,
+            });
         }
         if let Some(home) = &self.home {
             let canonical = home.canonical.get_or_init(|| {
@@ -7930,11 +7998,14 @@ impl Rules {
             });
             match canonical {
                 Ok(canonical) => {
-                    if let Some(rebased) = home.dir.rebase_from(canonical, &resolved.path)
+                    if let Some(rebased) = home.dir.rebase_from(canonical, &resolved_full)
                         && rebased != full
-                        && !spellings.contains(&rebased)
+                        && spellings.iter().all(|known| known.path != rebased)
                     {
-                        spellings.push(rebased);
+                        spellings.push(FsSpelling {
+                            path: rebased,
+                            via_home: true,
+                        });
                     }
                 }
                 Err(ProbeError::NotFound) => {}

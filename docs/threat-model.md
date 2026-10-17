@@ -53,9 +53,11 @@ command in the same session, can create or re-point a symlink in between
 (`ln -s ~ /tmp/l` in one call, `rm -rf /tmp/l` in the next, only the second
 of which finds the link). shguard sees a command string, not a concurrent
 attacker, so this is not defended, the same stance as the session-state
-limit above. A path that does not exist when checked (`rm -rf
-~/proj/newdir`, or `rm -rf link/newdir` below a link) keeps its lexical
-result.
+limit above. A glob or a path that does not exist when checked (`rm -rf
+link/*`, `echo x >> link/.zshenv`) is checked through its longest existing
+ancestor, so it matches the rules the same as that ancestor's spelling does;
+a path with no ancestor that differs (`rm -rf ~/proj/newdir`) keeps its
+lexical result.
 
 Rules for the filesystem probes (decided on issue #661, 2026-10-14):
 
@@ -68,8 +70,12 @@ Rules for the filesystem probes (decided on issue #661, 2026-10-14):
    A symlink loop (ELOOP), a permission error (EACCES, EPERM) or any other
    error asks, with the path and the cause in the reason. A hung mount is
    the evaluation watchdog's job.
-4. Only a fixed list of candidate paths is resolved, at most 32 per
-   command, plus `$HOME` once; no directory is listed or walked.
+4. Only a fixed list of candidate paths is resolved: at most 32 distinct
+   lookups per simple command (not per line), counting path operands, the
+   ancestor prefixes tried for a glob or missing operand, and redirect
+   targets together, plus `$HOME` once. A command over the cap asks. No
+   directory is listed or walked; ancestors come from the operand's own
+   components.
 
 #### Cost of the filesystem probes
 
@@ -83,17 +89,19 @@ Wall-clock per invocation, spawn to exit, on macOS (Darwin 27.0.0).
 
 | Corpus | Binary | p50 | p99 |
 |---|---|---|---|
-| denials_input (n=1395) | before | 5.57 ms | 14.22 ms |
-| denials_input (n=1395) | after | 5.60 ms | 14.93 ms |
-| benign (n=505) | before | 4.42 ms | 5.34 ms |
-| benign (n=505) | after | 4.46 ms | 5.27 ms |
+| denials_input (n=1395) | before | 5.81 ms | 14.36 ms |
+| denials_input (n=1395) | after | 5.94 ms | 15.23 ms |
+| benign (n=505) | before | 4.63 ms | 5.29 ms |
+| benign (n=505) | after | 4.66 ms | 5.43 ms |
 
-The baseline is therefore about 4.4 to 5.6 ms p50 and 5.3 to 14.2 ms p99. The
+The baseline is therefore about 4.6 to 5.8 ms p50 and 5.3 to 14.4 ms p99. The
 budget for the extra filesystem work is 10% of the baseline p50 (about
-0.5 ms) on these corpora; measured, it is about 1% (0.03 to 0.04 ms), and the
+0.5 ms) on these corpora; measured, it is about 1 to 2% (0.03 to 0.13 ms), and the
 p99 differences are within the run-to-run noise. Worst cases, 200 runs each:
 a command no fs-sensitive rule applies to costs nothing measurable (4.28 vs
-4.30 ms p50); `rm -rf` with 32 missing absolute operands, 9.29 vs 9.45 ms; with
+4.30 ms p50); `rm -rf` with 32 missing absolute operands, 9.29 vs 9.45 ms (measured before
+ancestor lookups counted against the cap; such a command now asks once its
+operands and their distinct parents pass 32); with
 8 existing operands whose canonical spelling differs (`/tmp`, `/etc`,
 `/var` on macOS), 5.59 vs 6.56 ms, about 0.12 ms per such operand (each
 extra spelling is matched against every rule). The 32-operand cap bounds

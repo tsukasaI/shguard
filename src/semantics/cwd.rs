@@ -111,6 +111,18 @@ impl CwdContext {
         if refuse { scope.refusing_all() } else { scope }
     }
 
+    /// [`Self::trusted_base`] for the filesystem twin probe, which resolves
+    /// through `realpath` and so follows physical semantics itself: a
+    /// physical-mode anchor is as usable there as a logical one.
+    pub(crate) fn fs_probe_base(&self, wrapper_moves_cwd: bool) -> Option<&str> {
+        match self {
+            Self::Known(anchor) if anchor.path.starts_with('/') && !wrapper_moves_cwd => {
+                Some(anchor.path.as_str())
+            }
+            _ => None,
+        }
+    }
+
     /// The absolute directory relative paths of a command run now resolve
     /// against, when this module's lexical cwd can be trusted to name it.
     pub(crate) fn trusted_base(&self, wrapper_moves_cwd: bool) -> Option<&str> {

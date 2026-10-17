@@ -3251,12 +3251,20 @@ mod tests {
             let dir = tempdir().unwrap();
             let root = dir.path().canonicalize().unwrap();
             std::fs::create_dir_all(root.join("real/me/proj")).unwrap();
+            std::fs::create_dir_all(root.join("real/me/.config/shguard")).unwrap();
+            std::fs::create_dir_all(root.join("real/me/.ssh")).unwrap();
+            std::fs::create_dir_all(root.join("other")).unwrap();
             symlink(root.join("real/me"), root.join("home")).unwrap();
             symlink(root.join("home"), root.join("alias")).unwrap();
+            symlink(root.join("real/me/.config/shguard"), root.join("cfglink")).unwrap();
+            symlink(root.join("alias"), root.join("real/me/proj/uplink")).unwrap();
             symlink(root.join("loop-b"), root.join("loop-a")).unwrap();
             symlink(root.join("loop-a"), root.join("loop-b")).unwrap();
             let root = root.to_str().unwrap().to_string();
-            let (rules, allowlist) = self_protected("/etc/shguard", Some(&format!("{root}/home")));
+            let (rules, allowlist) = self_protected(
+                &format!("{root}/home/.config/shguard"),
+                Some(&format!("{root}/home")),
+            );
             Fixture {
                 _dir: dir,
                 root,
@@ -3304,8 +3312,10 @@ mod tests {
         #[test]
         fn home_twin_without_the_filesystem_misses_the_canonical_spelling() {
             let f = fixture();
-            let (rules, allowlist) =
-                self_protected("/etc/shguard", Some(&format!("{}/home", f.root)));
+            let (rules, allowlist) = self_protected(
+                &format!("{}/home/.config/shguard", f.root),
+                Some(&format!("{}/home", f.root)),
+            );
             let command = format!("rm -rf {}/real/me", f.root);
             assert_eq!(decide(&rules, &allowlist, &command, None), Decision::Allow);
             assert_eq!(f.decide(&command, None), Decision::Block);
@@ -3315,7 +3325,6 @@ mod tests {
         fn home_twin_resolves_a_symlinked_payload_cwd() {
             let f = fixture();
             let alias = format!("{}/alias", f.root);
-            assert_eq!(f.decide("rm -rf .", Some(&alias)), Decision::Block);
             assert_eq!(
                 f.decide("tar -x -C . -f a.tar", Some(&alias)),
                 Decision::Block
@@ -3329,6 +3338,104 @@ mod tests {
             let f = fixture();
             let command = format!("rm -rf {}/alias/not-created-yet", f.root);
             assert_eq!(f.decide(&command, None), Decision::Allow);
+        }
+
+        #[test]
+        fn home_twin_probes_the_parent_of_a_glob_or_a_not_yet_existing_operand() {
+            let f = fixture();
+            let root = &f.root;
+            let pairs = [
+                (format!("rm -rf {root}/alias/*"), "rm -rf ~/*"),
+                (
+                    format!("rm -rf {root}/cfglink/*"),
+                    "rm -rf ~/.config/shguard/*",
+                ),
+                (
+                    format!("echo x >> {root}/alias/.zshenv"),
+                    "echo x >> ~/.zshenv",
+                ),
+                (
+                    format!("echo x >> {root}/real/me/.ssh/authorized_keys"),
+                    "echo x >> ~/.ssh/authorized_keys",
+                ),
+                (
+                    format!("tee -a {root}/alias/.ssh/authorized_keys"),
+                    "tee -a ~/.ssh/authorized_keys",
+                ),
+                (format!("cp evil {root}/alias/.zshenv"), "cp evil ~/.zshenv"),
+                (
+                    format!("cp evil {root}/cfglink/extra.toml"),
+                    "cp evil ~/.config/shguard/extra.toml",
+                ),
+                (
+                    format!("echo x > {root}/cfglink/extra.toml"),
+                    "echo x > ~/.config/shguard/extra.toml",
+                ),
+                (
+                    format!("rm -rf {root}/alias/.config/shguard/newfile"),
+                    "rm -rf ~/.config/shguard/newfile",
+                ),
+            ];
+            for (twin, lexical) in pairs {
+                let expected = f.decide(lexical, None);
+                assert_ne!(expected, Decision::Allow, "{lexical}");
+                assert_eq!(f.decide(&twin, None), expected, "{twin}");
+            }
+        }
+
+        #[test]
+        fn home_twin_leaves_unrelated_glob_and_new_paths_alone() {
+            let f = fixture();
+            let root = &f.root;
+            for command in [
+                format!("rm -rf {root}/other/*"),
+                format!("rm -rf {root}/alias/proj/newdir"),
+                format!("rm -rf {root}/alias/proj/*"),
+                format!("echo x > {root}/other/f"),
+                format!("cp a {root}/other/f"),
+                format!("rm -rf {root}/missing/dir/*"),
+            ] {
+                assert_eq!(f.decide(&command, None), Decision::Allow, "{command}");
+            }
+        }
+
+        #[test]
+        fn home_twin_follows_a_link_under_a_physical_cd_anchor() {
+            let f = fixture();
+            let alias = format!("{}/alias", f.root);
+            for command in [
+                format!("cd -P {alias}/proj && rm -rf uplink"),
+                format!("cd {alias}/proj && rm -rf uplink"),
+            ] {
+                assert_eq!(f.decide(&command, None), Decision::Block, "{command}");
+            }
+            let control = format!("cd -P {alias}/proj && rm -rf newdir");
+            assert_eq!(f.decide(&control, None), Decision::Allow, "{control}");
+        }
+
+        #[test]
+        fn home_twin_probe_budget_covers_operands_and_redirects_together() {
+            let f = fixture();
+            let other = format!("{}/other", f.root);
+            let operands = (0..16)
+                .map(|n| format!("{other}/x{n}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let redirects = |count: usize| {
+                (0..count)
+                    .map(|n| format!("> {other}/r{n}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            let within = format!("rm -rf {operands} {}", redirects(5));
+            assert_eq!(f.decide(&within, None), Decision::Allow, "{within}");
+            let over = format!("rm -rf {operands} {}", redirects(20));
+            assert_eq!(f.decide(&over, None), Decision::Ask, "{over}");
+            assert!(
+                f.reason(&over).contains("more than 32"),
+                "{}",
+                f.reason(&over)
+            );
         }
 
         #[test]

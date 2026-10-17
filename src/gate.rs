@@ -360,9 +360,9 @@ use crate::policy::combine::{
 };
 use crate::policy::{self, Evidence, LimitKind, PolicyConfig, deny_msg_unsupported_construct};
 use crate::rules::{
-    AWK_INTERPRETERS, Allowlist, EVAL_BUILTIN, FsProbeFailure, PathForm, RedirectRule, Rules,
-    SymlinkScope, TRAP_BUILTIN, WrapperChainEscalation, has_expanding_glob_qualifier,
-    is_pipeline_interpreter, lexical_normalize, render_cwd_anchor,
+    AWK_INTERPRETERS, Allowlist, EVAL_BUILTIN, FsProbeBudget, FsProbeFailure, PathForm,
+    RedirectRule, Rules, SymlinkScope, TRAP_BUILTIN, WrapperChainEscalation,
+    has_expanding_glob_qualifier, is_pipeline_interpreter, lexical_normalize, render_cwd_anchor,
     unresolved_word_may_hide_glob_qualifier, wrapper_chain_changes_cwd,
 };
 use crate::semantics::cwd::{AnchorOrigin, CwdAnchor, CwdContext, CwdState, MAX_CWD_STACK_DEPTH};
@@ -3496,7 +3496,7 @@ fn evaluate_simple_command(
     match evaluate_fs_twin(
         &composed_pass_argv,
         &command.redirections,
-        cwd.trusted_base(wrapper_moves_cwd),
+        cwd.fs_probe_base(wrapper_moves_cwd),
         rules,
     ) {
         Some(twin) => fold_worst(verdict, twin),
@@ -3533,12 +3533,20 @@ fn evaluate_fs_twin(
         )
     };
 
-    let probe = rules.fs_twin_probe(argv, base);
+    let mut budget = FsProbeBudget::default();
+    let probe = rules.fs_twin_probe(argv, base, &mut budget);
     for twin in &probe.twins {
-        let subject = format!(
-            "{:?} resolves on the filesystem to {:?}",
-            twin.operand, twin.spelling
-        );
+        let subject = if twin.via_home {
+            format!(
+                "{:?} names the same directory as $HOME, spelled {:?}",
+                twin.operand, twin.spelling
+            )
+        } else {
+            format!(
+                "{:?} resolves on the filesystem to {:?}",
+                twin.operand, twin.spelling
+            )
+        };
         if let Some(rule) = rules.match_command(&twin.argv) {
             let reason = Reason::new(format!(
                 "{subject}, matching blocklist rule {:?}: {}",
@@ -3575,7 +3583,7 @@ fn evaluate_fs_twin(
     }
 
     for target in resolved_redirect_write_targets(redirections) {
-        let spellings = match rules.fs_twin_redirect_spellings(&target, base) {
+        let spellings = match rules.fs_twin_redirect_spellings(&target, base, &mut budget) {
             Ok(spellings) => spellings,
             Err(failure) => {
                 raise(ask_unresolved(&failure));
@@ -3583,12 +3591,19 @@ fn evaluate_fs_twin(
             }
         };
         for spelling in spellings {
-            let Some(rule) = rules.match_redirect_target(&spelling) else {
+            let Some(rule) = rules.match_redirect_target(&spelling.path) else {
                 continue;
             };
+            let path = &spelling.path;
+            let named = if spelling.via_home {
+                format!(
+                    "redirect target {target:?} names the same directory as $HOME, spelled {path:?}"
+                )
+            } else {
+                format!("redirect target {target:?} resolves on the filesystem to {path:?}")
+            };
             let reason = Reason::new(format!(
-                "redirect target {target:?} resolves on the filesystem to {spelling:?}, \
-                 matching rule {:?}: {}",
+                "{named}, matching rule {:?}: {}",
                 rule.id().as_str(),
                 rule.reason().as_str()
             ));
