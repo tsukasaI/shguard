@@ -9604,16 +9604,16 @@ fn compose_argv_against_cwd(
     anchor: &str,
     rules: &Rules,
 ) -> Vec<NormalizedWord> {
-    let command = crate::rules::effective_command(argv).map(|(name, _)| name.into_owned());
-    compose_argv_for_command(argv, command.as_deref().unwrap_or(""), anchor, rules)
+    compose_argv_for_command(argv, argv, anchor, rules)
 }
 
 /// [`compose_argv_against_cwd`] for an `argv` slice that does not itself
-/// start at the command (a tail after a `-C` operand): `command` names the
-/// command whose `target_flags` the glued-value composition may consult.
+/// start at the command (a tail after a `-C` operand): `scope_argv` is the
+/// full invocation whose wrapper chain names the commands whose
+/// `target_flags` the glued-value composition may consult.
 fn compose_argv_for_command(
     argv: &[NormalizedWord],
-    command: &str,
+    scope_argv: &[NormalizedWord],
     anchor: &str,
     rules: &Rules,
 ) -> Vec<NormalizedWord> {
@@ -9629,7 +9629,7 @@ fn compose_argv_for_command(
             }
             Resolution::Resolved(s) if s.starts_with('-') => {
                 match rules
-                    .target_flag_glued_value_offset(command, s)
+                    .target_flag_glued_value_offset(scope_argv, s)
                     .map(|at| s.split_at(at))
                 {
                     Some((flag, value))
@@ -9950,12 +9950,17 @@ fn composed_names_the_plain_floor_token(
     {
         return false;
     }
-    composed_subject_token(&composed_argv, argv, |probe| {
+    let floor_matches = |probe: &[NormalizedWord]| {
         rules
             .match_command_except_target_composed(probe)
             .is_some_and(|rule| rule.id() == plain.id())
-    })
-    .is_some()
+    };
+    // A floor the uncomposed argv already satisfies comes from an unresolved
+    // word, not from a relative token the composition resolved.
+    if floor_matches(argv) {
+        return false;
+    }
+    composed_subject_token(&composed_argv, argv, floor_matches).is_some()
 }
 
 /// The redirect-target half of [`evaluate_composed_cwd`], factored out so
@@ -10392,6 +10397,9 @@ fn resolve_tar_dash_c(
         return None;
     }
 
+    let scope: Vec<NormalizedWord> = std::iter::once(NormalizedWord::resolved("tar"))
+        .chain(rest.iter().cloned())
+        .collect();
     let mut composed = rest.to_vec();
     let mut current = CwdContext::Initial;
     let mut any_composed = false;
@@ -10411,7 +10419,7 @@ fn resolve_tar_dash_c(
             let range = &rest[occurrence.after..range_end];
             composed[occurrence.after..range_end].clone_from_slice(&compose_argv_for_command(
                 range,
-                "tar",
+                &scope,
                 &anchor.path,
                 rules,
             ));
@@ -10455,18 +10463,13 @@ fn evaluate_env_dash_c_override(
     if name != "env" {
         return None;
     }
-    let (wrapped_name, wrapped_tail) = crate::rules::effective_command(argv)?;
+    let (_, wrapped_tail) = crate::rules::effective_command(argv)?;
     let env_prefix_start = argv.len() - env_and_rest.len();
     let env_prefix_end = argv.len() - wrapped_tail.len();
     let env_prefix = &argv[env_prefix_start..env_prefix_end];
     let anchor = chain_dash_c_targets(env_prefix, &["--chdir"], true, Some("env"), env)?;
     let mut composed_argv = argv[..env_prefix_end].to_vec();
-    composed_argv.extend(compose_argv_for_command(
-        wrapped_tail,
-        &wrapped_name,
-        &anchor,
-        rules,
-    ));
+    composed_argv.extend(compose_argv_for_command(wrapped_tail, argv, &anchor, rules));
     evaluate_composed_argv_match(
         &composed_argv,
         argv,
@@ -15885,6 +15888,60 @@ mod tests {
         let allowlist = Allowlist::embedded().unwrap();
         let config = crate::rules::UserConfig::parse(user_toml).unwrap();
         crate::rules::merge_user_config(blocklist, allowlist, config).unwrap()
+    }
+
+    #[test]
+    fn user_rule_on_a_wrapper_command_composes_its_glued_target_flag_value() {
+        let cases = [
+            (
+                "xargs",
+                r#"["-a", "--arg-file"]"#,
+                "cd /etc && xargs -apasswd cat",
+            ),
+            (
+                "xargs",
+                r#"["-a", "--arg-file"]"#,
+                "cd /etc && xargs -apasswd",
+            ),
+            (
+                "xargs",
+                r#"["-a", "--arg-file"]"#,
+                "cd /etc && xargs --arg-file=passwd cat",
+            ),
+            ("sudo", r#"["-D"]"#, "cd /etc && sudo -Dfoo ls"),
+        ];
+        for (command, flags, line) in cases {
+            let (rules, allowlist) = policy_from_config(&format!(
+                r#"
+                [[deny]]
+                id = "user-wrapper-target-flag"
+                reason = "no /etc values"
+                command = "{command}"
+                target_flags = {flags}
+                targets = [{{ normalized_prefix = "/etc/" }}]
+            "#
+            ));
+            let verdict = analyze_with_policy(line, &rules, &allowlist);
+            assert_eq!(verdict.decision(), Decision::Block, "{line}");
+        }
+    }
+
+    #[test]
+    fn plain_floor_from_an_unresolved_glued_value_does_not_name_a_relative_token() {
+        let (rules, allowlist) = policy_from_config(
+            r#"
+            [[deny]]
+            id = "gh-body-file-escape"
+            reason = "gh --body-file outside the scratchpad"
+            command = "gh"
+            target_flags = ["--body-file", "-F"]
+            targets = [{ normalized_prefix = "/etc/" }]
+        "#,
+        );
+        let verdict = analyze_with_policy("cd /etc && gh issue create -F$X", &rules, &allowlist);
+        assert_eq!(verdict.decision(), Decision::Ask);
+        let reason = verdict.reason().map(super::Reason::as_str).unwrap();
+        assert!(!reason.contains("\"issue\""), "{reason}");
     }
 
     // ==== resolve_symlinks (issues #583, #612): same-line state, wrappers and
