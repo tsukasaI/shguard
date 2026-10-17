@@ -824,6 +824,66 @@ fn guardfall_transparent_wrapper_cases() {
     }
 }
 
+const ISSUE_638_TIME_AND_EXEC_WRAPPER_CASES: &[(&str, Decision)] = &[
+    // brush-parser strips only the leading reserved word `time`; the second `time` reaches the gate as a command
+    ("time time rm -rf /", Decision::Block),
+    // negated pipeline: `time` is not at pipeline start
+    ("! time rm -rf /", Decision::Block),
+    // external time binary by absolute path
+    ("/usr/bin/time rm -rf /", Decision::Block),
+    // backslash-escaped time is a plain command, not the reserved word
+    ("\\time rm -rf /", Decision::Block),
+    // time behind env
+    ("env time rm -rf /", Decision::Block),
+    // brush strips the reserved word `time` and leaves `--` as the command name; the parser drops it for timed pipelines
+    ("time -- rm -rf /", Decision::Block),
+    // `--` ends wrapper flags
+    ("/usr/bin/time -- rm -rf /", Decision::Block),
+    // GNU time -o takes a separated value
+    ("/usr/bin/time -o x rm -rf /", Decision::Block),
+    // time unwraps to sudo and reaches the escalation floor instead of Allow
+    ("time time sudo id", Decision::Ask),
+    // chroot NEWROOT positional
+    ("chroot / rm -rf /", Decision::Block),
+    // exec wrapper
+    ("caffeinate rm -rf /", Decision::Block),
+    // exec wrapper
+    ("unshare rm -rf /", Decision::Block),
+    // runuser -u takes a separated value
+    ("runuser -u root rm -rf /", Decision::Block),
+    // exec wrapper
+    ("strace rm -rf /", Decision::Block),
+    // exec wrapper
+    ("watch rm -rf /", Decision::Block),
+    // setarch ARCH positional
+    ("setarch x86_64 rm -rf /", Decision::Block),
+    // exec wrapper
+    ("prlimit rm -rf /", Decision::Block),
+    // exec wrapper
+    ("firejail rm -rf /", Decision::Block),
+    // exec wrapper
+    ("systemd-run rm -rf /", Decision::Block),
+    // exec wrapper
+    ("unbuffer rm -rf /", Decision::Block),
+    // exec wrapper
+    ("numactl rm -rf /", Decision::Block),
+];
+
+/// Issue #638: `time` and the exec wrappers added in #644 must unwrap to the
+/// wrapped command, so each reaches the rule a bare invocation does.
+#[test]
+fn guardfall_issue_638_time_and_exec_wrapper_cases() {
+    for (command, expected) in ISSUE_638_TIME_AND_EXEC_WRAPPER_CASES {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
 const EVAL_CASES: &[(&str, Decision)] = &[
     // The issue's own three repros.
     ("eval rm -rf /", Decision::Block),
@@ -2548,6 +2608,7 @@ const DECISION_TABLES: &[(&str, &[(&str, Decision)])] = &[
     named_table!(RM_DOTGLOB_TILDE_TARGETS),
     named_table!(ISSUE_453_FILESYSTEM_GAPS),
     named_table!(TRANSPARENT_WRAPPER_CASES),
+    named_table!(ISSUE_638_TIME_AND_EXEC_WRAPPER_CASES),
     named_table!(EVAL_CASES),
     named_table!(TRAP_CASES),
     named_table!(FIND_EXEC_BARE_INTERPRETER_CASES),
