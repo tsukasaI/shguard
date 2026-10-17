@@ -13688,7 +13688,7 @@ mod tests {
             "python3 \"$p\"",
             "node \"$p\"",
             "perl \"$p\"",
-            "S=/tmp/x; python3 -I \"$S/x.py\"",
+            "S=$(pwd); python3 -I \"$S/x.py\"",
             "python3 -X \"$o\" s.py",
             "node --require \"$m\" app.js",
         ] {
@@ -17625,21 +17625,26 @@ mod tests {
 
     #[test]
     fn git_alias_smuggling_through_quoted_variables_is_not_allowed() {
-        // Issue #600: a variable-carried `-c` value is unresolvable to the
-        // alias scan (Ask), quoted or not; only the literal spelling Blocks.
+        // Issue #600: a variable-carried `-c` value that is not a same-line
+        // literal is unresolvable to the alias scan (Ask), quoted or not.
+        // A literal binding substitutes into a quoted use (Block, like the
+        // literal spelling); an unquoted `!` value is not safe from
+        // expansion, so it stays unresolved.
         for command in [
-            r#"A='alias.x=!id'; git -c "$A" status"#,
             r#"A='alias.x=!id'; git -c $A status"#,
-            r#"A='alias.x=!id'; git -c "${A}" status"#,
-            r#"K=alias.x; git -c "$K=!id" status"#,
+            r#"A=$(echo 'alias.x=!id'); git -c "$A" status"#,
+            r#"read A; git -c "$A" status"#,
         ] {
             assert_decision(command, Decision::Ask);
         }
-        assert_eq!(
-            decide(r#"A='alias.x=!id'; git -c "$A" status"#).decision(),
-            decide("A='alias.x=!id'; git -c $A status").decision()
-        );
-        assert_decision(r#"git -c "alias.x=!id" status"#, Decision::Block);
+        for command in [
+            r#"A='alias.x=!id'; git -c "$A" status"#,
+            r#"A='alias.x=!id'; git -c "${A}" status"#,
+            r#"K=alias.x; git -c "$K=!id" status"#,
+            r#"git -c "alias.x=!id" status"#,
+        ] {
+            assert_decision(command, Decision::Block);
+        }
     }
 
     #[test]

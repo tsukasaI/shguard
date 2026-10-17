@@ -47,7 +47,8 @@
 //! The value domain also answers whether `$NAME` is certainly one literal
 //! string ([`env::Env::exact`]), which is the only source of an Allow from a
 //! binding. A variable starts as `Top` (the inherited environment may hold
-//! anything); only a literal `for` list word binds it. Anything that may rewrite it unseen drops the
+//! anything); only a strong literal-only assignment, or a literal `for`
+//! list word, binds it. Anything that may rewrite it unseen drops the
 //! binding: a builtin that writes the names it is given, code that may write
 //! anything (`eval`, a call to a function defined on the line, a trap), and
 //! attributes that change what an assignment stores. Special variables

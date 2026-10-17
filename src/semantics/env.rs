@@ -783,8 +783,23 @@ impl Env {
         }
     }
 
-    fn literal_write(&self, _assignment: &Assignment) -> Write {
-        Write::Top
+    /// The write `assignment` performs as far as the exact-value domain can
+    /// tell: a literal-only value, appended onto a prior exact value for
+    /// `+=`; everything else is `Top`, however well `resolve_write` folds it.
+    fn literal_write(&self, assignment: &Assignment) -> Write {
+        let AssignmentValue::Scalar(word) = &assignment.value else {
+            return Write::Top;
+        };
+        let Some(text) = literal_text(word, false) else {
+            return Write::Top;
+        };
+        if !assignment.append {
+            return Write::Exact(text);
+        }
+        match self.exact(&assignment.name) {
+            Some(prior) => Write::Exact(format!("{prior}{text}")),
+            None => Write::Top,
+        }
     }
 
     /// The write `assignment` performs, recording the `IFS+=` inherited-
@@ -883,7 +898,10 @@ mod tests {
         apply(&mut env, "X=a", ExecScope::Parent);
         apply(&mut env, "X=b", ExecScope::Parent);
         assert_eq!(history(&env, "X"), strings(&["a", "b"]));
-        assert_eq!(env.vars["X"].value, AbsValue::top());
+        assert_eq!(
+            env.vars["X"].value,
+            AbsValue::strong_write(&Write::Exact("b".into()))
+        );
     }
 
     #[test]
@@ -903,7 +921,9 @@ mod tests {
         apply(&mut env, "X=b true", ExecScope::Parent);
         assert_eq!(history(&env, "X"), strings(&["a", "b"]));
         assert_eq!(env.current("X"), Some("b"));
-        assert_eq!(env.vars["X"].value, AbsValue::top());
+        let both =
+            AbsValue::strong_write(&Write::Exact("a".into())).weak_write(&Write::Exact("b".into()));
+        assert_eq!(env.vars["X"].value, both);
     }
 
     #[test]
@@ -985,6 +1005,52 @@ mod tests {
         let command = simple(line);
         env.apply_assignments(&command, ExecScope::Parent);
         env.note_command_effects(&command, &normalize::normalize_argv(&command));
+    }
+
+    #[test]
+    fn a_strong_literal_assignment_is_exact_and_nothing_else_is() {
+        let mut env = Env::isolated();
+        assert_eq!(env.exact("X"), None);
+        run(&mut env, "X=/a");
+        assert_eq!(env.exact("X"), Some("/a"));
+        run(&mut env, "X+=/b");
+        assert_eq!(env.exact("X"), Some("/a/b"));
+        run(&mut env, "X='c d'");
+        assert_eq!(env.exact("X"), Some("c d"));
+        run(&mut env, "X=$(e)");
+        assert_eq!(env.exact("X"), None);
+        run(&mut env, "X+=/b");
+        assert_eq!(env.exact("X"), None);
+        run(&mut env, "X=~/b");
+        assert_eq!(env.exact("X"), None);
+        run(&mut env, "X={a,b}");
+        assert_eq!(env.exact("X"), None);
+        run(&mut env, "X=$Y");
+        assert_eq!(env.exact("X"), None);
+    }
+
+    #[test]
+    fn a_weak_or_unperformed_assignment_is_not_exact() {
+        for scope in [ExecScope::Conditional, ExecScope::Forked] {
+            let mut env = Env::isolated();
+            env.apply_assignments(&simple("X=/a"), scope);
+            assert_eq!(env.exact("X"), None);
+        }
+        let mut env = Env::isolated();
+        run(&mut env, "X=/a");
+        env.apply_assignments(&simple("X=/b"), ExecScope::Conditional);
+        assert_eq!(env.exact("X"), None);
+        env.apply_assignments(&simple("X=/a"), ExecScope::Parent);
+        assert_eq!(env.exact("X"), Some("/a"));
+        run(&mut env, "X=/b true");
+        assert_eq!(env.exact("X"), None);
+        run(&mut env, "X=/a");
+        run(&mut env, "X=/b > /dev/null");
+        assert_eq!(env.exact("X"), None);
+        let mut env = Env::isolated();
+        env.note_readonly_operands(&parser_argv("readonly X"));
+        run(&mut env, "X=/a");
+        assert_eq!(env.exact("X"), None);
     }
 
     #[test]
@@ -1127,6 +1193,21 @@ mod tests {
         env.note_function_defined("command_not_found_handle");
         env.bind_loop_variable("X", "/a");
         assert_eq!(env.exact("X"), None);
+    }
+
+    #[test]
+    fn substitution_reads_the_bindings_before_the_commands_own_assignments() {
+        let mut env = Env::isolated();
+        run(&mut env, "S=/old");
+        let command = simple("S=/new cat \"$S/a\" $S");
+        let substituted = env.substitute_literals(&command).unwrap();
+        env.apply_assignments(&command, ExecScope::Parent);
+        let rendered = format!("{:?}", substituted.words);
+        assert!(
+            rendered.contains("/old") && !rendered.contains("/new"),
+            "{rendered}"
+        );
+        assert_eq!(env.exact("S"), None);
     }
 
     fn substituted(env: &Env, line: &str) -> Option<String> {
