@@ -150,9 +150,10 @@ enum FlagMatcher {
     /// A single short-option letter.
     Short(char),
     /// A `-`-prefixed argv token, matched verbatim or with a `=value`
-    /// suffix (GNU long-option convention, e.g. `--in-place=.bak`). For
-    /// deny/ask rules whose command is `git`, a non-empty prefix of a
-    /// `--long` token also matches (issue #582, see [`Self::satisfied`]).
+    /// suffix (GNU long-option convention, e.g. `--in-place=.bak`). For a
+    /// git rule or a git `[[pipeline]]` sink, including version-suffixed
+    /// spellings such as `git2`, a non-empty prefix of a `--long` token
+    /// also matches (issue #582, see [`Self::satisfied`]).
     Token(String),
     /// Satisfied if any one alternative is satisfied.
     AnyOf(Vec<FlagMatcher>),
@@ -202,9 +203,9 @@ impl FlagMatcher {
     /// resolved strings — module docs on why unresolvable tokens never
     /// match).
     ///
-    /// With `long_abbrev` set (deny/ask rules whose command is exactly `git`,
-    /// issue #582, and `[[pipeline]]` rules whose resolved sink is `git`
-    /// after version-suffix stripping, issues #604 and #652), a
+    /// With `long_abbrev` set (deny/ask rules whose command is exactly
+    /// `git`, issue #582, and `[[pipeline]]` rules whose resolved sink is
+    /// `git` after version-suffix stripping, issues #604 and #652), a
     /// `--`-prefixed [`Self::Token`] is also satisfied by any non-empty
     /// prefix of it (`--mirr`, `--upl=x`): git's option parser accepts any
     /// unambiguous prefix of a long option. No per-subcommand option table

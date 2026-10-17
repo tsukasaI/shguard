@@ -265,9 +265,11 @@
 #                    cluster, a "-"-prefixed token, "|" alternation);
 #                    every entry must be satisfied by the resolved sink's
 #                    own arguments. Absent or empty = no flag constraint.
-#                    For a git sink, a "--"-prefixed token also matches any
-#                    unique-prefix abbreviation (`--no-ver` for
-#                    `--no-verify`), as git itself accepts.
+#                    For a git sink (including version-suffixed spellings
+#                    such as `git2`), a "--"-prefixed token also matches any
+#                    non-empty prefix of it (`--no-ver` for `--no-verify`);
+#                    ambiguous prefixes, which git itself rejects, are
+#                    over-matched to the rule's verdict.
 #
 # [[redirect]] — matches the target of an output/append redirection:
 #   id, reason       same as above.
