@@ -42,7 +42,7 @@ rather than letting it go stale silently.
   assert one literal per combinatorial loop iteration rather than one
   literal per case, so this undercounts the true number of individual
   assertions that actually run.
-- **Benign corpus size:** 92 (realistic agent-workflow commands in
+- **Benign corpus size:** 95 (realistic agent-workflow commands in
   `tests/benign_corpus.rs`, verified to `Allow` without friction).
 
 This is a different axis from an LLM-based agent's self-reported

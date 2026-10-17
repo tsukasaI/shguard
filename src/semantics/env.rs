@@ -721,6 +721,11 @@ impl Env {
         }
     }
 
+    /// Whether `name` was defined as a function earlier on this line.
+    pub(crate) fn defines_function(&self, name: &str) -> bool {
+        self.functions.contains(name)
+    }
+
     /// Folds in a body evaluated with its own [`Env::isolated`] whose effects
     /// still reach the parent shell (an `if`/loop body): its readonly facts
     /// become unknown here, since which iteration or branch ran is not known.

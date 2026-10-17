@@ -57,6 +57,8 @@
 {"command":"less file.txt","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"ls $PWD","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"ls -la","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"ls | while read -r x; do echo \"$x\"; done","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"ls | while read -r x; do wc -l < \"$x\"; done","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"make","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"make build > build.log","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"mkdir -p src/test","decision":"Allow","deny_message":null,"matched_rule":null}
@@ -66,6 +68,7 @@
 {"command":"ping -c 1 localhost","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"python -m pytest","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"rg \"rm -rf\" src/","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"rg -n foo src | while IFS=: read -r f l rest; do echo \"$f:$l\"; done","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"rm -rf ./build-output","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"rm -rf target/debug","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"sed '/^#/d' file","decision":"Allow","deny_message":null,"matched_rule":null}
