@@ -334,11 +334,9 @@
 //! verdict) is **not** allowlist-suppressible in v1: a deliberate,
 //! fail-closed scope cut, not an accident of where the wrap sits.
 
-use std::collections::HashMap;
-
 use crate::HookContext;
 use crate::ast::{
-    Assignment, AssignmentValue, Command, CommandLine, CompoundCommand, ElifClause, ExtendedTest,
+    AssignmentValue, Command, CommandLine, CompoundCommand, ElifClause, ExtendedTest,
     FileRedirectionKind, FunctionDefinition, Pipeline, Redirection, Separator, SimpleCommand, Word,
     WordPiece,
 };
@@ -358,6 +356,8 @@ use crate::rules::{
     lexical_normalize, render_cwd_anchor, unresolved_word_may_hide_glob_qualifier,
     wrapper_chain_changes_cwd,
 };
+use crate::semantics::cwd::{AnchorOrigin, CwdAnchor, CwdContext, CwdState, MAX_CWD_STACK_DEPTH};
+use crate::semantics::env::{Env, ExecScope};
 use crate::verdict::{Decision, DenyMessage, Reason, RuleId, Verdict};
 
 /// Cap on how many levels deep a command/backquote substitution (or a
@@ -605,32 +605,31 @@ fn evaluate_command_line(
     ctx: AnalysisCtx<'_>,
     cwd: &mut CwdState,
 ) -> Verdict {
-    let mut env = Env::new();
-    evaluate_command_line_in(command_line, &mut env, true, ctx, cwd)
+    let mut env = Env::isolated();
+    evaluate_command_line_in(command_line, &mut env, ExecScope::Parent, ctx, cwd)
 }
 
 /// [`evaluate_command_line`] over a caller-supplied [`Env`] (issue #607: a
 /// `BraceGroup` body shares its enclosing line's `Env`, the way `cwd` is
-/// already shared). `parent_persists` is whether the enclosing context
-/// certainly runs this line in the parent shell; when it does not (the group
-/// is an `&&`/`||` right-hand side, backgrounded, or a pipeline stage), every
-/// assignment inside is classified as non-persisting, exactly like #534.
+/// already shared). `scope` is where the enclosing context runs this line;
+/// when it is not `Parent` (the group is an `&&`/`||` right-hand side,
+/// backgrounded, or a pipeline stage), every assignment inside is a weak
+/// write, exactly like #534.
 fn evaluate_command_line_in(
     command_line: &CommandLine,
     env: &mut Env,
-    parent_persists: bool,
+    scope: ExecScope,
     ctx: AnalysisCtx<'_>,
     cwd: &mut CwdState,
 ) -> Verdict {
     let mut isolated = chain_is_backgrounded(command_line, 0).then(|| cwd.clone_untrusted());
-    let first_runs_in_parent_shell =
-        parent_persists && runs_in_parent_shell(None, isolated.is_some());
+    let first_scope = scope.after_separator(None, isolated.is_some());
     let mut worst = evaluate_pipeline(
         &command_line.first,
         env,
         ctx,
         isolated.as_mut().unwrap_or(cwd),
-        first_runs_in_parent_shell,
+        first_scope,
     );
     let mut prev_untrustworthy = pipeline_reported_success_is_untrustworthy(&command_line.first);
     for (index, (separator, pipeline)) in command_line.rest.iter().enumerate() {
@@ -658,26 +657,17 @@ fn evaluate_command_line_in(
             isolated =
                 chain_is_backgrounded(command_line, index + 1).then(|| cwd.clone_untrusted());
         }
-        let in_parent_shell =
-            parent_persists && runs_in_parent_shell(Some(*separator), isolated.is_some());
+        let pipeline_scope = scope.after_separator(Some(*separator), isolated.is_some());
         let verdict = evaluate_pipeline(
             pipeline,
             env,
             ctx,
             isolated.as_mut().unwrap_or(cwd),
-            in_parent_shell,
+            pipeline_scope,
         );
         worst = fold_worst(worst, verdict);
     }
     worst
-}
-
-/// Whether a pipeline is certain to run in the parent shell whenever the line
-/// reaches it (issue #534): not the right-hand side of an `&&`/`||` (which may
-/// short-circuit; `separator` is the one preceding it, `None` for the first
-/// pipeline) and not part of a backgrounded chain.
-fn runs_in_parent_shell(separator: Option<Separator>, backgrounded: bool) -> bool {
-    !backgrounded && !matches!(separator, Some(Separator::And | Separator::Or))
 }
 
 /// Whether the pipeline at `index` (0 = [`CommandLine::first`], `i` = the
@@ -739,16 +729,16 @@ type IfsAlternates = Vec<(Vec<NormalizedWord>, String)>;
 /// 5: the ported `curl|sh` blocklist rule and the NEW decode/interpreter
 /// structural rules) into one worst-decision-wins [`Verdict`].
 ///
-/// `runs_in_parent_shell` (issue #534): whether this pipeline is certain to
-/// run, in the parent shell, whenever the line reaches it: it is not the
-/// right-hand side of an `&&`/`||` (which may short-circuit) and not part of
-/// a backgrounded chain (which runs in a subshell). Combined with a
-/// single-stage check here (every stage of a multi-stage pipeline is a
-/// subshell by default, and `lastpipe` is not modelled), it decides whether a
-/// simple command's assignments may be treated as persisting
-/// ([`Env::apply_assignments`]). Any uncertainty resolves to "not
-/// persisting": such an assignment's value still enters the history, but it
-/// can neither mark `$name` unknown nor clear an earlier unknown marker.
+/// `scope` (issue #534): where this pipeline runs. It is `Parent` only when
+/// the pipeline is certain to run in the parent shell whenever the line
+/// reaches it: not the right-hand side of an `&&`/`||` (which may
+/// short-circuit) and not part of a backgrounded chain (which runs in a
+/// subshell). Combined with a single-stage check here (every stage of a
+/// multi-stage pipeline is a subshell by default, and `lastpipe` is not
+/// modelled), it decides whether a simple command's assignments are strong
+/// writes ([`Env::apply_assignments`]). Any uncertainty resolves to a weak
+/// write: its value still enters the history, but it can neither mark
+/// `$name` unknown nor clear an earlier unknown marker.
 ///
 /// `cwd` (issue #103): a `cd`/`pushd`/etc. only updates it when this
 /// pipeline has exactly one stage — every stage of a `|` pipeline runs in
@@ -766,7 +756,7 @@ fn evaluate_pipeline(
     env: &mut Env,
     ctx: AnalysisCtx<'_>,
     cwd: &mut CwdState,
-    runs_in_parent_shell: bool,
+    scope: ExecScope,
 ) -> Verdict {
     let rules = ctx.rules;
     let mut stages = Vec::with_capacity(1 + pipeline.rest.len());
@@ -822,7 +812,7 @@ fn evaluate_pipeline(
         // attacker-choosable.
         let verdict = match command {
             Command::Simple(simple) => {
-                env.apply_assignments(simple, runs_in_parent_shell && stage_count == 1);
+                env.apply_assignments(simple, scope.pipeline_stage(stage_count));
                 env.note_readonly_operands(&normalize::normalize_argv(simple));
                 let mut alternates = Vec::new();
                 let verdict = evaluate_simple_command(
@@ -838,7 +828,7 @@ fn evaluate_pipeline(
                     per_stage_alternates.push((index, alternates));
                 }
                 let argv = normalize::normalize_argv(simple);
-                cwd.note_earlier_command(simple, &argv);
+                note_earlier_command(cwd, simple, &argv);
                 // Issue #103: only a single-stage pipeline's own `cd`/
                 // `pushd`/etc. is allowed to mutate `cwd` for whatever
                 // comes after this pipeline — see this function's own docs.
@@ -853,10 +843,10 @@ fn evaluate_pipeline(
                 }
                 stage_argvs.push(Vec::new());
                 if stage_count == 1 {
-                    evaluate_compound_command(compound, env, runs_in_parent_shell, ctx, cwd)
+                    evaluate_compound_command(compound, env, scope, ctx, cwd)
                 } else {
                     let mut isolated = cwd.clone();
-                    evaluate_compound_command(compound, env, false, ctx, &mut isolated)
+                    evaluate_compound_command(compound, env, ExecScope::Forked, ctx, &mut isolated)
                 }
             }
             Command::FunctionDefinition(func) => {
@@ -1058,8 +1048,8 @@ fn pipeline_shape_verdict(
 /// drift on how these security-critical checks are applied.
 ///
 /// `env` (issue #607) is threaded like `cwd` for a `BraceGroup` only; every
-/// other body gets a fresh `Env`. `parent_persists` is whether the group
-/// certainly runs in the parent shell (see [`evaluate_command_line_in`]).
+/// other body gets a fresh `Env`. `scope` is where the group runs (see
+/// [`evaluate_command_line_in`]).
 ///
 /// `cwd` (issue #103) is threaded through per-variant, not uniformly, since
 /// this is the one place `BraceGroup` and `Subshell` diverge
@@ -1081,7 +1071,7 @@ fn pipeline_shape_verdict(
 fn evaluate_compound_command(
     compound: &CompoundCommand,
     env: &mut Env,
-    parent_persists: bool,
+    scope: ExecScope,
     ctx: AnalysisCtx<'_>,
     cwd: &mut CwdState,
 ) -> Verdict {
@@ -1112,7 +1102,7 @@ fn evaluate_compound_command(
     {
         cwd.earlier_writer.set(true);
     }
-    let verdict = evaluate_compound_command_body(compound, env, parent_persists, ctx, cwd);
+    let verdict = evaluate_compound_command_body(compound, env, scope, ctx, cwd);
     cwd.earlier_writer.set(true);
     verdict
 }
@@ -1120,7 +1110,7 @@ fn evaluate_compound_command(
 fn evaluate_compound_command_body(
     compound: &CompoundCommand,
     env: &mut Env,
-    parent_persists: bool,
+    scope: ExecScope,
     ctx: AnalysisCtx<'_>,
     cwd: &mut CwdState,
 ) -> Verdict {
@@ -1132,7 +1122,7 @@ fn evaluate_compound_command_body(
             let verdict = evaluate_command_line_in(
                 body,
                 env,
-                parent_persists && redirections.is_empty(),
+                scope.group_with_redirections(!redirections.is_empty()),
                 ctx,
                 cwd,
             );
@@ -1493,8 +1483,9 @@ fn evaluate_function_definition(
 ) -> Verdict {
     let mut isolated = cwd.clone();
     isolated.symlink_untrusted = true;
-    let mut env = Env::new();
-    let verdict = evaluate_compound_command(&func.body, &mut env, true, ctx, &mut isolated);
+    let mut env = Env::isolated();
+    let verdict =
+        evaluate_compound_command(&func.body, &mut env, ExecScope::Parent, ctx, &mut isolated);
     if compound_command_may_change_cwd(&func.body) {
         cwd.poison();
     }
@@ -4366,15 +4357,15 @@ fn evaluate_command_position_substitution(
 /// default whitespace — see [`substitute_command_name`]/[`split_with_ifs`].
 /// Also tries the plain default-whitespace split as a floor whenever no
 /// `IFS`-informed split matches: `Env`'s map (its own docs) is deliberately
-/// line-scoped rather than per-command, so `env.get("IFS")` alone can't
+/// line-scoped rather than per-command, so `env.current("IFS")` alone can't
 /// distinguish a persisting standalone `IFS=` assignment from one scoped
 /// only to a DIFFERENT command's own prefix (`IFS=, true; X='rm -rf /';
 /// $X` — real bash resets `$IFS` back to whatever it was before the
 /// instant `true` exits, so `$X` still splits under that earlier value,
-/// not `,`). Round 4 (see [`Env::ifs_history`]'s own docs) additionally
+/// not `,`). Round 4 (see [`Env::ifs_hypotheses`]'s own docs) additionally
 /// tries every value `IFS` was EVER resolved to on this line, not just its
 /// current one, for the same reason: a later reassignment or an
-/// unresolvable overwrite can shadow-or-remove `IFS` from `env.get`'s view
+/// unresolvable overwrite can shadow-or-remove `IFS` from `env.current`'s view
 /// without that necessarily reflecting what the real shell's `$IFS` was at
 /// `$VAR`'s own expansion. Trying every candidate and Blocking on the
 /// first match keeps this purely additive, matching this codebase's floor
@@ -4417,10 +4408,10 @@ fn evaluate_command_position_bare_var(
     };
 
     // Issue #463: an explicit unresolvable reassignment (`X=$(evil)`) still
-    // removes `name` from `env`'s map — `Env::apply_assignments`'s own docs
+    // clears `name`'s current value — `Env::apply_assignments`'s own docs
     // treat a stale *current* resolution as worse than none, so a bare
-    // `env.get(name)` miss must still mean "forget what we currently know".
-    // Issue #516: that must not also discard `value_history` — the same
+    // `env.current(name)` miss must still mean "forget what we currently know".
+    // Issue #516: that must not also discard the candidate history — the same
     // command-scoped-prefix-assignment gap #463 fixed for a resolved
     // shadowing value applies just as much to an UNRESOLVABLE one:
     // `X='rm -rf /'; X=$(evil) true; $X` never lets `true`'s own
@@ -4430,26 +4421,25 @@ fn evaluate_command_position_bare_var(
     // "current value" candidate loop is skipped entirely, but the
     // historical-value loop further down still runs — the two loops no
     // longer require a live current value to reach the history fallback.
-    let value = env.get(name);
+    let value = env.current(name);
     // Issue #516: a GENUINELY PERSISTING unresolvable reassignment (no
-    // following command on that same simple command — `Env`'s own docs on
-    // `persisting_unresolvable`) must not fall back to `value_history`
+    // following command on that same simple command — a strong write, see
+    // `Env::apply_assignments`) must not fall back to the candidate history
     // either: unlike a command-scoped prefix assignment, the real shell's
     // `$name` truly does take on the new (unknown) value here, so an older
     // historical entry is stale, not merely shadowed.
     //
     // A fable code-reviewer pass on PR #532 (round 3) found this must NOT
-    // be conditioned on `value.is_none()`: `Env::apply_one`'s own docs (see
-    // `persisting_unresolvable`'s field doc) establish that only a
-    // PERSISTING assignment can ever clear the set, so once `name` is in
-    // it, EVERY later prefix-scoped assignment for that name — resolved or
-    // not — leaves it there. A resolved prefix-scoped assignment
-    // (`X=ls true`) still updates `map` (issue #463's own design, `Env`'s
-    // struct docs), so `env.get(name)` can be `Some("ls")` even while the
+    // be conditioned on `value.is_none()`: only a strong write truncates the
+    // history or sets `overwritten_by_unknown`, so once `name` is marked,
+    // EVERY later weak write for that name — resolved or not — leaves it
+    // there. A resolved prefix-scoped assignment
+    // (`X=ls true`) still updates the current value (issue #463's own
+    // design, `Env`'s struct docs), so `env.current(name)` can be `Some("ls")` even while the
     // real runtime value is still whatever the earlier persisting
     // unresolvable assignment actually produced: `X='rm -rf /';
     // X=$(evil); X=ls true; $X` must not fall back to the pre-`$(evil)`
-    // `"rm -rf /"` just because `map` currently shows a resolved value —
+    // `"rm -rf /"` just because the current value is resolved —
     // the `"ls"` current-value candidate is still tried below (it can only
     // ever raise the decision toward Ask/Block, never toward a false
     // Allow), but no STALE history entry may.
@@ -4457,7 +4447,7 @@ fn evaluate_command_position_bare_var(
     // Issue #534: only history recorded BEFORE that unresolvable assignment
     // is stale; a value recorded after it by a possibly-skipped (or
     // subshell-scoped) resolved assignment is still a reachable candidate.
-    let name_history: &[String] = env.live_value_history(name);
+    let name_history: &[String] = env.candidates(name);
 
     // Every distinct IFS interpretation worth trying, most-specific first:
     // the current resolved value, then every earlier value a later
@@ -4466,12 +4456,12 @@ fn evaluate_command_position_bare_var(
     // for "current" vs. "default".
     // A quoted `"$name"` is never field-split, so no IFS interpretation
     // applies: the only candidate is the unsplit value.
-    let current_ifs = if quoted { None } else { env.get("IFS") };
+    let current_ifs = if quoted { None } else { env.current("IFS") };
     let mut candidates: Vec<(Option<&str>, &'static str)> = Vec::new();
     if let Some(current) = current_ifs {
         candidates.push((Some(current), " under the same-line `IFS` reassignment"));
     }
-    let ifs_history: &[String] = if quoted { &[] } else { env.ifs_history() };
+    let ifs_history: &[String] = if quoted { &[] } else { env.ifs_hypotheses() };
     for historical in ifs_history {
         if Some(historical.as_str()) != current_ifs {
             candidates.push((
@@ -4534,7 +4524,7 @@ fn evaluate_command_position_bare_var(
     // Issue #463: `value` above is only the CURRENT resolution — the same
     // value-scoping gap this function's own docs describe for `IFS`
     // applies to every OTHER name too. A same-line `X='rm -rf /'; X=ls
-    // true` resolves `X=ls`'s own RHS fine, so `env.get("X")` moves on to
+    // true` resolves `X=ls`'s own RHS fine, so `env.current("X")` moves on to
     // `"ls"` and never un-sets back to `"rm -rf /"` after `true` exits
     // (`Env`'s own docs) — this line's dangerous value is still one `$X`
     // invocation could hold. Try every earlier RESOLVED value on record,
@@ -6560,7 +6550,7 @@ fn recurse_find_exec_payload(
     let mut discarded_alternates = Vec::new();
     let inner = evaluate_simple_command(
         synthetic,
-        &Env::new(),
+        &Env::isolated(),
         ctx.deeper(),
         cwd,
         true,
@@ -8687,224 +8677,6 @@ const OPENSSL_ENC_CIPHER_NAMES: &[&str] = &[
     "camellia-256-cbc",
 ];
 
-// ---------------------------------------------------------------------
-// CwdContext: issue #103's folded, same-line working-directory tracking
-// ---------------------------------------------------------------------
-
-/// The folded working-directory context for the command line currently
-/// being analyzed (issue #103) — a `cd`/`pushd`/etc. *within one command
-/// line* is statically resolvable the same way tilde/brace expansion
-/// already are, so `cd X && cmd rel/path` is made to resolve to the same
-/// decision `cmd X/rel` would, without shguard gaining any notion of a real
-/// runtime cwd or any state that survives past one `analyze()` call
-/// (plan.md's cross-invocation scope boundary is unchanged — see the
-/// README's Limitations section).
-///
-/// - `Initial`: no `cd`-family command has been seen yet on this line. The
-///   ordinary, pre-#103 axiom holds unconditionally: a bare relative token
-///   (`rm config.toml` with no `cd` anywhere) is never itself dangerous, so
-///   nothing here composes or floors anything. **Never conflate this with
-///   `Poisoned`** — they read the same to a naive "do we know the cwd?"
-///   question, but only `Poisoned` means the cwd became attacker-steerable
-///   within the analyzed string itself; `Initial` means it never came up.
-///   A hook payload carrying an absolute `cwd` (issue #549) seeds the top
-///   level as `Known(cwd)` instead, so `Initial` there means "no usable
-///   payload `cwd`".
-/// - `Known(anchor)`: some earlier `cd`/`pushd` target on this line, or
-///   the hook payload's absolute `cwd` (issue #549), resolved to a
-///   lexically-certain string — `anchor.path` is that string, already
-///   normalized (`"/tmp"`, `"~/.config/shguard"`, `"build"`,
-///   `"../x"`; see [`render_cwd_anchor`]). Composing a later `Rel`-shaped
-///   token against it (`anchor + "/" + token`, then ordinary rule matching
-///   re-normalizes the join from scratch) is lexical CERTAINTY, the same
-///   class as tilde expansion — so a composed match inherits the matched
-///   rule's own full decision, uncapped (`crate::gate::evaluate_composed_cwd`).
-/// - `Poisoned`: a `cd`-family command ran whose destination is statically
-///   unknowable (`cd $(sub)`, `cd -`, `source file`, an unresolvable
-///   `argv[0]` that could itself be `cd`, …) — see [`apply_cwd_effect`]/
-///   [`cd_directive`]'s docs for the full catalogue. This is genuine
-///   uncertainty, not certainty: a later relative token only ever floors to
-///   `Ask` ([`scan_unknown_cwd_floor`]), never inherits a matched rule's own
-///   stricter decision.
-///
-/// # Recursion (substitutions, `bash -c`, subshells, loops, functions)
-///
-/// Every recursion boundary in this module seeds its own independent
-/// [`CwdContext`] from a CLONE of whatever was live at the recursion site —
-/// see [`analyze_at_depth`]'s own docs for why this is never
-/// [`CwdContext::Initial`] except at the two true top-level entry points.
-/// Whether that clone's own mutations are later allowed to write back
-/// (`evaluate_command_line`'s pipelines, a `BraceGroup`'s body) or are
-/// strictly discarded (a `$(...)`/backtick payload, a `Subshell`'s body, a
-/// loop's body/condition, a function definition's body, a non-single-stage
-/// pipeline's stages) is a per-construct decision documented at each call
-/// site — see [`evaluate_pipeline`]/[`evaluate_compound_command`]'s own
-/// docs for the full shell-semantics table this issue's design specified.
-///
-/// Additive-only, worst-wins by construction: every consumer of this type
-/// either composes a rewritten path and folds the result via ordinary
-/// [`fold_worst`] (never lowering a decision the uncomposed evaluation
-/// already reached), or floors to `Ask` on top of whatever a matching
-/// deny/ask rule already produced. A bug in this tracking logic can only
-/// ever push a decision toward over-asking, never toward a silent bypass.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum CwdContext {
-    Initial,
-    Known(CwdAnchor),
-    Poisoned,
-}
-
-impl CwdContext {
-    /// `Known` for an anchor a `cd`/`pushd` on the analyzed line produced.
-    fn on_line(path: String) -> Self {
-        Self::Known(CwdAnchor {
-            path,
-            origin: AnchorOrigin::Line,
-            physical: false,
-        })
-    }
-
-    /// The [`SymlinkScope`] a `resolve_symlinks` rule (issues #583, #612)
-    /// resolves this command's relative candidates in. The base is only a
-    /// `Known` anchor that is absolute and whose lexical spelling still names
-    /// the real cwd: a `~`-anchored, relative or physical-mode anchor,
-    /// `Initial` and `Poisoned` all yield no base, and so do commands whose
-    /// wrapper moved the real cwd (`sudo -D`) — those relative candidates
-    /// fail closed. `refuse` drops every exception (see
-    /// [`CwdState::earlier_writer`]).
-    fn symlink_scope<'a>(&'a self, wrapper_moves_cwd: bool, refuse: bool) -> SymlinkScope<'a> {
-        let scope = SymlinkScope::new(self.trusted_base(wrapper_moves_cwd));
-        if refuse { scope.refusing_all() } else { scope }
-    }
-
-    /// The absolute directory relative paths of a command run now resolve
-    /// against, when this module's lexical cwd can be trusted to name it.
-    fn trusted_base(&self, wrapper_moves_cwd: bool) -> Option<&str> {
-        match self {
-            Self::Known(anchor)
-                if anchor.path.starts_with('/') && !anchor.physical && !wrapper_moves_cwd =>
-            {
-                Some(anchor.path.as_str())
-            }
-            _ => None,
-        }
-    }
-}
-
-/// A [`CwdContext::Known`] directory and where it came from. The origin
-/// only shapes reason strings (issue #622): a composed match under the
-/// payload `cwd` must not be blamed on a `cd` the command line never ran.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CwdAnchor {
-    path: String,
-    origin: AnchorOrigin,
-    /// Set after a physical `cd -P` or under `set -P`: `path` is then the
-    /// lexical spelling, which can name a different directory than the real
-    /// cwd once a symlinked component is followed by `..`.
-    physical: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AnchorOrigin {
-    /// The hook payload's absolute `cwd`, untouched by the analyzed line.
-    Payload,
-    /// A `cd`/`pushd` on the analyzed line (possibly relative to the
-    /// payload `cwd`): the visible cause once one has run.
-    Line,
-}
-
-impl CwdAnchor {
-    /// What composed a relative target against this anchor, for a reason.
-    fn describe(&self) -> String {
-        match self.origin {
-            AnchorOrigin::Payload => format!("the hook payload cwd {:?}", self.path),
-            AnchorOrigin::Line => format!("a same-line folded `cd` to {:?}", self.path),
-        }
-    }
-
-    /// The [`SymlinkScope`] for the composed pass, whose relative tokens were
-    /// already joined onto this anchor: no `resolve_symlinks` exception
-    /// applies when the anchor's lexical spelling cannot be trusted to name
-    /// the real cwd (see [`CwdAnchor::physical`]) or a wrapper moved it.
-    fn composed_symlink_scope<'a>(
-        &'a self,
-        wrapper_moves_cwd: bool,
-        refuse: bool,
-    ) -> SymlinkScope<'a> {
-        let scope = SymlinkScope::new(Some(self.path.as_str()));
-        if self.physical || wrapper_moves_cwd || refuse {
-            scope.refusing_all()
-        } else {
-            scope
-        }
-    }
-}
-
-/// Cap on how many frames issue #210's directory-stack tracking
-/// ([`CwdState::stack`]) may hold before this module gives up modeling it
-/// precisely and poisons instead — the same fail-closed-on-overflow stance
-/// [`MAX_SUBSTITUTION_DEPTH`] takes, guarding against an adversarial
-/// `pushd d && pushd d && ...` chain growing the tracked stack unboundedly
-/// within one command line.
-const MAX_CWD_STACK_DEPTH: usize = 64;
-
-/// Issue #210: [`CwdContext`]'s current-directory tracking, paired with a
-/// linear stack of earlier frames pushed by `pushd`/popped by `popd` —
-/// modeling bash's own directory stack precisely enough to resolve
-/// `pushd ~/.config/shguard && pushd /tmp && popd && rm config.toml` back to
-/// the real, dangerous `~/.config/shguard` anchor instead of flooring
-/// straight to `Ask` the way collapsing every stack operation to
-/// [`CwdContext::Poisoned`] (this mechanism's pre-#210 behavior, and still
-/// its fallback for any shape it doesn't model — see [`apply_pushd`]/
-/// [`apply_popd`]'s own docs) would.
-///
-/// The ACTUAL stack contents are never threaded across a recursion
-/// boundary — every recursion starts its own local [`CwdState`], seeded
-/// via [`CwdState::seed`] or [`CwdState::seed_unknown_stack`] depending on
-/// what kind of boundary it is (a substitution recursion's own cwd
-/// mutations are independently read-or-discarded per [`CwdContext`]'s
-/// "Recursion" section above and never write back to the caller's stack
-/// either way, regardless of which seed is used). The two seeds differ in
-/// whether the STACK ITSELF is honestly modeled as possibly non-empty:
-/// - [`CwdState::seed`] (empty stack): correct only for a boundary that
-///   spawns a genuinely fresh interpreter process with its own empty
-///   `DIRSTACK` — `bash -c`/`sh -c`/`zsh -c`/`dash -c`/`fish -c`/
-///   `flock -c`/`su -c`/`env -S`, and the two top-level entry points.
-/// - [`CwdState::seed_unknown_stack`] (one [`CwdContext::Poisoned`]
-///   sentinel frame): required for a `$()`/backtick payload, a process
-///   substitution, a heredoc body substitution, or `eval`'s joined
-///   script — every one of these forks or evaluates in the CURRENT shell
-///   and really does inherit the parent's live stack via fork, so an
-///   inner `popd`/bare-`pushd` reaching past what the recursed scope
-///   itself pushed must poison forward rather than silently no-op past a
-///   frame that, in the real shell, actually exists. Using [`Self::seed`]
-///   at one of these boundaries was a confirmed Ask/Block→Allow bypass
-///   found in the initial #210 landing: `pushd
-///   ~/.config/shguard && pushd /tmp && cat $(popd && cp evil.toml
-///   config.toml)` composed the inner `cp` against `/tmp` instead of the
-///   real, inherited `~/.config/shguard`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CwdState {
-    current: CwdContext,
-    stack: Vec<CwdContext>,
-    /// `set -P`/`set -o physical` or a `cd -P` has run on this line, so
-    /// every anchor a later `cd` produces is marked [`CwdAnchor::physical`].
-    physical_mode: bool,
-    /// Set once an earlier simple command on this line is anything but a
-    /// cwd move or a no-write builtin (issue #612), so it may have written,
-    /// replaced or re-linked any path: every later `resolve_symlinks`
-    /// exception on the line is refused. Shared by every clone of this state
-    /// so a subshell, a backgrounded chain or a loop body that runs earlier
-    /// counts for a later command. A fresh recursion (`bash -c`, `$(...)`,
-    /// `eval`) starts its own flag and is refused outright instead
-    /// (`resolve_symlinks` at `depth > 0`).
-    earlier_writer: std::rc::Rc<std::cell::Cell<bool>>,
-    /// Set on the clone a function body or loop is evaluated with: the body
-    /// can run before or repeatedly around the commands that precede it
-    /// textually, so no `resolve_symlinks` exception applies inside it.
-    symlink_untrusted: bool,
-}
-
 /// Commands an earlier position on the line may hold without refusing a
 /// later `resolve_symlinks` exception: they move the shell's own cwd or
 /// write nothing to the filesystem. Not a denylist of writers: any other
@@ -8970,135 +8742,13 @@ fn earlier_command_may_write(command: &SimpleCommand, argv: &[NormalizedWord]) -
             operand.starts_with('-') && !operand.starts_with("--") && operand.contains(['v', 'n'])
         })
 }
-impl CwdState {
-    /// The clone a backgrounded chain runs with: it is not ordered against
-    /// the rest of the line, so no `resolve_symlinks` exception applies in it.
-    fn clone_untrusted(&self) -> Self {
-        Self {
-            symlink_untrusted: true,
-            ..self.clone()
-        }
-    }
 
-    /// Notes that `command` (already normalized to `argv`) ran earlier on the
-    /// line, refusing later `resolve_symlinks` exceptions when it may write
-    /// (see [`earlier_command_may_write`]).
-    fn note_earlier_command(&self, command: &SimpleCommand, argv: &[NormalizedWord]) {
-        if !self.earlier_writer.get() && earlier_command_may_write(command, argv) {
-            self.earlier_writer.set(true);
-        }
-    }
-    /// Marks the current anchor physical once physical mode is on, called
-    /// after every `cd`-family command.
-    fn apply_physical_mode(&mut self, requested: bool) {
-        self.physical_mode |= requested;
-        if self.physical_mode
-            && let CwdContext::Known(anchor) = &mut self.current
-        {
-            anchor.physical = true;
-        }
-    }
-
-    /// Seeds a fresh state from a recursion site's [`CwdContext`] (issue
-    /// #103's cwd-seeding mechanism) with a genuinely EMPTY stack — only
-    /// correct for a
-    /// boundary that spawns a real, fresh interpreter process with its own
-    /// empty `DIRSTACK` (`bash -c`/`sh -c`/`zsh -c`/`dash -c`/`fish -c`/
-    /// `flock -c`/`su -c`/`env -S`, and the two true top-level entry
-    /// points). See [`Self::seed_unknown_stack`] for the same-process
-    /// (`$()`/backtick/process-substitution/`eval`) counterpart, and
-    /// [`CwdState`]'s own docs for why the two are NOT interchangeable.
-    fn seed(current: CwdContext) -> Self {
-        Self {
-            current,
-            stack: Vec::new(),
-            physical_mode: false,
-            earlier_writer: Default::default(),
-            symlink_untrusted: false,
-        }
-    }
-
-    /// Seeds a fresh state for a SAME-process recursion boundary — a
-    /// `$()`/backtick payload, a process substitution, a heredoc body's own
-    /// substitution, or `eval`'s joined script — every one of which forks
-    /// or evaluates in the CURRENT shell and therefore really does inherit
-    /// the live directory stack, unlike [`Self::seed`]'s fresh-process
-    /// case. Seeding with a genuinely empty `stack` there would make an
-    /// inner `popd`/bare-`pushd` a silent, precise no-op (per
-    /// [`apply_popd`]/[`apply_pushd_swap`]'s own "empty stack is a safe
-    /// no-op" reasoning) even though a real, unmodeled frame is actually
-    /// there to pop back to — a confirmed Ask/Block→Allow regression in
-    /// the initial #210 landing. Seeding with one
-    /// [`CwdContext::Poisoned`] sentinel frame instead keeps every
-    /// operation this recursed scope can itself statically account for
-    /// (a balanced `pushd X ... popd` pair fully inside the recursion)
-    /// exactly as precise as [`Self::seed`] would, while any `popd`/bare-
-    /// `pushd` that reaches PAST what this scope itself pushed correctly
-    /// pops the sentinel and poisons forward — honest about "one or more
-    /// real frames exist here, contents unknown" instead of silently
-    /// claiming there are none.
-    fn seed_unknown_stack(current: CwdContext) -> Self {
-        Self {
-            current,
-            stack: vec![CwdContext::Poisoned],
-            physical_mode: false,
-            earlier_writer: Default::default(),
-            symlink_untrusted: false,
-        }
-    }
-
-    /// Poisons the current directory AND discards the tracked stack —
-    /// issue #210's stack is only ever meaningful alongside a `current` we
-    /// can still compose against; once `current` itself becomes unknown,
-    /// nothing later could safely pop back to a stack frame recorded before
-    /// the point uncertainty began, so keeping them would be false
-    /// precision, not caution.
-    fn poison(&mut self) {
-        self.current = CwdContext::Poisoned;
-        self.stack.clear();
-    }
-
-    /// Issue #353's mitigation: collapses a non-empty stack down to a
-    /// single [`CwdContext::Poisoned`] sentinel — the same "one or more
-    /// real frames exist here, contents unknown" shape [`Self::seed_unknown_stack`]
-    /// seeds with — leaving `current` untouched. Called at every
-    /// [`crate::ast::Separator`] in a [`crate::ast::CommandLine`] that
-    /// does NOT guarantee the preceding pipeline succeeded (every
-    /// separator except `&&`, OR `&&` following a pipeline whose reported
-    /// success is untrustworthy per
-    /// `crate::gate::pipeline_reported_success_is_untrustworthy` — a
-    /// `!`-negated pipeline reports SUCCESS to `&&` even when the real
-    /// command inside failed, since negation flips the reported exit
-    /// status, not whether the command itself ran; a single-stage brace
-    /// group whose own last inner pipeline is so negated inherits the
-    /// same untrustworthiness, since the group's reported status IS that
-    /// last pipeline's) whenever the stack is non-empty.
-    ///
-    /// [`apply_pushd`]'s own known limitation (assume-success: a `pushd X`
-    /// this module resolves is always assumed to actually `cd` there) means
-    /// the tracked stack can desync from reality the instant a resolved
-    /// push's target doesn't really exist — a real `pushd` to a
-    /// nonexistent target fails outright (no push, no `cd`), so this
-    /// module's stack ends up one frame deeper than reality from that
-    /// point on. Under `&&`-only continuation this is harmless: if the
-    /// real `pushd` fails, `&&` never runs what follows, so any verdict
-    /// about it is vacuous. Once a `;`/`||`/`&` separator makes that
-    /// failure-world reachable, though, a later `popd` recovers whichever
-    /// of TWO adjacent real-world outcomes shguard can no longer
-    /// distinguish — exactly the shape [`CwdContext::Poisoned`] already
-    /// exists to represent. Collapsing at the crossing rather than at
-    /// every individual resolved `pushd` (which would degenerate into
-    /// treating any `pushd` as unverifiable, discarding issue #210's value
-    /// for the extremely common `pushd X && ... && popd` shape entirely)
-    /// confines the cost to command lines that are ACTUALLY two-world —
-    /// still a real precision loss for a benign `pushd /tmp; make; popd`,
-    /// but strictly better than pre-#210's poison-on-any-`pushd` baseline,
-    /// and never worse than the already-accepted plain-`cd` gap (issue
-    /// #103) `current` alone still carries after the collapse.
-    fn collapse_stack_on_uncertain_crossing(&mut self) {
-        if !self.stack.is_empty() {
-            self.stack = vec![CwdContext::Poisoned];
-        }
+/// Notes that `command` (already normalized to `argv`) ran earlier on the
+/// line, refusing later `resolve_symlinks` exceptions when it may write
+/// (see [`earlier_command_may_write`]).
+fn note_earlier_command(cwd: &CwdState, command: &SimpleCommand, argv: &[NormalizedWord]) {
+    if !cwd.earlier_writer.get() && earlier_command_may_write(command, argv) {
+        cwd.earlier_writer.set(true);
     }
 }
 
@@ -11057,328 +10707,6 @@ fn apply_unknown_cwd_floor(
     apply_floor(verdict, floor_decision, floor_reason, deny_message)
 }
 
-// ---------------------------------------------------------------------
-// Env: same-command-line variable resolution (rule 2)
-// ---------------------------------------------------------------------
-
-/// Tracks `NAME -> value` for every assignment statically resolved so far
-/// on the current command line, in execution order — rule 2's "any earlier
-/// simple command, or same-command prefix assignment" resolution rule.
-///
-/// A single flat map, not scoped per-command: bash's own `X=v cmd` prefix
-/// assignment is scoped to `cmd`'s environment only, but shguard is a
-/// static analyzer deciding whether *this* command line is safe to run,
-/// not a shell — treating a prefix assignment as line-scoped (rather than
-/// command-scoped, and never un-set afterwards) is deliberately
-/// conservative: it can only make rule 2's resolution *more* available,
-/// never introduce a false Allow, since resolution only ever *upgrades*
-/// Ask to Block, never downgrades anything.
-///
-/// `assigned` (issue #103) separately tracks every name that has been
-/// assigned on this line AT ALL, resolved or not — `map` alone can't answer
-/// "was `HOME`/`CDPATH` touched on this line", since [`Self::apply_one`]
-/// deliberately *removes* a name from `map` the moment its value stops
-/// being statically resolvable (`HOME=$(evil) cd`), which would otherwise
-/// make a same-line `HOME=`/`CDPATH=` assignment with an unresolvable RHS
-/// invisible to `crate::gate`'s `cd`-poisoning checks — exactly the
-/// attacker-controlled-`HOME` case those checks exist to catch, not a case
-/// they may fail open on.
-///
-/// `value_history` (issue #139 round 4 for `IFS`; generalized to every
-/// name by issue #463) separately accumulates every value ever statically
-/// resolved for a given name on this line, in order, and — unlike `map` —
-/// a later reassignment never shrinks it. `map.get(name)` alone answers
-/// "what does `name` resolve to right now", but rule 2's bare-`$VAR`
-/// resolution needs "what could `name` have been at the moment `$VAR` was
-/// actually expanded", which can differ: a same-line `X=v true` is a prefix
-/// assignment scoped to `true` alone and never persists past it (bash
-/// resets `$X` back to whatever it was before the instant `true` exits),
-/// so a later, differently-resolved reassignment shadows it in `map`
-/// without that shadow reflecting reality — `Env` deliberately does not
-/// distinguish that case from an ordinary persisting reassignment
-/// (`X=v; X=w; $X`), so `value_history` treats both the same way; this is
-/// the same conservative over-approximation `ifs_history` already made,
-/// widening rule 2's Block coverage, never introducing a false Allow.
-/// `evaluate_command_position_bare_var` additionally tries every OTHER
-/// entry in `value_history(name)` once `map.get(name)`'s own current
-/// resolution has already been tried, so a shadowed-but-still-possible
-/// value is never silently missed — purely additive, matching every other
-/// floor in this file.
-///
-/// This is deliberately narrower than `assigned`'s "touched at all"
-/// tracking: an explicit unresolvable reassignment (`X=$(evil)`) still
-/// removes `name` from `map` — [`Self::apply_one`]'s own docs treat a stale
-/// *current* value as worse than none — but issue #516 found that must not
-/// also block the history fallback for the *name being resolved as the
-/// command itself*: a same-line, command-scoped prefix assignment with an
-/// unresolvable RHS (`X='rm -rf /'; X=$(evil) true; $X`) never persists
-/// past its own command in real bash either, exactly like a resolved
-/// shadowing prefix assignment already doesn't, so `value_history` must
-/// still be tried when `map.get(name)` comes up empty, not only alongside
-/// an already-known current resolution — `evaluate_command_position_bare_var`
-/// consults only [`Self::live_value_history`]: entries before a genuinely
-/// persisting unresolvable reassignment are dropped when the current
-/// absence (or a later prefix-scoped resolution on top of it) traces back
-/// to one, current-value candidates simply being absent from that scan
-/// when there is no current resolution to try.
-struct Env {
-    map: HashMap<String, String>,
-    assigned: std::collections::HashSet<String>,
-    value_history: HashMap<String, Vec<String>>,
-    /// Running "assume every same-line `IFS+=` appended onto the inherited
-    /// default" hypothesis (issue #358) — `None` until the first `IFS+=`
-    /// with no same-line prior. Tracked separately from `map`'s own
-    /// `IFS+=` chain (which starts from "unset appends onto empty",
-    /// [`Self::apply_one`]'s own docs) because BOTH starting points remain
-    /// live candidates the whole line through, and each needs its own
-    /// running total: `IFS+=,; IFS+=.` must offer `" \t\n,."` (this
-    /// field's chain) as well as `,.` (`map`'s chain) as floors, not just
-    /// the first append's `" \t\n,"` with the second append's `.` composed
-    /// onto the wrong base.
-    ifs_append_floor: Option<String>,
-    /// Issue #516: names for which the most recent PERSISTING (non-prefix-
-    /// scoped) assignment on this line had an unresolvable RHS, meaning
-    /// `$name`'s real runtime value is genuinely unknown from this point on
-    /// (`X=$(evil)` with no following command on the same simple command —
-    /// [`Self::apply_one`]'s own docs), as opposed to a command-scoped
-    /// prefix one (`X=$(evil) true`), which never changes what persists in
-    /// the real shell at all. `value_history`'s fallback is safe for the
-    /// latter (the old value truly does survive once the prefix-scoped
-    /// command exits) but not the former (the new, unresolvable value truly
-    /// does take over) — a fallback there would be a genuine false Block,
-    /// not a conservative over-approximation.
-    ///
-    /// Each entry is a cut index: `value_history[name].len()` at the moment
-    /// of that assignment, so only history recorded before it is stale (a
-    /// later possibly-skipped resolved assignment is still a reachable
-    /// candidate, issue #534; [`Self::live_value_history`]).
-    ///
-    /// Only a CERTAINLY PERSISTING assignment (`is_prefix_scoped == false` in
-    /// [`Self::apply_one`]) may ever insert into (unresolvable RHS) or advance
-    /// the cut of (resolved RHS) this map: a prefix-scoped, short-circuitable or
-    /// subshell-scoped assignment cannot clear a genuinely unknown persisting
-    /// value an earlier command left behind either (`X=$(evil); X=ls true;
-    /// $X` still has `$X` holding `$(evil)`'s own unknown value once `true`
-    /// exits — `"ls"` never actually took over), so it must leave the marker
-    /// alone in both of its own branches. Its resolved value still lands in
-    /// `value_history` after the cut.
-    persisting_unresolvable: HashMap<String, usize>,
-    /// Names that appeared as an operand of a readonly-ish builtin
-    /// (`readonly`, or `declare`/`typeset`/`local`/`export` with an
-    /// `-r`-containing flag cluster) earlier on this line. A later assignment
-    /// to such a name may silently fail, so it must not advance the cut.
-    readonly_names: std::collections::HashSet<String>,
-    /// A readonly-ish builtin whose operands could not be resolved: no name
-    /// can be trusted to be writable, so no cut advances.
-    readonly_unknown: bool,
-}
-
-impl Env {
-    fn new() -> Self {
-        Self {
-            map: HashMap::new(),
-            assigned: std::collections::HashSet::new(),
-            value_history: HashMap::new(),
-            ifs_append_floor: None,
-            persisting_unresolvable: HashMap::new(),
-            readonly_names: std::collections::HashSet::new(),
-            readonly_unknown: false,
-        }
-    }
-
-    /// An assignment to a possibly-readonly name may fail in the real shell,
-    /// so it neither marks the name unknown nor advances its cut.
-    fn is_possibly_readonly(&self, name: &str) -> bool {
-        self.readonly_unknown || self.readonly_names.contains(name)
-    }
-
-    /// Conservatively records `readonly`-ish operands (see
-    /// [`Self::readonly_names`]); any such appearance is enough, whether or
-    /// not the builtin certainly runs.
-    fn note_readonly_operands(&mut self, argv: &[NormalizedWord]) {
-        let Some((first, rest)) = argv.split_first() else {
-            return;
-        };
-        let Resolution::Resolved(name) = first.resolution() else {
-            return;
-        };
-        let readonlyish = match name.as_str() {
-            "readonly" => true,
-            "declare" | "typeset" | "local" | "export" => {
-                rest.iter().any(|word| match word.resolution() {
-                    Resolution::Resolved(arg) => arg.starts_with('-') && arg.contains('r'),
-                    Resolution::Unresolvable(_) => true,
-                })
-            }
-            _ => false,
-        };
-        if !readonlyish {
-            return;
-        }
-        for word in rest {
-            match word.resolution() {
-                Resolution::Resolved(arg) if arg.starts_with('-') => {}
-                Resolution::Resolved(arg) => {
-                    let operand = arg.split('=').next().unwrap_or(arg);
-                    self.readonly_names.insert(operand.to_string());
-                }
-                Resolution::Unresolvable(_) => self.readonly_unknown = true,
-            }
-        }
-    }
-
-    fn get(&self, name: &str) -> Option<&str> {
-        self.map.get(name).map(String::as_str)
-    }
-
-    /// Every value `name` has ever statically resolved to on this line so
-    /// far, in assignment order — see this struct's own docs for why this
-    /// must survive a later shadow/removal that `map.get(name)` would not.
-    fn value_history(&self, name: &str) -> &[String] {
-        self.value_history.get(name).map_or(&[], Vec::as_slice)
-    }
-
-    /// [`Self::value_history`] specialized to `IFS` — rule 2's `IFS`-aware
-    /// splitting candidates (`evaluate_command_position_bare_var`'s own
-    /// docs) only ever care about this one name.
-    fn ifs_history(&self) -> &[String] {
-        self.value_history("IFS")
-    }
-
-    /// Whether `name` was assigned anywhere on this command line so far
-    /// (this same command's own prefix assignments included, per
-    /// [`Self::apply_assignments`]'s ordering), regardless of whether the
-    /// assigned value itself resolved statically — see this struct's own
-    /// docs for why that distinction matters.
-    fn was_assigned(&self, name: &str) -> bool {
-        self.assigned.contains(name)
-    }
-
-    /// Issue #516: the part of `name`'s [`Self::value_history`] that is not
-    /// stale. When the most recent PERSISTING (non-prefix-scoped) assignment
-    /// to `name` had an unresolvable RHS, everything recorded before it is
-    /// dropped, independent of what `map` currently shows — a LATER
-    /// prefix-scoped resolution updates `map` (e.g. to `Some("ls")`) without
-    /// ever clearing this (see [`Self::persisting_unresolvable`]'s own docs
-    /// for why). `evaluate_command_position_bare_var` must NOT paper over
-    /// the genuinely unknown runtime value with those stale entries.
-    fn live_value_history(&self, name: &str) -> &[String] {
-        let history = self.value_history(name);
-        let cut = self.persisting_unresolvable.get(name).copied().unwrap_or(0);
-        history.get(cut..).unwrap_or(&[])
-    }
-
-    /// Folds `command`'s own assignments into the map. Must be called
-    /// before evaluating `command` itself, so a same-command prefix
-    /// assignment (`X=rm $X -rf /`) is visible to that very command, and
-    /// after, all later commands on the line see it too.
-    ///
-    /// A value that does not resolve to exactly one [`Resolution::Resolved`]
-    /// word (unresolvable, or an assignment whose RHS split into more than
-    /// one word — see `normalize_assignment_value`'s brace-alternation
-    /// divergence) removes any prior entry instead: a stale resolved value
-    /// is worse than no resolution at all, since rule 2 only ever uses a
-    /// resolution to *upgrade* Ask to Block.
-    ///
-    /// `persists_if_standalone` (issue #534) is whether the enclosing list/
-    /// pipeline context certainly runs `command` in the parent shell
-    /// ([`evaluate_pipeline`]'s `runs_in_parent_shell`, plus single-stage).
-    /// When it is not, the assignments are classified exactly like a
-    /// command-scoped prefix: they may never reach later commands, so they
-    /// must neither poison nor clear [`Self::persisting_unresolvable`]
-    /// (their resolved values still enter `value_history`, past the cut).
-    fn apply_assignments(&mut self, command: &SimpleCommand, persists_if_standalone: bool) {
-        let is_prefix_scoped = !command.words.is_empty() || !persists_if_standalone;
-        for assignment in &command.assignments {
-            self.apply_one(assignment, is_prefix_scoped);
-        }
-    }
-
-    fn apply_one(&mut self, assignment: &Assignment, is_prefix_scoped: bool) {
-        self.assigned.insert(assignment.name.clone());
-        let is_ifs = assignment.name == "IFS";
-        let resolved = match normalize::normalize_assignment_value(assignment).as_slice() {
-            [one] => match one.resolution() {
-                // `NAME+=value` (issue #139, round 4) appends to `NAME`'s
-                // own current value. When that current value is itself
-                // statically known, the appended result is exact. When it
-                // isn't — no same-line prior assignment at all — bash's own
-                // semantics treat an unset/unassigned variable's `+=` as
-                // starting from an empty string, so `Some(rhs.clone())` is
-                // exactly as valid an assumption as plain `NAME=value`
-                // already makes below (main-parity, not a new claim: round
-                // 6 found this arm returning `None` here regressed rule 2's
-                // coverage below what main had before this PR ever touched
-                // `+=`, e.g. `X+='rm -rf /'; $X` wrongly Asked instead of
-                // Blocking).
-                Resolution::Resolved(rhs) if assignment.append => {
-                    // `IFS+=value` could ALSO be appending onto the
-                    // shell's inherited default (`" \t\n"`) rather than
-                    // onto empty/`map`'s own tracked value — plausible
-                    // enough to try as one more floor candidate (see
-                    // `ifs_append_floor`'s own docs) on EVERY append,
-                    // chained, not just the first with no same-line `map`
-                    // prior.
-                    if is_ifs {
-                        let base = self
-                            .ifs_append_floor
-                            .clone()
-                            .unwrap_or_else(|| normalize::DEFAULT_IFS_WHITESPACE.to_string());
-                        let floor = format!("{base}{rhs}");
-                        self.value_history
-                            .entry(assignment.name.clone())
-                            .or_default()
-                            .push(floor.clone());
-                        self.ifs_append_floor = Some(floor);
-                    }
-                    match self.map.get(&assignment.name) {
-                        Some(prior) => Some(format!("{prior}{rhs}")),
-                        None => Some(rhs.clone()),
-                    }
-                }
-                Resolution::Resolved(rhs) => Some(rhs.clone()),
-                Resolution::Unresolvable(_) => None,
-            },
-            _ => None,
-        };
-        match resolved {
-            Some(value) => {
-                let cut_before_this_value = self.value_history(&assignment.name).len();
-                self.value_history
-                    .entry(assignment.name.clone())
-                    .or_default()
-                    .push(value.clone());
-                self.map.insert(assignment.name.clone(), value);
-                // A prefix-scoped resolution (`X=v cmd`) doesn't persist
-                // past `cmd` in real bash either, so it must not clear a
-                // genuinely persisting unresolvable state some EARLIER
-                // command on this line left behind: `X=$(evil); X=ls true;
-                // $X` still has `$X` holding `$(evil)`'s own unknown value
-                // once `true` exits, `"ls"` never having actually taken
-                // over. Only a persisting resolution (no words) can move the
-                // cut up to itself (dropping the stale pre-poison history
-                // but keeping the marker), the same asymmetry `None`'s own
-                // branch below applies.
-                if !is_prefix_scoped
-                    && !assignment.append
-                    && !self.is_possibly_readonly(&assignment.name)
-                    && let Some(cut) = self.persisting_unresolvable.get_mut(&assignment.name)
-                {
-                    *cut = cut_before_this_value;
-                }
-            }
-            None => {
-                self.map.remove(&assignment.name);
-                if !is_prefix_scoped && !self.is_possibly_readonly(&assignment.name) {
-                    let cut = self.value_history(&assignment.name).len();
-                    self.persisting_unresolvable
-                        .insert(assignment.name.clone(), cut);
-                }
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -11929,14 +11257,19 @@ mod tests {
         // a command-scoped prefix one. Real bash really does overwrite `$X`
         // with an unknown value here; falling back to the stale `"rm"`
         // would be a false Block, not a safe over-approximation, exactly
-        // the distinction `Env::persisting_unresolvable` now tracks.
+        // the distinction `VarFacts::overwritten_by_unknown` now tracks.
         assert_decision("X=rm; X=$(echo ls); $X -rf /", Decision::Ask);
+    }
+
+    #[test]
+    fn strong_resolved_write_after_conditional_write_drops_stale_history() {
+        assert_decision("X=$(e); a && X='rm -rf /'; X=ls; $X", Decision::Ask);
     }
 
     #[test]
     fn issue_516_a_later_prefix_scoped_assignment_does_not_clear_earlier_persisting_state() {
         // A fable code-reviewer pass on PR #532 found a real bug: the first
-        // draft cleared `persisting_unresolvable` on ANY resolved
+        // draft cleared the unknown-overwrite marker on ANY resolved
         // reassignment, prefix-scoped ones included. But a prefix-scoped
         // assignment (`X=ls true`) never changes what persists in the real
         // shell at all -- `$X` still holds the earlier `X=$(evil)`'s own
@@ -18125,7 +17458,7 @@ mod tests {
         let argv = vec![NormalizedWord::resolved("placeholder")];
         let rules = Rules::embedded().unwrap();
         let allowlist = Allowlist::embedded().unwrap();
-        let env = Env::new();
+        let env = Env::isolated();
         let verdict = evaluate_simple_command_core(
             &command,
             argv,
