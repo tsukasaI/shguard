@@ -63,6 +63,7 @@
 {"command":"chrt -f 99 rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"command eval rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"command trap 'rm -rf /' EXIT","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"coreutils rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"cp $SRC /dev/null","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"cp --remove-destination payload /dev/null","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"cp --target-directory=/dev/sda payload","decision":"Ask","deny_message":null,"matched_rule":null}
@@ -865,6 +866,7 @@
 {"command":"tee ~/.config/other/config.toml","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"tee ~/.config/shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-tee-tilde"}
 {"command":"timeout 5 rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"toybox rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"trap","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"trap \"$X\" EXIT","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"trap $'rm -rf /' EXIT","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}

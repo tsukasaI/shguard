@@ -78,28 +78,30 @@ enum Outcome {
 /// One reading of the invocation: which option table applies and whether
 /// option parsing ends at the first operand.
 #[derive(Debug, Clone, Copy)]
-struct Dialect {
-    bsd_options: bool,
-    stop_at_operand: bool,
+enum Dialect {
+    Gnu,
+    /// GNU under `POSIXLY_CORRECT`: the GNU table, first-operand termination.
+    GnuPosixlyCorrect,
+    Bsd,
 }
 
-const DIALECTS: [Dialect; 3] = [
-    // GNU default.
-    Dialect {
-        bsd_options: false,
-        stop_at_operand: false,
-    },
-    // GNU under `POSIXLY_CORRECT`.
-    Dialect {
-        bsd_options: false,
-        stop_at_operand: true,
-    },
-    // BSD.
-    Dialect {
-        bsd_options: true,
-        stop_at_operand: true,
-    },
-];
+impl Dialect {
+    fn bsd_options(self) -> bool {
+        match self {
+            Self::Bsd => true,
+            Self::Gnu | Self::GnuPosixlyCorrect => false,
+        }
+    }
+
+    fn stop_at_operand(self) -> bool {
+        match self {
+            Self::Gnu => false,
+            Self::GnuPosixlyCorrect | Self::Bsd => true,
+        }
+    }
+}
+
+const DIALECTS: [Dialect; 3] = [Dialect::Gnu, Dialect::GnuPosixlyCorrect, Dialect::Bsd];
 
 /// `None` when every reading of `args` (the words after the `sed` command
 /// name) is proven free of write/read/exec commands; otherwise the first
@@ -152,7 +154,7 @@ fn script_sources(args: &[NormalizedWord], dialect: Dialect) -> Result<Option<St
         };
         let text = text.as_str();
         if options_ended || !text.starts_with('-') || text == "-" {
-            if dialect.stop_at_operand {
+            if dialect.stop_at_operand() {
                 options_ended = true;
             }
             first_operand.get_or_insert_with(|| text.to_string());
@@ -167,23 +169,22 @@ fn script_sources(args: &[NormalizedWord], dialect: Dialect) -> Result<Option<St
                 Some((n, v)) => (n, Some(v)),
                 None => (long, None),
             };
-            let Some(name) = resolve_long_option(name) else {
+            let Some(kind) = resolve_long_option(name) else {
                 return Err(Outcome::Unsafe(Unproven::Unlexable));
             };
-            match name {
-                "expression" => match value {
+            match kind {
+                LongKind::Expression => match value {
                     Some(v) => expressions.push(v.to_string()),
                     None => expressions.push(take_value(args, &mut i, true)?),
                 },
-                "file" => return Err(Outcome::Unsafe(Unproven::ScriptFile)),
-                "line-length" if value.is_none() => {
-                    take_value(args, &mut i, false)?;
+                LongKind::File => return Err(Outcome::Unsafe(Unproven::ScriptFile)),
+                LongKind::TakesValue => {
+                    if value.is_none() {
+                        take_value(args, &mut i, false)?;
+                    }
                 }
-                "in-place" | "line-length" | "quiet" | "silent" | "regexp-extended" | "posix"
-                | "debug" | "sandbox" | "separate" | "unbuffered" | "null-data"
-                | "zero-terminated" | "binary" | "follow-symlinks" => {}
-                "version" | "help" => info_only = true,
-                _ => return Err(Outcome::Unsafe(Unproven::Unlexable)),
+                LongKind::Flag => {}
+                LongKind::Info => info_only = true,
             }
             continue;
         }
@@ -195,7 +196,7 @@ fn script_sources(args: &[NormalizedWord], dialect: Dialect) -> Result<Option<St
             let glued: String = cluster[j..].iter().collect();
             match flag {
                 'n' | 's' | 'E' | 'r' | 'z' | 'u' | 'b' => {}
-                'a' | 'l' if dialect.bsd_options => {}
+                'a' | 'l' if dialect.bsd_options() => {}
                 'f' => return Err(Outcome::Unsafe(Unproven::ScriptFile)),
                 'e' => {
                     expressions.push(if glued.is_empty() {
@@ -214,7 +215,7 @@ fn script_sources(args: &[NormalizedWord], dialect: Dialect) -> Result<Option<St
                 // GNU: `-iSUFFIX` only. BSD: the suffix is a separate word.
                 // `-I` exists on BSD only; read it the BSD way in both.
                 'i' | 'I' => {
-                    if glued.is_empty() && (dialect.bsd_options || flag == 'I') {
+                    if glued.is_empty() && (dialect.bsd_options() || flag == 'I') {
                         take_value(args, &mut i, false)?;
                     }
                     break;
@@ -232,40 +233,57 @@ fn script_sources(args: &[NormalizedWord], dialect: Dialect) -> Result<Option<St
     first_operand.map(Some).ok_or(Outcome::Unparseable)
 }
 
+/// How one GNU long option is handled. Each name carries its kind, so a name
+/// cannot be listed without being handled.
+#[derive(Debug, Clone, Copy)]
+enum LongKind {
+    /// Its value (`=value` or the next word) is script text.
+    Expression,
+    /// Its value is a script file that is never read.
+    File,
+    /// Its value is `=value` or the next word, and is not script text.
+    TakesValue,
+    Flag,
+    /// Nothing runs (`--version`, `--help`).
+    Info,
+}
+
 /// GNU `sed` long options. getopt_long accepts any unambiguous prefix, so
 /// `--expr=...` is `--expression=...`.
-const LONG_OPTIONS: &[&str] = &[
-    "expression",
-    "file",
-    "in-place",
-    "line-length",
-    "quiet",
-    "silent",
-    "regexp-extended",
-    "posix",
-    "debug",
-    "sandbox",
-    "separate",
-    "unbuffered",
-    "null-data",
-    "zero-terminated",
-    "binary",
-    "follow-symlinks",
-    "version",
-    "help",
+const LONG_OPTIONS: &[(&str, LongKind)] = &[
+    ("expression", LongKind::Expression),
+    ("file", LongKind::File),
+    ("in-place", LongKind::Flag),
+    ("line-length", LongKind::TakesValue),
+    ("quiet", LongKind::Flag),
+    ("silent", LongKind::Flag),
+    ("regexp-extended", LongKind::Flag),
+    ("posix", LongKind::Flag),
+    ("debug", LongKind::Flag),
+    ("sandbox", LongKind::Flag),
+    ("separate", LongKind::Flag),
+    ("unbuffered", LongKind::Flag),
+    ("null-data", LongKind::Flag),
+    ("zero-terminated", LongKind::Flag),
+    ("binary", LongKind::Flag),
+    ("follow-symlinks", LongKind::Flag),
+    ("version", LongKind::Info),
+    ("help", LongKind::Info),
 ];
 
-/// The full option name `name` selects, or `None` when it is unknown or an
+/// The kind of the option `name` selects, or `None` when it is unknown or an
 /// ambiguous prefix. Both are treated as unlexable by the caller rather than
 /// as a syntax error: a dialect that rejects the word as an option would
 /// instead consume it as a value, hiding it from the other reading.
-fn resolve_long_option(name: &str) -> Option<&'static str> {
-    if let Some(exact) = LONG_OPTIONS.iter().find(|o| **o == name) {
-        return Some(exact);
+fn resolve_long_option(name: &str) -> Option<LongKind> {
+    if let Some((_, kind)) = LONG_OPTIONS.iter().find(|(full, _)| *full == name) {
+        return Some(*kind);
     }
-    let mut matches = LONG_OPTIONS.iter().filter(|o| o.starts_with(name));
+    let mut matches = LONG_OPTIONS
+        .iter()
+        .filter(|(full, _)| full.starts_with(name));
     match (matches.next(), matches.next()) {
-        (Some(only), None) => Some(only),
+        (Some((_, kind)), None) => Some(*kind),
         _ => None,
     }
 }

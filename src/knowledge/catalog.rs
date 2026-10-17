@@ -393,6 +393,15 @@ pub(super) static CATALOG: &[CommandSpec] = &[
         slots: &[EXEC],
     },
     CommandSpec {
+        names: &["coreutils"],
+        options: OptionGrammar {
+            short_flags: "hV",
+            long_flags: &["help", "version", "list"],
+            ..BASE
+        },
+        slots: &[EXEC],
+    },
+    CommandSpec {
         names: &["builtin"],
         options: OptionGrammar {
             short_flags: "dlps",
