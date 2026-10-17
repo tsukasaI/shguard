@@ -1258,6 +1258,9 @@ fn evaluates_arithmetic(argv: &[NormalizedWord]) -> bool {
             tail.iter().any(|word| flag(word, 'i') || unresolved(word))
         }
         "printf" => tail.iter().any(|word| flag(word, 'v')),
+        "test" | "[" => tail
+            .iter()
+            .any(|word| matches!(word.resolution(), Resolution::Resolved(text) if text == "-v")),
         "read" => tail.iter().any(|word| {
             unresolved(word)
                 || matches!(word.resolution(), Resolution::Resolved(text)
@@ -6049,6 +6052,20 @@ fn scan_command_for_heredoc_candidates(command: &Command, out: &mut HeredocCandi
             let argv = normalize::normalize_argv(simple);
             out.record(&argv);
             out.record_stdin_use(&argv);
+            let assignment_words =
+                simple
+                    .assignments
+                    .iter()
+                    .flat_map(|assignment| match &assignment.value {
+                        AssignmentValue::Scalar(word) => std::slice::from_ref(word),
+                        AssignmentValue::Array(words) => words.as_slice(),
+                    });
+            if assignment_words
+                .chain(&simple.words)
+                .any(|word| pieces_have_substitution(&word.0))
+            {
+                out.binds_pipe_data = true;
+            }
             for assignment in &simple.assignments {
                 match &assignment.value {
                     AssignmentValue::Scalar(word) => scan_word_for_heredoc_candidates(word, out),
@@ -6114,6 +6131,22 @@ fn scan_redirections_for_heredoc_candidates(
             } => {}
         }
     }
+}
+
+/// Whether any piece is, or nests, a command or process substitution: its
+/// fork inherits the stdin and can bind what it reads.
+fn pieces_have_substitution(pieces: &[WordPiece]) -> bool {
+    pieces.iter().any(|piece| match piece {
+        WordPiece::CommandSubstitution(_)
+        | WordPiece::BackquotedSubstitution(_)
+        | WordPiece::ProcessSubstitution { .. } => true,
+        WordPiece::DoubleQuoted(inner) => pieces_have_substitution(inner),
+        WordPiece::ModifiedParameterExpansion { operand, .. } => pieces_have_substitution(operand),
+        WordPiece::BraceAlternation(members) => members
+            .iter()
+            .any(|member| pieces_have_substitution(&member.0)),
+        _ => false,
+    })
 }
 
 fn scan_word_for_heredoc_candidates(word: &Word, out: &mut HeredocCandidateScan) {
@@ -20085,6 +20118,12 @@ done"#,
             "curl x | { read -r n; echo ${n:0:n}; }",
             "curl x | { read -r n; read \"$n\"; }",
             "curl x | { mapfile -t a; [[ -n ${a[0]} ]]; }",
+            "curl x | { x=$(cat); let x++; }",
+            "curl x | { x=$(cat); [[ $x -gt 0 ]]; }",
+            "curl x | { x=$(</dev/stdin); unset \"$x\"; }",
+            "curl x | { x=$(sed -n 1p); printf -v \"$x\" y; }",
+            "curl x | { read -r n; [ -v \"$n\" ]; }",
+            "curl x | { read -r n; test -v \"$n\"; }",
         ] {
             let verdict = decide(command);
             assert_ne!(verdict.decision(), Decision::Allow, "{command:?}");
