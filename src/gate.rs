@@ -16845,19 +16845,21 @@ mod tests {
     }
 
     #[test]
-    fn time_and_exec_wrapper_second_review_findings_are_not_allowed() {
-        for command in [
-            "time -- ! rm -rf /",
-            "time -p -- ! rm -rf /",
-            "time -- ! sudo id",
-            "time -- coproc rm -rf /",
-            "watch -dx 'rm -rf /'",
-            "watch -dn rm -rf /",
-            "watch -s -x 'rm -rf /'",
-            "numactl -c 0 rm -rf /",
-            "numactl -ac 0 rm -rf /",
+    fn time_and_exec_wrapper_second_review_findings_keep_their_decision() {
+        for (command, expected) in [
+            // The `time -- !` Ask pins record current behaviour: bash would
+            // run the command after `!`; the target is Block.
+            ("time -- ! rm -rf /", Decision::Ask),
+            ("time -p -- ! rm -rf /", Decision::Ask),
+            ("time -- ! sudo id", Decision::Ask),
+            ("time -- coproc rm -rf /", Decision::Ask),
+            ("watch -dx 'rm -rf /'", Decision::Block),
+            ("watch -dn rm -rf /", Decision::Block),
+            ("watch -s -x 'rm -rf /'", Decision::Block),
+            ("numactl -c 0 rm -rf /", Decision::Block),
+            ("numactl -ac 0 rm -rf /", Decision::Block),
         ] {
-            assert_ne!(decide(command).decision(), Decision::Allow, "{command}");
+            assert_decision(command, expected);
         }
     }
 
@@ -20178,6 +20180,41 @@ done"#,
         // `chain_script_slots` finds `-c` independent of word
         // order, so the dangerous content is still caught.
         assert_decision("su root -c 'rm -rf /'", Decision::Block);
+    }
+
+    #[test]
+    fn runuser_and_su_session_command_recurse_like_su_dash_c() {
+        // Issue #648: `runuser -c` and both `--session-command` spellings
+        // hand their value to a shell, like `su -c`. `--comm` and
+        // `--session` are unambiguous long-option abbreviations.
+        for command in [
+            "su root -c 'rm -rf /'",
+            "su --session-command 'rm -rf /' root",
+            "su root --session-command='rm -rf /'",
+            "su --session 'rm -rf /' root",
+            "runuser root -c 'rm -rf /'",
+            "runuser -c 'rm -rf /' root",
+            "runuser -l root -c 'rm -rf /'",
+            "runuser root --command 'rm -rf /'",
+            "runuser root --command='rm -rf /'",
+            "runuser root --comm 'rm -rf /'",
+            "runuser root --session-command 'rm -rf /'",
+            "runuser root --session 'rm -rf /'",
+            "runuser -u root -- rm -rf /",
+        ] {
+            assert_decision(command, Decision::Block);
+        }
+    }
+
+    #[test]
+    fn runuser_and_su_session_command_with_unresolvable_value_asks() {
+        for command in [
+            r#"runuser root -c "$cmd""#,
+            r#"runuser root --session-command "$cmd""#,
+            r#"su root --session-command "$cmd""#,
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
     }
 
     #[test]

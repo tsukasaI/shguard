@@ -16,6 +16,23 @@ All notable changes to this project are documented in this file.
   like `toybox` (since 0.9.1) and `busybox`: both are exec wrappers, and an
   allow entry for one would launder every wrapped Ask/Block floor (intended,
   fail-closed). Remove the entry before upgrading.
+- `runuser -c`/`--command`/`--session-command` and `su --session-command`
+  now have their shell string recursed like `su -c` (#648): `runuser root
+  -c 'rm -rf /'` and `su --session-command 'rm -rf /' root` Block, where
+  they previously floored to Ask as an escalation.
+
+### Compatibility notes
+
+- The wrappers added in #644, shipped in 0.9.1 without a note here, are
+  transparent wrappers, so an `[[allow]]` entry that names one fails
+  config load since 0.9.1 (which fails shguard closed for every command until the entry
+  is removed): `time`, `watch`, `strace`, `chroot`, `systemd-run`, `numactl`,
+  `unshare`, `runuser`, `caffeinate`, `setarch` (and its aliases), `prlimit`,
+  `firejail`, `unbuffer`. A `command_prefix` that now collides with one of
+  them is rejected the same way, e.g. `systemd-`, `un`, `str`, `num`, `pr`,
+  `wat`, `ca`. Remove or narrow the entry. Separately, `runuser`
+  escalates privileges, so it hits the escalation floor (at least Ask) like
+  `su`/`sudo`/`doas`, whatever it wraps.
 
 ## [0.9.2] - 2026-10-16
 

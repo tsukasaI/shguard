@@ -5746,8 +5746,8 @@ fn collect_split_string_slots(
 }
 
 /// Finds every shell string a transparent-wrapper chain hands to a shell
-/// along `stage`: the catalog's `ShellScript` flags (`flock`/`su`/`script`
-/// `-c`/`--command`, issues #64/#66), `env`'s `-S` splices (issue #265),
+/// along `stage`: the catalog's `ShellScript` flags (`flock`/`su`/`runuser`/`script`
+/// `-c`/`--command`, `su`/`runuser` `--session-command`, issues #64/#66), `env`'s `-S` splices (issue #265),
 /// `watch`'s joined operands and `strace -o '|cmd'`. Mirrors the same
 /// wrapper-unwrap walk [`effective_command`]/[`wrapper_chain_escalation`]
 /// perform, but — unlike both of those — does not stop at the first hop and

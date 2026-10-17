@@ -252,6 +252,10 @@ pub(super) static CATALOG: &[CommandSpec] = &[
                 short: Some('c'),
                 long: Some("command"),
             },
+            Slot::ShellScript {
+                short: None,
+                long: Some("session-command"),
+            },
         ],
     },
     CommandSpec {
@@ -516,7 +520,18 @@ pub(super) static CATALOG: &[CommandSpec] = &[
             ],
             ..BASE
         },
-        slots: &[EXEC, Slot::Privilege],
+        slots: &[
+            EXEC,
+            Slot::Privilege,
+            Slot::ShellScript {
+                short: Some('c'),
+                long: Some("command"),
+            },
+            Slot::ShellScript {
+                short: None,
+                long: Some("session-command"),
+            },
+        ],
     },
     CommandSpec {
         names: &["strace"],
@@ -716,10 +731,8 @@ pub(super) static CATALOG: &[CommandSpec] = &[
     CommandSpec {
         names: &["numactl"],
         options: OptionGrammar {
-            // Short `-c` is absent on purpose: its arity is not known, so
-            // it stays unmodelled instead of guessing either way.
             short_flags: "absHltdDuTh",
-            short_values: "CNmpiPwSfoLMI",
+            short_values: "cCNmpiPwSfoLMI",
             long_flags: &[
                 "all",
                 "hardware",
