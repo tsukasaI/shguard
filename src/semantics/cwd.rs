@@ -27,36 +27,36 @@ use crate::rules::SymlinkScope;
 ///   the hook payload's absolute `cwd` (issue #549), resolved to a
 ///   lexically-certain string — `anchor.path` is that string, already
 ///   normalized (`"/tmp"`, `"~/.config/shguard"`, `"build"`,
-///   `"../x"`; see [`render_cwd_anchor`]). Composing a later `Rel`-shaped
+///   `"../x"`; see [`render_cwd_anchor`](crate::rules::render_cwd_anchor)). Composing a later `Rel`-shaped
 ///   token against it (`anchor + "/" + token`, then ordinary rule matching
 ///   re-normalizes the join from scratch) is lexical CERTAINTY, the same
 ///   class as tilde expansion — so a composed match inherits the matched
 ///   rule's own full decision, uncapped (`crate::gate::evaluate_composed_cwd`).
 /// - `Poisoned`: a `cd`-family command ran whose destination is statically
 ///   unknowable (`cd $(sub)`, `cd -`, `source file`, an unresolvable
-///   `argv[0]` that could itself be `cd`, …) — see [`apply_cwd_effect`]/
-///   [`cd_directive`]'s docs for the full catalogue. This is genuine
+///   `argv[0]` that could itself be `cd`, …) — see `apply_cwd_effect`/
+///   `cd_directive`'s docs for the full catalogue. This is genuine
 ///   uncertainty, not certainty: a later relative token only ever floors to
-///   `Ask` ([`scan_unknown_cwd_floor`]), never inherits a matched rule's own
+///   `Ask` (`scan_unknown_cwd_floor`), never inherits a matched rule's own
 ///   stricter decision.
 ///
 /// # Recursion (substitutions, `bash -c`, subshells, loops, functions)
 ///
-/// Every recursion boundary in this module seeds its own independent
+/// Every recursion boundary in `gate.rs` seeds its own independent
 /// [`CwdContext`] from a CLONE of whatever was live at the recursion site —
-/// see [`analyze_at_depth`]'s own docs for why this is never
+/// see `analyze_at_depth`'s own docs for why this is never
 /// [`CwdContext::Initial`] except at the two true top-level entry points.
 /// Whether that clone's own mutations are later allowed to write back
 /// (`evaluate_command_line`'s pipelines, a `BraceGroup`'s body) or are
 /// strictly discarded (a `$(...)`/backtick payload, a `Subshell`'s body, a
 /// loop's body/condition, a function definition's body, a non-single-stage
 /// pipeline's stages) is a per-construct decision documented at each call
-/// site — see [`evaluate_pipeline`]/[`evaluate_compound_command`]'s own
+/// site — see `evaluate_pipeline`/`evaluate_compound_command`'s own
 /// docs for the full shell-semantics table this issue's design specified.
 ///
 /// Additive-only, worst-wins by construction: every consumer of this type
 /// either composes a rewritten path and folds the result via ordinary
-/// [`fold_worst`] (never lowering a decision the uncomposed evaluation
+/// [`fold_worst`](crate::policy::combine::fold_worst) (never lowering a decision the uncomposed evaluation
 /// already reached), or floors to `Ask` on top of whatever a matching
 /// deny/ask rule already produced. A bug in this tracking logic can only
 /// ever push a decision toward over-asking, never toward a silent bypass.
@@ -71,6 +71,11 @@ impl CwdContext {
     /// The least upper bound of two contexts reaching the same program point:
     /// equal contexts stay, every other pair (`Initial` with `Known`, two
     /// different anchors, anything with `Poisoned`) becomes `Poisoned`.
+    ///
+    /// The lattice is flat with no bottom: `Initial` is not an identity
+    /// (`Initial ⊔ Known = Poisoned`). Anchors that differ only in `origin`
+    /// or `physical` are unequal and so also join to `Poisoned`, which is
+    /// sound but over-conservative.
     pub(crate) fn join(&self, other: &Self) -> Self {
         if self == other {
             self.clone()
@@ -169,9 +174,9 @@ impl CwdAnchor {
 }
 
 /// Cap on how many frames issue #210's directory-stack tracking
-/// ([`CwdState::stack`]) may hold before this module gives up modeling it
+/// ([`CwdState::stack`]) may hold before `gate.rs` gives up modeling it
 /// precisely and poisons instead — the same fail-closed-on-overflow stance
-/// [`MAX_SUBSTITUTION_DEPTH`] takes, guarding against an adversarial
+/// `MAX_SUBSTITUTION_DEPTH` takes, guarding against an adversarial
 /// `pushd d && pushd d && ...` chain growing the tracked stack unboundedly
 /// within one command line.
 pub(crate) const MAX_CWD_STACK_DEPTH: usize = 64;
@@ -183,8 +188,8 @@ pub(crate) const MAX_CWD_STACK_DEPTH: usize = 64;
 /// the real, dangerous `~/.config/shguard` anchor instead of flooring
 /// straight to `Ask` the way collapsing every stack operation to
 /// [`CwdContext::Poisoned`] (this mechanism's pre-#210 behavior, and still
-/// its fallback for any shape it doesn't model — see [`apply_pushd`]/
-/// [`apply_popd`]'s own docs) would.
+/// its fallback for any shape it doesn't model — see `apply_pushd`/
+/// `apply_popd`'s own docs) would.
 ///
 /// The ACTUAL stack contents are never threaded across a recursion
 /// boundary — every recursion starts its own local [`CwdState`], seeded
@@ -280,7 +285,7 @@ impl CwdState {
     /// the live directory stack, unlike [`Self::seed`]'s fresh-process
     /// case. Seeding with a genuinely empty `stack` there would make an
     /// inner `popd`/bare-`pushd` a silent, precise no-op (per
-    /// [`apply_popd`]/[`apply_pushd_swap`]'s own "empty stack is a safe
+    /// `apply_popd`/`apply_pushd_swap`'s own "empty stack is a safe
     /// no-op" reasoning) even though a real, unmodeled frame is actually
     /// there to pop back to — a confirmed Ask/Block→Allow regression in
     /// the initial #210 landing. Seeding with one
@@ -302,7 +307,9 @@ impl CwdState {
         }
     }
 
-    /// Poisons the current directory AND discards the tracked stack —
+    /// Poisons the current directory AND discards the tracked stack, where
+    /// [`Self::join`] alone would only collapse a differing stack to one
+    /// `Poisoned` frame —
     /// issue #210's stack is only ever meaningful alongside a `current` we
     /// can still compose against; once `current` itself becomes unknown,
     /// nothing later could safely pop back to a stack frame recorded before
@@ -324,6 +331,9 @@ impl CwdState {
     /// and `symlink_untrusted` are OR-ed so a join never regains trust; and
     /// `earlier_writer` is OR-ed into `self`'s shared cell, which the result
     /// keeps sharing.
+    ///
+    /// Not symmetric in side effects: the OR lands in `self`'s cell and the
+    /// result shares `self`'s `earlier_writer`, never `other`'s.
     pub(crate) fn join(&self, other: &Self) -> Self {
         self.earlier_writer
             .set(self.earlier_writer.get() || other.earlier_writer.get());
@@ -356,7 +366,7 @@ impl CwdState {
     /// same untrustworthiness, since the group's reported status IS that
     /// last pipeline's) whenever the stack is non-empty.
     ///
-    /// [`apply_pushd`]'s own known limitation (assume-success: a `pushd X`
+    /// `apply_pushd`'s own known limitation (assume-success: a `pushd X`
     /// this module resolves is always assumed to actually `cd` there) means
     /// the tracked stack can desync from reality the instant a resolved
     /// push's target doesn't really exist — a real `pushd` to a

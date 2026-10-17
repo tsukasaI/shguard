@@ -9,7 +9,7 @@ use crate::normalize::{self, NormalizedWord, Resolution};
 
 /// Where a command runs relative to the shell whose variables later commands
 /// see. Only [`Self::Parent`] certainly persists its assignments.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ExecScope {
     /// Certainly runs in the parent shell whenever the line reaches it.
     Parent,
@@ -24,30 +24,33 @@ impl ExecScope {
     /// The scope of a pipeline that follows `separator` (`None` for the
     /// first one) in a chain that is, or is not, `backgrounded`.
     pub(crate) fn after_separator(self, separator: Option<Separator>, backgrounded: bool) -> Self {
-        match self {
-            Self::Parent if backgrounded => Self::Forked,
-            Self::Parent if matches!(separator, Some(Separator::And | Separator::Or)) => {
-                Self::Conditional
-            }
-            other => other,
-        }
+        let target = if backgrounded {
+            Self::Forked
+        } else if matches!(separator, Some(Separator::And | Separator::Or)) {
+            Self::Conditional
+        } else {
+            Self::Parent
+        };
+        self.max(target)
     }
 
     /// The scope of one stage of a pipeline with `stage_count` stages: only
     /// a lone stage runs in the parent shell.
     pub(crate) fn pipeline_stage(self, stage_count: usize) -> Self {
-        match self {
-            Self::Parent if stage_count > 1 => Self::Forked,
-            other => other,
+        if stage_count > 1 {
+            self.max(Self::Forked)
+        } else {
+            self
         }
     }
 
     /// The scope of a brace-group body: a failing redirection skips the
     /// body, so a redirected group never certainly persists its assignments.
     pub(crate) fn group_with_redirections(self, has_redirections: bool) -> Self {
-        match self {
-            Self::Parent if has_redirections => Self::Conditional,
-            other => other,
+        if has_redirections {
+            self.max(Self::Conditional)
+        } else {
+            self
         }
     }
 }
@@ -66,6 +69,8 @@ struct VarFacts {
     /// A certain write of an unresolvable value happened (issue #516), so
     /// `$name` now holds something unknown that no earlier value explains.
     overwritten_by_unknown: bool,
+    /// Not a substitute for `history`: a strong write drops the earlier
+    /// value, which `candidates` keeps (#463).
     value: AbsValue,
 }
 
@@ -444,7 +449,9 @@ mod tests {
         assert_eq!(Conditional.after_separator(None, false), Conditional);
         assert_eq!(Parent.pipeline_stage(1), Parent);
         assert_eq!(Parent.pipeline_stage(2), Forked);
-        assert_eq!(Conditional.pipeline_stage(2), Conditional);
+        assert_eq!(Conditional.pipeline_stage(2), Forked);
+        assert_eq!(Conditional.pipeline_stage(1), Conditional);
+        assert_eq!(Forked.after_separator(Some(Separator::And), false), Forked);
         assert_eq!(Parent.group_with_redirections(false), Parent);
         assert_eq!(Parent.group_with_redirections(true), Conditional);
         assert_eq!(Forked.group_with_redirections(true), Forked);

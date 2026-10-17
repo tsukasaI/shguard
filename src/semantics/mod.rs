@@ -30,8 +30,9 @@
 //!
 //! A strong write of an unresolvable value truncates the candidate history
 //! and sets `overwritten_by_unknown`; the next strong resolved write that is
-//! not an append truncates once more, so only values written after the last
-//! certain overwrite stay candidates (issues #516, #534, #607).
+//! not an append truncates once more. Once an unknown overwrite has happened,
+//! only values written after the latest certain overwrite stay candidates;
+//! before one, every resolved write stays a candidate (#463).
 //!
 //! A subshell, loop or `if` body, a function body and a recursed payload each
 //! start from [`env::Env::isolated`]; only a brace group shares its parent's
