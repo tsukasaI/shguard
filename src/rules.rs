@@ -1153,7 +1153,9 @@ impl TargetMatcher {
     /// process substitution expands to) could match this target. The digits
     /// are not known, so every number counts. `false` only for a target
     /// that provably cannot equal or contain such a path: a relative, `~`
-    /// or URL target, or an absolute path outside `/dev/fd`.
+    /// or URL target, or an absolute path outside `/dev/fd`. Always `true`
+    /// for a `strip` target: the strip text may be glued to the path in one
+    /// word (`--out=<(x)`), which the parser splits.
     fn admits_dev_fd(&self) -> bool {
         const DEV_FD: &str = "/dev/fd/";
         let fold = |text: &str, case_insensitive: bool| {
@@ -1179,7 +1181,7 @@ impl TargetMatcher {
                 target,
                 case_insensitive,
             } => match (strip, target) {
-                (Some(strip), _) => may_start_with(strip, *case_insensitive),
+                (Some(_), _) => true,
                 (None, PathForm::Abs(comps)) => {
                     comps.iter().any(|c| c.contains(['*', '?', '[']))
                         || matches!(comps.as_slice(), [dev, fd, number]
@@ -1193,9 +1195,12 @@ impl TargetMatcher {
                 strip,
                 canon,
                 case_insensitive,
-            } => may_start_with(strip.as_deref().unwrap_or(canon), *case_insensitive),
+            } => match strip {
+                Some(_) => true,
+                None => may_start_with(canon, *case_insensitive),
+            },
             Self::NormalizedBasename { strip, base } => match strip {
-                Some(strip) => may_start_with(strip, false),
+                Some(_) => true,
                 None => base.bytes().all(|b| b.is_ascii_digit()),
             },
             Self::UrlHost(_) => false,

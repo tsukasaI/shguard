@@ -106,9 +106,11 @@
 //!    3, computed once up front in [`evaluate_simple_command_core`] (issue
 //!    #445) so it survives `core`'s own early returns too (`bash -c ls
 //!    <(rm -rf /)`). The one exception (issue #628) is an argument word that
-//!    is exactly one `<(...)` whose inner command is Allow and reads no
-//!    stdin as code, in a command that cannot run its operands as a
-//!    program ([`clear_input_process_substitutions`]): it becomes
+//!    is exactly one `<(...)`, standing alone in the source (not glued to
+//!    other text, as in `--out=<(x)`), whose inner command is Allow and
+//!    reads no stdin as code, in a command that names none of the
+//!    interpreters in [`may_run_operand_as_code`]
+//!    ([`clear_input_process_substitutions`]): it becomes
 //!    [`UnresolvableKind::DevFdPath`], which this rule does not floor, and
 //!    rule 4 skips it for rules whose targets cannot match `/dev/fd/N`.
 //! 9. Assignments-only and empty simple commands ("rule 9") — Allow; an
@@ -464,6 +466,10 @@ struct AnalysisCtx<'a> {
     /// has a `{name}>` redirection, which writes `name` and is invisible in
     /// the AST.
     bindings_trusted: bool,
+    /// Whether this command string has no `<(...)` glued to neighbouring
+    /// text. The parser splits `--out=<(x)` into two words, so adjacency is
+    /// only visible in the raw text.
+    process_substitutions_standalone: bool,
     /// Simple-command evaluations left for literal `for` lists on the whole
     /// line, shared by every nesting level and recursion.
     loop_budget: &'a Cell<usize>,
@@ -476,6 +482,7 @@ impl<'a> AnalysisCtx<'a> {
             allowlist,
             depth: 0,
             bindings_trusted: true,
+            process_substitutions_standalone: true,
             loop_budget,
         }
     }
@@ -569,6 +576,47 @@ fn has_fd_variable_redirect(command: &str) -> bool {
     false
 }
 
+/// Whether `command` has a `<(` touching a neighbouring word on either side
+/// (`--out=<(x)`, `pre<(x)post`, `<(x)ZZZ`). Over-approximates: quotes are not
+/// tracked, and an unmatched `)` counts as adjacent.
+fn has_adjacent_input_process_substitution(command: &str) -> bool {
+    let bytes = command.as_bytes();
+    let separates = |byte: u8| byte.is_ascii_whitespace() || matches!(byte, b';' | b'&' | b'|');
+    let mut from = 0;
+    while let Some(open) = command[from..].find("<(") {
+        let start = from + open;
+        if start > 0 && !separates(bytes[start - 1]) && bytes[start - 1] != b'(' {
+            return true;
+        }
+        let mut depth = 0usize;
+        let mut end = None;
+        for (offset, &byte) in bytes[start + 1..].iter().enumerate() {
+            match byte {
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(start + 1 + offset);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else {
+            return true;
+        };
+        if let Some(&after) = bytes.get(end + 1)
+            && !separates(after)
+            && !matches!(after, b')' | b'<' | b'>')
+        {
+            return true;
+        }
+        from = start + 2;
+    }
+    false
+}
+
 /// The top-level [`CwdContext`] for a payload `cwd`: `Known` only for an
 /// absolute path, `Initial` otherwise (never `Poisoned`: an absent cwd is
 /// "never came up", not "became attacker-steerable").
@@ -615,6 +663,7 @@ fn analyze_at_depth(command: &str, ctx: AnalysisCtx<'_>, mut cwd: CwdState) -> V
 
     let ctx = AnalysisCtx {
         bindings_trusted: ctx.depth == 0 && !has_fd_variable_redirect(command),
+        process_substitutions_standalone: !has_adjacent_input_process_substitution(command),
         ..ctx
     };
     match parser::parse(command) {
@@ -2828,8 +2877,9 @@ fn lone_input_process_substitution(word: &Word) -> Option<&CommandLine> {
 }
 
 /// Recurses every argument word that is exactly one `<(...)` and, when the
-/// whole command provably only reads its `/dev/fd/N` operands as data, turns
-/// the word in `argv` into [`UnresolvableKind::DevFdPath`], which rule 8 does
+/// command names no interpreter from [`may_run_operand_as_code`] (every other
+/// tool is treated as reading its operand as data, as it already is for a
+/// file argument), turns the word in `argv` into [`UnresolvableKind::DevFdPath`], which rule 8 does
 /// not floor. Returns the recursed bodies so rule 3 does not recurse them
 /// again.
 ///
@@ -2838,8 +2888,12 @@ fn lone_input_process_substitution(word: &Word) -> Option<&CommandLine> {
 ///   hide, a command name or a code-running flag;
 /// - the inner command is Allow and runs no interpreter on the stdin it
 ///   inherits (`cat <(bash)` runs bash on the outer stdin);
-/// - nothing in `argv` names an interpreter, `source`/`.`, `eval`, `trap` or
-///   awk, whose operand may be a program.
+/// - nothing in `argv` names a pipeline interpreter, `source`/`.`, `eval`,
+///   `trap` or awk, whose operand may be a program;
+/// - the `<(...)` is not concatenated to surrounding text in the source
+///   (`--out=<(x)`, `pre<(x)post`, `<(x)ZZZ`): the parser splits those into
+///   separate words, so the word would look lone while the shell passes one
+///   joined argument.
 fn clear_input_process_substitutions<'a>(
     command: &'a SimpleCommand,
     argv: &mut [NormalizedWord],
@@ -2889,7 +2943,11 @@ fn clear_input_process_substitutions<'a>(
     let brace_text = argv.iter().any(
         |word| matches!(word.resolution(), Resolution::Resolved(text) if text.contains(['{', '}'])),
     );
-    if !only_these_unresolved || brace_text || may_run_operand_as_code(argv) {
+    if !ctx.process_substitutions_standalone
+        || !only_these_unresolved
+        || brace_text
+        || may_run_operand_as_code(argv)
+    {
         return evaluated;
     }
     for ((body, verdict), offset) in evaluated.iter().zip(offsets) {
@@ -2900,9 +2958,12 @@ fn clear_input_process_substitutions<'a>(
     evaluated
 }
 
-/// Whether `argv` may run a file operand as a program. Scans every resolved
-/// word, not just the effective command, so a runner this crate does not peel
-/// (`flock lock bash <(x)`, `find -exec sh {} <(x)`) is still seen.
+/// Whether `argv` names one of the interpreters whose file operand may be a
+/// program: the pipeline interpreters, `source`/`.`, `eval`, `trap` and awk.
+/// Only these stay floored; any other tool is treated as reading the operand
+/// as data. Scans every resolved word, not just the effective command, so a
+/// runner this crate does not peel (`flock lock bash <(x)`,
+/// `find -exec sh {} <(x)`) is still seen.
 fn may_run_operand_as_code(argv: &[NormalizedWord]) -> bool {
     if crate::rules::effective_command(argv).is_none() {
         return true;
@@ -20555,7 +20616,33 @@ done"#,
     }
 
     #[test]
-    fn input_process_substitution_operand_that_may_run_as_a_program_is_not_allowed() {
+    fn input_process_substitution_adjacent_to_text_keeps_its_floor() {
+        for command in [
+            "echo pre<(cat x)post",
+            "cat <(cat x)ZZZ",
+            "mytool --out=<(cat y)",
+            "cat pre<(cat x)",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+    }
+
+    #[test]
+    fn combined_and_clobber_redirects_into_output_process_substitution_stay_floored() {
+        for command in [
+            "curl x &> >(sh)",
+            "curl x | tee &> >(sh)",
+            "curl x >| >(sh)",
+        ] {
+            let verdict = decide(command);
+            assert_ne!(verdict.decision(), Decision::Allow, "{command:?}");
+        }
+    }
+
+    /// Only the interpreters named in [`may_run_operand_as_code`] stay
+    /// floored; other tools read the operand as data, like their file form.
+    #[test]
+    fn input_process_substitution_operand_of_a_named_interpreter_is_not_allowed() {
         for command in [
             "bash <(curl x)",
             "bash <(cat x)",
