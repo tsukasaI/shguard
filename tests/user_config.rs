@@ -3424,6 +3424,12 @@ const LITERAL_BINDING_RULES: &str = r#"
     reason = "gh issue view without a body file"
     command = "gh issue view"
     required_flags = ["--body-file"]
+
+    [[deny]]
+    id = "user-deny-head-etc"
+    reason = "head of /etc"
+    command = "head"
+    targets = [{ prefix = "/etc" }]
 "#;
 
 fn assert_literal_binding_decision(commands: &[&str], expected: &str) {
@@ -3681,6 +3687,42 @@ fn literal_bindings_are_dropped_by_anything_that_may_rewrite_them() {
 }
 
 #[test]
+fn ps4_under_xtrace_is_a_write_channel_that_drops_every_binding() {
+    assert_literal_binding_decision(
+        &[
+            "X=; PS4='${X:=/etc}'; set -x; :; cat \"$X/passwd\"",
+            "X=; PS4='${X:=/etc}'; set -o xtrace; :; cat \"$X/passwd\"",
+            "X=; PS4='${X:=/etc}'; shopt -o -s xtrace; :; cat \"$X/passwd\"",
+            "X=; PS4='${X:=/etc}'; set -ex; :; cat \"$X/passwd\"",
+            "X=; PS4='${X:=/etc}'; set -xv; :; cat \"$X/passwd\"",
+            "X=; set -x; PS4='${X:=/etc}'; :; cat \"$X/passwd\"",
+            "X=; export PS4='${X:=/etc}'; set -x; :; cat \"$X/passwd\"",
+            "X=; declare PS4='${X:=/etc}'; set -x; :; cat \"$X/passwd\"",
+            "X=; typeset PS4='${X:=/etc}'; set -x; :; cat \"$X/passwd\"",
+            "X=; printf -v PS4 '%s' '${X:=/etc}'; set -x; :; cat \"$X/passwd\"",
+            "X=; read PS4; set -x; :; cat \"$X/passwd\"",
+            "X=; mapfile a; set -x; :; cat \"$X/passwd\"",
+            "PS4='${X:=/etc}' X=; set -x; :; cat \"$X/passwd\"",
+            "X=/safe; PS4='$((X=5))'; set -x; :; cat \"$X/passwd\"",
+            "X=/safe; PS4='$((X=5))'; builtin set -x; :; cat \"$X/passwd\"",
+            "X=/safe; for i in 1 2; do cat \"$X/passwd\"; PS4='$((X=5))'; set -x; done",
+        ],
+        "ask",
+    );
+    assert_literal_binding_decision(
+        &["X=; PS4='${X:=/etc}'; set -x; :; head \"$X/passwd\""],
+        "ask",
+    );
+    assert_literal_binding_decision(
+        &[
+            "X=/safe; PS4='> '; set -e; cat \"$X/passwd\"",
+            "X=/safe; set -x; cat \"$X/passwd\"",
+        ],
+        "allow",
+    );
+}
+
+#[test]
 fn literal_binding_in_a_loop_is_dropped_by_a_later_poisoning_statement() {
     assert_literal_binding_decision(
         &[
@@ -3750,6 +3792,36 @@ fn command_position_words_stay_unresolved() {
             "B=ls; \"$B\" -la",
             "T=/private/tmp/claude-501/x/target; \"$T/debug/shguard\" --help",
             "T=/tmp; $T/debug/shguard --help",
+            "B=ls; env $B -la",
+            "B=ls; command $B",
+            "B=ls; builtin $B",
+            "B=ls; exec $B",
+            "B=ls; xargs $B",
+            "B=ls; nohup $B",
+            "B=ls; nice $B -la",
+        ],
+        "ask",
+    );
+    // A substituted effective command may still upgrade to a Block.
+    assert_literal_binding_decision(&["B=rm; nice $B -rf /"], "deny");
+}
+
+#[test]
+fn only_the_effective_command_word_gets_builtin_treatment() {
+    assert_literal_binding_decision(
+        &[
+            "X=/safe; git add .; cat \"$X/passwd\"",
+            "X=/safe; ls .; cat \"$X/passwd\"",
+            "X=/safe; rg eval src; cat \"$X/passwd\"",
+            "X=/safe; echo export X; cat \"$X/passwd\"",
+            "X=/safe; grep -n source README; cat \"$X/passwd\"",
+        ],
+        "allow",
+    );
+    assert_literal_binding_decision(
+        &[
+            "X=/safe; command eval 'X=/etc'; cat \"$X/passwd\"",
+            "X=/safe; builtin source f; cat \"$X/passwd\"",
         ],
         "ask",
     );

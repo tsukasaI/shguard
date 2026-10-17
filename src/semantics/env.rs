@@ -1,5 +1,9 @@
 //! Same-command-line variable facts (rule 2's bare-`$VAR` resolution) and
 //! the execution scope an assignment runs in.
+//!
+//! Substituting a binding into an unquoted word assumes the inherited-default
+//! `IFS` (bash does not import `IFS` from the environment), the same
+//! assumption the Block direction makes; a same-line `IFS` write disables it.
 
 use std::collections::{HashMap, HashSet};
 
@@ -8,6 +12,7 @@ use crate::ast::{
     Assignment, AssignmentValue, Redirection, Separator, SimpleCommand, Word, WordPiece,
 };
 use crate::normalize::{self, NormalizedWord, Resolution};
+use crate::rules;
 
 /// Where a command runs relative to the shell whose variables later commands
 /// see. Only [`Self::Parent`] certainly persists its assignments.
@@ -170,6 +175,23 @@ const ATTRIBUTE_WORDS: &[&str] = &[
 /// Wrappers after which the next word is still run in the current shell.
 const SHELL_KEEPING_WRAPPERS: &[&str] = &["builtin", "command", "time"];
 
+/// Builtins that can switch `xtrace` on.
+const TRACE_OPTION_WORDS: &[&str] = &["set", "shopt", "setopt", "unsetopt"];
+
+/// Whether `operands` of `set`/`shopt`/`setopt` may switch `xtrace` on: a
+/// `-x` flag cluster, an option named `xtrace` (`NO_XTRACE` too, for
+/// `unsetopt`), or an operand not known statically.
+fn enables_xtrace(operands: &[NormalizedWord]) -> bool {
+    operands.iter().any(|operand| match operand.resolution() {
+        Resolution::Unresolvable(_) => true,
+        Resolution::Resolved(arg) => {
+            let folded = arg.to_ascii_lowercase().replace('_', "");
+            folded.contains("xtrace")
+                || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('x'))
+        }
+    })
+}
+
 /// Every `IFS` value the line could have split with, and the running
 /// inherited-default hypothesis. Never truncated: an `IFS` overwritten by
 /// an unresolvable value still leaves the earlier splitting possible for a
@@ -238,6 +260,14 @@ pub(crate) struct Env {
     /// `IFS` was, or may have been, rewritten: an unquoted expansion may
     /// split anywhere.
     ifs_changed: bool,
+    /// `PS4` was, or may have been, written. With `xtrace` on, bash expands
+    /// it (parameter, command and arithmetic expansion) in the current shell
+    /// before each traced command, so it is a write channel no assignment
+    /// scan sees.
+    ps4_written: bool,
+    /// `set -x` (or `-o xtrace`, `setopt xtrace`, ...) may be in effect. Never
+    /// cleared: a later `set +x` does not undo an expansion already done.
+    xtrace_on: bool,
 }
 
 /// Whether `value`, expanded unquoted, is certainly one word that no
@@ -248,7 +278,7 @@ fn is_unquoted_safe(value: &str) -> bool {
     !value.is_empty()
         && value
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "_./-:,=+@%^".contains(c))
+            .all(|c| c.is_ascii_alphanumeric() || "_./-:,+@%".contains(c))
 }
 
 /// Longest run of identifier characters at the start of `operand`
@@ -356,6 +386,8 @@ impl Env {
             tainted: parent.tainted.clone(),
             poisoned: parent.poisoned,
             ifs_changed: parent.ifs_changed,
+            ps4_written: parent.ps4_written,
+            xtrace_on: parent.xtrace_on,
             ..Self::default()
         }
     }
@@ -369,6 +401,8 @@ impl Env {
             tainted: parent.tainted.clone(),
             poisoned: parent.poisoned,
             ifs_changed: parent.ifs_changed,
+            ps4_written: parent.ps4_written,
+            xtrace_on: parent.xtrace_on,
             ..Self::default()
         }
     }
@@ -408,14 +442,44 @@ impl Env {
     pub(crate) fn clobber(&mut self, name: &str) {
         self.clobbered.insert(name.to_string());
         self.ifs_changed |= name == "IFS";
+        if name == "PS4" {
+            self.note_ps4_written();
+        }
         if let Some(facts) = self.vars.get_mut(name) {
             facts.value = AbsValue::top();
         }
     }
 
+    fn note_ps4_written(&mut self) {
+        self.ps4_written = true;
+        // Not `poison()`: that calls `clobber_all`, which lands here.
+        self.poisoned |= self.xtrace_on;
+    }
+
+    fn note_xtrace_on(&mut self) {
+        self.xtrace_on = true;
+        if self.ps4_written {
+            self.poison();
+        }
+    }
+
+    /// The `(PS4 written, xtrace on)` facts running `command` alone would
+    /// establish, for a loop body whose later commands run before its
+    /// earlier ones on the next iteration.
+    pub(crate) fn trace_effects(&self, command: &SimpleCommand) -> (bool, bool) {
+        let mut probe = Self {
+            functions: self.functions.clone(),
+            ..Self::default()
+        };
+        probe.apply_assignments(command, ExecScope::Conditional);
+        probe.note_command_effects(command, &normalize::normalize_argv(command));
+        (probe.ps4_written, probe.xtrace_on)
+    }
+
     fn clobber_all(&mut self) {
         self.clobbered_all = true;
         self.ifs_changed = true;
+        self.note_ps4_written();
         for facts in self.vars.values_mut() {
             facts.value = AbsValue::top();
         }
@@ -463,17 +527,32 @@ impl Env {
             self.poison();
         }
         for (index, word) in argv.iter().enumerate() {
-            match word.resolution() {
-                Resolution::Resolved(name) => self.note_word_effects(name, &argv[index + 1..]),
-                Resolution::Unresolvable(_) => {
-                    let after_wrapper = index > 0
-                        && matches!(
-                            argv[index - 1].resolution(),
-                            Resolution::Resolved(wrapper)
-                                if SHELL_KEEPING_WRAPPERS.contains(&wrapper.as_str())
-                        );
-                    if after_wrapper {
-                        self.poison();
+            if let Resolution::Unresolvable(_) = word.resolution() {
+                let after_wrapper = index > 0
+                    && matches!(
+                        argv[index - 1].resolution(),
+                        Resolution::Resolved(wrapper)
+                            if SHELL_KEEPING_WRAPPERS.contains(&wrapper.as_str())
+                    );
+                if after_wrapper {
+                    self.poison();
+                }
+            }
+        }
+        // Only the word that runs as the command is a builtin: an operand
+        // spelled `eval` or `export` is just an argument. When the wrapper
+        // chain cannot be walked, every word counts.
+        match rules::effective_command(argv) {
+            Some((_, tail)) => {
+                let index = argv.len() - tail.len() - 1;
+                if let Resolution::Resolved(name) = argv[index].resolution() {
+                    self.note_word_effects(name, tail);
+                }
+            }
+            None => {
+                for (index, word) in argv.iter().enumerate() {
+                    if let Resolution::Resolved(name) = word.resolution() {
+                        self.note_word_effects(name, &argv[index + 1..]);
                     }
                 }
             }
@@ -497,6 +576,8 @@ impl Env {
             }
         } else if ATTRIBUTE_WORDS.contains(&word) {
             self.taint_operands(rest);
+        } else if TRACE_OPTION_WORDS.contains(&word) && enables_xtrace(rest) {
+            self.note_xtrace_on();
         }
     }
 
@@ -543,12 +624,17 @@ impl Env {
     /// An unquoted use is replaced only by a value that is safe from word
     /// splitting and globbing; the replacement is single-quoted so it stays
     /// one literal word.
-    pub(crate) fn substitute_literals(&self, command: &SimpleCommand) -> Option<SimpleCommand> {
+    ///
+    /// Also returns the indices of the words that were replaced.
+    pub(crate) fn substitute_literals(
+        &self,
+        command: &SimpleCommand,
+    ) -> Option<(SimpleCommand, Vec<usize>)> {
         if self.poisoned || command.words.len() < 2 || command_may_write_variables(command) {
             return None;
         }
         let split_unsafe = self.ifs_changed || command.assignments.iter().any(|a| a.name == "IFS");
-        let mut changed = false;
+        let mut replaced = Vec::new();
         let words = command
             .words
             .iter()
@@ -565,18 +651,25 @@ impl Env {
                 if index == 0 || has_tilde {
                     return word.clone();
                 }
+                let mut changed = false;
                 let pieces = word
                     .0
                     .iter()
                     .map(|piece| self.substitute_piece(piece, split_unsafe, &mut changed))
                     .collect();
+                if changed {
+                    replaced.push(index);
+                }
                 Word(pieces)
             })
             .collect();
-        changed.then(|| SimpleCommand {
-            assignments: command.assignments.clone(),
-            words,
-            redirections: command.redirections.clone(),
+        (!replaced.is_empty()).then(|| {
+            let substituted = SimpleCommand {
+                assignments: command.assignments.clone(),
+                words,
+                redirections: command.redirections.clone(),
+            };
+            (substituted, replaced)
         })
     }
 
@@ -748,6 +841,9 @@ impl Env {
     fn apply_one(&mut self, assignment: &Assignment, strength: Strength, performed: bool) {
         self.touched.insert(assignment.name.clone());
         self.ifs_changed |= assignment.name == "IFS";
+        if assignment.name == "PS4" {
+            self.note_ps4_written();
+        }
         let write = self.resolve_write(assignment);
         let literal = self.literal_write(assignment);
         let facts = self.vars.entry(assignment.name.clone()).or_default();
@@ -1117,8 +1213,48 @@ mod tests {
         let mut env = Env::isolated();
         env.bind_loop_variable("X", "/a");
         run(&mut env, "printf %s v");
-        run(&mut env, "echo read X");
-        assert_eq!(env.exact("X"), None, "any resolved `read` word clobbers");
+        for line in ["echo read X", "git add .", "ls .", "grep -n source README"] {
+            run(&mut env, line);
+        }
+        assert_eq!(env.exact("X"), Some("/a"), "an operand is not a builtin");
+        run(&mut env, "command read X");
+        assert_eq!(env.exact("X"), None);
+    }
+
+    #[test]
+    fn a_trace_option_after_a_ps4_write_poisons_every_binding() {
+        for lines in [
+            &["PS4='${X:=/etc}'", "set -x"][..],
+            &["set -x", "PS4='${X:=/etc}'"],
+            &["PS4='${X:=/etc}' true", "set -ex"],
+            &["export PS4=x", "set -xv"],
+            &["declare PS4=x", "set -o xtrace"],
+            &["read PS4", "shopt -o -s xtrace"],
+            &["mapfile a", "set -x"],
+            &["printf -v PS4 %s x", "builtin set -x"],
+            &["PS4=x", "set $flags"],
+        ] {
+            let mut env = Env::isolated();
+            env.bind_loop_variable("X", "/a");
+            for line in lines {
+                run(&mut env, line);
+            }
+            env.bind_loop_variable("X", "/b");
+            assert_eq!(env.exact("X"), None, "{lines:?}");
+        }
+        for lines in [
+            &["PS4=x", "set -e"][..],
+            &["PS4=x", "set +x"],
+            &["PS4=x", "set -o pipefail"],
+            &["set -x"],
+        ] {
+            let mut env = Env::isolated();
+            env.bind_loop_variable("X", "/a");
+            for line in lines {
+                run(&mut env, line);
+            }
+            assert_eq!(env.exact("X"), Some("/a"), "{lines:?}");
+        }
     }
 
     #[test]
@@ -1202,7 +1338,7 @@ mod tests {
         let command = simple("S=/new cat \"$S/a\" $S");
         let substituted = env.substitute_literals(&command).unwrap();
         env.apply_assignments(&command, ExecScope::Parent);
-        let rendered = format!("{:?}", substituted.words);
+        let rendered = format!("{:?}", substituted.0.words);
         assert!(
             rendered.contains("/old") && !rendered.contains("/new"),
             "{rendered}"
@@ -1212,7 +1348,7 @@ mod tests {
 
     fn substituted(env: &Env, line: &str) -> Option<String> {
         let command = simple(line);
-        let result = env.substitute_literals(&command)?;
+        let (result, _) = env.substitute_literals(&command)?;
         Some(
             result
                 .words
@@ -1274,15 +1410,19 @@ mod tests {
             ("I", "a(b)"),
             ("J", "a'b"),
             ("K", "a$b"),
+            ("L", "^a"),
+            ("M", "=a"),
         ] {
             env.bind_loop_variable(name, value);
         }
-        for name in ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K"] {
+        for name in [
+            "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
+        ] {
             assert_eq!(substituted(&env, &format!("cat ${name}")), None, "{name}");
         }
         assert_eq!(substituted(&env, "cat \"$A\"").as_deref(), Some("cat a b"));
         assert_eq!(substituted(&env, "cat \"$K\"").as_deref(), Some("cat a$b"));
-        env.bind_loop_variable("S", "a-b_c.d/e:f,g=h+i@j%k^l");
+        env.bind_loop_variable("S", "a-b_c.d/e:f,g+i@j%k");
         assert!(substituted(&env, "cat $S").is_some());
     }
 

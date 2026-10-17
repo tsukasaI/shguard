@@ -372,11 +372,13 @@ const MAX_SUBSTITUTION_DEPTH: usize = 8;
 /// Longest literal `for` word list evaluated element by element.
 const MAX_FOR_LIST_WORDS: usize = 16;
 
-/// Loop-body evaluations one command line may spend on literal `for` lists,
-/// nested loops included. Not `MAX_FOR_LIST_WORDS` per loop: nesting would
-/// multiply it; a loop that does not fit the remainder is evaluated once,
-/// with its variable unbound.
-const MAX_FOR_BODY_EVALUATIONS: usize = 64;
+/// Simple-command evaluations one command line may spend on literal `for`
+/// lists (elements times the body's simple commands), nested loops included.
+/// Counts commands, not body evaluations: the cost of an evaluation grows
+/// with the body, and 16 elements of a 500-command body outran the
+/// watchdog. A loop that does not fit the remainder is evaluated once, with
+/// its variable unbound.
+const MAX_FOR_COMMAND_EVALUATIONS: usize = 256;
 
 /// Issue #471: category-specific `DenyMessage` guidance, attached via
 /// [`Verdict::with_deny_message`] at each structural `Ask` site below —
@@ -456,8 +458,8 @@ struct AnalysisCtx<'a> {
     /// has a `{name}>` redirection, which writes `name` and is invisible in
     /// the AST.
     bindings_trusted: bool,
-    /// Loop-body evaluations left for the whole line, shared by every
-    /// nesting level and recursion.
+    /// Simple-command evaluations left for literal `for` lists on the whole
+    /// line, shared by every nesting level and recursion.
     loop_budget: &'a Cell<usize>,
 }
 
@@ -531,7 +533,7 @@ pub(crate) fn analyze_with_policy_in_cwd(
     allowlist: &Allowlist,
     cwd: Option<&str>,
 ) -> Verdict {
-    let loop_budget = Cell::new(MAX_FOR_BODY_EVALUATIONS);
+    let loop_budget = Cell::new(MAX_FOR_COMMAND_EVALUATIONS);
     analyze_at_depth(
         command,
         AnalysisCtx::new(rules, allowlist, &loop_budget),
@@ -892,14 +894,28 @@ fn evaluate_pipeline(
                 env.note_readonly_operands(&original_argv);
                 env.note_command_effects(simple, &original_argv);
                 let mut alternates = Vec::new();
-                let verdict = evaluate_simple_command(
-                    substituted.as_ref().unwrap_or(simple),
-                    env,
-                    ctx,
-                    &cwd.current,
-                    cwd.symlink_untrusted || cwd.earlier_writer.get() || stage_count > 1,
-                    &mut alternates,
-                );
+                let refuse_symlinks =
+                    cwd.symlink_untrusted || cwd.earlier_writer.get() || stage_count > 1;
+                let verdict = match &substituted {
+                    Some((replaced_command, replaced)) => evaluate_substituted_command(
+                        simple,
+                        replaced_command,
+                        replaced,
+                        env,
+                        ctx,
+                        &cwd.current,
+                        refuse_symlinks,
+                        &mut alternates,
+                    ),
+                    None => evaluate_simple_command(
+                        simple,
+                        env,
+                        ctx,
+                        &cwd.current,
+                        refuse_symlinks,
+                        &mut alternates,
+                    ),
+                };
                 stage_argvs.push(verdict.normalized_argv().to_vec());
                 if !alternates.is_empty() {
                     per_stage_alternates.push((index, alternates));
@@ -910,7 +926,17 @@ fn evaluate_pipeline(
                 // `pushd`/etc. is allowed to mutate `cwd` for whatever
                 // comes after this pipeline — see this function's own docs.
                 if stage_count == 1 {
-                    apply_cwd_effect(cwd, &argv, env);
+                    // The directory a bound `cd "$S/x"` enters is as known
+                    // as the substituted form the rules just checked.
+                    let cwd_argv = match &substituted {
+                        Some((replaced_command, replaced))
+                            if !replaced_word_may_be_command(replaced_command, replaced) =>
+                        {
+                            normalize::normalize_argv(replaced_command)
+                        }
+                        _ => argv,
+                    };
+                    apply_cwd_effect(cwd, &cwd_argv, env);
                 }
                 verdict
             }
@@ -1224,6 +1250,73 @@ fn literal_for_items(words: Option<&[Word]>) -> Option<Vec<String>> {
     words.iter().map(|word| literal_text(word, true)).collect()
 }
 
+/// Evaluates `substituted`, the form of `original` with its same-line
+/// literal bindings filled in. A word that can become the effective command
+/// (the command word, or one reached through wrappers) is never trusted to
+/// turn an unresolved verdict into an Allow: `B=ls; env $B` stays as
+/// undecidable as `B=ls; $B`. Only a stricter verdict may come from the
+/// substituted form there. An Ask the substituted form keeps without
+/// guidance borrows the guidance the unsubstituted form's Ask carried: the
+/// unresolved word that carried it is gone, the reason to ask is not.
+#[allow(clippy::too_many_arguments)]
+fn evaluate_substituted_command(
+    original: &SimpleCommand,
+    substituted: &SimpleCommand,
+    replaced: &[usize],
+    env: &Env,
+    ctx: AnalysisCtx<'_>,
+    cwd: &CwdContext,
+    refuse_symlinks: bool,
+    alternates: &mut IfsAlternates,
+) -> Verdict {
+    let verdict = evaluate_simple_command(substituted, env, ctx, cwd, refuse_symlinks, alternates);
+    let decision = verdict.decision();
+    let command_position =
+        decision == Decision::Allow && replaced_word_may_be_command(substituted, replaced);
+    let needs_guidance = decision == Decision::Ask && verdict.deny_message().is_none();
+    if !command_position && !needs_guidance {
+        return verdict;
+    }
+    let mut original_alternates = Vec::new();
+    let unsubstituted = evaluate_simple_command(
+        original,
+        env,
+        ctx,
+        cwd,
+        refuse_symlinks,
+        &mut original_alternates,
+    );
+    if command_position {
+        *alternates = original_alternates;
+        return unsubstituted;
+    }
+    match (unsubstituted.decision(), unsubstituted.deny_message()) {
+        (Decision::Ask, Some(message)) => verdict.with_deny_message(Some(message.clone())),
+        _ => verdict,
+    }
+}
+
+/// Whether any of the `replaced` word indices of `command` is at or before
+/// the word that runs as the effective command once wrappers are peeled.
+fn replaced_word_may_be_command(command: &SimpleCommand, replaced: &[usize]) -> bool {
+    let argv = normalize::normalize_argv(command);
+    let Some((_, tail)) = crate::rules::effective_command(&argv) else {
+        return true;
+    };
+    let effective = argv.len() - tail.len() - 1;
+    let mut consumed = 0;
+    for (index, word) in command.words.iter().enumerate() {
+        if consumed > effective {
+            break;
+        }
+        if replaced.contains(&index) {
+            return true;
+        }
+        consumed += normalize::normalize_word(word).len();
+    }
+    false
+}
+
 /// Evaluates a `for` body. A literal word list is evaluated once per word,
 /// each with its own [`Env`] where the loop variable is bound to that word,
 /// and the verdicts fold worst-wins. Any other list, or a loop the line's
@@ -1237,8 +1330,10 @@ fn evaluate_for_body(
     cwd: &mut CwdState,
 ) -> Verdict {
     let repeats_function_definition = command_line_poisons_repeats(body, env);
-    let items = literal_for_items(words)
-        .filter(|items| ctx.bindings_trusted && ctx.reserve_loop_evaluations(items.len()));
+    let items = literal_for_items(words).filter(|items| {
+        ctx.bindings_trusted
+            && ctx.reserve_loop_evaluations(items.len().saturating_mul(count_command_line(body)))
+    });
     let verdict = match items {
         Some(items) => items
             .iter()
@@ -9450,29 +9545,96 @@ fn compound_command_may_change_cwd(compound: &CompoundCommand) -> bool {
     }
 }
 
+/// Simple commands (and extended tests) in `command_line`, nested bodies
+/// included, never fewer than one: the unit [`MAX_FOR_COMMAND_EVALUATIONS`]
+/// counts.
+fn count_command_line(command_line: &CommandLine) -> usize {
+    fn line(command_line: &CommandLine) -> usize {
+        std::iter::once(&command_line.first)
+            .chain(command_line.rest.iter().map(|(_, pipeline)| pipeline))
+            .flat_map(|pipeline| std::iter::once(&pipeline.first).chain(&pipeline.rest))
+            .map(command)
+            .sum()
+    }
+    fn command(command: &Command) -> usize {
+        match command {
+            Command::Simple(_) | Command::ExtendedTest(_) => 1,
+            Command::FunctionDefinition(_) => 1,
+            Command::Compound(
+                CompoundCommand::BraceGroup { body, .. }
+                | CompoundCommand::Subshell { body, .. }
+                | CompoundCommand::ForClause { body, .. },
+            ) => line(body),
+            Command::Compound(
+                CompoundCommand::WhileClause {
+                    condition, body, ..
+                }
+                | CompoundCommand::UntilClause {
+                    condition, body, ..
+                },
+            ) => line(condition) + line(body),
+            Command::Compound(CompoundCommand::IfClause {
+                condition,
+                then_body,
+                elifs,
+                else_body,
+                ..
+            }) => {
+                line(condition)
+                    + line(then_body)
+                    + elifs
+                        .iter()
+                        .map(|ElifClause { condition, body }| line(condition) + line(body))
+                        .sum::<usize>()
+                    + else_body.as_deref().map_or(0, line)
+            }
+        }
+    }
+    line(command_line).max(1)
+}
+
+/// What a loop body does that, together, makes `PS4` expand against a
+/// binding: some command writes `PS4` and some command switches `xtrace`
+/// on, in either order, since the loop runs the body again.
+#[derive(Default)]
+struct TraceScan {
+    ps4_written: bool,
+    xtrace_on: bool,
+}
+
 /// Whether anything in a loop's body or condition poisons its `Env` (see
 /// [`Env::would_poison`]) or defines a function. The loop runs it again, so
 /// the effect also reaches the statements that precede it.
 fn command_line_poisons_repeats(command_line: &CommandLine, env: &Env) -> bool {
+    let mut scan = TraceScan::default();
+    scan_line_poisons_repeats(command_line, env, &mut scan) || (scan.ps4_written && scan.xtrace_on)
+}
+
+fn scan_line_poisons_repeats(command_line: &CommandLine, env: &Env, scan: &mut TraceScan) -> bool {
     std::iter::once(&command_line.first)
         .chain(command_line.rest.iter().map(|(_, pipeline)| pipeline))
         .any(|pipeline| {
             std::iter::once(&pipeline.first)
                 .chain(&pipeline.rest)
-                .any(|command| command_poisons_repeats(command, env))
+                .any(|command| scan_command_poisons_repeats(command, env, scan))
         })
 }
 
-fn command_poisons_repeats(command: &Command, env: &Env) -> bool {
+fn scan_command_poisons_repeats(command: &Command, env: &Env, scan: &mut TraceScan) -> bool {
     match command {
         Command::FunctionDefinition(_) => true,
-        Command::Simple(simple) => env.would_poison(simple),
+        Command::Simple(simple) => {
+            let (ps4_written, xtrace_on) = env.trace_effects(simple);
+            scan.ps4_written |= ps4_written;
+            scan.xtrace_on |= xtrace_on;
+            env.would_poison(simple)
+        }
         Command::ExtendedTest(_) => false,
         Command::Compound(
             CompoundCommand::BraceGroup { body, .. }
             | CompoundCommand::Subshell { body, .. }
             | CompoundCommand::ForClause { body, .. },
-        ) => command_line_poisons_repeats(body, env),
+        ) => scan_line_poisons_repeats(body, env, scan),
         Command::Compound(
             CompoundCommand::WhileClause {
                 condition, body, ..
@@ -9481,7 +9643,8 @@ fn command_poisons_repeats(command: &Command, env: &Env) -> bool {
                 condition, body, ..
             },
         ) => {
-            command_line_poisons_repeats(condition, env) || command_line_poisons_repeats(body, env)
+            scan_line_poisons_repeats(condition, env, scan)
+                || scan_line_poisons_repeats(body, env, scan)
         }
         Command::Compound(CompoundCommand::IfClause {
             condition,
@@ -9490,15 +9653,15 @@ fn command_poisons_repeats(command: &Command, env: &Env) -> bool {
             else_body,
             ..
         }) => {
-            command_line_poisons_repeats(condition, env)
-                || command_line_poisons_repeats(then_body, env)
+            scan_line_poisons_repeats(condition, env, scan)
+                || scan_line_poisons_repeats(then_body, env, scan)
                 || elifs.iter().any(|ElifClause { condition, body }| {
-                    command_line_poisons_repeats(condition, env)
-                        || command_line_poisons_repeats(body, env)
+                    scan_line_poisons_repeats(condition, env, scan)
+                        || scan_line_poisons_repeats(body, env, scan)
                 })
                 || else_body
                     .as_deref()
-                    .is_some_and(|body| command_line_poisons_repeats(body, env))
+                    .is_some_and(|body| scan_line_poisons_repeats(body, env, scan))
         }
     }
 }
@@ -17800,7 +17963,7 @@ mod tests {
             argv,
             &env,
             SimpleCommandPolicy {
-                ctx: AnalysisCtx::new(&rules, &allowlist, &Cell::new(MAX_FOR_BODY_EVALUATIONS)),
+                ctx: AnalysisCtx::new(&rules, &allowlist, &Cell::new(MAX_FOR_COMMAND_EVALUATIONS)),
                 symlink_scope: SymlinkScope::default(),
                 sole_target_floor: &mut false,
             },
@@ -19308,6 +19471,19 @@ mod tests {
         );
         assert_eq!(scan.substitutions, vec!["rm -rf /"]);
         assert!(!scan.unterminated);
+    }
+
+    #[test]
+    fn a_literal_loop_is_budgeted_by_commands_not_by_body_evaluations() {
+        let items = "/ /a /b /c /d /e /f /g /h /i /j /k /l /m /n /o";
+        // 16 elements of a 4-command body fit the budget: bound, so Block.
+        let small = format!("for f in {items}; do :; :; :; rm -rf \"$f\"; done");
+        assert_eq!(decide(&small).decision(), Decision::Block);
+        // 16 elements of a 500-command body do not: one unbound pass, Ask,
+        // and not 8000 command evaluations.
+        let filler = ":; ".repeat(499);
+        let large = format!("for f in {items}; do {filler}rm -rf \"$f\"; done");
+        assert_eq!(decide(&large).decision(), Decision::Ask);
     }
 
     // ==== Issue #75: security-critical decisions for newly-supported
