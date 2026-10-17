@@ -150,9 +150,10 @@ enum FlagMatcher {
     /// A single short-option letter.
     Short(char),
     /// A `-`-prefixed argv token, matched verbatim or with a `=value`
-    /// suffix (GNU long-option convention, e.g. `--in-place=.bak`). For
-    /// deny/ask rules whose command is `git`, a non-empty prefix of a
-    /// `--long` token also matches (issue #582, see [`Self::satisfied`]).
+    /// suffix (GNU long-option convention, e.g. `--in-place=.bak`). For a
+    /// git rule or a git `[[pipeline]]` sink, including version-suffixed
+    /// spellings such as `git2`, a non-empty prefix of a `--long` token
+    /// also matches (issue #582, see [`Self::satisfied`]).
     Token(String),
     /// Satisfied if any one alternative is satisfied.
     AnyOf(Vec<FlagMatcher>),
@@ -202,9 +203,9 @@ impl FlagMatcher {
     /// resolved strings — module docs on why unresolvable tokens never
     /// match).
     ///
-    /// With `long_abbrev` set (deny/ask rules whose command is exactly `git`,
-    /// issue #582, and `[[pipeline]]` rules whose resolved sink is exactly
-    /// `git`, issue #604), a
+    /// With `long_abbrev` set (deny/ask rules whose command is exactly
+    /// `git`, issue #582, and `[[pipeline]]` rules whose resolved sink is
+    /// `git` after version-suffix stripping, issues #604 and #652), a
     /// `--`-prefixed [`Self::Token`] is also satisfied by any non-empty
     /// prefix of it (`--mirr`, `--upl=x`): git's option parser accepts any
     /// unambiguous prefix of a long option. No per-subcommand option table
@@ -4423,7 +4424,7 @@ impl PipelineRule {
         // inherited from [`CommandRule::constraints_match`] deliberately:
         // the sink is the same argv shape those rules match on.
         let sink_args = resolved_strings(sink_tail);
-        let long_abbrev = sink_name == "git";
+        let long_abbrev = strip_version_suffix(&sink_name) == "git";
         if !self
             .sink_required_flags
             .iter()
@@ -10791,6 +10792,27 @@ mod tests {
         ));
         assert!(pipeline_hit(&rules, &["env", "git", "commit", "--no-ver"]));
         assert!(!pipeline_hit(&rules, &["git", "commit"]));
+    }
+
+    #[test]
+    fn pipeline_rule_sink_long_abbrev_through_wrapper_and_global_opts() {
+        let rules = git_sink_flag_rule("--no-verify");
+        assert!(pipeline_hit(
+            &rules,
+            &["command", "git", "commit", "--no-ver"]
+        ));
+        assert!(pipeline_hit(
+            &rules,
+            &["git", "-C", "/r", "commit", "--no-ver"]
+        ));
+    }
+
+    #[test]
+    fn pipeline_rule_sink_long_abbrev_versioned_git() {
+        let rules = git_sink_flag_rule("--no-verify");
+        assert!(pipeline_hit(&rules, &["git2", "commit", "--no-ver"]));
+        assert!(pipeline_hit(&rules, &["git2.40", "commit", "--no-v"]));
+        assert!(!pipeline_hit(&rules, &["git2", "commit"]));
     }
 
     #[test]
