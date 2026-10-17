@@ -7786,15 +7786,23 @@ impl Rules {
     }
 
     /// Byte offset in `token` where the value starts, when `token` is a
-    /// listed `target_flags` flag of some rule with its value glued on
+    /// listed `target_flags` flag of a rule whose command matches some hop of
+    /// `scope_argv`'s wrapper chain (the walk rule matching itself uses) with
+    /// its value glued on
     /// (`--body-file=v`, `-Fv`, `-F=v`; the `=` of the last form stays in the
     /// flag part). The value of such a token is a path the rule tests, so
-    /// the cwd composition must reach it (issue #625).
+    /// the cwd composition must reach it (issue #625). Rules of other
+    /// commands are skipped: their `-F` is not this command's flag.
     #[must_use]
-    pub(crate) fn target_flag_glued_value_offset(&self, token: &str) -> Option<usize> {
+    pub(crate) fn target_flag_glued_value_offset(
+        &self,
+        scope_argv: &[NormalizedWord],
+        token: &str,
+    ) -> Option<usize> {
         self.command_rules
             .iter()
             .chain(self.ask_rules.iter())
+            .filter(|rule| rule.matching_rest_by_name(scope_argv).is_some())
             .find_map(|rule| rule.target_flag_glued_value_offset(token))
     }
 
@@ -13392,6 +13400,31 @@ mod tests {
         }
         // No listed flag at all: nothing is a target, so the rule is silent.
         assert!(!fires(&rules, &["gh", "/Users/me/issue", "list"]));
+    }
+
+    #[test]
+    fn target_flag_glued_value_offset_is_scoped_to_the_matching_command() {
+        let rules = target_flags_deny_rules("");
+        let scope = |words: &[&str]| -> Vec<NormalizedWord> {
+            words.iter().map(|w| NormalizedWord::resolved(*w)).collect()
+        };
+        assert_eq!(
+            rules.target_flag_glued_value_offset(&scope(&["gh", "issue"]), "-Fnotes.md"),
+            Some(2)
+        );
+        assert_eq!(
+            rules.target_flag_glued_value_offset(&scope(&["sudo", "gh"]), "--body-file=notes.md"),
+            Some(12)
+        );
+        // Another command's `-F` is not a listed flag of this rule.
+        assert_eq!(
+            rules.target_flag_glued_value_offset(&scope(&["awk"]), "-Fnotes.md"),
+            None
+        );
+        assert_eq!(
+            rules.target_flag_glued_value_offset(&[], "-Fnotes.md"),
+            None
+        );
     }
 
     #[test]
