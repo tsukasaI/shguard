@@ -845,27 +845,18 @@ const ISSUE_638_TIME_AND_EXEC_WRAPPER_CASES: &[(&str, Decision)] = &[
     ("time time sudo id", Decision::Ask),
     // chroot NEWROOT positional
     ("chroot / rm -rf /", Decision::Block),
-    // exec wrapper
     ("caffeinate rm -rf /", Decision::Block),
-    // exec wrapper
     ("unshare rm -rf /", Decision::Block),
     // runuser -u takes a separated value
     ("runuser -u root rm -rf /", Decision::Block),
-    // exec wrapper
     ("strace rm -rf /", Decision::Block),
-    // exec wrapper
     ("watch rm -rf /", Decision::Block),
     // setarch ARCH positional
     ("setarch x86_64 rm -rf /", Decision::Block),
-    // exec wrapper
     ("prlimit rm -rf /", Decision::Block),
-    // exec wrapper
     ("firejail rm -rf /", Decision::Block),
-    // exec wrapper
     ("systemd-run rm -rf /", Decision::Block),
-    // exec wrapper
     ("unbuffer rm -rf /", Decision::Block),
-    // exec wrapper
     ("numactl rm -rf /", Decision::Block),
 ];
 

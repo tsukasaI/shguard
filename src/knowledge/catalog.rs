@@ -731,10 +731,8 @@ pub(super) static CATALOG: &[CommandSpec] = &[
     CommandSpec {
         names: &["numactl"],
         options: OptionGrammar {
-            // Short `-c` is absent on purpose: its arity is not known, so
-            // it stays unmodelled instead of guessing either way.
             short_flags: "absHltdDuTh",
-            short_values: "CNmpiPwSfoLMI",
+            short_values: "cCNmpiPwSfoLMI",
             long_flags: &[
                 "all",
                 "hardware",

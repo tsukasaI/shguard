@@ -16847,6 +16847,8 @@ mod tests {
     #[test]
     fn time_and_exec_wrapper_second_review_findings_keep_their_decision() {
         for (command, expected) in [
+            // The `time -- !` Ask pins record current behaviour: bash would
+            // run the command after `!`; the target is Block.
             ("time -- ! rm -rf /", Decision::Ask),
             ("time -p -- ! rm -rf /", Decision::Ask),
             ("time -- ! sudo id", Decision::Ask),
@@ -16854,8 +16856,8 @@ mod tests {
             ("watch -dx 'rm -rf /'", Decision::Block),
             ("watch -dn rm -rf /", Decision::Block),
             ("watch -s -x 'rm -rf /'", Decision::Block),
-            ("numactl -c 0 rm -rf /", Decision::Ask),
-            ("numactl -ac 0 rm -rf /", Decision::Ask),
+            ("numactl -c 0 rm -rf /", Decision::Block),
+            ("numactl -ac 0 rm -rf /", Decision::Block),
         ] {
             assert_decision(command, expected);
         }

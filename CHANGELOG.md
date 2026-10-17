@@ -24,13 +24,13 @@ All notable changes to this project are documented in this file.
 ### Compatibility notes
 
 - The wrappers added in #644, shipped in 0.9.1 without a note here, are
-  transparent wrappers, so an `[[allow]]` entry that names one now fails
-  config load (which fails shguard closed for every command until the entry
+  transparent wrappers, so an `[[allow]]` entry that names one fails
+  config load since 0.9.1 (which fails shguard closed for every command until the entry
   is removed): `time`, `watch`, `strace`, `chroot`, `systemd-run`, `numactl`,
   `unshare`, `runuser`, `caffeinate`, `setarch` (and its aliases), `prlimit`,
   `firejail`, `unbuffer`. A `command_prefix` that now collides with one of
   them is rejected the same way, e.g. `systemd-`, `un`, `str`, `num`, `pr`,
-  `wat`, `fi`, `ca`. Remove or narrow the entry. Separately, `runuser`
+  `wat`, `ca`. Remove or narrow the entry. Separately, `runuser`
   escalates privileges, so it hits the escalation floor (at least Ask) like
   `su`/`sudo`/`doas`, whatever it wraps.
 
