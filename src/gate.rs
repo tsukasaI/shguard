@@ -86,9 +86,10 @@
 //!    `w`/`W`/`r`/`R`/`e` commands and `s///w`/`s///e` flags by a small
 //!    command lexer (`crate::sed_script`), and Ask otherwise. Rules 5b,
 //!    6a, and 6b all locate a flag by scanning argv positionally
-//!    ([`scan_for_flag`], or rule 6b's option-grammar walk); per issues #71/#53, an `Unresolvable` word at a
-//!    scanned position is treated as "might be the flag", never as
-//!    "definitely not" — fail-closed, per plan.md §4.
+//!    ([`scan_for_flag`], or rule 6b's option-grammar walk); per issues
+//!    #71/#53, an `Unresolvable` word at a scanned position is treated as
+//!    "might be the flag", never as "definitely not" — fail-closed, per
+//!    plan.md §4.
 //! 7. `$IFS`-derived words ("rule 7") — normalise.rs already folds against
 //!    the *default* IFS; this module adds the untrusted floor: a blocklist
 //!    hit still Blocks, but a miss floors to Ask, because a same-line
@@ -3152,12 +3153,22 @@ fn evaluate_simple_command_core(
                             .to_string(),
                         DENY_MSG_INLINE_INTERPRETER,
                     ),
+                    InlineCodeTrigger::StdinScript => (
+                        format!("`{name}` reads its program from stdin"),
+                        DENY_MSG_INLINE_INTERPRETER,
+                    ),
                     // Issue #633: no literal inline-code flag was written; an
                     // unresolved word merely sits where the flag could be, so
                     // "write it to a file" would be misleading guidance.
                     InlineCodeTrigger::UnresolvedWord(_) => (
                         "an unresolved argument sits where an inline-code flag (`-c`/`-e`) could \
                      appear, so inline code cannot be ruled out"
+                            .to_string(),
+                        DENY_MSG_UNRESOLVED_TARGET,
+                    ),
+                    InlineCodeTrigger::UnresolvedScriptOperand(_) => (
+                        "an unresolved argument sits in the script-operand position right after \
+                     `--`, so a stdin script cannot be ruled out"
                             .to_string(),
                         DENY_MSG_UNRESOLVED_TARGET,
                     ),
@@ -4177,7 +4188,7 @@ fn fold_floors(
         .map(|(_, guidance)| DenyMessage::new(*guidance));
     let unresolved_word_trigger = matches!(
         interpreter.trigger,
-        Some(InlineCodeTrigger::UnresolvedWord(_))
+        Some(InlineCodeTrigger::UnresolvedWord(_) | InlineCodeTrigger::UnresolvedScriptOperand(_))
     );
     let deny_message = except_floors
         .target
@@ -4208,10 +4219,15 @@ fn fold_floors(
         // recurses it instead). Scoped to the interpreter slot because an
         // argument-position substitution carries no message elsewhere.
         .or_else(|| {
-            (interpreter.trigger
-                == Some(InlineCodeTrigger::UnresolvedWord(
-                    UnresolvableKind::CommandSubstitution,
-                )))
+            matches!(
+                interpreter.trigger,
+                Some(
+                    InlineCodeTrigger::UnresolvedWord(UnresolvableKind::CommandSubstitution)
+                        | InlineCodeTrigger::UnresolvedScriptOperand(
+                            UnresolvableKind::CommandSubstitution
+                        )
+                )
+            )
             .then(|| DenyMessage::new(DENY_MSG_COMMAND_SUBSTITUTION))
         })
         .or(interpreter_deny_message);
@@ -7390,8 +7406,9 @@ fn is_opaque_unresolvable(kind: UnresolvableKind) -> bool {
 
 /// Option grammar of a non-shell interpreter, as far as rule 6b needs it to
 /// find the point where option parsing ends (the script operand, `-m`
-/// module, `--`, or `-` for stdin): everything after that point belongs to
-/// the script, not the interpreter. Any resolved option this grammar does not
+/// module, or `--`): everything after that point belongs to the script, not
+/// the interpreter. A stdin operand (`-`, `/dev/stdin`) at that point is
+/// inline code instead. Any resolved option this grammar does not
 /// list is treated as possibly supplying inline code (fail-closed), because
 /// an unknown option that takes a separate value would otherwise let that
 /// value be mistaken for the script operand.
@@ -7413,6 +7430,10 @@ struct InlineGrammar {
     operand_chars: &'static str,
     /// Whether several short flags may share one word (`-Ic`); otherwise the
     /// first letter alone decides and any leftover is an unknown option.
+    /// `false` is deliberate for node and lua: their parsers take one flag
+    /// per word (node rejects `-rv` as a bad option, lua.c requires
+    /// `-i`/`-v`/`-E` to be the whole word), so a clustered word is left
+    /// unplaced rather than guessed at.
     cluster: bool,
     /// Long options that supply inline code.
     long_code: &'static [&'static str],
@@ -7423,12 +7444,20 @@ struct InlineGrammar {
     long_value: &'static [&'static str],
     /// Prefixes of long options that take no value (`--disable-gems`).
     long_plain_prefixes: &'static [&'static str],
+    /// Whether `-` right after `--` still runs the program from stdin. True
+    /// for python, perl, ruby, node and php; lua 5.3 opens a file named `-`
+    /// instead.
+    dashdash_dash_is_stdin: bool,
+    /// Whether a bare `-` in script-operand position runs the program from
+    /// stdin. True for every interpreter but php, which opens a file named
+    /// `-`.
+    dash_is_stdin: bool,
 }
 
 const PYTHON_GRAMMAR: InlineGrammar = InlineGrammar {
     code_chars: "c",
     plain_chars: "BbdEhiIOPqsSuvVxR?",
-    value_chars: "WXQ",
+    value_chars: "WX",
     attached_chars: "",
     required_attached_chars: "",
     operand_chars: "m",
@@ -7437,6 +7466,8 @@ const PYTHON_GRAMMAR: InlineGrammar = InlineGrammar {
     long_plain: &["help", "help-env", "help-xoptions", "help-all", "version"],
     long_value: &["check-hash-based-pycs"],
     long_plain_prefixes: &[],
+    dashdash_dash_is_stdin: true,
+    dash_is_stdin: true,
 };
 
 const NODE_GRAMMAR: InlineGrammar = InlineGrammar {
@@ -7478,6 +7509,8 @@ const NODE_GRAMMAR: InlineGrammar = InlineGrammar {
         "title",
     ],
     long_plain_prefixes: &[],
+    dashdash_dash_is_stdin: true,
+    dash_is_stdin: true,
 };
 
 const PERL_GRAMMAR: InlineGrammar = InlineGrammar {
@@ -7492,6 +7525,8 @@ const PERL_GRAMMAR: InlineGrammar = InlineGrammar {
     long_plain: &["help", "version"],
     long_value: &[],
     long_plain_prefixes: &[],
+    dashdash_dash_is_stdin: true,
+    dash_is_stdin: true,
 };
 
 const RUBY_GRAMMAR: InlineGrammar = InlineGrammar {
@@ -7514,11 +7549,13 @@ const RUBY_GRAMMAR: InlineGrammar = InlineGrammar {
     ],
     long_value: &[],
     long_plain_prefixes: &["disable-", "enable-"],
+    dashdash_dash_is_stdin: true,
+    dash_is_stdin: true,
 };
 
 const PHP_GRAMMAR: InlineGrammar = InlineGrammar {
     code_chars: "rBRE",
-    plain_chars: "ahilmnqsvwHe",
+    plain_chars: "ahilmnqsvwCHe?",
     value_chars: "cdfFtSz",
     attached_chars: "",
     required_attached_chars: "",
@@ -7528,6 +7565,11 @@ const PHP_GRAMMAR: InlineGrammar = InlineGrammar {
     long_plain: &["version", "help", "ini"],
     long_value: &["rf", "rc", "re", "rz", "ri"],
     long_plain_prefixes: &[],
+    // After `--` php reads its script from stdin whatever follows
+    // (`php -- -v` ran the stdin script with `-v` as its argument).
+    dashdash_dash_is_stdin: true,
+    // `php -` fails with "Could not open input file: -".
+    dash_is_stdin: false,
 };
 
 const LUA_GRAMMAR: InlineGrammar = InlineGrammar {
@@ -7542,6 +7584,8 @@ const LUA_GRAMMAR: InlineGrammar = InlineGrammar {
     long_plain: &[],
     long_value: &[],
     long_plain_prefixes: &[],
+    dashdash_dash_is_stdin: false,
+    dash_is_stdin: true,
 };
 
 /// `osascript [-l language] [-i] [-s flags] [-e statement | programfile]`.
@@ -7557,6 +7601,8 @@ const OSASCRIPT_GRAMMAR: InlineGrammar = InlineGrammar {
     long_plain: &[],
     long_value: &[],
     long_plain_prefixes: &[],
+    dashdash_dash_is_stdin: false,
+    dash_is_stdin: true,
 };
 
 /// The option grammar of the non-shell interpreter `name` (rule 6b), or
@@ -7580,9 +7626,11 @@ fn inline_code_grammar(name: &str) -> Option<&'static InlineGrammar> {
 
 /// Whether the remaining words of an interpreter invocation possibly carry
 /// inline code under `grammar` (rule 6b). Scans only the interpreter's own
-/// options: the scan ends, with no inline code, at the first operand (the
-/// script, or `-` for stdin), a `--`, or an operand-taking flag such as
-/// python's `-m`, since every later word is that program's own argument. An
+/// options: the scan ends, with no inline code, at the first operand (a
+/// script file), a `--`, or an operand-taking flag such as python's `-m`,
+/// since every later word is that program's own argument; a stdin operand
+/// (`-`, `/dev/stdin`), also straight after `--` where the interpreter
+/// honors it, is inline code. An
 /// unresolvable word met before that point, or an option the grammar does
 /// not list, counts as possibly inline code (fail-closed): the word might
 /// itself be the flag, or the script operand's position is unknown.
@@ -7639,7 +7687,9 @@ fn scan_inline_code(
     grammar: &InlineGrammar,
     words: &[NormalizedWord],
 ) -> Option<InlineCodeTrigger> {
-    use InlineCodeTrigger::{Literal, UnplacedOption, UnresolvedWord};
+    use InlineCodeTrigger::{
+        Literal, StdinScript, UnplacedOption, UnresolvedScriptOperand, UnresolvedWord,
+    };
     let mut iter = words.iter();
     while let Some(word) = iter.next() {
         let text = match word.resolution() {
@@ -7653,7 +7703,21 @@ fn scan_inline_code(
             }
         };
         if text == "--" {
-            return None;
+            return match iter.next().map(NormalizedWord::resolution) {
+                Some(Resolution::Resolved(next))
+                    if is_stdin_alias_path(next)
+                        && (next != "-" || grammar.dashdash_dash_is_stdin) =>
+                {
+                    Some(StdinScript)
+                }
+                Some(Resolution::Unresolvable(kind)) => Some(UnresolvedScriptOperand(*kind)),
+                _ => None,
+            };
+        }
+        // A stdin operand in script-operand position reads the program from
+        // stdin, as awk's `FileFlagStdin` treats it.
+        if is_stdin_alias_path(text) && (text != "-" || grammar.dash_is_stdin) {
+            return Some(StdinScript);
         }
         let flags = text.strip_prefix('-').filter(|rest| !rest.is_empty())?;
         if let Some(long) = flags.strip_prefix('-') {
@@ -7728,9 +7792,15 @@ enum InlineCodeTrigger {
     /// An unresolvable word where the flag (or its value) could be, with the
     /// kind of that word so its deny message names the right cause.
     UnresolvedWord(UnresolvableKind),
+    /// An unresolvable word straight after `--`, where the script operand
+    /// sits: a stdin script cannot be ruled out.
+    UnresolvedScriptOperand(UnresolvableKind),
     /// An option the grammar cannot place (unknown, or missing a required
     /// attached value), so what follows it is unknown.
     UnplacedOption,
+    /// A stdin operand (`-`, `/dev/stdin`) where the script operand would be:
+    /// the interpreter reads its program from stdin.
+    StdinScript,
 }
 
 /// `sed` command names checked by rule 6e, after case folding and
@@ -13917,6 +13987,9 @@ mod tests {
     const UNPLACED_OPTION_REASON: &str = "an option that shguard cannot place was found on a \
          non-shell interpreter, so inline code cannot be ruled out";
 
+    const UNRESOLVED_OPERAND_REASON: &str = "an unresolved argument sits in the script-operand \
+         position right after `--`, so a stdin script cannot be ruled out";
+
     fn assert_interpreter_floor(command: &str, reason: &str, deny_message: &str) {
         let verdict = decide(command);
         assert_eq!(verdict.decision(), Decision::Ask, "{command:?}");
@@ -13929,6 +14002,7 @@ mod tests {
             INLINE_FLAG_REASON,
             UNRESOLVED_ARG_REASON,
             UNPLACED_OPTION_REASON,
+            UNRESOLVED_OPERAND_REASON,
         ] {
             assert!(
                 other == reason || !got_reason.contains(other),
@@ -13955,6 +14029,17 @@ mod tests {
             "node --require \"$m\" app.js",
         ] {
             assert_interpreter_floor(command, UNRESOLVED_ARG_REASON, DENY_MSG_UNRESOLVED_TARGET);
+        }
+    }
+
+    #[test]
+    fn interpreter_code_unresolved_word_after_double_dash_reports_operand_reason() {
+        for command in ["python3 -- \"$x\"", "lua -- \"$x\"", "perl -w -- \"$x\""] {
+            assert_interpreter_floor(
+                command,
+                UNRESOLVED_OPERAND_REASON,
+                DENY_MSG_UNRESOLVED_TARGET,
+            );
         }
     }
 
@@ -14141,6 +14226,140 @@ mod tests {
             "lua5.4 -e 'print(1)'",
         ] {
             assert_decision(command, Decision::Ask);
+        }
+    }
+
+    // A bare `-` script operand reads the program from stdin (issue #614).
+    #[test]
+    fn inline_stdin_script_operand_is_ask_floor() {
+        for command in [
+            "python3 -",
+            "python3.12 -",
+            "python3.13t -",
+            "python3 -u -",
+            "python3 -W ignore -",
+            "python3 -X dev -",
+            "pypy3 -",
+            "perl -",
+            "perl -w -",
+            "perl -I lib -",
+            "perl5.36 -",
+            "ruby -",
+            "ruby3.3 -",
+            "ruby -w -",
+            "node -",
+            "nodejs -",
+            "node --require ./x.js -",
+            "node -r ./x.js -",
+            "node --no-warnings -",
+            "lua -",
+            "lua5.4 -",
+            "lua -E -",
+            "lua -l mod -",
+            "osascript -",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+    }
+
+    // `-` is only the stdin operand in script-operand position.
+    #[test]
+    fn inline_stdin_dash_after_script_or_as_option_value_is_not_inline() {
+        for command in [
+            "python3 script.py -",
+            "python3 -u script.py -",
+            "python3 -m mod -",
+            "node s.js -",
+            "node --require ./x.js s.js -",
+            "perl s.pl -",
+            "ruby s.rb -",
+            "php s.php -",
+            "php -",
+            "php8.2 -",
+            "php -n -",
+            "lua s.lua -",
+            "python3 -W - s.py",
+            "node -r - s.js",
+            "lua -l - s.lua",
+            "lua -- -",
+        ] {
+            assert_decision(command, Decision::Allow);
+        }
+    }
+
+    // `-` straight after `--` still runs the program from stdin (issue #614).
+    #[test]
+    fn inline_stdin_dash_after_double_dash_is_ask_floor() {
+        for command in [
+            "python3 -- -",
+            "perl -w -- -",
+            "ruby -- -",
+            "node --no-warnings -- -",
+            "env python3 -- -",
+            "python3 -- \"$x\"",
+            "python3 -- /dev/stdin",
+            "lua -- /dev/stdin",
+            "lua -- \"$x\"",
+            "php -- /dev/stdin",
+            "php -- -",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+    }
+
+    // Probed against php 8.4.26 (issue #614): -r/-B/-R/-E run inline code,
+    // attached or separate, also clustered after plain flags; -C and -? are
+    // plain flags, so they no longer leave the option scan unplaced.
+    #[test]
+    fn inline_php_code_letters_are_ask_floor() {
+        for command in [
+            "php -r 'echo 1;'",
+            "php -B 'echo 1;'",
+            "php -R 'echo 1;'",
+            "php -E 'echo 1;'",
+            "php -recho",
+            "php -nr 'echo 1;'",
+            "php -C -r 'echo 1;'",
+            "php -? -r 'echo 1;'",
+            "php -Cr 'echo 1;'",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+        for command in ["php -C s.php", "php -? s.php", "php -Cn s.php -r"] {
+            assert_decision(command, Decision::Allow);
+        }
+    }
+
+    // Stdin aliases in script-operand position read the program from stdin.
+    // `python3 - < x.py` stays Ask on purpose: the redirect is not inspected.
+    #[test]
+    fn inline_stdin_alias_script_operand_is_ask_floor() {
+        for command in [
+            "python3 /dev/stdin",
+            "perl /dev/fd/0",
+            "ruby /proc/self/fd/0",
+            "python3 - < x.py",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+    }
+
+    #[test]
+    fn inline_stdin_script_reports_stdin_reason() {
+        for command in ["python3 -", "python3 /dev/stdin", "perl -w -- -"] {
+            let verdict = decide(command);
+            assert_eq!(verdict.decision(), Decision::Ask, "{command:?}");
+            let reason = verdict.reason().map(super::Reason::as_str).unwrap_or("");
+            assert!(
+                reason.contains("reads its program from stdin"),
+                "{command:?}: {reason:?}"
+            );
+            assert!(!reason.contains("`-c`/`-e`"), "{command:?}: {reason:?}");
+            assert_eq!(
+                verdict.deny_message().map(super::DenyMessage::as_str),
+                Some(DENY_MSG_INLINE_INTERPRETER),
+                "{command:?}"
+            );
         }
     }
 
