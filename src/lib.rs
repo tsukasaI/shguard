@@ -18,6 +18,7 @@ mod parser;
 pub mod policy;
 mod rules;
 mod sed_script;
+mod semantics;
 pub mod verdict;
 #[doc(hidden)]
 pub mod watchdog;
