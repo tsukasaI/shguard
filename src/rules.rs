@@ -59,7 +59,8 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 
-use crate::normalize::{FlagScan, NormalizedWord, Resolution, scan_for_flag};
+use crate::knowledge::{self, Finding, Known, OptionValue, ParsedArgv, ScriptValue};
+use crate::normalize::{NormalizedWord, Resolution};
 use crate::verdict::{Decision, DenyMessage, Reason, RuleId, Verdict};
 
 // ---------------------------------------------------------------------
@@ -970,38 +971,6 @@ impl ValueFlag {
                 .strip_prefix("--")
                 .is_some_and(|rest| rest == name.as_str()),
         }
-    }
-
-    /// The one long name in `flags` that `prefix` (no leading `--`)
-    /// abbreviates, per GNU `getopt_long`'s unambiguous-prefix rule
-    /// (issue #266). `None` for zero matches and for two or more: an
-    /// ambiguous prefix makes the real tool print "option is ambiguous"
-    /// and exit without executing anything.
-    ///
-    /// Ambiguity is judged against shguard's own per-wrapper value-flag
-    /// subset, not the tool's full option surface — deliberately, because
-    /// the subset can only ever err toward over-blocking. A prefix that is
-    /// unique here but ambiguous in reality makes shguard skip a value for
-    /// a command that never runs; a prefix ambiguous here is ambiguous in
-    /// the real tool too (the subset is a subset), so the tool runs
-    /// nothing either way. The one shape this cannot see is a BOOLEAN flag
-    /// whose exact name strictly prefixes a listed value flag, which real
-    /// getopt resolves to the boolean: no such collision exists in
-    /// [`wrapper_value_flags`] today, and adding a `Long` entry means
-    /// checking that tool's full `--help` for one.
-    fn unambiguous_long_prefix<'a>(flags: &'a [ValueFlag], prefix: &str) -> Option<&'a str> {
-        let mut hit = None;
-        for flag in flags {
-            if let ValueFlag::Long(name) = flag
-                && name.starts_with(prefix)
-            {
-                if hit.is_some() {
-                    return None;
-                }
-                hit = Some(name.as_str());
-            }
-        }
-        hit
     }
 
     /// Whether `token` is this flag's `--name=value` attached form (long
@@ -3298,10 +3267,7 @@ impl CommandRule {
                     return Some(effective);
                 }
             }
-            if !TRANSPARENT_WRAPPERS.contains(&folded_base.as_str()) {
-                return None;
-            }
-            rest = skip_wrapper_arguments(&folded_base, tail);
+            rest = wrapper_hop(base, &folded_base, tail, &[])?.next();
         }
     }
 
@@ -3932,13 +3898,13 @@ impl CommandRule {
     ///
     /// [`Self::matching_rest`] keeps walking past a hop whose name matches
     /// but whose constraints don't, as long as that hop's own base name is
-    /// itself a [`TRANSPARENT_WRAPPERS`] member (e.g. a rule naming `sudo`
+    /// itself a catalogued exec wrapper (e.g. a rule naming `sudo`
     /// as its `command`, reached through `env sudo ...`) — the deeper hop
     /// underneath might still satisfy the rule. This function stops at the
     /// first name match unconditionally, so for such a rule it would
     /// return the wrapper's own tail rather than continuing to unwrap.
     /// Currently unreachable — no rule in `rules/blocklist.toml` names a
-    /// `TRANSPARENT_WRAPPERS` entry as its `command` — but a future rule
+    /// catalogued exec wrapper as its `command` — but a future rule
     /// that does would need this function taught the same continue-past-
     /// a-wrapper behavior.
     #[must_use]
@@ -3959,10 +3925,7 @@ impl CommandRule {
             if self.command.matches(&folded_base) {
                 return Some(effective_tail(&folded_base, tail));
             }
-            if !TRANSPARENT_WRAPPERS.contains(&folded_base.as_str()) {
-                return None;
-            }
-            rest = skip_wrapper_arguments(&folded_base, tail);
+            rest = wrapper_hop(base, &folded_base, tail, &[])?.next();
         }
     }
 
@@ -4644,7 +4607,7 @@ fn candidate_has_unresolved_ascent(candidate: &str) -> bool {
 /// using only the token's own text — this module has no per-command
 /// flag-arity table by design (shape-based matching only, no regex, no
 /// command-specific semantics, module docs). Unlike
-/// [`skip_wrapper_arguments`]'s documented gap (which can only ever
+/// the wrapper walk's documented gap (which can only ever
 /// *under-resolve* which inner rule would have blocked, never turn a
 /// floor into a silent Allow), this gap really can let except_targets
 /// suppress a rule it shouldn't: `curl http://localhost
@@ -5086,173 +5049,9 @@ fn value_flag_consumed(rest_words: &[NormalizedWord], value_flags: &[ValueFlag])
 // handling)
 // ---------------------------------------------------------------------
 
-/// Commands whose own name is never the thing a pipeline-shape rule cares
-/// about: running one delegates to whatever command its own arguments name,
-/// either literally (`env sh`/`nohup sh` runs `sh`) or via argument-shaped
-/// indirection (`xargs sh` invokes `sh` once per batch, feeding it piped-in
-/// arguments — the same "what actually runs" question as the others). See
-/// [`effective_command`].
-///
-/// Shared by `src/gate.rs`'s pipeline-shape rules (`is_interpreter_sink`/
-/// `is_decode_stage`) and [`PipelineRule::matches`] here, so a wrapped or
-/// path-qualified sink/source cannot dodge either check by construction:
-/// `/bin/sh`, `./sh`, `nohup sh`, `nice sh`, `env sh`, `command sh`,
-/// `exec sh`, `xargs -0 sh` must all resolve to the `sh` they actually
-/// run.
-///
-/// # Known limitation
-///
-/// Wrapper-argument skipping recognises `-`-prefixed flags (plus `env`'s
-/// `NAME=value` form), a per-wrapper table of flags that take a *separate*
-/// value token ([`wrapper_value_flags`]), and a per-wrapper count of
-/// *positional* arguments consumed before the wrapped command
-/// ([`wrapper_positional_args`]). Together these close the previously
-/// documented gaps for the wrappers issue #54 covers: `nice -n 19 sh`,
-/// `sudo -u root sh`, `doas -u root sh`, and `su`'s positional-username
-/// form `su root -c 'sh'`.
-///
-/// What remains open: a wrapper's flag that takes a separate value token
-/// but isn't in [`wrapper_value_flags`] (e.g. `nohup`, `stdbuf`, `setsid`,
-/// `xargs`, `pkexec`, `run0` have no entries there — `exec`'s own `-a
-/// <name>` argv0-override flag was this same gap until issue #248) is
-/// still mistaken for the wrapped command, the same way every wrapper
-/// behaved before this table existed. `su` keeps a narrower residual gap
-/// of this
-/// same shape even though its own `-c`/`--command` flag IS now in
-/// [`wrapper_value_flags`] (issues #64/#66): [`skip_wrapper_flags`] only
-/// recognises a value flag occurring *before*
-/// [`wrapper_positional_args`]'s username slot is consumed, so `su -c 'sh'
-/// root` (options-before-user order) resolves cleanly through
-/// [`effective_command`], but `su root -c 'sh'` (user-before-options)
-/// still has the username slot consume `root` first, leaving `-c` to be
-/// mistaken for the *next* hop's command name by [`effective_command`]'s
-/// own walk. This residual gap is harmless for the actual security
-/// question, though, unlike the pre-#64/#66 state: [`RECURSABLE_SLOTS`]/
-/// [`wrapper_shell_string_scripts`] finds `su`'s `-c` flag independent of
-/// word order — it scans `su`'s whole argument tail, not just the region
-/// [`skip_wrapper_flags`] stops at — so the script value is still
-/// recursed into either way; only the unrelated question of what
-/// [`effective_command`] itself reports as "the resolved command name"
-/// stays order-sensitive. Separately, because real `su` grammar (`su
-/// [options] [-] [user [arg...]]`) gives no shape-based way to tell "no
-/// username, command follows directly" from "username follows", the
-/// positional slot unconditionally consumes whatever token comes first —
-/// so `su rm -rf /`, which pre-#54 happened to resolve `rm` as the wrapped
-/// command, now reads `rm` as the username instead (this actually matches
-/// real `su` behaviour more closely: without `-c`, `su rm -rf /` would not
-/// execute `rm -rf /` at all). All three cases are bounded the same way:
-/// [`wrapper_chain_escalation`]'s `Contains` arm fires on the vector's own
-/// name alone, before any argument skipping, so this limitation can only
-/// ever under-resolve which *inner* rule would have blocked — it never
-/// turns an escalation floor into a silent Allow.
-///
-/// `flock`'s own `-c '<command>'` form (like `sh -c`/`bash -c`, real
-/// `flock` runs the string via `$SHELL -c`) was a *different* kind of gap,
-/// not bounded the same way: `flock` is not an [`ESCALATION_VECTORS`]
-/// entry, so there was no floor to fall back on if its `-c` string were
-/// merely skipped — `flock /tmp/l -c 'rm -rf /'` silently `allow`ed
-/// (issue #66). Fixed (issues #64/#66) by
-/// [`RECURSABLE_SLOTS`]/[`wrapper_shell_string_scripts`]: `-c`/`--command`
-/// is in [`wrapper_value_flags`] so its value is never mistaken for the
-/// wrapped command by ordinary matching, and `crate::gate`'s wrapper-layer
-/// floor recurses that value as a shell-command string exactly like rule
-/// 6a already does for `sh -c`/`bash -c`, rather than merely skipping it.
-///
-/// `busybox` (issue #114) is a multi-call binary: `busybox <applet> args...`
-/// runs `<applet>` exactly as if invoked directly, so `busybox mkswap
-/// /dev/sda1`/`busybox rm -rf /`/`busybox sh -c 'rm -rf /'` all reached
-/// `Allow` before this entry, since the resolved command name was always
-/// the literal string `"busybox"`, matching no rule. Deliberately no
-/// [`wrapper_value_flags`]/[`wrapper_positional_args`] entry: real
-/// busybox's own global options (`--help`/`--install`/`--list`/`--show`)
-/// are terminal — its dispatcher handles them and exits, it never falls
-/// through to run a later argv word as an applet — so there is no
-/// `busybox --flag VALUE applet args...` shape whose `VALUE` could be
-/// mistaken for the wrapped command; the generic dash-prefix skip in
-/// [`skip_wrapper_flags`] can only ever over-resolve a global-flag
-/// invocation (e.g. `busybox --show rm` resolving `rm`, the safe
-/// direction), never swallow a real applet name. Not itself an
-/// [`ESCALATION_VECTORS`] entry — busybox is a dispatcher, not a
-/// privilege-escalation mechanism.
-///
-/// `toybox` (issue #610) is the same kind of multi-call dispatcher and
-/// takes the same handling as `busybox`.
-///
-/// `builtin` (issue #245) runs the next word as the shell's own builtin,
-/// bypassing any function/alias shadowing it — bash/zsh/ksh only, not
-/// POSIX and not in `dash`. Before this entry, `effective_command` stopped
-/// at the literal string `"builtin"`, matching no rule at all: not just
-/// the headline `builtin rm -rf /` (which, since `rm` isn't itself a shell
-/// builtin, actually errors in a real shell rather than running — treating
-/// it as transparent anyway is a deliberate over-approximation, the safe
-/// direction, the same posture `busybox`'s own doc above takes for a
-/// global-flag invocation), but a chain to a word that IS a builtin —
-/// `builtin command rm -rf /`, `builtin cd`, `builtin eval '...'` — which
-/// *does* execute for real and was a genuine, silent full bypass of every
-/// argv-based check in this crate. Deliberately no
-/// [`wrapper_value_flags`]/[`wrapper_positional_args`] entry: `builtin`
-/// takes no options of its own, only the builtin's own name and arguments,
-/// so it falls through to the same flagless handling `nohup`/`exec` already
-/// get. Not an [`ESCALATION_VECTORS`] entry — no privilege change, only a
-/// function/alias-shadowing bypass.
-pub(crate) const TRANSPARENT_WRAPPERS: &[&str] = &[
-    "env",
-    "command",
-    "nohup",
-    "nice",
-    "exec",
-    "stdbuf",
-    "setsid",
-    "sudo",
-    "xargs",
-    "doas",
-    "su",
-    "pkexec",
-    "run0",
-    "timeout",
-    "ionice",
-    "flock",
-    "chrt",
-    "taskset",
-    "busybox",
-    "toybox",
-    "builtin",
-    "time",
-    "caffeinate",
-    "chroot",
-    "unshare",
-    "runuser",
-    "strace",
-    "watch",
-    "setarch",
-    "prlimit",
-    "firejail",
-    "systemd-run",
-    "unbuffer",
-    "numactl",
-    "linux32",
-    "linux64",
-    "i386",
-    "x86_64",
-    "uname26",
-    "script",
-];
-
-/// The subset of [`TRANSPARENT_WRAPPERS`] that escalate privileges (issues
-/// #35/#36) — `crate::gate` rule 10 floors a blocklist miss to at least
-/// `escalation_floor`'s configured decision (default `Ask`) whenever one of
-/// these appears anywhere in a command's wrapper-unwrap chain, independent
-/// of whether the wrapped command trips its own rule. See
-/// [`wrapper_chain_escalation`]. Every entry here must also appear in
-/// [`TRANSPARENT_WRAPPERS`] (a unit test below pins this) — the allow-entry
-/// rejection in [`matches_dangerous_allow_target`] walks
-/// `TRANSPARENT_WRAPPERS`, not this list, so an escalation vector missing
-/// from `TRANSPARENT_WRAPPERS` would silently become allow-listable.
-pub(crate) const ESCALATION_VECTORS: &[&str] = &["sudo", "doas", "su", "pkexec", "run0", "runuser"];
-
 /// Shell interpreters whose `-c '<string>'` argument `crate::gate` recurses
-/// into as shell syntax (rule 6a). Lives here, next to
-/// [`TRANSPARENT_WRAPPERS`], so this module's allow-entry validation
+/// into as shell syntax (rule 6a). Lives here, next to the other
+/// interpreter lists, so this module's allow-entry validation
 /// (`matches_dangerous_allow_target`) can check a config entry against the
 /// same list `crate::gate` uses, without `rules` depending on `gate`
 /// ("dependencies point inward" — `gate` already depends on `rules`, not
@@ -5478,93 +5277,31 @@ pub(crate) fn is_stdin_script_interpreter(name: &str) -> bool {
     EXTRA_PIPELINE_INTERPRETERS.contains(&strip_version_suffix(&lower))
 }
 
-/// How a [`RecursableSlot`]'s value should be recursed — see
-/// [`RECURSABLE_SLOTS`]'s own docs for the two constructs this
-/// distinguishes.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum RecurseMode {
-    /// The flag's value is a shell-command string, re-tokenised and
-    /// recursed the same way rule 6a (`crate::gate`'s `evaluate_dash_c`)
-    /// already recurses `sh -c`/`bash -c` (issues #64/#66: `flock -c`/
-    /// `su -c` run their string via `$SHELL -c` too).
-    ShellString,
-    /// The flag starts a direct argv — no shell involved at all (issue
-    /// #72: `find -exec`/`-execdir`/`-ok`/`-okdir` run their payload
-    /// directly). The span runs from the word after the flag up to the
-    /// first word resolving to one of `terminators`.
-    DirectArgv {
-        terminators: &'static [&'static str],
-    },
-}
-
-/// One command+flag combination whose value is itself a command to
-/// recurse into, rather than an opaque argument
-/// [`skip_wrapper_arguments`]/[`wrapper_value_flags`] can simply skip
-/// (issues #64/#66/#72). Deliberately does NOT cover `bash`/`sh`/`zsh`/
-/// `dash -c` — rule 6a's own `-c` search
-/// (`crate::gate::evaluate_dash_c`) operates over
-/// [`effective_command`]'s `rest_words` (the tokens after the resolved
-/// *interpreter*, with any leading wrapper's own arguments already
-/// skipped), a different coordinate system from this table's per-wrapper-
-/// hop scan (`crate::gate::scan_recursable_slots`,
-/// [`wrapper_shell_string_scripts`]); folding `SHELL_INTERPRETERS` into
-/// this table would need reconciling the two, for no behavioural gain.
+/// One `find` flag whose payload is itself a command to recurse into
+/// directly: no shell is involved at all (issue #72: `find -exec`/
+/// `-execdir`/`-ok`/`-okdir` run their payload directly). The span runs from
+/// the word after the flag up to the first word resolving to one of
+/// `terminators`. The shell-string flags of wrappers (`flock -c`,
+/// `su -c`, `script -c`) are roles in the `crate::knowledge` catalog
+/// instead, since they belong to a wrapper's spec.
 pub(crate) struct RecursableSlot {
     pub(crate) command: &'static str,
     pub(crate) flag: &'static str,
-    pub(crate) mode: RecurseMode,
+    pub(crate) terminators: &'static [&'static str],
 }
 
-/// See [`RecursableSlot`]'s docs. `crate::gate` consumes this in two ways:
-/// [`wrapper_shell_string_scripts`] walks it for every [`RecurseMode::ShellString`]
-/// entry while unwrapping a stage's transparent-wrapper chain, and
-/// `crate::gate::scan_recursable_slots` walks it directly for `find`'s
-/// [`RecurseMode::DirectArgv`] entries (that construct has no wrapper chain
-/// to unwrap — `find` itself is never in [`TRANSPARENT_WRAPPERS`]).
+/// See [`RecursableSlot`]'s docs. `crate::gate::scan_recursable_slots` walks
+/// it directly (`find` has no wrapper chain to unwrap).
 pub(crate) const RECURSABLE_SLOTS: &[RecursableSlot] = &[
-    RecursableSlot {
-        command: "flock",
-        flag: "-c",
-        mode: RecurseMode::ShellString,
-    },
-    RecursableSlot {
-        command: "flock",
-        flag: "--command",
-        mode: RecurseMode::ShellString,
-    },
-    RecursableSlot {
-        command: "su",
-        flag: "-c",
-        mode: RecurseMode::ShellString,
-    },
-    RecursableSlot {
-        command: "su",
-        flag: "--command",
-        mode: RecurseMode::ShellString,
-    },
-    RecursableSlot {
-        command: "script",
-        flag: "-c",
-        mode: RecurseMode::ShellString,
-    },
-    RecursableSlot {
-        command: "script",
-        flag: "--command",
-        mode: RecurseMode::ShellString,
-    },
     RecursableSlot {
         command: "find",
         flag: "-exec",
-        mode: RecurseMode::DirectArgv {
-            terminators: &[";", "+"],
-        },
+        terminators: &[";", "+"],
     },
     RecursableSlot {
         command: "find",
         flag: "-execdir",
-        mode: RecurseMode::DirectArgv {
-            terminators: &[";", "+"],
-        },
+        terminators: &[";", "+"],
     },
     RecursableSlot {
         command: "find",
@@ -5575,17 +5312,13 @@ pub(crate) const RECURSABLE_SLOTS: &[RecursableSlot] = &[
         // only real terminator. A bare `+` here is an ordinary payload
         // argument, same as anywhere else it doesn't immediately follow a
         // literal `{}`.
-        mode: RecurseMode::DirectArgv {
-            terminators: &[";"],
-        },
+        terminators: &[";"],
     },
     RecursableSlot {
         command: "find",
         flag: "-okdir",
         // Issue #360, same rationale as `-ok` above.
-        mode: RecurseMode::DirectArgv {
-            terminators: &[";"],
-        },
+        terminators: &[";"],
     },
 ];
 
@@ -5597,24 +5330,89 @@ pub(crate) fn basename(token: &str) -> &str {
     token.rsplit('/').next().unwrap_or(token)
 }
 
-/// Whether `token` has the `NAME=value` shape of a POSIX environment
-/// assignment — `env`'s own leading-argument syntax (`env FOO=bar sh`): a
-/// non-empty run of ASCII letters/digits/underscore, not starting with a
-/// digit, followed by `=`. Used only so [`effective_command`] can skip past
-/// `env`'s assignment arguments the same way it skips `-`-flags.
-fn is_env_assignment_shape(token: &str) -> bool {
-    let Some((name, _value)) = token.split_once('=') else {
-        return false;
+/// One transparent-wrapper hop of a stage's wrapper chain: the catalogued
+/// wrapper, the words after its name and how its own arguments parse.
+///
+/// An option the catalog does not describe leaves `unmodeled` set. `parsed`
+/// then treats that token as a lone flag so the wrapped command stays
+/// visible to rule matching; [`first_unmodeled_wrapper_option`] is how the
+/// gate raises its floor for it.
+struct WrapperHop<'a> {
+    base: &'a str,
+    wrapper: Known,
+    tail: &'a [NormalizedWord],
+    parsed: ParsedArgv<'a>,
+    unmodeled: Option<Finding>,
+}
+
+impl<'a> WrapperHop<'a> {
+    /// The words from the wrapped command on.
+    fn next(&self) -> &'a [NormalizedWord] {
+        &self.tail[self.parsed.command_at()..]
+    }
+}
+
+/// Reads `tail` as the arguments of the wrapper named `folded`, unless
+/// `folded` is not a catalogued exec wrapper or is listed in `excluded`.
+fn wrapper_hop<'a>(
+    base: &'a str,
+    folded: &str,
+    tail: &'a [NormalizedWord],
+    excluded: &[&str],
+) -> Option<WrapperHop<'a>> {
+    if excluded.contains(&folded) {
+        return None;
+    }
+    let wrapper = knowledge::lookup(folded).filter(Known::runs_command)?;
+    let (parsed, unmodeled) = match wrapper.parse(tail) {
+        Ok(parsed) => (parsed, None),
+        Err(unmodeled) => {
+            let finding = unmodeled.finding();
+            (unmodeled.into_best_effort(), Some(finding))
+        }
     };
-    !name.is_empty()
-        && !name.starts_with(|c: char| c.is_ascii_digit())
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    Some(WrapperHop {
+        base,
+        wrapper,
+        tail,
+        parsed,
+        unmodeled,
+    })
+}
+
+/// One step of the wrapper-unwrap walk shared by every chain consumer.
+enum Step<'a> {
+    Wrapper(WrapperHop<'a>),
+    /// The first word is not a wrapper (or is an excluded one).
+    Command {
+        folded: String,
+        base: &'a str,
+        tail: &'a [NormalizedWord],
+    },
+    /// The first word is unresolvable.
+    Unresolvable,
+    Empty,
+}
+
+fn step<'a>(rest: &'a [NormalizedWord], excluded: &[&str]) -> Step<'a> {
+    let Some((first, tail)) = rest.split_first() else {
+        return Step::Empty;
+    };
+    let Resolution::Resolved(name) = first.resolution() else {
+        return Step::Unresolvable;
+    };
+    let base = basename(name);
+    let folded = fold_command_name(base);
+    match wrapper_hop(base, &folded, tail, excluded) {
+        Some(hop) => Step::Wrapper(hop),
+        None => Step::Command { folded, base, tail },
+    }
 }
 
 /// Finds the command a pipeline stage actually runs: the basename of
-/// `stage`'s command word, looking through any leading chain of
-/// [`TRANSPARENT_WRAPPERS`] (`nohup nice sh` resolves through both). Returns
-/// the effective command name plus the argv words after it, so a caller can
+/// `stage`'s command word, looking through any leading chain of catalogued
+/// exec wrappers (`nohup nice sh` resolves through both). Returns the
+/// effective command name plus the argv words after it, so a caller can
 /// still inspect the wrapped command's own flags (`is_decode_stage`'s
 /// `base64 -d` check must still see `-d` when reached through `env base64
 /// -d`).
@@ -5631,18 +5429,12 @@ pub(crate) fn effective_command(
 }
 
 /// Same walk as [`effective_command`], except every wrapper named in
-/// `excluded` is treated as though it were not in [`TRANSPARENT_WRAPPERS`]
-/// at all: the walk stops there and reports the wrapper itself as the
-/// effective command, rather than unwrapping through it. Scoped to the one
-/// caller that needs this (`crate::gate::resolve_static_substitution_output`,
-/// issue #130 follow-up), which excludes `xargs`: unlike every other
-/// `TRANSPARENT_WRAPPERS` member, `xargs`'s output is not statically
-/// determined — it appends stdin-derived operands the resolver cannot see
-/// (`xargs echo /dev/sda` may print more than `/dev/sda`). Every other
-/// caller (pipeline-interpreter/decode-stage detection, blocklist matching,
-/// the escalation floor) must keep resolving through `xargs` as normal —
-/// dropping it from `TRANSPARENT_WRAPPERS` itself would reopen the `xargs
-/// -0 sh` sink bypass a pinned test already closes.
+/// `excluded` is treated as though it were not a wrapper at all: the walk
+/// stops there and reports the wrapper itself as the effective command,
+/// rather than unwrapping through it. Scoped to the callers that need the
+/// wrapper's own flags intact (`crate::gate::resolve_static_substitution_output`
+/// excludes `xargs`, whose output is not statically determined;
+/// `evaluate_env_dash_c_override` excludes `env`).
 #[must_use]
 pub(crate) fn effective_command_excluding<'a>(
     stage: &'a [NormalizedWord],
@@ -5650,914 +5442,47 @@ pub(crate) fn effective_command_excluding<'a>(
 ) -> Option<(Cow<'a, str>, &'a [NormalizedWord])> {
     let mut rest = stage;
     loop {
-        let (first, tail) = rest.split_first()?;
-        let Resolution::Resolved(name) = first.resolution() else {
-            return None;
-        };
-        let base = basename(name);
-        let folded_base = fold_command_name(base);
-        if TRANSPARENT_WRAPPERS.contains(&folded_base.as_str())
-            && !excluded.contains(&folded_base.as_str())
-        {
-            rest = skip_wrapper_arguments(&folded_base, tail);
-        } else {
-            // Returned folded (issues #551, #562): callers compare this name
-            // against lowercase literals, so a raw re-cased spelling
-            // (`ENV`, `TAR`) would silently skip the check.
-            let name = if folded_base == base {
-                Cow::Borrowed(base)
-            } else {
-                Cow::Owned(folded_base)
-            };
-            return Some((name, tail));
+        match step(rest, excluded) {
+            Step::Wrapper(hop) => rest = hop.next(),
+            Step::Command { folded, base, tail } => {
+                // Returned folded (issues #551, #562): callers compare this
+                // name against lowercase literals, so a raw re-cased
+                // spelling (`ENV`, `TAR`) would silently skip the check.
+                let name = if folded == base {
+                    Cow::Borrowed(base)
+                } else {
+                    Cow::Owned(folded)
+                };
+                return Some((name, tail));
+            }
+            Step::Unresolvable | Step::Empty => return None,
         }
     }
 }
 
-/// Whether `token` is a bare spelling of one of `flags` on the wrapper
-/// effective-command path: an exact short or long match, or an
-/// unambiguous long-option abbreviation (`--uns` for `--unset`, issue
-/// #266). A token carrying `=` never abbreviates — the attached form is
-/// already handled by the generic dash-skip.
-///
-/// Deliberately NOT used on the [`CommandRule`] targets path
-/// ([`value_flag_free_candidates`], [`value_flag_consumed`]): there, a
-/// flag match REMOVES the next token from target candidacy, so
-/// over-matching drops a real target — under-blocking. Exact-only is the
-/// fail-closed direction there, and this asymmetry is why the two paths
-/// do not share a matcher.
-fn value_flag_bare_match(flags: &[ValueFlag], token: &str) -> bool {
-    if flags.iter().any(|flag| flag.is_bare(token)) {
-        return true;
-    }
-    match token.strip_prefix("--") {
-        Some(prefix) if !prefix.is_empty() && !prefix.contains('=') => {
-            ValueFlag::unambiguous_long_prefix(flags, prefix).is_some()
+/// The first option along `stage`'s wrapper chain that the catalog does not
+/// describe, if any. This is the only way an unmodelled option leaves
+/// `rules`; `crate::gate` turns it into a decision.
+#[must_use]
+pub(crate) fn first_unmodeled_wrapper_option(stage: &[NormalizedWord]) -> Option<Finding> {
+    let mut rest = stage;
+    while let Step::Wrapper(hop) = step(rest, &[]) {
+        if hop.unmodeled.is_some() {
+            return hop.unmodeled;
         }
-        _ => false,
-    }
-}
-
-/// A wrapper's boolean (no-value) short-option letters, for the
-/// getopt-cluster recognition in [`skip_wrapper_flags`] (issue #265). The
-/// value-taking letters are NOT repeated here — they are derived from
-/// [`wrapper_value_flags`]'s `ValueFlag::Short` entries at the call site,
-/// so the two tables cannot drift apart.
-///
-/// A wrapper is listed only when its complete short-option surface is
-/// documented and small enough to enumerate across every flavor shguard
-/// has to assume, because an unlisted letter makes the whole cluster
-/// unrecognized (see [`cluster_takes_separated_value`]). A wrapper absent
-/// here keeps the generic dash-skip, which consumes the cluster token and
-/// nothing else.
-fn wrapper_cluster_booleans(wrapper: &str) -> Option<&'static [char]> {
-    match wrapper {
-        // bash/zsh/ksh93 all accept exactly `-c`, `-l`, `-a <name>`.
-        "exec" => Some(&['c', 'l']),
-        // BSD `env(1)` SYNOPSIS is `-0iv`, GNU's booleans are
-        // `-i`/`-0`/`-v`; the value-takers of both flavors are exactly the
-        // `Short` entries in `wrapper_value_flags("env")`.
-        "env" => Some(&['0', 'i', 'v']),
-        // GNU Make 3.81's `man make` (issue #209 round 3): every short
-        // flag not listed in `wrapper_value_flags("make")` is boolean.
-        "make" => Some(&[
-            'b', 'm', 'B', 'd', 'e', 'i', 'k', 'L', 'n', 'p', 'q', 'r', 'R', 's', 'S', 't', 'v',
-            'w',
-        ]),
-        // Issue #638 wrappers. Every letter not listed here or in
-        // `wrapper_value_flags` makes a cluster unrecognized (the
-        // generic dash-skip then consumes it alone), so these are the
-        // complete short-option surfaces: strace's `-c`/`-C` are boolean.
-        "time" => Some(&['a', 'p', 'q', 'v', 'V', 'l', 'h']),
-        "caffeinate" => Some(&['d', 'i', 'm', 's', 'u']),
-        "chroot" => Some(&[]),
-        "unshare" => Some(&[
-            'm', 'u', 'i', 'n', 'p', 'U', 'C', 'T', 'f', 'r', 'c', 'h', 'V',
-        ]),
-        "runuser" => Some(&['f', 'l', 'm', 'p', 'P', 'h', 'V']),
-        "strace" => Some(&[
-            'A', 'C', 'c', 'd', 'D', 'f', 'F', 'h', 'i', 'k', 'n', 'q', 'r', 't', 'T', 'v', 'V',
-            'w', 'x', 'y', 'Y', 'z', 'Z',
-        ]),
-        // Not `d`: procps `-d` takes an optional glued argument, so
-        // `-dx` is `-d` with value `x`, not `-d -x`.
-        "watch" => Some(&['b', 'c', 'C', 'e', 'g', 'p', 'r', 't', 'w', 'x', 'h', 'v']),
-        "prlimit" => Some(&['h', 'V']),
-        // Union of BSD and util-linux booleans. BSD `-F` is deliberately
-        // absent: it is a boolean on macOS but takes a pipe path on older
-        // FreeBSD, so it stays unmodeled and floors via
-        // `collect_script_slots`.
-        "script" => Some(&['a', 'd', 'e', 'f', 'k', 'p', 'q', 'r', 'h', 'V']),
-        "systemd-run" => Some(&['r', 'd', 't', 'P', 'q', 'G', 'S', 'h']),
-        "numactl" => Some(&['a', 'b', 's', 'H', 'l', 't', 'd', 'D', 'u', 'T', 'h']),
-        // No `"tar"` entry (issue #209): tar's short-flag arity genuinely
-        // differs across flavors for letters that matter (bsdtar's `-s` takes a value; GNU
-        // tar's `-s`/`--same-order` is boolean), so a table built from
-        // either flavor silently swallows `-C` in a cluster the OTHER
-        // flavor's real tar would not — the same "unverified assumption
-        // about a tool's flag surface" bug class this table exists to
-        // prevent, just at the per-letter level instead of per-tool.
-        // `crate::gate::find_dash_c_in_cluster` deliberately does not use
-        // this table for tar at all; see that function's doc for the
-        // fail-closed alternative.
-        _ => None,
-    }
-}
-
-/// Whether `token` is a getopt short-flag cluster whose value comes from
-/// the NEXT token (issue #265) — i.e. every letter is one of `wrapper`'s
-/// modeled booleans up to the first value-taker, and that value-taker sits
-/// at the cluster's last position (`env -iu FOO`, `exec -la foo`).
-///
-/// Returns false — leaving the caller's generic dash-skip to consume the
-/// cluster token alone — in the two cases where that is already
-/// getopt-correct:
-///
-/// * the first value-taker is NOT last (`env -ui FOO`): real getopt glues
-///   the rest of the token as its value, so the next token is the command;
-/// * an unmodeled letter appears (`env -iL FOO`): both `env` and `exec`
-///   error out on an unknown option and execute nothing, so there is no
-///   execution to guard and never consuming an extra token cannot hide a
-///   real command word.
-fn cluster_takes_separated_value(wrapper: &str, token: &str) -> bool {
-    let Some(booleans) = wrapper_cluster_booleans(wrapper) else {
-        return false;
-    };
-    let value_takers: Vec<char> = wrapper_value_flags(wrapper)
-        .iter()
-        .filter_map(|flag| match flag {
-            ValueFlag::Short(letter) => Some(*letter),
-            ValueFlag::Long(_) => None,
-        })
-        .collect();
-    let Some(rest) = token.strip_prefix('-') else {
-        return false;
-    };
-    if rest.chars().count() < 2 || rest.starts_with('-') {
-        return false;
-    }
-    let last = rest.chars().count() - 1;
-    for (position, letter) in rest.chars().enumerate() {
-        if value_takers.contains(&letter) {
-            return position == last;
-        }
-        if !booleans.contains(&letter) {
-            return false;
-        }
-    }
-    // An all-boolean cluster consumes only itself, which the generic
-    // dash-skip already does.
-    false
-}
-
-/// Where a getopt short-flag cluster's `letter` value lives, for a caller
-/// that needs the value ITSELF rather than [`cluster_takes_separated_value`]'s
-/// stop-here-or-next-token classification for the wrapped-command walk.
-/// Shares [`wrapper_cluster_booleans`]/[`wrapper_value_flags`] with that
-/// function so the two classifications of "where does this wrapper's
-/// value-taking letter's value live" cannot drift apart — issue #209:
-/// `crate::gate::chain_dash_c_targets` had grown its
-/// own, incomplete, from-scratch parsing of env's `-C` position that only
-/// recognized a BARE `-C` token, missing every cluster form (`-iC`,
-/// `-iC<dir>`) `effective_command`'s wrapped-command walk already handles
-/// correctly via this module — reopening the very `env -C` bypass this
-/// mechanism exists to close.
-pub(crate) enum ClusterValue<'a> {
-    /// `letter` is the cluster's last character; its value is the WHOLE
-    /// next token (`env -iC dir`).
-    NextToken,
-    /// `letter` is followed by more characters within this same token;
-    /// those characters (never empty) are its value (`env -iCdir`).
-    Glued(&'a str),
-}
-
-pub(crate) fn locate_cluster_value<'a>(
-    wrapper: &str,
-    token: &'a str,
-    letter: char,
-) -> Option<ClusterValue<'a>> {
-    let booleans = wrapper_cluster_booleans(wrapper)?;
-    let value_takers: Vec<char> = wrapper_value_flags(wrapper)
-        .iter()
-        .filter_map(|flag| match flag {
-            ValueFlag::Short(c) => Some(*c),
-            ValueFlag::Long(_) => None,
-        })
-        .collect();
-    let rest = token.strip_prefix('-')?;
-    if rest.is_empty() || rest.starts_with('-') {
-        return None;
-    }
-    for (index, c) in rest.char_indices() {
-        if c == letter {
-            let glued = &rest[index + c.len_utf8()..];
-            return Some(if glued.is_empty() {
-                ClusterValue::NextToken
-            } else {
-                ClusterValue::Glued(glued)
-            });
-        }
-        if value_takers.contains(&c) {
-            // A DIFFERENT value-taking letter appears before `letter` —
-            // it, not `letter`, owns everything after it in this token,
-            // so `letter` never actually appears as its own flag here.
-            return None;
-        }
-        if !booleans.contains(&c) {
-            // An unmodeled letter: getopt errors out on this cluster at
-            // runtime, so there is no execution (and no `letter` value)
-            // to guard here either — the same reasoning
-            // `cluster_takes_separated_value`'s doc gives for its own
-            // unmodeled-letter case.
-            return None;
-        }
+        rest = hop.next();
     }
     None
 }
 
-/// Per-wrapper flags that take a *separate* value token (`-n 19`, `-u
-/// root`) — consulted by [`skip_wrapper_arguments`] so that value token
-/// isn't mistaken for the wrapped command (issue #54). `sudo`/`doas` share
-/// the gap `nice` originally exposed; `timeout`/`ionice` are new wrappers
-/// added by the same issue. Consumption follows the same [`ValueFlag`]
-/// semantics [`value_flag_free_candidates`] already uses for
-/// `except_targets` candidates: [`ValueFlag::is_bare`] matches only the
-/// flag's standalone spelling (`-n`), never a glued form (`-n19`), so a
-/// glued short flag still falls through to the ordinary dash-prefix skip
-/// below — it consumes only itself, not a following token, exactly like
-/// before this table existed. A wrapper absent from this table, or one
-/// whose flag isn't listed here, keeps that pre-existing dash-prefix-only
-/// behaviour; see [`TRANSPARENT_WRAPPERS`]'s doc for what stays open.
-///
-/// Each wrapper's short *and* long spelling is listed for every value flag
-/// (e.g. `timeout`'s `-s`/`--signal`): a long-only entry left out here
-/// would let its separated form (`--signal KILL 5 rm -rf /`) mistake the
-/// value for the wrapped command exactly as the pre-#54 short-flag gap
-/// did — [`ValueFlag::is_bare`] already treats `--signal` and `-s` as
-/// distinct spellings that must each be listed to be recognised. `flock`
-/// gained its own entry here for the same reason `nice`/`sudo` did: its
-/// `-w`/`--timeout` and `-E`/`--conflict-exit-code` flags take a separated
-/// value that would otherwise land in [`wrapper_positional_args`]'s
-/// lockfile slot (making the real lockfile argument the resolved command).
-fn wrapper_value_flags(wrapper: &str) -> Vec<ValueFlag> {
-    match wrapper {
-        // Issue #250: `env` is in `TRANSPARENT_WRAPPERS` but had no entry
-        // here, so its own value-taking flags were mistaken for the
-        // wrapped command by the generic dash-prefix skip -- `env -u FOO
-        // rm -rf /` silently resolved to `FOO`, matching no rule, even
-        // though this genuinely unsets `FOO` and executes `rm -rf /` in a
-        // real shell. The list below is the union of BSD's value-takers
-        // (`-u`, `-C`, `-P`, `-S`, no long spellings) and GNU's
-        // (`-u`/`--unset`, `-C`/`--chdir`, `-S`/`--split-string`,
-        // `-a`/`--argv0`); `-0`/`-i`/`-v` are boolean on both flavors.
-        // `-P` (BSD-only) and `-a`/`--argv0` (GNU-only)
-        // are listed even though the other flavor lacks them: consuming a
-        // value that would error at runtime on the flavor that doesn't
-        // recognise the flag is the safe, over-blocking direction, the
-        // same posture `exec`'s entry already takes for dash/tcsh/csh.
-        // Deliberately NOT added: GNU's `--default-signal`/
-        // `--ignore-signal`/`--block-signal` take an OPTIONAL value in
-        // `--flag=sig` form only (never a separated token) — unlike every
-        // flag listed below, `env --block-signal rm -rf /` does NOT treat
-        // `rm` as the flag's value in a real shell, so adding an entry
-        // for these would make `skip_wrapper_flags` wrongly consume the
-        // real wrapped command (`rm`) as if it were the flag's separated
-        // value, over-blocking into a *new* bypass (`-rf` mistaken for
-        // the command) instead of closing one. `env`'s short-flag
-        // clustering (`-iu FOO rm -rf /`) is handled by
-        // [`cluster_takes_separated_value`], and `-S`'s value splicing
-        // into the executed argv by [`collect_env_split_string_slots`]
-        // (both issue #265) — this entry alone stops the value from being
-        // read as the command name, and never looks inside it.
-        "env" => vec![
-            ValueFlag::Short('u'),
-            ValueFlag::Long("unset".to_string()),
-            ValueFlag::Short('C'),
-            ValueFlag::Long("chdir".to_string()),
-            ValueFlag::Short('S'),
-            ValueFlag::Long("split-string".to_string()),
-            ValueFlag::Short('P'),
-            ValueFlag::Short('a'),
-            ValueFlag::Long("argv0".to_string()),
-        ],
-        // Issue #248: bash/zsh/ksh93's `exec -a <name> cmd...` sets the
-        // exec'd process's own argv[0] to `<name>` — without this entry,
-        // the generic dash-prefix skip in `skip_wrapper_flags` consumed
-        // the bare `-a` token and mistook `<name>` (the flag's own value)
-        // for the wrapped command, so `exec -a foo rm -rf /` silently
-        // resolved to `foo`, matching no rule (`rm -rf /` genuinely runs
-        // in a real shell). No long-form spelling exists in any of these
-        // shells. dash/tcsh/csh's own `exec` builtins are flagless, so
-        // this entry is either correct or harmlessly conservative there
-        // too (consuming a value that would error at runtime anyway is
-        // the safe, over-blocking direction — the same posture this
-        // file's `busybox`/`builtin` doc comments already take).
-        "exec" => vec![ValueFlag::Short('a')],
-        "nice" => vec![
-            ValueFlag::Short('n'),
-            ValueFlag::Long("adjustment".to_string()),
-        ],
-        // Issue #402: the table below used to list only -u/-g/--user/
-        // --group, missing sudo's other separated-value flags -- an
-        // unlisted one's own value was mistaken for the wrapped command
-        // name by the generic dash-prefix skip, e.g. `sudo -p prompt rm
-        // -rf /` silently resolved to `prompt`, matching no rule (`rm -rf
-        // /` genuinely runs as root in a real shell). Every entry below is
-        // confirmed against sudo's own `long_opts` table
-        // (`src/parse_args.c`) as `required_argument` (a value as a
-        // SEPARATED token, `-X value`/`--name value`, or attached
-        // `--name=value` — [`ValueFlag::Long`] handles both attached and
-        // bare forms already): `-C`/`--close-from`, `-D`/`--chdir`, `-h`/
-        // `--host`, `-p`/`--prompt`, `-R`/`--chroot`, `-r`/`--role`, `-t`/
-        // `--type`, `-T`/`--command-timeout`, `-U`/`--other-user`, `-a`/
-        // `--auth-type` (BSD authentication type). `-c` (BSD login class)
-        // is added SHORT-ONLY, deliberately omitting its real long
-        // spelling, `--login-class`: `-i`'s own real long spelling,
-        // `--login`, strictly prefixes it, and unlike real `getopt_long`
-        // (which resolves an exact match, `--login`, before ever
-        // considering it as an abbreviation of a longer option),
-        // [`ValueFlag::unambiguous_long_prefix`] has no such boolean-flag
-        // awareness — declaring `Long("login-class")` would make it
-        // resolve `sudo --login rm -rf /` (universally valid) as that
-        // entry's abbreviation and wrongly consume `rm` as its value, a
-        // new, universal Block→Ask downgrade. Accepted residual: `sudo
-        // --login-class x rm -rf /` itself still downgrades on a BSD
-        // build (the same class of gap this issue closes elsewhere), but
-        // only for that one long spelling, and only on that flavor —
-        // pinned by
-        // `sudo_dash_dash_login_boolean_flag_still_blocks_without_consuming_the_next_word`
-        // in `src/gate.rs`.
-        "sudo" => vec![
-            ValueFlag::Short('u'),
-            ValueFlag::Short('g'),
-            ValueFlag::Long("user".to_string()),
-            ValueFlag::Long("group".to_string()),
-            ValueFlag::Short('C'),
-            ValueFlag::Long("close-from".to_string()),
-            ValueFlag::Short('D'),
-            ValueFlag::Long("chdir".to_string()),
-            ValueFlag::Short('h'),
-            ValueFlag::Long("host".to_string()),
-            ValueFlag::Short('p'),
-            ValueFlag::Long("prompt".to_string()),
-            ValueFlag::Short('R'),
-            ValueFlag::Long("chroot".to_string()),
-            ValueFlag::Short('r'),
-            ValueFlag::Long("role".to_string()),
-            ValueFlag::Short('t'),
-            ValueFlag::Long("type".to_string()),
-            ValueFlag::Short('T'),
-            ValueFlag::Long("command-timeout".to_string()),
-            ValueFlag::Short('U'),
-            ValueFlag::Long("other-user".to_string()),
-            ValueFlag::Long("auth-type".to_string()),
-            ValueFlag::Short('a'),
-            ValueFlag::Short('c'),
-        ],
-        // Issue #402: `-a`/`-C` (both `doas(1)` separated-value flags,
-        // confirmed against the man page) were missing the same way
-        // sudo's were -- `doas -a pam rm -rf /` silently resolved to
-        // `pam`. doas has no long-option spellings at all.
-        "doas" => vec![
-            ValueFlag::Short('u'),
-            ValueFlag::Short('a'),
-            ValueFlag::Short('C'),
-        ],
-        "timeout" => vec![
-            ValueFlag::Short('s'),
-            ValueFlag::Short('k'),
-            ValueFlag::Long("signal".to_string()),
-            ValueFlag::Long("kill-after".to_string()),
-        ],
-        "ionice" => vec![
-            ValueFlag::Short('c'),
-            ValueFlag::Short('n'),
-            ValueFlag::Short('p'),
-            ValueFlag::Long("class".to_string()),
-            ValueFlag::Long("classdata".to_string()),
-            ValueFlag::Long("pid".to_string()),
-        ],
-        "flock" => vec![
-            ValueFlag::Short('w'),
-            ValueFlag::Short('E'),
-            ValueFlag::Short('c'),
-            ValueFlag::Long("timeout".to_string()),
-            ValueFlag::Long("conflict-exit-code".to_string()),
-            ValueFlag::Long("command".to_string()),
-        ],
-        // Issues #64/#66: `su`'s own `-c`/`--command` flag (like `flock`'s)
-        // takes a separated shell-command-string value. Listing it here
-        // stops that string from being mistaken for the wrapped command by
-        // `effective_command`'s ordinary skip — the actual recursion into
-        // its content happens separately, via `RECURSABLE_SLOTS`/
-        // `wrapper_shell_string_scripts`, not by this table alone (adding
-        // a value flag here only ever means "skip this value", never
-        // "recurse into it").
-        "su" => vec![
-            ValueFlag::Short('c'),
-            ValueFlag::Long("command".to_string()),
-        ],
-        "chrt" => vec![
-            ValueFlag::Short('T'),
-            ValueFlag::Short('P'),
-            ValueFlag::Short('D'),
-            ValueFlag::Long("sched-runtime".to_string()),
-            ValueFlag::Long("sched-period".to_string()),
-            ValueFlag::Long("sched-deadline".to_string()),
-        ],
-        // Issue #264: `stdbuf` is in `TRANSPARENT_WRAPPERS` but had no
-        // entry here, so its own value-taking flags were mistaken for the
-        // wrapped command by the generic dash-prefix skip -- `stdbuf -o L
-        // rm -rf /` silently resolved to `L`, matching no rule, even
-        // though this genuinely line-buffers stdout and executes `rm -rf
-        // /` in a real shell. `man stdbuf` on this machine (BSD/macOS) and
-        // GNU coreutils' `stdbuf` (verified via `man` after installing
-        // coreutils locally) agree: `-i`/`--input`, `-o`/`--output`,
-        // `-e`/`--error` are the only options besides `--help`/`--version`,
-        // and all three take a value that is always mandatory and always a
-        // separated token on both flavors -- unlike `env`'s signal flags or
-        // `xargs`'s `-e`/`-i`/`-l` synonyms below, there is no
-        // optional-value form to avoid here. BSD has no long spellings;
-        // listing them anyway is harmlessly conservative (the same posture
-        // `env`'s entry already takes for flavor-specific flags).
-        "stdbuf" => vec![
-            ValueFlag::Short('i'),
-            ValueFlag::Long("input".to_string()),
-            ValueFlag::Short('o'),
-            ValueFlag::Long("output".to_string()),
-            ValueFlag::Short('e'),
-            ValueFlag::Long("error".to_string()),
-        ],
-        // Issue #264: `xargs` is in `TRANSPARENT_WRAPPERS` but had no entry
-        // here, so its own value-taking flags were mistaken for the wrapped
-        // command the same way `stdbuf`'s were above -- `xargs -n 1 rm -rf
-        // /` silently resolved to `1`, matching no rule, even though this
-        // genuinely executes `rm -rf /` (once per input line) in a real
-        // shell. The list below is the union of BSD/macOS `xargs`'s
-        // mandatory-value flags (`man xargs` on this machine: `-E`, `-I`,
-        // `-J`, `-L`, `-n`/`--max-args`, `-P`/`--max-procs`, `-R`, `-S`,
-        // `-s`/`--max-chars`) and GNU findutils' (verified via `man xargs`
-        // after installing findutils locally: `-a`/`--arg-file`,
-        // `-d`/`--delimiter`, `-E`, `-I`, `-L`, `-n`/`--max-args`,
-        // `-P`/`--max-procs`, `-s`/`--max-chars`,
-        // `--process-slot-var`). `-0`/`-o`/`-p`/`-r`/`-t`/`-x` are boolean
-        // on both flavors. Deliberately NOT added -- the same trap
-        // `env`'s entry avoids for `--block-signal`: GNU's `-e`/`--eof`,
-        // `-i`/`--replace` and `-l`/`--max-lines` are documented synonyms
-        // for `-E`/`-I`/`-L` respectively, but each takes an OPTIONAL value
-        // in *attached* form only (`-e[eof-str]`, `--replace[=replace-
-        // str]`, `-l[max-lines]`); `xargs -i rm -rf /` does NOT treat `rm`
-        // as `-i`'s value in a real shell (it defaults to `{}`), so
-        // listing these would make `skip_wrapper_flags` wrongly consume
-        // the real wrapped command as if it were a separated value,
-        // over-blocking into a new bypass instead of closing one.
-        "xargs" => vec![
-            ValueFlag::Short('E'),
-            ValueFlag::Short('I'),
-            ValueFlag::Short('J'),
-            ValueFlag::Short('L'),
-            ValueFlag::Short('n'),
-            ValueFlag::Long("max-args".to_string()),
-            ValueFlag::Short('P'),
-            ValueFlag::Long("max-procs".to_string()),
-            ValueFlag::Short('R'),
-            ValueFlag::Short('S'),
-            ValueFlag::Short('s'),
-            ValueFlag::Long("max-chars".to_string()),
-            ValueFlag::Short('a'),
-            ValueFlag::Long("arg-file".to_string()),
-            ValueFlag::Short('d'),
-            ValueFlag::Long("delimiter".to_string()),
-            ValueFlag::Long("process-slot-var".to_string()),
-        ],
-        // Issue #638: GNU `time` takes `-f`/`--format` and `-o`/`--output`;
-        // `-p`/`-a`/`-v`/`-q` and macOS `-l` are boolean.
-        "time" => vec![
-            ValueFlag::Short('f'),
-            ValueFlag::Long("format".to_string()),
-            ValueFlag::Short('o'),
-            ValueFlag::Long("output".to_string()),
-        ],
-        "caffeinate" => vec![ValueFlag::Short('t'), ValueFlag::Short('w')],
-        // The NEWROOT positional is in `wrapper_positional_args`.
-        "chroot" => vec![
-            ValueFlag::Long("userspec".to_string()),
-            ValueFlag::Long("groups".to_string()),
-            ValueFlag::Short('u'),
-            ValueFlag::Short('g'),
-            ValueFlag::Short('G'),
-        ],
-        // Required-argument options only: the namespace flags (`--mount[=file]`)
-        // take an optional `=`-joined value, and listing them would swallow
-        // the wrapped command.
-        "unshare" => vec![
-            ValueFlag::Short('S'),
-            ValueFlag::Long("setuid".to_string()),
-            ValueFlag::Short('G'),
-            ValueFlag::Long("setgid".to_string()),
-            ValueFlag::Short('R'),
-            ValueFlag::Long("root".to_string()),
-            ValueFlag::Short('w'),
-            ValueFlag::Long("wd".to_string()),
-            ValueFlag::Long("map-user".to_string()),
-            ValueFlag::Long("map-group".to_string()),
-            ValueFlag::Long("map-users".to_string()),
-            ValueFlag::Long("map-groups".to_string()),
-            ValueFlag::Long("setgroups".to_string()),
-            ValueFlag::Long("propagation".to_string()),
-            ValueFlag::Long("monotonic".to_string()),
-            ValueFlag::Long("boottime".to_string()),
-            ValueFlag::Long("load-interp".to_string()),
-            ValueFlag::Short('l'),
-        ],
-        "runuser" => vec![
-            ValueFlag::Short('u'),
-            ValueFlag::Long("user".to_string()),
-            ValueFlag::Short('g'),
-            ValueFlag::Long("group".to_string()),
-            ValueFlag::Short('G'),
-            ValueFlag::Long("supp-group".to_string()),
-            ValueFlag::Short('s'),
-            ValueFlag::Long("shell".to_string()),
-            ValueFlag::Short('w'),
-            ValueFlag::Long("whitelist-environment".to_string()),
-            ValueFlag::Short('c'),
-            ValueFlag::Long("command".to_string()),
-            ValueFlag::Long("session-command".to_string()),
-        ],
-        "strace" => vec![
-            ValueFlag::Short('o'),
-            ValueFlag::Short('e'),
-            ValueFlag::Short('p'),
-            ValueFlag::Short('s'),
-            ValueFlag::Short('u'),
-            ValueFlag::Short('E'),
-            ValueFlag::Short('a'),
-            ValueFlag::Short('b'),
-            ValueFlag::Short('I'),
-            ValueFlag::Short('O'),
-            ValueFlag::Short('P'),
-            ValueFlag::Short('S'),
-            ValueFlag::Short('X'),
-            ValueFlag::Long("output".to_string()),
-            ValueFlag::Long("trace".to_string()),
-            ValueFlag::Long("signal".to_string()),
-            ValueFlag::Long("status".to_string()),
-            ValueFlag::Long("env".to_string()),
-            ValueFlag::Long("user".to_string()),
-            ValueFlag::Long("string-limit".to_string()),
-            ValueFlag::Short('U'),
-            ValueFlag::Long("attach".to_string()),
-            ValueFlag::Long("trace-path".to_string()),
-            ValueFlag::Long("summary-sort-by".to_string()),
-            ValueFlag::Long("summary-columns".to_string()),
-            ValueFlag::Long("columns".to_string()),
-            ValueFlag::Long("detach-on".to_string()),
-            ValueFlag::Long("interruptible".to_string()),
-            ValueFlag::Long("const-print-style".to_string()),
-            ValueFlag::Long("abbrev".to_string()),
-            ValueFlag::Long("verbose".to_string()),
-            ValueFlag::Long("raw".to_string()),
-            ValueFlag::Long("read".to_string()),
-            ValueFlag::Long("write".to_string()),
-            ValueFlag::Long("inject".to_string()),
-            ValueFlag::Long("fault".to_string()),
-            ValueFlag::Long("syscall-limit".to_string()),
-            ValueFlag::Long("decode-pids".to_string()),
-        ],
-        // `-d`/`--differences` takes an optional `=`-joined value only.
-        "watch" => vec![
-            ValueFlag::Short('n'),
-            ValueFlag::Long("interval".to_string()),
-            ValueFlag::Short('q'),
-            ValueFlag::Long("equexit".to_string()),
-            ValueFlag::Short('s'),
-            ValueFlag::Long("shotsdir".to_string()),
-        ],
-        // BSD `-t time`/`-T fmt`, util-linux `-c`/`-E`/`-I`/`-O`/`-B`/`-m`/
-        // `-o`/`-T`. util-linux `-t` takes only a glued value, so a bare
-        // `-t` swallowing the next word is BSD-correct, except a
-        // dash-prefixed word (`script_t_value_is_dash_word`); the bare
-        // `-t -c cmd` shape is also found by `-c`'s whole-tail scan, and
-        // `collect_script_slots` covers `-qc`/`--command=`.
-        "script" => vec![
-            ValueFlag::Short('c'),
-            ValueFlag::Short('t'),
-            ValueFlag::Short('T'),
-            ValueFlag::Short('E'),
-            ValueFlag::Short('I'),
-            ValueFlag::Short('O'),
-            ValueFlag::Short('B'),
-            ValueFlag::Short('m'),
-            ValueFlag::Short('o'),
-            ValueFlag::Long("command".to_string()),
-            ValueFlag::Long("echo".to_string()),
-            ValueFlag::Long("log-in".to_string()),
-            ValueFlag::Long("log-out".to_string()),
-            ValueFlag::Long("log-io".to_string()),
-            ValueFlag::Long("log-timing".to_string()),
-            ValueFlag::Long("logging-format".to_string()),
-            ValueFlag::Long("output-limit".to_string()),
-        ],
-        // Resource limits (`--nofile=...`) are optional-argument, `=`-joined.
-        "prlimit" => vec![
-            ValueFlag::Short('p'),
-            ValueFlag::Long("pid".to_string()),
-            ValueFlag::Short('o'),
-            ValueFlag::Long("output".to_string()),
-        ],
-        "systemd-run" => vec![
-            ValueFlag::Short('u'),
-            ValueFlag::Long("unit".to_string()),
-            ValueFlag::Short('p'),
-            ValueFlag::Long("property".to_string()),
-            ValueFlag::Short('E'),
-            ValueFlag::Long("setenv".to_string()),
-            ValueFlag::Short('M'),
-            ValueFlag::Long("machine".to_string()),
-            ValueFlag::Short('H'),
-            ValueFlag::Long("host".to_string()),
-            ValueFlag::Long("uid".to_string()),
-            ValueFlag::Long("gid".to_string()),
-            ValueFlag::Long("nice".to_string()),
-            ValueFlag::Long("working-directory".to_string()),
-            ValueFlag::Long("description".to_string()),
-            ValueFlag::Long("slice".to_string()),
-            ValueFlag::Long("service-type".to_string()),
-            ValueFlag::Long("on-active".to_string()),
-            ValueFlag::Long("on-boot".to_string()),
-            ValueFlag::Long("on-startup".to_string()),
-            ValueFlag::Long("on-unit-active".to_string()),
-            ValueFlag::Long("on-unit-inactive".to_string()),
-            ValueFlag::Long("on-calendar".to_string()),
-            ValueFlag::Long("timer-property".to_string()),
-            ValueFlag::Short('C'),
-            ValueFlag::Long("capsule".to_string()),
-            ValueFlag::Long("path-property".to_string()),
-            ValueFlag::Long("socket-property".to_string()),
-            ValueFlag::Long("job-mode".to_string()),
-        ],
-        "numactl" => vec![
-            ValueFlag::Short('C'),
-            ValueFlag::Long("physcpubind".to_string()),
-            ValueFlag::Short('N'),
-            ValueFlag::Long("cpunodebind".to_string()),
-            ValueFlag::Short('m'),
-            ValueFlag::Long("membind".to_string()),
-            ValueFlag::Short('p'),
-            ValueFlag::Long("preferred".to_string()),
-            ValueFlag::Short('i'),
-            ValueFlag::Long("interleave".to_string()),
-            ValueFlag::Short('P'),
-            ValueFlag::Long("preferred-many".to_string()),
-            ValueFlag::Short('w'),
-            ValueFlag::Long("weighted-interleave".to_string()),
-            ValueFlag::Short('S'),
-            ValueFlag::Long("shm".to_string()),
-            ValueFlag::Short('f'),
-            ValueFlag::Long("file".to_string()),
-            ValueFlag::Short('o'),
-            ValueFlag::Long("offset".to_string()),
-            ValueFlag::Short('L'),
-            ValueFlag::Long("length".to_string()),
-            ValueFlag::Short('M'),
-            ValueFlag::Long("shmmode".to_string()),
-            ValueFlag::Short('I'),
-            ValueFlag::Long("shmid".to_string()),
-            ValueFlag::Long("cpubind".to_string()),
-        ],
-        // Issue #209: `make`/`tar` aren't
-        // `TRANSPARENT_WRAPPERS` (they don't exec an arbitrary wrapped
-        // command), so these two entries are never reached by
-        // `skip_wrapper_flags`/`skip_wrapper_arguments` — they exist
-        // solely so `crate::gate::chain_dash_c_targets`/
-        // `resolve_tar_dash_c` can call `locate_cluster_value` for these
-        // tools' own `-C` getopt-cluster recognition, sharing this same
-        // table so a future edit can't drift the two apart again the way
-        // `env`'s handling once did. GNU Make 3.81's `man make` classifies
-        // every short flag: `-C`/`-f`/`-I`/`-j`/`-l`/`-o`/`-W` take a
-        // value (verified live: `make -jC dir`/`make -lC dir` both treat
-        // `C` as `-j`/`-l`'s own glued value and never chdir, matching
-        // `-j`'s/`-l`'s real optional-value semantics — this table only
-        // needs "does this letter consume the rest of the cluster",
-        // which holds regardless of the value being optional or
-        // mandatory); every other short letter (`b m B d e i k L n p q r
-        // R s S t v w`) is boolean (verified: `make -kwC dir` chdirs,
-        // `make -Ckw` treats `kw` as `-C`'s own value).
-        "make" => vec![
-            ValueFlag::Short('C'),
-            ValueFlag::Long("directory".to_string()),
-            ValueFlag::Short('f'),
-            ValueFlag::Short('I'),
-            ValueFlag::Short('j'),
-            ValueFlag::Short('l'),
-            ValueFlag::Short('o'),
-            ValueFlag::Short('W'),
-        ],
-        // No `"tar"` entry: see `wrapper_cluster_booleans`'s doc for why
-        // issue #209 removed the bsdtar-only
-        // table this used to have (its `-s` classification was wrong for
-        // GNU tar's `-s`/`--same-order`, silently dropping `-C`
-        // composition on that flavor). `crate::gate::find_dash_c_in_cluster`
-        // does not consult this table for tar.
-        _ => vec![],
-    }
-}
-
-/// Per-wrapper count of *positional* (not flag-attached) arguments the
-/// wrapper consumes before the wrapped command itself — a separate table
-/// from [`wrapper_value_flags`] because these values aren't attached to
-/// any flag at all (issue #54):
-///
-/// - `timeout [OPTION]... DURATION COMMAND...` — the duration is a bare
-///   positional; without this, `timeout 5 rm -rf /` mistakes `5` for the
-///   command.
-/// - `flock [options] <file|directory> command...` — the lock target
-///   precedes the command. This one is load-bearing, not cosmetic: without
-///   it, `flock /tmp/l rm -rf /` resolves `/tmp/l` (basename `l`) as the
-///   command, `rm -rf /` never reaches the `rm` rule, and the whole
-///   invocation silently allows.
-/// - `su [options] [-] [user [args...]]` — the username, when present,
-///   precedes the command `su` itself runs.
-/// - `chrt [options] priority command [args]` — the scheduling priority is
-///   a bare positional before the command, the same shape as `timeout`'s
-///   duration. `chrt`'s other mode, `chrt -p [priority] pid` (operate on
-///   an already-running process), never starts a new command at all, so
-///   treating whatever follows the skipped positional as "the command"
-///   there resolves to a bare PID and matches no rule — not a new gap,
-///   since there is no command in that mode to miss.
-/// - `taskset [options] mask command [args]` — the CPU affinity mask
-///   precedes the command, same shape again. `taskset -p [mask] pid`
-///   shares `chrt -p`'s no-new-command mode and the same non-gap.
-///
-/// Applied by [`skip_wrapper_arguments`] *after* flag-skipping stops, so a
-/// leading run of flags (including a value-flag's separated value) is
-/// consumed first and the positional count applies to whatever token
-/// follows.
-fn wrapper_positional_args(wrapper: &str) -> usize {
-    // `setarch` is absent on purpose: its grammar is `[arch] [options]
-    // [program]`, handled by `skip_wrapper_arguments` itself.
-    match wrapper {
-        // BSD `script [file [command ...]]`: the typescript file precedes
-        // the command.
-        "timeout" | "flock" | "su" | "chrt" | "taskset" | "chroot" | "script" => 1,
-        _ => 0,
-    }
-}
-
-/// The flag-skipping half of [`skip_wrapper_arguments`], factored out so
-/// [`su_username_matches_blocklisted_command`] can find where `su`'s own
-/// flags end — and therefore which token occupies its positional
-/// "username" slot — without also applying [`wrapper_positional_args`]'s
-/// skip, which is exactly the token this function's caller needs to
-/// inspect rather than discard. Returns the index of the first token that
-/// is neither one of `wrapper`'s bare value flags nor `-`-prefixed (nor,
-/// for `env`, a `NAME=value` assignment) — i.e. where positional
-/// consumption would begin.
-fn skip_wrapper_flags(wrapper: &str, argv: &[NormalizedWord]) -> usize {
-    let value_flags = wrapper_value_flags(wrapper);
-    let mut idx = 0;
-    while idx < argv.len() {
-        let Resolution::Resolved(token) = argv[idx].resolution() else {
-            break;
-        };
-        // Issue #248 follow-up, generalized to
-        // `env` by issue #265: a value flag clusters trivially with its
-        // wrapper's boolean flags — `exec -la foo cmd` and `env -iu FOO
-        // rm -rf /` are ordinary, easily-typed spellings, and each
-        // genuinely runs the trailing command in a real shell.
-        // `ValueFlag::is_bare` above only matches a flag's standalone
-        // spelling, so a cluster falls through to the generic dash-skip
-        // below, which skips the cluster token alone and then wrongly
-        // resolves the flag's own value (`foo`, `FOO`) as the wrapped
-        // command — the same live-bypass shape the bare spellings had
-        // before their `wrapper_value_flags` entries existed.
-        //
-        // The getopt-correct test is the FIRST value-taker's position,
-        // not the token's last character: `-ajava`/`-aa`/`-acuda` end in
-        // `a` too, but that `a` belongs to the GLUED VALUE, and reading
-        // them as "value comes from the next token" consumed the real
-        // wrapped command (`rm`) as if it were the flag's value — a
-        // regression an earlier `ends_with('a')` version of this check had.
-        if (value_flag_bare_match(&value_flags, token)
-            || cluster_takes_separated_value(wrapper, token))
-            && !script_t_value_is_dash_word(wrapper, token, argv.get(idx + 1))
-        {
-            // The flag token itself is always consumed; its separated
-            // value is consumed too only when resolved: advancing past an
-            // unresolvable value unconditionally would let `nice -n $X
-            // ls`/`timeout -s $X 5 ls` silently resolve `ls` as the
-            // wrapped command and allow it, even though the real flag
-            // value — and therefore what actually runs — is unknown, the
-            // same class of gap [`skip_wrapper_arguments`]'s
-            // positional-skip has. Stopping here, at the value token (or
-            // at the end of `argv` if the flag was the last token), leaves
-            // it for the caller's own `Resolution::Resolved` check to fail
-            // closed — this function never resolves anything itself.
-            idx += 1;
-            match argv.get(idx).map(NormalizedWord::resolution) {
-                Some(Resolution::Resolved(_)) => idx += 1,
-                _ => break,
-            }
-            continue;
-        }
-        let skippable =
-            token.starts_with('-') || (wrapper == "env" && is_env_assignment_shape(token));
-        if !skippable {
-            break;
-        }
-        idx += 1;
-    }
-    idx
-}
-
-/// Whether `token` ends in `script`'s `-t` and the next word starts with `-`.
-/// BSD's `-t time` is a non-negative count and util-linux's `-t` takes only a
-/// glued value, so a dash-prefixed next word is a flag, never `-t`'s value
-/// (`script -t -qc 'rm -rf /'`).
-fn script_t_value_is_dash_word(wrapper: &str, token: &str, next: Option<&NormalizedWord>) -> bool {
-    wrapper == "script"
-        && token.starts_with('-')
-        && !token.starts_with("--")
-        && token.ends_with('t')
-        && matches!(
-            next.map(NormalizedWord::resolution),
-            Some(Resolution::Resolved(word)) if word.starts_with('-')
-        )
-}
-
-/// Skips a transparent wrapper's own leading arguments (see
-/// [`effective_command`]'s docs): a token matching one of
-/// [`wrapper_value_flags`]'s bare spellings skips itself *and* the
-/// following token (its separated value); any other `-`-prefixed token,
-/// plus `NAME=value` tokens when `wrapper == "env"`, skips only itself.
-/// Flag-skipping stops at the first token matching neither shape — that
-/// token starts the wrapper's [`wrapper_positional_args`] positionals, if
-/// it declares any — or at the first unresolvable token, which leaves
-/// `effective_command`'s next loop iteration to fail closed to `None`.
-///
-/// The positional count is applied once flag-skipping stops, one token at a
-/// time, and — like the flag-skipping loop above — stops early on the first
-/// [`Resolution::Unresolvable`] token rather than blindly counting past it:
-/// counting past an unresolvable token unconditionally would let `timeout
-/// $X ls`/`flock $F ls` silently resolve `ls` as the wrapped command and
-/// `allow` it, even though the real positional value — and therefore what
-/// actually runs — is unknown; the 0-positional `env $X ls` already
-/// correctly falls to `WrapperChainEscalation::Unresolved` via the
-/// flag-skipping loop's own early stop, so the positional loop must match
-/// that same fail-closed shape. Left pointing at that unresolvable
-/// token (not past it), so the caller's own `Resolution::Resolved` check —
-/// [`effective_command`]'s loop, or [`wrapper_chain_escalation`]'s — is what
-/// actually fails closed; this function only ever stops early, never
-/// resolves anything itself. Also bounded by however many tokens remain: a
-/// wrapper whose value or positional arguments consume the entire tail
-/// (`flock -x 9` alone) leaves an empty slice, which `effective_command`'s
-/// next loop iteration turns into `None` — fail-closed, never a guess past
-/// the end.
-///
-/// A lone `--` end-of-options marker immediately after that (e.g. `flock
-/// /tmp/l -- rm -rf /`) is skipped too: it is never itself a command name,
-/// and without this a positional-consuming wrapper resolves it as the
-/// wrapped command, which matches no rule and silently allows (issue #54
-/// follow-up). A wrapper with no positional (`sudo -u root -- rm -rf /`)
-/// never reaches this check — the flag-skipping loop above already
-/// consumes `--` itself, since it starts with `-`.
-fn skip_wrapper_arguments<'a>(wrapper: &str, argv: &'a [NormalizedWord]) -> &'a [NormalizedWord] {
-    let mut idx = 0;
-    // `setarch [arch] [options] [program]`: ARCH only when the first word
-    // is not an option, and the options come AFTER it (not before, like
-    // every other positional-taking wrapper here).
-    if wrapper == "setarch"
-        && let Some(Resolution::Resolved(arch)) = argv.first().map(NormalizedWord::resolution)
-        && !arch.starts_with('-')
-    {
-        idx = 1;
-    }
-    idx += skip_wrapper_flags(wrapper, &argv[idx..]);
-    let mut positionals_remaining = wrapper_positional_args(wrapper);
-    while positionals_remaining > 0 {
-        let Some(Resolution::Resolved(_)) = argv.get(idx).map(NormalizedWord::resolution) else {
-            break;
-        };
-        idx += 1;
-        positionals_remaining -= 1;
-    }
-    if let Some(Resolution::Resolved(token)) = argv.get(idx).map(NormalizedWord::resolution)
-        && token == "--"
-    {
-        idx += 1;
-    }
-    &argv[idx..]
-}
-
 /// How `stage`'s wrapper-unwrap chain (the same walk as
-/// [`effective_command`]) relates to [`ESCALATION_VECTORS`] — see
-/// [`wrapper_chain_escalation`].
+/// [`effective_command`]) relates to the catalog's privilege-escalating
+/// commands — see [`wrapper_chain_escalation`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WrapperChainEscalation {
-    /// One of [`ESCALATION_VECTORS`] appears at some hop of the chain —
-    /// carries which one (the `'static` entry from that constant), so
-    /// `crate::gate`'s floor reason can name it.
+    /// A privilege-escalating command appears at some hop of the chain —
+    /// carries which one (the catalog's `'static` name), so `crate::gate`'s
+    /// floor reason can name it.
     Contains(&'static str),
     /// The chain passed through at least one transparent wrapper and then
     /// hit an unresolvable word — the wrapped command, possibly an
@@ -6568,10 +5493,11 @@ pub(crate) enum WrapperChainEscalation {
     Absent,
 }
 
-/// Classifies `stage`'s wrapper-unwrap chain against [`ESCALATION_VECTORS`]
-/// at *any* hop, not just the terminal resolved command — `env sudo ls`
-/// must be caught the same as a bare `sudo ls` (issue #32, generalised to
-/// `doas`/`su`/`pkexec`/`run0` by issues #35/#36; `crate::gate` rule 10).
+/// Classifies `stage`'s wrapper-unwrap chain against the catalog's
+/// privilege-escalating commands at *any* hop, not just the terminal
+/// resolved command — `env sudo ls` must be caught the same as a bare
+/// `sudo ls` (issue #32, generalised to `doas`/`su`/`pkexec`/`run0` by
+/// issues #35/#36; `crate::gate` rule 10).
 ///
 /// [`WrapperChainEscalation::Unresolved`] is the fail-closed arm: past the
 /// first wrapper, an unresolvable word means what actually runs is
@@ -6584,72 +5510,41 @@ pub(crate) fn wrapper_chain_escalation(stage: &[NormalizedWord]) -> WrapperChain
     let mut rest = stage;
     let mut passed_wrapper = false;
     loop {
-        let Some((first, tail)) = rest.split_first() else {
-            return WrapperChainEscalation::Absent;
-        };
-        let Resolution::Resolved(name) = first.resolution() else {
-            return if passed_wrapper {
-                WrapperChainEscalation::Unresolved
-            } else {
-                WrapperChainEscalation::Absent
-            };
-        };
-        let base = basename(name);
-        // Issue #493 follow-up: fold for both checks below -- `SUDO`/
-        // `sudo` must be recognized identically as an escalation vector.
-        let folded_base = fold_command_name(base);
-        if let Some(&vector) = ESCALATION_VECTORS.iter().find(|v| **v == folded_base) {
-            return WrapperChainEscalation::Contains(vector);
+        match step(rest, &[]) {
+            Step::Wrapper(hop) => {
+                if hop.wrapper.escalates_privileges() {
+                    return WrapperChainEscalation::Contains(hop.wrapper.name());
+                }
+                passed_wrapper = true;
+                rest = hop.next();
+            }
+            Step::Unresolvable if passed_wrapper => return WrapperChainEscalation::Unresolved,
+            Step::Command { .. } | Step::Unresolvable | Step::Empty => {
+                return WrapperChainEscalation::Absent;
+            }
         }
-        if !TRANSPARENT_WRAPPERS.contains(&folded_base.as_str()) {
-            return WrapperChainEscalation::Absent;
-        }
-        passed_wrapper = true;
-        rest = skip_wrapper_arguments(&folded_base, tail);
     }
 }
 
-/// Whether `stage`'s wrapper-unwrap chain passes a `sudo` flag that runs the
-/// wrapped command in another directory (`-D`/`--chdir`) or root
+/// Whether `stage`'s wrapper-unwrap chain passes an option that runs the
+/// wrapped command in another directory (`sudo -D`/`--chdir`) or root
 /// (`-R`/`--chroot`) than the shell's own. Relative paths in the wrapped
 /// command then name different files than the lexical cwd suggests, and
 /// nothing composes them (unlike `env -C`, issue #209). Over-approximates on
-/// purpose: any short cluster containing `D`/`R` and any long option that is
-/// a prefix of `chdir`/`chroot` counts, because a false positive only makes
-/// a `resolve_symlinks` exception fail closed.
+/// purpose, see `Known::token_relocates_cwd`.
 #[must_use]
 pub(crate) fn wrapper_chain_changes_cwd(stage: &[NormalizedWord]) -> bool {
     let mut rest = stage;
-    loop {
-        let Some((first, tail)) = rest.split_first() else {
-            return false;
-        };
-        let Resolution::Resolved(name) = first.resolution() else {
-            return false;
-        };
-        let folded_base = fold_command_name(basename(name));
-        if !TRANSPARENT_WRAPPERS.contains(&folded_base.as_str()) {
-            return false;
+    while let Step::Wrapper(hop) = step(rest, &[]) {
+        let changes = hop.tail[..hop.parsed.options_end()].iter().any(|word| {
+            matches!(word.resolution(), Resolution::Resolved(token) if hop.wrapper.token_relocates_cwd(token))
+        });
+        if changes {
+            return true;
         }
-        if folded_base == "sudo" {
-            let flags_end = skip_wrapper_flags(&folded_base, tail);
-            let changes = tail[..flags_end].iter().any(|word| {
-                matches!(word.resolution(), Resolution::Resolved(token) if sudo_flag_changes_cwd(token))
-            });
-            if changes {
-                return true;
-            }
-        }
-        rest = skip_wrapper_arguments(&folded_base, tail);
+        rest = hop.next();
     }
-}
-
-fn sudo_flag_changes_cwd(token: &str) -> bool {
-    if let Some(long) = token.strip_prefix("--") {
-        let name = long.split('=').next().unwrap_or(long);
-        return name.len() >= 2 && ("chdir".starts_with(name) || "chroot".starts_with(name));
-    }
-    token.starts_with('-') && token.contains(['D', 'R'])
+    false
 }
 
 /// [`builtin_loadable_library`]'s outcome for one `builtin` hop found in
@@ -6679,61 +5574,35 @@ pub(crate) enum BuiltinLoadableLibrary {
 /// `-f` dlopen()s an arbitrary shared object and installs its exported
 /// symbols as new shell builtins, the same danger `enable -f` covers
 /// (`rules/blocklist.toml`'s `enable-loadable-builtin`). Unlike `enable`,
-/// `builtin` is ALSO a [`TRANSPARENT_WRAPPERS`] dispatcher — `builtin name
-/// args...` runs shell builtin `name` with the REST of argv as `name`'s own
+/// `builtin` is ALSO a catalogued exec wrapper — `builtin name args...`
+/// runs shell builtin `name` with the REST of argv as `name`'s own
 /// arguments — so a plain `required_flags = ["f"]` blocklist rule
 /// false-matches an ordinary dispatch whose wrapped command happens to use
-/// `-f`/`-rf` (`builtin $CMD -rf /`); that reversion is recorded in
-/// `enable-loadable-builtin`'s own doc comment.
+/// `-f`/`-rf` (`builtin $CMD -rf /`).
 ///
 /// `-f`/`-d` are only ever `builtin`'s OWN flags somewhere in its LEADING
 /// run of dash-prefixed tokens (ksh's grammar allows no option after the
 /// first bare name, which starts the dispatched command's own arguments) —
 /// but that run can be more than one token: ksh's option parser treats
-/// `-d -f lib` identically to a single clustered `-df lib` (an earlier
-/// version of this function, which checked only the very first
-/// tail token, let `builtin -s -f lib`/`builtin -d -f lib` slip
-/// through as a real bypass). So this walks every leading dash-cluster
-/// token (stopping at the first non-dash-cluster token, `--`, or the end of
-/// `tail`) looking for `f` in ANY of them, rather than [`FlagMatcher`]'s
-/// any-position-in-the-WHOLE-argv presence check (which is what let the
-/// wrapped command's own `-f`/`-rf` false-match in the reverted attempt).
-/// Mirrors [`wrapper_chain_escalation`]'s walk but stopping at the first
-/// hop resolving to `builtin` instead of an escalation vector.
-///
-/// Without this check, `effective_command`'s generic wrapper-argument skip
-/// (`skip_wrapper_arguments`) mis-resolves `builtin -f evil.so somefn` as an
-/// ordinary dispatch to the wrapped command `evil.so` — `builtin` has no
-/// [`wrapper_value_flags`] entry, so its dash-prefixed `-f` is skipped like
-/// a boolean flag and the shared-object path is read as the dispatched
-/// builtin's name, matching no rule.
+/// `-d -f lib` identically to a single clustered `-df lib`. So this scans
+/// every leading dash-cluster token (stopping at the first
+/// non-dash-cluster token, `--`, or the end of the tail) looking for `f` in
+/// ANY of them, rather than [`FlagMatcher`]'s any-position-in-the-WHOLE-argv
+/// presence check (which is what let the wrapped command's own `-f`/`-rf`
+/// false-match in the reverted attempt).
 #[must_use]
 pub(crate) fn builtin_loadable_library(stage: &[NormalizedWord]) -> BuiltinLoadableLibrary {
     let mut rest = stage;
-    loop {
-        let Some((first, tail)) = rest.split_first() else {
-            return BuiltinLoadableLibrary::Absent;
-        };
-        let Resolution::Resolved(name) = first.resolution() else {
-            return BuiltinLoadableLibrary::Absent;
-        };
-        let base = basename(name);
-        if base == "builtin" {
-            return builtin_own_leading_flags(tail);
+    while let Step::Wrapper(hop) = step(rest, &[]) {
+        // `builtin` is compared by its raw spelling, not the folded one:
+        // folding it would need its own justification this single-keyword
+        // check does not have.
+        if hop.base == "builtin" {
+            return builtin_own_leading_flags(hop.tail);
         }
-        // Issue #493 follow-up: fold for wrapper recognition only —
-        // `builtin` above stays raw. Unlike `command`/`exec` (also shell
-        // builtins, but ones this codebase treats as real wrapper names
-        // via `TRANSPARENT_WRAPPERS` and folds accordingly), `builtin`'s
-        // own case-sensitive comparison here isn't reached through that
-        // list at all, so folding it would need its own justification
-        // this narrow, single-keyword check doesn't have.
-        let folded_base = fold_command_name(base);
-        if !TRANSPARENT_WRAPPERS.contains(&folded_base.as_str()) {
-            return BuiltinLoadableLibrary::Absent;
-        }
-        rest = skip_wrapper_arguments(&folded_base, tail);
+        rest = hop.next();
     }
+    BuiltinLoadableLibrary::Absent
 }
 
 /// Scans `tail` (`builtin`'s own argv, unskipped) left-to-right for `f` in
@@ -6761,16 +5630,16 @@ fn builtin_own_leading_flags(tail: &[NormalizedWord]) -> BuiltinLoadableLibrary 
     BuiltinLoadableLibrary::Absent
 }
 
-/// One [`RecurseMode::ShellString`] slot's value, found while walking a
-/// stage's transparent-wrapper chain (issues #64/#66) — see
-/// [`wrapper_shell_string_scripts`].
+/// One shell-string slot's value, found while walking a stage's
+/// transparent-wrapper chain (issues #64/#66) — see
+/// [`chain_script_slots`].
 pub(crate) enum ScriptSlot {
     /// The flag's value resolved to a concrete shell-command string, ready
     /// for `crate::gate` to recurse the same way rule 6a recurses `sh
     /// -c`/`bash -c`.
     Resolved(String),
     /// The flag's own position, or its value, could not be statically
-    /// resolved — the fail-closed counterpart of [`FlagScan::Uncertain`]:
+    /// resolved — the fail-closed counterpart of [`crate::normalize::FlagScan::Uncertain`]:
     /// an unresolvable word at either position must never read as "no
     /// script to worry about".
     Unresolvable,
@@ -6813,93 +5682,35 @@ fn env_split_string_plain_word(word: &str) -> bool {
         })
 }
 
-/// The `-S`/`--split-string` values in one `env` hop's tail, as script
-/// slots (issue #265).
+/// The split-string values (`env -S`) in one hop, as script slots (issue
+/// #265).
 ///
 /// `-S` splits its string into new argv words that `env` then executes —
 /// and those words re-enter `env`'s own option processing, which is why
 /// each reconstruction is prefixed with `env` rather than recursed bare.
 /// The words after the value are appended too, because real `env` splices
 /// the split words AHEAD of the remaining argv (`env -S 'rm -rf' /` runs
-/// `rm -rf /`).
-///
-/// Listing `-S` in [`wrapper_value_flags`] only stops its value from being
-/// mistaken for the wrapped command; it cannot look inside the string.
-/// This is the `su -c` shell-string recursion applied to a flag whose
-/// value is spliced rather than passed on, so it needs its own detector
-/// for `-S`'s glued, clustered, and `=`-joined spellings.
-fn collect_env_split_string_slots(tail: &[NormalizedWord], slots: &mut Vec<ScriptSlot>) {
-    let boundary = skip_wrapper_flags("env", tail);
-    let value_takers: Vec<char> = wrapper_value_flags("env")
-        .iter()
-        .filter_map(|flag| match flag {
-            ValueFlag::Short(letter) => Some(*letter),
-            ValueFlag::Long(_) => None,
-        })
-        .collect();
-    let booleans = wrapper_cluster_booleans("env").unwrap_or(&[]);
-
-    for idx in 0..boundary {
-        let Resolution::Resolved(token) = tail[idx].resolution() else {
-            continue;
-        };
-        // Where `-S`'s value lives: glued into this token, or the next
-        // one. Long spellings resolve by unambiguous prefix (issue #266),
-        // because `env --split 'rm -rf /'` really splices on GNU and
-        // `skip_wrapper_flags` already consumes the abbreviated token —
-        // matching only the full name here would swallow the splice
-        // without ever recursing it.
-        let long_is_split_string = |name: &str| {
-            ValueFlag::unambiguous_long_prefix(&wrapper_value_flags("env"), name)
-                == Some("split-string")
-        };
-        let attached = if token == "-S"
-            || token.strip_prefix("--").is_some_and(|rest| {
-                !rest.is_empty() && !rest.contains('=') && long_is_split_string(rest)
-            }) {
-            None
-        } else if let Some(value) = token
-            .strip_prefix("--")
-            .and_then(|rest| rest.split_once('='))
-            .filter(|(name, _)| long_is_split_string(name))
-            .map(|(_, value)| value.to_string())
-        {
-            Some(value)
-        } else if let Some(cluster) = short_cluster_letters(token) {
-            let mut glued = None;
-            let mut reached_s = false;
-            for (offset, letter) in cluster.char_indices() {
-                if letter == 'S' {
-                    reached_s = true;
-                    let rest = &cluster[offset + letter.len_utf8()..];
-                    glued = (!rest.is_empty()).then(|| rest.to_string());
-                    break;
-                }
-                // Any other value-taker swallows the cluster remainder as
-                // its own value, so no `-S` occurs in this token.
-                if value_takers.contains(&letter) || !booleans.contains(&letter) {
-                    break;
-                }
-            }
-            if !reached_s {
-                continue;
-            }
-            glued
-        } else {
-            continue;
-        };
-
-        let (script, after) = match attached {
-            Some(script) => (script, &tail[idx + 1..]),
-            None => match tail.get(idx + 1).map(NormalizedWord::resolution) {
-                Some(Resolution::Resolved(script)) => (script.clone(), &tail[idx + 2..]),
-                Some(Resolution::Unresolvable(_)) => {
+/// `rm -rf /`). The catalog's grammar only stops the value from being read
+/// as the wrapped command; it cannot look inside the string, so this is the
+/// `su -c` shell-string recursion applied to a flag whose value is spliced
+/// rather than passed on.
+fn collect_split_string_slots(
+    hop: &WrapperHop<'_>,
+    flag: (char, &'static str),
+    slots: &mut Vec<ScriptSlot>,
+) {
+    for option in hop.parsed.options_named(flag) {
+        let (script, after) = match option.value {
+            OptionValue::Glued(script) => (script.to_string(), &hop.tail[option.token + 1..]),
+            OptionValue::Separate(word) => match word.resolution() {
+                Resolution::Resolved(script) => (script.clone(), &hop.tail[option.token + 2..]),
+                Resolution::Unresolvable(_) => {
                     slots.push(ScriptSlot::Unresolvable);
                     continue;
                 }
-                // `-S` with nothing after it: real `env` errors out.
-                None => continue,
             },
+            // `-S` with nothing after it: real `env` errors out.
+            OptionValue::Absent => continue,
         };
 
         if !env_split_string_reconstructable(&script) {
@@ -6933,96 +5744,42 @@ fn collect_env_split_string_slots(tail: &[NormalizedWord], slots: &mut Vec<Scrip
     }
 }
 
-/// Finds every [`RecurseMode::ShellString`] [`RecursableSlot`]'s script
-/// value along `stage`'s transparent-wrapper chain (today: `flock`/`su`'s
-/// `-c`/`--command`, issues #64/#66), plus `env`'s `-S` splices, which
-/// need their own detector ([`collect_env_split_string_slots`], issue
-/// #265) because their value is spliced into argv rather than passed on
-/// and arrives in glued, clustered, and `=`-joined spellings a
-/// [`RecursableSlot`] flag name cannot express. Mirrors the same wrapper-unwrap walk
-/// [`effective_command`]/[`wrapper_chain_escalation`] perform, but — unlike
-/// both of those — does not stop at the first hop and does not rely on
-/// [`skip_wrapper_flags`]'s own flag-then-positional ordering to find the
-/// flag: each wrapper hop's *entire* argument tail is scanned for its
-/// `RECURSABLE_SLOTS` flag via [`scan_for_flag`], independent of whether
-/// that flag sits before or after the wrapper's own positional slot (see
-/// [`TRANSPARENT_WRAPPERS`]'s docs on why `su -c 'sh' root` and `su root
-/// -c 'sh'` must both be found, even though only the former resolves
-/// cleanly through [`effective_command`] itself). This is deliberately
-/// broader than [`skip_wrapper_flags`]'s own boundary — a same-hop token
-/// that happens to also look like `-c`/`--command` but belongs to a
-/// different, unrelated flag on some other wrapper would still be found
-/// here; accepted because this function only ever produces an
-/// [`ScriptSlot::Unresolvable`]/[`ScriptSlot::Resolved`] *floor* (never an
-/// early-return Allow, per `crate::gate`'s wrapper-layer docs), so a
-/// mismatch can only cost an extra recursion or an over-cautious Ask, never
-/// a silent Allow.
+/// Finds every shell string a transparent-wrapper chain hands to a shell
+/// along `stage`: the catalog's `ShellScript` flags (`flock`/`su`/`script`
+/// `-c`/`--command`, issues #64/#66), `env`'s `-S` splices (issue #265),
+/// `watch`'s joined operands and `strace -o '|cmd'`. Mirrors the same
+/// wrapper-unwrap walk [`effective_command`]/[`wrapper_chain_escalation`]
+/// perform, but — unlike both of those — does not stop at the first hop and
+/// does not rely on the hop's option region to find the flag: each hop's
+/// *entire* argument tail is scanned for its script flag (see
+/// `Known::shell_script_values`), independent of whether that flag sits
+/// before or after the wrapper's own positional slot. This is deliberately
+/// broader than the option region — a same-hop token that happens to also
+/// look like `-c` but belongs to the wrapped command would still be found
+/// here; accepted because this function only ever produces a *floor*
+/// (never an early-return Allow, per `crate::gate`'s wrapper-layer docs), so
+/// a mismatch can only cost an extra recursion or an over-cautious Ask.
 #[must_use]
-pub(crate) fn wrapper_shell_string_scripts(stage: &[NormalizedWord]) -> Vec<ScriptSlot> {
+pub(crate) fn chain_script_slots(stage: &[NormalizedWord]) -> Vec<ScriptSlot> {
     let mut slots = Vec::new();
     let mut rest = stage;
-    while let Some((first, tail)) = rest.split_first() {
-        let Resolution::Resolved(name) = first.resolution() else {
-            break;
-        };
-        let base = basename(name);
-        // Issue #493 follow-up: fold once and reuse for every internal
-        // wrapper-name comparison below (`env`, `wrapper_value_flags`,
-        // `RECURSABLE_SLOTS`'s own `command` field) — a case-variant
-        // wrapper spelling must recurse identically to the lowercase one.
-        let base = fold_command_name(base);
-        if !TRANSPARENT_WRAPPERS.contains(&base.as_str()) {
-            break;
+    while let Step::Wrapper(hop) = step(rest, &[]) {
+        for value in hop.wrapper.shell_script_values(hop.tail) {
+            slots.push(match value {
+                ScriptValue::Text(script) => ScriptSlot::Resolved(script.to_string()),
+                ScriptValue::Unresolvable => ScriptSlot::Unresolvable,
+            });
         }
-        if base == "env" {
-            collect_env_split_string_slots(tail, &mut slots);
+        if let Some(flag) = hop.wrapper.split_string_option() {
+            collect_split_string_slots(&hop, flag, &mut slots);
         }
-        let value_flags = wrapper_value_flags(&base);
-        for slot in RECURSABLE_SLOTS
-            .iter()
-            .filter(|slot| slot.command == base && matches!(slot.mode, RecurseMode::ShellString))
-        {
-            // The abbreviation rule of issue #266 applies here too, so
-            // `su --com "rm -rf /"` reaches its own recursion instead of
-            // only the escalation floor. Over-matching costs nothing:
-            // this function produces a raise-only floor, and util-linux's
-            // `flock` (which rejects `--com` outright) simply never runs
-            // the string shguard recursed.
-            match scan_for_flag(tail, |s| {
-                s == slot.flag
-                    || match (slot.flag.strip_prefix("--"), s.strip_prefix("--")) {
-                        (Some(target), Some(prefix))
-                            if !prefix.is_empty() && !prefix.contains('=') =>
-                        {
-                            ValueFlag::unambiguous_long_prefix(&value_flags, prefix) == Some(target)
-                        }
-                        _ => false,
-                    }
-            }) {
-                FlagScan::Found(i) => match tail.get(i + 1).map(NormalizedWord::resolution) {
-                    Some(Resolution::Resolved(script)) => {
-                        slots.push(ScriptSlot::Resolved(script.clone()));
-                    }
-                    Some(Resolution::Unresolvable(_)) => slots.push(ScriptSlot::Unresolvable),
-                    // No word follows the flag at all — the same shape
-                    // `crate::gate::evaluate_dash_c` treats as "not this
-                    // shape" (`rest_words.get(flag_index + 1)?`) rather
-                    // than an Ask floor: a `-c` with nothing after it names
-                    // no command to worry about.
-                    None => {}
-                },
-                FlagScan::Uncertain(_) => slots.push(ScriptSlot::Unresolvable),
-                FlagScan::Absent => {}
-            }
+        if let Some(exec_flag) = hop.wrapper.operands_as_shell_script_exec_flag() {
+            collect_operands_shell_slot(&hop, exec_flag, &mut slots);
         }
-        match base.as_str() {
-            "watch" => collect_watch_shell_slots(tail, &mut slots),
-            "strace" => collect_strace_pipe_slots(tail, &mut slots),
-            "numactl" => collect_numactl_short_c_slot(tail, &mut slots),
-            "script" => collect_script_slots(tail, &mut slots),
-            _ => {}
+        if let Some(flag) = hop.wrapper.piped_output_option() {
+            collect_piped_output_slots(&hop, flag, &mut slots);
         }
-        rest = skip_wrapper_arguments(&base, tail);
+        rest = hop.next();
     }
     slots
 }
@@ -7031,36 +5788,17 @@ pub(crate) fn wrapper_shell_string_scripts(stage: &[NormalizedWord]) -> Vec<Scri
 /// unless `-x`/`--exec` is given, so `watch 'echo; rm -rf /'` is a shell
 /// string, not a command named `echo; rm -rf /`. Any unresolved word in
 /// that tail floors to Ask.
-fn collect_watch_shell_slots(tail: &[NormalizedWord], slots: &mut Vec<ScriptSlot>) {
-    let end = skip_wrapper_flags("watch", tail);
-    // Same consumption rule as `skip_wrapper_flags`, so a value taken by a
-    // flag (`watch -s -x 'rm -rf /'`) is never read as the `-x` flag.
-    let value_flags = wrapper_value_flags("watch");
-    let mut exec_mode = false;
-    let mut index = 0;
-    while index < end {
-        let Resolution::Resolved(flag) = tail[index].resolution() else {
-            break;
-        };
-        if value_flag_bare_match(&value_flags, flag) || cluster_takes_separated_value("watch", flag)
-        {
-            index += 2;
-            continue;
-        }
-        if (flag.len() >= 4 && "--exec".starts_with(flag))
-            || (flag.starts_with('-')
-                && !flag.starts_with("--")
-                && cluster_has_letter("watch", flag, 'x'))
-        {
-            exec_mode = true;
-        }
-        index += 1;
-    }
-    if exec_mode || end >= tail.len() {
+fn collect_operands_shell_slot(
+    hop: &WrapperHop<'_>,
+    exec_flag: (char, &'static str),
+    slots: &mut Vec<ScriptSlot>,
+) {
+    let operands = hop.next();
+    if hop.parsed.options_named(exec_flag).next().is_some() || operands.is_empty() {
         return;
     }
     let mut script = String::new();
-    for word in &tail[end..] {
+    for word in operands {
         let Resolution::Resolved(text) = word.resolution() else {
             slots.push(ScriptSlot::Unresolvable);
             return;
@@ -7073,172 +5811,22 @@ fn collect_watch_shell_slots(tail: &[NormalizedWord], slots: &mut Vec<ScriptSlot
     slots.push(ScriptSlot::Resolved(script));
 }
 
-/// `script`'s flag surface differs between BSD and util-linux, so a flag
-/// outside the modeled union could swallow the file operand (BSD) and shift
-/// the command word; any unmodeled flag floors to Ask. Also finds util-linux's
-/// clustered (`-qc cmd`) and `=`-joined (`--command=cmd`) command string,
-/// which `RECURSABLE_SLOTS`' exact-spelling scan does not.
-fn collect_script_slots(tail: &[NormalizedWord], slots: &mut Vec<ScriptSlot>) {
-    const LONG_BOOLEANS: &[&str] = &[
-        "append", "return", "flush", "force", "quiet", "help", "version",
-    ];
-    let end = skip_wrapper_flags("script", tail);
-    let value_flags = wrapper_value_flags("script");
-    let booleans = wrapper_cluster_booleans("script").unwrap_or(&[]);
-    let value_takers: Vec<char> = value_flags
-        .iter()
-        .filter_map(|flag| match flag {
-            ValueFlag::Short(letter) => Some(*letter),
-            ValueFlag::Long(_) => None,
-        })
-        .collect();
-    // util-linux permutes options, so `script out.txt -qc cmd` honors `-qc`
-    // after the typescript operand: look for the command string over the
-    // whole tail, as `RECURSABLE_SLOTS` does for a bare `-c`.
-    for (index, word) in tail.iter().enumerate() {
-        let Resolution::Resolved(token) = word.resolution() else {
-            continue;
-        };
-        let command_string = if let Some(glued) = token.strip_prefix("--command=") {
-            Some(Some(glued.to_string()))
-        } else if token != "-c"
-            && let Some(location) = locate_cluster_value("script", token, 'c')
-        {
-            Some(match location {
-                ClusterValue::Glued(glued) => Some(glued.to_string()),
-                ClusterValue::NextToken => None,
-            })
-        } else {
-            None
-        };
-        match command_string {
-            Some(Some(script)) => slots.push(ScriptSlot::Resolved(script)),
-            Some(None) => match tail.get(index + 1).map(NormalizedWord::resolution) {
-                Some(Resolution::Resolved(script)) => {
-                    slots.push(ScriptSlot::Resolved(script.clone()));
-                }
-                Some(Resolution::Unresolvable(_)) => slots.push(ScriptSlot::Unresolvable),
-                None => {}
-            },
-            None => {}
-        }
-    }
-    // A dash-prefixed word left in command position is an option shguard
-    // did not place (`script out.txt -ac cmd`).
-    if let Some(Resolution::Resolved(word)) = skip_wrapper_arguments("script", tail)
-        .first()
-        .map(NormalizedWord::resolution)
-        && word.starts_with('-')
-    {
-        slots.push(ScriptSlot::Unresolvable);
-    }
-    let mut index = 0;
-    while index < end {
-        let Resolution::Resolved(token) = tail[index].resolution() else {
-            return;
-        };
-        let consumes_next = (value_flag_bare_match(&value_flags, token)
-            || cluster_takes_separated_value("script", token))
-            && !script_t_value_is_dash_word("script", token, tail.get(index + 1));
-        if consumes_next {
-            index += 2;
-            continue;
-        }
-        let known = if let Some(long) = token.strip_prefix("--") {
-            let name = long.split('=').next().unwrap_or(long);
-            long.is_empty()
-                || LONG_BOOLEANS.contains(&name)
-                || value_flags
-                    .iter()
-                    .any(|flag| matches!(flag, ValueFlag::Long(l) if l == name))
-        } else if let Some(letters) = short_cluster_letters(token) {
-            let mut known = true;
-            for letter in letters.chars() {
-                if value_takers.contains(&letter) {
-                    break;
-                }
-                if !booleans.contains(&letter) {
-                    known = false;
-                    break;
-                }
-            }
-            known
-        } else {
-            true
-        };
-        if !known {
-            slots.push(ScriptSlot::Unresolvable);
-            return;
-        }
-        index += 1;
-    }
-}
-
-/// numactl's short `-c` is not known to take a value or not, and either
-/// guess can expose the wrong word as the wrapped command, so any short
-/// flag token containing `c` floors to Ask.
-fn collect_numactl_short_c_slot(tail: &[NormalizedWord], slots: &mut Vec<ScriptSlot>) {
-    let end = skip_wrapper_flags("numactl", tail);
-    let uncertain = tail[..end].iter().any(|word| {
-        matches!(
-            word.resolution(),
-            Resolution::Resolved(flag)
-                if flag.starts_with('-') && !flag.starts_with("--") && flag.contains('c')
-        )
-    });
-    if uncertain {
-        slots.push(ScriptSlot::Unresolvable);
-    }
-}
-
-/// Whether `token` (a `-`-cluster) holds `letter` as one of its own flags
-/// rather than as part of a value glued to an earlier value-taking letter.
-fn cluster_has_letter(wrapper: &str, token: &str, letter: char) -> bool {
-    let Some(booleans) = wrapper_cluster_booleans(wrapper) else {
-        return false;
-    };
-    for c in token.trim_start_matches('-').chars() {
-        if c == letter {
-            return true;
-        }
-        if !booleans.contains(&c) {
-            return false;
-        }
-    }
-    false
-}
-
 /// `strace -o '|cmd'` / `-o '!cmd'` pipes the trace to `sh -c cmd`. The
 /// remainder is recursed as a shell string; an unresolved `-o` value floors
 /// to Ask because it could be such a pipe.
-fn collect_strace_pipe_slots(tail: &[NormalizedWord], slots: &mut Vec<ScriptSlot>) {
-    let end = skip_wrapper_flags("strace", tail);
-    // `end` can stop on an unresolved value token; include it in the scan.
-    let scanned = &tail[..end.saturating_add(1).min(tail.len())];
-    for (index, word) in scanned.iter().enumerate() {
-        let Resolution::Resolved(flag) = word.resolution() else {
-            continue;
-        };
-        let value = if flag == "-o" || flag == "--output" {
-            Some(scanned.get(index + 1))
-        } else if let Some(attached) = flag.strip_prefix("--output=") {
-            slots.extend(pipe_remainder(attached));
-            None
-        } else {
-            match locate_cluster_value("strace", flag, 'o') {
-                Some(ClusterValue::NextToken) => Some(scanned.get(index + 1)),
-                Some(ClusterValue::Glued(glued)) => {
-                    slots.extend(pipe_remainder(glued));
-                    None
-                }
-                None => None,
-            }
-        };
-        if let Some(Some(next)) = value {
-            match next.resolution() {
+fn collect_piped_output_slots(
+    hop: &WrapperHop<'_>,
+    flag: (char, &'static str),
+    slots: &mut Vec<ScriptSlot>,
+) {
+    for option in hop.parsed.options_named(flag) {
+        match option.value {
+            OptionValue::Glued(text) => slots.extend(pipe_remainder(text)),
+            OptionValue::Separate(word) => match word.resolution() {
                 Resolution::Resolved(text) => slots.extend(pipe_remainder(text)),
                 Resolution::Unresolvable(_) => slots.push(ScriptSlot::Unresolvable),
-            }
+            },
+            OptionValue::Absent => {}
         }
     }
 }
@@ -7257,15 +5845,13 @@ fn pipe_remainder(value: &str) -> Option<ScriptSlot> {
 ///
 /// `su [options] [-] [user [args...]]` is shape-ambiguous: `su rm -rf /`
 /// can't be told apart from "su into a user literally named `rm`, with no
-/// command" by structure alone (see [`wrapper_positional_args`]'s docs on
-/// `su`), and `crate::gate`'s rule 10 already floors that ambiguity to at
-/// least `escalation_floor` (default `Ask`) because `su` is an
-/// [`ESCALATION_VECTORS`] entry. But when the username slot and its
-/// trailing arguments, read as a command line, *fully* match a real
-/// blocklist rule — not just its command name — the coincidence is worth
-/// treating as that rule's own decision (typically `deny`) rather than only
-/// the generic floor: `su rm -rf /` reads at least as suspicious as `rm -rf
-/// /` itself.
+/// command" by structure alone, and `crate::gate`'s rule 10 already floors
+/// that ambiguity to at least `escalation_floor` (default `Ask`) because
+/// `su` escalates privileges. But when the username slot and its trailing
+/// arguments, read as a command line, *fully* match a real blocklist rule —
+/// not just its command name — the coincidence is worth treating as that
+/// rule's own decision (typically `deny`) rather than only the generic
+/// floor: `su rm -rf /` reads at least as suspicious as `rm -rf /` itself.
 ///
 /// Matching on name alone (an earlier version of this function) was wrong:
 /// `su - git` and `su git -c 'git pull'` — routine administration on any
@@ -7275,50 +5861,34 @@ fn pipe_remainder(value: &str) -> Option<ScriptSlot> {
 /// [`CommandRule::matches`] (the same constraint/target-checked matcher
 /// [`Rules::match_command`] uses everywhere else) instead of a name-only
 /// check means the shadow only fires when the reinterpreted command line
-/// would itself have tripped the rule — exactly reproducing the pre-#54
-/// behaviour's own matching for the one case where it mattered (`su rm -rf
-/// /`, where `-rf /` are read as `rm`'s own arguments and satisfy its
-/// `required_flags`/targets), while leaving `su - git` at the generic Ask
-/// floor like any other unresolvable-intent `su` invocation.
+/// would itself have tripped the rule.
 ///
 /// Only `su` gets this treatment: `sudo`/`doas`'s user argument is always
 /// flag-introduced (`-u root`), so there is no bare positional slot for a
 /// command name to land in by coincidence in the first place.
 ///
 /// Walks the same wrapper-unwrap chain as [`effective_command`] so a
-/// wrapped `su` (`env su rm -rf /`) is still caught, and reuses
-/// [`skip_wrapper_flags`] — not [`skip_wrapper_arguments`] — at the `su`
-/// hop specifically, since the whole point is to inspect the token
-/// [`wrapper_positional_args`]'s skip would otherwise discard unread.
+/// wrapped `su` (`env su rm -rf /`) is still caught, and starts at the end
+/// of `su`'s option region — the token the positional skip would otherwise
+/// discard unread.
 #[must_use]
 pub(crate) fn su_username_matches_blocklisted_command<'a>(
     stage: &[NormalizedWord],
     rules: &'a Rules,
 ) -> Option<&'a CommandRule> {
     let mut rest = stage;
-    loop {
-        let (first, tail) = rest.split_first()?;
-        let Resolution::Resolved(name) = first.resolution() else {
-            return None;
-        };
-        let base = basename(name);
-        // Issue #493 follow-up: fold once and reuse for every internal
-        // wrapper-name comparison below, same as the sibling walk above.
-        let base = fold_command_name(base);
-        if base == "su" {
-            let idx = skip_wrapper_flags(&base, tail);
+    while let Step::Wrapper(hop) = step(rest, &[]) {
+        if hop.wrapper.name() == "su" {
+            let start = hop.parsed.options_end();
             return rules
                 .command_rules
                 .iter()
-                .find(|rule| rule.matches(&tail[idx..]));
+                .find(|rule| rule.matches(&hop.tail[start..]));
         }
-        if !TRANSPARENT_WRAPPERS.contains(&base.as_str()) {
-            return None;
-        }
-        rest = skip_wrapper_arguments(&base, tail);
+        rest = hop.next();
     }
+    None
 }
-
 // ---------------------------------------------------------------------
 // Typed rule-file specs (the serde-free input of this module's
 // constructors; `crate::config_loader` deserializes TOML into its own
@@ -9515,7 +8085,7 @@ pub(crate) fn apply_allowlist(verdict: &Verdict, allowlist: &Allowlist) -> Allow
 /// Whether `entry`'s matcher would match any known shell interpreter,
 /// `eval`/`trap`, awk variant, or transparent wrapper name (`SHELL_INTERPRETERS`/
 /// `EVAL_BUILTIN`/`TRAP_BUILTIN`/`EXTRA_PIPELINE_INTERPRETERS`/`AWK_INTERPRETERS`/
-/// `TRANSPARENT_WRAPPERS`) —
+/// the catalog's exec wrappers) —
 /// used to reject `allow` config entries that would suppress every
 /// recursion-derived `Ask` involving one of those names (`bash -c`
 /// recursion, `eval`'s own recursion (issue #120), a decode-fed pipeline
@@ -9551,7 +8121,8 @@ fn matches_dangerous_allow_target(entry: &CommandRule) -> bool {
             .chain(TRAP_BUILTIN.iter())
             .chain(EXTRA_PIPELINE_INTERPRETERS.iter())
             .chain(AWK_INTERPRETERS.iter())
-            .chain(TRANSPARENT_WRAPPERS.iter())
+            .copied()
+            .chain(knowledge::exec_wrapper_names())
     };
     let matches_ci = |name: &str| match &entry.command {
         CommandMatch::Exact(exact) => fold_command_name(exact) == fold_command_name(name),
@@ -9559,13 +8130,13 @@ fn matches_dangerous_allow_target(entry: &CommandRule) -> bool {
             fold_command_name(name).starts_with(&fold_command_name(prefix))
         }
     };
-    if candidates().any(|name| matches_ci(name)) {
+    if candidates().any(matches_ci) {
         return true;
     }
     match &entry.command {
         CommandMatch::Exact(exact) => {
             let lower = fold_command_name(exact);
-            candidates().any(|name| strip_version_suffix(&lower) == *name)
+            candidates().any(|name| strip_version_suffix(&lower) == name)
         }
         CommandMatch::Prefix(_) => false,
     }
@@ -10084,40 +8655,6 @@ mod tests {
                 .map(|rule| rule.id().as_str()),
             Some("rm-recursive-dangerous-target")
         );
-    }
-
-    // ---- issue #266: unambiguous long-option abbreviation ----
-    #[test]
-    fn value_flag_bare_match_accepts_exact_and_unambiguous_prefix() {
-        let flags = vec![
-            ValueFlag::Short('u'),
-            ValueFlag::Long("unset".to_string()),
-            ValueFlag::Long("chdir".to_string()),
-        ];
-        assert!(value_flag_bare_match(&flags, "--unset"));
-        assert!(value_flag_bare_match(&flags, "--uns"));
-        assert!(value_flag_bare_match(&flags, "-u"));
-        // The attached form is the generic dash-skip's job.
-        assert!(!value_flag_bare_match(&flags, "--uns=x"));
-    }
-
-    #[test]
-    fn value_flag_bare_match_rejects_the_end_of_flags_marker() {
-        // Without the empty-prefix guard `--` would abbreviate the only
-        // long flag and swallow the following command.
-        let flags = vec![ValueFlag::Long("adjustment".to_string())];
-        assert!(!value_flag_bare_match(&flags, "--"));
-    }
-
-    #[test]
-    fn value_flag_bare_match_rejects_an_ambiguous_prefix() {
-        let flags = vec![
-            ValueFlag::Long("debug".to_string()),
-            ValueFlag::Long("default-signal".to_string()),
-        ];
-        assert!(!value_flag_bare_match(&flags, "--d"));
-        assert!(!value_flag_bare_match(&flags, "--de"));
-        assert!(value_flag_bare_match(&flags, "--deb"));
     }
 
     // ---- FlagMatcher::Token also accepts a GNU "=value" suffix ----
@@ -11499,7 +10036,7 @@ mod tests {
         );
     }
 
-    // ==== Issue #54: TRANSPARENT_WRAPPERS gained timeout/ionice/flock,
+    // ==== Issue #54: timeout/ionice/flock became exec wrappers,
     // and skip_wrapper_arguments gained per-wrapper value-flag and
     // positional-argument tables ====
 
@@ -11614,29 +10151,46 @@ mod tests {
     fn su_positional_username_is_skipped() {
         // `su [options] [-] [user [args...]]`: the username occupies one
         // positional slot before the command su itself runs.
-        //
-        // UPDATED (issues #64/#66): `su`'s own `-c`/`--command` flag IS now
-        // in `wrapper_value_flags`, but that alone doesn't change this
-        // test's expectation — `skip_wrapper_flags` only recognises a
-        // value flag occurring BEFORE the username positional is consumed
-        // (`su -c 'sh' root`, options-before-user order), and this test
-        // uses the opposite, user-before-options order (`su root -c sh`):
-        // `root` is consumed by the positional slot first, leaving `-c` to
-        // be mistaken for the *next* hop's resolved "command" name by
-        // `effective_command`'s own walk, exactly as before. This still
-        // pins that shape rather than asserting full correctness of `su
-        // -c` through `effective_command` specifically — the actual
-        // security fix for this exact word order is
-        // `wrapper_shell_string_scripts`, which finds `su`'s `-c` flag
-        // independent of word order by scanning `su`'s whole argument
-        // tail rather than relying on `skip_wrapper_flags`'s boundary; see
-        // `crate::gate`'s `su_dash_c_user_before_options_order_still_blocks`
-        // test for the end-to-end behaviour this test's own narrower
-        // `effective_command` shape doesn't capture.
+        // `su` permutes its options, so `su root -c sh` has the username
+        // `root`, the option `-c sh`, and no command operand left. The
+        // script itself is found by `chain_script_slots`.
         let words = argv(&["su", "root", "-c", "sh"]);
+        assert!(effective_command(&words).is_none());
+        let words = argv(&["su", "-c", "sh", "root", "ls"]);
         let (name, rest) = effective_command(&words).unwrap();
-        assert_eq!(name, "-c");
-        assert_eq!(resolved_strings(rest), vec!["sh"]);
+        assert_eq!(name, "ls");
+        assert!(rest.is_empty());
+    }
+
+    // ---- RFC #658 stage 2: unmodelled wrapper options ----
+
+    #[test]
+    fn unmodeled_option_keeps_the_wrapped_command_visible() {
+        let words = argv(&["sudo", "--bogus", "rm", "-rf", "/"]);
+        let (name, rest) = effective_command(&words).unwrap();
+        assert_eq!(name, "rm");
+        assert_eq!(resolved_strings(rest), vec!["-rf", "/"]);
+    }
+
+    #[test]
+    fn first_unmodeled_wrapper_option_names_the_offending_hop() {
+        assert!(first_unmodeled_wrapper_option(&argv(&["nice", "-n", "5", "ls"])).is_none());
+        assert!(first_unmodeled_wrapper_option(&argv(&["ls", "--bogus"])).is_none());
+        let finding =
+            first_unmodeled_wrapper_option(&argv(&["env", "nice", "--bogus", "ls"])).unwrap();
+        assert_eq!(finding.command(), "nice");
+        // A non-wrapper command's own flags are never the catalog's concern.
+        assert!(first_unmodeled_wrapper_option(&argv(&["make", "-Z"])).is_none());
+    }
+
+    #[test]
+    fn unresolvable_word_before_the_command_stops_the_walk() {
+        let mut words = argv(&["nice", "-n"]);
+        words.push(NormalizedWord::unresolvable(
+            crate::normalize::UnresolvableKind::ParameterExpansion,
+        ));
+        words.extend(argv(&["ls"]));
+        assert!(effective_command(&words).is_none());
     }
 
     // ---- issue #54 follow-up: su_username_matches_blocklisted_command ----
@@ -11682,7 +10236,7 @@ mod tests {
         );
     }
 
-    // ==== Issue #114: TRANSPARENT_WRAPPERS gained busybox ====
+    // ==== Issue #114: busybox became an exec wrapper ====
 
     #[test]
     fn mkswap_matches_through_busybox_wrapper() {
@@ -11710,15 +10264,15 @@ mod tests {
     #[test]
     fn wrapper_chain_escalation_finds_every_vector_through_busybox() {
         // Mirrors wrapper_chain_escalation_finds_each_escalation_vector's
-        // "through env" case, but through busybox — every ESCALATION_VECTORS
-        // entry must still floor when reached via busybox's empty flag/
-        // positional tables, not just su. (A "vector before busybox", e.g.
+        // "through env" case, but through busybox — every escalation vector
+        // must still floor when reached via busybox's empty option
+        // grammar, not just su. (A "vector before busybox", e.g.
         // `sudo busybox rm -rf /`, would be vacuous coverage here: the
-        // per-hop ESCALATION_VECTORS check fires on `sudo` before
+        // per-hop escalation check fires on `sudo` before
         // `busybox` is ever inspected, so that ordering can't exercise
-        // busybox's TRANSPARENT_WRAPPERS membership at all — this loop
+        // busybox's exec-wrapper membership at all — this loop
         // only tests the direction that actually depends on it.)
-        for vector in ESCALATION_VECTORS {
+        for vector in crate::knowledge::escalation_vectors() {
             assert_eq!(
                 wrapper_chain_escalation(&argv(&["busybox", vector, "whoami"])),
                 WrapperChainEscalation::Contains(vector),
@@ -11730,8 +10284,8 @@ mod tests {
     #[test]
     fn wrapper_chain_escalation_is_absent_for_busybox_alone() {
         // Guards against a future regression that adds busybox to
-        // ESCALATION_VECTORS, contradicting TRANSPARENT_WRAPPERS' doc
-        // comment ("busybox is a dispatcher, not a privilege-escalation
+        // the escalation vectors, contradicting its catalog entry
+        // ("busybox is a dispatcher, not a privilege-escalation
         // mechanism") with no test failing to catch it.
         assert_eq!(
             wrapper_chain_escalation(&argv(&["busybox", "rm", "-rf", "/"])),
@@ -11798,7 +10352,7 @@ mod tests {
 
     #[test]
     fn timeout_long_signal_value_flag_does_not_hide_the_wrapped_command() {
-        // Regression: wrapper_value_flags originally listed only the short
+        // Regression: the grammar originally listed only the short
         // spelling (`-s`), so `--signal`'s separated value fell through to
         // the duration positional and the real command was never reached.
         let rules = Rules::embedded().unwrap();
@@ -11813,7 +10367,7 @@ mod tests {
 
     #[test]
     fn flock_own_value_flags_do_not_hide_the_wrapped_command() {
-        // Regression: flock had no wrapper_value_flags entry at all, so
+        // Regression: flock had no value-flag grammar at all, so
         // `-w`'s separated timeout value was mistaken for the lock-target
         // positional and the lockfile path became the resolved command.
         let rules = Rules::embedded().unwrap();
@@ -11957,7 +10511,7 @@ mod tests {
     fn wrapper_chain_escalation_finds_each_escalation_vector() {
         // issues #35/#36: doas/su/pkexec/run0 must be classified `Contains`
         // exactly like sudo, both bare and through another wrapper.
-        for vector in ESCALATION_VECTORS {
+        for vector in crate::knowledge::escalation_vectors() {
             assert_eq!(
                 wrapper_chain_escalation(&argv(&[vector, "whoami"])),
                 WrapperChainEscalation::Contains(vector),
@@ -11991,21 +10545,6 @@ mod tests {
             wrapper_chain_escalation(&unresolvable_first(&["ls"])),
             WrapperChainEscalation::Absent
         );
-    }
-
-    #[test]
-    fn every_escalation_vector_is_a_transparent_wrapper() {
-        // matches_dangerous_allow_target (the `[[allow]]` rejection) walks
-        // TRANSPARENT_WRAPPERS, not ESCALATION_VECTORS — an escalation
-        // vector missing from TRANSPARENT_WRAPPERS would silently become
-        // allow-listable, so this invariant must hold without relying on
-        // the two lists being edited in lockstep by eye.
-        for vector in ESCALATION_VECTORS {
-            assert!(
-                TRANSPARENT_WRAPPERS.contains(vector),
-                "{vector:?} must be in TRANSPARENT_WRAPPERS"
-            );
-        }
     }
 
     #[test]
@@ -16843,7 +15382,7 @@ mod tests {
 
     #[test]
     fn user_config_rejects_allow_entry_matching_busybox() {
-        // Issue #114: busybox joined TRANSPARENT_WRAPPERS, so an
+        // Issue #114: busybox became an exec wrapper, so an
         // `[[allow]] command = "busybox"` entry must be rejected the same
         // way `env`'s is above — otherwise it would launder every
         // busybox-wrapped Ask/Block floor to Allow.
@@ -16861,7 +15400,7 @@ mod tests {
 
     #[test]
     fn user_config_rejects_allow_entry_matching_builtin() {
-        // Issue #245: builtin joined TRANSPARENT_WRAPPERS, so an
+        // Issue #245: builtin became an exec wrapper, so an
         // `[[allow]] command = "builtin"` entry must be rejected the same
         // way busybox's/env's is above — otherwise it would launder every
         // builtin-wrapped Ask/Block floor to Allow.

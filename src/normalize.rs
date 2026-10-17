@@ -715,7 +715,7 @@ pub(crate) fn fold_alternative(pieces: &[WordPiece]) -> Vec<NormalizedWord> {
 /// word we cannot read at an earlier position may be the flag, or may
 /// demote a later literal flag to a positional argument).
 ///
-/// Shared by both [`crate::gate`] and [`crate::rules::wrapper_shell_string_scripts`]
+/// Shared by both [`crate::gate`] and [`crate::rules::chain_script_slots`]
 /// (issues #64/#66/#72, #408) so the flag-position fail-closed semantics
 /// these two types encode can never drift between the two call sites.
 #[must_use]

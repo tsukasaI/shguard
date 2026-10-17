@@ -115,7 +115,7 @@
 //!    list (`rules/blocklist.toml`'s `[[redirect]]` rules) — only
 //!    statically-resolved targets are checked; unresolved targets fall
 //!    through to whatever the rest of the command would decide.
-//! 10. Any [`crate::rules::ESCALATION_VECTORS`] entry (`sudo`, `doas`, `su`,
+//! 10. Any privilege-escalating catalog entry (`sudo`, `doas`, `su`,
 //!     `pkexec`, `run0`) anywhere in a command's transparent-wrapper chain
 //!     ("rule 10", issue #32, generalised to the other four vectors by
 //!     issues #35/#36) — privilege escalation itself is gated: a blocklist
@@ -316,7 +316,7 @@
 //!
 //! **A command whose wrapper chain passes through an escalation vector
 //! (rule 10) is likewise never eligible for the allow-downgrade step.**
-//! Allow-entry matching resolves through `TRANSPARENT_WRAPPERS` exactly
+//! Allow-entry matching resolves through the exec-wrapper catalog exactly
 //! like rule matching, so an entry written for the unprivileged command
 //! (`[[allow]] command = "gh"`) would otherwise also clear
 //! `sudo gh pr view`'s rule-10 Ask — consent to a command is not consent
@@ -1741,7 +1741,7 @@ fn resolve_static_substitution_output(inner: &str) -> Option<String> {
     let argv = normalize::normalize_argv(command);
     // `xargs` is excluded from the wrapper-transparent walk here (but
     // nowhere else — see `effective_command_excluding`'s docs): its output
-    // is not statically determined, unlike every other TRANSPARENT_WRAPPERS
+    // is not statically determined, unlike every other exec wrapper
     // member.
     let (name, rest) = crate::rules::effective_command_excluding(&argv, &["xargs"])?;
     match name.as_ref() {
@@ -2404,6 +2404,10 @@ fn evaluate_simple_command(
     // for the same reason `recursable`/`expansion` are: this floor must
     // survive `core`'s early returns too.
     let tar_dashless_floor = scan_tar_dashless_unmodeled_floor(&argv);
+    // RFC #658 stage 2: an option the command catalog does not describe on
+    // any wrapper of the chain. Computed here for the same reason: this
+    // floor must survive `core`'s early returns too.
+    let unmodeled_option_floor = scan_unmodeled_option_floor(&argv);
     // Issue #78: a target token that ascends via `..` past an unknown
     // number of directories, then descends into a shape that would match
     // a rule's own dangerous-target namespace. Computed here for the same
@@ -2517,6 +2521,7 @@ fn evaluate_simple_command(
         alternates,
     );
     let tar_dashless_floor_present = tar_dashless_floor.is_some();
+    let unmodeled_option_floor_present = unmodeled_option_floor.is_some();
     let ascent_descent_floor_present = ascent_descent_floor.is_some();
     let redirect_ascent_descent_floor_present = redirect_ascent_descent_floor.is_some();
     let glob_floor_present = glob_floor.is_some();
@@ -2537,6 +2542,7 @@ fn evaluate_simple_command(
     let verdict = apply_recursable_floor(verdict, recursable.floor);
     let verdict = apply_recursable_floor(verdict, alias_floor);
     let verdict = apply_tar_dashless_floor(verdict, tar_dashless_floor);
+    let verdict = apply_unmodeled_option_floor(verdict, unmodeled_option_floor);
     let verdict = apply_command_ascent_descent_floor(verdict, ascent_descent_floor);
     let verdict = apply_redirect_ask_floor(verdict, redirect_ascent_descent_floor);
     let verdict = apply_glob_floor(verdict, glob_floor);
@@ -2639,6 +2645,7 @@ fn evaluate_simple_command(
         || escalation_in_chain
         || recursable.has_any
         || tar_dashless_floor_present
+        || unmodeled_option_floor_present
         || ascent_descent_floor_present
         || redirect_ascent_descent_floor_present
         || glob_floor_present
@@ -2949,7 +2956,7 @@ fn evaluate_simple_command_core(
         .as_ref()
         .map(|(name, rest)| (name.as_ref(), *rest));
 
-    // Rule 10: a command wrapped by any `ESCALATION_VECTORS` entry floors to
+    // Rule 10: a command wrapped by any catalogued escalation vector floors to
     // at least `escalation_floor`'s configured decision on a blocklist miss
     // — privilege escalation itself is the risk being gated, independent of
     // whether the wrapped command trips its own rule (issue #32, generalised
@@ -3557,6 +3564,29 @@ fn scan_tar_dashless_unmodeled_floor(argv: &[NormalizedWord]) -> Option<(Decisio
 /// [`apply_floor`]'s docs for the shared max-lift mechanics and why each
 /// floor gets its own function).
 fn apply_tar_dashless_floor(verdict: Verdict, floor: Option<(Decision, String)>) -> Verdict {
+    let Some((floor_decision, floor_reason)) = floor else {
+        return verdict;
+    };
+    apply_floor(verdict, floor_decision, floor_reason, None)
+}
+
+/// The one place an unmodelled option becomes a decision (RFC #658 stage 2,
+/// Invariant B): `Some(Ask, reason)` when any wrapper along `argv`'s chain
+/// is given an option the command catalog does not describe, so what the
+/// wrapper runs cannot be read with certainty. The rule matching below
+/// still sees the wrapped command; this floor only keeps the line from
+/// ending in Allow.
+fn scan_unmodeled_option_floor(argv: &[NormalizedWord]) -> Option<(Decision, String)> {
+    let finding = crate::rules::first_unmodeled_wrapper_option(argv)?;
+    Some((
+        Decision::Ask,
+        format!("unmodelled option for `{}`", finding.command()),
+    ))
+}
+
+/// Applies [`scan_unmodeled_option_floor`]'s floor to `verdict` (see
+/// [`apply_floor`]'s docs for the shared max-lift mechanics).
+fn apply_unmodeled_option_floor(verdict: Verdict, floor: Option<(Decision, String)>) -> Verdict {
     let Some((floor_decision, floor_reason)) = floor else {
         return verdict;
     };
@@ -4989,7 +5019,7 @@ fn trap_action_index(rest_words: &[NormalizedWord]) -> Option<usize> {
 /// The reusable core of rule 6a's own recursion ([`evaluate_dash_c`]),
 /// factored out (issues #64/#66) so the flock/su `-c` wrapper-layer floor
 /// (`crate::gate`'s wrapper layer, via
-/// [`crate::rules::wrapper_shell_string_scripts`]) can recurse its own
+/// [`crate::rules::chain_script_slots`]) can recurse its own
 /// statically-resolved script the exact same way rather than duplicating
 /// this mapping. An inner `Allow` propagates as `Allow` at both call
 /// sites: by the time either caller reaches here, the `-c`/`--command`
@@ -5408,9 +5438,9 @@ fn classify_heredoc_candidate(argv: &[NormalizedWord]) -> Option<HeredocCandidat
     // that flag's string names is — and `effective_command` only resolves
     // ordinary positional argv, which walks straight past the flag's own
     // value (`flock /tmp/l -c perl` resolves to the literal token `-c`, not
-    // `perl`). `wrapper_shell_string_scripts` is the same helper issues
+    // `perl`). `chain_script_slots` is the same helper issues
     // #64/#66/#265 already use to find this exact shape.
-    if !crate::rules::wrapper_shell_string_scripts(argv).is_empty() {
+    if !crate::rules::chain_script_slots(argv).is_empty() {
         return Some(HeredocCandidate::Opaque(
             "a transparent wrapper's own shell-string flag (`flock -c`/`su -c`/`env -S`/...)",
         ));
@@ -6053,7 +6083,7 @@ fn scan_recursable_slots(
     let mut has_any = false;
     let mut floor: Option<(Decision, String)> = None;
 
-    for slot in crate::rules::wrapper_shell_string_scripts(argv) {
+    for slot in crate::rules::chain_script_slots(argv) {
         has_any = true;
         match slot {
             crate::rules::ScriptSlot::Unresolvable => raise_expansion_floor(
@@ -6574,22 +6604,16 @@ fn find_exec_flag_kind(word: &Word) -> FindExecFlagKind {
     }
 }
 
-/// The [`crate::rules::RecurseMode::DirectArgv`] terminator list for
-/// `command`'s recursable slot matching literal flag spelling `flag`, if
-/// any — the lookup [`find_exec_flag_kind`] needs from both its
-/// exactly-one-normalised-word arm and its `$IFS`-multiplied arm, factored
-/// out so the two can never drift on what counts as a match.
+/// The direct-argv terminator list for `command`'s recursable slot matching
+/// literal flag spelling `flag`, if any — the lookup [`find_exec_flag_kind`]
+/// needs from both its exactly-one-normalised-word arm and its
+/// `$IFS`-multiplied arm, factored out so the two can never drift on what
+/// counts as a match.
 fn direct_argv_terminators_for(command: &str, flag: &str) -> Option<&'static [&'static str]> {
     crate::rules::RECURSABLE_SLOTS
         .iter()
-        .find_map(|slot| match slot.mode {
-            crate::rules::RecurseMode::DirectArgv { terminators }
-                if slot.command == command && slot.flag == flag =>
-            {
-                Some(terminators)
-            }
-            _ => None,
-        })
+        .find(|slot| slot.command == command && slot.flag == flag)
+        .map(|slot| slot.terminators)
 }
 
 /// The four outcomes [`find_exec_flag_kind`] can report for one AST word,
@@ -9143,7 +9167,7 @@ fn resolve_cwd_outcome(current: &CwdContext, outcome: CwdOutcome) -> CwdContext 
 /// in place. A no-op for an empty argv (assignments-only/redirection-only
 /// commands touch nothing — rule 9's own axiom) or an ordinary command with
 /// no cwd-changing shape. Routes through [`crate::rules::effective_command`]
-/// (the same `TRANSPARENT_WRAPPERS` resolution every rule match already
+/// (the same exec-wrapper catalog resolution every rule match already
 /// uses — including `builtin` as of issue #245) so `command cd ~/x`,
 /// `sudo pushd ~/x`, `builtin cd ~/x`, etc. are recognized exactly like a
 /// bare `cd`/`pushd`/`popd` would be — otherwise the whole feature would be
@@ -9992,9 +10016,8 @@ fn evaluate_composed_cwd_redirects(
 /// errors "unknown option: -pC" rather than clustering `-p` with `-C`)
 /// recognizes `-C` glued into a getopt short-flag cluster with OTHER
 /// boolean flags ahead of it (`env -iC dir`, `env -iCdir`, `make -kC
-/// dir`) via [`crate::rules::locate_cluster_value`] — the same
-/// [`crate::rules::wrapper_cluster_booleans`]/
-/// [`crate::rules::wrapper_value_flags`] tables `effective_command`'s own
+/// dir`) via [`crate::knowledge::locate_short_value`] — the same
+/// catalog grammar `effective_command`'s own
 /// wrapped-command walk already uses, so the two can't drift apart. This
 /// function's `-C`-only matching (the
 /// branches above) used to miss every cluster form entirely for `env` — `env
@@ -10008,8 +10031,7 @@ fn evaluate_composed_cwd_redirects(
 /// for make: `man make` documents `-C`/`-f`/`-I`/`-j`/`-l`/`-o`/`-W` as
 /// value-taking and everything else as boolean, and `make -kC dir`
 /// genuinely chdirs) — closed by giving `make` its own
-/// `wrapper_cluster_booleans("make")`/`wrapper_value_flags("make")`
-/// entries and passing `Some("make")` here too, rather than adding a
+/// catalog entry and passing `Some("make")` here too, rather than adding a
 /// third hand-rolled parser.
 ///
 /// `None` when `rest` has no such flag at all (composition doesn't
@@ -10062,11 +10084,11 @@ fn chain_dash_c_targets(
         {
             Some(attached.to_string())
         } else if let Some(wrapper) = cluster_wrapper
-            && let Some(location) = crate::rules::locate_cluster_value(wrapper, s, 'C')
+            && let Some(location) = crate::knowledge::locate_short_value(wrapper, s, 'C')
         {
             match location {
-                crate::rules::ClusterValue::Glued(value) => Some(value.to_string()),
-                crate::rules::ClusterValue::NextToken => {
+                crate::knowledge::ShortValue::Glued(value) => Some(value.to_string()),
+                crate::knowledge::ShortValue::NextToken => {
                     match words.next().map(NormalizedWord::resolution) {
                         Some(Resolution::Resolved(value)) => Some(value.clone()),
                         Some(Resolution::Unresolvable(_)) | None => None,
@@ -10117,7 +10139,7 @@ fn chain_dash_c_targets(
 /// for `env`/`make` — bsdtar clusters `-C` with other boolean short
 /// flags (`tar -vcC dir -f out.tar file` chdirs, verified live) and
 /// accepts a glued value with no cluster prefix at all (`tar -C/tmp -cf
-/// out.tar file` also chdirs). Routing this through [`crate::rules::locate_cluster_value`]'s
+/// out.tar file` also chdirs). Routing this through [`crate::knowledge::locate_short_value`]'s
 /// swallow-if-an-earlier-letter-takes-a-value logic (the same mechanism
 /// `env`/`make` correctly use) is unsound for `tar` SPECIFICALLY: that
 /// logic depends on correctly knowing every letter's arity, but tar's
@@ -10165,7 +10187,7 @@ fn chain_dash_c_targets(
 /// already knows this specific detection mechanism's remaining blind
 /// spots — tracked in issue #356 rather than extending this PR
 /// indefinitely.
-fn find_dash_c_in_cluster(token: &str) -> Option<crate::rules::ClusterValue<'_>> {
+fn find_dash_c_in_cluster(token: &str) -> Option<crate::knowledge::ShortValue<'_>> {
     let rest = token.strip_prefix('-')?;
     if rest.is_empty() || rest.starts_with('-') {
         return None;
@@ -10173,9 +10195,9 @@ fn find_dash_c_in_cluster(token: &str) -> Option<crate::rules::ClusterValue<'_>>
     let index = rest.find('C')?;
     let glued = &rest[index + 'C'.len_utf8()..];
     Some(if glued.is_empty() {
-        crate::rules::ClusterValue::NextToken
+        crate::knowledge::ShortValue::NextToken
     } else {
-        crate::rules::ClusterValue::Glued(glued)
+        crate::knowledge::ShortValue::Glued(glued)
     })
 }
 
@@ -10316,8 +10338,8 @@ fn resolve_tar_dash_c(
             (Some(value.to_string()), index + 1)
         } else if let Some(location) = find_dash_c_in_cluster(s) {
             match location {
-                crate::rules::ClusterValue::Glued(value) => (Some(value.to_string()), index + 1),
-                crate::rules::ClusterValue::NextToken => {
+                crate::knowledge::ShortValue::Glued(value) => (Some(value.to_string()), index + 1),
+                crate::knowledge::ShortValue::NextToken => {
                     match rest.get(index + 1).map(NormalizedWord::resolution) {
                         Some(Resolution::Resolved(value)) => (Some(value.clone()), index + 2),
                         Some(Resolution::Unresolvable(_)) => (None, index + 2),
@@ -10371,7 +10393,7 @@ fn resolve_tar_dash_c(
 /// Issue #209's `env -C dir cmd args...` handling: `env` is already
 /// unwrapped through [`crate::rules::effective_command`] before its own
 /// `-C`/`--chdir` value is otherwise visible to any other floor in this
-/// module (`crate::rules::wrapper_value_flags`'s issue #250 entry already
+/// module (the catalog's `env` grammar already
 /// treats it as a value-taking flag so it isn't mistaken for the wrapped
 /// command), so this function scans `argv`'s own `env`-owned prefix
 /// directly rather than through that unwrap.
@@ -10379,7 +10401,7 @@ fn resolve_tar_dash_c(
 /// Locates `env` via [`crate::rules::effective_command_excluding`] with
 /// `env` itself excluded from further unwrapping, rather than checking
 /// `argv[0]`'s basename directly — the `argv[0]`-only check used to miss `env` reached through any
-/// LEADING [`crate::rules::TRANSPARENT_WRAPPERS`] member (`nice env -C
+/// LEADING exec wrapper (`nice env -C
 /// ~/.config/shguard cp evil.toml config.toml`, `timeout 5 env -C ...`),
 /// asymmetric with the git/make/tar branch below, which already resolves
 /// through wrappers via `effective_command`. Excluding `env` from the
@@ -14490,7 +14512,7 @@ mod tests {
         assert_decision("echo x | base64 -d | xargs -0 sh", Decision::Block);
     }
 
-    // Issue #114: busybox joins TRANSPARENT_WRAPPERS, so it must be caught
+    // Issue #114: busybox is an exec wrapper, so it must be caught
     // by the same interpreter-sink and shell-recursion paths every other
     // wrapper already is.
     #[test]
@@ -14498,8 +14520,8 @@ mod tests {
         assert_decision("echo x | base64 -d | busybox sh", Decision::Block);
     }
 
-    // Issue #245 should-fix (PR #247): builtin joins
-    // TRANSPARENT_WRAPPERS too, so it must be caught by the same
+    // Issue #245 should-fix (PR #247): builtin is an exec wrapper
+    // too, so it must be caught by the same
     // interpreter-sink/pipeline-shape paths every other wrapper already
     // is, not just the argv blocklist match the other #245 tests pin.
     #[test]
@@ -14531,18 +14553,18 @@ mod tests {
     #[test]
     fn busybox_su_dash_c_recurses_via_recursable_slots() {
         // su's `-c`/`--command` shell-string recursion (RECURSABLE_SLOTS/
-        // wrapper_shell_string_scripts) is a distinct mechanism from rule
+        // chain_script_slots) is a distinct mechanism from rule
         // 6a's SHELL_INTERPRETERS-based `-c` recursion (already covered by
         // busybox_sh_dash_c_recurses_into_the_shell_string above) — this
         // pins that separate path end-to-end through a busybox prefix too.
         assert_decision("busybox su -c 'rm -rf /'", Decision::Block);
     }
 
-    // Issue #245: `builtin` joins TRANSPARENT_WRAPPERS. `builtin rm -rf /`
+    // Issue #245: `builtin` is an exec wrapper. `builtin rm -rf /`
     // itself actually errors in a real shell (`rm` isn't a shell builtin,
     // so `builtin` has nothing to dispatch to) -- treating it as
     // transparent anyway is a deliberate, documented over-approximation
-    // (TRANSPARENT_WRAPPERS' own doc comment), the safe direction. Pinned
+    // (the catalog's own docs), the safe direction. Pinned
     // as the headline case regardless, since it's the shape the issue was
     // filed against.
     #[test]
@@ -14583,7 +14605,7 @@ mod tests {
 
     // Backslash-escaped `\builtin` normalizes to `builtin` the same way
     // `\cd`/`\rm` already do (quote-removal folding) -- must not dodge
-    // TRANSPARENT_WRAPPERS resolution by spelling.
+    // exec-wrapper resolution by spelling.
     #[test]
     fn backslash_escaped_builtin_still_blocks() {
         assert_decision("\\builtin rm -rf /", Decision::Block);
@@ -14593,7 +14615,7 @@ mod tests {
     // loop has nothing left to resolve to and returns None, same as a bare
     // `nohup`/`env` already does -- there is nothing dangerous about the
     // word alone, so this stays Allow, consistent with every other
-    // TRANSPARENT_WRAPPERS entry's own bare-invocation behavior (not a
+    // the catalog entry's own bare-invocation behavior (not a
     // dedicated fail-closed floor -- `effective_command` returning None
     // only matters where a caller specifically treats it as unresolvable,
     // e.g. issue #103's cwd-poisoning; ordinary rule matching just finds
@@ -14634,21 +14656,21 @@ mod tests {
 
     // `builtin` is not an escalation vector (no privilege change, only a
     // function/alias-shadowing bypass) -- it must not silently gain
-    // escalation-floor treatment as a side effect of joining
-    // TRANSPARENT_WRAPPERS.
+    // escalation-floor treatment as a side effect of being an
+    // exec wrapper.
     #[test]
     fn builtin_is_not_an_escalation_vector() {
-        assert!(!crate::rules::ESCALATION_VECTORS.contains(&"builtin"));
+        assert!(!crate::knowledge::escalation_vectors().any(|v| v == "builtin"));
     }
 
     // ==== Issue #246: enable -f/ksh builtin -f loadable-builtins native
     // code loading. A fundamentally different shape from issue #245's
-    // TRANSPARENT_WRAPPERS entry for `builtin` (which is about `builtin
+    // the catalog entry for `builtin` (which is about `builtin
     // name args...` dispatching to the shell builtin `name`) -- this is
     // "dlopen() an arbitrary file and run its exported code", closer in
     // spirit to a decode-pipe/interpreter-sink danger than to wrapper
     // transparency, so it's a direct blocklist rule rather than a
-    // TRANSPARENT_WRAPPERS/effective_command change. ====
+    // catalog/effective_command change. ====
 
     #[test]
     fn enable_loadable_builtin_with_following_name_blocks() {
@@ -14684,7 +14706,7 @@ mod tests {
 
     // ksh93's `builtin -f <libname>` shares bash `enable -f`'s exact
     // loadable-builtins shape (verified against ksh93's own manual). Unlike
-    // `enable`, `builtin` is ALSO a TRANSPARENT_WRAPPERS dispatcher (issue
+    // `enable`, `builtin` is ALSO an exec-wrapper dispatcher (issue
     // #245), so a naive `required_flags = ["f"]` blocklist rule
     // false-matches any wrapped command that happens to use `-f`/`-rf`
     // (confirmed during development of that rule: it broke
@@ -16531,8 +16553,8 @@ mod tests {
 
     #[test]
     fn sudo_with_separated_value_flag_no_longer_hides_wrapped_command() {
-        // Issue #54 closed this `TRANSPARENT_WRAPPERS` known limitation:
-        // `sudo`'s `wrapper_value_flags` entry now skips `-u root`'s
+        // Issue #54 closed this exec-wrapper known limitation:
+        // `sudo`'s catalog grammar now skips `-u root`'s
         // separated value along with the flag itself, so the rm rule
         // reaches its own Block decision instead of only the escalation
         // floor's Ask.
@@ -16541,7 +16563,7 @@ mod tests {
 
     #[test]
     fn sudo_every_separated_value_flag_no_longer_hides_wrapped_command() {
-        // Issue #402: wrapper_value_flags's "sudo" entry used to list only
+        // Issue #402: the "sudo" catalog grammar used to list only
         // -u/-g/--user/--group, so every other separated-value flag below
         // downgraded this Block to the escalation floor's Ask instead.
         for flag in [
@@ -16585,7 +16607,7 @@ mod tests {
 
     #[test]
     fn doas_every_separated_value_flag_no_longer_hides_wrapped_command() {
-        // Issue #402: wrapper_value_flags's "doas" entry used to list only
+        // Issue #402: the "doas" catalog grammar used to list only
         // -u, so -a/-C's value downgraded this Block to the escalation
         // floor's Ask instead.
         for flag in ["-u", "-a", "-C"] {
@@ -16728,8 +16750,8 @@ mod tests {
 
     #[test]
     fn nice_with_separated_value_flag_no_longer_misses_rule() {
-        // Issue #54 closed this `TRANSPARENT_WRAPPERS` known limitation:
-        // `nice`'s `wrapper_value_flags` entry now skips `-n 19`'s
+        // Issue #54 closed this exec-wrapper known limitation:
+        // `nice`'s catalog grammar now skips `-n 19`'s
         // separated value along with the flag itself, so `19` is no
         // longer mistaken for the wrapped command.
         assert_decision("nice -n 19 rm -rf /", Decision::Block);
@@ -16742,8 +16764,8 @@ mod tests {
 
     #[test]
     fn exec_with_separated_argv0_flag_no_longer_hides_wrapped_command() {
-        // Issue #248 closed this `TRANSPARENT_WRAPPERS` known limitation:
-        // `exec`'s `wrapper_value_flags` entry now skips `-a foo`'s
+        // Issue #248 closed this exec-wrapper known limitation:
+        // `exec`'s catalog grammar now skips `-a foo`'s
         // separated value along with the flag itself, so `foo` is no
         // longer mistaken for the wrapped command -- `exec -a foo rm -rf
         // /` genuinely executes `rm -rf /` in a real bash/zsh/ksh93
@@ -16835,7 +16857,7 @@ mod tests {
 
     #[test]
     fn env_with_separated_unset_flag_no_longer_hides_wrapped_command() {
-        // `env` was in `TRANSPARENT_WRAPPERS` with no `wrapper_value_flags`
+        // `env` was an exec wrapper with no option grammar
         // entry for its own `-u name` flag (GNU/BSD: unsets environment
         // variable `name` before running the wrapped command) -- the
         // generic dash-prefix skip in `skip_wrapper_flags` consumed the
@@ -16854,7 +16876,7 @@ mod tests {
 
     #[test]
     fn env_with_attached_long_unset_flag_still_blocks() {
-        // `--unset=FOO` (attached form) needs no `wrapper_value_flags`
+        // `--unset=FOO` (attached form) needs no catalog grammar entry
         // entry to be handled correctly: the whole token starts with `-`,
         // so the pre-existing generic dash-prefix skip already consumes
         // just this one token, no separate value token to mistake for the
@@ -16936,10 +16958,39 @@ mod tests {
     #[test]
     fn ambiguous_long_prefix_is_not_treated_as_a_value_flag() {
         // Real getopt errors on an ambiguous prefix and executes nothing,
-        // so declining to match cannot miss a real execution. `--d` is
-        // ambiguous for env, `--max` for xargs.
-        assert_decision("env --d FOO ls", Decision::Allow);
-        assert_decision("xargs --max 1 rm -rf /", Decision::Allow);
+        // so declining to match cannot miss a real execution; the prefix is
+        // unmodelled, which floors the line to Ask. `--d` is ambiguous for
+        // env, `--max` for xargs.
+        assert_decision("env --d FOO ls", Decision::Ask);
+        assert_decision("xargs --max 1 rm -rf /", Decision::Ask);
+    }
+
+    #[test]
+    fn unmodeled_wrapper_option_floors_to_ask_with_a_pinned_reason() {
+        let verdict = decide("nice --bogus ls");
+        assert_eq!(verdict.decision(), Decision::Ask);
+        assert_eq!(
+            verdict.reason().map(super::Reason::as_str),
+            Some("unmodelled option for `nice`")
+        );
+        let chained = decide("env nice --bogus ls");
+        assert_eq!(
+            chained.reason().map(super::Reason::as_str),
+            Some("unmodelled option for `nice`")
+        );
+    }
+
+    #[test]
+    fn unmodeled_wrapper_option_never_lowers_a_wrapped_block() {
+        assert_decision("nice --bogus rm -rf /", Decision::Block);
+        assert_decision("sudo --bogus rm -rf /", Decision::Block);
+    }
+
+    #[test]
+    fn modelled_wrapper_options_do_not_trip_the_unmodeled_floor() {
+        assert_decision("nice -n 5 ls", Decision::Allow);
+        assert_decision("timeout --foreground -k 1 5 ls", Decision::Allow);
+        assert_decision("command -v ls", Decision::Allow);
     }
 
     #[test]
@@ -16973,7 +17024,7 @@ mod tests {
 
     #[test]
     fn env_block_signal_flag_still_blocks_without_a_value_flags_entry() {
-        // Pinned so nobody "completes" `wrapper_value_flags`'s `env` arm
+        // Pinned so nobody "completes" the catalog's `env` grammar
         // by adding GNU's signal flags to it — see that arm's own comment
         // for why doing so would open a new bypass rather than close one.
         assert_decision("env --block-signal rm -rf /", Decision::Block);
@@ -17003,10 +17054,11 @@ mod tests {
     #[test]
     fn env_cluster_value_taker_missing_its_value_is_a_pinned_known_trade_off() {
         // `-u` has no variable name, so the cluster consumes `rm` as its
-        // value and `/` resolves as the command. Not a reachable
-        // weakening: real `env` then rejects `-rf` and executes nothing --
-        // the same trade-off the bare `env -u rm -rf /` spelling pins.
-        assert_decision("env -iu rm -rf /", Decision::Allow);
+        // value and `/` resolves as the command. Real `env` then rejects
+        // `-rf` and executes nothing; `-rf` is unmodelled for env, so the
+        // line floors to Ask -- the same as the bare `env -u rm -rf /`
+        // spelling.
+        assert_decision("env -iu rm -rf /", Decision::Ask);
     }
 
     #[test]
@@ -17025,34 +17077,30 @@ mod tests {
 
     #[test]
     fn env_cluster_with_unmodeled_letter_falls_through_to_generic_skip() {
-        // `L` is in neither table, so the cluster is not recognised and
-        // only the cluster token is consumed, leaving `FOO` as the
-        // resolved command. macOS and GNU `env` both reject `-L` and
-        // execute nothing, so there is no execution this fails to guard.
-        // FreeBSD >= 13's `env` does have `-L user[/class]` as a value
-        // flag, where this would genuinely run the trailing command --
-        // out of scope while shguard targets macOS and Linux, and the
-        // fix would be a FreeBSD row in the two tables.
-        assert_decision("env -iL FOO rm -rf /", Decision::Allow);
+        // `L` is not in env's grammar, so the cluster is unmodelled: only
+        // the cluster token is consumed, leaving `FOO` as the resolved
+        // command, and the line floors to Ask. macOS and GNU `env` both
+        // reject `-L` and execute nothing. FreeBSD >= 13's `env` does have
+        // `-L user[/class]` as a value flag, where this would genuinely
+        // run the trailing command -- which is why the Ask matters; the
+        // fix would be a FreeBSD row in the catalog.
+        assert_decision("env -iL FOO rm -rf /", Decision::Ask);
     }
 
     #[test]
     fn exec_cluster_with_unmodeled_letter_is_a_pinned_narrowing() {
-        // Deliberate narrowing from the exec-specific predecessor of
-        // `cluster_takes_separated_value`, which tested only the first
-        // `a`'s position and ignored the letters before it: `-xa` Blocked
-        // by consuming `foo` and resolving `rm`. Real shells reject an
-        // invalid `exec` option and run nothing -- verified in zsh
-        // (`unknown exec flag -x`, exit 1); bash documents the same
-        // rejection.
-        assert_decision("exec -xa foo rm -rf /", Decision::Allow);
+        // `x` is not an `exec` option, so the cluster is unmodelled and
+        // the line floors to Ask. Real shells reject an invalid `exec`
+        // option and run nothing -- verified in zsh (`unknown exec flag
+        // -x`, exit 1); bash documents the same rejection.
+        assert_decision("exec -xa foo rm -rf /", Decision::Ask);
     }
 
     #[test]
     fn env_split_string_splice_recurses_and_blocks() {
         // Issue #265, was the pinned known gap of issue #250: `-S` splits
         // its string into new argv words that `env` itself executes, so
-        // listing `-S` in `wrapper_value_flags` stopped the value from
+        // listing `-S` in the catalog grammar stopped the value from
         // being read as the command name but could not look inside it.
         assert_decision("env -S \"rm -rf /\" true", Decision::Block);
     }
@@ -17124,11 +17172,9 @@ mod tests {
     fn env_unset_missing_its_value_is_a_pinned_known_trade_off() {
         // `-u` here has no variable name, so the entry consumes `rm` as
         // its value and resolves `/` as the command -- Block before this
-        // fix, Allow after. Not a reachable weakening: real `env` rejects
-        // `-rf` as an invalid option and executes nothing. Pinned as the
-        // same accepted trade-off every `wrapper_value_flags` entry makes
-        // (`nice -n rm -rf /`).
-        assert_decision("env -u rm -rf /", Decision::Allow);
+        // fix. Real `env` rejects `-rf` as an invalid option and executes
+        // nothing; `-rf` is unmodelled for env, so the line floors to Ask.
+        assert_decision("env -u rm -rf /", Decision::Ask);
     }
 
     // ==== Issue #264: stdbuf's and xargs's own value-taking flags
@@ -17136,8 +17182,8 @@ mod tests {
 
     #[test]
     fn stdbuf_with_separated_output_flag_no_longer_hides_wrapped_command() {
-        // `stdbuf` was in `TRANSPARENT_WRAPPERS` with no
-        // `wrapper_value_flags` entry for its own `-o bufdef` flag -- the
+        // `stdbuf` was an exec wrapper with no
+        // catalog grammar for its own `-o bufdef` flag -- the
         // generic dash-prefix skip in `skip_wrapper_flags` consumed the
         // bare `-o` token and mistook `L` (the flag's own value) for the
         // wrapped command, so `stdbuf -o L rm -rf /` silently resolved to
@@ -17172,8 +17218,8 @@ mod tests {
 
     #[test]
     fn xargs_with_separated_max_args_flag_no_longer_hides_wrapped_command() {
-        // `xargs` was in `TRANSPARENT_WRAPPERS` with no
-        // `wrapper_value_flags` entry for its own `-n number` flag -- the
+        // `xargs` was an exec wrapper with no
+        // catalog grammar for its own `-n number` flag -- the
         // generic dash-prefix skip consumed the bare `-n` token and
         // mistook `1` (the flag's own value) for the wrapped command, so
         // `xargs -n 1 rm -rf /` silently resolved to `1`, matching no
@@ -17737,7 +17783,7 @@ mod tests {
 
     #[test]
     fn each_escalation_vector_floors_benign_command_to_ask() {
-        for vector in crate::rules::ESCALATION_VECTORS {
+        for vector in crate::knowledge::escalation_vectors() {
             let command = format!("{vector} whoami");
             assert_decision(&command, Decision::Ask);
         }
@@ -17751,10 +17797,7 @@ mod tests {
         // /` is not the same shape as `sudo rm -rf /`; see
         // `su_positional_argument_hides_wrapped_command_but_floor_still_blocks`
         // below for that case.
-        for vector in crate::rules::ESCALATION_VECTORS
-            .iter()
-            .filter(|v| **v != "su")
-        {
+        for vector in crate::knowledge::escalation_vectors().filter(|v| *v != "su") {
             let command = format!("{vector} rm -rf /");
             assert_decision(&command, Decision::Block);
         }
@@ -17762,7 +17805,7 @@ mod tests {
 
     #[test]
     fn su_positional_argument_hides_wrapped_command_but_floor_still_blocks() {
-        // Issue #54 gave `su` a `wrapper_positional_args` entry so `su
+        // Issue #54 gave `su` an operand slot so `su
         // root -c 'sh'` no longer mistakes the username `root` for the
         // wrapped command. The trade-off: `su`'s real grammar (`su
         // [options] [-] [user [arg...]]`) has no way to tell "no username,
@@ -17784,7 +17827,7 @@ mod tests {
 
     #[test]
     fn each_escalation_vector_through_env_wrapper_floors_to_ask() {
-        for vector in crate::rules::ESCALATION_VECTORS {
+        for vector in crate::knowledge::escalation_vectors() {
             let command = format!("env {vector} ls");
             assert_decision(&command, Decision::Ask);
         }
@@ -17813,7 +17856,7 @@ mod tests {
             escalation_floor = "deny"
         "#,
         );
-        for vector in crate::rules::ESCALATION_VECTORS {
+        for vector in crate::knowledge::escalation_vectors() {
             let command = format!("{vector} whoami");
             let verdict = analyze_with_policy(&command, &rules, &allowlist);
             assert_eq!(verdict.decision(), Decision::Block, "{command:?}");
@@ -19988,9 +20031,9 @@ done"#,
     fn su_dash_c_user_before_options_order_still_blocks() {
         // `su root -c 'rm -rf /'` (user-before-options order):
         // `effective_command` itself still can't resolve `su`'s wrapped
-        // command cleanly in this word order (see
-        // `crate::rules::TRANSPARENT_WRAPPERS`'s docs), but
-        // `wrapper_shell_string_scripts` finds `-c` independent of word
+        // command cleanly in this word order (`su`
+        // permutes its options, see the catalog), but
+        // `chain_script_slots` finds `-c` independent of word
         // order, so the dangerous content is still caught.
         assert_decision("su root -c 'rm -rf /'", Decision::Block);
     }
@@ -20084,7 +20127,7 @@ done"#,
     fn transparent_wrapper_cd_still_blocks() {
         // `command cd ...` must not be a day-one bypass of the whole
         // feature — cwd tracking routes through the same
-        // `effective_command`/`TRANSPARENT_WRAPPERS` resolution every rule
+        // `effective_command`'s exec-wrapper resolution every rule
         // match already uses.
         assert_decision(
             "command cd ~/.config/shguard && cp evil.toml config.toml",
@@ -21302,7 +21345,7 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
 
     // Two confirmed gaps in the
     // `env -C` composition: (1) it only fired when `argv[0]` was
-    // literally `env`, so any leading TRANSPARENT_WRAPPERS prefix
+    // literally `env`, so any leading exec-wrapper prefix
     // (`nice`/`timeout`/`sudo`/etc.) reopened the exact bypass this
     // issue exists to close; (2) `chain_dash_c_targets` only recognized
     // the separated `-C <dir>` form, missing GNU env's own glued
@@ -21415,10 +21458,10 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
     // CLUSTER form (`-iC dir`, `-iC<dir>`) that real `env` also accepts,
     // even though `effective_command`'s own wrapped-command walk already
     // handles these clusters correctly via
-    // `crate::rules::wrapper_cluster_booleans`/`wrapper_value_flags`. The
+    // the catalog grammar. The
     // anchor-extraction parser here and the wrapped-command-locating
     // parser had silently diverged. Fixed by
-    // `crate::rules::locate_cluster_value`, which shares those same
+    // `crate::knowledge::locate_short_value`, which shares those same
     // tables so the two classifications cannot drift apart again.
 
     #[test]
@@ -21477,25 +21520,25 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
     fn env_dash_c_cluster_with_an_unmodeled_letter_is_not_modeled() {
         // `env -iL dir cp ...`: `L` is not one of env's modeled booleans
         // or value-takers, so real env errors out on this cluster and
-        // executes nothing — no anchor to extract, and no execution to
-        // guard either.
+        // executes nothing — no anchor to extract. The unmodelled letter
+        // floors the line to Ask instead.
         assert_eq!(
             decide("env -iL ~/.config/shguard cp evil.toml config.toml").decision(),
-            Decision::Allow
+            Decision::Ask
         );
     }
 
     // The SAME bypass class was still open for
-    // `make`/`tar`: the prior fix built `crate::rules::locate_cluster_value`
+    // `make`/`tar`: the prior fix built `crate::knowledge::locate_short_value`
     // as a shared source of truth but wired it up for `env` only, on the
     // unverified assumption that git/make/tar "have no boolean short-flag
     // surface of their own to cluster with `-C`" — true for git (`git
     // -pC /tmp` errors "unknown option: -pC", confirmed live), empirically
     // FALSE for make (`make -kC dir` chdirs) and tar (`tar -cC dir -f
     // out.tar file` chdirs, `tar -C/path -cf ...` glues with no cluster
-    // prefix at all). Closed by giving `make`/`tar` their own
-    // `wrapper_cluster_booleans`/`wrapper_value_flags` entries and routing
-    // both through the same `locate_cluster_value` mechanism `env` already
+    // prefix at all). Closed by giving `make` its own catalog
+    // entry and routing
+    // both through the same `locate_short_value` mechanism `env` already
     // uses, rather than adding two more one-off parsers.
 
     #[test]

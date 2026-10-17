@@ -11,6 +11,7 @@ mod config_loader;
 mod decision_log;
 mod fs_canonicalizer;
 mod gate;
+mod knowledge;
 pub mod normalize;
 mod parser;
 #[doc(hidden)]
