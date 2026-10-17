@@ -6548,7 +6548,7 @@ fn recurse_find_exec_payload(
 }
 
 /// Whether AST word `word` is one of `find`'s
-/// [`crate::rules::RecurseMode::DirectArgv`] flags (`-exec`/`-execdir`/
+/// [`crate::rules::RecursableSlot`] direct-argv flags (`-exec`/`-execdir`/
 /// `-ok`/`-okdir`, issue #72) — see [`FindExecFlagKind`].
 fn find_exec_flag_kind(word: &Word) -> FindExecFlagKind {
     match normalize::normalize_word(word).as_slice() {
@@ -6622,7 +6622,7 @@ fn direct_argv_terminators_for(command: &str, flag: &str) -> Option<&'static [&'
 /// rather than [`NormalizedWord`]s — [`scan_recursable_slots`] needs the
 /// real `Word` nodes past a `Yes` flag to build the recursed synthetic
 /// command, not just resolved strings. `Yes` carries the matched slot's
-/// own [`crate::rules::RecurseMode::DirectArgv`] terminator list — `;`/`+`
+/// own [`crate::rules::RecursableSlot`] terminator list — `;`/`+`
 /// for `-exec`/`-execdir`, `;`-only for `-ok`/`-okdir` (issue #360: neither
 /// prompts per matched file compatibly with `+` batching) — read from
 /// [`crate::rules::RECURSABLE_SLOTS`] rather than hard-coded here, so a
@@ -16785,7 +16785,7 @@ mod tests {
     // easily-typed ways to spell "override argv0", each genuinely
     // executing `rm -rf /` in a real shell before this fix. `exec`'s
     // entire option surface is tiny and fully known -- `a` is its only
-    // value-taking flag, full stop -- so `skip_wrapper_flags` treats ANY
+    // value-taking flag, full stop -- so the knowledge catalog option parser treats ANY
     // dash-cluster containing `a`, in any position, as consuming the next
     // token too. This is exec-specific and does not generalize to other
     // wrappers, which is why `attached_value_flags`
@@ -16860,7 +16860,7 @@ mod tests {
         // `env` was an exec wrapper with no option grammar
         // entry for its own `-u name` flag (GNU/BSD: unsets environment
         // variable `name` before running the wrapped command) -- the
-        // generic dash-prefix skip in `skip_wrapper_flags` consumed the
+        // generic dash-prefix skip (not the knowledge catalog option parser) consumed the
         // bare `-u` token and mistook `FOO` (the flag's own value) for the
         // wrapped command, so `env -u FOO rm -rf /` silently resolved to
         // `FOO`, matching no rule, even though this genuinely unsets `FOO`
@@ -16946,7 +16946,7 @@ mod tests {
 
     #[test]
     fn abbreviated_split_string_splice_is_still_recursed() {
-        // The abbreviated flag is consumed by `skip_wrapper_flags`, so
+        // The abbreviated flag is consumed by the knowledge catalog option parser, so
         // without the same prefix rule in the splice detector the payload
         // would be swallowed and never recursed.
         assert_decision(r#"env --split "rm -rf /""#, Decision::Block);
@@ -17184,7 +17184,7 @@ mod tests {
     fn stdbuf_with_separated_output_flag_no_longer_hides_wrapped_command() {
         // `stdbuf` was an exec wrapper with no
         // catalog grammar for its own `-o bufdef` flag -- the
-        // generic dash-prefix skip in `skip_wrapper_flags` consumed the
+        // generic dash-prefix skip (not the knowledge catalog option parser) consumed the
         // bare `-o` token and mistook `L` (the flag's own value) for the
         // wrapped command, so `stdbuf -o L rm -rf /` silently resolved to
         // `L`, matching no rule, even though this genuinely line-buffers
