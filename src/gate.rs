@@ -7445,9 +7445,13 @@ struct InlineGrammar {
     /// Prefixes of long options that take no value (`--disable-gems`).
     long_plain_prefixes: &'static [&'static str],
     /// Whether `-` right after `--` still runs the program from stdin. True
-    /// for python, perl, ruby and node; lua 5.3 opens a file named `-`
+    /// for python, perl, ruby, node and php; lua 5.3 opens a file named `-`
     /// instead.
     dashdash_dash_is_stdin: bool,
+    /// Whether a bare `-` in script-operand position runs the program from
+    /// stdin. True for every interpreter but php, which opens a file named
+    /// `-`.
+    dash_is_stdin: bool,
 }
 
 const PYTHON_GRAMMAR: InlineGrammar = InlineGrammar {
@@ -7463,6 +7467,7 @@ const PYTHON_GRAMMAR: InlineGrammar = InlineGrammar {
     long_value: &["check-hash-based-pycs"],
     long_plain_prefixes: &[],
     dashdash_dash_is_stdin: true,
+    dash_is_stdin: true,
 };
 
 const NODE_GRAMMAR: InlineGrammar = InlineGrammar {
@@ -7505,6 +7510,7 @@ const NODE_GRAMMAR: InlineGrammar = InlineGrammar {
     ],
     long_plain_prefixes: &[],
     dashdash_dash_is_stdin: true,
+    dash_is_stdin: true,
 };
 
 const PERL_GRAMMAR: InlineGrammar = InlineGrammar {
@@ -7520,6 +7526,7 @@ const PERL_GRAMMAR: InlineGrammar = InlineGrammar {
     long_value: &[],
     long_plain_prefixes: &[],
     dashdash_dash_is_stdin: true,
+    dash_is_stdin: true,
 };
 
 const RUBY_GRAMMAR: InlineGrammar = InlineGrammar {
@@ -7543,11 +7550,12 @@ const RUBY_GRAMMAR: InlineGrammar = InlineGrammar {
     long_value: &[],
     long_plain_prefixes: &["disable-", "enable-"],
     dashdash_dash_is_stdin: true,
+    dash_is_stdin: true,
 };
 
 const PHP_GRAMMAR: InlineGrammar = InlineGrammar {
     code_chars: "rBRE",
-    plain_chars: "ahilmnqsvwHe",
+    plain_chars: "ahilmnqsvwCHe?",
     value_chars: "cdfFtSz",
     attached_chars: "",
     required_attached_chars: "",
@@ -7557,8 +7565,11 @@ const PHP_GRAMMAR: InlineGrammar = InlineGrammar {
     long_plain: &["version", "help", "ini"],
     long_value: &["rf", "rc", "re", "rz", "ri"],
     long_plain_prefixes: &[],
-    // Unverified, see #614.
-    dashdash_dash_is_stdin: false,
+    // After `--` php reads its script from stdin whatever follows
+    // (`php -- -v` ran the stdin script with `-v` as its argument).
+    dashdash_dash_is_stdin: true,
+    // `php -` fails with "Could not open input file: -".
+    dash_is_stdin: false,
 };
 
 const LUA_GRAMMAR: InlineGrammar = InlineGrammar {
@@ -7574,6 +7585,7 @@ const LUA_GRAMMAR: InlineGrammar = InlineGrammar {
     long_value: &[],
     long_plain_prefixes: &[],
     dashdash_dash_is_stdin: false,
+    dash_is_stdin: true,
 };
 
 /// `osascript [-l language] [-i] [-s flags] [-e statement | programfile]`.
@@ -7590,6 +7602,7 @@ const OSASCRIPT_GRAMMAR: InlineGrammar = InlineGrammar {
     long_value: &[],
     long_plain_prefixes: &[],
     dashdash_dash_is_stdin: false,
+    dash_is_stdin: true,
 };
 
 /// The option grammar of the non-shell interpreter `name` (rule 6b), or
@@ -7703,7 +7716,7 @@ fn scan_inline_code(
         }
         // A stdin operand in script-operand position reads the program from
         // stdin, as awk's `FileFlagStdin` treats it.
-        if is_stdin_alias_path(text) {
+        if is_stdin_alias_path(text) && (text != "-" || grammar.dash_is_stdin) {
             return Some(StdinScript);
         }
         let flags = text.strip_prefix('-').filter(|rest| !rest.is_empty())?;
@@ -14239,9 +14252,6 @@ mod tests {
             "node --require ./x.js -",
             "node -r ./x.js -",
             "node --no-warnings -",
-            "php -",
-            "php8.2 -",
-            "php -n -",
             "lua -",
             "lua5.4 -",
             "lua -E -",
@@ -14264,6 +14274,9 @@ mod tests {
             "perl s.pl -",
             "ruby s.rb -",
             "php s.php -",
+            "php -",
+            "php8.2 -",
+            "php -n -",
             "lua s.lua -",
             "python3 -W - s.py",
             "node -r - s.js",
@@ -14288,8 +14301,32 @@ mod tests {
             "lua -- /dev/stdin",
             "lua -- \"$x\"",
             "php -- /dev/stdin",
+            "php -- -",
         ] {
             assert_decision(command, Decision::Ask);
+        }
+    }
+
+    // Probed against php 8.4.26 (issue #614): -r/-B/-R/-E run inline code,
+    // attached or separate, also clustered after plain flags; -C and -? are
+    // plain flags, so they no longer leave the option scan unplaced.
+    #[test]
+    fn inline_php_code_letters_are_ask_floor() {
+        for command in [
+            "php -r 'echo 1;'",
+            "php -B 'echo 1;'",
+            "php -R 'echo 1;'",
+            "php -E 'echo 1;'",
+            "php -recho",
+            "php -nr 'echo 1;'",
+            "php -C -r 'echo 1;'",
+            "php -? -r 'echo 1;'",
+            "php -Cr 'echo 1;'",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+        for command in ["php -C s.php", "php -? s.php", "php -Cn s.php -r"] {
+            assert_decision(command, Decision::Allow);
         }
     }
 
