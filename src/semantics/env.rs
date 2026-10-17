@@ -122,6 +122,9 @@ pub(crate) struct Env {
     touched: HashSet<String>,
     ifs: IfsHypotheses,
     readonly: ReadonlyFacts,
+    /// Names defined as functions on this line: a call may run any
+    /// `readonly` its body holds.
+    functions: HashSet<String>,
 }
 
 impl Env {
@@ -138,6 +141,21 @@ impl Env {
         self.readonly.all || self.readonly.names.contains(name)
     }
 
+    /// Records that `name` is defined as a function on this line.
+    pub(crate) fn note_function_defined(&mut self, name: &str) {
+        self.functions.insert(name.to_string());
+    }
+
+    /// Folds in a body evaluated with its own [`Env::isolated`] whose effects
+    /// still reach the parent shell (an `if`/loop body): its readonly facts
+    /// become unknown here, since which iteration or branch ran is not known.
+    pub(crate) fn absorb_body(&mut self, body: &Env) {
+        if body.readonly.all || !body.readonly.names.is_empty() {
+            self.readonly.all = true;
+        }
+        self.functions.extend(body.functions.iter().cloned());
+    }
+
     /// Conservatively records `readonly`-ish operands (`readonly`, or
     /// `declare`/`typeset`/`local`/`export` with an `-r`-containing flag
     /// cluster); any such appearance is enough, whether or not the builtin
@@ -149,6 +167,16 @@ impl Env {
         let Resolution::Resolved(name) = first.resolution() else {
             return;
         };
+        // Wrappers and sourced code can run a `readonly` this scan cannot
+        // see (`builtin readonly X`, zsh `integer -r X`), as can a call to
+        // a function defined on this line.
+        if matches!(
+            name.as_str(),
+            "builtin" | "command" | "eval" | "source" | "." | "integer" | "float" | "private"
+        ) || self.functions.contains(name.as_str())
+        {
+            self.readonly.all = true;
+        }
         let readonlyish = match name.as_str() {
             "readonly" => true,
             "declare" | "typeset" | "local" | "export" => {

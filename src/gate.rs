@@ -855,6 +855,11 @@ fn evaluate_pipeline(
                 }
                 stage_argvs.push(Vec::new());
                 if stage_count == 1 {
+                    if let [name] = normalize::normalize_word(&func.name).as_slice()
+                        && let Resolution::Resolved(name) = name.resolution()
+                    {
+                        env.note_function_defined(name);
+                    }
                     evaluate_function_definition(func, ctx, cwd)
                 } else {
                     let mut isolated = cwd.clone();
@@ -1107,6 +1112,21 @@ fn evaluate_compound_command(
     verdict
 }
 
+/// Evaluates an `if`/loop body or condition with its own [`Env`] (which
+/// branch or iteration ran is unknowable, so no assignment inside is
+/// inherited) while keeping what it may have made readonly or defined.
+fn evaluate_child_body(
+    body: &CommandLine,
+    parent: &mut Env,
+    ctx: AnalysisCtx<'_>,
+    cwd: &mut CwdState,
+) -> Verdict {
+    let mut child = Env::isolated();
+    let verdict = evaluate_command_line_in(body, &mut child, ExecScope::Parent, ctx, cwd);
+    parent.absorb_body(&child);
+    verdict
+}
+
 fn evaluate_compound_command_body(
     compound: &CompoundCommand,
     env: &mut Env,
@@ -1122,7 +1142,7 @@ fn evaluate_compound_command_body(
             let verdict = evaluate_command_line_in(
                 body,
                 env,
-                scope.group_with_redirections(!redirections.is_empty()),
+                scope.group_with_redirections(redirections.iter().any(redirection_can_fail)),
                 ctx,
                 cwd,
             );
@@ -1141,7 +1161,7 @@ fn evaluate_compound_command_body(
         } => {
             let mut isolated = cwd.clone();
             isolated.symlink_untrusted = true;
-            let verdict = evaluate_command_line(body, ctx, &mut isolated);
+            let verdict = evaluate_child_body(body, env, ctx, &mut isolated);
             if command_line_may_change_cwd(body) {
                 cwd.poison();
             }
@@ -1163,8 +1183,8 @@ fn evaluate_compound_command_body(
         } => {
             let mut isolated = cwd.clone();
             isolated.symlink_untrusted = true;
-            let cond_verdict = evaluate_command_line(condition, ctx, &mut isolated);
-            let body_verdict = evaluate_command_line(body, ctx, &mut isolated);
+            let cond_verdict = evaluate_child_body(condition, env, ctx, &mut isolated);
+            let body_verdict = evaluate_child_body(body, env, ctx, &mut isolated);
             if command_line_may_change_cwd(condition) || command_line_may_change_cwd(body) {
                 cwd.poison();
             }
@@ -1182,19 +1202,28 @@ fn evaluate_compound_command_body(
             redirections,
         } => {
             let mut isolated = cwd.clone();
-            let mut worst = evaluate_command_line(condition, ctx, &mut isolated);
-            worst = fold_worst(worst, evaluate_command_line(then_body, ctx, &mut isolated));
+            let mut worst = evaluate_child_body(condition, env, ctx, &mut isolated);
+            worst = fold_worst(
+                worst,
+                evaluate_child_body(then_body, env, ctx, &mut isolated),
+            );
             let mut may_change_cwd =
                 command_line_may_change_cwd(condition) || command_line_may_change_cwd(then_body);
             for ElifClause { condition, body } in elifs {
-                worst = fold_worst(worst, evaluate_command_line(condition, ctx, &mut isolated));
-                worst = fold_worst(worst, evaluate_command_line(body, ctx, &mut isolated));
+                worst = fold_worst(
+                    worst,
+                    evaluate_child_body(condition, env, ctx, &mut isolated),
+                );
+                worst = fold_worst(worst, evaluate_child_body(body, env, ctx, &mut isolated));
                 may_change_cwd = may_change_cwd
                     || command_line_may_change_cwd(condition)
                     || command_line_may_change_cwd(body);
             }
             if let Some(else_body) = else_body {
-                worst = fold_worst(worst, evaluate_command_line(else_body, ctx, &mut isolated));
+                worst = fold_worst(
+                    worst,
+                    evaluate_child_body(else_body, env, ctx, &mut isolated),
+                );
                 may_change_cwd = may_change_cwd || command_line_may_change_cwd(else_body);
             }
             if may_change_cwd {
@@ -1457,6 +1486,28 @@ fn evaluate_extended_test(test: &ExtendedTest, ctx: AnalysisCtx<'_>, cwd: &CwdCo
         ctx,
         cwd,
     )
+}
+
+/// Whether opening `redirection` can fail and so skip the group's body. Only
+/// a `/dev/null` target and a duplication of the standard fds are taken as
+/// infallible.
+fn redirection_can_fail(redirection: &Redirection) -> bool {
+    let Redirection::File { kind, target } = redirection else {
+        return true;
+    };
+    let words = normalize::normalize_word(target);
+    let [word] = words.as_slice() else {
+        return true;
+    };
+    let Resolution::Resolved(target) = word.resolution() else {
+        return true;
+    };
+    match kind {
+        FileRedirectionKind::DuplicateInput | FileRedirectionKind::DuplicateOutput => {
+            !matches!(target.as_str(), "0" | "1" | "2")
+        }
+        _ => target != "/dev/null",
+    }
 }
 
 /// Evaluates a function definition (issue #75) by evaluating its body
@@ -11515,6 +11566,84 @@ mod tests {
         ] {
             assert_decision(command, Decision::Block);
         }
+    }
+
+    #[test]
+    fn issue_653_readonly_behind_wrappers_does_not_advance_the_cut() {
+        for command in [
+            "X=$Y; true && X=\"rm -rf /\"; builtin readonly X; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; command readonly X; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; eval readonly X; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; integer -r X; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; float -r X; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; private -r X; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; source ./f; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; . ./f; X=ls; $X",
+        ] {
+            assert_decision(command, Decision::Block);
+        }
+    }
+
+    #[test]
+    fn issue_653_readonly_inside_compound_bodies_does_not_advance_the_cut() {
+        for command in [
+            "X=$Y; true && X=\"rm -rf /\"; if true; then readonly X; fi; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; if false; then :; else readonly X; fi; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; for i in 1; do readonly X; done; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; while readonly X; do :; done; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; until true; do readonly X; done; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; if true; then if true; then builtin readonly X; fi; fi; X=ls; $X",
+        ] {
+            assert_decision(command, Decision::Block);
+        }
+    }
+
+    #[test]
+    fn issue_653_readonly_inside_a_called_function_does_not_advance_the_cut() {
+        for command in [
+            "X=$Y; true && X=\"rm -rf /\"; f() { readonly X; }; f; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; f() { builtin readonly X; }; f; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; if true; then f() { readonly X; }; fi; f; X=ls; $X",
+        ] {
+            assert_decision(command, Decision::Block);
+        }
+    }
+
+    #[test]
+    fn issue_653_readonly_in_a_subshell_is_not_inherited() {
+        assert_decision(
+            "X=$Y; true && X=\"rm -rf /\"; (readonly X); X=ls; $X",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn issue_653_readonly_group_with_infallible_redirections_keeps_parent_scope() {
+        for command in [
+            "X=\"rm -rf /\"; { X=$Y; } 2>/dev/null; $X",
+            "X=\"rm -rf /\"; { X=$Y; } >/dev/null 2>&1; $X",
+            "X=\"rm -rf /\"; { X=$Y; } >&2; $X",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+        assert_decision("X=\"rm -rf /\"; { X=$Y; } >&9; $X", Decision::Block);
+    }
+
+    #[test]
+    fn issue_653_readonly_then_unknown_write_and_append_verdicts_are_pinned() {
+        // Accepted as is: a write to an already-readonly name is weak, so
+        // the earlier value stays reachable; `+=` builds on an unknown value.
+        assert_decision("X=\"rm -rf /\"; readonly X; X=$Y; $X", Decision::Block);
+        assert_decision("X=\"rm -rf /\"; X+=$Z; $X", Decision::Ask);
+    }
+
+    #[test]
+    fn issue_653_readonly_case_clause_is_an_unparsable_ask() {
+        // `case` is not parsed at all, so the whole line floors to Ask.
+        assert_decision(
+            "X=$Y; true && X=\"rm -rf /\"; case a in a) readonly X;; esac; X=ls; $X",
+            Decision::Ask,
+        );
     }
 
     #[test]
