@@ -5203,10 +5203,11 @@ pub(crate) fn fold_command_name(name: &str) -> String {
 /// Strips a trailing distro-style version suffix (`python3.12` -> `python`,
 /// `lua5.4` -> `lua`, `php8.2` -> `php`) so interpreter-name matching
 /// recognises versioned binaries (issue #346) without a hand-maintained list
-/// of every version. Also strips a `-dbg`/`-debug` suffix and the CPython ABI
-/// letters (`t` free-threaded, `m` pymalloc, `d` debug, `u` unicode) that
-/// follow the digits (`python3.13t`, `python3.7m`, `python3.12-dbg`); the ABI
-/// letters are stripped only when a digit precedes them, so a plain name
+/// of every version. Also strips a `-dbg`/`-debug` suffix and any trailing
+/// run of the CPython ABI letters (`t` free-threaded, `m` pymalloc, `d` debug,
+/// `u` unicode, in any combination or order: `python3.13t`, `python3.7m`,
+/// `python3.7dm`, `python3.12-dbg`) that follows the digits; the run is
+/// stripped only when a digit precedes it, so a plain name
 /// ending in one of those letters (`sed`) is left alone. `trim_end_matches`
 /// (byte-index-unsafe alternatives like `rfind` + manual slicing panic on a
 /// multibyte name ending just past a non-ASCII character, e.g. `café`) only

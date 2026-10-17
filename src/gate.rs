@@ -86,9 +86,10 @@
 //!    `w`/`W`/`r`/`R`/`e` commands and `s///w`/`s///e` flags by a small
 //!    command lexer (`crate::sed_script`), and Ask otherwise. Rules 5b,
 //!    6a, and 6b all locate a flag by scanning argv positionally
-//!    ([`scan_for_flag`], or rule 6b's option-grammar walk); per issues #71/#53, an `Unresolvable` word at a
-//!    scanned position is treated as "might be the flag", never as
-//!    "definitely not" — fail-closed, per plan.md §4.
+//!    ([`scan_for_flag`], or rule 6b's option-grammar walk); per issues
+//!    #71/#53, an `Unresolvable` word at a scanned position is treated as
+//!    "might be the flag", never as "definitely not" — fail-closed, per
+//!    plan.md §4.
 //! 7. `$IFS`-derived words ("rule 7") — normalise.rs already folds against
 //!    the *default* IFS; this module adds the untrusted floor: a blocklist
 //!    hit still Blocks, but a miss floors to Ask, because a same-line
@@ -7413,6 +7414,10 @@ struct InlineGrammar {
     operand_chars: &'static str,
     /// Whether several short flags may share one word (`-Ic`); otherwise the
     /// first letter alone decides and any leftover is an unknown option.
+    /// `false` is deliberate for node and lua: their parsers take one flag
+    /// per word (node rejects `-rv` as a bad option, lua.c requires
+    /// `-i`/`-v`/`-E` to be the whole word), so a clustered word is left
+    /// unplaced rather than guessed at.
     cluster: bool,
     /// Long options that supply inline code.
     long_code: &'static [&'static str],
@@ -7428,7 +7433,7 @@ struct InlineGrammar {
 const PYTHON_GRAMMAR: InlineGrammar = InlineGrammar {
     code_chars: "c",
     plain_chars: "BbdEhiIOPqsSuvVxR?",
-    value_chars: "WXQ",
+    value_chars: "WX",
     attached_chars: "",
     required_attached_chars: "",
     operand_chars: "m",
@@ -7654,6 +7659,11 @@ fn scan_inline_code(
         };
         if text == "--" {
             return None;
+        }
+        // A bare `-` in script-operand position reads the program from stdin:
+        // inline code, as awk's `FileFlagStdin` treats it.
+        if text == "-" {
+            return Some(Literal);
         }
         let flags = text.strip_prefix('-').filter(|rest| !rest.is_empty())?;
         if let Some(long) = flags.strip_prefix('-') {
@@ -14141,6 +14151,64 @@ mod tests {
             "lua5.4 -e 'print(1)'",
         ] {
             assert_decision(command, Decision::Ask);
+        }
+    }
+
+    // A bare `-` script operand reads the program from stdin (issue #614).
+    #[test]
+    fn inline_stdin_script_operand_is_ask_floor() {
+        for command in [
+            "python3 -",
+            "python3.12 -",
+            "python3.13t -",
+            "python3 -u -",
+            "python3 -W ignore -",
+            "python3 -X dev -",
+            "pypy3 -",
+            "perl -",
+            "perl -w -",
+            "perl -I lib -",
+            "perl5.36 -",
+            "ruby -",
+            "ruby3.3 -",
+            "ruby -w -",
+            "node -",
+            "nodejs -",
+            "node --require ./x.js -",
+            "node -r ./x.js -",
+            "node --no-warnings -",
+            "php -",
+            "php8.2 -",
+            "php -n -",
+            "lua -",
+            "lua5.4 -",
+            "lua -E -",
+            "lua -l mod -",
+            "osascript -",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+    }
+
+    // `-` is only the stdin operand in script-operand position.
+    #[test]
+    fn inline_stdin_dash_after_script_or_as_option_value_is_not_inline() {
+        for command in [
+            "python3 script.py -",
+            "python3 -u script.py -",
+            "python3 -m mod -",
+            "python3 -- -",
+            "node s.js -",
+            "node --require ./x.js s.js -",
+            "perl s.pl -",
+            "ruby s.rb -",
+            "php s.php -",
+            "lua s.lua -",
+            "python3 -W - s.py",
+            "node -r - s.js",
+            "lua -l - s.lua",
+        ] {
+            assert_decision(command, Decision::Allow);
         }
     }
 
