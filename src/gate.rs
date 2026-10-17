@@ -105,7 +105,12 @@
 //!    Ask, never Allow. Like rule
 //!    3, computed once up front in [`evaluate_simple_command_core`] (issue
 //!    #445) so it survives `core`'s own early returns too (`bash -c ls
-//!    <(rm -rf /)`).
+//!    <(rm -rf /)`). The one exception (issue #628) is an argument word that
+//!    is exactly one `<(...)` whose inner command is Allow and reads no
+//!    stdin as code, in a command that cannot run its operands as a
+//!    program ([`clear_input_process_substitutions`]): it becomes
+//!    [`UnresolvableKind::DevFdPath`], which this rule does not floor, and
+//!    rule 4 skips it for rules whose targets cannot match `/dev/fd/N`.
 //! 9. Assignments-only and empty simple commands ("rule 9") — Allow; an
 //!    assignment's RHS is already recursed by rule 11 below, so what's left
 //!    here is only the resulting *value*'s later use, which rule 2 handles
@@ -431,7 +436,8 @@ fn deny_msg_for_unresolvable_kind(kind: UnresolvableKind) -> Option<DenyMessage>
         | UnresolvableKind::ParameterExpansion
         | UnresolvableKind::NonUtf8
         | UnresolvableKind::ExpansionLimit
-        | UnresolvableKind::EmbeddedNul => return None,
+        | UnresolvableKind::EmbeddedNul
+        | UnresolvableKind::DevFdPath => return None,
     };
     Some(deny_msg_unsupported_construct(name))
 }
@@ -2809,6 +2815,119 @@ fn first_non_vanishing_word_idx(command: &SimpleCommand) -> Option<usize> {
         .position(|word| !normalize::normalize_word(word).is_empty())
 }
 
+fn lone_input_process_substitution(word: &Word) -> Option<&CommandLine> {
+    match word.0.as_slice() {
+        [
+            WordPiece::ProcessSubstitution {
+                direction: ProcessSubstitutionDirection::Read,
+                body,
+            },
+        ] => Some(body),
+        _ => None,
+    }
+}
+
+/// Recurses every argument word that is exactly one `<(...)` and, when the
+/// whole command provably only reads its `/dev/fd/N` operands as data, turns
+/// the word in `argv` into [`UnresolvableKind::DevFdPath`], which rule 8 does
+/// not floor. Returns the recursed bodies so rule 3 does not recurse them
+/// again.
+///
+/// Every condition is fail-closed:
+/// - every other word of `argv` is resolved, so no unresolved word can be, or
+///   hide, a command name or a code-running flag;
+/// - the inner command is Allow and runs no interpreter on the stdin it
+///   inherits (`cat <(bash)` runs bash on the outer stdin);
+/// - nothing in `argv` names an interpreter, `source`/`.`, `eval`, `trap` or
+///   awk, whose operand may be a program.
+fn clear_input_process_substitutions<'a>(
+    command: &'a SimpleCommand,
+    argv: &mut [NormalizedWord],
+    env: &Env,
+    ctx: AnalysisCtx<'_>,
+    cwd: &CwdContext,
+) -> Vec<(&'a CommandLine, Verdict)> {
+    if !command
+        .words
+        .iter()
+        .any(|word| lone_input_process_substitution(word).is_some())
+    {
+        return Vec::new();
+    }
+    let Some(first_word) = first_non_vanishing_word_idx(command) else {
+        return Vec::new();
+    };
+    let mut evaluated = Vec::new();
+    let mut offsets = Vec::new();
+    let mut offset = 0;
+    for (index, word) in command.words.iter().enumerate() {
+        let normalized = normalize::normalize_word(word);
+        if index > first_word
+            && let Some(body) = lone_input_process_substitution(word)
+        {
+            let mut isolated = CwdState::seed_unknown_stack(cwd.clone());
+            evaluated.push((body, evaluate_command_line(body, ctx, &mut isolated)));
+            offsets.push(offset);
+        }
+        offset += normalized.len();
+    }
+    let unresolved = argv
+        .iter()
+        .filter(|word| matches!(word.resolution(), Resolution::Unresolvable(_)))
+        .count();
+    let only_these_unresolved = unresolved == offsets.len()
+        && offsets.iter().all(|&offset| {
+            matches!(
+                argv.get(offset).map(NormalizedWord::resolution),
+                Some(Resolution::Unresolvable(
+                    UnresolvableKind::ProcessSubstitution
+                ))
+            )
+        });
+    // The parser splits `tar{,<(x)}` into `tar{,`, `<(x)` and `}`, hiding the
+    // `tar` word that really runs; the floor must stay while a brace is in play.
+    let brace_text = argv.iter().any(
+        |word| matches!(word.resolution(), Resolution::Resolved(text) if text.contains(['{', '}'])),
+    );
+    if !only_these_unresolved || brace_text || may_run_operand_as_code(argv) {
+        return evaluated;
+    }
+    for ((body, verdict), offset) in evaluated.iter().zip(offsets) {
+        if verdict.decision() == Decision::Allow && !command_line_reads_stdin(body, env) {
+            argv[offset] = NormalizedWord::unresolvable(UnresolvableKind::DevFdPath);
+        }
+    }
+    evaluated
+}
+
+/// Whether `argv` may run a file operand as a program. Scans every resolved
+/// word, not just the effective command, so a runner this crate does not peel
+/// (`flock lock bash <(x)`, `find -exec sh {} <(x)`) is still seen.
+fn may_run_operand_as_code(argv: &[NormalizedWord]) -> bool {
+    if crate::rules::effective_command(argv).is_none() {
+        return true;
+    }
+    argv.iter().any(|word| {
+        let Resolution::Resolved(text) = word.resolution() else {
+            return false;
+        };
+        let name = text.rsplit('/').next().unwrap_or(text);
+        let folded = crate::rules::fold_command_name(name);
+        let base = crate::rules::strip_version_suffix(&folded);
+        crate::rules::is_pipeline_interpreter(name)
+            || matches!(base, "source" | ".")
+            || EVAL_BUILTIN.contains(&base)
+            || TRAP_BUILTIN.contains(&base)
+            || AWK_INTERPRETERS.contains(&base)
+    })
+}
+
+/// Whether running `line` with the stdin it inherits could execute that stdin
+/// as code, or could not be shown not to.
+fn command_line_reads_stdin(line: &CommandLine, env: &Env) -> bool {
+    command_line_stdin_sinks(line, env).reader.is_some()
+}
+
 /// Whether `command`'s argument words (everything after the first
 /// non-empty word) contain any argument-position command/backquote
 /// substitution (rule 3). Computed independently of, and before, running
@@ -2898,7 +3017,9 @@ fn evaluate_simple_command(
         depth,
         ..
     } = ctx;
-    let argv = normalize::normalize_argv(command);
+    let mut argv = normalize::normalize_argv(command);
+    let evaluated_process_substitutions =
+        clear_input_process_substitutions(command, &mut argv, env, ctx, cwd);
     let wrapper_moves_cwd = wrapper_chain_changes_cwd(&argv);
     // A recursion (`depth > 0`: `bash -c`, `$(...)`, `eval`, `find -exec`)
     // cannot see the earlier commands of the line it was spawned from, and a
@@ -3078,6 +3199,7 @@ fn evaluate_simple_command(
             ctx,
             symlink_scope,
             sole_target_floor: &mut sole_target_floor,
+            evaluated_process_substitutions: &evaluated_process_substitutions,
         },
         escalation_chain,
         cwd,
@@ -3297,6 +3419,9 @@ struct SimpleCommandPolicy<'a> {
     ctx: AnalysisCtx<'a>,
     symlink_scope: SymlinkScope<'a>,
     sole_target_floor: &'a mut bool,
+    /// The `<(...)` argument words [`clear_input_process_substitutions`]
+    /// already recursed, so rule 3 does not recurse them a second time.
+    evaluated_process_substitutions: &'a [(&'a CommandLine, Verdict)],
 }
 
 /// Evaluates one [`SimpleCommand`] against every per-command gate rule (1,
@@ -3322,6 +3447,7 @@ fn evaluate_simple_command_core(
         ctx,
         symlink_scope,
         sole_target_floor,
+        evaluated_process_substitutions,
     } = policy;
     let AnalysisCtx { rules, .. } = ctx;
     // Redirect target check runs FIRST, before any early return —
@@ -3436,7 +3562,7 @@ fn evaluate_simple_command_core(
     // since `argument_words` alone (everything after `first_word_ast`)
     // never sees content embedded in that same AST word.
     let substitution_result = fold_optional_decision(
-        evaluate_argument_substitutions(argument_words, ctx, cwd),
+        evaluate_argument_substitutions(argument_words, evaluated_process_substitutions, ctx, cwd),
         leftover_floor,
     );
     let mut command_position_subs = Vec::new();
@@ -5685,6 +5811,7 @@ fn recurse_shell_string(
 /// outer command non-Allow (plan.md §4's `echo $(date)` example).
 fn evaluate_argument_substitutions(
     argument_words: &[Word],
+    evaluated: &[(&CommandLine, Verdict)],
     ctx: AnalysisCtx<'_>,
     cwd: &CwdContext,
 ) -> Option<(Decision, Option<DenyMessage>)> {
@@ -5718,8 +5845,16 @@ fn evaluate_argument_substitutions(
         // `evaluate_command_position_substitution`'s docs on this
         // distinction).
         for inner in collect_process_substitutions(word) {
-            let mut isolated = CwdState::seed_unknown_stack(cwd.clone());
-            let verdict = evaluate_command_line(inner, ctx, &mut isolated);
+            let verdict = match evaluated
+                .iter()
+                .find(|(body, _)| std::ptr::eq(*body, inner))
+            {
+                Some((_, verdict)) => verdict.clone(),
+                None => {
+                    let mut isolated = CwdState::seed_unknown_stack(cwd.clone());
+                    evaluate_command_line(inner, ctx, &mut isolated)
+                }
+            };
             raise(verdict.decision(), verdict.deny_message().cloned());
         }
     }
@@ -8037,7 +8172,8 @@ fn is_opaque_unresolvable(kind: UnresolvableKind) -> bool {
             // raw-text/structural rescans (`collect_substitutions_into`'s
             // `ArithmeticExpansion` arm, `collect_process_substitutions_into`)
             // exist only to let a `Block` from something embedded escalate
-            // *above* this floor, never to let the floor itself be skipped.
+            // *above* this floor. Only `clear_input_process_substitutions`
+            // skips it, by rewriting the word to `DevFdPath` first.
             | UnresolvableKind::ArithmeticExpansion
             | UnresolvableKind::ProcessSubstitution
     )
@@ -18345,6 +18481,7 @@ mod tests {
                 ctx: AnalysisCtx::new(&rules, &allowlist, &Cell::new(MAX_FOR_COMMAND_EVALUATIONS)),
                 symlink_scope: SymlinkScope::default(),
                 sole_target_floor: &mut false,
+                evaluated_process_substitutions: &[],
             },
             WrapperChainEscalation::Absent,
             &CwdContext::Initial,
@@ -20368,6 +20505,96 @@ done"#,
         assert_decision("diff x < <(cat y)", Decision::Allow);
         assert_decision("cat < <(echo hi) > out", Decision::Allow);
         assert_decision("cat f > >(wc -l)", Decision::Allow);
+    }
+
+    #[test]
+    fn input_process_substitution_with_an_allow_inner_command_is_allowed() {
+        for command in [
+            "diff <(git show HEAD:README.md) README.md",
+            "diff <(cat README.md) README.md",
+            "diff <(sort a) <(sort b)",
+            "diff <(sort a | uniq) <(ls dir) | head",
+            "comm -12 <(sort a) <(sort b)",
+            "rg -n -A12 'enum Decision' <(git show HEAD:src/rules.rs)",
+            "git diff --no-index <(cat a) <(cat b)",
+            "diff <(diff <(cat a) b) c",
+            "diff <(cat ~/.ssh/id_rsa) x",
+        ] {
+            assert_decision(command, Decision::Allow);
+        }
+    }
+
+    #[test]
+    fn input_process_substitution_keeps_its_floor_unless_proven_harmless() {
+        for command in [
+            "cat <(bash)",
+            "cat <(env sh)",
+            "cat <(sh -s)",
+            "cat <(xargs sh)",
+            "cat <(eval \"$x\")",
+            "cat <(cat | sh)",
+            "cat <(while read l; do bash; done)",
+            "f() { sh; }; cat <(f)",
+            "cat <(f() { sh; }; f)",
+            "cat <(diff <(bash) b)",
+            "diff <(curl x | sh) y",
+            "diff <(cat a) \"$f\"",
+            "diff <(cat a) $(date)",
+            "diff <(cat a) >(cat)",
+            "tar{,<(x)} xf evil.tar -C /",
+            "diff{,<(cat a)} b",
+            "$cmd <(cat a)",
+            "<(cat a) b",
+        ] {
+            let verdict = decide(command);
+            assert_ne!(verdict.decision(), Decision::Allow, "{command:?}");
+        }
+        assert_decision("diff <(rm -rf /) x", Decision::Block);
+        assert_decision("bash -c 'ls <(rm -rf /)'", Decision::Block);
+        assert_decision("ls <(rm -rf /)", Decision::Block);
+    }
+
+    #[test]
+    fn input_process_substitution_operand_that_may_run_as_a_program_is_not_allowed() {
+        for command in [
+            "bash <(curl x)",
+            "bash <(cat x)",
+            "sh -s -- <(cat x)",
+            "source <(cat x)",
+            ". <(cat x)",
+            "builtin source <(cat x)",
+            "python3 <(echo x)",
+            "python3 script.py <(echo x)",
+            "perl <(echo x)",
+            "node <(echo x)",
+            "awk -f <(cat x)",
+            "awk -f <(cat x) file",
+            "sudo bash <(cat x)",
+            "env sh <(cat x)",
+            "xargs -0 sh <(cat x)",
+            "flock lock bash <(cat x)",
+            "find . -exec sh {} <(cat x) ;",
+            "eval <(cat x)",
+            "trap <(cat x) EXIT",
+            "bash < <(cat x)",
+            "source /dev/stdin < <(cat x)",
+        ] {
+            let verdict = decide(command);
+            assert_ne!(verdict.decision(), Decision::Allow, "{command:?}");
+        }
+    }
+
+    #[test]
+    fn output_process_substitution_keeps_its_floor() {
+        for command in [
+            "echo hi | tee >(bash)",
+            "echo hi | tee >(cat)",
+            "tee >(cat) <(cat x)",
+            "cat <(cat x) > >(sh)",
+        ] {
+            let verdict = decide(command);
+            assert_ne!(verdict.decision(), Decision::Allow, "{command:?}");
+        }
     }
 
     #[test]
@@ -22560,5 +22787,56 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
             decide_dash_c("tar cCCf ~/.config/shguard $(echo x) out.tar config.toml").decision(),
             Decision::Block
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod dev_fd_rule_tests {
+    use super::*;
+    use crate::verdict::Decision;
+
+    fn decide(command: &str, extra_rule: &str) -> Verdict {
+        let mut toml = String::from(include_str!("../rules/blocklist.toml"));
+        toml.push_str(extra_rule);
+        analyze_with_policy(
+            command,
+            &Rules::parse(&toml).expect("test rule set should parse"),
+            &Allowlist::embedded().unwrap(),
+        )
+    }
+
+    const SECRET_READ: &str = r#"
+[[command]]
+id = "test-secret-read"
+reason = "test"
+command = "cat"
+targets = [{ normalized_prefix = "~/.ssh" }]
+"#;
+
+    #[test]
+    fn a_secret_read_rule_still_judges_the_inner_command() {
+        assert_eq!(
+            decide("diff <(cat ~/.ssh/id_rsa) x", SECRET_READ).decision(),
+            Decision::Block
+        );
+        assert_eq!(
+            decide("diff <(cat ~/.ssh/id_rsa) x", "").decision(),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn a_rule_whose_targets_exclude_dev_fd_does_not_floor_the_operand() {
+        assert_eq!(
+            decide("cat <(echo a)", SECRET_READ).decision(),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn a_rule_whose_targets_admit_dev_fd_keeps_its_floor() {
+        let rule = SECRET_READ.replace("~/.ssh", "/dev/");
+        assert_eq!(decide("cat <(echo a)", &rule).decision(), Decision::Ask);
     }
 }

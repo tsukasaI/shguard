@@ -50,6 +50,13 @@ const COMMANDS: &[&str] = &[
     // Argument-position substitutions with benign inner commands.
     "echo $(date)",
     "echo $(whoami)",
+    // Issue #628: input process substitution whose inner command is Allow.
+    "diff <(git show HEAD:README.md) README.md",
+    "diff <(cat README.md) README.md",
+    "diff <(sort a.txt) <(sort b.txt)",
+    "comm -12 <(sort a.txt) <(sort b.txt)",
+    "rg -n -A12 'enum Decision' <(git show HEAD:src/rules.rs)",
+    "git diff --no-index <(git show HEAD:a.txt) <(git show HEAD~1:a.txt)",
     // Issue #51: expansion-position substitutions with benign inner
     // commands (assignment RHS, heredoc body) must stay Allow too.
     "X=$(date)",
