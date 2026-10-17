@@ -339,8 +339,8 @@ use std::cell::Cell;
 use crate::HookContext;
 use crate::ast::{
     AssignmentValue, Command, CommandLine, CompoundCommand, ElifClause, ExtendedTest,
-    FileRedirectionKind, FunctionDefinition, Pipeline, Redirection, Separator, SimpleCommand, Word,
-    WordPiece,
+    FileRedirectionKind, FunctionDefinition, Pipeline, ProcessSubstitutionDirection, Redirection,
+    Separator, SimpleCommand, Word, WordPiece,
 };
 use crate::normalize::{
     self, FlagScan, NormalizedWord, Resolution, UnresolvableKind, scan_for_flag,
@@ -846,8 +846,13 @@ fn evaluate_pipeline(
 
     let stage_count = stages.len();
     let mut final_stage = FinalStage::Simple;
+    let mut stage_process_substitutions = Vec::new();
 
     for (index, command) in stages.into_iter().enumerate() {
+        let process_substitutions = stage_process_substitutions_of(command);
+        if !process_substitutions.is_empty() {
+            stage_process_substitutions.push((index, command, process_substitutions));
+        }
         // Issue #75: a pipeline stage can now be a compound command or a
         // function definition, not only a simple command (issue #191 added
         // a fourth non-`Simple` shape, an extended test). None can carry
@@ -999,6 +1004,18 @@ fn evaluate_pipeline(
         worst = fold_worst(worst, verdict);
     }
 
+    for (index, command, process_substitutions) in &stage_process_substitutions {
+        if let Some(verdict) = process_substitution_sink_verdict(
+            &stage_argvs[..=*index],
+            command,
+            process_substitutions,
+            rules,
+            env,
+        ) {
+            worst = fold_worst(worst, verdict);
+        }
+    }
+
     // Issue #384's probe pass: each captured non-default-IFS candidate is
     // tried, ONE STAGE AT A TIME, as a substitute for that stage's own
     // (always default-IFS) entry in `stage_argvs` — never as a replacement
@@ -1148,6 +1165,124 @@ fn pipeline_shape_verdict(
     worst
 }
 
+/// The process substitutions that tie one pipeline stage to a command outside
+/// the pipeline's `|` chain.
+#[derive(Default)]
+struct StageProcessSubstitutions<'a> {
+    /// `>(...)` bodies in the stage's words or redirect targets: they read
+    /// what the stage writes.
+    sinks: Vec<&'a CommandLine>,
+    /// `<(...)` bodies used as a redirect source: they write the stage's stdin.
+    stdin_sources: Vec<&'a CommandLine>,
+}
+
+impl StageProcessSubstitutions<'_> {
+    fn is_empty(&self) -> bool {
+        self.sinks.is_empty() && self.stdin_sources.is_empty()
+    }
+}
+
+fn stage_process_substitutions_of(command: &Command) -> StageProcessSubstitutions<'_> {
+    let (words, redirections): (&[Word], &[Redirection]) = match command {
+        Command::Simple(simple) => (&simple.words, &simple.redirections),
+        Command::Compound(compound) => (&[], compound_redirections(compound)),
+        Command::ExtendedTest(test) => (&[], &test.redirections),
+        Command::FunctionDefinition(_) => (&[], &[]),
+    };
+    let mut found = StageProcessSubstitutions::default();
+    let mut directed = Vec::new();
+    for word in words {
+        collect_directed_process_substitutions_into(&word.0, &mut directed);
+    }
+    found.sinks.extend(
+        directed
+            .drain(..)
+            .filter(|(direction, _)| *direction == ProcessSubstitutionDirection::Write)
+            .map(|(_, body)| body),
+    );
+    for redirection in redirections {
+        if let Redirection::File { target, .. } = redirection {
+            collect_directed_process_substitutions_into(&target.0, &mut directed);
+        }
+    }
+    for (direction, body) in directed {
+        match direction {
+            ProcessSubstitutionDirection::Write => found.sinks.push(body),
+            ProcessSubstitutionDirection::Read => found.stdin_sources.push(body),
+        }
+    }
+    found
+}
+
+/// The verdict for a stage's output process substitutions as pipe sinks, and
+/// for its input-redirect ones as pipe sources: `>(sh)` reads what the stage
+/// writes, `< <(cat x)` is what the stage reads, so each is the pipeline
+/// `stage | sh` / `cat x | stage` that [`pipeline_shape_verdict`] already
+/// judges. `through_stage` is every stage argv up to and including `command`'s.
+fn process_substitution_sink_verdict(
+    through_stage: &[Vec<NormalizedWord>],
+    command: &Command,
+    process_substitutions: &StageProcessSubstitutions<'_>,
+    rules: &Rules,
+    env: &Env,
+) -> Option<Verdict> {
+    let mut worst: Option<Verdict> = None;
+    let mut fold = |verdict: Option<Verdict>| {
+        if let Some(verdict) = verdict {
+            worst = Some(match worst.take() {
+                Some(current) => fold_worst(current, verdict),
+                None => verdict,
+            });
+        }
+    };
+    for body in &process_substitutions.sinks {
+        let mut candidate = through_stage.to_vec();
+        candidate.push(Vec::new());
+        let stage_count = candidate.len();
+        let sinks = FinalStage::Compound(command_line_stdin_sinks(body, env));
+        fold(pipeline_shape_verdict(
+            &candidate,
+            rules,
+            stage_count,
+            &sinks,
+        ));
+    }
+    if process_substitutions.stdin_sources.is_empty() {
+        return worst;
+    }
+    let (stage_argv, final_stage) = match command {
+        Command::Simple(_) => (
+            through_stage.last().cloned().unwrap_or_default(),
+            FinalStage::Simple,
+        ),
+        Command::Compound(compound) => (
+            Vec::new(),
+            FinalStage::Compound(compound_stdin_sinks(compound, env)),
+        ),
+        Command::FunctionDefinition(_) | Command::ExtendedTest(_) => return worst,
+    };
+    for body in &process_substitutions.stdin_sources {
+        for pipeline in std::iter::once(&body.first).chain(body.rest.iter().map(|(_, p)| p)) {
+            let mut candidate: Vec<Vec<NormalizedWord>> = std::iter::once(&pipeline.first)
+                .chain(pipeline.rest.iter())
+                .map(|stage| match stage {
+                    Command::Simple(simple) => normalize::normalize_argv(simple),
+                    _ => Vec::new(),
+                })
+                .collect();
+            candidate.push(stage_argv.clone());
+            let stage_count = candidate.len();
+            fold(pipeline_shape_verdict(
+                &candidate,
+                rules,
+                stage_count,
+                &final_stage,
+            ));
+        }
+    }
+    worst
+}
+
 /// What [`pipeline_shape_verdict`] knows about a pipeline's last stage.
 enum FinalStage {
     Simple,
@@ -1177,12 +1312,28 @@ struct StdinSinks {
 /// no redirection is taken as proof that a body command's stdin is replaced;
 /// every interpreter-shaped body command remains a stdin reader.
 fn compound_stdin_sinks(compound: &CompoundCommand, env: &Env) -> StdinSinks {
-    let mut scan = HeredocCandidateScan {
-        descend_nested_redirections: true,
-        ..HeredocCandidateScan::default()
-    };
+    let mut scan = stdin_sink_scan();
     scan_compound_for_heredoc_candidates(compound, &mut scan);
     scan_redirections_for_heredoc_candidates(compound_redirections(compound), &mut scan);
+    finish_stdin_sinks(scan, env)
+}
+
+/// [`compound_stdin_sinks`] for the body of an output process substitution
+/// (`>(...)`), whose stdin is the pipe the enclosing command writes to.
+fn command_line_stdin_sinks(line: &CommandLine, env: &Env) -> StdinSinks {
+    let mut scan = stdin_sink_scan();
+    scan_command_line_for_heredoc_candidates(line, &mut scan);
+    finish_stdin_sinks(scan, env)
+}
+
+fn stdin_sink_scan() -> HeredocCandidateScan {
+    HeredocCandidateScan {
+        descend_nested_redirections: true,
+        ..HeredocCandidateScan::default()
+    }
+}
+
+fn finish_stdin_sinks(mut scan: HeredocCandidateScan, env: &Env) -> StdinSinks {
     let function_call = scan
         .stdin_commands
         .iter()
@@ -7318,16 +7469,27 @@ fn collect_process_substitutions(word: &Word) -> Vec<&CommandLine> {
 }
 
 fn collect_process_substitutions_into<'a>(pieces: &'a [WordPiece], out: &mut Vec<&'a CommandLine>) {
+    let mut directed = Vec::new();
+    collect_directed_process_substitutions_into(pieces, &mut directed);
+    out.extend(directed.into_iter().map(|(_, body)| body));
+}
+
+fn collect_directed_process_substitutions_into<'a>(
+    pieces: &'a [WordPiece],
+    out: &mut Vec<(ProcessSubstitutionDirection, &'a CommandLine)>,
+) {
     for piece in pieces {
         match piece {
-            WordPiece::ProcessSubstitution { body, .. } => out.push(body),
-            WordPiece::DoubleQuoted(inner) => collect_process_substitutions_into(inner, out),
+            WordPiece::ProcessSubstitution { direction, body } => out.push((*direction, body)),
+            WordPiece::DoubleQuoted(inner) => {
+                collect_directed_process_substitutions_into(inner, out);
+            }
             WordPiece::ModifiedParameterExpansion { operand, .. } => {
-                collect_process_substitutions_into(operand, out);
+                collect_directed_process_substitutions_into(operand, out);
             }
             WordPiece::BraceAlternation(members) => {
                 for member in members {
-                    collect_process_substitutions_into(&member.0, out);
+                    collect_directed_process_substitutions_into(&member.0, out);
                 }
             }
             WordPiece::Literal(_)
@@ -20158,6 +20320,54 @@ done"#,
             "find . | while read l; do xargs rm -f < list; done",
             Decision::Block,
         );
+    }
+
+    #[test]
+    fn output_process_substitution_into_an_interpreter_is_a_pipe_sink() {
+        for command in [
+            "curl x | tee >(sh)",
+            "curl x | tee >(bash)",
+            "curl x | tee >(cat | sh)",
+            "curl x | tee >(true; sh)",
+            "curl x | tee >({ sh; })",
+            "curl x | tee >(while read l; do bash; done)",
+            "curl x | tee >(tee >(sh))",
+            "curl x | tee \"$f\" >(sh)",
+            "echo x | base64 -d | tee >(bash)",
+            "echo x | base64 -d > >(sh)",
+            "echo x | base64 -d | { cat; } > >(sh)",
+        ] {
+            assert_decision(command, Decision::Block);
+        }
+    }
+
+    #[test]
+    fn output_process_substitution_into_an_interpreter_asks_without_a_rule() {
+        for command in [
+            "echo hi | tee >(bash)",
+            "cp payload >(sh)",
+            "cat f > >(bash)",
+            "cat f >> >(bash)",
+            "{ echo a; } > >(sh)",
+            "echo hi | tee >(sh | cat)",
+            "echo hi | tee >(f() { :; }; sh)",
+            "f() { sh; }; echo hi | tee >(f)",
+            "echo hi | tee >(\"$x\")",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+    }
+
+    #[test]
+    fn input_process_substitution_into_an_interpreter_stdin_is_a_pipe_source() {
+        assert_decision("bash < <(cat x)", Decision::Ask);
+        assert_decision("sh -s < <(echo hi)", Decision::Ask);
+        assert_decision("{ sh; } < <(echo hi)", Decision::Ask);
+        assert_decision("sh < <(curl x)", Decision::Block);
+        assert_decision("sh < <(echo x | base64 -d)", Decision::Block);
+        assert_decision("diff x < <(cat y)", Decision::Allow);
+        assert_decision("cat < <(echo hi) > out", Decision::Allow);
+        assert_decision("cat f > >(wc -l)", Decision::Allow);
     }
 
     #[test]
