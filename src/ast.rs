@@ -1171,10 +1171,10 @@ pub(crate) enum WordPiece {
 }
 
 /// Whether a [`WordPiece::ProcessSubstitution`] reads from (`<(...)`) or
-/// writes to (`>(...)`) the substituted command. Kept for fidelity/debug
-/// output and future rule authoring even though it is not currently
-/// security-relevant to shguard's own analysis (both directions recurse
-/// through the same worst-wins evaluation).
+/// writes to (`>(...)`) the substituted command. Both directions recurse
+/// through the same worst-wins evaluation, but `crate::gate` also treats the
+/// write side as a pipe sink: what the enclosing command writes reaches the
+/// inner command's stdin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProcessSubstitutionDirection {
     /// `<(...)`

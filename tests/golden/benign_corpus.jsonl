@@ -10,8 +10,12 @@
 {"command":"cat file | sed 's/a/b/' | sort","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"cd \"${HOME:-/tmp}\"","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"cd $HOME","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"comm -12 <(sort a.txt) <(sort b.txt)","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"cp file1 file2","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"curl -s https://api.example.com/health","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"diff <(cat README.md) README.md","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"diff <(git show HEAD:README.md) README.md","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"diff <(sort a.txt) <(sort b.txt)","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"du -sh target/","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"echo \"${x:-plain}\"","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"echo \"exit=${PIPESTATUS[0]}\"","decision":"Allow","deny_message":null,"matched_rule":null}
@@ -40,6 +44,7 @@
 {"command":"git commit -m \"fix: normalize output\"","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"git commit -m 'rm -rf /'","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"git commit -m clean","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git diff --no-index <(git show HEAD:a.txt) <(git show HEAD~1:a.txt)","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"git diff HEAD~1","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"git log --grep rebase","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"git log --oneline -20","decision":"Allow","deny_message":null,"matched_rule":null}
@@ -68,6 +73,7 @@
 {"command":"ping -c 1 localhost","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"python -m pytest","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"rg \"rm -rf\" src/","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"rg -n -A12 'enum Decision' <(git show HEAD:src/rules.rs)","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"rg -n foo src | while IFS=: read -r f l rest; do echo \"$f:$l\"; done","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"rm -rf ./build-output","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"rm -rf target/debug","decision":"Allow","deny_message":null,"matched_rule":null}

@@ -105,7 +105,14 @@
 //!    Ask, never Allow. Like rule
 //!    3, computed once up front in [`evaluate_simple_command_core`] (issue
 //!    #445) so it survives `core`'s own early returns too (`bash -c ls
-//!    <(rm -rf /)`).
+//!    <(rm -rf /)`). The one exception (issue #628) is an argument word that
+//!    is exactly one `<(...)`, standing alone in the source (not glued to
+//!    other text, as in `--out=<(x)`), whose inner command is Allow and
+//!    reads no stdin as code, in a command that names none of the
+//!    interpreters in [`may_run_operand_as_code`]
+//!    ([`clear_input_process_substitutions`]): it becomes
+//!    [`UnresolvableKind::DevFdPath`], which this rule does not floor, and
+//!    rule 4 skips it for rules whose targets cannot match `/dev/fd/N`.
 //! 9. Assignments-only and empty simple commands ("rule 9") — Allow; an
 //!    assignment's RHS is already recursed by rule 11 below, so what's left
 //!    here is only the resulting *value*'s later use, which rule 2 handles
@@ -339,8 +346,8 @@ use std::cell::Cell;
 use crate::HookContext;
 use crate::ast::{
     AssignmentValue, Command, CommandLine, CompoundCommand, ElifClause, ExtendedTest,
-    FileRedirectionKind, FunctionDefinition, Pipeline, Redirection, Separator, SimpleCommand, Word,
-    WordPiece,
+    FileRedirectionKind, FunctionDefinition, Pipeline, ProcessSubstitutionDirection, Redirection,
+    Separator, SimpleCommand, Word, WordPiece,
 };
 use crate::normalize::{
     self, FlagScan, NormalizedWord, Resolution, UnresolvableKind, scan_for_flag,
@@ -431,7 +438,8 @@ fn deny_msg_for_unresolvable_kind(kind: UnresolvableKind) -> Option<DenyMessage>
         | UnresolvableKind::ParameterExpansion
         | UnresolvableKind::NonUtf8
         | UnresolvableKind::ExpansionLimit
-        | UnresolvableKind::EmbeddedNul => return None,
+        | UnresolvableKind::EmbeddedNul
+        | UnresolvableKind::DevFdPath => return None,
     };
     Some(deny_msg_unsupported_construct(name))
 }
@@ -458,6 +466,10 @@ struct AnalysisCtx<'a> {
     /// has a `{name}>` redirection, which writes `name` and is invisible in
     /// the AST.
     bindings_trusted: bool,
+    /// Whether this command string has no `<(...)` glued to neighbouring
+    /// text. The parser splits `--out=<(x)` into two words, so adjacency is
+    /// only visible in the raw text.
+    process_substitutions_standalone: bool,
     /// Simple-command evaluations left for literal `for` lists on the whole
     /// line, shared by every nesting level and recursion.
     loop_budget: &'a Cell<usize>,
@@ -470,6 +482,7 @@ impl<'a> AnalysisCtx<'a> {
             allowlist,
             depth: 0,
             bindings_trusted: true,
+            process_substitutions_standalone: true,
             loop_budget,
         }
     }
@@ -563,6 +576,47 @@ fn has_fd_variable_redirect(command: &str) -> bool {
     false
 }
 
+/// Whether `command` has a `<(` touching a neighbouring word on either side
+/// (`--out=<(x)`, `pre<(x)post`, `<(x)ZZZ`). Over-approximates: quotes are not
+/// tracked, and an unmatched `)` counts as adjacent.
+fn has_adjacent_input_process_substitution(command: &str) -> bool {
+    let bytes = command.as_bytes();
+    let separates = |byte: u8| byte.is_ascii_whitespace() || matches!(byte, b';' | b'&' | b'|');
+    let mut from = 0;
+    while let Some(open) = command[from..].find("<(") {
+        let start = from + open;
+        if start > 0 && !separates(bytes[start - 1]) && bytes[start - 1] != b'(' {
+            return true;
+        }
+        let mut depth = 0usize;
+        let mut end = None;
+        for (offset, &byte) in bytes[start + 1..].iter().enumerate() {
+            match byte {
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(start + 1 + offset);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else {
+            return true;
+        };
+        if let Some(&after) = bytes.get(end + 1)
+            && !separates(after)
+            && !matches!(after, b')' | b'<' | b'>')
+        {
+            return true;
+        }
+        from = start + 2;
+    }
+    false
+}
+
 /// The top-level [`CwdContext`] for a payload `cwd`: `Known` only for an
 /// absolute path, `Initial` otherwise (never `Poisoned`: an absent cwd is
 /// "never came up", not "became attacker-steerable").
@@ -609,6 +663,7 @@ fn analyze_at_depth(command: &str, ctx: AnalysisCtx<'_>, mut cwd: CwdState) -> V
 
     let ctx = AnalysisCtx {
         bindings_trusted: ctx.depth == 0 && !has_fd_variable_redirect(command),
+        process_substitutions_standalone: !has_adjacent_input_process_substitution(command),
         ..ctx
     };
     match parser::parse(command) {
@@ -846,8 +901,13 @@ fn evaluate_pipeline(
 
     let stage_count = stages.len();
     let mut final_stage = FinalStage::Simple;
+    let mut stage_process_substitutions = Vec::new();
 
     for (index, command) in stages.into_iter().enumerate() {
+        let process_substitutions = stage_process_substitutions_of(command);
+        if !process_substitutions.is_empty() {
+            stage_process_substitutions.push((index, command, process_substitutions));
+        }
         // Issue #75: a pipeline stage can now be a compound command or a
         // function definition, not only a simple command (issue #191 added
         // a fourth non-`Simple` shape, an extended test). None can carry
@@ -999,6 +1059,18 @@ fn evaluate_pipeline(
         worst = fold_worst(worst, verdict);
     }
 
+    for (index, command, process_substitutions) in &stage_process_substitutions {
+        if let Some(verdict) = process_substitution_sink_verdict(
+            &stage_argvs[..=*index],
+            command,
+            process_substitutions,
+            rules,
+            env,
+        ) {
+            worst = fold_worst(worst, verdict);
+        }
+    }
+
     // Issue #384's probe pass: each captured non-default-IFS candidate is
     // tried, ONE STAGE AT A TIME, as a substitute for that stage's own
     // (always default-IFS) entry in `stage_argvs` — never as a replacement
@@ -1148,6 +1220,124 @@ fn pipeline_shape_verdict(
     worst
 }
 
+/// The process substitutions that tie one pipeline stage to a command outside
+/// the pipeline's `|` chain.
+#[derive(Default)]
+struct StageProcessSubstitutions<'a> {
+    /// `>(...)` bodies in the stage's words or redirect targets: they read
+    /// what the stage writes.
+    sinks: Vec<&'a CommandLine>,
+    /// `<(...)` bodies used as a redirect source: they write the stage's stdin.
+    stdin_sources: Vec<&'a CommandLine>,
+}
+
+impl StageProcessSubstitutions<'_> {
+    fn is_empty(&self) -> bool {
+        self.sinks.is_empty() && self.stdin_sources.is_empty()
+    }
+}
+
+fn stage_process_substitutions_of(command: &Command) -> StageProcessSubstitutions<'_> {
+    let (words, redirections): (&[Word], &[Redirection]) = match command {
+        Command::Simple(simple) => (&simple.words, &simple.redirections),
+        Command::Compound(compound) => (&[], compound_redirections(compound)),
+        Command::ExtendedTest(test) => (&[], &test.redirections),
+        Command::FunctionDefinition(_) => (&[], &[]),
+    };
+    let mut found = StageProcessSubstitutions::default();
+    let mut directed = Vec::new();
+    for word in words {
+        collect_directed_process_substitutions_into(&word.0, &mut directed);
+    }
+    found.sinks.extend(
+        directed
+            .drain(..)
+            .filter(|(direction, _)| *direction == ProcessSubstitutionDirection::Write)
+            .map(|(_, body)| body),
+    );
+    for redirection in redirections {
+        if let Redirection::File { target, .. } = redirection {
+            collect_directed_process_substitutions_into(&target.0, &mut directed);
+        }
+    }
+    for (direction, body) in directed {
+        match direction {
+            ProcessSubstitutionDirection::Write => found.sinks.push(body),
+            ProcessSubstitutionDirection::Read => found.stdin_sources.push(body),
+        }
+    }
+    found
+}
+
+/// The verdict for a stage's output process substitutions as pipe sinks, and
+/// for its input-redirect ones as pipe sources: `>(sh)` reads what the stage
+/// writes, `< <(cat x)` is what the stage reads, so each is the pipeline
+/// `stage | sh` / `cat x | stage` that [`pipeline_shape_verdict`] already
+/// judges. `through_stage` is every stage argv up to and including `command`'s.
+fn process_substitution_sink_verdict(
+    through_stage: &[Vec<NormalizedWord>],
+    command: &Command,
+    process_substitutions: &StageProcessSubstitutions<'_>,
+    rules: &Rules,
+    env: &Env,
+) -> Option<Verdict> {
+    let mut worst: Option<Verdict> = None;
+    let mut fold = |verdict: Option<Verdict>| {
+        if let Some(verdict) = verdict {
+            worst = Some(match worst.take() {
+                Some(current) => fold_worst(current, verdict),
+                None => verdict,
+            });
+        }
+    };
+    for body in &process_substitutions.sinks {
+        let mut candidate = through_stage.to_vec();
+        candidate.push(Vec::new());
+        let stage_count = candidate.len();
+        let sinks = FinalStage::Compound(command_line_stdin_sinks(body, env));
+        fold(pipeline_shape_verdict(
+            &candidate,
+            rules,
+            stage_count,
+            &sinks,
+        ));
+    }
+    if process_substitutions.stdin_sources.is_empty() {
+        return worst;
+    }
+    let (stage_argv, final_stage) = match command {
+        Command::Simple(_) => (
+            through_stage.last().cloned().unwrap_or_default(),
+            FinalStage::Simple,
+        ),
+        Command::Compound(compound) => (
+            Vec::new(),
+            FinalStage::Compound(compound_stdin_sinks(compound, env)),
+        ),
+        Command::FunctionDefinition(_) | Command::ExtendedTest(_) => return worst,
+    };
+    for body in &process_substitutions.stdin_sources {
+        for pipeline in std::iter::once(&body.first).chain(body.rest.iter().map(|(_, p)| p)) {
+            let mut candidate: Vec<Vec<NormalizedWord>> = std::iter::once(&pipeline.first)
+                .chain(pipeline.rest.iter())
+                .map(|stage| match stage {
+                    Command::Simple(simple) => normalize::normalize_argv(simple),
+                    _ => Vec::new(),
+                })
+                .collect();
+            candidate.push(stage_argv.clone());
+            let stage_count = candidate.len();
+            fold(pipeline_shape_verdict(
+                &candidate,
+                rules,
+                stage_count,
+                &final_stage,
+            ));
+        }
+    }
+    worst
+}
+
 /// What [`pipeline_shape_verdict`] knows about a pipeline's last stage.
 enum FinalStage {
     Simple,
@@ -1177,12 +1367,28 @@ struct StdinSinks {
 /// no redirection is taken as proof that a body command's stdin is replaced;
 /// every interpreter-shaped body command remains a stdin reader.
 fn compound_stdin_sinks(compound: &CompoundCommand, env: &Env) -> StdinSinks {
-    let mut scan = HeredocCandidateScan {
-        descend_nested_redirections: true,
-        ..HeredocCandidateScan::default()
-    };
+    let mut scan = stdin_sink_scan();
     scan_compound_for_heredoc_candidates(compound, &mut scan);
     scan_redirections_for_heredoc_candidates(compound_redirections(compound), &mut scan);
+    finish_stdin_sinks(scan, env)
+}
+
+/// [`compound_stdin_sinks`] for the body of an output process substitution
+/// (`>(...)`), whose stdin is the pipe the enclosing command writes to.
+fn command_line_stdin_sinks(line: &CommandLine, env: &Env) -> StdinSinks {
+    let mut scan = stdin_sink_scan();
+    scan_command_line_for_heredoc_candidates(line, &mut scan);
+    finish_stdin_sinks(scan, env)
+}
+
+fn stdin_sink_scan() -> HeredocCandidateScan {
+    HeredocCandidateScan {
+        descend_nested_redirections: true,
+        ..HeredocCandidateScan::default()
+    }
+}
+
+fn finish_stdin_sinks(mut scan: HeredocCandidateScan, env: &Env) -> StdinSinks {
     let function_call = scan
         .stdin_commands
         .iter()
@@ -2658,6 +2864,131 @@ fn first_non_vanishing_word_idx(command: &SimpleCommand) -> Option<usize> {
         .position(|word| !normalize::normalize_word(word).is_empty())
 }
 
+fn lone_input_process_substitution(word: &Word) -> Option<&CommandLine> {
+    match word.0.as_slice() {
+        [
+            WordPiece::ProcessSubstitution {
+                direction: ProcessSubstitutionDirection::Read,
+                body,
+            },
+        ] => Some(body),
+        _ => None,
+    }
+}
+
+/// Recurses every argument word that is exactly one `<(...)` and, when the
+/// command names no interpreter from [`may_run_operand_as_code`] (every other
+/// tool is treated as reading its operand as data, as it already is for a
+/// file argument), turns the word in `argv` into [`UnresolvableKind::DevFdPath`], which rule 8 does
+/// not floor. Returns the recursed bodies so rule 3 does not recurse them
+/// again.
+///
+/// Every condition is fail-closed:
+/// - every other word of `argv` is resolved, so no unresolved word can be, or
+///   hide, a command name or a code-running flag;
+/// - the inner command is Allow and runs no interpreter on the stdin it
+///   inherits (`cat <(bash)` runs bash on the outer stdin);
+/// - nothing in `argv` names a pipeline interpreter, `source`/`.`, `eval`,
+///   `trap` or awk, whose operand may be a program;
+/// - the `<(...)` is not concatenated to surrounding text in the source
+///   (`--out=<(x)`, `pre<(x)post`, `<(x)ZZZ`): the parser splits those into
+///   separate words, so the word would look lone while the shell passes one
+///   joined argument.
+fn clear_input_process_substitutions<'a>(
+    command: &'a SimpleCommand,
+    argv: &mut [NormalizedWord],
+    env: &Env,
+    ctx: AnalysisCtx<'_>,
+    cwd: &CwdContext,
+) -> Vec<(&'a CommandLine, Verdict)> {
+    if !command
+        .words
+        .iter()
+        .any(|word| lone_input_process_substitution(word).is_some())
+    {
+        return Vec::new();
+    }
+    let Some(first_word) = first_non_vanishing_word_idx(command) else {
+        return Vec::new();
+    };
+    let mut evaluated = Vec::new();
+    let mut offsets = Vec::new();
+    let mut offset = 0;
+    for (index, word) in command.words.iter().enumerate() {
+        let normalized = normalize::normalize_word(word);
+        if index > first_word
+            && let Some(body) = lone_input_process_substitution(word)
+        {
+            let mut isolated = CwdState::seed_unknown_stack(cwd.clone());
+            evaluated.push((body, evaluate_command_line(body, ctx, &mut isolated)));
+            offsets.push(offset);
+        }
+        offset += normalized.len();
+    }
+    let unresolved = argv
+        .iter()
+        .filter(|word| matches!(word.resolution(), Resolution::Unresolvable(_)))
+        .count();
+    let only_these_unresolved = unresolved == offsets.len()
+        && offsets.iter().all(|&offset| {
+            matches!(
+                argv.get(offset).map(NormalizedWord::resolution),
+                Some(Resolution::Unresolvable(
+                    UnresolvableKind::ProcessSubstitution
+                ))
+            )
+        });
+    // The parser splits `tar{,<(x)}` into `tar{,`, `<(x)` and `}`, hiding the
+    // `tar` word that really runs; the floor must stay while a brace is in play.
+    let brace_text = argv.iter().any(
+        |word| matches!(word.resolution(), Resolution::Resolved(text) if text.contains(['{', '}'])),
+    );
+    if !ctx.process_substitutions_standalone
+        || !only_these_unresolved
+        || brace_text
+        || may_run_operand_as_code(argv)
+    {
+        return evaluated;
+    }
+    for ((body, verdict), offset) in evaluated.iter().zip(offsets) {
+        if verdict.decision() == Decision::Allow && !command_line_reads_stdin(body, env) {
+            argv[offset] = NormalizedWord::unresolvable(UnresolvableKind::DevFdPath);
+        }
+    }
+    evaluated
+}
+
+/// Whether `argv` names one of the interpreters whose file operand may be a
+/// program: the pipeline interpreters, `source`/`.`, `eval`, `trap` and awk.
+/// Only these stay floored; any other tool is treated as reading the operand
+/// as data. Scans every resolved word, not just the effective command, so a
+/// runner this crate does not peel (`flock lock bash <(x)`,
+/// `find -exec sh {} <(x)`) is still seen.
+fn may_run_operand_as_code(argv: &[NormalizedWord]) -> bool {
+    if crate::rules::effective_command(argv).is_none() {
+        return true;
+    }
+    argv.iter().any(|word| {
+        let Resolution::Resolved(text) = word.resolution() else {
+            return false;
+        };
+        let name = text.rsplit('/').next().unwrap_or(text);
+        let folded = crate::rules::fold_command_name(name);
+        let base = crate::rules::strip_version_suffix(&folded);
+        crate::rules::is_pipeline_interpreter(name)
+            || matches!(base, "source" | ".")
+            || EVAL_BUILTIN.contains(&base)
+            || TRAP_BUILTIN.contains(&base)
+            || AWK_INTERPRETERS.contains(&base)
+    })
+}
+
+/// Whether running `line` with the stdin it inherits could execute that stdin
+/// as code, or could not be shown not to.
+fn command_line_reads_stdin(line: &CommandLine, env: &Env) -> bool {
+    command_line_stdin_sinks(line, env).reader.is_some()
+}
+
 /// Whether `command`'s argument words (everything after the first
 /// non-empty word) contain any argument-position command/backquote
 /// substitution (rule 3). Computed independently of, and before, running
@@ -2747,7 +3078,9 @@ fn evaluate_simple_command(
         depth,
         ..
     } = ctx;
-    let argv = normalize::normalize_argv(command);
+    let mut argv = normalize::normalize_argv(command);
+    let evaluated_process_substitutions =
+        clear_input_process_substitutions(command, &mut argv, env, ctx, cwd);
     let wrapper_moves_cwd = wrapper_chain_changes_cwd(&argv);
     // A recursion (`depth > 0`: `bash -c`, `$(...)`, `eval`, `find -exec`)
     // cannot see the earlier commands of the line it was spawned from, and a
@@ -2927,6 +3260,7 @@ fn evaluate_simple_command(
             ctx,
             symlink_scope,
             sole_target_floor: &mut sole_target_floor,
+            evaluated_process_substitutions: &evaluated_process_substitutions,
         },
         escalation_chain,
         cwd,
@@ -3146,6 +3480,9 @@ struct SimpleCommandPolicy<'a> {
     ctx: AnalysisCtx<'a>,
     symlink_scope: SymlinkScope<'a>,
     sole_target_floor: &'a mut bool,
+    /// The `<(...)` argument words [`clear_input_process_substitutions`]
+    /// already recursed, so rule 3 does not recurse them a second time.
+    evaluated_process_substitutions: &'a [(&'a CommandLine, Verdict)],
 }
 
 /// Evaluates one [`SimpleCommand`] against every per-command gate rule (1,
@@ -3171,6 +3508,7 @@ fn evaluate_simple_command_core(
         ctx,
         symlink_scope,
         sole_target_floor,
+        evaluated_process_substitutions,
     } = policy;
     let AnalysisCtx { rules, .. } = ctx;
     // Redirect target check runs FIRST, before any early return —
@@ -3285,7 +3623,7 @@ fn evaluate_simple_command_core(
     // since `argument_words` alone (everything after `first_word_ast`)
     // never sees content embedded in that same AST word.
     let substitution_result = fold_optional_decision(
-        evaluate_argument_substitutions(argument_words, ctx, cwd),
+        evaluate_argument_substitutions(argument_words, evaluated_process_substitutions, ctx, cwd),
         leftover_floor,
     );
     let mut command_position_subs = Vec::new();
@@ -5534,6 +5872,7 @@ fn recurse_shell_string(
 /// outer command non-Allow (plan.md §4's `echo $(date)` example).
 fn evaluate_argument_substitutions(
     argument_words: &[Word],
+    evaluated: &[(&CommandLine, Verdict)],
     ctx: AnalysisCtx<'_>,
     cwd: &CwdContext,
 ) -> Option<(Decision, Option<DenyMessage>)> {
@@ -5567,8 +5906,16 @@ fn evaluate_argument_substitutions(
         // `evaluate_command_position_substitution`'s docs on this
         // distinction).
         for inner in collect_process_substitutions(word) {
-            let mut isolated = CwdState::seed_unknown_stack(cwd.clone());
-            let verdict = evaluate_command_line(inner, ctx, &mut isolated);
+            let verdict = match evaluated
+                .iter()
+                .find(|(body, _)| std::ptr::eq(*body, inner))
+            {
+                Some((_, verdict)) => verdict.clone(),
+                None => {
+                    let mut isolated = CwdState::seed_unknown_stack(cwd.clone());
+                    evaluate_command_line(inner, ctx, &mut isolated)
+                }
+            };
             raise(verdict.decision(), verdict.deny_message().cloned());
         }
     }
@@ -7318,16 +7665,27 @@ fn collect_process_substitutions(word: &Word) -> Vec<&CommandLine> {
 }
 
 fn collect_process_substitutions_into<'a>(pieces: &'a [WordPiece], out: &mut Vec<&'a CommandLine>) {
+    let mut directed = Vec::new();
+    collect_directed_process_substitutions_into(pieces, &mut directed);
+    out.extend(directed.into_iter().map(|(_, body)| body));
+}
+
+fn collect_directed_process_substitutions_into<'a>(
+    pieces: &'a [WordPiece],
+    out: &mut Vec<(ProcessSubstitutionDirection, &'a CommandLine)>,
+) {
     for piece in pieces {
         match piece {
-            WordPiece::ProcessSubstitution { body, .. } => out.push(body),
-            WordPiece::DoubleQuoted(inner) => collect_process_substitutions_into(inner, out),
+            WordPiece::ProcessSubstitution { direction, body } => out.push((*direction, body)),
+            WordPiece::DoubleQuoted(inner) => {
+                collect_directed_process_substitutions_into(inner, out);
+            }
             WordPiece::ModifiedParameterExpansion { operand, .. } => {
-                collect_process_substitutions_into(operand, out);
+                collect_directed_process_substitutions_into(operand, out);
             }
             WordPiece::BraceAlternation(members) => {
                 for member in members {
-                    collect_process_substitutions_into(&member.0, out);
+                    collect_directed_process_substitutions_into(&member.0, out);
                 }
             }
             WordPiece::Literal(_)
@@ -7875,7 +8233,8 @@ fn is_opaque_unresolvable(kind: UnresolvableKind) -> bool {
             // raw-text/structural rescans (`collect_substitutions_into`'s
             // `ArithmeticExpansion` arm, `collect_process_substitutions_into`)
             // exist only to let a `Block` from something embedded escalate
-            // *above* this floor, never to let the floor itself be skipped.
+            // *above* this floor. Only `clear_input_process_substitutions`
+            // skips it, by rewriting the word to `DevFdPath` first.
             | UnresolvableKind::ArithmeticExpansion
             | UnresolvableKind::ProcessSubstitution
     )
@@ -18183,6 +18542,7 @@ mod tests {
                 ctx: AnalysisCtx::new(&rules, &allowlist, &Cell::new(MAX_FOR_COMMAND_EVALUATIONS)),
                 symlink_scope: SymlinkScope::default(),
                 sole_target_floor: &mut false,
+                evaluated_process_substitutions: &[],
             },
             WrapperChainEscalation::Absent,
             &CwdContext::Initial,
@@ -20158,6 +20518,170 @@ done"#,
             "find . | while read l; do xargs rm -f < list; done",
             Decision::Block,
         );
+    }
+
+    #[test]
+    fn output_process_substitution_into_an_interpreter_is_a_pipe_sink() {
+        for command in [
+            "curl x | tee >(sh)",
+            "curl x | tee >(bash)",
+            "curl x | tee >(cat | sh)",
+            "curl x | tee >(true; sh)",
+            "curl x | tee >({ sh; })",
+            "curl x | tee >(while read l; do bash; done)",
+            "curl x | tee >(tee >(sh))",
+            "curl x | tee \"$f\" >(sh)",
+            "echo x | base64 -d | tee >(bash)",
+            "echo x | base64 -d > >(sh)",
+            "echo x | base64 -d | { cat; } > >(sh)",
+        ] {
+            assert_decision(command, Decision::Block);
+        }
+    }
+
+    #[test]
+    fn output_process_substitution_into_an_interpreter_asks_without_a_rule() {
+        for command in [
+            "echo hi | tee >(bash)",
+            "cp payload >(sh)",
+            "cat f > >(bash)",
+            "cat f >> >(bash)",
+            "{ echo a; } > >(sh)",
+            "echo hi | tee >(sh | cat)",
+            "echo hi | tee >(f() { :; }; sh)",
+            "f() { sh; }; echo hi | tee >(f)",
+            "echo hi | tee >(\"$x\")",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+    }
+
+    #[test]
+    fn input_process_substitution_into_an_interpreter_stdin_is_a_pipe_source() {
+        assert_decision("bash < <(cat x)", Decision::Ask);
+        assert_decision("sh -s < <(echo hi)", Decision::Ask);
+        assert_decision("{ sh; } < <(echo hi)", Decision::Ask);
+        assert_decision("sh < <(curl x)", Decision::Block);
+        assert_decision("sh < <(echo x | base64 -d)", Decision::Block);
+        assert_decision("diff x < <(cat y)", Decision::Allow);
+        assert_decision("cat < <(echo hi) > out", Decision::Allow);
+        assert_decision("cat f > >(wc -l)", Decision::Allow);
+    }
+
+    #[test]
+    fn input_process_substitution_with_an_allow_inner_command_is_allowed() {
+        for command in [
+            "diff <(git show HEAD:README.md) README.md",
+            "diff <(cat README.md) README.md",
+            "diff <(sort a) <(sort b)",
+            "diff <(sort a | uniq) <(ls dir) | head",
+            "comm -12 <(sort a) <(sort b)",
+            "rg -n -A12 'enum Decision' <(git show HEAD:src/rules.rs)",
+            "git diff --no-index <(cat a) <(cat b)",
+            "diff <(diff <(cat a) b) c",
+            "diff <(cat ~/.ssh/id_rsa) x",
+        ] {
+            assert_decision(command, Decision::Allow);
+        }
+    }
+
+    #[test]
+    fn input_process_substitution_keeps_its_floor_unless_proven_harmless() {
+        for command in [
+            "cat <(bash)",
+            "cat <(env sh)",
+            "cat <(sh -s)",
+            "cat <(xargs sh)",
+            "cat <(eval \"$x\")",
+            "cat <(cat | sh)",
+            "cat <(while read l; do bash; done)",
+            "f() { sh; }; cat <(f)",
+            "cat <(f() { sh; }; f)",
+            "cat <(diff <(bash) b)",
+            "diff <(curl x | sh) y",
+            "diff <(cat a) \"$f\"",
+            "diff <(cat a) $(date)",
+            "diff <(cat a) >(cat)",
+            "tar{,<(x)} xf evil.tar -C /",
+            "diff{,<(cat a)} b",
+            "$cmd <(cat a)",
+            "<(cat a) b",
+        ] {
+            let verdict = decide(command);
+            assert_ne!(verdict.decision(), Decision::Allow, "{command:?}");
+        }
+        assert_decision("diff <(rm -rf /) x", Decision::Block);
+        assert_decision("bash -c 'ls <(rm -rf /)'", Decision::Block);
+        assert_decision("ls <(rm -rf /)", Decision::Block);
+    }
+
+    #[test]
+    fn input_process_substitution_adjacent_to_text_keeps_its_floor() {
+        for command in [
+            "echo pre<(cat x)post",
+            "cat <(cat x)ZZZ",
+            "mytool --out=<(cat y)",
+            "cat pre<(cat x)",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+    }
+
+    #[test]
+    fn combined_and_clobber_redirects_into_output_process_substitution_stay_floored() {
+        for command in [
+            "curl x &> >(sh)",
+            "curl x | tee &> >(sh)",
+            "curl x >| >(sh)",
+        ] {
+            let verdict = decide(command);
+            assert_ne!(verdict.decision(), Decision::Allow, "{command:?}");
+        }
+    }
+
+    /// Only the interpreters named in [`may_run_operand_as_code`] stay
+    /// floored; other tools read the operand as data, like their file form.
+    #[test]
+    fn input_process_substitution_operand_of_a_named_interpreter_is_not_allowed() {
+        for command in [
+            "bash <(curl x)",
+            "bash <(cat x)",
+            "sh -s -- <(cat x)",
+            "source <(cat x)",
+            ". <(cat x)",
+            "builtin source <(cat x)",
+            "python3 <(echo x)",
+            "python3 script.py <(echo x)",
+            "perl <(echo x)",
+            "node <(echo x)",
+            "awk -f <(cat x)",
+            "awk -f <(cat x) file",
+            "sudo bash <(cat x)",
+            "env sh <(cat x)",
+            "xargs -0 sh <(cat x)",
+            "flock lock bash <(cat x)",
+            "find . -exec sh {} <(cat x) ;",
+            "eval <(cat x)",
+            "trap <(cat x) EXIT",
+            "bash < <(cat x)",
+            "source /dev/stdin < <(cat x)",
+        ] {
+            let verdict = decide(command);
+            assert_ne!(verdict.decision(), Decision::Allow, "{command:?}");
+        }
+    }
+
+    #[test]
+    fn output_process_substitution_keeps_its_floor() {
+        for command in [
+            "echo hi | tee >(bash)",
+            "echo hi | tee >(cat)",
+            "tee >(cat) <(cat x)",
+            "cat <(cat x) > >(sh)",
+        ] {
+            let verdict = decide(command);
+            assert_ne!(verdict.decision(), Decision::Allow, "{command:?}");
+        }
     }
 
     #[test]
@@ -22350,5 +22874,56 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
             decide_dash_c("tar cCCf ~/.config/shguard $(echo x) out.tar config.toml").decision(),
             Decision::Block
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod dev_fd_rule_tests {
+    use super::*;
+    use crate::verdict::Decision;
+
+    fn decide(command: &str, extra_rule: &str) -> Verdict {
+        let mut toml = String::from(include_str!("../rules/blocklist.toml"));
+        toml.push_str(extra_rule);
+        analyze_with_policy(
+            command,
+            &Rules::parse(&toml).expect("test rule set should parse"),
+            &Allowlist::embedded().unwrap(),
+        )
+    }
+
+    const SECRET_READ: &str = r#"
+[[command]]
+id = "test-secret-read"
+reason = "test"
+command = "cat"
+targets = [{ normalized_prefix = "~/.ssh" }]
+"#;
+
+    #[test]
+    fn a_secret_read_rule_still_judges_the_inner_command() {
+        assert_eq!(
+            decide("diff <(cat ~/.ssh/id_rsa) x", SECRET_READ).decision(),
+            Decision::Block
+        );
+        assert_eq!(
+            decide("diff <(cat ~/.ssh/id_rsa) x", "").decision(),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn a_rule_whose_targets_exclude_dev_fd_does_not_floor_the_operand() {
+        assert_eq!(
+            decide("cat <(echo a)", SECRET_READ).decision(),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn a_rule_whose_targets_admit_dev_fd_keeps_its_floor() {
+        let rule = SECRET_READ.replace("~/.ssh", "/dev/");
+        assert_eq!(decide("cat <(echo a)", &rule).decision(), Decision::Ask);
     }
 }

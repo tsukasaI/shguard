@@ -1149,6 +1149,64 @@ impl TargetMatcher {
         }
     }
 
+    /// Whether a token that is exactly `/dev/fd/<digits>` (what an input
+    /// process substitution expands to) could match this target. The digits
+    /// are not known, so every number counts. `false` only for a target
+    /// that provably cannot equal or contain such a path: a relative, `~`
+    /// or URL target, or an absolute path outside `/dev/fd`. Always `true`
+    /// for a `strip` target: the strip text may be glued to the path in one
+    /// word (`--out=<(x)`), which the parser splits.
+    fn admits_dev_fd(&self) -> bool {
+        const DEV_FD: &str = "/dev/fd/";
+        let fold = |text: &str, case_insensitive: bool| {
+            if case_insensitive {
+                text.to_ascii_lowercase()
+            } else {
+                text.to_owned()
+            }
+        };
+        // Whether some `/dev/fd/<digits>` starts with `prefix`.
+        let may_start_with = |prefix: &str, case_insensitive: bool| {
+            let (prefix, dev_fd) = (fold(prefix, case_insensitive), DEV_FD.to_owned());
+            dev_fd.starts_with(&prefix)
+                || prefix
+                    .strip_prefix(&dev_fd)
+                    .is_some_and(|digits| digits.bytes().all(|b| b.is_ascii_digit()))
+        };
+        match self {
+            Self::Exact(text) => text.starts_with(DEV_FD),
+            Self::Prefix(prefix) => may_start_with(prefix, false),
+            Self::NormalizedExact {
+                strip,
+                target,
+                case_insensitive,
+            } => match (strip, target) {
+                (Some(_), _) => true,
+                (None, PathForm::Abs(comps)) => {
+                    comps.iter().any(|c| c.contains(['*', '?', '[']))
+                        || matches!(comps.as_slice(), [dev, fd, number]
+                            if fold(dev, *case_insensitive) == "dev"
+                                && fold(fd, *case_insensitive) == "fd"
+                                && number.bytes().all(|b| b.is_ascii_digit()))
+                }
+                (None, _) => false,
+            },
+            Self::NormalizedPrefix {
+                strip,
+                canon,
+                case_insensitive,
+            } => match strip {
+                Some(_) => true,
+                None => may_start_with(canon, *case_insensitive),
+            },
+            Self::NormalizedBasename { strip, base } => match strip {
+                Some(_) => true,
+                None => base.bytes().all(|b| b.is_ascii_digit()),
+            },
+            Self::UrlHost(_) => false,
+        }
+    }
+
     /// Whether a `-`-leading token (the only kind that can satisfy any
     /// [`FlagMatcher`]) might ALSO satisfy this target, so that one word
     /// could fill both the flag role and the target role (issue #579).
@@ -3659,6 +3717,19 @@ impl CommandRule {
         }
         let Some(rest_words) = self.matching_rest_by_name(argv) else {
             return false;
+        };
+        let rest_words = if rest_words.iter().any(NormalizedWord::is_dev_fd_path)
+            && !self.targets.iter().any(TargetMatcher::admits_dev_fd)
+        {
+            Cow::Owned(
+                rest_words
+                    .iter()
+                    .filter(|word| !word.is_dev_fd_path())
+                    .cloned()
+                    .collect(),
+            )
+        } else {
+            rest_words
         };
         let has_unresolvable = rest_words
             .iter()
@@ -12387,6 +12458,49 @@ mod tests {
         let cmd = argv(&["rm", "-rf", "./build"]);
         assert!(rules.match_command(&cmd).is_none());
         assert!(rules.match_command_except_target(&cmd).is_none());
+    }
+
+    #[test]
+    fn except_target_skips_a_dev_fd_word_only_when_no_target_admits_dev_fd() {
+        let dev_fd = || NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::DevFdPath);
+        let unresolved =
+            || NormalizedWord::unresolvable(crate::normalize::UnresolvableKind::ParameterExpansion);
+        let fires = |targets: &str, word: NormalizedWord| {
+            let rules = Rules::parse(&format!(
+                "[[command]]\nid = \"t\"\nreason = \"test\"\ncommand = \"rm\"\ntargets = [{targets}]\n"
+            ))
+            .unwrap();
+            let mut cmd = argv(&["rm"]);
+            cmd.push(word);
+            rules.match_command_except_target(&cmd).is_some()
+        };
+        for targets in [
+            r#"{ exact = "/etc/passwd" }"#,
+            r#"{ prefix = "/etc/" }"#,
+            r#"{ normalized = "/etc/passwd" }"#,
+            r#"{ normalized = "/dev/fd" }"#,
+            r#"{ normalized_prefix = "/etc/" }"#,
+            r#"{ normalized_basename = ".env" }"#,
+            r#"{ normalized = "~/.ssh" }"#,
+            r#"{ normalized = "secret" }"#,
+        ] {
+            assert!(!fires(targets, dev_fd()), "{targets}");
+            assert!(fires(targets, unresolved()), "{targets}");
+        }
+        for targets in [
+            r#"{ exact = "/dev/fd/3" }"#,
+            r#"{ prefix = "/dev/" }"#,
+            r#"{ prefix = "/" }"#,
+            r#"{ normalized = "/dev/fd/3" }"#,
+            r#"{ normalized = "/dev/fd/*" }"#,
+            r#"{ normalized_prefix = "/dev/" }"#,
+            r#"{ normalized_prefix = "/" }"#,
+            r#"{ normalized_prefix = "/dev/fd/" }"#,
+            r#"{ normalized_basename = "63" }"#,
+            r#"{ exact = "/etc/passwd" }, { prefix = "/dev/" }"#,
+        ] {
+            assert!(fires(targets, dev_fd()), "{targets}");
+        }
     }
 
     #[test]

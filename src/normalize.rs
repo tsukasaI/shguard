@@ -90,6 +90,14 @@ pub enum UnresolvableKind {
     /// string — `crate::gate` recurses it via a different code path (direct
     /// AST descent, not a re-parse), and the reported reason should say so.
     ProcessSubstitution,
+    /// An input process substitution (`<(...)`) that `crate::gate` proved
+    /// harmless to run: the word is exactly one `/dev/fd/<digits>` path whose
+    /// digits are unknown. Never produced by this stage — `crate::gate`
+    /// rewrites a [`UnresolvableKind::ProcessSubstitution`] word to it after
+    /// recursing the inner command — and left unresolved rather than folded
+    /// to a literal so that interpreters' script slots still see an
+    /// unresolved word.
+    DevFdPath,
     /// The word contains a structural shape this stage cannot fold without
     /// guessing, and that (per shguard's AST and the parser adapter that
     /// builds it) should not be reachable through normal parsing at all.
@@ -379,6 +387,16 @@ impl NormalizedWord {
     #[must_use]
     pub fn is_ifs_derived(&self) -> bool {
         self.ifs_derived
+    }
+
+    /// Whether this word is a cleared input process substitution: exactly
+    /// one `/dev/fd/<digits>` path ([`UnresolvableKind::DevFdPath`]).
+    #[must_use]
+    pub fn is_dev_fd_path(&self) -> bool {
+        matches!(
+            self.resolution,
+            Resolution::Unresolvable(UnresolvableKind::DevFdPath)
+        )
     }
 
     /// Whether this word is GUARANTEED to denote exactly one runtime shell

@@ -417,6 +417,25 @@ fn user_config_ask_rule_reaches_the_directory_equals_tilde_floor_too() {
 }
 
 #[test]
+fn user_deny_rule_with_strip_target_is_not_skipped_for_an_input_process_substitution() {
+    let (_dir, config_path) = write_config(
+        r#"
+        [[deny]]
+        id = "user-deny-mytool-dev"
+        reason = "mytool must not write to a device"
+        command = "mytool"
+        targets = [{ strip = "--out=", normalized_prefix = "/dev/" }]
+    "#,
+    );
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+
+    for command in ["mytool --out=<(cat y)", "mytool --out=/dev/fd/63"] {
+        let output = run_hook(&bash_command(command), &envs);
+        assert_ne!(permission_decision(&output), "allow", "{command:?}");
+    }
+}
+
+#[test]
 fn user_config_ask_rule_reaches_the_except_target_floor_too() {
     // Issue #403: `Rules::match_command_except_target` used to scan only
     // `command_rules`, unlike its 6 sibling floor probes above and below,
