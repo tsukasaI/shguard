@@ -87,11 +87,17 @@ enum Dialect {
 
 impl Dialect {
     fn bsd_options(self) -> bool {
-        matches!(self, Self::Bsd)
+        match self {
+            Self::Bsd => true,
+            Self::Gnu | Self::GnuPosixlyCorrect => false,
+        }
     }
 
     fn stop_at_operand(self) -> bool {
-        !matches!(self, Self::Gnu)
+        match self {
+            Self::Gnu => false,
+            Self::GnuPosixlyCorrect | Self::Bsd => true,
+        }
     }
 }
 

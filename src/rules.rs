@@ -10287,7 +10287,7 @@ mod tests {
         // `busybox` is ever inspected, so that ordering can't exercise
         // busybox's exec-wrapper membership at all — this loop
         // only tests the direction that actually depends on it.)
-        for wrapper in ["busybox", "toybox"] {
+        for wrapper in ["busybox", "toybox", "coreutils"] {
             for vector in crate::knowledge::escalation_vectors() {
                 assert_eq!(
                     wrapper_chain_escalation(&argv(&[wrapper, vector, "whoami"])),
@@ -10304,7 +10304,7 @@ mod tests {
         // the escalation vectors, contradicting its catalog entry
         // ("busybox is a dispatcher, not a privilege-escalation
         // mechanism") with no test failing to catch it.
-        for wrapper in ["busybox", "toybox"] {
+        for wrapper in ["busybox", "toybox", "coreutils"] {
             assert_eq!(
                 wrapper_chain_escalation(&argv(&[wrapper, "rm", "-rf", "/"])),
                 WrapperChainEscalation::Absent,
