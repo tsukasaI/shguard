@@ -3154,7 +3154,7 @@ fn evaluate_simple_command_core(
                         DENY_MSG_INLINE_INTERPRETER,
                     ),
                     InlineCodeTrigger::StdinScript => (
-                        format!("`{name}` reads its program from stdin (`-`)"),
+                        format!("`{name}` reads its program from stdin"),
                         DENY_MSG_INLINE_INTERPRETER,
                     ),
                     // Issue #633: no literal inline-code flag was written; an
@@ -3163,6 +3163,12 @@ fn evaluate_simple_command_core(
                     InlineCodeTrigger::UnresolvedWord(_) => (
                         "an unresolved argument sits where an inline-code flag (`-c`/`-e`) could \
                      appear, so inline code cannot be ruled out"
+                            .to_string(),
+                        DENY_MSG_UNRESOLVED_TARGET,
+                    ),
+                    InlineCodeTrigger::UnresolvedScriptOperand(_) => (
+                        "an unresolved argument sits in the script-operand position right after \
+                     `--`, so a stdin script cannot be ruled out"
                             .to_string(),
                         DENY_MSG_UNRESOLVED_TARGET,
                     ),
@@ -4182,7 +4188,7 @@ fn fold_floors(
         .map(|(_, guidance)| DenyMessage::new(*guidance));
     let unresolved_word_trigger = matches!(
         interpreter.trigger,
-        Some(InlineCodeTrigger::UnresolvedWord(_))
+        Some(InlineCodeTrigger::UnresolvedWord(_) | InlineCodeTrigger::UnresolvedScriptOperand(_))
     );
     let deny_message = except_floors
         .target
@@ -4213,10 +4219,15 @@ fn fold_floors(
         // recurses it instead). Scoped to the interpreter slot because an
         // argument-position substitution carries no message elsewhere.
         .or_else(|| {
-            (interpreter.trigger
-                == Some(InlineCodeTrigger::UnresolvedWord(
-                    UnresolvableKind::CommandSubstitution,
-                )))
+            matches!(
+                interpreter.trigger,
+                Some(
+                    InlineCodeTrigger::UnresolvedWord(UnresolvableKind::CommandSubstitution)
+                        | InlineCodeTrigger::UnresolvedScriptOperand(
+                            UnresolvableKind::CommandSubstitution
+                        )
+                )
+            )
             .then(|| DenyMessage::new(DENY_MSG_COMMAND_SUBSTITUTION))
         })
         .or(interpreter_deny_message);
@@ -7663,7 +7674,9 @@ fn scan_inline_code(
     grammar: &InlineGrammar,
     words: &[NormalizedWord],
 ) -> Option<InlineCodeTrigger> {
-    use InlineCodeTrigger::{Literal, StdinScript, UnplacedOption, UnresolvedWord};
+    use InlineCodeTrigger::{
+        Literal, StdinScript, UnplacedOption, UnresolvedScriptOperand, UnresolvedWord,
+    };
     let mut iter = words.iter();
     while let Some(word) = iter.next() {
         let text = match word.resolution() {
@@ -7677,12 +7690,14 @@ fn scan_inline_code(
             }
         };
         if text == "--" {
-            if !grammar.dashdash_dash_is_stdin {
-                return None;
-            }
             return match iter.next().map(NormalizedWord::resolution) {
-                Some(Resolution::Resolved(next)) if is_stdin_alias_path(next) => Some(StdinScript),
-                Some(Resolution::Unresolvable(kind)) => Some(UnresolvedWord(*kind)),
+                Some(Resolution::Resolved(next))
+                    if is_stdin_alias_path(next)
+                        && (next != "-" || grammar.dashdash_dash_is_stdin) =>
+                {
+                    Some(StdinScript)
+                }
+                Some(Resolution::Unresolvable(kind)) => Some(UnresolvedScriptOperand(*kind)),
                 _ => None,
             };
         }
@@ -7764,6 +7779,9 @@ enum InlineCodeTrigger {
     /// An unresolvable word where the flag (or its value) could be, with the
     /// kind of that word so its deny message names the right cause.
     UnresolvedWord(UnresolvableKind),
+    /// An unresolvable word straight after `--`, where the script operand
+    /// sits: a stdin script cannot be ruled out.
+    UnresolvedScriptOperand(UnresolvableKind),
     /// An option the grammar cannot place (unknown, or missing a required
     /// attached value), so what follows it is unknown.
     UnplacedOption,
@@ -13956,6 +13974,9 @@ mod tests {
     const UNPLACED_OPTION_REASON: &str = "an option that shguard cannot place was found on a \
          non-shell interpreter, so inline code cannot be ruled out";
 
+    const UNRESOLVED_OPERAND_REASON: &str = "an unresolved argument sits in the script-operand \
+         position right after `--`, so a stdin script cannot be ruled out";
+
     fn assert_interpreter_floor(command: &str, reason: &str, deny_message: &str) {
         let verdict = decide(command);
         assert_eq!(verdict.decision(), Decision::Ask, "{command:?}");
@@ -13968,6 +13989,7 @@ mod tests {
             INLINE_FLAG_REASON,
             UNRESOLVED_ARG_REASON,
             UNPLACED_OPTION_REASON,
+            UNRESOLVED_OPERAND_REASON,
         ] {
             assert!(
                 other == reason || !got_reason.contains(other),
@@ -13994,6 +14016,17 @@ mod tests {
             "node --require \"$m\" app.js",
         ] {
             assert_interpreter_floor(command, UNRESOLVED_ARG_REASON, DENY_MSG_UNRESOLVED_TARGET);
+        }
+    }
+
+    #[test]
+    fn interpreter_code_unresolved_word_after_double_dash_reports_operand_reason() {
+        for command in ["python3 -- \"$x\"", "lua -- \"$x\"", "perl -w -- \"$x\""] {
+            assert_interpreter_floor(
+                command,
+                UNRESOLVED_OPERAND_REASON,
+                DENY_MSG_UNRESOLVED_TARGET,
+            );
         }
     }
 
@@ -14252,6 +14285,9 @@ mod tests {
             "env python3 -- -",
             "python3 -- \"$x\"",
             "python3 -- /dev/stdin",
+            "lua -- /dev/stdin",
+            "lua -- \"$x\"",
+            "php -- /dev/stdin",
         ] {
             assert_decision(command, Decision::Ask);
         }
@@ -14278,7 +14314,7 @@ mod tests {
             assert_eq!(verdict.decision(), Decision::Ask, "{command:?}");
             let reason = verdict.reason().map(super::Reason::as_str).unwrap_or("");
             assert!(
-                reason.contains("reads its program from stdin (`-`)"),
+                reason.contains("reads its program from stdin"),
                 "{command:?}: {reason:?}"
             );
             assert!(!reason.contains("`-c`/`-e`"), "{command:?}: {reason:?}");
