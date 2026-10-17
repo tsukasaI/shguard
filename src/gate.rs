@@ -14556,7 +14556,12 @@ mod tests {
     // wrapper already is.
     #[test]
     fn finding2_decode_pipe_into_busybox_wrapped_sink_blocks() {
-        assert_decision("echo x | base64 -d | busybox sh", Decision::Block);
+        for wrapper in ["busybox", "toybox"] {
+            assert_decision(
+                &format!("echo x | base64 -d | {wrapper} sh"),
+                Decision::Block,
+            );
+        }
     }
 
     // Issue #245 should-fix (PR #247): builtin is an exec wrapper
@@ -14575,7 +14580,9 @@ mod tests {
 
     #[test]
     fn busybox_sh_dash_c_recurses_into_the_shell_string() {
-        assert_decision("busybox sh -c 'rm -rf /'", Decision::Block);
+        for wrapper in ["busybox", "toybox"] {
+            assert_decision(&format!("{wrapper} sh -c 'rm -rf /'"), Decision::Block);
+        }
     }
 
     #[test]
@@ -14586,7 +14593,9 @@ mod tests {
         // maintained list). Pinning it end-to-end, not just via `sh`,
         // guards against that same drift recurring for busybox-wrapped
         // shells specifically.
-        assert_decision("busybox ash -c 'rm -rf /'", Decision::Block);
+        for wrapper in ["busybox", "toybox"] {
+            assert_decision(&format!("{wrapper} ash -c 'rm -rf /'"), Decision::Block);
+        }
     }
 
     #[test]
@@ -14596,7 +14605,30 @@ mod tests {
         // 6a's SHELL_INTERPRETERS-based `-c` recursion (already covered by
         // busybox_sh_dash_c_recurses_into_the_shell_string above) — this
         // pins that separate path end-to-end through a busybox prefix too.
-        assert_decision("busybox su -c 'rm -rf /'", Decision::Block);
+        for wrapper in ["busybox", "toybox"] {
+            assert_decision(&format!("{wrapper} su -c 'rm -rf /'"), Decision::Block);
+        }
+    }
+
+    // The uutils multicall binary dispatches to the named utility. Its
+    // `--coreutils-prog` spelling is not in the grammar, so it fails closed.
+    #[test]
+    fn coreutils_dispatches_to_the_named_utility() {
+        assert_decision("coreutils rm -rf /", Decision::Block);
+        assert_decision("coreutils sh -c 'rm -rf /'", Decision::Block);
+        assert_decision("echo x | base64 -d | coreutils sh", Decision::Block);
+        assert_decision("coreutils ls", Decision::Allow);
+    }
+
+    #[test]
+    fn coreutils_prog_option_is_never_allow() {
+        for command in [
+            "coreutils --coreutils-prog=rm -rf /",
+            "coreutils --coreutils-prog rm -rf /",
+            "coreutils --coreutils-prog=ls",
+        ] {
+            assert_ne!(decide(command).decision(), Decision::Allow, "{command:?}");
+        }
     }
 
     // Issue #245: `builtin` is an exec wrapper. `builtin rm -rf /`
@@ -14953,6 +14985,22 @@ mod tests {
             "POSIXLY_CORRECT=1 sed -l 5 'w /tmp/x' -e p f",
             Decision::Ask,
         );
+    }
+
+    #[test]
+    fn sed_with_an_inherited_posixly_correct_is_still_not_allowed() {
+        // Every dialect reading is analysed, so the environment need not be
+        // set on the command line for the stop-at-operand reading to count.
+        assert_decision("sed -i 'w /tmp/x' -e p f", Decision::Ask);
+        assert_decision(
+            "env POSIXLY_CORRECT=1 sed -i 'w /tmp/x' -e p f",
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn sed_double_dash_before_a_variable_file_operand_is_allowed() {
+        assert_decision(r#"sed -n p -- "$file""#, Decision::Allow);
     }
 
     #[test]

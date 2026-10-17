@@ -19,6 +19,8 @@ pub(super) const EXEC_WRAPPER_REFERENCE: &[&str] = &[
     "stdbuf",
     "chroot",
     "runcon",
+    // uutils multicall binary: `coreutils rm -rf /`
+    "coreutils",
     // util-linux
     "chrt",
     "choom",

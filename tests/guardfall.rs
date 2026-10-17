@@ -802,6 +802,9 @@ const TRANSPARENT_WRAPPER_CASES: &[(&str, Decision)] = &[
     // above uses — pins the busybox->rm resolution path specifically,
     // independent of the mkswap case above.
     ("busybox rm -rf /", Decision::Block),
+    ("toybox rm -rf /", Decision::Block),
+    // Issue #643: the uutils multicall binary dispatches to its operand.
+    ("coreutils rm -rf /", Decision::Block),
 ];
 
 /// Issue #54: `timeout`/`ionice`/`flock` joined `TRANSPARENT_WRAPPERS`, so

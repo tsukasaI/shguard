@@ -4,6 +4,20 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `coreutils` (the uutils multicall binary) is a transparent wrapper
+  (#643): `coreutils rm -rf /` Blocks. Its `--coreutils-prog` spelling is
+  not modelled and Asks.
+
+### Changed
+
+- An existing `[[allow]] command = "toybox"` or `command = "coreutils"` is
+  rejected at config load, like `busybox` (intended, fail-closed; `coreutils`
+  is new in this release): both are exec wrappers, and
+  an allow entry for one would launder every wrapped Ask/Block floor
+  (intended, fail-closed). Remove the entry before upgrading.
+
 ## [0.9.2] - 2026-10-16
 
 ### Added

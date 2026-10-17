@@ -10253,21 +10253,27 @@ mod tests {
         // identically to a bare `mkswap /dev/sda1` and must match the same
         // rule.
         let rules = Rules::embedded().unwrap();
-        assert!(
-            rules
-                .match_command(&argv(&["busybox", "mkswap", "/dev/sda1"]))
-                .is_some()
-        );
+        for wrapper in ["busybox", "toybox"] {
+            assert!(
+                rules
+                    .match_command(&argv(&[wrapper, "mkswap", "/dev/sda1"]))
+                    .is_some(),
+                "{wrapper}"
+            );
+        }
     }
 
     #[test]
     fn rm_rf_root_matches_through_busybox_wrapper() {
         let rules = Rules::embedded().unwrap();
-        assert!(
-            rules
-                .match_command(&argv(&["busybox", "rm", "-rf", "/"]))
-                .is_some()
-        );
+        for wrapper in ["busybox", "toybox", "coreutils"] {
+            assert!(
+                rules
+                    .match_command(&argv(&[wrapper, "rm", "-rf", "/"]))
+                    .is_some(),
+                "{wrapper}"
+            );
+        }
     }
 
     #[test]
@@ -10281,12 +10287,14 @@ mod tests {
         // `busybox` is ever inspected, so that ordering can't exercise
         // busybox's exec-wrapper membership at all — this loop
         // only tests the direction that actually depends on it.)
-        for vector in crate::knowledge::escalation_vectors() {
-            assert_eq!(
-                wrapper_chain_escalation(&argv(&["busybox", vector, "whoami"])),
-                WrapperChainEscalation::Contains(vector),
-                "vector {vector:?} through busybox"
-            );
+        for wrapper in ["busybox", "toybox"] {
+            for vector in crate::knowledge::escalation_vectors() {
+                assert_eq!(
+                    wrapper_chain_escalation(&argv(&[wrapper, vector, "whoami"])),
+                    WrapperChainEscalation::Contains(vector),
+                    "vector {vector:?} through {wrapper}"
+                );
+            }
         }
     }
 
@@ -10296,10 +10304,13 @@ mod tests {
         // the escalation vectors, contradicting its catalog entry
         // ("busybox is a dispatcher, not a privilege-escalation
         // mechanism") with no test failing to catch it.
-        assert_eq!(
-            wrapper_chain_escalation(&argv(&["busybox", "rm", "-rf", "/"])),
-            WrapperChainEscalation::Absent
-        );
+        for wrapper in ["busybox", "toybox"] {
+            assert_eq!(
+                wrapper_chain_escalation(&argv(&[wrapper, "rm", "-rf", "/"])),
+                WrapperChainEscalation::Absent,
+                "{wrapper}"
+            );
+        }
     }
 
     // ---- regression: the shadow check must match a rule's full
@@ -15436,21 +15447,28 @@ mod tests {
     }
 
     #[test]
-    fn user_config_rejects_allow_entry_matching_busybox() {
+    fn user_config_rejects_allow_entry_matching_busybox_toybox_and_coreutils() {
         // Issue #114: busybox became an exec wrapper, so an
         // `[[allow]] command = "busybox"` entry must be rejected the same
         // way `env`'s is above — otherwise it would launder every
         // busybox-wrapped Ask/Block floor to Allow.
-        let toml = r#"
-            [[allow]]
-            id = "user-allow-busybox"
-            reason = "trust me"
-            command = "busybox"
-        "#;
-        assert!(matches!(
-            UserConfig::parse(toml),
-            Err(RulesError::InvalidRule { .. })
-        ));
+        for wrapper in ["busybox", "toybox", "coreutils"] {
+            let toml = format!(
+                r#"
+                [[allow]]
+                id = "user-allow-{wrapper}"
+                reason = "trust me"
+                command = "{wrapper}"
+                "#
+            );
+            assert!(
+                matches!(
+                    UserConfig::parse(&toml),
+                    Err(RulesError::InvalidRule { .. })
+                ),
+                "{wrapper}"
+            );
+        }
     }
 
     #[test]
