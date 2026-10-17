@@ -34,9 +34,24 @@
 //! only values written after the latest certain overwrite stay candidates;
 //! before one, every resolved write stays a candidate (#463).
 //!
-//! A subshell, loop or `if` body, a function body and a recursed payload each
-//! start from [`env::Env::isolated`]; only a brace group shares its parent's
-//! `Env`. Child environments that join back are future work (#653).
+//! A brace group shares its parent's `Env`. A loop or `if` body starts from
+//! [`env::Env::child_of`] and a subshell from [`env::Env::subshell_of`]: no
+//! values, but the functions, attributes and poison of the parent. A
+//! function body is [`env::Env::opaque`], and a recursed payload binds
+//! nothing. A body that writes into the parent shell is folded back by
+//! [`env::Env::absorb_body`] as writes of unknown values; joining the body's
+//! values is future work (#653).
+//!
+//! # Exact values
+//!
+//! The value domain also answers whether `$NAME` is certainly one literal
+//! string ([`env::Env::exact`]), which is the only source of an Allow from a
+//! binding. A variable starts as `Top` (the inherited environment may hold
+//! anything); only a literal `for` list word binds it. Anything that may rewrite it unseen drops the
+//! binding: a builtin that writes the names it is given, code that may write
+//! anything (`eval`, a call to a function defined on the line, a trap), and
+//! attributes that change what an assignment stores. Special variables
+//! (`IFS`, `HOME`, `PATH`, `BASH_*`, ...) are never bound.
 //!
 //! # Floor functions by domain
 //!

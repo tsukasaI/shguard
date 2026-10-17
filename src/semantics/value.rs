@@ -14,6 +14,14 @@ impl KnownSet {
     fn union(&self, other: &Self) -> Self {
         Self(self.0.union(&other.0).cloned().collect())
     }
+
+    fn only(&self) -> Option<&str> {
+        let mut values = self.0.iter();
+        match (values.next(), values.next()) {
+            (Some(value), None) => Some(value.as_str()),
+            _ => None,
+        }
+    }
 }
 
 /// One assignment as the value domain sees it: a statically resolved string,
@@ -49,6 +57,20 @@ impl AbsValue {
                 open: true,
             },
         }
+    }
+
+    /// The value of a variable nothing is known about.
+    pub(crate) fn top() -> Self {
+        Self::of(&Write::Top)
+    }
+
+    /// The one string this value certainly is: `Some` only when the known
+    /// set has a single element and the value is not open.
+    pub(crate) fn exact(&self) -> Option<&str> {
+        if self.open {
+            return None;
+        }
+        self.known.only()
     }
 
     pub(crate) fn join(&self, other: &Self) -> Self {
@@ -134,6 +156,17 @@ mod tests {
             assert_eq!(x.join(&top()), top(), "{x:?}");
             assert_eq!(top().join(&x), top(), "{x:?}");
         }
+    }
+
+    #[test]
+    fn exact_is_some_only_for_a_single_known_string() {
+        assert_eq!(exact("a").exact(), Some("a"));
+        assert_eq!(exact("a").join(&exact("a")).exact(), Some("a"));
+        assert_eq!(exact("a").join(&exact("b")).exact(), None);
+        assert_eq!(AbsValue::default().exact(), None);
+        assert_eq!(top().exact(), None);
+        assert_eq!(AbsValue::top(), top());
+        assert_eq!(exact("a").weak_write(&Write::Top).exact(), None);
     }
 
     #[test]

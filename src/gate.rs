@@ -334,6 +334,8 @@
 //! verdict) is **not** allowlist-suppressible in v1: a deliberate,
 //! fail-closed scope cut, not an accident of where the wrap sits.
 
+use std::cell::Cell;
+
 use crate::HookContext;
 use crate::ast::{
     AssignmentValue, Command, CommandLine, CompoundCommand, ElifClause, ExtendedTest,
@@ -357,13 +359,24 @@ use crate::rules::{
     wrapper_chain_changes_cwd,
 };
 use crate::semantics::cwd::{AnchorOrigin, CwdAnchor, CwdContext, CwdState, MAX_CWD_STACK_DEPTH};
-use crate::semantics::env::{Env, ExecScope};
+use crate::semantics::env::{
+    Env, ExecScope, literal_text, redirections_may_write_variables, word_may_write_variables,
+};
 use crate::verdict::{Decision, DenyMessage, Reason, RuleId, Verdict};
 
 /// Cap on how many levels deep a command/backquote substitution (or a
 /// resolved `bash -c` script) may recurse before this module fails closed —
 /// see the module docs' "Substitution recursion and the depth cap" section.
 const MAX_SUBSTITUTION_DEPTH: usize = 8;
+
+/// Longest literal `for` word list evaluated element by element.
+const MAX_FOR_LIST_WORDS: usize = 16;
+
+/// Loop-body evaluations one command line may spend on literal `for` lists,
+/// nested loops included. Not `MAX_FOR_LIST_WORDS` per loop: nesting would
+/// multiply it; a loop that does not fit the remainder is evaluated once,
+/// with its variable unbound.
+const MAX_FOR_BODY_EVALUATIONS: usize = 64;
 
 /// Issue #471: category-specific `DenyMessage` guidance, attached via
 /// [`Verdict::with_deny_message`] at each structural `Ask` site below —
@@ -429,22 +442,45 @@ fn deny_msg_for_unresolvable_kind(kind: UnresolvableKind) -> Option<DenyMessage>
 /// its inner context with [`Self::deeper`].
 ///
 /// `cwd` and [`Env`] are deliberately not members: they are mutated as the
-/// walk proceeds (or re-seeded per recursion), while these three never
-/// change within one stage.
+/// walk proceeds (or re-seeded per recursion), while the policy, `depth` and
+/// `bindings_trusted` never change within one stage. `loop_budget` is the
+/// one shared mutable member: it is spent across the whole line.
 #[derive(Clone, Copy)]
 struct AnalysisCtx<'a> {
     rules: &'a Rules,
     allowlist: &'a Allowlist,
     depth: usize,
+    /// Whether same-line literal bindings may be substituted into this
+    /// command string. `false` in a recursed payload, which inherits the
+    /// functions and handlers of the line it came from, and once the text
+    /// has a `{name}>` redirection, which writes `name` and is invisible in
+    /// the AST.
+    bindings_trusted: bool,
+    /// Loop-body evaluations left for the whole line, shared by every
+    /// nesting level and recursion.
+    loop_budget: &'a Cell<usize>,
 }
 
 impl<'a> AnalysisCtx<'a> {
-    fn new(rules: &'a Rules, allowlist: &'a Allowlist) -> Self {
+    fn new(rules: &'a Rules, allowlist: &'a Allowlist, loop_budget: &'a Cell<usize>) -> Self {
         Self {
             rules,
             allowlist,
             depth: 0,
+            bindings_trusted: true,
+            loop_budget,
         }
+    }
+
+    /// Takes `count` evaluations from the line's loop budget; `false`, and
+    /// nothing taken, when fewer are left.
+    fn reserve_loop_evaluations(self, count: usize) -> bool {
+        let left = self.loop_budget.get();
+        if count > left {
+            return false;
+        }
+        self.loop_budget.set(left - count);
+        true
     }
 
     /// The context for a recursion boundary: same policy, one level deeper.
@@ -495,11 +531,34 @@ pub(crate) fn analyze_with_policy_in_cwd(
     allowlist: &Allowlist,
     cwd: Option<&str>,
 ) -> Verdict {
+    let loop_budget = Cell::new(MAX_FOR_BODY_EVALUATIONS);
     analyze_at_depth(
         command,
-        AnalysisCtx::new(rules, allowlist),
+        AnalysisCtx::new(rules, allowlist, &loop_budget),
         CwdState::seed(payload_cwd_context(cwd)),
     )
+}
+
+/// Whether `command` has a `{name}>` / `{name}<` redirection, which assigns
+/// the descriptor number to `name`. The parser drops it, so this reads the
+/// text and over-approximates (`'{a}>'` in a string matches too).
+fn has_fd_variable_redirect(command: &str) -> bool {
+    let mut from = 0;
+    while let Some(open) = command[from..].find('{') {
+        let rest = &command[from + open + 1..];
+        let name_len = rest
+            .bytes()
+            .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_')
+            .count();
+        if name_len > 0
+            && let Some(after) = rest[name_len..].strip_prefix('}')
+            && after.starts_with(['<', '>'])
+        {
+            return true;
+        }
+        from += open + 1;
+    }
+    false
 }
 
 /// The top-level [`CwdContext`] for a payload `cwd`: `Known` only for an
@@ -546,8 +605,18 @@ fn analyze_at_depth(command: &str, ctx: AnalysisCtx<'_>, mut cwd: CwdState) -> V
         });
     }
 
+    let ctx = AnalysisCtx {
+        bindings_trusted: ctx.depth == 0 && !has_fd_variable_redirect(command),
+        ..ctx
+    };
     match parser::parse(command) {
-        Ok(command_line) => evaluate_command_line(&command_line, ctx, &mut cwd),
+        Ok(command_line) => evaluate_command_line_in(
+            &command_line,
+            &mut Env::isolated(),
+            ExecScope::Parent,
+            ctx,
+            &mut cwd,
+        ),
         Err(err) => decide_structural(Evidence::ParseFailure {
             message: err.to_string(),
             construct: err.unsupported_construct().map(str::to_string),
@@ -605,7 +674,7 @@ fn evaluate_command_line(
     ctx: AnalysisCtx<'_>,
     cwd: &mut CwdState,
 ) -> Verdict {
-    let mut env = Env::isolated();
+    let mut env = Env::opaque();
     evaluate_command_line_in(command_line, &mut env, ExecScope::Parent, ctx, cwd)
 }
 
@@ -812,11 +881,19 @@ fn evaluate_pipeline(
         // attacker-choosable.
         let verdict = match command {
             Command::Simple(simple) => {
+                // Read before `apply_assignments`: bash expands the words
+                // before a prefix assignment takes effect.
+                let substituted = ctx
+                    .bindings_trusted
+                    .then(|| env.substitute_literals(simple))
+                    .flatten();
                 env.apply_assignments(simple, scope.pipeline_stage(stage_count));
-                env.note_readonly_operands(&normalize::normalize_argv(simple));
+                let original_argv = normalize::normalize_argv(simple);
+                env.note_readonly_operands(&original_argv);
+                env.note_command_effects(simple, &original_argv);
                 let mut alternates = Vec::new();
                 let verdict = evaluate_simple_command(
-                    simple,
+                    substituted.as_ref().unwrap_or(simple),
                     env,
                     ctx,
                     &cwd.current,
@@ -827,7 +904,7 @@ fn evaluate_pipeline(
                 if !alternates.is_empty() {
                     per_stage_alternates.push((index, alternates));
                 }
-                let argv = normalize::normalize_argv(simple);
+                let argv = original_argv;
                 note_earlier_command(cwd, simple, &argv);
                 // Issue #103: only a single-stage pipeline's own `cd`/
                 // `pushd`/etc. is allowed to mutate `cwd` for whatever
@@ -879,6 +956,8 @@ fn evaluate_pipeline(
                 let verdict = evaluate_extended_test(test, ctx, &cwd.current);
                 // Its operands may hold substitutions that write.
                 cwd.earlier_writer.set(true);
+                // `[[ a -eq X=1 ]]` evaluates its operands as arithmetic.
+                env.note_arbitrary_writes();
                 verdict
             }
         };
@@ -1052,9 +1131,10 @@ fn pipeline_shape_verdict(
 /// [`evaluate_extended_test`] (issue #191) so the two never independently
 /// drift on how these security-critical checks are applied.
 ///
-/// `env` (issue #607) is threaded like `cwd` for a `BraceGroup` only; every
-/// other body gets a fresh `Env`. `scope` is where the group runs (see
-/// [`evaluate_command_line_in`]).
+/// `env` (issue #607) is threaded like `cwd` for a `BraceGroup` only; a loop
+/// or `if` body gets [`Env::child_of`] (a literal `for` list one per word),
+/// a subshell [`Env::subshell_of`], a function body [`Env::opaque`]. `scope`
+/// is where the group runs (see [`evaluate_command_line_in`]).
 ///
 /// `cwd` (issue #103) is threaded through per-variant, not uniformly, since
 /// this is the one place `BraceGroup` and `Subshell` diverge
@@ -1107,6 +1187,11 @@ fn evaluate_compound_command(
     {
         cwd.earlier_writer.set(true);
     }
+    if redirections_may_write_variables(redirections)
+        || for_words.iter().any(word_may_write_variables)
+    {
+        env.note_arbitrary_writes();
+    }
     let verdict = evaluate_compound_command_body(compound, env, scope, ctx, cwd);
     cwd.earlier_writer.set(true);
     verdict
@@ -1118,12 +1203,61 @@ fn evaluate_compound_command(
 fn evaluate_child_body(
     body: &CommandLine,
     parent: &mut Env,
+    repeats_function_definition: bool,
     ctx: AnalysisCtx<'_>,
     cwd: &mut CwdState,
 ) -> Verdict {
     let mut child = Env::child_of(parent);
+    if repeats_function_definition {
+        child.poison();
+    }
     let verdict = evaluate_command_line_in(body, &mut child, ExecScope::Parent, ctx, cwd);
     parent.absorb_body(&child);
+    verdict
+}
+
+/// The literal words of a `for` list, or `None` when the list is absent,
+/// empty, longer than [`MAX_FOR_LIST_WORDS`], or has any word that is not
+/// plainly literal (an expansion, a glob, a tilde, a brace).
+fn literal_for_items(words: Option<&[Word]>) -> Option<Vec<String>> {
+    let words = words.filter(|words| (1..=MAX_FOR_LIST_WORDS).contains(&words.len()))?;
+    words.iter().map(|word| literal_text(word, true)).collect()
+}
+
+/// Evaluates a `for` body. A literal word list is evaluated once per word,
+/// each with its own [`Env`] where the loop variable is bound to that word,
+/// and the verdicts fold worst-wins. Any other list, or a loop the line's
+/// budget cannot afford, is evaluated once with the variable unbound.
+fn evaluate_for_body(
+    variable: &str,
+    words: Option<&[Word]>,
+    body: &CommandLine,
+    env: &mut Env,
+    ctx: AnalysisCtx<'_>,
+    cwd: &mut CwdState,
+) -> Verdict {
+    let repeats_function_definition = command_line_poisons_repeats(body, env);
+    let items = literal_for_items(words)
+        .filter(|items| ctx.bindings_trusted && ctx.reserve_loop_evaluations(items.len()));
+    let verdict = match items {
+        Some(items) => items
+            .iter()
+            .map(|item| {
+                let mut child = Env::child_of(env);
+                if repeats_function_definition {
+                    child.poison();
+                }
+                child.bind_loop_variable(variable, item);
+                let verdict =
+                    evaluate_command_line_in(body, &mut child, ExecScope::Parent, ctx, cwd);
+                env.absorb_body(&child);
+                verdict
+            })
+            .reduce(fold_worst)
+            .unwrap_or_else(|| Verdict::allow(Vec::new())),
+        None => evaluate_child_body(body, env, repeats_function_definition, ctx, cwd),
+    };
+    env.clobber(variable);
     verdict
 }
 
@@ -1153,18 +1287,21 @@ fn evaluate_compound_command_body(
         }
         CompoundCommand::Subshell { body, redirections } => {
             let mut isolated = cwd.clone();
-            let verdict = evaluate_command_line(body, ctx, &mut isolated);
+            let mut child = Env::subshell_of(env);
+            let verdict =
+                evaluate_command_line_in(body, &mut child, ExecScope::Parent, ctx, &mut isolated);
             (verdict, redirections.as_slice(), [].as_slice())
         }
         CompoundCommand::ForClause {
+            variable,
             words,
             body,
             redirections,
-            ..
         } => {
             let mut isolated = cwd.clone();
             isolated.symlink_untrusted = true;
-            let verdict = evaluate_child_body(body, env, ctx, &mut isolated);
+            let verdict =
+                evaluate_for_body(variable, words.as_deref(), body, env, ctx, &mut isolated);
             if command_line_may_change_cwd(body) {
                 cwd.poison();
             }
@@ -1186,8 +1323,10 @@ fn evaluate_compound_command_body(
         } => {
             let mut isolated = cwd.clone();
             isolated.symlink_untrusted = true;
-            let cond_verdict = evaluate_child_body(condition, env, ctx, &mut isolated);
-            let body_verdict = evaluate_child_body(body, env, ctx, &mut isolated);
+            let repeats = command_line_poisons_repeats(condition, env)
+                || command_line_poisons_repeats(body, env);
+            let cond_verdict = evaluate_child_body(condition, env, repeats, ctx, &mut isolated);
+            let body_verdict = evaluate_child_body(body, env, repeats, ctx, &mut isolated);
             if command_line_may_change_cwd(condition) || command_line_may_change_cwd(body) {
                 cwd.poison();
             }
@@ -1205,19 +1344,22 @@ fn evaluate_compound_command_body(
             redirections,
         } => {
             let mut isolated = cwd.clone();
-            let mut worst = evaluate_child_body(condition, env, ctx, &mut isolated);
+            let mut worst = evaluate_child_body(condition, env, false, ctx, &mut isolated);
             worst = fold_worst(
                 worst,
-                evaluate_child_body(then_body, env, ctx, &mut isolated),
+                evaluate_child_body(then_body, env, false, ctx, &mut isolated),
             );
             let mut may_change_cwd =
                 command_line_may_change_cwd(condition) || command_line_may_change_cwd(then_body);
             for ElifClause { condition, body } in elifs {
                 worst = fold_worst(
                     worst,
-                    evaluate_child_body(condition, env, ctx, &mut isolated),
+                    evaluate_child_body(condition, env, false, ctx, &mut isolated),
                 );
-                worst = fold_worst(worst, evaluate_child_body(body, env, ctx, &mut isolated));
+                worst = fold_worst(
+                    worst,
+                    evaluate_child_body(body, env, false, ctx, &mut isolated),
+                );
                 may_change_cwd = may_change_cwd
                     || command_line_may_change_cwd(condition)
                     || command_line_may_change_cwd(body);
@@ -1225,7 +1367,7 @@ fn evaluate_compound_command_body(
             if let Some(else_body) = else_body {
                 worst = fold_worst(
                     worst,
-                    evaluate_child_body(else_body, env, ctx, &mut isolated),
+                    evaluate_child_body(else_body, env, false, ctx, &mut isolated),
                 );
                 may_change_cwd = may_change_cwd || command_line_may_change_cwd(else_body);
             }
@@ -1515,7 +1657,7 @@ fn evaluate_function_definition(
 ) -> Verdict {
     let mut isolated = cwd.clone();
     isolated.symlink_untrusted = true;
-    let mut env = Env::isolated();
+    let mut env = Env::opaque();
     let verdict =
         evaluate_compound_command(&func.body, &mut env, ExecScope::Parent, ctx, &mut isolated);
     if compound_command_may_change_cwd(&func.body) {
@@ -2363,6 +2505,7 @@ fn evaluate_simple_command(
         rules,
         allowlist,
         depth,
+        ..
     } = ctx;
     let argv = normalize::normalize_argv(command);
     let wrapper_moves_cwd = wrapper_chain_changes_cwd(&argv);
@@ -9303,6 +9446,59 @@ fn compound_command_may_change_cwd(compound: &CompoundCommand) -> bool {
                 || else_body
                     .as_deref()
                     .is_some_and(command_line_may_change_cwd)
+        }
+    }
+}
+
+/// Whether anything in a loop's body or condition poisons its `Env` (see
+/// [`Env::would_poison`]) or defines a function. The loop runs it again, so
+/// the effect also reaches the statements that precede it.
+fn command_line_poisons_repeats(command_line: &CommandLine, env: &Env) -> bool {
+    std::iter::once(&command_line.first)
+        .chain(command_line.rest.iter().map(|(_, pipeline)| pipeline))
+        .any(|pipeline| {
+            std::iter::once(&pipeline.first)
+                .chain(&pipeline.rest)
+                .any(|command| command_poisons_repeats(command, env))
+        })
+}
+
+fn command_poisons_repeats(command: &Command, env: &Env) -> bool {
+    match command {
+        Command::FunctionDefinition(_) => true,
+        Command::Simple(simple) => env.would_poison(simple),
+        Command::ExtendedTest(_) => false,
+        Command::Compound(
+            CompoundCommand::BraceGroup { body, .. }
+            | CompoundCommand::Subshell { body, .. }
+            | CompoundCommand::ForClause { body, .. },
+        ) => command_line_poisons_repeats(body, env),
+        Command::Compound(
+            CompoundCommand::WhileClause {
+                condition, body, ..
+            }
+            | CompoundCommand::UntilClause {
+                condition, body, ..
+            },
+        ) => {
+            command_line_poisons_repeats(condition, env) || command_line_poisons_repeats(body, env)
+        }
+        Command::Compound(CompoundCommand::IfClause {
+            condition,
+            then_body,
+            elifs,
+            else_body,
+            ..
+        }) => {
+            command_line_poisons_repeats(condition, env)
+                || command_line_poisons_repeats(then_body, env)
+                || elifs.iter().any(|ElifClause { condition, body }| {
+                    command_line_poisons_repeats(condition, env)
+                        || command_line_poisons_repeats(body, env)
+                })
+                || else_body
+                    .as_deref()
+                    .is_some_and(|body| command_line_poisons_repeats(body, env))
         }
     }
 }
@@ -17599,7 +17795,7 @@ mod tests {
             argv,
             &env,
             SimpleCommandPolicy {
-                ctx: AnalysisCtx::new(&rules, &allowlist),
+                ctx: AnalysisCtx::new(&rules, &allowlist, &Cell::new(MAX_FOR_BODY_EVALUATIONS)),
                 symlink_scope: SymlinkScope::default(),
                 sole_target_floor: &mut false,
             },

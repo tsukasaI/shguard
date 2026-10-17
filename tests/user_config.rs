@@ -3409,3 +3409,153 @@ fn deny_on_trap_holds_with_and_without_payload_cwd() {
         assert_reason_does_not_call_the_script_a_path(&output);
     }
 }
+
+// ==== Issue #632: same-line literal bindings ====
+
+const LITERAL_BINDING_RULES: &str = r#"
+    [[ask]]
+    id = "user-ask-cat-secrets"
+    reason = "cat of a secret"
+    command = "cat"
+    targets = [{ normalized_basename = ".env" }, { prefix = "/etc" }]
+
+    [[ask]]
+    id = "user-ask-gh-issue-view"
+    reason = "gh issue view without a body file"
+    command = "gh issue view"
+    required_flags = ["--body-file"]
+"#;
+
+fn assert_literal_binding_decision(commands: &[&str], expected: &str) {
+    let (_dir, config_path) = write_config(LITERAL_BINDING_RULES);
+    let envs = [("SHGUARD_CONFIG", config_path.to_str().unwrap())];
+    for command in commands {
+        let output = run_hook(&bash_command(command), &envs);
+        assert_eq!(permission_decision(&output), expected, "{command}");
+    }
+}
+
+#[test]
+fn literal_for_lists_substitute_into_the_rule_check() {
+    assert_literal_binding_decision(
+        &[
+            r#"for f in a.txt b.txt; do cat "$f"; done"#,
+            "for f in a b; do cat $f; done",
+            "for n in 100 101; do gh issue view $n --json body; done",
+            "for n in 100 101; do echo $n; done",
+            r#"for m in j g h; do cat "/abs/drafts/$m.md"; done"#,
+            "for f in 'a b'; do cat \"$f\"; done",
+        ],
+        "allow",
+    );
+}
+
+#[test]
+fn literal_for_lists_are_rule_checked_per_element() {
+    assert_literal_binding_decision(
+        &[
+            "for f in a /etc/passwd; do cat $f; done",
+            "for f in a .env; do cat \"$f\"; done",
+            "for f in /etc; do cat $f/passwd; done",
+        ],
+        "ask",
+    );
+    assert_literal_binding_decision(&["for d in /; do rm -rf \"$d\"; done"], "deny");
+}
+
+#[test]
+fn non_literal_for_lists_keep_the_unresolved_floor() {
+    assert_literal_binding_decision(
+        &[
+            "for f in *; do cat $f; done",
+            "for f in *.txt; do cat \"$f\"; done",
+            "for f in $(ls); do cat \"$f\"; done",
+            "for f in a $(ls); do cat \"$f\"; done",
+            "for f in a $X; do cat \"$f\"; done",
+            "for f in ~/x; do cat \"$f\"; done",
+            "for f in a{1,2}; do cat \"$f\"; done",
+            "for f; do cat \"$f\"; done",
+            "for f in; do cat \"$f\"; done",
+        ],
+        "ask",
+    );
+}
+
+#[test]
+fn for_variable_the_body_rewrites_stays_unresolved() {
+    assert_literal_binding_decision(
+        &[
+            "for f in a b; do read f; cat \"$f\"; done",
+            "for f in a b; do f=$(x); cat \"$f\"; done",
+            "for f in a b; do printf -v f %s x; cat \"$f\"; done",
+            "for f in a b; do eval 'f=/etc'; cat \"$f\"; done",
+            "for f in a b; do unset f; cat \"$f\"; done",
+            "for f in a b; do declare -n f=Y; cat \"$f\"; done",
+            "for f in a b; do echo $((f=1)); cat \"$f\"; done",
+            "for f in a b; do cat \"$f\"; trap 'f=/etc' DEBUG; done",
+            "for f in a b; do cat \"$f\"; g() { f=/etc; }; done",
+        ],
+        "ask",
+    );
+}
+
+#[test]
+fn for_variable_is_unresolved_outside_its_loop() {
+    assert_literal_binding_decision(
+        &[
+            "for f in a b; do :; done; cat \"$f\"",
+            "f=safe; for f in a b; do :; done; cat \"$f\"",
+            "for f in a b; do cat $f; done; cat $f",
+        ],
+        "ask",
+    );
+}
+
+#[test]
+fn for_variable_unquoted_split_or_glob_values_stay_unresolved() {
+    assert_literal_binding_decision(
+        &[
+            "for f in 'a b'; do cat $f; done",
+            "for f in 'a*'; do cat $f; done",
+            "for f in '~'; do cat $f; done",
+            "for f in ''; do cat $f; done",
+            "IFS=,; for f in a,b; do cat $f; done",
+        ],
+        "ask",
+    );
+}
+
+#[test]
+fn for_special_variable_names_are_never_bound() {
+    assert_literal_binding_decision(
+        &[
+            "for IFS in ,; do for f in a,b; do cat $f; done; done",
+            "for HOME in x; do cat \"$HOME/y\"; done",
+            "for PATH in x; do cat \"$PATH\"; done",
+            "for UID in x; do cat \"$UID\"; done",
+            "for BASH_ENV in x; do cat \"$BASH_ENV\"; done",
+        ],
+        "ask",
+    );
+}
+
+#[test]
+fn for_command_position_stays_unresolved() {
+    assert_literal_binding_decision(
+        &[
+            "for b in ls; do $b -la; done",
+            "for t in /tmp/t; do \"$t/debug/shguard\" --help; done",
+        ],
+        "ask",
+    );
+}
+
+#[test]
+fn nested_for_loops_share_one_evaluation_budget() {
+    let sixteen = "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16";
+    let within = format!("for a in 1 2; do for b in {sixteen}; do cat $b; done; done");
+    let beyond = format!("for a in {sixteen}; do for b in {sixteen}; do cat $b; done; done");
+    let too_long = format!("for a in {sixteen} 17; do cat $a; done");
+    assert_literal_binding_decision(&[within.as_str()], "allow");
+    assert_literal_binding_decision(&[beyond.as_str(), too_long.as_str()], "ask");
+}
