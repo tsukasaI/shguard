@@ -108,6 +108,11 @@ const COMMANDS: &[&str] = &[
     "echo \"exit=${PIPESTATUS[0]}\"",
     "echo ${PIPESTATUS[@]}",
     "for f in *.ts; do echo \"${f%.ts}\"; done",
+    // Issue #629: a compound final stage whose body runs no interpreter on
+    // the pipe.
+    "ls | while read -r x; do echo \"$x\"; done",
+    "rg -n foo src | while IFS=: read -r f l rest; do echo \"$f:$l\"; done",
+    "ls | while read -r x; do wc -l < \"$x\"; done",
     "cd \"${HOME:-/tmp}\"",
     "echo ${TMPDIR:-/tmp}",
     "echo ${x%.ts}",

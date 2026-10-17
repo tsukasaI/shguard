@@ -1017,6 +1017,8 @@ pub(crate) enum Redirection {
     /// `<`, `>`, or `>>` with a target word (a filename, itself subject to
     /// the same word-piece expansions as any other word).
     File {
+        /// The explicit fd prefix (`3<file`), `None` when absent.
+        fd: Option<i32>,
         kind: FileRedirectionKind,
         target: Word,
     },
@@ -1027,6 +1029,8 @@ pub(crate) enum Redirection {
     /// it is dropped rather than carried in this type; only what it implies
     /// (`expand_body`) is kept.
     HereDoc {
+        /// The explicit fd prefix (`3<<EOF`), `None` when absent.
+        fd: Option<i32>,
         strip_leading_tabs: bool,
         /// `false` when the delimiter was quoted (`<<'EOF'`): bash performs
         /// no parameter/command-substitution expansion on the body in that

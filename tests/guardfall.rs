@@ -1911,9 +1911,9 @@ const FIND_PIPE_XARGS_RM_FORCE_CASES: &[(&str, Decision)] = &[
     ("cat list.txt | xargs rm -f", Decision::Allow),
     // Static argument, equivalent to `rm -f tmp.txt`.
     ("echo tmp.txt | xargs rm -f", Decision::Allow),
-    // A compound final stage pushes an empty stage argv that no
-    // pipeline rule can match; the compound-sink floor catches it.
-    ("find . | { xargs rm -f; }", Decision::Ask),
+    // A compound final stage pushes an empty stage argv; each command in
+    // its body that reads the pipe is matched as the final stage instead.
+    ("find . | { xargs rm -f; }", Decision::Block),
 ];
 
 /// Issue #268: `find … | xargs rm -f` has the same delete-every-match

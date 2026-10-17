@@ -281,7 +281,7 @@
 {"command":"find . | xargs -P 4 rm -f","decision":"Block","deny_message":null,"matched_rule":"find-pipe-rm-force"}
 {"command":"find . | xargs -n 1 rm -rf","decision":"Block","deny_message":null,"matched_rule":"find-pipe-rm-force"}
 {"command":"find . | xargs rm","decision":"Allow","deny_message":null,"matched_rule":null}
-{"command":"find . | { xargs rm -f; }","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"find . | { xargs rm -f; }","decision":"Block","deny_message":null,"matched_rule":"find-pipe-rm-force"}
 {"command":"find / -exec rm -f {} +","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"find / -exec rm -r {} +","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"find / -exec rm -r {} \\;","decision":"Block","deny_message":null,"matched_rule":null}
