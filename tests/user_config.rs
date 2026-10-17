@@ -3857,3 +3857,71 @@ fn expansions_with_modifiers_are_not_substituted() {
         "ask",
     );
 }
+
+// ==== Issue #602: a symlinked $HOME and payload cwd, through the real
+// filesystem adapter ====
+
+#[cfg(unix)]
+mod symlinked_home_end_to_end {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    /// `<root>/real/me` is the home directory; `HOME` is told as the
+    /// symlink `<root>/home`, and `<root>/alias` links to the same place.
+    fn home_fixture() -> (tempfile::TempDir, String) {
+        let dir = tempdir().expect("tempdir should create");
+        let root = dir.path().canonicalize().expect("root should resolve");
+        fs::create_dir_all(root.join("real/me/proj")).expect("home should create");
+        symlink(root.join("real/me"), root.join("home")).expect("symlink should create");
+        symlink(root.join("real/me"), root.join("alias")).expect("symlink should create");
+        write_empty_config_under_home(&root.join("home"));
+        let root = root.to_str().unwrap().to_string();
+        (dir, root)
+    }
+
+    fn hook_decision(root: &str, command: &str, cwd: Option<&str>) -> String {
+        let mut value: Value = serde_json::from_str(&bash_command(command)).unwrap();
+        if let Some(cwd) = cwd {
+            value["cwd"] = Value::String(cwd.to_string());
+        }
+        let home = format!("{root}/home");
+        let output = run_hook(&value.to_string(), &[("HOME", &home)]);
+        permission_decision(&output).to_string()
+    }
+
+    #[test]
+    fn home_twin_blocks_the_canonical_spelling_of_a_symlinked_home() {
+        let (_dir, root) = home_fixture();
+        assert_eq!(
+            hook_decision(&root, &format!("rm -rf {root}/real/me"), None),
+            "deny"
+        );
+        assert_eq!(
+            hook_decision(&root, &format!("rm -rf {root}/real/me/proj"), None),
+            "allow"
+        );
+    }
+
+    #[test]
+    fn home_twin_blocks_a_payload_cwd_that_is_a_link_to_home() {
+        let (_dir, root) = home_fixture();
+        let alias = format!("{root}/alias");
+        assert_eq!(hook_decision(&root, "rm -rf .", Some(&alias)), "deny");
+        assert_eq!(
+            hook_decision(&root, "tar -x -C . -f a.tar", Some(&alias)),
+            "deny"
+        );
+        assert_eq!(hook_decision(&root, "rm -rf proj", Some(&alias)), "allow");
+    }
+
+    #[test]
+    fn home_twin_check_cwd_flag_resolves_like_the_hook() {
+        let (_dir, root) = home_fixture();
+        let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
+        cmd.env_remove("SHGUARD_CONFIG")
+            .env_remove("XDG_CONFIG_HOME")
+            .env("HOME", format!("{root}/home"))
+            .args(["check", "rm -rf .", "--cwd", &format!("{root}/alias")]);
+        cmd.assert().code(1);
+    }
+}

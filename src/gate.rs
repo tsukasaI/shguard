@@ -360,10 +360,10 @@ use crate::policy::combine::{
 };
 use crate::policy::{self, Evidence, LimitKind, PolicyConfig, deny_msg_unsupported_construct};
 use crate::rules::{
-    AWK_INTERPRETERS, Allowlist, EVAL_BUILTIN, PathForm, RedirectRule, Rules, SymlinkScope,
-    TRAP_BUILTIN, WrapperChainEscalation, has_expanding_glob_qualifier, is_pipeline_interpreter,
-    lexical_normalize, render_cwd_anchor, unresolved_word_may_hide_glob_qualifier,
-    wrapper_chain_changes_cwd,
+    AWK_INTERPRETERS, Allowlist, EVAL_BUILTIN, FsProbeFailure, PathForm, RedirectRule, Rules,
+    SymlinkScope, TRAP_BUILTIN, WrapperChainEscalation, has_expanding_glob_qualifier,
+    is_pipeline_interpreter, lexical_normalize, render_cwd_anchor,
+    unresolved_word_may_hide_glob_qualifier, wrapper_chain_changes_cwd,
 };
 use crate::semantics::cwd::{AnchorOrigin, CwdAnchor, CwdContext, CwdState, MAX_CWD_STACK_DEPTH};
 use crate::semantics::env::{
@@ -535,10 +535,13 @@ pub(crate) fn analyze_with_policy(command: &str, rules: &Rules, allowlist: &Allo
 
 /// [`analyze`] for a command that will run in `cwd` (the hook
 /// payload's working directory, issue #549). An absolute `cwd` seeds the
-/// top-level [`CwdContext::Known`], so every relative path token composes
-/// against it through the same machinery a same-line `cd /abs` uses. A
-/// missing, empty, relative, or `~`-anchored `cwd` seeds
-/// [`CwdContext::Initial`], exactly as before.
+/// top-level [`CwdContext::Known`] (as does a `~`-anchored one), so every
+/// relative path token composes against it through the same machinery a
+/// same-line `cd /abs` uses. A missing, empty or relative `cwd` seeds
+/// [`CwdContext::Initial`], exactly as before. A `Known` payload `cwd` also
+/// gets an unknown directory stack ([`CwdState::seed_unknown_stack`]): the
+/// session behind the payload is persistent, so `popd` may reach a frame
+/// this line never pushed.
 #[must_use]
 pub(crate) fn analyze_with_policy_in_cwd(
     command: &str,
@@ -547,10 +550,20 @@ pub(crate) fn analyze_with_policy_in_cwd(
     cwd: Option<&str>,
 ) -> Verdict {
     let loop_budget = Cell::new(MAX_FOR_COMMAND_EVALUATIONS);
+    let payload_cwd = payload_cwd_context(cwd);
+    // The payload comes from a persistent shell session whose directory
+    // stack this line did not build, so `popd` may reach a frame we cannot
+    // see; with no payload cwd the line starts a fresh process (the
+    // `analyze` entry point), whose stack really is empty.
+    let state = if matches!(payload_cwd, CwdContext::Known(_)) {
+        CwdState::seed_unknown_stack(payload_cwd)
+    } else {
+        CwdState::seed(payload_cwd)
+    };
     analyze_at_depth(
         command,
         AnalysisCtx::new(rules, allowlist, &loop_budget),
-        CwdState::seed(payload_cwd_context(cwd)),
+        state,
     )
 }
 
@@ -617,21 +630,24 @@ fn has_adjacent_input_process_substitution(command: &str) -> bool {
     false
 }
 
-/// The top-level [`CwdContext`] for a payload `cwd`: `Known` only for an
-/// absolute path, `Initial` otherwise (never `Poisoned`: an absent cwd is
-/// "never came up", not "became attacker-steerable").
+/// The top-level [`CwdContext`] for a payload `cwd`: `Known` for an absolute
+/// or `~`-anchored path, `Initial` otherwise (never `Poisoned`: an absent cwd
+/// is "never came up", not "became attacker-steerable"). A `~` anchor composes
+/// lexically like a `cd ~/x` would but names no base for `resolve_symlinks`.
 fn payload_cwd_context(cwd: Option<&str>) -> CwdContext {
     let Some(cwd) = cwd else {
         return CwdContext::Initial;
     };
     match lexical_normalize(cwd) {
-        form @ PathForm::Abs(_) => render_cwd_anchor(&form).map_or(CwdContext::Initial, |path| {
-            CwdContext::Known(CwdAnchor {
-                path,
-                origin: AnchorOrigin::Payload,
-                physical: false,
+        form @ (PathForm::Abs(_) | PathForm::Home(_)) => {
+            render_cwd_anchor(&form).map_or(CwdContext::Initial, |path| {
+                CwdContext::Known(CwdAnchor {
+                    path,
+                    origin: AnchorOrigin::Payload,
+                    physical: false,
+                })
             })
-        }),
+        }
         _ => CwdContext::Initial,
     }
 }
@@ -644,7 +660,7 @@ fn payload_cwd_context(cwd: Option<&str>) -> CwdContext {
 /// [`CwdState::seed`] (a genuinely fresh process boundary: `bash -c`
 /// family/`fish -c`/`flock -c`/`su -c`/`env -S`, or the two top-level entry
 /// points, seeded there by [`payload_cwd_context`]: `Initial` unless the
-/// hook payload carried an absolute `cwd`, then `Known`) or
+/// hook payload carried an absolute or `~`-anchored `cwd`, then `Known`) or
 /// [`CwdState::seed_unknown_stack`] (a same-process boundary that really
 /// does inherit the live directory stack via fork: `$()`/backtick, a
 /// process substitution, a heredoc body substitution, `eval`'s joined
@@ -3464,11 +3480,126 @@ fn evaluate_simple_command(
     // `evaluate_dash_c_override`/`evaluate_composed_argv_match` never
     // receive or reference an `Allowlist`, and this call sits after the
     // allowlist-downgrade/ask-floor steps above.
-    if let Some(dash_c) = evaluate_dash_c_override(&composed_pass_argv, env, rules) {
+    let verdict = if let Some(dash_c) = evaluate_dash_c_override(&composed_pass_argv, env, rules) {
         fold_worst(verdict, dash_c)
     } else {
         verdict
+    };
+
+    // Issue #602: the filesystem twin pass runs last, so every lexical
+    // match has already had its say, and not at all once the command is
+    // Blocked. Like the passes above it sees no allowlist and only folds
+    // worst-wins.
+    if verdict.decision() == Decision::Block {
+        return verdict;
     }
+    match evaluate_fs_twin(
+        &composed_pass_argv,
+        &command.redirections,
+        cwd.trusted_base(wrapper_moves_cwd),
+        rules,
+    ) {
+        Some(twin) => fold_worst(verdict, twin),
+        None => verdict,
+    }
+}
+
+/// Issue #602: matches the spellings the filesystem gives a command's path
+/// operands and redirect targets (a symlink to `$HOME`, a symlinked `$HOME`
+/// or payload `cwd`; see [`Rules::fs_twin_probe`]) against the ordinary
+/// deny/ask rules, in addition to the lexical match already made. A path the
+/// filesystem refuses to resolve (loop, permission, I/O error) asks.
+fn evaluate_fs_twin(
+    argv: &[NormalizedWord],
+    redirections: &[Redirection],
+    base: Option<&str>,
+    rules: &Rules,
+) -> Option<Verdict> {
+    let mut worst: Option<Verdict> = None;
+    let mut raise = |verdict: Verdict| {
+        worst = Some(match worst.take() {
+            Some(current) => fold_worst(current, verdict),
+            None => verdict,
+        });
+    };
+    let ask_unresolved = |failure: &FsProbeFailure| {
+        Verdict::ask(
+            Reason::new(format!(
+                "{:?} could not be resolved on the filesystem ({}), so whether it names a \
+                 protected path is unknown",
+                failure.subject, failure.why
+            )),
+            argv.to_vec(),
+        )
+    };
+
+    let probe = rules.fs_twin_probe(argv, base);
+    for twin in &probe.twins {
+        let subject = format!(
+            "{:?} resolves on the filesystem to {:?}",
+            twin.operand, twin.spelling
+        );
+        if let Some(rule) = rules.match_command(&twin.argv) {
+            let reason = Reason::new(format!(
+                "{subject}, matching blocklist rule {:?}: {}",
+                rule.id().as_str(),
+                rule.reason().as_str()
+            ));
+            raise(
+                match rule.decision() {
+                    Decision::Block => {
+                        Verdict::block(reason, argv.to_vec(), Some(rule.id().clone()))
+                    }
+                    Decision::Ask => Verdict::ask(reason, argv.to_vec()),
+                    Decision::Allow => unreachable!("rules never carry Decision::Allow"),
+                }
+                .with_deny_message(rule.deny_message().cloned()),
+            );
+        }
+        if let Some(rule) = rules.match_ask(&twin.argv) {
+            raise(
+                Verdict::ask(
+                    Reason::new(format!(
+                        "{subject}, matching user-configured ask rule {:?}: {}",
+                        rule.id().as_str(),
+                        rule.reason().as_str()
+                    )),
+                    argv.to_vec(),
+                )
+                .with_deny_message(rule.deny_message().cloned()),
+            );
+        }
+    }
+    for failure in &probe.failures {
+        raise(ask_unresolved(failure));
+    }
+
+    for target in resolved_redirect_write_targets(redirections) {
+        let spellings = match rules.fs_twin_redirect_spellings(&target, base) {
+            Ok(spellings) => spellings,
+            Err(failure) => {
+                raise(ask_unresolved(&failure));
+                continue;
+            }
+        };
+        for spelling in spellings {
+            let Some(rule) = rules.match_redirect_target(&spelling) else {
+                continue;
+            };
+            let reason = Reason::new(format!(
+                "redirect target {target:?} resolves on the filesystem to {spelling:?}, \
+                 matching rule {:?}: {}",
+                rule.id().as_str(),
+                rule.reason().as_str()
+            ));
+            raise(match rule.decision() {
+                Decision::Block => Verdict::block(reason, argv.to_vec(), Some(rule.id().clone())),
+                Decision::Ask => Verdict::ask(reason, argv.to_vec()),
+                Decision::Allow => unreachable!("rules never carry Decision::Allow"),
+            });
+        }
+    }
+    worst
 }
 
 /// The per-command policy inputs [`evaluate_simple_command_core`] takes
@@ -11648,8 +11779,9 @@ fn scan_unknown_cwd_floor(
     Some((
         Decision::Ask,
         format!(
-            "a same-line `cd` target could not be statically resolved, so the working directory \
-             is entirely unknown for the rest of this command line; a target token could \
+            "the working directory could not be statically resolved (a `cd`/`popd` target is \
+             unknown, or `popd` reached a directory stack this command line did not build), so \
+             it is entirely unknown for the rest of this command line; a target token could \
              plausibly land inside rule {:?}'s own dangerous namespace ({}) depending on what \
              that unknown directory turns out to be",
             rule.id().as_str(),
@@ -16619,10 +16751,10 @@ mod tests {
 
     mod resolve_symlinks {
         use super::*;
-        use crate::rules::{PathCanonicalizer, ResolvedPath};
+        use crate::rules::{PathCanonicalizer, ProbeError, ResolvedPath};
 
-        fn file(path: &str) -> Option<ResolvedPath> {
-            Some(ResolvedPath {
+        fn file(path: &str) -> Result<ResolvedPath, ProbeError> {
+            Ok(ResolvedPath {
                 path: path.to_string(),
                 is_dir: false,
                 link_count: 1,
@@ -16633,13 +16765,13 @@ mod tests {
         /// directory with its own `rel.md` and a symlinked `ok.md`
         /// (pointing out of `/scratch`), and a symlinked `link.md`. `/work`
         /// holds `ok.md`.
-        fn fake_fs(path: &str) -> Option<ResolvedPath> {
+        fn fake_fs(path: &str) -> Result<ResolvedPath, ProbeError> {
             match path {
                 "/scratch/ok.md" | "/scratch/rel.md" | "/scratch/sub/rel.md" | "/work/ok.md" => {
                     file(path)
                 }
                 "/scratch/sub/ok.md" | "/scratch/link.md" => file("/outside/secret"),
-                _ => None,
+                _ => Err(ProbeError::NotFound),
             }
         }
 

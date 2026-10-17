@@ -2983,12 +2983,39 @@ pub(crate) fn render_cwd_anchor(form: &PathForm) -> Option<String> {
 
 /// Symlink resolution as a port this module owns (`coding-guidelines/
 /// principles.md`: ports are defined next to the code that consumes them):
-/// what the filesystem says about an absolute path, or `None` when it
-/// cannot be produced (missing, unreadable, not valid UTF-8). The
-/// composition root (`src/lib.rs`) wires the filesystem adapter in through
-/// [`Rules::with_path_canonicalizer`], the way `gate` receives its parse
-/// function; this module never touches the filesystem itself.
-pub(crate) type CanonicalizeFn = fn(&str) -> Option<ResolvedPath>;
+/// what the filesystem says about an absolute path, or why it cannot say
+/// ([`ProbeError`]). The composition root (`src/lib.rs`) wires the
+/// filesystem adapter in through [`Rules::with_path_canonicalizer`], the way
+/// `gate` receives its parse function; this module never touches the
+/// filesystem itself.
+pub(crate) type CanonicalizeFn = fn(&str) -> Result<ResolvedPath, ProbeError>;
+
+/// Why a [`CanonicalizeFn`] produced no [`ResolvedPath`]. The variants exist
+/// because the callers treat them differently: a path that is not there
+/// (yet) leaves the lexical verdict standing, while the rest mean the
+/// filesystem form of the path could not be checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProbeError {
+    /// ENOENT or ENOTDIR (also a dangling link): nothing to resolve.
+    NotFound,
+    /// ELOOP: a symlink cycle.
+    Loop,
+    /// EACCES or EPERM.
+    Denied,
+    /// Any other I/O error, or a resolved name that is not valid UTF-8.
+    Other,
+}
+
+impl std::fmt::Display for ProbeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NotFound => "it does not exist",
+            Self::Loop => "it is part of a symlink loop",
+            Self::Denied => "permission was denied",
+            Self::Other => "the filesystem reported an error",
+        })
+    }
+}
 
 /// A path as the filesystem spells it after symlink resolution, plus the
 /// two facts `resolve_symlinks` needs beyond the spelling.
@@ -3014,13 +3041,14 @@ impl PathCanonicalizer {
     }
 
     /// The default for a [`Rules`] nobody wired a canonicalizer into:
-    /// resolves nothing, so every `resolve_symlinks` exception stays
-    /// unapplied (fail-closed).
+    /// resolves nothing (every path is [`ProbeError::NotFound`]), so every
+    /// `resolve_symlinks` exception stays unapplied (fail-closed) and the
+    /// filesystem twin probe never adds a spelling.
     fn unavailable() -> Self {
-        Self(|_| None)
+        Self(|_| Err(ProbeError::NotFound))
     }
 
-    fn canonicalize(self, path: &str) -> Option<ResolvedPath> {
+    fn canonicalize(self, path: &str) -> Result<ResolvedPath, ProbeError> {
         (self.0)(path)
     }
 }
@@ -3120,11 +3148,9 @@ fn resolve_candidate(
         return CandidateResolution::Refused;
     };
     match canonicalizer.canonicalize(full) {
-        None => CandidateResolution::Unresolved(full.to_string()),
-        Some(resolved) if !resolved.is_dir && resolved.link_count > 1 => {
-            CandidateResolution::Refused
-        }
-        Some(resolved) => CandidateResolution::Canonical(resolved.path),
+        Err(_) => CandidateResolution::Unresolved(full.to_string()),
+        Ok(resolved) if !resolved.is_dir && resolved.link_count > 1 => CandidateResolution::Refused,
+        Ok(resolved) => CandidateResolution::Canonical(resolved.path),
     }
 }
 
@@ -7376,6 +7402,17 @@ pub(crate) struct Rules {
     ask_rules: Vec<CommandRule>,
     escalation_floor: Decision,
     path_canonicalizer: PathCanonicalizer,
+    home: Option<HomeContext>,
+}
+
+/// The parsed `$HOME` kept on [`Rules`] for the filesystem twin probe, plus
+/// its canonical spelling, resolved at most once and only when a probe
+/// actually runs (not at load: a command no fs-sensitive rule applies to
+/// never pays for it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HomeContext {
+    dir: HomeDir,
+    canonical: std::sync::OnceLock<Result<HomeDir, ProbeError>>,
 }
 
 /// Shared scan behind every worst-decision-wins `match_*` method on
@@ -7570,9 +7607,19 @@ impl Rules {
     /// widen a carve-out) and has no counterpart on [`Allowlist`] (a twin
     /// there would widen an allow).
     ///
+    /// The asymmetry is visible to a rule author: a `~/scratch` entry in
+    /// `except_targets` excepts the `~` spelling only, so the same
+    /// directory spelled `/Users/me/scratch` is still matched by the
+    /// rule's (twinned) `targets` and not excepted. That fails closed;
+    /// spell the absolute path in `except_targets` to carve it out too.
+    ///
     /// `fold_case` ORs into each twin's own `case_insensitive` flag, for
     /// platforms whose default volume treats `/Users/Me` and `/users/me`
     /// as one directory.
+    ///
+    /// Also remembers `home`, so the filesystem twin probe
+    /// ([`Self::fs_twin_probe`]) can expand a `~` operand and match the
+    /// canonical spelling of a symlinked `$HOME`.
     #[must_use]
     pub(crate) fn with_home_twins(mut self, home: &HomeDir, fold_case: bool) -> Self {
         for rule in self.command_rules.iter_mut().chain(&mut self.ask_rules) {
@@ -7581,6 +7628,10 @@ impl Rules {
         for rule in &mut self.redirect_rules {
             push_home_twins(&mut rule.targets, home, fold_case);
         }
+        self.home = Some(HomeContext {
+            dir: home.clone(),
+            canonical: std::sync::OnceLock::new(),
+        });
         self
     }
 
@@ -7607,7 +7658,7 @@ impl Rules {
                     "" => "/",
                     trimmed => trimmed,
                 };
-                if let Some(resolved) = canonicalizer.canonicalize(written)
+                if let Ok(resolved) = canonicalizer.canonicalize(written)
                     && resolved.path != written
                 {
                     warnings.push(format!(
@@ -7630,6 +7681,272 @@ impl Rules {
     pub(crate) fn with_path_canonicalizer(mut self, canonicalizer: PathCanonicalizer) -> Self {
         self.path_canonicalizer = canonicalizer;
         self
+    }
+}
+
+/// Most distinct path operands one command may have probed on the
+/// filesystem; a command with more asks instead of probing a prefix of them
+/// (a skipped operand would be an unchecked one).
+const MAX_FS_PROBES: usize = 32;
+
+/// Id prefix of the rules `crate::config` generates to protect shguard's own
+/// config directory and decision log.
+const SELF_PROTECTION_ID_PREFIX: &str = "shguard-self-protect-";
+
+/// Whether the filesystem can change which rule a target spelling hits: a
+/// `~`-anchored target (its `$HOME` may be a symlink, and so may anything
+/// that points into it) or a rule that protects shguard's own files.
+fn fs_sensitive(id: &RuleId, targets: &[TargetMatcher]) -> bool {
+    id.as_str().starts_with(SELF_PROTECTION_ID_PREFIX)
+        || targets.iter().any(|target| match target {
+            TargetMatcher::NormalizedExact {
+                target: PathForm::Home(_),
+                ..
+            } => true,
+            TargetMatcher::NormalizedPrefix { canon, .. } => canon.starts_with('~'),
+            _ => false,
+        })
+}
+
+/// An operand split into the literal text glued before its path (`-C`,
+/// `--directory=`, `of=`) and the path itself; `("", "")` for an operand
+/// that carries no path.
+fn split_operand(token: &str) -> (&str, &str) {
+    if token.starts_with("--") {
+        return token
+            .split_once('=')
+            .map_or(("", ""), |(flag, value)| (&token[..flag.len() + 1], value));
+    }
+    if token.starts_with('-') {
+        let value = token.get(2..).unwrap_or("");
+        return if value.starts_with(['/', '~']) {
+            (&token[..2], value)
+        } else {
+            ("", "")
+        };
+    }
+    if !token.starts_with(['/', '~'])
+        && let Some((name, value)) = token.split_once('=')
+        && value.starts_with('/')
+        && name.chars().all(|c| c.is_ascii_alphabetic())
+    {
+        return (&token[..name.len() + 1], value);
+    }
+    ("", token)
+}
+
+/// One extra spelling of a command line for the filesystem twin probe: the
+/// operand at one position replaced by a spelling the filesystem gave it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FsTwin {
+    pub(crate) argv: Vec<NormalizedWord>,
+    /// The operand as written.
+    pub(crate) operand: String,
+    /// The spelling it was replaced by.
+    pub(crate) spelling: String,
+}
+
+/// A path the filesystem twin probe could not check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FsProbeFailure {
+    pub(crate) subject: String,
+    pub(crate) why: String,
+}
+
+/// What [`Rules::fs_twin_probe`] found: spellings to match in addition to the
+/// lexical one, and the paths it could not check.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct FsTwinProbe {
+    pub(crate) twins: Vec<FsTwin>,
+    pub(crate) failures: Vec<FsProbeFailure>,
+}
+
+impl HomeDir {
+    fn path(&self) -> String {
+        format!("/{}", self.comps.join("/"))
+    }
+
+    /// `path` moved from under `from` to under `self`, or `None` when it is
+    /// not under `from`.
+    fn rebase_from(&self, from: &Self, path: &str) -> Option<String> {
+        let PathForm::Abs(comps) = lexical_normalize(path) else {
+            return None;
+        };
+        let tail = comps.strip_prefix(from.comps.as_slice())?;
+        Some(format!(
+            "/{}",
+            self.comps
+                .iter()
+                .map(String::as_str)
+                .chain(tail.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+                .join("/")
+        ))
+    }
+}
+
+impl Rules {
+    /// Issue #602: the filesystem half of home and config self-protection.
+    /// Rule matching is lexical, so `rm -rf link` (a symlink to `$HOME`), a
+    /// payload `cwd` that is such a link, or a `$HOME` that is itself a link
+    /// slip past the `~` rules. For each path operand of a command that an
+    /// fs-sensitive rule applies to, this asks the filesystem port for the
+    /// canonical spelling and returns the command line with that operand
+    /// replaced by it (and, when `$HOME` is a symlink, by the lexical-home
+    /// form of it), so the caller can match the extra spellings with the
+    /// ordinary rules. It only adds spellings: the lexical one is never
+    /// removed. Run it after the lexical match and skip it once that
+    /// blocked.
+    ///
+    /// `base` is the absolute directory relative operands resolve against,
+    /// when it is trustworthy. A path that does not exist leaves the lexical
+    /// result standing; a loop, a permission error or any other failure
+    /// is reported in [`FsTwinProbe::failures`] for the caller to Ask on. Only
+    /// the operands themselves are looked up, never a directory's contents.
+    #[must_use]
+    pub(crate) fn fs_twin_probe(&self, argv: &[NormalizedWord], base: Option<&str>) -> FsTwinProbe {
+        let mut probe = FsTwinProbe::default();
+        let applies = self
+            .command_rules
+            .iter()
+            .chain(&self.ask_rules)
+            .any(|rule| {
+                fs_sensitive(&rule.id, &rule.targets) && rule.matching_rest(argv).is_some()
+            });
+        if !applies {
+            return probe;
+        }
+        let Some((_, rest)) = effective_command(argv) else {
+            return probe;
+        };
+        let start = argv.len() - rest.len();
+        let mut spellings: std::collections::HashMap<String, Result<Vec<String>, FsProbeFailure>> =
+            std::collections::HashMap::new();
+        for (index, word) in argv.iter().enumerate().skip(start) {
+            let Resolution::Resolved(token) = word.resolution() else {
+                continue;
+            };
+            let (prefix, value) = split_operand(token);
+            let Some(full) = self.probe_path(value, base) else {
+                continue;
+            };
+            if !spellings.contains_key(&full) && spellings.len() >= MAX_FS_PROBES {
+                probe.failures.push(FsProbeFailure {
+                    subject: "the command".to_string(),
+                    why: format!("it has more than {MAX_FS_PROBES} path operands to resolve"),
+                });
+                break;
+            }
+            let found = spellings
+                .entry(full.clone())
+                .or_insert_with(|| self.fs_twin_spellings(&full));
+            match found {
+                Ok(found) => {
+                    for spelling in found {
+                        let mut twin = argv.to_vec();
+                        twin[index] = NormalizedWord::resolved(format!("{prefix}{spelling}"));
+                        probe.twins.push(FsTwin {
+                            argv: twin,
+                            operand: token.clone(),
+                            spelling: spelling.clone(),
+                        });
+                    }
+                }
+                Err(failure) => {
+                    if !probe.failures.contains(failure) {
+                        probe.failures.push(failure.clone());
+                    }
+                }
+            }
+        }
+        probe
+    }
+
+    /// [`Self::fs_twin_probe`] for a redirect target: the extra spellings to
+    /// match against the redirect rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`FsProbeFailure`] when the target (or `$HOME`) could not
+    /// be resolved for a reason other than not existing.
+    pub(crate) fn fs_twin_redirect_spellings(
+        &self,
+        target: &str,
+        base: Option<&str>,
+    ) -> Result<Vec<String>, FsProbeFailure> {
+        if !self
+            .redirect_rules
+            .iter()
+            .any(|rule| fs_sensitive(&rule.id, &rule.targets))
+        {
+            return Ok(Vec::new());
+        }
+        match self.probe_path(target, base) {
+            Some(full) => self.fs_twin_spellings(&full),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// The absolute path an operand value names, when it can be looked up:
+    /// absolute, `~`-led under a known `$HOME`, or relative under `base`.
+    /// Globs are not paths.
+    fn probe_path(&self, value: &str, base: Option<&str>) -> Option<String> {
+        if value.is_empty() || value.contains(['*', '?', '[', '{']) {
+            return None;
+        }
+        if value.starts_with('/') {
+            return Some(value.to_string());
+        }
+        if value == "~" || value.starts_with("~/") {
+            let home = self.home.as_ref()?;
+            return Some(format!("{}{}", home.dir.path(), &value[1..]));
+        }
+        if value.starts_with('~') || value == "-" {
+            return None;
+        }
+        base.filter(|base| base.starts_with('/'))
+            .map(|base| format!("{base}/{value}"))
+    }
+
+    fn fs_twin_spellings(&self, full: &str) -> Result<Vec<String>, FsProbeFailure> {
+        let resolved = match self.path_canonicalizer.canonicalize(full) {
+            Ok(resolved) => resolved,
+            Err(ProbeError::NotFound) => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(FsProbeFailure {
+                    subject: full.to_string(),
+                    why: error.to_string(),
+                });
+            }
+        };
+        let mut spellings = Vec::new();
+        if resolved.path != full {
+            spellings.push(resolved.path.clone());
+        }
+        if let Some(home) = &self.home {
+            let canonical = home.canonical.get_or_init(|| {
+                let resolved = self.path_canonicalizer.canonicalize(&home.dir.path())?;
+                HomeDir::parse(&resolved.path).map_err(|_| ProbeError::NotFound)
+            });
+            match canonical {
+                Ok(canonical) => {
+                    if let Some(rebased) = home.dir.rebase_from(canonical, &resolved.path)
+                        && rebased != full
+                        && !spellings.contains(&rebased)
+                    {
+                        spellings.push(rebased);
+                    }
+                }
+                Err(ProbeError::NotFound) => {}
+                Err(error) => {
+                    return Err(FsProbeFailure {
+                        subject: "$HOME".to_string(),
+                        why: error.to_string(),
+                    });
+                }
+            }
+        }
+        Ok(spellings)
     }
 }
 
@@ -7682,6 +7999,7 @@ impl Rules {
             ask_rules: Vec::new(),
             escalation_floor: Decision::Ask,
             path_canonicalizer: PathCanonicalizer::unavailable(),
+            home: None,
         })
     }
 
@@ -8547,6 +8865,7 @@ pub(crate) fn merge_user_config(
             ask_rules,
             escalation_floor,
             path_canonicalizer: blocklist.path_canonicalizer,
+            home: blocklist.home,
         },
         Allowlist { entries },
     ))
@@ -14163,8 +14482,8 @@ mod tests {
     mod resolve_symlinks {
         use super::*;
 
-        fn resolved(path: &str, is_dir: bool, link_count: u64) -> Option<ResolvedPath> {
-            Some(ResolvedPath {
+        fn resolved(path: &str, is_dir: bool, link_count: u64) -> Result<ResolvedPath, ProbeError> {
+            Ok(ResolvedPath {
                 path: path.to_string(),
                 is_dir,
                 link_count,
@@ -14177,14 +14496,14 @@ mod tests {
         /// link, `/tmp/scratch` a directory behind a symlinked `/tmp`, and
         /// everything else (dangling links, files not created yet) fails to
         /// resolve.
-        fn fake_canonicalize(path: &str) -> Option<ResolvedPath> {
+        fn fake_canonicalize(path: &str) -> Result<ResolvedPath, ProbeError> {
             match path {
                 "/scratch/ok.md" => resolved("/scratch/ok.md", false, 1),
                 "/scratch/link.md" => resolved("/outside/secret", false, 1),
                 "/scratch/hard.md" => resolved("/scratch/hard.md", false, 2),
                 "/scratch/sub" => resolved("/scratch/sub", true, 3),
                 "/tmp/scratch" => resolved("/private/tmp/scratch", true, 2),
-                _ => None,
+                _ => Err(ProbeError::NotFound),
             }
         }
 

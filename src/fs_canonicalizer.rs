@@ -3,21 +3,40 @@
 //! wires [`canonicalize`] into the rule set; nothing inward of it names this
 //! module.
 
-use crate::rules::ResolvedPath;
+use crate::rules::{ProbeError, ResolvedPath};
 
 /// The `std::fs::canonicalize`d spelling of `path` with its directory flag
-/// and hard-link count, or `None` when the path does not exist, cannot be
-/// read, or resolves to a non-UTF-8 name. Blocks for as long as the
-/// underlying `stat` calls do, so a hung network mount on the path stalls
-/// the caller until the evaluation watchdog trips.
-pub(crate) fn canonicalize(path: &str) -> Option<ResolvedPath> {
-    let canonical = std::fs::canonicalize(path).ok()?;
-    let metadata = std::fs::metadata(&canonical).ok()?;
-    Some(ResolvedPath {
-        path: canonical.into_os_string().into_string().ok()?,
+/// and hard-link count. Blocks for as long as the underlying `stat` calls
+/// do, so a hung network mount on the path stalls the caller until the
+/// evaluation watchdog trips.
+///
+/// # Errors
+///
+/// [`ProbeError::NotFound`] for a path that does not exist (ENOENT, ENOTDIR,
+/// or a dangling link), [`ProbeError::Loop`] for ELOOP,
+/// [`ProbeError::Denied`] for EACCES/EPERM, and [`ProbeError::Other`] for
+/// anything else, including a resolved name that is not valid UTF-8.
+pub(crate) fn canonicalize(path: &str) -> Result<ResolvedPath, ProbeError> {
+    let canonical = std::fs::canonicalize(path).map_err(probe_error)?;
+    let metadata = std::fs::metadata(&canonical).map_err(probe_error)?;
+    Ok(ResolvedPath {
+        path: canonical
+            .into_os_string()
+            .into_string()
+            .map_err(|_| ProbeError::Other)?,
         is_dir: metadata.is_dir(),
         link_count: link_count(&metadata),
     })
+}
+
+// Not `ErrorKind::FilesystemLoop`: still unstable (`io_error_more`).
+fn probe_error(error: std::io::Error) -> ProbeError {
+    match (error.kind(), error.raw_os_error()) {
+        (std::io::ErrorKind::NotFound, _) | (_, Some(libc::ENOTDIR)) => ProbeError::NotFound,
+        (_, Some(libc::ELOOP)) => ProbeError::Loop,
+        (std::io::ErrorKind::PermissionDenied, _) => ProbeError::Denied,
+        _ => ProbeError::Other,
+    }
 }
 
 #[cfg(unix)]
@@ -44,12 +63,16 @@ mod tests {
         (dir, canonical)
     }
 
-    fn resolve(path: &std::path::Path) -> Option<ResolvedPath> {
+    fn resolve(path: &std::path::Path) -> Result<ResolvedPath, ProbeError> {
         canonicalize(path.to_str().unwrap())
     }
 
-    fn resolved(path: &std::path::Path, is_dir: bool, link_count: u64) -> Option<ResolvedPath> {
-        Some(ResolvedPath {
+    fn resolved(
+        path: &std::path::Path,
+        is_dir: bool,
+        link_count: u64,
+    ) -> Result<ResolvedPath, ProbeError> {
+        Ok(ResolvedPath {
             path: path.to_str().unwrap().to_string(),
             is_dir,
             link_count,
@@ -83,7 +106,7 @@ mod tests {
         std::fs::create_dir(root.join("dir")).unwrap();
         std::fs::write(root.join("a.md"), "x").unwrap();
         std::fs::hard_link(root.join("a.md"), root.join("b.md")).unwrap();
-        assert_eq!(resolve(&root.join("dir")).map(|r| r.is_dir), Some(true));
+        assert_eq!(resolve(&root.join("dir")).map(|r| r.is_dir), Ok(true));
         assert_eq!(
             resolve(&root.join("b.md")),
             resolved(&root.join("b.md"), false, 2)
@@ -94,7 +117,46 @@ mod tests {
     fn resolve_symlinks_adapter_fails_on_dangling_and_missing_paths() {
         let (_guard, root) = temp();
         symlink(root.join("gone"), root.join("dangling.md")).unwrap();
-        assert_eq!(resolve(&root.join("dangling.md")), None);
-        assert_eq!(resolve(&root.join("missing.md")), None);
+        assert_eq!(
+            resolve(&root.join("dangling.md")),
+            Err(ProbeError::NotFound)
+        );
+        assert_eq!(resolve(&root.join("missing.md")), Err(ProbeError::NotFound));
+    }
+
+    #[test]
+    fn probe_adapter_maps_a_file_used_as_a_directory_to_not_found() {
+        let (_guard, root) = temp();
+        std::fs::write(root.join("file"), "x").unwrap();
+        assert_eq!(
+            resolve(&root.join("file").join("below")),
+            Err(ProbeError::NotFound)
+        );
+    }
+
+    #[test]
+    fn probe_adapter_reports_a_symlink_loop_as_loop() {
+        let (_guard, root) = temp();
+        symlink(root.join("b"), root.join("a")).unwrap();
+        symlink(root.join("a"), root.join("b")).unwrap();
+        assert_eq!(resolve(&root.join("a")), Err(ProbeError::Loop));
+    }
+
+    #[test]
+    fn probe_adapter_reports_an_unsearchable_directory_as_denied() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_guard, root) = temp();
+        std::fs::create_dir(root.join("locked")).unwrap();
+        std::fs::write(root.join("locked").join("f"), "x").unwrap();
+        std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o000))
+            .unwrap();
+        let result = resolve(&root.join("locked").join("f"));
+        std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        // Root is not stopped by the mode bits.
+        if result.is_ok() {
+            return;
+        }
+        assert_eq!(result, Err(ProbeError::Denied));
     }
 }
