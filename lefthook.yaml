@@ -26,9 +26,12 @@ pre-push:
       run: cargo fmt -- --check
     rust-lint:
       run: cargo clippy --all-targets -- -D warnings
-    rust-test:
-      run: cargo test
     cargo-deny:
       run: cargo deny check
     workflow-scripts-test:
       run: node --test .claude/workflows/bypass-hunt.test.mjs
+    # Not plain `cargo test`: the nix build's checkPhase runs with
+    # HOME=/homeless-shelter and no shguard config, so a test that leans on
+    # the host's ~/.config/shguard passes here and breaks darwin-rebuild.
+    rust-test:
+      run: env -u SHGUARD_CONFIG -u XDG_CONFIG_HOME -u SHGUARD_STRICT_CONFIG CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" HOME=/homeless-shelter cargo test
