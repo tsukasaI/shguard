@@ -53,9 +53,15 @@
 {"command":"builtin eval rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"builtin trap 'rm -rf /' EXIT","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"builtin typeset PATH=.; ls","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"bun x rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"bundle exec rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"bundle exec rspec","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"bunx rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"busybox env a.b=c rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"busybox mkswap /dev/sda1","decision":"Block","deny_message":null,"matched_rule":"mkswap-any-device"}
 {"command":"busybox rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"bwrap --bind / / rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"bwrap --ro-bind / / --dev /dev rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"caffeinate rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"cat $DIR/*(+f)","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"cat /etc/bash.bashrc","decision":"Allow","deny_message":null,"matched_rule":null}
@@ -104,6 +110,8 @@
 {"command":"cd ~/.config && echo x > s*/config.toml","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"cd ~/.config && rm -rf nvim/*","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"cd ~/.config && rm -rf s*","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"cgexec -g cpu:grp rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"chronic rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"chroot / rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"chrt -f 99 rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"command a.b=c rm -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
@@ -309,8 +317,23 @@
 {"command":"dd of=/etc/cron.d/x if=evil","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"dd of=/etc/passwd if=/dev/zero","decision":"Block","deny_message":null,"matched_rule":"dd-write-device"}
 {"command":"dd of=/etc/zsh/zshrc if=evil","decision":"Ask","deny_message":null,"matched_rule":null}
-{"command":"docker exec -i c sh <<EOF\nrm -rf /\nEOF","decision":"Ask","deny_message":"Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f prog.awk`) — inline interpreter code is never inspected.","matched_rule":null}
+{"command":"devbox run rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"direnv exec . rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"docker $X c rm -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"docker --weird exec c ls","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"docker -H tcp://x exec -it c rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"docker container exec c rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"docker exec -i c sh <<EOF\nrm -rf /\nEOF","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"docker exec c ls","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"docker exec c rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"docker logs c <<EOF\nx\nEOF","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"docker ps","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"docker run alpine ls","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"dotenv -- rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"dotenv -e .env -- node app.js","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"dotenv run -- rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"dotenv run rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"eatmydata rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"echo \"$(cat <<\"a'b\"\nab\n)\na'b\nrm -rf /\n)\"","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (heredoc delimiter whose quote removal brush and bash read differently); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
 {"command":"echo \"$(cat <<\"a\\b\"\nab\n)\na\\b\nrm -rf /\n)\"","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (heredoc delimiter whose quote removal brush and bash read differently); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
 {"command":"echo \"$(cat <<'E'\n\u0001\nE\n)\"","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (control character reserved for heredoc substitution handling); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
@@ -381,6 +404,11 @@
 {"command":"echo 2147483648>f","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"echo \\$${=x,y}{c,d}","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (unresolved `$` expansion form (a `${...}` split by a top-level comma)); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
 {"command":"echo \\\\${=x,y}{c,d}","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (unresolved `$` expansion form (a `${...}` split by a top-level comma)); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
+{"command":"echo a=b | xargs --replace env {} rm -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"echo a=b | xargs -I X env X rm -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"echo a=b | xargs -I{} env {} rm -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"echo a=b | xargs -J % env % rm -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"echo a=b | xargs -i env {} rm -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"echo a{9223372036854775808b","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (brace range expansion ({1..5} / {a..z})); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
 {"command":"echo cm0gLXJmIC8= | base64 -d | [[ -n $(sh) ]] | cat","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"echo cm0gLXJmIC8= | base64 -d | bash | tee log","decision":"Block","deny_message":null,"matched_rule":null}
@@ -433,6 +461,15 @@
 {"command":"echo hi | socat - TCP:example.com:80","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"echo hi | socat READLINE UNIX-CONNECT:/tmp/s","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"echo hi\\\\\nrm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"echo rm | gxargs -I{} {} -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"echo rm | xargs --replace={} {} -rf ~","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"echo rm | xargs -I% % -rf ~","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"echo rm | xargs -I{} sh -c '{} -rf ~'","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"echo rm | xargs -I{} {} -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"echo rm | xargs -I{} {} -rf ~","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"echo rm | xargs -i{} {} -rf ~","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"echo rm | xargs -n1 -I{} {} -rf ~","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"echo sh | xargs -I{} {} -c \"rm -rf ~\"","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"echo tmp.txt | xargs rm -f","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"echo x 2> $HOME/.zshrc","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"echo x 2> ~root/.zshrc","decision":"Ask","deny_message":null,"matched_rule":null}
@@ -467,6 +504,7 @@
 {"command":"echo {c,d}${ rm -rf ~; echo ,; }","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (unresolved `$` expansion form (a `${...}` split by a top-level comma)); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
 {"command":"echo$IFS/{$(rm -rf /),}","decision":"Block","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
 {"command":"echo$IFS/{,$(rm -rf /)}","decision":"Block","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"entr rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"env","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"env 'a b=c' rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"env -- =x ls","decision":"Ask","deny_message":null,"matched_rule":null}
@@ -492,6 +530,7 @@
 {"command":"env a.b=c ls","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"env a.b=c rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"env git -c core.fsmonitor=x status","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"env rm -rf ~","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"env sed 'w out' a.txt","decision":"Ask","deny_message":"Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected. A variable file operand (`sed -n p \"$file\"`) cannot be told apart from a script word, so expand it to a literal file path.","matched_rule":null}
 {"command":"env time rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"eval","decision":"Allow","deny_message":null,"matched_rule":null}
@@ -537,12 +576,19 @@
 {"command":"f() { source ./a.sh \"$1\"; }; f x","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"f() { source ./a.sh; }; f","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"f=' '; sed{,-i${f}$(printf p)${f}/home/user/.config/shguard/config.toml}","decision":"Ask","deny_message":"Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected. A variable file operand (`sed -n p \"$file\"`) cannot be told apart from a script word, so expand it to a literal file path.","matched_rule":null}
+{"command":"fakeroot -u rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"fakeroot rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"faketime '2020-01-01' rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"fd -H . / -Hx rm -rf","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"fd -e rs","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"fd -e rs -X wc -l","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"fd -e rs -x echo {}","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"fd -ex foo","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"fd -tx foo","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"fd . -X {/} x","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"fd . -x env {} rm -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"fd . -x sh -c '{}'","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"fd . -x {} -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"fd . / $FLAG rm -rf","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"fd . / -- -x rm -rf","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"fd . / --exec rm -rf","decision":"Block","deny_message":null,"matched_rule":null}
@@ -582,6 +628,8 @@
 {"command":"find . -exec bash +","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"find . -exec bash \\;","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"find . -exec bash {} -career \\;","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"find . -exec env FOO=1 ls {} \\;","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"find . -exec env {} rm -rf / \\;","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"find . -exec fish --command \"rm -rf /\" \\;","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"find . -exec fish --command ls \\;","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"find . -exec fish --command='rm -rf /' \\;","decision":"Block","deny_message":null,"matched_rule":null}
@@ -589,6 +637,7 @@
 {"command":"find . -exec fish -C 'rm -rf /' \\;","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"find . -exec fish -C ls \\;","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"find . -exec fish -C ls {} \\;","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"find . -exec grep x {} +","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"find . -exec python3 \\;","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"find . -exec rm -f '{}' \\;","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"find . -exec rm -f ././{} \\;","decision":"Block","deny_message":null,"matched_rule":null}
@@ -605,11 +654,16 @@
 {"command":"find . -exec sh $(echo -c) \"rm -rf /\" \\;","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"find . -exec sh -c \"ls\" \\;","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"find . -exec sh -c \"rm -rf /\" \\;","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"find . -exec sh -c 'echo {}' \\;","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"find . -exec sh -c '{}' \\;","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"find . -exec sh /fixed/path.sh \\;","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"find . -exec sh \\; -quit","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"find . -exec sh {} -c \\;","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"find . -exec sh {} -c true \\;","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"find . -exec sh {} \\;","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"find . -exec {} -rf / \\;","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"find . -exec {} \\;","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"find . -execdir env {} rm -rf / \\;","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"find . -execdir sh \\;","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"find . -name '*.log' -print0 | xargs -0 rm -rf","decision":"Block","deny_message":null,"matched_rule":"find-pipe-rm-force"}
 {"command":"find . -name '*.o' | xargs ls","decision":"Allow","deny_message":null,"matched_rule":null}
@@ -622,6 +676,7 @@
 {"command":"find . -name '*.tmp' | xargs -0 grep -l foo","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"find . -name '*.tmp' | xargs rm -f","decision":"Block","deny_message":null,"matched_rule":"find-pipe-rm-force"}
 {"command":"find . -ok sh \\;","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"find . -ok {} \\;","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"find . -okdir sh \\;","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"find . -print0 | xargs -0 rm -f","decision":"Block","deny_message":null,"matched_rule":"find-pipe-rm-force"}
 {"command":"find . | gxargs rm -rf","decision":"Block","deny_message":null,"matched_rule":"find-pipe-rm-force"}
@@ -638,6 +693,7 @@
 {"command":"find / -exec rm -r {} +","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"find / -exec rm -r {} \\;","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"find / -exec rm -rf {} +","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"find /bin -name rm -exec sh -c '{} -rf /' \\;","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"find /data -type d -exec rsync -a --delete empty/ {} \\;","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"find /dev -exec rm -f {} +","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"find /tmp/x | xargs rm --force","decision":"Block","deny_message":null,"matched_rule":"find-pipe-rm-force"}
@@ -676,11 +732,22 @@
 {"command":"fish script.fish -c 'rm -rf /'","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"flock /tmp/l -c 'echo hi'","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"gcat README.md","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"gchroot / rm -rf ~","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"gcp /dev/zero /dev/sda","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"gdb --args rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"gdb --eval-command='shell rm -rf /'","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"gdb -batch --args rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"gdb -ex 'shell rm -rf /' -batch","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"gdb -iex 'shell rm -rf /'","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"gdb -x cmds.gdb","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"gdb prog","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"gdd if=/dev/zero of=/dev/sda","decision":"Block","deny_message":null,"matched_rule":"dd-write-device"}
+{"command":"genv FOO=1 ls","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"genv rm -rf ~","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"gfind . -print0 | xargs -0 rm -f","decision":"Block","deny_message":null,"matched_rule":"find-pipe-rm-force"}
 {"command":"gfind / -delete","decision":"Block","deny_message":null,"matched_rule":"find-delete"}
 {"command":"gfind / -exec rm -rf {} +","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"gfind ~ -delete","decision":"Block","deny_message":null,"matched_rule":"find-delete"}
 {"command":"gh pr create --title t --body \"$(cat <<'EOF'\n(x\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"gh pr create --title t --body \"$(cat <<'EOF'\ndon't\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"gh pr create --title t --body \"$(cat <<'EOF'\nfix: thing\n\n1) first item\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
@@ -822,11 +889,25 @@
 {"command":"git tag -f v1.0.0","decision":"Block","deny_message":null,"matched_rule":"git-tag-destructive"}
 {"command":"gls -la","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"gmv /etc/passwd /dev/null","decision":"Block","deny_message":null,"matched_rule":"mv-write-device"}
+{"command":"gmv ~ /dev/null","decision":"Block","deny_message":null,"matched_rule":"mv-write-device"}
+{"command":"gnice -n 5 ls","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"gnice rm -rf ~","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"gnohup rm -rf ~","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"grm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"grm -rf ~","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"gsed 'w out' a.txt","decision":"Ask","deny_message":"Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected. A variable file operand (`sed -n p \"$file\"`) cannot be told apart from a script word, so expand it to a literal file path.","matched_rule":null}
+{"command":"gshred -u /etc/passwd","decision":"Block","deny_message":null,"matched_rule":"shred"}
 {"command":"gshred /dev/sda","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"gstdbuf -oL rm -rf ~","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"gtar xfC a.tar /","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}
+{"command":"gtime rm -rf ~","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"gtimeout 5 ls","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"gtimeout 5 rm -rf ~","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"gtimeout 5 sh -c 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"gtruncate -s 0 ~/.zshrc","decision":"Block","deny_message":null,"matched_rule":"truncate-zero"}
+{"command":"gxargs rm -rf ~","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"if true; then x=$(( ${ rm -rf /; } )); fi","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"ifne rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"install -m 644 evil ~/.config/fish/conf.d/x.fish","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"install -m 644 evil ~/.config/fish/config.fish","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"install -m 755 evil /etc/cron.d","decision":"Ask","deny_message":null,"matched_rule":null}
@@ -856,6 +937,9 @@
 {"command":"install bin /dev/shm/test/","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"install payload.bin /dev/sda","decision":"Block","deny_message":null,"matched_rule":"install-write-device"}
 {"command":"install payload.bin /dev/shm/../sda","decision":"Block","deny_message":null,"matched_rule":"install-write-device"}
+{"command":"ip link show","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"ip netns exec ns ip a","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"ip netns exec ns rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"kill %1","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"kill -9 \" -1\"","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"kill -9 '  -1'","decision":"Ask","deny_message":null,"matched_rule":null}
@@ -871,6 +955,10 @@
 {"command":"killall -9 -u me","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"killall node","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"killall5 -9","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"kubectl exec -it p -- rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"kubectl exec p -- ls","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"kubectl exec p -- rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"kubectl get pods","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"ln -sf evil ~/.bashrc","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"ln -sf evil ~/.ssh/rc","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"ls \"$DIR\"/*(e:x:)","decision":"Ask","deny_message":null,"matched_rule":null}
@@ -887,13 +975,20 @@
 {"command":"ls *(oe:'x':)","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"ls *(om[1])","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"ls | cat > $(date +%F).log","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"ls | entr -r make","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"ls | entr /_","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"ls | script -qc 'echo hi' out","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"ls | sort | { cat; } | head","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"ls | xargs -I{} cp {} /tmp","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"ls | xargs -I{} echo {}","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"ls | xargs rm -f","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"ls ~/$X/*(:h)","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"ls ~/.config/*(/)","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"ltrace rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"make -f - <<EOF\nall:\n\trm -rf /\nEOF","decision":"Ask","deny_message":"Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f prog.awk`) — inline interpreter code is never inspected.","matched_rule":null}
 {"command":"make <<EOF\nx\nEOF","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"mise exec -- rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"mise exec node@20 -- rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"mkfs -t ext4 /dev/sda1","decision":"Block","deny_message":null,"matched_rule":"mkfs-dispatcher-any-filesystem"}
 {"command":"mkfs /dev/sda1","decision":"Block","deny_message":null,"matched_rule":"mkfs-dispatcher-any-filesystem"}
 {"command":"mkfs.ext4 /dev/sda1","decision":"Block","deny_message":null,"matched_rule":"mkfs-any-filesystem"}
@@ -945,10 +1040,27 @@
 {"command":"n=5; [[ $n -gt 3 ]]","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"nice fd . / -x rm -rf","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"nice gdd if=/dev/zero of=/dev/sda","decision":"Block","deny_message":null,"matched_rule":"dd-write-device"}
+{"command":"nix build .","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"nix develop -c rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"nix develop .#x -c rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"nix shell -c rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"nix shell nixpkgs#hello","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"nix-shell --run 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"nohup env a.b=c rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"npm $X -- rm -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"npm exec -- eslint .","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"npm exec -- rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"npm exec --yes -- rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"npm exec rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"npm install","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"npx -c 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"npx -y rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"npx prettier --check .","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"npx rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"numactl rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"nvm() { source \"$NVM_DIR/nvm.sh\"; }","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"oils-for-unix osh -c 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"op run -- rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"osascript -e 'do shell script \"rm -rf ~\"'","decision":"Ask","deny_message":"Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f prog.awk`) — inline interpreter code is never inspected.","matched_rule":null}
 {"command":"osascript -l JavaScript -e 1","decision":"Ask","deny_message":"Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f prog.awk`) — inline interpreter code is never inspected.","matched_rule":null}
 {"command":"osascript -l JavaScript script.js","decision":"Allow","deny_message":null,"matched_rule":null}
@@ -961,12 +1073,22 @@
 {"command":"parallel -j4 echo ::: a b","decision":"Ask","deny_message":"Run the commands directly or with a shell loop (`for x in ...; do cmd \"$x\"; done`) so each argv is inspectable; GNU `parallel` builds its command lines from templates and `:::` sources that are never inspected.","matched_rule":null}
 {"command":"parallel ::: 'rm -rf /'","decision":"Ask","deny_message":"Run the commands directly or with a shell loop (`for x in ...; do cmd \"$x\"; done`) so each argv is inspectable; GNU `parallel` builds its command lines from templates and `:::` sources that are never inspected.","matched_rule":null}
 {"command":"parallel rm -rf ::: /","decision":"Ask","deny_message":"Run the commands directly or with a shell loop (`for x in ...; do cmd \"$x\"; done`) so each argv is inspectable; GNU `parallel` builds its command lines from templates and `:::` sources that are never inspected.","matched_rule":null}
+{"command":"pipx install x","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"pipx run rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"pkill --user me","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"pkill -9 -u me","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"pkill -9 node","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"pkill -U me","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"pnpm dlx rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"pnpm exec rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"poetry $X rm -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"poetry install","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"poetry run pytest","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"poetry run rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"prlimit rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"proot -r / rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"r''m -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"rlwrap rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"rm --recursive --force ~/.*","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"rm -Rf .","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"rm -Rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
@@ -1039,6 +1161,7 @@
 {"command":"rm -rf ./build/*","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"rm -rf ./build/*(N)","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"rm -rf .[!.]?*","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"rm -rf / ${-9223372036854775809}","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"rm -rf / ${99999999999999999999}","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"rm -rf / ${x}{1..2}","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (brace range expansion ({1..5} / {a..z})); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
@@ -1194,7 +1317,17 @@
 {"command":"rsync -a src/ /dev/sda","decision":"Block","deny_message":null,"matched_rule":"rsync-write-device"}
 {"command":"rsync -a src/ /dev/shm/../sda","decision":"Block","deny_message":null,"matched_rule":"rsync-write-device"}
 {"command":"rsync -a src/ /dev/shm/scratch","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"runcon --type=foo_t rm -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"runcon -tfoo_t rm -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"runcon ctx rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"runuser -u root rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"rustup +stable run x rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"rustup run stable rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"screen -L -Logfile x.log make","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"screen -S x -X quit","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"screen -X stuff 'rm -rf /'","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"screen -dmS x rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"screen -r","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"script --command='rm -rf /' /dev/null","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"script -F out.txt ls","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"script -Z val out.txt rm -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
@@ -1282,6 +1415,9 @@
 {"command":"set -- <(curl x); source \"$1\" x{,}","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"set -- <(curl x); source /dev/stdin < \"$1\"","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"setarch x86_64 rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"sg grp","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"sg grp 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"sg grp -c 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"sh","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"sh -c 'echo hi' > /dev/sda","decision":"Block","deny_message":null,"matched_rule":"redirect-overwrite-device-or-critical-file"}
 {"command":"shopt -s expand_aliases; alias x=\"rm -rf /\"\nx","decision":"Block","deny_message":null,"matched_rule":null}
@@ -1311,7 +1447,18 @@
 {"command":"socat /dev/null EXEC:'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"source /dev/stdin < ./x.sh","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"source ~/.bashrc","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"ssh -o LocalCommand='rm -rf /' -o PermitLocalCommand=yes host","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"ssh -o ProxyCommand=$X host","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"ssh -o ProxyCommand='rm -rf /' host","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"ssh -o StrictHostKeyChecking=no host ls","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"ssh -p 22 host -t rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"ssh host","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"ssh host 'ls -la'","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"ssh host 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"ssh host ls","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"ssh host rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"sshpass -f pw ssh host ls","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"sshpass -p pw rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"strace rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"systemd-run rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"tar --extract --directory=/ -f evil.tar","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}
@@ -1362,6 +1509,23 @@
 {"command":"time time rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"time time sudo id","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"timeout 5 rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"timeout 5 rm -rf ~","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"tmux -L x new -d rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"tmux -c 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"tmux display-popup -E 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"tmux if-shell true 'rm -rf /'","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"tmux new-session -d -s x","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"tmux new-session -d -s x 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"tmux new-session rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"tmux new-window 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"tmux new-window -n x","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"tmux pipe-pane 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"tmux respawn-pane 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"tmux run-shell 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"tmux send-keys 'rm -rf /' Enter","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"tmux send-keys -t x","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"tmux split-window 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"tmux split-window -h","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"toybox rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"trap","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"trap \"$X\" EXIT","decision":"Ask","deny_message":null,"matched_rule":null}
@@ -1395,6 +1559,14 @@
 {"command":"unlink /etc/bash.bashrc","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"unlink ~/.bashrc","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"unshare rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"uv run --with x rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"uv run pytest","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"uv run rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"uv sync","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"uv tool install x","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"uv tool run rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"uvx rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"valgrind rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"watch -x -- env -- A=b rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"watch rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"wget --output-document ~/.zshrc https://x","decision":"Ask","deny_message":null,"matched_rule":null}
@@ -1418,7 +1590,9 @@
 {"command":"x='$(rm -rf ~)'; echo ${(e)x}","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (unresolved `$` expansion form (zsh flags/short forms such as ${(e)x}, ${=x}, $=x, $~x, or a ${ command; } substitution)); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
 {"command":"x=rm; $=x -rf ~","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (unresolved `$` expansion form (zsh flags/short forms such as ${(e)x}, ${=x}, $=x, $~x, or a ${ command; } substitution)); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
 {"command":"x=rm; ${=x} -rf ~","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (unresolved `$` expansion form (zsh flags/short forms such as ${(e)x}, ${=x}, $=x, $~x, or a ${ command; } substitution)); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
+{"command":"xargs -I{} sh -c '{} -rf ~' < list","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"xargs -x fd pattern","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"xvfb-run rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"{ echo x; } >> $HOME/.zshrc","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"{ echo x; } >> ~/.zshrc","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"{ echo x; } >> ~root/.zshrc","decision":"Ask","deny_message":null,"matched_rule":null}

@@ -4508,6 +4508,14 @@ impl PipelineRule {
         let Some((sink_name, sink_tail)) = effective_command(sink_stage) else {
             return false;
         };
+        // Not the local interpreter: `ssh host sh` and `docker exec -i c sh`
+        // run it elsewhere, which the stdin-sink floor already asks about.
+        if wrapper_hops(sink_stage)
+            .iter()
+            .any(|(name, _)| REMOTE_EXEC_WRAPPERS.contains(&name.as_str()))
+        {
+            return false;
+        }
         // Issue #497: a versioned/distro-suffixed sink binary (`dash5`)
         // resolves to the same interpreter `strip_version_suffix` already
         // normalizes it to elsewhere (`is_pipeline_interpreter`,
@@ -5263,8 +5271,10 @@ const EXTRA_PIPELINE_INTERPRETERS: &[&str] = &[
 /// `vi`, `vim`, `dc`, `m4`) and a database client with one (`sqlite3`,
 /// `psql`, `mysql`). A sink by NAME alone, like
 /// [`EXTRA_PIPELINE_INTERPRETERS`], but not part of
-/// [`matches_dangerous_allow_target`]: these are everyday tools, and an
-/// `allow` entry naming `ssh` or `psql` must keep loading.
+/// [`matches_dangerous_allow_target`] for their own sake: these are everyday
+/// tools, and an `allow` entry naming `psql` must keep loading. `ssh` and
+/// `gdb` are also exec wrappers (issue #740), which is what makes an entry
+/// naming them rejected.
 ///
 /// Entries are post-[`strip_version_suffix`] and case-folded: `sqlite3` is
 /// `sqlite`, `m4` is `m`, `R` is `r`. A stdin-operand-gated sink (`make -f
@@ -5329,13 +5339,20 @@ pub(crate) fn fold_command_name(name: &str) -> String {
 
 /// Unprefixed names of the GNU tools that Homebrew installs with a `g` prefix
 /// (`gdd`, `grm`, `gfind`, `gtar`) so they do not shadow the BSD tools on
-/// macOS: coreutils, findutils, tar and sed. `xargs` is the one exec wrapper
-/// already included; the rest (`env`, `nice`, `nohup`, `timeout`, `stdbuf`,
-/// `chroot`, `runcon`) are deliberately absent: issue #740 only has to add
-/// them here, and the wrapper catalog then resolves the canonical name.
+/// macOS: coreutils (including its exec wrappers `env`, `nice`, `nohup`,
+/// `timeout`, `stdbuf`, `chroot`, `runcon`), findutils, tar, sed and GNU
+/// `time` (`gtime`). The wrapper catalog resolves the canonical name.
 const GNU_G_PREFIXED_TOOLS: &[&str] = &[
     "find",
     "xargs",
+    "env",
+    "nice",
+    "nohup",
+    "timeout",
+    "stdbuf",
+    "chroot",
+    "runcon",
+    "time",
     "locate",
     "updatedb",
     "tar",
@@ -5688,6 +5705,9 @@ fn wrapper_hop<'a>(
             (unmodeled.into_best_effort(), Some(finding))
         }
     };
+    if !parsed.applies() {
+        return None;
+    }
     Some(WrapperHop {
         base,
         wrapper,
@@ -5790,6 +5810,134 @@ pub(crate) fn first_unmodeled_wrapper_option(stage: &[NormalizedWord]) -> Option
         rest = hop.next();
     }
     None
+}
+
+/// Wrappers that run their command on another host or in a container.
+const REMOTE_EXEC_WRAPPERS: &[&str] = &["ssh", "docker", "kubectl"];
+
+/// The canonical name and argument tail of every wrapper hop along `stage`'s
+/// chain, outermost first. A wrapper that is itself a stdin sink (`ssh`,
+/// `docker exec -i`) is only visible here: [`effective_command`] reports the
+/// command behind it.
+#[must_use]
+pub(crate) fn wrapper_hops(stage: &[NormalizedWord]) -> Vec<(String, &[NormalizedWord])> {
+    let mut hops = Vec::new();
+    let mut rest = stage;
+    while let Step::Wrapper(hop) = step(rest, &[]) {
+        hops.push((canonical_command_name(hop.base), hop.tail));
+        rest = hop.next();
+    }
+    hops
+}
+
+/// The replace-string an `xargs` hop's own options set (`-I R`, `-IR`, `-i[R]`,
+/// `--replace[=R]`, BSD `-J R`), the last one winning; `None` when it sets
+/// none or the value is unresolvable.
+fn xargs_replace_string(hop: &WrapperHop<'_>) -> Option<String> {
+    let words = &hop.tail[..hop.parsed.command_at()];
+    let text = |i: usize| match words.get(i)?.resolution() {
+        Resolution::Resolved(s) => Some(s.as_str()),
+        Resolution::Unresolvable(_) => None,
+    };
+    let mut replace = None;
+    let mut i = 0;
+    while let Some(word) = text(i) {
+        i += 1;
+        if word == "--replace" {
+            replace = Some("{}".to_string());
+        } else if let Some(value) = word.strip_prefix("--replace=") {
+            replace = Some(value.to_string());
+        } else if let Some(cluster) = word.strip_prefix('-').filter(|c| !c.starts_with('-')) {
+            for (at, c) in cluster.char_indices() {
+                let attached = &cluster[at + 1..];
+                match c {
+                    'i' => {
+                        replace =
+                            Some(if attached.is_empty() { "{}" } else { attached }.to_string());
+                        break;
+                    }
+                    'I' | 'J' => {
+                        replace = if attached.is_empty() {
+                            let value = text(i).map(str::to_string);
+                            i += 1;
+                            value
+                        } else {
+                            Some(attached.to_string())
+                        };
+                        break;
+                    }
+                    'E' | 'L' | 'l' | 'n' | 's' | 'P' | 'd' | 'a' | 'e' | 'R' | 'S' => {
+                        if attached.is_empty() && !matches!(c, 'l' | 'e') {
+                            i += 1;
+                        }
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    replace.filter(|r| !r.is_empty())
+}
+
+/// Whether some hop of `stage`'s wrapper chain has a command word that
+/// contains one of `initial` or an enclosing `xargs`' replace-string. Such a
+/// word is substituted before the command runs (`xargs -I{} {} -rf /`,
+/// `find -exec env {} rm -rf / \;`), so the command that actually runs
+/// comes from data this crate cannot see.
+#[must_use]
+pub(crate) fn placeholder_in_command_slot(stage: &[NormalizedWord], initial: &[&str]) -> bool {
+    let mut active: Vec<String> = initial.iter().map(|p| (*p).to_string()).collect();
+    let mut rest = stage;
+    loop {
+        if let Some(Resolution::Resolved(word)) = rest.first().map(NormalizedWord::resolution)
+            && active.iter().any(|p| word.contains(p.as_str()))
+        {
+            return true;
+        }
+        match step(rest, &[]) {
+            Step::Wrapper(hop) => {
+                active.extend(hop_placeholders(&hop));
+                rest = hop.next();
+            }
+            Step::Command { .. } | Step::Unresolvable | Step::Empty => return false,
+        }
+    }
+}
+
+/// The words a wrapper hop itself substitutes into the command it runs.
+fn hop_placeholders(hop: &WrapperHop<'_>) -> Vec<String> {
+    match canonical_command_name(hop.base).as_str() {
+        "xargs" => xargs_replace_string(hop).into_iter().collect(),
+        "entr" => vec!["/_".to_string()],
+        _ => Vec::new(),
+    }
+}
+
+/// The shell strings the wrapper chain of `stage` runs once a placeholder is
+/// active (`find -exec sh -c '{} -rf /'`, `xargs -I{} sh -c '{} -rf ~'`),
+/// with the placeholders active for them. The caller checks each string's
+/// own commands with [`placeholder_in_command_slot`].
+#[must_use]
+pub(crate) fn placeholder_script_strings(
+    stage: &[NormalizedWord],
+    initial: &[&str],
+) -> (Vec<String>, Vec<String>) {
+    let mut active: Vec<String> = initial.iter().map(|p| (*p).to_string()).collect();
+    let mut scripts = Vec::new();
+    let mut rest = stage;
+    while let Step::Wrapper(hop) = step(rest, &[]) {
+        active.extend(hop_placeholders(&hop));
+        if !active.is_empty() {
+            for value in hop.wrapper.shell_script_values(hop.tail) {
+                if let ScriptValue::Text(script) = value {
+                    scripts.push(script.to_string());
+                }
+            }
+        }
+        rest = hop.next();
+    }
+    (scripts, active)
 }
 
 /// Whether the command `stage` finally runs is named by a word containing
@@ -6122,15 +6270,53 @@ pub(crate) fn chain_script_slots(stage: &[NormalizedWord]) -> Vec<ScriptSlot> {
             collect_split_string_slots(&hop, flag, &mut slots);
         }
         if let Some(exec_flag) = hop.wrapper.operands_as_shell_script_exec_flag() {
-            collect_operands_shell_slot(&hop, exec_flag, &mut slots);
+            collect_operands_shell_slot(&hop, Some(exec_flag), &mut slots);
+        } else if hop.wrapper.joins_operands_as_shell_script() {
+            collect_operands_shell_slot(&hop, None, &mut slots);
         }
         if let Some(flag) = hop.wrapper.piped_output_option() {
             collect_piped_output_slots(&hop, flag, &mut slots);
+        }
+        if let Some((letter, keys)) = hop.wrapper.keyed_shell_script() {
+            collect_keyed_script_slots(&hop, letter, keys, &mut slots);
         }
         rest = hop.next();
     }
     socat_command_slots(stage, &mut slots);
     slots
+}
+
+/// `ssh -o ProxyCommand=CMD` / `-o 'LocalCommand CMD'` hand CMD to a shell.
+/// Keys are matched case-folded, as ssh does; an unresolved value might be
+/// either key.
+fn collect_keyed_script_slots(
+    hop: &WrapperHop<'_>,
+    letter: char,
+    keys: &[&str],
+    slots: &mut Vec<ScriptSlot>,
+) {
+    for option in hop.parsed.options_named((letter, "")) {
+        let value = match option.value {
+            OptionValue::Glued(text) => text,
+            OptionValue::Separate(word) => match word.resolution() {
+                Resolution::Resolved(text) => text.as_str(),
+                Resolution::Unresolvable(_) => {
+                    slots.push(ScriptSlot::Unresolvable);
+                    continue;
+                }
+            },
+            OptionValue::Absent => continue,
+        };
+        let (key, rest) = value
+            .split_once(|c: char| c == '=' || c.is_whitespace())
+            .unwrap_or((value, ""));
+        if keys.contains(&fold_command_name(key).as_str()) {
+            let script = rest.trim_start_matches(|c: char| c == '=' || c.is_whitespace());
+            if !script.eq_ignore_ascii_case("none") {
+                slots.push(ScriptSlot::Resolved(script.to_string()));
+            }
+        }
+    }
 }
 
 /// `watch` runs its operands through `sh -c` (words joined by spaces)
@@ -6139,11 +6325,13 @@ pub(crate) fn chain_script_slots(stage: &[NormalizedWord]) -> Vec<ScriptSlot> {
 /// that tail floors to Ask.
 fn collect_operands_shell_slot(
     hop: &WrapperHop<'_>,
-    exec_flag: (char, &'static str),
+    exec_flag: Option<(char, &'static str)>,
     slots: &mut Vec<ScriptSlot>,
 ) {
     let operands = hop.next();
-    if hop.parsed.options_named(exec_flag).next().is_some() || operands.is_empty() {
+    if exec_flag.is_some_and(|flag| hop.parsed.options_named(flag).next().is_some())
+        || operands.is_empty()
+    {
         return;
     }
     let mut script = String::new();
@@ -9037,7 +9225,7 @@ fn matches_dangerous_allow_target(entry: &CommandRule) -> bool {
             .chain(EXTRA_PIPELINE_INTERPRETERS.iter())
             .chain(AWK_INTERPRETERS.iter())
             .copied()
-            .chain(knowledge::exec_wrapper_names())
+            .chain(knowledge::always_wrapping_names())
     };
     let matches_ci = |name: &str| match &entry.command {
         CommandMatch::Exact(exact) => {
@@ -16447,6 +16635,32 @@ mod tests {
                 ),
                 "{wrapper}"
             );
+        }
+    }
+
+    #[test]
+    fn user_config_allow_entry_for_subcommand_gated_wrapper_loads_but_pure_wrapper_is_rejected() {
+        // Issue #740: `npm`, `docker` and the like wrap a command only for
+        // one subcommand, so their allow entries keep loading; `npx`, `ssh`
+        // and `gtimeout` wrap every call.
+        for (name, loads) in [
+            ("npm", true),
+            ("docker", true),
+            ("tmux", true),
+            ("npx", false),
+            ("ssh", false),
+            ("sshpass", false),
+            ("gtimeout", false),
+        ] {
+            let toml = format!(
+                r#"
+                [[allow]]
+                id = "user-allow-{name}"
+                reason = "trust me"
+                command = "{name}"
+                "#
+            );
+            assert_eq!(UserConfig::parse(&toml).is_ok(), loads, "{name}");
         }
     }
 

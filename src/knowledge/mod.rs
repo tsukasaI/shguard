@@ -49,10 +49,22 @@ pub(crate) fn is_exec_wrapper(folded: &str) -> bool {
 }
 
 /// Every name of a catalogued exec wrapper.
+#[cfg(test)]
 pub(crate) fn exec_wrapper_names() -> impl Iterator<Item = &'static str> {
     catalog::CATALOG
         .iter()
         .filter(|spec| spec.runs_command())
+        .flat_map(|spec| spec.names.iter().copied())
+}
+
+/// Every name of a catalogued exec wrapper that wraps a command on every
+/// call. A wrapper gated on a subcommand (`npm exec`, `docker exec`) is a
+/// tool people legitimately allow for its other subcommands, so it is left
+/// out.
+pub(crate) fn always_wrapping_names() -> impl Iterator<Item = &'static str> {
+    catalog::CATALOG
+        .iter()
+        .filter(|spec| spec.runs_command() && spec.subcommands().is_none())
         .flat_map(|spec| spec.names.iter().copied())
 }
 
@@ -218,6 +230,17 @@ impl Known {
 
     pub(crate) fn piped_output_option(&self) -> Option<(char, &'static str)> {
         self.spec.piped_output_option()
+    }
+
+    /// The option letter and keys of a `-o key=value` option whose value is a
+    /// shell command for those keys.
+    pub(crate) fn keyed_shell_script(&self) -> Option<(char, &'static [&'static str])> {
+        self.spec.keyed_shell_script()
+    }
+
+    /// Whether the operands are always joined into a shell string.
+    pub(crate) fn joins_operands_as_shell_script(&self) -> bool {
+        self.spec.joins_operands_as_shell_script()
     }
 
     /// The exec flag that turns off running the operands as a shell string.

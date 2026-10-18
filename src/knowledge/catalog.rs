@@ -949,6 +949,626 @@ pub(super) static CATALOG: &[CommandSpec] = &[
         },
         slots: &[EXEC],
     },
+    // Issue #740: command runners that were Allow with any inner command.
+    // Tools whose wrapper form is one subcommand (`poetry run`, `docker
+    // exec`) carry `Slot::Subcommands`, so their other subcommands stay
+    // ordinary commands.
+    CommandSpec {
+        names: &["eatmydata"],
+        options: BASE,
+        slots: &[EXEC],
+    },
+    CommandSpec {
+        names: &["bwrap"],
+        options: OptionGrammar {
+            long_flags: &[
+                "unshare-user",
+                "unshare-user-try",
+                "unshare-ipc",
+                "unshare-pid",
+                "unshare-net",
+                "unshare-uts",
+                "unshare-cgroup",
+                "unshare-cgroup-try",
+                "unshare-all",
+                "share-net",
+                "die-with-parent",
+                "new-session",
+                "as-pid-1",
+                "disable-userns",
+                "assert-userns-disabled",
+                "clearenv",
+                "help",
+                "version",
+            ],
+            long_values: &[
+                "tmpfs",
+                "proc",
+                "dev",
+                "mqueue",
+                "dir",
+                "unsetenv",
+                "uid",
+                "gid",
+                "hostname",
+                "chdir",
+                "userns",
+                "userns2",
+                "pidns",
+                "cap-add",
+                "cap-drop",
+                "seccomp",
+                "block-fd",
+                "sync-fd",
+                "lock-file",
+                "argv0",
+                "remount-ro",
+                "size",
+                "perms",
+                "info-fd",
+                "json-status-fd",
+                "userns-block-fd",
+                "exec-label",
+                "file-label",
+            ],
+            long_pairs: &[
+                "bind",
+                "bind-try",
+                "ro-bind",
+                "ro-bind-try",
+                "dev-bind",
+                "dev-bind-try",
+                "symlink",
+                "setenv",
+                "file",
+                "bind-data",
+                "ro-bind-data",
+                "chmod",
+            ],
+            ..BASE
+        },
+        slots: &[EXEC],
+    },
+    CommandSpec {
+        names: &["proot"],
+        options: OptionGrammar {
+            short_flags: "0hV",
+            short_values: "rRSbqwvk",
+            long_flags: &["help", "version", "kill-on-exit", "link2symlink", "sysvipc"],
+            long_values: &[
+                "rootfs",
+                "bind",
+                "mount",
+                "qemu",
+                "cwd",
+                "pwd",
+                "verbose",
+                "kernel-release",
+            ],
+            ..BASE
+        },
+        slots: &[EXEC],
+    },
+    CommandSpec {
+        names: &["ltrace"],
+        options: OptionGrammar {
+            short_flags: "cCdfiLrStTbhVg",
+            short_values: "oepsuaAlnwxF",
+            ..BASE
+        },
+        slots: &[EXEC],
+    },
+    CommandSpec {
+        names: &["gdb"],
+        // The program is only run under `--args`; without it the first
+        // operand is a file to debug, which is a harmless "command" here.
+        options: OptionGrammar {
+            single_dash_long: true,
+            long_flags: &[
+                "args", "batch", "quiet", "q", "nx", "nh", "silent", "readnow", "write", "tui",
+                "fullname", "help", "version",
+            ],
+            long_values: &[
+                "ex",
+                "iex",
+                "eval-command",
+                "init-eval-command",
+                "command",
+                "x",
+                "ix",
+                "directory",
+                "cd",
+                "tty",
+                "core",
+                "pid",
+                "symbols",
+                "exec",
+                "se",
+                "data-directory",
+                "init-command",
+            ],
+            // These run gdb commands, `shell ...` among them.
+            floor_options: &[
+                "ex",
+                "iex",
+                "eval-command",
+                "init-eval-command",
+                "command",
+                "x",
+                "ix",
+                "init-command",
+            ],
+            ..BASE
+        },
+        slots: &[EXEC],
+    },
+    // The union of the options of the subcommands below. `-l` is split-window's
+    // size and `-d` new-session's flag, so `tmux -l` and `run-shell -d DELAY`
+    // are misread.
+    CommandSpec {
+        names: &["tmux"],
+        options: OptionGrammar {
+            short_flags: "2CNuvVDAdEPXkabhZBOoIHKMR",
+            short_values: "cfLSTeFnstxylpw",
+            ..BASE
+        },
+        slots: &[
+            Slot::Subcommands(&[
+                &["new-session"],
+                &["new"],
+                &["new-window"],
+                &["neww"],
+                &["split-window"],
+                &["splitw"],
+                &["run-shell"],
+                &["run"],
+                &["respawn-pane"],
+                &["respawnp"],
+                &["respawn-window"],
+                &["respawnw"],
+                &["display-popup"],
+                &["popup"],
+                &["pipe-pane"],
+                &["pipep"],
+            ]),
+            Slot::UnmodeledSubcommands(&[&["send-keys"], &["send"], &["if-shell"], &["if"]]),
+            EXEC,
+            Slot::ShellScript {
+                short: Some('c'),
+                long: None,
+            },
+            Slot::OperandsJoinedShellScript,
+        ],
+    },
+    CommandSpec {
+        names: &["screen"],
+        options: OptionGrammar {
+            short_flags: "aAdDfilLmOqUvw",
+            short_values: "hpsStTceX",
+            short_glued: "rRx",
+            dash_word_values: &["Logfile"],
+            dash_words: &["fn", "fa", "ln"],
+            floor_values: &[(
+                'X',
+                &[
+                    "stuff", "eval", "source", "register", "paste", "readreg", "readbuf",
+                ],
+            )],
+            ..BASE
+        },
+        slots: &[EXEC],
+    },
+    CommandSpec {
+        names: &["faketime"],
+        options: OptionGrammar {
+            short_flags: "mfh",
+            long_flags: &["exclude-monotonic", "disable-cache", "help", "version"],
+            ..BASE
+        },
+        slots: &[EXEC, Slot::Operands(1)],
+    },
+    CommandSpec {
+        names: &["xvfb-run"],
+        options: OptionGrammar {
+            short_flags: "ahl",
+            short_values: "efnpsw",
+            long_flags: &["auto-servernum", "help", "listen-tcp"],
+            long_values: &[
+                "error-file",
+                "auth-file",
+                "server-num",
+                "xauth-protocol",
+                "server-args",
+                "wait",
+            ],
+            ..BASE
+        },
+        slots: &[EXEC],
+    },
+    CommandSpec {
+        names: &["sg"],
+        options: OptionGrammar {
+            short_values: "c",
+            bare_dash_option: true,
+            order: ArgOrder::PermuteUntilCommand,
+            ..BASE
+        },
+        slots: &[
+            EXEC,
+            Slot::Operands(1),
+            Slot::ShellScript {
+                short: Some('c'),
+                long: None,
+            },
+            Slot::OperandsJoinedShellScript,
+        ],
+    },
+    CommandSpec {
+        names: &["cgexec"],
+        options: OptionGrammar {
+            short_flags: "h",
+            short_values: "g",
+            long_flags: &["sticky"],
+            ..BASE
+        },
+        slots: &[EXEC],
+    },
+    CommandSpec {
+        names: &["ip"],
+        options: OptionGrammar {
+            short_flags: "46B0sdrhVjpTtDoOqa",
+            short_values: "nbf",
+            ..BASE
+        },
+        slots: &[
+            Slot::Subcommands(&[&["netns", "exec"]]),
+            EXEC,
+            Slot::Operands(1),
+        ],
+    },
+    CommandSpec {
+        names: &["sshpass"],
+        options: OptionGrammar {
+            short_flags: "ehvV",
+            short_values: "pfdP",
+            ..BASE
+        },
+        slots: &[EXEC],
+    },
+    CommandSpec {
+        names: &["entr"],
+        options: OptionGrammar {
+            short_flags: "acdnprxz",
+            short_values: "s",
+            ..BASE
+        },
+        slots: &[
+            EXEC,
+            Slot::ShellScript {
+                short: Some('s'),
+                long: None,
+            },
+        ],
+    },
+    CommandSpec {
+        names: &["chronic"],
+        options: OptionGrammar {
+            short_flags: "ev",
+            ..BASE
+        },
+        slots: &[EXEC],
+    },
+    CommandSpec {
+        names: &["ifne"],
+        options: OptionGrammar {
+            short_flags: "n",
+            ..BASE
+        },
+        slots: &[EXEC],
+    },
+    CommandSpec {
+        names: &["poetry"],
+        options: OptionGrammar {
+            short_flags: "vVqnh",
+            short_values: "CP",
+            long_flags: &[
+                "ansi",
+                "no-ansi",
+                "quiet",
+                "verbose",
+                "version",
+                "no-interaction",
+                "no-plugins",
+                "no-cache",
+                "help",
+            ],
+            long_values: &["directory", "project"],
+            ..BASE
+        },
+        slots: &[Slot::Subcommands(&[&["run"]]), EXEC],
+    },
+    CommandSpec {
+        names: &["uv"],
+        options: UV_RUN_OPTIONS,
+        slots: &[Slot::Subcommands(&[&["run"], &["tool", "run"]]), EXEC],
+    },
+    CommandSpec {
+        names: &["npx"],
+        options: NPM_EXEC_OPTIONS,
+        slots: &[
+            EXEC,
+            Slot::ShellScript {
+                short: Some('c'),
+                long: Some("call"),
+            },
+        ],
+    },
+    CommandSpec {
+        names: &["npm"],
+        options: NPM_EXEC_OPTIONS,
+        slots: &[
+            Slot::Subcommands(&[&["exec"], &["x"]]),
+            EXEC,
+            Slot::ShellScript {
+                short: Some('c'),
+                long: Some("call"),
+            },
+        ],
+    },
+    CommandSpec {
+        names: &["pnpm"],
+        options: OptionGrammar {
+            short_flags: "rwh",
+            short_values: "CF",
+            long_flags: &["recursive", "workspace-root", "help"],
+            long_values: &["filter", "dir"],
+            ..BASE
+        },
+        slots: &[Slot::Subcommands(&[&["exec"], &["dlx"]]), EXEC],
+    },
+    CommandSpec {
+        names: &["bundle"],
+        options: OptionGrammar {
+            long_flags: &["keep-file-descriptors", "help"],
+            ..BASE
+        },
+        slots: &[Slot::Subcommands(&[&["exec"]]), EXEC],
+    },
+    CommandSpec {
+        names: &["mise"],
+        options: OptionGrammar {
+            short_flags: "hqvy",
+            short_values: "Cj",
+            long_flags: &["raw", "quiet", "verbose", "yes", "help"],
+            long_values: &["cd", "jobs"],
+            command_after: &["--"],
+            ..BASE
+        },
+        slots: &[Slot::Subcommands(&[&["exec"], &["x"]]), EXEC],
+    },
+    CommandSpec {
+        names: &["direnv"],
+        options: BASE,
+        slots: &[Slot::Subcommands(&[&["exec"]]), EXEC, Slot::Operands(1)],
+    },
+    CommandSpec {
+        names: &["rustup"],
+        options: OptionGrammar {
+            short_flags: "vqh",
+            long_flags: &["install", "verbose", "quiet", "help"],
+            plus_operand: true,
+            ..BASE
+        },
+        slots: &[Slot::Subcommands(&[&["run"]]), EXEC, Slot::Operands(1)],
+    },
+    CommandSpec {
+        names: &["nix"],
+        options: OptionGrammar {
+            short_flags: "cLvqik",
+            short_values: "u",
+            long_flags: &[
+                "command",
+                "print-build-logs",
+                "verbose",
+                "quiet",
+                "impure",
+                "refresh",
+                "no-write-lock-file",
+                "ignore-environment",
+                "keep-going",
+                "help",
+                "version",
+            ],
+            long_values: &[
+                "profile",
+                "extra-experimental-features",
+                "unset",
+                "keep",
+                "log-format",
+            ],
+            command_after: &["-c", "--command"],
+            ..BASE
+        },
+        slots: &[Slot::Subcommands(&[&["develop"], &["shell"]]), EXEC],
+    },
+    CommandSpec {
+        names: &["nix-shell"],
+        options: OptionGrammar {
+            short_flags: "qvk",
+            short_values: "pIAjiE",
+            long_flags: &[
+                "pure",
+                "impure",
+                "quiet",
+                "verbose",
+                "show-trace",
+                "keep-going",
+                "help",
+                "version",
+            ],
+            long_values: &[
+                "run", "command", "packages", "attr", "max-jobs", "keep", "include", "expr",
+            ],
+            long_pairs: &["arg", "argstr", "option"],
+            ..BASE
+        },
+        slots: &[
+            EXEC,
+            Slot::ShellScript {
+                short: None,
+                long: Some("run"),
+            },
+            Slot::ShellScript {
+                short: None,
+                long: Some("command"),
+            },
+        ],
+    },
+    CommandSpec {
+        names: &["uvx"],
+        options: UV_RUN_OPTIONS,
+        slots: &[EXEC],
+    },
+    CommandSpec {
+        names: &["bun"],
+        options: BUN_OPTIONS,
+        slots: &[Slot::Subcommands(&[&["x"]]), EXEC],
+    },
+    CommandSpec {
+        names: &["bunx"],
+        options: BUN_OPTIONS,
+        slots: &[EXEC],
+    },
+    CommandSpec {
+        names: &["pipx"],
+        options: OptionGrammar {
+            short_flags: "vqh",
+            long_flags: &[
+                "no-cache",
+                "system-site-packages",
+                "verbose",
+                "quiet",
+                "help",
+            ],
+            long_values: &["spec", "python", "pip-args", "index-url", "suffix"],
+            ..BASE
+        },
+        slots: &[Slot::Subcommands(&[&["run"]]), EXEC],
+    },
+    CommandSpec {
+        names: &["devbox"],
+        options: OptionGrammar {
+            short_flags: "qh",
+            short_values: "ce",
+            long_flags: &["pure", "quiet", "help"],
+            long_values: &["config", "env"],
+            ..BASE
+        },
+        slots: &[Slot::Subcommands(&[&["run"]]), EXEC],
+    },
+    CommandSpec {
+        names: &["op"],
+        options: OptionGrammar {
+            long_flags: &["no-masking", "cache", "no-cache", "help"],
+            long_values: &["env-file", "account", "vault", "environment"],
+            ..BASE
+        },
+        slots: &[Slot::Subcommands(&[&["run"]]), EXEC],
+    },
+    CommandSpec {
+        names: &["dotenv"],
+        options: OptionGrammar {
+            short_flags: "oh",
+            short_values: "evfp",
+            short_glued: "c",
+            long_flags: &["override", "help"],
+            long_values: &["file"],
+            command_after: &["--"],
+            skip_first_operand: &["run"],
+            ..BASE
+        },
+        slots: &[EXEC],
+    },
+    CommandSpec {
+        names: &["ssh"],
+        options: OptionGrammar {
+            short_flags: "1246AaCfGgKkMNnqsTtVvXxYy",
+            short_values: "bBcDEeFIiJLlmOopPQRSWw",
+            order: ArgOrder::PermuteUntilCommand,
+            ..BASE
+        },
+        slots: &[
+            EXEC,
+            Slot::Operands(1),
+            Slot::OperandsJoinedShellScript,
+            Slot::KeyedShellScript {
+                short: 'o',
+                keys: &["proxycommand", "localcommand"],
+            },
+        ],
+    },
+    CommandSpec {
+        names: &["docker"],
+        options: OptionGrammar {
+            short_flags: "ditDhv",
+            short_values: "Hcleuw",
+            long_flags: &[
+                "debug",
+                "detach",
+                "interactive",
+                "tty",
+                "privileged",
+                "tls",
+                "tlsverify",
+                "help",
+                "version",
+            ],
+            long_values: &[
+                "host",
+                "context",
+                "config",
+                "log-level",
+                "env",
+                "env-file",
+                "user",
+                "workdir",
+                "detach-keys",
+                "tlscacert",
+                "tlscert",
+                "tlskey",
+            ],
+            ..BASE
+        },
+        slots: &[
+            Slot::Subcommands(&[&["exec"], &["container", "exec"]]),
+            EXEC,
+            Slot::Operands(1),
+        ],
+    },
+    CommandSpec {
+        names: &["kubectl"],
+        options: OptionGrammar {
+            short_flags: "itqh",
+            short_values: "cfns",
+            long_flags: &["stdin", "tty", "quiet", "help"],
+            long_values: &[
+                "container",
+                "filename",
+                "namespace",
+                "server",
+                "pod-running-timeout",
+                "context",
+                "kubeconfig",
+                "cluster",
+                "user",
+                "as",
+                "token",
+            ],
+            order: ArgOrder::PermuteUntilCommand,
+            ..BASE
+        },
+        slots: &[Slot::Subcommands(&[&["exec"]]), EXEC, Slot::Operands(1)],
+    },
     // macOS `arch`: architecture selectors are whole single-dash words.
     CommandSpec {
         names: &["arch"],
@@ -1005,3 +1625,88 @@ pub(super) static CATALOG: &[CommandSpec] = &[
         slots: &[EXEC],
     },
 ];
+
+/// `uv run`, `uv tool run` and `uvx` share their options.
+const UV_RUN_OPTIONS: OptionGrammar = OptionGrammar {
+    short_flags: "qvmhV",
+    short_values: "pwC",
+    long_flags: &[
+        "no-sync",
+        "frozen",
+        "locked",
+        "isolated",
+        "active",
+        "module",
+        "no-project",
+        "quiet",
+        "verbose",
+        "offline",
+        "no-cache",
+        "no-dev",
+        "dev",
+        "all-extras",
+        "no-editable",
+        "exact",
+        "no-env-file",
+        "help",
+        "version",
+    ],
+    long_values: &[
+        "with",
+        "with-editable",
+        "with-requirements",
+        "python",
+        "project",
+        "directory",
+        "package",
+        "extra",
+        "group",
+        "only-group",
+        "no-group",
+        "env-file",
+        "index",
+        "color",
+        "cache-dir",
+        "config-file",
+        "from",
+    ],
+    ..BASE
+};
+
+/// `bun x` and `bunx`.
+const BUN_OPTIONS: OptionGrammar = OptionGrammar {
+    short_flags: "hv",
+    long_flags: &["bun", "silent", "no-install", "help", "version"],
+    long_values: &["cwd", "config", "registry", "package"],
+    ..BASE
+};
+
+/// `npx` and `npm exec` share their options.
+const NPM_EXEC_OPTIONS: OptionGrammar = OptionGrammar {
+    short_flags: "yhvqng",
+    short_values: "pcw",
+    long_flags: &[
+        "yes",
+        "no",
+        "no-install",
+        "quiet",
+        "silent",
+        "verbose",
+        "offline",
+        "prefer-online",
+        "prefer-offline",
+        "ignore-existing",
+        "help",
+        "version",
+    ],
+    long_values: &[
+        "package",
+        "call",
+        "workspace",
+        "loglevel",
+        "registry",
+        "cache",
+        "userconfig",
+    ],
+    ..BASE
+};

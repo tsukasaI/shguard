@@ -30,6 +30,45 @@ All notable changes to this project are documented in this file.
   parameter, a command substitution or a variable the line binds (`source
   "$1"`, `p=$1; source "$p"`) asks, as does `source /dev/stdin < "$1"`. `oils-for-unix` is
   a transparent wrapper (`curl x | oils-for-unix osh` Blocks).
+- Command runners are transparent wrappers, so `rm -rf /` behind them
+  Blocks like the bare command (#740): `eatmydata`, `bwrap`, `proot`,
+  `ltrace`, `gdb --args`, `faketime`, `xvfb-run`, `sg`, `cgexec`, `sshpass`,
+  `entr`, `chronic`, `ifne`, `screen`, `tmux` (`new-session`, `new-window`,
+  `split-window`, `run-shell`, `respawn-pane`, `display-popup`,
+  `pipe-pane`, or a global `-c`), `ip netns exec`, `poetry run`, `uv run`,
+  `uv tool run`, `uvx`, `npx`, `npm exec`, `pnpm exec`/`dlx`, `bun x`,
+  `bunx`, `pipx run`, `bundle exec`, `mise exec`, `direnv exec`,
+  `rustup run`, `nix develop`/`shell -c`, `nix-shell --run`, `devbox run`,
+  `op run`, `dotenv`, `ssh host CMD` (also `-o ProxyCommand`/`LocalCommand`),
+  `docker exec` and `kubectl exec`. For the tools with subcommands only the
+  named subcommand wraps a command; `poetry install`, `docker ps` and the
+  like are unchanged. An option the catalog does not describe on a wrapper
+  call makes it Ask, as do `gdb -ex`/`-x`, `tmux if-shell`, `tmux send-keys`
+  and `screen -X stuff`. `tmux send-keys` with a literal command
+  (`send-keys 'rm -rf /' Enter`) is joined into a shell string and Blocks
+  like `rm -rf /`; with `-t` or a non-literal key it Asks.
+- A placeholder standing for the command inside a shell string the payload
+  runs (`find -exec sh -c '{} -rf /' \;`, `xargs -I{} sh -c '{} ...'`) and
+  `entr`'s `/_` Ask.
+
+### Fixed
+
+- Homebrew's `g`-prefixed `env`, `nice`, `nohup`, `timeout`, `stdbuf`,
+  `chroot`, `runcon` and `time` (`gtimeout 5 rm -rf ~`) are matched like the
+  unprefixed wrappers (#740).
+- A word standing in for the command, an `xargs` replace-string
+  (`xargs -I{} {} -rf /`) or a `find`/`fd` `{}` placeholder (`find -exec {}
+  \;`, `-exec env {} rm ...`), now Asks instead of Allow (#740).
+
+### Changed
+
+- An `[[allow]] command` entry naming one of those `g`-prefixed wrappers
+  (`gtimeout`, `genv`, ...) or a runner that wraps a command on every call
+  (`npx`, `ssh`, `sshpass`, `eatmydata`, `bwrap`, `uvx`, ...) is now
+  rejected at config load, like the unprefixed `timeout`/`env` (#740).
+  Remove the entry before upgrading. Entries naming a tool that wraps a
+  command only for one subcommand (`npm`, `docker`, `kubectl`, `poetry`,
+  `uv`, `tmux`, `ip`, ...) keep loading.
 
 ### Compatibility notes
 

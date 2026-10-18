@@ -976,6 +976,228 @@ fn guardfall_issue_736_fd_exec_and_g_prefixed_coreutils() {
     }
 }
 
+const ISSUE_740_G_WRAPPERS_AND_PLACEHOLDER_COMMAND_CASES: &[(&str, Decision)] = &[
+    // The issue's g-prefixed coreutils rows: each is the unprefixed tool.
+    ("gtimeout 5 rm -rf ~", Decision::Block),
+    ("gnice rm -rf ~", Decision::Block),
+    ("genv rm -rf ~", Decision::Block),
+    ("gnohup rm -rf ~", Decision::Block),
+    ("gstdbuf -oL rm -rf ~", Decision::Block),
+    ("gchroot / rm -rf ~", Decision::Block),
+    ("gxargs rm -rf ~", Decision::Block),
+    ("gtime rm -rf ~", Decision::Block),
+    ("grm -rf ~", Decision::Block),
+    ("gshred -u /etc/passwd", Decision::Block),
+    ("gtruncate -s 0 ~/.zshrc", Decision::Block),
+    ("gmv ~ /dev/null", Decision::Block),
+    ("gfind ~ -delete", Decision::Block),
+    ("gtimeout 5 sh -c 'rm -rf /'", Decision::Block),
+    // Controls: the unprefixed spellings.
+    ("timeout 5 rm -rf ~", Decision::Block),
+    ("env rm -rf ~", Decision::Block),
+    // The `xargs` replace-string as the command word.
+    ("echo rm | xargs -I{} {} -rf ~", Decision::Ask),
+    ("echo sh | xargs -I{} {} -c \"rm -rf ~\"", Decision::Ask),
+    ("echo rm | xargs -I% % -rf ~", Decision::Ask),
+    ("echo rm | xargs -i{} {} -rf ~", Decision::Ask),
+    ("echo rm | xargs --replace={} {} -rf ~", Decision::Ask),
+    ("echo rm | xargs -n1 -I{} {} -rf ~", Decision::Ask),
+    ("echo rm | xargs -I{} {} -rf /", Decision::Ask),
+    // ... also behind a wrapper or in env's command position.
+    ("echo a=b | xargs -I{} env {} rm -rf /", Decision::Ask),
+    ("echo a=b | xargs -I X env X rm -rf /", Decision::Ask),
+    ("echo a=b | xargs -i env {} rm -rf /", Decision::Ask),
+    ("echo a=b | xargs --replace env {} rm -rf /", Decision::Ask),
+    ("echo a=b | xargs -J % env % rm -rf /", Decision::Ask),
+    ("echo rm | gxargs -I{} {} -rf /", Decision::Ask),
+    // `find`'s and `fd`'s placeholders as the command word.
+    ("find . -exec {} -rf / \\;", Decision::Ask),
+    ("find . -exec {} \\;", Decision::Ask),
+    ("find . -exec env {} rm -rf / \\;", Decision::Ask),
+    ("find . -execdir env {} rm -rf / \\;", Decision::Ask),
+    ("find . -ok {} \\;", Decision::Ask),
+    ("fd . -x {} -rf /", Decision::Ask),
+    ("fd . -x env {} rm -rf /", Decision::Ask),
+    ("fd . -X {/} x", Decision::Ask),
+    // `runcon -t/--type` takes no CONTEXT operand; the catalog cannot say so.
+    ("runcon -tfoo_t rm -rf /", Decision::Ask),
+    ("runcon --type=foo_t rm -rf /", Decision::Ask),
+    ("runcon ctx rm -rf /", Decision::Block),
+    // False-positive guards: the placeholder as an argument stays Allow.
+    ("ls | xargs -I{} echo {}", Decision::Allow),
+    ("ls | xargs -I{} cp {} /tmp", Decision::Allow),
+    ("find . -exec grep x {} +", Decision::Allow),
+    ("find . -exec env FOO=1 ls {} \\;", Decision::Allow),
+    ("gtimeout 5 ls", Decision::Allow),
+    ("genv FOO=1 ls", Decision::Allow),
+    ("gnice -n 5 ls", Decision::Allow),
+    // Command runners with `rm -rf /` as the inner command: the control is
+    // `rm -rf /` (Block).
+    ("rm -rf /", Decision::Block),
+    ("fakeroot rm -rf /", Decision::Block),
+    ("fakeroot -u rm -rf /", Decision::Block),
+    ("eatmydata rm -rf /", Decision::Block),
+    ("bwrap --bind / / rm -rf /", Decision::Block),
+    ("bwrap --ro-bind / / --dev /dev rm -rf /", Decision::Block),
+    ("proot -r / rm -rf /", Decision::Block),
+    ("ltrace rm -rf /", Decision::Block),
+    ("valgrind rm -rf /", Decision::Block),
+    ("gdb --args rm -rf /", Decision::Block),
+    ("gdb -batch --args rm -rf /", Decision::Block),
+    ("tmux new-session rm -rf /", Decision::Block),
+    ("tmux new-session -d -s x 'rm -rf /'", Decision::Block),
+    ("tmux -L x new -d rm -rf /", Decision::Block),
+    ("screen -dmS x rm -rf /", Decision::Block),
+    ("faketime '2020-01-01' rm -rf /", Decision::Block),
+    ("xvfb-run rm -rf /", Decision::Block),
+    ("sg grp -c 'rm -rf /'", Decision::Block),
+    ("cgexec -g cpu:grp rm -rf /", Decision::Block),
+    ("ip netns exec ns rm -rf /", Decision::Block),
+    ("sshpass -p pw rm -rf /", Decision::Block),
+    ("entr rm -rf /", Decision::Block),
+    ("chronic rm -rf /", Decision::Block),
+    ("ifne rm -rf /", Decision::Block),
+    ("rlwrap rm -rf /", Decision::Block),
+    // Package and environment runners.
+    ("poetry run rm -rf /", Decision::Block),
+    ("uv run rm -rf /", Decision::Block),
+    ("uv run --with x rm -rf /", Decision::Block),
+    ("npx rm -rf /", Decision::Block),
+    ("npx -y rm -rf /", Decision::Block),
+    ("npx -c 'rm -rf /'", Decision::Block),
+    ("npm exec rm -rf /", Decision::Block),
+    ("npm exec -- rm -rf /", Decision::Block),
+    ("npm exec --yes -- rm -rf /", Decision::Block),
+    ("pnpm exec rm -rf /", Decision::Block),
+    ("bundle exec rm -rf /", Decision::Block),
+    ("mise exec -- rm -rf /", Decision::Block),
+    ("mise exec node@20 -- rm -rf /", Decision::Block),
+    ("direnv exec . rm -rf /", Decision::Block),
+    ("rustup run stable rm -rf /", Decision::Block),
+    ("nix develop -c rm -rf /", Decision::Block),
+    ("nix develop .#x -c rm -rf /", Decision::Block),
+    ("devbox run rm -rf /", Decision::Block),
+    ("op run -- rm -rf /", Decision::Block),
+    ("dotenv -- rm -rf /", Decision::Block),
+    ("dotenv run -- rm -rf /", Decision::Block),
+    // Remote and container.
+    ("ssh host rm -rf /", Decision::Block),
+    ("ssh host 'rm -rf /'", Decision::Block),
+    ("ssh -p 22 host -t rm -rf /", Decision::Block),
+    ("docker exec c rm -rf /", Decision::Block),
+    ("docker container exec c rm -rf /", Decision::Block),
+    ("docker -H tcp://x exec -it c rm -rf /", Decision::Block),
+    ("kubectl exec p -- rm -rf /", Decision::Block),
+    ("kubectl exec -it p -- rm -rf /", Decision::Block),
+    // An unmodelled option before the subcommand is never Allow.
+    ("docker --weird exec c ls", Decision::Ask),
+    // False-positive guards: benign runner uses stay Allow, and so do the
+    // runners' other subcommands.
+    ("npx prettier --check .", Decision::Allow),
+    ("poetry run pytest", Decision::Allow),
+    ("uv run pytest", Decision::Allow),
+    ("bundle exec rspec", Decision::Allow),
+    ("npm exec -- eslint .", Decision::Allow),
+    ("ssh host ls", Decision::Allow),
+    ("ssh host 'ls -la'", Decision::Allow),
+    ("ssh host", Decision::Allow),
+    ("docker exec c ls", Decision::Allow),
+    ("kubectl exec p -- ls", Decision::Allow),
+    ("tmux new-session -d -s x", Decision::Allow),
+    ("ip netns exec ns ip a", Decision::Allow),
+    ("poetry install", Decision::Allow),
+    ("docker ps", Decision::Allow),
+    ("docker run alpine ls", Decision::Allow),
+    ("screen -r", Decision::Allow),
+    ("uv sync", Decision::Allow),
+    ("nix build .", Decision::Allow),
+    ("ip link show", Decision::Allow),
+    ("npm install", Decision::Allow),
+    ("kubectl get pods", Decision::Allow),
+    ("sshpass -f pw ssh host ls", Decision::Allow),
+    ("dotenv -e .env -- node app.js", Decision::Allow),
+    // A placeholder as the command word of a shell string the payload runs.
+    (
+        "find /bin -name rm -exec sh -c '{} -rf /' \\;",
+        Decision::Ask,
+    ),
+    ("find . -exec sh -c '{}' \\;", Decision::Ask),
+    ("fd . -x sh -c '{}'", Decision::Ask),
+    ("xargs -I{} sh -c '{} -rf ~' < list", Decision::Ask),
+    ("echo rm | xargs -I{} sh -c '{} -rf ~'", Decision::Ask),
+    ("ls | entr /_", Decision::Ask),
+    ("find . -exec sh -c 'echo {}' \\;", Decision::Allow),
+    ("ls | entr -r make", Decision::Allow),
+    // `sg` always runs its command through a shell.
+    ("sg grp 'rm -rf /'", Decision::Block),
+    ("sg grp", Decision::Allow),
+    // tmux subcommands that run a shell string, and the global `-c`.
+    ("tmux -c 'rm -rf /'", Decision::Block),
+    ("tmux new-window 'rm -rf /'", Decision::Block),
+    ("tmux split-window 'rm -rf /'", Decision::Block),
+    ("tmux run-shell 'rm -rf /'", Decision::Block),
+    ("tmux respawn-pane 'rm -rf /'", Decision::Block),
+    ("tmux display-popup -E 'rm -rf /'", Decision::Block),
+    ("tmux pipe-pane 'rm -rf /'", Decision::Block),
+    ("tmux if-shell true 'rm -rf /'", Decision::Ask),
+    ("tmux send-keys 'rm -rf /' Enter", Decision::Block),
+    ("tmux send-keys -t x", Decision::Ask),
+    ("tmux new-window -n x", Decision::Allow),
+    ("tmux split-window -h", Decision::Allow),
+    // gdb commands can `shell` out.
+    ("gdb -ex 'shell rm -rf /' -batch", Decision::Ask),
+    ("gdb -iex 'shell rm -rf /'", Decision::Ask),
+    ("gdb -x cmds.gdb", Decision::Ask),
+    ("gdb --eval-command='shell rm -rf /'", Decision::Ask),
+    ("gdb prog", Decision::Allow),
+    // ssh options that run a local command.
+    ("ssh -o ProxyCommand='rm -rf /' host", Decision::Block),
+    (
+        "ssh -o LocalCommand='rm -rf /' -o PermitLocalCommand=yes host",
+        Decision::Block,
+    ),
+    ("ssh -o ProxyCommand=$X host", Decision::Ask),
+    ("ssh -o StrictHostKeyChecking=no host ls", Decision::Allow),
+    // More runners.
+    ("uv tool run rm -rf /", Decision::Block),
+    ("uvx rm -rf /", Decision::Block),
+    ("pnpm dlx rm -rf /", Decision::Block),
+    ("bun x rm -rf /", Decision::Block),
+    ("bunx rm -rf /", Decision::Block),
+    ("pipx run rm -rf /", Decision::Block),
+    ("nix shell -c rm -rf /", Decision::Block),
+    ("nix-shell --run 'rm -rf /'", Decision::Block),
+    ("dotenv run rm -rf /", Decision::Block),
+    ("rustup +stable run x rm -rf /", Decision::Block),
+    ("nix shell nixpkgs#hello", Decision::Allow),
+    ("pipx install x", Decision::Allow),
+    ("uv tool install x", Decision::Allow),
+    // An unresolvable word where the subcommand belongs might be it.
+    ("docker $X c rm -rf /", Decision::Ask),
+    ("poetry $X rm -rf /", Decision::Ask),
+    ("npm $X -- rm -rf /", Decision::Ask),
+    // screen's `-X` and `-Logfile`, which are not wrapper options.
+    ("screen -S x -X quit", Decision::Allow),
+    ("screen -L -Logfile x.log make", Decision::Allow),
+    ("screen -X stuff 'rm -rf /'", Decision::Ask),
+];
+
+/// Issue #740: the `g`-prefixed exec wrappers resolve to the unprefixed
+/// catalog entries, and a replace-string/placeholder in command position is
+/// never read as the command it will be replaced with.
+#[test]
+fn guardfall_issue_740_g_wrappers_and_placeholder_command() {
+    for (command, expected) in ISSUE_740_G_WRAPPERS_AND_PLACEHOLDER_COMMAND_CASES {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
 /// Issue #722: a wrapper's shell-string flag consumes the interpreter name as
 /// an option value, so the sink check used to see the wrapper's operand
 /// instead of the interpreter reading the pipe.
@@ -2899,7 +3121,9 @@ const ISSUE_748_INTERPRETER_GAP_CASES: &[(&str, Decision)] = &[
     ("exec env PATH=. ls", Decision::Ask),
     ("curl x | crontab", Decision::Ask),
     ("curl x | crontab -u root", Decision::Ask),
-    ("docker exec -i c sh <<EOF\nrm -rf /\nEOF", Decision::Ask),
+    // `docker exec` is a wrapper (#740), so the heredoc is a shell script
+    // whose body Blocks like `sh <<EOF`.
+    ("docker exec -i c sh <<EOF\nrm -rf /\nEOF", Decision::Block),
     ("make -f - <<EOF\nall:\n\trm -rf /\nEOF", Decision::Ask),
     ("curl x | docker-compose exec -T c sh", Decision::Ask),
     ("curl x | podman-compose exec c sh", Decision::Ask),
@@ -3353,6 +3577,7 @@ const DECISION_TABLES: &[(&str, &[(&str, Decision)])] = &[
     named_table!(TRANSPARENT_WRAPPER_CASES),
     named_table!(ISSUE_638_TIME_AND_EXEC_WRAPPER_CASES),
     named_table!(ISSUE_736_FD_EXEC_AND_G_PREFIXED_COREUTILS_CASES),
+    named_table!(ISSUE_740_G_WRAPPERS_AND_PLACEHOLDER_COMMAND_CASES),
     named_table!(ISSUE_722_WRAPPER_SHELL_STRING_SINK_CASES),
     named_table!(ISSUE_739_ENV_ASSIGNMENT_CASES),
     named_table!(EVAL_CASES),
