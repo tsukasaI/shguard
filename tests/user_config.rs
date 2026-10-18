@@ -3030,7 +3030,7 @@ mod resolve_symlinks {
     }
 
     #[test]
-    fn except_entry_spelled_through_a_symlink_warns_on_stderr() {
+    fn except_entry_spelled_through_a_symlink_is_not_probed_on_the_hook_path() {
         let work = tempdir().unwrap();
         let root = work.path().canonicalize().unwrap();
         fs::create_dir(root.join("real")).unwrap();
@@ -3055,10 +3055,7 @@ mod resolve_symlinks {
             .assert()
             .success();
         let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
-        assert!(
-            stderr.contains(&format!("resolves to \"{}/real\"", root.display())),
-            "{stderr}"
-        );
+        assert!(!stderr.contains("resolves to"), "{stderr}");
     }
 }
 

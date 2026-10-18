@@ -270,3 +270,73 @@ fn ignores_stdin() {
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
     assert!(stdout.contains("no issues found"));
 }
+
+/// A `resolve_symlinks` rule whose `except_targets` entry reaches its
+/// directory through a symlink: the entry is spelled `<tmp>/link/`, but
+/// candidates are matched in canonical form, so it would never apply.
+fn respelled_entry_config() -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempdir().expect("tempdir should create");
+    let real = dir.path().join("real");
+    fs::create_dir(&real).expect("real dir should create");
+    std::os::unix::fs::symlink(&real, dir.path().join("link")).expect("symlink should create");
+    let config = format!(
+        r#"
+        [[deny]]
+        id = "user-deny-upload"
+        reason = "uploads are limited to the scratch directory"
+        command = "upload-tool"
+        except_targets = [{{ prefix = "{}/link/" }}]
+        resolve_symlinks = true
+    "#,
+        dir.path().display()
+    );
+    let path = dir.path().join("config.toml");
+    fs::write(&path, config).expect("config file should write");
+    (dir, path)
+}
+
+#[test]
+fn resolve_symlinks_entry_with_another_canonical_spelling_is_flagged() {
+    let (_dir, config_path) = respelled_entry_config();
+    let assert = run_check_config(&[("SHGUARD_CONFIG", config_path.to_str().unwrap())])
+        .failure()
+        .code(1);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(stderr.contains("user-deny-upload"), "{stderr}");
+    assert!(stderr.contains("resolve_symlinks"), "{stderr}");
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(!stdout.contains("no issues found"), "{stdout}");
+}
+
+#[test]
+fn resolve_symlinks_entry_already_in_canonical_spelling_reports_clean() {
+    let (dir, config_path) = respelled_entry_config();
+    let canonical = fs::canonicalize(dir.path().join("real")).unwrap();
+    let config = fs::read_to_string(&config_path).unwrap().replace(
+        &format!("{}/link/", dir.path().display()),
+        &format!("{}/", canonical.display()),
+    );
+    fs::write(&config_path, config).unwrap();
+    let assert = run_check_config(&[("SHGUARD_CONFIG", config_path.to_str().unwrap())]).success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(stdout.contains("no issues found"));
+}
+
+/// The hook path loads the policy on every command; probing each
+/// `resolve_symlinks` entry there is what moved to `--check-config`.
+#[test]
+fn hook_path_does_not_warn_about_a_respelled_resolve_symlinks_entry() {
+    let (_dir, config_path) = respelled_entry_config();
+    let assert = Command::cargo_bin("shguard")
+        .expect("shguard binary should build")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("HOME")
+        .env_remove("SHGUARD_TEST_PANIC")
+        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
+        .env("SHGUARD_CONFIG", &config_path)
+        .write_stdin(r#"{"tool_name":"Bash","tool_input":{"command":"echo hi"}}"#)
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(!stderr.contains("resolve_symlinks"), "{stderr}");
+}

@@ -525,7 +525,8 @@ impl Policy {
 
     /// [`Self::load`] with the symlink-resolution adapter (supplied by the
     /// composition root, `src/lib.rs`) wired into the loaded rules, so
-    /// `resolve_symlinks` rules and the load-time spelling warning use it.
+    /// `resolve_symlinks` rules and [`Self::resolve_symlinks_spelling_warnings`]
+    /// use it.
     pub(crate) fn load_with(canonicalizer: PathCanonicalizer) -> Result<Self, LoadError> {
         let (shguard_config, xdg_config_home, home) =
             Self::read_env_paths().map_err(|source| LoadError { path: None, source })?;
@@ -702,13 +703,10 @@ impl Policy {
             None => rules,
         };
 
-        // Issue #612: an `except_targets` entry spelled differently from its
-        // canonical form (`/tmp` vs `/private/tmp`) never matches a
-        // `resolve_symlinks` candidate, so say so at load.
+        // Not warned about here: the spelling check stats every
+        // `resolve_symlinks` entry, which the per-invocation hook path must
+        // not pay for (see `Self::resolve_symlinks_spelling_warnings`).
         let rules = rules.with_path_canonicalizer(canonicalizer);
-        for warning in rules.resolve_symlinks_spelling_warnings() {
-            eprintln!("shguard: warning: {warning}");
-        }
 
         Ok(Self {
             rules: std::sync::Arc::new(rules),
@@ -739,6 +737,19 @@ impl Policy {
             decision_log_path: Some(DecisionLogPath::for_test_unchecked(decision_log_path)),
             ask_outcome: crate::rules::AskOutcome::default(),
         }
+    }
+
+    /// One warning per `resolve_symlinks` `except_targets` entry (issue
+    /// #612) whose canonical spelling differs from how it is written (on
+    /// macOS `/tmp` is `/private/tmp`): candidates are matched in canonical
+    /// form, so such an entry never applies.
+    ///
+    /// Probes the filesystem once per entry, so only `shguard
+    /// --check-config` calls it; the hook path, which loads the policy on
+    /// every command, never does.
+    #[must_use]
+    pub fn resolve_symlinks_spelling_warnings(&self) -> Vec<String> {
+        self.rules.resolve_symlinks_spelling_warnings()
     }
 
     /// Ids of every deny/ask/allow rule in this policy whose

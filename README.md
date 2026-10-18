@@ -582,7 +582,8 @@ relative candidate with no usable absolute `cwd`, including after an in-line
 fires. That includes a file the same command creates later. Write
 `except_targets` entries in the canonical spelling (on macOS `/tmp` resolves
 to `/private/tmp`); a rule whose entry canonicalizes to a different spelling
-prints a warning to stderr at load time, and every `exact`/`prefix` entry
+is reported by `shguard --check-config` (exit 1; the hook path does not stat
+your entries on every command), and every `exact`/`prefix` entry
 must start with `/`. Everything else stays lexical. The key is only valid on
 `deny`/`ask` rules with path-based (`exact`/`prefix`) `except_targets`;
 `allow` entries and `url_host` excepts reject it at load time.
@@ -596,6 +597,9 @@ The exception also does not apply (the rule fires) when:
 
 - the candidate is a regular file with more than one hard link: a second name
   outside the excepted prefix would reach the same file;
+- the candidate resolves to a directory (`upload-tool sub`): shguard never
+  lists a directory, so the entries inside it are not inspected and a symlink
+  among them could point anywhere. Name the files, not the directory;
 - an earlier command runs on the same line: with `resolve_symlinks`, an
   exception applies only when no earlier command on the line other than
   `cd`/`pushd`/`popd`/`dirs` and a few no-write builtins (`set`, `shopt`,
@@ -613,9 +617,11 @@ The exception also does not apply (the rule fires) when:
   backgrounded (`&`) list, none of which can be ordered
   against the rest of the line, or carries a substitution in its own
   assignment prefix, redirect target or heredoc body: no exception applies;
-- the command runs through `sudo -D`/`--chdir` (or `-R`/`--chroot`), which
-  moves the working directory without shguard composing it, so relative
-  candidates are not resolved and absolute ones are refused too;
+- the command runs through `sudo -D`/`--chdir` (or `-R`/`--chroot`), `run0
+  -D`/`--chdir`, a login or shell session (`sudo -i`/`--login`, `sudo
+  -s`/`--shell`, `su -`/`-l`/`--login`), which moves the working directory
+  without shguard composing it, so relative candidates are not resolved and
+  absolute ones are refused too;
 - the line ran `cd -P` (or `-P` in any cluster), `set -P` or `set -o
   physical`, after which shguard's lexical cwd can name a different
   directory than the real one; relative and absolute candidates are both
@@ -630,6 +636,11 @@ The exception also does not apply (the rule fires) when:
 Resolving a candidate calls the filesystem (`stat`), so a path on a hung
 network mount blocks the check until shguard's evaluation time limit trips
 and the command asks.
+
+shguard judges one call at a time and cannot see state an earlier call left
+behind: a background job still running from a previous call, a function or
+alias named like an allowlisted builtin, or a `CDPATH` exported earlier can
+each change what a later command touches without appearing in its text.
 
 The rule fires unless *every* candidate target token matches an
 `except_targets` alternative — a mix of a local and a remote `rsync`

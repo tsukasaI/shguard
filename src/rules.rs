@@ -3116,7 +3116,7 @@ enum CandidateResolution {
     /// Resolved to this canonical spelling, ready for `except_targets`.
     Canonical(String),
     /// Deliberately not resolved: no usable cwd, a scope that refuses
-    /// everything, or a hard-linked file.
+    /// everything, a directory, or a hard-linked file.
     Refused,
     /// The filesystem could not resolve this absolute path.
     Unresolved(String),
@@ -3125,8 +3125,12 @@ enum CandidateResolution {
 /// Resolves an except-target candidate for a rule with `resolve_symlinks`
 /// (issue #583). Fails closed on every doubt: an empty token, a relative
 /// token with no absolute `scope.base`, a refusing scope, a path that does
-/// not exist or cannot be read, or a regular file with more than one hard
-/// link.
+/// not exist or cannot be read, a directory, or a file with more than one
+/// hard link.
+///
+/// A directory is refused rather than walked: the entries inside it are never
+/// listed or inspected, so a symlink among them could name anything and the
+/// directory's own spelling proves nothing about what the command reaches.
 fn resolve_candidate(
     token: &str,
     scope: SymlinkScope<'_>,
@@ -3149,7 +3153,7 @@ fn resolve_candidate(
     };
     match canonicalizer.canonicalize(full) {
         Err(_) => CandidateResolution::Unresolved(full.to_string()),
-        Ok(resolved) if !resolved.is_dir && resolved.link_count > 1 => CandidateResolution::Refused,
+        Ok(resolved) if resolved.is_dir || resolved.link_count > 1 => CandidateResolution::Refused,
         Ok(resolved) => CandidateResolution::Canonical(resolved.path),
     }
 }
@@ -3424,7 +3428,7 @@ impl CommandRule {
     /// exception to apply. Anything short of a clean resolution leaves the
     /// exception unapplied, so the rule fires: a missing file, a permission
     /// error, a relative candidate with no usable base, a refusing scope, a
-    /// hard-linked regular file. A
+    /// directory (never walked), a hard-linked file. A
     /// file that does not exist yet fails closed the same way. Canonical
     /// paths are spelled as the OS resolves them (on macOS `/tmp` is
     /// `/private/tmp`), so `except_targets` entries must use that spelling.
@@ -5626,8 +5630,9 @@ pub(crate) fn wrapper_chain_escalation(stage: &[NormalizedWord]) -> WrapperChain
 }
 
 /// Whether `stage`'s wrapper-unwrap chain passes an option that runs the
-/// wrapped command in another directory (`sudo -D`/`--chdir`) or root
-/// (`-R`/`--chroot`) than the shell's own. Relative paths in the wrapped
+/// wrapped command in another directory (`sudo -D`/`--chdir`, `run0 -D`) or
+/// root (`-R`/`--chroot`) than the shell's own, or starts a login or `$SHELL`
+/// session (`sudo -i`/`-s`, `su -`/`-l`). Relative paths in the wrapped
 /// command then name different files than the lexical cwd suggests, and
 /// nothing composes them (unlike `env -C`, issue #209). Over-approximates on
 /// purpose, see `Known::token_relocates_cwd`.
@@ -14623,11 +14628,33 @@ mod tests {
         }
 
         #[test]
-        fn hard_linked_regular_file_fails_closed_but_a_directory_is_excepted() {
+        fn hard_linked_files_and_directories_fail_closed() {
             let rules = rules_excepting("/scratch");
             let hit = |path: &str| rules.match_command(&argv(&["upload-tool", path])).is_some();
             assert!(hit("/scratch/hard.md"));
-            assert!(!hit("/scratch/sub"));
+            assert!(hit("/scratch/sub"));
+        }
+
+        #[test]
+        fn login_and_chdir_wrappers_relocate_the_cwd() {
+            for words in [
+                &["sudo", "-i", "rm", "-rf", "x"][..],
+                &["sudo", "--shell", "rm", "x"],
+                &["su", "-", "root", "-c", "rm x"],
+                &["su", "-l", "root", "-c", "rm x"],
+                &["run0", "-D", "/w", "rm", "x"],
+                &["env", "sudo", "-i", "rm", "x"],
+            ] {
+                assert!(wrapper_chain_changes_cwd(&argv(words)), "{words:?}");
+            }
+            for words in [
+                &["sudo", "rm", "-i", "x"][..],
+                &["sudo", "-u", "root", "rm", "x"],
+                &["su", "root", "-c", "rm x"],
+                &["rm", "-rf", "x"],
+            ] {
+                assert!(!wrapper_chain_changes_cwd(&argv(words)), "{words:?}");
+            }
         }
 
         #[test]

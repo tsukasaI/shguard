@@ -121,11 +121,15 @@ impl Known {
         let relocating = || {
             self.spec
                 .cwd_options()
+                .chain(self.spec.cwd_switches())
                 .filter(|(_, _, effect)| *effect == CwdEffect::Relocates)
         };
         if let Some(long) = token.strip_prefix("--") {
             let name = long.split('=').next().unwrap_or(long);
             return name.len() >= 2 && relocating().any(|(_, full, _)| full.starts_with(name));
+        }
+        if token == "-" {
+            return self.spec.cwd_bare_dash() == Some(CwdEffect::Relocates);
         }
         token.starts_with('-') && relocating().any(|(letter, _, _)| token.contains(letter))
     }
@@ -452,6 +456,25 @@ mod tests {
         assert!(!sudo.token_relocates_cwd("-u"));
         let env = lookup("env").expect("catalogued");
         assert!(!env.token_relocates_cwd("-C"));
+    }
+
+    #[test]
+    fn login_shell_and_chdir_wrappers_relocate_the_cwd() {
+        let sudo = lookup("sudo").expect("catalogued");
+        for token in ["-i", "-s", "-iu", "--login", "--shell", "--log", "--sh"] {
+            assert!(sudo.token_relocates_cwd(token), "sudo {token}");
+        }
+        assert!(!sudo.token_relocates_cwd("-"));
+        let su = lookup("su").expect("catalogued");
+        for token in ["-", "-l", "-lm", "--login", "--log"] {
+            assert!(su.token_relocates_cwd(token), "su {token}");
+        }
+        assert!(!su.token_relocates_cwd("-m"));
+        let run0 = lookup("run0").expect("catalogued");
+        for token in ["-D", "--chdir=/x", "--chdir"] {
+            assert!(run0.token_relocates_cwd(token), "run0 {token}");
+        }
+        assert!(!run0.token_relocates_cwd("-u"));
     }
 
     #[test]

@@ -16786,6 +16786,11 @@ mod tests {
                     file(path)
                 }
                 "/scratch/sub/ok.md" | "/scratch/link.md" => file("/outside/secret"),
+                "/scratch/sub" => Ok(ResolvedPath {
+                    path: path.to_string(),
+                    is_dir: true,
+                    link_count: 3,
+                }),
                 _ => Err(ProbeError::NotFound),
             }
         }
@@ -16892,6 +16897,31 @@ mod tests {
                 sudo("sudo -D /work upload-tool /scratch/ok.md"),
                 Decision::Block
             );
+        }
+
+        #[test]
+        fn login_and_shell_wrappers_drop_the_base_for_relative_candidates() {
+            let wrapped = |command: &str| verdict_in("deny", command, Some("/scratch")).decision();
+            for command in [
+                "sudo -i upload-tool ok.md",
+                "sudo --login upload-tool ok.md",
+                "sudo -s upload-tool ok.md",
+                "sudo --shell upload-tool ok.md",
+                "su - root -c 'upload-tool ok.md'",
+                "su -l root -c 'upload-tool ok.md'",
+                "run0 -D /work upload-tool ok.md",
+                "run0 --chdir=/work upload-tool ok.md",
+            ] {
+                assert_ne!(wrapped(command), Decision::Allow, "{command}");
+            }
+            assert_eq!(wrapped("sudo -i upload-tool ok.md"), Decision::Block);
+        }
+
+        #[test]
+        fn a_directory_candidate_is_never_excepted() {
+            assert_eq!(decide("upload-tool sub"), Decision::Block);
+            assert_eq!(decide("upload-tool /scratch/sub"), Decision::Block);
+            assert_eq!(decide("upload-tool sub/rel.md"), Decision::Allow);
         }
 
         #[test]

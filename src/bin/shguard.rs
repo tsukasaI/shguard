@@ -761,9 +761,17 @@ fn check_config() -> i32 {
     };
 
     let mixed = policy.rules_with_mixed_except_targets();
-    if mixed.is_empty() {
+    // Here, not in `Policy::load`: it probes the filesystem once per
+    // `resolve_symlinks` entry, which the hook path must not pay for on
+    // every command.
+    let respelled = policy.resolve_symlinks_spelling_warnings();
+    if mixed.is_empty() && respelled.is_empty() {
         let _ = writeln!(io::stdout(), "shguard --check-config: no issues found");
         return 0;
+    }
+
+    for warning in &respelled {
+        let _ = writeln!(io::stderr(), "shguard --check-config: {warning}");
     }
 
     for id in &mixed {
