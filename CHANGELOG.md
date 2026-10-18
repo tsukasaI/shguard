@@ -4,6 +4,31 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Rule 5 recognises more stdin-reading interpreters (#748): `mksh`, `yash`
+  and `rbash` join the shells (`curl x | mksh` Blocks); `nu`, `xonsh`,
+  `elvish`, `pypy` and a set of stdin-to-code tools (`at`, `batch`, `ssh`,
+  `gdb`, `sqlite3`, `psql`, `mysql`, `ed`, `ex`, `vi`, `vim`, `m4`, `dc`,
+  `expect`, `wish`, `jshell`, `R`, `julia`) floor a pipeline or heredoc to
+  Ask. `make -f -`, `crontab` (no file operand or `-`), `Rscript -`,
+  `bun run -`, and `exec`/`run` of `docker`, `podman`, `nerdctl`, `kubectl`,
+  `oc`, `docker-compose` and `podman-compose` are sinks only in those
+  shapes. A final-stage `trap` whose action runs an interpreter is a sink.
+- `arch`, `sandbox-exec`, `valgrind`, `fakeroot` and `rlwrap` are
+  transparent wrappers.
+- A `PATH` assignment with an empty or relative literal component, and a
+  `[[ ]]` arithmetic comparison (`-eq`, `-gt`, ...) of an operand that is
+  not provably an integer, floor to Ask.
+
+### Compatibility notes
+
+- `[[allow]] command = "arch"`, `"sandbox-exec"`, `"valgrind"`,
+  `"fakeroot"` and `"rlwrap"` are now rejected at config load, like the
+  other exec wrappers, as are `"mksh"`, `"yash"`, `"rbash"`, `"nu"`,
+  `"xonsh"`, `"elvish"` and `"pypy"`. Remove such entries before upgrading.
+  The stdin-to-code tools above are not rejected.
+
 ## [0.9.3] - 2026-10-18
 
 ### Added

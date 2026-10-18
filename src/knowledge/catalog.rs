@@ -949,4 +949,59 @@ pub(super) static CATALOG: &[CommandSpec] = &[
         },
         slots: &[EXEC],
     },
+    // macOS `arch`: architecture selectors are whole single-dash words.
+    CommandSpec {
+        names: &["arch"],
+        options: OptionGrammar {
+            short_flags: "ch",
+            short_values: "de",
+            dash_words: &[
+                "x86_64", "x86_64h", "arm64", "arm64e", "i386", "ppc", "ppc64",
+            ],
+            dash_word_values: &["arch"],
+            numeric_option: true,
+            ..BASE
+        },
+        slots: &[EXEC],
+    },
+    CommandSpec {
+        names: &["sandbox-exec"],
+        options: OptionGrammar {
+            short_values: "nfpD",
+            ..BASE
+        },
+        slots: &[EXEC],
+    },
+    // Every valgrind option is `--name[=value]`.
+    CommandSpec {
+        names: &["valgrind"],
+        options: OptionGrammar {
+            short_flags: "vqdh",
+            any_long_attached: true,
+            ..BASE
+        },
+        slots: &[EXEC],
+    },
+    CommandSpec {
+        names: &["fakeroot"],
+        options: OptionGrammar {
+            short_flags: "uhv",
+            short_values: "lfisb",
+            long_flags: &["unknown-is-real", "help", "version"],
+            long_values: &["lib", "faked", "fd-base"],
+            ..BASE
+        },
+        slots: &[EXEC],
+    },
+    // Only options with a documented arity; the rest floor to Ask.
+    CommandSpec {
+        names: &["rlwrap"],
+        options: OptionGrammar {
+            short_flags: "AcFhiInNorRTUv",
+            short_values: "bCDefgHlMOPqsStwz",
+            short_glued: "apm",
+            ..BASE
+        },
+        slots: &[EXEC],
+    },
 ];

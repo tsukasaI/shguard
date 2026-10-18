@@ -64,6 +64,11 @@ pub(super) const EXEC_WRAPPER_REFERENCE: &[&str] = &[
     "firejail",
     "systemd-run",
     "unbuffer",
+    "arch",
+    "sandbox-exec",
+    "valgrind",
+    "fakeroot",
+    "rlwrap",
     // shell dispatch builtins
     "builtin",
     "command",
