@@ -1152,6 +1152,8 @@ pub(crate) enum WordPiece {
     ModifiedParameterExpansion {
         name: String,
         operand: Vec<WordPiece>,
+        /// `${#NAME}`: the value is a decimal length, never code.
+        length: bool,
     },
     /// `$(...)` — the raw, unparsed inner command string.
     CommandSubstitution(String),

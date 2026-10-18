@@ -1040,7 +1040,7 @@ fn resolve_pieces(pieces: &[WordPiece], allow_split: bool) -> (Vec<Chunk>, bool)
 fn operand_mentions_ifs(pieces: &[WordPiece]) -> bool {
     pieces.iter().any(|piece| match piece {
         WordPiece::ParameterExpansion(name) => name == "IFS",
-        WordPiece::ModifiedParameterExpansion { name, operand } => {
+        WordPiece::ModifiedParameterExpansion { name, operand, .. } => {
             name == "IFS" || operand_mentions_ifs(operand)
         }
         WordPiece::DoubleQuoted(inner) => operand_mentions_ifs(inner),
@@ -1208,7 +1208,7 @@ fn resolve_piece(piece: &WordPiece, allow_split: bool) -> (Chunk, bool) {
         // `ifs_derived` when the parameter is `IFS` or `$IFS` appears in
         // the operand, so rule 7's `$IFS`-derived-word floor holds for
         // `${IFS%x}` and `${x:-$IFS}` too.
-        WordPiece::ModifiedParameterExpansion { name, operand } => (
+        WordPiece::ModifiedParameterExpansion { name, operand, .. } => (
             Chunk::Unresolvable(
                 UnresolvableKind::ParameterExpansion,
                 name != "@" && !name.ends_with("[@]") && !allow_split,

