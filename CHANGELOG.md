@@ -20,6 +20,16 @@ All notable changes to this project are documented in this file.
 - A `PATH` assignment with an empty or relative literal component, and a
   `[[ ]]` arithmetic comparison (`-eq`, `-gt`, ...) of an operand that is
   not provably an integer, floor to Ask.
+- The Oils shells `osh`, `ysh` and `oil` are shell interpreters (#750):
+  `curl x | oil` Blocks. `nu` stays Ask.
+- `curl`/`wget` writing to a shell-init, cron, autostart or persistence
+  file (`curl -o ~/.bashrc`, `--output`, `--output=`, `wget -O`,
+  `--output-document`, glued `-o~/.bashrc`) asks, like a redirect to the
+  same file. `kill` with pid `-1` (`kill -9 -1`), `killall5`, and `pkill`/
+  `killall` with `-u`/`-U`/`--user` ask. `source`/`.` of a positional
+  parameter, a command substitution or a variable the line binds (`source
+  "$1"`, `p=$1; source "$p"`) asks, as does `source /dev/stdin < "$1"`. `oils-for-unix` is
+  a transparent wrapper (`curl x | oils-for-unix osh` Blocks).
 - Command runners are transparent wrappers, so `rm -rf /` behind them
   Blocks like the bare command (#740): `eatmydata`, `bwrap`, `proot`,
   `ltrace`, `gdb --args`, `faketime`, `xvfb-run`, `sg`, `cgexec`, `sshpass`,
@@ -33,8 +43,10 @@ All notable changes to this project are documented in this file.
   `docker exec` and `kubectl exec`. For the tools with subcommands only the
   named subcommand wraps a command; `poetry install`, `docker ps` and the
   like are unchanged. An option the catalog does not describe on a wrapper
-  call makes it Ask, as do `gdb -ex`/`-x`, `tmux send-keys`/`if-shell` and
-  `screen -X stuff`.
+  call makes it Ask, as do `gdb -ex`/`-x`, `tmux if-shell`, `tmux send-keys`
+  and `screen -X stuff`. `tmux send-keys` with a literal command
+  (`send-keys 'rm -rf /' Enter`) is joined into a shell string and Blocks
+  like `rm -rf /`; with `-t` or a non-literal key it Asks.
 - A placeholder standing for the command inside a shell string the payload
   runs (`find -exec sh -c '{} -rf /' \;`, `xargs -I{} sh -c '{} ...'`) and
   `entr`'s `/_` Ask.
@@ -63,7 +75,8 @@ All notable changes to this project are documented in this file.
 - `[[allow]] command = "arch"`, `"sandbox-exec"`, `"valgrind"`,
   `"fakeroot"` and `"rlwrap"` are now rejected at config load, like the
   other exec wrappers, as are `"mksh"`, `"yash"`, `"rbash"`, `"nu"`,
-  `"xonsh"`, `"elvish"` and `"pypy"`. Remove such entries before upgrading.
+  `"xonsh"`, `"elvish"` and `"pypy"`, plus `"osh"`, `"ysh"` and `"oil"`.
+  Remove such entries before upgrading.
   The stdin-to-code tools above are not rejected.
 
 ## [0.9.3] - 2026-10-18

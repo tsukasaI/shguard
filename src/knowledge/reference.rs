@@ -44,6 +44,8 @@ pub(super) const EXEC_WRAPPER_REFERENCE: &[&str] = &[
     // busybox and runit applets
     "busybox",
     "toybox",
+    "oils-for-unix",
+    "oils_for_unix",
     "chpst",
     "envdir",
     "envuidgid",

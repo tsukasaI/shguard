@@ -420,9 +420,9 @@ mod tests {
     use super::*;
     use crate::rules::SHELL_INTERPRETERS;
 
-    // The shell-init/persistence path list is duplicated across nine
+    // The shell-init/persistence path list is duplicated across sixteen
     // `[[command]]` rules and one `[[redirect]]` rule (issue #261's own
-    // tenth copy). Nothing in the schema ties them together, so this test
+    // copy). Nothing in the schema ties them together, so this test
     // is what keeps a path added to one mechanism from silently missing
     // from the others.
     #[test]
@@ -473,8 +473,8 @@ mod tests {
             checked += 1;
         }
         assert_eq!(
-            checked, 11,
-            "expected eleven shell-init rules, found {checked}"
+            checked, 17,
+            "expected seventeen shell-init rules, found {checked}"
         );
     }
 

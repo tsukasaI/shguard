@@ -5170,6 +5170,7 @@ fn value_flag_consumed(rest_words: &[NormalizedWord], value_flags: &[ValueFlag])
 /// the reverse).
 pub(crate) const SHELL_INTERPRETERS: &[&str] = &[
     "bash", "sh", "zsh", "dash", "fish", "ksh", "tcsh", "csh", "ash", "mksh", "yash", "rbash",
+    "osh", "ysh", "oil",
 ];
 
 /// The `eval` builtin (issue #120): same "interpret this string as a shell
