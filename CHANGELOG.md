@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-10-18
+
 ### Added
 
 - `coreutils` (the uutils multicall binary) is a transparent wrapper
@@ -27,6 +29,13 @@ All notable changes to this project are documented in this file.
   prints one.
 - `sudo -i`/`-s`, `su -`/`-l` and `run0 -D`/`-u` now refuse `resolve_symlinks`
   exceptions (Block where they used to Ask).
+
+### Fixed
+
+- The test suite no longer reads the host's shguard config (#758): one
+  `check --cwd` test failed wherever none existed, which broke the nix
+  package build (its sandbox sets `HOME=/homeless-shelter`) and the Linux
+  CI on `main`.
 
 ### Compatibility notes
 
