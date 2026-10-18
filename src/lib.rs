@@ -19,6 +19,7 @@ pub mod policy;
 mod rules;
 mod sed_script;
 mod semantics;
+mod syntax;
 pub mod verdict;
 #[doc(hidden)]
 pub mod watchdog;

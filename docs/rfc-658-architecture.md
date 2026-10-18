@@ -339,13 +339,12 @@ re-recorded at the end of stage 1:
   in parser.rs is quote-blind, which is a disclosed limitation. The panic catch stays as the last line of
   defence for the panics inside brush's PEG grammar (brace sequence,
   tilde dirstack, io-number).
-- **Parser strategy:** brush-parser is pinned at `=0.4.0`, the latest
-  stable version known when ADR 0001 was written. A `brush-ocap-*` rc line
-  also appears on crates.io and has not been evaluated. The stage-4 ADR
-  re-checks both against crates.io at the time it is written. Stage 4 opens with a short ADR
-  (`docs/adr/0003-...`) choosing between staying on 0.4.0, upgrading, or
-  forking with the panic fixes. The `src/parser.rs` fixture corpus remains
-  the upgrade gate.
+- **Parser strategy:** brush-parser stays pinned at `=0.4.0`, the latest
+  stable version. `brush-ocap-parser 0.5.0-rc.1` is a pre-release and a fork
+  is rejected for its maintenance burden; see
+  [ADR 0003](adr/0003-brush-parser-stay-on-0.4.0.md) for the decision, the
+  re-check triggers and the crates.io check dated 2026-10-18. The
+  `src/parser.rs` fixture corpus remains the upgrade gate.
 - **The differential fuzzer is extended** to heredoc bodies and compound
   commands. It already uses real bash as the oracle per simple command.
 - **Issues:** #655 (double-dollar brace tokenisation; its high-severity

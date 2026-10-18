@@ -1047,7 +1047,25 @@ pub(crate) enum Redirection {
         /// string then, rather than this type pre-committing to a `Word`
         /// shape that doesn't fit a multi-line body.
         body: String,
+        /// The command and backquote substitutions `body` expands, found by
+        /// brush's heredoc grammar at parse time. Always
+        /// [`HeredocSubstitutions::Parsed`] with no entries when
+        /// `expand_body` is `false`: a quoted-delimiter body is inert.
+        substitutions: HeredocSubstitutions,
     },
+}
+
+/// What the parser found in a heredoc body: either the substitutions it will
+/// expand, or the fact that it could not delimit them. A sum type so a caller
+/// cannot read an empty list for "nothing found" when the real answer is
+/// "could not tell"; the gate floors [`Self::Unparsed`] to `Ask`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HeredocSubstitutions {
+    /// The raw inner text of each top-level `$(...)`/backquote substitution.
+    Parsed(Vec<String>),
+    /// The body has a substitution opener that cannot be delimited (for
+    /// example a `$(` that never closes), or brush rejected the body.
+    Unparsed,
 }
 
 /// The kind of a plain file redirection, per the ADR's redirection fixture

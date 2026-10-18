@@ -65,6 +65,24 @@
 //! past the others -- see `sandbox_never_executes_the_real_rm` and
 //! `absolute_path_and_redirect_guard_rejects_crafted_bypass_attempts` below.
 //!
+//! # Whole-command candidates (heredocs and compound commands)
+//!
+//! A [`Candidate::Whole`] is a heredoc or compound command (`if`, `for`,
+//! `while`, `case`, `{ }`, `( )`, a function definition and call) analysed
+//! as one unit. Its oracle is execution, not argv: bash runs the text under
+//! the same PATH-shim sandbox and every shim logs its invocation into a
+//! per-run log file. The property is "a command bash actually ran that
+//! shguard would not `Allow` on its own implies shguard does not `Allow` the
+//! whole text" -- a deny-listed command hidden in a heredoc substitution,
+//! an arithmetic expansion or a compound body must not turn the whole into
+//! an `Allow`.
+//!
+//! Defense layers 1, 2 and 4 above apply unchanged. Layer 3 does not: a
+//! whole candidate IS run as the command, which is why every command word
+//! the generator can emit is a [`SHIM_COMMANDS`] name or a harmless bash
+//! builtin, why the run has a wall-clock timeout, and why stdin/stdout/stderr
+//! are null.
+//!
 //! # Known-open findings
 //!
 //! [`shguard_argv_contains_unexpanded_tilde`]: a fully intentional,
@@ -123,7 +141,8 @@ use std::fs;
 use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use shguard::normalize::{Resolution, UnresolvableKind};
 use shguard::verdict::Decision;
@@ -750,6 +769,73 @@ impl Sandbox {
     }
 }
 
+/// Wall-clock cap on one whole-candidate bash run; a hung candidate is
+/// killed and skipped, never waited on.
+const WHOLE_RUN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Parses the shim log: one record per line, the shim's own path followed by
+/// each argument, all `\037`-separated. Returns each invocation as
+/// `[command name, args...]`.
+fn parse_shim_log(log: &str) -> Vec<Vec<String>> {
+    log.lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let mut parts = line.split('\u{1f}');
+            let program = parts.next().unwrap_or_default();
+            let name = Path::new(program)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            std::iter::once(name)
+                .chain(parts.map(str::to_string))
+                .collect()
+        })
+        .collect()
+}
+
+impl Sandbox {
+    /// Runs `text` as a bash command under the shim sandbox and returns every
+    /// shim invocation it made, or `None` if the static reject-list flags the
+    /// text, the spawn fails, or the run times out. The exit status is
+    /// deliberately ignored: a candidate may legitimately fail after the
+    /// invocations that matter have already been logged.
+    fn run_whole(&self, text: &str) -> Option<Vec<Vec<String>>> {
+        if is_unsafe_to_execute(text) {
+            return None;
+        }
+        fs::write(&self.log_path, b"").ok()?;
+        let mut child = Command::new(&self.bash_path)
+            .arg("-c")
+            .arg(text)
+            .env_clear()
+            .env("PATH", self.shim_dir.path())
+            .env("HOME", self.home_dir.path())
+            .env("SHGUARD_FUZZ_SHIM_LOG", &self.log_path)
+            .current_dir(self.cwd_dir.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        let deadline = Instant::now() + WHOLE_RUN_TIMEOUT;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                _ => {
+                    child.kill().ok();
+                    child.wait().ok();
+                    return None;
+                }
+            }
+        }
+        let log = fs::read(&self.log_path).ok()?;
+        Some(parse_shim_log(&String::from_utf8_lossy(&log)))
+    }
+}
+
 #[test]
 fn sandbox_never_executes_the_real_rm() {
     let sandbox = Sandbox::new();
@@ -793,6 +879,50 @@ fn sandbox_never_executes_the_real_rm() {
         log.contains("/rm\x1f-rf\x1f"),
         "the rm shim (not the real binary) should have logged its own invocation: {log:?}"
     );
+}
+
+#[test]
+fn whole_candidate_run_observes_shim_invocations_in_every_compound_shape() {
+    let sandbox = Sandbox::new();
+    for text in [
+        "rm -rf /",
+        "if true; then rm -rf /; fi",
+        "for i in 1; do rm -rf /; done",
+        "f() { rm -rf /; }; f",
+        "( rm -rf / )",
+        "cat <<EOF\n$(rm -rf /)\nEOF",
+        "cat <<EOF\n$(( $(rm -rf /) 1 ))\nEOF",
+        "cat <<EOF\n${x:-$(rm -rf /)}\nEOF",
+    ] {
+        let invocations = sandbox
+            .run_whole(text)
+            .unwrap_or_else(|| panic!("{text:?} should run"));
+        assert!(
+            invocations
+                .iter()
+                .any(|argv| argv == &["rm".to_string(), "-rf".to_string(), "/".to_string()]),
+            "{text:?} did not log the rm shim: {invocations:?}"
+        );
+    }
+}
+
+#[test]
+fn whole_candidate_run_does_not_log_inert_text() {
+    let sandbox = Sandbox::new();
+    for text in [
+        "cat <<'EOF'\n$(rm -rf /)\nEOF",
+        "cat <<EOF\n\\$(rm -rf /)\nEOF",
+        "while false; do rm -rf /; done",
+        "true || rm -rf /",
+    ] {
+        let invocations = sandbox
+            .run_whole(text)
+            .unwrap_or_else(|| panic!("{text:?} should run"));
+        assert!(
+            invocations.iter().all(|argv| argv[0] != "rm"),
+            "{text:?} unexpectedly ran rm: {invocations:?}"
+        );
+    }
 }
 
 // =====================================================================
@@ -1080,6 +1210,25 @@ const LITERAL_SEEDS: &[&str] = &[
     "busybox mkswap /dev/sda1",
     "tar -C ~ -xf evil.tar",
     "git push --force origin main",
+    "cat <<EOF\n$(rm -rf /)\nEOF",
+    "cat <<'EOF'\n$(rm -rf /)\nEOF",
+    "cat <<EOF\n`rm -rf /`\nEOF",
+    "cat <<EOF\n$(( $(rm -rf /) 1 ))\nEOF",
+    "cat <<EOF\n${x:-$(rm -rf /)}\nEOF",
+    "echo $(( $(rm -rf /) 1 ))",
+    "cat <<EOF\n$(echo hi # )\nrm -rf /)\nEOF",
+    "cat <<EOF\n$(echo hi #)\nEOF",
+    "cat <<EOF\n$\\\n(rm -rf /)\nEOF",
+    "cat <<EOF\n`echo \"\\$(rm -rf /)\"`\nEOF",
+    "true; echo `echo \"\\$(rm -rf /)\"`",
+    "cat <<EOF\n$( (echo hi)#x )\nrm -rf /)\nEOF",
+    "cat <<EOF\n$(echo \\'  # )\nrm -rf /)\nEOF",
+    "cat <<EOF\n$(echo $'a\\'' # )\nrm -rf /)\nEOF",
+    "if true; then rm -rf /; fi",
+    "for i in 1 2; do rm -rf /; done",
+    "{ rm -rf /; }",
+    "( rm -rf / )",
+    "f() { rm -rf /; }; f",
 ];
 
 /// A candidate: one or more `|`-joined stage texts, already individually
@@ -1101,6 +1250,141 @@ fn generate_candidate(rng: &mut Rng) -> Vec<String> {
         let template = &templates[rng.gen_range(templates.len())];
         let tokens: Vec<String> = template.iter().map(ToString::to_string).collect();
         vec![mutate_stage(&tokens, rng, mechanism_count, MECHANISMS)]
+    }
+}
+
+/// What one sweep entry is checked against.
+enum Candidate {
+    /// `|`-joined stage texts, each diffed against bash's real argv.
+    Stages(Vec<String>),
+    /// A heredoc or compound command, analysed as one unit and checked
+    /// against what bash actually executes (module docs, "Whole-command
+    /// candidates").
+    Whole(String),
+}
+
+/// A literal seed is a [`Candidate::Stages`] when the argv technique can
+/// handle it and a [`Candidate::Whole`] otherwise (a `;`, a newline, a
+/// heredoc or a compound command).
+fn literal_seed_candidate(seed: &str) -> Candidate {
+    if split_top_level_stages(seed).is_some() {
+        Candidate::Stages(vec![seed.to_string()])
+    } else {
+        Candidate::Whole(seed.to_string())
+    }
+}
+
+/// Compound wrappers around one command word list. Every shape either runs
+/// `{cmd}` or provably does not (`while false`, `true || ...`), so the
+/// property is exercised in both directions.
+const COMPOUND_WRAPPERS: &[&str] = &[
+    "if true; then {cmd}; fi",
+    "if false; then :; else {cmd}; fi",
+    "for i in 1 2; do {cmd}; done",
+    "{ {cmd}; }",
+    "( {cmd} )",
+    "f() { {cmd}; }; f",
+    "i=0; while [ $i -lt 1 ]; do {cmd}; i=1; done",
+    "while false; do {cmd}; done",
+    "case x in x) {cmd};; esac",
+    "echo ok && {cmd}",
+    "true || {cmd}",
+    "{cmd} | cat",
+    "x=$({cmd}); echo $x",
+];
+
+/// Heredoc bodies: `{cmd}` appears in every expansion position the gate has
+/// to find (command substitution, backquote, arithmetic, `${...}` operand,
+/// nested), next to inert shapes (escaped, quote-protected by a quoted
+/// delimiter wrapper).
+const HEREDOC_BODIES: &[&str] = &[
+    "$({cmd})",
+    "`{cmd}`",
+    "text $({cmd}) text",
+    "$(( $({cmd}) 1 ))",
+    "$[ $({cmd}) 1 ]",
+    "${x:-$({cmd})}",
+    "${x:-`{cmd}`}",
+    "$(echo $({cmd}))",
+    "'$({cmd})'",
+    "$(echo \")\"; {cmd})",
+    "$(echo $'it\\'s'; {cmd})",
+    "$(echo \\) ; {cmd})",
+    "\\$({cmd})",
+    "plain text",
+];
+
+const HEREDOC_WRAPPERS: &[&str] = &[
+    "cat <<EOF\n{body}\nEOF",
+    "cat <<-EOF\n\t{body}\nEOF",
+    "cat <<'EOF'\n{body}\nEOF",
+    "{ cat; } <<EOF\n{body}\nEOF",
+    "if true; then cat <<EOF\n{body}\nEOF\nfi",
+    "for i in 1; do cat <<EOF\n{body}\nEOF\ndone",
+    "f() { cat <<EOF\n{body}\nEOF\n}; f",
+    "( cat <<EOF\n{body}\nEOF\n)",
+    "x=$(cat <<EOF\n{body}\nEOF\n)",
+    "cat <<EOF | cat\n{body}\nEOF",
+    "cat <<A <<B\n{body}\nA\nplain\nB",
+];
+
+/// Keeps the whole-candidate stream independent of the argv stream: adding
+/// or reordering templates here must not shift [`generate_candidate`]'s
+/// output, which `golden_snapshot_fuzz` pins.
+const WHOLE_RNG_SALT: u64 = 0x5748_4F4C_4521;
+
+fn generate_whole_candidate(rng: &mut Rng) -> String {
+    let templates = seed_templates();
+    let template = &templates[rng.gen_range(templates.len())];
+    let tokens: Vec<String> = template.iter().map(ToString::to_string).collect();
+    let mechanism_count = rng.gen_range(3);
+    let command = mutate_stage(&tokens, rng, mechanism_count, PIPELINE_STAGE_MECHANISMS);
+    if rng.gen_bool() {
+        COMPOUND_WRAPPERS[rng.gen_range(COMPOUND_WRAPPERS.len())].replace("{cmd}", &command)
+    } else {
+        let body = HEREDOC_BODIES[rng.gen_range(HEREDOC_BODIES.len())].replace("{cmd}", &command);
+        HEREDOC_WRAPPERS[rng.gen_range(HEREDOC_WRAPPERS.len())].replace("{body}", &body)
+    }
+}
+
+/// A whole candidate whose decision was `Allow` although bash ran a command
+/// shguard would not allow by itself.
+struct ExecutionViolation {
+    candidate: String,
+    executed: Vec<String>,
+}
+
+enum WholeOutcome {
+    Skipped,
+    Consistent { dangerous_executed: u64 },
+    Violation(ExecutionViolation),
+}
+
+fn render_command(argv: &[String]) -> String {
+    argv.iter()
+        .map(|word| shell_single_quote(word))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn check_whole_candidate(sandbox: &Sandbox, text: &str) -> WholeOutcome {
+    let decision = shguard::analyze(text).decision();
+    let Some(invocations) = sandbox.run_whole(text) else {
+        return WholeOutcome::Skipped;
+    };
+    let executed: Vec<String> = invocations
+        .iter()
+        .map(|argv| render_command(argv))
+        .filter(|command| shguard::analyze(command).decision() != Decision::Allow)
+        .collect();
+    if decision == Decision::Allow && !executed.is_empty() {
+        return WholeOutcome::Violation(ExecutionViolation {
+            candidate: text.to_string(),
+            executed,
+        });
+    }
+    WholeOutcome::Consistent {
+        dangerous_executed: executed.len() as u64,
     }
 }
 
@@ -1492,6 +1776,9 @@ const DEFAULT_SEED: u64 = 0x5347_5541_5244_2123; // "SGUARD!#" in ASCII hex
 /// `SHGUARD_FUZZ_ITERATIONS` with a much larger sweep.
 const DEFAULT_ITERATIONS: u64 = 200;
 
+/// Whole-command candidates per sweep; each costs one bash spawn.
+const DEFAULT_WHOLE_ITERATIONS: u64 = 150;
+
 fn env_u64(name: &str, default: u64) -> u64 {
     std::env::var(name)
         .ok()
@@ -1503,6 +1790,7 @@ fn env_u64(name: &str, default: u64) -> u64 {
 // varies those, and the golden corpus must stay fixed.
 const GOLDEN_SEED: u64 = 659;
 const GOLDEN_CANDIDATES: usize = 1200;
+const GOLDEN_WHOLE_CANDIDATES: usize = 300;
 
 #[test]
 fn golden_snapshot_fuzz() {
@@ -1510,12 +1798,17 @@ fn golden_snapshot_fuzz() {
     let generated: Vec<String> = (0..GOLDEN_CANDIDATES)
         .map(|_| generate_candidate(&mut rng).join(" | "))
         .collect();
+    let mut whole_rng = Rng::new(GOLDEN_SEED ^ WHOLE_RNG_SALT);
+    let whole: Vec<String> = (0..GOLDEN_WHOLE_CANDIDATES)
+        .map(|_| generate_whole_candidate(&mut whole_rng))
+        .collect();
     golden::check(
         "fuzz",
         LITERAL_SEEDS
             .iter()
             .copied()
-            .chain(generated.iter().map(String::as_str)),
+            .chain(generated.iter().map(String::as_str))
+            .chain(whole.iter().map(String::as_str)),
     );
 }
 
@@ -1694,26 +1987,55 @@ fn differential_fuzz_shguard_vs_bash_argv() {
     let mut compared: u64 = 0;
     let mut divergences: Vec<DivergenceReport> = Vec::new();
 
-    let mut candidates: Vec<Vec<String>>;
+    let mut whole_checked: u64 = 0;
+    let mut skipped_whole: u64 = 0;
+    let mut dangerous_executed: u64 = 0;
+    let mut violations: Vec<ExecutionViolation> = Vec::new();
+
+    let mut candidates: Vec<Candidate>;
     let is_replay = std::env::var("SHGUARD_FUZZ_REPLAY").is_ok();
     if let Ok(replay) = std::env::var("SHGUARD_FUZZ_REPLAY") {
         eprintln!("fuzz: replaying a single candidate from SHGUARD_FUZZ_REPLAY: {replay:?}");
-        candidates = vec![vec![replay]];
+        candidates = vec![literal_seed_candidate(&replay)];
     } else {
         let seed = env_u64("SHGUARD_FUZZ_SEED", DEFAULT_SEED);
         let iterations = env_u64("SHGUARD_FUZZ_ITERATIONS", DEFAULT_ITERATIONS);
+        let whole_iterations = env_u64("SHGUARD_FUZZ_WHOLE_ITERATIONS", DEFAULT_WHOLE_ITERATIONS);
         let mut rng = Rng::new(seed);
         candidates = LITERAL_SEEDS
             .iter()
-            .map(|s| vec![(*s).to_string()])
+            .map(|s| literal_seed_candidate(s))
             .collect();
         for _ in 0..iterations {
-            candidates.push(generate_candidate(&mut rng));
+            candidates.push(Candidate::Stages(generate_candidate(&mut rng)));
+        }
+        let mut whole_rng = Rng::new(seed ^ WHOLE_RNG_SALT);
+        for _ in 0..whole_iterations {
+            candidates.push(Candidate::Whole(generate_whole_candidate(&mut whole_rng)));
         }
     }
 
-    for stages in candidates {
+    for candidate in candidates {
         generated += 1;
+        let stages = match candidate {
+            Candidate::Stages(stages) => stages,
+            Candidate::Whole(text) => {
+                match check_whole_candidate(&sandbox, &text) {
+                    WholeOutcome::Skipped => skipped_whole += 1,
+                    WholeOutcome::Consistent {
+                        dangerous_executed: n,
+                    } => {
+                        whole_checked += 1;
+                        dangerous_executed += n;
+                    }
+                    WholeOutcome::Violation(violation) => {
+                        whole_checked += 1;
+                        violations.push(violation);
+                    }
+                }
+                continue;
+            }
+        };
         if !pipeline_stage_count_is_consistent(&stages) {
             generator_desync += 1;
             continue;
@@ -1750,10 +2072,19 @@ fn differential_fuzz_shguard_vs_bash_argv() {
          skipped_ineligible={skipped_ineligible} skipped_unresolvable={skipped_unresolvable} \
          skipped_tilde_not_expanded={skipped_tilde_not_expanded} \
          skipped_capture_failed={skipped_capture_failed} generator_desync={generator_desync} \
-         known_open_divergences={} new_divergences={}",
+         known_open_divergences={} new_divergences={} whole_checked={whole_checked} \
+         skipped_whole={skipped_whole} dangerous_executed={dangerous_executed} \
+         execution_violations={}",
         known_open.len(),
-        new_divergences.len()
+        new_divergences.len(),
+        violations.len()
     );
+    for violation in &violations {
+        eprintln!(
+            "EXECUTION VIOLATION candidate={:?} executed={:?}",
+            violation.candidate, violation.executed
+        );
+    }
 
     if !known_open.is_empty() || !new_divergences.is_empty() {
         let bash_version = sandbox.bash_version_line();
@@ -1782,6 +2113,19 @@ fn differential_fuzz_shguard_vs_bash_argv() {
         eprintln!(
             "fuzz: replayed candidate had no comparable stage (every stage was skipped -- \
              see skipped_* counts above); this is a normal outcome, not a harness failure"
+        );
+    }
+    assert!(
+        violations.is_empty(),
+        "found {} whole candidate(s) shguard allowed although bash ran a command shguard \
+         would not allow; see stderr for each candidate and the commands it executed",
+        violations.len()
+    );
+    if !is_replay {
+        assert!(
+            dangerous_executed > 0,
+            "no whole candidate executed a command shguard flags -- the execution oracle \
+             is not observing anything, check the shim log wiring"
         );
     }
     // Always fails loud, regardless of RootCause: an Allow-direction

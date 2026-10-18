@@ -164,13 +164,14 @@
 //!     returns — rule 6a's inner-Allow return chief among them — never
 //!     reach [`fold_floors`], so a floor placed inside `core` would vanish
 //!     on exactly those paths (`X=$(rm -rf /) bash -c 'ls'` must still
-//!     Block). The heredoc body scanner
-//!     ([`collect_heredoc_substitutions`]) is a hand-written iterative raw-
-//!     text scan, not a re-parse: `Redirection::HereDoc`'s `body` is a raw
-//!     `String`, not a `Word` (see that type's own docs on why), and bash's
-//!     heredoc-body expansion rules don't match its ordinary word-quoting
-//!     rules anyway (quotes are inert in an unquoted-delimiter heredoc body
-//!     — `'$(rm -rf /)'` still executes). [`check_redirect_targets`]'s
+//!     Block). Heredoc-body substitutions are not scanned here: the parser
+//!     finds them with brush's heredoc grammar (`crate::syntax::heredoc`)
+//!     and stores them on `Redirection::HereDoc`'s `substitutions`, because
+//!     bash's heredoc-body expansion rules don't match its ordinary
+//!     word-quoting rules (quotes are inert in an unquoted-delimiter heredoc
+//!     body — `'$(rm -rf /)'` still executes). A body brush cannot delimit
+//!     is `HeredocSubstitutions::Unparsed`, floored to `Ask`.
+//!     [`check_redirect_targets`]'s
 //!     existing MVP scope limit — an unresolved redirect target *path* is
 //!     never checked against the dangerous-path list — is unchanged by this
 //!     rule; rule 11 only adds checking the substitution's own inner
@@ -341,13 +342,14 @@
 //! verdict) is **not** allowlist-suppressible in v1: a deliberate,
 //! fail-closed scope cut, not an accident of where the wrap sits.
 
+use std::borrow::Cow;
 use std::cell::Cell;
 
 use crate::HookContext;
 use crate::ast::{
     AssignmentValue, Command, CommandLine, CompoundCommand, ElifClause, ExtendedTest,
-    FileRedirectionKind, FunctionDefinition, Pipeline, ProcessSubstitutionDirection, Redirection,
-    Separator, SimpleCommand, Word, WordPiece,
+    FileRedirectionKind, FunctionDefinition, HeredocSubstitutions, Pipeline,
+    ProcessSubstitutionDirection, Redirection, Separator, SimpleCommand, Word, WordPiece,
 };
 use crate::normalize::{
     self, FlagScan, NormalizedWord, Resolution, UnresolvableKind, scan_for_flag,
@@ -369,6 +371,7 @@ use crate::semantics::cwd::{AnchorOrigin, CwdAnchor, CwdContext, CwdState, MAX_C
 use crate::semantics::env::{
     Env, ExecScope, literal_text, redirections_may_write_variables, word_may_write_variables,
 };
+use crate::syntax::heredoc;
 use crate::verdict::{Decision, DenyMessage, Reason, RuleId, Verdict};
 
 /// Cap on how many levels deep a command/backquote substitution (or a
@@ -5194,7 +5197,7 @@ fn except_target_floor_reason(rule_id: &str) -> String {
 /// payload is already a parsed `CommandLine`, not raw text to re-parse (see
 /// `crate::ast::WordPiece::ProcessSubstitution`'s docs).
 fn evaluate_command_position_substitution(
-    inner_commands: &[&str],
+    inner_commands: &[Cow<'_, str>],
     inner_process_substitutions: &[&CommandLine],
     argv: Vec<NormalizedWord>,
     ctx: AnalysisCtx<'_>,
@@ -6042,7 +6045,7 @@ fn evaluate_argument_substitutions(
     for word in argument_words {
         for inner in collect_substitutions(word) {
             let verdict = analyze_at_depth(
-                inner,
+                &inner,
                 ctx.deeper(),
                 CwdState::seed_unknown_stack(cwd.clone()),
             );
@@ -6175,7 +6178,7 @@ fn evaluate_leftover_alternative_substitutions(
         for inner in subs {
             raise(
                 analyze_at_depth(
-                    inner,
+                    &inner,
                     ctx.deeper(),
                     CwdState::seed_unknown_stack(cwd.clone()),
                 )
@@ -6608,17 +6611,16 @@ fn scan_redirections_for_heredoc_candidates(
             Redirection::File { target, .. } => scan_word_for_heredoc_candidates(target, out),
             Redirection::HereDoc {
                 expand_body: true,
-                body,
+                substitutions,
                 ..
-            } => {
-                let scan = collect_heredoc_substitutions(body);
-                if scan.unterminated {
-                    out.uncertain = true;
+            } => match substitutions {
+                HeredocSubstitutions::Parsed(found) => {
+                    for inner in found {
+                        scan_substitution_text_for_heredoc_candidates(inner, out);
+                    }
                 }
-                for inner in &scan.substitutions {
-                    scan_substitution_text_for_heredoc_candidates(inner, out);
-                }
-            }
+                HeredocSubstitutions::Unparsed => out.uncertain = true,
+            },
             Redirection::HereDoc {
                 expand_body: false, ..
             } => {}
@@ -6657,12 +6659,13 @@ fn scan_word_pieces_for_heredoc_candidates(pieces: &[WordPiece], out: &mut Hered
             }
             WordPiece::ArithmeticExpansion(raw) => {
                 out.note_arithmetic(&[]);
-                let scan = collect_heredoc_substitutions(raw);
-                if scan.unterminated {
-                    out.uncertain = true;
-                }
-                for inner in &scan.substitutions {
-                    scan_substitution_text_for_heredoc_candidates(inner, out);
+                match heredoc::parse_body(raw) {
+                    Ok(found) => {
+                        for inner in &found {
+                            scan_substitution_text_for_heredoc_candidates(inner, out);
+                        }
+                    }
+                    Err(_) => out.uncertain = true,
                 }
             }
             WordPiece::DoubleQuoted(inner) => scan_word_pieces_for_heredoc_candidates(inner, out),
@@ -6690,7 +6693,7 @@ fn scan_word_pieces_for_heredoc_candidates(pieces: &[WordPiece], out: &mut Hered
 }
 
 /// A `$()`/backtick/arithmetic-nested substitution's raw inner text is not
-/// itself an AST node — [`collect_heredoc_substitutions`]/`collect_substitutions`
+/// itself an AST node — `crate::syntax::heredoc::parse_body`/`collect_substitutions`
 /// only ever hand back the text — so it must be re-parsed here the same way
 /// [`analyze_at_depth`] would before its own commands can be walked. A parse
 /// failure sets `uncertain` (fail-closed) rather than being silently
@@ -6712,8 +6715,8 @@ fn scan_substitution_text_for_heredoc_candidates(text: &str, out: &mut HeredocCa
 /// [`collect_substitutions`] for the `Word`-shaped positions (assignment
 /// value, redirect target) rather than writing a new `Word` walk; the
 /// heredoc body is raw text, not a `Word` (`crate::ast::Redirection::HereDoc`'s
-/// own docs), so it goes through the dedicated
-/// [`collect_heredoc_substitutions`] scanner instead. A quoted-delimiter
+/// own docs), so its substitutions come from the parser-populated
+/// `substitutions` field (`crate::syntax::heredoc`) instead. A quoted-delimiter
 /// heredoc (`expand_body: false`) skips the `$()`/backtick scan — that part
 /// is unaffected by `expand_body` (module docs, rule 11) — but not the
 /// interpreter-as-stdin floor (issue #424) `scan_redirection_expansions`
@@ -6826,7 +6829,10 @@ fn scan_redirection_expansions(
                 scan_word_expansions(target, ctx, cwd, accum, "a redirection target");
             }
             Redirection::HereDoc {
-                expand_body, body, ..
+                expand_body,
+                body,
+                substitutions,
+                ..
             } => {
                 // Issue #424: the heredoc body is this command's stdin, so
                 // when the command is a known interpreter, the body is
@@ -6870,8 +6876,7 @@ fn scan_redirection_expansions(
                     HeredocCandidate::Opaque(_) | HeredocCandidate::NonShell(_) => None,
                 }) {
                     // Bash dequotes `\$`/`` \` ``/`\\`/`\<newline>` (the
-                    // only escapes an unquoted-delimiter body recognises,
-                    // same as `collect_heredoc_substitutions`'s own docs)
+                    // only escapes an unquoted-delimiter body recognises)
                     // before handing the body to the reading shell's stdin;
                     // a quoted delimiter never recognises them at all, so
                     // the body stays raw. Recursing the un-dequoted text
@@ -6958,16 +6963,20 @@ fn scan_redirection_expansions(
                 }
 
                 if *expand_body {
-                    let scan = collect_heredoc_substitutions(body);
-                    if scan.unterminated {
-                        accum.raise(
-                            Decision::Ask,
-                            "the heredoc body contains a `$(`/`` ` `` that never closes before \
-                             the heredoc ends; refusing to allow with unknown content"
-                                .to_string(),
-                        );
-                    }
-                    for inner in &scan.substitutions {
+                    let found: &[String] = match substitutions {
+                        HeredocSubstitutions::Parsed(found) => found,
+                        HeredocSubstitutions::Unparsed => {
+                            accum.raise(
+                                Decision::Ask,
+                                "the heredoc body contains a `$(`/`` ` `` that never closes \
+                                 before the heredoc ends, or text that could not be parsed; \
+                                 refusing to allow with unknown content"
+                                    .to_string(),
+                            );
+                            &[]
+                        }
+                    };
+                    for inner in found {
                         let decision = analyze_at_depth(
                             inner,
                             ctx.deeper(),
@@ -7002,7 +7011,7 @@ fn scan_word_expansions(
 ) {
     for inner in collect_substitutions(word) {
         let decision = analyze_at_depth(
-            inner,
+            &inner,
             ctx.deeper(),
             CwdState::seed_unknown_stack(cwd.clone()),
         )
@@ -7717,7 +7726,7 @@ fn alternative_has_substitution(pieces: &[WordPiece]) -> bool {
 /// inside double quotes (`"$(...)"`) or brace alternation. Used for both
 /// rule 1 (command position: is this list non-empty at all) and rule 3
 /// (argument position: recurse each one found).
-fn collect_substitutions(word: &Word) -> Vec<&str> {
+fn collect_substitutions(word: &Word) -> Vec<Cow<'_, str>> {
     let mut out = Vec::new();
     collect_substitutions_into(&word.0, true, &mut out);
     out
@@ -7731,7 +7740,7 @@ fn collect_substitutions(word: &Word) -> Vec<&str> {
 fn collect_substitutions_into<'a>(
     pieces: &'a [WordPiece],
     allow_split: bool,
-    out: &mut Vec<&'a str>,
+    out: &mut Vec<Cow<'a, str>>,
 ) {
     for piece in pieces {
         match piece {
@@ -7761,24 +7770,26 @@ fn collect_substitutions_into<'a>(
             WordPiece::CommandSubstitution(inner) | WordPiece::BackquotedSubstitution(inner)
                 if allow_split && inner.trim().is_empty() => {}
             WordPiece::CommandSubstitution(inner) | WordPiece::BackquotedSubstitution(inner) => {
-                out.push(inner.as_str());
+                out.push(Cow::Borrowed(inner.as_str()));
             }
             // Issue #75: `$((...))`'s raw text is not itself submitted as a
             // substitution (`x+1` doesn't parse as a command line — see
-            // `collect_heredoc_substitutions`'s docs, which already handle
-            // exactly this "arithmetic span, but a nested `$(...)` inside it
-            // still expands" case for heredoc bodies). Reusing that scanner
+            // `crate::syntax::heredoc`, which already handles exactly this
+            // "arithmetic span, but a nested `$(...)` inside it still
+            // expands" case for heredoc bodies). Reusing that parser
             // here is what makes it safe to treat the surrounding segment
             // (issue #82: the piece run between `$IFS` split points, or the
             // whole word if there are none) as merely opaque
             // (`UnresolvableKind::ArithmeticExpansion`, floored to Ask by
             // `is_opaque_unresolvable`) rather than hiding an embedded
             // `$(rm -rf /)` inside it entirely. Any
-            // unterminated `$(`/backtick this scan finds is not surfaced
+            // unterminated `$(`/backtick the parse rejects is not surfaced
             // separately — the opaque-kind floor already guarantees at
             // least `Ask` regardless.
             WordPiece::ArithmeticExpansion(raw) => {
-                out.extend(collect_heredoc_substitutions(raw).substitutions);
+                if let Ok(found) = heredoc::parse_body(raw) {
+                    out.extend(found.into_iter().map(Cow::Owned));
+                }
             }
             WordPiece::DoubleQuoted(inner) => collect_substitutions_into(inner, false, out),
             WordPiece::ModifiedParameterExpansion { operand, .. } => {
@@ -7848,156 +7859,8 @@ fn collect_directed_process_substitutions_into<'a>(
 }
 
 // ---------------------------------------------------------------------
-// Heredoc body scanning (rule 11, issue #51)
+// Heredoc body dequoting (rule 11, issue #51)
 // ---------------------------------------------------------------------
-
-/// The result of [`collect_heredoc_substitutions`]: every top-level (i.e.
-/// not itself nested inside a captured substitution — see that function's
-/// docs) `$()`/backtick span's raw inner text, and whether a `$(`/`` ` ``
-/// was opened but never closed before the body ran out (fail-closed: the
-/// caller floors to `Ask` on this, same posture as any other unresolvable
-/// construct in this module).
-struct HeredocScan<'a> {
-    substitutions: Vec<&'a str>,
-    unterminated: bool,
-}
-
-/// Quote-tracking state used while finding the matching close of a captured
-/// `$(...)`/`` `...` `` span (`scan_paren_span`) — normal shell quoting
-/// rules apply *inside* such a span (the content is itself going to be
-/// parsed as a command line), unlike the heredoc body's own top level
-/// (see [`collect_heredoc_substitutions`]'s docs on why quotes are inert
-/// out there).
-///
-/// [`QuoteState::AnsiC`] (issue #69) is deliberately a separate state from
-/// [`QuoteState::Single`], not a flag on it: bash's plain `'...'` and
-/// ANSI-C `$'...'` have different escape grammars inside the SAME
-/// terminating character (`'`) — plain single quotes have NO escape
-/// processing at all (a `\` inside one is just a literal backslash, never
-/// escapes the closing `'`), while `$'...'` treats `\'` as an escaped
-/// literal quote that does NOT close the string. Only entered from
-/// [`QuoteState::None`] on seeing `$` immediately followed by `'` (the
-/// two-byte `$'` opener consumed together) — this scanner never enters it
-/// mid-quote (e.g. from inside `Double`), since bash's own grammar doesn't
-/// recognize `$'` as special there either.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum QuoteState {
-    None,
-    Single,
-    AnsiC,
-    Double,
-}
-
-/// Rule 11's heredoc-body scanner: an unquoted-delimiter heredoc body
-/// (`Redirection::HereDoc { expand_body: true, .. }`) is raw `String`, not a
-/// `Word` (`crate::ast::Redirection::HereDoc`'s own docs explain why), so it
-/// cannot go through [`collect_substitutions`]'s `Word`-piece walk — this is
-/// its from-scratch equivalent, purpose-built for bash's actual
-/// heredoc-body grammar rather than its word-quoting grammar (the two
-/// differ: `<<EOF` body quotes are NOT special characters — `'$(rm -rf /)'`
-/// inside one still executes — only `\$`, `` \` ``, and `\\` are recognised
-/// escapes at the body's top level).
-///
-/// **Fully iterative, zero recursion**: nested `$((...))` arithmetic spans
-/// are tracked with `arithmetic_depths`, a `Vec`-backed stack of paren-
-/// depth counters, one push per nested `$((`, rather than a recursive
-/// helper call per nesting level — nesting depth costs heap, never
-/// call-stack frames, so attacker-controlled nesting in a heredoc body
-/// cannot drive this scanner itself into a stack-exhaustion crash (the same
-/// concern `src/parser.rs`'s own raw pre-parse depth scan defends against
-/// for the underlying parser, for the same reason: a security control that
-/// can be turned into unbounded recursion is not a mitigation).
-///
-/// Extracts only the **outer** span of each top-level `$()`/backtick —
-/// nested substitutions inside a captured span (`$(echo $(date))`'s inner
-/// `$(date)`) are left in the captured text verbatim, for
-/// [`analyze_at_depth`]'s own ordinary recursion (parse -> normalise ->
-/// `collect_substitutions` at one depth deeper) to find, exactly as rule
-/// 3's argument-position recursion already relies on. `$((...))` is the one
-/// exception: an arithmetic span is never itself submitted as a
-/// substitution (its content, e.g. `x+1`, does not parse as a command line
-/// — submitting it would misroute a benign `$((x+1))` to `Ask`), but any
-/// `$()`/backtick *nested inside* the arithmetic (`$(($(rm -rf /)))`) is
-/// still found and extracted individually, because bash does expand a
-/// nested command substitution before evaluating the arithmetic around it.
-///
-/// Scans bytes, not `char`s: `$`, `(`, `)`, `` ` ``, `\`, `'`, `"` are all
-/// single-byte ASCII, and no UTF-8 continuation byte (`0x80..=0xBF`) can
-/// equal one of them, so counting raw bytes is exact for any valid UTF-8
-/// input and avoids paying for UTF-8 decoding on a hot, security-critical
-/// scan — this is stdin-derived, attacker-controlled data, and a `Vec<char>`
-/// plus a `char`-index-to-byte-offset table would both amplify `body`'s
-/// memory footprint several-fold for no correctness benefit (the same
-/// reasoning `src/parser.rs`'s own raw nesting scan applies, issue #52).
-/// Byte offsets double as slice boundaries directly, so no conversion table
-/// is needed at all: every boundary this scanner slices at sits immediately
-/// after (or exactly on) one of those single-byte ASCII delimiters, which
-/// is always a valid UTF-8 char boundary — an ASCII byte can never be a
-/// continuation byte of some other character's multi-byte sequence, so the
-/// position right after one is guaranteed to start a new character (or hit
-/// EOF), never split one.
-fn collect_heredoc_substitutions(body: &str) -> HeredocScan<'_> {
-    let bytes = body.as_bytes();
-    let n = bytes.len();
-    let mut i = 0usize;
-    let mut substitutions: Vec<&str> = Vec::new();
-    let mut arithmetic_depths: Vec<usize> = Vec::new();
-    let mut unterminated = false;
-
-    while i < n {
-        let in_arithmetic = !arithmetic_depths.is_empty();
-
-        // Top level: heredoc-body semantics — quotes are inert (a `'` or
-        // `"` here is just literal text, never a quote-protection
-        // boundary), and only `\$`/`` \` ``/`\\` are recognised escapes.
-        if !in_arithmetic
-            && i + 1 < n
-            && bytes[i] == b'\\'
-            && matches!(bytes[i + 1], b'$' | b'`' | b'\\')
-        {
-            i += 2;
-            continue;
-        }
-
-        match consume_nested_token(bytes, body, i, &mut substitutions, &mut arithmetic_depths) {
-            Ok(Some(next)) => {
-                i = next;
-                continue;
-            }
-            Ok(None) => {}
-            Err(()) => {
-                unterminated = true;
-                break;
-            }
-        }
-
-        if in_arithmetic {
-            match bytes[i] {
-                b'(' => {
-                    if let Some(depth) = arithmetic_depths.last_mut() {
-                        *depth += 1;
-                    }
-                }
-                b')' => {
-                    if let Some(depth) = arithmetic_depths.last_mut() {
-                        *depth -= 1;
-                        if *depth == 0 {
-                            arithmetic_depths.pop();
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        i += 1;
-    }
-
-    HeredocScan {
-        substitutions,
-        unterminated: unterminated || !arithmetic_depths.is_empty(),
-    }
-}
 
 /// Reverses the four escapes bash's own manual ("Here Documents") states an
 /// unquoted-delimiter heredoc body recognises at its top level — `\$`,
@@ -8008,18 +7871,16 @@ fn collect_heredoc_substitutions(body: &str) -> HeredocScan<'_> {
 /// handing it to the reading shell's stdin, so analysing the raw text would
 /// let a backslash-escaped payload (`\$(rm -rf /)`, which the child shell
 /// receives and runs as a real `$(rm -rf /)` substitution) be seen as inert,
-/// escaped text instead. Note this is a stricter set than
-/// [`collect_heredoc_substitutions`]'s own three-escape comment documents —
-/// that scanner's own `\<newline>` gap is a separate, pre-existing issue,
-/// not fixed here. Only ever called on an `expand_body: true` body — a
+/// escaped text instead. (`crate::syntax::heredoc` strips `\<newline>` from
+/// the body itself before extracting substitutions.) Only
+/// ever called on an `expand_body: true` body — a
 /// quoted delimiter's body recognises none of these escapes, so calling
 /// this on one would corrupt literal text the child shell receives
 /// unchanged.
 ///
-/// Scans bytes, not `char`s, for the same reason `collect_heredoc_substitutions`
-/// does (its own docs): `\`, `$`, `` ` ``, newline are single-byte ASCII, and
-/// no UTF-8 continuation byte can equal one, so copying every non-matched
-/// byte through unchanged can never split a multi-byte character.
+/// Scans bytes, not `char`s: `\`, `$`, `` ` ``, newline are single-byte
+/// ASCII, and no UTF-8 continuation byte can equal one, so copying every
+/// non-matched byte through unchanged can never split a multi-byte character.
 fn dequote_heredoc_body(body: &str) -> String {
     let bytes = body.as_bytes();
     let mut out = String::with_capacity(body.len());
@@ -8052,186 +7913,6 @@ fn dequote_heredoc_body(body: &str) -> String {
     }
     out.push_str(&body[start..]);
     out
-}
-
-/// Tries to consume a `$(`/`$((`/`` ` `` token starting at `bytes[i]`.
-/// `Ok(None)` means `bytes[i]` does not start any such token at all (the
-/// caller advances `i` itself, applying whatever rules its own scanning
-/// context needs — top-level vs. inside an arithmetic span). `Ok(Some(j))`
-/// means a token was consumed, `j` is where to resume scanning: for `$((`,
-/// a fresh frame (`2`, the two already-consumed opening parens) is pushed
-/// onto `arithmetic_depths`; for a plain `$(`/`` ` ``, its captured inner
-/// text is pushed onto `substitutions`. `Err(())` means a token started
-/// (`$(`/`` ` ``) but never found its matching close before the body ran
-/// out — the caller fails closed on this (`unterminated`).
-fn consume_nested_token<'a>(
-    bytes: &[u8],
-    body: &'a str,
-    i: usize,
-    substitutions: &mut Vec<&'a str>,
-    arithmetic_depths: &mut Vec<usize>,
-) -> Result<Option<usize>, ()> {
-    let n = bytes.len();
-    let c = bytes[i];
-
-    if c == b'$' && i + 1 < n && bytes[i + 1] == b'(' {
-        if i + 2 < n && bytes[i + 2] == b'(' {
-            arithmetic_depths.push(2);
-            return Ok(Some(i + 3));
-        }
-        return match scan_paren_span(bytes, body, i + 2) {
-            Some((inner, end)) => {
-                substitutions.push(inner);
-                Ok(Some(end))
-            }
-            None => Err(()),
-        };
-    }
-
-    if c == b'`' {
-        return match scan_backtick_span(bytes, body, i + 1) {
-            Some((inner, end)) => {
-                substitutions.push(inner);
-                Ok(Some(end))
-            }
-            None => Err(()),
-        };
-    }
-
-    Ok(None)
-}
-
-/// Finds the matching close paren for a `$(` whose content starts at
-/// `bytes[start]` (the byte right after the opening `$(`), respecting
-/// nested parens (`depth`, starting at 1) and ordinary shell single-/
-/// double-/ANSI-C-quoting within the span — `$(echo ")")` must not close
-/// on the quoted `)`. Returns the captured inner text and the index just
-/// past the matching close paren, or `None` if the body runs out first
-/// (unterminated).
-///
-/// Issue #69 fixed two divergences from bash's real `$(...)` grammar here:
-/// - `QuoteState::AnsiC` (entered on an unquoted `$'`) gives `$'...'`
-///   backslash-escape awareness, distinct from plain `'...'`
-///   ([`QuoteState::Single`], correctly left with none) — bash's ANSI-C
-///   quoting treats `\'` as an escaped literal quote that does NOT close
-///   the string, so without this a real `$'it\'s'`-shaped span mistook the
-///   escaped quote for the closing one, desyncing paren-depth tracking
-///   from bash's actual parse.
-/// - `QuoteState::None` now skips ANY backslash-escaped character as one
-///   unit (mirroring `Double`'s existing shape), not just inside quotes —
-///   bash's unquoted top level treats `\` as escaping exactly the next
-///   character, so an escaped `\(`/`\)` must not affect `depth` the way an
-///   unescaped one does. This is checked before the `$'` detection below,
-///   which is what makes `\$'` (escaped dollar, then a REAL plain `'...'`
-///   string) resolve correctly: the backslash case consumes `\$` as one
-///   unit, so the following `'` is examined fresh next iteration, never
-///   mistaken for an ANSI-C opener.
-///
-/// Known residual imprecision, not fixed here: `$$'...'` (`$$`, the shell
-/// PID special parameter, immediately followed by a real plain `'...'`
-/// string) is misread as `$` + an ANSI-C `$'...'` opener, since this scan
-/// has no notion of `$$` as its own two-character token. Depending on
-/// whether the quoted content contains an escaped `\'`, this can make the
-/// span close either LATER than bash's real parse (ordinary over-capture:
-/// the captured superset fails to parse and floors to `Ask`) or, more
-/// subtly, EARLIER — e.g. `$$'\''`: bash reads `$$` then a plain quote
-/// that closes at the first `'`, immediately followed by a second `'`
-/// that opens ANOTHER quote, which stays open through what this scanner
-/// mistakes for the real closing paren. An early close is still
-/// fail-closed, but not for the over-capture reason above: whenever the
-/// span closes early, bash's own parse is — by construction — still
-/// inside that open quote at the very same byte offset (that's the only
-/// way a real `)` could fail to be bash's closing paren there), so the
-/// captured (truncated) prefix itself always ends with an unbalanced
-/// quote and is not valid shell syntax on its own. shguard's per-word
-/// re-parse (`bword::parse` via `convert_word_text` in parser.rs) rejects
-/// it, which surfaces as a `parser::parse` `Err` and floors to `Ask` in
-/// `analyze_at_depth` — the same fail-closed posture this scanner's other
-/// gaps already have. `$$` immediately followed by `'` is a vanishingly
-/// rare real-world shape (the PID glued directly to a quoted string with
-/// no separator).
-fn scan_paren_span<'a>(bytes: &[u8], body: &'a str, start: usize) -> Option<(&'a str, usize)> {
-    let n = bytes.len();
-    let mut depth = 1usize;
-    let mut quote = QuoteState::None;
-    let mut i = start;
-
-    while i < n {
-        let c = bytes[i];
-        match quote {
-            QuoteState::Single => {
-                if c == b'\'' {
-                    quote = QuoteState::None;
-                }
-                i += 1;
-            }
-            QuoteState::AnsiC => {
-                if c == b'\\' && i + 1 < n {
-                    i += 2;
-                    continue;
-                }
-                if c == b'\'' {
-                    quote = QuoteState::None;
-                }
-                i += 1;
-            }
-            QuoteState::Double => {
-                if c == b'\\' && i + 1 < n {
-                    i += 2;
-                    continue;
-                }
-                if c == b'"' {
-                    quote = QuoteState::None;
-                }
-                i += 1;
-            }
-            QuoteState::None => {
-                if c == b'\\' && i + 1 < n {
-                    i += 2;
-                    continue;
-                }
-                if c == b'$' && i + 1 < n && bytes[i + 1] == b'\'' {
-                    quote = QuoteState::AnsiC;
-                    i += 2;
-                    continue;
-                }
-                match c {
-                    b'\'' => quote = QuoteState::Single,
-                    b'"' => quote = QuoteState::Double,
-                    b'(' => depth += 1,
-                    b')' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            return Some((&body[start..i], i + 1));
-                        }
-                    }
-                    _ => {}
-                }
-                i += 1;
-            }
-        }
-    }
-    None
-}
-
-/// Finds the next unescaped backtick starting at `bytes[start]` (the byte
-/// right after the opening `` ` ``). Returns the captured inner text and
-/// the index just past the closing backtick, or `None` if the body runs
-/// out first (unterminated).
-fn scan_backtick_span<'a>(bytes: &[u8], body: &'a str, start: usize) -> Option<(&'a str, usize)> {
-    let n = bytes.len();
-    let mut i = start;
-    while i < n {
-        if bytes[i] == b'\\' && i + 1 < n {
-            i += 2;
-            continue;
-        }
-        if bytes[i] == b'`' {
-            return Some((&body[start..i], i + 1));
-        }
-        i += 1;
-    }
-    None
 }
 
 /// A word is a "bare" `$VAR`/`${VAR}` (rule 2's command-position sense) only
@@ -20006,8 +19687,8 @@ mod tests {
         assert_decision("( { python3; } ) <<EOF\nprint('hi')\nEOF", Decision::Ask);
     }
 
-    // ==== Issue #69: end-to-end pins for scan_paren_span's ANSI-C-quoting
-    // and escaped-paren fixes ====
+    // ==== Issue #69: end-to-end pins for the heredoc ANSI-C-quoting and
+    // escaped-paren span handling ====
 
     #[test]
     fn heredoc_body_ansi_c_escaped_quote_still_blocks() {
@@ -20029,210 +19710,39 @@ mod tests {
         assert_decision("cat <<EOF\n$(echo $'hello')\nEOF", Decision::Allow);
     }
 
-    // ==== Issue #51: `collect_heredoc_substitutions` unit coverage ====
-
     #[test]
-    fn heredoc_scan_finds_nothing_in_plain_text() {
-        let scan = collect_heredoc_substitutions("just some prose, no substitutions here");
-        assert!(scan.substitutions.is_empty());
-        assert!(!scan.unterminated);
-    }
-
-    #[test]
-    fn heredoc_scan_extracts_command_substitution() {
-        let scan = collect_heredoc_substitutions("before $(rm -rf /) after");
-        assert_eq!(scan.substitutions, vec!["rm -rf /"]);
-        assert!(!scan.unterminated);
-    }
-
-    #[test]
-    fn heredoc_scan_extracts_backquote_substitution() {
-        let scan = collect_heredoc_substitutions("before `rm -rf /` after");
-        assert_eq!(scan.substitutions, vec!["rm -rf /"]);
-        assert!(!scan.unterminated);
-    }
-
-    #[test]
-    fn heredoc_scan_only_extracts_the_outer_span_of_a_nested_substitution() {
-        let scan = collect_heredoc_substitutions("$(echo $(date))");
-        assert_eq!(scan.substitutions, vec!["echo $(date)"]);
-        assert!(!scan.unterminated);
-    }
-
-    #[test]
-    fn heredoc_scan_skips_a_close_paren_hidden_inside_quotes() {
-        // `$(echo ")")`'s inner `)` sits inside a double-quoted string and
-        // must not be mistaken for the substitution's own closing paren.
-        let scan = collect_heredoc_substitutions(r#"$(echo ")")"#);
-        assert_eq!(scan.substitutions, vec![r#"echo ")""#]);
-        assert!(!scan.unterminated);
-    }
-
-    #[test]
-    fn heredoc_scan_top_level_single_quotes_are_inert() {
-        let scan = collect_heredoc_substitutions("'$(rm -rf /)'");
-        assert_eq!(scan.substitutions, vec!["rm -rf /"]);
-        assert!(!scan.unterminated);
-    }
-
-    // ==== Issue #69: scan_paren_span's ANSI-C-quoting and escaped-paren
-    // awareness ====
-
-    #[test]
-    fn scan_paren_span_ansi_c_escaped_quote_does_not_end_the_string() {
-        // `$'it\'s'` is bash's ANSI-C quoting: the `\'` is an escaped
-        // literal quote, does NOT close the string — unlike a plain
-        // `'...'`, which has no escape processing at all. Before this fix,
-        // `$'` was indistinguishable from a bare `'`, so the escaped quote
-        // was mistaken for the closing one, and the string effectively
-        // never closed within this content (no further `'` follows),
-        // leaving the span unterminated.
-        let scan = collect_heredoc_substitutions(r"$(echo $'it\'s'; rm -rf /)");
-        assert_eq!(scan.substitutions, vec![r"echo $'it\'s'; rm -rf /"]);
-        assert!(!scan.unterminated);
-    }
-
-    #[test]
-    fn scan_paren_span_ansi_c_string_containing_a_literal_paren() {
-        let scan = collect_heredoc_substitutions(r"$(echo $'a)b')");
-        assert_eq!(scan.substitutions, vec![r"echo $'a)b'"]);
-        assert!(!scan.unterminated);
-    }
-
-    #[test]
-    fn scan_paren_span_unterminated_ansi_c_string_is_flagged() {
-        let scan = collect_heredoc_substitutions(r"$(echo $'abc");
-        assert!(scan.unterminated);
-    }
-
-    #[test]
-    fn scan_paren_span_empty_ansi_c_string() {
-        let scan = collect_heredoc_substitutions(r"$(echo $''; rm -rf /)");
-        assert_eq!(scan.substitutions, vec![r"echo $''; rm -rf /"]);
-        assert!(!scan.unterminated);
-    }
-
-    #[test]
-    fn scan_paren_span_dollar_dollar_ansi_c_misread_still_asks() {
-        // Documented residual gap: `$$` (the shell PID special parameter)
-        // immediately followed by a real plain `'...'` is misread as `$`
-        // + an ANSI-C `$'...'` opener. When the quoted content itself
-        // contains an escaped `\'`, this can make the span close EARLIER
-        // than bash's real parse rather than later (see the doc comment
-        // on `scan_paren_span`): bash reads `$$` then a plain quote that
-        // closes at the first `'`, immediately followed by a second `'`
-        // that opens ANOTHER quote which stays open through what this
-        // scanner mistakes for the real closing paren — so the captured
-        // prefix drops the trailing `; rm -rf /` entirely.
-        let scan = collect_heredoc_substitutions(r"$(echo $$'\'')'; rm -rf /)");
-        assert_eq!(scan.substitutions, vec![r"echo $$'\''"]);
-        assert!(!scan.unterminated);
-        // Still fail-closed end-to-end: the truncated capture itself ends
-        // on an unbalanced quote, which shguard's parser rejects, and a
-        // parse failure floors to Ask, not Allow.
+    fn heredoc_body_dollar_dollar_ansi_c_misread_still_asks() {
+        // `$$` (the PID) glued to a plain `'...'` holding an escaped `\'`:
+        // however the span is delimited, the dangerous tail must not be
+        // dropped into an Allow.
         assert_decision("cat <<EOF\n$(echo $$'\\'')'; rm -rf /)\nEOF", Decision::Ask);
     }
 
     #[test]
-    fn scan_paren_span_plain_single_quotes_still_have_no_escape_processing() {
-        // Regression guard: this fix must not give plain `'...'` (no `$`
-        // prefix) any escape awareness — real bash single quotes have
-        // none at all, so a bare `\` inside one is just a literal
-        // backslash, and the very next `'` always closes.
-        let scan = collect_heredoc_substitutions(r"$(echo 'a\'; rm -rf /)");
-        assert_eq!(scan.substitutions, vec![r"echo 'a\'; rm -rf /"]);
-        assert!(!scan.unterminated);
+    fn heredoc_body_every_unterminated_opener_asks() {
+        assert_decision("cat <<EOF\n`rm -rf /\nEOF", Decision::Ask);
+        assert_decision("cat <<EOF\n$((1+1\nEOF", Decision::Ask);
+        assert_decision("cat <<EOF\n$[1+1\nEOF", Decision::Ask);
     }
 
     #[test]
-    fn scan_paren_span_escaped_paren_does_not_affect_depth() {
-        // `\)` at the span's unquoted top level is a literal, non-special
-        // paren in real bash — before this fix it still decremented
-        // `depth`, closing the span early and leaving the real danger
-        // (`rm -rf /`) in unscanned trailing text.
-        let scan = collect_heredoc_substitutions(r"$(echo \) ; rm -rf /)");
-        assert_eq!(scan.substitutions, vec![r"echo \) ; rm -rf /"]);
-        assert!(!scan.unterminated);
+    fn heredoc_body_substitutions_hidden_in_arithmetic_or_operands_block() {
+        assert_decision("cat <<EOF\n$(($(rm -rf /)))\nEOF", Decision::Block);
+        assert_decision("cat <<EOF\n$[ $(rm -rf /) ]\nEOF", Decision::Block);
+        assert_decision("cat <<EOF\n${x:-$(rm -rf /)}\nEOF", Decision::Block);
+        assert_decision("cat <<EOF\n${a[$(rm -rf /)]}\nEOF", Decision::Block);
     }
 
     #[test]
-    fn scan_paren_span_escaped_paren_inside_double_quotes_still_works() {
-        // Already handled by the pre-existing `Double` arm — pinned here
-        // so a future refactor of the new `None`-arm escape handling
-        // can't regress it.
-        let scan = collect_heredoc_substitutions(r#"$(echo "\)")"#);
-        assert_eq!(scan.substitutions, vec![r#"echo "\)""#]);
-        assert!(!scan.unterminated);
+    fn heredoc_body_nested_backquote_escapes_are_decoded_before_analysis() {
+        assert_decision("cat <<EOF\n`echo \\`rm -rf /\\``\nEOF", Decision::Block);
     }
 
     #[test]
-    fn scan_paren_span_double_backslash_still_closes_on_the_following_paren() {
-        // `\\` escapes only the backslash itself, so the following `)`
-        // is NOT escaped and closes the span normally — guards against an
-        // over-eager escape implementation swallowing a real closing
-        // paren.
-        let scan = collect_heredoc_substitutions(r"$(echo \\)");
-        assert_eq!(scan.substitutions, vec![r"echo \\"]);
-        assert!(!scan.unterminated);
-    }
-
-    #[test]
-    fn scan_paren_span_trailing_lone_backslash_is_unterminated() {
-        let scan = collect_heredoc_substitutions(r"$(foo \");
-        assert!(scan.unterminated);
-    }
-
-    #[test]
-    fn heredoc_scan_respects_the_three_recognised_escapes() {
-        let scan = collect_heredoc_substitutions(r"\$(rm -rf /) \`rm -rf /\` \\$(rm -rf /)");
-        // `\$(` and `` \` `` are not scanned at all; `\\` escapes only the
-        // backslash itself, so the substitution right after `\\` IS found.
-        assert_eq!(scan.substitutions, vec!["rm -rf /"]);
-        assert!(!scan.unterminated);
-    }
-
-    #[test]
-    fn heredoc_scan_arithmetic_expansion_yields_no_substitutions() {
-        let scan = collect_heredoc_substitutions("$((x+1))");
-        assert!(scan.substitutions.is_empty());
-        assert!(!scan.unterminated);
-    }
-
-    #[test]
-    fn heredoc_scan_extracts_substitution_nested_inside_arithmetic() {
-        let scan = collect_heredoc_substitutions("$(($(rm -rf /)))");
-        assert_eq!(scan.substitutions, vec!["rm -rf /"]);
-        assert!(!scan.unterminated);
-    }
-
-    #[test]
-    fn heredoc_scan_unterminated_command_substitution_is_flagged() {
-        let scan = collect_heredoc_substitutions("$(rm -rf /");
-        assert!(scan.unterminated);
-    }
-
-    #[test]
-    fn heredoc_scan_unterminated_backquote_is_flagged() {
-        let scan = collect_heredoc_substitutions("`rm -rf /");
-        assert!(scan.unterminated);
-    }
-
-    #[test]
-    fn heredoc_scan_unterminated_arithmetic_is_flagged() {
-        let scan = collect_heredoc_substitutions("$((x+1");
-        assert!(scan.unterminated);
-    }
-
-    #[test]
-    fn heredoc_scan_finds_substitution_amid_multibyte_text() {
-        // Byte-based scanning (not `char`-based) must still slice at valid
-        // UTF-8 boundaries and extract exactly the substitution's content —
-        // never panic on, or corrupt, the surrounding multi-byte text.
-        let scan = collect_heredoc_substitutions(
-            "これは日本語のテキストです $(rm -rf /) この後にも日本語",
-        );
-        assert_eq!(scan.substitutions, vec!["rm -rf /"]);
-        assert!(!scan.unterminated);
+    fn arithmetic_expansion_substitution_is_still_analysed() {
+        assert_decision("echo $(( $(rm -rf /) ))", Decision::Block);
+        assert_decision("echo $[ $(rm -rf /) ]", Decision::Block);
+        assert_decision("echo $((1+1))", Decision::Ask);
     }
 
     #[test]
@@ -23096,6 +22606,26 @@ targets = [{ normalized_prefix = "~/.ssh" }]
             decide("diff <(cat ~/.ssh/id_rsa) x", "").decision(),
             Decision::Allow
         );
+    }
+
+    #[test]
+    fn heredoc_comment_continuation_and_backquote_escape_bypasses_never_allow() {
+        for command in [
+            "cat <<EOF\n$(echo hi # )\nrm -rf /)\nEOF",
+            "cat <<EOF\n$(echo hi #)\nEOF",
+            "cat <<EOF\n$\\\n(rm -rf /)\nEOF",
+            "cat <<EOF\n`echo \"\\$(rm -rf /)\"`\nEOF",
+            "true; echo `echo \"\\$(rm -rf /)\"`",
+            "cat <<EOF\n$( (echo hi)#x )\nrm -rf /)\nEOF",
+            "cat <<EOF\n$(echo \\'  # )\nrm -rf /)\nEOF",
+            "cat <<EOF\n$(echo $'a\\'' # )\nrm -rf /)\nEOF",
+        ] {
+            assert_ne!(
+                decide(command, "").decision(),
+                Decision::Allow,
+                "{command:?}"
+            );
+        }
     }
 
     #[test]
