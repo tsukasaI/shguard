@@ -831,9 +831,9 @@ fn has_pid_dollars_before_brace(text: &str) -> bool {
 }
 
 /// Converts consecutive brace-pre-pass segments. A `Text` ending in an odd
-/// number of unescaped `$` directly followed by an `Expr` is a `${...}` the pre-pass split
-/// at a top-level comma; no shell brace-expands `${`, and the real parse
-/// would never see the `${` text, so it is rejected here.
+/// number of unescaped `$` directly followed by an `Expr` is a `${...}` the
+/// pre-pass split at a top-level comma; no shell brace-expands `${`, and the
+/// real parse would never see the `${` text, so it is rejected here.
 fn convert_brace_segments(
     segments: impl IntoIterator<Item = bword::BraceExpressionOrText>,
     depth: usize,

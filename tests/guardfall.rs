@@ -2411,6 +2411,17 @@ const PARAMETER_EXPANSION_OPERAND_CASES: &[(&str, Decision)] = &[
     ("cat <<'EOF'\n${ rm -rf /; }\nEOF", Decision::Allow),
     ("cat <<'EOF'\n${(e)x}\nEOF", Decision::Allow),
     ("cat <<EOF\n\\${ rm -rf /; }\nEOF", Decision::Allow),
+    // Issue #655: an arithmetic expansion whose text cannot be parsed is
+    // unknown, in assignment, array, and redirection positions too.
+    ("x=$(( ${ rm -rf /; } ))", Decision::Ask),
+    ("x=\"$(( ${ rm -rf /; } ))\"", Decision::Ask),
+    ("x=$(( ${ rm -rf /; } )) echo hi", Decision::Ask),
+    ("a=($(( ${ rm -rf /; } )))", Decision::Ask),
+    ("x=$[ ${ rm -rf /; } ]", Decision::Ask),
+    ("cat > $(( ${ rm -rf /; } ))", Decision::Ask),
+    ("cat < $(( ${ rm -rf /; } ))", Decision::Ask),
+    ("x=$(( $=y ))", Decision::Ask),
+    ("if true; then x=$(( ${ rm -rf /; } )); fi", Decision::Ask),
 ];
 
 #[test]
