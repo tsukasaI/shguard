@@ -7155,8 +7155,27 @@ fn scan_recursable_slots(
                 .any(|slot| slot.commands.contains(&name.as_str()))
         });
     if let Some(slot_command) = slot_command.as_deref() {
-        let mut i = 0;
+        let is_fd = matches!(slot_command, "fd" | "fdfind");
+        // Not `fd`'s flags before the `fd` word itself (`xargs -x fd`), nor
+        // anything after a bare `--` (`fd . / -- -x`), which are patterns.
+        let mut i = if is_fd {
+            command
+                .words
+                .iter()
+                .position(|word| {
+                    single_resolved(word).is_some_and(|s| {
+                        crate::rules::canonical_command_name(crate::rules::basename(&s))
+                            == slot_command
+                    })
+                })
+                .unwrap_or(0)
+        } else {
+            0
+        };
         while i < command.words.len() {
+            if is_fd && single_resolved(&command.words[i]).as_deref() == Some("--") {
+                break;
+            }
             match find_exec_flag_kind(&command.words[i], slot_command) {
                 FindExecFlagKind::No => {
                     i += 1;
@@ -7542,19 +7561,23 @@ fn recurse_find_exec_payload(
     floor: &mut Option<(Decision, String)>,
 ) {
     let label = exec_label(slot_command);
-    let with_placeholder;
-    let synthetic = if lacks_implicit_fd_placeholder(slot_command, synthetic) {
-        with_placeholder = SimpleCommand {
+    let fd_payload;
+    let synthetic = if matches!(slot_command, "fd" | "fdfind") {
+        let mut found = false;
+        let mut words: Vec<Word> = synthetic
+            .words
+            .iter()
+            .map(|word| Word(rewrite_fd_placeholders(&word.0, &mut found)))
+            .collect();
+        if !found {
+            words.push(Word(vec![WordPiece::Literal("{}".to_string())]));
+        }
+        fd_payload = SimpleCommand {
             assignments: Vec::new(),
-            words: synthetic
-                .words
-                .iter()
-                .cloned()
-                .chain([Word(vec![WordPiece::Literal("{}".to_string())])])
-                .collect(),
+            words,
             redirections: Vec::new(),
         };
-        &with_placeholder
+        &fd_payload
     } else {
         synthetic
     };
@@ -7731,18 +7754,46 @@ fn direct_argv_terminators_for(command: &str, flag: &str) -> Option<&'static [&'
         .map(|slot| slot.terminators)
 }
 
-/// Whether `synthetic` is an `fd` payload with no `{}`-style placeholder:
-/// `fd` then appends the match as a final argument, so `fd -x rm -rf` runs
-/// `rm -rf <match>`.
-fn lacks_implicit_fd_placeholder(slot_command: &str, synthetic: &SimpleCommand) -> bool {
-    matches!(slot_command, "fd" | "fdfind")
-        && !synthetic.words.iter().any(|word| {
-            single_resolved(word).is_none_or(|s| {
-                ["{}", "{/}", "{//}", "{.}", "{/.}"]
-                    .iter()
-                    .any(|placeholder| s.contains(placeholder))
-            })
+/// Rewrites `fd`'s placeholders (`{}`, `{/}`, `{//}`, `{.}`, `{/.}`) to `{}`,
+/// the spelling the blocklist targets know, and sets `found` when one was
+/// present; `fd` appends the match when none is. `{{`/`}}` are consumed first
+/// as literal-brace escapes, so `{{}}` is not a placeholder.
+fn rewrite_fd_placeholders(pieces: &[WordPiece], found: &mut bool) -> Vec<WordPiece> {
+    fn rewrite_text(text: &str, found: &mut bool) -> String {
+        let mut out = String::new();
+        let mut rest = text;
+        while !rest.is_empty() {
+            if let Some(tail) = rest.strip_prefix("{{") {
+                out.push('{');
+                rest = tail;
+            } else if let Some(tail) = rest.strip_prefix("}}") {
+                out.push('}');
+                rest = tail;
+            } else if let Some(tail) = ["{/.}", "{//}", "{/}", "{.}", "{}"]
+                .iter()
+                .find_map(|placeholder| rest.strip_prefix(placeholder))
+            {
+                out.push_str("{}");
+                *found = true;
+                rest = tail;
+            } else if let Some(c) = rest.chars().next() {
+                out.push(c);
+                rest = &rest[c.len_utf8()..];
+            }
+        }
+        out
+    }
+    pieces
+        .iter()
+        .map(|piece| match piece {
+            WordPiece::Literal(text) => WordPiece::Literal(rewrite_text(text, found)),
+            WordPiece::SingleQuoted(text) => WordPiece::SingleQuoted(rewrite_text(text, found)),
+            WordPiece::DoubleQuoted(inner) => {
+                WordPiece::DoubleQuoted(rewrite_fd_placeholders(inner, found))
+            }
+            other => other.clone(),
         })
+        .collect()
 }
 
 /// The flags of `command`'s recursable slots, for messages.

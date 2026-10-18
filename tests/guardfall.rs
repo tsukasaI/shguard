@@ -918,6 +918,29 @@ const ISSUE_736_FD_EXEC_AND_G_PREFIXED_COREUTILS_CASES: &[(&str, Decision)] = &[
         Decision::Block,
     ),
     ("fd . / -x grm -rf", Decision::Block),
+    // Every `fd` placeholder reaches the same target rules as `{}`.
+    ("fd . / -x rm -rf {/}", Decision::Block),
+    ("fd . / -x rm -rf {//}", Decision::Block),
+    ("fd . / -x rm -rf {.}", Decision::Block),
+    ("fd . / -X rm -rf {/.}", Decision::Block),
+    ("fd . / -x sh -c 'rm -rf {//}'", Decision::Block),
+    // No blocklist rule covers `chmod 000`, with `{}` or any placeholder.
+    ("find / -exec chmod 000 {} +", Decision::Allow),
+    ("fd . / -x chmod 000 {}", Decision::Allow),
+    ("fd . / -x chmod 000 {//}", Decision::Allow),
+    // `{{`/`}}` are literal braces, so `fd` still appends the match.
+    ("fd . / -x rm -rf {{}}", Decision::Block),
+    ("fd . / -X rm -rf {{}}", Decision::Block),
+    ("fd . / -x rm -rf {{}", Decision::Block),
+    ("fd . / -x rm -rf {{/}}", Decision::Block),
+    // Other Homebrew g-prefixed GNU tools.
+    ("gfind / -exec rm -rf {} +", Decision::Block),
+    ("gfind / -delete", Decision::Block),
+    ("gtar xfC a.tar /", Decision::Block),
+    ("find . | gxargs rm -rf", Decision::Block),
+    // Flags before the `fd` word or after a bare `--` are not `fd`'s.
+    ("xargs -x fd pattern", Decision::Allow),
+    ("fd . / -- -x rm -rf", Decision::Allow),
     // False-positive guards: benign `fd` and `g`-prefixed uses stay Allow.
     ("fd -e rs", Decision::Allow),
     ("fd -e rs -x echo {}", Decision::Allow),

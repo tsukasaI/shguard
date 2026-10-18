@@ -3357,7 +3357,7 @@ impl CommandRule {
                     return Some(effective);
                 }
             }
-            rest = wrapper_hop(base, &folded_base, tail, &[])?.next();
+            rest = wrapper_hop(base, &canonical, tail, &[])?.next();
         }
     }
 
@@ -4029,7 +4029,7 @@ impl CommandRule {
             if self.command.matches(&folded_base) || self.command.matches(&canonical) {
                 return Some(effective_tail(&canonical, tail));
             }
-            rest = wrapper_hop(base, &folded_base, tail, &[])?.next();
+            rest = wrapper_hop(base, &canonical, tail, &[])?.next();
         }
     }
 
@@ -5303,13 +5303,19 @@ pub(crate) fn fold_command_name(name: &str) -> String {
         .replace(['\u{FB05}', '\u{FB06}'], "st") // ﬅ (long s + t), ﬆ (st)
 }
 
-/// Unprefixed names of the GNU coreutils programs that Homebrew's `coreutils`
-/// formula installs with a `g` prefix (`gdd`, `grm`, `gshred`) so they do not
-/// shadow the BSD tools on macOS. Exec wrappers (`env`, `nice`, `nohup`,
-/// `timeout`, `stdbuf`, `chroot`, `runcon`) are deliberately absent: issue #740
-/// extends this list with them, and the wrapper catalog then resolves the
-/// canonical name.
-const GNU_PREFIXED_COREUTILS: &[&str] = &[
+/// Unprefixed names of the GNU tools that Homebrew installs with a `g` prefix
+/// (`gdd`, `grm`, `gfind`, `gtar`) so they do not shadow the BSD tools on
+/// macOS: coreutils, findutils, tar and sed. Exec wrappers (`env`, `nice`,
+/// `nohup`, `timeout`, `stdbuf`, `chroot`, `runcon`) are deliberately absent:
+/// issue #740 only has to add them here, and the wrapper catalog then
+/// resolves the canonical name.
+const GNU_G_PREFIXED_TOOLS: &[&str] = &[
+    "find",
+    "xargs",
+    "locate",
+    "updatedb",
+    "tar",
+    "sed",
     "arch",
     "b2sum",
     "base32",
@@ -5412,7 +5418,7 @@ const GNU_PREFIXED_COREUTILS: &[&str] = &[
 ];
 
 /// [`fold_command_name`], then a `g` prefix is dropped when the rest names a
-/// [`GNU_PREFIXED_COREUTILS`] program, so `gdd` is matched exactly like `dd`.
+/// [`GNU_G_PREFIXED_TOOLS`] program, so `gdd` is matched exactly like `dd`.
 /// Used for the command word of an invocation only: config entries keep
 /// their literal [`fold_command_name`] spelling, so an `allow` for `gcp`
 /// cannot widen to `cp`.
@@ -5420,7 +5426,7 @@ const GNU_PREFIXED_COREUTILS: &[&str] = &[
 pub(crate) fn canonical_command_name(name: &str) -> String {
     let folded = fold_command_name(name);
     match folded.strip_prefix('g') {
-        Some(rest) if GNU_PREFIXED_COREUTILS.contains(&rest) => rest.to_string(),
+        Some(rest) if GNU_G_PREFIXED_TOOLS.contains(&rest) => rest.to_string(),
         _ => folded,
     }
 }
@@ -8781,7 +8787,10 @@ fn matches_dangerous_allow_target(entry: &CommandRule) -> bool {
             .chain(knowledge::exec_wrapper_names())
     };
     let matches_ci = |name: &str| match &entry.command {
-        CommandMatch::Exact(exact) => fold_command_name(exact) == fold_command_name(name),
+        CommandMatch::Exact(exact) => {
+            let name = fold_command_name(name);
+            fold_command_name(exact) == name || canonical_command_name(exact) == name
+        }
         CommandMatch::Prefix(prefix) => {
             fold_command_name(name).starts_with(&fold_command_name(prefix))
         }
@@ -8791,7 +8800,7 @@ fn matches_dangerous_allow_target(entry: &CommandRule) -> bool {
     }
     match &entry.command {
         CommandMatch::Exact(exact) => {
-            let lower = fold_command_name(exact);
+            let lower = canonical_command_name(exact);
             candidates().any(|name| strip_version_suffix(&lower) == name)
         }
         CommandMatch::Prefix(_) => false,

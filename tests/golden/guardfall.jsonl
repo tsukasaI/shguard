@@ -247,15 +247,27 @@
 {"command":"fd -ex foo","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"fd -tx foo","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"fd . / $FLAG rm -rf","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"fd . / -- -x rm -rf","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"fd . / --exec rm -rf","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"fd . / --exec-batch rm -rf","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"fd . / --exec=rm -rf","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"fd . / -X rm -rf","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"fd . / -X rm -rf {/.}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"fd . / -X rm -rf {{}}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"fd . / -x chmod 000 {//}","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"fd . / -x chmod 000 {}","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"fd . / -x echo \\; -x rm -rf","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"fd . / -x grm -rf","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"fd . / -x rm -rf","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"fd . / -x rm -rf {.}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"fd . / -x rm -rf {//}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"fd . / -x rm -rf {/}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"fd . / -x rm -rf {{/}}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"fd . / -x rm -rf {{}","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"fd . / -x rm -rf {{}}","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"fd . / -x rm -rf {}","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"fd . / -x sh","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"fd . / -x sh -c 'rm -rf {//}'","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"fd . / -x=rm -rf","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"fd . / -xrm -rf","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"fdfind . / -x rm -rf","decision":"Block","deny_message":null,"matched_rule":null}
@@ -308,6 +320,7 @@
 {"command":"find . -ok sh \\;","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"find . -okdir sh \\;","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"find . -print0 | xargs -0 rm -f","decision":"Block","deny_message":null,"matched_rule":"find-pipe-rm-force"}
+{"command":"find . | gxargs rm -rf","decision":"Block","deny_message":null,"matched_rule":"find-pipe-rm-force"}
 {"command":"find . | rm -f foo.txt","decision":"Block","deny_message":null,"matched_rule":"find-pipe-rm-force"}
 {"command":"find . | sudo xargs rm -f","decision":"Block","deny_message":null,"matched_rule":"find-pipe-rm-force"}
 {"command":"find . | xargs -I {} rm -f {}","decision":"Block","deny_message":null,"matched_rule":"rm-force-find-placeholder-target"}
@@ -315,6 +328,7 @@
 {"command":"find . | xargs -n 1 rm -rf","decision":"Block","deny_message":null,"matched_rule":"find-pipe-rm-force"}
 {"command":"find . | xargs rm","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"find . | { xargs rm -f; }","decision":"Block","deny_message":null,"matched_rule":"find-pipe-rm-force"}
+{"command":"find / -exec chmod 000 {} +","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"find / -exec gdd if=/dev/zero of=/dev/sda \\;","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"find / -exec rm -f {} +","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"find / -exec rm -r {} +","decision":"Block","deny_message":null,"matched_rule":null}
@@ -360,6 +374,8 @@
 {"command":"gcp /dev/zero /dev/sda","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"gdd if=/dev/zero of=/dev/sda","decision":"Block","deny_message":null,"matched_rule":"dd-write-device"}
 {"command":"gfind . -print0 | xargs -0 rm -f","decision":"Block","deny_message":null,"matched_rule":"find-pipe-rm-force"}
+{"command":"gfind / -delete","decision":"Block","deny_message":null,"matched_rule":"find-delete"}
+{"command":"gfind / -exec rm -rf {} +","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"gh pr create -t \"feat: add floor (+func)\" -b x","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"git $X -c core.fsmonitor=x status","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"git --config-env core.editor=ENVVAR commit","decision":"Ask","deny_message":null,"matched_rule":null}
@@ -470,6 +486,7 @@
 {"command":"grm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"gsed 'w out' a.txt","decision":"Ask","deny_message":"Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected. A variable file operand (`sed -n p \"$file\"`) cannot be told apart from a script word, so expand it to a literal file path.","matched_rule":null}
 {"command":"gshred /dev/sda","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"gtar xfC a.tar /","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}
 {"command":"if true; then x=$(( ${ rm -rf /; } )); fi","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"install -m 644 evil ~/.config/fish/conf.d/x.fish","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"install -m 644 evil ~/.config/fish/config.fish","decision":"Ask","deny_message":null,"matched_rule":null}
@@ -976,6 +993,7 @@
 {"command":"x='$(rm -rf ~)'; echo ${(e)x}","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (unresolved `$` expansion form (zsh flags/short forms such as ${(e)x}, ${=x}, $=x, $~x, or a ${ command; } substitution)); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
 {"command":"x=rm; $=x -rf ~","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (unresolved `$` expansion form (zsh flags/short forms such as ${(e)x}, ${=x}, $=x, $~x, or a ${ command; } substitution)); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
 {"command":"x=rm; ${=x} -rf ~","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (unresolved `$` expansion form (zsh flags/short forms such as ${(e)x}, ${=x}, $=x, $~x, or a ${ command; } substitution)); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
+{"command":"xargs -x fd pattern","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"{ echo x; } >> $HOME/.zshrc","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"{ echo x; } >> ~/.zshrc","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"{ echo x; } >> ~root/.zshrc","decision":"Ask","deny_message":null,"matched_rule":null}
