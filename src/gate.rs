@@ -919,7 +919,7 @@ fn evaluate_pipeline(
     let mut per_stage_alternates: Vec<(usize, IfsAlternates)> = Vec::new();
 
     let stage_count = stages.len();
-    let mut final_stage = FinalStage::Simple;
+    let mut stage_kinds = Vec::with_capacity(stage_count);
     let mut stage_process_substitutions = Vec::new();
 
     for (index, command) in stages.into_iter().enumerate() {
@@ -995,6 +995,7 @@ fn evaluate_pipeline(
                         &mut alternates,
                     ),
                 };
+                stage_kinds.push(FinalStage::Simple);
                 stage_argvs.push(verdict.normalized_argv().to_vec());
                 if !alternates.is_empty() {
                     per_stage_alternates.push((index, alternates));
@@ -1020,9 +1021,11 @@ fn evaluate_pipeline(
                 verdict
             }
             Command::Compound(compound) => {
-                if index == stage_count - 1 && stage_count > 1 {
-                    final_stage = FinalStage::Compound(compound_stdin_sinks(compound, env));
-                }
+                stage_kinds.push(if stage_count > 1 {
+                    FinalStage::Compound(compound_stdin_sinks(compound, env))
+                } else {
+                    FinalStage::Simple
+                });
                 stage_argvs.push(Vec::new());
                 if stage_count == 1 {
                     evaluate_compound_command(compound, env, scope, ctx, cwd)
@@ -1032,9 +1035,7 @@ fn evaluate_pipeline(
                 }
             }
             Command::FunctionDefinition(func) => {
-                if index == stage_count - 1 {
-                    final_stage = FinalStage::Opaque;
-                }
+                stage_kinds.push(FinalStage::Opaque);
                 stage_argvs.push(Vec::new());
                 if stage_count == 1 {
                     if let [name] = normalize::normalize_word(&func.name).as_slice()
@@ -1049,9 +1050,7 @@ fn evaluate_pipeline(
                 }
             }
             Command::ExtendedTest(test) => {
-                if index == stage_count - 1 {
-                    final_stage = FinalStage::Opaque;
-                }
+                stage_kinds.push(FinalStage::Opaque);
                 stage_argvs.push(Vec::new());
                 // An extended test can never run `cd`/`pushd`/etc. (it has
                 // no command position at all — `crate::ast::ExtendedTest`'s
@@ -1074,7 +1073,7 @@ fn evaluate_pipeline(
         have_worst = true;
     }
 
-    if let Some(verdict) = pipeline_shape_verdict(&stage_argvs, rules, stage_count, &final_stage) {
+    if let Some(verdict) = every_stage_shape_verdict(&stage_argvs, rules, &stage_kinds) {
         worst = fold_worst(worst, verdict);
     }
 
@@ -1119,7 +1118,7 @@ fn evaluate_pipeline(
                 let mut probe_stage_argvs = stage_argvs.clone();
                 probe_stage_argvs[*stage_index] = candidate_argv.clone();
                 let Some(probe) =
-                    pipeline_shape_verdict(&probe_stage_argvs, rules, stage_count, &final_stage)
+                    every_stage_shape_verdict(&probe_stage_argvs, rules, &stage_kinds)
                 else {
                     continue;
                 };
@@ -1150,6 +1149,32 @@ fn evaluate_pipeline(
         }
     }
 
+    worst
+}
+
+/// [`pipeline_shape_verdict`] with every stage after the first taken as the
+/// sink: an interpreter in a middle stage reads its upstream's output exactly
+/// as a final one does, so `curl x | sh | cat` is `curl x | sh`. The last
+/// stage is folded first so that on a tie its verdict is the one reported.
+/// A function definition or extended test only matters as the final stage.
+fn every_stage_shape_verdict(
+    stage_argvs: &[Vec<NormalizedWord>],
+    rules: &Rules,
+    stage_kinds: &[FinalStage],
+) -> Option<Verdict> {
+    let mut worst: Option<Verdict> = None;
+    for end in (2..=stage_argvs.len()).rev() {
+        let kind = &stage_kinds[end - 1];
+        if end < stage_argvs.len() && matches!(kind, FinalStage::Opaque) {
+            continue;
+        }
+        if let Some(verdict) = pipeline_shape_verdict(&stage_argvs[..end], rules, end, kind) {
+            worst = Some(match worst {
+                Some(current) => fold_worst(current, verdict),
+                None => verdict,
+            });
+        }
+    }
     worst
 }
 
