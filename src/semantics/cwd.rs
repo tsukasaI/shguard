@@ -26,7 +26,8 @@ use crate::rules::SymlinkScope;
 /// - `Known(anchor)`: some earlier `cd`/`pushd` target on this line, or
 ///   the hook payload's absolute `cwd` (issue #549), resolved to a
 ///   lexically-certain string — `anchor.path` is that string, already
-///   normalized (`"/tmp"`, `"~/.config/shguard"`, `"build"`,
+///   normalized and either absolute (the hook payload's `cwd`) or
+///   `~`-anchored (`"/tmp"`, `"~/.config/shguard"`, `"build"`,
 ///   `"../x"`; see [`render_cwd_anchor`](crate::rules::render_cwd_anchor)). Composing a later `Rel`-shaped
 ///   token against it (`anchor + "/" + token`, then ordinary rule matching
 ///   re-normalizes the join from scratch) is lexical CERTAINTY, the same
@@ -108,6 +109,18 @@ impl CwdContext {
     ) -> SymlinkScope<'a> {
         let scope = SymlinkScope::new(self.trusted_base(wrapper_moves_cwd));
         if refuse { scope.refusing_all() } else { scope }
+    }
+
+    /// [`Self::trusted_base`] for the filesystem twin probe, which resolves
+    /// through `realpath` and so follows physical semantics itself: a
+    /// physical-mode anchor is as usable there as a logical one.
+    pub(crate) fn fs_probe_base(&self, wrapper_moves_cwd: bool) -> Option<&str> {
+        match self {
+            Self::Known(anchor) if anchor.path.starts_with('/') && !wrapper_moves_cwd => {
+                Some(anchor.path.as_str())
+            }
+            _ => None,
+        }
     }
 
     /// The absolute directory relative paths of a command run now resolve
@@ -202,9 +215,12 @@ pub(crate) const MAX_CWD_STACK_DEPTH: usize = 64;
 /// - [`CwdState::seed`] (empty stack): correct only for a boundary that
 ///   spawns a genuinely fresh interpreter process with its own empty
 ///   `DIRSTACK` — `bash -c`/`sh -c`/`zsh -c`/`dash -c`/`fish -c`/
-///   `flock -c`/`su -c`/`env -S`, and the two top-level entry points.
+///   `flock -c`/`su -c`/`env -S`, and the top-level entry points when the
+///   hook payload carries no usable `cwd`.
 /// - [`CwdState::seed_unknown_stack`] (one [`CwdContext::Poisoned`]
-///   sentinel frame): required for a `$()`/backtick payload, a process
+///   sentinel frame): required for a hook payload with a `Known` `cwd` (the
+///   persistent shell behind it has a directory stack this line did not
+///   build), a `$()`/backtick payload, a process
 ///   substitution, a heredoc body substitution, or `eval`'s joined
 ///   script — every one of these forks or evaluates in the CURRENT shell
 ///   and really does inherit the parent's live stack via fork, so an

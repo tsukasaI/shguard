@@ -3112,18 +3112,35 @@ mod tests {
     #[test]
     fn home_twin_composes_with_the_payload_cwd() {
         let (rules, allowlist) = self_protected("/etc/shguard", Some("/Users/me"));
-        assert_eq!(
-            decide(&rules, &allowlist, "rm -rf .", Some("/Users/me")),
-            Decision::Block
-        );
-        assert_eq!(
-            decide(&rules, &allowlist, "rm -rf ..", Some("/Users/me/proj")),
-            Decision::Block
-        );
-        assert_eq!(
-            decide(&rules, &allowlist, "rm -rf build", Some("/Users/me/proj")),
-            Decision::Allow
-        );
+        let (plain, plain_allow) = self_protected("/etc/shguard", None);
+        // Each pair discriminates: with the twin the composed absolute home
+        // is caught, without it the same command slips through.
+        for (command, cwd) in [
+            ("tar -x -C . -f a.tar", "/Users/me"),
+            ("rm -rf ../../me", "/Users/me/proj"),
+        ] {
+            assert_eq!(
+                decide(&rules, &allowlist, command, Some(cwd)),
+                Decision::Block,
+                "{command} at {cwd}"
+            );
+            assert_eq!(
+                decide(&plain, &plain_allow, command, Some(cwd)),
+                Decision::Allow,
+                "{command} at {cwd} without the twin"
+            );
+        }
+        for (command, cwd) in [
+            ("rm -rf ../../me", "/tmp/x"),
+            ("rm -rf build", "/Users/me/proj"),
+            ("tar -x -C . -f a.tar", "/Users/me/proj"),
+        ] {
+            assert_eq!(
+                decide(&rules, &allowlist, command, Some(cwd)),
+                Decision::Allow,
+                "{command} at {cwd}"
+            );
+        }
     }
 
     #[test]
@@ -3139,5 +3156,311 @@ mod tests {
         assert_eq!(HomeDir::parse("/"), Err(HomeDirRejection::Root));
         assert_eq!(HomeDir::parse("/a/../.."), Err(HomeDirRejection::Root));
         assert!(HomeDir::parse("/Users/me/").is_ok());
+    }
+
+    #[test]
+    fn unusable_home_values_add_no_twins_at_policy_load() {
+        let load = |home: Option<&str>| {
+            Policy::load_resolved(
+                None,
+                false,
+                home.map(str::to_string),
+                crate::fs_path_canonicalizer(),
+            )
+            .unwrap()
+        };
+        let decide_at_home = |policy: &Policy| {
+            crate::gate::analyze_with_policy_in_cwd(
+                "rm -rf /Users/me",
+                &policy.rules,
+                &policy.allowlist,
+                None,
+            )
+            .decision()
+        };
+        assert_eq!(decide_at_home(&load(Some("/Users/me"))), Decision::Block);
+        for unusable in [
+            None,
+            Some(""),
+            Some("  "),
+            Some("relative"),
+            Some("~"),
+            Some("/"),
+        ] {
+            assert_eq!(
+                decide_at_home(&load(unusable)),
+                Decision::Allow,
+                "{unusable:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn home_twin_popd_in_a_persistent_shell_asks() {
+        let (rules, allowlist) = self_protected("/etc/shguard", Some("/Users/me"));
+        let command = "popd && rm -rf build";
+        // The payload cwd's shell may hold a directory stack this line did not
+        // build, so `popd` can land anywhere, home included.
+        assert_eq!(
+            decide(&rules, &allowlist, command, Some("/Users/me/proj")),
+            Decision::Ask
+        );
+        // With no payload cwd the line is a fresh process: its stack is empty.
+        assert_eq!(decide(&rules, &allowlist, command, None), Decision::Allow);
+        // A balanced push/pop on the line itself still resolves precisely.
+        assert_eq!(
+            decide(
+                &rules,
+                &allowlist,
+                "pushd /tmp && popd && rm -rf .",
+                Some("/Users/me")
+            ),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn home_twin_accepts_a_tilde_payload_cwd() {
+        let (rules, allowlist) = self_protected("/etc/shguard", Some("/Users/me"));
+        assert_eq!(
+            decide(&rules, &allowlist, "rm -rf .", Some("~")),
+            Decision::Block
+        );
+        assert_eq!(
+            decide(&rules, &allowlist, "rm -rf build", Some("~/proj")),
+            Decision::Allow
+        );
+    }
+
+    #[cfg(unix)]
+    mod symlinked_home {
+        use super::*;
+        use std::os::unix::fs::symlink;
+
+        /// `<root>/real/me` is the home directory, `<root>/home` a symlink to
+        /// it (the `$HOME` the policy is told), and `<root>/alias` a second
+        /// symlink to `home`.
+        struct Fixture {
+            _dir: tempfile::TempDir,
+            root: String,
+            rules: Rules,
+            allowlist: Allowlist,
+        }
+
+        fn fixture() -> Fixture {
+            let dir = tempdir().unwrap();
+            let root = dir.path().canonicalize().unwrap();
+            std::fs::create_dir_all(root.join("real/me/proj")).unwrap();
+            std::fs::create_dir_all(root.join("real/me/.config/shguard")).unwrap();
+            std::fs::create_dir_all(root.join("real/me/.ssh")).unwrap();
+            std::fs::create_dir_all(root.join("other")).unwrap();
+            symlink(root.join("real/me"), root.join("home")).unwrap();
+            symlink(root.join("home"), root.join("alias")).unwrap();
+            symlink(root.join("real/me/.config/shguard"), root.join("cfglink")).unwrap();
+            symlink(root.join("alias"), root.join("real/me/proj/uplink")).unwrap();
+            symlink(root.join("loop-b"), root.join("loop-a")).unwrap();
+            symlink(root.join("loop-a"), root.join("loop-b")).unwrap();
+            let root = root.to_str().unwrap().to_string();
+            let (rules, allowlist) = self_protected(
+                &format!("{root}/home/.config/shguard"),
+                Some(&format!("{root}/home")),
+            );
+            Fixture {
+                _dir: dir,
+                root,
+                rules: rules.with_path_canonicalizer(crate::fs_path_canonicalizer()),
+                allowlist,
+            }
+        }
+
+        impl Fixture {
+            fn decide(&self, command: &str, cwd: Option<&str>) -> Decision {
+                decide(&self.rules, &self.allowlist, command, cwd)
+            }
+
+            fn reason(&self, command: &str) -> String {
+                crate::gate::analyze_with_policy_in_cwd(command, &self.rules, &self.allowlist, None)
+                    .reason()
+                    .map(|reason| reason.as_str().to_string())
+                    .unwrap_or_default()
+            }
+        }
+
+        #[test]
+        fn home_twin_matches_the_canonical_spelling_of_a_symlinked_home() {
+            let f = fixture();
+            let root = &f.root;
+            for command in [
+                format!("rm -rf {root}/home"),
+                format!("rm -rf {root}/real/me"),
+                format!("rm -rf {root}/alias"),
+                format!("tar -x -C {root}/real/me -f a.tar"),
+                format!("tar -x --directory={root}/alias -f a.tar"),
+            ] {
+                assert_eq!(f.decide(&command, None), Decision::Block, "{command}");
+            }
+            // Only the home itself, not what is under it.
+            for command in [
+                format!("rm -rf {root}/real/me/proj"),
+                format!("rm -rf {root}/alias/proj"),
+                format!("rm -rf {root}/real"),
+            ] {
+                assert_eq!(f.decide(&command, None), Decision::Allow, "{command}");
+            }
+        }
+
+        #[test]
+        fn home_twin_without_the_filesystem_misses_the_canonical_spelling() {
+            let f = fixture();
+            let (rules, allowlist) = self_protected(
+                &format!("{}/home/.config/shguard", f.root),
+                Some(&format!("{}/home", f.root)),
+            );
+            let command = format!("rm -rf {}/real/me", f.root);
+            assert_eq!(decide(&rules, &allowlist, &command, None), Decision::Allow);
+            assert_eq!(f.decide(&command, None), Decision::Block);
+        }
+
+        #[test]
+        fn home_twin_resolves_a_symlinked_payload_cwd() {
+            let f = fixture();
+            let alias = format!("{}/alias", f.root);
+            assert_eq!(
+                f.decide("tar -x -C . -f a.tar", Some(&alias)),
+                Decision::Block
+            );
+            assert_eq!(f.decide("rm -rf proj", Some(&alias)), Decision::Allow);
+            assert_eq!(f.decide("rm -rf build", Some(&alias)), Decision::Allow);
+        }
+
+        #[test]
+        fn home_twin_leaves_a_missing_path_to_the_lexical_result() {
+            let f = fixture();
+            let command = format!("rm -rf {}/alias/not-created-yet", f.root);
+            assert_eq!(f.decide(&command, None), Decision::Allow);
+        }
+
+        #[test]
+        fn home_twin_probes_the_parent_of_a_glob_or_a_not_yet_existing_operand() {
+            let f = fixture();
+            let root = &f.root;
+            let pairs = [
+                (format!("rm -rf {root}/alias/*"), "rm -rf ~/*"),
+                (
+                    format!("rm -rf {root}/cfglink/*"),
+                    "rm -rf ~/.config/shguard/*",
+                ),
+                (
+                    format!("echo x >> {root}/alias/.zshenv"),
+                    "echo x >> ~/.zshenv",
+                ),
+                (
+                    format!("echo x >> {root}/real/me/.ssh/authorized_keys"),
+                    "echo x >> ~/.ssh/authorized_keys",
+                ),
+                (
+                    format!("tee -a {root}/alias/.ssh/authorized_keys"),
+                    "tee -a ~/.ssh/authorized_keys",
+                ),
+                (format!("cp evil {root}/alias/.zshenv"), "cp evil ~/.zshenv"),
+                (
+                    format!("cp evil {root}/cfglink/extra.toml"),
+                    "cp evil ~/.config/shguard/extra.toml",
+                ),
+                (
+                    format!("echo x > {root}/cfglink/extra.toml"),
+                    "echo x > ~/.config/shguard/extra.toml",
+                ),
+                (
+                    format!("rm -rf {root}/alias/.config/shguard/newfile"),
+                    "rm -rf ~/.config/shguard/newfile",
+                ),
+            ];
+            for (twin, lexical) in pairs {
+                let expected = f.decide(lexical, None);
+                assert_ne!(expected, Decision::Allow, "{lexical}");
+                assert_eq!(f.decide(&twin, None), expected, "{twin}");
+            }
+        }
+
+        #[test]
+        fn home_twin_leaves_unrelated_glob_and_new_paths_alone() {
+            let f = fixture();
+            let root = &f.root;
+            for command in [
+                format!("rm -rf {root}/other/*"),
+                format!("rm -rf {root}/alias/proj/newdir"),
+                format!("rm -rf {root}/alias/proj/*"),
+                format!("echo x > {root}/other/f"),
+                format!("cp a {root}/other/f"),
+                format!("rm -rf {root}/missing/dir/*"),
+            ] {
+                assert_eq!(f.decide(&command, None), Decision::Allow, "{command}");
+            }
+        }
+
+        #[test]
+        fn home_twin_follows_a_link_under_a_physical_cd_anchor() {
+            let f = fixture();
+            let alias = format!("{}/alias", f.root);
+            for command in [
+                format!("cd -P {alias}/proj && rm -rf uplink"),
+                format!("cd {alias}/proj && rm -rf uplink"),
+            ] {
+                assert_eq!(f.decide(&command, None), Decision::Block, "{command}");
+            }
+            let control = format!("cd -P {alias}/proj && rm -rf newdir");
+            assert_eq!(f.decide(&control, None), Decision::Allow, "{control}");
+        }
+
+        #[test]
+        fn home_twin_probe_budget_covers_operands_and_redirects_together() {
+            let f = fixture();
+            let other = format!("{}/other", f.root);
+            let operands = (0..16)
+                .map(|n| format!("{other}/x{n}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let redirects = |count: usize| {
+                (0..count)
+                    .map(|n| format!("> {other}/r{n}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            let within = format!("rm -rf {operands} {}", redirects(5));
+            assert_eq!(f.decide(&within, None), Decision::Allow, "{within}");
+            let over = format!("rm -rf {operands} {}", redirects(20));
+            assert_eq!(f.decide(&over, None), Decision::Ask, "{over}");
+            assert!(
+                f.reason(&over).contains("more than 32"),
+                "{}",
+                f.reason(&over)
+            );
+        }
+
+        #[test]
+        fn home_twin_asks_when_the_filesystem_cannot_resolve_a_path() {
+            let f = fixture();
+            let command = format!("rm -rf {}/loop-a", f.root);
+            assert_eq!(f.decide(&command, None), Decision::Ask);
+            let reason = f.reason(&command);
+            assert!(reason.contains("symlink loop"), "{reason}");
+        }
+
+        #[test]
+        fn home_twin_does_not_probe_a_command_no_home_rule_applies_to() {
+            let f = fixture();
+            let command = format!("cat {}/loop-a", f.root);
+            assert_eq!(f.decide(&command, None), Decision::Allow);
+        }
+
+        #[test]
+        fn home_twin_never_lowers_a_lexical_match() {
+            let f = fixture();
+            let command = format!("rm -rf {}/home", f.root);
+            assert_eq!(f.decide(&command, None), Decision::Block);
+            let missing = "rm -rf ~";
+            assert_eq!(f.decide(missing, None), Decision::Block);
+        }
     }
 }

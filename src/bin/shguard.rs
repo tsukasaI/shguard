@@ -783,7 +783,8 @@ fn check_config() -> i32 {
 /// Usage string shared by every `run_check` argument-error path — kept as
 /// one constant so `--permission-mode`'s addition (issue #469) didn't need
 /// updating at each of the several call sites separately.
-const CHECK_USAGE: &str = "usage: shguard check <command> [--json] [--permission-mode <mode>]";
+const CHECK_USAGE: &str =
+    "usage: shguard check <command> [--json] [--permission-mode <mode>] [--cwd <path>]";
 
 /// Reports a `run_check` usage error and returns its exit code (`2`).
 /// `json` reflects whatever `--json` parsing has observed so far when the
@@ -807,8 +808,8 @@ fn check_usage_error(json: bool, message: &str) -> i32 {
     2
 }
 
-/// `shguard check <command> [--json] [--permission-mode <mode>]` (issue
-/// #109): a dry-run mode that prints the
+/// `shguard check <command> [--json] [--permission-mode <mode>] [--cwd <path>]`
+/// (issue #109): a dry-run mode that prints the
 /// [`shguard::analyze_with_policy`] verdict for a command string given
 /// directly on the command line, instead of through the PreToolUse
 /// stdin contract [`run`] otherwise only ever serves. Exists so rule
@@ -826,6 +827,11 @@ fn check_usage_error(json: bool, message: &str) -> i32 {
 /// resolving a `[ask_outcome]` table's per-mode floor the same
 /// conservative way an `Unknown` mode does (`Ask`, unless the config used
 /// #467's bare-string form instead).
+///
+/// `--cwd <path>` (issue #602) stands in for the hook payload's `cwd`: the
+/// directory the command is taken to run in, so relative targets and a
+/// symlinked cwd resolve the way they would in a real hook call. Omitted,
+/// there is no cwd, as before.
 ///
 /// Always evaluates through [`shguard::analyze_with_policy`] — the exact
 /// same pipeline [`run`] hands a real hook payload's command to — never a
@@ -880,6 +886,7 @@ fn run_check(args: &[std::ffi::OsString]) -> i32 {
     let mut json = false;
     let mut permission_mode: Option<&std::ffi::OsString> = None;
     let mut command: Option<&std::ffi::OsString> = None;
+    let mut cwd: Option<&std::ffi::OsString> = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         // Compared against `&str` directly (not through `arg.to_str()`
@@ -915,6 +922,26 @@ fn run_check(args: &[std::ffi::OsString]) -> i32 {
                 );
             };
             permission_mode = Some(value);
+        } else if arg == "--cwd" {
+            if cwd.is_some() {
+                return check_usage_error(
+                    json,
+                    &format!("shguard check: --cwd given more than once ({CHECK_USAGE})"),
+                );
+            }
+            // A single `-` may start a path, but a `--`-led value is the
+            // next flag swallowed (`--cwd --json`), as for `--permission-mode`.
+            let value = iter.next().filter(|v| match v.to_str() {
+                Some(v) => !v.starts_with("--"),
+                None => true,
+            });
+            let Some(value) = value else {
+                return check_usage_error(
+                    json,
+                    &format!("shguard check: --cwd requires a value ({CHECK_USAGE})"),
+                );
+            };
+            cwd = Some(value);
         } else if command.is_none() && arg.to_str().is_some_and(|arg| arg.starts_with("--")) {
             // A `--`-prefixed positional is a typo'd/unrecognized flag, not
             // a command: a real shell command never begins with `--`, so
@@ -965,7 +992,34 @@ fn run_check(args: &[std::ffi::OsString]) -> i32 {
             }
         },
     };
-    let context = shguard::HookContext::new(permission_mode, None, None);
+    let cwd = match cwd {
+        None => None,
+        Some(value) => match value.to_str() {
+            Some(value) => {
+                if !value.starts_with(['/', '~']) {
+                    let _ = writeln!(
+                        io::stderr(),
+                        "shguard check: note: --cwd {value:?} is neither absolute nor `~`-led, so \
+                         it is treated as no cwd"
+                    );
+                }
+                Some(value.to_string())
+            }
+            None => {
+                return check_usage_error(json, "shguard check: --cwd value must be valid UTF-8");
+            }
+        },
+    };
+    let context = shguard::HookContext::new(permission_mode, None, None).with_cwd(cwd);
+
+    // On stderr so `--json` stdout stays one parseable object.
+    if std::env::var_os("HOME").is_none() {
+        let _ = writeln!(
+            io::stderr(),
+            "shguard check: note: $HOME is unset, so rules that name `~` match only as spelled, \
+             not as the absolute home path"
+        );
+    }
 
     let policy = match shguard::config::Policy::load() {
         Ok(policy) => policy,

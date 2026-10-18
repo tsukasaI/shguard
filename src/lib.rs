@@ -212,6 +212,12 @@ impl HookContext {
 /// and the adapter's job becomes trivial and impossible to get wrong: call
 /// `analyze`, always get a `Verdict`, always emit a `permissionDecision`.
 ///
+/// This is the embedded-defaults entry point: it knows no working directory,
+/// no `$HOME` and no filesystem, so it cannot see a relative target resolved
+/// against the hook payload's `cwd`, the absolute spelling of `~`, or a
+/// symlink to either. A caller that guards real commands should use
+/// [`analyze_with_policy`], which is what the hook and `shguard check` run.
+///
 /// The pipeline itself — parse (`src/parser.rs`) → normalise
 /// (`src/normalize.rs`) → rules (`src/rules.rs`) → structural gate
 /// (`src/gate.rs`) → worst-decision-wins fold — is composed in

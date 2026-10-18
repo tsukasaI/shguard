@@ -260,6 +260,37 @@ positioned after the offending argument is never reached and that case
 still falls back to human-readable text on stderr. Check the exit code
 (`2`) first if you're scripting against this.
 
+`shguard check` has no working directory unless you give it one: add
+`--cwd <path>` to evaluate the command as if the hook payload's `cwd` were
+that directory (relative targets resolve against it, and a symlinked `cwd`
+is followed; see "Home directory spellings and symlinks" below).
+
+### Home directory spellings and symlinks
+
+Rules that name `~` (the embedded `rm -rf ~` rule, `tar -C ~`, and any
+`~`-anchored `normalized` target in your config) also match the absolute
+spelling of `$HOME`, so `rm -rf /Users/me` is treated like `rm -rf ~`. The
+absolute twin is added to `targets` only, never to `except_targets`: an
+exception written `~/scratch` excepts that spelling alone, and
+`/Users/me/scratch` is still matched by the rule. That fails closed; write
+the absolute path in `except_targets` too to carve it out. When `$HOME` is
+unset or unusable (empty, relative, `/`) no twin is added and `~` rules match
+only as written; `shguard check` says so on stderr when `HOME` is unset, and
+`shguard` prints a warning at load for an unusable value.
+
+For commands a home or config-protection rule applies to, shguard also asks
+the filesystem for the canonical spelling of each path operand (and of a
+relative operand under the payload `cwd`) and matches it as well, so a
+symlink to your home directory, a symlinked `$HOME`, or a symlinked `cwd`
+does not slip past. This only adds spellings to match; a lexical match is
+never dropped. A path that does not exist yet keeps its lexical result. A
+symlink loop, a permission error or another I/O error on a path asks, with
+the failing path in the reason. At most 32 distinct operands are looked up
+per command; a command with more asks. Nothing is listed or walked: only the
+operands themselves are resolved, and only after the lexical match did not
+already block the command. The filesystem can change between the check and
+the run (see `docs/threat-model.md`).
+
 ## Configuration
 
 shguard needs a config file at the default path
