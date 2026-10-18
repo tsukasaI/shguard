@@ -5305,10 +5305,10 @@ pub(crate) fn fold_command_name(name: &str) -> String {
 
 /// Unprefixed names of the GNU tools that Homebrew installs with a `g` prefix
 /// (`gdd`, `grm`, `gfind`, `gtar`) so they do not shadow the BSD tools on
-/// macOS: coreutils, findutils, tar and sed. Exec wrappers (`env`, `nice`,
-/// `nohup`, `timeout`, `stdbuf`, `chroot`, `runcon`) are deliberately absent:
-/// issue #740 only has to add them here, and the wrapper catalog then
-/// resolves the canonical name.
+/// macOS: coreutils, findutils, tar and sed. `xargs` is the one exec wrapper
+/// already included; the rest (`env`, `nice`, `nohup`, `timeout`, `stdbuf`,
+/// `chroot`, `runcon`) are deliberately absent: issue #740 only has to add
+/// them here, and the wrapper catalog then resolves the canonical name.
 const GNU_G_PREFIXED_TOOLS: &[&str] = &[
     "find",
     "xargs",
@@ -5765,6 +5765,28 @@ pub(crate) fn first_unmodeled_wrapper_option(stage: &[NormalizedWord]) -> Option
     None
 }
 
+/// Whether the command `stage` finally runs is named by a word containing
+/// `=`. Bash runs such a word as a command name (`a.b=c`, `1a=b`, `=x` are
+/// not assignments), so what executes is unknowable here and `crate::gate`
+/// floors it. Checked on the raw word, not [`basename`]: `FOO=/bin/rm` would
+/// otherwise read as `rm`.
+#[must_use]
+pub(crate) fn has_assignment_shaped_command_name(stage: &[NormalizedWord]) -> bool {
+    let mut rest = stage;
+    loop {
+        match step(rest, &[]) {
+            Step::Wrapper(hop) => rest = hop.next(),
+            Step::Command { .. } => {
+                return matches!(
+                    rest.first().map(NormalizedWord::resolution),
+                    Some(Resolution::Resolved(word)) if word.contains('=')
+                );
+            }
+            Step::Unresolvable | Step::Empty => return false,
+        }
+    }
+}
+
 /// How `stage`'s wrapper-unwrap chain (the same walk as
 /// [`effective_command`]) relates to the catalog's privilege-escalating
 /// commands — see [`wrapper_chain_escalation`].
@@ -6060,6 +6082,14 @@ pub(crate) fn chain_script_slots(stage: &[NormalizedWord]) -> Vec<ScriptSlot> {
                 ScriptValue::Text(script) => ScriptSlot::Resolved(script.to_string()),
                 ScriptValue::Unresolvable => ScriptSlot::Unresolvable,
             });
+        }
+        // Not `ScriptSlot::Unresolvable`: `script` with neither `-c` nor a
+        // command starts `$SHELL` on a pty wired to its own stdin.
+        if hop.wrapper.name() == "script"
+            && hop.next().is_empty()
+            && hop.wrapper.shell_script_values(hop.tail).is_empty()
+        {
+            slots.push(ScriptSlot::Resolved("sh".to_string()));
         }
         if let Some(flag) = hop.wrapper.split_string_option() {
             collect_split_string_slots(&hop, flag, &mut slots);

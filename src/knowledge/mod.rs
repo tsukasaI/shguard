@@ -158,11 +158,12 @@ impl Known {
                 continue;
             };
             let mut hit = false;
+            let mut reported_unresolvable = false;
             for (index, word) in tail.iter().enumerate() {
                 let Resolution::Resolved(token) = word.resolution() else {
-                    if !hit {
+                    if !hit && !reported_unresolvable {
                         values.push(ScriptValue::Unresolvable);
-                        break;
+                        reported_unresolvable = true;
                     }
                     continue;
                 };

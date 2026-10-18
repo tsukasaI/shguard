@@ -1193,12 +1193,20 @@ fn pipeline_shape_verdict(
     };
     let mut worst = rule_verdict(stage_argvs);
 
-    if let FinalStage::Compound(sinks) = final_stage
-        && let Some((_, earlier)) = stage_argvs.split_last()
-    {
+    let mut wrapper_reads_stdin = false;
+    if let Some((last, earlier)) = stage_argvs.split_last() {
+        let commands = match final_stage {
+            FinalStage::Compound(sinks) => sinks.commands.clone(),
+            FinalStage::Simple => {
+                let wrapped = wrapper_shell_string_sinks(last, 0);
+                wrapper_reads_stdin = wrapped.reads_stdin;
+                wrapped.commands
+            }
+            FinalStage::Opaque => Vec::new(),
+        };
         let mut candidate = earlier.to_vec();
-        for command in &sinks.commands {
-            candidate.push(command.clone());
+        for command in commands {
+            candidate.push(command);
             if let Some(verdict) = rule_verdict(&candidate) {
                 worst = Some(match worst {
                     Some(current) => fold_worst(current, verdict),
@@ -1210,7 +1218,7 @@ fn pipeline_shape_verdict(
     }
 
     let shape = match final_stage {
-        FinalStage::Simple => evaluate_pipeline_shape(stage_argvs),
+        FinalStage::Simple => evaluate_pipeline_shape(stage_argvs, wrapper_reads_stdin),
         FinalStage::Compound(StdinSinks {
             reader: Some(reader),
             ..
@@ -1386,7 +1394,7 @@ struct StdinSinks {
 /// no redirection is taken as proof that a body command's stdin is replaced;
 /// every interpreter-shaped body command remains a stdin reader.
 fn compound_stdin_sinks(compound: &CompoundCommand, env: &Env) -> StdinSinks {
-    let mut scan = stdin_sink_scan();
+    let mut scan = stdin_sink_scan(false);
     scan_compound_for_heredoc_candidates(compound, &mut scan);
     scan_redirections_for_heredoc_candidates(compound_redirections(compound), &mut scan);
     finish_stdin_sinks(scan, env)
@@ -1395,14 +1403,19 @@ fn compound_stdin_sinks(compound: &CompoundCommand, env: &Env) -> StdinSinks {
 /// [`compound_stdin_sinks`] for the body of an output process substitution
 /// (`>(...)`), whose stdin is the pipe the enclosing command writes to.
 fn command_line_stdin_sinks(line: &CommandLine, env: &Env) -> StdinSinks {
-    let mut scan = stdin_sink_scan();
+    command_line_stdin_sinks_with(line, env, false)
+}
+
+fn command_line_stdin_sinks_with(line: &CommandLine, env: &Env, direct_only: bool) -> StdinSinks {
+    let mut scan = stdin_sink_scan(direct_only);
     scan_command_line_for_heredoc_candidates(line, &mut scan);
     finish_stdin_sinks(scan, env)
 }
 
-fn stdin_sink_scan() -> HeredocCandidateScan {
+fn stdin_sink_scan(direct_only: bool) -> HeredocCandidateScan {
     HeredocCandidateScan {
         descend_nested_redirections: true,
+        direct_sinks_only: direct_only,
         ..HeredocCandidateScan::default()
     }
 }
@@ -1444,7 +1457,7 @@ fn compound_redirections(compound: &CompoundCommand) -> &[Redirection] {
 }
 
 /// Whether `argv` reads the pipe as code, or may: see [`compound_stdin_sinks`].
-fn is_stdin_reader(argv: &[NormalizedWord]) -> bool {
+fn is_stdin_reader(argv: &[NormalizedWord], direct_only: bool) -> bool {
     if argv.is_empty() {
         return false;
     }
@@ -1453,7 +1466,11 @@ fn is_stdin_reader(argv: &[NormalizedWord]) -> bool {
         Some((name, _)) => {
             EVAL_BUILTIN.contains(&name.as_ref())
                 || TRAP_BUILTIN.contains(&name.as_ref())
-                || is_interpreter_sink(argv)
+                || if direct_only {
+                    is_interpreter_sink_direct(argv)
+                } else {
+                    is_interpreter_sink(argv)
+                }
         }
     }
 }
@@ -2137,9 +2154,12 @@ fn evaluate_function_definition(
 /// stages, or the final stage is not an interpreter) — the caller folds
 /// this in as one more candidate alongside per-stage and pipeline-rule
 /// verdicts, never as the sole source of truth.
-fn evaluate_pipeline_shape(stages: &[Vec<NormalizedWord>]) -> Option<Verdict> {
+fn evaluate_pipeline_shape(
+    stages: &[Vec<NormalizedWord>],
+    wrapper_reads_stdin: bool,
+) -> Option<Verdict> {
     let (last, earlier) = stages.split_last()?;
-    if earlier.is_empty() || !is_interpreter_sink(last) {
+    if earlier.is_empty() || !(wrapper_reads_stdin || is_interpreter_sink_direct(last)) {
         return None;
     }
     Some(pipe_into_interpreter_verdict(earlier, last))
@@ -4501,12 +4521,23 @@ fn apply_tar_dashless_floor(verdict: Verdict, floor: Option<(Decision, String)>)
 /// wrapper runs cannot be read with certainty. The rule matching below
 /// still sees the wrapped command; this floor only keeps the line from
 /// ending in Allow.
+///
+/// Also floors a command name containing `=` (`a.b=c rm -rf /`): it is not
+/// a valid assignment, so bash runs it as a command name this crate cannot
+/// place.
 fn scan_unmodeled_option_floor(argv: &[NormalizedWord]) -> Option<(Decision, String)> {
-    let finding = crate::rules::first_unmodeled_wrapper_option(argv)?;
-    Some((
-        Decision::Ask,
-        format!("unmodelled option for `{}`", finding.command()),
-    ))
+    if let Some(finding) = crate::rules::first_unmodeled_wrapper_option(argv) {
+        return Some((
+            Decision::Ask,
+            format!("unmodelled option for `{}`", finding.command()),
+        ));
+    }
+    crate::rules::has_assignment_shaped_command_name(argv).then(|| {
+        (
+            Decision::Ask,
+            "unmodelled command name: a word containing `=` that is not an assignment".to_string(),
+        )
+    })
 }
 
 /// Applies [`scan_unmodeled_option_floor`]'s floor to `verdict` (see
@@ -6450,11 +6481,15 @@ struct HeredocCandidateScan {
     descend_nested_redirections: bool,
     /// The argv of every command in the body.
     stdin_commands: Vec<Vec<NormalizedWord>>,
+    /// Judge [`is_stdin_reader`] without looking into wrappers' shell
+    /// strings: [`wrapper_shell_string_sinks`] recurses into them itself,
+    /// under its own depth cap.
+    direct_sinks_only: bool,
 }
 
 impl HeredocCandidateScan {
     fn record_stdin_use(&mut self, argv: &[NormalizedWord]) {
-        if self.stdin_reader.is_none() && is_stdin_reader(argv) {
+        if self.stdin_reader.is_none() && is_stdin_reader(argv, self.direct_sinks_only) {
             self.stdin_reader = Some(argv.to_vec());
         }
         self.binds_pipe_data |= binds_pipe_data(argv);
@@ -7567,7 +7602,7 @@ fn recurse_find_exec_payload(
         let mut words: Vec<Word> = synthetic
             .words
             .iter()
-            .map(|word| Word(rewrite_fd_placeholders(&word.0, &mut found)))
+            .map(|word| rewrite_fd_word(word, &mut found))
             .collect();
         if !found {
             words.push(Word(vec![WordPiece::Literal("{}".to_string())]));
@@ -7754,46 +7789,39 @@ fn direct_argv_terminators_for(command: &str, flag: &str) -> Option<&'static [&'
         .map(|slot| slot.terminators)
 }
 
-/// Rewrites `fd`'s placeholders (`{}`, `{/}`, `{//}`, `{.}`, `{/.}`) to `{}`,
-/// the spelling the blocklist targets know, and sets `found` when one was
-/// present; `fd` appends the match when none is. `{{`/`}}` are consumed first
-/// as literal-brace escapes, so `{{}}` is not a placeholder.
-fn rewrite_fd_placeholders(pieces: &[WordPiece], found: &mut bool) -> Vec<WordPiece> {
-    fn rewrite_text(text: &str, found: &mut bool) -> String {
-        let mut out = String::new();
-        let mut rest = text;
-        while !rest.is_empty() {
-            if let Some(tail) = rest.strip_prefix("{{") {
-                out.push('{');
-                rest = tail;
-            } else if let Some(tail) = rest.strip_prefix("}}") {
-                out.push('}');
-                rest = tail;
-            } else if let Some(tail) = ["{/.}", "{//}", "{/}", "{.}", "{}"]
-                .iter()
-                .find_map(|placeholder| rest.strip_prefix(placeholder))
-            {
-                out.push_str("{}");
-                *found = true;
-                rest = tail;
-            } else if let Some(c) = rest.chars().next() {
-                out.push(c);
-                rest = &rest[c.len_utf8()..];
-            }
+/// Rewrites `fd`'s placeholders (`{}`, `{/}`, `{//}`, `{.}`, `{/.}`) in one
+/// word to `{}`, the spelling the blocklist targets know, and sets `found`
+/// when one was present; `fd` appends the match when none is. Tokenizes the
+/// word's resolved text, not its pieces: `fd` sees the shell-joined argument,
+/// so quoting can split (`'{'//}`) or invent (`'{'{}}`) a placeholder. An
+/// unresolvable word is kept as is. `{{`/`}}` are consumed first as
+/// literal-brace escapes, so `{{}}` is not a placeholder.
+fn rewrite_fd_word(word: &Word, found: &mut bool) -> Word {
+    let Some(text) = single_resolved(word) else {
+        return word.clone();
+    };
+    let mut out = String::new();
+    let mut rest = text.as_str();
+    while let Some(c) = rest.chars().next() {
+        if let Some(tail) = rest.strip_prefix("{{") {
+            out.push('{');
+            rest = tail;
+        } else if let Some(tail) = rest.strip_prefix("}}") {
+            out.push('}');
+            rest = tail;
+        } else if let Some(tail) = ["{/.}", "{//}", "{/}", "{.}", "{}"]
+            .iter()
+            .find_map(|placeholder| rest.strip_prefix(placeholder))
+        {
+            out.push_str("{}");
+            *found = true;
+            rest = tail;
+        } else {
+            out.push(c);
+            rest = &rest[c.len_utf8()..];
         }
-        out
     }
-    pieces
-        .iter()
-        .map(|piece| match piece {
-            WordPiece::Literal(text) => WordPiece::Literal(rewrite_text(text, found)),
-            WordPiece::SingleQuoted(text) => WordPiece::SingleQuoted(rewrite_text(text, found)),
-            WordPiece::DoubleQuoted(inner) => {
-                WordPiece::DoubleQuoted(rewrite_fd_placeholders(inner, found))
-            }
-            other => other.clone(),
-        })
-        .collect()
+    Word(vec![WordPiece::SingleQuoted(out)])
 }
 
 /// The flags of `command`'s recursable slots, for messages.
@@ -9006,6 +9034,11 @@ fn awk_value_flag_needs_separate_arg(token: &str) -> bool {
 /// every other fail-closed floor in this module takes, since a dynamic
 /// value could resolve to a stdin alias at runtime.
 fn is_interpreter_sink(stage: &[NormalizedWord]) -> bool {
+    wrapper_shell_string_sinks(stage, 0).reads_stdin || is_interpreter_sink_direct(stage)
+}
+
+/// [`is_interpreter_sink`] without the wrapper shell strings it also checks.
+fn is_interpreter_sink_direct(stage: &[NormalizedWord]) -> bool {
     let Some((name, rest)) = crate::rules::effective_command(stage) else {
         return false;
     };
@@ -9025,6 +9058,63 @@ fn is_interpreter_sink(stage: &[NormalizedWord]) -> bool {
         Some(Resolution::Unresolvable(_)) => true,
         None => false,
     }
+}
+
+/// What the shell strings a wrapper chain hands to a shell (`flock -c`,
+/// `script -c`, `env -S`, `strace -o '|cmd'`; issue #722) do with the pipe.
+/// `effective_command` cannot see them: each is consumed as an option value,
+/// so it reports the wrapper's own operand instead.
+struct WrapperSinks {
+    /// Every command found in those strings, nested wrapper strings
+    /// included, each to be matched as though it were the final stage.
+    commands: Vec<Vec<NormalizedWord>>,
+    /// Some string may run an interpreter on the pipe, or could not be
+    /// examined: unresolvable, unparsable, or nested past the depth cap.
+    reads_stdin: bool,
+}
+
+fn wrapper_shell_string_sinks(stage: &[NormalizedWord], depth: usize) -> WrapperSinks {
+    wrapper_shell_string_sinks_at(stage, depth, &mut std::collections::HashSet::new())
+}
+
+/// `seen` holds every string already examined in this walk: a chain of
+/// wrappers yields one string per hop, each containing the next hop's, so
+/// without it the walk revisits the tail of the chain exponentially often.
+fn wrapper_shell_string_sinks_at(
+    stage: &[NormalizedWord],
+    depth: usize,
+    seen: &mut std::collections::HashSet<String>,
+) -> WrapperSinks {
+    let mut found = WrapperSinks {
+        commands: Vec::new(),
+        reads_stdin: false,
+    };
+    if depth > MAX_SUBSTITUTION_DEPTH {
+        found.reads_stdin = true;
+        return found;
+    }
+    for slot in crate::rules::chain_script_slots(stage) {
+        let crate::rules::ScriptSlot::Resolved(script) = slot else {
+            found.reads_stdin = true;
+            continue;
+        };
+        if !seen.insert(script.clone()) {
+            continue;
+        }
+        let Ok(line) = parser::parse(&script) else {
+            found.reads_stdin = true;
+            continue;
+        };
+        let sinks = command_line_stdin_sinks_with(&line, &Env::isolated(), true);
+        found.reads_stdin |= sinks.reader.is_some();
+        for command in sinks.commands {
+            let inner = wrapper_shell_string_sinks_at(&command, depth + 1, seen);
+            found.reads_stdin |= inner.reads_stdin;
+            found.commands.push(command);
+            found.commands.extend(inner.commands);
+        }
+    }
+    found
 }
 
 /// Whether short-option cluster token `token` (e.g. `-rf`) includes flag
@@ -11729,6 +11819,17 @@ mod tests {
         assert_eq!(slot(&["fish", "-d", "x", "-c", "x"]), vec![4]);
         assert_eq!(slot(&["trap", "ñ; y", "EXIT"]), vec![1]);
         assert!(slot(&["ls", "-c", "x"]).is_empty());
+    }
+
+    #[test]
+    fn wrapper_shell_string_nesting_past_the_depth_cap_reads_the_pipe() {
+        let argv: Vec<NormalizedWord> = ["flock", "/tmp/l", "-c", "echo hi"]
+            .iter()
+            .map(|w| NormalizedWord::resolved(*w))
+            .collect();
+        assert!(!wrapper_shell_string_sinks(&argv, 0).reads_stdin);
+        assert!(!wrapper_shell_string_sinks(&argv, MAX_SUBSTITUTION_DEPTH - 1).reads_stdin);
+        assert!(wrapper_shell_string_sinks(&argv, MAX_SUBSTITUTION_DEPTH).reads_stdin);
     }
 
     fn assert_decision(command: &str, expected: Decision) {
