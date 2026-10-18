@@ -5948,11 +5948,20 @@ pub(crate) enum SocatAddress {
     /// A keyword on the known non-spawning allowlist, or a bare path.
     Inert,
     /// `EXEC:`/`SYSTEM:`/`SHELL:`: spawns a program whose stdin receives
-    /// the other address's bytes. Carries the command text, minus options.
-    Spawns(String),
-    /// A keyword outside the allowlist, or one written in a form this parse
-    /// does not model (quotes, backslashes, whitespace): fail closed.
+    /// the other address's bytes.
+    Spawns {
+        /// The command text up to the first `,` (where socat's options start).
+        command: String,
+        /// Everything after the keyword's `:` to the end of the whole
+        /// operand: socat's own lexer nests and quotes, which this parse
+        /// does not model, so the uncut text is kept for fail-closed use.
+        raw: String,
+    },
+    /// A keyword outside the allowlist.
     Unknown,
+    /// A keyword written with a quote, backslash or whitespace, which this
+    /// parse does not model.
+    Unparsable,
     /// The operand could not be resolved statically.
     Unresolvable,
 }
@@ -5963,23 +5972,13 @@ impl SocatAddress {
     }
 }
 
-/// Whether `name` (an [`effective_command`] name) is `socat`, including a
-/// versioned binary such as `socat1`/`socat2`.
+/// Whether `name` (an [`effective_command`] name, already case-folded) is
+/// `socat`, including a versioned binary such as `socat1`/`socat2`.
 pub(crate) fn is_socat(name: &str) -> bool {
-    strip_version_suffix(&name.to_ascii_lowercase()) == "socat"
+    strip_version_suffix(name) == "socat"
 }
 
-const SOCAT_INERT_KEYWORD_PREFIXES: &[&str] = &[
-    "TCP",
-    "UDP",
-    "UNIX-",
-    "ABSTRACT-",
-    "OPENSSL",
-    "SCTP",
-    "SOCKS",
-    "PROXY",
-    "IP",
-];
+/// Address keywords that take no further `-` parts.
 const SOCAT_INERT_KEYWORDS: &[&str] = &[
     "-",
     "NOP",
@@ -5994,81 +5993,119 @@ const SOCAT_INERT_KEYWORDS: &[&str] = &[
     "PIPE",
     "PTY",
     "INTERFACE",
+    "READLINE",
 ];
+/// First `-`-separated part of a connection-style address keyword
+/// (`TCP4-LISTEN`, `UNIX-CONNECT`, `OPENSSL-DTLS-CLIENT`).
+const SOCAT_INERT_FAMILIES: &[&str] = &[
+    "TCP", "TCP4", "TCP6", "UDP", "UDP4", "UDP6", "UDPLITE", "UDPLITE4", "UDPLITE6", "SCTP",
+    "SCTP4", "SCTP6", "IP", "IP4", "IP6", "UNIX", "ABSTRACT", "OPENSSL", "SOCKS4", "SOCKS4A",
+    "PROXY",
+];
+/// The `-`-separated parts that may follow a family.
+const SOCAT_INERT_SUFFIXES: &[&str] = &[
+    "CONNECT", "LISTEN", "L", "SENDTO", "RECV", "RECVFROM", "DATAGRAM", "CLIENT", "SERVER", "DTLS",
+];
+
+enum SocatKeyword {
+    Spawning,
+    Inert,
+    Unlisted,
+    Unparsable,
+}
+
+fn classify_socat_keyword(keyword: &str) -> SocatKeyword {
+    if keyword.contains(['\'', '"', '\\']) || keyword.contains(char::is_whitespace) {
+        return SocatKeyword::Unparsable;
+    }
+    let upper = keyword.to_ascii_uppercase();
+    if matches!(upper.as_str(), "EXEC" | "SYSTEM" | "SHELL") {
+        return SocatKeyword::Spawning;
+    }
+    let mut parts = upper.split('-');
+    let family_ok = parts
+        .next()
+        .is_some_and(|family| SOCAT_INERT_FAMILIES.contains(&family))
+        && parts.all(|part| SOCAT_INERT_SUFFIXES.contains(&part));
+    if family_ok || SOCAT_INERT_KEYWORDS.contains(&upper.as_str()) {
+        SocatKeyword::Inert
+    } else {
+        SocatKeyword::Unlisted
+    }
+}
 
 /// Parses one `socat` operand into its address pieces. socat's dual
 /// address `A!!B` writes to `B`, and socat2 chains with `|`, so each piece
 /// is judged on its own keyword (the text before the first `:`, `,` or `|`).
+/// A colon-less piece is a file path (socat's GOPEN), so it is inert unless
+/// it is written with quotes, backslashes or whitespace, or is a bare
+/// spawning keyword.
 pub(crate) fn socat_address_pieces(word: &NormalizedWord) -> Vec<SocatAddress> {
     let Resolution::Resolved(text) = word.resolution() else {
         return vec![SocatAddress::Unresolvable];
     };
     let mut pieces = Vec::new();
-    for half in text.split("!!") {
-        let mut segment = half;
+    let mut half_start = 0;
+    loop {
+        let half_end = text[half_start..]
+            .find("!!")
+            .map_or(text.len(), |at| half_start + at);
+        let mut segment_start = half_start;
         loop {
+            let segment = &text[segment_start..half_end];
             let Some(end) = segment.find([':', ',', '|']) else {
                 pieces.push(bare_socat_piece(segment));
                 break;
             };
             let keyword = &segment[..end];
-            if segment.as_bytes()[end] != b':' {
-                pieces.push(bare_socat_piece(keyword));
-            } else {
-                let rest = &segment[end + 1..];
-                if let Some(kind) = socat_colon_keyword(keyword) {
-                    if kind {
-                        let command = rest.split(',').next().unwrap_or_default();
-                        pieces.push(SocatAddress::Spawns(command.to_string()));
-                        break;
+            if segment.as_bytes()[end] == b':' {
+                match classify_socat_keyword(keyword) {
+                    SocatKeyword::Spawning => {
+                        let raw = &text[segment_start + end + 1..];
+                        let command = raw.split_once(',').map_or(raw, |(command, _)| command);
+                        pieces.push(SocatAddress::Spawns {
+                            command: command.to_string(),
+                            raw: raw.to_string(),
+                        });
+                        return pieces;
                     }
-                    pieces.push(SocatAddress::Inert);
-                } else {
-                    pieces.push(SocatAddress::Unknown);
+                    SocatKeyword::Inert => pieces.push(SocatAddress::Inert),
+                    SocatKeyword::Unlisted => pieces.push(SocatAddress::Unknown),
+                    SocatKeyword::Unparsable => pieces.push(SocatAddress::Unparsable),
                 }
+            } else {
+                pieces.push(bare_socat_piece(keyword));
             }
             match segment.find('|') {
-                Some(bar) => segment = &segment[bar + 1..],
+                Some(bar) => segment_start += bar + 1,
                 None => break,
             }
         }
+        if half_end == text.len() {
+            return pieces;
+        }
+        half_start = half_end + 2;
     }
-    pieces
 }
 
 fn bare_socat_piece(text: &str) -> SocatAddress {
     if text.contains(['\'', '"', '\\']) || text.contains(char::is_whitespace) {
         return SocatAddress::Unknown;
     }
-    let keyword = text.to_ascii_uppercase();
-    if keyword == "EXEC" || keyword == "SYSTEM" || keyword == "SHELL" {
+    if matches!(
+        text.to_ascii_uppercase().as_str(),
+        "EXEC" | "SYSTEM" | "SHELL"
+    ) {
         return SocatAddress::Unknown;
     }
     SocatAddress::Inert
 }
 
-/// `Some(true)` for a spawning keyword, `Some(false)` for an allowlisted
-/// inert one, `None` for anything else.
-fn socat_colon_keyword(keyword: &str) -> Option<bool> {
-    if !keyword
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        return None;
-    }
-    let upper = keyword.to_ascii_uppercase();
-    if matches!(upper.as_str(), "EXEC" | "SYSTEM" | "SHELL") {
-        return Some(true);
-    }
-    (SOCAT_INERT_KEYWORDS.contains(&upper.as_str())
-        || SOCAT_INERT_KEYWORD_PREFIXES
-            .iter()
-            .any(|prefix| upper.starts_with(prefix)))
-    .then_some(false)
-}
-
 /// The shell-string slots of a `socat` stage: the command text of each
-/// spawning address, and an unresolved operand (it could be `EXEC:...`).
+/// spawning address, both cut at the first `,` and uncut, and an unresolved
+/// operand (it could be `EXEC:...`). A command containing characters socat's
+/// own lexer treats specially, or a keyword this parse cannot read, floors to
+/// Ask.
 fn socat_command_slots(stage: &[NormalizedWord], slots: &mut Vec<ScriptSlot>) {
     let Some((name, args)) = effective_command(stage) else {
         return;
@@ -6079,8 +6116,18 @@ fn socat_command_slots(stage: &[NormalizedWord], slots: &mut Vec<ScriptSlot>) {
     for word in args {
         for piece in socat_address_pieces(word) {
             match piece {
-                SocatAddress::Spawns(command) => slots.push(ScriptSlot::Resolved(command)),
-                SocatAddress::Unresolvable => slots.push(ScriptSlot::Unresolvable),
+                SocatAddress::Spawns { command, raw } => {
+                    if raw.contains(['\'', '"', '\\', '[', ']', '{', '}', '(', ')']) {
+                        slots.push(ScriptSlot::Unresolvable);
+                    }
+                    if raw != command {
+                        slots.push(ScriptSlot::Resolved(raw));
+                    }
+                    slots.push(ScriptSlot::Resolved(command));
+                }
+                SocatAddress::Unparsable | SocatAddress::Unresolvable => {
+                    slots.push(ScriptSlot::Unresolvable);
+                }
                 SocatAddress::Inert | SocatAddress::Unknown => {}
             }
         }
