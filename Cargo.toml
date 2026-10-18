@@ -15,7 +15,9 @@ name = "shguard"
 path = "src/bin/shguard.rs"
 
 [dependencies]
-# Pinned exactly per docs/adr/0001-parser-crate.md — the fixture corpus in
+# Pinned exactly per docs/adr/0001-parser-crate.md; staying on 0.4.0 (not the
+# brush-ocap rc line, no fork) is recorded in
+# docs/adr/0003-brush-parser-stay-on-0.4.0.md. The fixture corpus in
 # src/parser.rs is the upgrade-compatibility gate for any version bump.
 brush-parser = "=0.4.0"
 # rust-lang-maintained raw libc bindings — used for RSS measurement in the
