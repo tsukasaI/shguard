@@ -5,7 +5,7 @@
 
 use brush_parser::word::{self as bword, WordPiece};
 
-use super::compat::catch_parser_panic;
+use super::compat::{catch_parser_panic, strip_raw_line_continuations_blind};
 use super::{ParseError, parser_options};
 
 /// The raw inner text of every top-level `$(...)` and backquote substitution
@@ -60,10 +60,13 @@ fn parse_text(text: &str) -> Result<Vec<Found>, ParseError> {
         literal_run.clear();
 
         match with_source.piece {
-            WordPiece::Text(_) | WordPiece::EscapeSequence(_) => {}
-            WordPiece::CommandSubstitution(inner)
-            | WordPiece::BackquotedCommandSubstitution(inner) => {
+            WordPiece::EscapeSequence(_) => {}
+            WordPiece::CommandSubstitution(inner) => {
+                reject_comment_in_substitution(&inner)?;
                 found.push(Found::Substitution(inner));
+            }
+            WordPiece::BackquotedCommandSubstitution(inner) => {
+                found.push(Found::Substitution(decode_backquote_escapes(&inner)));
             }
             WordPiece::ArithmeticExpression(expression) => {
                 found.push(Found::Nested(expression.value));
@@ -75,7 +78,8 @@ fn parse_text(text: &str) -> Result<Vec<Found>, ParseError> {
                     found.push(Found::Nested(inner.to_owned()));
                 }
             }
-            WordPiece::SingleQuotedText(_)
+            WordPiece::Text(_)
+            | WordPiece::SingleQuotedText(_)
             | WordPiece::AnsiCQuotedText(_)
             | WordPiece::DoubleQuotedSequence(_)
             | WordPiece::GettextDoubleQuotedSequence(_)
@@ -100,6 +104,57 @@ fn braced_parameter_inner(source: Option<&str>) -> Result<Option<&str>, ParseErr
     rest.strip_suffix('}').map(Some).ok_or_else(|| {
         ParseError::unsupported("heredoc `${...}` expansion without a closing brace")
     })
+}
+
+/// Bash removes `\<newline>` from an expanding heredoc body before any
+/// expansion, so `$\<newline>(cmd)` is a real substitution; brush keeps it raw.
+pub(crate) fn strip_line_continuations(body: &str) -> String {
+    strip_raw_line_continuations_blind(body).into_owned()
+}
+
+/// Bash decodes `\$` and `\\` (as well as `` \` ``) inside backquotes before
+/// running the text; brush's `backquoted_char` decodes only `` \` ``. Left to
+/// right, so `\\$` is a backslash then `$`.
+pub(crate) fn decode_backquote_escapes(inner: &str) -> String {
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' && matches!(chars.peek(), Some('$' | '\\')) {
+            if let Some(next) = chars.next() {
+                out.push(next);
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Not a comment-aware scan: brush's word-level command rule has no comment
+/// concept, so a `)` after a `#` closes the substitution here while bash
+/// treats it as comment text. Over-asks on any unquoted word-start `#`.
+fn reject_comment_in_substitution(inner: &str) -> Result<(), ParseError> {
+    let mut quote: Option<char> = None;
+    let mut prev: Option<char> = None;
+    for c in inner.chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None => {
+                if c == '\'' || c == '"' {
+                    quote = Some(c);
+                } else if c == '#'
+                    && prev.is_none_or(|p| p.is_whitespace() || matches!(p, ';' | '|' | '&' | '('))
+                {
+                    return Err(ParseError::unsupported(
+                        "`#` comment inside a heredoc command substitution",
+                    ));
+                }
+            }
+        }
+        prev = Some(c);
+    }
+    Ok(())
 }
 
 fn reject_unterminated_opener(literal: &str) -> Result<(), ParseError> {
@@ -127,6 +182,24 @@ mod tests {
             parse_body(body).is_err(),
             "expected {body:?} to be rejected"
         );
+    }
+
+    #[test]
+    fn comment_inside_a_substitution_is_rejected() {
+        rejected("$(echo hi # )\nrm -rf /)");
+        rejected("$(echo hi #)");
+        rejected("$(echo hi;#x\n)");
+        assert_eq!(subs("$(echo a#b \"# x\" '#')"), ["echo a#b \"# x\" '#'"]);
+    }
+
+    #[test]
+    fn backquote_escapes_are_decoded() {
+        assert_eq!(
+            decode_backquote_escapes(r"echo \$(x) \\ \a"),
+            r"echo $(x) \ \a"
+        );
+        assert_eq!(decode_backquote_escapes(r"\\$"), r"\$");
+        assert_eq!(subs(r#"`echo "\$(rm -rf /)"`"#), [r#"echo "$(rm -rf /)""#]);
     }
 
     #[test]

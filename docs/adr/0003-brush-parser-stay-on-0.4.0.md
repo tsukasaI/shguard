@@ -28,10 +28,11 @@ Stay on `brush-parser = "=0.4.0"`.
 - `brush-ocap-parser 0.5.0-rc.1` is a release candidate. A fail-closed gate
   does not build on a pre-release parser whose output shape can still move.
 - A fork is rejected: carrying our own parser fork is a standing
-  maintenance burden out of proportion to three known panic sites.
+  maintenance burden out of proportion to four known panic sites.
 - The panic catch (`catch_parser_panic`) stays as the last line of defence.
   It covers the known `unwrap()` sites inside brush's PEG grammar: the tilde
-  directory-stack form, the brace sequence form, and the io-number form. A
+  directory-stack forms (unsigned/`+`-prefixed and `-`-prefixed), the brace
+  sequence form, and the io-number form. A
   caught panic maps to `Ask`, never `Allow`.
 - The `src/parser.rs` fixture corpus remains the upgrade gate.
 

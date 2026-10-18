@@ -524,10 +524,13 @@
 {"command":"cat <<EOF\n$(echo $'it\\'s'; taskset$IFS0x1$IFSrm$IFS~/.config/shguard/config.toml$IFS/)\nEOF","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"cat <<EOF\n$(echo $(busybox $'\\x72\\x6d' -rf /))\nEOF","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"cat <<EOF\n$(echo \\) ; sed -i ~/.config/shguard/config.toml)\nEOF","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"cat <<EOF\n$(echo hi # )\nrm -rf /)\nEOF","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"cat <<EOF\n$(echo hi #)\nEOF","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"cat <<EOF\n$(find /\"\"x -delete)\nEOF","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"cat <<EOF\n$(find ~+ -delete)\nEOF","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"cat <<EOF\n$(rm -rf /)\nEOF","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"cat <<EOF\n$[ $({,git} `printf '%s' 'reset'` --hard HEAD) 1 ]\nEOF","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"cat <<EOF\n$\\\n(rm -rf /)\nEOF","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"cat <<EOF\n${x:-$(chrt -\"\"f 99 rm -rf {/,})}\nEOF","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"cat <<EOF\n${x:-$(git reset --hard HEAD)}\nEOF","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"cat <<EOF\n${x:-$(rm -rf ..)}\nEOF","decision":"Block","deny_message":null,"matched_rule":null}
@@ -539,6 +542,7 @@
 {"command":"cat <<EOF\n'$({dd,} if=/dev/zero $(printf '%s' 'of=/dev/sda'))'\nEOF","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"cat <<EOF\n'$({dd,}$IFSif=/dev/zero$IFSof=/dev/sda)'\nEOF","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"cat <<EOF\n\\$($'\\x66\\x69\\x6e\\x64' ~root -delete)\nEOF","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"cat <<EOF\n`echo \"\\$(rm -rf /)\"`\nEOF","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"cat <<EOF\n`git push --force origin main`\nEOF","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"cat <<EOF\n`rm -rf /`\nEOF","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"cat <<EOF\n`shred /dev/sda`\nEOF","decision":"Block","deny_message":null,"matched_rule":null}
@@ -1199,6 +1203,7 @@
 {"command":"true || tee$IFS`printf '%s' '~/.config/shguard/config.toml'`","decision":"Ask","deny_message":"Resolve the target literally so the rule can check it.","matched_rule":null}
 {"command":"true || toybox$IFSrm$IFS-rf$IFS/","decision":"Ask","deny_message":"Expand the variable yourself and re-issue the command with the literal path or binary name.","matched_rule":null}
 {"command":"true || truncate ~+ 0 /importan''t","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"true; echo `echo \"\\$(rm -rf /)\"`","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"trun\"\"cate -\"\"s 0 /important","decision":"Block","deny_message":null,"matched_rule":"truncate-zero"}
 {"command":"trunc\"\"ate -s {0,} $'\\x2f\\x69\\x6d\\x70\\x6f\\x72\\x74\\x61\\x6e\\x74'","decision":"Block","deny_message":null,"matched_rule":"truncate-zero"}
 {"command":"truncat''e -s 0 /important","decision":"Block","deny_message":null,"matched_rule":"truncate-zero"}

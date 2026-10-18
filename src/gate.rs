@@ -7871,9 +7871,8 @@ fn collect_directed_process_substitutions_into<'a>(
 /// handing it to the reading shell's stdin, so analysing the raw text would
 /// let a backslash-escaped payload (`\$(rm -rf /)`, which the child shell
 /// receives and runs as a real `$(rm -rf /)` substitution) be seen as inert,
-/// escaped text instead. Note this is a stricter set than
-/// `crate::syntax::heredoc`'s three recognised escapes — its own
-/// `\<newline>` gap is a separate, pre-existing issue, not fixed here. Only
+/// escaped text instead. (`crate::syntax::heredoc` strips `\<newline>` from
+/// the body itself before extracting substitutions.) Only
 /// ever called on an `expand_body: true` body — a
 /// quoted delimiter's body recognises none of these escapes, so calling
 /// this on one would corrupt literal text the child shell receives
@@ -22607,6 +22606,23 @@ targets = [{ normalized_prefix = "~/.ssh" }]
             decide("diff <(cat ~/.ssh/id_rsa) x", "").decision(),
             Decision::Allow
         );
+    }
+
+    #[test]
+    fn heredoc_comment_continuation_and_backquote_escape_bypasses_never_allow() {
+        for command in [
+            "cat <<EOF\n$(echo hi # )\nrm -rf /)\nEOF",
+            "cat <<EOF\n$(echo hi #)\nEOF",
+            "cat <<EOF\n$\\\n(rm -rf /)\nEOF",
+            "cat <<EOF\n`echo \"\\$(rm -rf /)\"`\nEOF",
+            "true; echo `echo \"\\$(rm -rf /)\"`",
+        ] {
+            assert_ne!(
+                decide(command, "").decision(),
+                Decision::Allow,
+                "{command:?}"
+            );
+        }
     }
 
     #[test]

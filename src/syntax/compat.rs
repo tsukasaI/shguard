@@ -298,7 +298,7 @@ fn strip_raw_line_continuations(command: &str) -> std::borrow::Cow<'_, str> {
 /// trips a cap: between the two, a `\`+newline-split keyword/`[[` opener
 /// is rejoined by at least one of them regardless of which side of a
 /// real-vs-quoted `#` it falls on.
-fn strip_raw_line_continuations_blind(command: &str) -> std::borrow::Cow<'_, str> {
+pub(super) fn strip_raw_line_continuations_blind(command: &str) -> std::borrow::Cow<'_, str> {
     let bytes = command.as_bytes();
     let mut rewritten: Option<String> = None;
     let mut last_copied = 0;

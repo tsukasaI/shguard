@@ -713,7 +713,7 @@ fn convert_redirect_target(target: &bast::IoFileRedirectTarget) -> Result<Word, 
 fn convert_heredoc(heredoc: &bast::IoHereDocument) -> Result<Redirection, ParseError> {
     let body = heredoc.doc.value.clone();
     let substitutions = if heredoc.requires_expansion {
-        heredoc::parse_body(&body)
+        heredoc::parse_body(&heredoc::strip_line_continuations(&body))
             .map_or(HeredocSubstitutions::Unparsed, HeredocSubstitutions::Parsed)
     } else {
         HeredocSubstitutions::Parsed(Vec::new())
@@ -1217,9 +1217,9 @@ fn convert_word_piece(
             convert_parameter_expansion(expr, in_double_quotes)
         }
         bword::WordPiece::CommandSubstitution(inner) => Ok(WordPiece::CommandSubstitution(inner)),
-        bword::WordPiece::BackquotedCommandSubstitution(inner) => {
-            Ok(WordPiece::BackquotedSubstitution(inner))
-        }
+        bword::WordPiece::BackquotedCommandSubstitution(inner) => Ok(
+            WordPiece::BackquotedSubstitution(heredoc::decode_backquote_escapes(&inner)),
+        ),
         bword::WordPiece::EscapeSequence(escape) => {
             let ch = escape
                 .chars()
