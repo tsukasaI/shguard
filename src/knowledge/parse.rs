@@ -217,6 +217,23 @@ impl<'a> Parser<'a> {
         Flow::Next(at + 1)
     }
 
+    /// Skips the assignments starting at `from` and returns the index of the
+    /// first word that is not one. A nameless `=x` is skipped but marked
+    /// unmodelled: `env` rejects it, so what follows cannot be placed.
+    fn skip_assignments(&mut self, from: usize) -> usize {
+        let mut idx = from;
+        while let Some(Resolution::Resolved(token)) =
+            self.argv.get(idx).map(NormalizedWord::resolution)
+            && is_assignment(token)
+        {
+            if token.starts_with('=') {
+                self.culprit.get_or_insert(idx);
+            }
+            idx += 1;
+        }
+        idx
+    }
+
     /// Takes the next word as `name`'s separated value.
     fn separate_value(&mut self, name: OptionName, at: usize) -> Flow {
         match self.argv.get(at + 1) {
@@ -321,15 +338,12 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// Whether `token` has the `NAME=value` shape of a POSIX environment
-/// assignment.
+/// Whether `token` is an argument the wrapper applies as an environment
+/// assignment. Not the POSIX identifier shape: GNU and BSD `env` take any
+/// argument containing `=` and `putenv` does not validate the name, so
+/// `a.b=c` and `1a=b` are skipped before the command is exec'd.
 fn is_assignment(token: &str) -> bool {
-    let Some((name, _)) = token.split_once('=') else {
-        return false;
-    };
-    !name.is_empty()
-        && !name.starts_with(|c: char| c.is_ascii_digit())
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    token.contains('=')
 }
 
 /// Parses `argv` (the words after the command name) against `spec`.
@@ -366,10 +380,13 @@ pub(crate) fn parse<'a>(
         };
         if token == "--" {
             idx += 1;
+            if grammar.assignments {
+                idx = parser.skip_assignments(idx);
+            }
             break;
         }
-        if grammar.assignments && is_assignment(token) {
-            idx += 1;
+        if grammar.assignments && !token.starts_with('-') && is_assignment(token) {
+            idx = parser.skip_assignments(idx);
             continue;
         }
         let is_option = (token.starts_with('-') && token.len() > 1)

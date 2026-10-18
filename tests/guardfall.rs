@@ -875,6 +875,64 @@ fn guardfall_issue_638_time_and_exec_wrapper_cases() {
     }
 }
 
+const ISSUE_739_ENV_ASSIGNMENT_CASES: &[(&str, Decision)] = &[
+    // `env` skips every argument containing `=`, not just identifier-shaped
+    // names, and keeps skipping after `--`.
+    ("env a.b=c rm -rf /", Decision::Block),
+    ("env 1a=b rm -rf /", Decision::Block),
+    ("env a-b=c rm -rf /", Decision::Block),
+    ("env 'a b=c' rm -rf /", Decision::Block),
+    ("env -i a.b=c rm -rf /", Decision::Block),
+    ("busybox env a.b=c rm -rf /", Decision::Block),
+    ("nohup env a.b=c rm -rf /", Decision::Block),
+    ("env -S 'a.b=c rm -rf ~'", Decision::Block),
+    ("env -- FOO=bar rm -rf /", Decision::Block),
+    ("env -i -- FOO=bar rm -rf /", Decision::Block),
+    ("env -S '-- FOO=bar rm -rf ~'", Decision::Block),
+    ("watch -x -- env -- A=b rm -rf /", Decision::Block),
+    ("env -- a.b=c FOO=bar rm -rf /", Decision::Block),
+    // Controls from the issue.
+    ("env FOO=bar rm -rf /", Decision::Block),
+    ("env -- rm -rf /", Decision::Block),
+    // A nameless `=x` is not modelled: the command behind it still reaches
+    // its rule, and a benign one floors to Ask.
+    ("env =x rm -rf /", Decision::Block),
+    ("env -- =x rm -rf /", Decision::Block),
+    ("env =x ls", Decision::Ask),
+    ("env -- =x ls", Decision::Ask),
+    // `time` and `command` apply no assignments: bash runs `a.b=c` as the
+    // command name, as in the unwrapped control. It cannot be placed, so
+    // the stage floors to Ask.
+    ("a.b=c rm -rf /", Decision::Ask),
+    ("1a=b rm -rf /", Decision::Ask),
+    ("=x rm -rf /", Decision::Ask),
+    ("time a.b=c rm -rf /", Decision::Ask),
+    ("command a.b=c rm -rf /", Decision::Ask),
+    // A valid assignment prefix is still an assignment, not a command name.
+    ("FOO=bar ls", Decision::Allow),
+    // False-positive guards: benign wrapped commands and bare assignments.
+    ("env a.b=c ls", Decision::Allow),
+    ("env -- FOO=bar ls", Decision::Allow),
+    ("env -i -- FOO=bar git status", Decision::Allow),
+    ("env -S 'a.b=c ls'", Decision::Allow),
+    ("env FOO=bar", Decision::Allow),
+    ("env -- FOO=bar", Decision::Allow),
+    ("env", Decision::Allow),
+];
+
+#[test]
+fn guardfall_issue_739_env_assignment_cases() {
+    for (command, expected) in ISSUE_739_ENV_ASSIGNMENT_CASES {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
 const EVAL_CASES: &[(&str, Decision)] = &[
     // The issue's own three repros.
     ("eval rm -rf /", Decision::Block),
@@ -2622,6 +2680,7 @@ const DECISION_TABLES: &[(&str, &[(&str, Decision)])] = &[
     named_table!(ISSUE_453_FILESYSTEM_GAPS),
     named_table!(TRANSPARENT_WRAPPER_CASES),
     named_table!(ISSUE_638_TIME_AND_EXEC_WRAPPER_CASES),
+    named_table!(ISSUE_739_ENV_ASSIGNMENT_CASES),
     named_table!(EVAL_CASES),
     named_table!(TRAP_CASES),
     named_table!(FIND_EXEC_BARE_INTERPRETER_CASES),
