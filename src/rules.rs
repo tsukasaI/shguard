@@ -4508,6 +4508,14 @@ impl PipelineRule {
         let Some((sink_name, sink_tail)) = effective_command(sink_stage) else {
             return false;
         };
+        // Not the local interpreter: `ssh host sh` and `docker exec -i c sh`
+        // run it elsewhere, which the stdin-sink floor already asks about.
+        if wrapper_hops(sink_stage)
+            .iter()
+            .any(|(name, _)| REMOTE_EXEC_WRAPPERS.contains(&name.as_str()))
+        {
+            return false;
+        }
         // Issue #497: a versioned/distro-suffixed sink binary (`dash5`)
         // resolves to the same interpreter `strip_version_suffix` already
         // normalizes it to elsewhere (`is_pipeline_interpreter`,
@@ -5161,7 +5169,7 @@ fn value_flag_consumed(rest_words: &[NormalizedWord], value_flags: &[ValueFlag])
 /// ("dependencies point inward" — `gate` already depends on `rules`, not
 /// the reverse).
 pub(crate) const SHELL_INTERPRETERS: &[&str] = &[
-    "bash", "sh", "zsh", "dash", "fish", "ksh", "tcsh", "csh", "ash",
+    "bash", "sh", "zsh", "dash", "fish", "ksh", "tcsh", "csh", "ash", "mksh", "yash", "rbash",
 ];
 
 /// The `eval` builtin (issue #120): same "interpret this string as a shell
@@ -5248,6 +5256,29 @@ const EXTRA_PIPELINE_INTERPRETERS: &[&str] = &[
     "irb",
     "deno",
     "pwsh",
+    "nu",
+    "xonsh",
+    "elvish",
+    // `pypy3` is version-stripped to this.
+    "pypy",
+];
+
+/// Tools that run code read from stdin without being a language
+/// interpreter (issue #748): a job scheduler (`at`, `batch`), a remote
+/// shell (`ssh`), a debugger or REPL (`gdb`, `expect`, `wish`, `jshell`,
+/// `R`, `julia`), an editor or calculator with a shell escape (`ed`, `ex`,
+/// `vi`, `vim`, `dc`, `m4`) and a database client with one (`sqlite3`,
+/// `psql`, `mysql`). A sink by NAME alone, like
+/// [`EXTRA_PIPELINE_INTERPRETERS`], but not part of
+/// [`matches_dangerous_allow_target`]: these are everyday tools, and an
+/// `allow` entry naming `ssh` or `psql` must keep loading.
+///
+/// Entries are post-[`strip_version_suffix`] and case-folded: `sqlite3` is
+/// `sqlite`, `m4` is `m`, `R` is `r`. A stdin-operand-gated sink (`make -f
+/// -`, `crontab -`) cannot be a name here; see `crate::gate`.
+const STDIN_CODE_TOOLS: &[&str] = &[
+    "at", "batch", "ssh", "gdb", "sqlite", "psql", "mysql", "ed", "ex", "vi", "vim", "m", "dc",
+    "expect", "wish", "jshell", "r", "julia",
 ];
 
 /// The `awk` family (`crate::gate` rule 6d, issue #195): every one of these
@@ -5483,7 +5514,9 @@ pub(crate) fn strip_version_suffix(name: &str) -> &str {
 pub(crate) fn is_pipeline_interpreter(name: &str) -> bool {
     let lower = fold_command_name(name);
     let name = strip_version_suffix(&lower);
-    SHELL_INTERPRETERS.contains(&name) || EXTRA_PIPELINE_INTERPRETERS.contains(&name)
+    SHELL_INTERPRETERS.contains(&name)
+        || EXTRA_PIPELINE_INTERPRETERS.contains(&name)
+        || STDIN_CODE_TOOLS.contains(&name)
 }
 
 /// Whether `name` is a [`SHELL_INTERPRETERS`] member once
@@ -5514,7 +5547,8 @@ pub(crate) fn is_shell_interpreter(name: &str) -> bool {
 #[must_use]
 pub(crate) fn is_stdin_script_interpreter(name: &str) -> bool {
     let lower = fold_command_name(name);
-    EXTRA_PIPELINE_INTERPRETERS.contains(&strip_version_suffix(&lower))
+    let name = strip_version_suffix(&lower);
+    EXTRA_PIPELINE_INTERPRETERS.contains(&name) || STDIN_CODE_TOOLS.contains(&name)
 }
 
 /// One `find` flag whose payload is itself a command to recurse into
@@ -5773,6 +5807,24 @@ pub(crate) fn first_unmodeled_wrapper_option(stage: &[NormalizedWord]) -> Option
         rest = hop.next();
     }
     None
+}
+
+/// Wrappers that run their command on another host or in a container.
+const REMOTE_EXEC_WRAPPERS: &[&str] = &["ssh", "docker", "kubectl"];
+
+/// The canonical name and argument tail of every wrapper hop along `stage`'s
+/// chain, outermost first. A wrapper that is itself a stdin sink (`ssh`,
+/// `docker exec -i`) is only visible here: [`effective_command`] reports the
+/// command behind it.
+#[must_use]
+pub(crate) fn wrapper_hops(stage: &[NormalizedWord]) -> Vec<(String, &[NormalizedWord])> {
+    let mut hops = Vec::new();
+    let mut rest = stage;
+    while let Step::Wrapper(hop) = step(rest, &[]) {
+        hops.push((canonical_command_name(hop.base), hop.tail));
+        rest = hop.next();
+    }
+    hops
 }
 
 /// The replace-string an `xargs` hop's own options set (`-I R`, `-IR`, `-i[R]`,
@@ -6191,6 +6243,7 @@ pub(crate) fn chain_script_slots(stage: &[NormalizedWord]) -> Vec<ScriptSlot> {
         }
         rest = hop.next();
     }
+    socat_command_slots(stage, &mut slots);
     slots
 }
 
@@ -6247,6 +6300,201 @@ fn pipe_remainder(value: &str) -> Option<ScriptSlot> {
     value
         .strip_prefix(['|', '!'])
         .map(|script| ScriptSlot::Resolved(script.to_string()))
+}
+
+/// What one piece of a `socat` address operand does (issue #737).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SocatAddress {
+    /// A keyword on the known non-spawning allowlist, or a bare path.
+    Inert,
+    /// `EXEC:`/`SYSTEM:`/`SHELL:`: spawns a program whose stdin receives
+    /// the other address's bytes.
+    Spawns {
+        /// The command text up to the first `,` (where socat's options start).
+        command: String,
+        /// Everything after the keyword's `:` to the end of the whole
+        /// operand: socat's own lexer nests and quotes, which this parse
+        /// does not model, so the uncut text is kept for fail-closed use.
+        raw: String,
+    },
+    /// A keyword outside the allowlist.
+    Unknown,
+    /// A keyword written with a quote, backslash or whitespace, which this
+    /// parse does not model.
+    Unparsable,
+    /// The operand could not be resolved statically.
+    Unresolvable,
+}
+
+impl SocatAddress {
+    pub(crate) fn is_sink(&self) -> bool {
+        !matches!(self, Self::Inert)
+    }
+}
+
+/// Whether `name` (an [`effective_command`] name, already case-folded) is
+/// `socat`, including a versioned binary such as `socat1`/`socat2`.
+pub(crate) fn is_socat(name: &str) -> bool {
+    strip_version_suffix(name) == "socat"
+}
+
+/// Address keywords that take no further `-` parts.
+const SOCAT_INERT_KEYWORDS: &[&str] = &[
+    "-",
+    "NOP",
+    "OPEN",
+    "GOPEN",
+    "CREATE",
+    "FD",
+    "STDIO",
+    "STDIN",
+    "STDOUT",
+    "STDERR",
+    "PIPE",
+    "PTY",
+    "INTERFACE",
+    "READLINE",
+];
+/// First `-`-separated part of a connection-style address keyword
+/// (`TCP4-LISTEN`, `UNIX-CONNECT`, `OPENSSL-DTLS-CLIENT`).
+const SOCAT_INERT_FAMILIES: &[&str] = &[
+    "TCP", "TCP4", "TCP6", "UDP", "UDP4", "UDP6", "UDPLITE", "UDPLITE4", "UDPLITE6", "SCTP",
+    "SCTP4", "SCTP6", "IP", "IP4", "IP6", "UNIX", "ABSTRACT", "OPENSSL", "SOCKS4", "SOCKS4A",
+    "SOCKS5", "SOCKET", "VSOCK", "DCCP", "DCCP4", "DCCP6", "POSIXMQ", "PROXY",
+];
+/// The `-`-separated parts that may follow a family.
+const SOCAT_INERT_SUFFIXES: &[&str] = &[
+    "CONNECT", "LISTEN", "L", "SENDTO", "RECV", "RECVFROM", "DATAGRAM", "CLIENT", "SERVER", "DTLS",
+];
+
+enum SocatKeyword {
+    Spawning,
+    Inert,
+    Unlisted,
+    Unparsable,
+}
+
+fn classify_socat_keyword(keyword: &str) -> SocatKeyword {
+    if keyword.contains(['\'', '"', '\\']) || keyword.contains(char::is_whitespace) {
+        return SocatKeyword::Unparsable;
+    }
+    let upper = keyword.to_ascii_uppercase();
+    if matches!(upper.as_str(), "EXEC" | "SYSTEM" | "SHELL") {
+        return SocatKeyword::Spawning;
+    }
+    let mut parts = upper.split('-');
+    let family_ok = parts
+        .next()
+        .is_some_and(|family| SOCAT_INERT_FAMILIES.contains(&family))
+        && parts.all(|part| SOCAT_INERT_SUFFIXES.contains(&part));
+    if family_ok || SOCAT_INERT_KEYWORDS.contains(&upper.as_str()) {
+        SocatKeyword::Inert
+    } else {
+        SocatKeyword::Unlisted
+    }
+}
+
+/// Parses one `socat` operand into its address pieces. socat's dual
+/// address `A!!B` writes to `B`, and socat2 chains with `|`, so each piece
+/// is judged on its own keyword (the text before the first `:`, `,` or `|`).
+/// A colon-less piece is a file path (socat's GOPEN), so it is inert unless
+/// it is written with quotes, backslashes or whitespace, or is a bare
+/// spawning keyword.
+pub(crate) fn socat_address_pieces(word: &NormalizedWord) -> Vec<SocatAddress> {
+    let Resolution::Resolved(text) = word.resolution() else {
+        return vec![SocatAddress::Unresolvable];
+    };
+    let mut pieces = Vec::new();
+    let mut half_start = 0;
+    loop {
+        let half_end = text[half_start..]
+            .find("!!")
+            .map_or(text.len(), |at| half_start + at);
+        let mut segment_start = half_start;
+        loop {
+            let segment = &text[segment_start..half_end];
+            let Some(end) = segment.find([':', ',', '|']) else {
+                pieces.push(bare_socat_piece(segment));
+                break;
+            };
+            let keyword = &segment[..end];
+            if segment.as_bytes()[end] == b':' {
+                match classify_socat_keyword(keyword) {
+                    SocatKeyword::Spawning => {
+                        let raw = &text[segment_start + end + 1..];
+                        let command_end = [raw.find(','), raw.find("!!"), raw.find('|')]
+                            .into_iter()
+                            .flatten()
+                            .min()
+                            .unwrap_or(raw.len());
+                        pieces.push(SocatAddress::Spawns {
+                            command: raw[..command_end].to_string(),
+                            raw: raw.to_string(),
+                        });
+                    }
+                    SocatKeyword::Inert => pieces.push(SocatAddress::Inert),
+                    SocatKeyword::Unlisted => pieces.push(SocatAddress::Unknown),
+                    SocatKeyword::Unparsable => pieces.push(SocatAddress::Unparsable),
+                }
+            } else {
+                pieces.push(bare_socat_piece(keyword));
+            }
+            match segment.find('|') {
+                Some(bar) => segment_start += bar + 1,
+                None => break,
+            }
+        }
+        if half_end == text.len() {
+            return pieces;
+        }
+        half_start = half_end + 2;
+    }
+}
+
+fn bare_socat_piece(text: &str) -> SocatAddress {
+    if text.contains(['\'', '"', '\\']) || text.contains(char::is_whitespace) {
+        return SocatAddress::Unknown;
+    }
+    if matches!(
+        text.to_ascii_uppercase().as_str(),
+        "EXEC" | "SYSTEM" | "SHELL"
+    ) {
+        return SocatAddress::Unknown;
+    }
+    SocatAddress::Inert
+}
+
+/// The shell-string slots of a `socat` stage: the command text of each
+/// spawning address, both cut at the first `,` and uncut, and an unresolved
+/// operand (it could be `EXEC:...`). A command containing characters socat's
+/// own lexer treats specially, or a keyword this parse cannot read, floors to
+/// Ask.
+fn socat_command_slots(stage: &[NormalizedWord], slots: &mut Vec<ScriptSlot>) {
+    let Some((name, args)) = effective_command(stage) else {
+        return;
+    };
+    if !is_socat(&name) {
+        return;
+    }
+    for word in args {
+        for piece in socat_address_pieces(word) {
+            match piece {
+                SocatAddress::Spawns { command, raw } => {
+                    if raw.contains(['\'', '"', '\\', '[', ']', '{', '}', '(', ')']) {
+                        slots.push(ScriptSlot::Unresolvable);
+                    }
+                    if raw != command {
+                        slots.push(ScriptSlot::Resolved(raw));
+                    }
+                    slots.push(ScriptSlot::Resolved(command));
+                }
+                SocatAddress::Unparsable | SocatAddress::Unresolvable => {
+                    slots.push(ScriptSlot::Unresolvable);
+                }
+                SocatAddress::Inert | SocatAddress::Unknown => {}
+            }
+        }
+    }
 }
 
 /// Whether `stage`'s wrapper-unwrap chain passes through `su` with a
