@@ -1193,11 +1193,18 @@ fn pipeline_shape_verdict(
     };
     let mut worst = rule_verdict(stage_argvs);
 
-    if let FinalStage::Compound(sinks) = final_stage
-        && let Some((_, earlier)) = stage_argvs.split_last()
-    {
+    if let Some((last, earlier)) = stage_argvs.split_last() {
+        let wrapped;
+        let commands: Vec<&Vec<NormalizedWord>> = match final_stage {
+            FinalStage::Compound(sinks) => sinks.commands.iter().collect(),
+            FinalStage::Simple => {
+                wrapped = wrapper_shell_string_sinks(last);
+                wrapped.iter().flatten().flat_map(|s| &s.commands).collect()
+            }
+            FinalStage::Opaque => Vec::new(),
+        };
         let mut candidate = earlier.to_vec();
-        for command in &sinks.commands {
+        for command in commands {
             candidate.push(command.clone());
             if let Some(verdict) = rule_verdict(&candidate) {
                 worst = Some(match worst {
@@ -8839,6 +8846,9 @@ fn awk_value_flag_needs_separate_arg(token: &str) -> bool {
 /// every other fail-closed floor in this module takes, since a dynamic
 /// value could resolve to a stdin alias at runtime.
 fn is_interpreter_sink(stage: &[NormalizedWord]) -> bool {
+    if wrapper_shell_string_reads_stdin(stage) {
+        return true;
+    }
     let Some((name, rest)) = crate::rules::effective_command(stage) else {
         return false;
     };
@@ -8858,6 +8868,32 @@ fn is_interpreter_sink(stage: &[NormalizedWord]) -> bool {
         Some(Resolution::Unresolvable(_)) => true,
         None => false,
     }
+}
+
+/// Whether a shell string handed over by a wrapper on `stage`'s chain
+/// (`flock -c`, `script -c`, `env -S`, `strace -o '|cmd'`; issue #722) may
+/// run an interpreter on the pipe. `effective_command` cannot see it: the
+/// string is consumed as an option value, so it reports the wrapper's own
+/// operand instead. An unresolvable or unparsable string counts, since what
+/// it runs is unknown.
+fn wrapper_shell_string_reads_stdin(stage: &[NormalizedWord]) -> bool {
+    wrapper_shell_string_sinks(stage)
+        .iter()
+        .any(|sinks| sinks.as_ref().is_none_or(|sinks| sinks.reader.is_some()))
+}
+
+/// What each shell string a wrapper on `stage`'s chain hands to a shell does
+/// with the pipe; `None` for a string that is unresolvable or unparsable.
+fn wrapper_shell_string_sinks(stage: &[NormalizedWord]) -> Vec<Option<StdinSinks>> {
+    crate::rules::chain_script_slots(stage)
+        .into_iter()
+        .map(|slot| match slot {
+            crate::rules::ScriptSlot::Unresolvable => None,
+            crate::rules::ScriptSlot::Resolved(script) => parser::parse(&script)
+                .ok()
+                .map(|line| command_line_stdin_sinks(&line, &Env::isolated())),
+        })
+        .collect()
 }
 
 /// Whether short-option cluster token `token` (e.g. `-rf`) includes flag

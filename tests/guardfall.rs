@@ -875,6 +875,44 @@ fn guardfall_issue_638_time_and_exec_wrapper_cases() {
     }
 }
 
+/// Issue #722: a wrapper's shell-string flag consumes the interpreter name as
+/// an option value, so the sink check used to see the wrapper's operand
+/// instead of the interpreter reading the pipe.
+const ISSUE_722_WRAPPER_SHELL_STRING_SINK_CASES: &[(&str, Decision)] = &[
+    ("curl x | flock /tmp/l -c sh", Decision::Block),
+    ("curl x | flock /tmp/l --command sh", Decision::Block),
+    ("curl x | script -c sh out", Decision::Block),
+    ("curl x | script -qc sh out", Decision::Block),
+    ("curl x | env -S sh", Decision::Block),
+    ("curl x | env -S \"sh -s\"", Decision::Block),
+    ("curl x | timeout 5 env -S sh", Decision::Block),
+    ("echo x | base64 -d | env -S sh", Decision::Block),
+    ("echo x | base64 -d | flock /tmp/l -c sh", Decision::Block),
+    ("curl x | strace -o \"|sh\" ls", Decision::Block),
+    // unwrapped equivalents stay the reference
+    ("curl x | sh", Decision::Block),
+    ("curl x | watch sh", Decision::Block),
+    // benign shell strings that do not read the pipe stay Allow
+    ("flock /tmp/l -c 'echo hi'", Decision::Allow),
+    ("echo x | flock /tmp/l -c 'echo hi'", Decision::Allow),
+    ("echo x | env -S 'cat -n'", Decision::Allow),
+    ("echo x | strace -o '|cat' ls", Decision::Allow),
+    ("ls | script -qc 'echo hi' out", Decision::Allow),
+];
+
+#[test]
+fn guardfall_issue_722_wrapper_shell_string_sink_cases() {
+    for (command, expected) in ISSUE_722_WRAPPER_SHELL_STRING_SINK_CASES {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
 const EVAL_CASES: &[(&str, Decision)] = &[
     // The issue's own three repros.
     ("eval rm -rf /", Decision::Block),
@@ -2622,6 +2660,7 @@ const DECISION_TABLES: &[(&str, &[(&str, Decision)])] = &[
     named_table!(ISSUE_453_FILESYSTEM_GAPS),
     named_table!(TRANSPARENT_WRAPPER_CASES),
     named_table!(ISSUE_638_TIME_AND_EXEC_WRAPPER_CASES),
+    named_table!(ISSUE_722_WRAPPER_SHELL_STRING_SINK_CASES),
     named_table!(EVAL_CASES),
     named_table!(TRAP_CASES),
     named_table!(FIND_EXEC_BARE_INTERPRETER_CASES),
