@@ -2414,6 +2414,38 @@ fn guardfall_sed_script_write_exec_cases() {
     }
 }
 
+const ISSUE_729_SED_HELP_VERSION_W_FILE_CASES: &[(&str, Decision)] = &[
+    // GNU sed compiles each `-e` script while reading options, so a `w` file
+    // is opened before `--help`/`--version` exits.
+    ("sed -e 'w FILE' --version", Decision::Ask),
+    ("sed --expr='s/x/y/w FILE' --h", Decision::Ask),
+    ("sed -e 'w FILE' --help f", Decision::Ask),
+    ("sed -e 'w /tmp/x' --help", Decision::Ask),
+    // Same decision as the identical script without the info option.
+    ("sed -e 'w /tmp/x'", Decision::Ask),
+    ("sed -e 'w FILE' f", Decision::Ask),
+    // An info option ahead of the script is not trusted either.
+    ("sed --help -e 'w FILE'", Decision::Ask),
+    ("sed --version --expression='w FILE'", Decision::Ask),
+    // No script: unchanged.
+    ("sed --help", Decision::Allow),
+    ("sed --version", Decision::Allow),
+    ("sed -e p --help", Decision::Allow),
+];
+
+#[test]
+fn guardfall_issue_729_sed_help_version_w_file_cases() {
+    for (command, expected) in ISSUE_729_SED_HELP_VERSION_W_FILE_CASES {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
 const PARAMETER_EXPANSION_OPERAND_CASES: &[(&str, Decision)] = &[
     // Issues #578/#580: substitutions inside a modified expansion's
     // operand are still analyzed.
@@ -2696,6 +2728,7 @@ const DECISION_TABLES: &[(&str, &[(&str, Decision)])] = &[
     named_table!(SHELL_INIT_REDIRECT_CASES),
     named_table!(BRUSH_PARSER_OVERFLOW_PANIC_CASES),
     named_table!(SED_SCRIPT_WRITE_EXEC_CASES),
+    named_table!(ISSUE_729_SED_HELP_VERSION_W_FILE_CASES),
     named_table!(PARAMETER_EXPANSION_OPERAND_CASES),
     named_table!(GIT_CONFIG_COMMAND_KEY_CASES),
     named_table!(OSASCRIPT_SCRIPT_PARALLEL_CASES),
