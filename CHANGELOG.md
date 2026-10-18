@@ -20,13 +20,21 @@ All notable changes to this project are documented in this file.
 - A `PATH` assignment with an empty or relative literal component, and a
   `[[ ]]` arithmetic comparison (`-eq`, `-gt`, ...) of an operand that is
   not provably an integer, floor to Ask.
+- The Oils shells `osh`, `ysh` and `oil` are shell interpreters (#750):
+  `curl x | oil` Blocks. `nu` stays Ask.
+- `curl`/`wget` writing to a shell-init, cron, autostart or persistence
+  file (`curl -o ~/.bashrc`, `--output`, `--output=`, `wget -O`,
+  `--output-document`) asks, like a redirect to the same file. `kill` with
+  pid `-1` (`kill -9 -1`) asks. `source`/`.` of an unresolvable file in a
+  function body (`f() { source "$1"; }`) asks.
 
 ### Compatibility notes
 
 - `[[allow]] command = "arch"`, `"sandbox-exec"`, `"valgrind"`,
   `"fakeroot"` and `"rlwrap"` are now rejected at config load, like the
   other exec wrappers, as are `"mksh"`, `"yash"`, `"rbash"`, `"nu"`,
-  `"xonsh"`, `"elvish"` and `"pypy"`. Remove such entries before upgrading.
+  `"xonsh"`, `"elvish"` and `"pypy"`, plus `"osh"`, `"ysh"` and `"oil"`.
+  Remove such entries before upgrading.
   The stdin-to-code tools above are not rejected.
 
 ## [0.9.3] - 2026-10-18
