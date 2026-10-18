@@ -220,6 +220,11 @@ impl Known {
         self.spec.piped_output_option()
     }
 
+    /// Whether the operands are always joined into a shell string.
+    pub(crate) fn joins_operands_as_shell_script(&self) -> bool {
+        self.spec.joins_operands_as_shell_script()
+    }
+
     /// The exec flag that turns off running the operands as a shell string.
     pub(crate) fn operands_as_shell_script_exec_flag(&self) -> Option<(char, &'static str)> {
         self.spec.operands_as_shell_script_exec_flag()

@@ -50,6 +50,15 @@ pub(crate) struct OptionGrammar {
     /// An optional first operand before the options (`setarch ARCH`).
     pub(crate) leading_operand: bool,
     pub(crate) order: ArgOrder,
+    /// Long names (no `--`) that take two separated values (`bwrap --bind
+    /// SRC DEST`); never `=`-attached.
+    pub(crate) long_pairs: &'static [&'static str],
+    /// A single dash also introduces a long name (`gdb -batch`).
+    pub(crate) single_dash_long: bool,
+    /// Tokens after which the command starts when one appears behind the
+    /// first operand (`mise exec node@20 -- cmd`, `nix develop .#x -c cmd`),
+    /// so the operands before it are not mistaken for the command.
+    pub(crate) command_after: &'static [&'static str],
 }
 
 impl OptionGrammar {
@@ -68,6 +77,9 @@ impl OptionGrammar {
         assignments: false,
         leading_operand: false,
         order: ArgOrder::FirstOperand,
+        long_pairs: &[],
+        single_dash_long: false,
+        command_after: &[],
     };
 }
 
@@ -108,6 +120,13 @@ pub(crate) enum Slot {
         exec_short: char,
         exec_long: &'static str,
     },
+    /// The operands, joined, are always run through a shell (`ssh host CMD`,
+    /// `tmux new-session CMD`).
+    OperandsJoinedShellScript,
+    /// The command only wraps another when its first operands spell one of
+    /// these word sequences (`poetry run`, `ip netns exec`); anything else
+    /// (`poetry install`) is not a wrapper call. Options may surround it.
+    Subcommands(&'static [&'static [&'static str]]),
     /// An option that changes the directory the wrapped command runs in.
     Cwd {
         short: char,
@@ -157,6 +176,19 @@ impl CommandSpec {
                 _ => 0,
             })
             .sum()
+    }
+
+    pub(crate) fn joins_operands_as_shell_script(&self) -> bool {
+        self.slots
+            .iter()
+            .any(|slot| matches!(slot, Slot::OperandsJoinedShellScript))
+    }
+
+    pub(crate) fn subcommands(&self) -> Option<&'static [&'static [&'static str]]> {
+        self.slots.iter().find_map(|slot| match slot {
+            Slot::Subcommands(alternatives) => Some(*alternatives),
+            _ => None,
+        })
     }
 
     pub(crate) fn cwd_options(&self) -> impl Iterator<Item = (char, &'static str, CwdEffect)> {

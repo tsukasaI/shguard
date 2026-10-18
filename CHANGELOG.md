@@ -4,6 +4,36 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Homebrew's `g`-prefixed `env`, `nice`, `nohup`, `timeout`, `stdbuf`,
+  `chroot`, `runcon` and `time` (`gtimeout 5 rm -rf ~`) are matched like the
+  unprefixed wrappers (#740).
+- A word standing in for the command, an `xargs` replace-string
+  (`xargs -I{} {} -rf /`) or a `find`/`fd` `{}` placeholder (`find -exec {}
+  \;`, `-exec env {} rm ...`), now Asks instead of Allow (#740).
+
+- Command runners are transparent wrappers, so `rm -rf /` behind them
+  Blocks like the bare command (#740): `fakeroot`, `eatmydata`, `bwrap`,
+  `proot`, `ltrace`, `valgrind`, `gdb --args`, `faketime`, `xvfb-run`,
+  `sg -c`, `cgexec`, `sshpass`, `entr`, `chronic`, `ifne`, `rlwrap`,
+  `screen`, `tmux new-session`, `ip netns exec`, `poetry run`, `uv run`,
+  `npx`, `npm exec`, `pnpm exec`, `bundle exec`, `mise exec`,
+  `direnv exec`, `rustup run`, `nix develop -c`, `devbox run`, `op run`,
+  `dotenv`, `ssh host CMD`, `docker exec` and `kubectl exec`. For the tools
+  with subcommands only the named subcommand wraps a command; `poetry
+  install`, `docker ps` and the like are unchanged. An option the catalog
+  does not describe on a wrapper call makes it Ask.
+
+### Changed
+
+- An `[[allow]] command` entry naming one of those `g`-prefixed wrappers
+  (`gtimeout`, `genv`, ...) or one of the newly catalogued runners above is
+  now rejected at config load, like the unprefixed `timeout`/`env` (#740).
+  Remove the entry before upgrading; an entry naming `ssh`, `docker`, `npm`
+  and the like is affected too, even though most of their subcommands are
+  not wrappers.
+
 ## [0.9.3] - 2026-10-18
 
 ### Added

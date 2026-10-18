@@ -4617,6 +4617,14 @@ fn scan_unmodeled_option_floor(argv: &[NormalizedWord]) -> Option<(Decision, Str
             format!("unmodelled option for `{}`", finding.command()),
         ));
     }
+    if crate::rules::placeholder_in_command_slot(argv, &[]) {
+        return Some((
+            Decision::Ask,
+            "an `xargs` replace-string stands in for a command word, so the command that runs \
+             comes from standard input"
+                .to_string(),
+        ));
+    }
     crate::rules::has_assignment_shaped_command_name(argv).then(|| {
         (
             Decision::Ask,
@@ -7729,6 +7737,16 @@ fn recurse_find_exec_payload(
     // DirectArgv payload only — a bare top-level `sh` invocation is
     // unaffected.
     let payload_argv = normalize::normalize_argv(synthetic);
+    if crate::rules::placeholder_in_command_slot(&payload_argv, &["{}"]) {
+        raise_expansion_floor(
+            floor,
+            Decision::Ask,
+            format!(
+                "{label} placeholder stands in for a command word, so the command that runs \
+                 is the matched path"
+            ),
+        );
+    }
     if let Some((name, rest_words)) = crate::rules::effective_command(&payload_argv)
         && crate::rules::is_shell_interpreter(&name)
     {

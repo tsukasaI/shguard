@@ -38,6 +38,7 @@ pub(crate) struct ParsedArgv<'a> {
     options: Vec<ParsedOption<'a>>,
     options_end: usize,
     command_at: usize,
+    applies: bool,
 }
 
 impl<'a> ParsedArgv<'a> {
@@ -56,6 +57,12 @@ impl<'a> ParsedArgv<'a> {
     /// parse when that word is unresolvable.
     pub(crate) fn command_at(&self) -> usize {
         self.command_at
+    }
+
+    /// Whether the words spell a call that runs another command: `false`
+    /// when the command needs a subcommand (`poetry run`) the words lack.
+    pub(crate) fn applies(&self) -> bool {
+        self.applies
     }
 
     #[cfg(test)]
@@ -118,6 +125,7 @@ enum Arity {
     Flag,
     Value,
     Glued,
+    Pair,
 }
 
 enum LongLookup {
@@ -130,7 +138,8 @@ impl OptionGrammar {
         let flags = self.long_flags.iter().map(|name| (*name, Arity::Flag));
         let values = self.long_values.iter().map(|name| (*name, Arity::Value));
         let glued = self.long_glued.iter().map(|name| (*name, Arity::Glued));
-        flags.chain(values).chain(glued)
+        let pairs = self.long_pairs.iter().map(|name| (*name, Arity::Pair));
+        flags.chain(values).chain(glued).chain(pairs)
     }
 
     /// An exact name wins over an abbreviation (`--login` over
@@ -253,6 +262,20 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Takes the next two words as `name`'s separated values.
+    fn pair_value(&mut self, name: OptionName, at: usize) -> Flow {
+        let (Some(first), Some(second)) = (self.argv.get(at + 1), self.argv.get(at + 2)) else {
+            self.push(at, name, OptionValue::Absent);
+            return self.unmodeled(at);
+        };
+        self.push(at, name, OptionValue::Separate(first));
+        match (first.resolution(), second.resolution()) {
+            (Resolution::Resolved(_), Resolution::Resolved(_)) => Flow::Next(at + 3),
+            (Resolution::Unresolvable(_), _) => Flow::StopAt(at + 1),
+            (_, Resolution::Unresolvable(_)) => Flow::StopAt(at + 2),
+        }
+    }
+
     fn short_cluster(&mut self, at: usize, token: &'a str) -> Flow {
         let grammar = self.grammar;
         let body = &token[1..];
@@ -296,7 +319,7 @@ impl<'a> Parser<'a> {
     }
 
     fn long_option(&mut self, at: usize, token: &'a str) -> Flow {
-        let body = &token[2..];
+        let body = token.strip_prefix("--").unwrap_or(&token[1..]);
         let (name, attached) = match body.split_once('=') {
             Some((name, value)) => (name, Some(value)),
             None => (body, None),
@@ -319,6 +342,12 @@ impl<'a> Parser<'a> {
                 }
                 None => self.separate_value(OptionName::Long(full), at),
             },
+            LongLookup::Found(full, Arity::Pair) => {
+                if attached.is_some() {
+                    return self.unmodeled(at);
+                }
+                self.pair_value(OptionName::Long(full), at)
+            }
             LongLookup::Found(full, Arity::Glued) => {
                 let value = attached.map_or(OptionValue::Absent, OptionValue::Glued);
                 self.push(at, OptionName::Long(full), value);
@@ -330,7 +359,7 @@ impl<'a> Parser<'a> {
     }
 
     fn option(&mut self, at: usize, token: &'a str) -> Flow {
-        if token.starts_with("--") {
+        if token.starts_with("--") || self.grammar.single_dash_long {
             self.long_option(at, token)
         } else {
             self.short_cluster(at, token)
@@ -344,6 +373,49 @@ impl<'a> Parser<'a> {
 /// `a.b=c` and `1a=b` are skipped before the command is exec'd.
 fn is_assignment(token: &str) -> bool {
     token.contains('=')
+}
+
+/// The length of the first of `alternatives` that `words` start with.
+fn match_subcommand(alternatives: &[&[&str]], words: &[NormalizedWord]) -> Option<usize> {
+    alternatives
+        .iter()
+        .find(|alternative| {
+            alternative.len() <= words.len()
+                && alternative.iter().zip(words).all(|(want, word)| {
+                    matches!(word.resolution(), Resolution::Resolved(text) if text == want)
+                })
+        })
+        .map(|alternative| alternative.len())
+}
+
+/// The index just past the first `command_after` marker at or behind `from`,
+/// unless the marker was already parsed as an option ahead of the first
+/// operand (`nix develop -c cmd -c`), where the first operand is the command.
+fn command_after_marker(
+    grammar: &OptionGrammar,
+    parsed: &[ParsedOption<'_>],
+    argv: &[NormalizedWord],
+    from: usize,
+) -> Option<usize> {
+    if grammar.command_after.is_empty() {
+        return None;
+    }
+    let seen = parsed.iter().any(|option| match option.name {
+        OptionName::Short(c) => grammar.command_after.contains(&format!("-{c}").as_str()),
+        OptionName::Long(name) => grammar
+            .command_after
+            .contains(&format!("--{name}").as_str()),
+    });
+    if seen {
+        return None;
+    }
+    argv[from..]
+        .iter()
+        .position(|word| {
+            matches!(word.resolution(), Resolution::Resolved(text)
+                if grammar.command_after.contains(&text.as_str()))
+        })
+        .map(|offset| from + offset + 1)
 }
 
 /// Parses `argv` (the words after the command name) against `spec`.
@@ -374,6 +446,7 @@ pub(crate) fn parse<'a>(
 
     let mut options_end = None;
     let mut command_at = None;
+    let mut sub_pending = spec.subcommands();
     while idx < argv.len() {
         let Resolution::Resolved(token) = argv[idx].resolution() else {
             break;
@@ -401,8 +474,21 @@ pub(crate) fn parse<'a>(
             }
             continue;
         }
+        if let Some(alternatives) = sub_pending {
+            let Some(len) = match_subcommand(alternatives, &argv[idx..]) else {
+                break;
+            };
+            sub_pending = None;
+            idx += len;
+            continue;
+        }
         match grammar.order {
-            ArgOrder::FirstOperand => break,
+            ArgOrder::FirstOperand => {
+                if let Some(at) = command_after_marker(grammar, &parser.options, argv, idx) {
+                    command_at = Some(at);
+                }
+                break;
+            }
             ArgOrder::PermuteUntilCommand => {
                 options_end.get_or_insert(idx);
                 if remaining_operands == 0 {
@@ -448,6 +534,7 @@ pub(crate) fn parse<'a>(
         options: parser.options,
         options_end,
         command_at,
+        applies: sub_pending.is_none(),
     };
     match parser.culprit {
         None => Ok(parsed),
