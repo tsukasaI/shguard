@@ -363,7 +363,7 @@ use crate::policy::combine::{
 use crate::policy::{self, Evidence, LimitKind, PolicyConfig, deny_msg_unsupported_construct};
 use crate::rules::{
     AWK_INTERPRETERS, Allowlist, EVAL_BUILTIN, FsProbeBudget, FsProbeFailure, PathForm,
-    RedirectRule, Rules, SymlinkScope, TRAP_BUILTIN, WrapperChainEscalation,
+    RedirectRule, Rules, SocatAddress, SymlinkScope, TRAP_BUILTIN, WrapperChainEscalation,
     has_expanding_glob_qualifier, is_pipeline_interpreter, lexical_normalize, render_cwd_anchor,
     unresolved_word_may_hide_glob_qualifier, wrapper_chain_changes_cwd,
 };
@@ -8838,6 +8838,11 @@ fn awk_value_flag_needs_separate_arg(token: &str) -> bool {
 /// fails CLOSED (treated as a sink) rather than open — the same direction
 /// every other fail-closed floor in this module takes, since a dynamic
 /// value could resolve to a stdin alias at runtime.
+///
+/// `socat` (issue #737) is a sink unless every address piece of every
+/// operand is on [`crate::rules::socat_address_pieces`]'s non-spawning
+/// allowlist: `EXEC:`/`SYSTEM:`/`SHELL:`, including as the write side of
+/// `A!!B` or a `|` chain, hand the pipe to a spawned program's stdin.
 fn is_interpreter_sink(stage: &[NormalizedWord]) -> bool {
     let Some((name, rest)) = crate::rules::effective_command(stage) else {
         return false;
@@ -8846,8 +8851,12 @@ fn is_interpreter_sink(stage: &[NormalizedWord]) -> bool {
     if is_pipeline_interpreter(name) {
         return true;
     }
-    if name == "socat" {
-        return rest.iter().any(is_socat_exec_address);
+    if crate::rules::is_socat(name) {
+        return rest.iter().any(|word| {
+            crate::rules::socat_address_pieces(word)
+                .iter()
+                .any(SocatAddress::is_sink)
+        });
     }
     if !matches!(name, "source" | ".") {
         return false;
@@ -8860,23 +8869,6 @@ fn is_interpreter_sink(stage: &[NormalizedWord]) -> bool {
         Some(Resolution::Resolved(v)) => is_stdin_alias_path(v),
         Some(Resolution::Unresolvable(_)) => true,
         None => false,
-    }
-}
-
-/// Whether a `socat` operand is an address that spawns a program (issue
-/// #737): `EXEC:` and `SYSTEM:` relay the other address's bytes, here the
-/// pipe, to the child's stdin. Address keywords are case-insensitive. Any
-/// operand position counts, since either address may be the spawning one,
-/// and an unresolvable operand fails closed because it could be `EXEC:...`.
-fn is_socat_exec_address(word: &NormalizedWord) -> bool {
-    match word.resolution() {
-        Resolution::Resolved(v) => {
-            let keyword = v.split(':').next().unwrap_or_default();
-            !v.starts_with('-')
-                && v.contains(':')
-                && (keyword.eq_ignore_ascii_case("exec") || keyword.eq_ignore_ascii_case("system"))
-        }
-        Resolution::Unresolvable(_) => true,
     }
 }
 

@@ -5885,6 +5885,7 @@ pub(crate) fn chain_script_slots(stage: &[NormalizedWord]) -> Vec<ScriptSlot> {
         }
         rest = hop.next();
     }
+    socat_command_slots(stage, &mut slots);
     slots
 }
 
@@ -5939,6 +5940,151 @@ fn pipe_remainder(value: &str) -> Option<ScriptSlot> {
     value
         .strip_prefix(['|', '!'])
         .map(|script| ScriptSlot::Resolved(script.to_string()))
+}
+
+/// What one piece of a `socat` address operand does (issue #737).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SocatAddress {
+    /// A keyword on the known non-spawning allowlist, or a bare path.
+    Inert,
+    /// `EXEC:`/`SYSTEM:`/`SHELL:`: spawns a program whose stdin receives
+    /// the other address's bytes. Carries the command text, minus options.
+    Spawns(String),
+    /// A keyword outside the allowlist, or one written in a form this parse
+    /// does not model (quotes, backslashes, whitespace): fail closed.
+    Unknown,
+    /// The operand could not be resolved statically.
+    Unresolvable,
+}
+
+impl SocatAddress {
+    pub(crate) fn is_sink(&self) -> bool {
+        !matches!(self, Self::Inert)
+    }
+}
+
+/// Whether `name` (an [`effective_command`] name) is `socat`, including a
+/// versioned binary such as `socat1`/`socat2`.
+pub(crate) fn is_socat(name: &str) -> bool {
+    strip_version_suffix(&name.to_ascii_lowercase()) == "socat"
+}
+
+const SOCAT_INERT_KEYWORD_PREFIXES: &[&str] = &[
+    "TCP",
+    "UDP",
+    "UNIX-",
+    "ABSTRACT-",
+    "OPENSSL",
+    "SCTP",
+    "SOCKS",
+    "PROXY",
+    "IP",
+];
+const SOCAT_INERT_KEYWORDS: &[&str] = &[
+    "-",
+    "NOP",
+    "OPEN",
+    "GOPEN",
+    "CREATE",
+    "FD",
+    "STDIO",
+    "STDIN",
+    "STDOUT",
+    "STDERR",
+    "PIPE",
+    "PTY",
+    "INTERFACE",
+];
+
+/// Parses one `socat` operand into its address pieces. socat's dual
+/// address `A!!B` writes to `B`, and socat2 chains with `|`, so each piece
+/// is judged on its own keyword (the text before the first `:`, `,` or `|`).
+pub(crate) fn socat_address_pieces(word: &NormalizedWord) -> Vec<SocatAddress> {
+    let Resolution::Resolved(text) = word.resolution() else {
+        return vec![SocatAddress::Unresolvable];
+    };
+    let mut pieces = Vec::new();
+    for half in text.split("!!") {
+        let mut segment = half;
+        loop {
+            let Some(end) = segment.find([':', ',', '|']) else {
+                pieces.push(bare_socat_piece(segment));
+                break;
+            };
+            let keyword = &segment[..end];
+            if segment.as_bytes()[end] != b':' {
+                pieces.push(bare_socat_piece(keyword));
+            } else {
+                let rest = &segment[end + 1..];
+                if let Some(kind) = socat_colon_keyword(keyword) {
+                    if kind {
+                        let command = rest.split(',').next().unwrap_or_default();
+                        pieces.push(SocatAddress::Spawns(command.to_string()));
+                        break;
+                    }
+                    pieces.push(SocatAddress::Inert);
+                } else {
+                    pieces.push(SocatAddress::Unknown);
+                }
+            }
+            match segment.find('|') {
+                Some(bar) => segment = &segment[bar + 1..],
+                None => break,
+            }
+        }
+    }
+    pieces
+}
+
+fn bare_socat_piece(text: &str) -> SocatAddress {
+    if text.contains(['\'', '"', '\\']) || text.contains(char::is_whitespace) {
+        return SocatAddress::Unknown;
+    }
+    let keyword = text.to_ascii_uppercase();
+    if keyword == "EXEC" || keyword == "SYSTEM" || keyword == "SHELL" {
+        return SocatAddress::Unknown;
+    }
+    SocatAddress::Inert
+}
+
+/// `Some(true)` for a spawning keyword, `Some(false)` for an allowlisted
+/// inert one, `None` for anything else.
+fn socat_colon_keyword(keyword: &str) -> Option<bool> {
+    if !keyword
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return None;
+    }
+    let upper = keyword.to_ascii_uppercase();
+    if matches!(upper.as_str(), "EXEC" | "SYSTEM" | "SHELL") {
+        return Some(true);
+    }
+    (SOCAT_INERT_KEYWORDS.contains(&upper.as_str())
+        || SOCAT_INERT_KEYWORD_PREFIXES
+            .iter()
+            .any(|prefix| upper.starts_with(prefix)))
+    .then_some(false)
+}
+
+/// The shell-string slots of a `socat` stage: the command text of each
+/// spawning address, and an unresolved operand (it could be `EXEC:...`).
+fn socat_command_slots(stage: &[NormalizedWord], slots: &mut Vec<ScriptSlot>) {
+    let Some((name, args)) = effective_command(stage) else {
+        return;
+    };
+    if !is_socat(&name) {
+        return;
+    }
+    for word in args {
+        for piece in socat_address_pieces(word) {
+            match piece {
+                SocatAddress::Spawns(command) => slots.push(ScriptSlot::Resolved(command)),
+                SocatAddress::Unresolvable => slots.push(ScriptSlot::Unresolvable),
+                SocatAddress::Inert | SocatAddress::Unknown => {}
+            }
+        }
+    }
 }
 
 /// Whether `stage`'s wrapper-unwrap chain passes through `su` with a
