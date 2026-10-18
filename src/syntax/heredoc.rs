@@ -6,7 +6,7 @@
 use brush_parser::word::{self as bword, WordPiece};
 
 use super::compat::{catch_parser_panic, strip_raw_line_continuations_blind};
-use super::{ParseError, parser_options};
+use super::{ParseError, parser_options, reject_unresolved_dollar_run};
 
 /// The raw inner text of every top-level `$(...)` and backquote substitution
 /// in `body`, in source order.
@@ -57,6 +57,7 @@ fn parse_text(text: &str) -> Result<Vec<Found>, ParseError> {
             continue;
         }
         reject_unterminated_opener(&literal_run)?;
+        reject_unresolved_dollar_run(&literal_run)?;
         literal_run.clear();
 
         match with_source.piece {
@@ -91,6 +92,7 @@ fn parse_text(text: &str) -> Result<Vec<Found>, ParseError> {
         }
     }
     reject_unterminated_opener(&literal_run)?;
+    reject_unresolved_dollar_run(&literal_run)?;
     Ok(found)
 }
 
@@ -365,6 +367,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn unresolved_dollar_forms_in_a_body_are_rejected() {
+        rejected("${(e)x}");
+        rejected("a ${=x} b");
+        rejected("${ rm -rf /; }");
+        rejected("${| rm -rf /; }");
+        rejected("$=x");
+        rejected("x $(echo a) ${(e)x}");
+        assert!(subs("${99999999999999999999} \\${(e)x} $x").is_empty());
     }
 
     #[test]

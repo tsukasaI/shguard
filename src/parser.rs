@@ -76,7 +76,7 @@ use crate::ast::{
 };
 use crate::syntax::compat::{self, catch_parser_panic};
 use crate::syntax::heredoc;
-use crate::syntax::{ParseError, parser_options};
+use crate::syntax::{ParseError, parser_options, reject_unresolved_dollar_run};
 
 /// Parses a raw shell command line into shguard's AST.
 ///
@@ -831,7 +831,7 @@ fn has_pid_dollars_before_brace(text: &str) -> bool {
 }
 
 /// Converts consecutive brace-pre-pass segments. A `Text` ending in an odd
-/// run of `$` directly followed by an `Expr` is a `${...}` the pre-pass split
+/// number of unescaped `$` directly followed by an `Expr` is a `${...}` the pre-pass split
 /// at a top-level comma; no shell brace-expands `${`, and the real parse
 /// would never see the `${` text, so it is rejected here.
 fn convert_brace_segments(
@@ -1167,32 +1167,6 @@ fn reject_unresolved_dollar_forms<'a>(
         }
     }
     reject_unresolved_dollar_run(&run)
-}
-
-/// `rest` follows a `$`. A numeric `{N}` / `{-N}` (an overflowing positional
-/// parameter brush cannot parse) is only an unset parameter, not an
-/// evaluated form, so it stays literal.
-fn is_unresolved_brace(rest: &str) -> bool {
-    let Some(body) = rest.strip_prefix('{') else {
-        return false;
-    };
-    let digits = body.strip_prefix('-').unwrap_or(body);
-    let after_digits = digits.trim_start_matches(|c: char| c.is_ascii_digit());
-    let numeric = after_digits.len() < digits.len() && after_digits.starts_with('}');
-    !numeric
-}
-
-fn reject_unresolved_dollar_run(run: &str) -> Result<(), ParseError> {
-    let unresolved = run
-        .split('$')
-        .skip(1)
-        .any(|rest| rest.starts_with(['=', '~', '^', '+']) || is_unresolved_brace(rest));
-    if unresolved {
-        return Err(ParseError::unsupported(
-            "unresolved `$` expansion form (zsh flags/short forms such as ${(e)x}, ${=x}, $=x, $~x, or a ${ command; } substitution)",
-        ));
-    }
-    Ok(())
 }
 
 fn convert_word_piece(
@@ -2066,6 +2040,24 @@ mod tests {
                 "{cmd:?}: {:?}",
                 parse(cmd)
             );
+        }
+    }
+
+    #[test]
+    fn double_dollar_after_an_even_backslash_run_is_still_rejected() {
+        for cmd in ["echo \\\\${=x,y}{c,d}", "echo \\$${=x,y}{c,d}"] {
+            assert!(
+                matches!(parse(cmd), Err(ParseError::Unsupported { .. })),
+                "{cmd:?}: {:?}",
+                parse(cmd)
+            );
+        }
+    }
+
+    #[test]
+    fn double_dollar_that_is_escaped_or_quoted_stays_parseable() {
+        for cmd in ["echo \\\\\\${=x,y}", "echo \"$\"{a,b}"] {
+            assert!(parse(cmd).is_ok(), "{cmd:?}: {:?}", parse(cmd));
         }
     }
 

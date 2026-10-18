@@ -73,3 +73,33 @@ impl ParseError {
 pub(crate) fn parser_options() -> BrushParserOptions {
     BrushParserOptions::default()
 }
+
+/// `rest` follows a `$`. A numeric `{N}` / `{-N}` (an overflowing positional
+/// parameter brush cannot parse) is only an unset parameter, not an
+/// evaluated form, so it stays literal.
+fn is_unresolved_brace(rest: &str) -> bool {
+    let Some(body) = rest.strip_prefix('{') else {
+        return false;
+    };
+    let digits = body.strip_prefix('-').unwrap_or(body);
+    let after_digits = digits.trim_start_matches(|c: char| c.is_ascii_digit());
+    let numeric = after_digits.len() < digits.len() && after_digits.starts_with('}');
+    !numeric
+}
+
+/// Rejects a run of literal text (one brush left unexpanded) that still
+/// carries a `$` form zsh/mksh/bash 5.3 evaluate: `${(e)x}`, `${=x}`,
+/// `${ cmd; }`, `$=x`, `$~x`, `$^x`, `$+x`. Shared by words and expanding
+/// heredoc bodies so the two cannot drift apart.
+pub(crate) fn reject_unresolved_dollar_run(run: &str) -> Result<(), ParseError> {
+    let unresolved = run
+        .split('$')
+        .skip(1)
+        .any(|rest| rest.starts_with(['=', '~', '^', '+']) || is_unresolved_brace(rest));
+    if unresolved {
+        return Err(ParseError::unsupported(
+            "unresolved `$` expansion form (zsh flags/short forms such as ${(e)x}, ${=x}, $=x, $~x, or a ${ command; } substitution)",
+        ));
+    }
+    Ok(())
+}

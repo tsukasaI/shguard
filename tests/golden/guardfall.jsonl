@@ -43,6 +43,13 @@
 {"command":"cat < *(e:'rm -rf ~':)","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"cat < *(e:x:)","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"cat < ~/.zshrc","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"cat <<'EOF'\n${ rm -rf /; }\nEOF","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"cat <<'EOF'\n${(e)x}\nEOF","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"cat <<EOF\n${ rm -rf /; }\nEOF","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"cat <<EOF\n${(e)x}\nEOF","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"cat <<EOF\n${=x}\nEOF","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"cat <<EOF\n${| rm -rf /; }\nEOF","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"cat <<EOF\n\\${ rm -rf /; }\nEOF","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"cat > \"$HOME\"/.config/shguard/config.toml","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"cat > \"$HOME/.config/shguard/config.toml\"","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"cat > ${HOME}/.config/shguard/config.toml","decision":"Ask","deny_message":null,"matched_rule":null}
@@ -167,6 +174,8 @@
 {"command":"echo ${x:-`rm -rf ~`}","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"echo ${~x}","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (unresolved `$` expansion form (zsh flags/short forms such as ${(e)x}, ${=x}, $=x, $~x, or a ${ command; } substitution)); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
 {"command":"echo 2147483648>f","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo \\$${=x,y}{c,d}","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (unresolved `$` expansion form (a `${...}` split by a top-level comma)); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
+{"command":"echo \\\\${=x,y}{c,d}","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (unresolved `$` expansion form (a `${...}` split by a top-level comma)); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
 {"command":"echo a{9223372036854775808b","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (brace range expansion ({1..5} / {a..z})); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
 {"command":"echo cm0gLXJmIC8= | base64 -d | sh","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"echo evil >> ~/.bashrc","decision":"Ask","deny_message":null,"matched_rule":null}

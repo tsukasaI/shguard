@@ -2400,6 +2400,17 @@ const PARAMETER_EXPANSION_OPERAND_CASES: &[(&str, Decision)] = &[
     ("echo $${x;touch /tmp/x;echo }", Decision::Ask),
     ("echo $${ x\ntouch /tmp/x\necho }", Decision::Ask),
     ("echo $$$${ x; touch /tmp/x; echo }", Decision::Ask),
+    ("echo \\\\${=x,y}{c,d}", Decision::Ask),
+    ("echo \\$${=x,y}{c,d}", Decision::Ask),
+    // Issue #655: zsh/funsub `$` forms in an expanding heredoc body; a
+    // quoted delimiter keeps the body inert.
+    ("cat <<EOF\n${(e)x}\nEOF", Decision::Ask),
+    ("cat <<EOF\n${=x}\nEOF", Decision::Ask),
+    ("cat <<EOF\n${ rm -rf /; }\nEOF", Decision::Ask),
+    ("cat <<EOF\n${| rm -rf /; }\nEOF", Decision::Ask),
+    ("cat <<'EOF'\n${ rm -rf /; }\nEOF", Decision::Allow),
+    ("cat <<'EOF'\n${(e)x}\nEOF", Decision::Allow),
+    ("cat <<EOF\n\\${ rm -rf /; }\nEOF", Decision::Allow),
 ];
 
 #[test]
