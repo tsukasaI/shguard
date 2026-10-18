@@ -7147,11 +7147,17 @@ fn scan_recursable_slots(
 
     // Issue #493 follow-up: fold for recognition only, `name` itself is
     // never displayed here.
-    let is_find = crate::rules::effective_command(argv).is_some_and(|(name, _)| name == "find");
-    if is_find {
+    let slot_command = crate::rules::effective_command(argv)
+        .map(|(name, _)| name.into_owned())
+        .filter(|name| {
+            crate::rules::RECURSABLE_SLOTS
+                .iter()
+                .any(|slot| slot.commands.contains(&name.as_str()))
+        });
+    if let Some(slot_command) = slot_command.as_deref() {
         let mut i = 0;
         while i < command.words.len() {
-            match find_exec_flag_kind(&command.words[i]) {
+            match find_exec_flag_kind(&command.words[i], slot_command) {
                 FindExecFlagKind::No => {
                     i += 1;
                 }
@@ -7160,12 +7166,45 @@ fn scan_recursable_slots(
                     raise_expansion_floor(
                         &mut floor,
                         Decision::Ask,
-                        "an argument to `find` could not be statically resolved and might be \
-                         `-exec`/`-execdir`/`-ok`/`-okdir`, whose payload would need to be \
-                         recursed as a direct command"
-                            .to_string(),
+                        format!(
+                            "an argument to `{slot_command}` could not be statically resolved \
+                             and might be {}, whose payload would need to be recursed as a \
+                             direct command",
+                            exec_flag_names(slot_command)
+                        ),
                     );
                     i += 1;
+                }
+                FindExecFlagKind::Attached { terminators, first } => {
+                    has_any = true;
+                    let span_start = i + 1;
+                    let span_end = command.words[span_start..]
+                        .iter()
+                        .position(|word| {
+                            single_resolved(word).is_some_and(|s| terminators.contains(&s.as_str()))
+                        })
+                        .map_or(command.words.len(), |offset| span_start + offset);
+                    let mut words = Vec::new();
+                    if !first.is_empty() {
+                        words.push(Word(vec![WordPiece::Literal(first)]));
+                    }
+                    words.extend_from_slice(&command.words[span_start..span_end]);
+                    if !words.is_empty() {
+                        let synthetic = SimpleCommand {
+                            assignments: Vec::new(),
+                            words,
+                            redirections: Vec::new(),
+                        };
+                        recurse_find_exec_payload(
+                            &synthetic,
+                            slot_command,
+                            " (first word attached to the flag)",
+                            ctx,
+                            cwd,
+                            &mut floor,
+                        );
+                    }
+                    i = span_end + 1;
                 }
                 FindExecFlagKind::Yes(terminators) => {
                     has_any = true;
@@ -7226,7 +7265,14 @@ fn scan_recursable_slots(
                             words: command.words[span_start..span_end].to_vec(),
                             redirections: Vec::new(),
                         };
-                        recurse_find_exec_payload(&synthetic, "", ctx, cwd, &mut floor);
+                        recurse_find_exec_payload(
+                            &synthetic,
+                            slot_command,
+                            "",
+                            ctx,
+                            cwd,
+                            &mut floor,
+                        );
                     }
 
                     // Fail-closed (design note, issue #72): when no
@@ -7297,12 +7343,13 @@ fn scan_recursable_slots(
                         raise_expansion_floor(
                             &mut floor,
                             Decision::Ask,
-                            "`find`'s `-exec`/`-execdir`/`-ok`/`-okdir` flag is fused with only \
-                             part of its payload into one word (brace alternation or partial \
-                             $IFS splitting); the clause's true payload span, ending at its \
-                             terminator, extends into a later word this scan cannot safely \
-                             reconstruct"
-                                .to_string(),
+                            format!(
+                                "{} flag is fused with only part of its payload into one word \
+                                 (brace alternation or partial $IFS splitting); the clause's \
+                                 true payload span, ending at its terminator, extends into a \
+                                 later word this scan cannot safely reconstruct",
+                                exec_label(slot_command)
+                            ),
                         );
                         i += 1;
                         continue;
@@ -7355,6 +7402,7 @@ fn scan_recursable_slots(
                         // which token is `effective_command`'s first word.
                         recurse_find_exec_payload(
                             &synthetic,
+                            slot_command,
                             " (the whole clause fused into one word by $IFS splitting or brace \
                               alternation)",
                             ctx,
@@ -7487,18 +7535,36 @@ fn scan_alias_definition_floor(
 /// before incrementing, is equivalent).
 fn recurse_find_exec_payload(
     synthetic: &SimpleCommand,
+    slot_command: &str,
     fused_note: &str,
     ctx: AnalysisCtx<'_>,
     cwd: &CwdContext,
     floor: &mut Option<(Decision, String)>,
 ) {
+    let label = exec_label(slot_command);
+    let with_placeholder;
+    let synthetic = if lacks_implicit_fd_placeholder(slot_command, synthetic) {
+        with_placeholder = SimpleCommand {
+            assignments: Vec::new(),
+            words: synthetic
+                .words
+                .iter()
+                .cloned()
+                .chain([Word(vec![WordPiece::Literal("{}".to_string())])])
+                .collect(),
+            redirections: Vec::new(),
+        };
+        &with_placeholder
+    } else {
+        synthetic
+    };
     let depth = ctx.depth;
     if depth >= MAX_SUBSTITUTION_DEPTH {
         raise_expansion_floor(
             floor,
             Decision::Ask,
             format!(
-                "`find`'s `-exec`/`-execdir`/`-ok`/`-okdir` payload nesting exceeds the \
+                "{label} payload nesting exceeds the \
                  recursion depth cap ({MAX_SUBSTITUTION_DEPTH}); refusing to keep recursing \
                  (fail-closed denial-of-service guard, see gate.rs module docs)"
             ),
@@ -7531,7 +7597,7 @@ fn recurse_find_exec_payload(
                     floor,
                     Decision::Ask,
                     format!(
-                        "`find`'s `-exec`/`-execdir`/`-ok`/`-okdir` payload invokes `{name}` \
+                        "{label} payload invokes `{name}` \
                          directly with an operand but no `-c` script flag before it; the shell \
                          runs that operand as a script, which is not statically verifiable"
                     ),
@@ -7542,7 +7608,7 @@ fn recurse_find_exec_payload(
                     floor,
                     Decision::Block,
                     format!(
-                        "`find`'s `-exec`/`-execdir`/`-ok`/`-okdir` payload invokes `{name}` \
+                        "{label} payload invokes `{name}` \
                          directly with no `-c` script argument and no operand; this spawns an \
                          interactive or stdin-fed shell per matched file, which has no batch use"
                     ),
@@ -7567,7 +7633,7 @@ fn recurse_find_exec_payload(
         floor,
         inner.decision(),
         format!(
-            "`find`'s `-exec`/`-execdir`/`-ok`/`-okdir` payload{fused_note} recurses through the \
+            "{label} payload{fused_note} recurses through the \
              full pipeline; inner decision: {:?}{}",
             inner.decision(),
             inner
@@ -7581,11 +7647,19 @@ fn recurse_find_exec_payload(
 /// Whether AST word `word` is one of `find`'s
 /// [`crate::rules::RecursableSlot`] direct-argv flags (`-exec`/`-execdir`/
 /// `-ok`/`-okdir`, issue #72) — see [`FindExecFlagKind`].
-fn find_exec_flag_kind(word: &Word) -> FindExecFlagKind {
+fn find_exec_flag_kind(word: &Word, command: &str) -> FindExecFlagKind {
     match normalize::normalize_word(word).as_slice() {
         [nw] => match nw.resolution() {
-            Resolution::Resolved(s) => direct_argv_terminators_for("find", s)
-                .map_or(FindExecFlagKind::No, FindExecFlagKind::Yes),
+            Resolution::Resolved(s) => match direct_argv_terminators_for(command, s) {
+                Some(terminators) => FindExecFlagKind::Yes(terminators),
+                None => crate::rules::fd_attached_exec(command, s).map_or(
+                    FindExecFlagKind::No,
+                    |(flag, first)| FindExecFlagKind::Attached {
+                        terminators: direct_argv_terminators_for(command, flag).unwrap_or(&[";"]),
+                        first,
+                    },
+                ),
+            },
             Resolution::Unresolvable(_) => FindExecFlagKind::Unresolvable,
         },
         // Issue #82 fallout, closed by issue #122: `$IFS` splitting (or
@@ -7614,16 +7688,26 @@ fn find_exec_flag_kind(word: &Word) -> FindExecFlagKind {
             let any_unresolvable = multiple
                 .iter()
                 .any(|nw| matches!(nw.resolution(), Resolution::Unresolvable(_)));
+            let any_attached = multiple.iter().any(|nw| {
+                matches!(
+                    nw.resolution(),
+                    Resolution::Resolved(s) if crate::rules::fd_attached_exec(command, s).is_some()
+                )
+            });
             let mut flag_matches =
                 multiple
                     .iter()
                     .enumerate()
                     .filter_map(|(idx, nw)| match nw.resolution() {
-                        Resolution::Resolved(s) => direct_argv_terminators_for("find", s)
+                        Resolution::Resolved(s) => direct_argv_terminators_for(command, s)
                             .map(|terminators| (idx, terminators)),
                         Resolution::Unresolvable(_) => None,
                     });
-            match (any_unresolvable, flag_matches.next(), flag_matches.next()) {
+            match (
+                any_unresolvable || any_attached,
+                flag_matches.next(),
+                flag_matches.next(),
+            ) {
                 (false, Some((flag_index, terminators)), None) => FindExecFlagKind::YesFused {
                     terminators,
                     flag_index,
@@ -7643,8 +7727,34 @@ fn find_exec_flag_kind(word: &Word) -> FindExecFlagKind {
 fn direct_argv_terminators_for(command: &str, flag: &str) -> Option<&'static [&'static str]> {
     crate::rules::RECURSABLE_SLOTS
         .iter()
-        .find(|slot| slot.command == command && slot.flag == flag)
+        .find(|slot| slot.commands.contains(&command) && slot.flag == flag)
         .map(|slot| slot.terminators)
+}
+
+/// Whether `synthetic` is an `fd` payload with no `{}`-style placeholder:
+/// `fd` then appends the match as a final argument, so `fd -x rm -rf` runs
+/// `rm -rf <match>`.
+fn lacks_implicit_fd_placeholder(slot_command: &str, synthetic: &SimpleCommand) -> bool {
+    matches!(slot_command, "fd" | "fdfind")
+        && !synthetic.words.iter().any(|word| {
+            single_resolved(word).is_none_or(|s| {
+                ["{}", "{/}", "{//}", "{.}", "{/.}"]
+                    .iter()
+                    .any(|placeholder| s.contains(placeholder))
+            })
+        })
+}
+
+/// The flags of `command`'s recursable slots, for messages.
+fn exec_flag_names(command: &str) -> &'static str {
+    match command {
+        "fd" | "fdfind" => "`-x`/`--exec`/`-X`/`--exec-batch`",
+        _ => "`-exec`/`-execdir`/`-ok`/`-okdir`",
+    }
+}
+
+fn exec_label(command: &str) -> String {
+    format!("`{command}`'s {}", exec_flag_names(command))
 }
 
 /// The four outcomes [`find_exec_flag_kind`] can report for one AST word,
@@ -7670,6 +7780,12 @@ fn direct_argv_terminators_for(command: &str, flag: &str) -> Option<&'static [&'
 /// `flag_index`, rather than re-parsing joined text as fresh shell syntax.
 enum FindExecFlagKind {
     Yes(&'static [&'static str]),
+    /// An `fd` word with the payload's first word attached to the flag
+    /// (`--exec=rm`, `-xrm`) or the flag inside a short cluster (`-Hx`).
+    Attached {
+        terminators: &'static [&'static str],
+        first: String,
+    },
     YesFused {
         terminators: &'static [&'static str],
         flag_index: usize,

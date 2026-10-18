@@ -875,6 +875,75 @@ fn guardfall_issue_638_time_and_exec_wrapper_cases() {
     }
 }
 
+const ISSUE_736_FD_EXEC_AND_G_PREFIXED_COREUTILS_CASES: &[(&str, Decision)] = &[
+    // The issue's own two repros.
+    ("fd . / -x rm -rf", Decision::Block),
+    ("gdd if=/dev/zero of=/dev/sda", Decision::Block),
+    // Control: the find spelling the issue compares against.
+    ("find / -exec rm -rf {} +", Decision::Block),
+    // Control: the unprefixed spelling.
+    ("dd if=/dev/zero of=/dev/sda", Decision::Block),
+    // Every `fd` exec spelling runs its payload.
+    ("fd . / --exec rm -rf", Decision::Block),
+    ("fd . / -X rm -rf", Decision::Block),
+    ("fd . / --exec-batch rm -rf", Decision::Block),
+    ("fd . / -x rm -rf {}", Decision::Block),
+    ("fdfind . / -x rm -rf", Decision::Block),
+    ("/usr/bin/fd . / -x rm -rf", Decision::Block),
+    // Payload attached to the flag, or the flag inside a short cluster.
+    ("fd . / --exec=rm -rf", Decision::Block),
+    ("fd . / -xrm -rf", Decision::Block),
+    ("fd . / -x=rm -rf", Decision::Block),
+    ("fd -H . / -Hx rm -rf", Decision::Block),
+    // `;` ends the payload, and the next `-x` runs a second one.
+    ("fd . / -x echo \\; -x rm -rf", Decision::Block),
+    // Payload behind a wrapper.
+    ("nice fd . / -x rm -rf", Decision::Block),
+    // fd appends the match, so a bare shell payload runs it as a script.
+    ("fd . / -x sh", Decision::Ask),
+    // An unresolvable flag position might be an exec flag.
+    ("fd . / $FLAG rm -rf", Decision::Ask),
+    // Homebrew's g-prefixed GNU coreutils are the same programs.
+    ("grm -rf /", Decision::Block),
+    ("gshred /dev/sda", Decision::Block),
+    ("gmv /etc/passwd /dev/null", Decision::Block),
+    ("gcp /dev/zero /dev/sda", Decision::Ask),
+    (
+        "/opt/homebrew/bin/gdd if=/dev/zero of=/dev/sda",
+        Decision::Block,
+    ),
+    ("nice gdd if=/dev/zero of=/dev/sda", Decision::Block),
+    (
+        "find / -exec gdd if=/dev/zero of=/dev/sda \\;",
+        Decision::Block,
+    ),
+    ("fd . / -x grm -rf", Decision::Block),
+    // False-positive guards: benign `fd` and `g`-prefixed uses stay Allow.
+    ("fd -e rs", Decision::Allow),
+    ("fd -e rs -x echo {}", Decision::Allow),
+    ("fd -e rs -X wc -l", Decision::Allow),
+    // `-tx` is `-t x` (type filter) and `-ex` is `-e x` (extension filter).
+    ("fd -tx foo", Decision::Allow),
+    ("fd -ex foo", Decision::Allow),
+    ("gls -la", Decision::Allow),
+    ("gcat README.md", Decision::Allow),
+];
+
+/// Issue #736: `fd -x`/`-X` run their payload like `find -exec`, and the
+/// `g`-prefixed GNU coreutils resolve to the unprefixed rules.
+#[test]
+fn guardfall_issue_736_fd_exec_and_g_prefixed_coreutils() {
+    for (command, expected) in ISSUE_736_FD_EXEC_AND_G_PREFIXED_COREUTILS_CASES {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
 const EVAL_CASES: &[(&str, Decision)] = &[
     // The issue's own three repros.
     ("eval rm -rf /", Decision::Block),
@@ -2622,6 +2691,7 @@ const DECISION_TABLES: &[(&str, &[(&str, Decision)])] = &[
     named_table!(ISSUE_453_FILESYSTEM_GAPS),
     named_table!(TRANSPARENT_WRAPPER_CASES),
     named_table!(ISSUE_638_TIME_AND_EXEC_WRAPPER_CASES),
+    named_table!(ISSUE_736_FD_EXEC_AND_G_PREFIXED_COREUTILS_CASES),
     named_table!(EVAL_CASES),
     named_table!(TRAP_CASES),
     named_table!(FIND_EXEC_BARE_INTERPRETER_CASES),

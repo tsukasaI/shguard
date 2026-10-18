@@ -3350,8 +3350,9 @@ impl CommandRule {
             // APFS default), so blocklist matching must not depend on
             // case any more than wrapper recognition already doesn't.
             let folded_base = fold_command_name(base);
-            if self.command.matches(&folded_base) {
-                let effective = effective_tail(&folded_base, tail);
+            let canonical = canonical_command_name(base);
+            if self.command.matches(&folded_base) || self.command.matches(&canonical) {
+                let effective = effective_tail(&canonical, tail);
                 if self.constraints_match(&effective) {
                     return Some(effective);
                 }
@@ -4024,8 +4025,9 @@ impl CommandRule {
             // Issue #536: fold before the blocklist match, same as the
             // sibling walk above.
             let folded_base = fold_command_name(base);
-            if self.command.matches(&folded_base) {
-                return Some(effective_tail(&folded_base, tail));
+            let canonical = canonical_command_name(base);
+            if self.command.matches(&folded_base) || self.command.matches(&canonical) {
+                return Some(effective_tail(&canonical, tail));
             }
             rest = wrapper_hop(base, &folded_base, tail, &[])?.next();
         }
@@ -5301,6 +5303,128 @@ pub(crate) fn fold_command_name(name: &str) -> String {
         .replace(['\u{FB05}', '\u{FB06}'], "st") // ﬅ (long s + t), ﬆ (st)
 }
 
+/// Unprefixed names of the GNU coreutils programs that Homebrew's `coreutils`
+/// formula installs with a `g` prefix (`gdd`, `grm`, `gshred`) so they do not
+/// shadow the BSD tools on macOS. Exec wrappers (`env`, `nice`, `nohup`,
+/// `timeout`, `stdbuf`, `chroot`, `runcon`) are deliberately absent: issue #740
+/// extends this list with them, and the wrapper catalog then resolves the
+/// canonical name.
+const GNU_PREFIXED_COREUTILS: &[&str] = &[
+    "arch",
+    "b2sum",
+    "base32",
+    "base64",
+    "basename",
+    "basenc",
+    "cat",
+    "chcon",
+    "chgrp",
+    "chmod",
+    "chown",
+    "cksum",
+    "comm",
+    "cp",
+    "csplit",
+    "cut",
+    "date",
+    "dd",
+    "df",
+    "dir",
+    "dircolors",
+    "dirname",
+    "du",
+    "echo",
+    "expand",
+    "expr",
+    "factor",
+    "false",
+    "fmt",
+    "fold",
+    "groups",
+    "head",
+    "hostid",
+    "id",
+    "install",
+    "join",
+    "kill",
+    "link",
+    "ln",
+    "logname",
+    "ls",
+    "md5sum",
+    "mkdir",
+    "mkfifo",
+    "mknod",
+    "mktemp",
+    "mv",
+    "nl",
+    "nproc",
+    "numfmt",
+    "od",
+    "paste",
+    "pathchk",
+    "pinky",
+    "pr",
+    "printenv",
+    "printf",
+    "ptx",
+    "pwd",
+    "readlink",
+    "realpath",
+    "rm",
+    "rmdir",
+    "seq",
+    "sha1sum",
+    "sha224sum",
+    "sha256sum",
+    "sha384sum",
+    "sha512sum",
+    "shred",
+    "shuf",
+    "sleep",
+    "sort",
+    "split",
+    "stat",
+    "stty",
+    "sum",
+    "sync",
+    "tac",
+    "tail",
+    "tee",
+    "test",
+    "touch",
+    "tr",
+    "true",
+    "truncate",
+    "tsort",
+    "tty",
+    "uname",
+    "unexpand",
+    "uniq",
+    "unlink",
+    "uptime",
+    "users",
+    "vdir",
+    "wc",
+    "who",
+    "whoami",
+    "yes",
+];
+
+/// [`fold_command_name`], then a `g` prefix is dropped when the rest names a
+/// [`GNU_PREFIXED_COREUTILS`] program, so `gdd` is matched exactly like `dd`.
+/// Used for the command word of an invocation only: config entries keep
+/// their literal [`fold_command_name`] spelling, so an `allow` for `gcp`
+/// cannot widen to `cp`.
+#[must_use]
+pub(crate) fn canonical_command_name(name: &str) -> String {
+    let folded = fold_command_name(name);
+    match folded.strip_prefix('g') {
+        Some(rest) if GNU_PREFIXED_COREUTILS.contains(&rest) => rest.to_string(),
+        _ => folded,
+    }
+}
+
 /// Strips a trailing distro-style version suffix (`python3.12` -> `python`,
 /// `lua5.4` -> `lua`, `php8.2` -> `php`) so interpreter-name matching
 /// recognises versioned binaries (issue #346) without a hand-maintained list
@@ -5388,7 +5512,7 @@ pub(crate) fn is_stdin_script_interpreter(name: &str) -> bool {
 /// `su -c`, `script -c`) are roles in the `crate::knowledge` catalog
 /// instead, since they belong to a wrapper's spec.
 pub(crate) struct RecursableSlot {
-    pub(crate) command: &'static str,
+    pub(crate) commands: &'static [&'static str],
     pub(crate) flag: &'static str,
     pub(crate) terminators: &'static [&'static str],
 }
@@ -5397,17 +5521,17 @@ pub(crate) struct RecursableSlot {
 /// it directly (`find` has no wrapper chain to unwrap).
 pub(crate) const RECURSABLE_SLOTS: &[RecursableSlot] = &[
     RecursableSlot {
-        command: "find",
+        commands: &["find"],
         flag: "-exec",
         terminators: &[";", "+"],
     },
     RecursableSlot {
-        command: "find",
+        commands: &["find"],
         flag: "-execdir",
         terminators: &[";", "+"],
     },
     RecursableSlot {
-        command: "find",
+        commands: &["find"],
         flag: "-ok",
         // Issue #360: unlike `-exec`/`-execdir`, POSIX/GNU/BSD `find` never
         // give `-ok`/`-okdir` a `{} +` batching form (they prompt per
@@ -5418,12 +5542,69 @@ pub(crate) const RECURSABLE_SLOTS: &[RecursableSlot] = &[
         terminators: &[";"],
     },
     RecursableSlot {
-        command: "find",
+        commands: &["find"],
         flag: "-okdir",
         // Issue #360, same rationale as `-ok` above.
         terminators: &[";"],
     },
+    // Issue #736: `fd` (`fdfind` on Debian/Ubuntu) runs its payload directly
+    // for each match (`-x`) or once with every match (`-X`), exactly like
+    // `find -exec`. The payload runs to the end of the command unless a `;`
+    // ends it; `+` is never special.
+    RecursableSlot {
+        commands: FD_COMMANDS,
+        flag: "-x",
+        terminators: &[";"],
+    },
+    RecursableSlot {
+        commands: FD_COMMANDS,
+        flag: "--exec",
+        terminators: &[";"],
+    },
+    RecursableSlot {
+        commands: FD_COMMANDS,
+        flag: "-X",
+        terminators: &[";"],
+    },
+    RecursableSlot {
+        commands: FD_COMMANDS,
+        flag: "--exec-batch",
+        terminators: &[";"],
+    },
 ];
+
+const FD_COMMANDS: &[&str] = &["fd", "fdfind"];
+
+/// The `-x`/`-X`/`--exec`/`--exec-batch` spelling an `fd` word carries when
+/// the payload's first word is attached to the flag (`--exec=rm`, `-xrm`,
+/// `-Hx=rm`) or the flag sits in a short-option cluster (`-Hx`), with the
+/// attached text (empty for a bare cluster). `None` for any other word.
+/// Not a `strip_prefix("-x")` check: `-ex` is `-e x` (extension filter) and
+/// `-tx` is `-t x` (type filter), so the scan stops at the first letter of
+/// a value-taking flag.
+pub(crate) fn fd_attached_exec(command: &str, word: &str) -> Option<(&'static str, String)> {
+    if !FD_COMMANDS.contains(&command) {
+        return None;
+    }
+    for (long, flag) in [("--exec=", "--exec"), ("--exec-batch=", "--exec-batch")] {
+        if let Some(value) = word.strip_prefix(long) {
+            return Some((flag, value.to_string()));
+        }
+    }
+    let cluster = word.strip_prefix('-').filter(|c| !c.starts_with('-'))?;
+    for (at, c) in cluster.char_indices() {
+        match c {
+            'x' | 'X' => {
+                let rest = &cluster[at + 1..];
+                let value = rest.strip_prefix('=').unwrap_or(rest);
+                return Some((if c == 'x' { "-x" } else { "-X" }, value.to_string()));
+            }
+            'd' | 'E' | 't' | 'e' | 'S' | 'o' | 'c' | 'j' | 'C' => return None,
+            _ => {}
+        }
+    }
+    None
+}
 
 /// The basename of a command token: `/bin/sh` -> `sh`, `./sh` -> `sh`, a
 /// bare `sh` unchanged. A pure string operation on the already-normalised
@@ -5505,7 +5686,7 @@ fn step<'a>(rest: &'a [NormalizedWord], excluded: &[&str]) -> Step<'a> {
         return Step::Unresolvable;
     };
     let base = basename(name);
-    let folded = fold_command_name(base);
+    let folded = canonical_command_name(base);
     match wrapper_hop(base, &folded, tail, excluded) {
         Some(hop) => Step::Wrapper(hop),
         None => Step::Command { folded, base, tail },
