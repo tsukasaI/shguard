@@ -11,6 +11,8 @@
 //!   handling, the io-number panic guard) and the parser panic catch.
 //! - [`heredoc`]: parsing of heredoc bodies and arithmetic text through
 //!   brush's own `word::parse_heredoc`.
+//! - [`substitution`]: the tokenizer-derived extent of an argument-position
+//!   `$(...)` that contains a heredoc.
 //!
 //! `crate::parser` (conversion into `crate::ast`), `crate::ast` and
 //! `crate::normalize` still live outside this module; moving them in is a
@@ -18,6 +20,7 @@
 
 pub(crate) mod compat;
 pub(crate) mod heredoc;
+pub(crate) mod substitution;
 
 use brush_parser::ParserOptions as BrushParserOptions;
 
