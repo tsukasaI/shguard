@@ -16791,6 +16791,11 @@ mod tests {
                     is_dir: true,
                     link_count: 3,
                 }),
+                "/scratch/flat" => Ok(ResolvedPath {
+                    path: path.to_string(),
+                    is_dir: true,
+                    link_count: 1,
+                }),
                 _ => Err(ProbeError::NotFound),
             }
         }
@@ -16907,20 +16912,23 @@ mod tests {
                 "sudo --login upload-tool ok.md",
                 "sudo -s upload-tool ok.md",
                 "sudo --shell upload-tool ok.md",
-                "su - root -c 'upload-tool ok.md'",
-                "su -l root -c 'upload-tool ok.md'",
+                "su - root upload-tool ok.md",
+                "su -l root upload-tool ok.md",
+                "su --l root upload-tool ok.md",
                 "run0 -D /work upload-tool ok.md",
                 "run0 --chdir=/work upload-tool ok.md",
+                "run0 --c=/x upload-tool ok.md",
+                "run0 -u alice upload-tool ok.md",
             ] {
-                assert_ne!(wrapped(command), Decision::Allow, "{command}");
+                assert_eq!(wrapped(command), Decision::Block, "{command}");
             }
-            assert_eq!(wrapped("sudo -i upload-tool ok.md"), Decision::Block);
         }
 
         #[test]
         fn a_directory_candidate_is_never_excepted() {
             assert_eq!(decide("upload-tool sub"), Decision::Block);
             assert_eq!(decide("upload-tool /scratch/sub"), Decision::Block);
+            assert_eq!(decide("upload-tool flat"), Decision::Block);
             assert_eq!(decide("upload-tool sub/rel.md"), Decision::Allow);
         }
 

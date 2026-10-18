@@ -321,6 +321,13 @@ pub(super) static CATALOG: &[CommandSpec] = &[
                 long: "chdir",
                 effect: CwdEffect::Relocates,
             },
+            // Not only a non-root target: any `-u` is treated as running in
+            // that user's home, so the exception fails closed.
+            Slot::Cwd {
+                short: 'u',
+                long: "user",
+                effect: CwdEffect::Relocates,
+            },
         ],
     },
     CommandSpec {

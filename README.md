@@ -618,10 +618,11 @@ The exception also does not apply (the rule fires) when:
   against the rest of the line, or carries a substitution in its own
   assignment prefix, redirect target or heredoc body: no exception applies;
 - the command runs through `sudo -D`/`--chdir` (or `-R`/`--chroot`), `run0
-  -D`/`--chdir`, a login or shell session (`sudo -i`/`--login`, `sudo
-  -s`/`--shell`, `su -`/`-l`/`--login`), which moves the working directory
-  without shguard composing it, so relative candidates are not resolved and
-  absolute ones are refused too;
+  -D`/`--chdir`, `run0 -u`/`--user`, a login or shell session (`sudo
+  -i`/`--login`, `sudo -s`/`--shell`, `su -`/`-l`/`--login`), which moves the
+  working directory without shguard composing it (`sudo -s`/`--shell` and
+  `run0 -u` are treated as moving it, an over-approximation), so relative
+  candidates are not resolved and absolute ones are refused too;
 - the line ran `cd -P` (or `-P` in any cluster), `set -P` or `set -o
   physical`, after which shguard's lexical cwd can name a different
   directory than the real one; relative and absolute candidates are both
@@ -701,7 +702,9 @@ things to know before reaching for it:
   host, not adding to them. Run `shguard --check-config` after editing
   `except_targets` — it flags any rule whose `except_targets` mixes a
   `url_host` entry with an `exact`/`prefix` entry (exits `1` if it finds
-  one, `0` if clean, `2` if the config itself fails to load) without
+  one, `0` if clean, `2` if the config itself fails to load; it also
+  reports an `except_targets` entry on a `resolve_symlinks` rule that is
+  not in its canonical spelling, and exits `1` for that too) without
   needing to prove the two entries target the same host; the PreToolUse
   hook itself can't safely warn about this on its own, since it re-parses
   config on every single command.

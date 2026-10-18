@@ -14569,7 +14569,8 @@ mod tests {
         /// In-memory stand-in for the filesystem adapter: `/scratch/ok.md`
         /// is a regular file, `/scratch/link.md` a symlink out of the
         /// scratch directory, `/scratch/hard.md` a file with a second hard
-        /// link, `/tmp/scratch` a directory behind a symlinked `/tmp`, and
+        /// link, `/scratch/flat` a directory with a link count of one,
+        /// `/tmp/scratch` a directory behind a symlinked `/tmp`, and
         /// everything else (dangling links, files not created yet) fails to
         /// resolve.
         fn fake_canonicalize(path: &str) -> Result<ResolvedPath, ProbeError> {
@@ -14578,6 +14579,7 @@ mod tests {
                 "/scratch/link.md" => resolved("/outside/secret", false, 1),
                 "/scratch/hard.md" => resolved("/scratch/hard.md", false, 2),
                 "/scratch/sub" => resolved("/scratch/sub", true, 3),
+                "/scratch/flat" => resolved("/scratch/flat", true, 1),
                 "/tmp/scratch" => resolved("/private/tmp/scratch", true, 2),
                 _ => Err(ProbeError::NotFound),
             }
@@ -14633,6 +14635,8 @@ mod tests {
             let hit = |path: &str| rules.match_command(&argv(&["upload-tool", path])).is_some();
             assert!(hit("/scratch/hard.md"));
             assert!(hit("/scratch/sub"));
+            // Refused as a directory even with no extra hard link.
+            assert!(hit("/scratch/flat"));
         }
 
         #[test]

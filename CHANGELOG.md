@@ -20,9 +20,21 @@ All notable changes to this project are documented in this file.
   now have their shell string recursed like `su -c` (#648): `runuser root
   -c 'rm -rf /'` and `su --session-command 'rm -rf /' root` Block, where
   they previously floored to Ask as an escalation.
+- A `resolve_symlinks` candidate that resolves to a directory under an
+  excepted prefix now refuses the exception.
+- The spelling warning for `resolve_symlinks` `except_targets` entries moved
+  from the hook path to `shguard --check-config`, which now exits 1 when it
+  prints one.
+- `sudo -i`/`-s`, `su -`/`-l` and `run0 -D`/`-u` now refuse `resolve_symlinks`
+  exceptions (Block where they used to Ask).
 
 ### Compatibility notes
 
+- `shguard --check-config` exits 1 when it prints a spelling warning, so a
+  script that treated its exit 0 as clean now sees a failure for a
+  non-canonical `except_targets` entry.
+- `sudo -i`/`-s`, `su -`/`-l` and `run0 -D`/`-u` on a command with a
+  `resolve_symlinks` exception now Block where they used to Ask.
 - The wrappers added in #644, shipped in 0.9.1 without a note here, are
   transparent wrappers, so an `[[allow]]` entry that names one fails
   config load since 0.9.1 (which fails shguard closed for every command until the entry
