@@ -67,7 +67,7 @@
 use std::io::Cursor;
 
 use brush_parser::word::{self as bword};
-use brush_parser::{Parser as BrushParser, ParserOptions as BrushParserOptions, ast as bast};
+use brush_parser::{Parser as BrushParser, ast as bast};
 
 use crate::ast::{
     Assignment, AssignmentValue, BACKTRACK_COST_OPENER, BACKTRACK_COST_PAREN, Command, CommandLine,
@@ -81,58 +81,7 @@ use crate::ast::{
     STACK_COST_KEYWORD, STACK_COST_LEGACY_ARITH_EXTRA, STACK_COST_PARAM_EXPANSION_EXTRA,
     STACK_COST_PAREN, Separator, SimpleCommand, Word, WordPiece,
 };
-
-/// Everything that can go wrong converting a raw command string into
-/// shguard's AST.
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum ParseError {
-    /// The input is not valid shell syntax at all — brush-parser rejected it
-    /// outright, or the parsed shape was degenerate (e.g. an empty pipeline).
-    #[error("syntax error: {message}")]
-    Syntax {
-        /// A human-readable description of what failed to parse.
-        message: String,
-    },
-    /// The input parsed, but into a brush-parser AST node shguard's AST
-    /// cannot represent. See the module docs for the full list.
-    #[error("unsupported construct: {construct}")]
-    Unsupported {
-        /// A human-readable description of the unsupported construct.
-        construct: String,
-    },
-}
-
-impl ParseError {
-    fn syntax(message: impl Into<String>) -> Self {
-        Self::Syntax {
-            message: message.into(),
-        }
-    }
-
-    fn unsupported(construct: impl Into<String>) -> Self {
-        Self::Unsupported {
-            construct: construct.into(),
-        }
-    }
-
-    /// The unsupported construct's own description, for issue #471's
-    /// category-specific `DenyMessage` at `crate::gate`'s top-level parse
-    /// failure site — `None` for [`Self::Syntax`] (a genuine syntax error
-    /// names no specific construct to point the agent at). Exposed as a
-    /// method rather than a public field: `construct`/`message` stay
-    /// private to this module, matching this enum's other fields.
-    #[must_use]
-    pub(crate) fn unsupported_construct(&self) -> Option<&str> {
-        match self {
-            Self::Unsupported { construct } => Some(construct),
-            Self::Syntax { .. } => None,
-        }
-    }
-}
-
-fn parser_options() -> BrushParserOptions {
-    BrushParserOptions::default()
-}
+use crate::syntax::{ParseError, parser_options};
 
 /// Runs a brush-parser entry point and converts an internal panic (a
 /// pinned dependency's own unchecked `unwrap()` — brush-parser 0.4.0 has
