@@ -121,11 +121,24 @@ impl Known {
         let relocating = || {
             self.spec
                 .cwd_options()
+                .chain(self.spec.cwd_switches())
                 .filter(|(_, _, effect)| *effect == CwdEffect::Relocates)
         };
         if let Some(long) = token.strip_prefix("--") {
             let name = long.split('=').next().unwrap_or(long);
-            return name.len() >= 2 && relocating().any(|(_, full, _)| full.starts_with(name));
+            if name.is_empty() {
+                return false;
+            }
+            // Not a bare prefix match on a unique abbreviation: judge the
+            // option the parser would read. Ambiguous or unknown names fall
+            // back to any prefix, which only over-refuses an exception.
+            return match self.spec.options.canonical_long(name) {
+                Some(canonical) => relocating().any(|(_, full, _)| full == canonical),
+                None => relocating().any(|(_, full, _)| full.starts_with(name)),
+            };
+        }
+        if token == "-" {
+            return self.spec.cwd_bare_dash() == Some(CwdEffect::Relocates);
         }
         token.starts_with('-') && relocating().any(|(letter, _, _)| token.contains(letter))
     }
@@ -448,10 +461,31 @@ mod tests {
         assert!(sudo.token_relocates_cwd("-uD"));
         assert!(sudo.token_relocates_cwd("--chdir=/x"));
         assert!(sudo.token_relocates_cwd("--ch"));
-        assert!(!sudo.token_relocates_cwd("--c"));
+        // Ambiguous abbreviation: the prefix fallback refuses (fail closed).
+        assert!(sudo.token_relocates_cwd("--c"));
+        assert!(!sudo.token_relocates_cwd("--cl"));
         assert!(!sudo.token_relocates_cwd("-u"));
         let env = lookup("env").expect("catalogued");
         assert!(!env.token_relocates_cwd("-C"));
+    }
+
+    #[test]
+    fn login_shell_and_chdir_wrappers_relocate_the_cwd() {
+        let sudo = lookup("sudo").expect("catalogued");
+        for token in ["-i", "-s", "-iu", "--login", "--shell", "--log", "--sh"] {
+            assert!(sudo.token_relocates_cwd(token), "sudo {token}");
+        }
+        assert!(!sudo.token_relocates_cwd("-"));
+        let su = lookup("su").expect("catalogued");
+        for token in ["-", "-l", "-lm", "--login", "--log", "--l"] {
+            assert!(su.token_relocates_cwd(token), "su {token}");
+        }
+        assert!(!su.token_relocates_cwd("-m"));
+        let run0 = lookup("run0").expect("catalogued");
+        for token in ["-D", "--chdir=/x", "--chdir", "--c=/x", "-u", "--us=alice"] {
+            assert!(run0.token_relocates_cwd(token), "run0 {token}");
+        }
+        assert!(!run0.token_relocates_cwd("-g"));
     }
 
     #[test]

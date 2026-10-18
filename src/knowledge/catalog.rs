@@ -178,6 +178,16 @@ pub(super) static CATALOG: &[CommandSpec] = &[
                 long: "chroot",
                 effect: CwdEffect::Relocates,
             },
+            Slot::CwdSwitch {
+                short: 'i',
+                long: "login",
+                effect: CwdEffect::Relocates,
+            },
+            Slot::CwdSwitch {
+                short: 's',
+                long: "shell",
+                effect: CwdEffect::Relocates,
+            },
         ],
     },
     CommandSpec {
@@ -256,6 +266,14 @@ pub(super) static CATALOG: &[CommandSpec] = &[
                 short: None,
                 long: Some("session-command"),
             },
+            Slot::CwdSwitch {
+                short: 'l',
+                long: "login",
+                effect: CwdEffect::Relocates,
+            },
+            Slot::CwdBareDash {
+                effect: CwdEffect::Relocates,
+            },
         ],
     },
     CommandSpec {
@@ -295,7 +313,22 @@ pub(super) static CATALOG: &[CommandSpec] = &[
             ],
             ..BASE
         },
-        slots: &[EXEC, Slot::Privilege],
+        slots: &[
+            EXEC,
+            Slot::Privilege,
+            Slot::Cwd {
+                short: 'D',
+                long: "chdir",
+                effect: CwdEffect::Relocates,
+            },
+            // Not only a non-root target: any `-u` is treated as running in
+            // that user's home, so the exception fails closed.
+            Slot::Cwd {
+                short: 'u',
+                long: "user",
+                effect: CwdEffect::Relocates,
+            },
+        ],
     },
     CommandSpec {
         names: &["timeout"],

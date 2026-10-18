@@ -114,6 +114,17 @@ pub(crate) enum Slot {
         long: &'static str,
         effect: CwdEffect,
     },
+    /// A boolean switch that moves the wrapped command to another directory
+    /// (`sudo -i`, a login shell in the target user's home). Unlike
+    /// [`Slot::Cwd`] it takes no value.
+    CwdSwitch {
+        short: char,
+        long: &'static str,
+        effect: CwdEffect,
+    },
+    /// A lone `-` option that moves the wrapped command to another directory
+    /// (`su -`, the same as `su -l`).
+    CwdBareDash { effect: CwdEffect },
     /// The command escalates privileges.
     Privilege,
 }
@@ -161,6 +172,24 @@ impl CommandSpec {
 }
 
 impl CommandSpec {
+    pub(crate) fn cwd_switches(&self) -> impl Iterator<Item = (char, &'static str, CwdEffect)> {
+        self.slots.iter().filter_map(|slot| match slot {
+            Slot::CwdSwitch {
+                short,
+                long,
+                effect,
+            } => Some((*short, *long, *effect)),
+            _ => None,
+        })
+    }
+
+    pub(crate) fn cwd_bare_dash(&self) -> Option<CwdEffect> {
+        self.slots.iter().find_map(|slot| match slot {
+            Slot::CwdBareDash { effect } => Some(*effect),
+            _ => None,
+        })
+    }
+
     fn slot_pair(
         &self,
         pick: impl Fn(&Slot) -> Option<(char, &'static str)>,
