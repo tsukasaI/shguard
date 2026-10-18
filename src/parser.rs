@@ -729,11 +729,57 @@ fn heredoc_tag_reads_alike(raw: &str) -> bool {
                 .is_some_and(|rest| !rest.is_empty() && plain(rest)))
 }
 
-/// Whether `body` ends in an odd run of backslashes before its final
-/// newline, which bash splices into the delimiter line.
-fn ends_in_line_continuation(body: &str) -> bool {
-    let trimmed = body.strip_suffix('\n').unwrap_or(body);
-    (trimmed.len() - trimmed.trim_end_matches('\\').len()) % 2 == 1
+fn odd_trailing_backslashes(line: &str) -> bool {
+    (line.len() - line.trim_end_matches('\\').len()) % 2 == 1
+}
+
+/// Whether bash, which splices `\<newline>` out of an expanding heredoc
+/// before comparing each line to the delimiter, closes the heredoc somewhere
+/// brush did not: inside the body, or at the delimiter line itself.
+fn bash_ends_expanding_heredoc_elsewhere(body: &str, delimiter: &str, strip_tabs: bool) -> bool {
+    let lines: Vec<&str> = body.split('\n').collect();
+    // A CRLF line's `\r` hides its backslash from the splice check, so any
+    // `\<CR>` ending is refused outright rather than guessed at.
+    if lines.iter().any(|line| {
+        line.strip_suffix('\r')
+            .is_some_and(odd_trailing_backslashes)
+    }) {
+        return true;
+    }
+    let (mut whole, mut per_line) = (String::new(), String::new());
+    let mut spliced = false;
+    for line in &lines {
+        let continued = odd_trailing_backslashes(line);
+        let piece = if continued {
+            &line[..line.len() - 1]
+        } else {
+            line
+        };
+        whole.push_str(piece);
+        per_line.push_str(if strip_tabs {
+            piece.trim_start_matches('\t')
+        } else {
+            piece
+        });
+        if continued {
+            spliced = true;
+            continue;
+        }
+        let candidate = if strip_tabs {
+            whole.trim_start_matches('\t')
+        } else {
+            &whole
+        };
+        if spliced && (candidate == delimiter || per_line == delimiter) {
+            return true;
+        }
+        whole.clear();
+        per_line.clear();
+        spliced = false;
+    }
+    // The last body line ends in a continuation that splices into the
+    // delimiter line.
+    odd_trailing_backslashes(body.strip_suffix('\n').unwrap_or(body))
 }
 
 fn convert_heredoc(heredoc: &bast::IoHereDocument) -> Result<Redirection, ParseError> {
@@ -743,9 +789,15 @@ fn convert_heredoc(heredoc: &bast::IoHereDocument) -> Result<Redirection, ParseE
         ));
     }
     let body = heredoc.doc.value.clone();
-    if heredoc.requires_expansion && ends_in_line_continuation(&body) {
+    if heredoc.requires_expansion
+        && bash_ends_expanding_heredoc_elsewhere(
+            &body,
+            &heredoc.here_end.value,
+            heredoc.remove_tabs,
+        )
+    {
         return Err(ParseError::unsupported(
-            "expanding heredoc body ending in a line continuation",
+            "expanding heredoc whose line continuations make bash end it elsewhere than brush",
         ));
     }
     let substitutions = if heredoc.requires_expansion {

@@ -3026,6 +3026,28 @@ const ISSUE_631_HEREDOC_IN_SUBSTITUTION_CASES: &[(&str, Decision)] = &[
     ),
     ("echo \"$(cat <<EOF\nx\\\\\nEOF\n)\"", Decision::Allow),
     ("echo \"$(cat <<'EOF'\nx\\\nEOF\n)\"", Decision::Allow),
+    // Bash splices `\<newline>` before comparing a line to the delimiter, so
+    // an interior continuation can close the heredoc before brush does.
+    (
+        "echo \"$(cat <<EOF\nEO\\\nF\nrm -rf /\nEOF\n)\"",
+        Decision::Ask,
+    ),
+    ("cat <<EOF\nEO\\\nF\nrm -rf /\nEOF", Decision::Ask),
+    (
+        "echo \"$(cat <<EOF\nE\\\nO\\\nF\nrm -rf /\nEOF\n)\"",
+        Decision::Ask,
+    ),
+    (
+        "echo \"$(cat <<EOF\nx\nEO\\\nF\nrm -rf /\nEOF\n)\"",
+        Decision::Ask,
+    ),
+    (
+        "echo \"$(cat <<-EOF\n\tEO\\\nF\nrm -rf /\nEOF\n)\"",
+        Decision::Ask,
+    ),
+    ("echo \"$(cat <<EOF\r\nx\\\r\nEOF\r\n)\"", Decision::Ask),
+    ("cat > s.sh <<EOF\nmake \\\n  all\nEOF", Decision::Allow),
+    ("cat <<'EOF'\nEO\\\nF\nEOF", Decision::Allow),
     // Body starting with `)` reads as an operator: safe over-ask.
     ("echo \"$(cat <<E\n)\nE\n)\"", Decision::Ask),
     // Raw U+0001 is the placeholder sentinel: refused.

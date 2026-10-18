@@ -47,16 +47,19 @@
 {"command":"cat < ~/.zshrc","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"cat <<'EOF'\n${ rm -rf /; }\nEOF","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"cat <<'EOF'\n${(e)x}\nEOF","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"cat <<'EOF'\nEO\\\nF\nEOF","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"cat <<EOF\n${ rm -rf /; }\nEOF","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"cat <<EOF\n${(e)x}\nEOF","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"cat <<EOF\n${=x}\nEOF","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"cat <<EOF\n${| rm -rf /; }\nEOF","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"cat <<EOF\nEO\\\nF\nrm -rf /\nEOF","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (expanding heredoc whose line continuations make bash end it elsewhere than brush); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
 {"command":"cat <<EOF\n\\${ rm -rf /; }\nEOF","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"cat > \"$HOME\"/.config/shguard/config.toml","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"cat > \"$HOME/.config/shguard/config.toml\"","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"cat > $(( ${ rm -rf /; } ))","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"cat > ${HOME}/.config/shguard/config.toml","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"cat > /etc/cron.d/job","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"cat > s.sh <<EOF\nmake \\\n  all\nEOF","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"cat > ~root/.config/shguard/config.toml","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"cat file >> /etc/passwd","decision":"Block","deny_message":null,"matched_rule":"redirect-overwrite-device-or-critical-file"}
 {"command":"cat list.txt | xargs rm -f","decision":"Allow","deny_message":null,"matched_rule":null}
@@ -161,17 +164,22 @@
 {"command":"echo \"$(cat <<'EOF'\nx\\\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"echo \"$(cat <<'a\\\\b'\nab\n)\na\\\\b\nrm -rf /\n)\"","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"echo \"$(cat <<'a\\b'\nab\n)\na\\b\nrm -rf /\n)\"","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (heredoc delimiter whose quote removal brush and bash read differently); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
+{"command":"echo \"$(cat <<-EOF\n\tEO\\\nF\nrm -rf /\nEOF\n)\"","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (expanding heredoc whose line continuations make bash end it elsewhere than brush); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
 {"command":"echo \"$(cat <<E\n)\nE\n)\"","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"echo \"$(cat <<EOF\n(x\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo \"$(cat <<EOF\nEO\\\nF\nrm -rf /\nEOF\n)\"","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (expanding heredoc whose line continuations make bash end it elsewhere than brush); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
+{"command":"echo \"$(cat <<EOF\nE\\\nO\\\nF\nrm -rf /\nEOF\n)\"","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (expanding heredoc whose line continuations make bash end it elsewhere than brush); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
 {"command":"echo \"$(cat <<EOF\ndon't\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"echo \"$(cat <<EOF\nfix: thing\n\n1) first item\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"echo \"$(cat <<EOF\nfix: thing\n\nfirst item\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"echo \"$(cat <<EOF\nit doesn't matter (the dog's bone) here\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"echo \"$(cat <<EOF\nsay \"hi\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"echo \"$(cat <<EOF\nx\nEOF\nrm -rf /\n)\"","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo \"$(cat <<EOF\nx\nEO\\\nF\nrm -rf /\nEOF\n)\"","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (expanding heredoc whose line continuations make bash end it elsewhere than brush); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
 {"command":"echo \"$(cat <<EOF\nx)\nEOF\nrm -rf /\n)\"","decision":"Block","deny_message":null,"matched_rule":null}
-{"command":"echo \"$(cat <<EOF\nx\\\nEOF\n)\nEOF\nrm -rf /\n)\"","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (expanding heredoc body ending in a line continuation); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
+{"command":"echo \"$(cat <<EOF\nx\\\nEOF\n)\nEOF\nrm -rf /\n)\"","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (expanding heredoc whose line continuations make bash end it elsewhere than brush); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
 {"command":"echo \"$(cat <<EOF\nx\\\\\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo \"$(cat <<EOF\r\nx\\\r\nEOF\r\n)\"","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (expanding heredoc whose line continuations make bash end it elsewhere than brush); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
 {"command":"echo \"$X (see: y)\"","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"echo \"${ rm -rf ~; }\"","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (unresolved `$` expansion form (zsh flags/short forms such as ${(e)x}, ${=x}, $=x, $~x, or a ${ command; } substitution)); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
 {"command":"echo \"${x%'$(rm -rf ~)'}\"","decision":"Block","deny_message":null,"matched_rule":null}
