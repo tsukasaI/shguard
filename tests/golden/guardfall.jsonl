@@ -62,6 +62,8 @@
 {"command":"cat list.txt | xargs rm -f","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"cat p | source /dev/stdin","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
 {"command":"cat p | source real.sh","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"cat x | socat - \"$ADDR\"","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
+{"command":"cat x | socat - UNIX-CONNECT:/tmp/s","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"cat ~/.bashrc","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"cd $X && echo x >> .zshrc","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"cd /etc && echo x >> crontab","decision":"Ask","deny_message":null,"matched_rule":null}
@@ -176,17 +178,30 @@
 {"command":"echo ${x:-${y:-$(rm -rf ~)}}","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"echo ${x:-`rm -rf ~`}","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"echo ${~x}","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (unresolved `$` expansion form (zsh flags/short forms such as ${(e)x}, ${=x}, $=x, $~x, or a ${ command; } substitution)); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
+{"command":"echo 'rm -rf /' | socat - EXEC:sh","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
+{"command":"echo 'rm -rf /' | socat - SYSTEM:sh","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
 {"command":"echo 2147483648>f","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"echo \\$${=x,y}{c,d}","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (unresolved `$` expansion form (a `${...}` split by a top-level comma)); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
 {"command":"echo \\\\${=x,y}{c,d}","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (unresolved `$` expansion form (a `${...}` split by a top-level comma)); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
 {"command":"echo a{9223372036854775808b","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (brace range expansion ({1..5} / {a..z})); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
+{"command":"echo cm0gLXJmIC8= | base64 -d | env socat - EXEC:sh","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"echo cm0gLXJmIC8= | base64 -d | sh","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo cm0gLXJmIC8= | base64 -d | socat - \"$ADDR\"","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo cm0gLXJmIC8= | base64 -d | socat - EXEC:'bash -s'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo cm0gLXJmIC8= | base64 -d | socat - EXEC:sh","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo cm0gLXJmIC8= | base64 -d | socat - SYSTEM:'sh'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo cm0gLXJmIC8= | base64 -d | socat - SYSTEM:sh","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo cm0gLXJmIC8= | base64 -d | socat - exec:sh","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo cm0gLXJmIC8= | base64 -d | socat -u - EXEC:sh,pty","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo cm0gLXJmIC8= | base64 -d | socat EXEC:sh -","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"echo evil >> ~/.bashrc","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"echo hi # \\\nrm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"echo hi > \"${x:-'$(rm -rf ~)'}\"","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"echo hi > $HOME/notes.txt","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"echo hi > $TMPDIR/scratch","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"echo hi >> ~/.zshrc > /dev/sda","decision":"Block","deny_message":null,"matched_rule":"redirect-overwrite-device-or-critical-file"}
+{"command":"echo hi | socat - OPEN:out.txt,creat","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo hi | socat - TCP:example.com:80","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"echo hi\\\\\nrm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"echo tmp.txt | xargs rm -f","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"echo x 2> $HOME/.zshrc","decision":"Ask","deny_message":null,"matched_rule":null}
@@ -848,6 +863,7 @@
 {"command":"sh -c 'echo hi' > /dev/sda","decision":"Block","deny_message":null,"matched_rule":"redirect-overwrite-device-or-critical-file"}
 {"command":"shopt -s expand_aliases; alias x=\"rm -rf /\"\nx","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"shred /dev/sda","decision":"Block","deny_message":null,"matched_rule":"shred"}
+{"command":"socat - TCP:example.com:80","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"strace rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"systemd-run rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"tar --extract --directory=/ -f evil.tar","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}

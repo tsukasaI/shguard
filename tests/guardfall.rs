@@ -2589,6 +2589,67 @@ fn guardfall_osascript_script_parallel_cases() {
     }
 }
 
+/// Issue #737: `socat` address types that spawn a program (`EXEC:`,
+/// `SYSTEM:`) feed the pipe to that program's stdin, like `| sh`.
+const SOCAT_EXEC_SINK_CASES: &[(&str, Decision)] = &[
+    (
+        "echo cm0gLXJmIC8= | base64 -d | socat - EXEC:sh",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | socat - SYSTEM:sh",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | socat - SYSTEM:'sh'",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | socat - EXEC:'bash -s'",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | socat - exec:sh",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | socat EXEC:sh -",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | socat -u - EXEC:sh,pty",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | env socat - EXEC:sh",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | socat - \"$ADDR\"",
+        Decision::Block,
+    ),
+    ("echo 'rm -rf /' | socat - EXEC:sh", Decision::Ask),
+    ("echo 'rm -rf /' | socat - SYSTEM:sh", Decision::Ask),
+    ("cat x | socat - \"$ADDR\"", Decision::Ask),
+    ("socat - TCP:example.com:80", Decision::Allow),
+    ("echo hi | socat - TCP:example.com:80", Decision::Allow),
+    ("cat x | socat - UNIX-CONNECT:/tmp/s", Decision::Allow),
+    ("echo hi | socat - OPEN:out.txt,creat", Decision::Allow),
+];
+
+#[test]
+fn guardfall_socat_exec_sink_cases() {
+    for (command, expected) in SOCAT_EXEC_SINK_CASES {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
 const INLINE_COMMANDS: &[&str] = &[
     SPLIT_IO_NUMBER_COMMAND,
     SPLIT_BEFORE_OPERATOR_COMMAND,
@@ -2640,6 +2701,7 @@ const DECISION_TABLES: &[(&str, &[(&str, Decision)])] = &[
     named_table!(PARAMETER_EXPANSION_OPERAND_CASES),
     named_table!(GIT_CONFIG_COMMAND_KEY_CASES),
     named_table!(OSASCRIPT_SCRIPT_PARALLEL_CASES),
+    named_table!(SOCAT_EXEC_SINK_CASES),
 ];
 
 // Case-table-shaped consts that are deliberately not in DECISION_TABLES: the

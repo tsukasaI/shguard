@@ -8846,6 +8846,9 @@ fn is_interpreter_sink(stage: &[NormalizedWord]) -> bool {
     if is_pipeline_interpreter(name) {
         return true;
     }
+    if name == "socat" {
+        return rest.iter().any(is_socat_exec_address);
+    }
     if !matches!(name, "source" | ".") {
         return false;
     }
@@ -8857,6 +8860,23 @@ fn is_interpreter_sink(stage: &[NormalizedWord]) -> bool {
         Some(Resolution::Resolved(v)) => is_stdin_alias_path(v),
         Some(Resolution::Unresolvable(_)) => true,
         None => false,
+    }
+}
+
+/// Whether a `socat` operand is an address that spawns a program (issue
+/// #737): `EXEC:` and `SYSTEM:` relay the other address's bytes, here the
+/// pipe, to the child's stdin. Address keywords are case-insensitive. Any
+/// operand position counts, since either address may be the spawning one,
+/// and an unresolvable operand fails closed because it could be `EXEC:...`.
+fn is_socat_exec_address(word: &NormalizedWord) -> bool {
+    match word.resolution() {
+        Resolution::Resolved(v) => {
+            let keyword = v.split(':').next().unwrap_or_default();
+            !v.starts_with('-')
+                && v.contains(':')
+                && (keyword.eq_ignore_ascii_case("exec") || keyword.eq_ignore_ascii_case("system"))
+        }
+        Resolution::Unresolvable(_) => true,
     }
 }
 
