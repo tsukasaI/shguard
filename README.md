@@ -35,7 +35,7 @@ rather than letting it go stale silently.
   regression table above, which covers A-D directly, plus class E via
   the destructive-commands suite in `tests/guardfall.rs`, and
   [Attribution](#attribution)).
-- **Regression test count:** 866 (861 pinned-decision literals across
+- **Regression test count:** 884 (879 pinned-decision literals across
   `tests/guardfall.rs`'s internally-discovered regression suite, plus 5
   externally-attributed cases in `tests/bypass_corpus.toml`). A lower
   bound, not an exact assertion count: some of `guardfall.rs`'s tests
@@ -1495,7 +1495,10 @@ eradicate shell-mediated destruction. Explicitly out of scope:
    body, IS recursively checked (issue #51) — `echo hi > $(curl ... | sh)`
    and a heredoc body's `$(rm -rf /)` are both denied — but only the
    substitution's *inner command*, never a resolved-but-unlisted or an
-   unresolvable target *path* itself.
+   unresolvable target *path* itself. Inside an expanding (unquoted-delimiter)
+   heredoc body, `$=`/`$~`/`$^`/`$+` and any `${` the parser cannot parse now
+   `Ask`; so does an arithmetic expansion (`$((...))`, `$[...]`) whose text
+   cannot be parsed, in an assignment, array element or redirection target.
 6. **Function definitions are evaluated, not tracked by name.** A `name() {
    ...; }` definition (issue #75) has its body evaluated eagerly and folded
    into the definition's own decision — a dangerous body denies the line

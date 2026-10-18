@@ -1568,7 +1568,7 @@ fn evaluate_compound_command(
     };
     if !redirections.is_empty()
         || for_words.iter().any(|word| {
-            !collect_substitutions(word).is_empty()
+            word_has_substitution_or_uncertain(word)
                 || !collect_process_substitutions(word).is_empty()
                 || normalize::normalize_word(word)
                     .iter()
@@ -2864,7 +2864,7 @@ fn named_user_home_word_with_tilde_substituted(word: &Word) -> Option<Word> {
 /// documented for `escalation_chain`.
 fn has_argument_position_substitution(argument_words: &[Word]) -> bool {
     argument_words.iter().any(|word| {
-        !collect_substitutions(word).is_empty() || !collect_process_substitutions(word).is_empty()
+        word_has_substitution_or_uncertain(word) || !collect_process_substitutions(word).is_empty()
     })
 }
 
@@ -3016,7 +3016,7 @@ fn command_line_reads_stdin(line: &CommandLine, env: &Env) -> bool {
 /// an argument-position substitution is never eligible.
 fn has_prefix_or_redirect_substitution(command: &SimpleCommand) -> bool {
     let word_has_substitution = |word: &Word| {
-        !collect_substitutions(word).is_empty() || !collect_process_substitutions(word).is_empty()
+        word_has_substitution_or_uncertain(word) || !collect_process_substitutions(word).is_empty()
     };
     command
         .assignments
@@ -3777,11 +3777,16 @@ fn evaluate_simple_command_core(
     );
     let mut command_position_subs = Vec::new();
     let mut command_position_proc_subs = Vec::new();
+    let mut command_position_uncertain = false;
     if let Some(pieces) = &command_position_pieces {
-        collect_substitutions_into(pieces, true, &mut command_position_subs);
+        command_position_uncertain =
+            collect_substitutions_into(pieces, true, &mut command_position_subs);
         collect_process_substitutions_into(pieces, &mut command_position_proc_subs);
     }
-    if !command_position_subs.is_empty() || !command_position_proc_subs.is_empty() {
+    if !command_position_subs.is_empty()
+        || !command_position_proc_subs.is_empty()
+        || command_position_uncertain
+    {
         return apply_opaque_kind_floor(
             apply_substitution_floor(
                 apply_leftover_command_floor(
@@ -6043,7 +6048,11 @@ fn evaluate_argument_substitutions(
         }
     };
     for word in argument_words {
-        for inner in collect_substitutions(word) {
+        let (substitutions, uncertain) = collect_substitutions(word);
+        if uncertain {
+            raise(Decision::Ask, None);
+        }
+        for inner in substitutions {
             let verdict = analyze_at_depth(
                 &inner,
                 ctx.deeper(),
@@ -6145,11 +6154,11 @@ fn evaluate_leftover_alternative_substitutions(
     };
     for (_, pieces) in leftover_alternatives {
         let mut subs = Vec::new();
-        collect_substitutions_into(pieces, true, &mut subs);
+        let uncertain = collect_substitutions_into(pieces, true, &mut subs);
         let mut proc_subs = Vec::new();
         collect_process_substitutions_into(pieces, &mut proc_subs);
 
-        let has_substitution = !subs.is_empty() || !proc_subs.is_empty();
+        let has_substitution = !subs.is_empty() || !proc_subs.is_empty() || uncertain;
         // A piece-*kind* check (only `ParameterExpansion`/`ArithmeticExpansion`/
         // `ProcessSubstitution` counted as "companions") missed that a
         // command/backquote substitution's own OUTPUT can just as well
@@ -7009,7 +7018,16 @@ fn scan_word_expansions(
     accum: &mut ExpansionAccum<'_>,
     position_description: &str,
 ) {
-    for inner in collect_substitutions(word) {
+    let (substitutions, uncertain) = collect_substitutions(word);
+    if uncertain {
+        accum.raise(
+            Decision::Ask,
+            format!(
+                "{position_description} contains an arithmetic expansion that could not be parsed"
+            ),
+        );
+    }
+    for inner in substitutions {
         let decision = analyze_at_depth(
             &inner,
             ctx.deeper(),
@@ -7712,8 +7730,7 @@ fn has_argument_position_bare_var(argument_words: &[Word]) -> bool {
 /// calls rather than using this and discarding the result.
 fn alternative_has_substitution(pieces: &[WordPiece]) -> bool {
     let mut subs = Vec::new();
-    collect_substitutions_into(pieces, true, &mut subs);
-    if !subs.is_empty() {
+    if collect_substitutions_into(pieces, true, &mut subs) || !subs.is_empty() {
         return true;
     }
     let mut proc_subs = Vec::new();
@@ -7726,10 +7743,19 @@ fn alternative_has_substitution(pieces: &[WordPiece]) -> bool {
 /// inside double quotes (`"$(...)"`) or brace alternation. Used for both
 /// rule 1 (command position: is this list non-empty at all) and rule 3
 /// (argument position: recurse each one found).
-fn collect_substitutions(word: &Word) -> Vec<Cow<'_, str>> {
+///
+/// The flag is `true` when an arithmetic expansion's text could not be
+/// parsed, so any substitution inside it is unknown: callers must floor to
+/// at least `Ask` rather than treat the word as clean.
+fn collect_substitutions(word: &Word) -> (Vec<Cow<'_, str>>, bool) {
     let mut out = Vec::new();
-    collect_substitutions_into(&word.0, true, &mut out);
-    out
+    let uncertain = collect_substitutions_into(&word.0, true, &mut out);
+    (out, uncertain)
+}
+
+fn word_has_substitution_or_uncertain(word: &Word) -> bool {
+    let (substitutions, uncertain) = collect_substitutions(word);
+    uncertain || !substitutions.is_empty()
 }
 
 /// `allow_split` mirrors `normalize::resolve_piece`'s own parameter of the
@@ -7741,7 +7767,8 @@ fn collect_substitutions_into<'a>(
     pieces: &'a [WordPiece],
     allow_split: bool,
     out: &mut Vec<Cow<'a, str>>,
-) {
+) -> bool {
+    let mut uncertain = false;
     for piece in pieces {
         match piece {
             // Issue #361: an UNQUOTED syntactically empty substitution
@@ -7776,28 +7803,25 @@ fn collect_substitutions_into<'a>(
             // substitution (`x+1` doesn't parse as a command line — see
             // `crate::syntax::heredoc`, which already handles exactly this
             // "arithmetic span, but a nested `$(...)` inside it still
-            // expands" case for heredoc bodies). Reusing that parser
-            // here is what makes it safe to treat the surrounding segment
-            // (issue #82: the piece run between `$IFS` split points, or the
-            // whole word if there are none) as merely opaque
-            // (`UnresolvableKind::ArithmeticExpansion`, floored to Ask by
-            // `is_opaque_unresolvable`) rather than hiding an embedded
-            // `$(rm -rf /)` inside it entirely. Any
-            // unterminated `$(`/backtick the parse rejects is not surfaced
-            // separately — the opaque-kind floor already guarantees at
-            // least `Ask` regardless.
-            WordPiece::ArithmeticExpansion(raw) => {
-                if let Ok(found) = heredoc::parse_body(raw) {
-                    out.extend(found.into_iter().map(Cow::Owned));
-                }
+            // expands" case for heredoc bodies). A parse the heredoc
+            // parser rejects (`${ rm -rf /; }`, `$=y`, an unterminated
+            // `$(`) leaves what the arithmetic text expands to unknown, so
+            // it sets `uncertain` for the caller to floor to Ask. Not the
+            // opaque-kind floor alone: assignment values and redirection
+            // targets never reach it.
+            WordPiece::ArithmeticExpansion(raw) => match heredoc::parse_body(raw) {
+                Ok(found) => out.extend(found.into_iter().map(Cow::Owned)),
+                Err(_) => uncertain = true,
+            },
+            WordPiece::DoubleQuoted(inner) => {
+                uncertain |= collect_substitutions_into(inner, false, out);
             }
-            WordPiece::DoubleQuoted(inner) => collect_substitutions_into(inner, false, out),
             WordPiece::ModifiedParameterExpansion { operand, .. } => {
-                collect_substitutions_into(operand, allow_split, out);
+                uncertain |= collect_substitutions_into(operand, allow_split, out);
             }
             WordPiece::BraceAlternation(members) => {
                 for member in members {
-                    collect_substitutions_into(&member.0, allow_split, out);
+                    uncertain |= collect_substitutions_into(&member.0, allow_split, out);
                 }
             }
             WordPiece::Literal(_)
@@ -7809,6 +7833,7 @@ fn collect_substitutions_into<'a>(
             | WordPiece::ProcessSubstitution { .. } => {}
         }
     }
+    uncertain
 }
 
 /// Recursively collects the already-parsed [`CommandLine`] body of every
