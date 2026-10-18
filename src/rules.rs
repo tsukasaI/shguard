@@ -6000,7 +6000,7 @@ const SOCAT_INERT_KEYWORDS: &[&str] = &[
 const SOCAT_INERT_FAMILIES: &[&str] = &[
     "TCP", "TCP4", "TCP6", "UDP", "UDP4", "UDP6", "UDPLITE", "UDPLITE4", "UDPLITE6", "SCTP",
     "SCTP4", "SCTP6", "IP", "IP4", "IP6", "UNIX", "ABSTRACT", "OPENSSL", "SOCKS4", "SOCKS4A",
-    "PROXY",
+    "SOCKS5", "SOCKET", "VSOCK", "DCCP", "DCCP4", "DCCP6", "POSIXMQ", "PROXY",
 ];
 /// The `-`-separated parts that may follow a family.
 const SOCAT_INERT_SUFFIXES: &[&str] = &[
@@ -6062,12 +6062,15 @@ pub(crate) fn socat_address_pieces(word: &NormalizedWord) -> Vec<SocatAddress> {
                 match classify_socat_keyword(keyword) {
                     SocatKeyword::Spawning => {
                         let raw = &text[segment_start + end + 1..];
-                        let command = raw.split_once(',').map_or(raw, |(command, _)| command);
+                        let command_end = [raw.find(','), raw.find("!!"), raw.find('|')]
+                            .into_iter()
+                            .flatten()
+                            .min()
+                            .unwrap_or(raw.len());
                         pieces.push(SocatAddress::Spawns {
-                            command: command.to_string(),
+                            command: raw[..command_end].to_string(),
                             raw: raw.to_string(),
                         });
-                        return pieces;
                     }
                     SocatKeyword::Inert => pieces.push(SocatAddress::Inert),
                     SocatKeyword::Unlisted => pieces.push(SocatAddress::Unknown),
