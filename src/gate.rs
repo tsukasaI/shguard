@@ -4501,12 +4501,23 @@ fn apply_tar_dashless_floor(verdict: Verdict, floor: Option<(Decision, String)>)
 /// wrapper runs cannot be read with certainty. The rule matching below
 /// still sees the wrapped command; this floor only keeps the line from
 /// ending in Allow.
+///
+/// Also floors a command name containing `=` (`a.b=c rm -rf /`): it is not
+/// a valid assignment, so bash runs it as a command name this crate cannot
+/// place.
 fn scan_unmodeled_option_floor(argv: &[NormalizedWord]) -> Option<(Decision, String)> {
-    let finding = crate::rules::first_unmodeled_wrapper_option(argv)?;
-    Some((
-        Decision::Ask,
-        format!("unmodelled option for `{}`", finding.command()),
-    ))
+    if let Some(finding) = crate::rules::first_unmodeled_wrapper_option(argv) {
+        return Some((
+            Decision::Ask,
+            format!("unmodelled option for `{}`", finding.command()),
+        ));
+    }
+    crate::rules::has_assignment_shaped_command_name(argv).then(|| {
+        (
+            Decision::Ask,
+            "unmodelled command name: a word containing `=` that is not an assignment".to_string(),
+        )
+    })
 }
 
 /// Applies [`scan_unmodeled_option_floor`]'s floor to `verdict` (see
