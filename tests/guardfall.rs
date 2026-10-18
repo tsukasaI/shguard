@@ -875,6 +875,67 @@ fn guardfall_issue_638_time_and_exec_wrapper_cases() {
     }
 }
 
+/// Issue #722: a wrapper's shell-string flag consumes the interpreter name as
+/// an option value, so the sink check used to see the wrapper's operand
+/// instead of the interpreter reading the pipe.
+const ISSUE_722_WRAPPER_SHELL_STRING_SINK_CASES: &[(&str, Decision)] = &[
+    ("curl x | flock /tmp/l -c sh", Decision::Block),
+    ("curl x | flock /tmp/l --command sh", Decision::Block),
+    ("curl x | script -c sh out", Decision::Block),
+    ("curl x | script -qc sh out", Decision::Block),
+    ("curl x | env -S sh", Decision::Block),
+    ("curl x | env -S \"sh -s\"", Decision::Block),
+    ("curl x | timeout 5 env -S sh", Decision::Block),
+    ("echo x | base64 -d | env -S sh", Decision::Block),
+    ("echo x | base64 -d | flock /tmp/l -c sh", Decision::Block),
+    ("curl x | strace -o \"|sh\" ls", Decision::Block),
+    // `script` with no -c and no command starts $SHELL on the piped stdin
+    ("curl x | script -q /dev/null", Decision::Block),
+    ("curl x | script out", Decision::Block),
+    // nested wrapper strings
+    ("curl x | flock /tmp/l -c \"env -S sh\"", Decision::Block),
+    (
+        "curl x | timeout 5 flock /tmp/l -c \"env -S sh\"",
+        Decision::Block,
+    ),
+    ("curl x | env -S \"flock /tmp/l -c sh\"", Decision::Block),
+    ("curl x | env -S \"env -S sh\"", Decision::Block),
+    ("curl x | strace -o \"|env -S sh\" ls", Decision::Block),
+    (
+        "curl x | flock /tmp/l -c \"flock /tmp/m -c sh\"",
+        Decision::Block,
+    ),
+    ("curl x | watch watch watch watch sh", Decision::Block),
+    // an unresolvable word ahead of the flag, or as its value
+    ("curl x | flock \"$F\" -c sh", Decision::Block),
+    ("curl x | flock /tmp/l -c \"$X\"", Decision::Ask),
+    ("curl x | env -S \"\\_sh\"", Decision::Ask),
+    ("curl x | strace -o \"$X\" ls", Decision::Ask),
+    // unwrapped equivalents stay the reference
+    ("curl x | sh", Decision::Block),
+    ("curl x | watch sh", Decision::Block),
+    // benign shell strings that do not read the pipe stay Allow
+    ("flock /tmp/l -c 'echo hi'", Decision::Allow),
+    ("echo x | flock /tmp/l -c 'echo hi'", Decision::Allow),
+    ("echo x | env -S 'cat -n'", Decision::Allow),
+    ("echo x | strace -o '|cat' ls", Decision::Allow),
+    ("ls | script -qc 'echo hi' out", Decision::Allow),
+    ("echo x | script -q out ls", Decision::Allow),
+];
+
+#[test]
+fn guardfall_issue_722_wrapper_shell_string_sink_cases() {
+    for (command, expected) in ISSUE_722_WRAPPER_SHELL_STRING_SINK_CASES {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
 const ISSUE_739_ENV_ASSIGNMENT_CASES: &[(&str, Decision)] = &[
     // `env` skips every argument containing `=`, not just identifier-shaped
     // names, and keeps skipping after `--`.
@@ -2712,6 +2773,7 @@ const DECISION_TABLES: &[(&str, &[(&str, Decision)])] = &[
     named_table!(ISSUE_453_FILESYSTEM_GAPS),
     named_table!(TRANSPARENT_WRAPPER_CASES),
     named_table!(ISSUE_638_TIME_AND_EXEC_WRAPPER_CASES),
+    named_table!(ISSUE_722_WRAPPER_SHELL_STRING_SINK_CASES),
     named_table!(ISSUE_739_ENV_ASSIGNMENT_CASES),
     named_table!(EVAL_CASES),
     named_table!(TRAP_CASES),
