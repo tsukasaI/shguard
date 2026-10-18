@@ -34,6 +34,10 @@ pub(crate) struct OptionGrammar {
     pub(crate) long_values: &'static [&'static str],
     /// Long names whose value, if any, is `=value` only.
     pub(crate) long_glued: &'static [&'static str],
+    /// Whole single-dash words (no `-`) that take no value (`arch -arm64`).
+    pub(crate) dash_words: &'static [&'static str],
+    /// Whole single-dash words whose value is the next word (`arch -arch x`).
+    pub(crate) dash_word_values: &'static [&'static str],
     /// Every `--name` is a flag and every `--name=value` an attached value,
     /// with no separated values (firejail).
     pub(crate) any_long_attached: bool,
@@ -61,6 +65,8 @@ impl OptionGrammar {
         long_flags: &[],
         long_values: &[],
         long_glued: &[],
+        dash_words: &[],
+        dash_word_values: &[],
         any_long_attached: false,
         bare_dash_option: false,
         dash_command_unmodeled: false,

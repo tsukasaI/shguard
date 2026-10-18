@@ -5159,7 +5159,7 @@ fn value_flag_consumed(rest_words: &[NormalizedWord], value_flags: &[ValueFlag])
 /// ("dependencies point inward" — `gate` already depends on `rules`, not
 /// the reverse).
 pub(crate) const SHELL_INTERPRETERS: &[&str] = &[
-    "bash", "sh", "zsh", "dash", "fish", "ksh", "tcsh", "csh", "ash",
+    "bash", "sh", "zsh", "dash", "fish", "ksh", "tcsh", "csh", "ash", "mksh", "yash", "rbash",
 ];
 
 /// The `eval` builtin (issue #120): same "interpret this string as a shell
@@ -5246,6 +5246,29 @@ const EXTRA_PIPELINE_INTERPRETERS: &[&str] = &[
     "irb",
     "deno",
     "pwsh",
+    "nu",
+    "xonsh",
+    "elvish",
+    // `pypy3` is version-stripped to this.
+    "pypy",
+];
+
+/// Tools that run code read from stdin without being a language
+/// interpreter (issue #748): a job scheduler (`at`, `batch`), a remote
+/// shell (`ssh`), a debugger or REPL (`gdb`, `expect`, `wish`, `jshell`,
+/// `R`, `julia`), an editor or calculator with a shell escape (`ed`, `ex`,
+/// `vi`, `vim`, `dc`, `m4`) and a database client with one (`sqlite3`,
+/// `psql`, `mysql`). A sink by NAME alone, like
+/// [`EXTRA_PIPELINE_INTERPRETERS`], but not part of
+/// [`matches_dangerous_allow_target`]: these are everyday tools, and an
+/// `allow` entry naming `ssh` or `psql` must keep loading.
+///
+/// Entries are post-[`strip_version_suffix`] and case-folded: `sqlite3` is
+/// `sqlite`, `m4` is `m`, `R` is `r`. A stdin-operand-gated sink (`make -f
+/// -`, `crontab -`) cannot be a name here; see `crate::gate`.
+const STDIN_CODE_TOOLS: &[&str] = &[
+    "at", "batch", "ssh", "gdb", "sqlite", "psql", "mysql", "ed", "ex", "vi", "vim", "m", "dc",
+    "expect", "wish", "jshell", "r", "julia",
 ];
 
 /// The `awk` family (`crate::gate` rule 6d, issue #195): every one of these
@@ -5346,7 +5369,9 @@ pub(crate) fn strip_version_suffix(name: &str) -> &str {
 pub(crate) fn is_pipeline_interpreter(name: &str) -> bool {
     let lower = fold_command_name(name);
     let name = strip_version_suffix(&lower);
-    SHELL_INTERPRETERS.contains(&name) || EXTRA_PIPELINE_INTERPRETERS.contains(&name)
+    SHELL_INTERPRETERS.contains(&name)
+        || EXTRA_PIPELINE_INTERPRETERS.contains(&name)
+        || STDIN_CODE_TOOLS.contains(&name)
 }
 
 /// Whether `name` is a [`SHELL_INTERPRETERS`] member once
@@ -5377,7 +5402,8 @@ pub(crate) fn is_shell_interpreter(name: &str) -> bool {
 #[must_use]
 pub(crate) fn is_stdin_script_interpreter(name: &str) -> bool {
     let lower = fold_command_name(name);
-    EXTRA_PIPELINE_INTERPRETERS.contains(&strip_version_suffix(&lower))
+    let name = strip_version_suffix(&lower);
+    EXTRA_PIPELINE_INTERPRETERS.contains(&name) || STDIN_CODE_TOOLS.contains(&name)
 }
 
 /// One `find` flag whose payload is itself a command to recurse into

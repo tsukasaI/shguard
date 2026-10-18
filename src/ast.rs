@@ -842,6 +842,9 @@ pub(crate) enum Command {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExtendedTest {
     pub(crate) words: Vec<Word>,
+    /// The operands bash evaluates as arithmetic (`-eq`/`-ne`/`-lt`/`-le`/
+    /// `-gt`/`-ge`); a subset of `words`. A value like `a[$(cmd)]` runs.
+    pub(crate) arithmetic_operands: Vec<Word>,
     pub(crate) redirections: Vec<Redirection>,
 }
 

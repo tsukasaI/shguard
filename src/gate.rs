@@ -1058,7 +1058,7 @@ fn evaluate_pipeline(
                 // docs), so unlike `Compound`/`FunctionDefinition` above it
                 // never needs an isolated `cwd` clone even in a multi-stage
                 // pipeline: nothing here can mutate `cwd` regardless.
-                let verdict = evaluate_extended_test(test, ctx, &cwd.current);
+                let verdict = evaluate_extended_test(test, ctx, &cwd.current, env);
                 // Its operands may hold substitutions that write.
                 cwd.earlier_writer.set(true);
                 // `[[ a -eq X=1 ]]` evaluates its operands as arithmetic.
@@ -2084,7 +2084,12 @@ fn apply_attached_word_and_redirect_checks(
 /// implementation. Defaults to `Allow` (an ordinary test with nothing
 /// dangerous inside it is inert) rather than recursing through
 /// [`evaluate_simple_command`] at all.
-fn evaluate_extended_test(test: &ExtendedTest, ctx: AnalysisCtx<'_>, cwd: &CwdContext) -> Verdict {
+fn evaluate_extended_test(
+    test: &ExtendedTest,
+    ctx: AnalysisCtx<'_>,
+    cwd: &CwdContext,
+    env: &Env,
+) -> Verdict {
     // Issue #424 round 5: `[[ ]]` is itself a compound command (bash's own
     // "Compound Commands" docs) — bash applies its own redirections before
     // expanding its operands, so `[[ $(perl) ]] <<EOF` forks `perl` AFTER
@@ -2098,7 +2103,7 @@ fn evaluate_extended_test(test: &ExtendedTest, ctx: AnalysisCtx<'_>, cwd: &CwdCo
         scan_word_for_heredoc_candidates(word, &mut scan);
     }
     let interpreters = scan.into_candidates();
-    apply_attached_word_and_redirect_checks(
+    let verdict = apply_attached_word_and_redirect_checks(
         Verdict::allow(Vec::new()),
         &test.words,
         "an extended test ([[ ]]) operand",
@@ -2106,7 +2111,54 @@ fn evaluate_extended_test(test: &ExtendedTest, ctx: AnalysisCtx<'_>, cwd: &CwdCo
         &interpreters,
         ctx,
         cwd,
+    );
+    if test
+        .arithmetic_operands
+        .iter()
+        .all(|operand| is_plain_integer_operand(operand, env))
+    {
+        return verdict;
+    }
+    apply_floor(
+        verdict,
+        Decision::Ask,
+        "an extended test ([[ ]]) compares an operand arithmetically that is not a plain \
+         integer, and bash evaluates such a value as an expression that can run a command"
+            .to_string(),
+        None,
     )
+}
+
+/// Whether `operand` of an arithmetic `[[ ]]` comparison is certainly an
+/// integer: a digit literal, `$#`/`$?`/`$$`/`$!`, or a variable the line
+/// bound to one.
+fn is_plain_integer_operand(operand: &Word, env: &Env) -> bool {
+    fn text(pieces: &[WordPiece], env: &Env, out: &mut String) -> bool {
+        pieces.iter().all(|piece| match piece {
+            WordPiece::Literal(s) | WordPiece::SingleQuoted(s) => {
+                out.push_str(s);
+                true
+            }
+            WordPiece::DoubleQuoted(inner) => text(inner, env, out),
+            WordPiece::ParameterExpansion(name)
+                if matches!(name.as_str(), "#" | "?" | "$" | "!") =>
+            {
+                out.push('0');
+                true
+            }
+            WordPiece::ParameterExpansion(name) => env.exact(name).is_some_and(|value| {
+                out.push_str(value);
+                true
+            }),
+            _ => false,
+        })
+    }
+    let mut joined = String::new();
+    if !text(&operand.0, env, &mut joined) {
+        return false;
+    }
+    let digits = joined.trim().trim_start_matches(['-', '+']);
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Evaluates a function definition (issue #75) by evaluating its body
@@ -3284,6 +3336,7 @@ fn evaluate_simple_command(
     // case this floor exists to still see, so it must survive `core`'s
     // early returns the same as every other floor here.
     let token_floor = scan_token_floor(command, &argv, rules);
+    let relative_path_floor = scan_relative_path_floor(command);
     // #103's composed pass and #209's `-C`-override pass (both below,
     // after `core`'s early returns are behind us) each need their own
     // normalized argv once `core` has taken ownership of this one —
@@ -3323,6 +3376,7 @@ fn evaluate_simple_command(
     let dirstack_equal_subst_floor_present = dirstack_equal_subst_floor.is_some();
     let unknown_cwd_floor_present = unknown_cwd_floor.is_some();
     let token_floor_present = token_floor.is_some();
+    let relative_path_floor_present = relative_path_floor.is_some();
     let alias_floor_present = alias_floor.is_some();
     let verdict = apply_expansion_floor(verdict, expansion.floor);
     let verdict = apply_recursable_floor(verdict, recursable.floor);
@@ -3344,6 +3398,10 @@ fn evaluate_simple_command(
     let verdict = apply_dirstack_equal_subst_floor(verdict, dirstack_equal_subst_floor);
     let verdict = apply_unknown_cwd_floor(verdict, unknown_cwd_floor);
     let verdict = apply_token_floor(verdict, token_floor);
+    let verdict = match relative_path_floor {
+        Some((decision, reason)) => apply_floor(verdict, decision, reason, None),
+        None => verdict,
+    };
 
     // Rule 11's allowlist guard: the same presence-based reasoning as
     // `has_argument_substitution` above (module docs, "User config
@@ -3447,6 +3505,7 @@ fn evaluate_simple_command(
         || dirstack_equal_subst_floor_present
         || unknown_cwd_floor_present
         || token_floor_present
+        || relative_path_floor_present
         || alias_floor_present
         || git_config_smuggled_present
     {
@@ -4842,6 +4901,56 @@ fn scan_token_floor(
         ),
         rule.deny_message().cloned(),
     ))
+}
+
+/// Issue #748: `Some(Ask, reason)` when this command assigns `PATH` (a prefix
+/// assignment, or an `export`/`declare`/... word) a value with an empty or
+/// relative literal component, which makes a later command name resolve to a
+/// planted file in the working directory. Components that begin with an
+/// expansion or `~` are not judged: `PATH=$HOME/bin:$PATH` stays quiet.
+fn scan_relative_path_floor(command: &SimpleCommand) -> Option<(Decision, String)> {
+    let skeleton_of = |word: &Word| word_literal_skeletons(word).unwrap_or_default();
+    let mut values: Vec<String> = Vec::new();
+    for assignment in &command.assignments {
+        if assignment.name == "PATH"
+            && let AssignmentValue::Scalar(word) = &assignment.value
+        {
+            values.extend(skeleton_of(word));
+        }
+    }
+    let declares = command.words.first().is_some_and(|first| {
+        skeleton_of(first).iter().any(|name| {
+            matches!(
+                name.as_str(),
+                "export" | "declare" | "typeset" | "local" | "readonly" | "env"
+            )
+        })
+    });
+    if declares {
+        for skeleton in command.words.iter().flat_map(skeleton_of) {
+            if let Some(value) = skeleton
+                .strip_prefix("PATH=")
+                .or_else(|| skeleton.strip_prefix("PATH+="))
+            {
+                values.push(value.to_string());
+            }
+        }
+    }
+    values
+        .iter()
+        .any(|value| {
+            value
+                .split(':')
+                .any(|component| !component.starts_with(['/', '~', TOKEN_SCAN_SENTINEL]))
+        })
+        .then(|| {
+            (
+                Decision::Ask,
+                "PATH is given an empty or relative component, so a command name may resolve to \
+                 a file in the working directory"
+                    .to_string(),
+            )
+        })
 }
 
 /// Applies [`scan_token_floor`]'s floor to `verdict` (see [`apply_floor`]'s
@@ -8883,8 +8992,11 @@ fn is_interpreter_sink_direct(stage: &[NormalizedWord]) -> bool {
         return false;
     };
     let name = name.as_ref();
-    if is_pipeline_interpreter(name) {
+    if is_pipeline_interpreter(name) || is_gated_stdin_sink(name, rest) {
         return true;
+    }
+    if TRAP_BUILTIN.contains(&name) {
+        return trap_action_runs_interpreter(rest);
     }
     if !matches!(name, "source" | ".") {
         return false;
@@ -8898,6 +9010,71 @@ fn is_interpreter_sink_direct(stage: &[NormalizedWord]) -> bool {
         Some(Resolution::Unresolvable(_)) => true,
         None => false,
     }
+}
+
+/// Commands that run stdin as code only when an operand names it
+/// (`make -f -`, `crontab -`, `Rscript -`, `bun run -`); a name alone cannot
+/// be a sink, or every `... | make` would ask.
+const STDIN_OPERAND_SINKS: &[&str] = &["make", "gmake", "crontab", "rscript", "bun"];
+
+/// Container and cluster CLIs whose `exec`/`run` subcommand hands stdin to a
+/// process inside; the process may be a shell.
+const CONTAINER_EXEC_CLIS: &[&str] = &["docker", "podman", "nerdctl", "kubectl", "oc"];
+
+/// Whether `name` with arguments `rest` is a sink only because of those
+/// arguments (issue #748). An unresolvable argument fails closed, as it does
+/// for `source`/`.`.
+fn is_gated_stdin_sink(name: &str, rest: &[NormalizedWord]) -> bool {
+    let operand_sink = STDIN_OPERAND_SINKS.contains(&name);
+    let container_sink = CONTAINER_EXEC_CLIS.contains(&name);
+    if !operand_sink && !container_sink {
+        return false;
+    }
+    rest.iter().any(|word| match word.resolution() {
+        Resolution::Unresolvable(_) => true,
+        Resolution::Resolved(text) if operand_sink => names_stdin(text),
+        Resolution::Resolved(text) => matches!(text.as_str(), "exec" | "run"),
+    })
+}
+
+/// Whether option word `text` is, or carries as its value, a stdin alias:
+/// `-`, `-f-`, `--file=/dev/stdin`.
+fn names_stdin(text: &str) -> bool {
+    if is_stdin_alias_path(text) {
+        return true;
+    }
+    if let Some(long) = text.strip_prefix("--") {
+        return long
+            .split_once('=')
+            .is_some_and(|(_, value)| is_stdin_alias_path(value));
+    }
+    text.strip_prefix('-')
+        .is_some_and(|short| short.get(1..).is_some_and(is_stdin_alias_path))
+}
+
+/// Whether `trap`'s action (the first word after its options) runs an
+/// interpreter, `eval`, or something unresolvable: the action fires in the
+/// pipeline stage and can read the pipe.
+fn trap_action_runs_interpreter(rest: &[NormalizedWord]) -> bool {
+    let Some(action) = trap_action_index(rest).and_then(|index| rest.get(index)) else {
+        return false;
+    };
+    let script = match action.resolution() {
+        Resolution::Unresolvable(_) => return true,
+        Resolution::Resolved(script) if script.is_empty() || script == "-" => return false,
+        Resolution::Resolved(script) => script,
+    };
+    script
+        .split([';', '&', '|', '\n', '(', ')', '{', '}'])
+        .any(|segment| {
+            let words: Vec<NormalizedWord> = segment
+                .split_whitespace()
+                .map(|token| NormalizedWord::resolved(token.replace(['\'', '"', '\\'], "")))
+                .collect();
+            crate::rules::effective_command(&words).is_some_and(|(name, _)| {
+                EVAL_BUILTIN.contains(&name.as_ref()) || is_interpreter_sink_direct(&words)
+            })
+        })
 }
 
 /// What the shell strings a wrapper chain hands to a shell (`flock -c`,

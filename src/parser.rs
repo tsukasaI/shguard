@@ -436,8 +436,11 @@ fn convert_extended_test(
 ) -> Result<ExtendedTest, ParseError> {
     let mut words = Vec::new();
     collect_extended_test_words(&test.expr, &mut words, 0)?;
+    let mut arithmetic_operands = Vec::new();
+    collect_arithmetic_operands(&test.expr, &mut arithmetic_operands)?;
     Ok(ExtendedTest {
         words,
+        arithmetic_operands,
         redirections: convert_redirect_list(redirects)?,
     })
 }
@@ -486,6 +489,41 @@ fn collect_extended_test_words(
         bast::ExtendedTestExpr::BinaryTest(_, left, right) => {
             words.push(convert_word(left)?);
             words.push(convert_word(right)?);
+        }
+    }
+    Ok(())
+}
+
+/// The operands of `-eq`/`-ne`/`-lt`/`-le`/`-gt`/`-ge`, which bash evaluates
+/// as arithmetic expressions. Recursion depth was already capped by
+/// [`collect_extended_test_words`], which runs first and fails on a deeper
+/// tree.
+fn collect_arithmetic_operands(
+    expr: &bast::ExtendedTestExpr,
+    out: &mut Vec<Word>,
+) -> Result<(), ParseError> {
+    match expr {
+        bast::ExtendedTestExpr::And(left, right) | bast::ExtendedTestExpr::Or(left, right) => {
+            collect_arithmetic_operands(left, out)?;
+            collect_arithmetic_operands(right, out)?;
+        }
+        bast::ExtendedTestExpr::Not(inner) | bast::ExtendedTestExpr::Parenthesized(inner) => {
+            collect_arithmetic_operands(inner, out)?;
+        }
+        bast::ExtendedTestExpr::UnaryTest(..) => {}
+        bast::ExtendedTestExpr::BinaryTest(predicate, left, right) => {
+            if matches!(
+                predicate,
+                bast::BinaryPredicate::ArithmeticEqualTo
+                    | bast::BinaryPredicate::ArithmeticNotEqualTo
+                    | bast::BinaryPredicate::ArithmeticLessThan
+                    | bast::BinaryPredicate::ArithmeticLessThanOrEqualTo
+                    | bast::BinaryPredicate::ArithmeticGreaterThan
+                    | bast::BinaryPredicate::ArithmeticGreaterThanOrEqualTo
+            ) {
+                out.push(convert_word(left)?);
+                out.push(convert_word(right)?);
+            }
         }
     }
     Ok(())

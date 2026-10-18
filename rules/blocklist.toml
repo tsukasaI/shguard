@@ -1105,7 +1105,7 @@ sources = ["curl", "wget"]
 # (`source /dev/stdin`), which name-only sink matching can't express, so
 # this over-approximates the same way `pwsh` already does in
 # EXTRA_PIPELINE_INTERPRETERS.
-sinks = ["sh", "bash", "zsh", "dash", "fish", "ksh", "tcsh", "csh", "ash", "source", "."]
+sinks = ["sh", "bash", "zsh", "dash", "fish", "ksh", "tcsh", "csh", "ash", "mksh", "yash", "rbash", "source", "."]
 
 # The piped spelling of the same "delete every match" effect the two `{}`
 # placeholder rules and `find-delete` already Block: with `xargs` the

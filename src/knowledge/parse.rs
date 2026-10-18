@@ -330,8 +330,15 @@ impl<'a> Parser<'a> {
     }
 
     fn option(&mut self, at: usize, token: &'a str) -> Flow {
+        let word = &token[1..];
+        let grammar = self.grammar;
         if token.starts_with("--") {
             self.long_option(at, token)
+        } else if let Some(name) = grammar.dash_words.iter().find(|name| **name == word) {
+            self.push(at, OptionName::Long(name), OptionValue::Absent);
+            Flow::Next(at + 1)
+        } else if let Some(name) = grammar.dash_word_values.iter().find(|name| **name == word) {
+            self.separate_value(OptionName::Long(name), at)
         } else {
             self.short_cluster(at, token)
         }
