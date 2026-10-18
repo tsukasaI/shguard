@@ -777,7 +777,7 @@ const WHOLE_RUN_TIMEOUT: Duration = Duration::from_secs(10);
 /// each argument, all `\037`-separated. Returns each invocation as
 /// `[command name, args...]`.
 fn parse_shim_log(log: &str) -> Vec<Vec<String>> {
-    log.lines()
+    log.split('\n')
         .filter(|line| !line.is_empty())
         .map(|line| {
             let mut parts = line.split('\u{1f}');
