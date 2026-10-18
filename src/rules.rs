@@ -5874,6 +5874,14 @@ pub(crate) fn chain_script_slots(stage: &[NormalizedWord]) -> Vec<ScriptSlot> {
                 ScriptValue::Unresolvable => ScriptSlot::Unresolvable,
             });
         }
+        // Not `ScriptSlot::Unresolvable`: `script` with neither `-c` nor a
+        // command starts `$SHELL` on a pty wired to its own stdin.
+        if hop.wrapper.name() == "script"
+            && hop.next().is_empty()
+            && hop.wrapper.shell_script_values(hop.tail).is_empty()
+        {
+            slots.push(ScriptSlot::Resolved("sh".to_string()));
+        }
         if let Some(flag) = hop.wrapper.split_string_option() {
             collect_split_string_slots(&hop, flag, &mut slots);
         }

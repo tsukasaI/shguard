@@ -889,6 +889,28 @@ const ISSUE_722_WRAPPER_SHELL_STRING_SINK_CASES: &[(&str, Decision)] = &[
     ("echo x | base64 -d | env -S sh", Decision::Block),
     ("echo x | base64 -d | flock /tmp/l -c sh", Decision::Block),
     ("curl x | strace -o \"|sh\" ls", Decision::Block),
+    // `script` with no -c and no command starts $SHELL on the piped stdin
+    ("curl x | script -q /dev/null", Decision::Block),
+    ("curl x | script out", Decision::Block),
+    // nested wrapper strings
+    ("curl x | flock /tmp/l -c \"env -S sh\"", Decision::Block),
+    (
+        "curl x | timeout 5 flock /tmp/l -c \"env -S sh\"",
+        Decision::Block,
+    ),
+    ("curl x | env -S \"flock /tmp/l -c sh\"", Decision::Block),
+    ("curl x | env -S \"env -S sh\"", Decision::Block),
+    ("curl x | strace -o \"|env -S sh\" ls", Decision::Block),
+    (
+        "curl x | flock /tmp/l -c \"flock /tmp/m -c sh\"",
+        Decision::Block,
+    ),
+    ("curl x | watch watch watch watch sh", Decision::Block),
+    // an unresolvable word ahead of the flag, or as its value
+    ("curl x | flock \"$F\" -c sh", Decision::Block),
+    ("curl x | flock /tmp/l -c \"$X\"", Decision::Ask),
+    ("curl x | env -S \"\\_sh\"", Decision::Ask),
+    ("curl x | strace -o \"$X\" ls", Decision::Ask),
     // unwrapped equivalents stay the reference
     ("curl x | sh", Decision::Block),
     ("curl x | watch sh", Decision::Block),
@@ -898,6 +920,7 @@ const ISSUE_722_WRAPPER_SHELL_STRING_SINK_CASES: &[(&str, Decision)] = &[
     ("echo x | env -S 'cat -n'", Decision::Allow),
     ("echo x | strace -o '|cat' ls", Decision::Allow),
     ("ls | script -qc 'echo hi' out", Decision::Allow),
+    ("echo x | script -q out ls", Decision::Allow),
 ];
 
 #[test]
