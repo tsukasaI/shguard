@@ -2640,6 +2640,7 @@ const DECISION_TABLES: &[(&str, &[(&str, Decision)])] = &[
     named_table!(PARAMETER_EXPANSION_OPERAND_CASES),
     named_table!(GIT_CONFIG_COMMAND_KEY_CASES),
     named_table!(OSASCRIPT_SCRIPT_PARALLEL_CASES),
+    named_table!(ISSUE_631_HEREDOC_IN_SUBSTITUTION_CASES),
 ];
 
 // Case-table-shaped consts that are deliberately not in DECISION_TABLES: the
@@ -2825,4 +2826,195 @@ fn guardfall_extglob_realistic_usage_is_not_rejected_by_the_backtrack_budget() {
         }
     }
     assert_eq!(shguard::analyze("ls +(a|b)").decision(), Decision::Allow);
+}
+
+/// Issue #631: an argument-position `$(...)` holding a heredoc takes its
+/// extent from the tokenizer, so a `)` or an apostrophe pair in the body
+/// neither truncates the inner command nor hides what follows the heredoc.
+/// The last two rows never terminate the heredoc inside the substitution
+/// and keep their Ask.
+const ISSUE_631_HEREDOC_IN_SUBSTITUTION_CASES: &[(&str, Decision)] = &[
+    (
+        "echo \"$(cat <<'EOF'\nfix: thing\n\nfirst item\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "git commit -m \"$(cat <<'EOF'\nfix: thing\n\nfirst item\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "gh pr create --title t --body \"$(cat <<'EOF'\nfix: thing\n\nfirst item\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "echo \"$(cat <<EOF\nfix: thing\n\nfirst item\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "git commit -m \"$(cat <<EOF\nfix: thing\n\nfirst item\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "gh pr create --title t --body \"$(cat <<EOF\nfix: thing\n\nfirst item\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "echo \"$(cat <<'EOF'\nfix: thing\n\n1) first item\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "git commit -m \"$(cat <<'EOF'\nfix: thing\n\n1) first item\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "gh pr create --title t --body \"$(cat <<'EOF'\nfix: thing\n\n1) first item\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "echo \"$(cat <<EOF\nfix: thing\n\n1) first item\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "git commit -m \"$(cat <<EOF\nfix: thing\n\n1) first item\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "gh pr create --title t --body \"$(cat <<EOF\nfix: thing\n\n1) first item\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "echo \"$(cat <<'EOF'\nit doesn't matter (the dog's bone) here\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "git commit -m \"$(cat <<'EOF'\nit doesn't matter (the dog's bone) here\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "gh pr create --title t --body \"$(cat <<'EOF'\nit doesn't matter (the dog's bone) here\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "echo \"$(cat <<EOF\nit doesn't matter (the dog's bone) here\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "git commit -m \"$(cat <<EOF\nit doesn't matter (the dog's bone) here\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "gh pr create --title t --body \"$(cat <<EOF\nit doesn't matter (the dog's bone) here\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    ("echo \"$(cat <<'EOF'\n(x\nEOF\n)\"", Decision::Allow),
+    (
+        "git commit -m \"$(cat <<'EOF'\n(x\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "gh pr create --title t --body \"$(cat <<'EOF'\n(x\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    ("echo \"$(cat <<EOF\n(x\nEOF\n)\"", Decision::Allow),
+    ("git commit -m \"$(cat <<EOF\n(x\nEOF\n)\"", Decision::Allow),
+    (
+        "gh pr create --title t --body \"$(cat <<EOF\n(x\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    ("echo \"$(cat <<'EOF'\ndon't\nEOF\n)\"", Decision::Allow),
+    (
+        "git commit -m \"$(cat <<'EOF'\ndon't\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "gh pr create --title t --body \"$(cat <<'EOF'\ndon't\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    ("echo \"$(cat <<EOF\ndon't\nEOF\n)\"", Decision::Allow),
+    (
+        "git commit -m \"$(cat <<EOF\ndon't\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "gh pr create --title t --body \"$(cat <<EOF\ndon't\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    ("echo \"$(cat <<'EOF'\nsay \"hi\nEOF\n)\"", Decision::Allow),
+    (
+        "git commit -m \"$(cat <<'EOF'\nsay \"hi\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "gh pr create --title t --body \"$(cat <<'EOF'\nsay \"hi\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    ("echo \"$(cat <<EOF\nsay \"hi\nEOF\n)\"", Decision::Allow),
+    (
+        "git commit -m \"$(cat <<EOF\nsay \"hi\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "gh pr create --title t --body \"$(cat <<EOF\nsay \"hi\nEOF\n)\"",
+        Decision::Allow,
+    ),
+    (
+        "echo \"$(cat <<'EOF'\nx)\nEOF\nrm -rf /\n)\"",
+        Decision::Block,
+    ),
+    (
+        "git commit -m \"$(cat <<'EOF'\nx)\nEOF\nrm -rf /\n)\"",
+        Decision::Block,
+    ),
+    (
+        "gh pr create --title t --body \"$(cat <<'EOF'\nx)\nEOF\nrm -rf /\n)\"",
+        Decision::Block,
+    ),
+    (
+        "echo \"$(cat <<EOF\nx)\nEOF\nrm -rf /\n)\"",
+        Decision::Block,
+    ),
+    (
+        "git commit -m \"$(cat <<EOF\nx)\nEOF\nrm -rf /\n)\"",
+        Decision::Block,
+    ),
+    (
+        "gh pr create --title t --body \"$(cat <<EOF\nx)\nEOF\nrm -rf /\n)\"",
+        Decision::Block,
+    ),
+    (
+        "echo \"$(cat <<'EOF'\nx\nEOF\nrm -rf /\n)\"",
+        Decision::Block,
+    ),
+    (
+        "git commit -m \"$(cat <<'EOF'\nx\nEOF\nrm -rf /\n)\"",
+        Decision::Block,
+    ),
+    (
+        "gh pr create --title t --body \"$(cat <<'EOF'\nx\nEOF\nrm -rf /\n)\"",
+        Decision::Block,
+    ),
+    ("echo \"$(cat <<EOF\nx\nEOF\nrm -rf /\n)\"", Decision::Block),
+    (
+        "git commit -m \"$(cat <<EOF\nx\nEOF\nrm -rf /\n)\"",
+        Decision::Block,
+    ),
+    (
+        "gh pr create --title t --body \"$(cat <<EOF\nx\nEOF\nrm -rf /\n)\"",
+        Decision::Block,
+    ),
+    ("echo \"$(cat <<'EOF'\nx)\n)\"", Decision::Ask),
+    ("echo \"$(cat <<'EOF'\nx\nEOF)\"", Decision::Ask),
+];
+
+#[test]
+fn guardfall_issue_631_heredoc_in_command_substitution_cases() {
+    for (command, expected) in ISSUE_631_HEREDOC_IN_SUBSTITUTION_CASES {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
 }

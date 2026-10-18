@@ -145,6 +145,24 @@
 {"command":"dd of=/etc/cron.d/x if=evil","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"dd of=/etc/passwd if=/dev/zero","decision":"Block","deny_message":null,"matched_rule":"dd-write-device"}
 {"command":"dd of=/etc/zsh/zshrc if=evil","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"echo \"$(cat <<'EOF'\n(x\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo \"$(cat <<'EOF'\ndon't\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo \"$(cat <<'EOF'\nfix: thing\n\n1) first item\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo \"$(cat <<'EOF'\nfix: thing\n\nfirst item\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo \"$(cat <<'EOF'\nit doesn't matter (the dog's bone) here\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo \"$(cat <<'EOF'\nsay \"hi\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo \"$(cat <<'EOF'\nx\nEOF\nrm -rf /\n)\"","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo \"$(cat <<'EOF'\nx\nEOF)\"","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"echo \"$(cat <<'EOF'\nx)\n)\"","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"echo \"$(cat <<'EOF'\nx)\nEOF\nrm -rf /\n)\"","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo \"$(cat <<EOF\n(x\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo \"$(cat <<EOF\ndon't\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo \"$(cat <<EOF\nfix: thing\n\n1) first item\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo \"$(cat <<EOF\nfix: thing\n\nfirst item\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo \"$(cat <<EOF\nit doesn't matter (the dog's bone) here\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo \"$(cat <<EOF\nsay \"hi\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo \"$(cat <<EOF\nx\nEOF\nrm -rf /\n)\"","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo \"$(cat <<EOF\nx)\nEOF\nrm -rf /\n)\"","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"echo \"$X (see: y)\"","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"echo \"${ rm -rf ~; }\"","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (unresolved `$` expansion form (zsh flags/short forms such as ${(e)x}, ${=x}, $=x, $~x, or a ${ command; } substitution)); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
 {"command":"echo \"${x%'$(rm -rf ~)'}\"","decision":"Block","deny_message":null,"matched_rule":null}
@@ -334,6 +352,22 @@
 {"command":"fish -n script.fish","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"fish script.fish -c 'rm -rf /'","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"gfind . -print0 | xargs -0 rm -f","decision":"Block","deny_message":null,"matched_rule":"find-pipe-rm-force"}
+{"command":"gh pr create --title t --body \"$(cat <<'EOF'\n(x\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"gh pr create --title t --body \"$(cat <<'EOF'\ndon't\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"gh pr create --title t --body \"$(cat <<'EOF'\nfix: thing\n\n1) first item\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"gh pr create --title t --body \"$(cat <<'EOF'\nfix: thing\n\nfirst item\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"gh pr create --title t --body \"$(cat <<'EOF'\nit doesn't matter (the dog's bone) here\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"gh pr create --title t --body \"$(cat <<'EOF'\nsay \"hi\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"gh pr create --title t --body \"$(cat <<'EOF'\nx\nEOF\nrm -rf /\n)\"","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"gh pr create --title t --body \"$(cat <<'EOF'\nx)\nEOF\nrm -rf /\n)\"","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"gh pr create --title t --body \"$(cat <<EOF\n(x\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"gh pr create --title t --body \"$(cat <<EOF\ndon't\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"gh pr create --title t --body \"$(cat <<EOF\nfix: thing\n\n1) first item\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"gh pr create --title t --body \"$(cat <<EOF\nfix: thing\n\nfirst item\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"gh pr create --title t --body \"$(cat <<EOF\nit doesn't matter (the dog's bone) here\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"gh pr create --title t --body \"$(cat <<EOF\nsay \"hi\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"gh pr create --title t --body \"$(cat <<EOF\nx\nEOF\nrm -rf /\n)\"","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"gh pr create --title t --body \"$(cat <<EOF\nx)\nEOF\nrm -rf /\n)\"","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"gh pr create -t \"feat: add floor (+func)\" -b x","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"git $X -c core.fsmonitor=x status","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"git --config-env core.editor=ENVVAR commit","decision":"Ask","deny_message":null,"matched_rule":null}
@@ -398,6 +432,22 @@
 {"command":"git commit --amend","decision":"Block","deny_message":null,"matched_rule":"git-commit-amend"}
 {"command":"git commit --no-ver -m x","decision":"Block","deny_message":null,"matched_rule":"git-commit-no-verify-short"}
 {"command":"git commit --no-verify -m 'skip hooks'","decision":"Block","deny_message":null,"matched_rule":"git-commit-no-verify-short"}
+{"command":"git commit -m \"$(cat <<'EOF'\n(x\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git commit -m \"$(cat <<'EOF'\ndon't\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git commit -m \"$(cat <<'EOF'\nfix: thing\n\n1) first item\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git commit -m \"$(cat <<'EOF'\nfix: thing\n\nfirst item\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git commit -m \"$(cat <<'EOF'\nit doesn't matter (the dog's bone) here\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git commit -m \"$(cat <<'EOF'\nsay \"hi\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git commit -m \"$(cat <<'EOF'\nx\nEOF\nrm -rf /\n)\"","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"git commit -m \"$(cat <<'EOF'\nx)\nEOF\nrm -rf /\n)\"","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"git commit -m \"$(cat <<EOF\n(x\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git commit -m \"$(cat <<EOF\ndon't\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git commit -m \"$(cat <<EOF\nfix: thing\n\n1) first item\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git commit -m \"$(cat <<EOF\nfix: thing\n\nfirst item\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git commit -m \"$(cat <<EOF\nit doesn't matter (the dog's bone) here\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git commit -m \"$(cat <<EOF\nsay \"hi\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git commit -m \"$(cat <<EOF\nx\nEOF\nrm -rf /\n)\"","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"git commit -m \"$(cat <<EOF\nx)\nEOF\nrm -rf /\n)\"","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"git commit -m \"chore: bump deps (retest)\"","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"git commit -m \"docs: clarify wording (e.g.)\"","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"git commit -m \"fix(rules): keep x (see: y)\"","decision":"Allow","deny_message":null,"matched_rule":null}

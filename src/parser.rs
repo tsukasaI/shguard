@@ -75,8 +75,8 @@ use crate::ast::{
     Pipeline, ProcessSubstitutionDirection, Redirection, Separator, SimpleCommand, Word, WordPiece,
 };
 use crate::syntax::compat::{self, catch_parser_panic};
-use crate::syntax::heredoc;
 use crate::syntax::{ParseError, parser_options, reject_unresolved_dollar_run};
+use crate::syntax::{heredoc, substitution};
 
 /// Parses a raw shell command line into shguard's AST.
 ///
@@ -733,6 +733,15 @@ fn convert_heredoc(heredoc: &bast::IoHereDocument) -> Result<Redirection, ParseE
 /// docs/adr/0001-parser-crate.md's evidence for construct #15).
 fn convert_word(word: &bast::Word) -> Result<Word, ParseError> {
     let raw = word.value.as_str();
+    let Some(masked) = substitution::mask(raw)? else {
+        return convert_unmasked_word(raw);
+    };
+    let mut converted = convert_unmasked_word(&masked.text)?;
+    masked.restore(&mut converted)?;
+    Ok(converted)
+}
+
+fn convert_unmasked_word(raw: &str) -> Result<Word, ParseError> {
     if has_pid_dollars_before_brace(raw) {
         return Err(ParseError::unsupported(
             "`$$` followed by `{` (brush reads the second `$` as a `${...}` opener, bash as the PID)",
