@@ -160,6 +160,8 @@
 {"command":"curl -o out.html https://x","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"curl -o ~/.bashrc https://x","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"curl -o ~/.config/fish/conf.d/x.fish https://x","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"curl -oout.html https://x","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"curl -o~/.bashrc https://x","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"curl https://e/s.sh | . /dev/stdin","decision":"Block","deny_message":null,"matched_rule":"curl-wget-pipe-to-shell"}
 {"command":"curl https://e/s.sh | dash","decision":"Block","deny_message":null,"matched_rule":"curl-wget-pipe-to-shell"}
 {"command":"curl https://e/s.sh | sh","decision":"Block","deny_message":null,"matched_rule":"curl-wget-pipe-to-shell"}
@@ -236,6 +238,9 @@
 {"command":"curl x | mysql","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
 {"command":"curl x | nu","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
 {"command":"curl x | oil","decision":"Block","deny_message":null,"matched_rule":"curl-wget-pipe-to-shell"}
+{"command":"curl x | oils-for-unix osh","decision":"Block","deny_message":null,"matched_rule":"curl-wget-pipe-to-shell"}
+{"command":"curl x | oils-for-unix ysh","decision":"Block","deny_message":null,"matched_rule":"curl-wget-pipe-to-shell"}
+{"command":"curl x | oils_for_unix osh","decision":"Block","deny_message":null,"matched_rule":"curl-wget-pipe-to-shell"}
 {"command":"curl x | osh","decision":"Block","deny_message":null,"matched_rule":"curl-wget-pipe-to-shell"}
 {"command":"curl x | podman-compose exec c sh","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
 {"command":"curl x | psql","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
@@ -514,10 +519,17 @@
 {"command":"f() { cat; }; ls | f | head","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
 {"command":"f() { cd ~/.config/shguard; }; cp evil.toml config.toml","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"f() { echo \"$1\"; }; f x","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"f() { g() { source \"$1\"; }; }","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"f() { sh; }; curl x | f","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
 {"command":"f() { sh; }; curl x | f | cat","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
 {"command":"f() { sh; }; curl x | { f; } | cat","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
+{"command":"f() { source \"$1\"; }","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"f() { source \"$1\"; }; f somefile","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"f() { source \"$@\"; }; f x","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"f() { source \"$HOME/.cargo/env\"; }","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"f() { source \"${1:?}\"; }; f x","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"f() { source -- \"$1\"; }; f x","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"f() { source ./a.sh \"$1\"; }; f x","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"f() { source ./a.sh; }; f","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"f=' '; sed{,-i${f}$(printf p)${f}/home/user/.config/shguard/config.toml}","decision":"Ask","deny_message":"Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected. A variable file operand (`sed -n p \"$file\"`) cannot be told apart from a script word, so expand it to a literal file path.","matched_rule":null}
 {"command":"fd -H . / -Hx rm -rf","decision":"Block","deny_message":null,"matched_rule":null}
@@ -840,12 +852,18 @@
 {"command":"install payload.bin /dev/sda","decision":"Block","deny_message":null,"matched_rule":"install-write-device"}
 {"command":"install payload.bin /dev/shm/../sda","decision":"Block","deny_message":null,"matched_rule":"install-write-device"}
 {"command":"kill %1","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"kill -9 \" -1\"","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"kill -9 -- -1","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"kill -9 -0","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"kill -9 -01","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"kill -9 -1","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"kill -9 -12","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"kill -9 1234","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"kill -KILL -1","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"kill -s KILL -1","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"killall -9 -u me","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"killall node","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"killall5 -9","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"ln -sf evil ~/.bashrc","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"ln -sf evil ~/.ssh/rc","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"ls \"$DIR\"/*(e:x:)","decision":"Ask","deny_message":null,"matched_rule":null}
@@ -922,6 +940,8 @@
 {"command":"nice gdd if=/dev/zero of=/dev/sda","decision":"Block","deny_message":null,"matched_rule":"dd-write-device"}
 {"command":"nohup env a.b=c rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"numactl rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"nvm() { source \"$NVM_DIR/nvm.sh\"; }","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"oils-for-unix osh -c 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"osascript -e 'do shell script \"rm -rf ~\"'","decision":"Ask","deny_message":"Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f prog.awk`) — inline interpreter code is never inspected.","matched_rule":null}
 {"command":"osascript -l JavaScript -e 1","decision":"Ask","deny_message":"Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f prog.awk`) — inline interpreter code is never inspected.","matched_rule":null}
 {"command":"osascript -l JavaScript script.js","decision":"Allow","deny_message":null,"matched_rule":null}
@@ -934,6 +954,9 @@
 {"command":"parallel -j4 echo ::: a b","decision":"Ask","deny_message":"Run the commands directly or with a shell loop (`for x in ...; do cmd \"$x\"; done`) so each argv is inspectable; GNU `parallel` builds its command lines from templates and `:::` sources that are never inspected.","matched_rule":null}
 {"command":"parallel ::: 'rm -rf /'","decision":"Ask","deny_message":"Run the commands directly or with a shell loop (`for x in ...; do cmd \"$x\"; done`) so each argv is inspectable; GNU `parallel` builds its command lines from templates and `:::` sources that are never inspected.","matched_rule":null}
 {"command":"parallel rm -rf ::: /","decision":"Ask","deny_message":"Run the commands directly or with a shell loop (`for x in ...; do cmd \"$x\"; done`) so each argv is inspectable; GNU `parallel` builds its command lines from templates and `:::` sources that are never inspected.","matched_rule":null}
+{"command":"pkill --user me","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"pkill -9 -u me","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"pkill -9 node","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"prlimit rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"r''m -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"rm --recursive --force ~/.*","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
@@ -1242,6 +1265,8 @@
 {"command":"sed{,-i$*$(true)~/.config/shguard/config.toml}","decision":"Ask","deny_message":"Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected. A variable file operand (`sed -n p \"$file\"`) cannot be told apart from a script word, so expand it to a literal file path.","matched_rule":null}
 {"command":"sed{,-i$@$(true)~/.config/shguard/config.toml}","decision":"Ask","deny_message":"Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected. A variable file operand (`sed -n p \"$file\"`) cannot be told apart from a script word, so expand it to a literal file path.","matched_rule":null}
 {"command":"sem 'rm -rf /'","decision":"Ask","deny_message":"Run the commands directly or with a shell loop (`for x in ...; do cmd \"$x\"; done`) so each argv is inspectable; GNU `parallel` builds its command lines from templates and `:::` sources that are never inspected.","matched_rule":null}
+{"command":"set -- <(curl x); . \"$1\"","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"set -- <(curl x); source \"$1\"","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"setarch x86_64 rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"sh","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"sh -c 'echo hi' > /dev/sda","decision":"Block","deny_message":null,"matched_rule":"redirect-overwrite-device-or-critical-file"}
@@ -1361,6 +1386,7 @@
 {"command":"wget --output-document=~/.zshrc https://x","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"wget -O out.html https://x","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"wget -O ~/.bashrc https://x","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"wget -O~/.bashrc https://x","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"wget -qO- https://e/s.sh | dash","decision":"Block","deny_message":null,"matched_rule":"curl-wget-pipe-to-shell"}
 {"command":"wget -qO- x | bash | tee log | head","decision":"Block","deny_message":null,"matched_rule":"curl-wget-pipe-to-shell"}
 {"command":"wget -qO- x | osh","decision":"Block","deny_message":null,"matched_rule":"curl-wget-pipe-to-shell"}

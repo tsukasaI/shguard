@@ -476,10 +476,6 @@ struct AnalysisCtx<'a> {
     /// Simple-command evaluations left for literal `for` lists on the whole
     /// line, shared by every nesting level and recursion.
     loop_budget: &'a Cell<usize>,
-    /// Whether this command sits in a function definition's body, where an
-    /// unresolvable `source` operand is most often a parameter (`$1`) that
-    /// the call site fills in.
-    in_function_body: bool,
 }
 
 impl<'a> AnalysisCtx<'a> {
@@ -491,7 +487,6 @@ impl<'a> AnalysisCtx<'a> {
             bindings_trusted: true,
             process_substitutions_standalone: true,
             loop_budget,
-            in_function_body: false,
         }
     }
 
@@ -2280,10 +2275,6 @@ fn evaluate_function_definition(
     let mut isolated = cwd.clone();
     isolated.symlink_untrusted = true;
     let mut env = Env::opaque();
-    let ctx = AnalysisCtx {
-        in_function_body: true,
-        ..ctx
-    };
     let verdict =
         evaluate_compound_command(&func.body, &mut env, ExecScope::Parent, ctx, &mut isolated);
     if compound_command_may_change_cwd(&func.body) {
@@ -4128,31 +4119,6 @@ fn evaluate_simple_command_core(
         );
     }
 
-    // Rule 6f (issue #750): `source "$1"` in a function body sources
-    // whatever file the call site passes.
-    if let Some((name, rest_words)) = effective
-        && ctx.in_function_body
-        && source_operand_is_unresolvable(name, rest_words)
-    {
-        let outcome = Verdict::ask(
-            Reason::new(
-                "`source`/`.` in a function body names a file that cannot be resolved \
-                 statically (a parameter such as `$1`), so the sourced script is unknown",
-            ),
-            argv.clone(),
-        );
-        return apply_opaque_kind_floor(
-            apply_substitution_floor(
-                apply_escalation_floor(
-                    apply_outer_rule_block(outcome, rules, &argv, symlink_scope),
-                    escalation_floor,
-                ),
-                substitution_result,
-            ),
-            opaque_kind,
-        );
-    }
-
     // Rule 6d (issue #693): `trap '<action>' SIGSPEC` stores shell code the
     // current shell runs later (`EXIT` on shell exit), so recurse it.
     if let Some((name, rest_words)) = effective
@@ -4220,6 +4186,30 @@ fn evaluate_simple_command_core(
             );
         }
         crate::rules::BuiltinLoadableLibrary::Absent => {}
+    }
+
+    // Rule 6f (issue #750): `source "$1"` sources whatever file a positional
+    // parameter holds (a function's argument, or `set -- <(curl x)`).
+    if let Some((name, rest_words)) = effective
+        && source_operand_is_positional(name, rest_words, &command.words)
+    {
+        let outcome = Verdict::ask(
+            Reason::new(
+                "`source`/`.` names its file through a positional parameter (`$1`, `$@`, \
+                 ...), so the sourced script is unknown",
+            ),
+            argv.clone(),
+        );
+        return apply_opaque_kind_floor(
+            apply_substitution_floor(
+                apply_escalation_floor(
+                    apply_outer_rule_block(outcome, rules, &argv, symlink_scope),
+                    escalation_floor,
+                ),
+                substitution_result,
+            ),
+            opaque_kind,
+        );
     }
 
     // Rule 6b: `python -c`/`perl -e`/`node -e` — no introspection of
@@ -9333,16 +9323,42 @@ fn is_interpreter_sink_direct(stage: &[NormalizedWord]) -> bool {
 }
 
 /// Whether `name` is `source`/`.` and its file operand (after an optional
-/// `--`) is unresolvable.
-fn source_operand_is_unresolvable(name: &str, rest: &[NormalizedWord]) -> bool {
+/// `--`) mentions a positional parameter. `rest` is the normalized argument
+/// list; when it still lines up one-to-one with the raw `words` the operand's
+/// own raw word is checked, otherwise every raw word is (over-asks, never
+/// allows).
+fn source_operand_is_positional(name: &str, rest: &[NormalizedWord], words: &[Word]) -> bool {
     if !matches!(name, "source" | ".") {
         return false;
     }
-    let operand = match rest.first().map(NormalizedWord::resolution) {
-        Some(Resolution::Resolved(v)) if v == "--" => rest.get(1).map(NormalizedWord::resolution),
-        other => other,
+    let skip = match rest.first().map(NormalizedWord::resolution) {
+        Some(Resolution::Resolved(v)) if v == "--" => 1,
+        _ => 0,
     };
-    matches!(operand, Some(Resolution::Unresolvable(_)))
+    let Some(first_raw) = words.len().checked_sub(rest.len()) else {
+        return words.iter().any(word_mentions_positional);
+    };
+    let raw_args = &words[first_raw..];
+    match raw_args.get(skip) {
+        Some(word) => word_mentions_positional(word),
+        None => false,
+    }
+}
+
+fn word_mentions_positional(word: &Word) -> bool {
+    fn has_positional(piece: &WordPiece) -> bool {
+        let is_positional = |name: &str| {
+            matches!(name, "@" | "*")
+                || (name.bytes().all(|b| b.is_ascii_digit()) && !name.is_empty() && name != "0")
+        };
+        match piece {
+            WordPiece::ParameterExpansion(name)
+            | WordPiece::ModifiedParameterExpansion { name, .. } => is_positional(name),
+            WordPiece::DoubleQuoted(pieces) => pieces.iter().any(has_positional),
+            _ => false,
+        }
+    }
+    word.0.iter().any(has_positional)
 }
 
 /// Commands that run stdin as code only when an operand names it

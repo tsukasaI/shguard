@@ -24,9 +24,11 @@ All notable changes to this project are documented in this file.
   `curl x | oil` Blocks. `nu` stays Ask.
 - `curl`/`wget` writing to a shell-init, cron, autostart or persistence
   file (`curl -o ~/.bashrc`, `--output`, `--output=`, `wget -O`,
-  `--output-document`) asks, like a redirect to the same file. `kill` with
-  pid `-1` (`kill -9 -1`) asks. `source`/`.` of an unresolvable file in a
-  function body (`f() { source "$1"; }`) asks.
+  `--output-document`, glued `-o~/.bashrc`) asks, like a redirect to the
+  same file. `kill` with pid `-1` (`kill -9 -1`), `killall5`, and `pkill`/
+  `killall` with `-u`/`--user` ask. `source`/`.` of a positional parameter
+  (`source "$1"`, in a function or after `set --`) asks. `oils-for-unix` is
+  a transparent wrapper (`curl x | oils-for-unix osh` Blocks).
 
 ### Compatibility notes
 
