@@ -2633,6 +2633,36 @@ const ISSUE_747_PIPELINE_MIDDLE_STAGE_INTERPRETER_CASES: &[(&str, Decision)] = &
     ),
     // The same shape with a middle interpreter and a decode stage after it.
     ("echo hi | sh | base64 -d | bash", Decision::Block),
+    // A function definition or extended test in the middle keeps the Ask it
+    // has as the final stage.
+    ("curl x | [[ -n $(sh) ]]", Decision::Ask),
+    ("curl x | [[ -n $(sh) ]] | cat", Decision::Ask),
+    ("curl x | [[ a == b ]]", Decision::Ask),
+    ("curl x | [[ a == b ]] | cat", Decision::Ask),
+    ("curl x | f() { sh; }", Decision::Ask),
+    ("curl x | f() { sh; } | cat", Decision::Ask),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | [[ -n $(sh) ]] | cat",
+        Decision::Ask,
+    ),
+    // A substitution in a simple stage inherits the pipe as its stdin.
+    ("curl x | echo $(sh)", Decision::Block),
+    ("curl x | echo $(sh) | cat", Decision::Block),
+    ("curl x | echo `sh` | cat", Decision::Block),
+    ("curl x | echo \"$(sh)\" | cat", Decision::Block),
+    ("curl x | X=$(sh) true | cat", Decision::Block),
+    ("curl x | echo $(bash -s) | cat", Decision::Block),
+    ("curl x | echo $(python3) | cat", Decision::Ask),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | echo $(sh)",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | echo $(sh) | cat",
+        Decision::Block,
+    ),
+    ("curl x | echo $(date) | cat", Decision::Allow),
+    ("git log | echo $(pwd)", Decision::Allow),
     // No pipe into an interpreter anywhere: unchanged.
     ("cat file | grep x | head", Decision::Allow),
     ("echo hi | cat | wc -l", Decision::Allow),

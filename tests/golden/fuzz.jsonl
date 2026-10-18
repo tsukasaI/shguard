@@ -172,7 +172,7 @@
 {"command":"$(printf '%s' 'echo')$IFScm0gLXJmIC8= | $'\\x62\\x61\\x73\\x65\\x36\\x34' ~- | s''h","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
 {"command":"$(printf '%s' 'echo')$IFScm0gLXJmIC8= | base64 ~+ | sh","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
 {"command":"$(printf '%s' 'echo')$IFScm0gLXJmIC8= | base64$IFS$'\\x7e\\x2d' | $(printf '%s' 'sh')","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
-{"command":"$(printf '%s' 'echo')$IFScm0gLXJmIC8= | {base64,}$IFS`printf '%s' '-d'` | `printf '%s' '`printf '%s' '{sh,}'`'`","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
+{"command":"$(printf '%s' 'echo')$IFScm0gLXJmIC8= | {base64,}$IFS`printf '%s' '-d'` | `printf '%s' '`printf '%s' '{sh,}'`'`","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"$(printf '%s' 'echo')$IFS~+ | `printf '%s' '$'\\x62\\x61\\x73\\x65\\x36\\x34''`$IFS-d | `printf '%s' '{sh,}'`","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
 {"command":"$(printf '%s' 'echo')$IFS~+ | `printf '%s' 'base64'` `printf '%s' '{-d,}'` | `printf '%s' 'sh'`","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
 {"command":"$(printf '%s' 'git') clean -fd","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
@@ -826,7 +826,7 @@
 {"command":"echo$IFS~+ | {,base64}$IFS{,-d} | {{sh,},}","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
 {"command":"echo$IFS~/\"\".config/shguard/config.toml | b''ase64 {-''d,} | {,sh}","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"echo$IFS~/.config/shguard/config.toml | $'\\x62\\x61\\x73\\x65\\x36\\x34'$IFS-d | `printf '%s' '$'\\x73\\x68''`","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
-{"command":"echo$IFS~/.config/shguard/config.toml | {base64,} $'\\x2d\\x64' | `printf '%s' '`printf '%s' 'sh'`'`","decision":"Ask","deny_message":"Rewrite the command without `$IFS`; there is no benign interactive use for it.","matched_rule":null}
+{"command":"echo$IFS~/.config/shguard/config.toml | {base64,} $'\\x2d\\x64' | `printf '%s' '`printf '%s' 'sh'`'`","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"f() { `printf '%s' 'cp'` $(printf '%s' 'evil.toml') target.toml; }; f","decision":"Ask","deny_message":"Run the substitution first, then call the resulting binary literally.","matched_rule":null}
 {"command":"f() { ca\"\"t {file,}; }; f","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"f() { cat <<EOF\n$($'\\x66\\x69\\x6e\\x64' /x -delete)\nEOF\n}; f","decision":"Block","deny_message":null,"matched_rule":null}
