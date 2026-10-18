@@ -977,6 +977,7 @@ fn evaluate_pipeline(
                     for word in assignment_words.chain(&simple.words) {
                         scan_word_for_heredoc_candidates(word, &mut scan);
                     }
+                    scan_redirections_for_heredoc_candidates(&simple.redirections, &mut scan);
                     let sinks = finish_stdin_sinks(scan, env);
                     if sinks.reader.is_some() || !sinks.commands.is_empty() {
                         substitution_sinks.push((index, sinks));
@@ -1015,9 +1016,21 @@ fn evaluate_pipeline(
                         &mut alternates,
                     ),
                 };
+                let calls_defined_function =
+                    crate::rules::effective_command(verdict.normalized_argv())
+                        .is_some_and(|(name, _)| env.defines_function(&name));
+                let kind = if calls_defined_function {
+                    let argv = verdict.normalized_argv().to_vec();
+                    StageKind::Compound(StdinSinks {
+                        reader: Some(argv.clone()),
+                        commands: vec![argv],
+                    })
+                } else {
+                    StageKind::Simple
+                };
                 shaped.push(PipelineStage {
                     argv: verdict.normalized_argv().to_vec(),
-                    kind: StageKind::Simple,
+                    kind,
                 });
                 if !alternates.is_empty() {
                     per_stage_alternates.push((index, alternates));
@@ -1108,12 +1121,7 @@ fn evaluate_pipeline(
     let stage_argvs: Vec<Vec<NormalizedWord>> =
         shaped.iter().map(|stage| stage.argv.clone()).collect();
     for (index, sinks) in substitution_sinks {
-        let mut candidate = stage_argvs[..index].to_vec();
-        candidate.push(Vec::new());
-        let stage_count = candidate.len();
-        if let Some(verdict) =
-            pipeline_shape_verdict(&candidate, rules, stage_count, &StageKind::Compound(sinks))
-        {
+        if let Some(verdict) = sink_stage_verdict(&stage_argvs[..index], sinks, rules) {
             worst = fold_worst(worst, verdict);
         }
     }
@@ -1279,7 +1287,7 @@ fn pipeline_shape_verdict(
         StageKind::Compound(_) => None,
         StageKind::Opaque if stage_count > 1 => Some(Verdict::ask(
             Reason::new(
-                "pipeline's final stage is a function definition or extended test; whether \
+                "a pipeline stage is a function definition or extended test; whether \
                  it acts as a data sink for the earlier stages cannot be determined \
                  structurally, so the pipeline-shape rule cannot apply here — treated as \
                  unknown, not safe",
@@ -1296,6 +1304,19 @@ fn pipeline_shape_verdict(
     }
 
     worst
+}
+
+/// [`pipeline_shape_verdict`] for `upstream` piped into a stage hidden behind
+/// `sinks` (a substitution body) that has no argv of its own.
+fn sink_stage_verdict(
+    upstream: &[Vec<NormalizedWord>],
+    sinks: StdinSinks,
+    rules: &Rules,
+) -> Option<Verdict> {
+    let mut candidate = upstream.to_vec();
+    candidate.push(Vec::new());
+    let stage_count = candidate.len();
+    pipeline_shape_verdict(&candidate, rules, stage_count, &StageKind::Compound(sinks))
 }
 
 /// The process substitutions that tie one pipeline stage to a command outside
@@ -1369,15 +1390,10 @@ fn process_substitution_sink_verdict(
         }
     };
     for body in &process_substitutions.sinks {
-        let mut candidate = through_stage.to_vec();
-        candidate.push(Vec::new());
-        let stage_count = candidate.len();
-        let sinks = StageKind::Compound(command_line_stdin_sinks(body, env));
-        fold(pipeline_shape_verdict(
-            &candidate,
+        fold(sink_stage_verdict(
+            through_stage,
+            command_line_stdin_sinks(body, env),
             rules,
-            stage_count,
-            &sinks,
         ));
     }
     if process_substitutions.stdin_sources.is_empty() {

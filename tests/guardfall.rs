@@ -2719,6 +2719,26 @@ const ISSUE_747_PIPELINE_MIDDLE_STAGE_INTERPRETER_CASES: &[(&str, Decision)] = &
         "echo cm0gLXJmIC8= | base64 -d | echo $(sh) | cat",
         Decision::Block,
     ),
+    // So does one in a redirect target.
+    ("curl x | cat > $(sh)", Decision::Block),
+    ("curl x | cat > $(sh) | cat", Decision::Block),
+    ("curl x | cat > \"$(sh)\" | cat", Decision::Block),
+    ("curl x | cat 2> $(sh) | cat", Decision::Block),
+    ("curl x | cat >> $(sh) | head", Decision::Block),
+    ("curl x | cat > `sh` | cat", Decision::Block),
+    ("curl x | true > /tmp/$(sh) | cat", Decision::Block),
+    ("curl x | cat < <(sh) | cat", Decision::Block),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | cat > $(sh) | cat",
+        Decision::Block,
+    ),
+    ("ls | cat > $(date +%F).log", Decision::Allow),
+    // A call to a function defined earlier on the line may run its body on
+    // the pipe.
+    ("f() { sh; }; curl x | f", Decision::Ask),
+    ("f() { sh; }; curl x | f | cat", Decision::Ask),
+    ("f() { sh; }; curl x | { f; } | cat", Decision::Ask),
+    ("f() { cat; }; ls | f | head", Decision::Ask),
     ("curl x | echo $(date) | cat", Decision::Allow),
     ("git log | echo $(pwd)", Decision::Allow),
     // No pipe into an interpreter anywhere: unchanged.
