@@ -133,7 +133,7 @@ pub(crate) fn classify(args: &[NormalizedWord]) -> Option<Unproven> {
 
 /// The text sed would run under one dialect reading: every `-e` value
 /// joined by newlines, else the first operand. `Ok(None)` for
-/// `--version`/`--help` (nothing runs). `Err(Safe)` is never produced.
+/// `--version`/`--help` with no `-e` (nothing runs). `Err(Safe)` is never produced.
 fn script_sources(args: &[NormalizedWord], dialect: Dialect) -> Result<Option<String>, Outcome> {
     let mut expressions: Vec<String> = Vec::new();
     let mut first_operand: Option<String> = None;
@@ -224,11 +224,11 @@ fn script_sources(args: &[NormalizedWord], dialect: Dialect) -> Result<Option<St
             }
         }
     }
-    if info_only {
-        return Ok(None);
-    }
     if !expressions.is_empty() {
         return Ok(Some(expressions.join("\n")));
+    }
+    if info_only {
+        return Ok(None);
     }
     first_operand.map(Some).ok_or(Outcome::Unparseable)
 }
@@ -244,7 +244,8 @@ enum LongKind {
     /// Its value is `=value` or the next word, and is not script text.
     TakesValue,
     Flag,
-    /// Nothing runs (`--version`, `--help`).
+    /// Nothing runs (`--version`, `--help`), but GNU compiles every earlier
+    /// `-e` first, so a `w` file is already open by then.
     Info,
 }
 
@@ -677,6 +678,19 @@ mod tests {
         assert_eq!(verdict(&["--bogus", "p", "f"]), Some(Unproven::Unlexable));
         assert_eq!(verdict(&["--version"]), None);
         assert_eq!(verdict(&["--help"]), None);
+    }
+
+    #[test]
+    fn expression_before_info_option_is_still_inspected() {
+        for args in [
+            &["-e", "w out", "--version"][..],
+            &["--expr=s/x/y/w out", "--h"],
+            &["-e", "w out", "--help", "f"],
+            &["--help", "-e", "w out"],
+        ] {
+            assert_eq!(verdict(args), Some(Unproven::Write), "{args:?}");
+        }
+        assert_eq!(verdict(&["-e", "p", "--help"]), None);
     }
 
     #[test]
