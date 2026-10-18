@@ -519,10 +519,13 @@
 {"command":"cat <<A <<B\nplain text\nA\nplain\nB","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"cat <<A <<B\ntext $($'\\x72\\x6d' $'\\x2d\\x72\\x66' .) text\nA\nplain\nB","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"cat <<A <<B\ntext $(tee$IFS~/.config/shguard/config.toml) text\nA\nplain\nB","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"cat <<EOF\n$( (echo hi)#x )\nrm -rf /)\nEOF","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"cat <<EOF\n$(( $(rm -rf /) 1 ))\nEOF","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"cat <<EOF\n$(echo \")\"; $'\\x73\\x65\\x64' {-i,} ~/.config/shguard/config.toml)\nEOF","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"cat <<EOF\n$(echo $'a\\'' # )\nrm -rf /)\nEOF","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"cat <<EOF\n$(echo $'it\\'s'; taskset$IFS0x1$IFSrm$IFS~/.config/shguard/config.toml$IFS/)\nEOF","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"cat <<EOF\n$(echo $(busybox $'\\x72\\x6d' -rf /))\nEOF","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"cat <<EOF\n$(echo \\'  # )\nrm -rf /)\nEOF","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"cat <<EOF\n$(echo \\) ; sed -i ~/.config/shguard/config.toml)\nEOF","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"cat <<EOF\n$(echo hi # )\nrm -rf /)\nEOF","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"cat <<EOF\n$(echo hi #)\nEOF","decision":"Ask","deny_message":null,"matched_rule":null}

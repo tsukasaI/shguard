@@ -132,25 +132,21 @@ pub(crate) fn decode_backquote_escapes(inner: &str) -> String {
 
 /// Not a comment-aware scan: brush's word-level command rule has no comment
 /// concept, so a `)` after a `#` closes the substitution here while bash
-/// treats it as comment text. Over-asks on any unquoted word-start `#`.
+/// treats it as comment text. Deliberately no quote tracking: every quote
+/// model disagrees with bash somewhere (`\'`, `$'a\''`, `(..)#`), so any
+/// word-start `#` is rejected even inside quotes, over-asking on e.g.
+/// `$(echo "# x")`.
 fn reject_comment_in_substitution(inner: &str) -> Result<(), ParseError> {
-    let mut quote: Option<char> = None;
     let mut prev: Option<char> = None;
     for c in inner.chars() {
-        match quote {
-            Some(q) if c == q => quote = None,
-            Some(_) => {}
-            None => {
-                if c == '\'' || c == '"' {
-                    quote = Some(c);
-                } else if c == '#'
-                    && prev.is_none_or(|p| p.is_whitespace() || matches!(p, ';' | '|' | '&' | '('))
-                {
-                    return Err(ParseError::unsupported(
-                        "`#` comment inside a heredoc command substitution",
-                    ));
-                }
-            }
+        if c == '#'
+            && prev.is_none_or(|p| {
+                p.is_whitespace() || matches!(p, ';' | '|' | '&' | '(' | ')' | '<' | '>')
+            })
+        {
+            return Err(ParseError::unsupported(
+                "`#` comment inside a heredoc command substitution",
+            ));
         }
         prev = Some(c);
     }

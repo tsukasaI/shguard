@@ -22616,6 +22616,9 @@ targets = [{ normalized_prefix = "~/.ssh" }]
             "cat <<EOF\n$\\\n(rm -rf /)\nEOF",
             "cat <<EOF\n`echo \"\\$(rm -rf /)\"`\nEOF",
             "true; echo `echo \"\\$(rm -rf /)\"`",
+            "cat <<EOF\n$( (echo hi)#x )\nrm -rf /)\nEOF",
+            "cat <<EOF\n$(echo \\'  # )\nrm -rf /)\nEOF",
+            "cat <<EOF\n$(echo $'a\\'' # )\nrm -rf /)\nEOF",
         ] {
             assert_ne!(
                 decide(command, "").decision(),
