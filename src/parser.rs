@@ -735,8 +735,9 @@ fn odd_trailing_backslashes(line: &str) -> bool {
 
 /// Whether bash, which splices `\<newline>` out of an expanding heredoc
 /// before comparing each line to the delimiter, closes the heredoc somewhere
-/// brush did not: inside the body, or at the delimiter line itself.
-fn bash_ends_expanding_heredoc_elsewhere(body: &str, delimiter: &str, strip_tabs: bool) -> bool {
+/// brush did not: inside the body, or at the delimiter line itself. `<<-` tabs
+/// are already stripped from every physical line of `body` by brush.
+fn bash_ends_expanding_heredoc_elsewhere(body: &str, delimiter: &str) -> bool {
     let lines: Vec<&str> = body.split('\n').collect();
     // A CRLF line's `\r` hides its backslash from the splice check, so any
     // `\<CR>` ending is refused outright rather than guessed at.
@@ -746,35 +747,23 @@ fn bash_ends_expanding_heredoc_elsewhere(body: &str, delimiter: &str, strip_tabs
     }) {
         return true;
     }
-    let (mut whole, mut per_line) = (String::new(), String::new());
+    let mut whole = String::new();
     let mut spliced = false;
     for line in &lines {
         let continued = odd_trailing_backslashes(line);
-        let piece = if continued {
+        whole.push_str(if continued {
             &line[..line.len() - 1]
         } else {
             line
-        };
-        whole.push_str(piece);
-        per_line.push_str(if strip_tabs {
-            piece.trim_start_matches('\t')
-        } else {
-            piece
         });
         if continued {
             spliced = true;
             continue;
         }
-        let candidate = if strip_tabs {
-            whole.trim_start_matches('\t')
-        } else {
-            &whole
-        };
-        if spliced && (candidate == delimiter || per_line == delimiter) {
+        if spliced && whole == delimiter {
             return true;
         }
         whole.clear();
-        per_line.clear();
         spliced = false;
     }
     // The last body line ends in a continuation that splices into the
@@ -789,12 +778,11 @@ fn convert_heredoc(heredoc: &bast::IoHereDocument) -> Result<Redirection, ParseE
         ));
     }
     let body = heredoc.doc.value.clone();
+    if body.contains('\0') {
+        return Err(ParseError::unsupported("NUL byte in heredoc body"));
+    }
     if heredoc.requires_expansion
-        && bash_ends_expanding_heredoc_elsewhere(
-            &body,
-            &heredoc.here_end.value,
-            heredoc.remove_tabs,
-        )
+        && bash_ends_expanding_heredoc_elsewhere(&body, &heredoc.here_end.value)
     {
         return Err(ParseError::unsupported(
             "expanding heredoc whose line continuations make bash end it elsewhere than brush",

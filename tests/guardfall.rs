@@ -3045,7 +3045,19 @@ const ISSUE_631_HEREDOC_IN_SUBSTITUTION_CASES: &[(&str, Decision)] = &[
         "echo \"$(cat <<-EOF\n\tEO\\\nF\nrm -rf /\nEOF\n)\"",
         Decision::Ask,
     ),
+    (
+        "echo \"$(cat <<-EOF\n\tEO\\\n\tF\nrm -rf /\nEOF\n)\"",
+        Decision::Ask,
+    ),
     ("echo \"$(cat <<EOF\r\nx\\\r\nEOF\r\n)\"", Decision::Ask),
+    // Bash drops NUL bytes while reading, so `E<NUL>OF` ends the heredoc early.
+    ("cat <<EOF\nE\0OF\nrm -rf /\nEOF", Decision::Ask),
+    (
+        "echo \"$(cat <<EOF\nE\0OF\nrm -rf /\nEOF\n)\"",
+        Decision::Ask,
+    ),
+    ("cat <<EOF\nx\nEOF\0\nrm -rf /\nEOF", Decision::Ask),
+    ("cat <<'EOF'\nE\0OF\nrm -rf /\nEOF", Decision::Ask),
     ("cat > s.sh <<EOF\nmake \\\n  all\nEOF", Decision::Allow),
     ("cat <<'EOF'\nEO\\\nF\nEOF", Decision::Allow),
     // Body starting with `)` reads as an operator: safe over-ask.
