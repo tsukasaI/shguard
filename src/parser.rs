@@ -71,10 +71,11 @@ use brush_parser::{Parser as BrushParser, ast as bast};
 
 use crate::ast::{
     Assignment, AssignmentValue, Command, CommandLine, CompoundCommand, ElifClause, ExtendedTest,
-    FileRedirectionKind, FunctionDefinition, MAX_BRACE_NESTING_DEPTH, Pipeline,
-    ProcessSubstitutionDirection, Redirection, Separator, SimpleCommand, Word, WordPiece,
+    FileRedirectionKind, FunctionDefinition, HeredocSubstitutions, MAX_BRACE_NESTING_DEPTH,
+    Pipeline, ProcessSubstitutionDirection, Redirection, Separator, SimpleCommand, Word, WordPiece,
 };
 use crate::syntax::compat::{self, catch_parser_panic};
+use crate::syntax::heredoc;
 use crate::syntax::{ParseError, parser_options};
 
 /// Parses a raw shell command line into shguard's AST.
@@ -710,10 +711,18 @@ fn convert_redirect_target(target: &bast::IoFileRedirectTarget) -> Result<Word, 
 }
 
 fn convert_heredoc(heredoc: &bast::IoHereDocument) -> Result<Redirection, ParseError> {
+    let body = heredoc.doc.value.clone();
+    let substitutions = if heredoc.requires_expansion {
+        heredoc::parse_body(&body)
+            .map_or(HeredocSubstitutions::Unparsed, HeredocSubstitutions::Parsed)
+    } else {
+        HeredocSubstitutions::Parsed(Vec::new())
+    };
     Ok(Redirection::HereDoc {
         strip_leading_tabs: heredoc.remove_tabs,
         expand_body: heredoc.requires_expansion,
-        body: heredoc.doc.value.clone(),
+        body,
+        substitutions,
     })
 }
 
@@ -1628,13 +1637,47 @@ mod tests {
                 strip_leading_tabs,
                 expand_body,
                 body,
+                substitutions,
             } => {
                 assert!(!strip_leading_tabs);
                 assert!(expand_body);
                 assert_eq!(body.trim_end_matches('\n'), "rm -rf /");
+                assert_eq!(*substitutions, HeredocSubstitutions::Parsed(Vec::new()));
             }
             other => panic!("expected HereDoc, got {other:?}"),
         }
+    }
+
+    fn heredoc_substitutions(command: &str) -> HeredocSubstitutions {
+        let cmd = parse_ok(command);
+        match &simple(&cmd.first.first).redirections[0] {
+            Redirection::HereDoc { substitutions, .. } => substitutions.clone(),
+            other => panic!("expected HereDoc, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn heredoc_unquoted_body_records_its_substitutions() {
+        assert_eq!(
+            heredoc_substitutions("cat <<EOF\nhi $(rm -rf /) `id`\nEOF\n"),
+            HeredocSubstitutions::Parsed(vec!["rm -rf /".to_string(), "id".to_string()])
+        );
+    }
+
+    #[test]
+    fn heredoc_quoted_delimiter_records_no_substitutions() {
+        assert_eq!(
+            heredoc_substitutions("cat <<'EOF'\n$(rm -rf /)\nEOF\n"),
+            HeredocSubstitutions::Parsed(Vec::new())
+        );
+    }
+
+    #[test]
+    fn heredoc_unterminated_substitution_is_unparsed_not_empty() {
+        assert_eq!(
+            heredoc_substitutions("cat <<EOF\n$(rm -rf /\nEOF\n"),
+            HeredocSubstitutions::Unparsed
+        );
     }
 
     // ---- 8. heredoc, tab-strip ----
