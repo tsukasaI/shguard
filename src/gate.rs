@@ -4680,7 +4680,8 @@ fn scan_unmodeled_option_floor(argv: &[NormalizedWord]) -> Option<(Decision, Str
             format!("unmodelled option for `{}`", finding.command()),
         ));
     }
-    if crate::rules::placeholder_in_command_slot(argv, &[]) {
+    if crate::rules::placeholder_in_command_slot(argv, &[]) || placeholder_in_scripts(argv, &[], 0)
+    {
         return Some((
             Decision::Ask,
             "an `xargs` replace-string stands in for a command word, so the command that runs \
@@ -4693,6 +4694,53 @@ fn scan_unmodeled_option_floor(argv: &[NormalizedWord]) -> Option<(Decision, Str
             Decision::Ask,
             "unmodelled command name: a word containing `=` that is not an assignment".to_string(),
         )
+    })
+}
+
+/// The resolved `-c` script of the shell `stage` finally runs, if it is one.
+fn shell_dash_c_script(stage: &[NormalizedWord]) -> Option<String> {
+    let (name, rest) = crate::rules::effective_command(stage)?;
+    if !crate::rules::is_shell_interpreter(&name) {
+        return None;
+    }
+    let FlagScan::Found(flag_index) = scan_for_flag(rest, is_dash_c_token) else {
+        return None;
+    };
+    let index = locate_dash_c_script(rest, crate::rules::strip_version_suffix(&name), flag_index)
+        .ok()??;
+    match rest.get(index)?.resolution() {
+        Resolution::Resolved(script) => Some(script.clone()),
+        Resolution::Unresolvable(_) => None,
+    }
+}
+
+/// Whether a shell string run by `stage`'s wrapper chain (`sh -c '{} -rf /'`)
+/// has a command word that is an active placeholder (`initial`, or an
+/// `xargs` replace-string or `entr` `/_` on the chain). Unparsable strings
+/// and nesting past the depth cap count, as everywhere else.
+fn placeholder_in_scripts(stage: &[NormalizedWord], initial: &[&str], depth: usize) -> bool {
+    let (mut scripts, active) = crate::rules::placeholder_script_strings(stage, initial);
+    if !active.is_empty() {
+        scripts.extend(shell_dash_c_script(stage));
+    }
+    if scripts.is_empty() {
+        return false;
+    }
+    if depth > MAX_SUBSTITUTION_DEPTH {
+        return true;
+    }
+    let active: Vec<&str> = active.iter().map(String::as_str).collect();
+    scripts.iter().any(|script| {
+        let Ok(line) = parser::parse(script) else {
+            return true;
+        };
+        command_line_stdin_sinks_with(&line, &Env::isolated(), true)
+            .commands
+            .iter()
+            .any(|command| {
+                crate::rules::placeholder_in_command_slot(command, &active)
+                    || placeholder_in_scripts(command, &active, depth + 1)
+            })
     })
 }
 
@@ -7862,7 +7910,9 @@ fn recurse_find_exec_payload(
     // DirectArgv payload only — a bare top-level `sh` invocation is
     // unaffected.
     let payload_argv = normalize::normalize_argv(synthetic);
-    if crate::rules::placeholder_in_command_slot(&payload_argv, &["{}"]) {
+    if crate::rules::placeholder_in_command_slot(&payload_argv, &["{}"])
+        || placeholder_in_scripts(&payload_argv, &["{}"], 0)
+    {
         raise_expansion_floor(
             floor,
             Decision::Ask,

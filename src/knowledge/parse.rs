@@ -454,6 +454,7 @@ pub(crate) fn parse<'a>(
     let mut options_end = None;
     let mut command_at = None;
     let mut sub_pending = spec.subcommands();
+    let mut skipped_first = false;
     while idx < argv.len() {
         let Resolution::Resolved(token) = argv[idx].resolution() else {
             break;
@@ -482,15 +483,33 @@ pub(crate) fn parse<'a>(
             continue;
         }
         if let Some(alternatives) = sub_pending {
-            let Some(len) = match_subcommand(alternatives, &argv[idx..]) else {
+            if grammar.plus_operand && token.starts_with('+') {
+                idx += 1;
+                continue;
+            }
+            if let Some(len) = match_subcommand(alternatives, &argv[idx..]) {
+                sub_pending = None;
+                idx += len;
+                continue;
+            }
+            let Some(len) = spec
+                .unmodeled_subcommands()
+                .and_then(|unmodeled| match_subcommand(unmodeled, &argv[idx..]))
+            else {
                 break;
             };
+            parser.culprit.get_or_insert(idx);
             sub_pending = None;
             idx += len;
             continue;
         }
         match grammar.order {
             ArgOrder::FirstOperand => {
+                if !skipped_first && grammar.skip_first_operand.contains(&token.as_str()) {
+                    skipped_first = true;
+                    idx += 1;
+                    continue;
+                }
                 if let Some(at) = command_after_marker(grammar, &parser.options, argv, idx) {
                     command_at = Some(at);
                 }
@@ -537,11 +556,48 @@ pub(crate) fn parse<'a>(
         parser.culprit.get_or_insert(command_at);
     }
 
+    // An unresolvable word where the subcommand belongs might be it.
+    let unresolved_subcommand = sub_pending.is_some()
+        && matches!(
+            argv.get(idx).map(NormalizedWord::resolution),
+            Some(Resolution::Unresolvable(_))
+        );
+    if unresolved_subcommand {
+        parser.culprit.get_or_insert(idx);
+    }
+    for option in &parser.options {
+        let floored = match option.name {
+            OptionName::Long(name) => grammar.floor_options.contains(&name),
+            OptionName::Short(letter) => grammar
+                .floor_values
+                .iter()
+                .filter(|(floor_letter, _)| *floor_letter == letter)
+                .any(|(_, values)| match option.value {
+                    OptionValue::Glued(text) => values.contains(&text),
+                    OptionValue::Separate(word) => match word.resolution() {
+                        Resolution::Resolved(text) => values.contains(&text.as_str()),
+                        Resolution::Unresolvable(_) => true,
+                    },
+                    OptionValue::Absent => false,
+                }),
+        };
+        if floored {
+            parser.culprit.get_or_insert(option.token);
+        }
+    }
+    // A shell-string flag makes the call a wrapper even without its
+    // subcommand (`tmux -c CMD`).
+    let script_flag_seen = spec.script_short_flags().any(|letter| {
+        parser
+            .options
+            .iter()
+            .any(|option| option.name == OptionName::Short(letter))
+    });
     let parsed = ParsedArgv {
         options: parser.options,
         options_end,
         command_at,
-        applies: sub_pending.is_none(),
+        applies: sub_pending.is_none() || unresolved_subcommand || script_flag_seen,
     };
     match parser.culprit {
         None => Ok(parsed),

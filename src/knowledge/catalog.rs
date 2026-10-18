@@ -1085,21 +1085,58 @@ pub(super) static CATALOG: &[CommandSpec] = &[
                 "exec",
                 "se",
                 "data-directory",
+                "init-command",
+            ],
+            // These run gdb commands, `shell ...` among them.
+            floor_options: &[
+                "ex",
+                "iex",
+                "eval-command",
+                "init-eval-command",
+                "command",
+                "x",
+                "ix",
+                "init-command",
             ],
             ..BASE
         },
         slots: &[EXEC],
     },
+    // The union of the options of the subcommands below. `-l` is split-window's
+    // size and `-d` new-session's flag, so `tmux -l` and `run-shell -d DELAY`
+    // are misread.
     CommandSpec {
         names: &["tmux"],
         options: OptionGrammar {
-            short_flags: "2CNlDuvVAdEPX",
-            short_values: "cfLSTeFnstxy",
+            short_flags: "2CNuvVDAdEPXkabhZBOoIHKMR",
+            short_values: "cfLSTeFnstxylpw",
             ..BASE
         },
         slots: &[
-            Slot::Subcommands(&[&["new-session"], &["new"]]),
+            Slot::Subcommands(&[
+                &["new-session"],
+                &["new"],
+                &["new-window"],
+                &["neww"],
+                &["split-window"],
+                &["splitw"],
+                &["run-shell"],
+                &["run"],
+                &["respawn-pane"],
+                &["respawnp"],
+                &["respawn-window"],
+                &["respawnw"],
+                &["display-popup"],
+                &["popup"],
+                &["pipe-pane"],
+                &["pipep"],
+            ]),
+            Slot::UnmodeledSubcommands(&[&["send-keys"], &["send"], &["if-shell"], &["if"]]),
             EXEC,
+            Slot::ShellScript {
+                short: Some('c'),
+                long: None,
+            },
             Slot::OperandsJoinedShellScript,
         ],
     },
@@ -1107,8 +1144,16 @@ pub(super) static CATALOG: &[CommandSpec] = &[
         names: &["screen"],
         options: OptionGrammar {
             short_flags: "aAdDfilLmOqUvw",
-            short_values: "hpsStTce",
+            short_values: "hpsStTceX",
             short_glued: "rRx",
+            dash_word_values: &["Logfile"],
+            dash_words: &["fn", "fa", "ln"],
+            floor_values: &[(
+                'X',
+                &[
+                    "stuff", "eval", "source", "register", "paste", "readreg", "readbuf",
+                ],
+            )],
             ..BASE
         },
         slots: &[EXEC],
@@ -1155,6 +1200,7 @@ pub(super) static CATALOG: &[CommandSpec] = &[
                 short: Some('c'),
                 long: None,
             },
+            Slot::OperandsJoinedShellScript,
         ],
     },
     CommandSpec {
@@ -1243,51 +1289,8 @@ pub(super) static CATALOG: &[CommandSpec] = &[
     },
     CommandSpec {
         names: &["uv"],
-        options: OptionGrammar {
-            short_flags: "qvmhV",
-            short_values: "pwC",
-            long_flags: &[
-                "no-sync",
-                "frozen",
-                "locked",
-                "isolated",
-                "active",
-                "module",
-                "no-project",
-                "quiet",
-                "verbose",
-                "offline",
-                "no-cache",
-                "no-dev",
-                "dev",
-                "all-extras",
-                "no-editable",
-                "exact",
-                "no-env-file",
-                "help",
-                "version",
-            ],
-            long_values: &[
-                "with",
-                "with-editable",
-                "with-requirements",
-                "python",
-                "project",
-                "directory",
-                "package",
-                "extra",
-                "group",
-                "only-group",
-                "no-group",
-                "env-file",
-                "index",
-                "color",
-                "cache-dir",
-                "config-file",
-            ],
-            ..BASE
-        },
-        slots: &[Slot::Subcommands(&[&["run"]]), EXEC],
+        options: UV_RUN_OPTIONS,
+        slots: &[Slot::Subcommands(&[&["run"], &["tool", "run"]]), EXEC],
     },
     CommandSpec {
         names: &["npx"],
@@ -1321,7 +1324,7 @@ pub(super) static CATALOG: &[CommandSpec] = &[
             long_values: &["filter", "dir"],
             ..BASE
         },
-        slots: &[Slot::Subcommands(&[&["exec"]]), EXEC],
+        slots: &[Slot::Subcommands(&[&["exec"], &["dlx"]]), EXEC],
     },
     CommandSpec {
         names: &["bundle"],
@@ -1353,6 +1356,7 @@ pub(super) static CATALOG: &[CommandSpec] = &[
         options: OptionGrammar {
             short_flags: "vqh",
             long_flags: &["install", "verbose", "quiet", "help"],
+            plus_operand: true,
             ..BASE
         },
         slots: &[Slot::Subcommands(&[&["run"]]), EXEC, Slot::Operands(1)],
@@ -1385,7 +1389,71 @@ pub(super) static CATALOG: &[CommandSpec] = &[
             command_after: &["-c", "--command"],
             ..BASE
         },
-        slots: &[Slot::Subcommands(&[&["develop"]]), EXEC],
+        slots: &[Slot::Subcommands(&[&["develop"], &["shell"]]), EXEC],
+    },
+    CommandSpec {
+        names: &["nix-shell"],
+        options: OptionGrammar {
+            short_flags: "qvk",
+            short_values: "pIAjiE",
+            long_flags: &[
+                "pure",
+                "impure",
+                "quiet",
+                "verbose",
+                "show-trace",
+                "keep-going",
+                "help",
+                "version",
+            ],
+            long_values: &[
+                "run", "command", "packages", "attr", "max-jobs", "keep", "include", "expr",
+            ],
+            long_pairs: &["arg", "argstr", "option"],
+            ..BASE
+        },
+        slots: &[
+            EXEC,
+            Slot::ShellScript {
+                short: None,
+                long: Some("run"),
+            },
+            Slot::ShellScript {
+                short: None,
+                long: Some("command"),
+            },
+        ],
+    },
+    CommandSpec {
+        names: &["uvx"],
+        options: UV_RUN_OPTIONS,
+        slots: &[EXEC],
+    },
+    CommandSpec {
+        names: &["bun"],
+        options: BUN_OPTIONS,
+        slots: &[Slot::Subcommands(&[&["x"]]), EXEC],
+    },
+    CommandSpec {
+        names: &["bunx"],
+        options: BUN_OPTIONS,
+        slots: &[EXEC],
+    },
+    CommandSpec {
+        names: &["pipx"],
+        options: OptionGrammar {
+            short_flags: "vqh",
+            long_flags: &[
+                "no-cache",
+                "system-site-packages",
+                "verbose",
+                "quiet",
+                "help",
+            ],
+            long_values: &["spec", "python", "pip-args", "index-url", "suffix"],
+            ..BASE
+        },
+        slots: &[Slot::Subcommands(&[&["run"]]), EXEC],
     },
     CommandSpec {
         names: &["devbox"],
@@ -1416,6 +1484,7 @@ pub(super) static CATALOG: &[CommandSpec] = &[
             long_flags: &["override", "help"],
             long_values: &["file"],
             command_after: &["--"],
+            skip_first_operand: &["run"],
             ..BASE
         },
         slots: &[EXEC],
@@ -1428,7 +1497,15 @@ pub(super) static CATALOG: &[CommandSpec] = &[
             order: ArgOrder::PermuteUntilCommand,
             ..BASE
         },
-        slots: &[EXEC, Slot::Operands(1), Slot::OperandsJoinedShellScript],
+        slots: &[
+            EXEC,
+            Slot::Operands(1),
+            Slot::OperandsJoinedShellScript,
+            Slot::KeyedShellScript {
+                short: 'o',
+                keys: &["proxycommand", "localcommand"],
+            },
+        ],
     },
     CommandSpec {
         names: &["docker"],
@@ -1548,6 +1625,61 @@ pub(super) static CATALOG: &[CommandSpec] = &[
         slots: &[EXEC],
     },
 ];
+
+/// `uv run`, `uv tool run` and `uvx` share their options.
+const UV_RUN_OPTIONS: OptionGrammar = OptionGrammar {
+    short_flags: "qvmhV",
+    short_values: "pwC",
+    long_flags: &[
+        "no-sync",
+        "frozen",
+        "locked",
+        "isolated",
+        "active",
+        "module",
+        "no-project",
+        "quiet",
+        "verbose",
+        "offline",
+        "no-cache",
+        "no-dev",
+        "dev",
+        "all-extras",
+        "no-editable",
+        "exact",
+        "no-env-file",
+        "help",
+        "version",
+    ],
+    long_values: &[
+        "with",
+        "with-editable",
+        "with-requirements",
+        "python",
+        "project",
+        "directory",
+        "package",
+        "extra",
+        "group",
+        "only-group",
+        "no-group",
+        "env-file",
+        "index",
+        "color",
+        "cache-dir",
+        "config-file",
+        "from",
+    ],
+    ..BASE
+};
+
+/// `bun x` and `bunx`.
+const BUN_OPTIONS: OptionGrammar = OptionGrammar {
+    short_flags: "hv",
+    long_flags: &["bun", "silent", "no-install", "help", "version"],
+    long_values: &["cwd", "config", "registry", "package"],
+    ..BASE
+};
 
 /// `npx` and `npm exec` share their options.
 const NPM_EXEC_OPTIONS: OptionGrammar = OptionGrammar {

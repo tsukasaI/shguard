@@ -21,16 +21,23 @@ All notable changes to this project are documented in this file.
   `[[ ]]` arithmetic comparison (`-eq`, `-gt`, ...) of an operand that is
   not provably an integer, floor to Ask.
 - Command runners are transparent wrappers, so `rm -rf /` behind them
-  Blocks like the bare command (#740): `fakeroot`, `eatmydata`, `bwrap`,
-  `proot`, `ltrace`, `valgrind`, `gdb --args`, `faketime`, `xvfb-run`,
-  `sg -c`, `cgexec`, `sshpass`, `entr`, `chronic`, `ifne`, `rlwrap`,
-  `screen`, `tmux new-session`, `ip netns exec`, `poetry run`, `uv run`,
-  `npx`, `npm exec`, `pnpm exec`, `bundle exec`, `mise exec`,
-  `direnv exec`, `rustup run`, `nix develop -c`, `devbox run`, `op run`,
-  `dotenv`, `ssh host CMD`, `docker exec` and `kubectl exec`. For the tools
-  with subcommands only the named subcommand wraps a command; `poetry
-  install`, `docker ps` and the like are unchanged. An option the catalog
-  does not describe on a wrapper call makes it Ask.
+  Blocks like the bare command (#740): `eatmydata`, `bwrap`, `proot`,
+  `ltrace`, `gdb --args`, `faketime`, `xvfb-run`, `sg`, `cgexec`, `sshpass`,
+  `entr`, `chronic`, `ifne`, `screen`, `tmux` (`new-session`, `new-window`,
+  `split-window`, `run-shell`, `respawn-pane`, `display-popup`,
+  `pipe-pane`, or a global `-c`), `ip netns exec`, `poetry run`, `uv run`,
+  `uv tool run`, `uvx`, `npx`, `npm exec`, `pnpm exec`/`dlx`, `bun x`,
+  `bunx`, `pipx run`, `bundle exec`, `mise exec`, `direnv exec`,
+  `rustup run`, `nix develop`/`shell -c`, `nix-shell --run`, `devbox run`,
+  `op run`, `dotenv`, `ssh host CMD` (also `-o ProxyCommand`/`LocalCommand`),
+  `docker exec` and `kubectl exec`. For the tools with subcommands only the
+  named subcommand wraps a command; `poetry install`, `docker ps` and the
+  like are unchanged. An option the catalog does not describe on a wrapper
+  call makes it Ask, as do `gdb -ex`/`-x`, `tmux send-keys`/`if-shell` and
+  `screen -X stuff`.
+- A placeholder standing for the command inside a shell string the payload
+  runs (`find -exec sh -c '{} -rf /' \;`, `xargs -I{} sh -c '{} ...'`) and
+  `entr`'s `/_` Ask.
 
 ### Fixed
 
@@ -44,11 +51,12 @@ All notable changes to this project are documented in this file.
 ### Changed
 
 - An `[[allow]] command` entry naming one of those `g`-prefixed wrappers
-  (`gtimeout`, `genv`, ...) or one of the newly catalogued runners above is
-  now rejected at config load, like the unprefixed `timeout`/`env` (#740).
-  Remove the entry before upgrading; an entry naming `ssh`, `docker`, `npm`
-  and the like is affected too, even though most of their subcommands are
-  not wrappers.
+  (`gtimeout`, `genv`, ...) or a runner that wraps a command on every call
+  (`npx`, `ssh`, `sshpass`, `eatmydata`, `bwrap`, `uvx`, ...) is now
+  rejected at config load, like the unprefixed `timeout`/`env` (#740).
+  Remove the entry before upgrading. Entries naming a tool that wraps a
+  command only for one subcommand (`npm`, `docker`, `kubectl`, `poetry`,
+  `uv`, `tmux`, `ip`, ...) keep loading.
 
 ### Compatibility notes
 

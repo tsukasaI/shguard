@@ -1116,6 +1116,70 @@ const ISSUE_740_G_WRAPPERS_AND_PLACEHOLDER_COMMAND_CASES: &[(&str, Decision)] = 
     ("kubectl get pods", Decision::Allow),
     ("sshpass -f pw ssh host ls", Decision::Allow),
     ("dotenv -e .env -- node app.js", Decision::Allow),
+    // A placeholder as the command word of a shell string the payload runs.
+    (
+        "find /bin -name rm -exec sh -c '{} -rf /' \\;",
+        Decision::Ask,
+    ),
+    ("find . -exec sh -c '{}' \\;", Decision::Ask),
+    ("fd . -x sh -c '{}'", Decision::Ask),
+    ("xargs -I{} sh -c '{} -rf ~' < list", Decision::Ask),
+    ("echo rm | xargs -I{} sh -c '{} -rf ~'", Decision::Ask),
+    ("ls | entr /_", Decision::Ask),
+    ("find . -exec sh -c 'echo {}' \\;", Decision::Allow),
+    ("ls | entr -r make", Decision::Allow),
+    // `sg` always runs its command through a shell.
+    ("sg grp 'rm -rf /'", Decision::Block),
+    ("sg grp", Decision::Allow),
+    // tmux subcommands that run a shell string, and the global `-c`.
+    ("tmux -c 'rm -rf /'", Decision::Block),
+    ("tmux new-window 'rm -rf /'", Decision::Block),
+    ("tmux split-window 'rm -rf /'", Decision::Block),
+    ("tmux run-shell 'rm -rf /'", Decision::Block),
+    ("tmux respawn-pane 'rm -rf /'", Decision::Block),
+    ("tmux display-popup -E 'rm -rf /'", Decision::Block),
+    ("tmux pipe-pane 'rm -rf /'", Decision::Block),
+    ("tmux if-shell true 'rm -rf /'", Decision::Ask),
+    ("tmux send-keys 'rm -rf /' Enter", Decision::Block),
+    ("tmux send-keys -t x", Decision::Ask),
+    ("tmux new-window -n x", Decision::Allow),
+    ("tmux split-window -h", Decision::Allow),
+    // gdb commands can `shell` out.
+    ("gdb -ex 'shell rm -rf /' -batch", Decision::Ask),
+    ("gdb -iex 'shell rm -rf /'", Decision::Ask),
+    ("gdb -x cmds.gdb", Decision::Ask),
+    ("gdb --eval-command='shell rm -rf /'", Decision::Ask),
+    ("gdb prog", Decision::Allow),
+    // ssh options that run a local command.
+    ("ssh -o ProxyCommand='rm -rf /' host", Decision::Block),
+    (
+        "ssh -o LocalCommand='rm -rf /' -o PermitLocalCommand=yes host",
+        Decision::Block,
+    ),
+    ("ssh -o ProxyCommand=$X host", Decision::Ask),
+    ("ssh -o StrictHostKeyChecking=no host ls", Decision::Allow),
+    // More runners.
+    ("uv tool run rm -rf /", Decision::Block),
+    ("uvx rm -rf /", Decision::Block),
+    ("pnpm dlx rm -rf /", Decision::Block),
+    ("bun x rm -rf /", Decision::Block),
+    ("bunx rm -rf /", Decision::Block),
+    ("pipx run rm -rf /", Decision::Block),
+    ("nix shell -c rm -rf /", Decision::Block),
+    ("nix-shell --run 'rm -rf /'", Decision::Block),
+    ("dotenv run rm -rf /", Decision::Block),
+    ("rustup +stable run x rm -rf /", Decision::Block),
+    ("nix shell nixpkgs#hello", Decision::Allow),
+    ("pipx install x", Decision::Allow),
+    ("uv tool install x", Decision::Allow),
+    // An unresolvable word where the subcommand belongs might be it.
+    ("docker $X c rm -rf /", Decision::Ask),
+    ("poetry $X rm -rf /", Decision::Ask),
+    ("npm $X -- rm -rf /", Decision::Ask),
+    // screen's `-X` and `-Logfile`, which are not wrapper options.
+    ("screen -S x -X quit", Decision::Allow),
+    ("screen -L -Logfile x.log make", Decision::Allow),
+    ("screen -X stuff 'rm -rf /'", Decision::Ask),
 ];
 
 /// Issue #740: the `g`-prefixed exec wrappers resolve to the unprefixed

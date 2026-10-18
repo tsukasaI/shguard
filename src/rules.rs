@@ -5270,8 +5270,10 @@ const EXTRA_PIPELINE_INTERPRETERS: &[&str] = &[
 /// `vi`, `vim`, `dc`, `m4`) and a database client with one (`sqlite3`,
 /// `psql`, `mysql`). A sink by NAME alone, like
 /// [`EXTRA_PIPELINE_INTERPRETERS`], but not part of
-/// [`matches_dangerous_allow_target`]: these are everyday tools, and an
-/// `allow` entry naming `ssh` or `psql` must keep loading.
+/// [`matches_dangerous_allow_target`] for their own sake: these are everyday
+/// tools, and an `allow` entry naming `psql` must keep loading. `ssh` and
+/// `gdb` are also exec wrappers (issue #740), which is what makes an entry
+/// naming them rejected.
 ///
 /// Entries are post-[`strip_version_suffix`] and case-folded: `sqlite3` is
 /// `sqlite`, `m4` is `m`, `R` is `r`. A stdin-operand-gated sink (`make -f
@@ -5894,14 +5896,47 @@ pub(crate) fn placeholder_in_command_slot(stage: &[NormalizedWord], initial: &[&
         }
         match step(rest, &[]) {
             Step::Wrapper(hop) => {
-                if canonical_command_name(hop.base) == "xargs" {
-                    active.extend(xargs_replace_string(&hop));
-                }
+                active.extend(hop_placeholders(&hop));
                 rest = hop.next();
             }
             Step::Command { .. } | Step::Unresolvable | Step::Empty => return false,
         }
     }
+}
+
+/// The words a wrapper hop itself substitutes into the command it runs.
+fn hop_placeholders(hop: &WrapperHop<'_>) -> Vec<String> {
+    match canonical_command_name(hop.base).as_str() {
+        "xargs" => xargs_replace_string(hop).into_iter().collect(),
+        "entr" => vec!["/_".to_string()],
+        _ => Vec::new(),
+    }
+}
+
+/// The shell strings the wrapper chain of `stage` runs once a placeholder is
+/// active (`find -exec sh -c '{} -rf /'`, `xargs -I{} sh -c '{} -rf ~'`),
+/// with the placeholders active for them. The caller checks each string's
+/// own commands with [`placeholder_in_command_slot`].
+#[must_use]
+pub(crate) fn placeholder_script_strings(
+    stage: &[NormalizedWord],
+    initial: &[&str],
+) -> (Vec<String>, Vec<String>) {
+    let mut active: Vec<String> = initial.iter().map(|p| (*p).to_string()).collect();
+    let mut scripts = Vec::new();
+    let mut rest = stage;
+    while let Step::Wrapper(hop) = step(rest, &[]) {
+        active.extend(hop_placeholders(&hop));
+        if !active.is_empty() {
+            for value in hop.wrapper.shell_script_values(hop.tail) {
+                if let ScriptValue::Text(script) = value {
+                    scripts.push(script.to_string());
+                }
+            }
+        }
+        rest = hop.next();
+    }
+    (scripts, active)
 }
 
 /// Whether the command `stage` finally runs is named by a word containing
@@ -6241,10 +6276,46 @@ pub(crate) fn chain_script_slots(stage: &[NormalizedWord]) -> Vec<ScriptSlot> {
         if let Some(flag) = hop.wrapper.piped_output_option() {
             collect_piped_output_slots(&hop, flag, &mut slots);
         }
+        if let Some((letter, keys)) = hop.wrapper.keyed_shell_script() {
+            collect_keyed_script_slots(&hop, letter, keys, &mut slots);
+        }
         rest = hop.next();
     }
     socat_command_slots(stage, &mut slots);
     slots
+}
+
+/// `ssh -o ProxyCommand=CMD` / `-o 'LocalCommand CMD'` hand CMD to a shell.
+/// Keys are matched case-folded, as ssh does; an unresolved value might be
+/// either key.
+fn collect_keyed_script_slots(
+    hop: &WrapperHop<'_>,
+    letter: char,
+    keys: &[&str],
+    slots: &mut Vec<ScriptSlot>,
+) {
+    for option in hop.parsed.options_named((letter, "")) {
+        let value = match option.value {
+            OptionValue::Glued(text) => text,
+            OptionValue::Separate(word) => match word.resolution() {
+                Resolution::Resolved(text) => text.as_str(),
+                Resolution::Unresolvable(_) => {
+                    slots.push(ScriptSlot::Unresolvable);
+                    continue;
+                }
+            },
+            OptionValue::Absent => continue,
+        };
+        let (key, rest) = value
+            .split_once(|c: char| c == '=' || c.is_whitespace())
+            .unwrap_or((value, ""));
+        if keys.contains(&fold_command_name(key).as_str()) {
+            let script = rest.trim_start_matches(|c: char| c == '=' || c.is_whitespace());
+            if !script.eq_ignore_ascii_case("none") {
+                slots.push(ScriptSlot::Resolved(script.to_string()));
+            }
+        }
+    }
 }
 
 /// `watch` runs its operands through `sh -c` (words joined by spaces)
@@ -9153,7 +9224,7 @@ fn matches_dangerous_allow_target(entry: &CommandRule) -> bool {
             .chain(EXTRA_PIPELINE_INTERPRETERS.iter())
             .chain(AWK_INTERPRETERS.iter())
             .copied()
-            .chain(knowledge::exec_wrapper_names())
+            .chain(knowledge::always_wrapping_names())
     };
     let matches_ci = |name: &str| match &entry.command {
         CommandMatch::Exact(exact) => {
@@ -16563,6 +16634,32 @@ mod tests {
                 ),
                 "{wrapper}"
             );
+        }
+    }
+
+    #[test]
+    fn user_config_allow_entry_for_subcommand_gated_wrapper_loads_but_pure_wrapper_is_rejected() {
+        // Issue #740: `npm`, `docker` and the like wrap a command only for
+        // one subcommand, so their allow entries keep loading; `npx`, `ssh`
+        // and `gtimeout` wrap every call.
+        for (name, loads) in [
+            ("npm", true),
+            ("docker", true),
+            ("tmux", true),
+            ("npx", false),
+            ("ssh", false),
+            ("sshpass", false),
+            ("gtimeout", false),
+        ] {
+            let toml = format!(
+                r#"
+                [[allow]]
+                id = "user-allow-{name}"
+                reason = "trust me"
+                command = "{name}"
+                "#
+            );
+            assert_eq!(UserConfig::parse(&toml).is_ok(), loads, "{name}");
         }
     }
 
