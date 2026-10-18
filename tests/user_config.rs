@@ -3928,9 +3928,16 @@ mod symlinked_home_end_to_end {
 
     #[test]
     fn check_cwd_flag_rejects_a_flag_shaped_value_and_notes_a_relative_one() {
+        let (_dir, root) = home_fixture();
         let stderr_of = |args: [&str; 4]| {
             let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
-            let output = cmd.args(args).output().expect("shguard should run");
+            let output = cmd
+                .env_remove("SHGUARD_CONFIG")
+                .env_remove("XDG_CONFIG_HOME")
+                .env("HOME", format!("{root}/home"))
+                .args(args)
+                .output()
+                .expect("shguard should run");
             (
                 output.status.code(),
                 String::from_utf8_lossy(&output.stderr).into_owned(),
