@@ -7602,7 +7602,7 @@ fn recurse_find_exec_payload(
         let mut words: Vec<Word> = synthetic
             .words
             .iter()
-            .map(|word| rewrite_fd_word(word, &mut found))
+            .flat_map(|word| rewrite_fd_word(word, &mut found))
             .collect();
         if !found {
             words.push(Word(vec![WordPiece::Literal("{}".to_string())]));
@@ -7796,32 +7796,45 @@ fn direct_argv_terminators_for(command: &str, flag: &str) -> Option<&'static [&'
 /// so quoting can split (`'{'//}`) or invent (`'{'{}}`) a placeholder. An
 /// unresolvable word is kept as is. `{{`/`}}` are consumed first as
 /// literal-brace escapes, so `{{}}` is not a placeholder.
-fn rewrite_fd_word(word: &Word, found: &mut bool) -> Word {
-    let Some(text) = single_resolved(word) else {
-        return word.clone();
+fn rewrite_fd_word(word: &Word, found: &mut bool) -> Vec<Word> {
+    let normalized = normalize::normalize_word(word);
+    let texts: Option<Vec<&String>> = normalized
+        .iter()
+        .map(|nw| match nw.resolution() {
+            Resolution::Resolved(s) => Some(s),
+            Resolution::Unresolvable(_) => None,
+        })
+        .collect();
+    let Some(texts) = texts else {
+        return vec![word.clone()];
     };
-    let mut out = String::new();
-    let mut rest = text.as_str();
-    while let Some(c) = rest.chars().next() {
-        if let Some(tail) = rest.strip_prefix("{{") {
-            out.push('{');
-            rest = tail;
-        } else if let Some(tail) = rest.strip_prefix("}}") {
-            out.push('}');
-            rest = tail;
-        } else if let Some(tail) = ["{/.}", "{//}", "{/}", "{.}", "{}"]
-            .iter()
-            .find_map(|placeholder| rest.strip_prefix(placeholder))
-        {
-            out.push_str("{}");
-            *found = true;
-            rest = tail;
-        } else {
-            out.push(c);
-            rest = &rest[c.len_utf8()..];
-        }
-    }
-    Word(vec![WordPiece::SingleQuoted(out)])
+    texts
+        .into_iter()
+        .map(|text| {
+            let mut out = String::new();
+            let mut rest = text.as_str();
+            while let Some(c) = rest.chars().next() {
+                if let Some(tail) = rest.strip_prefix("{{") {
+                    out.push('{');
+                    rest = tail;
+                } else if let Some(tail) = rest.strip_prefix("}}") {
+                    out.push('}');
+                    rest = tail;
+                } else if let Some(tail) = ["{/.}", "{//}", "{/}", "{.}", "{}"]
+                    .iter()
+                    .find_map(|placeholder| rest.strip_prefix(placeholder))
+                {
+                    out.push_str("{}");
+                    *found = true;
+                    rest = tail;
+                } else {
+                    out.push(c);
+                    rest = &rest[c.len_utf8()..];
+                }
+            }
+            Word(vec![WordPiece::SingleQuoted(out)])
+        })
+        .collect()
 }
 
 /// The flags of `command`'s recursable slots, for messages.
