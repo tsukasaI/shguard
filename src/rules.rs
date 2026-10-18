@@ -5578,6 +5578,28 @@ pub(crate) fn first_unmodeled_wrapper_option(stage: &[NormalizedWord]) -> Option
     None
 }
 
+/// Whether the command `stage` finally runs is named by a word containing
+/// `=`. Bash runs such a word as a command name (`a.b=c`, `1a=b`, `=x` are
+/// not assignments), so what executes is unknowable here and `crate::gate`
+/// floors it. Checked on the raw word, not [`basename`]: `FOO=/bin/rm` would
+/// otherwise read as `rm`.
+#[must_use]
+pub(crate) fn has_assignment_shaped_command_name(stage: &[NormalizedWord]) -> bool {
+    let mut rest = stage;
+    loop {
+        match step(rest, &[]) {
+            Step::Wrapper(hop) => rest = hop.next(),
+            Step::Command { .. } => {
+                return matches!(
+                    rest.first().map(NormalizedWord::resolution),
+                    Some(Resolution::Resolved(word)) if word.contains('=')
+                );
+            }
+            Step::Unresolvable | Step::Empty => return false,
+        }
+    }
+}
+
 /// How `stage`'s wrapper-unwrap chain (the same walk as
 /// [`effective_command`]) relates to the catalog's privilege-escalating
 /// commands — see [`wrapper_chain_escalation`].
