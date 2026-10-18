@@ -2162,7 +2162,11 @@ targets = [
 # also asks); the `strip` rules match the attached `--output=PATH`/
 # `--output-document=PATH` forms, and the `-glued` rules the glued
 # `-oPATH`/`-OPATH` forms. Gaps, disclosed not fixed: curl `-O`/
-# `--remote-name` (cwd-relative name) and `--output-dir`, wget `-P`.
+# `--remote-name` (cwd-relative name) and `--output-dir`, wget `-P`, and an
+# option cluster glued to the path (`-sSLo~/.bashrc`): `strip` is a fixed
+# prefix, so the cluster cannot be enumerated. (The shell does not expand a
+# mid-word `~`, so only a glued `$HOME/...` reaches the real file; that is
+# unresolvable and left to the generic floors.)
 
 [[command]]
 id = "shell-init-curl"
@@ -2462,8 +2466,9 @@ id = "kill-all-processes"
 decision = "ask"
 reason = "kill with pid -1 signals every process the user can signal, ending the whole session"
 command = "kill"
-# `exact` cannot normalise an integer, so zero-padded (`-01`, `-001`) and
-# blank-padded spellings are listed; longer padding is a disclosed gap.
+# `exact` cannot normalise an integer, so zero-padded (`-01`, `-001`,
+# `-0001`) and blank-padded spellings are listed; longer padding is a
+# disclosed gap.
 targets = [
     { exact = "-1" },
     { exact = "-01" },
@@ -2471,6 +2476,9 @@ targets = [
     { exact = " -1" },
     { exact = "-1 " },
     { exact = " -1 " },
+    { exact = "-0001" },
+    { exact = "  -1" },
+    { exact = "-1  " },
 ]
 
 # `killall5` signals every process outside its own session; `pkill`/`killall`
@@ -2488,7 +2496,7 @@ id = "pkill-user-processes"
 decision = "ask"
 reason = "pkill -u signals processes owned by a user, up to all of them"
 command = "pkill"
-required_flags = ["u|--user"]
+required_flags = ["u|U|--user|--uid|--euid"]
 
 [[command]]
 id = "killall-user-processes"

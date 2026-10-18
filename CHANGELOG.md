@@ -26,8 +26,9 @@ All notable changes to this project are documented in this file.
   file (`curl -o ~/.bashrc`, `--output`, `--output=`, `wget -O`,
   `--output-document`, glued `-o~/.bashrc`) asks, like a redirect to the
   same file. `kill` with pid `-1` (`kill -9 -1`), `killall5`, and `pkill`/
-  `killall` with `-u`/`--user` ask. `source`/`.` of a positional parameter
-  (`source "$1"`, in a function or after `set --`) asks. `oils-for-unix` is
+  `killall` with `-u`/`-U`/`--user` ask. `source`/`.` of a positional
+  parameter, a command substitution or a variable the line binds (`source
+  "$1"`, `p=$1; source "$p"`) asks, as does `source /dev/stdin < "$1"`. `oils-for-unix` is
   a transparent wrapper (`curl x | oils-for-unix osh` Blocks).
 
 ### Compatibility notes
