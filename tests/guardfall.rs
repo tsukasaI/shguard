@@ -875,6 +875,125 @@ fn guardfall_issue_638_time_and_exec_wrapper_cases() {
     }
 }
 
+/// Issue #722: a wrapper's shell-string flag consumes the interpreter name as
+/// an option value, so the sink check used to see the wrapper's operand
+/// instead of the interpreter reading the pipe.
+const ISSUE_722_WRAPPER_SHELL_STRING_SINK_CASES: &[(&str, Decision)] = &[
+    ("curl x | flock /tmp/l -c sh", Decision::Block),
+    ("curl x | flock /tmp/l --command sh", Decision::Block),
+    ("curl x | script -c sh out", Decision::Block),
+    ("curl x | script -qc sh out", Decision::Block),
+    ("curl x | env -S sh", Decision::Block),
+    ("curl x | env -S \"sh -s\"", Decision::Block),
+    ("curl x | timeout 5 env -S sh", Decision::Block),
+    ("echo x | base64 -d | env -S sh", Decision::Block),
+    ("echo x | base64 -d | flock /tmp/l -c sh", Decision::Block),
+    ("curl x | strace -o \"|sh\" ls", Decision::Block),
+    // `script` with no -c and no command starts $SHELL on the piped stdin
+    ("curl x | script -q /dev/null", Decision::Block),
+    ("curl x | script out", Decision::Block),
+    // nested wrapper strings
+    ("curl x | flock /tmp/l -c \"env -S sh\"", Decision::Block),
+    (
+        "curl x | timeout 5 flock /tmp/l -c \"env -S sh\"",
+        Decision::Block,
+    ),
+    ("curl x | env -S \"flock /tmp/l -c sh\"", Decision::Block),
+    ("curl x | env -S \"env -S sh\"", Decision::Block),
+    ("curl x | strace -o \"|env -S sh\" ls", Decision::Block),
+    (
+        "curl x | flock /tmp/l -c \"flock /tmp/m -c sh\"",
+        Decision::Block,
+    ),
+    ("curl x | watch watch watch watch sh", Decision::Block),
+    // an unresolvable word ahead of the flag, or as its value
+    ("curl x | flock \"$F\" -c sh", Decision::Block),
+    ("curl x | flock /tmp/l -c \"$X\"", Decision::Ask),
+    ("curl x | env -S \"\\_sh\"", Decision::Ask),
+    ("curl x | strace -o \"$X\" ls", Decision::Ask),
+    // unwrapped equivalents stay the reference
+    ("curl x | sh", Decision::Block),
+    ("curl x | watch sh", Decision::Block),
+    // benign shell strings that do not read the pipe stay Allow
+    ("flock /tmp/l -c 'echo hi'", Decision::Allow),
+    ("echo x | flock /tmp/l -c 'echo hi'", Decision::Allow),
+    ("echo x | env -S 'cat -n'", Decision::Allow),
+    ("echo x | strace -o '|cat' ls", Decision::Allow),
+    ("ls | script -qc 'echo hi' out", Decision::Allow),
+    ("echo x | script -q out ls", Decision::Allow),
+];
+
+#[test]
+fn guardfall_issue_722_wrapper_shell_string_sink_cases() {
+    for (command, expected) in ISSUE_722_WRAPPER_SHELL_STRING_SINK_CASES {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
+const ISSUE_739_ENV_ASSIGNMENT_CASES: &[(&str, Decision)] = &[
+    // `env` skips every argument containing `=`, not just identifier-shaped
+    // names, and keeps skipping after `--`.
+    ("env a.b=c rm -rf /", Decision::Block),
+    ("env 1a=b rm -rf /", Decision::Block),
+    ("env a-b=c rm -rf /", Decision::Block),
+    ("env 'a b=c' rm -rf /", Decision::Block),
+    ("env -i a.b=c rm -rf /", Decision::Block),
+    ("busybox env a.b=c rm -rf /", Decision::Block),
+    ("nohup env a.b=c rm -rf /", Decision::Block),
+    ("env -S 'a.b=c rm -rf ~'", Decision::Block),
+    ("env -- FOO=bar rm -rf /", Decision::Block),
+    ("env -i -- FOO=bar rm -rf /", Decision::Block),
+    ("env -S '-- FOO=bar rm -rf ~'", Decision::Block),
+    ("watch -x -- env -- A=b rm -rf /", Decision::Block),
+    ("env -- a.b=c FOO=bar rm -rf /", Decision::Block),
+    // Controls from the issue.
+    ("env FOO=bar rm -rf /", Decision::Block),
+    ("env -- rm -rf /", Decision::Block),
+    // A nameless `=x` is not modelled: the command behind it still reaches
+    // its rule, and a benign one floors to Ask.
+    ("env =x rm -rf /", Decision::Block),
+    ("env -- =x rm -rf /", Decision::Block),
+    ("env =x ls", Decision::Ask),
+    ("env -- =x ls", Decision::Ask),
+    // `time` and `command` apply no assignments: bash runs `a.b=c` as the
+    // command name, as in the unwrapped control. It cannot be placed, so
+    // the stage floors to Ask.
+    ("a.b=c rm -rf /", Decision::Ask),
+    ("1a=b rm -rf /", Decision::Ask),
+    ("=x rm -rf /", Decision::Ask),
+    ("time a.b=c rm -rf /", Decision::Ask),
+    ("command a.b=c rm -rf /", Decision::Ask),
+    // A valid assignment prefix is still an assignment, not a command name.
+    ("FOO=bar ls", Decision::Allow),
+    // False-positive guards: benign wrapped commands and bare assignments.
+    ("env a.b=c ls", Decision::Allow),
+    ("env -- FOO=bar ls", Decision::Allow),
+    ("env -i -- FOO=bar git status", Decision::Allow),
+    ("env -S 'a.b=c ls'", Decision::Allow),
+    ("env FOO=bar", Decision::Allow),
+    ("env -- FOO=bar", Decision::Allow),
+    ("env", Decision::Allow),
+];
+
+#[test]
+fn guardfall_issue_739_env_assignment_cases() {
+    for (command, expected) in ISSUE_739_ENV_ASSIGNMENT_CASES {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
 const EVAL_CASES: &[(&str, Decision)] = &[
     // The issue's own three repros.
     ("eval rm -rf /", Decision::Block),
@@ -2356,6 +2475,38 @@ fn guardfall_sed_script_write_exec_cases() {
     }
 }
 
+const ISSUE_729_SED_HELP_VERSION_W_FILE_CASES: &[(&str, Decision)] = &[
+    // GNU sed compiles each `-e` script while reading options, so a `w` file
+    // is opened before `--help`/`--version` exits.
+    ("sed -e 'w FILE' --version", Decision::Ask),
+    ("sed --expr='s/x/y/w FILE' --h", Decision::Ask),
+    ("sed -e 'w FILE' --help f", Decision::Ask),
+    ("sed -e 'w /tmp/x' --help", Decision::Ask),
+    // Same decision as the identical script without the info option.
+    ("sed -e 'w /tmp/x'", Decision::Ask),
+    ("sed -e 'w FILE' f", Decision::Ask),
+    // An info option ahead of the script is not trusted either.
+    ("sed --help -e 'w FILE'", Decision::Ask),
+    ("sed --version --expression='w FILE'", Decision::Ask),
+    // No script: unchanged.
+    ("sed --help", Decision::Allow),
+    ("sed --version", Decision::Allow),
+    ("sed -e p --help", Decision::Allow),
+];
+
+#[test]
+fn guardfall_issue_729_sed_help_version_w_file_cases() {
+    for (command, expected) in ISSUE_729_SED_HELP_VERSION_W_FILE_CASES {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
 const PARAMETER_EXPANSION_OPERAND_CASES: &[(&str, Decision)] = &[
     // Issues #578/#580: substitutions inside a modified expansion's
     // operand are still analyzed.
@@ -2622,6 +2773,8 @@ const DECISION_TABLES: &[(&str, &[(&str, Decision)])] = &[
     named_table!(ISSUE_453_FILESYSTEM_GAPS),
     named_table!(TRANSPARENT_WRAPPER_CASES),
     named_table!(ISSUE_638_TIME_AND_EXEC_WRAPPER_CASES),
+    named_table!(ISSUE_722_WRAPPER_SHELL_STRING_SINK_CASES),
+    named_table!(ISSUE_739_ENV_ASSIGNMENT_CASES),
     named_table!(EVAL_CASES),
     named_table!(TRAP_CASES),
     named_table!(FIND_EXEC_BARE_INTERPRETER_CASES),
@@ -2637,6 +2790,7 @@ const DECISION_TABLES: &[(&str, &[(&str, Decision)])] = &[
     named_table!(SHELL_INIT_REDIRECT_CASES),
     named_table!(BRUSH_PARSER_OVERFLOW_PANIC_CASES),
     named_table!(SED_SCRIPT_WRITE_EXEC_CASES),
+    named_table!(ISSUE_729_SED_HELP_VERSION_W_FILE_CASES),
     named_table!(PARAMETER_EXPANSION_OPERAND_CASES),
     named_table!(GIT_CONFIG_COMMAND_KEY_CASES),
     named_table!(OSASCRIPT_SCRIPT_PARALLEL_CASES),
