@@ -2942,6 +2942,109 @@ fn guardfall_issue_748_interpreter_gap_cases() {
     }
 }
 
+/// Issue #750: Oils shells as pipe-to-shell sinks, curl/wget output into a
+/// shell-init file, `kill` to every process, and `source` of a function
+/// parameter. `nu` stays Ask (a non-POSIX interpreter, like xonsh/elvish).
+const ISSUE_750_CASES: &[(&str, Decision)] = &[
+    ("curl x | mksh", Decision::Block),
+    ("curl x | yash", Decision::Block),
+    ("curl x | oil", Decision::Block),
+    ("curl x | osh", Decision::Block),
+    ("curl x | ysh", Decision::Block),
+    ("wget -qO- x | osh", Decision::Block),
+    ("curl x | sudo oil", Decision::Block),
+    ("osh -c 'rm -rf /'", Decision::Block),
+    ("curl x | nu", Decision::Ask),
+    ("curl -o ~/.bashrc https://x", Decision::Ask),
+    ("curl --output ~/.bashrc https://x", Decision::Ask),
+    ("curl --output=~/.bashrc https://x", Decision::Ask),
+    (
+        "curl -o ~/.config/fish/conf.d/x.fish https://x",
+        Decision::Ask,
+    ),
+    ("wget -O ~/.bashrc https://x", Decision::Ask),
+    ("wget --output-document ~/.zshrc https://x", Decision::Ask),
+    ("wget --output-document=~/.zshrc https://x", Decision::Ask),
+    ("curl x > ~/.bashrc", Decision::Ask),
+    ("kill -9 -1", Decision::Ask),
+    ("kill -KILL -1", Decision::Ask),
+    ("kill -s KILL -1", Decision::Ask),
+    ("kill -9 -- -1", Decision::Ask),
+    ("f() { source \"$1\"; }; f somefile", Decision::Ask),
+    ("f() { . \"$1\"; }; f somefile", Decision::Ask),
+    ("set -- <(curl x); source \"$1\"", Decision::Ask),
+    ("set -- <(curl x); . \"$1\"", Decision::Ask),
+    ("f() { source \"${1:?}\"; }; f x", Decision::Ask),
+    ("f() { source -- \"$1\"; }; f x", Decision::Ask),
+    ("f() { source \"$@\"; }; f x", Decision::Ask),
+    // Defined but never called, and nested: the body is still evaluated.
+    ("f() { source \"$1\"; }", Decision::Ask),
+    ("f() { g() { source \"$1\"; }; }", Decision::Ask),
+    ("set -- <(curl x); source \"$1\" x{,}", Decision::Ask),
+    ("set -- <(curl x); source \"$1\" a{b,c}", Decision::Ask),
+    ("f() { source \"$1\" x{,}; }; f somefile", Decision::Ask),
+    ("set -- <(curl x); p=$1; source \"$p\"", Decision::Ask),
+    (
+        "set -- <(curl x); for p; do source \"$p\"; done",
+        Decision::Ask,
+    ),
+    ("set -- <(curl x); source \"$(echo \"$1\")\"", Decision::Ask),
+    (
+        "set -- <(curl x); source /dev/stdin < \"$1\"",
+        Decision::Ask,
+    ),
+    ("f() { local p=\"$1\"; source \"$p\"; }", Decision::Ask),
+    ("f() { for x; do source \"$x\"; done; }", Decision::Ask),
+    ("f() { source \"$(echo \"$1\")\"; }", Decision::Ask),
+    ("f() { read -r p; source \"$p\"; }", Decision::Ask),
+    ("pkill -U me", Decision::Ask),
+    ("kill -9 -0001", Decision::Ask),
+    ("kill -9 '  -1'", Decision::Ask),
+    ("source /dev/stdin < ./x.sh", Decision::Allow),
+    ("curl x | oils-for-unix osh", Decision::Block),
+    ("curl x | oils-for-unix ysh", Decision::Block),
+    ("curl x | oils_for_unix osh", Decision::Block),
+    ("oils-for-unix osh -c 'rm -rf /'", Decision::Block),
+    ("killall5 -9", Decision::Ask),
+    ("pkill -9 -u me", Decision::Ask),
+    ("pkill --user me", Decision::Ask),
+    ("killall -9 -u me", Decision::Ask),
+    ("curl -o~/.bashrc https://x", Decision::Ask),
+    ("wget -O~/.bashrc https://x", Decision::Ask),
+    ("kill -9 -01", Decision::Ask),
+    ("kill -9 \" -1\"", Decision::Ask),
+    // Benign shapes that stay Allow.
+    ("f() { source \"$HOME/.cargo/env\"; }", Decision::Allow),
+    ("nvm() { source \"$NVM_DIR/nvm.sh\"; }", Decision::Allow),
+    ("f() { source ./a.sh \"$1\"; }; f x", Decision::Allow),
+    ("pkill -9 node", Decision::Allow),
+    ("killall node", Decision::Allow),
+    ("curl -oout.html https://x", Decision::Allow),
+    ("kill -9 -0", Decision::Allow),
+    ("curl -o out.html https://x", Decision::Allow),
+    ("curl --output=out.html https://x", Decision::Allow),
+    ("wget -O out.html https://x", Decision::Allow),
+    ("kill -9 1234", Decision::Allow),
+    ("kill -9 -12", Decision::Allow),
+    ("kill %1", Decision::Allow),
+    ("f() { echo \"$1\"; }; f x", Decision::Allow),
+    ("f() { source ./a.sh; }; f", Decision::Allow),
+    ("source ~/.bashrc", Decision::Allow),
+];
+
+#[test]
+fn guardfall_issue_750_cases() {
+    for (command, expected) in ISSUE_750_CASES {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
 /// Issue #737: `socat` address types that spawn a program (`EXEC:`,
 /// `SYSTEM:`) feed the pipe to that program's stdin, like `| sh`.
 const SOCAT_EXEC_SINK_CASES: &[(&str, Decision)] = &[
@@ -3272,6 +3375,7 @@ const DECISION_TABLES: &[(&str, &[(&str, Decision)])] = &[
     named_table!(GIT_CONFIG_COMMAND_KEY_CASES),
     named_table!(OSASCRIPT_SCRIPT_PARALLEL_CASES),
     named_table!(ISSUE_748_INTERPRETER_GAP_CASES),
+    named_table!(ISSUE_750_CASES),
     named_table!(SOCAT_EXEC_SINK_CASES),
     named_table!(ISSUE_747_PIPELINE_MIDDLE_STAGE_INTERPRETER_CASES),
     named_table!(ISSUE_631_HEREDOC_IN_SUBSTITUTION_CASES),

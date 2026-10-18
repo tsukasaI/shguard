@@ -344,6 +344,7 @@
 
 use std::borrow::Cow;
 use std::cell::Cell;
+use std::collections::HashSet;
 
 use crate::HookContext;
 use crate::ast::{
@@ -476,6 +477,10 @@ struct AnalysisCtx<'a> {
     /// Simple-command evaluations left for literal `for` lists on the whole
     /// line, shared by every nesting level and recursion.
     loop_budget: &'a Cell<usize>,
+    /// Every variable name this command string binds anywhere (assignment,
+    /// `local`/`declare`/..., `read`, a `for` variable); `None` before the
+    /// string is parsed.
+    bound_names: Option<&'a HashSet<String>>,
 }
 
 impl<'a> AnalysisCtx<'a> {
@@ -487,6 +492,7 @@ impl<'a> AnalysisCtx<'a> {
             bindings_trusted: true,
             process_substitutions_standalone: true,
             loop_budget,
+            bound_names: None,
         }
     }
 
@@ -686,13 +692,20 @@ fn analyze_at_depth(command: &str, ctx: AnalysisCtx<'_>, mut cwd: CwdState) -> V
         ..ctx
     };
     match parser::parse(command) {
-        Ok(command_line) => evaluate_command_line_in(
-            &command_line,
-            &mut Env::isolated(),
-            ExecScope::Parent,
-            ctx,
-            &mut cwd,
-        ),
+        Ok(command_line) => {
+            let bound_names = collect_bound_names(&command_line);
+            let ctx = AnalysisCtx {
+                bound_names: Some(&bound_names),
+                ..ctx
+            };
+            evaluate_command_line_in(
+                &command_line,
+                &mut Env::isolated(),
+                ExecScope::Parent,
+                ctx,
+                &mut cwd,
+            )
+        }
         Err(err) => decide_structural(Evidence::ParseFailure {
             message: err.to_string(),
             construct: err.unsupported_construct().map(str::to_string),
@@ -4186,6 +4199,31 @@ fn evaluate_simple_command_core(
             );
         }
         crate::rules::BuiltinLoadableLibrary::Absent => {}
+    }
+
+    // Rule 6f (issue #750): `source "$1"` sources whatever file a positional
+    // parameter, a command substitution or a variable the line binds holds.
+    if let Some((name, _)) = effective
+        && source_operand_is_dynamic(name, command, ctx.bound_names)
+    {
+        let outcome = Verdict::ask(
+            Reason::new(
+                "`source`/`.` names its file through a positional parameter, a command \
+                 substitution or a variable bound on this line, so the sourced script is \
+                 unknown",
+            ),
+            argv.clone(),
+        );
+        return apply_opaque_kind_floor(
+            apply_substitution_floor(
+                apply_escalation_floor(
+                    apply_outer_rule_block(outcome, rules, &argv, symlink_scope),
+                    escalation_floor,
+                ),
+                substitution_result,
+            ),
+            opaque_kind,
+        );
     }
 
     // Rule 6b: `python -c`/`perl -e`/`node -e` — no introspection of
@@ -9296,6 +9334,175 @@ fn is_interpreter_sink_direct(stage: &[NormalizedWord]) -> bool {
         Some(Resolution::Unresolvable(_)) => true,
         None => false,
     }
+}
+
+/// Whether `name` is `source`/`.` and the file it reads is not statically
+/// known: its operand mentions a positional parameter, a command
+/// substitution or a variable the line itself binds, or it reads
+/// `/dev/stdin` with stdin redirected from such a word. Only the first raw
+/// operand is the file (later ones are arguments to the sourced script), and
+/// raw words are indexed, never the normalized ones, because brace expansion
+/// changes how many normalized words a raw word makes.
+fn source_operand_is_dynamic(
+    name: &str,
+    command: &SimpleCommand,
+    bound: Option<&HashSet<String>>,
+) -> bool {
+    if !matches!(name, "source" | ".") {
+        return false;
+    }
+    let is_dynamic = |word: &Word| word_is_dynamic(word, bound);
+    let Some(name_index) = command
+        .words
+        .iter()
+        .position(|word| literal_text(word, false).as_deref() == Some(name))
+    else {
+        return command.words.iter().any(is_dynamic);
+    };
+    let mut operands = command.words[name_index + 1..].iter();
+    let mut operand = operands.next();
+    if operand.is_some_and(|word| literal_text(word, false).as_deref() == Some("--")) {
+        operand = operands.next();
+    }
+    let Some(operand) = operand else {
+        return false;
+    };
+    if is_dynamic(operand) {
+        return true;
+    }
+    literal_text(operand, false).is_some_and(|path| is_stdin_alias_path(&path))
+        && command.redirections.iter().any(|redirection| {
+            matches!(
+                redirection,
+                Redirection::File { kind: FileRedirectionKind::Input, target } if is_dynamic(target)
+            )
+        })
+}
+
+fn word_is_dynamic(word: &Word, bound: Option<&HashSet<String>>) -> bool {
+    fn is_dynamic_name(name: &str, bound: Option<&HashSet<String>>) -> bool {
+        let base = name.split('[').next().unwrap_or(name);
+        matches!(base, "@" | "*")
+            || (!base.is_empty() && base != "0" && base.bytes().all(|b| b.is_ascii_digit()))
+            || bound.is_some_and(|names| names.contains(base))
+    }
+    fn piece_is_dynamic(piece: &WordPiece, bound: Option<&HashSet<String>>) -> bool {
+        match piece {
+            WordPiece::ParameterExpansion(name) => is_dynamic_name(name, bound),
+            WordPiece::ModifiedParameterExpansion { name, operand, .. } => {
+                is_dynamic_name(name, bound)
+                    || operand.iter().any(|piece| piece_is_dynamic(piece, bound))
+            }
+            WordPiece::CommandSubstitution(_) | WordPiece::BackquotedSubstitution(_) => true,
+            WordPiece::DoubleQuoted(pieces) => {
+                pieces.iter().any(|piece| piece_is_dynamic(piece, bound))
+            }
+            WordPiece::BraceAlternation(words) => {
+                words.iter().any(|word| word_is_dynamic(word, bound))
+            }
+            _ => false,
+        }
+    }
+    word.0.iter().any(|piece| piece_is_dynamic(piece, bound))
+}
+
+/// Builtins whose operands name the variables they bind.
+const NAME_BINDING_BUILTINS: &[&str] = &[
+    "local",
+    "declare",
+    "typeset",
+    "readonly",
+    "export",
+    "read",
+    "getopts",
+    "mapfile",
+    "readarray",
+];
+
+/// Every variable `command_line` binds anywhere: assignments, the operands of
+/// [`NAME_BINDING_BUILTINS`], and `for` variables. Nested bodies and function
+/// definitions are included; command substitutions are separate strings that
+/// get their own set when recursed.
+fn collect_bound_names(command_line: &CommandLine) -> HashSet<String> {
+    fn line(command_line: &CommandLine, names: &mut HashSet<String>) {
+        std::iter::once(&command_line.first)
+            .chain(command_line.rest.iter().map(|(_, pipeline)| pipeline))
+            .flat_map(|pipeline| std::iter::once(&pipeline.first).chain(&pipeline.rest))
+            .for_each(|command| visit(command, names));
+    }
+    fn visit(command: &Command, names: &mut HashSet<String>) {
+        match command {
+            Command::Simple(simple) => {
+                names.extend(simple.assignments.iter().map(|a| a.name.clone()));
+                let argv = normalize::normalize_argv(simple);
+                if let Some((name, _)) = crate::rules::effective_command(&argv)
+                    && NAME_BINDING_BUILTINS.contains(&name.as_ref())
+                {
+                    // Raw words, not normalized ones: `p="$1"` does not
+                    // resolve, but its leading literal still names `p`.
+                    for word in &simple.words {
+                        let leading = match word.0.first() {
+                            Some(WordPiece::Literal(text)) => text.as_str(),
+                            Some(WordPiece::DoubleQuoted(inner)) => match inner.first() {
+                                Some(WordPiece::Literal(text)) => text.as_str(),
+                                _ => "",
+                            },
+                            _ => "",
+                        };
+                        let end = leading
+                            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                            .unwrap_or(leading.len());
+                        if end > 0 {
+                            names.insert(leading[..end].to_string());
+                        }
+                    }
+                }
+            }
+            Command::FunctionDefinition(func) => compound(&func.body, names),
+            Command::Compound(inner) => compound(inner, names),
+            Command::ExtendedTest(_) => {}
+        }
+    }
+    fn compound(compound: &CompoundCommand, names: &mut HashSet<String>) {
+        match compound {
+            CompoundCommand::BraceGroup { body, .. } | CompoundCommand::Subshell { body, .. } => {
+                line(body, names);
+            }
+            CompoundCommand::ForClause { variable, body, .. } => {
+                names.insert(variable.clone());
+                line(body, names);
+            }
+            CompoundCommand::WhileClause {
+                condition, body, ..
+            }
+            | CompoundCommand::UntilClause {
+                condition, body, ..
+            } => {
+                line(condition, names);
+                line(body, names);
+            }
+            CompoundCommand::IfClause {
+                condition,
+                then_body,
+                elifs,
+                else_body,
+                ..
+            } => {
+                line(condition, names);
+                line(then_body, names);
+                for ElifClause { condition, body } in elifs {
+                    line(condition, names);
+                    line(body, names);
+                }
+                if let Some(body) = else_body {
+                    line(body, names);
+                }
+            }
+        }
+    }
+    let mut names = HashSet::new();
+    line(command_line, &mut names);
+    names
 }
 
 /// Commands that run stdin as code only when an operand names it

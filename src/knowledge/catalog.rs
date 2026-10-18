@@ -422,7 +422,7 @@ pub(super) static CATALOG: &[CommandSpec] = &[
         slots: &[EXEC, Slot::Operands(1)],
     },
     CommandSpec {
-        names: &["busybox", "toybox"],
+        names: &["busybox", "toybox", "oils-for-unix", "oils_for_unix"],
         options: OptionGrammar {
             long_flags: &["help", "install", "list", "list-full", "show", "version"],
             ..BASE

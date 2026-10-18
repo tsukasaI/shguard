@@ -20,13 +20,24 @@ All notable changes to this project are documented in this file.
 - A `PATH` assignment with an empty or relative literal component, and a
   `[[ ]]` arithmetic comparison (`-eq`, `-gt`, ...) of an operand that is
   not provably an integer, floor to Ask.
+- The Oils shells `osh`, `ysh` and `oil` are shell interpreters (#750):
+  `curl x | oil` Blocks. `nu` stays Ask.
+- `curl`/`wget` writing to a shell-init, cron, autostart or persistence
+  file (`curl -o ~/.bashrc`, `--output`, `--output=`, `wget -O`,
+  `--output-document`, glued `-o~/.bashrc`) asks, like a redirect to the
+  same file. `kill` with pid `-1` (`kill -9 -1`), `killall5`, and `pkill`/
+  `killall` with `-u`/`-U`/`--user` ask. `source`/`.` of a positional
+  parameter, a command substitution or a variable the line binds (`source
+  "$1"`, `p=$1; source "$p"`) asks, as does `source /dev/stdin < "$1"`. `oils-for-unix` is
+  a transparent wrapper (`curl x | oils-for-unix osh` Blocks).
 
 ### Compatibility notes
 
 - `[[allow]] command = "arch"`, `"sandbox-exec"`, `"valgrind"`,
   `"fakeroot"` and `"rlwrap"` are now rejected at config load, like the
   other exec wrappers, as are `"mksh"`, `"yash"`, `"rbash"`, `"nu"`,
-  `"xonsh"`, `"elvish"` and `"pypy"`. Remove such entries before upgrading.
+  `"xonsh"`, `"elvish"` and `"pypy"`, plus `"osh"`, `"ysh"` and `"oil"`.
+  Remove such entries before upgrading.
   The stdin-to-code tools above are not rejected.
 
 ## [0.9.3] - 2026-10-18
