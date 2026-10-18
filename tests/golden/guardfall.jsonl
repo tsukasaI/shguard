@@ -145,6 +145,9 @@
 {"command":"dd of=/etc/cron.d/x if=evil","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"dd of=/etc/passwd if=/dev/zero","decision":"Block","deny_message":null,"matched_rule":"dd-write-device"}
 {"command":"dd of=/etc/zsh/zshrc if=evil","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"echo \"$(cat <<\"a'b\"\nab\n)\na'b\nrm -rf /\n)\"","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (heredoc delimiter whose quote removal brush and bash read differently); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
+{"command":"echo \"$(cat <<\"a\\b\"\nab\n)\na\\b\nrm -rf /\n)\"","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (heredoc delimiter whose quote removal brush and bash read differently); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
+{"command":"echo \"$(cat <<'E'\n\u0001\nE\n)\"","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (control character reserved for heredoc substitution handling); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
 {"command":"echo \"$(cat <<'EOF'\n(x\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"echo \"$(cat <<'EOF'\ndon't\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"echo \"$(cat <<'EOF'\nfix: thing\n\n1) first item\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
@@ -155,6 +158,10 @@
 {"command":"echo \"$(cat <<'EOF'\nx\nEOF)\"","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"echo \"$(cat <<'EOF'\nx)\n)\"","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"echo \"$(cat <<'EOF'\nx)\nEOF\nrm -rf /\n)\"","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo \"$(cat <<'EOF'\nx\\\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"echo \"$(cat <<'a\\\\b'\nab\n)\na\\\\b\nrm -rf /\n)\"","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"echo \"$(cat <<'a\\b'\nab\n)\na\\b\nrm -rf /\n)\"","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (heredoc delimiter whose quote removal brush and bash read differently); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
+{"command":"echo \"$(cat <<E\n)\nE\n)\"","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"echo \"$(cat <<EOF\n(x\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"echo \"$(cat <<EOF\ndon't\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"echo \"$(cat <<EOF\nfix: thing\n\n1) first item\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
@@ -163,6 +170,8 @@
 {"command":"echo \"$(cat <<EOF\nsay \"hi\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"echo \"$(cat <<EOF\nx\nEOF\nrm -rf /\n)\"","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"echo \"$(cat <<EOF\nx)\nEOF\nrm -rf /\n)\"","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"echo \"$(cat <<EOF\nx\\\nEOF\n)\nEOF\nrm -rf /\n)\"","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (expanding heredoc body ending in a line continuation); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
+{"command":"echo \"$(cat <<EOF\nx\\\\\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"echo \"$X (see: y)\"","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"echo \"${ rm -rf ~; }\"","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (unresolved `$` expansion form (zsh flags/short forms such as ${(e)x}, ${=x}, $=x, $~x, or a ${ command; } substitution)); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
 {"command":"echo \"${x%'$(rm -rf ~)'}\"","decision":"Block","deny_message":null,"matched_rule":null}

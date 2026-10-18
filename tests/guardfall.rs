@@ -3004,6 +3004,32 @@ const ISSUE_631_HEREDOC_IN_SUBSTITUTION_CASES: &[(&str, Decision)] = &[
     ),
     ("echo \"$(cat <<'EOF'\nx)\n)\"", Decision::Ask),
     ("echo \"$(cat <<'EOF'\nx\nEOF)\"", Decision::Ask),
+    (
+        "echo \"$(cat <<'a\\b'\nab\n)\na\\b\nrm -rf /\n)\"",
+        Decision::Ask,
+    ),
+    (
+        "echo \"$(cat <<\"a\\b\"\nab\n)\na\\b\nrm -rf /\n)\"",
+        Decision::Ask,
+    ),
+    (
+        "echo \"$(cat <<\"a'b\"\nab\n)\na'b\nrm -rf /\n)\"",
+        Decision::Ask,
+    ),
+    (
+        "echo \"$(cat <<'a\\\\b'\nab\n)\na\\\\b\nrm -rf /\n)\"",
+        Decision::Ask,
+    ),
+    (
+        "echo \"$(cat <<EOF\nx\\\nEOF\n)\nEOF\nrm -rf /\n)\"",
+        Decision::Ask,
+    ),
+    ("echo \"$(cat <<EOF\nx\\\\\nEOF\n)\"", Decision::Allow),
+    ("echo \"$(cat <<'EOF'\nx\\\nEOF\n)\"", Decision::Allow),
+    // Body starting with `)` reads as an operator: safe over-ask.
+    ("echo \"$(cat <<E\n)\nE\n)\"", Decision::Ask),
+    // Raw U+0001 is the placeholder sentinel: refused.
+    ("echo \"$(cat <<'E'\n\u{1}\nE\n)\"", Decision::Ask),
 ];
 
 #[test]

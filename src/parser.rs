@@ -710,8 +710,44 @@ fn convert_redirect_target(target: &bast::IoFileRedirectTarget) -> Result<Word, 
     }
 }
 
+/// True when brush's quote removal and bash's agree on this raw start tag:
+/// brush drops every `'`, `"` and `\`, bash keeps a `\` inside single quotes,
+/// `\b` inside double quotes, and the other quote kind.
+fn heredoc_tag_reads_alike(raw: &str) -> bool {
+    let plain = |s: &str| !s.contains(['\'', '"', '\\']);
+    let quoted = |s: &str, q: char| {
+        s.strip_prefix(q)
+            .and_then(|r| r.strip_suffix(q))
+            .is_some_and(plain)
+    };
+    !raw.is_empty()
+        && (plain(raw)
+            || quoted(raw, '\'')
+            || quoted(raw, '"')
+            || raw
+                .strip_prefix('\\')
+                .is_some_and(|rest| !rest.is_empty() && plain(rest)))
+}
+
+/// Whether `body` ends in an odd run of backslashes before its final
+/// newline, which bash splices into the delimiter line.
+fn ends_in_line_continuation(body: &str) -> bool {
+    let trimmed = body.strip_suffix('\n').unwrap_or(body);
+    (trimmed.len() - trimmed.trim_end_matches('\\').len()) % 2 == 1
+}
+
 fn convert_heredoc(heredoc: &bast::IoHereDocument) -> Result<Redirection, ParseError> {
+    if !heredoc_tag_reads_alike(&heredoc.here_end.value) {
+        return Err(ParseError::unsupported(
+            "heredoc delimiter whose quote removal brush and bash read differently",
+        ));
+    }
     let body = heredoc.doc.value.clone();
+    if heredoc.requires_expansion && ends_in_line_continuation(&body) {
+        return Err(ParseError::unsupported(
+            "expanding heredoc body ending in a line continuation",
+        ));
+    }
     let substitutions = if heredoc.requires_expansion {
         heredoc::parse_body(&heredoc::strip_line_continuations(&body))
             .map_or(HeredocSubstitutions::Unparsed, HeredocSubstitutions::Parsed)

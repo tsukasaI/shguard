@@ -199,6 +199,10 @@ fn closing_backquote(bytes: &[u8], from: usize) -> Option<usize> {
 /// it tokenizes cleanly and that final `)` brings the parenthesis depth back
 /// to zero. A `)` inside a heredoc body leaves the heredoc unterminated in the
 /// prefix, which the tokenizer rejects, so such a candidate is skipped.
+///
+/// A heredoc body whose first line starts with `)` is read by the tokenizer as
+/// an operator, closing the substitution early; that falls to `Ask`, a safe
+/// over-ask kept rather than special-cased.
 fn closing_paren(
     raw: &str,
     inner_start: usize,
