@@ -6,10 +6,14 @@ Human-authored PRs have no GitHub Actions check: the lefthook `pre-push`
 hook is the merge gate (fmt, clippy, `cargo test` (via
 `scripts/hermetic-cargo-test.sh`), `cargo deny check`, the bypass-hunt
 workflow script tests, and a check that the pushed branch is based on the
-latest `origin/main`). `.github/workflows/main-check.yaml` runs
+latest `origin/main`). For `chore/release-*` pushes the hook also runs a
+sandboxed `nix build` of the pushed commit (`scripts/release-nix-build.sh`).
+`.github/workflows/main-check.yaml` runs
 the same Rust checks only on pushes to `main` and on Dependabot PRs, which
 never pass through a local hook. One-time setup (also needs Node >= 24 on
-`PATH`):
+`PATH`; release pushes additionally need nix with `sandbox = true` and
+`sandbox-fallback = false` in nix.conf, and the script refuses the push
+otherwise):
 
 ```bash
 cargo install cargo-deny --locked

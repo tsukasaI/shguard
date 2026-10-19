@@ -22,6 +22,10 @@ completes.
    That covers aarch64-darwin only, on the maintainer's Mac, and needs nix with
    the sandbox enabled (`sandbox = true`, `sandbox-fallback = false` in
    nix.conf); the script enforces this and refuses the push otherwise.
+   Do not add commits to a release PR through the GitHub UI (web edits,
+   "Commit suggestion", "Update branch"); push them locally instead, because
+   only a local push runs the pre-push nix build. The push-to-`main` nix-build
+   and `release.yaml`'s tag-time gate would still catch such a commit later.
    x86_64-linux and aarch64-darwin are first built by `main-check.yaml`'s
    `nix-build` job (ubuntu-latest and macos-latest) on the push to `main` when
    the release PR merges. x86_64-darwin is not gated: there is no hosted Intel

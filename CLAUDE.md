@@ -18,8 +18,11 @@ Precedence when guides conflict: language guide > principles.
   repo root; `gitleaks git --staged --redact`).
 - Human PRs get no CI: lefthook `pre-push` (fmt, clippy, test,
   `cargo deny check`, up-to-date-with-`origin/main` check) is the merge
-  gate. `main-check.yaml` covers only pushes to `main` and Dependabot PRs;
-  release and the nightly fuzzer stay on GitHub Actions.
+  gate. For `chore/release-*` pushes it also runs a sandboxed `nix build` of
+  the pushed commit (`scripts/release-nix-build.sh`). `main-check.yaml`
+  covers only pushes to `main`, Dependabot PRs, and on-demand
+  `workflow_dispatch` runs; release and the nightly fuzzer stay on GitHub
+  Actions.
 - `git commit --no-verify` and `SKIP=` bypasses are banned except as a
   documented emergency recorded in the commit message.
 - `rustfmt.toml` is INTENTIONALLY ABSENT: rustfmt runs at defaults per
