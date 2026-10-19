@@ -21,9 +21,13 @@ completes.
    (`scripts/release-nix-build.sh`, for pushes to `refs/heads/chore/release-*`).
    That covers aarch64-darwin only, on the maintainer's Mac, and needs nix with
    the sandbox enabled (`sandbox = true`, `sandbox-fallback = false` in
-   nix.conf). x86_64-linux is first built by `release.yaml` at tag time (step 3).
-   x86_64-darwin is not gated: there is no hosted Intel macOS runner.
-2. After merge, tag the merge commit `vX.Y.Z` and push the tag.
+   nix.conf); the script enforces this and refuses the push otherwise.
+   x86_64-linux and aarch64-darwin are first built by `main-check.yaml`'s
+   `nix-build` job (ubuntu-latest and macos-latest) on the push to `main` when
+   the release PR merges. x86_64-darwin is not gated: there is no hosted Intel
+   macOS runner.
+2. After merge, wait for `main-check.yaml`'s `nix-build` on the merge commit to
+   pass, then tag the merge commit `vX.Y.Z` and push the tag.
 3. `release.yaml` re-runs `nix build` on x86_64-linux and aarch64-darwin for the
    tagged commit, and its `build` and `release` jobs `needs` it, so a failed or
    skipped Darwin nix build cannot produce a GitHub release.

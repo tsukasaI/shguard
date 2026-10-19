@@ -14,7 +14,8 @@
 # refs/heads/chore/release-* are checked; every other ref, tag push and branch
 # deletion is skipped silently. Builds `git+file://<toplevel>?rev=<sha>`, not
 # the working tree, so uncommitted edits can neither mask nor cause a failure.
-# Fails closed: a release push without `nix` on PATH is refused.
+# Fails closed: a release push without `nix` on PATH, or with nix not running
+# sandbox = true and sandbox-fallback = false, is refused.
 set -euo pipefail
 
 zero_sha=0000000000000000000000000000000000000000
@@ -30,8 +31,20 @@ while read -r local_ref local_sha remote_ref _remote_sha; do
     exit 1
   fi
 
+  # Darwin nix defaults to no sandbox, which would let the #779 class pass;
+  # `--option sandbox true` is ignored by the daemon for untrusted users.
+  if [[ "$(nix config show sandbox 2>/dev/null)" != "true" ||
+    "$(nix config show sandbox-fallback 2>/dev/null)" != "false" ]]; then
+    echo "release-nix-build: nix must run with sandbox = true and sandbox-fallback = false (see docs/distribution.md); refusing to push $remote_ref." >&2
+    exit 1
+  fi
+
   toplevel=$(git rev-parse --show-toplevel)
-  if ! nix build -L --no-link "git+file://${toplevel}?rev=${local_sha}"; then
+  if [[ ! "$toplevel" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+    echo "release-nix-build: repo path '$toplevel' contains characters outside [A-Za-z0-9._/-] that the git+file:// URL cannot carry; refusing to push $remote_ref." >&2
+    exit 1
+  fi
+  if ! nix build -L --no-link "git+file://${toplevel}?rev=${local_sha}" </dev/null; then
     echo "release-nix-build: nix build of $local_sha ($local_ref) failed; fix it before pushing $remote_ref." >&2
     exit 1
   fi
