@@ -5797,21 +5797,21 @@ pub(crate) fn effective_command_excluding<'a>(
     }
 }
 
-/// The words that follow the own options of the first hop named `wrapper`
-/// (canonical name) along `stage`'s wrapper chain; `None` when no hop is.
+/// The canonical name and the `stage` index range of the own option words
+/// (wrapper word excluded) of every wrapper hop along `stage`'s chain,
+/// outermost first.
 #[must_use]
-pub(crate) fn after_wrapper_options<'a>(
-    stage: &'a [NormalizedWord],
-    wrapper: &str,
-) -> Option<&'a [NormalizedWord]> {
-    let mut rest = stage;
-    while let Step::Wrapper(hop) = step(rest, &[]) {
-        rest = hop.next();
-        if canonical_command_name(hop.base) == wrapper {
-            return Some(rest);
-        }
+pub(crate) fn wrapper_option_ranges(
+    stage: &[NormalizedWord],
+) -> Vec<(String, std::ops::Range<usize>)> {
+    let mut ranges = Vec::new();
+    let mut at = 0;
+    while let Step::Wrapper(hop) = step(&stage[at..], &[]) {
+        let end = at + 1 + hop.parsed.command_at();
+        ranges.push((canonical_command_name(hop.base), at + 1..end));
+        at = end;
     }
-    None
+    ranges
 }
 
 /// The first option along `stage`'s wrapper chain that the catalog does not

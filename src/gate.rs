@@ -11501,7 +11501,31 @@ fn chain_dash_c_targets(
     cluster_wrapper: Option<&str>,
     env: &Env,
 ) -> Option<String> {
-    let mut current = CwdContext::Initial;
+    match chain_dash_c_context(
+        rest,
+        long_names,
+        short_can_attach,
+        cluster_wrapper,
+        env,
+        CwdContext::Initial,
+    )? {
+        CwdContext::Known(anchor) => Some(anchor.path),
+        CwdContext::Initial | CwdContext::Poisoned => None,
+    }
+}
+
+/// [`chain_dash_c_targets`]'s scan, starting from `start` and returning the
+/// chained [`CwdContext`] (`Poisoned` for an unresolvable value) instead of
+/// only a known anchor; `None` when `rest` has no such flag.
+fn chain_dash_c_context(
+    rest: &[NormalizedWord],
+    long_names: &[&str],
+    short_can_attach: bool,
+    cluster_wrapper: Option<&str>,
+    env: &Env,
+    start: CwdContext,
+) -> Option<CwdContext> {
+    let mut current = start;
     let mut found = false;
     let mut words = rest.iter();
     while let Some(word) = words.next() {
@@ -11544,16 +11568,12 @@ fn chain_dash_c_targets(
             continue;
         };
         found = true;
-        let raw = raw?;
+        let Some(raw) = raw else {
+            return Some(CwdContext::Poisoned);
+        };
         current = resolve_cwd_outcome(&current, classify_cd_target(&raw, env));
     }
-    if !found {
-        return None;
-    }
-    match current {
-        CwdContext::Known(anchor) => Some(anchor.path),
-        CwdContext::Initial | CwdContext::Poisoned => None,
-    }
+    found.then_some(current)
 }
 
 /// Issue #209's `tar`-specific `-C`/`--directory` handling: tar's flag is
@@ -11869,20 +11889,36 @@ fn evaluate_env_dash_c_override(
     env: &Env,
     rules: &Rules,
 ) -> Option<Verdict> {
-    let (name, env_and_rest) = crate::rules::effective_command_excluding(argv, &["env"])?;
-    if name != "env" {
-        return None;
-    }
     let (_, wrapped_tail) = crate::rules::effective_command(argv)?;
-    let env_prefix_start = argv.len() - env_and_rest.len();
     let env_prefix_end = argv.len() - wrapped_tail.len();
-    let env_prefix = &argv[env_prefix_start..env_prefix_end];
-    let anchor = chain_dash_c_targets(env_prefix, &["--chdir"], true, Some("env"), env)?;
+    // Only env hops' own options: an inner wrapper's unrelated `-C`
+    // (`strace -C`) is not a chdir.
+    let ranges = crate::rules::wrapper_option_ranges(argv);
+    let env_options: Vec<_> = ranges
+        .iter()
+        .filter(|(name, _)| name == "env")
+        .map(|(_, options)| options.clone())
+        .collect();
+    let hops_start = env_options.first()?.end;
+    let mut current = CwdContext::Initial;
+    for options in env_options {
+        if let Some(next) = chain_dash_c_context(
+            &argv[options],
+            &["--chdir"],
+            true,
+            Some("env"),
+            env,
+            current.clone(),
+        ) {
+            current = next;
+        }
+    }
+    let CwdContext::Known(CwdAnchor { path: anchor, .. }) = current else {
+        return None;
+    };
     // Hops between env's own options and the wrapped tail run under the new
     // cwd too, so their glued `target_flags` values compose (`env -C /etc
     // xargs -apasswd cat`).
-    let after_env_options = crate::rules::after_wrapper_options(argv, "env")?;
-    let hops_start = argv.len() - after_env_options.len();
     let mut composed_argv = argv[..hops_start].to_vec();
     composed_argv.extend(compose_argv_for_command(
         &argv[hops_start..env_prefix_end],
@@ -22856,6 +22892,35 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
             "env -C /etc xargs -apasswd cat",
             "env -C /etc xargs --arg-file=passwd cat",
             "env -C /etc xargs -a passwd cat",
+        ] {
+            let verdict = analyze_with_policy(line, &rules, &allowlist);
+            assert_eq!(verdict.decision(), Decision::Block, "{line}");
+        }
+    }
+
+    #[test]
+    fn env_dash_c_ignores_an_inner_wrappers_unrelated_dash_c() {
+        let config = crate::rules::UserConfig::parse(
+            r#"
+            [[deny]]
+            id = "user-xargs-arg-file"
+            reason = "no passwd"
+            command = "xargs"
+            target_flags = ["-a", "--arg-file"]
+            targets = [{ exact = "/etc/passwd" }]
+        "#,
+        )
+        .unwrap();
+        let (rules, allowlist) = crate::rules::merge_user_config(
+            Rules::embedded().unwrap(),
+            Allowlist::embedded().unwrap(),
+            config,
+        )
+        .unwrap();
+        for line in [
+            "strace -C xargs -a/etc/passwd cat",
+            "env -C /etc strace -C xargs -apasswd cat",
+            "env -C / env -C etc xargs -apasswd cat",
         ] {
             let verdict = analyze_with_policy(line, &rules, &allowlist);
             assert_eq!(verdict.decision(), Decision::Block, "{line}");
