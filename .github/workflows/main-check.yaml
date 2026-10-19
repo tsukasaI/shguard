@@ -1,13 +1,11 @@
 # Backstop for what the lefthook pre-push gate cannot see; human PRs get no
-# check here (pre-push is their merge gate), except release PRs
-# (chore/release-*), which get the sandboxed nix-build matrix.
+# check here (pre-push is their merge gate). Release PRs (chore/release-*) are
+# covered by a local pre-push `nix build` (scripts/release-nix-build.sh), and
+# release.yaml re-runs nix build at tag time.
 # - push to main: tests the actual post-squash-merge tip, and on Linux (the
 #   pre-push gate runs only on the maintainer's macOS machine).
 # - Dependabot PRs: their branches are pushed server-side and never pass
 #   through anyone's local pre-push hook.
-# - Release PRs (head branch chore/release-*): nix-build on x86_64-linux
-#   (ubuntu-latest) and aarch64-darwin (macos-latest), because the Darwin nix
-#   sandbox is not reproducible by the local gate.
 # - workflow_dispatch: on-demand sandboxed nix-build (e.g. after a flake.lock
 #   renewal); test and cargo-deny skip.
 name: Main check
@@ -36,7 +34,7 @@ jobs:
       - run: bash scripts/hermetic-cargo-test.sh
 
   nix-build:
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.pull_request.user.login == 'dependabot[bot]' || startsWith(github.head_ref, 'chore/release-')
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.pull_request.user.login == 'dependabot[bot]'
     strategy:
       fail-fast: false
       matrix:
