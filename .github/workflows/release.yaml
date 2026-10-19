@@ -8,6 +8,7 @@
 # Re-run that for the listed tag (or the current latest tag) and update both
 # the SHA and its trailing version comment when bumping.
 #   - actions/checkout            @ v7.0.1 (shared pin with main-check.yaml and fuzz-nightly.yaml)
+#   - cachix/install-nix-action   @ v31.11.2 (shared pin with main-check.yaml)
 #   - dtolnay/rust-toolchain      @ master, pinned 2026-07-18 (shared pin with main-check.yaml and fuzz-nightly.yaml) -- manual renewal only, see above
 #   - actions/upload-artifact     @ v4.6.2
 #   - actions/download-artifact   @ v4.3.0
@@ -34,8 +35,23 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
+  # Fail-closed: build and release both need this job, so a failed or skipped
+  # Darwin nix build blocks the release.
+  nix-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
+        with:
+          extra_nix_config: sandbox = true
+      - run: nix build -L
+
   build:
-    needs: test
+    needs: [test, nix-build]
     strategy:
       fail-fast: false
       matrix:
@@ -81,7 +97,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: build
+    needs: [build, nix-build]
     runs-on: ubuntu-latest
     permissions:
       contents: write

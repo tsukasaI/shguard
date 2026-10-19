@@ -13,6 +13,17 @@ Published via `cargo publish` after tagging a release. The `Cargo.toml` metadata
 Run `cargo publish` after each tagged release, once the GitHub Release workflow
 completes.
 
+## Release procedure
+
+1. Open a `chore/release-vX.Y.Z` PR (the branch name must start with
+   `chore/release-`). The `nix-build` matrix in `main-check.yaml` (ubuntu-latest
+   and macos-latest, sandboxed) runs on it and must pass before merging.
+2. After merge, tag the merge commit `vX.Y.Z` and push the tag.
+3. `release.yaml` re-runs `nix build` on Linux and macOS for the tagged commit,
+   and its `build` and `release` jobs `needs` it, so a failed or skipped Darwin
+   nix build cannot produce a GitHub release.
+4. Once the workflow completes, `cargo publish` as described above.
+
 ## Homebrew
 
 **Not yet available.** A `tsukasaI/homebrew-shguard` tap is planned for a

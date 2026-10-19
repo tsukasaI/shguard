@@ -1,9 +1,12 @@
 # Backstop for what the lefthook pre-push gate cannot see; human PRs get no
-# check here (pre-push is their merge gate).
+# check here (pre-push is their merge gate), except release PRs
+# (chore/release-*), which get the sandboxed nix-build matrix.
 # - push to main: tests the actual post-squash-merge tip, and on Linux (the
 #   pre-push gate runs only on the maintainer's macOS machine).
 # - Dependabot PRs: their branches are pushed server-side and never pass
 #   through anyone's local pre-push hook.
+# - Release PRs (head branch chore/release-*): nix-build on Linux and macOS,
+#   because the Darwin nix sandbox is not reproducible by the local gate.
 name: Main check
 
 on:
@@ -30,11 +33,18 @@ jobs:
       - run: env -u SHGUARD_CONFIG -u XDG_CONFIG_HOME -u SHGUARD_STRICT_CONFIG CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" HOME=/homeless-shelter cargo test
 
   nix-build:
-    if: github.event_name == 'push' || github.event.pull_request.user.login == 'dependabot[bot]'
-    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event.pull_request.user.login == 'dependabot[bot]' || startsWith(github.head_ref, 'chore/release-')
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
+        with:
+          # The Darwin sandbox denies /Users; keep it on whatever the installer defaults to.
+          extra_nix_config: sandbox = true
       - run: nix build -L
 
   cargo-deny:
