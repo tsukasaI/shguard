@@ -13249,6 +13249,8 @@ mod tests {
             "X=$Y; true && X=\"rm -rf /\"; readarray -d -- -C cb -c 1 arr; X=ls; $X",
             "X=$Y; true && X=\"rm -rf /\"; mapfile $F arr; X=ls; $X",
             "X=$Y; true && X=\"rm -rf /\"; autoload f; X=ls; $X",
+            // Already Block via the first strong write (#463): regression pins;
+            // the `X=$Y; true &&` entries above are the ones exercising the fix.
             "X=\"rm -rf /\"; trap 'readonly X' DEBUG; X=ls; $X",
             "X=\"rm -rf /\"; mapfile -C cb arr; X=ls; $X",
             "X=\"rm -rf /\"; readarray -C cb arr; X=ls; $X",
