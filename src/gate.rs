@@ -13235,6 +13235,74 @@ mod tests {
     }
 
     #[test]
+    fn issue_653_742_readonly_via_trap_mapfile_callback_or_autoload_does_not_advance_the_cut() {
+        for command in [
+            "X=$Y; true && X=\"rm -rf /\"; trap 'readonly X' DEBUG; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; mapfile -C cb arr; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; readarray -C cb arr; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; mapfile -tC cb arr; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; readarray -Ccb arr; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; mapfile -n 1 -C cb arr; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; mapfile -d -- -C cb arr; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; mapfile -td -- -C cb arr; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; readarray -d -- -C cb -c 1 arr; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; mapfile -dd -C cb arr; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; mapfile -ds -C cb -c 1 arr; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; mapfile $F arr; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; autoload f; X=ls; $X",
+            // Already Block via the first strong write (#463): regression pins;
+            // the `X=$Y; true &&` entries above are the ones exercising the fix.
+            "X=\"rm -rf /\"; trap 'readonly X' DEBUG; X=ls; $X",
+            "X=\"rm -rf /\"; mapfile -C cb arr; X=ls; $X",
+            "X=\"rm -rf /\"; readarray -C cb arr; X=ls; $X",
+            "X=\"rm -rf /\"; autoload f; X=ls; $X",
+        ] {
+            assert_decision(command, Decision::Block);
+        }
+    }
+
+    #[test]
+    fn issue_653_742_mapfile_without_callback_flag_is_not_a_readonly_trigger() {
+        // The fallback value is a certain overwrite again, so `ls` runs.
+        for command in [
+            "X=$Y; true && X=\"rm -rf /\"; mapfile arr; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; readarray -t arr; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; mapfile -- -C arr; X=ls; $X",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+    }
+
+    #[test]
+    fn issue_653_744_body_after_a_top_level_readonly_that_adds_nothing_does_not_over_widen() {
+        // The body adds no readonly fact, so the later overwrite stays
+        // certain and `$X` is `ls`.
+        for command in [
+            "X=$Y; true && X=\"rm -rf /\"; readonly A; if true; then :; fi; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; readonly A; for i in 1; do :; done; X=ls; $X",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+        // A body that does add a readonly fact still widens.
+        assert_decision(
+            "X=$Y; true && X=\"rm -rf /\"; readonly A; if true; then readonly B; fi; X=ls; $X",
+            Decision::Block,
+        );
+    }
+
+    #[test]
+    fn issue_653_744_readonly_set_outside_a_body_stays_ask_inside_it() {
+        // Child bodies start with no variable values; needs #661 scoping.
+        for command in [
+            "X=\"rm -rf /\"; readonly X; if true; then X=ls; $X; fi",
+            "X=\"rm -rf /\"; readonly X; for i in 1; do X=ls; $X; done",
+            "X=\"rm -rf /\"; readonly X; f() { X=ls; $X; }; f",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+    }
+
+    #[test]
     fn issue_653_readonly_inside_compound_bodies_does_not_advance_the_cut() {
         for command in [
             "X=$Y; true && X=\"rm -rf /\"; if true; then readonly X; fi; X=ls; $X",
