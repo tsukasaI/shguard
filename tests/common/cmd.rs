@@ -1,7 +1,6 @@
 //! Every `cargo_bin` spawn of `shguard` goes through here (`clippy.toml` bans
-//! direct calls); a test that needs a `std::process::Command` must replay
-//! `shguard().get_envs()` (the `ask_outcome.rs` slow producer is pending
-//! #788).
+//! direct calls); a test that needs a `std::process::Command` uses
+//! `shguard_std()`, which replays the same env scrub.
 
 #![allow(clippy::expect_used)]
 
@@ -25,5 +24,28 @@ pub fn shguard() -> Command {
         .env_remove("SHGUARD_TEST_PANIC")
         .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .env_remove("RUST_BACKTRACE");
+    cmd
+}
+
+/// A `std::process::Command` for `shguard` carrying the same env scrub as
+/// [`shguard`], for tests that must spawn without `assert_cmd` (a piped,
+/// slowly fed stdin). Program, args, current dir, and env are replayed from
+/// `shguard()`, so a variable added there reaches this command too.
+/// `env_clear()` is not visible through `get_envs()`: one added to
+/// `shguard()` must be repeated here.
+#[allow(dead_code)] // not every test crate that includes this module needs a std command
+pub fn shguard_std() -> std::process::Command {
+    let base = shguard();
+    let mut cmd = std::process::Command::new(base.get_program());
+    cmd.args(base.get_args());
+    if let Some(dir) = base.get_current_dir() {
+        cmd.current_dir(dir);
+    }
+    for (key, value) in base.get_envs() {
+        match value {
+            Some(value) => cmd.env(key, value),
+            None => cmd.env_remove(key),
+        };
+    }
     cmd
 }
