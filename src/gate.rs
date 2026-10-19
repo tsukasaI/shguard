@@ -22909,9 +22909,18 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
             "env -C /etc xargs -apasswd cat",
             "env -C /etc xargs --arg-file=passwd cat",
             "env -C /etc xargs -a passwd cat",
+            "env -C /etc nice xargs -apasswd cat",
+            "env -C /etc timeout 5 xargs -apasswd cat",
         ] {
             let verdict = analyze_with_policy(line, &rules, &allowlist);
             assert_eq!(verdict.decision(), Decision::Block, "{line}");
+        }
+        for line in [
+            "env -C /tmp xargs -apasswd cat",
+            "env -C /etc xargs -a/tmp/x cat",
+        ] {
+            let verdict = analyze_with_policy(line, &rules, &allowlist);
+            assert_eq!(verdict.decision(), Decision::Allow, "{line}");
         }
     }
 
