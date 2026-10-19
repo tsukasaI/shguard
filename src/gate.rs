@@ -9391,6 +9391,34 @@ fn is_stdin_alias_path(path: &str) -> bool {
     if path == "-" {
         return true;
     }
+    // Before normalizing: `lexical_normalize` cancels `root`/`cwd` against a
+    // following `..` as if they were directories, but `/proc/self/root/..` is
+    // a real `..` of the process root, so `/proc/self/root/../dev/stdin` is
+    // `/dev/stdin`. Read what follows such a prefix like an unknown-cwd path,
+    // ignoring its ascent. Leading `..` are skipped, as everywhere else.
+    let parts: Vec<&str> = path
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect();
+    let mut start = parts.iter().take_while(|part| **part == "..").count();
+    let mut after_proc_root = false;
+    while let ["proc", p, "root" | "cwd", ..] = &parts[start..]
+        && is_proc_process(p)
+    {
+        start += 3;
+        after_proc_root = true;
+    }
+    if after_proc_root {
+        // `./` so a leading `~` in the remainder stays a plain component.
+        let rest = format!("./{}", parts[start..].join("/"));
+        return match lexical_normalize(&rest) {
+            PathForm::Rel { comps, .. } => {
+                let comps: Vec<&str> = comps.iter().map(String::as_str).collect();
+                is_stdin_alias_components(&comps)
+            }
+            _ => false,
+        };
+    }
     // Every anchor whose root is unknown yet may sit at `/`: a `..` that left
     // `~`, a named home or the directory stack can land anywhere, as an
     // ascent from an unknown cwd can. Not `Home`/`NamedUserHomeSub`, which
@@ -9407,11 +9435,20 @@ fn is_stdin_alias_path(path: &str) -> bool {
     is_stdin_alias_components(&comps)
 }
 
+fn is_ascii_digits(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// The `/proc/<this>` component naming a process: `self`, `thread-self` or a pid.
+fn is_proc_process(s: &str) -> bool {
+    matches!(s, "self" | "thread-self") || is_ascii_digits(s)
+}
+
 /// The component table behind [`is_stdin_alias_path`], for a path already
 /// anchored at `/` (or at an unknown cwd, whose ascent the caller dropped).
 fn is_stdin_alias_components(comps: &[&str]) -> bool {
-    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
-    let process = |s: &str| matches!(s, "self" | "thread-self") || digits(s);
+    let digits = is_ascii_digits;
+    let process = is_proc_process;
     // A process's root is the filesystem root, so the same table applies
     // beneath it (`/proc/self/root/dev/stdin`). A loop, not recursion: the
     // chain length is attacker-controlled and a deep one overflows the stack.
@@ -15696,6 +15733,9 @@ mod tests {
             "python3 /proc/1234/fd/0",
             "python3 /proc/self/task/42/fd/0",
             "python3 /proc/self/root/dev/stdin",
+            "python3 /proc/self/root/../dev/stdin",
+            "python3 /proc/self/root/../../dev/fd/3",
+            "python3 /proc/self/cwd/../../dev/stdin",
             "python3 /proc/1/root/proc/self/root/dev/fd/3",
             "python3 /dev/stdout",
             "awk -f /dev/stderr f",
