@@ -44,6 +44,10 @@
 {"command":"base64 -d p | source -- /dev/stdin","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"base64 -d p | source /dev//stdin","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"base64 -d p | source /dev/stdin","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"bash -c \"echo hi\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"bash -c \"echo$IFS\"","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"bash -c \"rm -rf /\"","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"bash -c \"rm$IFS-rf$IFS/\"","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"bash -c \"trap 'rm -rf /' EXIT\"","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"bash -c $'echo x #\\\nrm -rf /'","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (ANSI-C ($'...') quoting combined with a backslash-newline line continuation cannot be safely analyzed: brush and bash disagree on whether the continuation survives inside $'...', which could hide a command on the dropped line); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
 {"command":"bash -c $\\\n'echo x #\\\nrm -rf /'","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (ANSI-C ($'...') quoting combined with a backslash-newline line continuation cannot be safely analyzed: brush and bash disagree on whether the continuation survives inside $'...', which could hide a command on the dropped line); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
@@ -535,9 +539,12 @@
 {"command":"env time rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"eval","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"eval \"$(ssh-agent -s)\"","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"eval \"echo hi\"","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"eval \"ls -la\"","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"eval \"rm -rf /\"","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"eval \"rm -rf\" /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"eval \"rm$IFS-rf$IFS/\"","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"eval \"rm${IFS}-rf${IFS}/\"","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"eval \"trap 'rm -rf /' EXIT\"","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"eval $(echo rm -rf /)","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"eval 'rm' '-rf' '/'","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
@@ -1419,6 +1426,7 @@
 {"command":"sg grp 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"sg grp -c 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"sh","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"sh -c \"rm${IFS}-rf${IFS}/\"","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"sh -c 'echo hi' > /dev/sda","decision":"Block","deny_message":null,"matched_rule":"redirect-overwrite-device-or-critical-file"}
 {"command":"shopt -s expand_aliases; alias x=\"rm -rf /\"\nx","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"shred /dev/sda","decision":"Block","deny_message":null,"matched_rule":"shred"}
@@ -1529,6 +1537,7 @@
 {"command":"toybox rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"trap","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"trap \"$X\" EXIT","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"trap \"rm$IFS-rf$IFS/\" EXIT","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"trap $'rm -rf /' EXIT","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"trap '' INT","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"trap '-x; echo hi' EXIT","decision":"Allow","deny_message":null,"matched_rule":null}

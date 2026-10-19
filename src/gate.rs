@@ -383,6 +383,10 @@ const MAX_SUBSTITUTION_DEPTH: usize = 8;
 /// Longest literal `for` word list evaluated element by element.
 const MAX_FOR_LIST_WORDS: usize = 16;
 
+const IFS_FLOOR_REASON: &str = "a word was derived from $IFS splitting; a same-line IFS \
+                                reassignment could make the default-IFS fold wrong, so a \
+                                blocklist miss never falls through to Allow";
+
 /// Simple-command evaluations one command line may spend on literal `for`
 /// lists (elements times the body's simple commands), nested loops included.
 /// Counts commands, not body evaluations: the cost of an evaluation grows
@@ -4101,6 +4105,7 @@ fn evaluate_simple_command_core(
     if let Some((name, rest_words)) = effective
         && crate::rules::is_shell_interpreter(name)
         && let Some(outcome) = evaluate_dash_c(&argv, rest_words, name, ctx, cwd)
+            .map(|verdict| apply_ifs_floor(verdict, &argv))
     {
         return apply_opaque_kind_floor(
             apply_substitution_floor(
@@ -4119,6 +4124,7 @@ fn evaluate_simple_command_core(
     if let Some((name, rest_words)) = effective
         && EVAL_BUILTIN.contains(&name)
         && let Some(outcome) = evaluate_eval(&argv, rest_words, ctx, cwd)
+            .map(|verdict| apply_ifs_floor(verdict, &argv))
     {
         return apply_opaque_kind_floor(
             apply_substitution_floor(
@@ -4137,6 +4143,7 @@ fn evaluate_simple_command_core(
     if let Some((name, rest_words)) = effective
         && TRAP_BUILTIN.contains(&name)
         && let Some(outcome) = evaluate_trap(&argv, rest_words, ctx, cwd)
+            .map(|verdict| apply_ifs_floor(verdict, &argv))
     {
         return apply_opaque_kind_floor(
             apply_substitution_floor(
@@ -4612,6 +4619,18 @@ fn apply_outer_rule_block(
         Verdict::block(reason, argv.to_vec(), Some(rule.id().clone()))
             .with_deny_message(rule.deny_message().cloned()),
     )
+}
+
+/// Rule 7's `$IFS` floor for the early-return recursion rules (6a/6c/6d),
+/// which never reach [`fold_floors`]. A quoted `$IFS` inside the recursed
+/// string is folded with the default IFS, which an inherited non-default
+/// `IFS` would make wrong. Kept out of `escalation_floor`, which later rules
+/// apply again.
+fn apply_ifs_floor(verdict: Verdict, argv: &[NormalizedWord]) -> Verdict {
+    if !argv.iter().any(NormalizedWord::is_ifs_derived) {
+        return verdict;
+    }
+    apply_floor(verdict, Decision::Ask, IFS_FLOOR_REASON.to_string(), None)
 }
 
 /// Applies the escalation floor (rule 10) to a verdict produced on an
@@ -5471,11 +5490,7 @@ fn fold_floors(
     }
     if ifs_floor {
         decision = decision.max(Decision::Ask);
-        reasons.push(
-            "a word was derived from $IFS splitting; a same-line IFS reassignment could make \
-             the default-IFS fold wrong, so a blocklist miss never falls through to Allow"
-                .to_string(),
-        );
+        reasons.push(IFS_FLOOR_REASON.to_string());
     }
     if let Some((floor_decision, floor_reason)) = escalation_floor {
         decision = decision.max(floor_decision);
