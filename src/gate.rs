@@ -3321,7 +3321,10 @@ fn evaluate_simple_command(
     // them) that bypass `fold_floors` entirely, and a floor placed inside
     // `core` would vanish on exactly those paths. Needs `&argv` before it
     // is moved into `evaluate_simple_command_core` below.
-    let recursable = scan_recursable_slots(command, &argv, ctx, cwd);
+    // Payloads run under any `env -C` of the wrapper chain, so they start
+    // in its directory (`env -C dir -S "cmd"`).
+    let recursable =
+        scan_recursable_slots(command, &argv, ctx, &cwd_under_env_dash_c(&argv, env, cwd));
     // Issue #448: an `alias NAME=VALUE` argument's own value, recursed
     // unconditionally the same way a same-line function definition's body
     // already is (issue #75) — see `scan_alias_definition_floor`'s own docs.
@@ -4100,7 +4103,13 @@ fn evaluate_simple_command_core(
     // script exactly like a substitution.
     if let Some((name, rest_words)) = effective
         && crate::rules::is_shell_interpreter(name)
-        && let Some(outcome) = evaluate_dash_c(&argv, rest_words, name, ctx, cwd)
+        && let Some(outcome) = evaluate_dash_c(
+            &argv,
+            rest_words,
+            name,
+            ctx,
+            &cwd_under_env_dash_c(&argv, env, cwd),
+        )
     {
         return apply_opaque_kind_floor(
             apply_substitution_floor(
@@ -11839,6 +11848,47 @@ fn resolve_tar_dash_c(
     any_composed.then_some(composed)
 }
 
+/// The own-option ranges of every `env` hop along `argv`'s wrapper chain,
+/// and the cwd in force after each of them, chained from `start`. Only env
+/// hops' own options are scanned: an inner wrapper's unrelated `-C`
+/// (`strace -C`) is not a chdir.
+fn env_hop_cwds(
+    argv: &[NormalizedWord],
+    env: &Env,
+    start: CwdContext,
+) -> (Vec<std::ops::Range<usize>>, Vec<CwdContext>) {
+    let env_options: Vec<_> = crate::rules::wrapper_option_ranges(argv)
+        .into_iter()
+        .filter(|(name, _)| name == "env")
+        .map(|(_, options)| options)
+        .collect();
+    let mut current = start;
+    let mut after_hop = Vec::with_capacity(env_options.len());
+    for options in &env_options {
+        if let Some(next) = chain_dash_c_context(
+            &argv[options.clone()],
+            &["--chdir"],
+            true,
+            Some("env"),
+            env,
+            current.clone(),
+        ) {
+            current = next;
+        }
+        after_hop.push(current.clone());
+    }
+    (env_options, after_hop)
+}
+
+/// The cwd a script or payload recursed from `argv` starts in: `cwd`
+/// moved by every `env -C`/`--chdir` along the wrapper chain.
+fn cwd_under_env_dash_c(argv: &[NormalizedWord], env: &Env, cwd: &CwdContext) -> CwdContext {
+    env_hop_cwds(argv, env, cwd.clone())
+        .1
+        .pop()
+        .unwrap_or_else(|| cwd.clone())
+}
+
 /// Issue #209's `env -C dir cmd args...` handling: `env` is already
 /// unwrapped through [`crate::rules::effective_command`] before its own
 /// `-C`/`--chdir` value is otherwise visible to any other floor in this
@@ -11862,30 +11912,8 @@ fn evaluate_env_dash_c_override(
     env: &Env,
     rules: &Rules,
 ) -> Option<(CwdContext, Option<Verdict>)> {
-    // Only env hops' own options: an inner wrapper's unrelated `-C`
-    // (`strace -C`) is not a chdir.
-    let ranges = crate::rules::wrapper_option_ranges(argv);
-    let env_options: Vec<_> = ranges
-        .iter()
-        .filter(|(name, _)| name == "env")
-        .map(|(_, options)| options.clone())
-        .collect();
-    let mut current = CwdContext::Initial;
-    // The cwd in force after each env hop's options.
-    let mut after_hop = Vec::with_capacity(env_options.len());
-    for options in &env_options {
-        if let Some(next) = chain_dash_c_context(
-            &argv[options.clone()],
-            &["--chdir"],
-            true,
-            Some("env"),
-            env,
-            current.clone(),
-        ) {
-            current = next;
-        }
-        after_hop.push(current.clone());
-    }
+    let (env_options, after_hop) = env_hop_cwds(argv, env, CwdContext::Initial);
+    let current = after_hop.last()?.clone();
     let CwdContext::Known(CwdAnchor { path: anchor, .. }) = &current else {
         return None;
     };
@@ -11918,24 +11946,7 @@ fn evaluate_env_dash_c_override(
                 rules,
             )
         });
-    // The script an `env -S`/`--split-string` (or any other shell-script
-    // slot) hands on is recursed with no cwd, so the anchor is lost there
-    // and cannot be composed; not Allow rather than a guess.
-    let script_ask = (!crate::rules::chain_script_slots(argv).is_empty()).then(|| {
-        Verdict::ask(
-            Reason::new(
-                "`env -C`/`--chdir` changes the working directory of a command that is also \
-                 given as a shell script (`-S`/`--split-string`), and its relative paths \
-                 cannot be statically resolved against that directory",
-            ),
-            argv.to_vec(),
-        )
-    });
-    let verdict = match (composed, script_ask) {
-        (Some(composed), Some(ask)) => Some(fold_worst(composed, ask)),
-        (composed, ask) => composed.or(ask),
-    };
-    Some((current, verdict))
+    Some((current, composed))
 }
 
 /// Bounds a `git` invocation's own argv tail to the region BEFORE its
@@ -23066,14 +23077,23 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
     }
 
     #[test]
-    fn env_dash_c_with_a_split_string_script_is_not_allowed() {
+    fn env_dash_c_anchor_reaches_a_recursed_script() {
         for line in [
             r#"env -C ~/.config/shguard -S "cp evil.toml config.toml""#,
             r#"env --chdir ~/.config/shguard --split-string "cp evil.toml config.toml""#,
             r#"env --chdir=~/.config/shguard --split-string="cp evil.toml config.toml""#,
             r#"env -C ~/.config/shguard nice env -S "cp evil.toml config.toml""#,
+            r#"env -C ~/.config/shguard bash -c "cp evil.toml config.toml""#,
+            r#"env -C ~/.config/shguard sh -c "cp evil.toml config.toml""#,
+            r#"env -C ~/.config/shguard fish -c "cp evil.toml config.toml""#,
+            r#"env -C ~/.config/shguard nice sh -c "cp evil.toml config.toml""#,
+            r#"env -C ~/.config/shguard xargs sh -c "cp evil.toml config.toml""#,
+            r#"env -C ~/.config/shguard timeout 5 bash -c "cp evil.toml config.toml""#,
         ] {
-            assert_ne!(decide(line).decision(), Decision::Allow, "{line}");
+            assert_eq!(decide(line).decision(), Decision::Block, "{line}");
+        }
+        for line in [r#"env -C /tmp bash -c "ls""#, r#"env -C /tmp -S "ls -la""#] {
+            assert_eq!(decide(line).decision(), Decision::Allow, "{line}");
         }
     }
 
