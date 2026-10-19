@@ -1077,6 +1077,8 @@
 {"command":"php -F /dev/stdin","decision":"Ask","deny_message":"Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f prog.awk`) — inline interpreter code is never inspected.","matched_rule":null}
 {"command":"php -f /dev/stdin","decision":"Ask","deny_message":"Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f prog.awk`) — inline interpreter code is never inspected.","matched_rule":null}
 {"command":"php -f s.php -- -","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"php -f s.php -F /dev/stdin","decision":"Ask","deny_message":"Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f prog.awk`) — inline interpreter code is never inspected.","matched_rule":null}
+{"command":"php -f s.php -r 'system(\"id\");'","decision":"Ask","deny_message":"Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f prog.awk`) — inline interpreter code is never inspected.","matched_rule":null}
 {"command":"pipx install x","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"pipx run rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"pkill --user me","decision":"Ask","deny_message":null,"matched_rule":null}

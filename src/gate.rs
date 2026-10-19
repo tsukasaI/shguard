@@ -8644,6 +8644,11 @@ struct InlineGrammar {
     /// library the interpreter loads and runs: a stdin path there is a
     /// program read from stdin (issue #735).
     loaded_chars: &'static str,
+    /// Short-flag letters (also in `loaded_chars`) whose value is the script
+    /// itself (php's `-f`/`-F`). The option scan goes on after it, since php
+    /// still reads options there, but a later `--` or non-option word is the
+    /// script's own argument.
+    script_chars: &'static str,
     /// Whether several short flags may share one word (`-Ic`); otherwise the
     /// first letter alone decides and any leftover is an unknown option.
     /// `false` is deliberate for node and lua: their parsers take one flag
@@ -8681,6 +8686,7 @@ const PYTHON_GRAMMAR: InlineGrammar = InlineGrammar {
     required_attached_chars: "",
     operand_chars: "m",
     loaded_chars: "",
+    script_chars: "",
     cluster: true,
     long_code: &[],
     long_plain: &["help", "help-env", "help-xoptions", "help-all", "version"],
@@ -8699,6 +8705,7 @@ const NODE_GRAMMAR: InlineGrammar = InlineGrammar {
     required_attached_chars: "",
     operand_chars: "",
     loaded_chars: "r",
+    script_chars: "",
     cluster: false,
     long_code: &["eval", "print"],
     long_plain: &[
@@ -8744,6 +8751,7 @@ const PERL_GRAMMAR: InlineGrammar = InlineGrammar {
     required_attached_chars: "MmF",
     operand_chars: "",
     loaded_chars: "",
+    script_chars: "",
     cluster: true,
     long_code: &[],
     long_plain: &["help", "version"],
@@ -8762,6 +8770,7 @@ const RUBY_GRAMMAR: InlineGrammar = InlineGrammar {
     required_attached_chars: "",
     operand_chars: "",
     loaded_chars: "r",
+    script_chars: "",
     cluster: true,
     long_code: &[],
     long_plain: &[
@@ -8786,9 +8795,11 @@ const PHP_GRAMMAR: InlineGrammar = InlineGrammar {
     value_chars: "cdfFtSz",
     attached_chars: "",
     required_attached_chars: "",
-    // `-f file` names the script: `php -f s.php -- -` passes `-` to it.
-    operand_chars: "f",
+    operand_chars: "",
     loaded_chars: "fF",
+    // php keeps parsing options after the script: `php -f s.php -r x` runs
+    // `x`, and a later `-F` replaces the script.
+    script_chars: "fF",
     cluster: true,
     long_code: &[],
     long_plain: &["version", "help", "ini"],
@@ -8810,6 +8821,7 @@ const LUA_GRAMMAR: InlineGrammar = InlineGrammar {
     required_attached_chars: "",
     operand_chars: "",
     loaded_chars: "",
+    script_chars: "",
     cluster: false,
     long_code: &[],
     long_plain: &[],
@@ -8829,6 +8841,7 @@ const OSASCRIPT_GRAMMAR: InlineGrammar = InlineGrammar {
     required_attached_chars: "",
     operand_chars: "",
     loaded_chars: "",
+    script_chars: "",
     cluster: false,
     long_code: &[],
     long_plain: &[],
@@ -8926,6 +8939,9 @@ fn scan_inline_code(
     };
     // Not `-`: `ruby -r -` and `php -f -` name a file called `-`, not stdin.
     let loads_stdin = |value: &str| value != "-" && is_stdin_alias_path(value);
+    // Set once php's `-f`/`-F` has named the script: options still parse, but
+    // the first non-option word or `--` is that script's own argument.
+    let mut script_named = false;
     let mut iter = words.iter();
     while let Some(word) = iter.next() {
         let text = match word.resolution() {
@@ -8939,6 +8955,9 @@ fn scan_inline_code(
             }
         };
         if text == "--" {
+            if script_named {
+                return None;
+            }
             return match iter.next().map(NormalizedWord::resolution) {
                 Some(Resolution::Resolved(next))
                     if is_stdin_alias_path(next)
@@ -8952,7 +8971,7 @@ fn scan_inline_code(
         }
         // A stdin operand in script-operand position reads the program from
         // stdin, as awk's `FileFlagStdin` treats it.
-        if is_stdin_alias_path(text) && (text != "-" || grammar.dash_is_stdin) {
+        if !script_named && is_stdin_alias_path(text) && (text != "-" || grammar.dash_is_stdin) {
             return Some(StdinScript);
         }
         let flags = text.strip_prefix('-').filter(|rest| !rest.is_empty())?;
@@ -9018,9 +9037,7 @@ fn scan_inline_code(
                 } else if loads_stdin(rest) {
                     return Some(StdinScript);
                 }
-                if grammar.operand_chars.contains(letter) {
-                    return None;
-                }
+                script_named |= grammar.script_chars.contains(letter);
                 // The value is consumed; the `value_chars` arm below would
                 // swallow a second word.
                 break;
@@ -15613,15 +15630,34 @@ mod tests {
         }
     }
 
-    // After `-f` names the script, every later word is its argument.
+    // After `-f`/`-F` names the script, php still parses options (`-r`, `-B`,
+    // `-R`, `-E` run code, a later `-F` replaces the script) until a
+    // non-option word or `--`, which start the script's own arguments.
     #[test]
-    fn php_f_script_stops_the_option_scan() {
+    fn php_script_flag_keeps_scanning_options_until_the_arguments() {
         for command in [
             "php -f s.php -- -",
             "php -f s.php -- /dev/stdin",
-            "php -f s.php -r",
+            "php -f s.php /dev/stdin",
+            "php -f s.php x -r",
+            "php -F x -- -",
+            "php -Ff /dev/stdin",
         ] {
             assert_decision(command, Decision::Allow);
+        }
+        for command in [
+            "php -f s.php -r 'system(\"id\");'",
+            "php -f s.php -B x",
+            "php -f s.php -R x",
+            "php -f s.php -E x",
+            "php -f s.php -nr x",
+            "php -f s.php -r",
+            "php -f s.php -$X",
+            "php -f s.php $X",
+            "php -f s.php -F /dev/stdin",
+            "php -F s.php -f /dev/stdin",
+        ] {
+            assert_decision(command, Decision::Ask);
         }
     }
 
