@@ -4623,9 +4623,9 @@ fn apply_outer_rule_block(
 
 /// Rule 7's `$IFS` floor for the early-return recursion rules (6a/6c/6d),
 /// which never reach [`fold_floors`]. A quoted `$IFS` inside the recursed
-/// string is folded with the default IFS, which an inherited non-default
-/// `IFS` would make wrong. Kept out of `escalation_floor`, which later rules
-/// apply again.
+/// string is folded with the default IFS, which a same-line `IFS=`
+/// reassignment (`IFS=' '; eval "rm$IFS-rf$IFS/"`) would make wrong. Kept
+/// out of `escalation_floor`, which later rules apply again.
 fn apply_ifs_floor(verdict: Verdict, argv: &[NormalizedWord]) -> Verdict {
     if !argv.iter().any(NormalizedWord::is_ifs_derived) {
         return verdict;
