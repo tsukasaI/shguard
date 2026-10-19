@@ -4,6 +4,26 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-10-19
+
+### Fixed
+
+- `nix build` (and so `darwin-rebuild`) no longer fails in the Darwin
+  sandbox's checkPhase: a policy-load test that depended on the host
+  filesystem now uses a stub canonicalizer (#779).
+
+### Changed
+
+- CI and tests: releases are gated on a sandboxed Darwin nix build. A
+  lefthook pre-push guard (`scripts/release-nix-build.sh`, via
+  `scripts/pre-push-refs.sh`) builds the pushed commit of a
+  `chore/release-*` branch, and `release.yaml` re-runs the nix build on the
+  tagged commit before building or publishing (#779). Every test spawn of
+  `shguard` goes through an env-scrubbed `cmd::shguard()`, direct
+  `assert_cmd` `cargo_bin` calls are banned in `clippy.toml`, and lefthook
+  and CI share `scripts/hermetic-cargo-test.sh` (#759). No change to the
+  shipped binary's decisions.
+
 ## [0.9.4] - 2026-10-19
 
 ### Added
