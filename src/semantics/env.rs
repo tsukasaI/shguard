@@ -192,6 +192,22 @@ fn enables_xtrace(operands: &[NormalizedWord]) -> bool {
     })
 }
 
+/// Whether `mapfile`/`readarray` operands may carry `-C` (the callback runs
+/// arbitrary code, `readonly` included): a flag cluster containing `C`
+/// before any `--`, or an operand not known statically.
+fn has_callback_flag(operands: &[NormalizedWord]) -> bool {
+    operands
+        .iter()
+        .map(NormalizedWord::resolution)
+        .take_while(|resolution| !matches!(resolution, Resolution::Resolved(arg) if arg == "--"))
+        .any(|resolution| match resolution {
+            Resolution::Unresolvable(_) => true,
+            Resolution::Resolved(arg) => {
+                arg.starts_with('-') && !arg.starts_with("--") && arg.contains('C')
+            }
+        })
+}
+
 /// Every `IFS` value the line could have split with, and the running
 /// inherited-default hypothesis. Never truncated: an `IFS` overwritten by
 /// an unresolvable value still leaves the earlier splitting possible for a
@@ -730,7 +746,8 @@ impl Env {
     /// still reach the parent shell (an `if`/loop body): its readonly facts
     /// become unknown here, since which iteration or branch ran is not known.
     pub(crate) fn absorb_body(&mut self, body: &Env) {
-        if body.readonly.all || !body.readonly.names.is_empty() {
+        // The body inherited the parent's names, so only added ones count.
+        if body.readonly.all || !body.readonly.names.is_subset(&self.readonly.names) {
             self.readonly.all = true;
         }
         self.functions.extend(body.functions.iter().cloned());
@@ -763,8 +780,18 @@ impl Env {
         // a function defined on this line.
         if matches!(
             name.as_str(),
-            "builtin" | "command" | "eval" | "source" | "." | "integer" | "float" | "private"
+            "builtin"
+                | "command"
+                | "eval"
+                | "source"
+                | "."
+                | "integer"
+                | "float"
+                | "private"
+                | "trap"
+                | "autoload"
         ) || self.functions.contains(name.as_str())
+            || (matches!(name.as_str(), "mapfile" | "readarray") && has_callback_flag(rest))
         {
             self.readonly.all = true;
         }
