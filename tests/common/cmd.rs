@@ -29,12 +29,18 @@ pub fn shguard() -> Command {
 
 /// A `std::process::Command` for `shguard` carrying the same env scrub as
 /// [`shguard`], for tests that must spawn without `assert_cmd` (a piped,
-/// slowly fed stdin). The scrub is replayed from `shguard().get_envs()`, so a
-/// variable added there reaches this command too.
+/// slowly fed stdin). Program, args, current dir, and env are replayed from
+/// `shguard()`, so a variable added there reaches this command too.
+/// `env_clear()` is not visible through `get_envs()`: one added to
+/// `shguard()` must be repeated here.
 #[allow(dead_code)] // not every test crate that includes this module needs a std command
 pub fn shguard_std() -> std::process::Command {
     let base = shguard();
     let mut cmd = std::process::Command::new(base.get_program());
+    cmd.args(base.get_args());
+    if let Some(dir) = base.get_current_dir() {
+        cmd.current_dir(dir);
+    }
     for (key, value) in base.get_envs() {
         match value {
             Some(value) => cmd.env(key, value),
