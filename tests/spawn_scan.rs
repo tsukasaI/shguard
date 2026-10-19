@@ -20,10 +20,12 @@ const NEEDLES: [&str; 2] = [concat!("CARGO_BIN", "_EXE_"), concat!(".get_", "pro
 
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(dir).expect("tests dir should be readable") {
-        let path = entry.expect("dir entry should be readable").path();
-        if path.is_dir() {
+        let entry = entry.expect("dir entry should be readable");
+        let file_type = entry.file_type().expect("file type should be readable");
+        let path = entry.path();
+        if file_type.is_dir() {
             rust_files(&path, out);
-        } else if path.extension().is_some_and(|ext| ext == "rs") {
+        } else if file_type.is_file() && path.extension().is_some_and(|ext| ext == "rs") {
             out.push(path);
         }
     }
@@ -55,7 +57,8 @@ fn no_spawn_path_bypasses_the_env_scrub() {
 
     assert!(
         hits.is_empty(),
-        "spawn the binary via tests/common/cmd.rs, not directly:\n{}",
+        "spawn the binary via tests/common/cmd.rs, not directly. Comments and string \
+         literals count too; if a needle must be named, split it with concat!:\n{}",
         hits.join("\n")
     );
 }
