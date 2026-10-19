@@ -5770,8 +5770,7 @@ pub(crate) fn effective_command(
 /// stops there and reports the wrapper itself as the effective command,
 /// rather than unwrapping through it. Scoped to the callers that need the
 /// wrapper's own flags intact (`crate::gate::resolve_static_substitution_output`
-/// excludes `xargs`, whose output is not statically determined;
-/// `evaluate_env_dash_c_override` excludes `env`).
+/// excludes `xargs`, whose output is not statically determined).
 #[must_use]
 pub(crate) fn effective_command_excluding<'a>(
     stage: &'a [NormalizedWord],

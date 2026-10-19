@@ -11481,42 +11481,21 @@ fn evaluate_composed_cwd_redirects(
 ///
 /// `None` when `rest` has no such flag at all (composition doesn't
 /// apply — the ordinary uncomposed evaluation is unaffected, per
-/// [`CwdContext`]'s additive-only design) OR when any occurrence is
-/// malformed/unresolvable (a trailing bare flag with nothing after it, or
-/// an unresolvable value) OR when the fully-chained result isn't
-/// [`CwdContext::Known`] (e.g. a same-line `HOME=`/`CDPATH=` assignment
-/// poisoning one occurrence's target the same way [`classify_cd_target`]
-/// already poisons a `cd`'s). Issue #209's own scope note ("no cross-
-/// command-line state needed, unlike `cd`") is why this always starts
-/// from `Initial` rather than composing against any OUTER same-line
+/// [`CwdContext`]'s additive-only design). Otherwise the chained
+/// [`CwdContext`], which callers only compose against when it is
+/// [`CwdContext::Known`]: an unresolvable value (or a malformed trailing
+/// flag) yields `Poisoned`, as does a same-line `HOME=`/`CDPATH=`
+/// assignment poisoning one occurrence's target the same way
+/// [`classify_cd_target`] already poisons a `cd`'s. Issue #209's own scope
+/// note ("no cross-command-line state needed, unlike `cd`") is why this
+/// starts from `Initial` rather than composing against any OUTER same-line
 /// `cd`'s own [`CwdContext`] — a lower-priority compounding of two
 /// already-narrow mechanisms this function deliberately doesn't attempt.
+/// The one exception is `start`: an enclosing `env -C` anchor, which the
+/// chained occurrences compose against.
 ///
 /// `long_names` entries are matched via [`matches_long_flag_prefix`], whose
 /// own docs state the precondition every entry must meet.
-fn chain_dash_c_targets(
-    rest: &[NormalizedWord],
-    long_names: &[&str],
-    short_can_attach: bool,
-    cluster_wrapper: Option<&str>,
-    env: &Env,
-) -> Option<String> {
-    match chain_dash_c_context(
-        rest,
-        long_names,
-        short_can_attach,
-        cluster_wrapper,
-        env,
-        CwdContext::Initial,
-    )? {
-        CwdContext::Known(anchor) => Some(anchor.path),
-        CwdContext::Initial | CwdContext::Poisoned => None,
-    }
-}
-
-/// [`chain_dash_c_targets`]'s scan, starting from `start` and returning the
-/// chained [`CwdContext`] (`Poisoned` for an unresolvable value) instead of
-/// only a known anchor; `None` when `rest` has no such flag.
 fn chain_dash_c_context(
     rest: &[NormalizedWord],
     long_names: &[&str],
@@ -11579,7 +11558,7 @@ fn chain_dash_c_context(
 /// Issue #209's `tar`-specific `-C`/`--directory` handling: tar's flag is
 /// positional — GNU tar(1) applies it only to OPERANDS APPEARING AFTER
 /// it, unlike git/make's single-final-anchor model
-/// ([`chain_dash_c_targets`]) — but issue #354 live-verified (bsdtar
+/// ([`chain_dash_c_context`]) — but issue #354 live-verified (bsdtar
 /// 3.5.3) that multiple occurrences DO compose cumulatively with each
 /// other, contrary to this function's own original premise (a real
 /// `chdir(2)` per occurrence, so a later relative target lands relative
@@ -11754,7 +11733,7 @@ fn tar_dashless_leading_cluster_directory(
 /// archives `sub/f1` and `b/f2` under `a`, i.e. the second `-C b` resolves
 /// as `a/b`, a real `chdir(2)` relative to wherever the first `-C a` left
 /// tar's cwd): multiple occurrences compose CUMULATIVELY, exactly like
-/// git/make's own repeated `-C` ([`chain_dash_c_targets`]). What tar does
+/// git/make's own repeated `-C` ([`chain_dash_c_context`]). What tar does
 /// NOT do that git/make's single final anchor modeling assumes is apply
 /// one anchor to the WHOLE tail — each occurrence's anchor only governs
 /// the operands between it and the next occurrence (or the end of the
@@ -11774,6 +11753,7 @@ fn resolve_tar_dash_c(
     rest: &[NormalizedWord],
     env: &Env,
     rules: &Rules,
+    start: CwdContext,
 ) -> Option<Vec<NormalizedWord>> {
     struct Occurrence {
         raw: Option<String>,
@@ -11831,7 +11811,7 @@ fn resolve_tar_dash_c(
         .chain(rest.iter().cloned())
         .collect();
     let mut composed = rest.to_vec();
-    let mut current = CwdContext::Initial;
+    let mut current = start;
     let mut any_composed = false;
     for (i, occurrence) in occurrences.iter().enumerate() {
         let range_end = occurrences
@@ -11867,28 +11847,21 @@ fn resolve_tar_dash_c(
 /// command), so this function scans `argv`'s own `env`-owned prefix
 /// directly rather than through that unwrap.
 ///
-/// Locates `env` via [`crate::rules::effective_command_excluding`] with
-/// `env` itself excluded from further unwrapping, rather than checking
-/// `argv[0]`'s basename directly — the `argv[0]`-only check used to miss `env` reached through any
-/// LEADING exec wrapper (`nice env -C
-/// ~/.config/shguard cp evil.toml config.toml`, `timeout 5 env -C ...`),
-/// asymmetric with the git/make/tar branch below, which already resolves
-/// through wrappers via `effective_command`. Excluding `env` from the
-/// walk (rather than letting it unwrap too) is what preserves `env`'s own
-/// flags/value intact in the returned tail, instead of the wrapper-skip
-/// logic a full unwrap would use consuming `-C`'s value before this
-/// function ever sees it.
+/// Locates every `env` hop through [`crate::rules::wrapper_option_ranges`]
+/// rather than checking `argv[0]`'s basename directly, so `env` reached
+/// through any LEADING exec wrapper (`nice env -C ~/.config/shguard cp
+/// evil.toml config.toml`, `timeout 5 env -C ...`) is found, and only
+/// `env`'s own option words are scanned for `-C`/`--chdir`.
 ///
-/// `None` when no hop of the wrapper chain resolves to `env`, or
-/// [`crate::rules::effective_command`] can't identify a wrapped command
-/// at all (`env` alone, or an unresolvable wrapped command name — both
-/// already fail closed elsewhere), or [`chain_dash_c_targets`] finds no
-/// resolvable `-C`/`--chdir` in `env`'s own prefix.
+/// `None` when no hop resolves to `env` or no resolvable `-C`/`--chdir` in
+/// the `env` hops' own options yields a known anchor. Otherwise the anchor
+/// [`CwdContext`] (for the wrapped git/make/tar `-C` to chain from) and
+/// the verdict of this pass, if it matched anything.
 fn evaluate_env_dash_c_override(
     argv: &[NormalizedWord],
     env: &Env,
     rules: &Rules,
-) -> Option<Verdict> {
+) -> Option<(CwdContext, Option<Verdict>)> {
     // Only env hops' own options: an inner wrapper's unrelated `-C`
     // (`strace -C`) is not a chdir.
     let ranges = crate::rules::wrapper_option_ranges(argv);
@@ -11911,7 +11884,7 @@ fn evaluate_env_dash_c_override(
             current = next;
         }
     }
-    let CwdContext::Known(CwdAnchor { path: anchor, .. }) = current else {
+    let CwdContext::Known(CwdAnchor { path: anchor, .. }) = &current else {
         return None;
     };
     // Hops between env's own options and the wrapped tail run under the new
@@ -11923,10 +11896,10 @@ fn evaluate_env_dash_c_override(
         composed_argv.extend(compose_argv_for_command(
             &argv[hops_start..env_prefix_end],
             argv,
-            &anchor,
+            anchor,
             rules,
         ));
-        composed_argv.extend(compose_argv_for_command(wrapped_tail, argv, &anchor, rules));
+        composed_argv.extend(compose_argv_for_command(wrapped_tail, argv, anchor, rules));
         evaluate_composed_argv_match(
             &composed_argv,
             argv,
@@ -11947,14 +11920,15 @@ fn evaluate_env_dash_c_override(
             argv.to_vec(),
         )
     });
-    match (composed, script_ask) {
+    let verdict = match (composed, script_ask) {
         (Some(composed), Some(ask)) => Some(fold_worst(composed, ask)),
         (composed, ask) => composed.or(ask),
-    }
+    };
+    Some((current, verdict))
 }
 
 /// Bounds a `git` invocation's own argv tail to the region BEFORE its
-/// subcommand, so [`chain_dash_c_targets`] only scans `-C` occurrences
+/// subcommand, so [`chain_dash_c_context`] only scans `-C` occurrences
 /// that are actually git's OWN global cwd-override flag. Several git
 /// subcommands reuse the bare letter `-C` for unrelated semantics (`git
 /// commit -C <commit>`, `git cherry-pick -C`, `git notes add -C
@@ -11973,7 +11947,7 @@ fn evaluate_env_dash_c_override(
 /// always the subcommand, and this walk can safely skip exactly two
 /// tokens for one of those flags, one for anything else `-`-prefixed,
 /// until it finds that word. An unresolvable token in this region is kept
-/// in-scan (fails closed the same way [`chain_dash_c_targets`]'s own
+/// in-scan (fails closed the same way [`chain_dash_c_context`]'s own
 /// unresolvable-value handling already does) rather than guessed to be
 /// the subcommand boundary either way.
 fn bound_git_global_options(rest: &[NormalizedWord]) -> &[NormalizedWord] {
@@ -12319,7 +12293,7 @@ fn git_config_env_var_verdict(argv: &[NormalizedWord], command: &SimpleCommand) 
 /// same-line `cd`/`pushd` composition, for the handful of tools that
 /// accept a `-C <dir>`-shaped flag changing THEIR OWN working directory
 /// for just that one invocation — `git -C`/`make -C` (cumulative,
-/// [`chain_dash_c_targets`]), `tar -C`/`--directory` (positional,
+/// [`chain_dash_c_context`]), `tar -C`/`--directory` (positional,
 /// [`resolve_tar_dash_c`]), and `env -C`/`--chdir dir cmd args...`
 /// (shifts the wrapped command too, [`evaluate_env_dash_c_override`]).
 /// Unlike [`evaluate_composed_cwd`], this NEVER composes redirect
@@ -12328,7 +12302,8 @@ fn git_config_env_var_verdict(argv: &[NormalizedWord], command: &SimpleCommand) 
 /// invoking shell resolves its own `>`/`>>` targets) and NEVER reads or
 /// writes any cross-command-line [`CwdState`]/[`CwdContext`] — every
 /// anchor here is resolved fresh, per invocation, from
-/// [`CwdContext::Initial`].
+/// [`CwdContext::Initial`], except that a git/make/tar `-C` chains from an
+/// enclosing `env -C` anchor.
 ///
 /// `None` when the effective command isn't one of these four tools, or
 /// none of the tool-specific resolvers above found a composable anchor
@@ -12350,15 +12325,35 @@ fn git_config_env_var_verdict(argv: &[NormalizedWord], command: &SimpleCommand) 
 /// should expect this composition to reach subcommand words too, not
 /// just genuine path arguments.
 fn evaluate_dash_c_override(argv: &[NormalizedWord], env: &Env, rules: &Rules) -> Option<Verdict> {
-    if let Some(verdict) = evaluate_env_dash_c_override(argv, env, rules) {
-        return Some(verdict);
+    let (start, env_verdict) = match evaluate_env_dash_c_override(argv, env, rules) {
+        Some((cwd, verdict)) => (cwd, verdict),
+        None => (CwdContext::Initial, None),
+    };
+    // Both passes run: a weaker `env -C` verdict must not mask a stronger
+    // one from a `-C` nested under it.
+    match (
+        env_verdict,
+        evaluate_tool_dash_c_override(argv, env, rules, start),
+    ) {
+        (Some(env_verdict), Some(tool)) => Some(fold_worst(env_verdict, tool)),
+        (env_verdict, tool) => env_verdict.or(tool),
     }
+}
+
+/// The git/make/tar half of [`evaluate_dash_c_override`], chaining its own
+/// `-C` occurrences from `start` (the `env -C` anchor, or `Initial`).
+fn evaluate_tool_dash_c_override(
+    argv: &[NormalizedWord],
+    env: &Env,
+    rules: &Rules,
+    start: CwdContext,
+) -> Option<Verdict> {
     let (name, rest) = crate::rules::effective_command(argv)?;
     let name = crate::rules::strip_version_suffix(name.as_ref());
     match name {
         "git" | "make" => {
             // git rejects `-Cdir` glued ("unknown option: -Cdir"); make
-            // accepts it, same as `chain_dash_c_targets`'s own doc notes.
+            // accepts it, same as `chain_dash_c_context`'s own doc notes.
             let short_can_attach = name == "make";
             // Only git has subcommands that reuse the bare letter `-C`
             // for unrelated semantics (`git commit -C <commit>`); make
@@ -12385,18 +12380,22 @@ fn evaluate_dash_c_override(argv: &[NormalizedWord], env: &Env, rules: &Rules) -
             } else {
                 &[]
             };
-            let anchor = chain_dash_c_targets(
+            let CwdContext::Known(anchor) = chain_dash_c_context(
                 scan_region,
                 long_names,
                 short_can_attach,
                 cluster_wrapper,
                 env,
-            )?;
-            let composed_argv = compose_argv_against_cwd(argv, &anchor, rules);
+                start,
+            )?
+            else {
+                return None;
+            };
+            let composed_argv = compose_argv_against_cwd(argv, &anchor.path, rules);
             evaluate_composed_argv_match(&composed_argv, argv, "this invocation's own `-C`", rules)
         }
         "tar" => {
-            let composed_rest = resolve_tar_dash_c(rest, env, rules)?;
+            let composed_rest = resolve_tar_dash_c(rest, env, rules, start)?;
             let prefix_len = argv.len() - rest.len();
             let mut composed_argv = argv[..prefix_len].to_vec();
             composed_argv.extend(composed_rest);
@@ -22958,6 +22957,47 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
     }
 
     #[test]
+    fn env_dash_c_chains_into_a_nested_git_make_tar_dash_c() {
+        let config = crate::rules::UserConfig::parse(
+            r#"
+            [[deny]]
+            id = "t-git"
+            reason = "no /etc"
+            command = "git"
+            targets = [{ normalized_prefix = "/etc/" }]
+
+            [[deny]]
+            id = "t-make"
+            reason = "no /etc"
+            command = "make"
+            targets = [{ normalized_prefix = "/etc/" }]
+
+            [[deny]]
+            id = "t-tar"
+            reason = "no /etc"
+            command = "tar"
+            targets = [{ normalized_prefix = "/etc/" }]
+        "#,
+        )
+        .unwrap();
+        let (rules, allowlist) = crate::rules::merge_user_config(
+            Rules::embedded().unwrap(),
+            Allowlist::embedded().unwrap(),
+            config,
+        )
+        .unwrap();
+        for line in [
+            "git -C /etc add passwd",
+            "env -C / git -C etc add passwd",
+            "env -C / make -C etc foo",
+            "env -C / tar -C etc -cf out.tar passwd",
+        ] {
+            let verdict = analyze_with_policy(line, &rules, &allowlist);
+            assert_eq!(verdict.decision(), Decision::Block, "{line}");
+        }
+    }
+
+    #[test]
     fn env_without_dash_c_is_unaffected() {
         assert_eq!(
             decide("env cp evil.toml config.toml").decision(),
@@ -23209,7 +23249,7 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
     // `env -C` composition: (1) it only fired when `argv[0]` was
     // literally `env`, so any leading exec-wrapper prefix
     // (`nice`/`timeout`/`sudo`/etc.) reopened the exact bypass this
-    // issue exists to close; (2) `chain_dash_c_targets` only recognized
+    // issue exists to close; (2) `chain_dash_c_context` only recognized
     // the separated `-C <dir>` form, missing GNU env's own glued
     // `-C<dir>` spelling. Both fixed by locating `env` through
     // `effective_command_excluding` (mirroring how the git/make/tar
@@ -23315,7 +23355,7 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
     }
 
     // A THIRD gap in `env -C` composition:
-    // `chain_dash_c_targets` only recognized a bare `-C` token (or `-C`
+    // `chain_dash_c_context` only recognized a bare `-C` token (or `-C`
     // glued directly to its value) — it missed every getopt short-flag
     // CLUSTER form (`-iC dir`, `-iC<dir>`) that real `env` also accepts,
     // even though `effective_command`'s own wrapped-command walk already
