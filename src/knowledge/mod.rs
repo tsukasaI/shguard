@@ -23,7 +23,7 @@ pub(crate) use parse::{
     Finding, OptionName, OptionValue, ParsedArgv, ParsedOption, ShortValue, Unmodeled,
 };
 pub(crate) use spec::CwdEffect;
-use spec::{CommandSpec, Slot};
+use spec::{CommandSpec, OptionGrammar, Slot};
 
 /// A catalogued command found by name, with the name it was found under.
 #[derive(Debug, Clone, Copy)]
@@ -88,6 +88,33 @@ pub(crate) fn locate_short_value<'t>(
         .spec
         .options
         .locate_short_value(token, letter)
+}
+
+/// The short options of a target shell (bash) that take no value; `-o` and
+/// `-O` take one, so a cluster reaching them is left unplaced.
+const SHELL_SHORT_FLAGS: OptionGrammar = OptionGrammar {
+    short_flags: "abefhiklmnprstuvxBCDEHPT",
+    ..OptionGrammar::EMPTY
+};
+
+/// Adds the script of every bash `-c` cluster in `tail`. `-c` always takes
+/// the next word, whatever letters trail it in the cluster (`-ce CMD`). A
+/// cluster the command's own `-c` also places yields the same script twice,
+/// which only costs a repeated scan.
+fn collect_passthrough_scripts<'a>(tail: &'a [NormalizedWord], values: &mut Vec<ScriptValue<'a>>) {
+    for (index, word) in tail.iter().enumerate() {
+        let Resolution::Resolved(token) = word.resolution() else {
+            continue;
+        };
+        if SHELL_SHORT_FLAGS.locate_short_value(token, 'c').is_none() {
+            continue;
+        }
+        match tail.get(index + 1).map(NormalizedWord::resolution) {
+            Some(Resolution::Resolved(text)) => values.push(ScriptValue::Text(text)),
+            Some(Resolution::Unresolvable(_)) => values.push(ScriptValue::Unresolvable),
+            None => {}
+        }
+    }
 }
 
 /// A value found for a [`Slot::ShellScript`] flag.
@@ -166,6 +193,10 @@ impl Known {
     ) -> Vec<ScriptValue<'a>> {
         let mut values = Vec::new();
         for slot in self.spec.slots {
+            if matches!(slot, Slot::ShellPassthrough) {
+                collect_passthrough_scripts(tail, &mut values);
+                continue;
+            }
             let Slot::ShellScript { short, long } = slot else {
                 continue;
             };

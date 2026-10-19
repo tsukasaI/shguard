@@ -18242,12 +18242,18 @@ mod tests {
     #[test]
     fn time_and_exec_wrapper_second_review_findings_keep_their_decision() {
         for (command, expected) in [
-            // The `time -- !` Ask pins record current behaviour: bash would
-            // run the command after `!`; the target is Block.
-            ("time -- ! rm -rf /", Decision::Ask),
-            ("time -p -- ! rm -rf /", Decision::Ask),
+            // Issue #731: the `!` after `time --` opens the pipeline.
+            ("time -- ! rm -rf /", Decision::Block),
+            ("time -p -- ! rm -rf /", Decision::Block),
             ("time -- ! sudo id", Decision::Ask),
             ("time -- coproc rm -rf /", Decision::Ask),
+            // Issue #731: the arguments after the user reach the target
+            // shell, so `-ic`/`-ec` carry its command string.
+            ("runuser root -- -ic 'rm -rf /'", Decision::Block),
+            ("runuser root -- -ec 'rm -rf /'", Decision::Block),
+            ("su root -- -ic 'rm -rf /'", Decision::Block),
+            // Benign string stays at the escalation floor, as before.
+            ("runuser root -- -ic 'ls'", Decision::Ask),
             ("watch -dx 'rm -rf /'", Decision::Block),
             ("watch -dn rm -rf /", Decision::Block),
             ("watch -s -x 'rm -rf /'", Decision::Block),
