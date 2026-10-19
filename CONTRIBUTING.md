@@ -16,7 +16,7 @@ Release (`chore/release-*`) pushes also need nix >= 2.20 with
 `experimental-features = nix-command flakes`, and `sandbox = true` plus
 `sandbox-fallback = false` in the daemon's system config (`/etc/nix/nix.conf`
 or nix-darwin's `nix.settings`; a user-level nix.conf does not reach the
-daemon). The script refuses the push otherwise.
+daemon). `scripts/release-nix-build.sh` refuses the push otherwise.
 
 One-time setup (also needs Node >= 24 on `PATH`):
 
