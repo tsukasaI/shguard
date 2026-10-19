@@ -753,9 +753,10 @@ impl Env {
         self.functions.contains(name)
     }
 
-    /// Folds in a body evaluated with its own [`Env::isolated`] whose effects
-    /// still reach the parent shell (an `if`/loop body): its readonly facts
-    /// become unknown here, since which iteration or branch ran is not known.
+    /// Folds in a body evaluated with [`Env::child_of`] this env, whose effects
+    /// still reach the parent shell (an `if`/loop body). Readonly facts widen
+    /// to `all` only when the body set `all` or recorded a name the parent did
+    /// not already have, since which iteration or branch ran is not known.
     pub(crate) fn absorb_body(&mut self, body: &Env) {
         // The body inherited the parent's names, so only added ones count.
         if body.readonly.all || !body.readonly.names.is_subset(&self.readonly.names) {
