@@ -9387,7 +9387,16 @@ fn is_stdin_alias_path(path: &str) -> bool {
     if path == "-" {
         return true;
     }
-    let (PathForm::Abs(comps) | PathForm::Rel { comps, .. }) = lexical_normalize(path) else {
+    // Every anchor whose root is unknown yet may sit at `/`: a `..` that left
+    // `~`, a named home or the directory stack can land anywhere, as an
+    // ascent from an unknown cwd can. Not `Home`/`NamedUserHomeSub`, which
+    // stay inside a home directory.
+    let (PathForm::Abs(comps)
+    | PathForm::Rel { comps, .. }
+    | PathForm::EscapesHome(comps)
+    | PathForm::NamedUserHomeEscapes(comps)
+    | PathForm::DirStack(comps)) = lexical_normalize(path)
+    else {
         return false;
     };
     let comps: Vec<&str> = comps.iter().map(String::as_str).collect();
@@ -15594,6 +15603,9 @@ mod tests {
             "python3 /dev/fd/3 3<&0",
             "python3 /dev/fd/12",
             "python3 /dev/stderr 2<&0",
+            "python3 ~/../../dev/stdin",
+            "python3 ~+/../../dev/stdin",
+            "python3 ~root/../dev/stdin",
             "python3 /proc/thread-self/fd/3",
             "python3 /proc/1234/fd/0",
             "python3 /proc/self/task/42/fd/0",
@@ -15615,6 +15627,8 @@ mod tests {
             "python3 /dev/fd/",
             "python3 /dev/fd/3/x",
             "python3 /proc/self/root/etc/passwd",
+            "python3 ~/dev/stdin",
+            "python3 ~root/dev/stdin",
             "python3 /proc/x/fd/0",
             "python3 /proc/self/task/x/fd/0",
             "python3 ../../dev/stdin2",
