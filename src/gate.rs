@@ -4133,7 +4133,12 @@ fn evaluate_simple_command_core(
     // script and recurses it the same way rule 6a does.
     if let Some((name, rest_words)) = effective
         && EVAL_BUILTIN.contains(&name)
-        && let Some(outcome) = evaluate_eval(&argv, rest_words, ctx, cwd)
+        && let Some(outcome) = evaluate_eval(
+            &argv,
+            rest_words,
+            ctx,
+            &cwd_under_env_dash_c(&argv, env, cwd),
+        )
     {
         return apply_opaque_kind_floor(
             apply_substitution_floor(
@@ -4151,7 +4156,12 @@ fn evaluate_simple_command_core(
     // current shell runs later (`EXIT` on shell exit), so recurse it.
     if let Some((name, rest_words)) = effective
         && TRAP_BUILTIN.contains(&name)
-        && let Some(outcome) = evaluate_trap(&argv, rest_words, ctx, cwd)
+        && let Some(outcome) = evaluate_trap(
+            &argv,
+            rest_words,
+            ctx,
+            &cwd_under_env_dash_c(&argv, env, cwd),
+        )
     {
         return apply_opaque_kind_floor(
             apply_substitution_floor(
@@ -23106,6 +23116,8 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
             r#"env -C ~/.config/shguard timeout 5 bash -c "cp evil.toml config.toml""#,
             "env -C ~/.config/shguard bash <<'EOF'\ncp evil.toml config.toml\nEOF",
             "nice env -C ~/.config/shguard sh <<'EOF'\ncp evil.toml config.toml\nEOF",
+            r#"env -C ~/.config/shguard eval "cp evil.toml config.toml""#,
+            r#"env -C ~/.config/shguard trap "cp evil.toml config.toml" EXIT"#,
         ] {
             assert_eq!(decide(line).decision(), Decision::Block, "{line}");
         }
