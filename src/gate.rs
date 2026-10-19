@@ -348,8 +348,8 @@ use std::collections::HashSet;
 
 use crate::HookContext;
 use crate::ast::{
-    AssignmentValue, Command, CommandLine, CompoundCommand, ElifClause, ExtendedTest,
-    FileRedirectionKind, FunctionDefinition, HeredocSubstitutions, Pipeline,
+    ArithmeticSubstitutions, AssignmentValue, Command, CommandLine, CompoundCommand, ElifClause,
+    ExtendedTest, FileRedirectionKind, FunctionDefinition, HeredocSubstitutions, Pipeline,
     ProcessSubstitutionDirection, Redirection, Separator, SimpleCommand, Word, WordPiece,
 };
 use crate::normalize::{
@@ -372,7 +372,6 @@ use crate::semantics::cwd::{AnchorOrigin, CwdAnchor, CwdContext, CwdState, MAX_C
 use crate::semantics::env::{
     Env, ExecScope, literal_text, redirections_may_write_variables, word_may_write_variables,
 };
-use crate::syntax::heredoc;
 use crate::verdict::{Decision, DenyMessage, Reason, RuleId, Verdict};
 
 /// Cap on how many levels deep a command/backquote substitution (or a
@@ -7005,15 +7004,15 @@ fn scan_word_pieces_for_heredoc_candidates(pieces: &[WordPiece], out: &mut Hered
             WordPiece::ProcessSubstitution { body, .. } => {
                 scan_command_line_for_heredoc_candidates(body, out);
             }
-            WordPiece::ArithmeticExpansion(raw) => {
+            WordPiece::ArithmeticExpansion(subs) => {
                 out.note_arithmetic(&[]);
-                match heredoc::parse_body(raw) {
-                    Ok(found) => {
-                        for inner in &found {
+                match subs {
+                    ArithmeticSubstitutions::Parsed(found) => {
+                        for inner in found {
                             scan_substitution_text_for_heredoc_candidates(inner, out);
                         }
                     }
-                    Err(_) => out.uncertain = true,
+                    ArithmeticSubstitutions::Unparsed => out.uncertain = true,
                 }
             }
             WordPiece::DoubleQuoted(inner) => scan_word_pieces_for_heredoc_candidates(inner, out),
@@ -7041,8 +7040,8 @@ fn scan_word_pieces_for_heredoc_candidates(pieces: &[WordPiece], out: &mut Hered
 }
 
 /// A `$()`/backtick/arithmetic-nested substitution's raw inner text is not
-/// itself an AST node — `crate::syntax::heredoc::parse_body`/`collect_substitutions`
-/// only ever hand back the text — so it must be re-parsed here the same way
+/// itself an AST node — the parser's substitution extraction
+/// only ever hands back the text — so it must be re-parsed here the same way
 /// [`analyze_at_depth`] would before its own commands can be walked. A parse
 /// failure sets `uncertain` (fail-closed) rather than being silently
 /// skipped: the caller cannot prove the inner text does NOT invoke an
@@ -8324,18 +8323,18 @@ fn collect_substitutions_into<'a>(
                 out.push(Cow::Borrowed(inner.as_str()));
             }
             // Issue #75: `$((...))`'s raw text is not itself submitted as a
-            // substitution (`x+1` doesn't parse as a command line — see
-            // `crate::syntax::heredoc`, which already handles exactly this
-            // "arithmetic span, but a nested `$(...)` inside it still
-            // expands" case for heredoc bodies). A parse the heredoc
+            // substitution (`x+1` doesn't parse as a command line); only
+            // the nested `$(...)` the parser extracted are. A parse the
             // parser rejects (`${ rm -rf /; }`, `$=y`, an unterminated
             // `$(`) leaves what the arithmetic text expands to unknown, so
             // it sets `uncertain` for the caller to floor to Ask. Not the
             // opaque-kind floor alone: assignment values and redirection
             // targets never reach it.
-            WordPiece::ArithmeticExpansion(raw) => match heredoc::parse_body(raw) {
-                Ok(found) => out.extend(found.into_iter().map(Cow::Owned)),
-                Err(_) => uncertain = true,
+            WordPiece::ArithmeticExpansion(subs) => match subs {
+                ArithmeticSubstitutions::Parsed(found) => {
+                    out.extend(found.iter().map(|s| Cow::Borrowed(s.as_str())));
+                }
+                ArithmeticSubstitutions::Unparsed => uncertain = true,
             },
             WordPiece::DoubleQuoted(inner) => {
                 uncertain |= collect_substitutions_into(inner, false, out);
