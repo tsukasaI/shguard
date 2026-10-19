@@ -11870,11 +11870,12 @@ fn evaluate_env_dash_c_override(
         .filter(|(name, _)| name == "env")
         .map(|(_, options)| options.clone())
         .collect();
-    let hops_start = env_options.first()?.end;
     let mut current = CwdContext::Initial;
-    for options in env_options {
+    // The cwd in force after each env hop's options.
+    let mut after_hop = Vec::with_capacity(env_options.len());
+    for options in &env_options {
         if let Some(next) = chain_dash_c_context(
-            &argv[options],
+            &argv[options.clone()],
             &["--chdir"],
             true,
             Some("env"),
@@ -11883,30 +11884,40 @@ fn evaluate_env_dash_c_override(
         ) {
             current = next;
         }
+        after_hop.push(current.clone());
     }
     let CwdContext::Known(CwdAnchor { path: anchor, .. }) = &current else {
         return None;
     };
-    // Hops between env's own options and the wrapped tail run under the new
-    // cwd too, so their glued `target_flags` values compose (`env -C /etc
-    // xargs -apasswd cat`).
-    let composed = crate::rules::effective_command(argv).and_then(|(_, wrapped_tail)| {
-        let env_prefix_end = argv.len() - wrapped_tail.len();
-        let mut composed_argv = argv[..hops_start].to_vec();
-        composed_argv.extend(compose_argv_for_command(
-            &argv[hops_start..env_prefix_end],
-            argv,
-            anchor,
-            rules,
-        ));
-        composed_argv.extend(compose_argv_for_command(wrapped_tail, argv, anchor, rules));
-        evaluate_composed_argv_match(
-            &composed_argv,
-            argv,
-            "this invocation's own `env -C`/`--chdir`",
-            rules,
-        )
-    });
+    // Words between an env hop's options and the next env hop (or the
+    // wrapped tail) run under the cwd that hop set, so their glued
+    // `target_flags` values compose (`env -C /etc xargs -apasswd cat`) and
+    // a later `env -C` does not retroactively move them.
+    let composed =
+        crate::rules::effective_command(argv).and_then(|(_, wrapped_tail)| {
+            let env_prefix_end = argv.len() - wrapped_tail.len();
+            let mut composed_argv = argv[..env_options[0].end].to_vec();
+            for (i, options) in env_options.iter().enumerate() {
+                let segment_end = env_options.get(i + 1).map_or(env_prefix_end, |n| n.start);
+                let segment = &argv[options.end..segment_end];
+                match &after_hop[i] {
+                    CwdContext::Known(hop_anchor) => composed_argv.extend(
+                        compose_argv_for_command(segment, argv, &hop_anchor.path, rules),
+                    ),
+                    _ => composed_argv.extend_from_slice(segment),
+                }
+                if let Some(next) = env_options.get(i + 1) {
+                    composed_argv.extend_from_slice(&argv[next.clone()]);
+                }
+            }
+            composed_argv.extend(compose_argv_for_command(wrapped_tail, argv, anchor, rules));
+            evaluate_composed_argv_match(
+                &composed_argv,
+                argv,
+                "this invocation's own `env -C`/`--chdir`",
+                rules,
+            )
+        });
     // The script an `env -S`/`--split-string` (or any other shell-script
     // slot) hands on is recursed with no cwd, so the anchor is lost there
     // and cannot be composed; not Allow rather than a guess.
@@ -23017,6 +23028,37 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
             "strace -C xargs -a/etc/passwd cat",
             "env -C /etc strace -C xargs -apasswd cat",
             "env -C / env -C etc xargs -apasswd cat",
+        ] {
+            let verdict = analyze_with_policy(line, &rules, &allowlist);
+            assert_eq!(verdict.decision(), Decision::Block, "{line}");
+        }
+    }
+
+    #[test]
+    fn env_dash_c_composes_a_hop_against_the_anchor_in_force_at_that_hop() {
+        let config = crate::rules::UserConfig::parse(
+            r#"
+            [[deny]]
+            id = "user-xargs-arg-file"
+            reason = "no /etc values"
+            command = "xargs"
+            target_flags = ["-a", "--arg-file"]
+            targets = [{ normalized_prefix = "/etc/" }]
+        "#,
+        )
+        .unwrap();
+        let (rules, allowlist) = crate::rules::merge_user_config(
+            Rules::embedded().unwrap(),
+            Allowlist::embedded().unwrap(),
+            config,
+        )
+        .unwrap();
+        for line in [
+            "xargs -a/etc/passwd env -C /tmp cat",
+            "env -C /etc xargs -apasswd env -C /tmp cat",
+            "env -C /etc xargs -apasswd nice env -C /tmp cat",
+            "env -C /etc xargs -apasswd env -C / cat",
+            "env -C /etc xargs -apasswd env -C /tmp git add x",
         ] {
             let verdict = analyze_with_policy(line, &rules, &allowlist);
             assert_eq!(verdict.decision(), Decision::Block, "{line}");
