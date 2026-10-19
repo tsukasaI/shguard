@@ -19,7 +19,7 @@ pre-commit:
 pre-push:
   parallel: true
   commands:
-    up-to-date:
+    pre-push-refs:
       use_stdin: true
       run: bash scripts/pre-push-refs.sh
     rust-format:
