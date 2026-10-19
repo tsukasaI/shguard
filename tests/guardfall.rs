@@ -3240,6 +3240,20 @@ const ISSUE_750_CASES: &[(&str, Decision)] = &[
     ("python3 /proc/self/root/../dev/stdin", Decision::Ask),
     ("python3 /proc/self/root/../../dev/fd/3", Decision::Ask),
     ("python3 /proc/self/cwd/../../dev/stdin", Decision::Ask),
+    ("python3 /tmp/../proc/self/root/../dev/stdin", Decision::Ask),
+    (
+        "python3 /proc/../proc/self/root/../dev/stdin",
+        Decision::Ask,
+    ),
+    (
+        "python3 /proc/self/../self/root/../dev/stdin",
+        Decision::Ask,
+    ),
+    (
+        "python3 /proc/self/root/tmp/../proc/self/root/../dev/stdin",
+        Decision::Ask,
+    ),
+    ("python3 /proc/self/task/1/root/../dev/stdin", Decision::Ask),
     ("python3 ~/../../dev/stdin", Decision::Ask),
     ("php -f s.php -r 'system(\"id\");'", Decision::Ask),
     ("php -f s.php -F /dev/stdin", Decision::Ask),

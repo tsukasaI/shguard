@@ -9391,32 +9391,32 @@ fn is_stdin_alias_path(path: &str) -> bool {
         return true;
     }
     // Before normalizing: `lexical_normalize` cancels `root`/`cwd` against a
-    // following `..` as if they were directories, but `/proc/self/root/..` is
-    // a real `..` of the process root, so `/proc/self/root/../dev/stdin` is
-    // `/dev/stdin`. Read what follows such a prefix like an unknown-cwd path,
-    // ignoring its ascent. Leading `..` are skipped, as everywhere else.
-    let parts: Vec<&str> = path
-        .split('/')
-        .filter(|part| !part.is_empty() && *part != ".")
-        .collect();
-    let mut start = parts.iter().take_while(|part| **part == "..").count();
-    let mut after_proc_root = false;
-    while let ["proc", p, "root" | "cwd", ..] = &parts[start..]
-        && is_proc_process(p)
-    {
-        start += 3;
-        after_proc_root = true;
-    }
-    if after_proc_root {
-        // `./` so a leading `~` in the remainder stays a plain component.
-        let rest = format!("./{}", parts[start..].join("/"));
-        return match lexical_normalize(&rest) {
-            PathForm::Rel { comps, .. } => {
-                let comps: Vec<&str> = comps.iter().map(String::as_str).collect();
-                is_stdin_alias_components(&comps)
-            }
+    // following `..` as if they were directories, but `/proc/<pid>/root` and
+    // `/proc/<pid>/cwd` are links, so `/proc/self/root/../dev/stdin` is
+    // `/dev/stdin`. One left-to-right pass resolves `..` against a stack and
+    // restarts it from `/` at every such link, wherever in the path it sits
+    // (`/tmp/../proc/self/root/../dev/stdin`); what follows the last link is
+    // then read with its ascent ignored, as an unknown-cwd path is.
+    let mut stack: Vec<&str> = Vec::new();
+    let mut link_seen = false;
+    for part in path.split('/').filter(|p| !p.is_empty() && *p != ".") {
+        if part == ".." {
+            stack.pop();
+            continue;
+        }
+        stack.push(part);
+        let is_link = match stack.as_slice() {
+            ["proc", p, "root" | "cwd"] => is_proc_process(p),
+            ["proc", p, "task", t, "root" | "cwd"] => is_proc_process(p) && is_ascii_digits(t),
             _ => false,
         };
+        if is_link {
+            stack.clear();
+            link_seen = true;
+        }
+    }
+    if link_seen {
+        return is_stdin_alias_components(&stack);
     }
     // Every anchor whose root is unknown yet may sit at `/`: a `..` that left
     // `~`, a named home or the directory stack can land anywhere, as an
@@ -15735,6 +15735,12 @@ mod tests {
             "python3 /proc/self/root/../dev/stdin",
             "python3 /proc/self/root/../../dev/fd/3",
             "python3 /proc/self/cwd/../../dev/stdin",
+            "python3 /tmp/../proc/self/root/../dev/stdin",
+            "python3 /proc/../proc/self/root/../dev/stdin",
+            "python3 /proc/self/../self/root/../dev/stdin",
+            "python3 /proc/self/root/tmp/../proc/self/root/../dev/stdin",
+            "python3 /proc/self/task/1/root/../dev/stdin",
+            "python3 /proc/self/task/1/cwd/../dev/stdin",
             "python3 /proc/1/root/proc/self/root/dev/fd/3",
             "python3 /dev/stdout",
             "awk -f /dev/stderr f",
