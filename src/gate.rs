@@ -9391,13 +9391,24 @@ fn is_stdin_alias_path(path: &str) -> bool {
         return false;
     };
     let comps: Vec<&str> = comps.iter().map(String::as_str).collect();
-    match comps.as_slice() {
+    is_stdin_alias_components(&comps)
+}
+
+/// The component table behind [`is_stdin_alias_path`], for a path already
+/// anchored at `/` (or at an unknown cwd, whose ascent the caller dropped).
+fn is_stdin_alias_components(comps: &[&str]) -> bool {
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let process = |s: &str| matches!(s, "self" | "thread-self") || digits(s);
+    match comps {
         // Not stdin by name, but `2<&0` makes descriptor 2 a stdin duplicate
         // just as `3<&0` does for `/dev/fd/3`.
         ["dev", "stdin" | "stdout" | "stderr"] => true,
-        ["dev", "fd", n] | ["proc", "self", "fd", n] => {
-            !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())
-        }
+        ["dev", "fd", n] => digits(n),
+        ["proc", p, "fd", n] => process(p) && digits(n),
+        ["proc", p, "task", t, "fd", n] => process(p) && digits(t) && digits(n),
+        // A process's root is the filesystem root, so the same table applies
+        // beneath it (`/proc/self/root/dev/stdin`).
+        ["proc", p, "root", rest @ ..] => process(p) && is_stdin_alias_components(rest),
         _ => false,
     }
 }
@@ -15583,6 +15594,11 @@ mod tests {
             "python3 /dev/fd/3 3<&0",
             "python3 /dev/fd/12",
             "python3 /dev/stderr 2<&0",
+            "python3 /proc/thread-self/fd/3",
+            "python3 /proc/1234/fd/0",
+            "python3 /proc/self/task/42/fd/0",
+            "python3 /proc/self/root/dev/stdin",
+            "python3 /proc/1/root/proc/self/root/dev/fd/3",
             "python3 /dev/stdout",
             "awk -f /dev/stderr f",
             "python3 /proc/self/fd/3",
@@ -15598,6 +15614,9 @@ mod tests {
             "python3 /dev/fd/x",
             "python3 /dev/fd/",
             "python3 /dev/fd/3/x",
+            "python3 /proc/self/root/etc/passwd",
+            "python3 /proc/x/fd/0",
+            "python3 /proc/self/task/x/fd/0",
             "python3 ../../dev/stdin2",
             "python3 s.py /dev/fd/3",
         ] {
