@@ -18280,6 +18280,15 @@ mod tests {
             ("runuser root -- -oc errexit 'rm -rf /'", Decision::Block),
             ("runuser root -- -Nc 'rm -rf /'", Decision::Block),
             ("runuser root -- -yc 'rm -rf /'", Decision::Block),
+            ("runuser root -- -o errexit -c 'rm -rf /'", Decision::Block),
+            ("su -l root -- -ic 'rm -rf /'", Decision::Block),
+            ("su - root -- -ic 'rm -rf /'", Decision::Block),
+            ("su -- root -ic 'rm -rf /'", Decision::Block),
+            // No script word, or one that cannot be resolved, stays at the floor.
+            ("runuser root -- -c -e", Decision::Ask),
+            ("runuser root -- -c --", Decision::Ask),
+            ("runuser root -- -cfoo", Decision::Ask),
+            (r#"runuser root -- -ic "$X""#, Decision::Ask),
             // Benign string stays at the escalation floor, as before.
             ("runuser root -- -ic 'ls'", Decision::Ask),
             ("watch -dx 'rm -rf /'", Decision::Block),

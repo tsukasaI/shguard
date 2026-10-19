@@ -1322,8 +1322,14 @@
 {"command":"runcon -tfoo_t rm -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"runcon ctx rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"runuser -u root rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"runuser root -- -Nc 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"runuser root -- -c +O extglob 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"runuser root -- -c -- 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"runuser root -- -c -e 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"runuser root -- -co errexit 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"runuser root -- -ec 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"runuser root -- -ic 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"runuser root -- -oc errexit 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"rustup +stable run x rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"rustup run stable rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"screen -L -Logfile x.log make","decision":"Allow","deny_message":null,"matched_rule":null}
@@ -1463,6 +1469,8 @@
 {"command":"sshpass -f pw ssh host ls","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"sshpass -p pw rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"strace rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"su -- root -ic 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"su -l root -- -ic 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"su root -- -ic 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"systemd-run rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"tar --extract --directory=/ -f evil.tar","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}
