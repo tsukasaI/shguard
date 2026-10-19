@@ -8807,7 +8807,8 @@ const PHP_GRAMMAR: InlineGrammar = InlineGrammar {
     long_loaded: &[],
     long_plain_prefixes: &[],
     // After `--` php reads its script from stdin whatever follows
-    // (`php -- -v` ran the stdin script with `-v` as its argument).
+    // (`php -- -v` ran the stdin script with `-v` as its argument), unless
+    // `-f`/`-F` already named the script.
     dashdash_dash_is_stdin: true,
     // `php -` fails with "Could not open input file: -".
     dash_is_stdin: false,
@@ -9088,8 +9089,10 @@ enum InlineCodeTrigger {
     /// An option the grammar cannot place (unknown, or missing a required
     /// attached value), so what follows it is unknown.
     UnplacedOption,
-    /// A stdin operand (`-`, `/dev/stdin`) where the script operand would be:
-    /// the interpreter reads its program from stdin.
+    /// A stdin path ([`is_stdin_alias_path`]) where the script operand would
+    /// be, or as the value of an option that loads a file or library (php's
+    /// `-f`, ruby's `-r`, node's `--require`): the interpreter reads its
+    /// program from stdin.
     StdinScript,
 }
 
@@ -9118,8 +9121,9 @@ enum AwkScriptPosition {
     /// `-e`/`--source` or operand, with an ordinary file value — the
     /// script lives in a file.
     FileFlag,
-    /// Like `FileFlag`, but the file value is stdin itself (`-`,
-    /// `/dev/stdin`, `/proc/self/fd/0`, or `/dev/fd/0`): the "file" awk
+    /// Like `FileFlag`, but the file value is stdin itself, or a descriptor
+    /// that may be ([`is_stdin_alias_path`]: `-`, `/dev/stdin`, any
+    /// `/dev/fd/N` or `/proc/.../fd/N`, and their relative respellings): the "file" awk
     /// reads its program from is actually the same pipe an attacker can
     /// write to, so this floors to Ask rather than `FileFlag`'s Allow.
     FileFlagStdin,
