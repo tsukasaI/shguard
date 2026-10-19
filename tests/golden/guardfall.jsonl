@@ -1,3 +1,5 @@
+{"command":"! ! time -- ! rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"! ! time time -- ! rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"! time -- ! rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"! time rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"\"${x:-'$(rm -rf ~)'}\" foo","decision":"Block","deny_message":null,"matched_rule":null}

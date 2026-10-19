@@ -851,6 +851,9 @@ const ISSUE_638_TIME_AND_EXEC_WRAPPER_CASES: &[(&str, Decision)] = &[
     ("time -p -- time -- ! rm -rf /", Decision::Block),
     ("! time -- ! rm -rf /", Decision::Block),
     ("time ! time -- ! rm -rf /", Decision::Block),
+    // brush folds `! !` to no bang and leaves the `time` after it untimed
+    ("! ! time -- ! rm -rf /", Decision::Block),
+    ("! ! time time -- ! rm -rf /", Decision::Block),
     // `--` ends wrapper flags
     ("/usr/bin/time -- rm -rf /", Decision::Block),
     // GNU time -o takes a separated value

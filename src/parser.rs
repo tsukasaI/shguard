@@ -196,11 +196,9 @@ fn convert_pipeline(pipeline: &bast::Pipeline) -> Result<Pipeline, ParseError> {
         .next()
         .ok_or_else(|| ParseError::syntax("empty pipeline"))?;
     let timed = pipeline.timed.is_some();
-    let rewritten = if timed || pipeline.bang {
-        without_time_option_terminator(first, timed)?
-    } else {
-        None
-    };
+    // Not gated on `timed`/`bang`: brush folds `! !` to no bang and does not
+    // mark a `time` after `!` as timed.
+    let rewritten = without_time_option_terminator(first, timed)?;
     let bang = pipeline.bang ^ rewritten.as_ref().is_some_and(|r| r.negated);
     let first = convert_command(rewritten.as_ref().map_or(first, |r| &r.command))?;
     let rest = commands.map(convert_command).collect::<Result<_, _>>()?;
@@ -3309,6 +3307,8 @@ mod tests {
             ("time -- ! time ! rm -rf /", "rm -rf /"),
             ("time time -- ! rm -rf /", "! rm -rf /"),
             ("! time -- ! rm -rf /", "rm -rf /"),
+            ("! ! time -- ! rm -rf /", "! rm -rf /"),
+            ("! ! time time -- ! rm -rf /", "! rm -rf /"),
         ] {
             assert_eq!(parse_ok(timed), parse_ok(plain), "{timed}");
         }

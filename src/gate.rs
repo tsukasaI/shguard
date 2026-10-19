@@ -18329,6 +18329,16 @@ mod tests {
             ("time -p -- time -- ! rm -rf /", Decision::Block),
             ("! time -- ! rm -rf /", Decision::Block),
             ("time ! time -- ! rm -rf /", Decision::Block),
+            ("! ! time -- ! rm -rf /", Decision::Block),
+            ("! ! time time -- ! rm -rf /", Decision::Block),
+            ("if ! ! time -- ! rm -rf /; then :; fi", Decision::Block),
+            ("bash -c '! ! time -- ! rm -rf /'", Decision::Block),
+            ("! ls", Decision::Allow),
+            ("! time ls", Decision::Allow),
+            ("time ls", Decision::Allow),
+            ("ls", Decision::Allow),
+            // Deliberate fail-closed: no pipeline after the grammar words.
+            ("! time", Decision::Ask),
             // After `!` a `--` is a command name, which bash runs as such.
             ("time -- ! -- rm -rf /", Decision::Allow),
             // A grammar word with no pipeline after it fails closed.
