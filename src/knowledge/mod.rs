@@ -23,7 +23,7 @@ pub(crate) use parse::{
     Finding, OptionName, OptionValue, ParsedArgv, ParsedOption, ShortValue, Unmodeled,
 };
 pub(crate) use spec::CwdEffect;
-use spec::{CommandSpec, OptionGrammar, Slot};
+use spec::{CommandSpec, Slot};
 
 /// A catalogued command found by name, with the name it was found under.
 #[derive(Debug, Clone, Copy)]
@@ -90,14 +90,10 @@ pub(crate) fn locate_short_value<'t>(
         .locate_short_value(token, letter)
 }
 
-/// The short options of a target shell (bash) that take no value; `-o` and
-/// `-O` take one, so a cluster reaching them is left unplaced.
-const SHELL_SHORT_FLAGS: OptionGrammar = OptionGrammar {
-    short_flags: "abefhiklmnprstuvxBCDEHPT",
-    ..OptionGrammar::EMPTY
-};
-
-/// Adds the script of every bash `-c` cluster in `tail`. Bash takes the
+/// Adds the script of every `-c` cluster in `tail`. Any `-`/`+` cluster with
+/// a `c` counts, whatever letters precede it: the target shell is whichever
+/// `su`/`runuser` is configured to start (bash, zsh with `-Nc`...), so its
+/// option letters are not enumerated. Bash takes the
 /// script from the first operand after all options, not from the word right
 /// after the cluster (`-c -e CMD`, `-c -- CMD`, `-co errexit CMD`), so both
 /// that operand and the next word are reported. A cluster the command's own
@@ -108,7 +104,10 @@ fn collect_passthrough_scripts<'a>(tail: &'a [NormalizedWord], values: &mut Vec<
         let Resolution::Resolved(token) = word.resolution() else {
             continue;
         };
-        if SHELL_SHORT_FLAGS.locate_short_value(token, 'c').is_none() {
+        if token.len() < 2 || token.starts_with("--") || !token.starts_with(['-', '+']) {
+            continue;
+        }
+        if !token.contains('c') {
             continue;
         }
         push_script_word(tail, index + 1, values);

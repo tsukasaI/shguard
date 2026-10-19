@@ -18276,6 +18276,10 @@ mod tests {
             ("runuser root -- -c -- 'rm -rf /'", Decision::Block),
             ("runuser root -- -co errexit 'rm -rf /'", Decision::Block),
             ("runuser root -- -c +O extglob 'rm -rf /'", Decision::Block),
+            // The target shell may be zsh, whose option letters are not bash's.
+            ("runuser root -- -oc errexit 'rm -rf /'", Decision::Block),
+            ("runuser root -- -Nc 'rm -rf /'", Decision::Block),
+            ("runuser root -- -yc 'rm -rf /'", Decision::Block),
             // Benign string stays at the escalation floor, as before.
             ("runuser root -- -ic 'ls'", Decision::Ask),
             ("watch -dx 'rm -rf /'", Decision::Block),
