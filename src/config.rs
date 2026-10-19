@@ -3176,7 +3176,8 @@ mod tests {
                 None,
                 false,
                 home.map(str::to_string),
-                // Not the real filesystem: a nix sandbox denies `/Users` (EPERM), which turns Allow into Ask.
+                // Not the real filesystem: a nix sandbox denies `/Users` (EPERM),
+                // which turns Allow into Ask.
                 PathCanonicalizer::new(|_| Err(crate::rules::ProbeError::NotFound)),
             )
             .unwrap()

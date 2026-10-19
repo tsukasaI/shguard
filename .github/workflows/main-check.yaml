@@ -5,8 +5,9 @@
 #   pre-push gate runs only on the maintainer's macOS machine).
 # - Dependabot PRs: their branches are pushed server-side and never pass
 #   through anyone's local pre-push hook.
-# - Release PRs (head branch chore/release-*): nix-build on Linux and macOS,
-#   because the Darwin nix sandbox is not reproducible by the local gate.
+# - Release PRs (head branch chore/release-*): nix-build on x86_64-linux
+#   (ubuntu-latest) and aarch64-darwin (macos-latest), because the Darwin nix
+#   sandbox is not reproducible by the local gate.
 name: Main check
 
 on:
@@ -43,8 +44,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
         with:
-          # The Darwin sandbox denies /Users; keep it on whatever the installer defaults to.
-          extra_nix_config: sandbox = true
+          # Not the installer default: Nix defaults the sandbox off on Darwin and
+          # falls back to unsandboxed builds, so the /Users denial nix-darwin
+          # consumers hit (#779) would go unreproduced.
+          extra_nix_config: |
+            sandbox = true
+            sandbox-fallback = false
       - run: nix build -L
 
   cargo-deny:
