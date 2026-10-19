@@ -1178,9 +1178,11 @@ pub(crate) enum WordPiece {
     /// A backslash-escaped character, e.g. `\ ` inside an otherwise
     /// unquoted word.
     EscapeSequence(char),
-    /// `$((...))` (issue #75) — the raw, unparsed inner arithmetic text
-    /// (`bword::ParameterExpr`'s `UnexpandedArithmeticExpr.value`). Only the
-    /// embedded substitutions are kept, not the text: bash performs command
+    /// `$((...))` (issue #75) — the command/backquote substitutions the
+    /// parser extracted from the inner arithmetic text
+    /// (`bword::ParameterExpr`'s `UnexpandedArithmeticExpr.value`), or
+    /// `Unparsed` when it could not delimit them. Only the substitutions
+    /// are kept, not the text: bash performs command
     /// substitution *inside* an arithmetic expression before evaluating it
     /// (`$(( $(rm -rf /) ))` really does run the `rm`), so the parser
     /// extracts them once, like a heredoc body's, and `crate::gate` walks
