@@ -42,3 +42,7 @@ nix run github:tsukasaI/shguard
 ### Keeping current
 The flake input points to the repository; `nix flake update` picks up new
 commits and tags automatically.
+
+`flake.lock`'s nixpkgs has no automated renewal (Dependabot does not cover
+flakes): renew it manually with `nix flake update`, then verify with
+`nix build -L`.

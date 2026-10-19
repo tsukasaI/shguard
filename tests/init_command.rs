@@ -6,19 +6,15 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use assert_cmd::Command;
 use std::fs;
 use tempfile::tempdir;
 
+#[path = "common/cmd.rs"]
+mod cmd;
+
 fn run_init(args: &[&str], envs: &[(&str, &str)]) -> assert_cmd::assert::Assert {
-    let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
-    cmd.arg("init")
-        .args(args)
-        .env_remove("SHGUARD_CONFIG")
-        .env_remove("XDG_CONFIG_HOME")
-        .env_remove("HOME")
-        .env_remove("SHGUARD_TEST_PANIC")
-        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB");
+    let mut cmd = cmd::shguard();
+    cmd.arg("init").args(args);
     for (key, value) in envs {
         cmd.env(key, value);
     }
@@ -54,14 +50,8 @@ fn scaffolded_config_loads_cleanly_via_check_config() {
     let config_path = dir.path().join("config.toml");
     run_init(&[], &[("SHGUARD_CONFIG", config_path.to_str().unwrap())]).success();
 
-    Command::cargo_bin("shguard")
-        .expect("shguard binary should build")
+    cmd::shguard()
         .arg("--check-config")
-        .env_remove("SHGUARD_CONFIG")
-        .env_remove("XDG_CONFIG_HOME")
-        .env_remove("HOME")
-        .env_remove("SHGUARD_TEST_PANIC")
-        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .env("SHGUARD_CONFIG", &config_path)
         .assert()
         .success();
@@ -116,14 +106,8 @@ fn unexpected_argument_is_a_usage_error() {
 fn ignores_stdin() {
     let dir = tempdir().expect("tempdir should create");
     let config_path = dir.path().join("config.toml");
-    Command::cargo_bin("shguard")
-        .expect("shguard binary should build")
+    cmd::shguard()
         .arg("init")
-        .env_remove("SHGUARD_CONFIG")
-        .env_remove("XDG_CONFIG_HOME")
-        .env_remove("HOME")
-        .env_remove("SHGUARD_TEST_PANIC")
-        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .env("SHGUARD_CONFIG", &config_path)
         .write_stdin(r#"{"tool_name":"Bash","tool_input":{"command":"echo hi"}}"#)
         .assert()

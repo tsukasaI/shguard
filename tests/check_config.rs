@@ -6,9 +6,11 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use assert_cmd::Command;
 use std::fs;
 use tempfile::tempdir;
+
+#[path = "common/cmd.rs"]
+mod cmd;
 
 fn write_config(contents: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempdir().expect("tempdir should create");
@@ -22,13 +24,8 @@ fn write_config(contents: &str) -> (tempfile::TempDir, std::path::PathBuf) {
 /// pattern — results here must depend only on `envs`, never on whatever
 /// config happens to exist on the host machine running the test.
 fn run_check_config(envs: &[(&str, &str)]) -> assert_cmd::assert::Assert {
-    let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
-    cmd.arg("--check-config")
-        .env_remove("SHGUARD_CONFIG")
-        .env_remove("XDG_CONFIG_HOME")
-        .env_remove("HOME")
-        .env_remove("SHGUARD_TEST_PANIC")
-        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB");
+    let mut cmd = cmd::shguard();
+    cmd.arg("--check-config");
     for (key, value) in envs {
         cmd.env(key, value);
     }
@@ -256,14 +253,8 @@ fn awk_allow_entry_fails_to_load_and_exits_two() {
 /// entirely.
 #[test]
 fn ignores_stdin() {
-    let assert = Command::cargo_bin("shguard")
-        .expect("shguard binary should build")
+    let assert = cmd::shguard()
         .arg("--check-config")
-        .env_remove("SHGUARD_CONFIG")
-        .env_remove("XDG_CONFIG_HOME")
-        .env_remove("HOME")
-        .env_remove("SHGUARD_TEST_PANIC")
-        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .write_stdin(r#"{"tool_name":"Bash","tool_input":{"command":"echo hi"}}"#)
         .assert()
         .success();
@@ -327,12 +318,7 @@ fn resolve_symlinks_entry_already_in_canonical_spelling_reports_clean() {
 #[test]
 fn hook_path_does_not_warn_about_a_respelled_resolve_symlinks_entry() {
     let (_dir, config_path) = respelled_entry_config();
-    let assert = Command::cargo_bin("shguard")
-        .expect("shguard binary should build")
-        .env_remove("XDG_CONFIG_HOME")
-        .env_remove("HOME")
-        .env_remove("SHGUARD_TEST_PANIC")
-        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
+    let assert = cmd::shguard()
         .env("SHGUARD_CONFIG", &config_path)
         .write_stdin(r#"{"tool_name":"Bash","tool_input":{"command":"echo hi"}}"#)
         .assert()
