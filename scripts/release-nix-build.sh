@@ -48,6 +48,9 @@ while read -r local_ref local_sha remote_ref _remote_sha; do
     echo "release-nix-build: repo path '$toplevel' contains characters outside [A-Za-z0-9._/-] that the git+file:// URL cannot carry; refusing to push $remote_ref." >&2
     exit 1
   fi
+  # No --rebuild (a cache hit skips checkPhase): flake.nix's `src = ./.` makes
+  # every tree change (releases bump the version) a new derivation, so a hit
+  # means this exact tree was built and checked under the same daemon config.
   if ! nix build -L --no-link "git+file://${toplevel}?rev=${local_sha}" </dev/null; then
     echo "release-nix-build: nix build of $local_sha ($local_ref) failed; fix it before pushing $remote_ref." >&2
     exit 1

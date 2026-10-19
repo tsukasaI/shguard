@@ -20,12 +20,22 @@ completes.
    the lefthook pre-push hook runs `nix build` on the exact pushed commit
    (`scripts/release-nix-build.sh`, for pushes to `refs/heads/chore/release-*`).
    That covers aarch64-darwin only, on the maintainer's Mac, and needs nix with
-   the sandbox enabled (`sandbox = true`, `sandbox-fallback = false` in
-   nix.conf); the script enforces this and refuses the push otherwise.
-   x86_64-linux and aarch64-darwin are first built by `main-check.yaml`'s
+   the sandbox enabled (`sandbox = true`, `sandbox-fallback = false` in the
+   daemon's system config: `/etc/nix/nix.conf`, or nix-darwin's
+   `nix.settings`; a user-level nix.conf does not reach the daemon); the
+   script enforces this and refuses the push otherwise.
+   x86_64-linux and aarch64-darwin are first built in CI by `main-check.yaml`'s
    `nix-build` job (ubuntu-latest and macos-latest) on the push to `main` when
    the release PR merges. x86_64-darwin is not gated: there is no hosted Intel
    macOS runner.
+   Do not add commits to a release PR through the GitHub UI (web edits,
+   "Commit suggestion", "Update branch"); push them locally instead, because
+   only a local push runs the pre-push nix build. The push-to-`main` nix-build
+   and `release.yaml`'s tag-time gate would still catch such a commit later.
+   If a UI commit already landed, pulling it and running `git push` gives the
+   hook no refs to check, so the nix build does not run; make a new local
+   commit (e.g. `git commit --amend --no-edit`) and push with
+   `--force-with-lease` so the hook checks it.
 2. After merge, wait for `main-check.yaml`'s `nix-build` on the merge commit to
    pass, then tag the merge commit `vX.Y.Z` and push the tag.
 3. `release.yaml` re-runs `nix build` on x86_64-linux and aarch64-darwin for the
