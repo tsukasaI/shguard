@@ -33,8 +33,12 @@ while read -r local_ref local_sha remote_ref _remote_sha; do
 
   # Darwin nix defaults to no sandbox, which would let the #779 class pass;
   # `--option sandbox true` is ignored by the daemon for untrusted users.
-  if [[ "$(nix config show sandbox 2>/dev/null)" != "true" ||
-    "$(nix config show sandbox-fallback 2>/dev/null)" != "false" ]]; then
+  if ! sandbox=$(nix config show sandbox 2>/dev/null) ||
+    ! sandbox_fallback=$(nix config show sandbox-fallback 2>/dev/null); then
+    echo "release-nix-build: cannot read nix config (needs nix >= 2.20 with nix-command); refusing to push $remote_ref." >&2
+    exit 1
+  fi
+  if [[ "$sandbox" != "true" || "$sandbox_fallback" != "false" ]]; then
     echo "release-nix-build: nix must run with sandbox = true and sandbox-fallback = false (see docs/distribution.md); refusing to push $remote_ref." >&2
     exit 1
   fi
