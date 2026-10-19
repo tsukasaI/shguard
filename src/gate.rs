@@ -12323,7 +12323,9 @@ fn git_config_env_var_verdict(argv: &[NormalizedWord], command: &SimpleCommand) 
 /// git/make subcommand/target-name shape today, so this has no live
 /// effect — but a future rule author declaring `targets` for `git`/`make`
 /// should expect this composition to reach subcommand words too, not
-/// just genuine path arguments.
+/// just genuine path arguments. The same holds for the `env -C` hop region
+/// ([`evaluate_env_dash_c_override`]), which also rewrites non-path words
+/// (`timeout 5` becomes `/etc/5`); that can only add matches.
 fn evaluate_dash_c_override(argv: &[NormalizedWord], env: &Env, rules: &Rules) -> Option<Verdict> {
     let (start, env_verdict) = match evaluate_env_dash_c_override(argv, env, rules) {
         Some((cwd, verdict)) => (cwd, verdict),
