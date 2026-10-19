@@ -8737,7 +8737,7 @@ const NODE_GRAMMAR: InlineGrammar = InlineGrammar {
         "env-file",
         "title",
     ],
-    long_loaded: &["require", "import"],
+    long_loaded: &["require", "import", "loader", "experimental-loader"],
     long_plain_prefixes: &[],
     dashdash_dash_is_stdin: true,
     dash_is_stdin: true,
@@ -15616,6 +15616,8 @@ mod tests {
             "node --require /dev/stdin s.js",
             "node --require=/dev/stdin s.js",
             "node --import /dev/fd/3 s.js",
+            "node --loader /dev/stdin s.js",
+            "node --experimental-loader=/dev/stdin s.js",
         ] {
             assert_decision(command, Decision::Ask);
         }
