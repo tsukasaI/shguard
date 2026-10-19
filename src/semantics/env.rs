@@ -789,7 +789,8 @@ impl Env {
         };
         // Wrappers and sourced code can run a `readonly` this scan cannot
         // see (`builtin readonly X`, zsh `integer -r X`), as can a call to
-        // a function defined on this line.
+        // a function defined on this line, a `trap` handler, a
+        // `mapfile`/`readarray -C` callback, or an autoloaded function.
         if matches!(
             name.as_str(),
             "builtin"
