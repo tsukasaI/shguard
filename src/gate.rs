@@ -11889,8 +11889,6 @@ fn evaluate_env_dash_c_override(
     env: &Env,
     rules: &Rules,
 ) -> Option<Verdict> {
-    let (_, wrapped_tail) = crate::rules::effective_command(argv)?;
-    let env_prefix_end = argv.len() - wrapped_tail.len();
     // Only env hops' own options: an inner wrapper's unrelated `-C`
     // (`strace -C`) is not a chdir.
     let ranges = crate::rules::wrapper_option_ranges(argv);
@@ -11919,20 +11917,40 @@ fn evaluate_env_dash_c_override(
     // Hops between env's own options and the wrapped tail run under the new
     // cwd too, so their glued `target_flags` values compose (`env -C /etc
     // xargs -apasswd cat`).
-    let mut composed_argv = argv[..hops_start].to_vec();
-    composed_argv.extend(compose_argv_for_command(
-        &argv[hops_start..env_prefix_end],
-        argv,
-        &anchor,
-        rules,
-    ));
-    composed_argv.extend(compose_argv_for_command(wrapped_tail, argv, &anchor, rules));
-    evaluate_composed_argv_match(
-        &composed_argv,
-        argv,
-        "this invocation's own `env -C`/`--chdir`",
-        rules,
-    )
+    let composed = crate::rules::effective_command(argv).and_then(|(_, wrapped_tail)| {
+        let env_prefix_end = argv.len() - wrapped_tail.len();
+        let mut composed_argv = argv[..hops_start].to_vec();
+        composed_argv.extend(compose_argv_for_command(
+            &argv[hops_start..env_prefix_end],
+            argv,
+            &anchor,
+            rules,
+        ));
+        composed_argv.extend(compose_argv_for_command(wrapped_tail, argv, &anchor, rules));
+        evaluate_composed_argv_match(
+            &composed_argv,
+            argv,
+            "this invocation's own `env -C`/`--chdir`",
+            rules,
+        )
+    });
+    // The script an `env -S`/`--split-string` (or any other shell-script
+    // slot) hands on is recursed with no cwd, so the anchor is lost there
+    // and cannot be composed; not Allow rather than a guess.
+    let script_ask = (!crate::rules::chain_script_slots(argv).is_empty()).then(|| {
+        Verdict::ask(
+            Reason::new(
+                "`env -C`/`--chdir` changes the working directory of a command that is also \
+                 given as a shell script (`-S`/`--split-string`), and its relative paths \
+                 cannot be statically resolved against that directory",
+            ),
+            argv.to_vec(),
+        )
+    });
+    match (composed, script_ask) {
+        (Some(composed), Some(ask)) => Some(fold_worst(composed, ask)),
+        (composed, ask) => composed.or(ask),
+    }
 }
 
 /// Bounds a `git` invocation's own argv tail to the region BEFORE its
@@ -22924,6 +22942,18 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
         ] {
             let verdict = analyze_with_policy(line, &rules, &allowlist);
             assert_eq!(verdict.decision(), Decision::Block, "{line}");
+        }
+    }
+
+    #[test]
+    fn env_dash_c_with_a_split_string_script_is_not_allowed() {
+        for line in [
+            r#"env -C ~/.config/shguard -S "cp evil.toml config.toml""#,
+            r#"env --chdir ~/.config/shguard --split-string "cp evil.toml config.toml""#,
+            r#"env --chdir=~/.config/shguard --split-string="cp evil.toml config.toml""#,
+            r#"env -C ~/.config/shguard nice env -S "cp evil.toml config.toml""#,
+        ] {
+            assert_ne!(decide(line).decision(), Decision::Allow, "{line}");
         }
     }
 
