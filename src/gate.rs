@@ -1969,11 +1969,11 @@ fn evaluate_compound_command_body(
 
     apply_attached_word_and_redirect_checks(
         worst,
-        extra_words,
-        "a `for` clause's `in` word list",
+        (extra_words, "a `for` clause's `in` word list"),
         redirections,
         &interpreters,
         ctx,
+        env,
         &redirect_anchor,
     )
 }
@@ -2011,11 +2011,11 @@ fn evaluate_compound_command_body(
 /// what makes the `for`-list case (a real exposure) work at all.
 fn apply_attached_word_and_redirect_checks(
     mut worst: Verdict,
-    extra_words: &[Word],
-    extra_words_description: &str,
+    (extra_words, extra_words_description): (&[Word], &str),
     redirections: &[Redirection],
     interpreters: &[HeredocCandidate],
     ctx: AnalysisCtx<'_>,
+    env: &Env,
     redirect_anchor: &CwdContext,
 ) -> Verdict {
     let rules = ctx.rules;
@@ -2039,7 +2039,14 @@ fn apply_attached_word_and_redirect_checks(
             extra_words_description,
         );
     }
-    scan_redirection_expansions(redirections, interpreters, ctx, redirect_anchor, &mut accum);
+    scan_redirection_expansions(
+        redirections,
+        interpreters,
+        ctx,
+        env,
+        redirect_anchor,
+        &mut accum,
+    );
     if let Some((floor_decision, floor_reason)) = floor {
         let argv = worst.normalized_argv().to_vec();
         let floored = match floor_decision {
@@ -2202,11 +2209,11 @@ fn evaluate_extended_test(
     let interpreters = scan.into_candidates();
     let verdict = apply_attached_word_and_redirect_checks(
         Verdict::allow(Vec::new()),
-        &test.words,
-        "an extended test ([[ ]]) operand",
+        (&test.words, "an extended test ([[ ]]) operand"),
         &test.redirections,
         &interpreters,
         ctx,
+        env,
         cwd,
     );
     if test
@@ -3312,7 +3319,7 @@ fn evaluate_simple_command(
     // returns (rule 6a's inner-Allow chief among them) that bypass
     // `fold_floors` entirely, and a floor placed inside `core` would vanish
     // on exactly those paths (module docs, rule 11).
-    let expansion = scan_expansion_positions(command, &argv, ctx, cwd);
+    let expansion = scan_expansion_positions(command, &argv, ctx, env, cwd);
     // Issues #64/#66/#72: the flock/su `-c` shell-string floor and the
     // `find -exec`/`-execdir`/`-ok`/`-okdir` direct-argv floor. Computed
     // here, in the wrapper layer, for the same reason rule 11's `expansion`
@@ -6709,7 +6716,7 @@ impl ExpansionAccum<'_> {
 /// also finds one nested inside a freshly-parsed, locally-owned substitution
 /// body, which cannot lend the outer scan a borrow that outlives it.
 enum HeredocCandidate {
-    Shell(String),
+    Shell(String, Vec<NormalizedWord>),
     Opaque(&'static str),
     NonShell(String),
 }
@@ -6752,12 +6759,12 @@ fn classify_heredoc_candidate(argv: &[NormalizedWord]) -> Option<HeredocCandidat
         return Some(if hands_off {
             HeredocCandidate::Opaque("fish's `-c`/`-C`/`--command`/`--init-command` flag")
         } else {
-            HeredocCandidate::Shell(name.to_string())
+            HeredocCandidate::Shell(name.to_string(), argv.to_vec())
         });
     }
     if crate::rules::is_shell_interpreter(name) {
         match scan_for_flag(rest, is_dash_c_token) {
-            FlagScan::Absent => Some(HeredocCandidate::Shell(name.to_string())),
+            FlagScan::Absent => Some(HeredocCandidate::Shell(name.to_string(), argv.to_vec())),
             FlagScan::Found(_) | FlagScan::Uncertain(_) => Some(HeredocCandidate::Opaque(
                 "a shell invoked with its own `-c`",
             )),
@@ -7089,6 +7096,7 @@ fn scan_expansion_positions(
     command: &SimpleCommand,
     argv: &[crate::normalize::NormalizedWord],
     ctx: AnalysisCtx<'_>,
+    env: &Env,
     cwd: &CwdContext,
 ) -> ExpansionPositionScan {
     let mut has_any = false;
@@ -7126,7 +7134,14 @@ fn scan_expansion_positions(
 
     let interpreters: Vec<HeredocCandidate> =
         classify_heredoc_candidate(argv).into_iter().collect();
-    scan_redirection_expansions(&command.redirections, &interpreters, ctx, cwd, &mut accum);
+    scan_redirection_expansions(
+        &command.redirections,
+        &interpreters,
+        ctx,
+        env,
+        cwd,
+        &mut accum,
+    );
 
     ExpansionPositionScan { has_any, floor }
 }
@@ -7145,6 +7160,7 @@ fn scan_redirection_expansions(
     redirections: &[Redirection],
     interpreters: &[HeredocCandidate],
     ctx: AnalysisCtx<'_>,
+    env: &Env,
     cwd: &CwdContext,
     accum: &mut ExpansionAccum<'_>,
 ) {
@@ -7208,7 +7224,7 @@ fn scan_redirection_expansions(
                 // fail-closed.
                 if let Some(desc) = interpreters.iter().find_map(|c| match c {
                     HeredocCandidate::Opaque(desc) => Some(*desc),
-                    HeredocCandidate::Shell(_) | HeredocCandidate::NonShell(_) => None,
+                    HeredocCandidate::Shell(..) | HeredocCandidate::NonShell(_) => None,
                 }) {
                     // None of these shapes read this heredoc as ITS OWN
                     // script — each hands the heredoc's stdin off to
@@ -7227,8 +7243,8 @@ fn scan_redirection_expansions(
                         ),
                     );
                 }
-                if let Some(name) = interpreters.iter().find_map(|c| match c {
-                    HeredocCandidate::Shell(name) => Some(name.as_str()),
+                if let Some((name, shell_argv)) = interpreters.iter().find_map(|c| match c {
+                    HeredocCandidate::Shell(name, argv) => Some((name.as_str(), argv.as_slice())),
                     HeredocCandidate::Opaque(_) | HeredocCandidate::NonShell(_) => None,
                 }) {
                     // Bash dequotes `\$`/`` \` ``/`\\`/`\<newline>` (the
@@ -7247,7 +7263,7 @@ fn scan_redirection_expansions(
                     let inner = analyze_at_depth(
                         &script,
                         ctx.deeper(),
-                        CwdState::seed_unknown_stack(cwd.clone()),
+                        CwdState::seed_unknown_stack(cwd_under_env_dash_c(shell_argv, env, cwd)),
                     );
                     let decision = inner.decision();
                     let inner_reason = inner
@@ -7282,7 +7298,7 @@ fn scan_redirection_expansions(
                         let mut inner_scan = HeredocCandidateScan::default();
                         scan_command_line_for_heredoc_candidates(&inner_line, &mut inner_scan);
                         if let Some(inner_name) = inner_scan.candidates.first().map(|c| match c {
-                            HeredocCandidate::Shell(n) | HeredocCandidate::NonShell(n) => {
+                            HeredocCandidate::Shell(n, _) | HeredocCandidate::NonShell(n) => {
                                 n.as_str()
                             }
                             HeredocCandidate::Opaque(desc) => *desc,
@@ -7308,7 +7324,7 @@ fn scan_redirection_expansions(
                 }
                 if let Some(name) = interpreters.iter().find_map(|c| match c {
                     HeredocCandidate::NonShell(name) => Some(name.as_str()),
-                    HeredocCandidate::Shell(_) | HeredocCandidate::Opaque(_) => None,
+                    HeredocCandidate::Shell(..) | HeredocCandidate::Opaque(_) => None,
                 }) {
                     accum.raise(
                         Decision::Ask,
@@ -23088,10 +23104,16 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
             r#"env -C ~/.config/shguard nice sh -c "cp evil.toml config.toml""#,
             r#"env -C ~/.config/shguard xargs sh -c "cp evil.toml config.toml""#,
             r#"env -C ~/.config/shguard timeout 5 bash -c "cp evil.toml config.toml""#,
+            "env -C ~/.config/shguard bash <<'EOF'\ncp evil.toml config.toml\nEOF",
+            "nice env -C ~/.config/shguard sh <<'EOF'\ncp evil.toml config.toml\nEOF",
         ] {
             assert_eq!(decide(line).decision(), Decision::Block, "{line}");
         }
-        for line in [r#"env -C /tmp bash -c "ls""#, r#"env -C /tmp -S "ls -la""#] {
+        for line in [
+            r#"env -C /tmp bash -c "ls""#,
+            r#"env -C /tmp -S "ls -la""#,
+            "env -C /tmp bash <<'EOF'\nls\nEOF",
+        ] {
             assert_eq!(decide(line).decision(), Decision::Allow, "{line}");
         }
     }
