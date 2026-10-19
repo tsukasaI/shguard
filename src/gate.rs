@@ -9392,7 +9392,9 @@ fn is_stdin_alias_path(path: &str) -> bool {
     };
     let comps: Vec<&str> = comps.iter().map(String::as_str).collect();
     match comps.as_slice() {
-        ["dev", "stdin"] => true,
+        // Not stdin by name, but `2<&0` makes descriptor 2 a stdin duplicate
+        // just as `3<&0` does for `/dev/fd/3`.
+        ["dev", "stdin" | "stdout" | "stderr"] => true,
         ["dev", "fd", n] | ["proc", "self", "fd", n] => {
             !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())
         }
@@ -15580,6 +15582,9 @@ mod tests {
         for command in [
             "python3 /dev/fd/3 3<&0",
             "python3 /dev/fd/12",
+            "python3 /dev/stderr 2<&0",
+            "python3 /dev/stdout",
+            "awk -f /dev/stderr f",
             "python3 /proc/self/fd/3",
             "python3 ../../../../dev/stdin",
             "python3 ../dev/fd/3",

@@ -3235,6 +3235,7 @@ const ISSUE_750_CASES: &[(&str, Decision)] = &[
     ("ruby -r /dev/stdin s.rb", Decision::Ask),
     ("node -r /dev/stdin s.js", Decision::Ask),
     ("php -f s.php -- -", Decision::Allow),
+    ("python3 /dev/stderr 2<&0", Decision::Ask),
     ("php -f s.php -r 'system(\"id\");'", Decision::Ask),
     ("php -f s.php -F /dev/stdin", Decision::Ask),
     ("curl x | oils-for-unix osh", Decision::Block),
