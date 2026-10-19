@@ -1071,6 +1071,18 @@ pub(crate) enum HeredocSubstitutions {
     Unparsed,
 }
 
+/// What the parser found in a `$((...))` body; same shape and fail-closed
+/// meaning as [`HeredocSubstitutions`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ArithmeticSubstitutions {
+    /// The raw inner text of each top-level `$(...)`/backquote substitution.
+    Parsed(Vec<String>),
+    /// The text has a substitution opener that cannot be delimited (for
+    /// example `${ rm -rf /; }` or a `$(` that never closes), or brush
+    /// rejected it.
+    Unparsed,
+}
+
 /// The kind of a plain file redirection, per the ADR's redirection fixture
 /// (row 18: `echo x > /dev/null`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1167,14 +1179,13 @@ pub(crate) enum WordPiece {
     /// unquoted word.
     EscapeSequence(char),
     /// `$((...))` (issue #75) — the raw, unparsed inner arithmetic text
-    /// (`bword::ParameterExpr`'s `UnexpandedArithmeticExpr.value`). Raw, not
-    /// a `Word`, for the same reason as [`WordPiece::CommandSubstitution`]:
-    /// bash performs command substitution *inside* an arithmetic expression
-    /// before evaluating it (`$(( $(rm -rf /) ))` really does run the `rm`),
-    /// so `crate::gate` must re-scan this raw text for embedded `$(...)`/
-    /// backtick substitutions the same way it already does for heredoc
-    /// bodies, rather than treating the whole expression as inert.
-    ArithmeticExpansion(String),
+    /// (`bword::ParameterExpr`'s `UnexpandedArithmeticExpr.value`). Only the
+    /// embedded substitutions are kept, not the text: bash performs command
+    /// substitution *inside* an arithmetic expression before evaluating it
+    /// (`$(( $(rm -rf /) ))` really does run the `rm`), so the parser
+    /// extracts them once, like a heredoc body's, and `crate::gate` walks
+    /// them rather than treating the whole expression as inert.
+    ArithmeticExpansion(ArithmeticSubstitutions),
     /// `<(...)`/`>(...)` (issue #75) — process substitution. Unlike
     /// [`WordPiece::CommandSubstitution`], the inner command is **not** raw
     /// text: brush-parser already parses it into a structural command list

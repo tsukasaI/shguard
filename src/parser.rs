@@ -70,9 +70,10 @@ use brush_parser::word::{self as bword};
 use brush_parser::{Parser as BrushParser, ast as bast};
 
 use crate::ast::{
-    Assignment, AssignmentValue, Command, CommandLine, CompoundCommand, ElifClause, ExtendedTest,
-    FileRedirectionKind, FunctionDefinition, HeredocSubstitutions, MAX_BRACE_NESTING_DEPTH,
-    Pipeline, ProcessSubstitutionDirection, Redirection, Separator, SimpleCommand, Word, WordPiece,
+    ArithmeticSubstitutions, Assignment, AssignmentValue, Command, CommandLine, CompoundCommand,
+    ElifClause, ExtendedTest, FileRedirectionKind, FunctionDefinition, HeredocSubstitutions,
+    MAX_BRACE_NESTING_DEPTH, Pipeline, ProcessSubstitutionDirection, Redirection, Separator,
+    SimpleCommand, Word, WordPiece,
 };
 use crate::syntax::compat::{self, catch_parser_panic};
 use crate::syntax::{ParseError, parser_options, reject_unresolved_dollar_run};
@@ -1324,9 +1325,12 @@ fn convert_word_piece(
                 .ok_or_else(|| ParseError::syntax("empty escape sequence"))?;
             Ok(WordPiece::EscapeSequence(ch))
         }
-        bword::WordPiece::ArithmeticExpression(expr) => {
-            Ok(WordPiece::ArithmeticExpansion(expr.value))
-        }
+        bword::WordPiece::ArithmeticExpression(expr) => Ok(WordPiece::ArithmeticExpansion(
+            heredoc::parse_body(&expr.value).map_or(
+                ArithmeticSubstitutions::Unparsed,
+                ArithmeticSubstitutions::Parsed,
+            ),
+        )),
     }
 }
 
@@ -3476,12 +3480,14 @@ mod tests {
     }
 
     #[test]
-    fn arithmetic_expansion_keeps_raw_text_for_the_gate_to_rescan() {
+    fn arithmetic_expansion_carries_its_parsed_substitutions() {
         let cmd = parse_ok("echo $((1+$(rm -rf /)))");
         let word = &simple(&cmd.first.first).words[1];
         assert_eq!(
             word.0,
-            vec![WordPiece::ArithmeticExpansion("1+$(rm -rf /)".to_string())]
+            vec![WordPiece::ArithmeticExpansion(
+                ArithmeticSubstitutions::Parsed(vec!["rm -rf /".to_string()])
+            )]
         );
     }
 
