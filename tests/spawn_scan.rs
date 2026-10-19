@@ -25,7 +25,10 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
         let path = entry.path();
         if file_type.is_dir() {
             rust_files(&path, out);
-        } else if file_type.is_file() && path.extension().is_some_and(|ext| ext == "rs") {
+        // Directory symlinks are not followed; file symlinks are, as cargo does.
+        } else if (file_type.is_file() || (file_type.is_symlink() && path.is_file()))
+            && path.extension().is_some_and(|ext| ext == "rs")
+        {
             out.push(path);
         }
     }
