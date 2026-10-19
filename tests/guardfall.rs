@@ -66,10 +66,10 @@ const HEADLINE_CASES: &[(&str, Decision)] = &[
     (r#"eval "rm${IFS}-rf${IFS}/""#, Decision::Ask),
     (r#"bash -c "echo$IFS""#, Decision::Ask),
     (r#"trap "rm$IFS-rf$IFS/" EXIT"#, Decision::Ask),
+    (r#"xargs sh -c "rm$IFS-rf$IFS/""#, Decision::Ask),
     // The exploit shape: a same-line `IFS=` makes the default-IFS fold wrong.
     (r#"IFS=' '; eval "rm$IFS-rf$IFS/""#, Decision::Ask),
     (r#"IFS=' '; bash -c "rm$IFS-rf$IFS/""#, Decision::Ask),
-    (r#"xargs sh -c "rm$IFS-rf$IFS/""#, Decision::Ask),
     (r#"bash -c "rm -rf /""#, Decision::Block),
     (r#"eval "rm -rf /""#, Decision::Block),
     (r#"bash -c "echo hi""#, Decision::Allow),
