@@ -9412,6 +9412,16 @@ fn is_stdin_alias_path(path: &str) -> bool {
 fn is_stdin_alias_components(comps: &[&str]) -> bool {
     let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     let process = |s: &str| matches!(s, "self" | "thread-self") || digits(s);
+    // A process's root is the filesystem root, so the same table applies
+    // beneath it (`/proc/self/root/dev/stdin`). A loop, not recursion: the
+    // chain length is attacker-controlled and a deep one overflows the stack.
+    let mut comps = comps;
+    while let ["proc", p, "root", rest @ ..] = comps {
+        if !process(p) {
+            return false;
+        }
+        comps = rest;
+    }
     match comps {
         // Not stdin by name, but `2<&0` makes descriptor 2 a stdin duplicate
         // just as `3<&0` does for `/dev/fd/3`.
@@ -9419,9 +9429,6 @@ fn is_stdin_alias_components(comps: &[&str]) -> bool {
         ["dev", "fd", n] => digits(n),
         ["proc", p, "fd", n] => process(p) && digits(n),
         ["proc", p, "task", t, "fd", n] => process(p) && digits(t) && digits(n),
-        // A process's root is the filesystem root, so the same table applies
-        // beneath it (`/proc/self/root/dev/stdin`).
-        ["proc", p, "root", rest @ ..] => process(p) && is_stdin_alias_components(rest),
         _ => false,
     }
 }
@@ -15665,6 +15672,13 @@ mod tests {
         ] {
             assert_decision(command, Decision::Ask);
         }
+    }
+
+    #[test]
+    fn long_proc_root_chain_does_not_overflow_the_stack() {
+        let chain = "/proc/self/root".repeat(10_000);
+        assert!(super::is_stdin_alias_path(&format!("{chain}/dev/stdin")));
+        assert!(!super::is_stdin_alias_path(&format!("{chain}/etc/passwd")));
     }
 
     // Any descriptor, and a relative respelling of a stdin path, may be
