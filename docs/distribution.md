@@ -32,9 +32,10 @@ completes.
    "Commit suggestion", "Update branch"); push them locally instead, because
    only a local push runs the pre-push nix build. The push-to-`main` nix-build
    and `release.yaml`'s tag-time gate would still catch such a commit later.
-   If a UI commit already landed, pulling it and running `git push` updates no
-   refs, so the pre-push hook never runs; rebase or amend it locally and push
-   with `--force-with-lease` so the hook checks the new commit.
+   If a UI commit already landed, pulling it and running `git push` gives the
+   hook no refs to check, so the nix build does not run; make a new local
+   commit (e.g. `git commit --amend --no-edit`) and push with
+   `--force-with-lease` so the hook checks it.
 2. After merge, wait for `main-check.yaml`'s `nix-build` on the merge commit to
    pass, then tag the merge commit `vX.Y.Z` and push the tag.
 3. `release.yaml` re-runs `nix build` on x86_64-linux and aarch64-darwin for the

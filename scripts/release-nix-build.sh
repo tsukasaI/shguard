@@ -48,9 +48,9 @@ while read -r local_ref local_sha remote_ref _remote_sha; do
     echo "release-nix-build: repo path '$toplevel' contains characters outside [A-Za-z0-9._/-] that the git+file:// URL cannot carry; refusing to push $remote_ref." >&2
     exit 1
   fi
-  # No --rebuild: a cached output would skip checkPhase, but flake.nix's
-  # `src = ./.` makes every tree change a new derivation, and a release
-  # commit always bumps Cargo.toml's version, so there is nothing cached to hit.
+  # No --rebuild: flake.nix's `src = ./.` makes every tree change (a release
+  # always bumps the version) a new derivation, so a cache hit means this exact
+  # tree was already built and checked under the same daemon config.
   if ! nix build -L --no-link "git+file://${toplevel}?rev=${local_sha}" </dev/null; then
     echo "release-nix-build: nix build of $local_sha ($local_ref) failed; fix it before pushing $remote_ref." >&2
     exit 1

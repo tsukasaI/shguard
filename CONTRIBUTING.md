@@ -10,13 +10,15 @@ latest `origin/main`). For `chore/release-*` pushes the hook also runs a
 sandboxed `nix build` of the pushed commit (`scripts/release-nix-build.sh`).
 `.github/workflows/main-check.yaml` runs the same Rust checks only on pushes
 to `main` and on Dependabot PRs, which never pass through a local hook; an
-on-demand `workflow_dispatch` run runs only its
-`nix-build` job. One-time setup (also needs Node >= 24 on `PATH`; release
-pushes additionally need nix >= 2.20 with `experimental-features = nix-command
-flakes`, plus `sandbox = true` and `sandbox-fallback = false` in the daemon's
-system config (`/etc/nix/nix.conf`, or nix-darwin's `nix.settings`; a
-user-level nix.conf does not reach the daemon), and the script refuses the
-push otherwise):
+on-demand `workflow_dispatch` runs only its `nix-build` job.
+
+Release (`chore/release-*`) pushes also need nix >= 2.20 with
+`experimental-features = nix-command flakes`, and `sandbox = true` plus
+`sandbox-fallback = false` in the daemon's system config (`/etc/nix/nix.conf`
+or nix-darwin's `nix.settings`; a user-level nix.conf does not reach the
+daemon). The script refuses the push otherwise.
+
+One-time setup (also needs Node >= 24 on `PATH`):
 
 ```bash
 cargo install cargo-deny --locked
