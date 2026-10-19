@@ -192,6 +192,41 @@ fn enables_xtrace(operands: &[NormalizedWord]) -> bool {
     })
 }
 
+/// Whether `mapfile`/`readarray` operands may carry `-C` (the callback runs
+/// arbitrary code, `readonly` included): a flag cluster containing `C`
+/// before an unconsumed `--`, or an operand not known statically.
+fn has_callback_flag(operands: &[NormalizedWord]) -> bool {
+    // Not a plain `take_while` on `--`: it can be the value of an option
+    // taking an argument (`mapfile -d -- -C cb arr` still honours `-C`).
+    let mut skip_next = false;
+    for operand in operands {
+        let arg = match operand.resolution() {
+            Resolution::Unresolvable(_) => return true,
+            Resolution::Resolved(arg) => arg,
+        };
+        if skip_next {
+            skip_next = false;
+        } else if arg == "--" {
+            return false;
+        } else if let Some(cluster) = arg.strip_prefix('-') {
+            if arg.contains('C') {
+                return true;
+            }
+            // `d:u:n:O:tC:c:s:` — walk the cluster like getopt: a value-taking
+            // flag swallows the rest of the word, or the next word if it ends it.
+            let mut flags = cluster.chars();
+            skip_next = false;
+            while let Some(flag) = flags.next() {
+                if "duOnsc".contains(flag) {
+                    skip_next = flags.as_str().is_empty();
+                    break;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Every `IFS` value the line could have split with, and the running
 /// inherited-default hypothesis. Never truncated: an `IFS` overwritten by
 /// an unresolvable value still leaves the earlier splitting possible for a
@@ -726,11 +761,13 @@ impl Env {
         self.functions.contains(name)
     }
 
-    /// Folds in a body evaluated with its own [`Env::isolated`] whose effects
-    /// still reach the parent shell (an `if`/loop body): its readonly facts
-    /// become unknown here, since which iteration or branch ran is not known.
+    /// Folds in a body evaluated with [`Env::child_of`] this env, whose effects
+    /// still reach the parent shell (an `if`/loop body). Readonly facts widen
+    /// to `all` only when the body set `all` or recorded a name the parent did
+    /// not already have, since which iteration or branch ran is not known.
     pub(crate) fn absorb_body(&mut self, body: &Env) {
-        if body.readonly.all || !body.readonly.names.is_empty() {
+        // The body inherited the parent's names, so only added ones count.
+        if body.readonly.all || !body.readonly.names.is_subset(&self.readonly.names) {
             self.readonly.all = true;
         }
         self.functions.extend(body.functions.iter().cloned());
@@ -760,11 +797,22 @@ impl Env {
         };
         // Wrappers and sourced code can run a `readonly` this scan cannot
         // see (`builtin readonly X`, zsh `integer -r X`), as can a call to
-        // a function defined on this line.
+        // a function defined on this line, a `trap` handler, a
+        // `mapfile`/`readarray -C` callback, or an autoloaded function.
         if matches!(
             name.as_str(),
-            "builtin" | "command" | "eval" | "source" | "." | "integer" | "float" | "private"
+            "builtin"
+                | "command"
+                | "eval"
+                | "source"
+                | "."
+                | "integer"
+                | "float"
+                | "private"
+                | "trap"
+                | "autoload"
         ) || self.functions.contains(name.as_str())
+            || (matches!(name.as_str(), "mapfile" | "readarray") && has_callback_flag(rest))
         {
             self.readonly.all = true;
         }
