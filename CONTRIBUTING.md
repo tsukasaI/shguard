@@ -8,12 +8,15 @@ hook is the merge gate (fmt, clippy, `cargo test` (via
 workflow script tests, and a check that the pushed branch is based on the
 latest `origin/main`). For `chore/release-*` pushes the hook also runs a
 sandboxed `nix build` of the pushed commit (`scripts/release-nix-build.sh`).
-`.github/workflows/main-check.yaml` runs
-the same Rust checks only on pushes to `main` and on Dependabot PRs, which
-never pass through a local hook. One-time setup (also needs Node >= 24 on
-`PATH`; release pushes additionally need nix with `sandbox = true` and
-`sandbox-fallback = false` in nix.conf, and the script refuses the push
-otherwise):
+`.github/workflows/main-check.yaml` runs the same Rust checks only on pushes
+to `main` and on Dependabot PRs, which never pass through a local hook; an
+on-demand `workflow_dispatch` run runs only its
+`nix-build` job. One-time setup (also needs Node >= 24 on `PATH`; release
+pushes additionally need nix >= 2.20 with `experimental-features = nix-command
+flakes`, plus `sandbox = true` and `sandbox-fallback = false` in the daemon's
+system config (`/etc/nix/nix.conf`, or nix-darwin's `nix.settings`; a
+user-level nix.conf does not reach the daemon), and the script refuses the
+push otherwise):
 
 ```bash
 cargo install cargo-deny --locked

@@ -4,12 +4,12 @@
 # branch commit rather than a tag, so it is NOT covered by that automation
 # (unverified whether Dependabot's github-actions updater tracks bare-branch
 # pins) and still needs the manual procedure:
-#   gh api repos/<owner>/<repo>/git/ref/tags/<tag> --jq '.object.sha'
-# Re-run that for the tag in the `uses:` line's trailing version comment (or
-# the latest tag) and update both the SHA and that comment when bumping.
+#   gh api repos/dtolnay/rust-toolchain/commits/master --jq '.sha'
+# then: update the SHA and its `master (<date>)` comment on every dtolnay
+# `uses:` line (release.yaml, main-check.yaml, fuzz-nightly.yaml).
 #   - actions/checkout            (shared pin with main-check.yaml and fuzz-nightly.yaml)
 #   - cachix/install-nix-action   (shared pin with main-check.yaml)
-#   - dtolnay/rust-toolchain      @ master, pinned 2026-07-18 (shared pin with main-check.yaml and fuzz-nightly.yaml) -- manual renewal only, see above
+#   - dtolnay/rust-toolchain      @ master (shared pin with main-check.yaml and fuzz-nightly.yaml) -- manual renewal only, see above
 #   - actions/upload-artifact
 #   - actions/download-artifact
 #   - softprops/action-gh-release
