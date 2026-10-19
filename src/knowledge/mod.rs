@@ -129,7 +129,7 @@ fn push_script_word<'a>(tail: &'a [NormalizedWord], at: usize, values: &mut Vec<
 
 /// Index of the first word after the option cluster at `cluster` that is not
 /// an option or an option's value: each `o`/`O` in a cluster takes one more
-/// word (`-o errexit`, `+O extglob`), and `--` ends the options. An
+/// word (`-o errexit`, `+O extglob`), and `--` or a lone `-` ends the options. An
 /// unresolvable word is returned as is, since it could be the operand.
 fn first_operand_after_options(tail: &[NormalizedWord], cluster: usize) -> Option<usize> {
     let value_words = |word: &NormalizedWord| match word.resolution() {
@@ -146,7 +146,7 @@ fn first_operand_after_options(tail: &[NormalizedWord], cluster: usize) -> Optio
             let Resolution::Resolved(token) = word.resolution() else {
                 return Some(at);
             };
-            if token == "--" {
+            if token == "--" || token == "-" {
                 return (at + 1 < tail.len()).then_some(at + 1);
             }
             let is_cluster = token.len() > 1 && token.starts_with(['-', '+']);

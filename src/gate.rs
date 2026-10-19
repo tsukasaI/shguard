@@ -18352,6 +18352,7 @@ mod tests {
             // The script is the first operand after bash's options.
             ("runuser root -- -c -e 'rm -rf /'", Decision::Block),
             ("runuser root -- -c -- 'rm -rf /'", Decision::Block),
+            ("runuser root -- -c - 'rm -rf /'", Decision::Block),
             ("runuser root -- -co errexit 'rm -rf /'", Decision::Block),
             ("runuser root -- -c +O extglob 'rm -rf /'", Decision::Block),
             // The target shell may be zsh, whose option letters are not bash's.

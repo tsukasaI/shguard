@@ -1326,6 +1326,7 @@
 {"command":"runuser -u root rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"runuser root -- -Nc 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"runuser root -- -c +O extglob 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"runuser root -- -c - 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"runuser root -- -c -- 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"runuser root -- -c -e 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"runuser root -- -co errexit 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}

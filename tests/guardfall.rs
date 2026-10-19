@@ -873,6 +873,7 @@ const ISSUE_638_TIME_AND_EXEC_WRAPPER_CASES: &[(&str, Decision)] = &[
     // the script is the first operand after the shell's options, and any cluster with `c` counts
     ("runuser root -- -c -e 'rm -rf /'", Decision::Block),
     ("runuser root -- -c -- 'rm -rf /'", Decision::Block),
+    ("runuser root -- -c - 'rm -rf /'", Decision::Block),
     ("runuser root -- -co errexit 'rm -rf /'", Decision::Block),
     ("runuser root -- -c +O extglob 'rm -rf /'", Decision::Block),
     ("runuser root -- -oc errexit 'rm -rf /'", Decision::Block),
