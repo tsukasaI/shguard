@@ -1,3 +1,4 @@
+{"command":"! time -- ! rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"! time rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"\"${x:-'$(rm -rf ~)'}\" foo","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"$'\\x72\\x6d' -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
@@ -1507,10 +1508,19 @@
 {"command":"tee ~/.config//shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-tee-tilde"}
 {"command":"tee ~/.config/other/config.toml","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"tee ~/.config/shguard/config.toml","decision":"Block","deny_message":null,"matched_rule":"self-protect-config-tee-tilde"}
+{"command":"time ! time -- ! rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"time -- ! ! time -- ! rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"time -- ! rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"time -- ! time ! rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"time -- ! time -- ! rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"time -- ! time -p -- ! rm -rf ~","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"time -- ! time time -- ! rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"time -- rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"time -- time -- ! rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"time -p -- ! rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"time -p -- time -- ! rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"time a.b=c rm -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"time time -- ! rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"time time rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"time time sudo id","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"timeout 5 rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}

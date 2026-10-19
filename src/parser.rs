@@ -195,8 +195,9 @@ fn convert_pipeline(pipeline: &bast::Pipeline) -> Result<Pipeline, ParseError> {
     let first = commands
         .next()
         .ok_or_else(|| ParseError::syntax("empty pipeline"))?;
-    let rewritten = if pipeline.timed.is_some() {
-        without_time_option_terminator(first)?
+    let timed = pipeline.timed.is_some();
+    let rewritten = if timed || pipeline.bang {
+        without_time_option_terminator(first, timed)?
     } else {
         None
     };
@@ -210,22 +211,29 @@ fn convert_pipeline(pipeline: &bast::Pipeline) -> Result<Pipeline, ParseError> {
 /// Bash's `time` reserved word accepts `-p` and `--` before the pipeline,
 /// but brush strips only `-p`, leaving `--` as the command name: `time --
 /// rm -rf /` would reach the rules as the command `--`. Narrow on purpose
-/// (timed pipelines only): an untimed `-- rm` (e.g. `eval -- -- rm -rf /`)
-/// really is the command `--`. Rewritten on brush's AST rather than
-/// shguard's: brush tags everything after the fake `--` command as suffix
-/// items, so `time -- FOO=bar rm` carries `FOO=bar` as a suffix word and a
-/// plain drop would make it the command name. Leading assignments and
+/// (timed or negated pipelines only): an untimed `-- rm` (e.g. `eval -- --
+/// rm -rf /`) really is the command `--`. Rewritten on brush's AST rather
+/// than shguard's: brush tags everything after the fake `--` command as
+/// suffix items, so `time -- FOO=bar rm` carries `FOO=bar` as a suffix word
+/// and a plain drop would make it the command name. Leading assignments and
 /// redirects move to the prefix and the first word becomes the command name,
-/// exactly as `FOO=bar rm` parses. `None` (command left untouched) unless a
-/// command word follows. A promoted name that is a bare reserved word
-/// (`time -- ! rm -rf /`) is rejected: bash would parse it as grammar, not
-/// as a command, and a plain simple command named `!` would hide the rest.
-/// The exception is a `!` that opens the pipeline (`time -- ! rm -rf /`):
-/// bash's `timespec` is followed by `BANG pipeline`, so each leading `!` is
-/// consumed as a negation (reported in [`TimedRewrite::negated`]) and the
-/// words after it are promoted as above.
+/// exactly as `FOO=bar rm` parses.
+///
+/// Bash's grammar lets a pipeline open with any run of `!` and `time [-p]
+/// [--]` (`time -- ! time -- ! rm`), and brush consumes only the first of
+/// them. Each further literal one is grammar, not a command: left in place a
+/// `time` would be unwrapped as GNU time, whose `-- !` makes `!` a harmless
+/// unknown command that hides the rest. They are consumed here, `!` toggling
+/// [`TimedRewrite::negated`]. A `time` followed by an option other than `-p`
+/// or `--` is left as the command name for the wrapper layer. `None`
+/// (command left untouched) unless a command word follows. A promoted name
+/// that is a bare reserved word is rejected, and so is a run of grammar
+/// words with no pipeline after it (bash accepts `BANG list_terminator`,
+/// which this refuses on purpose): a plain simple command named `!` would
+/// hide the rest.
 fn without_time_option_terminator(
     command: &bast::Command,
+    timed: bool,
 ) -> Result<Option<TimedRewrite>, ParseError> {
     let bast::Command::Simple(simple) = command else {
         return Ok(None);
@@ -233,30 +241,65 @@ fn without_time_option_terminator(
     if simple.prefix.is_some() {
         return Ok(None);
     }
-    let is_terminator = simple
-        .word_or_name
-        .as_ref()
-        .is_some_and(|word| is_literal_word(word, "--"));
-    if !is_terminator {
-        return Ok(None);
-    }
-    let Some(suffix) = simple.suffix.as_ref() else {
+    let Some(head) = simple.word_or_name.as_ref() else {
         return Ok(None);
     };
-    let mut items = suffix.0.iter();
+    let words: Vec<_> = std::iter::once(bast::CommandPrefixOrSuffixItem::Word(head.clone()))
+        .chain(
+            simple
+                .suffix
+                .iter()
+                .flat_map(|suffix| suffix.0.iter().cloned()),
+        )
+        .collect();
+    let literal = |at: usize, text: &str| matches!(words.get(at), Some(bast::CommandPrefixOrSuffixItem::Word(word)) if is_literal_word(word, text));
+    let leads_with_option = |at: usize| {
+        matches!(words.get(at), Some(bast::CommandPrefixOrSuffixItem::Word(word))
+            if matches!(convert_word(word), Ok(Word(pieces))
+                if matches!(pieces.as_slice(), [WordPiece::Literal(text)] if text.starts_with('-'))))
+    };
+    let mut at = 0;
+    let mut dropped = false;
+    let mut saw_grammar = false;
+    let mut negated = false;
+    if timed && literal(0, "--") {
+        at = 1;
+        dropped = true;
+    }
+    loop {
+        if literal(at, "!") {
+            negated = !negated;
+        } else if literal(at, "time")
+            && (!leads_with_option(at + 1) || literal(at + 1, "-p") || literal(at + 1, "--"))
+        {
+            at += 1;
+            if literal(at, "-p") {
+                at += 1;
+            }
+            if literal(at, "--") {
+                at += 1;
+            }
+            saw_grammar = true;
+            dropped = true;
+            continue;
+        } else {
+            break;
+        }
+        saw_grammar = true;
+        dropped = true;
+        at += 1;
+    }
+    if !dropped {
+        return Ok(None);
+    }
     let mut prefix = Vec::new();
     let mut name = None;
-    let mut negated = false;
-    for item in items.by_ref() {
+    let mut rest = words[at..].iter();
+    for item in rest.by_ref() {
         match item {
             bast::CommandPrefixOrSuffixItem::AssignmentWord(..)
             | bast::CommandPrefixOrSuffixItem::IoRedirect(_) => prefix.push(item.clone()),
             bast::CommandPrefixOrSuffixItem::Word(word) => {
-                // Only a `!` before any assignment or redirect is grammar.
-                if prefix.is_empty() && is_literal_word(word, "!") {
-                    negated = !negated;
-                    continue;
-                }
                 name = Some(word.clone());
                 break;
             }
@@ -264,9 +307,10 @@ fn without_time_option_terminator(
         }
     }
     let Some(name) = name else {
-        // `time -- !` with nothing after the negation is not a pipeline.
-        return if negated {
-            Err(ParseError::syntax("`!` without a pipeline after `time --`"))
+        return if saw_grammar {
+            Err(ParseError::syntax(
+                "`!` or `time` without a pipeline after it",
+            ))
         } else {
             Ok(None)
         };
@@ -279,7 +323,7 @@ fn without_time_option_terminator(
             "reserved word `{text}` after `time --`"
         )));
     }
-    let suffix: Vec<_> = items.cloned().collect();
+    let suffix: Vec<_> = rest.cloned().collect();
     Ok(Some(TimedRewrite {
         command: bast::Command::Simple(bast::SimpleCommand {
             prefix: (!prefix.is_empty()).then_some(bast::CommandPrefix(prefix)),
@@ -290,10 +334,11 @@ fn without_time_option_terminator(
     }))
 }
 
-/// A timed pipeline's first command with the `--` terminator removed.
+/// A pipeline's first command with the leading `--`, `!` and `time` grammar
+/// words removed.
 struct TimedRewrite {
     command: bast::Command,
-    /// An odd number of `!` followed the terminator.
+    /// An odd number of `!` were removed.
     negated: bool,
 }
 
@@ -3244,6 +3289,8 @@ mod tests {
             "time -- coproc rm -rf /",
             "time -- if true",
             "time -- !",
+            "time -- ! !",
+            "time -- ! time",
             "time -- FOO=bar ! rm -rf /",
         ] {
             assert!(parse(command).is_err(), "{command}");
@@ -3258,6 +3305,10 @@ mod tests {
             ("time -- ! FOO=bar rm -rf /", "! FOO=bar rm -rf /"),
             ("time -- ! ! rm -rf /", "! ! rm -rf /"),
             ("time -- ! sudo id | cat", "! sudo id | cat"),
+            ("time -- ! time -- ! rm -rf /", "rm -rf /"),
+            ("time -- ! time ! rm -rf /", "rm -rf /"),
+            ("time time -- ! rm -rf /", "! rm -rf /"),
+            ("! time -- ! rm -rf /", "rm -rf /"),
         ] {
             assert_eq!(parse_ok(timed), parse_ok(plain), "{timed}");
         }

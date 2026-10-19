@@ -18247,6 +18247,25 @@ mod tests {
             ("time -p -- ! rm -rf /", Decision::Block),
             ("time -- ! sudo id", Decision::Ask),
             ("time -- coproc rm -rf /", Decision::Ask),
+            // Further `!`/`time` words in the run are grammar too, not a
+            // GNU `time` wrapping a command named `!`.
+            ("time -- ! time -- ! rm -rf /", Decision::Block),
+            ("time -- ! time -p -- ! rm -rf /", Decision::Block),
+            ("time -- ! time -- ! rm -rf ~", Decision::Block),
+            ("time -- ! ! time -- ! rm -rf /", Decision::Block),
+            ("time -- ! time ! rm -rf /", Decision::Block),
+            ("time -- ! time time -- ! rm -rf /", Decision::Block),
+            ("time -- ! time -- ! sudo id", Decision::Ask),
+            ("time time -- ! rm -rf /", Decision::Block),
+            ("time -- time -- ! rm -rf /", Decision::Block),
+            ("time -p -- time -- ! rm -rf /", Decision::Block),
+            ("! time -- ! rm -rf /", Decision::Block),
+            ("time ! time -- ! rm -rf /", Decision::Block),
+            // After `!` a `--` is a command name, which bash runs as such.
+            ("time -- ! -- rm -rf /", Decision::Allow),
+            // A grammar word with no pipeline after it fails closed.
+            ("time -- ! !", Decision::Ask),
+            ("time -- !", Decision::Ask),
             // Issue #731: the arguments after the user reach the target
             // shell, so `-ic`/`-ec` carry its command string.
             ("runuser root -- -ic 'rm -rf /'", Decision::Block),

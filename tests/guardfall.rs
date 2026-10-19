@@ -840,6 +840,17 @@ const ISSUE_638_TIME_AND_EXEC_WRAPPER_CASES: &[(&str, Decision)] = &[
     // the `!` after `time --` is pipeline negation, not a command name
     ("time -- ! rm -rf /", Decision::Block),
     ("time -p -- ! rm -rf /", Decision::Block),
+    // further `!`/`time` words in the run are grammar, not GNU time wrapping a command named `!`
+    ("time -- ! time -- ! rm -rf /", Decision::Block),
+    ("time -- ! time -p -- ! rm -rf ~", Decision::Block),
+    ("time -- ! ! time -- ! rm -rf /", Decision::Block),
+    ("time -- ! time ! rm -rf /", Decision::Block),
+    ("time -- ! time time -- ! rm -rf /", Decision::Block),
+    ("time time -- ! rm -rf /", Decision::Block),
+    ("time -- time -- ! rm -rf /", Decision::Block),
+    ("time -p -- time -- ! rm -rf /", Decision::Block),
+    ("! time -- ! rm -rf /", Decision::Block),
+    ("time ! time -- ! rm -rf /", Decision::Block),
     // `--` ends wrapper flags
     ("/usr/bin/time -- rm -rf /", Decision::Block),
     // GNU time -o takes a separated value
