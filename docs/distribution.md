@@ -21,10 +21,9 @@ completes.
    and must pass before merging. x86_64-darwin is not gated: there is no hosted
    Intel macOS runner.
 2. After merge, tag the merge commit `vX.Y.Z` and push the tag.
-3. `release.yaml` re-runs `nix build` on x86_64-linux and aarch64-darwin for
-   the tagged commit,
-   and its `build` and `release` jobs `needs` it, so a failed or skipped Darwin
-   nix build cannot produce a GitHub release.
+3. `release.yaml` re-runs `nix build` on x86_64-linux and aarch64-darwin for the
+   tagged commit, and its `build` and `release` jobs `needs` it, so a failed or
+   skipped Darwin nix build cannot produce a GitHub release.
 4. Once the workflow completes, `cargo publish` as described above.
 
 ## Homebrew
