@@ -97,10 +97,12 @@ const SHELL_SHORT_FLAGS: OptionGrammar = OptionGrammar {
     ..OptionGrammar::EMPTY
 };
 
-/// Adds the script of every bash `-c` cluster in `tail`. `-c` always takes
-/// the next word, whatever letters trail it in the cluster (`-ce CMD`). A
-/// cluster the command's own `-c` also places yields the same script twice,
-/// which only costs a repeated scan.
+/// Adds the script of every bash `-c` cluster in `tail`. Bash takes the
+/// script from the first operand after all options, not from the word right
+/// after the cluster (`-c -e CMD`, `-c -- CMD`, `-co errexit CMD`), so both
+/// that operand and the next word are reported. A cluster the command's own
+/// `-c` also places yields the same script twice, which only costs a repeated
+/// scan.
 fn collect_passthrough_scripts<'a>(tail: &'a [NormalizedWord], values: &mut Vec<ScriptValue<'a>>) {
     for (index, word) in tail.iter().enumerate() {
         let Resolution::Resolved(token) = word.resolution() else {
@@ -109,11 +111,52 @@ fn collect_passthrough_scripts<'a>(tail: &'a [NormalizedWord], values: &mut Vec<
         if SHELL_SHORT_FLAGS.locate_short_value(token, 'c').is_none() {
             continue;
         }
-        match tail.get(index + 1).map(NormalizedWord::resolution) {
-            Some(Resolution::Resolved(text)) => values.push(ScriptValue::Text(text)),
-            Some(Resolution::Unresolvable(_)) => values.push(ScriptValue::Unresolvable),
-            None => {}
+        push_script_word(tail, index + 1, values);
+        if let Some(operand) = first_operand_after_options(tail, index)
+            && operand != index + 1
+        {
+            push_script_word(tail, operand, values);
         }
+    }
+}
+
+fn push_script_word<'a>(tail: &'a [NormalizedWord], at: usize, values: &mut Vec<ScriptValue<'a>>) {
+    match tail.get(at).map(NormalizedWord::resolution) {
+        Some(Resolution::Resolved(text)) => values.push(ScriptValue::Text(text)),
+        Some(Resolution::Unresolvable(_)) => values.push(ScriptValue::Unresolvable),
+        None => {}
+    }
+}
+
+/// Index of the first word after the option cluster at `cluster` that is not
+/// an option or an option's value: each `o`/`O` in a cluster takes one more
+/// word (`-o errexit`, `+O extglob`), and `--` ends the options. An
+/// unresolvable word is returned as is, since it could be the operand.
+fn first_operand_after_options(tail: &[NormalizedWord], cluster: usize) -> Option<usize> {
+    let value_words = |word: &NormalizedWord| match word.resolution() {
+        Resolution::Resolved(token) => token.chars().filter(|c| matches!(c, 'o' | 'O')).count(),
+        Resolution::Unresolvable(_) => 0,
+    };
+    let mut pending = value_words(tail.get(cluster)?);
+    let mut at = cluster + 1;
+    loop {
+        let word = tail.get(at)?;
+        if pending > 0 {
+            pending -= 1;
+        } else {
+            let Resolution::Resolved(token) = word.resolution() else {
+                return Some(at);
+            };
+            if token == "--" {
+                return (at + 1 < tail.len()).then_some(at + 1);
+            }
+            let is_cluster = token.len() > 1 && token.starts_with(['-', '+']);
+            if !is_cluster {
+                return Some(at);
+            }
+            pending = value_words(word);
+        }
+        at += 1;
     }
 }
 
