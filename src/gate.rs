@@ -13266,7 +13266,7 @@ mod tests {
             "X=$Y; true && X=\"rm -rf /\"; readarray -t arr; X=ls; $X",
             "X=$Y; true && X=\"rm -rf /\"; mapfile -- -C arr; X=ls; $X",
         ] {
-            assert_ne!(decide(command).decision(), Decision::Block, "{command}");
+            assert_decision(command, Decision::Ask);
         }
     }
 
@@ -13278,7 +13278,7 @@ mod tests {
             "X=$Y; true && X=\"rm -rf /\"; readonly A; if true; then :; fi; X=ls; $X",
             "X=$Y; true && X=\"rm -rf /\"; readonly A; for i in 1; do :; done; X=ls; $X",
         ] {
-            assert_ne!(decide(command).decision(), Decision::Block, "{command}");
+            assert_decision(command, Decision::Ask);
         }
         // A body that does add a readonly fact still widens.
         assert_decision(
