@@ -243,6 +243,12 @@ fn without_time_option_terminator(
     let Some(head) = simple.word_or_name.as_ref() else {
         return Ok(None);
     };
+    let opens_with_grammar = (timed && is_literal_word(head, "--"))
+        || is_literal_word(head, "!")
+        || is_literal_word(head, "time");
+    if !opens_with_grammar {
+        return Ok(None);
+    }
     let words: Vec<_> = std::iter::once(bast::CommandPrefixOrSuffixItem::Word(head.clone()))
         .chain(
             simple
