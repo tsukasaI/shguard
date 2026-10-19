@@ -3480,6 +3480,18 @@ mod tests {
     }
 
     #[test]
+    fn arithmetic_expansion_with_undelimitable_substitution_is_unparsed_not_empty() {
+        let cmd = parse_ok("echo $(( ${ rm -rf /; } ))");
+        let word = &simple(&cmd.first.first).words[1];
+        assert_eq!(
+            word.0,
+            vec![WordPiece::ArithmeticExpansion(
+                ArithmeticSubstitutions::Unparsed
+            )]
+        );
+    }
+
+    #[test]
     fn arithmetic_expansion_carries_its_parsed_substitutions() {
         let cmd = parse_ok("echo $((1+$(rm -rf /)))");
         let word = &simple(&cmd.first.first).words[1];
