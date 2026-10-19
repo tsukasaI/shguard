@@ -1046,6 +1046,7 @@
 {"command":"nix shell -c rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"nix shell nixpkgs#hello","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"nix-shell --run 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"node -r /dev/stdin s.js","decision":"Ask","deny_message":"Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f prog.awk`) — inline interpreter code is never inspected.","matched_rule":null}
 {"command":"nohup env a.b=c rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"npm $X -- rm -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"npm exec -- eslint .","decision":"Allow","deny_message":null,"matched_rule":null}
@@ -1073,6 +1074,9 @@
 {"command":"parallel -j4 echo ::: a b","decision":"Ask","deny_message":"Run the commands directly or with a shell loop (`for x in ...; do cmd \"$x\"; done`) so each argv is inspectable; GNU `parallel` builds its command lines from templates and `:::` sources that are never inspected.","matched_rule":null}
 {"command":"parallel ::: 'rm -rf /'","decision":"Ask","deny_message":"Run the commands directly or with a shell loop (`for x in ...; do cmd \"$x\"; done`) so each argv is inspectable; GNU `parallel` builds its command lines from templates and `:::` sources that are never inspected.","matched_rule":null}
 {"command":"parallel rm -rf ::: /","decision":"Ask","deny_message":"Run the commands directly or with a shell loop (`for x in ...; do cmd \"$x\"; done`) so each argv is inspectable; GNU `parallel` builds its command lines from templates and `:::` sources that are never inspected.","matched_rule":null}
+{"command":"php -F /dev/stdin","decision":"Ask","deny_message":"Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f prog.awk`) — inline interpreter code is never inspected.","matched_rule":null}
+{"command":"php -f /dev/stdin","decision":"Ask","deny_message":"Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f prog.awk`) — inline interpreter code is never inspected.","matched_rule":null}
+{"command":"php -f s.php -- -","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"pipx install x","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"pipx run rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"pkill --user me","decision":"Ask","deny_message":null,"matched_rule":null}
@@ -1087,6 +1091,8 @@
 {"command":"poetry run rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"prlimit rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"proot -r / rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"python3 ../../../../dev/stdin","decision":"Ask","deny_message":"Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f prog.awk`) — inline interpreter code is never inspected.","matched_rule":null}
+{"command":"python3 /dev/fd/3 3<&0","decision":"Ask","deny_message":"Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f prog.awk`) — inline interpreter code is never inspected.","matched_rule":null}
 {"command":"r''m -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"rlwrap rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"rm --recursive --force ~/.*","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
@@ -1317,6 +1323,7 @@
 {"command":"rsync -a src/ /dev/sda","decision":"Block","deny_message":null,"matched_rule":"rsync-write-device"}
 {"command":"rsync -a src/ /dev/shm/../sda","decision":"Block","deny_message":null,"matched_rule":"rsync-write-device"}
 {"command":"rsync -a src/ /dev/shm/scratch","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"ruby -r /dev/stdin s.rb","decision":"Ask","deny_message":"Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f prog.awk`) — inline interpreter code is never inspected.","matched_rule":null}
 {"command":"runcon --type=foo_t rm -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"runcon -tfoo_t rm -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"runcon ctx rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}

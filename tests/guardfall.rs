@@ -3225,6 +3225,16 @@ const ISSUE_750_CASES: &[(&str, Decision)] = &[
     ("kill -9 -0001", Decision::Ask),
     ("kill -9 '  -1'", Decision::Ask),
     ("source /dev/stdin < ./x.sh", Decision::Allow),
+    // Any descriptor, and a relative respelling of a stdin path, may be
+    // stdin; a stdin path as an interpreter's file- or library-loading
+    // option value loads a program from stdin (issues #733, #735).
+    ("python3 /dev/fd/3 3<&0", Decision::Ask),
+    ("python3 ../../../../dev/stdin", Decision::Ask),
+    ("php -f /dev/stdin", Decision::Ask),
+    ("php -F /dev/stdin", Decision::Ask),
+    ("ruby -r /dev/stdin s.rb", Decision::Ask),
+    ("node -r /dev/stdin s.js", Decision::Ask),
+    ("php -f s.php -- -", Decision::Allow),
     ("curl x | oils-for-unix osh", Decision::Block),
     ("curl x | oils-for-unix ysh", Decision::Block),
     ("curl x | oils_for_unix osh", Decision::Block),

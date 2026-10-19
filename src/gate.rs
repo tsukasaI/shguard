@@ -8640,6 +8640,10 @@ struct InlineGrammar {
     /// Short-flag letters naming the operand (python's `-m module`):
     /// everything after belongs to it.
     operand_chars: &'static str,
+    /// Short-flag letters (also in `value_chars`) whose value is a file or
+    /// library the interpreter loads and runs: a stdin path there is a
+    /// program read from stdin (issue #735).
+    loaded_chars: &'static str,
     /// Whether several short flags may share one word (`-Ic`); otherwise the
     /// first letter alone decides and any leftover is an unknown option.
     /// `false` is deliberate for node and lua: their parsers take one flag
@@ -8654,6 +8658,9 @@ struct InlineGrammar {
     /// Long options that take the next word as their value (when not written
     /// `--name=value`).
     long_value: &'static [&'static str],
+    /// Long options (also in `long_value`) that load a file, as
+    /// `loaded_chars` does.
+    long_loaded: &'static [&'static str],
     /// Prefixes of long options that take no value (`--disable-gems`).
     long_plain_prefixes: &'static [&'static str],
     /// Whether `-` right after `--` still runs the program from stdin. True
@@ -8673,10 +8680,12 @@ const PYTHON_GRAMMAR: InlineGrammar = InlineGrammar {
     attached_chars: "",
     required_attached_chars: "",
     operand_chars: "m",
+    loaded_chars: "",
     cluster: true,
     long_code: &[],
     long_plain: &["help", "help-env", "help-xoptions", "help-all", "version"],
     long_value: &["check-hash-based-pycs"],
+    long_loaded: &[],
     long_plain_prefixes: &[],
     dashdash_dash_is_stdin: true,
     dash_is_stdin: true,
@@ -8689,6 +8698,7 @@ const NODE_GRAMMAR: InlineGrammar = InlineGrammar {
     attached_chars: "",
     required_attached_chars: "",
     operand_chars: "",
+    loaded_chars: "r",
     cluster: false,
     long_code: &["eval", "print"],
     long_plain: &[
@@ -8720,6 +8730,7 @@ const NODE_GRAMMAR: InlineGrammar = InlineGrammar {
         "env-file",
         "title",
     ],
+    long_loaded: &["require", "import"],
     long_plain_prefixes: &[],
     dashdash_dash_is_stdin: true,
     dash_is_stdin: true,
@@ -8732,10 +8743,12 @@ const PERL_GRAMMAR: InlineGrammar = InlineGrammar {
     attached_chars: "xiCDV",
     required_attached_chars: "MmF",
     operand_chars: "",
+    loaded_chars: "",
     cluster: true,
     long_code: &[],
     long_plain: &["help", "version"],
     long_value: &[],
+    long_loaded: &[],
     long_plain_prefixes: &[],
     dashdash_dash_is_stdin: true,
     dash_is_stdin: true,
@@ -8748,6 +8761,7 @@ const RUBY_GRAMMAR: InlineGrammar = InlineGrammar {
     attached_chars: "Fxi",
     required_attached_chars: "",
     operand_chars: "",
+    loaded_chars: "r",
     cluster: true,
     long_code: &[],
     long_plain: &[
@@ -8760,6 +8774,7 @@ const RUBY_GRAMMAR: InlineGrammar = InlineGrammar {
         "debug",
     ],
     long_value: &[],
+    long_loaded: &[],
     long_plain_prefixes: &["disable-", "enable-"],
     dashdash_dash_is_stdin: true,
     dash_is_stdin: true,
@@ -8771,11 +8786,14 @@ const PHP_GRAMMAR: InlineGrammar = InlineGrammar {
     value_chars: "cdfFtSz",
     attached_chars: "",
     required_attached_chars: "",
-    operand_chars: "",
+    // `-f file` names the script: `php -f s.php -- -` passes `-` to it.
+    operand_chars: "f",
+    loaded_chars: "fF",
     cluster: true,
     long_code: &[],
     long_plain: &["version", "help", "ini"],
     long_value: &["rf", "rc", "re", "rz", "ri"],
+    long_loaded: &[],
     long_plain_prefixes: &[],
     // After `--` php reads its script from stdin whatever follows
     // (`php -- -v` ran the stdin script with `-v` as its argument).
@@ -8791,10 +8809,12 @@ const LUA_GRAMMAR: InlineGrammar = InlineGrammar {
     attached_chars: "",
     required_attached_chars: "",
     operand_chars: "",
+    loaded_chars: "",
     cluster: false,
     long_code: &[],
     long_plain: &[],
     long_value: &[],
+    long_loaded: &[],
     long_plain_prefixes: &[],
     dashdash_dash_is_stdin: false,
     dash_is_stdin: true,
@@ -8808,10 +8828,12 @@ const OSASCRIPT_GRAMMAR: InlineGrammar = InlineGrammar {
     attached_chars: "",
     required_attached_chars: "",
     operand_chars: "",
+    loaded_chars: "",
     cluster: false,
     long_code: &[],
     long_plain: &[],
     long_value: &[],
+    long_loaded: &[],
     long_plain_prefixes: &[],
     dashdash_dash_is_stdin: false,
     dash_is_stdin: true,
@@ -8902,6 +8924,8 @@ fn scan_inline_code(
     use InlineCodeTrigger::{
         Literal, StdinScript, UnplacedOption, UnresolvedScriptOperand, UnresolvedWord,
     };
+    // Not `-`: `ruby -r -` and `php -f -` name a file called `-`, not stdin.
+    let loads_stdin = |value: &str| value != "-" && is_stdin_alias_path(value);
     let mut iter = words.iter();
     while let Some(word) = iter.next() {
         let text = match word.resolution() {
@@ -8933,12 +8957,28 @@ fn scan_inline_code(
         }
         let flags = text.strip_prefix('-').filter(|rest| !rest.is_empty())?;
         if let Some(long) = flags.strip_prefix('-') {
-            let (name, has_value) = match long.split_once('=') {
-                Some((name, _)) => (name, true),
-                None => (long, false),
+            let (name, value) = match long.split_once('=') {
+                Some((name, value)) => (name, Some(value)),
+                None => (long, None),
             };
+            let has_value = value.is_some();
             if grammar.long_code.contains(&name) {
                 return Some(Literal);
+            }
+            if grammar.long_loaded.contains(&name) {
+                match value {
+                    Some(value) if loads_stdin(value) => return Some(StdinScript),
+                    Some(_) => continue,
+                    None => match iter.next().map(NormalizedWord::resolution) {
+                        Some(Resolution::Resolved(value)) if loads_stdin(value) => {
+                            return Some(StdinScript);
+                        }
+                        Some(Resolution::Unresolvable(kind)) => {
+                            return Some(UnresolvedWord(*kind));
+                        }
+                        _ => continue,
+                    },
+                }
             }
             if has_value
                 || grammar.long_plain.contains(&name)
@@ -8963,6 +9003,27 @@ fn scan_inline_code(
             let rest = &flags[index + letter.len_utf8()..];
             if grammar.code_chars.contains(letter) {
                 return Some(Literal);
+            }
+            if grammar.loaded_chars.contains(letter) {
+                if rest.is_empty() {
+                    match iter.next().map(NormalizedWord::resolution) {
+                        Some(Resolution::Resolved(value)) if loads_stdin(value) => {
+                            return Some(StdinScript);
+                        }
+                        Some(Resolution::Unresolvable(kind)) => {
+                            return Some(UnresolvedWord(*kind));
+                        }
+                        _ => {}
+                    }
+                } else if loads_stdin(rest) {
+                    return Some(StdinScript);
+                }
+                if grammar.operand_chars.contains(letter) {
+                    return None;
+                }
+                // The value is consumed; the `value_chars` arm below would
+                // swallow a second word.
+                break;
             }
             if grammar.operand_chars.contains(letter) {
                 return None;
@@ -9280,33 +9341,46 @@ fn awk_file_flag_glued_value(flag_token: &str) -> Option<&str> {
         })
 }
 
-/// Whether `path` is one of the well-known aliases for stdin: `-` (the
-/// POSIX convention most utilities honor), `/dev/stdin`, `/proc/self/fd/0`,
-/// and `/dev/fd/0` (Linux symlinks `/dev/fd` to `/proc/self/fd`; BSD/macOS
-/// give `/dev/fd/0` its own device node — either way it's stdin). Compared
-/// through [`lexical_normalize`] rather than by exact string, so a
-/// double-slash/`.`-component respelling (`/dev//stdin`, `/dev/./stdin`)
-/// that a real shell still opens as stdin doesn't dodge this check the way
-/// a byte-exact match would. Shared by awk's `-f`/`-E`/`-i` file-value scan
+/// Whether `path` names stdin or a descriptor that may be it: `-` (the
+/// POSIX convention most utilities honor), `/dev/stdin`, and any
+/// `/dev/fd/N` or `/proc/self/fd/N`. Every N counts (issue #733: `python3
+/// /dev/fd/3 3<&0` reads stdin through a duplicate), because a script read
+/// from a descriptor is never introspectable and the redirect that makes N
+/// stdin is not worth chasing. Compared through [`lexical_normalize`]
+/// rather than by exact string, so a double-slash/`.`-component respelling
+/// (`/dev//stdin`, `/dev/./stdin`) that a real shell still opens as stdin
+/// doesn't dodge this check the way a byte-exact match would.
+///
+/// A relative path counts when its tail after the unresolved `..` ascent
+/// ([`PathForm::Rel`]) is one of those, whatever the ascent, none included:
+/// `../../../../dev/stdin` is `/dev/stdin` from any cwd shallow enough for
+/// the `..`s to reach the root. The cwd is unknown, so no ascent count can
+/// prove the path is not stdin, and the fail-closed reading is that it
+/// might be. This over-Asks a real `dev/stdin` file in the cwd, which is
+/// vanishingly rare.
+///
+/// Shared by awk's `-f`/`-E`/`-i` file-value scan
 /// (issue #195, "Blocker B": a value here means awk's program text comes
 /// from the same pipe its *records* would otherwise come from —
-/// unintrospectable and attacker-controllable through it) and
+/// unintrospectable and attacker-controllable through it),
 /// [`is_interpreter_sink`]'s `source`/`.` case (issue #446: same reasoning
-/// for a script sourced from the pipe instead of read as records).
+/// for a script sourced from the pipe instead of read as records), and the
+/// interpreter file- and library-loading option values (issue #735).
 fn is_stdin_alias_path(path: &str) -> bool {
     if path == "-" {
         return true;
     }
-    let PathForm::Abs(comps) = lexical_normalize(path) else {
+    let (PathForm::Abs(comps) | PathForm::Rel { comps, .. }) = lexical_normalize(path) else {
         return false;
     };
-    [
-        &["dev", "stdin"][..],
-        &["proc", "self", "fd", "0"][..],
-        &["dev", "fd", "0"][..],
-    ]
-    .iter()
-    .any(|alias| comps.iter().map(String::as_str).eq(alias.iter().copied()))
+    let comps: Vec<&str> = comps.iter().map(String::as_str).collect();
+    match comps.as_slice() {
+        ["dev", "stdin"] => true,
+        ["dev", "fd", n] | ["proc", "self", "fd", n] => {
+            !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())
+        }
+        _ => false,
+    }
 }
 
 /// Whether `token` is awk's `-e`/`--source` inline-script flag, in any
@@ -15479,6 +15553,75 @@ mod tests {
             "python3 - < x.py",
         ] {
             assert_decision(command, Decision::Ask);
+        }
+    }
+
+    // Any descriptor, and a relative respelling of a stdin path, may be
+    // stdin (issue #733).
+    #[test]
+    fn inline_stdin_fd_and_relative_aliases_are_ask_floor() {
+        for command in [
+            "python3 /dev/fd/3 3<&0",
+            "python3 /dev/fd/12",
+            "python3 /proc/self/fd/3",
+            "python3 ../../../../dev/stdin",
+            "python3 ../dev/fd/3",
+            "python3 a/../../dev/stdin",
+            "python3 dev/stdin",
+            "awk -f /dev/fd/3 f",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+        for command in [
+            "python3 /dev/fd/x",
+            "python3 /dev/fd/",
+            "python3 /dev/fd/3/x",
+            "python3 ../../dev/stdin2",
+            "python3 s.py /dev/fd/3",
+        ] {
+            assert_decision(command, Decision::Allow);
+        }
+    }
+
+    // A stdin path as the value of a file- or library-loading option loads a
+    // program from stdin (issue #735).
+    #[test]
+    fn inline_stdin_option_value_is_ask_floor() {
+        for command in [
+            "php -f /dev/stdin",
+            "php -F /dev/stdin",
+            "php -f/dev/stdin",
+            "php -nf /dev/stdin",
+            "php -f ../../dev/stdin",
+            "ruby -r /dev/stdin s.rb",
+            "ruby -r/dev/stdin s.rb",
+            "node -r /dev/stdin s.js",
+            "node --require /dev/stdin s.js",
+            "node --require=/dev/stdin s.js",
+            "node --import /dev/fd/3 s.js",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+        for command in [
+            "ruby -r json s.rb",
+            "ruby -r - s.rb",
+            "node --require ./x.js s.js",
+            "node --require=./x.js s.js",
+            "php -f s.php /dev/stdin",
+        ] {
+            assert_decision(command, Decision::Allow);
+        }
+    }
+
+    // After `-f` names the script, every later word is its argument.
+    #[test]
+    fn php_f_script_stops_the_option_scan() {
+        for command in [
+            "php -f s.php -- -",
+            "php -f s.php -- /dev/stdin",
+            "php -f s.php -r",
+        ] {
+            assert_decision(command, Decision::Allow);
         }
     }
 
