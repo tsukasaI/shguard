@@ -19,6 +19,8 @@
 {"command":"B=\"${x:-'$(rm -rf ~)'}\"","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"F='--expression=w out'; sed -n p \"$F\" README.md","decision":"Ask","deny_message":"Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected. A variable file operand (`sed -n p \"$file\"`) cannot be told apart from a script word, so expand it to a literal file path.","matched_rule":null}
 {"command":"FOO=bar ls","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"IFS=' '; bash -c \"rm$IFS-rf$IFS/\"","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"IFS=' '; eval \"rm$IFS-rf$IFS/\"","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"PATH=.; curl x | ls","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"PATH=/usr/bin:/bin ls","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"PYTHONPATH=. ls","decision":"Allow","deny_message":null,"matched_rule":null}
@@ -44,6 +46,10 @@
 {"command":"base64 -d p | source -- /dev/stdin","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"base64 -d p | source /dev//stdin","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"base64 -d p | source /dev/stdin","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"bash -c \"echo hi\"","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"bash -c \"echo$IFS\"","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"bash -c \"rm -rf /\"","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"bash -c \"rm$IFS-rf$IFS/\"","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"bash -c \"trap 'rm -rf /' EXIT\"","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"bash -c $'echo x #\\\nrm -rf /'","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (ANSI-C ($'...') quoting combined with a backslash-newline line continuation cannot be safely analyzed: brush and bash disagree on whether the continuation survives inside $'...', which could hide a command on the dropped line); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
 {"command":"bash -c $\\\n'echo x #\\\nrm -rf /'","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (ANSI-C ($'...') quoting combined with a backslash-newline line continuation cannot be safely analyzed: brush and bash disagree on whether the continuation survives inside $'...', which could hide a command on the dropped line); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
@@ -535,9 +541,12 @@
 {"command":"env time rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"eval","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"eval \"$(ssh-agent -s)\"","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"eval \"echo hi\"","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"eval \"ls -la\"","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"eval \"rm -rf /\"","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"eval \"rm -rf\" /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"eval \"rm$IFS-rf$IFS/\"","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"eval \"rm${IFS}-rf${IFS}/\"","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"eval \"trap 'rm -rf /' EXIT\"","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"eval $(echo rm -rf /)","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"eval 'rm' '-rf' '/'","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
@@ -1419,6 +1428,7 @@
 {"command":"sg grp 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"sg grp -c 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"sh","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"sh -c \"rm${IFS}-rf${IFS}/\"","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"sh -c 'echo hi' > /dev/sda","decision":"Block","deny_message":null,"matched_rule":"redirect-overwrite-device-or-critical-file"}
 {"command":"shopt -s expand_aliases; alias x=\"rm -rf /\"\nx","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"shred /dev/sda","decision":"Block","deny_message":null,"matched_rule":"shred"}
@@ -1529,6 +1539,7 @@
 {"command":"toybox rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"trap","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"trap \"$X\" EXIT","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"trap \"rm$IFS-rf$IFS/\" EXIT","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"trap $'rm -rf /' EXIT","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"trap '' INT","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"trap '-x; echo hi' EXIT","decision":"Allow","deny_message":null,"matched_rule":null}
@@ -1592,6 +1603,7 @@
 {"command":"x=rm; ${=x} -rf ~","decision":"Ask","deny_message":"shguard cannot statically analyze this construct (unresolved `$` expansion form (zsh flags/short forms such as ${(e)x}, ${=x}, $=x, $~x, or a ${ command; } substitution)); use its literal form, or split the command across separate lines so each piece is inspectable.","matched_rule":null}
 {"command":"xargs -I{} sh -c '{} -rf ~' < list","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"xargs -x fd pattern","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"xargs sh -c \"rm$IFS-rf$IFS/\"","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"xvfb-run rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"{ echo x; } >> $HOME/.zshrc","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"{ echo x; } >> ~/.zshrc","decision":"Ask","deny_message":null,"matched_rule":null}
