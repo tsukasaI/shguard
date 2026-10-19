@@ -11878,7 +11878,18 @@ fn evaluate_env_dash_c_override(
     let env_prefix_end = argv.len() - wrapped_tail.len();
     let env_prefix = &argv[env_prefix_start..env_prefix_end];
     let anchor = chain_dash_c_targets(env_prefix, &["--chdir"], true, Some("env"), env)?;
-    let mut composed_argv = argv[..env_prefix_end].to_vec();
+    // Hops between env's own options and the wrapped tail run under the new
+    // cwd too, so their glued `target_flags` values compose (`env -C /etc
+    // xargs -apasswd cat`).
+    let after_env_options = crate::rules::after_wrapper_options(argv, "env")?;
+    let hops_start = argv.len() - after_env_options.len();
+    let mut composed_argv = argv[..hops_start].to_vec();
+    composed_argv.extend(compose_argv_for_command(
+        &argv[hops_start..env_prefix_end],
+        argv,
+        &anchor,
+        rules,
+    ));
     composed_argv.extend(compose_argv_for_command(wrapped_tail, argv, &anchor, rules));
     evaluate_composed_argv_match(
         &composed_argv,
@@ -12289,7 +12300,7 @@ fn evaluate_dash_c_override(argv: &[NormalizedWord], env: &Env, rules: &Rules) -
         return Some(verdict);
     }
     let (name, rest) = crate::rules::effective_command(argv)?;
-    let name = name.as_ref();
+    let name = crate::rules::strip_version_suffix(name.as_ref());
     match name {
         "git" | "make" => {
             // git rejects `-Cdir` glued ("unknown option: -Cdir"); make
@@ -22822,6 +22833,36 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
     }
 
     #[test]
+    fn env_dash_c_composes_glued_target_flag_of_an_inner_wrapper_hop() {
+        let config = crate::rules::UserConfig::parse(
+            r#"
+            [[deny]]
+            id = "user-xargs-arg-file"
+            reason = "no /etc values"
+            command = "xargs"
+            target_flags = ["-a", "--arg-file"]
+            targets = [{ normalized_prefix = "/etc/" }]
+        "#,
+        )
+        .unwrap();
+        let (rules, allowlist) = crate::rules::merge_user_config(
+            Rules::embedded().unwrap(),
+            Allowlist::embedded().unwrap(),
+            config,
+        )
+        .unwrap();
+        for line in [
+            "xargs -a/etc/passwd cat",
+            "env -C /etc xargs -apasswd cat",
+            "env -C /etc xargs --arg-file=passwd cat",
+            "env -C /etc xargs -a passwd cat",
+        ] {
+            let verdict = analyze_with_policy(line, &rules, &allowlist);
+            assert_eq!(verdict.decision(), Decision::Block, "{line}");
+        }
+    }
+
+    #[test]
     fn env_without_dash_c_is_unaffected() {
         assert_eq!(
             decide("env cp evil.toml config.toml").decision(),
@@ -22835,6 +22876,30 @@ targets = [{ normalized_prefix = "~/.config/shguard/" }]
             decide_dash_c("git -C ~/.config/shguard add config.toml").decision(),
             Decision::Block
         );
+    }
+
+    #[test]
+    fn version_suffixed_git_dash_c_composes_like_git() {
+        // `git2` is not `git` to the rule matcher, so a rule naming it
+        // is what makes the composed `-C` anchor observable.
+        let mut toml = String::from(include_str!("../rules/blocklist.toml"));
+        toml.push_str(
+            r#"
+[[command]]
+id = "test-726-git2-config-target"
+reason = "test-only git2 targets rule"
+command = "git2"
+targets = [{ normalized_prefix = "~/.config/shguard/" }]
+"#,
+        );
+        let rules = Rules::parse(&toml).expect("test rule set should parse");
+        let allowlist = Allowlist::embedded().unwrap();
+        let decide = |line: &str| analyze_with_policy(line, &rules, &allowlist).decision();
+        assert_eq!(
+            decide("git2 -C ~/.config/shguard add config.toml"),
+            Decision::Block
+        );
+        assert_eq!(decide("git2 add config.toml"), Decision::Allow);
     }
 
     #[test]

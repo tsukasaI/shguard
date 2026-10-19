@@ -5797,6 +5797,23 @@ pub(crate) fn effective_command_excluding<'a>(
     }
 }
 
+/// The words that follow the own options of the first hop named `wrapper`
+/// (canonical name) along `stage`'s wrapper chain; `None` when no hop is.
+#[must_use]
+pub(crate) fn after_wrapper_options<'a>(
+    stage: &'a [NormalizedWord],
+    wrapper: &str,
+) -> Option<&'a [NormalizedWord]> {
+    let mut rest = stage;
+    while let Step::Wrapper(hop) = step(rest, &[]) {
+        rest = hop.next();
+        if canonical_command_name(hop.base) == wrapper {
+            return Some(rest);
+        }
+    }
+    None
+}
+
 /// The first option along `stage`'s wrapper chain that the catalog does not
 /// describe, if any. This is the only way an unmodelled option leaves
 /// `rules`; `crate::gate` turns it into a decision.
