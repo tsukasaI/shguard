@@ -159,7 +159,7 @@ fn first_operand_after_options(tail: &[NormalizedWord], cluster: usize) -> Optio
     }
 }
 
-/// A value found for a [`Slot::ShellScript`] flag.
+/// A value found for a [`Slot::ShellScript`] or [`Slot::ShellPassthrough`] flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScriptValue<'a> {
     Text(&'a str),
