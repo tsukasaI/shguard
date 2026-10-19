@@ -13,7 +13,10 @@ pub fn shguard() -> Command {
     // Not `Command::cargo_bin` at the call sites: each one would have to
     // remember this scrub, and a forgotten one passes on a bare CI runner but
     // fails under a nix build or on a developer machine with real config.
-    #[allow(clippy::disallowed_methods)]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the single sanctioned cargo_bin call"
+    )]
     let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
     cmd.env_remove("SHGUARD_CONFIG")
         .env_remove("XDG_CONFIG_HOME")
