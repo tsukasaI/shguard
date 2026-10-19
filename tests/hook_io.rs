@@ -161,12 +161,8 @@ fn check_config_flag_with_trailing_argument_exits_with_error() {
 // using a command a user config denies that the embedded blocklist alone
 // would allow — that's what actually pins config-loading, not the mirrors.
 //
-// Every test that reaches config loading or hook evaluation (i.e.
-// everything except the pure usage-error/`--version` cases above, which
-// `main`'s argument dispatch rejects before any config or env read)
-// isolates the environment the same way `tests/user_config.rs` does, via
-// `run_hook`/`isolated_check`, so a host machine's own `SHGUARD_CONFIG`/
-// config file can't make these spuriously fail or pass.
+// Every spawn goes through `cmd::shguard()`, so a host's own
+// `SHGUARD_CONFIG`/config file can't make these spuriously fail or pass.
 
 fn isolated_check(args: &[&str]) -> Command {
     let mut cmd = cmd::shguard();

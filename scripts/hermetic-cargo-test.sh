@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Runs the test suite with the environment the nix build's checkPhase sees:
-# HOME=/homeless-shelter and none of the shguard config or test-injection
-# variables. A test that leans on the host's ~/.config/shguard passes under a
+# Runs the test suite with the parts of the nix checkPhase's environment that
+# tests can observe: HOME=/homeless-shelter and none of the shguard config or
+# test-injection variables. A test that leans on the host's ~/.config/shguard passes under a
 # plain run and then breaks the nix build (darwin-rebuild).
 #
 # Mirrors the nix environment, not its profile: the checkPhase runs release

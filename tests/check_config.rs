@@ -20,9 +20,9 @@ fn write_config(contents: &str) -> (tempfile::TempDir, std::path::PathBuf) {
 }
 
 /// Runs `shguard --check-config` with the environment fully reset except
-/// for `envs`, mirroring `tests/fail_closed_exit_paths.rs`'s env-isolation
-/// pattern — results here must depend only on `envs`, never on whatever
-/// config happens to exist on the host machine running the test.
+/// for `envs`, via `cmd::shguard()` — results here must depend only on
+/// `envs`, never on whatever config happens to exist on the host machine
+/// running the test.
 fn run_check_config(envs: &[(&str, &str)]) -> assert_cmd::assert::Assert {
     let mut cmd = cmd::shguard();
     cmd.arg("--check-config");

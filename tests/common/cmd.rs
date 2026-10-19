@@ -1,5 +1,6 @@
-//! The only place a test may spawn the `shguard` binary (enforced by
-//! `clippy.toml`), so no test can inherit the host's config or HOME.
+//! Every `cargo_bin` spawn of `shguard` goes through here (`clippy.toml` bans
+//! direct calls); a test that needs a `std::process::Command` must replay
+//! `shguard().get_envs()`.
 
 #![allow(clippy::expect_used)]
 

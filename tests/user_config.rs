@@ -1,11 +1,10 @@
 //! End-to-end tests for the user config feature (deny/ask/allow,
 //! plan.md §6 item 8): drives the real `shguard` binary with controlled
 //! `SHGUARD_CONFIG`/`XDG_CONFIG_HOME`/`HOME` env vars and a real config
-//! file on disk. Isolation comes from `cmd::shguard()`, and env vars are
-//! set on the *child process* via
-//! `assert_cmd::Command::env` — safe under parallel
-//! `cargo test`, unlike `std::env::set_var` (which mutates the whole test
-//! process and is `unsafe` in recent Rust editions).
+//! file on disk. Isolation comes from `cmd::shguard()`, and env vars are set
+//! on the *child process* via `assert_cmd::Command::env` — safe under
+//! parallel `cargo test`, unlike `std::env::set_var` (which mutates the
+//! whole test process and is `unsafe` in recent Rust editions).
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
@@ -1087,7 +1086,7 @@ fn shguard_strict_config_with_valid_config_still_allows() {
 // A present-but-non-UTF-8 `SHGUARD_CONFIG` must fail closed (hard error),
 // not silently collapse into "unset" and fall through to XDG/HOME
 // discovery (issue #23). `run_hook` takes `&str` envs, so this test builds
-// the `Command` directly, mirroring `run_hook`'s env-isolation pattern.
+// the `Command` directly, via `cmd::shguard()`.
 #[test]
 #[cfg(unix)]
 fn shguard_config_non_utf8_fails_closed() {
@@ -1175,7 +1174,7 @@ fn xdg_config_home_non_utf8_fails_closed() {
 // `SHGUARD_CONFIG`/`XDG_CONFIG_HOME`, and confirms `ls -la` still gets its
 // ordinary built-in-rules decision (`allow`) instead of the planted `deny`.
 // `run_hook` doesn't set `current_dir`, so this test builds the `Command`
-// directly, mirroring `run_hook`'s env-isolation pattern.
+// directly, via `cmd::shguard()`.
 #[test]
 fn empty_home_does_not_fall_back_to_cwd_relative_config() {
     let dir = tempdir().expect("tempdir should create");
@@ -1359,7 +1358,7 @@ fn shguard_config_takes_precedence_over_default_path() {
 // component relative path, which previously fed an empty `prefix` into
 // the self-protection rule generator and failed the whole config load
 // (issue #24). `run_hook` doesn't set `current_dir`, so this test builds
-// the `Command` directly, mirroring `run_hook`'s env-isolation pattern.
+// the `Command` directly, via `cmd::shguard()`.
 #[test]
 fn bare_filename_shguard_config_still_loads_a_valid_config() {
     let dir = tempdir().expect("tempdir should create");

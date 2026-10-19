@@ -1,8 +1,8 @@
 //! `shguard init` (issue #112): scaffolds a starter config at the same
 //! path `Policy::load` would discover, refusing to overwrite an existing
-//! file without `--force` — via the real binary with controlled env vars,
-//! the same env-isolation pattern `tests/check_config.rs` uses (mutating
-//! process env in a unit test is test-unsafe under parallel `cargo test`).
+//! file without `--force` — via the real binary with controlled env vars
+//! via `cmd::shguard()` (mutating process env in a unit test is test-unsafe
+//! under parallel `cargo test`).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
