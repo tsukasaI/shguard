@@ -1,7 +1,7 @@
-//! Every `cargo_bin` spawn of `shguard` goes through here (a `clippy.toml` ban
-//! on direct calls is pending #786); a test that needs a
-//! `std::process::Command` must replay `shguard().get_envs()` (the
-//! `ask_outcome.rs` slow producer is pending #788).
+//! Every `cargo_bin` spawn of `shguard` goes through here (`clippy.toml` bans
+//! direct calls); a test that needs a `std::process::Command` must replay
+//! `shguard().get_envs()` (the `ask_outcome.rs` slow producer is pending
+//! #788).
 
 #![allow(clippy::expect_used)]
 

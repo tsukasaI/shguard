@@ -1,0 +1,9 @@
+disallowed-methods = [
+  { path = "assert_cmd::cmd::Command::cargo_bin", reason = "use tests/common/cmd.rs::shguard()" },
+  { path = "assert_cmd::cargo::CommandCargoExt::cargo_bin", reason = "use tests/common/cmd.rs::shguard()" },
+  { path = "assert_cmd::cargo::cargo_bin", reason = "use tests/common/cmd.rs::shguard()" },
+]
+disallowed-macros = [
+  { path = "assert_cmd::cargo_bin", reason = "use tests/common/cmd.rs::shguard()" },
+  { path = "assert_cmd::cargo_bin_cmd", reason = "use tests/common/cmd.rs::shguard()" },
+]
