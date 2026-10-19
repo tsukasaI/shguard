@@ -9,27 +9,21 @@
 //! `shguard` binary (`assert_cmd`, like `tests/hook_io.rs`) and pin that
 //! each path now exits 0 with a well-formed `ask` decision instead.
 //!
-//! Uses `tests/user_config.rs`'s env-isolation pattern (`SHGUARD_CONFIG`/
-//! `XDG_CONFIG_HOME`/`HOME`, plus the `SHGUARD_TEST_PANIC`/
-//! `SHGUARD_TEST_MEM_LIMIT_MB` test-injection vars, all `env_remove`d on the
-//! child process), so results here depend only on the embedded rules, never
-//! on whatever config or leaked test-injection env happens to exist on the
-//! host machine running the test.
+//! Isolation comes from `cmd::shguard()`, so results here depend only on the
+//! embedded rules, never on host config or leaked test-injection env.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use assert_cmd::Command;
 use serde_json::Value;
 
-/// Runs the real binary against `stdin` with the environment fully reset,
-/// mirroring `tests/user_config.rs`'s `run_hook`.
+#[path = "common/cmd.rs"]
+mod cmd;
+
+/// Runs the real binary against `stdin` with the environment fully reset
+/// via `cmd::shguard()`.
 fn run_hook(stdin: &str) -> Value {
-    let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
-    cmd.env_remove("SHGUARD_CONFIG")
-        .env_remove("XDG_CONFIG_HOME")
-        .env_remove("HOME")
-        .env_remove("SHGUARD_TEST_PANIC")
-        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB");
+    let mut cmd = cmd::shguard();
     let assert = cmd.write_stdin(stdin).assert().success();
     let output = assert.get_output();
     serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON")
@@ -504,12 +498,8 @@ fn oversized_stdin_fails_closed_to_ask() {
 )]
 #[test]
 fn injected_panic_fails_closed_to_ask() {
-    let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
+    let mut cmd = cmd::shguard();
     let assert = cmd
-        .env_remove("SHGUARD_CONFIG")
-        .env_remove("XDG_CONFIG_HOME")
-        .env_remove("HOME")
-        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .env("SHGUARD_TEST_PANIC", "1")
         .write_stdin(bash_command("echo hi"))
         .assert()
@@ -546,13 +536,8 @@ fn injected_panic_fails_closed_to_ask() {
 /// path.
 #[test]
 fn heredoc_inside_unterminated_command_substitution_fails_closed_to_ask() {
-    let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
+    let mut cmd = cmd::shguard();
     let assert = cmd
-        .env_remove("SHGUARD_CONFIG")
-        .env_remove("XDG_CONFIG_HOME")
-        .env_remove("HOME")
-        .env_remove("SHGUARD_TEST_PANIC")
-        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .timeout(std::time::Duration::from_secs(30))
         .write_stdin(bash_command("<<$( |] "))
         .assert()
@@ -573,13 +558,8 @@ fn heredoc_inside_unterminated_command_substitution_fails_closed_to_ask() {
 /// before the heredoc-as-stdin floor existed.
 #[test]
 fn heredoc_to_python_interpreter_does_not_allow() {
-    let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
+    let mut cmd = cmd::shguard();
     let assert = cmd
-        .env_remove("SHGUARD_CONFIG")
-        .env_remove("XDG_CONFIG_HOME")
-        .env_remove("HOME")
-        .env_remove("SHGUARD_TEST_PANIC")
-        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .write_stdin(bash_command(
             "python3 <<'EOF'\nimport os\nos.system('cat ~/.ssh/id_rsa')\nEOF",
         ))
@@ -596,13 +576,8 @@ fn heredoc_to_python_interpreter_does_not_allow() {
 /// direct-invocation repro above.
 #[test]
 fn heredoc_attached_to_subshell_wrapping_an_interpreter_does_not_allow() {
-    let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
+    let mut cmd = cmd::shguard();
     let assert = cmd
-        .env_remove("SHGUARD_CONFIG")
-        .env_remove("XDG_CONFIG_HOME")
-        .env_remove("HOME")
-        .env_remove("SHGUARD_TEST_PANIC")
-        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .write_stdin(bash_command(
             "(python3) <<'EOF'\nimport os\nos.system('cat ~/.ssh/id_rsa')\nEOF",
         ))
@@ -644,12 +619,8 @@ fn heredoc_attached_to_subshell_wrapping_an_interpreter_does_not_allow() {
 )]
 #[test]
 fn memory_budget_trip_fails_closed_to_ask() {
-    let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
+    let mut cmd = cmd::shguard();
     let assert = cmd
-        .env_remove("SHGUARD_CONFIG")
-        .env_remove("XDG_CONFIG_HOME")
-        .env_remove("HOME")
-        .env_remove("SHGUARD_TEST_PANIC")
         .env("SHGUARD_TEST_MEM_LIMIT_MB", "1")
         .timeout(std::time::Duration::from_secs(30))
         .write_stdin(bash_command("<<$( |] "))

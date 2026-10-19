@@ -33,7 +33,7 @@ jobs:
           components: clippy, rustfmt
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - run: bash scripts/hermetic-cargo-test.sh
 
   # Fail-closed: build and release both need this job, so a failed or skipped
   # Darwin nix build blocks the release.
@@ -45,6 +45,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
         with:
           # Same settings and reason as main-check.yaml's nix-build.

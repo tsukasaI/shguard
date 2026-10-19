@@ -1,31 +1,27 @@
 //! End-to-end tests for the user config feature (deny/ask/allow,
 //! plan.md §6 item 8): drives the real `shguard` binary with controlled
 //! `SHGUARD_CONFIG`/`XDG_CONFIG_HOME`/`HOME` env vars and a real config
-//! file on disk. Env vars are set on the *child process* via
-//! `assert_cmd::Command::env`/`env_remove` — safe under parallel
-//! `cargo test`, unlike `std::env::set_var` (which mutates the whole test
-//! process and is `unsafe` in recent Rust editions).
+//! file on disk. Isolation comes from `cmd::shguard()`, and env vars are set
+//! on the *child process* via `assert_cmd::Command::env` — safe under
+//! parallel `cargo test`, unlike `std::env::set_var` (which mutates the
+//! whole test process and is `unsafe` in recent Rust editions).
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::fs;
 
-use assert_cmd::Command;
 use serde_json::Value;
 use tempfile::tempdir;
+
+#[path = "common/cmd.rs"]
+mod cmd;
 
 /// Runs the real binary against `stdin`, with the environment fully reset
 /// (no `SHGUARD_CONFIG`/`XDG_CONFIG_HOME`/`HOME` inherited from the host
 /// running the test) before applying `envs` — every test controls exactly
 /// what shguard sees, regardless of the actual machine's real config.
 fn run_hook(stdin: &str, envs: &[(&str, &str)]) -> Value {
-    let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
-    cmd.env_remove("SHGUARD_CONFIG")
-        .env_remove("XDG_CONFIG_HOME")
-        .env_remove("HOME")
-        .env_remove("SHGUARD_STRICT_CONFIG")
-        .env_remove("SHGUARD_TEST_PANIC")
-        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB");
+    let mut cmd = cmd::shguard();
     for (key, value) in envs {
         cmd.env(key, value);
     }
@@ -1090,7 +1086,7 @@ fn shguard_strict_config_with_valid_config_still_allows() {
 // A present-but-non-UTF-8 `SHGUARD_CONFIG` must fail closed (hard error),
 // not silently collapse into "unset" and fall through to XDG/HOME
 // discovery (issue #23). `run_hook` takes `&str` envs, so this test builds
-// the `Command` directly, mirroring `run_hook`'s env-isolation pattern.
+// the `Command` directly, via `cmd::shguard()`.
 #[test]
 #[cfg(unix)]
 fn shguard_config_non_utf8_fails_closed() {
@@ -1098,13 +1094,8 @@ fn shguard_config_non_utf8_fails_closed() {
 
     let non_utf8 = std::ffi::OsString::from_vec(vec![0xFF, 0xFE]);
 
-    let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
+    let mut cmd = cmd::shguard();
     let assert = cmd
-        .env_remove("XDG_CONFIG_HOME")
-        .env_remove("HOME")
-        .env_remove("SHGUARD_STRICT_CONFIG")
-        .env_remove("SHGUARD_TEST_PANIC")
-        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .env("SHGUARD_CONFIG", non_utf8)
         .write_stdin(bash_command("echo hi"))
         .assert()
@@ -1128,13 +1119,8 @@ fn home_non_utf8_fails_closed() {
 
     let non_utf8 = std::ffi::OsString::from_vec(vec![0xFF, 0xFE]);
 
-    let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
+    let mut cmd = cmd::shguard();
     let assert = cmd
-        .env_remove("SHGUARD_CONFIG")
-        .env_remove("XDG_CONFIG_HOME")
-        .env_remove("SHGUARD_STRICT_CONFIG")
-        .env_remove("SHGUARD_TEST_PANIC")
-        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .env("HOME", non_utf8)
         .write_stdin(bash_command("echo hi"))
         .assert()
@@ -1161,14 +1147,9 @@ fn xdg_config_home_non_utf8_fails_closed() {
 
     let non_utf8 = std::ffi::OsString::from_vec(vec![0xFF, 0xFE]);
 
-    let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
+    let mut cmd = cmd::shguard();
     let assert = cmd
-        .env_remove("SHGUARD_CONFIG")
         .env("XDG_CONFIG_HOME", non_utf8)
-        .env_remove("HOME")
-        .env_remove("SHGUARD_STRICT_CONFIG")
-        .env_remove("SHGUARD_TEST_PANIC")
-        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .write_stdin(bash_command("echo hi"))
         .assert()
         .success();
@@ -1193,7 +1174,7 @@ fn xdg_config_home_non_utf8_fails_closed() {
 // `SHGUARD_CONFIG`/`XDG_CONFIG_HOME`, and confirms `ls -la` still gets its
 // ordinary built-in-rules decision (`allow`) instead of the planted `deny`.
 // `run_hook` doesn't set `current_dir`, so this test builds the `Command`
-// directly, mirroring `run_hook`'s env-isolation pattern.
+// directly, via `cmd::shguard()`.
 #[test]
 fn empty_home_does_not_fall_back_to_cwd_relative_config() {
     let dir = tempdir().expect("tempdir should create");
@@ -1210,12 +1191,8 @@ fn empty_home_does_not_fall_back_to_cwd_relative_config() {
     )
     .expect("config file should write");
 
-    let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
+    let mut cmd = cmd::shguard();
     let assert = cmd
-        .env_remove("SHGUARD_CONFIG")
-        .env_remove("XDG_CONFIG_HOME")
-        .env_remove("SHGUARD_TEST_PANIC")
-        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .env("HOME", "")
         .current_dir(dir.path())
         .write_stdin(bash_command("ls -la"))
@@ -1381,7 +1358,7 @@ fn shguard_config_takes_precedence_over_default_path() {
 // component relative path, which previously fed an empty `prefix` into
 // the self-protection rule generator and failed the whole config load
 // (issue #24). `run_hook` doesn't set `current_dir`, so this test builds
-// the `Command` directly, mirroring `run_hook`'s env-isolation pattern.
+// the `Command` directly, via `cmd::shguard()`.
 #[test]
 fn bare_filename_shguard_config_still_loads_a_valid_config() {
     let dir = tempdir().expect("tempdir should create");
@@ -1396,12 +1373,8 @@ fn bare_filename_shguard_config_still_loads_a_valid_config() {
     )
     .expect("config file should write");
 
-    let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
+    let mut cmd = cmd::shguard();
     let assert = cmd
-        .env_remove("XDG_CONFIG_HOME")
-        .env_remove("HOME")
-        .env_remove("SHGUARD_TEST_PANIC")
-        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .env("SHGUARD_CONFIG", "config.toml")
         .current_dir(dir.path())
         .write_stdin(bash_command("scary-tool --run"))
@@ -1439,12 +1412,8 @@ fn relative_dir_shguard_config_does_not_over_match_self_protection() {
     )
     .expect("config file should write");
 
-    let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
+    let mut cmd = cmd::shguard();
     let assert = cmd
-        .env_remove("XDG_CONFIG_HOME")
-        .env_remove("HOME")
-        .env_remove("SHGUARD_TEST_PANIC")
-        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .env("SHGUARD_CONFIG", "./config.toml")
         .current_dir(dir.path())
         .write_stdin(bash_command("scary-tool --run"))
@@ -1459,12 +1428,8 @@ fn relative_dir_shguard_config_does_not_over_match_self_protection() {
     // Regression check: a `prefix = "."` self-protection rule would match
     // any dot-leading path token, wrongly denying unrelated commands like
     // this one.
-    let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
+    let mut cmd = cmd::shguard();
     let assert = cmd
-        .env_remove("XDG_CONFIG_HOME")
-        .env_remove("HOME")
-        .env_remove("SHGUARD_TEST_PANIC")
-        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
         .env("SHGUARD_CONFIG", "./config.toml")
         .current_dir(dir.path())
         .write_stdin(bash_command("cp a ./b"))
@@ -2748,7 +2713,7 @@ fn config_symlinked_to_dev_null_still_protects_its_own_literal_directory() {
 #[cfg(unix)]
 mod resolve_symlinks {
     use super::{
-        Command, bash_command, fs, permission_decision, permission_reason, run_hook, tempdir,
+        bash_command, cmd, fs, permission_decision, permission_reason, run_hook, tempdir,
         write_config,
     };
     use std::os::unix::fs::symlink;
@@ -3046,10 +3011,7 @@ mod resolve_symlinks {
         "#,
             root.display()
         ));
-        let assert = Command::cargo_bin("shguard")
-            .unwrap()
-            .env_remove("XDG_CONFIG_HOME")
-            .env_remove("HOME")
+        let assert = cmd::shguard()
             .env("SHGUARD_CONFIG", &config)
             .write_stdin(payload("ls", None))
             .assert()
@@ -3914,11 +3876,13 @@ mod symlinked_home_end_to_end {
     fn home_twin_check_cwd_flag_resolves_like_the_hook() {
         let (_dir, root) = home_fixture();
         let check = |cwd: &str| {
-            let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
-            cmd.env_remove("SHGUARD_CONFIG")
-                .env_remove("XDG_CONFIG_HOME")
-                .env("HOME", format!("{root}/home"))
-                .args(["check", "tar -x -C . -f a.tar", "--cwd", cwd]);
+            let mut cmd = cmd::shguard();
+            cmd.env("HOME", format!("{root}/home")).args([
+                "check",
+                "tar -x -C . -f a.tar",
+                "--cwd",
+                cwd,
+            ]);
             cmd
         };
         check(&format!("{root}/alias")).assert().code(1);
@@ -3930,10 +3894,8 @@ mod symlinked_home_end_to_end {
     fn check_cwd_flag_rejects_a_flag_shaped_value_and_notes_a_relative_one() {
         let (_dir, root) = home_fixture();
         let stderr_of = |args: [&str; 4]| {
-            let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
+            let mut cmd = cmd::shguard();
             let output = cmd
-                .env_remove("SHGUARD_CONFIG")
-                .env_remove("XDG_CONFIG_HOME")
                 .env("HOME", format!("{root}/home"))
                 .args(args)
                 .output()

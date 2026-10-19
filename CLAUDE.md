@@ -24,8 +24,9 @@ Precedence when guides conflict: language guide > principles.
   documented emergency recorded in the commit message.
 - `rustfmt.toml` is INTENTIONALLY ABSENT: rustfmt runs at defaults per
   `languages/rust.md` — do not add the file.
-- Clippy configuration lives only in `Cargo.toml`'s `[lints.clippy]` table —
-  never blanket-enable pedantic/nursery groups.
+- Clippy lint levels live in `Cargo.toml`'s `[lints.clippy]` table, lint
+  parameters (`disallowed-*`) in `clippy.toml` — never blanket-enable
+  pedantic/nursery groups.
 
 ## Project references
 

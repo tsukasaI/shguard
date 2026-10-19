@@ -11,17 +11,11 @@ use assert_cmd::Command;
 use serde_json::Value;
 use tempfile::tempdir;
 
+#[path = "common/cmd.rs"]
+mod cmd;
+
 fn run_hook(stdin: &str) -> Value {
-    let assert = Command::cargo_bin("shguard")
-        .expect("shguard binary should build")
-        .env_remove("SHGUARD_CONFIG")
-        .env_remove("XDG_CONFIG_HOME")
-        .env_remove("HOME")
-        .env_remove("SHGUARD_TEST_PANIC")
-        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
-        .write_stdin(stdin)
-        .assert()
-        .success();
+    let assert = cmd::shguard().write_stdin(stdin).assert().success();
     let output = assert.get_output();
     serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON")
 }
@@ -104,11 +98,7 @@ fn non_bash_tool_defers() {
 /// `--version` prints the crate version and does not touch stdin.
 #[test]
 fn version_flag_prints_version() {
-    let assert = Command::cargo_bin("shguard")
-        .expect("shguard binary should build")
-        .arg("--version")
-        .assert()
-        .success();
+    let assert = cmd::shguard().arg("--version").assert().success();
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
     assert!(stdout.contains(env!("CARGO_PKG_VERSION")));
 }
@@ -121,8 +111,7 @@ fn version_flag_prints_version() {
 
 #[test]
 fn unrecognized_flag_exits_with_error_instead_of_falling_through_to_hook_mode() {
-    Command::cargo_bin("shguard")
-        .expect("shguard binary should build")
+    cmd::shguard()
         .arg("--check-confg")
         .assert()
         .failure()
@@ -135,8 +124,7 @@ fn unrecognized_flag_exits_with_error_instead_of_falling_through_to_hook_mode() 
 // dashes) doesn't silently fall through to hook mode either.
 #[test]
 fn non_flag_positional_argument_exits_with_error_instead_of_falling_through_to_hook_mode() {
-    Command::cargo_bin("shguard")
-        .expect("shguard binary should build")
+    cmd::shguard()
         .arg("check-config")
         .assert()
         .failure()
@@ -145,8 +133,7 @@ fn non_flag_positional_argument_exits_with_error_instead_of_falling_through_to_h
 
 #[test]
 fn version_flag_with_trailing_argument_exits_with_error() {
-    Command::cargo_bin("shguard")
-        .expect("shguard binary should build")
+    cmd::shguard()
         .args(["--version", "extra"])
         .assert()
         .failure()
@@ -155,8 +142,7 @@ fn version_flag_with_trailing_argument_exits_with_error() {
 
 #[test]
 fn check_config_flag_with_trailing_argument_exits_with_error() {
-    Command::cargo_bin("shguard")
-        .expect("shguard binary should build")
+    cmd::shguard()
         .args(["--check-config", "extra"])
         .assert()
         .failure()
@@ -175,21 +161,12 @@ fn check_config_flag_with_trailing_argument_exits_with_error() {
 // using a command a user config denies that the embedded blocklist alone
 // would allow — that's what actually pins config-loading, not the mirrors.
 //
-// Every test that reaches config loading or hook evaluation (i.e.
-// everything except the pure usage-error/`--version` cases above, which
-// `main`'s argument dispatch rejects before any config or env read)
-// isolates the environment the same way `tests/user_config.rs` does, via
-// `run_hook`/`isolated_check`, so a host machine's own `SHGUARD_CONFIG`/
-// config file can't make these spuriously fail or pass.
+// Every spawn goes through `cmd::shguard()`, so a host's own
+// `SHGUARD_CONFIG`/config file can't make these spuriously fail or pass.
 
 fn isolated_check(args: &[&str]) -> Command {
-    let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
-    cmd.env_remove("SHGUARD_CONFIG")
-        .env_remove("XDG_CONFIG_HOME")
-        .env_remove("HOME")
-        .env_remove("SHGUARD_TEST_PANIC")
-        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
-        .args(args);
+    let mut cmd = cmd::shguard();
+    cmd.args(args);
     cmd
 }
 

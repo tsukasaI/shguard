@@ -21,6 +21,9 @@ use assert_cmd::Command;
 use serde_json::Value;
 use tempfile::TempDir;
 
+#[path = "common/cmd.rs"]
+mod cmd;
+
 fn write_config(contents: &str) -> (TempDir, PathBuf) {
     let dir = tempfile::tempdir().expect("tempdir should create");
     let path = dir.path().join("config.toml");
@@ -29,12 +32,8 @@ fn write_config(contents: &str) -> (TempDir, PathBuf) {
 }
 
 fn isolated_command(config_path: &std::path::Path) -> Command {
-    let mut cmd = Command::cargo_bin("shguard").expect("shguard binary should build");
-    cmd.env_remove("XDG_CONFIG_HOME")
-        .env_remove("HOME")
-        .env_remove("SHGUARD_TEST_PANIC")
-        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
-        .env("SHGUARD_CONFIG", config_path);
+    let mut cmd = cmd::shguard();
+    cmd.env("SHGUARD_CONFIG", config_path);
     cmd
 }
 
