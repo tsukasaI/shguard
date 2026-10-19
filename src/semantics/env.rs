@@ -196,16 +196,27 @@ fn enables_xtrace(operands: &[NormalizedWord]) -> bool {
 /// arbitrary code, `readonly` included): a flag cluster containing `C`
 /// before any `--`, or an operand not known statically.
 fn has_callback_flag(operands: &[NormalizedWord]) -> bool {
-    operands
-        .iter()
-        .map(NormalizedWord::resolution)
-        .take_while(|resolution| !matches!(resolution, Resolution::Resolved(arg) if arg == "--"))
-        .any(|resolution| match resolution {
-            Resolution::Unresolvable(_) => true,
-            Resolution::Resolved(arg) => {
-                arg.starts_with('-') && !arg.starts_with("--") && arg.contains('C')
+    // Not a plain `take_while` on `--`: it can be the value of an option
+    // taking an argument (`mapfile -d -- -C cb arr` still honours `-C`).
+    let mut skip_next = false;
+    for operand in operands {
+        let arg = match operand.resolution() {
+            Resolution::Unresolvable(_) => return true,
+            Resolution::Resolved(arg) => arg,
+        };
+        if skip_next {
+            skip_next = false;
+        } else if arg == "--" {
+            return false;
+        } else if arg.starts_with('-') {
+            if arg.contains('C') {
+                return true;
             }
-        })
+            // `d:u:n:O:tC:c:s:` — the last flag of a cluster takes the next word.
+            skip_next = arg.ends_with(['d', 'u', 'n', 'O', 's', 'c']);
+        }
+    }
+    false
 }
 
 /// Every `IFS` value the line could have split with, and the running
