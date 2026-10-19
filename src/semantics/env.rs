@@ -194,7 +194,7 @@ fn enables_xtrace(operands: &[NormalizedWord]) -> bool {
 
 /// Whether `mapfile`/`readarray` operands may carry `-C` (the callback runs
 /// arbitrary code, `readonly` included): a flag cluster containing `C`
-/// before any `--`, or an operand not known statically.
+/// before an unconsumed `--`, or an operand not known statically.
 fn has_callback_flag(operands: &[NormalizedWord]) -> bool {
     // Not a plain `take_while` on `--`: it can be the value of an option
     // taking an argument (`mapfile -d -- -C cb arr` still honours `-C`).
@@ -208,12 +208,20 @@ fn has_callback_flag(operands: &[NormalizedWord]) -> bool {
             skip_next = false;
         } else if arg == "--" {
             return false;
-        } else if arg.starts_with('-') {
+        } else if let Some(cluster) = arg.strip_prefix('-') {
             if arg.contains('C') {
                 return true;
             }
-            // `d:u:n:O:tC:c:s:` — the last flag of a cluster takes the next word.
-            skip_next = arg.ends_with(['d', 'u', 'n', 'O', 's', 'c']);
+            // `d:u:n:O:tC:c:s:` — walk the cluster like getopt: a value-taking
+            // flag swallows the rest of the word, or the next word if it ends it.
+            let mut flags = cluster.chars();
+            skip_next = false;
+            while let Some(flag) = flags.next() {
+                if "duOnsc".contains(flag) {
+                    skip_next = flags.as_str().is_empty();
+                    break;
+                }
+            }
         }
     }
     false

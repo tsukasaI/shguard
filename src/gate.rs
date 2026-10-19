@@ -13247,6 +13247,8 @@ mod tests {
             "X=$Y; true && X=\"rm -rf /\"; mapfile -d -- -C cb arr; X=ls; $X",
             "X=$Y; true && X=\"rm -rf /\"; mapfile -td -- -C cb arr; X=ls; $X",
             "X=$Y; true && X=\"rm -rf /\"; readarray -d -- -C cb -c 1 arr; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; mapfile -dd -C cb arr; X=ls; $X",
+            "X=$Y; true && X=\"rm -rf /\"; mapfile -ds -C cb -c 1 arr; X=ls; $X",
             "X=$Y; true && X=\"rm -rf /\"; mapfile $F arr; X=ls; $X",
             "X=$Y; true && X=\"rm -rf /\"; autoload f; X=ls; $X",
             // Already Block via the first strong write (#463): regression pins;
