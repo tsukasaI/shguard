@@ -434,16 +434,8 @@ fn oversized_stdin_from_a_slow_producer_still_reports_the_size_cap() {
 
     const MAX_STDIN_BYTES: usize = 10 * 1024 * 1024;
     let (_dir, config_path) = write_config("");
-    let mut cmd = std::process::Command::new(isolated_command(&config_path).get_program());
-    // Only the program path is borrowed from `isolated_command`; a plain
-    // `std` command carries none of its env scrub, so it is repeated here.
-    cmd.env_remove("XDG_CONFIG_HOME")
-        .env_remove("HOME")
-        .env_remove("SHGUARD_STRICT_CONFIG")
-        .env_remove("SHGUARD_TEST_PANIC")
-        .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
-        .env_remove("RUST_BACKTRACE")
-        .env("SHGUARD_CONFIG", &config_path)
+    let mut cmd = cmd::shguard_std();
+    cmd.env("SHGUARD_CONFIG", &config_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped());
     let mut child = cmd.spawn().expect("shguard should spawn");
