@@ -3044,7 +3044,7 @@ impl PathCanonicalizer {
     /// resolves nothing (every path is [`ProbeError::NotFound`]), so every
     /// `resolve_symlinks` exception stays unapplied (fail-closed) and the
     /// filesystem twin probe never adds a spelling.
-    fn unavailable() -> Self {
+    pub(crate) fn unavailable() -> Self {
         Self(|_| Err(ProbeError::NotFound))
     }
 
