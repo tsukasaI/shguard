@@ -4758,11 +4758,14 @@ fn apply_tar_dashless_floor(verdict: Verdict, floor: Option<(Decision, String)>)
 fn scan_unmodeled_option_floor(argv: &[NormalizedWord]) -> Option<(Decision, String)> {
     if let Some(finding) = crate::rules::first_unmodeled_wrapper_option(argv) {
         let reason = match finding.word() {
-            Some(word) => format!(
-                "unmodelled option {:?} for `{}`",
-                word.chars().take(64).collect::<String>(),
-                finding.command()
-            ),
+            Some(word) => {
+                let shown: String = word.chars().take(64).collect();
+                let suffix = if word.chars().count() > 64 { "…" } else { "" };
+                format!(
+                    "unmodelled option {shown:?}{suffix} for `{}`",
+                    finding.command()
+                )
+            }
             None => format!("unmodelled option for `{}`", finding.command()),
         };
         return Some((Decision::Ask, reason));
@@ -19129,6 +19132,12 @@ mod tests {
         assert_eq!(
             escaped.reason().map(super::Reason::as_str),
             Some(r#"unmodelled option "--\u{1b}[31m\n" for `nice`"#)
+        );
+        let long = format!("--{}", "a".repeat(63));
+        let truncated = decide(&format!("nice {long}a ls"));
+        assert_eq!(
+            truncated.reason().map(super::Reason::as_str),
+            Some(format!("unmodelled option {long:?}… for `nice`").as_str())
         );
     }
 
