@@ -828,7 +828,8 @@ const TRANSPARENT_WRAPPER_CASES: &[(&str, Decision)] = &[
 ];
 
 /// Issue #54: `timeout`/`ionice`/`flock` joined the wrapper `CATALOG`
-/// (`src/knowledge/catalog.rs`), so a wrapped `rm -rf /` must reach the same rm rule a bare invocation does.
+/// (`src/knowledge/catalog.rs`), so a wrapped `rm -rf /` must reach the same
+/// rm rule a bare invocation does.
 #[test]
 fn guardfall_transparent_wrapper_cases() {
     let cases = TRANSPARENT_WRAPPER_CASES;
