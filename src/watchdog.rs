@@ -55,8 +55,9 @@
 //! watchdog *inside* the binary's own — two `shguard-eval` threads, one
 //! nested in the other. This is deliberate, not an oversight: the two
 //! bound different scopes (this one only the evaluation pipeline; the
-//! binary's also config load and stdin read) and the binary's bound is
-//! always at least as strict — its wall-clock deadline starts earlier
+//! binary's also config load, plus the stdin read under its own separate
+//! `STDIN_READ_TIMEOUT`) and the binary's bound is at least as strict in
+//! release builds — its wall-clock deadline starts earlier
 //! (right after the stdin read, before config load), so for the time bound
 //! in release builds the binary's watchdog always trips first (or the
 //! evaluation finishes before either does). Debug builds can lengthen the

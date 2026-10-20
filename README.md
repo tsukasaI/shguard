@@ -182,11 +182,12 @@ Add to `settings.json`:
 }
 ```
 
-Do not set the hook `timeout` below shguard's worst-case total of about 12s
-(10s stdin read bound + 2s evaluation bound + a short decision-log
-write), i.e. keep it above ~15s. If Claude Code kills the hook first,
-empty stdout is treated as allow, so a too-low `timeout` reopens the
-fail-open gap the internal bounds exist to close.
+Claude Code's per-hook `timeout` field is in seconds. shguard's own worst
+case is about 12s (10s stdin read bound + 2s evaluation bound + a short
+decision-log write, plus process start-up), so if you set `timeout`, use at
+least 15. If Claude Code kills the hook first, empty stdout is treated as
+allow, so a too-low `timeout` reopens the fail-open gap the internal bounds
+exist to close.
 
 ### Wrapping the binary to fail closed (issue #440)
 

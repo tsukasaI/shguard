@@ -133,7 +133,8 @@ const MAX_STDIN_BYTES: u64 = 10 * 1024 * 1024;
 /// but a producer that never finishes must still not hang the hook.
 ///
 /// Not 30s or more: the worst case is `STDIN_READ_TIMEOUT` +
-/// [`EVALUATION_TIMEOUT`] + [`TRIP_LOG_TIMEOUT`] (10s + 2s + 50ms), and if
+/// [`EVALUATION_TIMEOUT`] + [`TRIP_LOG_TIMEOUT`] (10s + 2s + 50ms, plus
+/// process start-up), and if
 /// Claude Code kills the hook first, empty stdout is treated as allow
 /// (fail-open), so a higher value only widens that window. Users must keep
 /// the hook `timeout` above that total. Not much lower either: a producer
