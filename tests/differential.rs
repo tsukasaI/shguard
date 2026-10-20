@@ -6,13 +6,13 @@
 //! (`strangler_tightenings.jsonl`, `relaxations.jsonl`).
 //!
 //! Configs (checked-in fixtures in `tests/fixtures/differential/`):
-//! `empty`, `owner` (the shape of a long-lived user config), `ask_outcome_deny`,
-//! `allow` (one `[[allow]]`).
+//! `empty`, `owner` (the shape of a long-lived user config),
+//! `ask_outcome_deny`, `allow` (one `[[allow]]`).
 //!
 //! Corpora (`tests/golden/*.jsonl`, command column): guardfall, fuzz,
-//! denials, benign, bypass, legacy units (gate rows on the embedded rules only), must_not_allow; plus
-//! `tests/fixtures/differential/rows.jsonl`, the rows that reach the rules the
-//! config fixtures add.
+//! denials, benign, bypass, legacy units (gate rows on the embedded rules
+//! only), must_not_allow; plus `tests/fixtures/differential/rows.jsonl`, the
+//! rows that reach the rules the config fixtures add.
 //!
 //! Every run loads all four configs and reads every corpus (the wiring
 //! check). Rows are evaluated only when `SHGUARD_DIFFERENTIAL=1` or
@@ -100,7 +100,8 @@ const CORPORA: [(&str, &str, Reader); 8] = [
 /// the embedded rule set (no `config`) with no `cwd`, deduplicated: the
 /// differential applies its own four configs, so a row recorded under another
 /// rule set or directory would not mean what it recorded. Other kinds are
-/// skipped; a malformed line or a used gate row without a string `command` fails.
+/// skipped; a malformed line or a used gate row without a string `command`
+/// fails.
 fn read_legacy_gate_commands(path: &Path) -> Result<Vec<String>, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
