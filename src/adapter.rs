@@ -310,7 +310,7 @@ pub fn peek_bash_command(stdin: &str) -> Option<(String, HookContext)> {
 /// The no-decision output (issue #462) when `stdin` parses as a payload for a
 /// tool other than `Bash`, otherwise `None`. Uses [`extract_bash_command`]'s
 /// own `tool_name != "Bash"` test, so the composition root can short-circuit
-/// a non-Bash tool before config load without a second predicate; malformed
+/// a non-Bash tool when config load fails, without a second predicate; malformed
 /// JSON, and any `Bash` payload, yield `None` and stay on the fail-closed
 /// paths.
 #[must_use]

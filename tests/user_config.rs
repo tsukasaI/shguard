@@ -1161,7 +1161,13 @@ fn config_failure_keeps_failing_closed_for_unparseable_or_toolless_stdin() {
         ("SHGUARD_CONFIG", config_path.to_str().unwrap()),
         ("SHGUARD_STRICT_CONFIG", "1"),
     ];
-    for stdin in ["not json", "", r#"{"tool_input":{"command":"ls"}}"#] {
+    for stdin in [
+        "not json",
+        "",
+        r#"{"tool_input":{"command":"ls"}}"#,
+        r#"{"tool_name":null,"tool_input":{"command":"ls"}}"#,
+        r#"{"tool_name":"Edit","tool_name":"Bash","tool_input":{"command":"ls"}}"#,
+    ] {
         let output = run_hook(stdin, &envs);
         assert_eq!(permission_decision(&output), "deny", "stdin: {stdin:?}");
     }

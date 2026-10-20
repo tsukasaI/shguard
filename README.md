@@ -1350,8 +1350,9 @@ can't be read or fails to parse/validate, shguard fails closed: every
 Bash command asks for human confirmation until the config is fixed or
 created (`shguard init`), rather than silently falling back to the
 embedded blocklist alone. A non-Bash tool call (`Edit`, `Write`, ...) gets
-the same no-decision output as when the config loads fine (issue #684). The only case that still runs embedded-only is when no
-config path can be resolved at all (`SHGUARD_CONFIG` unset and neither
+the same no-decision output as when the config loads fine (issue #684).
+The only case that still runs embedded-only is when no config path can
+be resolved at all (`SHGUARD_CONFIG` unset and neither
 `XDG_CONFIG_HOME` nor `HOME` usable).
 
 Setting `SHGUARD_STRICT_CONFIG` (issue #440, any value counts as set)

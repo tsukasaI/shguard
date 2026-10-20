@@ -1726,6 +1726,8 @@ fn init_config_template() -> String {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::verdict::Decision;
+    use tempfile::tempdir;
 
     #[test]
     fn load_error_renders_its_message_once_in_an_error_chain() {
@@ -1738,8 +1740,6 @@ mod tests {
         assert!(std::error::Error::source(&err).is_none());
         assert_eq!(err.to_string(), err.error().to_string());
     }
-    use crate::verdict::Decision;
-    use tempfile::tempdir;
 
     #[test]
     fn shguard_config_takes_precedence_over_everything() {
