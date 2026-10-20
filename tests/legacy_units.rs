@@ -17,6 +17,10 @@ use serde_json::Value;
 #[path = "common/golden.rs"]
 #[allow(dead_code)]
 mod golden;
+#[path = "common/legacy_rows.rs"]
+mod legacy_rows;
+
+use legacy_rows::Kind;
 
 const CORPUS: &str = include_str!("golden/legacy_units.jsonl");
 
@@ -87,12 +91,9 @@ fn load(text: &str) -> Result<Corpus, String> {
         let Value::Object(mut fields) = row else {
             return Err(format!("legacy_units.jsonl line {number}: not an object"));
         };
-        let kind = fields
-            .get("kind")
-            .and_then(Value::as_str)
-            .ok_or_else(|| format!("legacy_units.jsonl line {number}: missing kind"))?
-            .to_string();
-        if kind == "config" {
+        let kind = legacy_rows::kind(&fields)
+            .map_err(|err| format!("legacy_units.jsonl line {number}: {err}"))?;
+        if kind == Kind::Config {
             if let Some(key) = fields
                 .keys()
                 .find(|key| !["kind", "id", "toml"].contains(&key.as_str()))
@@ -129,29 +130,27 @@ fn load(text: &str) -> Result<Corpus, String> {
                 "legacy_units.jsonl line {number}: duplicate of line {first}"
             ));
         }
-        match kind.as_str() {
-            "gate" => {
-                if fields.contains_key("config") || fields.contains_key("cwd") {
+        match kind {
+            Kind::Config => {}
+            Kind::Gate => {
+                if !legacy_rows::is_public_gate(&fields) {
                     corpus.gate_internal += 1;
                 } else {
-                    let command = fields
-                        .get("command")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| format!("line {number}: gate row without command"))?;
+                    let command = legacy_rows::gate_command(&fields)
+                        .map_err(|err| format!("line {number}: {err}"))?;
                     let expect = expect.ok_or_else(|| format!("line {number}: no expect"))?;
                     corpus
                         .gate_public
                         .push(serde_json::json!({ "command": command, "expect": expect }));
                 }
             }
-            "rules" => corpus.rules += 1,
-            "excluded" => {
+            Kind::Rules => corpus.rules += 1,
+            Kind::Excluded => {
                 if reason.is_none() {
                     return Err(format!("line {number}: excluded row without reason"));
                 }
                 corpus.excluded += 1;
             }
-            other => return Err(format!("line {number}: unknown kind {other:?}")),
         }
     }
     if keys.is_empty() {
@@ -286,6 +285,11 @@ fn loader_rejects_damage() -> Result<(), String> {
     let damaged = [
         ("empty file", String::new(), None),
         ("malformed line", format!("{row}not json\n"), None),
+        (
+            "unknown kind",
+            format!("{row}{{\"kind\":\"gat\",\"command\":\"ls\"}}\n"),
+            Some("unknown kind"),
+        ),
         ("duplicate key", format!("{row}{row}"), None),
         (
             "config header with a duplicate id",
