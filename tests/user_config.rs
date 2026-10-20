@@ -1083,6 +1083,96 @@ fn shguard_strict_config_with_valid_config_still_allows() {
     assert_eq!(permission_decision(&output), "allow");
 }
 
+#[test]
+fn shguard_strict_config_broken_config_via_xdg_config_home_denies_bash() {
+    let xdg = tempdir().expect("tempdir should create");
+    let home = tempdir().expect("tempdir should create");
+    let config_dir = xdg.path().join("shguard");
+    fs::create_dir_all(&config_dir).expect("config dir should create");
+    let config_path = config_dir.join("config.toml");
+    fs::write(&config_path, "this is not [valid toml").expect("config file should write");
+
+    let output = run_hook(
+        &bash_command("echo hi"),
+        &[
+            ("XDG_CONFIG_HOME", xdg.path().to_str().unwrap()),
+            ("HOME", home.path().to_str().unwrap()),
+            ("SHGUARD_STRICT_CONFIG", "1"),
+        ],
+    );
+    assert_eq!(permission_decision(&output), "deny");
+    assert_names_config_path_and_asks_the_user(&output, &config_path);
+}
+
+fn tool_payload(tool_name: &str) -> String {
+    serde_json::json!({
+        "tool_name": tool_name,
+        "tool_input": { "file_path": "/tmp/x", "content": "x" },
+        "hook_event_name": "PreToolUse",
+    })
+    .to_string()
+}
+
+/// Issue #684: with a broken config, a non-Bash tool takes the same
+/// no-decision path as with a loadable config, strict or not; Bash keeps
+/// the config-failure verdict.
+#[test]
+fn config_failure_gives_non_bash_tools_no_decision_and_bash_the_failure_verdict() {
+    let (_dir, config_path) = write_config("this is not [valid toml");
+    let config = config_path.to_str().unwrap();
+    let (_ok_dir, ok_path) = write_config("");
+
+    for strict in [false, true] {
+        let mut envs = vec![("SHGUARD_CONFIG", config)];
+        let mut ok_envs = vec![("SHGUARD_CONFIG", ok_path.to_str().unwrap())];
+        if strict {
+            envs.push(("SHGUARD_STRICT_CONFIG", "1"));
+            ok_envs.push(("SHGUARD_STRICT_CONFIG", "1"));
+        }
+        for tool in ["Edit", "Write"] {
+            let output = run_hook(&tool_payload(tool), &envs);
+            assert!(
+                output["hookSpecificOutput"]
+                    .get("permissionDecision")
+                    .is_none(),
+                "{tool} (strict={strict}) should get no decision: {output}"
+            );
+            assert_eq!(
+                output,
+                run_hook(&tool_payload(tool), &ok_envs),
+                "{tool} (strict={strict}) should match the loadable-config output"
+            );
+        }
+        let bash = run_hook(&bash_command("echo hi"), &envs);
+        assert_eq!(
+            permission_decision(&bash),
+            if strict { "deny" } else { "ask" }
+        );
+        assert_names_config_path_and_asks_the_user(&bash, &config_path);
+    }
+}
+
+/// Malformed stdin and a payload with no `tool_name` are not a non-Bash
+/// tool: with a broken config they keep the config-failure verdict.
+#[test]
+fn config_failure_keeps_failing_closed_for_unparseable_or_toolless_stdin() {
+    let (_dir, config_path) = write_config("this is not [valid toml");
+    let envs = [
+        ("SHGUARD_CONFIG", config_path.to_str().unwrap()),
+        ("SHGUARD_STRICT_CONFIG", "1"),
+    ];
+    for stdin in [
+        "not json",
+        "",
+        r#"{"tool_input":{"command":"ls"}}"#,
+        r#"{"tool_name":null,"tool_input":{"command":"ls"}}"#,
+        r#"{"tool_name":"Edit","tool_name":"Bash","tool_input":{"command":"ls"}}"#,
+    ] {
+        let output = run_hook(stdin, &envs);
+        assert_eq!(permission_decision(&output), "deny", "stdin: {stdin:?}");
+    }
+}
+
 // A present-but-non-UTF-8 `SHGUARD_CONFIG` must fail closed (hard error),
 // not silently collapse into "unset" and fall through to XDG/HOME
 // discovery (issue #23). `run_hook` takes `&str` envs, so this test builds

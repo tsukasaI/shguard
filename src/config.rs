@@ -173,11 +173,13 @@ pub enum ConfigError {
 /// (an env var that is not valid UTF-8, or nothing configured and no usable
 /// `$HOME`). Displays as the underlying error.
 #[derive(Debug, thiserror::Error)]
-#[error("{source}")]
+#[error("{error}")]
 pub struct LoadError {
     path: Option<PathBuf>,
-    #[source]
-    source: ConfigError,
+    // Not named `source` and not `#[source]`: the Display already renders
+    // this error, so exposing it as a source would print the message twice
+    // in chain-walking reporters.
+    error: ConfigError,
 }
 
 impl LoadError {
@@ -190,7 +192,7 @@ impl LoadError {
     /// The underlying failure.
     #[must_use]
     pub fn error(&self) -> &ConfigError {
-        &self.source
+        &self.error
     }
 }
 
@@ -529,7 +531,7 @@ impl Policy {
     /// use it.
     pub(crate) fn load_with(canonicalizer: PathCanonicalizer) -> Result<Self, LoadError> {
         let (shguard_config, xdg_config_home, home) =
-            Self::read_env_paths().map_err(|source| LoadError { path: None, source })?;
+            Self::read_env_paths().map_err(|error| LoadError { path: None, error })?;
         let explicit = shguard_config.is_some();
 
         let path = Self::resolve_config_path(
@@ -539,7 +541,7 @@ impl Policy {
         );
 
         Self::load_resolved(path.clone(), explicit, home, canonicalizer)
-            .map_err(|source| LoadError { path, source })
+            .map_err(|error| LoadError { path, error })
     }
 
     /// The load proper, once discovery has resolved `path` (`None`: nothing
@@ -1726,6 +1728,18 @@ mod tests {
     use super::*;
     use crate::verdict::Decision;
     use tempfile::tempdir;
+
+    #[test]
+    fn load_error_renders_its_message_once_in_an_error_chain() {
+        let err = LoadError {
+            path: None,
+            error: ConfigError::Missing {
+                path: PathBuf::from("/x/config.toml"),
+            },
+        };
+        assert!(std::error::Error::source(&err).is_none());
+        assert_eq!(err.to_string(), err.error().to_string());
+    }
 
     #[test]
     fn shguard_config_takes_precedence_over_everything() {
