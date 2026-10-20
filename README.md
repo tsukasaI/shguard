@@ -182,6 +182,12 @@ Add to `settings.json`:
 }
 ```
 
+Do not set the hook `timeout` below shguard's worst-case total of about 12s
+(10s stdin read bound + 2s evaluation bound + a short decision-log
+write), i.e. keep it above ~15s. If Claude Code kills the hook first,
+empty stdout is treated as allow, so a too-low `timeout` reopens the
+fail-open gap the internal bounds exist to close.
+
 ### Wrapping the binary to fail closed (issue #440)
 
 The registration above invokes the bare `shguard` binary directly, and
@@ -1280,7 +1286,8 @@ reports this as a distinct exit-2 runtime error rather than printing a
 `Decision: Ask` line, so it isn't mistaken for a real decision).
 
 For the real hook path specifically, the outer watchdog's wall-clock
-deadline starts *before* config load and stdin read even run, so for a
+deadline starts *after* the stdin read (which has its own separate 10s
+bound) and before config load, so for a
 genuine hang inside the analysis pipeline itself, not just a blocking log
 write, it always wins the race against `analyze_with_policy`'s own internal
 watchdog: `analyze_with_policy` never gets a chance to return, let alone
