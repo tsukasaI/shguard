@@ -611,8 +611,8 @@ fn memory_limit_bytes() -> u64 {
 /// `SHGUARD_TEST_EVAL_TIMEOUT_MS`, so hook-path integration tests can run
 /// under a relaxed budget instead of racing the production 2s bound on a
 /// loaded machine, and the tests that need the outer time trip can opt into
-/// a short one. Anything but a positive integer falls back to
-/// [`EVALUATION_TIMEOUT`]: a malformed value must never widen or disable the
+/// a short one. Anything but an integer in 1..=[`MAX_EVAL_TIMEOUT_OVERRIDE_MS`]
+/// falls back to [`EVALUATION_TIMEOUT`]: a malformed value must never widen or disable the
 /// bound.
 fn evaluation_timeout() -> Duration {
     #[cfg(debug_assertions)]

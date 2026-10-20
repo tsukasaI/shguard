@@ -521,10 +521,10 @@ fn injected_panic_fails_closed_to_ask() {
 /// process ran until the OS killed it for memory exhaustion. Pins that the
 /// real binary now exits 0 with a well-formed `ask` decision instead,
 /// within the binary's outer bounds (time pinned to 5s here) or the library
-/// watchdog's. Which of the two trips first for this repro is
+/// watchdog's. Which bound trips first for this repro is
 /// allocation-rate-dependent — live-confirmed to be the memory bound in
 /// both a debug build (well under a second) and a release build (~0.5s,
-/// well under `EVALUATION_TIMEOUT`) on this machine, but that could differ
+/// well under 2s) on this machine, but that could differ
 /// on a slower or more memory-constrained host, so this only asserts
 /// fail-closed `ask` with *a* watchdog reason, not which one.
 ///
