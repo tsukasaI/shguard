@@ -197,6 +197,39 @@ fn replay(row: &Value) -> Result<(), Failure> {
     }
 }
 
+const MAX_REPLAY_THREADS: usize = 8;
+
+/// Replays `rows` on up to [`MAX_REPLAY_THREADS`] threads, each taking one
+/// contiguous chunk. Chunks are joined in spawn order, so failures come out
+/// in corpus order whatever the scheduling.
+fn replay_all(rows: &[Value]) -> Vec<Failure> {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(MAX_REPLAY_THREADS);
+    let chunk_len = rows.len().div_ceil(threads).max(1);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = rows
+            .chunks(chunk_len)
+            .map(|chunk| {
+                scope.spawn(|| {
+                    chunk
+                        .iter()
+                        .filter_map(|row| replay(row).err())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
+    })
+}
+
 fn main() -> ExitCode {
     if let Err(err) = loader_rejects_damage() {
         eprintln!("legacy_units: {err}");
@@ -209,11 +242,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let failures: Vec<Failure> = corpus
-        .gate_public
-        .iter()
-        .filter_map(|row| replay(row).err())
-        .collect();
+    let failures = replay_all(&corpus.gate_public);
     println!(
         "legacy_units: {} gate rows replayed through the public API; {} gate rows (custom rule \
          set or cwd) and {} rules rows replayed by `cargo test --lib legacy_units`; {} tests \
