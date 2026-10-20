@@ -474,7 +474,7 @@ fn emit_first_result(
     log_state: &LogState,
 ) {
     let first = if stdin_read_finished(read_done_rx, STDIN_READ_TIMEOUT) {
-        resolve_first_result(rx, memory_limit_bytes(), EVALUATION_TIMEOUT)
+        resolve_first_result(rx, memory_limit_bytes(), evaluation_timeout())
     } else {
         FirstResult::TimeTrip(LimitKind::OuterTime)
     };
@@ -604,6 +604,25 @@ fn memory_limit_bytes() -> u64 {
         return mb.saturating_mul(1024 * 1024);
     }
     MEMORY_LIMIT_BYTES
+}
+
+/// Effective outer wall-clock budget used by [`resolve_first_result`] —
+/// [`EVALUATION_TIMEOUT`] in release builds. Debug builds additionally honour
+/// `SHGUARD_TEST_EVAL_TIMEOUT_MS`, so hook-path integration tests can run
+/// under a relaxed budget instead of racing the production 2s bound on a
+/// loaded machine, and the tests that need the outer time trip can opt into
+/// a short one. Anything but a positive integer falls back to
+/// [`EVALUATION_TIMEOUT`]: a malformed value must never widen or disable the
+/// bound.
+fn evaluation_timeout() -> Duration {
+    #[cfg(debug_assertions)]
+    if let Some(value) = std::env::var_os("SHGUARD_TEST_EVAL_TIMEOUT_MS")
+        && let Ok(ms) = value.to_string_lossy().parse::<u64>()
+        && ms > 0
+    {
+        return Duration::from_millis(ms);
+    }
+    EVALUATION_TIMEOUT
 }
 
 /// Installs a one-line panic hook in place of the Rust default (which
@@ -1324,6 +1343,15 @@ fn run(
                     command,
                     context,
                 });
+                // Test-only: parks the worker after `EarlyInfo` is in hand so
+                // a test can force exactly the outer time trip. Debug-only,
+                // like `SHGUARD_TEST_PANIC`.
+                #[cfg(debug_assertions)]
+                if std::env::var_os("SHGUARD_TEST_HANG_AFTER_EARLY").is_some() {
+                    loop {
+                        std::thread::sleep(Duration::from_secs(3600));
+                    }
+                }
             }
             let sink = DedupSink { state: log_state };
             shguard::adapter::handle_with_policy(&stdin, &policy, &sink)

@@ -531,13 +531,15 @@ fn injected_panic_fails_closed_to_ask() {
 /// Inlines `run_hook` to add a child-process timeout: if *both* watchdog
 /// bounds regress, this input reverts to an unbounded multi-GB/s
 /// allocating hang, and without a bound the test would thrash and wait
-/// for the OS to OOM-kill something rather than fail cleanly. 30s is
-/// ~15x the 2s `EVALUATION_TIMEOUT`, so it can never fire on the passing
-/// path.
+/// for the OS to OOM-kill something rather than fail cleanly. The outer
+/// budget is pinned to 5s via `SHGUARD_TEST_EVAL_TIMEOUT_MS` (the shared
+/// `cmd::shguard()` default is a relaxed 60s), so 30s is 6x that and can
+/// never fire on the passing path.
 #[test]
 fn heredoc_inside_unterminated_command_substitution_fails_closed_to_ask() {
     let mut cmd = cmd::shguard();
     let assert = cmd
+        .env("SHGUARD_TEST_EVAL_TIMEOUT_MS", "5000")
         .timeout(std::time::Duration::from_secs(30))
         .write_stdin(bash_command("<<$( |] "))
         .assert()

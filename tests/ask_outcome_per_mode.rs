@@ -17,7 +17,6 @@
 use std::fs;
 use std::path::PathBuf;
 
-use assert_cmd::Command;
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -31,12 +30,6 @@ fn write_config(contents: &str) -> (TempDir, PathBuf) {
     (dir, path)
 }
 
-fn isolated_command(config_path: &std::path::Path) -> Command {
-    let mut cmd = cmd::shguard();
-    cmd.env("SHGUARD_CONFIG", config_path);
-    cmd
-}
-
 fn run_check_json(
     config_path: &std::path::Path,
     command: &str,
@@ -47,13 +40,13 @@ fn run_check_json(
         args.push("--permission-mode");
         args.push(mode);
     }
-    let assert = isolated_command(config_path).args(args).assert();
+    let assert = cmd::isolated_command(config_path).args(args).assert();
     let output = assert.get_output();
     serde_json::from_slice(&output.stdout).expect("check --json stdout should be valid JSON")
 }
 
 fn run_hook(config_path: &std::path::Path, stdin: &str) -> Value {
-    let assert = isolated_command(config_path)
+    let assert = cmd::isolated_command(config_path)
         .write_stdin(stdin)
         .assert()
         .success();
@@ -317,7 +310,7 @@ fn wrong_typed_table_slot_fails_config_load_closed() {
         default = 5
         "#,
     );
-    isolated_command(&config_path)
+    cmd::isolated_command(&config_path)
         .args(["check", "echo hi", "--json"])
         .assert()
         .failure()
@@ -420,7 +413,7 @@ fn check_without_permission_mode_flag_matches_the_hook_with_no_permission_mode_f
 #[test]
 fn check_permission_mode_missing_value_is_a_usage_error() {
     let (_dir, config_path) = write_config("");
-    isolated_command(&config_path)
+    cmd::isolated_command(&config_path)
         .args(["check", "echo hi", "--permission-mode"])
         .assert()
         .failure()
@@ -435,7 +428,7 @@ fn check_permission_mode_missing_value_is_a_usage_error() {
 #[test]
 fn check_permission_mode_missing_value_usage_error_is_json_when_json_precedes_it() {
     let (_dir, config_path) = write_config("");
-    let assert = isolated_command(&config_path)
+    let assert = cmd::isolated_command(&config_path)
         .args(["check", "echo hi", "--json", "--permission-mode"])
         .assert()
         .failure()
@@ -456,7 +449,7 @@ fn check_permission_mode_missing_value_usage_error_is_json_when_json_precedes_it
 #[test]
 fn check_missing_command_usage_error_is_json_when_json_precedes_it() {
     let (_dir, config_path) = write_config("");
-    let assert = isolated_command(&config_path)
+    let assert = cmd::isolated_command(&config_path)
         .args(["check", "--json"])
         .assert()
         .failure()
@@ -481,7 +474,7 @@ fn check_missing_command_usage_error_is_json_when_json_precedes_it() {
 #[test]
 fn check_permission_mode_value_looking_like_a_flag_is_a_usage_error() {
     let (_dir, config_path) = write_config("");
-    isolated_command(&config_path)
+    cmd::isolated_command(&config_path)
         .args(["check", "echo hi", "--permission-mode", "--json"])
         .assert()
         .failure()
@@ -493,7 +486,7 @@ fn check_permission_mode_value_looking_like_a_flag_is_a_usage_error() {
 #[test]
 fn check_permission_mode_given_twice_is_a_usage_error() {
     let (_dir, config_path) = write_config("");
-    isolated_command(&config_path)
+    cmd::isolated_command(&config_path)
         .args([
             "check",
             "echo hi",
@@ -515,7 +508,7 @@ fn check_permission_mode_given_twice_is_a_usage_error() {
 #[test]
 fn check_dash_dash_prefixed_positional_is_a_usage_error_not_a_command() {
     let (_dir, config_path) = write_config("");
-    isolated_command(&config_path)
+    cmd::isolated_command(&config_path)
         .args(["check", "--permission-mode=auto", "--json"])
         .assert()
         .failure()

@@ -23,7 +23,21 @@ pub fn shguard() -> Command {
         .env_remove("SHGUARD_STRICT_CONFIG")
         .env_remove("SHGUARD_TEST_PANIC")
         .env_remove("SHGUARD_TEST_MEM_LIMIT_MB")
+        .env_remove("SHGUARD_TEST_HANG_AFTER_EARLY")
         .env_remove("RUST_BACKTRACE");
+    // Not the production 2s: a test that is not about the outer time trip
+    // must not flake when a loaded machine stretches evaluation past it. A
+    // test that needs the trip overrides this with a short value after the
+    // call. Debug-only in the binary, so a no-op in release builds.
+    cmd.env("SHGUARD_TEST_EVAL_TIMEOUT_MS", "60000");
+    cmd
+}
+
+/// [`shguard`] pointed at `config_path` through `SHGUARD_CONFIG`.
+#[allow(dead_code)] // not every test crate that includes this module needs it
+pub fn isolated_command(config_path: &std::path::Path) -> Command {
+    let mut cmd = shguard();
+    cmd.env("SHGUARD_CONFIG", config_path);
     cmd
 }
 
