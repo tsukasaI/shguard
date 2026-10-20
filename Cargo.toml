@@ -68,6 +68,10 @@ unimplemented = "warn"
 [features]
 test-support = []
 
+[[test]]
+name = "legacy_units"
+harness = false
+
 [dev-dependencies]
 shguard = { path = ".", features = ["test-support"] }
 assert_cmd = "2.2.2"

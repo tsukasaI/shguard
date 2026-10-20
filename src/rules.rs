@@ -8729,6 +8729,14 @@ impl Rules {
         })
     }
 
+    /// `PathCanonicalizer` never takes part in equality, so the legacy_units
+    /// recorder asks this to tell a wired-up filesystem double apart.
+    #[cfg(test)]
+    #[allow(clippy::fn_to_numeric_cast)]
+    pub(crate) fn legacy_has_default_canonicalizer(&self) -> bool {
+        self.path_canonicalizer.0 as usize == PathCanonicalizer::unavailable().0 as usize
+    }
+
     /// The embedded/user-config [`CommandRule`] declared with id `id`, if
     /// any — issue #452: lets a `src/gate.rs` structural check (one that
     /// detects the same *intent* as an existing TOML rule through a shape
@@ -8749,6 +8757,12 @@ impl Rules {
     /// keep the first-declared rule.
     #[must_use]
     pub(crate) fn match_command(&self, argv: &[NormalizedWord]) -> Option<&CommandRule> {
+        #[cfg(test)]
+        let _legacy = crate::legacy_units::rules_call(
+            crate::legacy_units::Receiver::Rules(self),
+            "match_command",
+            &crate::legacy_units::Call::Argv(argv),
+        );
         self.match_command_in(argv, SymlinkScope::default())
     }
 
@@ -8773,6 +8787,12 @@ impl Rules {
     /// [`Self::match_token`]); ties keep the first-declared rule.
     #[must_use]
     pub(crate) fn match_pipeline(&self, stages: &[Vec<NormalizedWord>]) -> Option<&PipelineRule> {
+        #[cfg(test)]
+        let _legacy = crate::legacy_units::rules_call(
+            crate::legacy_units::Receiver::Rules(self),
+            "match_pipeline",
+            &crate::legacy_units::Call::Stages(stages),
+        );
         worst_wins(&self.pipeline_rules, PipelineRule::decision, |rule| {
             rule.matches(stages)
         })
@@ -8783,6 +8803,12 @@ impl Rules {
     /// order (issue #261); ties keep the first-declared rule.
     #[must_use]
     pub(crate) fn match_redirect_target(&self, target: &str) -> Option<&RedirectRule> {
+        #[cfg(test)]
+        let _legacy = crate::legacy_units::rules_call(
+            crate::legacy_units::Receiver::Rules(self),
+            "match_redirect_target",
+            &crate::legacy_units::Call::Target(target),
+        );
         worst_wins(&self.redirect_rules, RedirectRule::decision, |rule| {
             rule.matches(target)
         })
@@ -8798,6 +8824,12 @@ impl Rules {
         &self,
         target: &str,
     ) -> Option<&RedirectRule> {
+        #[cfg(test)]
+        let _legacy = crate::legacy_units::rules_call(
+            crate::legacy_units::Receiver::Rules(self),
+            "match_redirect_target_ascent_descent",
+            &crate::legacy_units::Call::Target(target),
+        );
         self.redirect_rules
             .iter()
             .find(|rule| rule.ascent_descent_plausible(target))
@@ -8805,6 +8837,12 @@ impl Rules {
 
     #[must_use]
     pub(crate) fn match_redirect_target_glob(&self, target: &str) -> Option<&RedirectRule> {
+        #[cfg(test)]
+        let _legacy = crate::legacy_units::rules_call(
+            crate::legacy_units::Receiver::Rules(self),
+            "match_redirect_target_glob",
+            &crate::legacy_units::Call::Target(target),
+        );
         self.redirect_rules
             .iter()
             .find(|rule| rule.glob_plausible(target))
@@ -8820,6 +8858,12 @@ impl Rules {
         &self,
         target: &str,
     ) -> Option<&RedirectRule> {
+        #[cfg(test)]
+        let _legacy = crate::legacy_units::rules_call(
+            crate::legacy_units::Receiver::Rules(self),
+            "match_redirect_target_dirstack_tilde",
+            &crate::legacy_units::Call::Target(target),
+        );
         self.redirect_rules
             .iter()
             .find(|rule| rule.dirstack_tilde_plausible(target))
@@ -8873,6 +8917,12 @@ impl Rules {
     /// [`Self::match_redirect_target`]; ties keep the first-declared rule.
     #[must_use]
     pub(crate) fn match_token(&self, candidates: &[String]) -> Option<&TokenRule> {
+        #[cfg(test)]
+        let _legacy = crate::legacy_units::rules_call(
+            crate::legacy_units::Receiver::Rules(self),
+            "match_token",
+            &crate::legacy_units::Call::Tokens(candidates),
+        );
         worst_wins(&self.token_rules, TokenRule::decision, |rule| {
             rule.matches(candidates)
         })
@@ -8915,6 +8965,12 @@ impl Rules {
         scope_argv: &[NormalizedWord],
         token: &str,
     ) -> Option<usize> {
+        #[cfg(test)]
+        let _legacy = crate::legacy_units::rules_call(
+            crate::legacy_units::Receiver::Rules(self),
+            "target_flag_glued_value_offset",
+            &crate::legacy_units::Call::ArgvToken(scope_argv, token),
+        );
         self.command_rules
             .iter()
             .chain(self.ask_rules.iter())
@@ -8933,6 +8989,12 @@ impl Rules {
         &self,
         argv: &[NormalizedWord],
     ) -> Option<&CommandRule> {
+        #[cfg(test)]
+        let _legacy = crate::legacy_units::rules_call(
+            crate::legacy_units::Receiver::Rules(self),
+            "match_command_except_target",
+            &crate::legacy_units::Call::Argv(argv),
+        );
         self.find_command_or_ask_rule(|rule| rule.matches_except_target(argv))
     }
 
@@ -8969,6 +9031,12 @@ impl Rules {
         &self,
         argv: &[NormalizedWord],
     ) -> Option<&CommandRule> {
+        #[cfg(test)]
+        let _legacy = crate::legacy_units::rules_call(
+            crate::legacy_units::Receiver::Rules(self),
+            "match_command_except_flags",
+            &crate::legacy_units::Call::Argv(argv),
+        );
         self.find_command_or_ask_rule(|rule| rule.matches_except_flags(argv))
     }
 
@@ -8982,11 +9050,23 @@ impl Rules {
         &self,
         argv: &[NormalizedWord],
     ) -> Option<&CommandRule> {
+        #[cfg(test)]
+        let _legacy = crate::legacy_units::rules_call(
+            crate::legacy_units::Receiver::Rules(self),
+            "match_command_ascent_descent",
+            &crate::legacy_units::Call::Argv(argv),
+        );
         self.find_command_or_ask_rule(|rule| rule.matches_ascent_descent_floor(argv))
     }
 
     #[must_use]
     pub(crate) fn match_command_glob(&self, argv: &[NormalizedWord]) -> Option<&CommandRule> {
+        #[cfg(test)]
+        let _legacy = crate::legacy_units::rules_call(
+            crate::legacy_units::Receiver::Rules(self),
+            "match_command_glob",
+            &crate::legacy_units::Call::Argv(argv),
+        );
         self.find_command_or_ask_rule(|rule| rule.matches_glob_floor(argv))
     }
 
@@ -9000,6 +9080,12 @@ impl Rules {
         &self,
         argv: &[NormalizedWord],
     ) -> Option<&CommandRule> {
+        #[cfg(test)]
+        let _legacy = crate::legacy_units::rules_call(
+            crate::legacy_units::Receiver::Rules(self),
+            "match_command_named_user_home",
+            &crate::legacy_units::Call::Argv(argv),
+        );
         self.find_command_or_ask_rule(|rule| rule.matches_named_user_home_floor(argv))
     }
 
@@ -9013,6 +9099,12 @@ impl Rules {
         &self,
         argv: &[NormalizedWord],
     ) -> Option<&CommandRule> {
+        #[cfg(test)]
+        let _legacy = crate::legacy_units::rules_call(
+            crate::legacy_units::Receiver::Rules(self),
+            "match_command_dirstack_tilde",
+            &crate::legacy_units::Call::Argv(argv),
+        );
         self.find_command_or_ask_rule(|rule| rule.matches_dirstack_tilde_floor(argv))
     }
 
@@ -9026,6 +9118,12 @@ impl Rules {
         &self,
         argv: &[NormalizedWord],
     ) -> Option<&CommandRule> {
+        #[cfg(test)]
+        let _legacy = crate::legacy_units::rules_call(
+            crate::legacy_units::Receiver::Rules(self),
+            "match_command_unknown_cwd",
+            &crate::legacy_units::Call::Argv(argv),
+        );
         self.find_command_or_ask_rule(|rule| rule.matches_unknown_cwd_floor(argv))
     }
 
@@ -9039,6 +9137,12 @@ impl Rules {
         &self,
         argv: &[NormalizedWord],
     ) -> Option<&CommandRule> {
+        #[cfg(test)]
+        let _legacy = crate::legacy_units::rules_call(
+            crate::legacy_units::Receiver::Rules(self),
+            "match_command_directory_equals_tilde",
+            &crate::legacy_units::Call::Argv(argv),
+        );
         self.find_command_or_ask_rule(|rule| rule.matches_directory_equals_tilde_floor(argv))
     }
 
@@ -9053,6 +9157,12 @@ impl Rules {
         &self,
         argv: &[NormalizedWord],
     ) -> Option<&CommandRule> {
+        #[cfg(test)]
+        let _legacy = crate::legacy_units::rules_call(
+            crate::legacy_units::Receiver::Rules(self),
+            "match_command_dirstack_equal_subst",
+            &crate::legacy_units::Call::Argv(argv),
+        );
         self.find_command_or_ask_rule(|rule| rule.matches_dirstack_equal_subst_floor(argv))
     }
 
@@ -9131,7 +9241,13 @@ impl Allowlist {
     }
 
     /// The first allowlist entry that matches `argv`, if any.
-    fn first_match(&self, argv: &[NormalizedWord]) -> Option<&CommandRule> {
+    pub(crate) fn first_match(&self, argv: &[NormalizedWord]) -> Option<&CommandRule> {
+        #[cfg(test)]
+        let _legacy = crate::legacy_units::rules_call(
+            crate::legacy_units::Receiver::Allowlist(self),
+            "allowlist_first_match",
+            &crate::legacy_units::Call::Argv(argv),
+        );
         self.entries.iter().find(|entry| entry.matches(argv))
     }
 
