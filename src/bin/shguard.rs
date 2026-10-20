@@ -1,9 +1,9 @@
 //! Composition root (`coding-guidelines/languages/rust.md`'s "binaries MUST
-//! stay thin"): loads the user policy once (`shguard::config::Policy::load`),
-//! reads Claude Code's PreToolUse stdin JSON, hands both to
+//! stay thin"): reads Claude Code's PreToolUse stdin JSON, loads the user
+//! policy once (`shguard::config::Policy::load`), hands both to
 //! [`shguard::adapter::handle_with_policy`], and writes the resulting
 //! `hookSpecificOutput` JSON to stdout. All decision logic lives in the
-//! library crate; this file only wires config -> stdin -> adapter -> stdout.
+//! library crate; this file only wires stdin -> config -> adapter -> stdout.
 //!
 //! Never fails *silently* open: every fallible step (config load, stdin
 //! read, JSON serialisation) is matched explicitly and falls back to the
@@ -130,11 +130,17 @@ const MAX_STDIN_BYTES: u64 = 10 * 1024 * 1024;
 /// fails closed. Deliberately separate from [`EVALUATION_TIMEOUT`]: the
 /// read is I/O the producer (Claude Code) paces, not evaluation work, so a
 /// contended writer must not consume the evaluation budget (issue #689),
-/// but a producer that never finishes must still not hang the hook. Not
-/// tuned against measurements: a real payload arrives in milliseconds, so
-/// this only needs to be far above any contended-host stall and below
-/// Claude Code's own hook timeout.
-const STDIN_READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// but a producer that never finishes must still not hang the hook.
+///
+/// Not 30s or more: the worst case is `STDIN_READ_TIMEOUT` +
+/// [`EVALUATION_TIMEOUT`] + [`TRIP_LOG_TIMEOUT`] (10s + 2s + 50ms, plus
+/// process start-up), and if Claude Code kills the hook first, empty stdout
+/// is treated as allow (fail-open), so a higher value only widens that
+/// window. Users must keep the hook `timeout` above that total. Not much
+/// lower either: a producer writing the hook JSON finishes in milliseconds,
+/// so 10s is well above any realistic contention stall, while a lower value
+/// risks spurious asks on a loaded machine. Not tuned against measurements.
+const STDIN_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Wall-clock budget given to one [`run`], measured from the end of its
 /// stdin read, before [`main`] gives up on it and fails closed (crash-fuzzer finding: a heredoc operator whose
@@ -450,8 +456,9 @@ fn resolve_first_result(
 
 /// Waits up to `timeout` for the worker to finish reading stdin. `false`
 /// only on a timeout; a worker that dropped its sender without signalling
-/// (a panic, which leaves its result in the channel) counts as finished so
-/// [`resolve_first_result`] picks that result up.
+/// (a panic that unwinds before the signal, which drops the sender) counts
+/// as finished so [`resolve_first_result`] picks up whatever the worker
+/// sends next, or sees it disconnect.
 fn stdin_read_finished(read_done_rx: &Receiver<()>, timeout: Duration) -> bool {
     !matches!(
         read_done_rx.recv_timeout(timeout),
@@ -461,7 +468,9 @@ fn stdin_read_finished(read_done_rx: &Receiver<()>, timeout: Duration) -> bool {
 
 /// The only caller of [`resolve_first_result`], invoked from [`main`]: applies
 /// [`MEMORY_LIMIT_BYTES`] and [`EVALUATION_TIMEOUT`] (or their debug-only
-/// test overrides, [`memory_limit_bytes`] / [`evaluation_timeout`]), then emits whatever it resolved to. On either
+/// test overrides, [`memory_limit_bytes`] / [`evaluation_timeout`]) once the
+/// stdin read has finished within [`STDIN_READ_TIMEOUT`] (a read timeout is
+/// itself a time trip), then emits whatever it resolved to. On either
 /// trip (or a worker disconnect), emits the fail-closed decision, makes a
 /// best-effort attempt to log it ([`log_trip_best_effort`], bounded by
 /// [`TRIP_LOG_TIMEOUT`]), and only then exits the process — see the module
@@ -1314,7 +1323,9 @@ fn run(
     // Config is still loaded before any command is evaluated — a broken
     // user config must fail closed before evaluation, not partway through.
     // Read first only so a slow stdin producer cannot eat the evaluation
-    // budget; a config failure still wins over any stdin outcome.
+    // budget; a config failure still wins over any stdin read error or
+    // oversize result, but not over a read that hits `STDIN_READ_TIMEOUT`,
+    // which `main` fails closed on before config load is reached.
     let policy = match shguard::config::Policy::load() {
         Ok(policy) => policy,
         Err(err) => {
@@ -1417,7 +1428,30 @@ fn emit(output: serde_json::Value) {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
-    use super::{Duration, FirstResult, parse_eval_timeout_override, resolve_first_result};
+    use super::{
+        Duration, FirstResult, parse_eval_timeout_override, resolve_first_result,
+        stdin_read_finished,
+    };
+
+    #[test]
+    fn stdin_read_finished_true_when_signal_sent() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(()).expect("receiver alive");
+        assert!(stdin_read_finished(&rx, Duration::from_millis(10)));
+    }
+
+    #[test]
+    fn stdin_read_finished_true_when_sender_dropped() {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        drop(tx);
+        assert!(stdin_read_finished(&rx, Duration::from_millis(10)));
+    }
+
+    #[test]
+    fn stdin_read_finished_false_while_sender_held() {
+        let (_tx, rx) = std::sync::mpsc::channel::<()>();
+        assert!(!stdin_read_finished(&rx, Duration::from_millis(10)));
+    }
 
     #[test]
     fn eval_timeout_override_accepts_only_a_bounded_positive_integer() {
