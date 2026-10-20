@@ -317,9 +317,14 @@ fn watchdog_trip_verdict_is_still_logged() {
     let reason = lines[0]["reason"]
         .as_str()
         .expect("reason should be a string");
+    const INNER_TIME: &str =
+        "shguard: evaluation exceeded its time budget; refusing to evaluate (fail-closed)";
+    const INNER_MEMORY_PREFIX: &str = "shguard: evaluation exceeded its memory budget (";
+    const INNER_MEMORY_SUFFIX: &str = " bytes RSS growth); refusing to evaluate (fail-closed)";
     assert!(
-        reason.contains("time budget") || reason.contains("memory budget"),
-        "expected a watchdog fail-closed reason to be logged, got: {reason}"
+        reason == INNER_TIME
+            || (reason.starts_with(INNER_MEMORY_PREFIX) && reason.ends_with(INNER_MEMORY_SUFFIX)),
+        "expected the library (inner) watchdog's time or memory fail-closed reason to be logged, got: {reason}"
     );
 }
 
@@ -340,6 +345,12 @@ fn watchdog_trip_verdict_is_still_logged() {
 /// budget to a few seconds (long enough for process start and config load).
 /// The only possible resolution is the outer time trip, so the assertion
 /// matches its reason exactly (the library one says plain "time budget").
+///
+/// The outer memory trip (`LimitKind::OuterMemory`) has no decision-log test,
+/// an accepted gap (issue #846): both outer arms share `log_trip_best_effort`
+/// and the time arm is pinned here, while a reliable memory-arm repro needs a
+/// test seam in the trip path (a 1 MB test memory limit trips on the first
+/// poll, before `EarlyInfo` is sent, so nothing is logged).
 #[cfg_attr(
     not(debug_assertions),
     ignore = "SHGUARD_TEST_HANG_AFTER_EARLY and SHGUARD_TEST_EVAL_TIMEOUT_MS are compiled out in release builds"
