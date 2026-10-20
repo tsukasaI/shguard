@@ -315,6 +315,25 @@ impl NormalizedWord {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn legacy_from_parts(
+        resolution: Resolution,
+        ifs_derived: bool,
+        single_word: bool,
+        literal_tail: Option<String>,
+        literal_head_tilde: bool,
+        literal_head: Option<String>,
+    ) -> Self {
+        Self {
+            resolution,
+            ifs_derived,
+            single_word,
+            literal_tail,
+            literal_head_tilde,
+            literal_head,
+        }
+    }
+
     /// Attaches the literal text after this unresolvable word's last
     /// unresolved piece. Production code only calls this from
     /// [`chunks_to_words`].

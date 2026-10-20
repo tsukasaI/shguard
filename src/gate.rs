@@ -572,11 +572,15 @@ pub(crate) fn analyze_with_policy_in_cwd(
     } else {
         CwdState::seed(payload_cwd)
     };
-    analyze_at_depth(
+    #[cfg_attr(not(test), allow(clippy::let_and_return))]
+    let verdict = analyze_at_depth(
         command,
         AnalysisCtx::new(rules, allowlist, &loop_budget),
         state,
-    )
+    );
+    #[cfg(test)]
+    crate::legacy_units::observe_gate(command, rules, allowlist, cwd, &verdict);
+    verdict
 }
 
 /// Whether `command` has a `{name}>` / `{name}<` redirection, which assigns

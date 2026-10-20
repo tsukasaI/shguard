@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Regenerates tests/golden/legacy_units.jsonl from the gate and rules unit
+# tests (docs/rfc-redesign.md, stage R0).
+#
+# Runs `cargo test --lib` over the `gate::` and `rules::` tests with
+# SHGUARD_LEGACY_CAPTURE set; src/legacy_units.rs then appends one
+# `<test name><TAB><row>` line per engine call a test makes. This script
+# sorts and dedupes those rows, adds an `excluded` row for every test that
+# made no capturable call (an internal-function test with no command or argv
+# input) and for every oversize input, and writes the corpus.
+#
+# Run it whenever a gate/rules unit test is added or its behaviour changes
+# on purpose: without capture, the same unit tests fail unless their inputs
+# are already in the corpus with the same result.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+export LC_ALL=C
+
+out=tests/golden/legacy_units.jsonl
+work=$(mktemp -d "${TMPDIR:-/tmp}/legacy-units.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+raw=$work/raw.tsv
+
+# The library embeds the corpus with include_str!, so the file must exist
+# for the capture build to compile.
+if [ ! -s "$out" ]; then
+  printf '{"kind":"excluded","test":"bootstrap","reason":"bootstrap"}\n' >"$out"
+fi
+
+: >"$raw"
+SHGUARD_LEGACY_CAPTURE="$raw" cargo test --lib -- gate:: rules::
+
+cargo test --lib -- --list gate:: rules:: |
+  grep -E '^(gate|rules)::.*: test$' |
+  sed 's/: test$//' |
+  sort -u >"$work/all-tests"
+
+tab=$(printf '\t')
+cut -f1 "$raw" | sort -u >"$work/covered-tests"
+comm -23 "$work/all-tests" "$work/covered-tests" >"$work/uncovered-tests"
+
+cut -f2- "$raw" | grep -v '^{"oversize":' >"$work/rows" || true
+
+{
+  cat "$work/rows"
+  while IFS= read -r name; do
+    printf '{"kind":"excluded","test":"%s","reason":"no gate or rules engine call with a command or argv input"}\n' "$name"
+  done <"$work/uncovered-tests"
+  grep -F "${tab}{\"oversize\":" "$raw" | sort -u |
+    while IFS="$tab" read -r name json; do
+      bytes=${json#\{\"oversize\":}
+      bytes=${bytes%\}}
+      printf '{"kind":"excluded","test":"%s","reason":"input of %s bytes exceeds the 4096-byte cap"}\n' "$name" "$bytes"
+    done
+} | sort -u >"$out"
+
+echo "wrote $out: $(wc -l <"$out" | tr -d ' ') rows"
+echo "gate rows:     $(grep -c '^{"kind":"gate"' "$out" || true)"
+echo "rules rows:    $(grep -c '^{"kind":"rules"' "$out" || true)"
+echo "excluded rows: $(grep -c '^{"kind":"excluded"' "$out" || true)"
+
+# A key that two tests recorded with different results shows up as a
+# duplicate-key failure here.
+cargo test --lib legacy_units::

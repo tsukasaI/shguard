@@ -12,6 +12,8 @@ mod decision_log;
 mod fs_canonicalizer;
 mod gate;
 mod knowledge;
+#[cfg(test)]
+mod legacy_units;
 pub mod normalize;
 mod parser;
 #[doc(hidden)]

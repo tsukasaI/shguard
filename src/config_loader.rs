@@ -357,6 +357,8 @@ impl Rules {
     /// malformed flag spec), or a duplicate rule id — fail-closed, never a
     /// silently-skipped rule.
     pub(crate) fn parse(toml: &str) -> Result<Self, RulesError> {
+        #[cfg(test)]
+        crate::legacy_units::note_rules_toml(toml);
         let dto: RulesFileDto = deserialize(toml)?;
         Self::from_spec(dto.into())
     }
@@ -383,6 +385,8 @@ impl Allowlist {
     /// [`Rules::parse`] (invalid TOML, a semantically invalid entry, or a
     /// duplicate id).
     pub(crate) fn parse(toml: &str) -> Result<Self, RulesError> {
+        #[cfg(test)]
+        crate::legacy_units::note_allowlist_toml(toml);
         let dto: AllowlistFileDto = deserialize(toml)?;
         Self::from_spec(dto.into())
     }
@@ -409,6 +413,8 @@ impl UserConfig {
     /// Returns [`RulesError`] for invalid TOML syntax, or any error
     /// [`UserConfig::from_spec`] reports.
     pub(crate) fn parse(toml: &str) -> Result<Self, RulesError> {
+        #[cfg(test)]
+        crate::legacy_units::note_user_config_toml(toml);
         let dto: UserConfigFileDto = deserialize(toml)?;
         Self::from_spec(dto.into())
     }

@@ -54,6 +54,10 @@ dbg_macro = "warn"
 todo = "warn"
 unimplemented = "warn"
 
+[[test]]
+name = "legacy_units"
+harness = false
+
 [dev-dependencies]
 assert_cmd = "2.2.2"
 tempfile = "3.27.0"
