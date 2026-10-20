@@ -3099,6 +3099,12 @@ impl FakeFsEntry {
     }
 }
 
+/// A named `fn` item, not a closure, so a test can recognise the default by
+/// address (`std::ptr::fn_addr_eq`).
+fn unavailable_canonicalize(_: &str) -> Result<ResolvedPath, ProbeError> {
+    Err(ProbeError::NotFound)
+}
+
 impl PathCanonicalizer {
     #[cfg(not(test))]
     pub(crate) fn new(canonicalize: CanonicalizeFn) -> Self {
@@ -3126,7 +3132,7 @@ impl PathCanonicalizer {
     /// filesystem twin probe never adds a spelling. It is also the stand-in
     /// for tests that must not touch the real filesystem.
     pub(crate) fn unavailable() -> Self {
-        Self::new(|_| Err(ProbeError::NotFound))
+        Self::new(unavailable_canonicalize)
     }
 
     fn canonicalize(self, path: &str) -> Result<ResolvedPath, ProbeError> {
@@ -8830,9 +8836,11 @@ impl Rules {
     /// `PathCanonicalizer` never takes part in equality, so the legacy_units
     /// recorder asks this to tell a wired-up filesystem double apart.
     #[cfg(test)]
-    #[allow(clippy::fn_to_numeric_cast)]
     pub(crate) fn legacy_has_default_canonicalizer(&self) -> bool {
-        self.path_canonicalizer.0 as usize == PathCanonicalizer::unavailable().0 as usize
+        std::ptr::fn_addr_eq(
+            self.path_canonicalizer.0,
+            unavailable_canonicalize as CanonicalizeFn,
+        )
     }
 
     /// The embedded/user-config [`CommandRule`] declared with id `id`, if
