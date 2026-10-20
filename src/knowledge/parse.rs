@@ -79,19 +79,26 @@ impl<'a> ParsedArgv<'a> {
 pub(crate) struct Unmodeled<'a> {
     command: &'static str,
     token: usize,
+    word: String,
     best_effort: ParsedArgv<'a>,
 }
 
 /// What an [`Unmodeled`] parse found, without the parse itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Finding {
     command: &'static str,
     token: usize,
+    word: String,
 }
 
 impl Finding {
     pub(crate) fn command(&self) -> &'static str {
         self.command
+    }
+
+    /// The first unmodelled option token as written.
+    pub(crate) fn word(&self) -> &str {
+        &self.word
     }
 
     /// Index of the first unmodelled option token among the parsed words.
@@ -106,6 +113,7 @@ impl<'a> Unmodeled<'a> {
         Finding {
             command: self.command,
             token: self.token,
+            word: self.word.clone(),
         }
     }
 
@@ -604,6 +612,10 @@ pub(crate) fn parse<'a>(
         Some(token) => Err(Unmodeled {
             command,
             token,
+            word: match argv[token].resolution() {
+                Resolution::Resolved(word) => word.clone(),
+                Resolution::Unresolvable(_) => String::new(),
+            },
             best_effort: parsed,
         }),
     }

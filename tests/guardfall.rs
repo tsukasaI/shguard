@@ -827,8 +827,8 @@ const TRANSPARENT_WRAPPER_CASES: &[(&str, Decision)] = &[
     ("coreutils rm -rf /", Decision::Block),
 ];
 
-/// Issue #54: `timeout`/`ionice`/`flock` joined `TRANSPARENT_WRAPPERS`, so
-/// a wrapped `rm -rf /` must reach the same rm rule a bare invocation does.
+/// Issue #54: `timeout`/`ionice`/`flock` joined the wrapper `CATALOG`
+/// (`src/knowledge/catalog.rs`), so a wrapped `rm -rf /` must reach the same rm rule a bare invocation does.
 #[test]
 fn guardfall_transparent_wrapper_cases() {
     let cases = TRANSPARENT_WRAPPER_CASES;
@@ -1385,7 +1385,7 @@ const EVAL_CASES: &[(&str, Decision)] = &[
     // `eval eval ...` -- nested eval must compose through the same
     // recursion-depth guard as everything else, not a second mechanism.
     ("eval eval rm -rf /", Decision::Block),
-    // `builtin`/`command` (issue #245's TRANSPARENT_WRAPPERS entries)
+    // `builtin`/`command` (issue #245's wrapper `CATALOG` entries)
     // must resolve through to `eval` and recurse identically.
     ("builtin eval rm -rf /", Decision::Block),
     ("command eval rm -rf /", Decision::Block),

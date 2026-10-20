@@ -4733,7 +4733,11 @@ fn scan_unmodeled_option_floor(argv: &[NormalizedWord]) -> Option<(Decision, Str
     if let Some(finding) = crate::rules::first_unmodeled_wrapper_option(argv) {
         return Some((
             Decision::Ask,
-            format!("unmodelled option for `{}`", finding.command()),
+            format!(
+                "unmodelled option `{}` for `{}`",
+                finding.word(),
+                finding.command()
+            ),
         ));
     }
     if crate::rules::placeholder_in_command_slot(argv, &[]) || placeholder_in_scripts(argv, &[], 0)
@@ -18235,6 +18239,39 @@ mod tests {
     }
 
     #[test]
+    fn sudo_and_doas_shell_switches_run_their_operands_as_a_shell_string() {
+        // Issue #723 (B2): `sudo -s/-i` run the operands through the target
+        // shell, so a single quoted operand is a shell string, not a
+        // command named `rm -rf /`.
+        for command in [
+            r#"sudo -s "rm -rf /""#,
+            r#"sudo -i "rm -rf /""#,
+            r#"sudo --shell "rm -rf /""#,
+            r#"sudo --login "rm -rf /""#,
+            r#"sudo -u root -s "rm -rf /""#,
+            "sudo -s rm -rf /",
+            "sudo -i rm -rf /",
+            r#"doas -s "rm -rf /""#,
+            "doas -s rm -rf /",
+        ] {
+            assert_decision(command, Decision::Block);
+        }
+    }
+
+    #[test]
+    fn sudo_shell_switches_with_benign_operands_stay_at_the_escalation_floor() {
+        for command in [
+            "sudo -s",
+            "sudo -i",
+            "sudo -i ls",
+            "sudo -s ls -la",
+            "doas -s ls",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+    }
+
+    #[test]
     fn time_and_exec_wrappers_do_not_hide_the_wrapped_command() {
         // Issue #638: brush-parser strips only the leading reserved word
         // `time`, so every other spelling reaches the gate as a command.
@@ -18274,6 +18311,23 @@ mod tests {
             "numactl -C 0 rm -rf /",
         ] {
             assert_decision(command, Decision::Block);
+        }
+    }
+
+    #[test]
+    fn wrapper_shapes_whose_grammar_reads_no_wrapped_command_stay_allow() {
+        // Issue #723 (A8), pinned so a grammar change cannot flip them
+        // unnoticed. `firejail --profile x` and `prlimit --nofile 10` take
+        // their value as a separate word that the catalog reads as the
+        // wrapped command (`x`, `10`), so the `rm` is only that command's
+        // argument. `chrt -m` prints the scheduler limits and exits, and
+        // `rm` is consumed as its priority operand: nothing runs.
+        for command in [
+            "firejail --profile x rm -rf /",
+            "prlimit --nofile 10 rm -rf /",
+            "chrt -m rm -rf /",
+        ] {
+            assert_decision(command, Decision::Allow);
         }
     }
 
@@ -18645,12 +18699,19 @@ mod tests {
         assert_eq!(verdict.decision(), Decision::Ask);
         assert_eq!(
             verdict.reason().map(super::Reason::as_str),
-            Some("unmodelled option for `nice`")
+            Some("unmodelled option `--bogus` for `nice`")
         );
         let chained = decide("env nice --bogus ls");
         assert_eq!(
             chained.reason().map(super::Reason::as_str),
-            Some("unmodelled option for `nice`")
+            Some("unmodelled option `--bogus` for `nice`")
+        );
+        let wrapped_block = decide("nice --bogus rm -rf /");
+        assert_eq!(wrapped_block.decision(), Decision::Block);
+        let floor = decide("nice -Z ls");
+        assert_eq!(
+            floor.reason().map(super::Reason::as_str),
+            Some("unmodelled option `-Z` for `nice`")
         );
     }
 

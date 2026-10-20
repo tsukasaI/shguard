@@ -6271,7 +6271,13 @@ pub(crate) fn chain_script_slots(stage: &[NormalizedWord]) -> Vec<ScriptSlot> {
         }
         if let Some(exec_flag) = hop.wrapper.operands_as_shell_script_exec_flag() {
             collect_operands_shell_slot(&hop, Some(exec_flag), &mut slots);
-        } else if hop.wrapper.joins_operands_as_shell_script() {
+        } else if hop.wrapper.joins_operands_as_shell_script()
+            || hop
+                .wrapper
+                .operands_as_shell_script_switches()
+                .iter()
+                .any(|switch| hop.parsed.options_named(*switch).next().is_some())
+        {
             collect_operands_shell_slot(&hop, None, &mut slots);
         }
         if let Some(flag) = hop.wrapper.piped_output_option() {
