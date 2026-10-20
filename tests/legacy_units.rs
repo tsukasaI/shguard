@@ -9,7 +9,7 @@
 //!
 //! `harness = false` so the summary line shows in a plain `cargo test`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::process::ExitCode;
 
 use serde_json::Value;
@@ -21,6 +21,32 @@ struct Corpus {
     gate_internal: usize,
     rules: usize,
     excluded: usize,
+    config_ids: BTreeSet<String>,
+}
+
+fn str_field_of<'a>(fields: &'a serde_json::Map<String, Value>, name: &str) -> Option<&'a str> {
+    fields.get(name).and_then(Value::as_str)
+}
+
+/// Header rows precede the rows that cite them, so an id not yet seen is
+/// unknown.
+fn check_config_refs(
+    fields: &serde_json::Map<String, Value>,
+    known: &BTreeSet<String>,
+) -> Result<(), String> {
+    for source in ["rules", "allowlist"] {
+        let id = fields
+            .get("config")
+            .and_then(|config| config.get(source))
+            .and_then(|source| source.get("parse_ref"));
+        if let Some(id) = id {
+            let id = id.as_str().ok_or("parse_ref is not a string")?;
+            if !known.contains(id) {
+                return Err(format!("unknown config id {id:?}"));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn is_unreplayable(config: &Value) -> bool {
@@ -39,6 +65,7 @@ fn load(text: &str) -> Result<Corpus, String> {
         gate_internal: 0,
         rules: 0,
         excluded: 0,
+        config_ids: BTreeSet::new(),
     };
     for (index, line) in text.lines().enumerate() {
         let number = index + 1;
@@ -52,6 +79,19 @@ fn load(text: &str) -> Result<Corpus, String> {
             .and_then(Value::as_str)
             .ok_or_else(|| format!("legacy_units.jsonl line {number}: missing kind"))?
             .to_string();
+        if kind == "config" {
+            let id = str_field_of(&fields, "id")
+                .ok_or_else(|| format!("line {number}: config row without id"))?;
+            if str_field_of(&fields, "toml").is_none() {
+                return Err(format!("line {number}: config row without toml"));
+            }
+            if !corpus.config_ids.insert(id.to_string()) {
+                return Err(format!("line {number}: duplicate config id {id:?}"));
+            }
+            continue;
+        }
+        check_config_refs(&fields, &corpus.config_ids)
+            .map_err(|err| format!("line {number}: {err}"))?;
         let expect = fields.remove("expect");
         let reason = fields.get("reason").cloned();
         let mut identity = fields.clone();
@@ -167,6 +207,12 @@ fn loader_rejects_damage() -> Result<(), String> {
         ("empty file", String::new()),
         ("malformed line", format!("{row}not json\n")),
         ("duplicate key", format!("{row}{row}")),
+        (
+            "config reference to an unknown id",
+            format!(
+                "{row}{{\"kind\":\"gate\",\"config\":{{\"rules\":{{\"parse_ref\":\"nope\"}}}},\"command\":\"ls\",\"expect\":{{}}}}\n"
+            ),
+        ),
     ];
     for (what, text) in damaged {
         if load(&text).is_ok() {

@@ -44,8 +44,53 @@ pub(crate) enum Source {
     #[default]
     Embedded,
     Parse(String),
+    /// The embedded blocklist text followed by this suffix, parsed.
+    EmbeddedPlus(String),
+    /// On-disk form of `Parse`: the id of a `config` header row. `parse_corpus`
+    /// resolves it back to `Parse`, so it never survives loading.
+    ParseRef(String),
     UserConfig(String),
     Unreplayable(String),
+}
+
+impl Source {
+    /// A parsed text that extends the embedded blocklist is stored as the
+    /// suffix alone: each such text would otherwise repeat ~130 KB.
+    fn from_parsed_text(text: &str) -> Self {
+        match text.strip_prefix(crate::config_loader::EMBEDDED_BLOCKLIST) {
+            Some(suffix) if !suffix.is_empty() => Self::EmbeddedPlus(suffix.to_string()),
+            _ => Self::Parse(text.to_string()),
+        }
+    }
+}
+
+fn embedded_plus_text(suffix: &str) -> String {
+    format!("{}{suffix}", crate::config_loader::EMBEDDED_BLOCKLIST)
+}
+
+/// FNV-1a over the text, not `DefaultHasher`, whose output may change between
+/// Rust releases and would reshuffle every id on regeneration.
+fn config_id(text: &str) -> String {
+    let hash = text.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    });
+    format!("{hash:016x}")
+}
+
+#[derive(Serialize)]
+struct ConfigRow<'a> {
+    kind: &'static str,
+    id: &'a str,
+    toml: &'a str,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfigRowOwned {
+    #[serde(rename = "kind")]
+    _kind: String,
+    id: String,
+    toml: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
@@ -60,6 +105,44 @@ pub(crate) struct Config {
 impl Config {
     fn is_embedded(&self) -> bool {
         *self == Self::default()
+    }
+
+    fn sources_mut(&mut self) -> [&mut Source; 2] {
+        [&mut self.rules, &mut self.allowlist]
+    }
+
+    /// The disk form: each `Parse` text becomes a reference to a `config`
+    /// header row, returned alongside so the caller can write it.
+    fn externalize(&self) -> (Self, Vec<String>) {
+        let mut config = self.clone();
+        let mut headers = Vec::new();
+        for source in config.sources_mut() {
+            if let Source::Parse(text) = source {
+                let id = config_id(text);
+                headers.push(
+                    serde_json::to_string(&ConfigRow {
+                        kind: "config",
+                        id: &id,
+                        toml: text,
+                    })
+                    .unwrap(),
+                );
+                *source = Source::ParseRef(id);
+            }
+        }
+        (config, headers)
+    }
+
+    fn resolve(&mut self, texts: &HashMap<String, String>) -> Result<(), String> {
+        for source in self.sources_mut() {
+            if let Source::ParseRef(id) = source {
+                let text = texts
+                    .get(id.as_str())
+                    .ok_or_else(|| format!("unknown config id {id:?}"))?;
+                *source = Source::Parse(text.clone());
+            }
+        }
+        Ok(())
     }
 
     /// An unreplayable config names no rule set, so two different rule sets
@@ -184,10 +267,29 @@ impl Row {
 /// no key may repeat, and an empty corpus is an error.
 pub(crate) fn parse_corpus(text: &str) -> Result<HashMap<String, Row>, String> {
     let mut rows = HashMap::new();
+    let mut configs: HashMap<String, String> = HashMap::new();
     for (index, line) in text.lines().enumerate() {
         let number = index + 1;
-        let row: Row = serde_json::from_str(line)
-            .map_err(|err| format!("legacy_units.jsonl line {number}: {err}"))?;
+        let at = |err: String| format!("legacy_units.jsonl line {number}: {err}");
+        let value: Value = serde_json::from_str(line).map_err(|err| at(err.to_string()))?;
+        if value.get("kind").and_then(Value::as_str) == Some("config") {
+            let header: ConfigRowOwned =
+                serde_json::from_value(value).map_err(|err| at(err.to_string()))?;
+            if header.id != config_id(&header.toml) {
+                return Err(at(format!(
+                    "config id {} is not the id of its toml",
+                    header.id
+                )));
+            }
+            if configs.insert(header.id.clone(), header.toml).is_some() {
+                return Err(at(format!("duplicate config id {}", header.id)));
+            }
+            continue;
+        }
+        let mut row: Row = serde_json::from_value(value).map_err(|err| at(err.to_string()))?;
+        if let Row::Gate { config, .. } | Row::Rules { config, .. } = &mut row {
+            config.resolve(&configs).map_err(at)?;
+        }
         if let Some(previous) = rows.insert(row.key(), row) {
             return Err(format!(
                 "legacy_units.jsonl line {number}: duplicate key {}",
@@ -364,7 +466,7 @@ fn identify(rules: Option<&Rules>, allowlist: Option<&Allowlist>) -> Config {
                 .0
                 .iter()
                 .find(|t| Rules::parse(t).is_ok_and(|candidate| candidate == *rules))
-                .map(|t| Source::Parse(t.clone()));
+                .map(|t| Source::from_parsed_text(t));
             let user = || {
                 texts.2.iter().find_map(|t| {
                     let (candidate, allow) = merged(t)?;
@@ -390,7 +492,7 @@ fn identify(rules: Option<&Rules>, allowlist: Option<&Allowlist>) -> Config {
                     .1
                     .iter()
                     .find(|t| Allowlist::parse(t).is_ok_and(|candidate| candidate == *allowlist))
-                    .map(|t| Source::Parse(t.clone()))
+                    .map(|t| Source::from_parsed_text(t))
             })
             .unwrap_or_else(|| Source::Unreplayable(UNREPLAYABLE_CONFIG.to_string())),
     };
@@ -407,6 +509,8 @@ fn build(config: &Config) -> Option<(Rules, Allowlist)> {
     let (rules, coupled) = match &config.rules {
         Source::Embedded => (embedded_rules.clone(), None),
         Source::Parse(text) => (Rules::parse(text).ok()?, None),
+        Source::EmbeddedPlus(suffix) => (Rules::parse(&embedded_plus_text(suffix)).ok()?, None),
+        Source::ParseRef(id) => panic!("config reference {id:?} was not resolved by parse_corpus"),
         Source::UserConfig(text) => {
             let (rules, allowlist) = merged(text)?;
             (rules, Some((text.clone(), allowlist)))
@@ -416,6 +520,8 @@ fn build(config: &Config) -> Option<(Rules, Allowlist)> {
     let allowlist = match &config.allowlist {
         Source::Embedded => embedded_allowlist.clone(),
         Source::Parse(text) => Allowlist::parse(text).ok()?,
+        Source::EmbeddedPlus(suffix) => Allowlist::parse(&embedded_plus_text(suffix)).ok()?,
+        Source::ParseRef(id) => panic!("config reference {id:?} was not resolved by parse_corpus"),
         Source::UserConfig(text) => match coupled {
             Some((coupled_text, allowlist)) if coupled_text == *text => allowlist,
             _ => merged(text)?.1,
@@ -464,10 +570,19 @@ fn append_capture(file: &Mutex<std::fs::File>, line: &str) {
 }
 
 fn record(file: &Mutex<std::fs::File>, test: &str, row: &Row) {
-    append_capture(
-        file,
-        &format!("{test}\t{}\n", serde_json::to_string(row).unwrap()),
-    );
+    let mut row = row.clone();
+    let mut lines = Vec::new();
+    if let Row::Gate { config, .. } | Row::Rules { config, .. } = &mut row {
+        let (external, headers) = config.externalize();
+        *config = external;
+        lines.extend(headers);
+    }
+    lines.push(serde_json::to_string(&row).unwrap());
+    let text: String = lines
+        .iter()
+        .map(|line| format!("{test}\t{line}\n"))
+        .collect();
+    append_capture(file, &text);
 }
 
 fn record_oversize(file: &Mutex<std::fs::File>, test: &str, bytes: usize) {
@@ -856,6 +971,58 @@ mod tests {
         assert!(
             parse_corpus("{\"kind\":\"excluded\",\"test\":\"a\",\"reason\":\"b\",\"x\":1}\n")
                 .is_err()
+        );
+    }
+
+    fn gate_line(config: &str) -> String {
+        format!(
+            "{{\"kind\":\"gate\",\"config\":{config},\"command\":\"ls\",\"expect\":{{\"decision\":\"allow\",\"reason\":null,\"rule\":null,\"deny_message\":null,\"suppressed_by\":null}}}}\n"
+        )
+    }
+
+    #[test]
+    fn unknown_config_id_is_rejected() {
+        let line = gate_line("{\"rules\":{\"parse_ref\":\"0000000000000000\"}}");
+        let err = parse_corpus(&line).unwrap_err();
+        assert!(err.contains("unknown config id"), "{err}");
+    }
+
+    #[test]
+    fn config_header_resolves_references() {
+        let toml = "# x\n";
+        let id = config_id(toml);
+        let header = serde_json::to_string(&ConfigRow {
+            kind: "config",
+            id: &id,
+            toml,
+        })
+        .unwrap();
+        let line = gate_line(&format!("{{\"rules\":{{\"parse_ref\":\"{id}\"}}}}"));
+        let rows = parse_corpus(&format!("{header}\n{line}")).unwrap();
+        let [Row::Gate { config, .. }] = rows.values().collect::<Vec<_>>()[..] else {
+            panic!("expected one gate row");
+        };
+        assert_eq!(config.rules, Source::Parse(toml.to_string()));
+    }
+
+    #[test]
+    fn config_header_with_wrong_id_is_rejected() {
+        let err = parse_corpus("{\"kind\":\"config\",\"id\":\"0\",\"toml\":\"a\"}\n").unwrap_err();
+        assert!(err.contains("not the id"), "{err}");
+    }
+
+    #[test]
+    fn embedded_plus_rebuilds_the_exact_text() {
+        let embedded = crate::config_loader::EMBEDDED_BLOCKLIST;
+        let text = format!("{embedded}\n# suffix\n");
+        assert_eq!(
+            Source::from_parsed_text(&text),
+            Source::EmbeddedPlus("\n# suffix\n".to_string())
+        );
+        assert_eq!(embedded_plus_text("\n# suffix\n"), text);
+        assert_eq!(
+            Source::from_parsed_text("# other\n"),
+            Source::Parse("# other\n".to_string())
         );
     }
 
