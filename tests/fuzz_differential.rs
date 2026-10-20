@@ -128,14 +128,20 @@
 //!
 //! # Bash version
 //!
-//! macOS ships bash 3.2; CI (`ubuntu-latest`) runs bash 5.x. The specific
-//! combinators exercised here (ANSI-C quoting, `$IFS` splitting, brace
+//! macOS ships bash 3.2; CI (`ubuntu-latest`) runs bash 5.x. The argv
+//! comparison's combinators (ANSI-C quoting, `$IFS` splitting, brace
 //! alternation, tilde forms, variable indirection) are stable since bash
-//! 3.0, so this is a diagnostic, not a blocker: [`find_real_bash`] prefers
+//! 3.0, so there the version is a diagnostic: [`find_real_bash`] prefers
 //! whatever `bash` a contributor's `PATH` resolves first (typically a
 //! Homebrew-installed newer bash ahead of `/bin/bash` on macOS), and the
 //! resolved version string is printed as part of the test's diagnostic
 //! output and included in the structured divergence report.
+//!
+//! The execution oracle is stricter: its xtrace is written to
+//! `BASH_XTRACEFD`, which needs bash >= 4.1. On an older bash the trace
+//! stays empty and the oracle would silently degrade to the shim log alone,
+//! so `xtrace_oracle_is_supported_by_this_bash` and the sweep's
+//! `trace_observed > 0` assertion fail loudly instead.
 
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -826,6 +832,8 @@ impl WholeRun {
     /// shim invocation is matched against one not-yet-consumed trace entry
     /// and only appended when the trace has no equal argv (the candidate
     /// turned xtrace off, or the command ran inside something untraced).
+    /// Matching is on exact argv: a launcher-prefixed trace entry
+    /// (`exec rm ...`) and its shim twin (`rm ...`) differ, so both are kept.
     fn observed(&self) -> Vec<Vec<String>> {
         let mut merged = self.trace.clone();
         let mut matched = vec![false; self.trace.len()];
@@ -845,9 +853,10 @@ impl WholeRun {
 }
 
 /// Per-run marker that opens every trace record after the depth characters:
-/// `SHGXT<nonce>` then a unit separator. The nonce is unguessable to a
-/// candidate, so command output or a hand-written `>&200` line cannot pass
-/// for a record.
+/// `SHGXT<nonce>` then a unit separator. The nonce keeps stray output or a
+/// stale file from being mistaken for a record. A candidate can read `$PS4`,
+/// so it is not a boundary against a hostile candidate (the generator never
+/// emits one).
 fn next_xtrace_marker() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = std::time::SystemTime::now()
@@ -987,6 +996,39 @@ fn tokenize_xtrace_body(body: &str) -> Vec<String> {
     words
 }
 
+/// Whether `body` ends inside a `'...'` or `$'...'` quote, mirroring the
+/// quoting [`tokenize_xtrace_body`] undoes.
+fn has_unterminated_quote(body: &str) -> bool {
+    let mut chars = body.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                chars.next();
+            }
+            '\'' => {
+                if !chars.by_ref().any(|q| q == '\'') {
+                    return true;
+                }
+            }
+            '$' if chars.peek() == Some(&'\'') => {
+                chars.next();
+                loop {
+                    match chars.next() {
+                        None => return true,
+                        Some('\\') => {
+                            chars.next();
+                        }
+                        Some('\'') => break,
+                        Some(_) => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Words xtrace prints for compound-command bookkeeping rather than for a
 /// command that ran.
 const XTRACE_PSEUDO_COMMANDS: &[&str] = &["for", "select", "case", "((", "[["];
@@ -1005,9 +1047,10 @@ fn is_assignment_word(word: &str) -> bool {
 
 /// Parses an xtrace file into the simple commands it records, one argv each.
 /// A record starts at a line of one or more [`XTRACE_DEPTH_CHAR`] followed by
-/// `marker`; following lines that do not start a record continue it (bash
-/// 3.2 prints a newline inside quotes raw). Lines before the first record,
-/// and records with the wrong marker, are ignored. Leading `NAME=value`
+/// `marker`. A following line that does not start a record continues it only
+/// while the open record has an unterminated `'` / `$'` quote (bash 4.1-4.3
+/// print a newline inside quotes raw); otherwise it is dropped. Lines before
+/// the first record, and records with the wrong marker, are ignored. Leading `NAME=value`
 /// words are dropped (`x=1 rm` runs `rm`); a record that is only
 /// assignments or a [`XTRACE_PSEUDO_COMMANDS`] word yields nothing.
 fn parse_xtrace(trace: &str, marker: &str) -> Vec<Vec<String>> {
@@ -1033,7 +1076,9 @@ fn parse_xtrace(trace: &str, marker: &str) -> Vec<Vec<String>> {
         if starts_record {
             finish(body.take());
             body = Some(depth_stripped[marker.len()..].to_string());
-        } else if let Some(open) = body.as_mut() {
+        } else if let Some(open) = body.as_mut()
+            && has_unterminated_quote(open)
+        {
             open.push('\n');
             open.push_str(line);
         }
@@ -1287,6 +1332,24 @@ fn xtrace_parser_never_starts_a_command_from_a_forged_line() {
 }
 
 #[test]
+fn xtrace_parser_drops_unmarked_lines_after_a_complete_record() {
+    let marker = "SHGXTreal\u{1f}";
+    // A candidate-set `PS4=x` makes bash print unmarked lines; none of them
+    // may be glued onto the preceding, fully quoted record.
+    let trace = [
+        xtrace_record(1, marker, "echo 'a b'"),
+        "x rm -rf /\n".to_string(),
+        "xmkfs /dev/sda1\n".to_string(),
+        xtrace_record(1, marker, "true"),
+    ]
+    .concat();
+    assert_eq!(
+        parse_xtrace(&trace, marker),
+        vec![strings(&["echo", "a b"]), strings(&["true"])]
+    );
+}
+
+#[test]
 fn xtrace_parser_returns_nothing_for_an_empty_trace() {
     let marker = "SHGXTtest\u{1f}";
     assert!(parse_xtrace("", marker).is_empty());
@@ -1412,9 +1475,9 @@ fn xtrace_oracle_round_trips_awkward_arguments_through_real_bash() {
 #[test]
 fn xtrace_oracle_detects_destructive_command_reached_only_through_eval() {
     let sandbox = Sandbox::new();
-    // The name is assembled at run time and is not a SHIM_COMMANDS entry,
-    // so no PATH shim ever sees it (`command not found` after eval expands
-    // it). Only the xtrace records it.
+    // The name is assembled at run time and `mkfs.ext4` is unshimmed, so no
+    // PATH shim ever sees it (`command not found` after eval expands it).
+    // The `eval` record in the xtrace is the builtin evidence.
     let text = "a=mk; b=fs.ext4; eval \"$a$b /dev/sda1\"";
     let run = sandbox.run_whole(text).expect("candidate should run");
 
@@ -1431,17 +1494,31 @@ fn xtrace_oracle_detects_destructive_command_reached_only_through_eval() {
         run.trace
     );
 
-    let destructive =
-        |argv: &Vec<String>| shguard::analyze(&render_command(argv)).decision() != Decision::Allow;
+    let shim_only = WholeRun {
+        shim: run.shim.clone(),
+        trace: vec![],
+    };
     assert!(
-        run.shim.is_empty() && !run.shim.iter().any(destructive),
+        disallowed_executions(&shim_only).is_empty(),
         "the old shim-only oracle is blind to this candidate: {:?}",
         run.shim
     );
     assert!(
-        run.observed().iter().any(destructive),
+        !disallowed_executions(&run).is_empty(),
         "the xtrace oracle must see a command shguard does not allow: {:?}",
         run.observed()
+    );
+}
+
+#[test]
+fn xtrace_oracle_is_supported_by_this_bash() {
+    let sandbox = Sandbox::new();
+    let run = sandbox.run_whole("true").expect("candidate should run");
+    assert!(
+        !run.trace.is_empty(),
+        "the xtrace is empty for `true` under {} -- BASH_XTRACEFD needs bash >= 4.1; \
+         the execution oracle would silently degrade to the shim log alone",
+        sandbox.bash_version_line()
     );
 }
 
@@ -1876,7 +1953,10 @@ struct ExecutionViolation {
 
 enum WholeOutcome {
     Skipped,
-    Consistent { dangerous_executed: u64 },
+    Consistent {
+        dangerous_executed: u64,
+        trace_observed: u64,
+    },
     Violation(ExecutionViolation),
 }
 
@@ -1887,17 +1967,21 @@ fn render_command(argv: &[String]) -> String {
         .join(" ")
 }
 
+/// Rendered commands from `run`'s combined view that shguard does not allow.
+fn disallowed_executions(run: &WholeRun) -> Vec<String> {
+    run.observed()
+        .iter()
+        .map(|argv| render_command(argv))
+        .filter(|command| shguard::analyze(command).decision() != Decision::Allow)
+        .collect()
+}
+
 fn check_whole_candidate(sandbox: &Sandbox, text: &str) -> WholeOutcome {
     let decision = shguard::analyze(text).decision();
     let Some(run) = sandbox.run_whole(text) else {
         return WholeOutcome::Skipped;
     };
-    let executed: Vec<String> = run
-        .observed()
-        .iter()
-        .map(|argv| render_command(argv))
-        .filter(|command| shguard::analyze(command).decision() != Decision::Allow)
-        .collect();
+    let executed = disallowed_executions(&run);
     if decision == Decision::Allow && !executed.is_empty() {
         return WholeOutcome::Violation(ExecutionViolation {
             candidate: text.to_string(),
@@ -1906,6 +1990,7 @@ fn check_whole_candidate(sandbox: &Sandbox, text: &str) -> WholeOutcome {
     }
     WholeOutcome::Consistent {
         dangerous_executed: executed.len() as u64,
+        trace_observed: run.trace.len() as u64,
     }
 }
 
@@ -2511,6 +2596,7 @@ fn differential_fuzz_shguard_vs_bash_argv() {
     let mut whole_checked: u64 = 0;
     let mut skipped_whole: u64 = 0;
     let mut dangerous_executed: u64 = 0;
+    let mut trace_observed: u64 = 0;
     let mut violations: Vec<ExecutionViolation> = Vec::new();
 
     let mut candidates: Vec<Candidate>;
@@ -2545,9 +2631,11 @@ fn differential_fuzz_shguard_vs_bash_argv() {
                     WholeOutcome::Skipped => skipped_whole += 1,
                     WholeOutcome::Consistent {
                         dangerous_executed: n,
+                        trace_observed: t,
                     } => {
                         whole_checked += 1;
                         dangerous_executed += n;
+                        trace_observed += t;
                     }
                     WholeOutcome::Violation(violation) => {
                         whole_checked += 1;
@@ -2647,6 +2735,12 @@ fn differential_fuzz_shguard_vs_bash_argv() {
             dangerous_executed > 0,
             "no whole candidate executed a command shguard flags -- the execution oracle \
              is not observing anything, check the shim log wiring"
+        );
+        assert!(
+            trace_observed > 0,
+            "no whole candidate produced an xtrace entry -- BASH_XTRACEFD needs bash >= 4.1 \
+             (running {}); the oracle would be shim-only",
+            sandbox.bash_version_line()
         );
     }
     // Always fails loud, regardless of RootCause: an Allow-direction
