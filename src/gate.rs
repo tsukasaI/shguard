@@ -18648,10 +18648,13 @@ mod tests {
 
     #[test]
     fn sudo_and_doas_shell_switches_run_their_operands_as_a_shell_string() {
-        // Issue #723 (B2): `sudo -s/-i` run the operands through the target
-        // shell, so a single quoted operand is a shell string, not a
-        // command named `rm -rf /`.
+        // Issue #723 (B2): `sudo -s/-i` backslash-escape metacharacters in
+        // the joined `-c` string but leave `$` alone, so `$IFS`/`$VAR`
+        // expansion is the real vector. The joined string is recursed as an
+        // over-approximation. `doas -s` rejects a command outright and is
+        // kept for symmetry.
         for command in [
+            "sudo -s 'rm$IFS-rf$IFS/'",
             r#"sudo -s "rm -rf /""#,
             r#"sudo -i "rm -rf /""#,
             r#"sudo --shell "rm -rf /""#,

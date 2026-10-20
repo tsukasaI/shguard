@@ -148,9 +148,12 @@ pub(crate) enum Slot {
     /// The operands, joined, are always run through a shell (`ssh host CMD`,
     /// `tmux new-session CMD`).
     OperandsJoinedShellScript,
-    /// The operands, joined, run through the target shell when any of these
-    /// switches is present (`sudo -s`/`-i`, `doas -s`); without one, the
-    /// first operand is the command.
+    /// The operands, joined, are recursed as a shell string when any of
+    /// these switches is present (`sudo -s`/`-i`, `doas -s`); without one,
+    /// the first operand is the command. An over-approximation: sudo
+    /// backslash-escapes metacharacters in the joined string but leaves `$`
+    /// alone, so `$IFS`/`$VAR` expansion is the real vector, and `doas -s`
+    /// rejects a command outright (kept for symmetry).
     OperandsAsShellScriptWith(&'static [(char, &'static str)]),
     /// The command only wraps another when its first operands spell one of
     /// these word sequences (`poetry run`, `ip netns exec`); anything else
