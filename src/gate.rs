@@ -19133,7 +19133,7 @@ mod tests {
             escaped.reason().map(super::Reason::as_str),
             Some(r#"unmodelled option "--\u{1b}[31m\n" for `nice`"#)
         );
-        let long = format!("--{}", "a".repeat(63));
+        let long = format!("--{}", "a".repeat(62));
         let truncated = decide(&format!("nice {long}a ls"));
         assert_eq!(
             truncated.reason().map(super::Reason::as_str),
