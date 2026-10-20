@@ -4760,8 +4760,8 @@ fn scan_unmodeled_option_floor(argv: &[NormalizedWord]) -> Option<(Decision, Str
         return Some((
             Decision::Ask,
             format!(
-                "unmodelled option `{}` for `{}`",
-                finding.word(),
+                "unmodelled option {:?} for `{}`",
+                finding.word().chars().take(64).collect::<String>(),
                 finding.command()
             ),
         ));
@@ -19107,19 +19107,24 @@ mod tests {
         assert_eq!(verdict.decision(), Decision::Ask);
         assert_eq!(
             verdict.reason().map(super::Reason::as_str),
-            Some("unmodelled option `--bogus` for `nice`")
+            Some(r#"unmodelled option "--bogus" for `nice`"#)
         );
         let chained = decide("env nice --bogus ls");
         assert_eq!(
             chained.reason().map(super::Reason::as_str),
-            Some("unmodelled option `--bogus` for `nice`")
+            Some(r#"unmodelled option "--bogus" for `nice`"#)
         );
         let wrapped_block = decide("nice --bogus rm -rf /");
         assert_eq!(wrapped_block.decision(), Decision::Block);
         let floor = decide("nice -Z ls");
         assert_eq!(
             floor.reason().map(super::Reason::as_str),
-            Some("unmodelled option `-Z` for `nice`")
+            Some(r#"unmodelled option "-Z" for `nice`"#)
+        );
+        let escaped = decide("nice $'--\\e[31m\\n' ls");
+        assert_eq!(
+            escaped.reason().map(super::Reason::as_str),
+            Some(r#"unmodelled option "--\u{1b}[31m\n" for `nice`"#)
         );
     }
 
