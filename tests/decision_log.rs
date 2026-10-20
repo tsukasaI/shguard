@@ -15,7 +15,6 @@
 use std::fs;
 use std::path::PathBuf;
 
-use assert_cmd::Command;
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -27,12 +26,6 @@ fn write_config(contents: &str) -> (TempDir, PathBuf) {
     let path = dir.path().join("config.toml");
     fs::write(&path, contents).expect("config file should write");
     (dir, path)
-}
-
-fn isolated_command(config_path: &std::path::Path) -> Command {
-    let mut cmd = cmd::shguard();
-    cmd.env("SHGUARD_CONFIG", config_path);
-    cmd
 }
 
 fn read_jsonl_lines(path: &std::path::Path) -> Vec<Value> {
@@ -51,7 +44,7 @@ fn empty_decision_log_path_fails_config_load_closed() {
         "#,
     );
 
-    isolated_command(&config_path)
+    cmd::isolated_command(&config_path)
         .args(["check", "echo hello"])
         .assert()
         .failure()
@@ -68,7 +61,7 @@ fn decision_log_path_naming_an_existing_directory_fails_config_load_closed() {
         existing_dir.path().to_string_lossy()
     ));
 
-    isolated_command(&config_path)
+    cmd::isolated_command(&config_path)
         .args(["check", "echo hello"])
         .assert()
         .failure()
@@ -103,7 +96,7 @@ fn decision_log_path_naming_an_existing_fifo_fails_config_load_closed() {
         fifo_path.to_string_lossy()
     ));
 
-    isolated_command(&config_path)
+    cmd::isolated_command(&config_path)
         .args(["check", "echo hello"])
         .assert()
         .failure()
@@ -131,7 +124,7 @@ fn decision_log_path_naming_a_symlink_fails_config_load_closed() {
         symlink_path.to_string_lossy()
     ));
 
-    isolated_command(&config_path)
+    cmd::isolated_command(&config_path)
         .args(["check", "echo hello"])
         .assert()
         .failure()
@@ -157,7 +150,7 @@ fn decision_log_path_with_a_missing_parent_directory_fails_config_load_closed() 
         log_path.to_string_lossy()
     ));
 
-    isolated_command(&config_path)
+    cmd::isolated_command(&config_path)
         .args(["check", "echo hello"])
         .assert()
         .failure()
@@ -175,7 +168,7 @@ fn relative_decision_log_path_fails_config_load_closed() {
         "#,
     );
 
-    isolated_command(&config_path)
+    cmd::isolated_command(&config_path)
         .args(["check", "echo hello"])
         .assert()
         .failure()
@@ -196,7 +189,7 @@ fn decision_log_path_with_a_trailing_slash_fails_config_load_closed() {
         "#,
     ));
 
-    isolated_command(&config_path)
+    cmd::isolated_command(&config_path)
         .args(["check", "echo hello"])
         .assert()
         .failure()
@@ -214,7 +207,7 @@ fn check_subcommand_appends_a_decision_log_line_matching_the_verdict() {
         log_path.to_string_lossy()
     ));
 
-    isolated_command(&config_path)
+    cmd::isolated_command(&config_path)
         .args(["check", "rm -rf /"])
         .assert()
         .failure()
@@ -254,14 +247,14 @@ fn hook_path_and_check_cli_produce_equivalent_log_content_for_the_same_command()
         log_path.to_string_lossy()
     ));
 
-    isolated_command(&config_path)
+    cmd::isolated_command(&config_path)
         .args(["check", "rm -rf /"])
         .assert()
         .failure()
         .code(1);
 
     let hook_stdin = r#"{"tool_name":"Bash","tool_input":{"command":"rm -rf /"},"hook_event_name":"PreToolUse"}"#;
-    isolated_command(&config_path)
+    cmd::isolated_command(&config_path)
         .write_stdin(hook_stdin)
         .assert()
         .success();
@@ -312,7 +305,7 @@ fn watchdog_trip_verdict_is_still_logged() {
         log_path.to_string_lossy()
     ));
 
-    isolated_command(&config_path)
+    cmd::isolated_command(&config_path)
         .timeout(std::time::Duration::from_secs(30))
         .args(["check", "<<$( |] "])
         .assert()
@@ -331,52 +324,25 @@ fn watchdog_trip_verdict_is_still_logged() {
 }
 
 /// Issue #459: unlike `check`, the PreToolUse hook path's own outer
-/// watchdog (`src/bin/shguard.rs`'s `EVALUATION_TIMEOUT`, started once the
+/// watchdog (`src/bin/shguard.rs`'s outer time budget, started once the
 /// worker has finished reading stdin, so config load and evaluation both run
-/// inside it) normally wins the wall-clock race against
-/// `analyze_with_policy`'s internal watchdog for a genuine hang — see
-/// `tests/fail_closed_exit_paths.rs`'s
-/// `heredoc_inside_unterminated_command_substitution_fails_closed_to_ask`
-/// for the same repro exercised against stdout alone. That means the
-/// worker computing the real decision is abandoned mid-evaluation and
+/// inside it) can abandon a worker that is still mid-evaluation. That worker
 /// never reaches `analyze_with_policy`'s own `sink.append` call, which used
-/// to leave this exact case — the hook-path input most worth auditing —
-/// entirely unlogged. `run`'s `early_tx` send (right after parsing the
-/// stdin JSON, before handing the command to `analyze_with_policy`) gives
-/// `emit_first_result`'s trip arm a command and context to log against even
-/// though the worker itself never gets there.
+/// to leave the hook-path input most worth auditing entirely unlogged.
+/// `run`'s `early_tx` send (right after parsing the stdin JSON, before
+/// handing the command to `analyze_with_policy`) gives `emit_first_result`'s
+/// trip arm a command and context to log against even though the worker
+/// itself never gets there.
 ///
-/// Uses `SHGUARD_TEST_MEM_LIMIT_MB=64` (debug-only, same injection point
-/// `tests/fail_closed_exit_paths.rs`'s own
-/// `memory_budget_trip_fails_closed_to_ask` pins, which is where the
-/// memory-limit trip itself is pinned) so the binary's outer memory arm
-/// fires far below the internal watchdog's 256 MiB threshold, which makes
-/// the outer trip the likely, but not guaranteed, first one.
-///
-/// This is not fully deterministic. The outer 2s wall-clock timeout runs
-/// concurrently with the 64 MiB RSS poll, and under heavy parallel load (a
-/// full `cargo test` suite) the time arm can win before RSS crosses the
-/// limit; both outer trips go through the same `log_trip_best_effort` path
-/// under test, so either is accepted. The library watchdog can also still
-/// win in rarer ways, which would log a library reason and fail this test:
-/// (a) its deadline is only worker-setup later than the outer one, so a late
-/// `recv_timeout` wake in `main` can let the library time reason log first;
-/// (b) under roughly 1s of main-thread starvation the library's 256 MiB
-/// check can win; (c) a time trip before `early_tx` is sent logs nothing at
-/// all. If these show up in practice, a test-only time-budget override is
-/// the next step.
-///
-/// The reasons are told apart by wording (`resource_limit_reason` in
-/// `src/policy/mod.rs`). The outer memory reason is "memory budget (N bytes
-/// RSS); ...", whereas the library one is "memory budget (N bytes RSS
-/// growth); ..." and so also contains "bytes RSS": the distinguishing word
-/// is "growth". The outer time reason says "outer time budget" where the
-/// library one says plain "time budget". The assertion matches the outer
-/// time reason exactly and the outer memory reason by its "bytes RSS);"
-/// tail, which the library reason lacks.
+/// Deterministic: `SHGUARD_TEST_HANG_AFTER_EARLY` parks the worker right
+/// after the `early_tx` send, so neither the library watchdog nor a memory
+/// trip can run, and `SHGUARD_TEST_EVAL_TIMEOUT_MS` shortens the outer
+/// budget to a few seconds (long enough for process start and config load).
+/// The only possible resolution is the outer time trip, so the assertion
+/// matches its reason exactly (the library one says plain "time budget").
 #[cfg_attr(
     not(debug_assertions),
-    ignore = "SHGUARD_TEST_MEM_LIMIT_MB injection point is compiled out in release builds"
+    ignore = "SHGUARD_TEST_HANG_AFTER_EARLY and SHGUARD_TEST_EVAL_TIMEOUT_MS are compiled out in release builds"
 )]
 #[test]
 fn hook_path_watchdog_trip_is_still_logged() {
@@ -389,9 +355,10 @@ fn hook_path_watchdog_trip_is_still_logged() {
         log_path.to_string_lossy()
     ));
 
-    let hook_stdin = r#"{"tool_name":"Bash","tool_input":{"command":"<<$( |] "},"hook_event_name":"PreToolUse"}"#;
-    isolated_command(&config_path)
-        .env("SHGUARD_TEST_MEM_LIMIT_MB", "64")
+    let hook_stdin = r#"{"tool_name":"Bash","tool_input":{"command":"echo hello"},"hook_event_name":"PreToolUse"}"#;
+    cmd::isolated_command(&config_path)
+        .env("SHGUARD_TEST_HANG_AFTER_EARLY", "1")
+        .env("SHGUARD_TEST_EVAL_TIMEOUT_MS", "3000")
         .timeout(std::time::Duration::from_secs(30))
         .write_stdin(hook_stdin)
         .assert()
@@ -399,18 +366,11 @@ fn hook_path_watchdog_trip_is_still_logged() {
 
     let lines = read_jsonl_lines(&log_path);
     assert_eq!(lines.len(), 1);
-    assert_eq!(lines[0]["command"], "<<$( |] ");
+    assert_eq!(lines[0]["command"], "echo hello");
     assert_eq!(lines[0]["decision"], "Ask");
-    let reason = lines[0]["reason"]
-        .as_str()
-        .expect("reason should be a string");
-    let outer_memory = reason.contains("memory budget") && reason.contains("bytes RSS);");
-    let outer_time = reason
-        == "shguard: evaluation exceeded its outer time budget; refusing to evaluate (fail-closed)";
-    assert!(
-        outer_memory || outer_time,
-        "expected the binary's own outer-watchdog (memory or time) trip reason to be logged, \
-         got: {reason}"
+    assert_eq!(
+        lines[0]["reason"],
+        "shguard: evaluation exceeded its outer time budget; refusing to evaluate (fail-closed)"
     );
 }
 
@@ -430,7 +390,7 @@ fn hook_path_logs_permission_mode_and_agent_id_when_present() {
     ));
 
     let hook_stdin = r#"{"tool_name":"Bash","tool_input":{"command":"echo hello"},"permission_mode":"bypassPermissions","agent_id":"agent-42","agent_type":"explore"}"#;
-    isolated_command(&config_path)
+    cmd::isolated_command(&config_path)
         .write_stdin(hook_stdin)
         .assert()
         .success();
@@ -453,7 +413,7 @@ fn hook_path_logs_null_permission_mode_and_agent_id_when_absent() {
     ));
 
     let hook_stdin = r#"{"tool_name":"Bash","tool_input":{"command":"echo hello"}}"#;
-    isolated_command(&config_path)
+    cmd::isolated_command(&config_path)
         .write_stdin(hook_stdin)
         .assert()
         .success();
@@ -476,7 +436,7 @@ fn hook_path_logs_an_unrecognized_permission_mode_verbatim() {
     ));
 
     let hook_stdin = r#"{"tool_name":"Bash","tool_input":{"command":"echo hello"},"permission_mode":"some-future-mode"}"#;
-    isolated_command(&config_path)
+    cmd::isolated_command(&config_path)
         .write_stdin(hook_stdin)
         .assert()
         .success();
@@ -502,7 +462,7 @@ fn hook_path_logs_the_default_permission_mode_as_the_string_default_not_null() {
 
     let hook_stdin =
         r#"{"tool_name":"Bash","tool_input":{"command":"echo hello"},"permission_mode":"default"}"#;
-    isolated_command(&config_path)
+    cmd::isolated_command(&config_path)
         .write_stdin(hook_stdin)
         .assert()
         .success();
@@ -531,7 +491,7 @@ fn hook_path_logs_null_for_a_non_string_permission_mode() {
 
     let hook_stdin =
         r#"{"tool_name":"Bash","tool_input":{"command":"echo hello"},"permission_mode":123}"#;
-    isolated_command(&config_path)
+    cmd::isolated_command(&config_path)
         .write_stdin(hook_stdin)
         .assert()
         .success();
@@ -558,7 +518,7 @@ fn hook_path_logs_a_present_non_string_agent_id_stringified() {
 
     let hook_stdin =
         r#"{"tool_name":"Bash","tool_input":{"command":"echo hello"},"agent_id":{"x":1}}"#;
-    isolated_command(&config_path)
+    cmd::isolated_command(&config_path)
         .write_stdin(hook_stdin)
         .assert()
         .success();
@@ -585,7 +545,7 @@ fn hook_path_logs_null_for_an_explicitly_null_agent_id() {
 
     let hook_stdin =
         r#"{"tool_name":"Bash","tool_input":{"command":"echo hello"},"agent_id":null}"#;
-    isolated_command(&config_path)
+    cmd::isolated_command(&config_path)
         .write_stdin(hook_stdin)
         .assert()
         .success();
@@ -606,7 +566,7 @@ fn check_subcommand_logs_null_permission_mode_and_agent_id() {
         log_path.to_string_lossy()
     ));
 
-    isolated_command(&config_path)
+    cmd::isolated_command(&config_path)
         .args(["check", "echo hello"])
         .assert()
         .success();
@@ -638,7 +598,7 @@ fn rm_against_the_decision_log_path_is_blocked() {
         log_path.to_string_lossy()
     ));
 
-    let assert = isolated_command(&config_path)
+    let assert = cmd::isolated_command(&config_path)
         .args(["check", &format!("rm {:?}", log_path.to_string_lossy())])
         .assert()
         .failure()
@@ -667,7 +627,7 @@ fn truncate_against_the_decision_log_path_is_blocked() {
         log_path.to_string_lossy()
     ));
 
-    let assert = isolated_command(&config_path)
+    let assert = cmd::isolated_command(&config_path)
         .args([
             "check",
             &format!("truncate -s0 {:?}", log_path.to_string_lossy()),
@@ -694,7 +654,7 @@ fn ln_sf_over_the_decision_log_path_is_blocked() {
         log_path.to_string_lossy()
     ));
 
-    let assert = isolated_command(&config_path)
+    let assert = cmd::isolated_command(&config_path)
         .args([
             "check",
             &format!("ln -sf ./notes.txt {:?}", log_path.to_string_lossy()),
@@ -720,7 +680,7 @@ fn allow_decision_logs_a_null_matched_rule_id() {
         log_path.to_string_lossy()
     ));
 
-    isolated_command(&config_path)
+    cmd::isolated_command(&config_path)
         .args(["check", "echo hello"])
         .assert()
         .success();
