@@ -415,10 +415,11 @@ fn oversized_stdin_denies_when_ask_outcome_is_deny() {
     assert!(permission_reason(&output).contains("exceeds"));
 }
 
-/// A stdin producer slower than the 2s evaluation budget (issue #689) must
-/// still get the size-cap verdict: the budget starts after the stdin read,
-/// so a contended writer cannot turn "exceeds" into the outer-time-budget
-/// reason.
+/// A stdin producer slower than the outer evaluation budget (issue #689)
+/// must still get the size-cap verdict: the budget starts after the stdin
+/// read, so a contended writer cannot turn "exceeds" into the outer-time-budget
+/// reason. The budget is pinned to 1s, below the 2.5s producer delay, so a
+/// budget starting before the read would trip it.
 #[test]
 fn oversized_stdin_from_a_slow_producer_still_reports_the_size_cap() {
     use std::io::Write;
@@ -429,6 +430,7 @@ fn oversized_stdin_from_a_slow_producer_still_reports_the_size_cap() {
     let (_dir, config_path) = write_config("");
     let mut cmd = cmd::shguard_std();
     cmd.env("SHGUARD_CONFIG", &config_path)
+        .env("SHGUARD_TEST_EVAL_TIMEOUT_MS", "1000")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped());
     let mut child = cmd.spawn().expect("shguard should spawn");
