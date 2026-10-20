@@ -105,7 +105,9 @@ use std::time::{Duration, Instant};
 
 use shguard::policy::{Evidence, InputStage, LimitKind, PolicyConfig, decide};
 use shguard::verdict::Verdict;
-use shguard::watchdog::{PollOutcome, poll_with_budget};
+use shguard::watchdog::{
+    EVALUATION_TIMEOUT, MEMORY_LIMIT_BYTES, MEMORY_POLL_INTERVAL, PollOutcome, poll_with_budget,
+};
 use shguard::{DecisionLogSink, HookContext};
 
 /// The fail-closed output written when even producing JSON fails — a
@@ -141,52 +143,6 @@ const MAX_STDIN_BYTES: u64 = 10 * 1024 * 1024;
 /// so 10s is well above any realistic contention stall, while a lower value
 /// risks spurious asks on a loaded machine. Not tuned against measurements.
 const STDIN_READ_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Wall-clock budget given to one [`run`], measured from the end of its
-/// stdin read, before [`main`] gives up on it and fails closed (crash-fuzzer finding: a heredoc operator whose
-/// delimiter-word parsing recurses into an unterminated `$(...)` drives
-/// brush-parser's tokenizer into an unbounded allocating loop — no panic,
-/// no return, ~4 GB/s sustained (measured release build) until the OS
-/// kills the process). 2s is ~8x the measured p100 of every
-/// non-pathological input tried against this pipeline (20k-stage
-/// pipelines, 200KB words, 20k heredocs all resolved in <=0.25s), so it
-/// costs nothing on real hook traffic while still bounding a hang to a
-/// small, fixed delay instead of unbounded memory growth. Re-measure the
-/// p100 figure above before lowering this.
-///
-/// This bound alone is not sufficient on a memory-constrained host: at
-/// ~4 GB/s, a container or box with less than ~8 GB free can be
-/// SIGKILLed by the OS before this timeout ever fires — see
-/// [`MEMORY_LIMIT_BYTES`] for the complementary bound that closes that
-/// gap.
-const EVALUATION_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// How often [`resolve_first_result`]'s watchdog polls the worker's actual
-/// memory use (via [`shguard::watchdog::peak_rss_bytes`]) while waiting on
-/// the result channel, instead of blocking on a single
-/// [`EVALUATION_TIMEOUT`]-long `recv_timeout` the way the wall-clock-only watchdog used to. Short
-/// enough that the runaway-allocation repro (~4 GB/s, see
-/// [`EVALUATION_TIMEOUT`]) overshoots [`MEMORY_LIMIT_BYTES`] by at most
-/// ~200 MB (rate * interval) before a poll catches it; long enough that
-/// polling `getrusage` costs nothing against real hook traffic, which
-/// resolves in well under one interval to begin with.
-const MEMORY_POLL_INTERVAL: Duration = Duration::from_millis(50);
-
-/// Hard RSS budget for the whole process, polled by [`resolve_first_result`]
-/// independently of [`EVALUATION_TIMEOUT`] (follow-up to the wall-clock
-/// watchdog above: the same unbounded-allocating-loop input peaks at
-/// several GB RSS well within the 2s wall-clock budget, so a host or
-/// container with less free memory than that gets SIGKILLed by the OS
-/// before `recv_timeout` ever fires — empty stdout, the exact fail-open
-/// condition the wall-clock watchdog alone does not close). 256 MiB is
-/// ~10x the largest peak RSS measured for a legitimate, non-pathological
-/// fixture against this pipeline (24 MB, a 20k-stage/200KB-word command),
-/// and even with [`MEMORY_POLL_INTERVAL`]'s worst-case ~200 MB overshoot
-/// stays comfortably under what a small container typically allots a
-/// single process. There is no other documented memory budget for this
-/// project to anchor against (checked README.md and docs/ before picking
-/// this number). Re-measure both figures above before changing this.
-const MEMORY_LIMIT_BYTES: u64 = 256 * 1024 * 1024;
 
 /// The command and context [`run`] sends over a dedicated channel
 /// immediately after it parses the hook stdin's Bash command — before
@@ -1329,6 +1285,17 @@ fn run(
     let policy = match shguard::config::Policy::load() {
         Ok(policy) => policy,
         Err(err) => {
+            // A non-Bash tool is out of scope with a loadable config
+            // (issue #462), so a broken config must not turn it into a
+            // verdict either (issue #684). Only a cleanly read, in-cap
+            // payload qualifies; anything else keeps the config-failure
+            // verdict.
+            if read_result.is_ok()
+                && stdin.len() as u64 <= MAX_STDIN_BYTES
+                && let Some(no_decision) = shguard::adapter::non_bash_no_decision(&stdin)
+            {
+                return no_decision;
+            }
             let config = PolicyConfig::none().with_strict_config(strict_config_requested());
             return shguard::adapter::render(&decide(
                 &[Evidence::ConfigUnavailable {
