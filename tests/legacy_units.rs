@@ -232,35 +232,47 @@ fn loader_rejects_damage() -> Result<(), String> {
         "{{\"kind\":\"gate\",\"config\":{{\"rules\":{{\"parse_ref\":\"{id}\"}}}},\"command\":\"ls\",\"expect\":{{}}}}\n"
     );
     let damaged = [
-        ("empty file", String::new()),
-        ("malformed line", format!("{row}not json\n")),
-        ("duplicate key", format!("{row}{row}")),
+        ("empty file", String::new(), None),
+        ("malformed line", format!("{row}not json\n"), None),
+        ("duplicate key", format!("{row}{row}"), None),
         (
             "config header with a duplicate id",
-            format!("{header}{header}"),
+            format!("{row}{header}{header}"),
+            Some("duplicate config id"),
         ),
         (
             "config header with a wrong id",
-            "{\"kind\":\"config\",\"id\":\"0\",\"toml\":\"a\"}\n".to_string(),
+            format!("{row}{{\"kind\":\"config\",\"id\":\"0\",\"toml\":\"a\"}}\n"),
+            Some("is not the id of its toml"),
         ),
         (
             "config header with an unknown key",
-            format!("{{\"kind\":\"config\",\"id\":\"{id}\",\"toml\":\"a\",\"x\":1}}\n"),
+            format!("{row}{{\"kind\":\"config\",\"id\":\"{id}\",\"toml\":\"a\",\"x\":1}}\n"),
+            Some("unknown key"),
         ),
         (
             "config reference before its header",
             format!("{reference}{header}"),
+            None,
         ),
         (
             "config reference to an unknown id",
             format!(
                 "{row}{{\"kind\":\"gate\",\"config\":{{\"rules\":{{\"parse_ref\":\"nope\"}}}},\"command\":\"ls\",\"expect\":{{}}}}\n"
             ),
+            None,
         ),
     ];
-    for (what, text) in damaged {
-        if load(&text).is_ok() {
+    for (what, text, cause) in damaged {
+        let Err(err) = load(&text) else {
             return Err(format!("the loader accepted a corpus with a {what}"));
+        };
+        if let Some(cause) = cause
+            && !err.contains(cause)
+        {
+            return Err(format!(
+                "the loader rejected a corpus with a {what} for the wrong reason: {err}"
+            ));
         }
     }
     Ok(())
