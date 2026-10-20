@@ -397,6 +397,14 @@ pub(crate) const MAX_RAW_BACKTRACK_BUDGET: usize = 34;
 /// megabytes long is slow with or without any quote (409ms at 1MiB, the
 /// watchdog at 10MiB) and is not this control's concern.
 ///
+/// # Plain `(` after `$((` (issue #706)
+///
+/// This is also the cap for the `"${x'$((` + plain `(` + `'}"` carrier:
+/// `$((` is itself an opener plus a plain `(`, so the carrier is rejected
+/// before brush at zero extra parens. After the cap, `shguard::analyze` for
+/// up to 14 extra `(` measured at the timer floor (debug about 10ms, release
+/// 0-4ms). The global paren caps are unchanged.
+///
 /// # Known trade-off
 ///
 /// A command holding a quote in a `${...}` body (`"${x:-'d'}"`,

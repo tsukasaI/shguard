@@ -3825,6 +3825,36 @@ fn guardfall_extglob_quote_in_a_parameter_body_rejects_openers_whatever_precedes
 }
 
 #[test]
+fn guardfall_quoted_arithmetic_carrier_is_rejected_by_the_quoted_opener_cap() {
+    // Issue #706: `$((` is one opener plus one plain `(`, so after a quote in
+    // a `${` body the pairing rule rejects the carrier at zero extra parens.
+    for n in [0, 14] {
+        let parens = "(".repeat(n);
+        for quote in ["'", "$'"] {
+            assert_flood_rejected(
+                &format!("echo \"${{x{quote}$(({parens}e'}}\""),
+                CARRIER_REASON,
+            );
+        }
+        assert_flood_rejected(&format!("echo \"${{x:-'d'}}$(({parens}e\""), CARRIER_REASON);
+    }
+    // Positive control: with no quote inside the `${` body the same
+    // arithmetic is not this cap's concern.
+    for command in [
+        "echo \"${x$((e}\"".to_string(),
+        format!("echo \"${{x$(({}e}}\"", "(".repeat(14)),
+        "echo \"${x:-$((1))}\"".to_string(),
+    ] {
+        let verdict = shguard::analyze(&command);
+        let reason = verdict.reason().map_or("", |r| r.as_str());
+        assert!(
+            !reason.contains(CARRIER_REASON),
+            "command {command:?}, got: {reason}"
+        );
+    }
+}
+
+#[test]
 fn guardfall_extglob_quote_in_a_parameter_body_false_positive_checks() {
     assert_eq!(
         shguard::analyze("grep -rn '${' .").decision(),
