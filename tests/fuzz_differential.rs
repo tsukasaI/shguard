@@ -77,6 +77,12 @@
 //! an arithmetic expansion or a compound body must not turn the whole into
 //! an `Allow`.
 //!
+//! The shims only see external commands, so the run also enables `set -x`
+//! with `BASH_XTRACEFD` pointing at a dedicated fd and a per-run-nonce `PS4`
+//! ([`parse_xtrace`]); builtins such as `eval`, `exec`, `source`, `command`
+//! and `builtin`, and command names no shim covers, are observed there.
+//! [`WholeRun::observed`] unions the trace with the shim log.
+//!
 //! Defense layers 1, 2 and 4 above apply unchanged. Layer 3 does not: a
 //! whole candidate IS run as the command, which is why every command word
 //! the generator can emit is a [`SHIM_COMMANDS`] name or a harmless bash
@@ -122,14 +128,20 @@
 //!
 //! # Bash version
 //!
-//! macOS ships bash 3.2; CI (`ubuntu-latest`) runs bash 5.x. The specific
-//! combinators exercised here (ANSI-C quoting, `$IFS` splitting, brace
+//! macOS ships bash 3.2; CI (`ubuntu-latest`) runs bash 5.x. The argv
+//! comparison's combinators (ANSI-C quoting, `$IFS` splitting, brace
 //! alternation, tilde forms, variable indirection) are stable since bash
-//! 3.0, so this is a diagnostic, not a blocker: [`find_real_bash`] prefers
+//! 3.0, so there the version is a diagnostic: [`find_real_bash`] prefers
 //! whatever `bash` a contributor's `PATH` resolves first (typically a
 //! Homebrew-installed newer bash ahead of `/bin/bash` on macOS), and the
 //! resolved version string is printed as part of the test's diagnostic
 //! output and included in the structured divergence report.
+//!
+//! The execution oracle is stricter: its xtrace is written to
+//! `BASH_XTRACEFD`, which needs bash >= 4.1. On an older bash the trace
+//! stays empty and the oracle would silently degrade to the shim log alone,
+//! so `xtrace_oracle_is_supported_by_this_bash` and the sweep's
+//! `trace_observed > 0` assertion fail loudly instead.
 
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -142,6 +154,7 @@ use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use shguard::normalize::{Resolution, UnresolvableKind};
@@ -692,6 +705,7 @@ struct Sandbox {
     home_dir: TempDir,
     cwd_dir: TempDir,
     log_path: PathBuf,
+    trace_path: PathBuf,
     bash_path: PathBuf,
 }
 
@@ -702,12 +716,14 @@ impl Sandbox {
         let cwd_dir = tempfile::tempdir().expect("tempdir should create");
         build_shims(shim_dir.path());
         let log_path = shim_dir.path().join(".shim-log");
+        let trace_path = shim_dir.path().join(".xtrace");
         let bash_path = find_real_bash();
         Self {
             shim_dir,
             home_dir,
             cwd_dir,
             log_path,
+            trace_path,
             bash_path,
         }
     }
@@ -793,20 +809,307 @@ fn parse_shim_log(log: &str) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// File descriptor the xtrace is written to (`BASH_XTRACEFD`). Above the
+/// 0-9 range candidates use for their own `exec 3>...` style redirects.
+const XTRACE_FD: u32 = 200;
+
+/// First character of `PS4`: bash repeats it once per subshell /
+/// command-substitution nesting level, so a record's depth is the length of
+/// its run of this character.
+const XTRACE_DEPTH_CHAR: char = '\u{1e}';
+
+/// Everything one whole-candidate run is observed to have executed.
+struct WholeRun {
+    /// External commands, as logged by the PATH shims (argv[0] is the shim's
+    /// basename). Blind to builtins and to names that are not shimmed.
+    shim: Vec<Vec<String>>,
+    /// Simple commands from the xtrace, builtins included, one argv each.
+    trace: Vec<Vec<String>>,
+}
+
+impl WholeRun {
+    /// Union of both views. An external command shows up in both, so each
+    /// shim invocation is matched against one not-yet-consumed trace entry
+    /// and only appended when the trace has no equal argv (the candidate
+    /// turned xtrace off, or the command ran inside something untraced).
+    /// Matching is on exact argv: a launcher-prefixed trace entry
+    /// (`exec rm ...`) and its shim twin (`rm ...`) differ, so both are kept.
+    fn observed(&self) -> Vec<Vec<String>> {
+        let mut merged = self.trace.clone();
+        let mut matched = vec![false; self.trace.len()];
+        for invocation in &self.shim {
+            let hit = self
+                .trace
+                .iter()
+                .enumerate()
+                .find(|(i, argv)| !matched[*i] && *argv == invocation);
+            match hit {
+                Some((i, _)) => matched[i] = true,
+                None => merged.push(invocation.clone()),
+            }
+        }
+        merged
+    }
+}
+
+/// Per-run marker that opens every trace record after the depth characters:
+/// `SHGXT<nonce>` then a unit separator. The nonce keeps stray output or a
+/// stale file from being mistaken for a record. A candidate can read `$PS4`,
+/// so it is not a boundary against a hostile candidate (the generator never
+/// emits one).
+fn next_xtrace_marker() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    format!(
+        "SHGXT{}x{}x{nanos}\u{1f}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// Statements prepended to the candidate (same bash process, so the
+/// candidate's builtins are traced): open the trace fd, point
+/// `BASH_XTRACEFD` at it, set `PS4`, then `set -x` last so none of this is
+/// itself traced.
+fn xtrace_preamble(trace_path: &Path, marker: &str) -> String {
+    // `\036`/`\037` as ANSI-C escapes keep the control bytes out of argv.
+    let ps4 = marker.replace('\u{1f}', "\\037");
+    format!(
+        "exec {XTRACE_FD}>>{path}\nBASH_XTRACEFD={XTRACE_FD}\nPS4=$'\\036{ps4}'\nset -x\n",
+        path = shell_single_quote(&trace_path.display().to_string()),
+    )
+}
+
+/// Decodes the body of a `$'...'` word (everything after the opening quote)
+/// up to the closing quote, appending raw bytes to `out`.
+fn read_ansi_c_body(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, out: &mut Vec<u8>) {
+    let push_char = |out: &mut Vec<u8>, c: char| {
+        out.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes());
+    };
+    let take_digits = |chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+                       radix: u32,
+                       max: usize,
+                       seed: Option<u32>| {
+        let mut value = seed.unwrap_or(0);
+        let mut taken = usize::from(seed.is_some());
+        while taken < max {
+            let Some(digit) = chars.peek().and_then(|c| c.to_digit(radix)) else {
+                break;
+            };
+            value = value * radix + digit;
+            chars.next();
+            taken += 1;
+        }
+        value
+    };
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => return,
+            '\\' => match chars.next() {
+                None => out.push(b'\\'),
+                Some('n') => out.push(b'\n'),
+                Some('t') => out.push(b'\t'),
+                Some('r') => out.push(b'\r'),
+                Some('a') => out.push(7),
+                Some('b') => out.push(8),
+                Some('e' | 'E') => out.push(27),
+                Some('f') => out.push(12),
+                Some('v') => out.push(11),
+                Some(c @ ('\\' | '\'' | '"' | '?')) => push_char(out, c),
+                Some('x') => out.push(take_digits(chars, 16, 2, None) as u8),
+                Some(c @ '0'..='7') => {
+                    out.push(take_digits(chars, 8, 3, c.to_digit(8)) as u8);
+                }
+                Some(c @ ('u' | 'U')) => {
+                    let width = if c == 'u' { 4 } else { 8 };
+                    let code = take_digits(chars, 16, width, None);
+                    push_char(out, char::from_u32(code).unwrap_or('\u{fffd}'));
+                }
+                Some('c') => match chars.next() {
+                    Some(ctl) => out.push((ctl as u32 & 0x1f) as u8),
+                    None => out.extend_from_slice(b"\\c"),
+                },
+                Some(other) => {
+                    out.push(b'\\');
+                    push_char(out, other);
+                }
+            },
+            other => push_char(out, other),
+        }
+    }
+}
+
+/// Splits one xtrace record body into words, undoing bash's quoting:
+/// `'...'` (no escapes), `$'...'` (ANSI-C), and adjacent pieces glued into
+/// one word (`a='b c'`, `'it'\''s'`). Whitespace outside quotes separates
+/// words, newlines inside quotes belong to the word. An unterminated quote
+/// swallows the rest of the record rather than discarding it: over-reporting
+/// is the safe direction for an oracle.
+fn tokenize_xtrace_body(body: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current: Vec<u8> = Vec::new();
+    let mut in_word = false;
+    let mut chars = body.chars().peekable();
+    let flush = |words: &mut Vec<String>, current: &mut Vec<u8>| {
+        words.push(String::from_utf8_lossy(current).into_owned());
+        current.clear();
+    };
+    while let Some(c) = chars.next() {
+        match c {
+            ' ' | '\t' | '\n' => {
+                if in_word {
+                    flush(&mut words, &mut current);
+                    in_word = false;
+                }
+            }
+            '\'' => {
+                in_word = true;
+                for quoted in chars.by_ref() {
+                    if quoted == '\'' {
+                        break;
+                    }
+                    current.extend_from_slice(quoted.encode_utf8(&mut [0; 4]).as_bytes());
+                }
+            }
+            '$' if chars.peek() == Some(&'\'') => {
+                chars.next();
+                in_word = true;
+                read_ansi_c_body(&mut chars, &mut current);
+            }
+            // The `\'` between the two halves of bash's `'it'\''s'`.
+            '\\' => {
+                in_word = true;
+                let escaped = chars.next().unwrap_or('\\');
+                current.extend_from_slice(escaped.encode_utf8(&mut [0; 4]).as_bytes());
+            }
+            other => {
+                in_word = true;
+                current.extend_from_slice(other.encode_utf8(&mut [0; 4]).as_bytes());
+            }
+        }
+    }
+    if in_word {
+        flush(&mut words, &mut current);
+    }
+    words
+}
+
+/// Whether `body` ends inside a `'...'` or `$'...'` quote, mirroring the
+/// quoting [`tokenize_xtrace_body`] undoes.
+fn has_unterminated_quote(body: &str) -> bool {
+    let mut chars = body.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                chars.next();
+            }
+            '\'' => {
+                if !chars.by_ref().any(|q| q == '\'') {
+                    return true;
+                }
+            }
+            '$' if chars.peek() == Some(&'\'') => {
+                chars.next();
+                loop {
+                    match chars.next() {
+                        None => return true,
+                        Some('\\') => {
+                            chars.next();
+                        }
+                        Some('\'') => break,
+                        Some(_) => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Words xtrace prints for compound-command bookkeeping rather than for a
+/// command that ran.
+const XTRACE_PSEUDO_COMMANDS: &[&str] = &["for", "select", "case", "((", "[["];
+
+fn is_assignment_word(word: &str) -> bool {
+    let Some((name, _)) = word.split_once('=') else {
+        return false;
+    };
+    let name = name.strip_suffix('+').unwrap_or(name);
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Parses an xtrace file into the simple commands it records, one argv each.
+/// A record starts at a line of one or more [`XTRACE_DEPTH_CHAR`] followed by
+/// `marker`. A following line that does not start a record continues it only
+/// while the open record has an unterminated `'` / `$'` quote (bash 4.1-4.3
+/// print a newline inside quotes raw); otherwise it is dropped. Lines before
+/// the first record, and records with the wrong marker, are ignored. Leading `NAME=value`
+/// words are dropped (`x=1 rm` runs `rm`); a record that is only
+/// assignments or a [`XTRACE_PSEUDO_COMMANDS`] word yields nothing.
+fn parse_xtrace(trace: &str, marker: &str) -> Vec<Vec<String>> {
+    let mut commands = Vec::new();
+    let mut body: Option<String> = None;
+    let mut finish = |body: Option<String>| {
+        let Some(body) = body else { return };
+        let words = tokenize_xtrace_body(&body);
+        let argv: Vec<String> = words
+            .into_iter()
+            .skip_while(|w| is_assignment_word(w))
+            .collect();
+        match argv.first() {
+            Some(first) if !XTRACE_PSEUDO_COMMANDS.contains(&first.as_str()) => {
+                commands.push(argv);
+            }
+            _ => {}
+        }
+    };
+    for line in trace.split_terminator('\n') {
+        let depth_stripped = line.trim_start_matches(XTRACE_DEPTH_CHAR);
+        let starts_record = depth_stripped.len() < line.len() && depth_stripped.starts_with(marker);
+        if starts_record {
+            finish(body.take());
+            body = Some(depth_stripped[marker.len()..].to_string());
+        } else if let Some(open) = body.as_mut()
+            && has_unterminated_quote(open)
+        {
+            open.push('\n');
+            open.push_str(line);
+        }
+    }
+    finish(body.take());
+    commands
+}
+
 impl Sandbox {
-    /// Runs `text` as a bash command under the shim sandbox and returns every
-    /// shim invocation it made, or `None` if the static reject-list flags the
-    /// text, the spawn fails, or the run times out. The exit status is
-    /// deliberately ignored: a candidate may legitimately fail after the
+    /// Runs `text` as a bash command under the shim sandbox and returns what
+    /// it executed (see [`WholeRun`]), or `None` if the static reject-list
+    /// flags the text, the spawn fails, or the run times out. The exit status
+    /// is deliberately ignored: a candidate may legitimately fail after the
     /// invocations that matter have already been logged.
-    fn run_whole(&self, text: &str) -> Option<Vec<Vec<String>>> {
+    ///
+    /// The candidate runs in the same bash process as the xtrace preamble,
+    /// so `eval`, `exec`, `source`, `command` and `builtin` appear in the
+    /// trace like any other command. A candidate that closes fd 200 or runs
+    /// `set +x` blinds the trace for the rest of the run; the shim log still
+    /// covers it, and [`WholeRun::observed`] unions the two.
+    fn run_whole(&self, text: &str) -> Option<WholeRun> {
         if is_unsafe_to_execute(text) {
             return None;
         }
         fs::write(&self.log_path, b"").ok()?;
+        fs::write(&self.trace_path, b"").ok()?;
+        let marker = next_xtrace_marker();
+        let script = format!("{}{text}", xtrace_preamble(&self.trace_path, &marker));
         let mut child = Command::new(&self.bash_path)
             .arg("-c")
-            .arg(text)
+            .arg(script)
             .env_clear()
             .env("PATH", self.shim_dir.path())
             .env("HOME", self.home_dir.path())
@@ -832,7 +1135,11 @@ impl Sandbox {
             }
         }
         let log = fs::read(&self.log_path).ok()?;
-        Some(parse_shim_log(&String::from_utf8_lossy(&log)))
+        let trace = fs::read(&self.trace_path).ok()?;
+        Some(WholeRun {
+            shim: parse_shim_log(&String::from_utf8_lossy(&log)),
+            trace: parse_xtrace(&String::from_utf8_lossy(&trace), &marker),
+        })
     }
 }
 
@@ -894,14 +1201,19 @@ fn whole_candidate_run_observes_shim_invocations_in_every_compound_shape() {
         "cat <<EOF\n$(( $(rm -rf /) 1 ))\nEOF",
         "cat <<EOF\n${x:-$(rm -rf /)}\nEOF",
     ] {
-        let invocations = sandbox
+        let run = sandbox
             .run_whole(text)
             .unwrap_or_else(|| panic!("{text:?} should run"));
+        let rm = strings(&["rm", "-rf", "/"]);
         assert!(
-            invocations
-                .iter()
-                .any(|argv| argv == &["rm".to_string(), "-rf".to_string(), "/".to_string()]),
-            "{text:?} did not log the rm shim: {invocations:?}"
+            run.shim.contains(&rm),
+            "{text:?} did not log the rm shim: {:?}",
+            run.shim
+        );
+        assert!(
+            run.trace.contains(&rm),
+            "{text:?} did not trace the rm command: {:?}",
+            run.trace
         );
     }
 }
@@ -915,14 +1227,299 @@ fn whole_candidate_run_does_not_log_inert_text() {
         "while false; do rm -rf /; done",
         "true || rm -rf /",
     ] {
-        let invocations = sandbox
+        let run = sandbox
+            .run_whole(text)
+            .unwrap_or_else(|| panic!("{text:?} should run"));
+        let observed = run.observed();
+        assert!(
+            observed.iter().all(|argv| argv[0] != "rm"),
+            "{text:?} unexpectedly ran rm: {observed:?}"
+        );
+    }
+}
+
+fn xtrace_record(depth: usize, marker: &str, body: &str) -> String {
+    format!(
+        "{}{marker}{body}\n",
+        XTRACE_DEPTH_CHAR.to_string().repeat(depth)
+    )
+}
+
+#[test]
+fn xtrace_parser_unquotes_every_form_bash_uses() {
+    let marker = "SHGXTtest\u{1f}";
+    let cases: &[(&str, &[&str])] = &[
+        ("rm -rf /", &["rm", "-rf", "/"]),
+        ("echo 'a b'", &["echo", "a b"]),
+        ("echo ''", &["echo", ""]),
+        (r"echo 'it'\''s'", &["echo", "it's"]),
+        ("echo $'a\\nb' $'t\\tq'", &["echo", "a\nb", "t\tq"]),
+        (
+            r"echo $'it\'s' $'back\\slash'",
+            &["echo", "it's", r"back\slash"],
+        ),
+        (r"echo $'\x41\101é'", &["echo", "AA\u{e9}"]),
+        ("echo a='b c'", &["echo", "a=b c"]),
+        ("echo 'say \"hi\"'", &["echo", "say \"hi\""]),
+        ("  echo   x\ty  ", &["echo", "x", "y"]),
+    ];
+    for (body, expected) in cases {
+        let parsed = parse_xtrace(&xtrace_record(1, marker, body), marker);
+        assert_eq!(parsed, vec![strings(expected)], "body {body:?}");
+    }
+}
+
+#[test]
+fn xtrace_parser_joins_a_raw_newline_inside_quotes() {
+    let marker = "SHGXTtest\u{1f}";
+    let trace = format!(
+        "{}{}",
+        xtrace_record(1, marker, "echo 'line one\nline two'"),
+        xtrace_record(1, marker, "true")
+    );
+    assert_eq!(
+        parse_xtrace(&trace, marker),
+        vec![strings(&["echo", "line one\nline two"]), strings(&["true"])]
+    );
+}
+
+#[test]
+fn xtrace_parser_accepts_any_nesting_depth_and_keeps_order() {
+    let marker = "SHGXTtest\u{1f}";
+    let trace = [
+        xtrace_record(1, marker, "eval 'rm -rf /'"),
+        xtrace_record(1, marker, "rm -rf /"),
+        xtrace_record(2, marker, "echo sub"),
+        xtrace_record(4, marker, "echo deep"),
+    ]
+    .concat();
+    assert_eq!(
+        parse_xtrace(&trace, marker),
+        vec![
+            strings(&["eval", "rm -rf /"]),
+            strings(&["rm", "-rf", "/"]),
+            strings(&["echo", "sub"]),
+            strings(&["echo", "deep"]),
+        ]
+    );
+}
+
+#[test]
+fn xtrace_parser_ignores_forged_and_unmarked_lines() {
+    let marker = "SHGXTreal\u{1f}";
+    let trace = [
+        "garbage before the first record\n".to_string(),
+        xtrace_record(1, "SHGXTguess\u{1f}", "rm -rf /forged"),
+        format!("{marker}no depth char\n"),
+        xtrace_record(1, marker, "true"),
+    ]
+    .concat();
+    assert_eq!(parse_xtrace(&trace, marker), vec![strings(&["true"])]);
+}
+
+#[test]
+fn xtrace_parser_never_starts_a_command_from_a_forged_line() {
+    let marker = "SHGXTreal\u{1f}";
+    // After a real record, a forged line is only a continuation of it.
+    let trace = [
+        xtrace_record(1, marker, "echo hi"),
+        xtrace_record(1, "SHGXTguess\u{1f}", "rm -rf /forged"),
+    ]
+    .concat();
+    let parsed = parse_xtrace(&trace, marker);
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0][0], "echo");
+}
+
+#[test]
+fn xtrace_parser_drops_unmarked_lines_after_a_complete_record() {
+    let marker = "SHGXTreal\u{1f}";
+    // A candidate-set `PS4=x` makes bash print unmarked lines; none of them
+    // may be glued onto the preceding, fully quoted record.
+    let trace = [
+        xtrace_record(1, marker, "echo 'a b'"),
+        "x rm -rf /\n".to_string(),
+        "xmkfs /dev/sda1\n".to_string(),
+        xtrace_record(1, marker, "true"),
+    ]
+    .concat();
+    assert_eq!(
+        parse_xtrace(&trace, marker),
+        vec![strings(&["echo", "a b"]), strings(&["true"])]
+    );
+}
+
+#[test]
+fn xtrace_parser_returns_nothing_for_an_empty_trace() {
+    let marker = "SHGXTtest\u{1f}";
+    assert!(parse_xtrace("", marker).is_empty());
+    assert!(parse_xtrace("\n\n", marker).is_empty());
+    assert!(parse_xtrace(&xtrace_record(1, marker, ""), marker).is_empty());
+}
+
+#[test]
+fn xtrace_parser_keeps_an_unterminated_quote_rather_than_dropping_it() {
+    let marker = "SHGXTtest\u{1f}";
+    let parsed = parse_xtrace(&xtrace_record(1, marker, "rm 'unterminated -rf /"), marker);
+    assert_eq!(parsed, vec![strings(&["rm", "unterminated -rf /"])]);
+}
+
+#[test]
+fn xtrace_parser_strips_assignment_prefixes_and_compound_bookkeeping() {
+    let marker = "SHGXTtest\u{1f}";
+    let trace = [
+        xtrace_record(1, marker, "x=1"),
+        xtrace_record(1, marker, "x=1 y+=2 rm -rf /"),
+        xtrace_record(1, marker, "for i in 1 2"),
+        xtrace_record(1, marker, "[[ -n x ]]"),
+    ]
+    .concat();
+    assert_eq!(
+        parse_xtrace(&trace, marker),
+        vec![strings(&["rm", "-rf", "/"])]
+    );
+}
+
+#[test]
+fn observed_unions_trace_and_shim_without_double_counting() {
+    let run = WholeRun {
+        shim: vec![strings(&["rm", "-rf", "/"]), strings(&["rm", "-rf", "/"])],
+        trace: vec![strings(&["eval", "rm -rf /"]), strings(&["rm", "-rf", "/"])],
+    };
+    // One shim call matches the traced rm; the second has no traced twin
+    // (the candidate silenced xtrace) and is appended.
+    assert_eq!(
+        run.observed(),
+        vec![
+            strings(&["eval", "rm -rf /"]),
+            strings(&["rm", "-rf", "/"]),
+            strings(&["rm", "-rf", "/"]),
+        ]
+    );
+}
+
+#[test]
+fn xtrace_oracle_reports_eval_and_exec_builtins() {
+    let sandbox = Sandbox::new();
+
+    let run = sandbox
+        .run_whole("eval 'echo one two'")
+        .expect("eval candidate should run");
+    assert!(
+        run.trace.contains(&strings(&["eval", "echo one two"])),
+        "eval builtin missing from trace: {:?}",
+        run.trace
+    );
+    assert!(
+        run.trace.contains(&strings(&["echo", "one", "two"])),
+        "command run by eval missing from trace: {:?}",
+        run.trace
+    );
+
+    // `exec` replaces the shell with the shim, which exits 0.
+    let run = sandbox
+        .run_whole("exec rm -rf /")
+        .expect("exec candidate should run");
+    assert!(
+        run.trace.contains(&strings(&["exec", "rm", "-rf", "/"])),
+        "exec builtin missing from trace: {:?}",
+        run.trace
+    );
+    assert!(
+        run.shim.contains(&strings(&["rm", "-rf", "/"])),
+        "exec must still have reached the rm shim, not the real rm: {:?}",
+        run.shim
+    );
+}
+
+#[test]
+fn xtrace_oracle_reports_other_builtin_command_launchers() {
+    let sandbox = Sandbox::new();
+    for (text, expected) in [
+        ("command echo hi", strings(&["command", "echo", "hi"])),
+        ("builtin echo hi", strings(&["builtin", "echo", "hi"])),
+        ("source /dev/null", strings(&["source", "/dev/null"])),
+    ] {
+        let run = sandbox
             .run_whole(text)
             .unwrap_or_else(|| panic!("{text:?} should run"));
         assert!(
-            invocations.iter().all(|argv| argv[0] != "rm"),
-            "{text:?} unexpectedly ran rm: {invocations:?}"
+            run.trace.contains(&expected),
+            "{text:?}: {expected:?} missing from trace {:?}",
+            run.trace
         );
     }
+}
+
+#[test]
+fn xtrace_oracle_round_trips_awkward_arguments_through_real_bash() {
+    let sandbox = Sandbox::new();
+    let run = sandbox
+        .run_whole("echo 'a b' $'x\\ny' \"it's\" '' $'t\\tq' 'say \"hi\"'")
+        .expect("candidate should run");
+    assert!(
+        run.trace.contains(&strings(&[
+            "echo",
+            "a b",
+            "x\ny",
+            "it's",
+            "",
+            "t\tq",
+            "say \"hi\""
+        ])),
+        "trace argv did not round-trip: {:?}",
+        run.trace
+    );
+}
+
+#[test]
+fn xtrace_oracle_detects_destructive_command_reached_only_through_eval() {
+    let sandbox = Sandbox::new();
+    // The name is assembled at run time and `mkfs.ext4` is unshimmed, so no
+    // PATH shim ever sees it (`command not found` after eval expands it).
+    // The `eval` record in the xtrace is the builtin evidence.
+    let text = "a=mk; b=fs.ext4; eval \"$a$b /dev/sda1\"";
+    let run = sandbox.run_whole(text).expect("candidate should run");
+
+    let mkfs = strings(&["mkfs.ext4", "/dev/sda1"]);
+    assert!(
+        run.trace.contains(&mkfs),
+        "xtrace must see the command eval ran: {:?}",
+        run.trace
+    );
+    assert!(
+        run.trace
+            .contains(&strings(&["eval", "mkfs.ext4 /dev/sda1"])),
+        "xtrace must see the eval builtin itself: {:?}",
+        run.trace
+    );
+
+    let shim_only = WholeRun {
+        shim: run.shim.clone(),
+        trace: vec![],
+    };
+    assert!(
+        disallowed_executions(&shim_only).is_empty(),
+        "the old shim-only oracle is blind to this candidate: {:?}",
+        run.shim
+    );
+    assert!(
+        !disallowed_executions(&run).is_empty(),
+        "the xtrace oracle must see a command shguard does not allow: {:?}",
+        run.observed()
+    );
+}
+
+#[test]
+fn xtrace_oracle_is_supported_by_this_bash() {
+    let sandbox = Sandbox::new();
+    let run = sandbox.run_whole("true").expect("candidate should run");
+    assert!(
+        !run.trace.is_empty(),
+        "the xtrace is empty for `true` under {} -- BASH_XTRACEFD needs bash >= 4.1; \
+         the execution oracle would silently degrade to the shim log alone",
+        sandbox.bash_version_line()
+    );
 }
 
 // =====================================================================
@@ -1356,7 +1953,10 @@ struct ExecutionViolation {
 
 enum WholeOutcome {
     Skipped,
-    Consistent { dangerous_executed: u64 },
+    Consistent {
+        dangerous_executed: u64,
+        trace_observed: u64,
+    },
     Violation(ExecutionViolation),
 }
 
@@ -1367,16 +1967,21 @@ fn render_command(argv: &[String]) -> String {
         .join(" ")
 }
 
-fn check_whole_candidate(sandbox: &Sandbox, text: &str) -> WholeOutcome {
-    let decision = shguard::analyze(text).decision();
-    let Some(invocations) = sandbox.run_whole(text) else {
-        return WholeOutcome::Skipped;
-    };
-    let executed: Vec<String> = invocations
+/// Rendered commands from `run`'s combined view that shguard does not allow.
+fn disallowed_executions(run: &WholeRun) -> Vec<String> {
+    run.observed()
         .iter()
         .map(|argv| render_command(argv))
         .filter(|command| shguard::analyze(command).decision() != Decision::Allow)
-        .collect();
+        .collect()
+}
+
+fn check_whole_candidate(sandbox: &Sandbox, text: &str) -> WholeOutcome {
+    let decision = shguard::analyze(text).decision();
+    let Some(run) = sandbox.run_whole(text) else {
+        return WholeOutcome::Skipped;
+    };
+    let executed = disallowed_executions(&run);
     if decision == Decision::Allow && !executed.is_empty() {
         return WholeOutcome::Violation(ExecutionViolation {
             candidate: text.to_string(),
@@ -1385,6 +1990,7 @@ fn check_whole_candidate(sandbox: &Sandbox, text: &str) -> WholeOutcome {
     }
     WholeOutcome::Consistent {
         dangerous_executed: executed.len() as u64,
+        trace_observed: run.trace.len() as u64,
     }
 }
 
@@ -1990,6 +2596,7 @@ fn differential_fuzz_shguard_vs_bash_argv() {
     let mut whole_checked: u64 = 0;
     let mut skipped_whole: u64 = 0;
     let mut dangerous_executed: u64 = 0;
+    let mut trace_observed: u64 = 0;
     let mut violations: Vec<ExecutionViolation> = Vec::new();
 
     let mut candidates: Vec<Candidate>;
@@ -2024,9 +2631,11 @@ fn differential_fuzz_shguard_vs_bash_argv() {
                     WholeOutcome::Skipped => skipped_whole += 1,
                     WholeOutcome::Consistent {
                         dangerous_executed: n,
+                        trace_observed: t,
                     } => {
                         whole_checked += 1;
                         dangerous_executed += n;
+                        trace_observed += t;
                     }
                     WholeOutcome::Violation(violation) => {
                         whole_checked += 1;
@@ -2074,7 +2683,7 @@ fn differential_fuzz_shguard_vs_bash_argv() {
          skipped_capture_failed={skipped_capture_failed} generator_desync={generator_desync} \
          known_open_divergences={} new_divergences={} whole_checked={whole_checked} \
          skipped_whole={skipped_whole} dangerous_executed={dangerous_executed} \
-         execution_violations={}",
+         trace_observed={trace_observed} execution_violations={}",
         known_open.len(),
         new_divergences.len(),
         violations.len()
@@ -2126,6 +2735,12 @@ fn differential_fuzz_shguard_vs_bash_argv() {
             dangerous_executed > 0,
             "no whole candidate executed a command shguard flags -- the execution oracle \
              is not observing anything, check the shim log wiring"
+        );
+        assert!(
+            trace_observed > 0,
+            "no whole candidate produced an xtrace entry -- BASH_XTRACEFD needs bash >= 4.1 \
+             (running {}); the oracle would be shim-only",
+            sandbox.bash_version_line()
         );
     }
     // Always fails loud, regardless of RootCause: an Allow-direction
