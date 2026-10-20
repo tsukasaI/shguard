@@ -8,6 +8,16 @@
 //! fails on any such occurrence in a `.rs` file under `tests/` other than
 //! `tests/common/cmd.rs` itself.
 //!
+//! The scan's two needles, one per route above, miss other routes to the
+//! binary, which are left to code review. Known gaps include: a hard-coded
+//! binary path such as a literal `target/debug/shguard`; a sibling lookup that
+//! derives the path from the test executable's own location via `current_exe`;
+//! the UFCS call `Command::get_program(&c)`, and any other spelling of the
+//! method call (extra whitespace before the parens, a line break inside the
+//! call), because the program-path needle matches only the exact text of the
+//! method-call form; and a needle split with `concat!`, as this file does to
+//! name its own.
+//!
 //! The needles are built with `concat!`, and the prose above avoids spelling
 //! them, so this file does not match its own scan.
 
