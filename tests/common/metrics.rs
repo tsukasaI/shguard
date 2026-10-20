@@ -19,7 +19,8 @@
 //!
 //! `unknown.<corpus>.count` sums the kinds of one corpus;
 //! `unknown_command_count.<corpus>` is its `command` kind alone. Both are
-//! lower bounds of what R2 will count exactly.
+//! lower bounds of what R2 will count exactly. `unknown.total` is the sum of
+//! `unknown.<corpus>.count` over benign, denials and bypass.
 
 use std::collections::BTreeMap;
 use std::path::Path;

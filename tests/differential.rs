@@ -10,7 +10,9 @@
 //! `allow` (one `[[allow]]`).
 //!
 //! Corpora (`tests/golden/*.jsonl`, command column): guardfall, fuzz,
-//! denials, benign, bypass, legacy units, must_not_allow.
+//! denials, benign, bypass, legacy units, must_not_allow; plus
+//! `tests/fixtures/differential/rows.jsonl`, the rows that reach the rules the
+//! config fixtures add.
 //!
 //! Every run loads all four configs and reads every corpus (the wiring
 //! check). Rows are evaluated only when `SHGUARD_DIFFERENTIAL=1` or
@@ -49,18 +51,24 @@ const CONFIGS: [(&str, &str); 4] = [
     ("allow", "allow.toml"),
 ];
 
-/// `(name, file, required)`. A required corpus that is missing fails the run;
-/// an optional one is skipped with a note.
-const CORPORA: [(&str, &str, bool); 7] = [
-    ("guardfall", "guardfall.jsonl", true),
-    ("fuzz", "fuzz.jsonl", true),
-    ("denials", "denials.jsonl", true),
-    ("benign", "benign_corpus.jsonl", true),
-    ("bypass", "bypass_corpus.jsonl", true),
-    ("must_not_allow", "must_not_allow.jsonl", true),
+/// `(name, path from the checkout root, required)`. A required corpus that is
+/// missing fails the run; an optional one is skipped with a note.
+const CORPORA: [(&str, &str, bool); 8] = [
+    ("guardfall", "tests/golden/guardfall.jsonl", true),
+    ("fuzz", "tests/golden/fuzz.jsonl", true),
+    ("denials", "tests/golden/denials.jsonl", true),
+    ("benign", "tests/golden/benign_corpus.jsonl", true),
+    ("bypass", "tests/golden/bypass_corpus.jsonl", true),
+    ("must_not_allow", "tests/golden/must_not_allow.jsonl", true),
+    // Reaches the rules the checked-in configs add (allow.toml, owner.toml).
+    (
+        "fixture_rules",
+        "tests/fixtures/differential/rows.jsonl",
+        true,
+    ),
     // TODO(#836): make this required once the legacy_units.jsonl extraction
     // (gate.rs and rules.rs unit-test inputs) lands.
-    ("legacy", "legacy_units.jsonl", false),
+    ("legacy", "tests/golden/legacy_units.jsonl", false),
 ];
 
 /// What the differential compares: the decision and its reason text.
@@ -150,7 +158,6 @@ fn run() -> Result<(), String> {
     let seed = seed()?;
     let root = golden::checkout_dir();
     let fixtures = root.join("tests/fixtures/differential");
-    let golden_dir = root.join("tests/golden");
 
     let mut policies = Vec::new();
     for (name, file) in CONFIGS {
@@ -159,7 +166,7 @@ fn run() -> Result<(), String> {
 
     let mut corpora = Vec::new();
     for (corpus_name, file, required) in CORPORA {
-        let path = golden_dir.join(file);
+        let path = root.join(file);
         if !required && !path.exists() {
             println!("differential: skipping corpus {corpus_name}: {file} does not exist yet");
             continue;
