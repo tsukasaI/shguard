@@ -23,6 +23,15 @@ struct Corpus {
     excluded: usize,
 }
 
+fn is_unreplayable(config: &Value) -> bool {
+    ["rules", "allowlist"].iter().any(|source| {
+        config
+            .get(source)
+            .and_then(Value::as_object)
+            .is_some_and(|object| object.contains_key("unreplayable"))
+    })
+}
+
 fn load(text: &str) -> Result<Corpus, String> {
     let mut keys = BTreeMap::new();
     let mut corpus = Corpus {
@@ -46,10 +55,7 @@ fn load(text: &str) -> Result<Corpus, String> {
         let expect = fields.remove("expect");
         let reason = fields.get("reason").cloned();
         let mut identity = fields.clone();
-        if fields
-            .get("config")
-            .is_some_and(|config| config.to_string().contains("\"unreplayable\""))
-        {
+        if fields.get("config").is_some_and(is_unreplayable) {
             // No rule set is named, so the result is part of the row's identity.
             identity.insert("expect".to_string(), expect.clone().unwrap_or(Value::Null));
         }

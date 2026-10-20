@@ -13,6 +13,8 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash as _, Hasher as _};
 use std::io::Write as _;
 use std::sync::{Mutex, OnceLock};
 
@@ -35,10 +37,6 @@ const UNREPLAYABLE_CONFIG: &str = "rule set is not reproducible from the TOML te
      (path canonicalizer, home twins, or a hand-built rule set)";
 
 static CORPUS_TEXT: &str = include_str!("../tests/golden/legacy_units.jsonl");
-
-// ---------------------------------------------------------------------
-// Row model
-// ---------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -145,19 +143,37 @@ pub(crate) enum Row {
 
 impl Row {
     fn key(&self) -> String {
+        self.key_by(true)
+    }
+
+    /// Without `include_expect`, an unreplayable row's key drops its result,
+    /// so a row whose engine result changed still finds its old self.
+    fn key_by(&self, include_expect: bool) -> String {
         let key = match self {
             Self::Gate {
                 config,
                 command,
                 cwd,
                 expect,
-            } => serde_json::json!(["gate", config, cwd, command, config.identity_of(expect)]),
+            } => serde_json::json!([
+                "gate",
+                config,
+                cwd,
+                command,
+                include_expect.then(|| config.identity_of(expect))
+            ]),
             Self::Rules {
                 config,
                 method,
                 input,
                 expect,
-            } => serde_json::json!(["rules", config, method, input, config.identity_of(expect)]),
+            } => serde_json::json!([
+                "rules",
+                config,
+                method,
+                input,
+                include_expect.then(|| config.identity_of(expect))
+            ]),
             Self::Excluded { test, reason } => serde_json::json!(["excluded", test, reason]),
         };
         key.to_string()
@@ -190,23 +206,16 @@ fn corpus() -> &'static HashMap<String, Row> {
     CORPUS.get_or_init(|| parse_corpus(CORPUS_TEXT).unwrap_or_else(|err| panic!("{err}")))
 }
 
-// ---------------------------------------------------------------------
-// Words
-// ---------------------------------------------------------------------
-
-const KINDS: [(UnresolvableKind, &str); 9] = [
-    (UnresolvableKind::CommandSubstitution, "CommandSubstitution"),
-    (UnresolvableKind::ParameterExpansion, "ParameterExpansion"),
-    (UnresolvableKind::NonUtf8, "NonUtf8"),
-    (UnresolvableKind::ExpansionLimit, "ExpansionLimit"),
-    (UnresolvableKind::ArithmeticExpansion, "ArithmeticExpansion"),
-    (UnresolvableKind::ProcessSubstitution, "ProcessSubstitution"),
-    (UnresolvableKind::DevFdPath, "DevFdPath"),
-    (
-        UnresolvableKind::UnsupportedStructure,
-        "UnsupportedStructure",
-    ),
-    (UnresolvableKind::EmbeddedNul, "EmbeddedNul"),
+const ALL_KINDS: [UnresolvableKind; 9] = [
+    UnresolvableKind::CommandSubstitution,
+    UnresolvableKind::ParameterExpansion,
+    UnresolvableKind::NonUtf8,
+    UnresolvableKind::ExpansionLimit,
+    UnresolvableKind::ArithmeticExpansion,
+    UnresolvableKind::ProcessSubstitution,
+    UnresolvableKind::DevFdPath,
+    UnresolvableKind::UnsupportedStructure,
+    UnresolvableKind::EmbeddedNul,
 ];
 
 fn kind_name(kind: UnresolvableKind) -> &'static str {
@@ -224,10 +233,9 @@ fn kind_name(kind: UnresolvableKind) -> &'static str {
 }
 
 fn kind_from_name(name: &str) -> UnresolvableKind {
-    KINDS
-        .iter()
-        .find(|(_, n)| *n == name)
-        .map(|(kind, _)| *kind)
+    ALL_KINDS
+        .into_iter()
+        .find(|kind| kind_name(*kind) == name)
         .unwrap_or_else(|| panic!("unknown unresolvable kind {name:?}"))
 }
 
@@ -289,10 +297,6 @@ fn words(rows: &[Word]) -> Vec<NormalizedWord> {
     rows.iter().map(word_value).collect()
 }
 
-// ---------------------------------------------------------------------
-// Rule-set provenance
-// ---------------------------------------------------------------------
-
 #[derive(Default)]
 struct ParsedTexts {
     rules: Vec<String>,
@@ -305,12 +309,8 @@ thread_local! {
     static DEPTH: Cell<u32> = const { Cell::new(0) };
 }
 
-fn is_embedded_text(text: &str, embedded: &str) -> bool {
-    std::ptr::eq(text.as_ptr(), embedded.as_ptr())
-}
-
 pub(crate) fn note_rules_toml(text: &str) {
-    if is_embedded_text(text, crate::config_loader::EMBEDDED_BLOCKLIST) {
+    if text == crate::config_loader::EMBEDDED_BLOCKLIST {
         return;
     }
     PARSED.with(|p| push_new(&mut p.borrow_mut().rules, text));
@@ -425,10 +425,6 @@ fn build(config: &Config) -> Option<(Rules, Allowlist)> {
     Some((rules, allowlist))
 }
 
-// ---------------------------------------------------------------------
-// Recording / checking
-// ---------------------------------------------------------------------
-
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Origin {
     Gate,
@@ -478,15 +474,69 @@ fn record_oversize(file: &Mutex<std::fs::File>, test: &str, bytes: usize) {
     append_capture(file, &format!("{test}\t{{\"oversize\":{bytes}}}\n"));
 }
 
+/// Names a row without its config text, which can run to kilobytes.
+fn describe(row: &Row) -> String {
+    let (what, config) = match row {
+        Row::Gate {
+            config,
+            command,
+            cwd,
+            ..
+        } => (
+            format!("gate command={command:?} cwd={cwd:?}"),
+            Some(config),
+        ),
+        Row::Rules {
+            config,
+            method,
+            input,
+            ..
+        } => (
+            format!("rules method={method} input={input:?}"),
+            Some(config),
+        ),
+        Row::Excluded { test, reason } => (format!("excluded {test}: {reason}"), None),
+    };
+    let Some(config) = config else {
+        return what;
+    };
+    let mut hasher = DefaultHasher::new();
+    serde_json::to_string(config).unwrap().hash(&mut hasher);
+    format!("{what} config#{:08x}", hasher.finish() >> 32)
+}
+
+fn expect_of(row: &Row) -> String {
+    match row {
+        Row::Gate { expect, .. } => format!("{expect:?}"),
+        Row::Rules { expect, .. } => expect.to_string(),
+        Row::Excluded { .. } => String::new(),
+    }
+}
+
 fn check(test: &str, row: &Row) {
     let key = row.key();
     let Some(known) = corpus().get(&key) else {
-        panic!("{test}: {REGEN_HINT}: {key}");
+        let loose = row.key_by(false);
+        if let Some(old) = corpus().values().find(|r| r.key_by(false) == loose) {
+            panic!(
+                "{test}: the engine now disagrees with its legacy_units row (regenerate with \
+                 scripts/regen-legacy-units if the change is intended): {}\n  corpus expect: {}\n  \
+                 engine expect: {}",
+                describe(row),
+                expect_of(old),
+                expect_of(row)
+            );
+        }
+        panic!("{test}: {REGEN_HINT}: {}", describe(row));
     };
-    assert_eq!(
-        known, row,
+    assert!(
+        known == row,
         "{test}: the engine now disagrees with its legacy_units row (regenerate with \
-         scripts/regen-legacy-units if the change is intended): {key}"
+         scripts/regen-legacy-units if the change is intended): {}\n  corpus expect: {}\n  \
+         engine expect: {}",
+        describe(row),
+        expect_of(known),
+        expect_of(row)
     );
 }
 
@@ -600,15 +650,15 @@ pub(crate) fn rules_call(receiver: Receiver<'_>, method: &'static str, call: &Ca
         };
         let expect =
             run_method(&receiver, method, &input).unwrap_or_else(|err| panic!("{test}: {err}"));
+        let size = serde_json::to_string(&input).map_or(usize::MAX, |s| s.len());
         let row = Row::Rules {
             config,
             method: method.to_string(),
             input,
             expect,
         };
-        let size = serde_json::to_string(&row).map_or(usize::MAX, |s| s.len());
         let file = capture_file();
-        if size > MAX_INPUT_BYTES * 2 {
+        if size > MAX_INPUT_BYTES {
             if let Some(file) = file {
                 record_oversize(file, &test, size);
             }
@@ -618,10 +668,6 @@ pub(crate) fn rules_call(receiver: Receiver<'_>, method: &'static str, call: &Ca
     }
     Depth
 }
-
-// ---------------------------------------------------------------------
-// Replay
-// ---------------------------------------------------------------------
 
 fn id_of<T>(found: Option<&T>, id: impl Fn(&T) -> &str) -> Value {
     found.map_or(Value::Null, |rule| Value::String(id(rule).to_string()))
@@ -831,9 +877,23 @@ mod tests {
     }
 
     #[test]
-    fn kinds_table_covers_every_kind() {
-        for (kind, name) in &KINDS {
-            assert_eq!(kind_name(*kind), *name);
+    fn all_kinds_lists_every_variant() {
+        // Exhaustive: a new variant fails to compile here until it is given an
+        // index, and then the round trip fails until ALL_KINDS lists it.
+        let index = |kind: UnresolvableKind| match kind {
+            UnresolvableKind::CommandSubstitution => 0,
+            UnresolvableKind::ParameterExpansion => 1,
+            UnresolvableKind::NonUtf8 => 2,
+            UnresolvableKind::ExpansionLimit => 3,
+            UnresolvableKind::ArithmeticExpansion => 4,
+            UnresolvableKind::ProcessSubstitution => 5,
+            UnresolvableKind::DevFdPath => 6,
+            UnresolvableKind::UnsupportedStructure => 7,
+            UnresolvableKind::EmbeddedNul => 8,
+        };
+        for (position, kind) in ALL_KINDS.into_iter().enumerate() {
+            assert_eq!(index(kind), position);
+            assert_eq!(kind_from_name(kind_name(kind)), kind);
         }
     }
 }

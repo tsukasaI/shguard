@@ -2,8 +2,9 @@
 # Regenerates tests/golden/legacy_units.jsonl from the gate and rules unit
 # tests (docs/rfc-redesign.md, stage R0).
 #
-# Runs `cargo test --lib` over the `gate::` and `rules::` tests with
-# SHGUARD_LEGACY_CAPTURE set; src/legacy_units.rs then appends one
+# Runs `cargo test --lib` (through scripts/hermetic-cargo-test.sh, so the
+# developer's config does not shape the capture) over the `gate::` and
+# `rules::` tests, ignored ones included, with SHGUARD_LEGACY_CAPTURE set; src/legacy_units.rs then appends one
 # `<test name><TAB><row>` line per engine call a test makes. This script
 # sorts and dedupes those rows, adds an `excluded` row for every test that
 # made no capturable call (an internal-function test with no command or argv
@@ -29,7 +30,7 @@ if [ ! -s "$out" ]; then
 fi
 
 : >"$raw"
-SHGUARD_LEGACY_CAPTURE="$raw" cargo test --lib -- gate:: rules::
+SHGUARD_LEGACY_CAPTURE="$raw" scripts/hermetic-cargo-test.sh --lib -- --include-ignored gate:: rules::
 
 cargo test --lib -- --list gate:: rules:: |
   grep -E '^(gate|rules)::.*: test$' |
