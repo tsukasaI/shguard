@@ -24,6 +24,10 @@ completes.
    daemon's system config: `/etc/nix/nix.conf`, or nix-darwin's
    `nix.settings`; a user-level nix.conf does not reach the daemon); the
    script enforces this and refuses the push otherwise.
+   The nix build's checkPhase runs the test suite in release mode, where
+   `SHGUARD_TEST_EVAL_TIMEOUT_MS` is compiled out, so hook-path tests run
+   against the production 2s bound; flakes from a loaded builder there are
+   out of scope (accepted).
    x86_64-linux and aarch64-darwin are first built in CI by `main-check.yaml`'s
    `nix-build` job (ubuntu-latest and macos-latest) on the push to `main` when
    the release PR merges. x86_64-darwin is not gated: there is no hosted Intel
