@@ -57,9 +57,11 @@
 //! bound different scopes (this one only the evaluation pipeline; the
 //! binary's also config load and stdin read) and the binary's bound is
 //! always at least as strict — its wall-clock deadline starts earlier
-//! (before stdin is even read), so for the time bound the binary's
-//! watchdog always trips first (or the evaluation finishes before either
-//! does). The memory bound is not ordered the same way: its absolute cap
+//! (right after the stdin read, before config load), so for the time bound
+//! in release builds the binary's watchdog always trips first (or the
+//! evaluation finishes before either does). Debug builds can lengthen the
+//! binary's budget via `SHGUARD_TEST_EVAL_TIMEOUT_MS`, so there this
+//! watchdog may trip first. The memory bound is not ordered the same way: its absolute cap
 //! is always `<=` this module's `baseline + `[`MEMORY_LIMIT_BYTES`]`
 //! (`baseline` cannot be negative), but both watchdogs poll RSS on
 //! independent, unsynchronised cycles (`src/bin/shguard.rs`'s `LogState`
@@ -231,7 +233,7 @@ fn bounded_with_memory_limit(
     // already exceeds `memory_limit_bytes`.
     let baseline_rss = rss();
     // Computed before `spawn`, not after: like the binary's own deadline
-    // (started before stdin is even read), the budget covers everything
+    // (started right after the stdin read), the budget covers everything
     // this call does, including thread-spawn latency — not just the time
     // from "the worker exists" onward.
     let deadline = Instant::now() + EVALUATION_TIMEOUT;
