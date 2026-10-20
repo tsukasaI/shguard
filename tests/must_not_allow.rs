@@ -6,8 +6,8 @@
 //! point, equivalent to `SHGUARD_CONFIG=/dev/null`): every payload that is
 //! Allow under the embedded rules with no config and is named in the RFC
 //! "Problem" section or in the issues the RFC maps to R1 and R2. The golden
-//! snapshots encode today's fail-open Allows, so "no new Allow" alone would keep them; this file is the baseline that says
-//! which Allows are bugs.
+//! snapshots encode today's fail-open Allows, so "no new Allow" alone would
+//! keep them; this file is the baseline that says which Allows are bugs.
 //!
 //! Each row is `{"command", "status", "source", "note"?}`:
 //!
