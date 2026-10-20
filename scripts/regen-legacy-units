@@ -9,7 +9,9 @@
 # call a test makes. This script sorts and dedupes those rows, adds an
 # `excluded` row for every test that made no capturable call (an
 # internal-function test with no command or argv input) and for every
-# oversize input, and writes the corpus.
+# oversize input, and writes the corpus. The captured rows already name each
+# parsed TOML text by id and carry it once as a `config` header row, which the
+# byte-order sort puts ahead of every row that cites it.
 #
 # Run it whenever a gate/rules unit test is added or its behaviour changes
 # on purpose: without capture, the same unit tests fail unless their inputs
@@ -61,6 +63,7 @@ echo "wrote $out: $(wc -l <"$out" | tr -d ' ') rows"
 echo "gate rows:     $(grep -c '^{"kind":"gate"' "$out" || true)"
 echo "rules rows:    $(grep -c '^{"kind":"rules"' "$out" || true)"
 echo "excluded rows: $(grep -c '^{"kind":"excluded"' "$out" || true)"
+echo "config rows:   $(grep -c '^{"kind":"config"' "$out" || true)"
 
 # A key that two tests recorded with different results shows up as a
 # duplicate-key failure here.
