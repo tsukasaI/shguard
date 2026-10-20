@@ -3836,6 +3836,7 @@ fn guardfall_quoted_arithmetic_carrier_is_rejected_by_the_quoted_opener_cap() {
                 CARRIER_REASON,
             );
         }
+        // Not a clean close: the quote keeps the body open to the end.
         assert_flood_rejected(&format!("echo \"${{x:-'d'}}$(({parens}e\""), CARRIER_REASON);
     }
     // Positive control: with no quote inside the `${` body the same
@@ -3844,11 +3845,17 @@ fn guardfall_quoted_arithmetic_carrier_is_rejected_by_the_quoted_opener_cap() {
         "echo \"${x$((e}\"".to_string(),
         format!("echo \"${{x$(({}e}}\"", "(".repeat(14)),
         "echo \"${x:-$((1))}\"".to_string(),
+        // A clean `${x}` close, then the quote: reaches brush (a syntax error).
+        format!("echo \"${{x}}'$(({}e'\"", "(".repeat(14)),
     ] {
         let verdict = shguard::analyze(&command);
         let reason = verdict.reason().map_or("", |r| r.as_str());
         assert!(
             !reason.contains(CARRIER_REASON),
+            "command {command:?}, got: {reason}"
+        );
+        assert!(
+            !reason.contains("time budget"),
             "command {command:?}, got: {reason}"
         );
     }
