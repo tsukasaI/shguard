@@ -1,0 +1,7 @@
+# Differential config 4 of 4 (docs/rfc-redesign.md "Plan"): one `[[allow]]`,
+# the relaxation channel. The new core must keep an `[[allow]]` from
+# downgrading anything but an Ask (or, later, an Unknown), never a Block.
+[[allow]]
+id = "differential-allow-git"
+reason = "exercise the allowlist downgrade path"
+command = "git"

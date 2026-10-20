@@ -1,0 +1,35 @@
+# Differential config 2 of 4 (docs/rfc-redesign.md "Plan"): the shape of the
+# owner's own config (a dotfiles-managed ~/.config/shguard/config.toml),
+# trimmed to its load-bearing keys so the fixture is checked in and the
+# differential does not depend on the host's home directory. It keeps the
+# bare-string `ask_outcome`, the `escalation_floor`, and user `[[deny]]`
+# rules that overlap the embedded blocklist and add commands it does not
+# deny. Extend it when the owner's config gains a key class the differential
+# should cover.
+ask_outcome = "deny"
+escalation_floor = "deny"
+
+[[deny]]
+id = "owner-privilege-sudo"
+reason = "sudo grants root-level access"
+command = "sudo"
+
+[[deny]]
+id = "owner-privilege-su"
+reason = "su switches to another user account"
+command = "su"
+
+[[deny]]
+id = "owner-privilege-doas"
+reason = "doas grants elevated privileges"
+command = "doas"
+
+[[deny]]
+id = "owner-file-rm"
+reason = "rm permanently deletes files"
+command = "rm"
+
+[[deny]]
+id = "owner-file-truncate"
+reason = "truncate zeroes out file contents"
+command = "truncate"

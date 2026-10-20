@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Prints the R0 metrics of the evaluation-core redesign (docs/rfc-redesign.md,
+# issue #836) on stdout, one `metrics: <key>: <value>` line each:
+#
+#   benign.over_ask_rate / denials.over_ask_rate  share of corpus rows not Allow
+#   unknown.<corpus>.<kind>, unknown.total        Unknown counts by kind
+#   unknown_command_count                         same total, under its RFC name
+#   bypass.allow_count                            bypass rows decided Allow
+#
+# There is one implementation: tests/common/metrics.rs, run here through the
+# `metrics` test target (harness = false), which `cargo test` also runs and
+# prints. The Unknown-kind mapping is documented in that file.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+exec bash scripts/hermetic-cargo-test.sh --test metrics -q

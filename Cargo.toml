@@ -54,6 +54,22 @@ dbg_macro = "warn"
 todo = "warn"
 unimplemented = "warn"
 
+# `harness = false`: libtest captures the output of a passing test, and these
+# targets exist to print a number in plain `cargo test` output (issue #836).
+[[test]]
+name = "metrics"
+harness = false
+
+[[test]]
+name = "must_not_allow"
+harness = false
+
+# The config loader reads SHGUARD_CONFIG from the process environment, so the
+# differential sets it before any thread exists.
+[[test]]
+name = "differential"
+harness = false
+
 [dev-dependencies]
 assert_cmd = "2.2.2"
 tempfile = "3.27.0"
