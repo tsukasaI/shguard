@@ -12,8 +12,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash as _, Hasher as _};
 use std::io::Write as _;
 use std::sync::{Mutex, OnceLock};
@@ -22,7 +22,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::normalize::{NormalizedWord, Resolution, UnresolvableKind};
-use crate::rules::{Allowlist, CommandRule, Rules, SymlinkScope, UserConfig, merge_user_config};
+use crate::rules::{
+    Allowlist, CommandRule, FakeFsEntry, PathCanonicalizer, Rules, SymlinkScope, UserConfig,
+    merge_user_config,
+};
 use crate::verdict::Verdict;
 
 /// Inputs above this many bytes are not recorded: the corpus is meant to be
@@ -34,7 +37,7 @@ const MAX_INPUT_BYTES: usize = 4096;
 const CAPTURE_ENV: &str = "SHGUARD_LEGACY_CAPTURE";
 const REGEN_HINT: &str = "add a legacy_units row (run scripts/regen-legacy-units)";
 const UNREPLAYABLE_CONFIG: &str = "rule set is not reproducible from the TOML texts the test parsed \
-     (path canonicalizer, home twins, or a hand-built rule set)";
+     (a path canonicalizer other than a fake filesystem table, home twins, or a hand-built rule set)";
 
 static CORPUS_TEXT: &str = include_str!("../tests/golden/legacy_units.jsonl");
 
@@ -95,6 +98,49 @@ struct ConfigRowOwned {
     toml: String,
 }
 
+/// What a fake filesystem answers for one path; a path the map does not list
+/// is not found.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FakeFsResolution {
+    path: String,
+    is_dir: bool,
+    link_count: u64,
+}
+
+fn fake_fs_map(table: &[FakeFsEntry]) -> BTreeMap<String, FakeFsResolution> {
+    let mut map = BTreeMap::new();
+    for entry in table {
+        let resolution = FakeFsResolution {
+            path: entry.resolves_to.to_string(),
+            is_dir: entry.is_dir,
+            link_count: entry.link_count,
+        };
+        assert!(
+            map.insert(entry.path.to_string(), resolution).is_none(),
+            "fake filesystem lists {:?} twice",
+            entry.path
+        );
+    }
+    map
+}
+
+fn fake_fs_canonicalizer(map: &BTreeMap<String, FakeFsResolution>) -> PathCanonicalizer {
+    // Leaked: `PathCanonicalizer::fake_fs` takes a `'static` table, and the
+    // replay is test-only.
+    let leak = |text: &str| -> &'static str { Box::leak(text.to_string().into_boxed_str()) };
+    let table: Vec<FakeFsEntry> = map
+        .iter()
+        .map(|(path, resolution)| FakeFsEntry {
+            path: leak(path),
+            resolves_to: leak(&resolution.path),
+            is_dir: resolution.is_dir,
+            link_count: resolution.link_count,
+        })
+        .collect();
+    PathCanonicalizer::fake_fs(Box::leak(table.into_boxed_slice()))
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Config {
@@ -102,6 +148,8 @@ pub(crate) struct Config {
     rules: Source,
     #[serde(default)]
     allowlist: Source,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fake_fs: Option<BTreeMap<String, FakeFsResolution>>,
 }
 
 impl Config {
@@ -461,6 +509,7 @@ fn merged(text: &str) -> Option<(Rules, Allowlist)> {
 /// means "the embedded default".
 fn identify(rules: Option<&Rules>, allowlist: Option<&Allowlist>) -> Config {
     let (embedded_rules, embedded_allowlist) = embedded();
+    let fake_fs = rules.and_then(Rules::legacy_fake_fs);
     let texts = PARSED.with(|p| {
         let p = p.borrow();
         (p.rules.clone(), p.allowlist.clone(), p.user_config.clone())
@@ -468,7 +517,7 @@ fn identify(rules: Option<&Rules>, allowlist: Option<&Allowlist>) -> Config {
     let mut coupled_allowlist: Option<(String, Allowlist)> = None;
     let rules_source = match rules {
         None => Source::Embedded,
-        Some(rules) if !rules.legacy_has_default_canonicalizer() => {
+        Some(rules) if fake_fs.is_none() && !rules.legacy_has_default_canonicalizer() => {
             Source::Unreplayable(UNREPLAYABLE_CONFIG.to_string())
         }
         Some(rules) if rules == embedded_rules => Source::Embedded,
@@ -505,11 +554,18 @@ fn identify(rules: Option<&Rules>, allowlist: Option<&Allowlist>) -> Config {
                     .find(|t| Allowlist::parse(t).is_ok_and(|candidate| candidate == *allowlist))
                     .map(|t| Source::from_parsed_text(t))
             })
+            .or_else(|| {
+                texts.2.iter().find_map(|t| {
+                    let (_, merged_allowlist) = merged(t)?;
+                    (merged_allowlist == *allowlist).then(|| Source::UserConfig(t.clone()))
+                })
+            })
             .unwrap_or_else(|| Source::Unreplayable(UNREPLAYABLE_CONFIG.to_string())),
     };
     Config {
         rules: rules_source,
         allowlist: allowlist_source,
+        fake_fs: fake_fs.map(fake_fs_map),
     }
 }
 
@@ -544,6 +600,7 @@ fn identify_rule(rule: &CommandRule) -> Config {
     Config {
         rules: source,
         allowlist: Source::Embedded,
+        fake_fs: None,
     }
 }
 
@@ -584,6 +641,10 @@ fn build(config: &Config) -> Option<(Rules, Allowlist)> {
             _ => merged(text)?.1,
         },
         Source::Unreplayable(_) => return None,
+    };
+    let rules = match &config.fake_fs {
+        Some(map) => rules.with_path_canonicalizer(fake_fs_canonicalizer(map)),
+        None => rules,
     };
     Some((rules, allowlist))
 }
@@ -1043,6 +1104,12 @@ mod tests {
         assert_eq!(
             skipped, unreplayable_rows,
             "every skipped row must be flagged unreplayable"
+        );
+        assert_eq!(
+            unreplayable_rows, 0,
+            "a gate or rules unit test built a rule set legacy_units cannot reconstruct; \
+             teach `identify`/`build` its provenance (issue #857) instead of recording it \
+             as unreplayable"
         );
         assert!(
             failures.is_empty(),
