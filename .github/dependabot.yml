@@ -1,19 +1,18 @@
 version: 2
 
 updates:
-  # Keeps the SHA-pinned actions in main-check.yaml, release.yaml, and
-  # fuzz-nightly.yaml current: Dependabot resolves the new tag's commit SHA
-  # itself and updates both the pin and its trailing "# vX.Y.Z" comment, the
-  # same renewal release.yaml's header currently describes as a manual
-  # `gh api ... --jq '.object.sha'` procedure.
+  # Keeps the SHA pins that track a release tag (a trailing `# vX.Y.Z`
+  # comment) in main-check.yaml, release.yaml, and fuzz-nightly.yaml current:
+  # Dependabot resolves the new tag's commit SHA itself and updates both the
+  # pin and that comment, so those pins need no manual SHA lookup; renewal is
+  # reviewing and merging Dependabot's PR (see release.yaml's header).
   #
   # NOTE: dtolnay/rust-toolchain is pinned to a `master` branch commit (no
   # version tag), unlike the other tag-pinned actions here. Dependabot's
-  # github-actions updater is documented against tag-based `uses:` refs;
-  # its behavior for a bare-branch commit pin like this one is unverified
-  # in this change, so the manual `gh api .../commits/master --jq '.sha'`
-  # renewal (release.yaml's header) remains the path for that one pin until
-  # confirmed otherwise.
+  # github-actions updater is documented against tag-based `uses:` refs; its
+  # behavior for a bare-branch commit pin like this one is unverified, so the
+  # manual `gh api .../commits/master --jq '.sha'` renewal (release.yaml's
+  # header) remains the path for that one pin until confirmed otherwise.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
