@@ -266,6 +266,7 @@ pub(super) static CATALOG: &[CommandSpec] = &[
                 short: None,
                 long: Some("session-command"),
             },
+            Slot::ShellPassthrough,
             Slot::CwdSwitch {
                 short: 'l',
                 long: "login",
@@ -564,6 +565,7 @@ pub(super) static CATALOG: &[CommandSpec] = &[
                 short: None,
                 long: Some("session-command"),
             },
+            Slot::ShellPassthrough,
         ],
     },
     CommandSpec {

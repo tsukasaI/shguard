@@ -18614,12 +18614,66 @@ mod tests {
     #[test]
     fn time_and_exec_wrapper_second_review_findings_keep_their_decision() {
         for (command, expected) in [
-            // The `time -- !` Ask pins record current behaviour: bash would
-            // run the command after `!`; the target is Block.
-            ("time -- ! rm -rf /", Decision::Ask),
-            ("time -p -- ! rm -rf /", Decision::Ask),
+            // Issue #731: the `!` after `time --` opens the pipeline.
+            ("time -- ! rm -rf /", Decision::Block),
+            ("time -p -- ! rm -rf /", Decision::Block),
             ("time -- ! sudo id", Decision::Ask),
             ("time -- coproc rm -rf /", Decision::Ask),
+            // Further `!`/`time` words in the run are grammar too, not a
+            // GNU `time` wrapping a command named `!`.
+            ("time -- ! time -- ! rm -rf /", Decision::Block),
+            ("time -- ! time -p -- ! rm -rf /", Decision::Block),
+            ("time -- ! time -- ! rm -rf ~", Decision::Block),
+            ("time -- ! ! time -- ! rm -rf /", Decision::Block),
+            ("time -- ! time ! rm -rf /", Decision::Block),
+            ("time -- ! time time -- ! rm -rf /", Decision::Block),
+            ("time -- ! time -- ! sudo id", Decision::Ask),
+            ("time time -- ! rm -rf /", Decision::Block),
+            ("time -- time -- ! rm -rf /", Decision::Block),
+            ("time -p -- time -- ! rm -rf /", Decision::Block),
+            ("! time -- ! rm -rf /", Decision::Block),
+            ("time ! time -- ! rm -rf /", Decision::Block),
+            ("! ! time -- ! rm -rf /", Decision::Block),
+            ("! ! time time -- ! rm -rf /", Decision::Block),
+            ("if ! ! time -- ! rm -rf /; then :; fi", Decision::Block),
+            ("bash -c '! ! time -- ! rm -rf /'", Decision::Block),
+            ("! ls", Decision::Allow),
+            ("! time ls", Decision::Allow),
+            ("time ls", Decision::Allow),
+            ("ls", Decision::Allow),
+            // Deliberate fail-closed: no pipeline after the grammar words.
+            ("! time", Decision::Ask),
+            // After `!` a `--` is a command name, which bash runs as such.
+            ("time -- ! -- rm -rf /", Decision::Allow),
+            // A grammar word with no pipeline after it fails closed.
+            ("time -- ! !", Decision::Ask),
+            ("time -- !", Decision::Ask),
+            // Issue #731: the arguments after the user reach the target
+            // shell, so `-ic`/`-ec` carry its command string.
+            ("runuser root -- -ic 'rm -rf /'", Decision::Block),
+            ("runuser root -- -ec 'rm -rf /'", Decision::Block),
+            ("su root -- -ic 'rm -rf /'", Decision::Block),
+            // The script is the first operand after bash's options.
+            ("runuser root -- -c -e 'rm -rf /'", Decision::Block),
+            ("runuser root -- -c -- 'rm -rf /'", Decision::Block),
+            ("runuser root -- -c - 'rm -rf /'", Decision::Block),
+            ("runuser root -- -co errexit 'rm -rf /'", Decision::Block),
+            ("runuser root -- -c +O extglob 'rm -rf /'", Decision::Block),
+            // The target shell may be zsh, whose option letters are not bash's.
+            ("runuser root -- -oc errexit 'rm -rf /'", Decision::Block),
+            ("runuser root -- -Nc 'rm -rf /'", Decision::Block),
+            ("runuser root -- -yc 'rm -rf /'", Decision::Block),
+            ("runuser root -- -o errexit -c 'rm -rf /'", Decision::Block),
+            ("su -l root -- -ic 'rm -rf /'", Decision::Block),
+            ("su - root -- -ic 'rm -rf /'", Decision::Block),
+            ("su -- root -ic 'rm -rf /'", Decision::Block),
+            // No script word, or one that cannot be resolved, stays at the floor.
+            ("runuser root -- -c -e", Decision::Ask),
+            ("runuser root -- -c --", Decision::Ask),
+            ("runuser root -- -cfoo", Decision::Ask),
+            (r#"runuser root -- -ic "$X""#, Decision::Ask),
+            // Benign string stays at the escalation floor, as before.
+            ("runuser root -- -ic 'ls'", Decision::Ask),
             ("watch -dx 'rm -rf /'", Decision::Block),
             ("watch -dn rm -rf /", Decision::Block),
             ("watch -s -x 'rm -rf /'", Decision::Block),

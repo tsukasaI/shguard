@@ -90,7 +90,76 @@ pub(crate) fn locate_short_value<'t>(
         .locate_short_value(token, letter)
 }
 
-/// A value found for a [`Slot::ShellScript`] flag.
+/// Adds the script of every `-c` cluster in `tail`. Any `-`/`+` cluster with
+/// a `c` counts, whatever letters precede it: the target shell is whichever
+/// `su`/`runuser` is configured to start (bash, zsh with `-Nc`...), so its
+/// option letters are not enumerated. Bash takes the
+/// script from the first operand after all options, not from the word right
+/// after the cluster (`-c -e CMD`, `-c -- CMD`, `-co errexit CMD`), so both
+/// that operand and the next word are reported. A cluster the command's own
+/// `-c` also places yields the same script twice, which only costs a repeated
+/// scan.
+fn collect_passthrough_scripts<'a>(tail: &'a [NormalizedWord], values: &mut Vec<ScriptValue<'a>>) {
+    for (index, word) in tail.iter().enumerate() {
+        let Resolution::Resolved(token) = word.resolution() else {
+            continue;
+        };
+        if token.len() < 2 || token.starts_with("--") || !token.starts_with(['-', '+']) {
+            continue;
+        }
+        if !token.contains('c') {
+            continue;
+        }
+        push_script_word(tail, index + 1, values);
+        if let Some(operand) = first_operand_after_options(tail, index)
+            && operand != index + 1
+        {
+            push_script_word(tail, operand, values);
+        }
+    }
+}
+
+fn push_script_word<'a>(tail: &'a [NormalizedWord], at: usize, values: &mut Vec<ScriptValue<'a>>) {
+    match tail.get(at).map(NormalizedWord::resolution) {
+        Some(Resolution::Resolved(text)) => values.push(ScriptValue::Text(text)),
+        Some(Resolution::Unresolvable(_)) => values.push(ScriptValue::Unresolvable),
+        None => {}
+    }
+}
+
+/// Index of the first word after the option cluster at `cluster` that is not
+/// an option or an option's value: each `o`/`O` in a cluster takes one more
+/// word (`-o errexit`, `+O extglob`), and `--` or a lone `-` ends the options. An
+/// unresolvable word is returned as is, since it could be the operand.
+fn first_operand_after_options(tail: &[NormalizedWord], cluster: usize) -> Option<usize> {
+    let value_words = |word: &NormalizedWord| match word.resolution() {
+        Resolution::Resolved(token) => token.chars().filter(|c| matches!(c, 'o' | 'O')).count(),
+        Resolution::Unresolvable(_) => 0,
+    };
+    let mut pending = value_words(tail.get(cluster)?);
+    let mut at = cluster + 1;
+    loop {
+        let word = tail.get(at)?;
+        if pending > 0 {
+            pending -= 1;
+        } else {
+            let Resolution::Resolved(token) = word.resolution() else {
+                return Some(at);
+            };
+            if token == "--" || token == "-" {
+                return (at + 1 < tail.len()).then_some(at + 1);
+            }
+            let is_cluster = token.len() > 1 && token.starts_with(['-', '+']);
+            if !is_cluster {
+                return Some(at);
+            }
+            pending = value_words(word);
+        }
+        at += 1;
+    }
+}
+
+/// A value found for a [`Slot::ShellScript`] or [`Slot::ShellPassthrough`] flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScriptValue<'a> {
     Text(&'a str),
@@ -166,6 +235,10 @@ impl Known {
     ) -> Vec<ScriptValue<'a>> {
         let mut values = Vec::new();
         for slot in self.spec.slots {
+            if matches!(slot, Slot::ShellPassthrough) {
+                collect_passthrough_scripts(tail, &mut values);
+                continue;
+            }
             let Slot::ShellScript { short, long } = slot else {
                 continue;
             };
