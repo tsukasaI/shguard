@@ -8,7 +8,11 @@ repository = "https://github.com/tsukasaI/shguard"
 readme = "README.md"
 keywords = ["security", "shell", "cli", "hooks", "claude"]
 categories = ["command-line-utilities", "development-tools"]
-include = ["src/**", "rules/**", "tests/**", "/Cargo.toml", "/README.md", "/CHANGELOG.md", "/LICENSE-*"]
+include = ["src/**", "rules/**", "tests/**", "/Cargo.toml", "/README.md", "/CHANGELOG.md", "/LICENSE-*", "!tests/golden_snapshot.rs", "!tests/guardfall.rs"]
+# The two test crates negated above need the `test-support` feature, which
+# only the path-only self dev-dependency turns on, and `cargo publish` drops
+# that dependency, so they would not compile from the published package.
+# Their golden data stays: tests/differential.rs and tests/metrics.rs read it.
 
 [[bin]]
 name = "shguard"
