@@ -2683,7 +2683,7 @@ fn differential_fuzz_shguard_vs_bash_argv() {
          skipped_capture_failed={skipped_capture_failed} generator_desync={generator_desync} \
          known_open_divergences={} new_divergences={} whole_checked={whole_checked} \
          skipped_whole={skipped_whole} dangerous_executed={dangerous_executed} \
-         execution_violations={}",
+         trace_observed={trace_observed} execution_violations={}",
         known_open.len(),
         new_divergences.len(),
         violations.len()
