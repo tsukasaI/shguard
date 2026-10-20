@@ -149,9 +149,6 @@
 {"kind":"excluded","test":"rules::tests::except_targets_url_host_wildcard_is_rejected","reason":"no gate or rules engine call with a command or argv input"}
 {"kind":"excluded","test":"rules::tests::except_targets_url_host_with_strip_is_rejected","reason":"no gate or rules engine call with a command or argv input"}
 {"kind":"excluded","test":"rules::tests::first_unmodeled_wrapper_option_names_the_offending_hop","reason":"no gate or rules engine call with a command or argv input"}
-{"kind":"excluded","test":"rules::tests::flag_and_target_composition_denies_force_push_to_either_protected_branch","reason":"no gate or rules engine call with a command or argv input"}
-{"kind":"excluded","test":"rules::tests::flag_and_target_composition_does_not_match_an_unprotected_branch","reason":"no gate or rules engine call with a command or argv input"}
-{"kind":"excluded","test":"rules::tests::flag_and_target_composition_does_not_match_without_the_flag","reason":"no gate or rules engine call with a command or argv input"}
 {"kind":"excluded","test":"rules::tests::flag_matcher_parse_any_of_alternatives","reason":"no gate or rules engine call with a command or argv input"}
 {"kind":"excluded","test":"rules::tests::flag_matcher_parse_rejects_bad_specs","reason":"no gate or rules engine call with a command or argv input"}
 {"kind":"excluded","test":"rules::tests::flag_matcher_parse_rejects_empty_alternatives","reason":"no gate or rules engine call with a command or argv input"}
@@ -220,11 +217,9 @@
 {"kind":"excluded","test":"rules::tests::required_tokens_rejects_leading_or_trailing_whitespace","reason":"no gate or rules engine call with a command or argv input"}
 {"kind":"excluded","test":"rules::tests::required_tokens_word_fully_covered_by_except_targets_loads_successfully","reason":"no gate or rules engine call with a command or argv input"}
 {"kind":"excluded","test":"rules::tests::required_tokens_word_never_covered_by_except_targets_is_rejected_at_load_time","reason":"no gate or rules engine call with a command or argv input"}
-{"kind":"excluded","test":"rules::tests::resolve_symlinks::a_refusing_scope_excepts_nothing","reason":"no gate or rules engine call with a command or argv input"}
 {"kind":"excluded","test":"rules::tests::resolve_symlinks::except_entry_that_canonicalizes_to_another_spelling_is_warned_about","reason":"no gate or rules engine call with a command or argv input"}
 {"kind":"excluded","test":"rules::tests::resolve_symlinks::login_and_chdir_wrappers_relocate_the_cwd","reason":"no gate or rules engine call with a command or argv input"}
 {"kind":"excluded","test":"rules::tests::resolve_symlinks::rejected_without_path_except_targets_or_on_allow_side_entries","reason":"no gate or rules engine call with a command or argv input"}
-{"kind":"excluded","test":"rules::tests::resolve_symlinks::relative_candidate_resolves_against_base_and_fails_closed_without_one","reason":"no gate or rules engine call with a command or argv input"}
 {"kind":"excluded","test":"rules::tests::resolve_symlinks::relative_except_entries_are_rejected_at_load","reason":"no gate or rules engine call with a command or argv input"}
 {"kind":"excluded","test":"rules::tests::role_counting_is_skipped_when_a_target_can_double_as_a_flag","reason":"no gate or rules engine call with a command or argv input"}
 {"kind":"excluded","test":"rules::tests::role_counting_keeps_the_floor_for_a_plausibility_floor_target","reason":"no gate or rules engine call with a command or argv input"}
@@ -237,13 +232,7 @@
 {"kind":"excluded","test":"rules::tests::strip_version_suffix_strips_abi_letters_and_debug_suffix","reason":"no gate or rules engine call with a command or argv input"}
 {"kind":"excluded","test":"rules::tests::strip_version_suffix_strips_trailing_digits_and_dots","reason":"no gate or rules engine call with a command or argv input"}
 {"kind":"excluded","test":"rules::tests::su_positional_username_is_skipped","reason":"no gate or rules engine call with a command or argv input"}
-{"kind":"excluded","test":"rules::tests::su_username_naming_a_blocklisted_commands_own_account_is_not_flagged","reason":"no gate or rules engine call with a command or argv input"}
 {"kind":"excluded","test":"rules::tests::su_username_shadow_check_does_not_apply_to_sudo","reason":"no gate or rules engine call with a command or argv input"}
-{"kind":"excluded","test":"rules::tests::su_username_shadow_check_sees_through_an_outer_wrapper","reason":"no gate or rules engine call with a command or argv input"}
-{"kind":"excluded","test":"rules::tests::su_username_slot_matching_a_blocklist_command_name_is_found","reason":"no gate or rules engine call with a command or argv input"}
-{"kind":"excluded","test":"rules::tests::su_username_slot_naming_a_real_user_is_not_flagged","reason":"no gate or rules engine call with a command or argv input"}
-{"kind":"excluded","test":"rules::tests::su_username_with_trailing_args_that_do_not_satisfy_the_rule_is_not_flagged","reason":"no gate or rules engine call with a command or argv input"}
-{"kind":"excluded","test":"rules::tests::su_username_with_trailing_args_that_do_satisfy_the_rule_is_flagged","reason":"no gate or rules engine call with a command or argv input"}
 {"kind":"excluded","test":"rules::tests::target_flags_load_validation","reason":"no gate or rules engine call with a command or argv input"}
 {"kind":"excluded","test":"rules::tests::target_flags_rejects_strip_targets","reason":"no gate or rules engine call with a command or argv input"}
 {"kind":"excluded","test":"rules::tests::targets_normalized_is_still_accepted","reason":"no gate or rules engine call with a command or argv input"}
@@ -2590,7 +2579,15 @@
 {"kind":"rules","config":{"rules":{"unreplayable":"rule set is not reproducible from the TOML texts the test parsed (path canonicalizer, home twins, or a hand-built rule set)"},"allowlist":"embedded"},"method":"match_command","input":{"argv":["upload-tool","/scratch/missing.md"]},"expect":"upload"}
 {"kind":"rules","config":{"rules":{"unreplayable":"rule set is not reproducible from the TOML texts the test parsed (path canonicalizer, home twins, or a hand-built rule set)"},"allowlist":"embedded"},"method":"match_command","input":{"argv":["upload-tool","/scratch/ok.md"]},"expect":null}
 {"kind":"rules","config":{"rules":{"unreplayable":"rule set is not reproducible from the TOML texts the test parsed (path canonicalizer, home twins, or a hand-built rule set)"},"allowlist":"embedded"},"method":"match_command","input":{"argv":["upload-tool","/scratch/sub"]},"expect":"upload"}
+{"kind":"rules","config":{"rules":{"unreplayable":"rule set is not reproducible from the TOML texts the test parsed (path canonicalizer, home twins, or a hand-built rule set)"},"allowlist":"embedded"},"method":"match_command_in","input":{"argv":["upload-tool","/scratch/ok.md"],"base":"/scratch","refuse_all":true},"expect":"upload"}
+{"kind":"rules","config":{"rules":{"unreplayable":"rule set is not reproducible from the TOML texts the test parsed (path canonicalizer, home twins, or a hand-built rule set)"},"allowlist":"embedded"},"method":"match_command_in","input":{"argv":["upload-tool","ok.md"],"base":"/scratch"},"expect":null}
+{"kind":"rules","config":{"rules":{"unreplayable":"rule set is not reproducible from the TOML texts the test parsed (path canonicalizer, home twins, or a hand-built rule set)"},"allowlist":"embedded"},"method":"match_command_in","input":{"argv":["upload-tool","ok.md"],"base":"relative"},"expect":"upload"}
+{"kind":"rules","config":{"rules":{"unreplayable":"rule set is not reproducible from the TOML texts the test parsed (path canonicalizer, home twins, or a hand-built rule set)"},"allowlist":"embedded"},"method":"match_command_in","input":{"argv":["upload-tool","ok.md"]},"expect":"upload"}
 {"kind":"rules","config":{"rules":{"user_config":"\n            [[deny]]\n            id = \"user-deny-case-sensitive-prefix\"\n            reason = \"test\"\n            command = \"tee\"\n            targets = [{ normalized_prefix = \"/Users/h/.config/shguard/\" }]\n        "},"allowlist":"embedded"},"method":"match_command","input":{"argv":["tee","/USERS/H/.CONFIG/SHGUARD/config.toml"]},"expect":null}
+{"kind":"rules","config":{"rules":{"user_config":"\n            [[deny]]\n            id = \"user-deny-protected-branch-force-push\"\n            reason = \"force push to a protected branch\"\n            command = \"git push\"\n            required_flags = [\"f|--force\"]\n            targets = [{ exact = \"main\" }, { exact = \"master\" }]\n        "},"allowlist":"embedded"},"method":"rule_matches","input":{"argv":["git","push","--force","origin","feature"],"rule":"user-deny-protected-branch-force-push"},"expect":false}
+{"kind":"rules","config":{"rules":{"user_config":"\n            [[deny]]\n            id = \"user-deny-protected-branch-force-push\"\n            reason = \"force push to a protected branch\"\n            command = \"git push\"\n            required_flags = [\"f|--force\"]\n            targets = [{ exact = \"main\" }, { exact = \"master\" }]\n        "},"allowlist":"embedded"},"method":"rule_matches","input":{"argv":["git","push","--force","origin","main"],"rule":"user-deny-protected-branch-force-push"},"expect":true}
+{"kind":"rules","config":{"rules":{"user_config":"\n            [[deny]]\n            id = \"user-deny-protected-branch-force-push\"\n            reason = \"force push to a protected branch\"\n            command = \"git push\"\n            required_flags = [\"f|--force\"]\n            targets = [{ exact = \"main\" }, { exact = \"master\" }]\n        "},"allowlist":"embedded"},"method":"rule_matches","input":{"argv":["git","push","--force","origin","master"],"rule":"user-deny-protected-branch-force-push"},"expect":true}
+{"kind":"rules","config":{"rules":{"user_config":"\n            [[deny]]\n            id = \"user-deny-protected-branch-force-push\"\n            reason = \"force push to a protected branch\"\n            command = \"git push\"\n            required_flags = [\"f|--force\"]\n            targets = [{ exact = \"main\" }, { exact = \"master\" }]\n        "},"allowlist":"embedded"},"method":"rule_matches","input":{"argv":["git","push","origin","main"],"rule":"user-deny-protected-branch-force-push"},"expect":false}
 {"kind":"rules","config":{"rules":{"user_config":"\n            [[deny]]\n            id = \"user-deny-recased-ascent-descent\"\n            reason = \"test\"\n            command = \"tee\"\n            targets = [{ normalized = \"~/mystuff\", case_insensitive = true }]\n        "},"allowlist":"embedded"},"method":"match_command_ascent_descent","input":{"argv":["tee","../MYSTUFF"]},"expect":"user-deny-recased-ascent-descent"}
 {"kind":"rules","config":{"rules":{"user_config":"\n            [[deny]]\n            id = \"user-deny-recased-exact\"\n            reason = \"test\"\n            command = \"rm\"\n            targets = [{ normalized = \"/Users/h/.config\", case_insensitive = true }]\n        "},"allowlist":"embedded"},"method":"match_command","input":{"argv":["rm","/USERS/H/.CONFIG"]},"expect":"user-deny-recased-exact"}
 {"kind":"rules","config":{"rules":{"user_config":"\n            [[deny]]\n            id = \"user-deny-recased-exact\"\n            reason = \"test\"\n            command = \"rm\"\n            targets = [{ normalized = \"/Users/h/.config\", case_insensitive = true }]\n        "},"allowlist":"embedded"},"method":"match_command","input":{"argv":["rm","/Users/h/.config"]},"expect":"user-deny-recased-exact"}
@@ -2949,3 +2946,298 @@
 {"kind":"rules","method":"match_redirect_target_ascent_descent","input":{"target":"../build/output.txt"},"expect":null}
 {"kind":"rules","method":"match_redirect_target_ascent_descent","input":{"target":"~-/dev/sda"},"expect":"redirect-overwrite-device-or-critical-file"}
 {"kind":"rules","method":"match_redirect_target_ascent_descent","input":{"target":"~/../../etc/passwd"},"expect":"redirect-overwrite-device-or-critical-file"}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"blkdiscard-any-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"cp-remove-destination-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"cp-write-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"dcfldd-write-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"dd-write-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"enable-loadable-builtin"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"find-delete"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"git-am-no-verify"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"git-branch-force-delete"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"git-branch-force-delete-flags"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"git-checkout-dashdash"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"git-checkout-force-ask"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"git-clean-any"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"git-commit-amend"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"git-commit-no-verify-short"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"git-merge-no-verify"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"git-p4-submit-no-verify"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"git-pull-no-verify"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"git-push-force"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"git-push-no-verify"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"git-rebase"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"git-reset-hard"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"git-restore-ask"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"git-stash-clear"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"git-stash-drop"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"git-tag-destructive"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"install-write-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"kill-all-processes"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"killall-user-processes"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"killall5-all-processes"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"mkdosfs-any-filesystem"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"mke2fs-any-filesystem"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"mkfs-any-filesystem"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"mkfs-dispatcher-any-filesystem"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"mkntfs-any-filesystem"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"mkswap-any-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"mv-write-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"pkill-user-processes"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"rm-force-find-placeholder-target"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"rm-recursive-dangerous-target"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"rm-recursive-force-dangerous-target"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"rsync-delete-dangerous-target"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"rsync-delete-root-or-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"rsync-write-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"self-protect-config-ancestor-cp-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"self-protect-config-ancestor-mv-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"self-protect-config-ancestor-rm-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"self-protect-config-ancestor-rsync-copy-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"self-protect-config-ancestor-rsync-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"self-protect-config-ancestor-tar-extract-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"self-protect-config-ancestor-unzip-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"self-protect-config-cp-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"self-protect-config-dcfldd-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"self-protect-config-dd-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"self-protect-config-find-exec-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"self-protect-config-install-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"self-protect-config-ln-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"self-protect-config-mv-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"self-protect-config-patch-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"self-protect-config-perl-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"self-protect-config-rm-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"self-protect-config-rmdir-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"self-protect-config-rsync-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"self-protect-config-sed-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"self-protect-config-tee-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"self-protect-config-unlink-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"shell-init-cp"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"shell-init-curl"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"shell-init-curl-attached"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"shell-init-curl-glued"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"shell-init-dcfldd"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"shell-init-dd"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"shell-init-install"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"shell-init-ln"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"shell-init-mv"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"shell-init-rm"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"shell-init-sed"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"shell-init-tee"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"shell-init-unlink"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"shell-init-wget"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"shell-init-wget-attached"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"shell-init-wget-glued"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"shred"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"tar-absolute-names-ask"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"tar-directory-root-or-home"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"tar-extract-over-root-or-home"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"tee-write-device-or-critical-file"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"truncate-reference"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"truncate-zero"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"wipefs-any-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"blkdiscard-any-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"cp-remove-destination-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"cp-write-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"dcfldd-write-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"dd-write-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"enable-loadable-builtin"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"find-delete"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"git-am-no-verify"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"git-branch-force-delete"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"git-branch-force-delete-flags"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"git-checkout-dashdash"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"git-checkout-force-ask"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"git-clean-any"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"git-commit-amend"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"git-commit-no-verify-short"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"git-merge-no-verify"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"git-p4-submit-no-verify"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"git-pull-no-verify"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"git-push-force"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"git-push-no-verify"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"git-rebase"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"git-reset-hard"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"git-restore-ask"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"git-stash-clear"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"git-stash-drop"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"git-tag-destructive"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"install-write-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"kill-all-processes"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"killall-user-processes"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"killall5-all-processes"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"mkdosfs-any-filesystem"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"mke2fs-any-filesystem"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"mkfs-any-filesystem"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"mkfs-dispatcher-any-filesystem"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"mkntfs-any-filesystem"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"mkswap-any-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"mv-write-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"pkill-user-processes"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"rm-force-find-placeholder-target"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"rm-recursive-dangerous-target"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"rm-recursive-force-dangerous-target"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"rsync-delete-dangerous-target"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"rsync-delete-root-or-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"rsync-write-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"self-protect-config-ancestor-cp-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"self-protect-config-ancestor-mv-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"self-protect-config-ancestor-rm-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"self-protect-config-ancestor-rsync-copy-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"self-protect-config-ancestor-rsync-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"self-protect-config-ancestor-tar-extract-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"self-protect-config-ancestor-unzip-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"self-protect-config-cp-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"self-protect-config-dcfldd-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"self-protect-config-dd-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"self-protect-config-find-exec-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"self-protect-config-install-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"self-protect-config-ln-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"self-protect-config-mv-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"self-protect-config-patch-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"self-protect-config-perl-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"self-protect-config-rm-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"self-protect-config-rmdir-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"self-protect-config-rsync-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"self-protect-config-sed-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"self-protect-config-tee-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"self-protect-config-unlink-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"shell-init-cp"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"shell-init-curl"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"shell-init-curl-attached"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"shell-init-curl-glued"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"shell-init-dcfldd"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"shell-init-dd"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"shell-init-install"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"shell-init-ln"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"shell-init-mv"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"shell-init-rm"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"shell-init-sed"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"shell-init-tee"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"shell-init-unlink"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"shell-init-wget"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"shell-init-wget-attached"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"shell-init-wget-glued"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"shred"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"tar-absolute-names-ask"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"tar-directory-root-or-home"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"tar-extract-over-root-or-home"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"tee-write-device-or-critical-file"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"truncate-reference"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"truncate-zero"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"wipefs-any-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","push","--force","origin","main"],"rule":"blkdiscard-any-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","push","--force","origin","main"],"rule":"dcfldd-write-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","push","--force","origin","main"],"rule":"dd-write-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","push","--force","origin","main"],"rule":"find-delete"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","push","--force","origin","main"],"rule":"git-push-force"},"expect":true}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","push","--force","origin","main"],"rule":"install-write-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","push","--force","origin","main"],"rule":"mkdosfs-any-filesystem"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","push","--force","origin","main"],"rule":"mke2fs-any-filesystem"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","push","--force","origin","main"],"rule":"mkfs-any-filesystem"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","push","--force","origin","main"],"rule":"mkfs-dispatcher-any-filesystem"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","push","--force","origin","main"],"rule":"mkntfs-any-filesystem"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","push","--force","origin","main"],"rule":"mkswap-any-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","push","--force","origin","main"],"rule":"mv-write-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","push","--force","origin","main"],"rule":"rm-force-find-placeholder-target"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","push","--force","origin","main"],"rule":"rm-recursive-dangerous-target"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","push","--force","origin","main"],"rule":"rm-recursive-force-dangerous-target"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","push","--force","origin","main"],"rule":"rsync-write-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","push","--force","origin","main"],"rule":"shred"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","push","--force","origin","main"],"rule":"tar-absolute-names-ask"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","push","--force","origin","main"],"rule":"tar-directory-root-or-home"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","push","--force","origin","main"],"rule":"tar-extract-over-root-or-home"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","push","--force","origin","main"],"rule":"truncate-reference"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","push","--force","origin","main"],"rule":"truncate-zero"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","push","--force","origin","main"],"rule":"wipefs-any-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"blkdiscard-any-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"cp-remove-destination-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"cp-write-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"dcfldd-write-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"dd-write-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"enable-loadable-builtin"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"find-delete"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"git-am-no-verify"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"git-branch-force-delete"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"git-branch-force-delete-flags"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"git-checkout-dashdash"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"git-checkout-force-ask"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"git-clean-any"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"git-commit-amend"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"git-commit-no-verify-short"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"git-merge-no-verify"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"git-p4-submit-no-verify"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"git-pull-no-verify"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"git-push-force"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"git-push-no-verify"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"git-rebase"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"git-reset-hard"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"git-restore-ask"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"git-stash-clear"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"git-stash-drop"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"git-tag-destructive"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"install-write-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"kill-all-processes"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"killall-user-processes"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"killall5-all-processes"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"mkdosfs-any-filesystem"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"mke2fs-any-filesystem"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"mkfs-any-filesystem"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"mkfs-dispatcher-any-filesystem"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"mkntfs-any-filesystem"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"mkswap-any-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"mv-write-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"pkill-user-processes"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"rm-force-find-placeholder-target"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"rm-recursive-dangerous-target"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"rm-recursive-force-dangerous-target"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"rsync-delete-dangerous-target"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"rsync-delete-root-or-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"rsync-write-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"self-protect-config-ancestor-cp-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"self-protect-config-ancestor-mv-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"self-protect-config-ancestor-rm-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"self-protect-config-ancestor-rsync-copy-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"self-protect-config-ancestor-rsync-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"self-protect-config-ancestor-tar-extract-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"self-protect-config-ancestor-unzip-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"self-protect-config-cp-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"self-protect-config-dcfldd-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"self-protect-config-dd-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"self-protect-config-find-exec-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"self-protect-config-install-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"self-protect-config-ln-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"self-protect-config-mv-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"self-protect-config-patch-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"self-protect-config-perl-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"self-protect-config-rm-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"self-protect-config-rmdir-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"self-protect-config-rsync-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"self-protect-config-sed-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"self-protect-config-tee-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"self-protect-config-unlink-tilde"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"shell-init-cp"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"shell-init-curl"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"shell-init-curl-attached"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"shell-init-curl-glued"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"shell-init-dcfldd"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"shell-init-dd"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"shell-init-install"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"shell-init-ln"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"shell-init-mv"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"shell-init-rm"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"shell-init-sed"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"shell-init-tee"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"shell-init-unlink"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"shell-init-wget"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"shell-init-wget-attached"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"shell-init-wget-glued"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"shred"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"tar-absolute-names-ask"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"tar-directory-root-or-home"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"tar-extract-over-root-or-home"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"tee-write-device-or-critical-file"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"truncate-reference"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"truncate-zero"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"wipefs-any-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["rm","-rf","/"],"rule":"rm-recursive-force-dangerous-target"},"expect":true}

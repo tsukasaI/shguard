@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::normalize::{NormalizedWord, Resolution, UnresolvableKind};
-use crate::rules::{Allowlist, Rules, UserConfig, merge_user_config};
+use crate::rules::{Allowlist, CommandRule, Rules, SymlinkScope, UserConfig, merge_user_config};
 use crate::verdict::Verdict;
 
 /// Inputs above this many bytes are not recorded: the corpus is meant to be
@@ -190,6 +190,12 @@ pub(crate) struct RulesInput {
     tokens: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rule: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    base: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    refuse_all: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -507,6 +513,40 @@ fn identify(rules: Option<&Rules>, allowlist: Option<&Allowlist>) -> Config {
     }
 }
 
+/// Names the TOML provenance of a rule a test calls `matches` on directly:
+/// the rule must come back unchanged from the rule set the source rebuilds,
+/// found by its id, or the row could not replay.
+fn identify_rule(rule: &CommandRule) -> Config {
+    let id = rule.id().as_str();
+    let (embedded_rules, _) = embedded();
+    let same = |rules: &Rules| rules.command_rule_by_id(id) == Some(rule);
+    let texts = PARSED.with(|p| {
+        let p = p.borrow();
+        (p.rules.clone(), p.user_config.clone())
+    });
+    let source = if same(embedded_rules) {
+        Source::Embedded
+    } else if let Some(text) = texts
+        .0
+        .iter()
+        .find(|t| Rules::parse(t).is_ok_and(|rules| same(&rules)))
+    {
+        Source::from_parsed_text(text)
+    } else if let Some(text) = texts
+        .1
+        .iter()
+        .find(|t| merged(t).is_some_and(|(rules, _)| same(&rules)))
+    {
+        Source::UserConfig(text.clone())
+    } else {
+        Source::Unreplayable(UNREPLAYABLE_CONFIG.to_string())
+    };
+    Config {
+        rules: source,
+        allowlist: Source::Embedded,
+    }
+}
+
 /// A recorded `Parse`/`EmbeddedPlus` text parsed when the row was captured, so
 /// a failure now means the config format regressed: fail loudly instead of
 /// letting the row drop out as skipped.
@@ -722,9 +762,11 @@ pub(crate) enum Call<'a> {
     Target(&'a str),
     Tokens(&'a [String]),
     ArgvToken(&'a [NormalizedWord], &'a str),
+    ArgvScope(&'a [NormalizedWord], Option<&'a str>, bool),
 }
 
 pub(crate) enum Receiver<'a> {
+    Rule(&'a CommandRule),
     Rules(&'a Rules),
     Allowlist(&'a Allowlist),
 }
@@ -775,8 +817,22 @@ pub(crate) fn rules_call(receiver: Receiver<'_>, method: &'static str, call: &Ca
                 token: Some(token.to_string()),
                 ..RulesInput::default()
             },
+            Call::ArgvScope(argv, base, refuse_all) => RulesInput {
+                argv: Some(argv.iter().map(word_row).collect()),
+                base: base.map(str::to_string),
+                refuse_all,
+                ..RulesInput::default()
+            },
+        };
+        let input = match receiver {
+            Receiver::Rule(rule) => RulesInput {
+                rule: Some(rule.id().as_str().to_string()),
+                ..input
+            },
+            Receiver::Rules(_) | Receiver::Allowlist(_) => input,
         };
         let config = match receiver {
+            Receiver::Rule(rule) => identify_rule(rule),
             Receiver::Rules(rules) => identify(Some(rules), None),
             Receiver::Allowlist(allowlist) => identify(None, Some(allowlist)),
         };
@@ -811,6 +867,9 @@ fn run_method(receiver: &Receiver<'_>, method: &str, input: &RulesInput) -> Resu
         argv.as_deref()
             .ok_or_else(|| format!("{method}: row has no argv"))
     };
+    if let Receiver::Rule(rule) = receiver {
+        return Ok(Value::Bool(rule.matches(need_argv()?)));
+    }
     if let Receiver::Allowlist(allowlist) = receiver {
         return match method {
             "allowlist_first_match" => Ok(id_of(allowlist.first_match(need_argv()?), |r| {
@@ -820,7 +879,7 @@ fn run_method(receiver: &Receiver<'_>, method: &str, input: &RulesInput) -> Resu
         };
     }
     let Receiver::Rules(rules) = receiver else {
-        unreachable!("the allowlist receiver returned above");
+        unreachable!("the allowlist and rule receivers returned above");
     };
     let command = |found: Option<&crate::rules::CommandRule>| id_of(found, |r| r.id().as_str());
     Ok(match method {
@@ -839,6 +898,25 @@ fn run_method(receiver: &Receiver<'_>, method: &str, input: &RulesInput) -> Resu
         }
         "match_command_dirstack_equal_subst" => {
             command(rules.match_command_dirstack_equal_subst(need_argv()?))
+        }
+        "match_command_in" => {
+            let scope = SymlinkScope::new(input.base.as_deref());
+            let scope = if input.refuse_all {
+                scope.refusing_all()
+            } else {
+                scope
+            };
+            command(rules.match_command_in(need_argv()?, scope))
+        }
+        "rule_matches" => {
+            let id = input
+                .rule
+                .as_deref()
+                .ok_or("rule_matches: row has no rule id")?;
+            let rule = rules
+                .command_rule_by_id(id)
+                .ok_or_else(|| format!("rule_matches: no command rule {id:?} in the rule set"))?;
+            Value::Bool(rule.matches(need_argv()?))
         }
         "match_pipeline" => {
             let stages: Vec<Vec<NormalizedWord>> = input

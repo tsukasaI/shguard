@@ -3412,7 +3412,13 @@ impl CommandRule {
     /// ([`Self::target_match_candidates`]), and the except candidates are
     /// the flag values that matched `targets`.
     #[must_use]
-    fn matches(&self, argv: &[NormalizedWord]) -> bool {
+    pub(crate) fn matches(&self, argv: &[NormalizedWord]) -> bool {
+        #[cfg(test)]
+        let _legacy = crate::legacy_units::rules_call(
+            crate::legacy_units::Receiver::Rule(self),
+            "rule_matches",
+            &crate::legacy_units::Call::Argv(argv),
+        );
         self.matches_in(
             argv,
             SymlinkScope::default(),
@@ -8775,6 +8781,12 @@ impl Rules {
         argv: &[NormalizedWord],
         scope: SymlinkScope<'_>,
     ) -> Option<&CommandRule> {
+        #[cfg(test)]
+        let _legacy = crate::legacy_units::rules_call(
+            crate::legacy_units::Receiver::Rules(self),
+            "match_command_in",
+            &crate::legacy_units::Call::ArgvScope(argv, scope.base, scope.refuse_all),
+        );
         worst_wins(&self.command_rules, CommandRule::decision, |rule| {
             rule.matches_in(argv, scope, self.path_canonicalizer)
         })
