@@ -1,0 +1,3 @@
+# Differential config 1 of 4 (docs/rfc-redesign.md "Plan"): no user rules.
+# Not identical to `SHGUARD_CONFIG=/dev/null`: `Policy::load` adds
+# self-protection rules for the config file's own directory.

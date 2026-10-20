@@ -54,6 +54,22 @@ dbg_macro = "warn"
 todo = "warn"
 unimplemented = "warn"
 
+# `harness = false`: libtest captures the output of a passing test, and these
+# targets exist to print a number in plain `cargo test` output (issue #836).
+[[test]]
+name = "metrics"
+harness = false
+
+[[test]]
+name = "must_not_allow"
+harness = false
+
+# The config loader reads SHGUARD_CONFIG from the process environment, so the
+# differential sets it before any thread exists.
+[[test]]
+name = "differential"
+harness = false
+
 # Test-only surface (e.g. `BUILD_MANIFEST_DIR`). Off by default; the self
 # dev-dependency below turns it on for every `cargo test`/`cargo clippy
 # --all-targets` build without `--features`.
