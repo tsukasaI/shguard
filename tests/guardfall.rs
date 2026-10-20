@@ -857,6 +857,23 @@ const ISSUE_638_TIME_AND_EXEC_WRAPPER_CASES: &[(&str, Decision)] = &[
     ("env time rm -rf /", Decision::Block),
     // brush strips the reserved word `time` and leaves `--` as the command name; the parser drops it for timed pipelines
     ("time -- rm -rf /", Decision::Block),
+    // the `!` after `time --` is pipeline negation, not a command name
+    ("time -- ! rm -rf /", Decision::Block),
+    ("time -p -- ! rm -rf /", Decision::Block),
+    // further `!`/`time` words in the run are grammar, not GNU time wrapping a command named `!`
+    ("time -- ! time -- ! rm -rf /", Decision::Block),
+    ("time -- ! time -p -- ! rm -rf ~", Decision::Block),
+    ("time -- ! ! time -- ! rm -rf /", Decision::Block),
+    ("time -- ! time ! rm -rf /", Decision::Block),
+    ("time -- ! time time -- ! rm -rf /", Decision::Block),
+    ("time time -- ! rm -rf /", Decision::Block),
+    ("time -- time -- ! rm -rf /", Decision::Block),
+    ("time -p -- time -- ! rm -rf /", Decision::Block),
+    ("! time -- ! rm -rf /", Decision::Block),
+    ("time ! time -- ! rm -rf /", Decision::Block),
+    // brush folds `! !` to no bang and leaves the `time` after it untimed
+    ("! ! time -- ! rm -rf /", Decision::Block),
+    ("! ! time time -- ! rm -rf /", Decision::Block),
     // `--` ends wrapper flags
     ("/usr/bin/time -- rm -rf /", Decision::Block),
     // GNU time -o takes a separated value
@@ -869,6 +886,20 @@ const ISSUE_638_TIME_AND_EXEC_WRAPPER_CASES: &[(&str, Decision)] = &[
     ("unshare rm -rf /", Decision::Block),
     // runuser -u takes a separated value
     ("runuser -u root rm -rf /", Decision::Block),
+    // arguments after the user reach the target shell: bash `-ic`/`-ec` run the string
+    ("runuser root -- -ic 'rm -rf /'", Decision::Block),
+    ("runuser root -- -ec 'rm -rf /'", Decision::Block),
+    ("su root -- -ic 'rm -rf /'", Decision::Block),
+    // the script is the first operand after the shell's options, and any cluster with `c` counts
+    ("runuser root -- -c -e 'rm -rf /'", Decision::Block),
+    ("runuser root -- -c -- 'rm -rf /'", Decision::Block),
+    ("runuser root -- -c - 'rm -rf /'", Decision::Block),
+    ("runuser root -- -co errexit 'rm -rf /'", Decision::Block),
+    ("runuser root -- -c +O extglob 'rm -rf /'", Decision::Block),
+    ("runuser root -- -oc errexit 'rm -rf /'", Decision::Block),
+    ("runuser root -- -Nc 'rm -rf /'", Decision::Block),
+    ("su -l root -- -ic 'rm -rf /'", Decision::Block),
+    ("su -- root -ic 'rm -rf /'", Decision::Block),
     ("strace rm -rf /", Decision::Block),
     ("watch rm -rf /", Decision::Block),
     // setarch ARCH positional

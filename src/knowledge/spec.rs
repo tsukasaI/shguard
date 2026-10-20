@@ -129,6 +129,10 @@ pub(crate) enum Slot {
         short: Option<char>,
         long: Option<&'static str>,
     },
+    /// The arguments after the user are handed to the target shell, so
+    /// bash's own `-c` clusters (`-ic`, `-ec`) carry a shell command string
+    /// that the command's own grammar cannot place (`su root -- -ic CMD`).
+    ShellPassthrough,
     /// A flag whose value is split into argv words spliced ahead of the
     /// remaining arguments (`env -S`).
     SplitString { short: char, long: &'static str },
