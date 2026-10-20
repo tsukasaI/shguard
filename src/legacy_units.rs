@@ -879,7 +879,9 @@ mod tests {
     #[test]
     fn all_kinds_lists_every_variant() {
         // Exhaustive: a new variant fails to compile here until it is given an
-        // index, and then the round trip fails until ALL_KINDS lists it.
+        // index, and bumping VARIANT_COUNT (next to the arms) is what fails
+        // the length check until ALL_KINDS lists it.
+        const VARIANT_COUNT: usize = 9;
         let index = |kind: UnresolvableKind| match kind {
             UnresolvableKind::CommandSubstitution => 0,
             UnresolvableKind::ParameterExpansion => 1,
@@ -891,6 +893,7 @@ mod tests {
             UnresolvableKind::UnsupportedStructure => 7,
             UnresolvableKind::EmbeddedNul => 8,
         };
+        assert_eq!(ALL_KINDS.len(), VARIANT_COUNT);
         for (position, kind) in ALL_KINDS.into_iter().enumerate() {
             assert_eq!(index(kind), position);
             assert_eq!(kind_from_name(kind_name(kind)), kind);

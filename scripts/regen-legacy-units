@@ -4,11 +4,12 @@
 #
 # Runs `cargo test --lib` (through scripts/hermetic-cargo-test.sh, so the
 # developer's config does not shape the capture) over the `gate::` and
-# `rules::` tests, ignored ones included, with SHGUARD_LEGACY_CAPTURE set; src/legacy_units.rs then appends one
-# `<test name><TAB><row>` line per engine call a test makes. This script
-# sorts and dedupes those rows, adds an `excluded` row for every test that
-# made no capturable call (an internal-function test with no command or argv
-# input) and for every oversize input, and writes the corpus.
+# `rules::` tests, ignored ones included, with SHGUARD_LEGACY_CAPTURE set;
+# src/legacy_units.rs then appends one `<test name><TAB><row>` line per engine
+# call a test makes. This script sorts and dedupes those rows, adds an
+# `excluded` row for every test that made no capturable call (an
+# internal-function test with no command or argv input) and for every
+# oversize input, and writes the corpus.
 #
 # Run it whenever a gate/rules unit test is added or its behaviour changes
 # on purpose: without capture, the same unit tests fail unless their inputs
