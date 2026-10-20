@@ -8,11 +8,23 @@ repository = "https://github.com/tsukasaI/shguard"
 readme = "README.md"
 keywords = ["security", "shell", "cli", "hooks", "claude"]
 categories = ["command-line-utilities", "development-tools"]
-include = ["src/**", "rules/**", "tests/**", "/Cargo.toml", "/README.md", "/CHANGELOG.md", "/LICENSE-*", "!tests/golden_snapshot.rs", "!tests/guardfall.rs"]
-# The two test crates negated above need the `test-support` feature, which
-# only the path-only self dev-dependency turns on, and `cargo publish` drops
-# that dependency, so they would not compile from the published package.
-# Their golden data stays: tests/differential.rs and tests/metrics.rs read it.
+include = [
+    "src/**", "rules/**", "tests/**", "/Cargo.toml", "/README.md", "/CHANGELOG.md", "/LICENSE-*",
+    "!tests/benign_corpus.rs", "!tests/bypass_corpus.rs", "!tests/bypass_corpus.toml",
+    "!tests/coverage_metrics.rs", "!tests/differential.rs", "!tests/fuzz_differential.rs",
+    "!tests/golden_snapshot.rs", "!tests/guardfall.rs", "!tests/legacy_units.rs",
+    "!tests/metrics.rs", "!tests/must_not_allow.rs",
+    "!tests/common/golden.rs", "!tests/common/corpus.rs", "!tests/common/metrics.rs",
+    "!tests/common/legacy_rows.rs", "!tests/fixtures/differential/**", "!tests/golden/**",
+    "tests/golden/legacy_units.jsonl",
+]
+# Every test crate negated above includes tests/common/golden.rs, whose
+# `checkout_dir()` reads `shguard::BUILD_MANIFEST_DIR`, a `test-support`
+# item. Only the path-only self dev-dependency turns that feature on, and
+# `cargo publish` drops that dependency, so they would not compile from the
+# published package; they and the data only they read stay out of it.
+# `tests/golden/legacy_units.jsonl` stays: the lib's `#[cfg(test)]`
+# `src/legacy_units.rs` embeds it with `include_str!`.
 
 [[bin]]
 name = "shguard"
