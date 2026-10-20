@@ -929,7 +929,10 @@ fn run_method(receiver: &Receiver<'_>, method: &str, input: &RulesInput) -> Resu
             .ok_or_else(|| format!("{method}: row has no argv"))
     };
     if let Receiver::Rule(rule) = receiver {
-        return Ok(Value::Bool(rule.matches(need_argv()?)));
+        return match method {
+            "rule_matches" => Ok(Value::Bool(rule.matches(need_argv()?))),
+            other => Err(format!("unknown rule method {other:?}")),
+        };
     }
     if let Receiver::Allowlist(allowlist) = receiver {
         return match method {

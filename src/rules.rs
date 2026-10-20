@@ -3031,7 +3031,7 @@ pub(crate) struct ResolvedPath {
 
 /// The injected [`CanonicalizeFn`]. Compares equal to every other value: it
 /// is a capability, not rule data, so it never takes part in rule-set
-/// equality.
+/// equality. In tests it can also carry a fake-fs table.
 #[derive(Clone, Copy)]
 pub(crate) struct PathCanonicalizer(CanonicalizeFn, #[cfg(test)] Option<&'static [FakeFsEntry]>);
 
@@ -3113,8 +3113,8 @@ impl PathCanonicalizer {
     /// A filesystem double that answers from `table`. The table travels with
     /// the canonicalizer so the legacy_units recorder reads the map back
     /// instead of guessing it from an opaque function; the function slot is
-    /// never called, and is not the default one so that
-    /// `legacy_has_default_canonicalizer` stays false for it.
+    /// never called, and fails closed (`ProbeError::Other`) if the table were
+    /// ever bypassed.
     #[cfg(test)]
     pub(crate) fn fake_fs(table: &'static [FakeFsEntry]) -> Self {
         Self(|_| Err(ProbeError::Other), Some(table))
@@ -8820,13 +8820,15 @@ impl Rules {
         })
     }
 
-    /// `PathCanonicalizer` never takes part in equality, so the legacy_units
-    /// recorder asks this to tell a wired-up filesystem double apart.
+    /// The table a [`PathCanonicalizer::fake_fs`] double answers from, so the
+    /// recorder can write it into the row.
     #[cfg(test)]
     pub(crate) fn legacy_fake_fs(&self) -> Option<&'static [FakeFsEntry]> {
         self.path_canonicalizer.1
     }
 
+    /// `PathCanonicalizer` never takes part in equality, so the legacy_units
+    /// recorder asks this to tell a wired-up filesystem double apart.
     #[cfg(test)]
     #[allow(clippy::fn_to_numeric_cast)]
     pub(crate) fn legacy_has_default_canonicalizer(&self) -> bool {
