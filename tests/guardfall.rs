@@ -54,6 +54,26 @@ const HEADLINE_CASES: &[(&str, Decision)] = &[
     //     word after it, so this stays Ask (fail-closed), never Block
     //     or Allow.
     ("''${IFS}rm -rf /", Decision::Ask),
+    // 12b. issue #738: a quoted `$IFS` inside a recursed shell string
+    //     (`bash -c`, `eval`, ...) is folded with the default IFS, so
+    //     the inner script split on newlines and evaluated as Allow;
+    //     it now floors to Ask like the bare form. Controls: the same
+    //     strings spelled out stay Block, and a string with no `$IFS`
+    //     stays Allow.
+    (r#"bash -c "rm$IFS-rf$IFS/""#, Decision::Ask),
+    (r#"eval "rm$IFS-rf$IFS/""#, Decision::Ask),
+    (r#"sh -c "rm${IFS}-rf${IFS}/""#, Decision::Ask),
+    (r#"eval "rm${IFS}-rf${IFS}/""#, Decision::Ask),
+    (r#"bash -c "echo$IFS""#, Decision::Ask),
+    (r#"trap "rm$IFS-rf$IFS/" EXIT"#, Decision::Ask),
+    (r#"xargs sh -c "rm$IFS-rf$IFS/""#, Decision::Ask),
+    // The exploit shape: a same-line `IFS=` makes the default-IFS fold wrong.
+    (r#"IFS=' '; eval "rm$IFS-rf$IFS/""#, Decision::Ask),
+    (r#"IFS=' '; bash -c "rm$IFS-rf$IFS/""#, Decision::Ask),
+    (r#"bash -c "rm -rf /""#, Decision::Block),
+    (r#"eval "rm -rf /""#, Decision::Block),
+    (r#"bash -c "echo hi""#, Decision::Allow),
+    (r#"eval "echo hi""#, Decision::Allow),
     // 13. issue #446: `dash` was in SHELL_INTERPRETERS but missing from
     //     curl-wget-pipe-to-shell's own `sinks` list, so it floored to
     //     Ask (no decode stage upstream) instead of Block like every
