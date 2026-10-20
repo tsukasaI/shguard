@@ -422,9 +422,9 @@ fn oversized_stdin_denies_when_ask_outcome_is_deny() {
 /// budget starting before the read would trip it.
 #[test]
 fn oversized_stdin_from_a_slow_producer_still_reports_the_size_cap() {
-    use std::io::Write;
+    use std::io::{Read, Write};
     use std::process::Stdio;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     const MAX_STDIN_BYTES: usize = 10 * 1024 * 1024;
     let (_dir, config_path) = write_config("");
@@ -437,13 +437,46 @@ fn oversized_stdin_from_a_slow_producer_still_reports_the_size_cap() {
     let mut stdin = child.stdin.take().expect("stdin should be piped");
     let writer = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(2500));
-        // A broken pipe just means the binary already answered.
+        // A broken pipe means the binary already answered or was killed at the deadline.
         let _ = stdin.write_all(&vec![b'a'; MAX_STDIN_BYTES + 1]);
     });
-    let output = child.wait_with_output().expect("shguard should exit");
+    // Drained on its own thread so a full pipe cannot block the child.
+    let mut child_stdout = child.stdout.take().expect("stdout should be piped");
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        child_stdout.read_to_end(&mut buf).map(|_| buf)
+    });
+    // Not an unbounded `wait_with_output()`: a regression that blocks on
+    // stdin must fail this test, not hang it (issue #797).
+    const DEADLINE: Duration = Duration::from_secs(30);
+    let deadline = Instant::now() + DEADLINE;
+    let exited = loop {
+        if child
+            .try_wait()
+            .expect("polling shguard should work")
+            .is_some()
+        {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    if !exited {
+        child.kill().expect("hung shguard should be killable");
+        child.wait().expect("killed shguard should be reaped");
+    }
+    assert!(
+        exited,
+        "shguard did not exit within {DEADLINE:?} of a slow oversized stdin"
+    );
     writer.join().expect("writer thread should not panic");
-    let output: Value =
-        serde_json::from_slice(&output.stdout).expect("hook stdout should be valid JSON");
+    let stdout = reader
+        .join()
+        .expect("reader thread should not panic")
+        .expect("shguard stdout should be readable");
+    let output: Value = serde_json::from_slice(&stdout).expect("hook stdout should be valid JSON");
     assert_eq!(permission_decision(&output), "ask");
     assert!(
         permission_reason(&output).contains("exceeds"),
