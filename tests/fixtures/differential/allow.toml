@@ -1,7 +1,19 @@
 # Differential config 4 of 4 (docs/rfc-redesign.md "Plan"): one `[[allow]]`,
 # the relaxation channel. The new core must keep an `[[allow]]` from
 # downgrading anything but an Ask (or, later, an Unknown), never a Block.
+#
+# `difftool` is a made-up name that no embedded rule or catalog entry
+# mentions, so the allow neither depends on one nor trips a load-time
+# rejection of an allow that names a catalogued command. The `decision =
+# "ask"` deny supplies the structural Ask the allow downgrades:
+# `difftool sync x` is Allow, `difftool wipe x` stays Ask.
+[[deny]]
+id = "differential-ask-difftool"
+reason = "confirm every difftool invocation"
+command = "difftool"
+decision = "ask"
+
 [[allow]]
-id = "differential-allow-git"
+id = "differential-allow-difftool-sync"
 reason = "exercise the allowlist downgrade path"
-command = "git"
+command = "difftool sync"

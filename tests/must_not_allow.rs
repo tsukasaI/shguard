@@ -3,9 +3,9 @@
 //!
 //! `tests/golden/must_not_allow.jsonl` lists commands that must never be
 //! Allow under the embedded rules with no user config (the `analyze` entry
-//! point, equivalent to `SHGUARD_CONFIG=/dev/null`): every Allow payload the
-//! RFC "Problem" section names and every payload in the issues the RFC maps
-//! to R1, R2 and R3. The golden snapshots encode today's fail-open Allows, so
+//! point, equivalent to `SHGUARD_CONFIG=/dev/null`): every payload that is
+//! Allow under the embedded rules with no config and is named in the RFC
+//! "Problem" section or in the issues the RFC maps to R1 and R2. The golden snapshots encode today's fail-open Allows, so
 //! "no new Allow" alone would keep them; this file is the baseline that says
 //! which Allows are bugs.
 //!
@@ -25,9 +25,7 @@
 //! `strangler_tightenings.jsonl`, `relaxations.jsonl` or any other approval
 //! list, so a differential approval cannot hide a fail-open here.
 //!
-//! `harness = false` (see `[[test]]` in `Cargo.toml`): libtest captures the
-//! output of a passing test, so the open-row count would be invisible in plain
-//! `cargo test`. The strict-parse checks of the reader run first, in `main`.
+//! The strict-parse checks of the reader run first, in `main`.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -41,7 +39,11 @@ use shguard::verdict::Decision;
 mod golden;
 
 /// Rows that are still Allow on main. Lower it when rows flip to `closed`.
-const EXPECTED_OPEN: usize = 109;
+const EXPECTED_OPEN: usize = 115;
+
+/// Rows that are not Allow today. Raise it when a row is added as `closed` or
+/// flipped from `open`.
+const EXPECTED_CLOSED: usize = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -127,7 +129,19 @@ fn evaluate(rows: &[Row]) -> Result<(usize, usize), Vec<String>> {
     let mut problems = Vec::new();
     let (mut open, mut closed) = (0, 0);
     for row in rows {
-        let decision = shguard::analyze(&row.command).decision();
+        let verdict = shguard::analyze(&row.command);
+        if verdict
+            .reason()
+            .is_some_and(|reason| reason.as_str().ends_with(golden::WATCHDOG_REASON_SUFFIX))
+        {
+            problems.push(format!(
+                "harness failure: the evaluation watchdog tripped, so this row's decision is \
+                 not its real one ({:?})",
+                row.command
+            ));
+            continue;
+        }
+        let decision = verdict.decision();
         match (row.status, decision) {
             (Status::Open, Decision::Allow) => open += 1,
             (Status::Open, other) => problems.push(format!(
@@ -156,11 +170,21 @@ fn run(path: &Path) -> Result<(), Vec<String>> {
     let rows = parse_rows(&path.display().to_string(), &text).map_err(|err| vec![err])?;
     let (open, closed) = evaluate(&rows)?;
     println!("must_not_allow: {open} open / {closed} closed rows");
+    let mut problems = Vec::new();
     if open != EXPECTED_OPEN {
-        return Err(vec![format!(
+        problems.push(format!(
             "{open} open rows but EXPECTED_OPEN is {EXPECTED_OPEN}: set EXPECTED_OPEN to {open} \
              in tests/must_not_allow.rs (a row was added or flipped)"
-        )]);
+        ));
+    }
+    if closed != EXPECTED_CLOSED {
+        problems.push(format!(
+            "{closed} closed rows but EXPECTED_CLOSED is {EXPECTED_CLOSED}: set EXPECTED_CLOSED \
+             to {closed} in tests/must_not_allow.rs (a row was added or flipped)"
+        ));
+    }
+    if !problems.is_empty() {
+        return Err(problems);
     }
     Ok(())
 }

@@ -12,25 +12,14 @@
 //! Allow, so an unknown command that was Allowed cannot be counted from the
 //! outside. What can be counted is every non-Allow verdict whose reason says
 //! shguard could not read part of the line. [`classify_unknown`] maps the
-//! reason text to the RFC's `UnknownKind` families (first match wins, in the order of `KIND_NEEDLES`; a
-//! verdict that names a matched blocklist rule is a finding, not an
-//! Unknown):
+//! reason text to the RFC's `UnknownKind` families by the needles in
+//! [`KIND_NEEDLES`], the single place to update when a reason is reworded
+//! (first match wins, in that order; a verdict that names a matched
+//! blocklist rule is a finding, not an Unknown).
 //!
-//! | kind          | reason text contains                                                  |
-//! |---------------|-----------------------------------------------------------------------|
-//! | `parse`       | `could not parse command`                                             |
-//! | `option`      | `unmodelled option`, `option that shguard cannot place`, `option list could not be` |
-//! | `command`     | `unmodelled command name`, `command position`, `wrapped command could not be statically resolved`, `shell-string flag` |
-//! | `stdin`       | `reads its program from stdin`, `no decode stage upstream`, `decodes/transforms data upstream`, `standard input`, `on stdin` |
-//! | `operand`     | `script is not proven`, `bare positional argument`, `inline code`, `names its file through`, `script operand could not`, `payload invokes`, `cannot be introspected`, `could not be statically resolved` |
-//! | `env`         | `$IFS`, `PATH is given`, `session state could still differ`           |
-//! | `cwd`         | `working directory could not be`, `unknown anchor`, `directory-stack`  |
-//! | `persisted`   | `whose value git runs as a shell command`, `could name alias.`        |
-//! | `expansion`   | `glob in`, `unresolvable`, `qualifier expansion`, `arithmetic expansion`, `placeholder stands in` |
-//!
-//! `unknown.total` ("unknown-command count") is the sum over the kinds. It
-//! is a lower bound of what R2 will count exactly, and it moves when a
-//! reason is reworded: the table above is the single place to update.
+//! `unknown.<corpus>.count` sums the kinds of one corpus;
+//! `unknown_command_count.<corpus>` is its `command` kind alone. Both are
+//! lower bounds of what R2 will count exactly.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -137,7 +126,7 @@ pub struct CorpusStats {
 
 impl CorpusStats {
     #[must_use]
-    pub fn over_ask(&self) -> usize {
+    pub fn not_allow(&self) -> usize {
         self.ask + self.block
     }
 
@@ -185,18 +174,26 @@ pub fn report(golden_dir: &Path) -> Result<Vec<String>, String> {
     let benign = measure(golden_dir, "benign_corpus")?;
     let denials = measure(golden_dir, "denials")?;
     let bypass = measure(golden_dir, "bypass_corpus")?;
+    let must_not_allow = measure(golden_dir, "must_not_allow")?;
     let mut lines = Vec::new();
     for (key, stats) in [("benign", &benign), ("denials", &denials)] {
         lines.push(format!(
-            "{key}.over_ask_rate: {} ({}/{} not Allow: {} Ask, {} Block)",
-            percent(stats.over_ask(), stats.total),
-            stats.over_ask(),
+            "{key}.over_ask_rate: {} ({}/{} Ask)",
+            percent(stats.ask, stats.total),
+            stats.ask,
+            stats.total
+        ));
+        lines.push(format!(
+            "{key}.not_allow_rate: {} ({}/{} not Allow: {} Ask, {} Block)",
+            percent(stats.not_allow(), stats.total),
+            stats.not_allow(),
             stats.total,
             stats.ask,
             stats.block
         ));
     }
     let mut total = 0;
+    let mut command_counts = Vec::new();
     for (key, stats) in [
         ("benign", &benign),
         ("denials", &denials),
@@ -207,13 +204,20 @@ pub fn report(golden_dir: &Path) -> Result<Vec<String>, String> {
         for (kind, _) in KIND_NEEDLES {
             let count = stats.unknown_by_kind.get(kind).copied().unwrap_or(0);
             lines.push(format!("unknown.{key}.{kind}: {count}"));
+            if kind == "command" {
+                command_counts.push(format!("unknown_command_count.{key}: {count}"));
+            }
         }
     }
     lines.push(format!("unknown.total: {total}"));
-    lines.push(format!("unknown_command_count: {total}"));
+    lines.extend(command_counts);
     lines.push(format!(
         "bypass.allow_count: {} ({} rows)",
         bypass.allow, bypass.total
+    ));
+    lines.push(format!(
+        "must_not_allow.allow_count: {} ({} rows)",
+        must_not_allow.allow, must_not_allow.total
     ));
     Ok(lines)
 }

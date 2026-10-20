@@ -18,7 +18,7 @@ const MAX_REPORTED_PER_BUCKET: usize = 40;
 // Not `contains("fail-closed")`: only the watchdog's own verdicts end this
 // way, and a loaded runner tripping its 2s budget is a harness failure, not
 // a behaviour change worth recording.
-const WATCHDOG_REASON_SUFFIX: &str = "refusing to evaluate (fail-closed)";
+pub const WATCHDOG_REASON_SUFFIX: &str = "refusing to evaluate (fail-closed)";
 
 // Field order is the serialized key order; kept alphabetical so a record
 // reads the same as a sorted-keys JSON dump.

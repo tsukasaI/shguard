@@ -1,11 +1,12 @@
-# Differential config 2 of 4 (docs/rfc-redesign.md "Plan"): the shape of the
-# owner's own config (a dotfiles-managed ~/.config/shguard/config.toml),
-# trimmed to its load-bearing keys so the fixture is checked in and the
-# differential does not depend on the host's home directory. It keeps the
-# bare-string `ask_outcome`, the `escalation_floor`, and user `[[deny]]`
-# rules that overlap the embedded blocklist and add commands it does not
-# deny. Extend it when the owner's config gains a key class the differential
-# should cover.
+# Differential config 2 of 4 (docs/rfc-redesign.md "Plan"): a stand-in for
+# the shape of a real long-lived user config, written generically so the
+# fixture is checked in and the differential does not depend on the host's
+# home directory. It carries one representative rule per key class such a
+# config uses: the bare-string `ask_outcome`, `escalation_floor`, plain
+# `[[deny]]` rules that overlap the embedded blocklist and add commands it
+# does not deny, `required_tokens`, `required_flags`, `except_targets` with
+# `value_flags`, a `resolve_symlinks` rule, and an `[[allow]]`. Extend it
+# when a real config gains a key class the differential should cover.
 ask_outcome = "deny"
 escalation_floor = "deny"
 
@@ -33,3 +34,37 @@ command = "rm"
 id = "owner-file-truncate"
 reason = "truncate zeroes out file contents"
 command = "truncate"
+
+[[deny]]
+id = "owner-disk-erase"
+reason = "diskutil erase destroys a volume"
+command = "diskutil"
+required_tokens = ["erase"]
+
+[[deny]]
+id = "owner-sed-in-place"
+reason = "in-place sed edits rewrite files without a backup"
+command = "sed"
+required_flags = ["i|--in-place"]
+
+[[ask]]
+id = "owner-curl-non-localhost"
+reason = "confirm before curl reaches a non-localhost target"
+command = "curl"
+value_flags = ["o", "w"]
+except_targets = [
+  { prefix = "http://localhost" },
+  { prefix = "http://127.0.0.1" },
+]
+
+[[deny]]
+id = "owner-upload-outside-scratch"
+reason = "uploads are limited to the scratch directory"
+command = "upload-tool"
+except_targets = [{ prefix = "/var/scratch/" }]
+resolve_symlinks = true
+
+[[allow]]
+id = "owner-allow-ownertool"
+reason = "a trusted local helper the owner runs routinely"
+command = "ownertool"

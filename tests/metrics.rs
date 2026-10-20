@@ -1,10 +1,7 @@
 //! Prints the R0 metrics of the evaluation-core redesign (docs/rfc-redesign.md,
 //! issue #836) in plain `cargo test` output.
 //!
-//! `harness = false` (see `[[test]]` in `Cargo.toml`): libtest captures the
-//! output of a passing test, so a normal test could only show the metrics
-//! under `--nocapture`. This target's `main` prints them unconditionally and
-//! exits nonzero when a corpus cannot be read. `scripts/metrics` runs it
+//! Exits nonzero when a corpus cannot be read. `scripts/metrics` runs it
 //! alone. The metric definitions, including the Unknown-kind mapping, live in
 //! `tests/common/metrics.rs`.
 
