@@ -15,12 +15,20 @@
 # deletion is skipped silently. Builds `git+file://<toplevel>?rev=<sha>`, not
 # the working tree, so uncommitted edits can neither mask nor cause a failure.
 # Fails closed: a release push without `nix` on PATH, or whose system nix
-# config (not the user's nix.conf or NIX_CONFIG, which do not govern the
-# daemon) lacks sandbox = true and sandbox-fallback = false, is refused.
+# config or effective user config (nix.conf and NIX_CONFIG merged) lacks
+# sandbox = true and sandbox-fallback = false, is refused.
 set -euo pipefail
 
+# Mirrors /etc/nix/nix.conf and its includes as the client sees them; root-only
+# daemon config files and the daemon's own launchd environment are not visible
+# from here.
 system_nix_config() {
-  env -u NIX_CONF_DIR NIX_USER_CONF_FILES=/dev/null NIX_CONFIG= nix config show "$1"
+  env -u NIX_CONF_DIR NIX_USER_CONF_FILES=/dev/null NIX_CONFIG= \
+    nix --extra-experimental-features nix-command config show "$1"
+}
+
+effective_nix_config() {
+  nix --extra-experimental-features nix-command config show "$1"
 }
 
 zero_sha=0000000000000000000000000000000000000000
@@ -38,16 +46,20 @@ while read -r local_ref local_sha remote_ref _remote_sha; do
 
   # Darwin nix defaults to no sandbox, which would let the #779 class pass;
   # `--option sandbox true` is ignored by the daemon for untrusted users.
-  # Not a plain `nix config show`: it merges the user's own nix.conf and
-  # NIX_CONFIG, which do not govern the daemon's sandbox for an untrusted user
-  # (#802), so only the system config may satisfy this check.
-  if ! sandbox=$(system_nix_config sandbox 2>/dev/null) ||
-    ! sandbox_fallback=$(system_nix_config sandbox-fallback 2>/dev/null); then
-    echo "release-nix-build: cannot read nix config (needs nix >= 2.20 with nix-command); refusing to push $remote_ref." >&2
+  # Both reads must pass (#802): an untrusted user is governed by the system
+  # config, which the user's nix.conf cannot override, while a trusted user or
+  # single-user install honours user-level overrides at build time, which only
+  # the merged read shows.
+  if ! sys_sandbox=$(system_nix_config sandbox 2>/dev/null) ||
+    ! sys_fallback=$(system_nix_config sandbox-fallback 2>/dev/null) ||
+    ! eff_sandbox=$(effective_nix_config sandbox 2>/dev/null) ||
+    ! eff_fallback=$(effective_nix_config sandbox-fallback 2>/dev/null); then
+    echo "release-nix-build: cannot read nix config (needs nix >= 2.20); refusing to push $remote_ref." >&2
     exit 1
   fi
-  if [[ "$sandbox" != "true" || "$sandbox_fallback" != "false" ]]; then
-    echo "release-nix-build: nix must run with sandbox = true and sandbox-fallback = false (see docs/distribution.md); refusing to push $remote_ref." >&2
+  if [[ "$sys_sandbox" != "true" || "$sys_fallback" != "false" ||
+    "$eff_sandbox" != "true" || "$eff_fallback" != "false" ]]; then
+    echo "release-nix-build: nix must run with sandbox = true and sandbox-fallback = false in both the system config and your effective user config (see docs/distribution.md); refusing to push $remote_ref." >&2
     exit 1
   fi
 
