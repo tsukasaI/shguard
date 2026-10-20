@@ -7002,6 +7002,20 @@ fn scan_nested_compound(nested: &CompoundCommand, out: &mut HeredocCandidateScan
 /// candidates — a redirect target or an unquoted-delimiter heredoc body can
 /// itself carry a `$()`/backtick substitution that inherits the enclosing
 /// command's stdin exactly like an ordinary argument-position one does.
+fn scan_extracted_substitutions_for_heredoc_candidates(
+    substitutions: &ExtractedSubstitutions,
+    out: &mut HeredocCandidateScan,
+) {
+    match substitutions {
+        ExtractedSubstitutions::Parsed(found) => {
+            for inner in found {
+                scan_substitution_text_for_heredoc_candidates(inner, out);
+            }
+        }
+        ExtractedSubstitutions::Unparsed => out.uncertain = true,
+    }
+}
+
 fn scan_redirections_for_heredoc_candidates(
     redirections: &[Redirection],
     out: &mut HeredocCandidateScan,
@@ -7013,14 +7027,7 @@ fn scan_redirections_for_heredoc_candidates(
                 expand_body: true,
                 substitutions,
                 ..
-            } => match substitutions {
-                ExtractedSubstitutions::Parsed(found) => {
-                    for inner in found {
-                        scan_substitution_text_for_heredoc_candidates(inner, out);
-                    }
-                }
-                ExtractedSubstitutions::Unparsed => out.uncertain = true,
-            },
+            } => scan_extracted_substitutions_for_heredoc_candidates(substitutions, out),
             Redirection::HereDoc {
                 expand_body: false, ..
             } => {}
@@ -7059,14 +7066,7 @@ fn scan_word_pieces_for_heredoc_candidates(pieces: &[WordPiece], out: &mut Hered
             }
             WordPiece::ArithmeticExpansion(subs) => {
                 out.note_arithmetic(&[]);
-                match subs {
-                    ExtractedSubstitutions::Parsed(found) => {
-                        for inner in found {
-                            scan_substitution_text_for_heredoc_candidates(inner, out);
-                        }
-                    }
-                    ExtractedSubstitutions::Unparsed => out.uncertain = true,
-                }
+                scan_extracted_substitutions_for_heredoc_candidates(subs, out);
             }
             WordPiece::DoubleQuoted(inner) => scan_word_pieces_for_heredoc_candidates(inner, out),
             WordPiece::ModifiedParameterExpansion { name, operand, .. } => {

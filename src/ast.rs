@@ -1066,9 +1066,9 @@ pub(crate) enum Redirection {
     },
 }
 
-/// What the parser found in text it will expand, a heredoc body or a
-/// `$((...))` arithmetic expansion: either the substitutions it will expand,
-/// or the fact that it could not delimit them. A sum type so a caller cannot
+/// What the parser found in text bash will expand, a heredoc body or a
+/// `$((...))` arithmetic expansion: either the substitutions in it, or the
+/// fact that it could not delimit them. A sum type so a caller cannot
 /// read an empty list for "nothing found" when the real answer is "could not
 /// tell"; the gate floors [`Self::Unparsed`] to `Ask`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1076,8 +1076,8 @@ pub(crate) enum ExtractedSubstitutions {
     /// The raw inner text of each top-level `$(...)`/backquote substitution.
     Parsed(Vec<String>),
     /// The text has a substitution opener that cannot be delimited (for
-    /// example a `$(` that never closes, or `${ rm -rf /; }` in an
-    /// arithmetic expansion), or brush rejected it.
+    /// example a `$(` that never closes, or `${ rm -rf /; }`), or brush
+    /// rejected it.
     Unparsed,
 }
 
