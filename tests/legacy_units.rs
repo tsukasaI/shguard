@@ -14,6 +14,10 @@ use std::process::ExitCode;
 
 use serde_json::Value;
 
+#[path = "common/golden.rs"]
+#[allow(dead_code)]
+mod golden;
+
 const CORPUS: &str = include_str!("golden/legacy_units.jsonl");
 
 struct Corpus {
@@ -160,10 +164,23 @@ fn str_field<'a>(value: &'a Value, name: &str) -> Option<&'a str> {
     value.get(name).and_then(Value::as_str)
 }
 
-fn replay(row: &Value) -> Result<(), String> {
+/// Why a replayed row failed. A watchdog trip says the row ran out of time
+/// or memory, not that the engine disagrees with the corpus.
+enum Failure {
+    Mismatch(String),
+    Watchdog(String),
+}
+
+fn replay(row: &Value) -> Result<(), Failure> {
     let command = str_field(row, "command").unwrap_or_default();
     let expect = &row["expect"];
     let verdict = shguard::analyze(command);
+    if verdict
+        .reason()
+        .is_some_and(|reason| reason.as_str().ends_with(golden::WATCHDOG_REASON_SUFFIX))
+    {
+        return Err(Failure::Watchdog(format!("{command:?}")));
+    }
     let got = serde_json::json!({
         "decision": format!("{:?}", verdict.decision()).to_lowercase(),
         "reason": verdict.reason().map(|r| r.as_str()),
@@ -174,9 +191,9 @@ fn replay(row: &Value) -> Result<(), String> {
     if got == *expect {
         Ok(())
     } else {
-        Err(format!(
+        Err(Failure::Mismatch(format!(
             "{command:?}\n  expected {expect}\n  got      {got}"
-        ))
+        )))
     }
 }
 
@@ -192,7 +209,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let failures: Vec<String> = corpus
+    let failures: Vec<Failure> = corpus
         .gate_public
         .iter()
         .filter_map(|row| replay(row).err())
@@ -210,10 +227,16 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     for failure in &failures {
-        eprintln!("legacy_units: MISMATCH {failure}");
+        match failure {
+            Failure::Mismatch(row) => eprintln!("legacy_units: MISMATCH {row}"),
+            Failure::Watchdog(row) => eprintln!(
+                "legacy_units: HARNESS FAILURE the row tripped the evaluation watchdog, so its \
+                 decision is not its real one: {row}"
+            ),
+        }
     }
     eprintln!(
-        "legacy_units: {} of {} rows mismatched",
+        "legacy_units: {} of {} rows failed",
         failures.len(),
         corpus.gate_public.len()
     );
