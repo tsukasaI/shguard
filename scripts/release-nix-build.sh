@@ -50,10 +50,10 @@ while read -r local_ref local_sha remote_ref _remote_sha; do
   # config, which the user's nix.conf cannot override, while a trusted user or
   # single-user install honours user-level overrides at build time, which only
   # the merged read shows.
-  if ! sys_sandbox=$(system_nix_config sandbox 2>/dev/null) ||
-    ! sys_fallback=$(system_nix_config sandbox-fallback 2>/dev/null) ||
-    ! eff_sandbox=$(effective_nix_config sandbox 2>/dev/null) ||
-    ! eff_fallback=$(effective_nix_config sandbox-fallback 2>/dev/null); then
+  if ! sys_sandbox=$(system_nix_config sandbox) ||
+    ! sys_fallback=$(system_nix_config sandbox-fallback) ||
+    ! eff_sandbox=$(effective_nix_config sandbox) ||
+    ! eff_fallback=$(effective_nix_config sandbox-fallback); then
     echo "release-nix-build: cannot read nix config (needs nix >= 2.20); refusing to push $remote_ref." >&2
     exit 1
   fi
