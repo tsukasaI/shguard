@@ -42,6 +42,8 @@ mod corpus;
 #[path = "common/golden.rs"]
 #[allow(dead_code)]
 mod golden;
+#[path = "common/legacy_rows.rs"]
+mod legacy_rows;
 
 const SAMPLE_PER_CORPUS: usize = 40;
 
@@ -99,9 +101,9 @@ const CORPORA: [(&str, &str, Reader); 8] = [
 /// Commands of the `kind == "gate"` rows of `legacy_units.jsonl` recorded on
 /// the embedded rule set (no `config`) with no `cwd`, deduplicated: the
 /// differential applies its own four configs, so a row recorded under another
-/// rule set or directory would not mean what it recorded. Other kinds (the
-/// `config` header rows included) are skipped; a malformed line or a used
-/// gate row without a string `command` fails.
+/// rule set or directory would not mean what it recorded. Other known kinds
+/// (the `config` header rows included) are skipped; a malformed line, an
+/// unknown kind or a used gate row without a string `command` fails.
 fn read_legacy_gate_commands(path: &Path) -> Result<Vec<String>, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
@@ -114,20 +116,14 @@ fn read_legacy_gate_commands(path: &Path) -> Result<Vec<String>, String> {
         let at = format!("{}:{}", path.display(), index + 1);
         let row: serde_json::Value =
             serde_json::from_str(line).map_err(|err| format!("{at}: malformed line: {err}"))?;
-        let kind = row
-            .get("kind")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| format!("{at}: missing string `kind`"))?;
-        if kind != "gate" {
+        let row = row
+            .as_object()
+            .ok_or_else(|| format!("{at}: not an object"))?;
+        let kind = legacy_rows::kind(row).map_err(|err| format!("{at}: {err}"))?;
+        if kind != legacy_rows::Kind::Gate || !legacy_rows::is_public_gate(row) {
             continue;
         }
-        if row.get("config").is_some() || row.get("cwd").is_some() {
-            continue;
-        }
-        let command = row
-            .get("command")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| format!("{at}: gate row missing string `command`"))?;
+        let command = legacy_rows::gate_command(row).map_err(|err| format!("{at}: {err}"))?;
         if seen.insert(command.to_string()) {
             commands.push(command.to_string());
         }

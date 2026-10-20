@@ -14,6 +14,14 @@ use std::process::ExitCode;
 
 use serde_json::Value;
 
+#[path = "common/golden.rs"]
+#[allow(dead_code)]
+mod golden;
+#[path = "common/legacy_rows.rs"]
+mod legacy_rows;
+
+use legacy_rows::Kind;
+
 const CORPUS: &str = include_str!("golden/legacy_units.jsonl");
 
 struct Corpus {
@@ -83,12 +91,9 @@ fn load(text: &str) -> Result<Corpus, String> {
         let Value::Object(mut fields) = row else {
             return Err(format!("legacy_units.jsonl line {number}: not an object"));
         };
-        let kind = fields
-            .get("kind")
-            .and_then(Value::as_str)
-            .ok_or_else(|| format!("legacy_units.jsonl line {number}: missing kind"))?
-            .to_string();
-        if kind == "config" {
+        let kind = legacy_rows::kind(&fields)
+            .map_err(|err| format!("legacy_units.jsonl line {number}: {err}"))?;
+        if kind == Kind::Config {
             if let Some(key) = fields
                 .keys()
                 .find(|key| !["kind", "id", "toml"].contains(&key.as_str()))
@@ -125,29 +130,27 @@ fn load(text: &str) -> Result<Corpus, String> {
                 "legacy_units.jsonl line {number}: duplicate of line {first}"
             ));
         }
-        match kind.as_str() {
-            "gate" => {
-                if fields.contains_key("config") || fields.contains_key("cwd") {
+        match kind {
+            Kind::Config => unreachable!("config rows are handled above"),
+            Kind::Gate => {
+                if !legacy_rows::is_public_gate(&fields) {
                     corpus.gate_internal += 1;
                 } else {
-                    let command = fields
-                        .get("command")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| format!("line {number}: gate row without command"))?;
+                    let command = legacy_rows::gate_command(&fields)
+                        .map_err(|err| format!("line {number}: {err}"))?;
                     let expect = expect.ok_or_else(|| format!("line {number}: no expect"))?;
                     corpus
                         .gate_public
                         .push(serde_json::json!({ "command": command, "expect": expect }));
                 }
             }
-            "rules" => corpus.rules += 1,
-            "excluded" => {
+            Kind::Rules => corpus.rules += 1,
+            Kind::Excluded => {
                 if reason.is_none() {
                     return Err(format!("line {number}: excluded row without reason"));
                 }
                 corpus.excluded += 1;
             }
-            other => return Err(format!("line {number}: unknown kind {other:?}")),
         }
     }
     if keys.is_empty() {
@@ -160,10 +163,23 @@ fn str_field<'a>(value: &'a Value, name: &str) -> Option<&'a str> {
     value.get(name).and_then(Value::as_str)
 }
 
-fn replay(row: &Value) -> Result<(), String> {
+/// Why a replayed row failed. A watchdog trip says the row ran out of time
+/// or memory, not that the engine disagrees with the corpus.
+enum Failure {
+    Mismatch(String),
+    Watchdog(String),
+}
+
+fn replay(row: &Value) -> Result<(), Failure> {
     let command = str_field(row, "command").unwrap_or_default();
     let expect = &row["expect"];
     let verdict = shguard::analyze(command);
+    if verdict
+        .reason()
+        .is_some_and(|reason| reason.as_str().ends_with(golden::WATCHDOG_REASON_SUFFIX))
+    {
+        return Err(Failure::Watchdog(format!("{command:?}")));
+    }
     let got = serde_json::json!({
         "decision": format!("{:?}", verdict.decision()).to_lowercase(),
         "reason": verdict.reason().map(|r| r.as_str()),
@@ -174,10 +190,52 @@ fn replay(row: &Value) -> Result<(), String> {
     if got == *expect {
         Ok(())
     } else {
-        Err(format!(
+        Err(Failure::Mismatch(format!(
             "{command:?}\n  expected {expect}\n  got      {got}"
-        ))
+        )))
     }
+}
+
+const MAX_REPLAY_THREADS: usize = 8;
+
+/// Replays `rows` on up to [`MAX_REPLAY_THREADS`] threads, each taking one
+/// contiguous chunk. Chunks are joined in spawn order, so failures come out
+/// in corpus order whatever the scheduling. A row that trips the watchdog is
+/// re-run once serially: the trip may come from the parallel load, not the
+/// row. Mismatches are not retried.
+fn replay_all(rows: &[Value]) -> Vec<Failure> {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(MAX_REPLAY_THREADS);
+    let chunk_len = rows.len().div_ceil(threads).max(1);
+    let failed: Vec<(&Value, Failure)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = rows
+            .chunks(chunk_len)
+            .map(|chunk| {
+                scope.spawn(|| {
+                    chunk
+                        .iter()
+                        .filter_map(|row| replay(row).err().map(|failure| (row, failure)))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
+    });
+    failed
+        .into_iter()
+        .filter_map(|(row, failure)| match failure {
+            Failure::Watchdog(_) => replay(row).err(),
+            Failure::Mismatch(_) => Some(failure),
+        })
+        .collect()
 }
 
 fn main() -> ExitCode {
@@ -192,11 +250,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let failures: Vec<String> = corpus
-        .gate_public
-        .iter()
-        .filter_map(|row| replay(row).err())
-        .collect();
+    let failures = replay_all(&corpus.gate_public);
     println!(
         "legacy_units: {} gate rows replayed through the public API; {} gate rows (custom rule \
          set or cwd) and {} rules rows replayed by `cargo test --lib legacy_units`; {} tests \
@@ -210,10 +264,16 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     for failure in &failures {
-        eprintln!("legacy_units: MISMATCH {failure}");
+        match failure {
+            Failure::Mismatch(row) => eprintln!("legacy_units: MISMATCH {row}"),
+            Failure::Watchdog(row) => eprintln!(
+                "legacy_units: HARNESS FAILURE the row tripped the evaluation watchdog, so its \
+                 decision is not its real one: {row}"
+            ),
+        }
     }
     eprintln!(
-        "legacy_units: {} of {} rows mismatched",
+        "legacy_units: {} of {} rows failed",
         failures.len(),
         corpus.gate_public.len()
     );
@@ -234,6 +294,11 @@ fn loader_rejects_damage() -> Result<(), String> {
     let damaged = [
         ("empty file", String::new(), None),
         ("malformed line", format!("{row}not json\n"), None),
+        (
+            "unknown kind",
+            format!("{row}{{\"kind\":\"gat\",\"command\":\"ls\"}}\n"),
+            Some("unknown kind"),
+        ),
         ("duplicate key", format!("{row}{row}"), None),
         (
             "config header with a duplicate id",
