@@ -134,13 +134,12 @@ const MAX_STDIN_BYTES: u64 = 10 * 1024 * 1024;
 ///
 /// Not 30s or more: the worst case is `STDIN_READ_TIMEOUT` +
 /// [`EVALUATION_TIMEOUT`] + [`TRIP_LOG_TIMEOUT`] (10s + 2s + 50ms, plus
-/// process start-up), and if
-/// Claude Code kills the hook first, empty stdout is treated as allow
-/// (fail-open), so a higher value only widens that window. Users must keep
-/// the hook `timeout` above that total. Not much lower either: a producer
-/// writing the hook JSON finishes in milliseconds, so 10s is well above any
-/// realistic contention stall, while a lower value risks spurious asks on a
-/// loaded machine. Not tuned against measurements.
+/// process start-up), and if Claude Code kills the hook first, empty stdout
+/// is treated as allow (fail-open), so a higher value only widens that
+/// window. Users must keep the hook `timeout` above that total. Not much
+/// lower either: a producer writing the hook JSON finishes in milliseconds,
+/// so 10s is well above any realistic contention stall, while a lower value
+/// risks spurious asks on a loaded machine. Not tuned against measurements.
 const STDIN_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Wall-clock budget given to one [`run`], measured from the end of its
