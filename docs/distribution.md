@@ -22,8 +22,9 @@ completes.
    That covers aarch64-darwin only, on the maintainer's Mac, and needs nix with
    the sandbox enabled (`sandbox = true`, `sandbox-fallback = false` in the
    daemon's system config: `/etc/nix/nix.conf`, or nix-darwin's
-   `nix.settings`; a user-level nix.conf does not reach the daemon); the
-   script enforces this and refuses the push otherwise.
+   `nix.settings`; for an untrusted user a user-level nix.conf does not reach
+   the daemon, so the script requires both the system config and your
+   effective user config to set them) and refuses the push otherwise.
    The nix build's checkPhase runs the test suite in release mode, where
    `SHGUARD_TEST_EVAL_TIMEOUT_MS` is compiled out, so hook-path tests run
    against the production 2s bound; flakes from a loaded builder there are
