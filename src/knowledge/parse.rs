@@ -79,7 +79,7 @@ impl<'a> ParsedArgv<'a> {
 pub(crate) struct Unmodeled<'a> {
     command: &'static str,
     token: usize,
-    word: String,
+    word: Option<String>,
     best_effort: ParsedArgv<'a>,
 }
 
@@ -88,7 +88,7 @@ pub(crate) struct Unmodeled<'a> {
 pub(crate) struct Finding {
     command: &'static str,
     token: usize,
-    word: String,
+    word: Option<String>,
 }
 
 impl Finding {
@@ -96,9 +96,10 @@ impl Finding {
         self.command
     }
 
-    /// The first unmodelled option token as written.
-    pub(crate) fn word(&self) -> &str {
-        &self.word
+    /// The first unmodelled option token as written; `None` when the token
+    /// is unresolvable.
+    pub(crate) fn word(&self) -> Option<&str> {
+        self.word.as_deref()
     }
 
     /// Index of the first unmodelled option token among the parsed words.
@@ -613,8 +614,8 @@ pub(crate) fn parse<'a>(
             command,
             token,
             word: match argv[token].resolution() {
-                Resolution::Resolved(word) => word.clone(),
-                Resolution::Unresolvable(_) => String::new(),
+                Resolution::Resolved(word) => Some(word.clone()),
+                Resolution::Unresolvable(_) => None,
             },
             best_effort: parsed,
         }),

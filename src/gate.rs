@@ -4757,14 +4757,15 @@ fn apply_tar_dashless_floor(verdict: Verdict, floor: Option<(Decision, String)>)
 /// place.
 fn scan_unmodeled_option_floor(argv: &[NormalizedWord]) -> Option<(Decision, String)> {
     if let Some(finding) = crate::rules::first_unmodeled_wrapper_option(argv) {
-        return Some((
-            Decision::Ask,
-            format!(
+        let reason = match finding.word() {
+            Some(word) => format!(
                 "unmodelled option {:?} for `{}`",
-                finding.word().chars().take(64).collect::<String>(),
+                word.chars().take(64).collect::<String>(),
                 finding.command()
             ),
-        ));
+            None => format!("unmodelled option for `{}`", finding.command()),
+        };
+        return Some((Decision::Ask, reason));
     }
     if crate::rules::placeholder_in_command_slot(argv, &[]) || placeholder_in_scripts(argv, &[], 0)
     {
