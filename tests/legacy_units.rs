@@ -9,7 +9,7 @@
 //!
 //! `harness = false` so the summary line shows in a plain `cargo test`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::process::ExitCode;
 
 use serde_json::Value;
@@ -21,6 +21,41 @@ struct Corpus {
     gate_internal: usize,
     rules: usize,
     excluded: usize,
+    config_ids: BTreeSet<String>,
+}
+
+/// FNV-1a-64 of the text, as 16 hex digits: the id `legacy_units::config_id`
+/// gives a `config` header row.
+fn config_id(text: &str) -> String {
+    let hash = text.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    });
+    format!("{hash:016x}")
+}
+
+fn str_field_of<'a>(fields: &'a serde_json::Map<String, Value>, name: &str) -> Option<&'a str> {
+    fields.get(name).and_then(Value::as_str)
+}
+
+/// Header rows precede the rows that cite them, so an id not yet seen is
+/// unknown.
+fn check_config_refs(
+    fields: &serde_json::Map<String, Value>,
+    known: &BTreeSet<String>,
+) -> Result<(), String> {
+    for source in ["rules", "allowlist"] {
+        let id = fields
+            .get("config")
+            .and_then(|config| config.get(source))
+            .and_then(|source| source.get("parse_ref"));
+        if let Some(id) = id {
+            let id = id.as_str().ok_or("parse_ref is not a string")?;
+            if !known.contains(id) {
+                return Err(format!("unknown config id {id:?}"));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn is_unreplayable(config: &Value) -> bool {
@@ -39,6 +74,7 @@ fn load(text: &str) -> Result<Corpus, String> {
         gate_internal: 0,
         rules: 0,
         excluded: 0,
+        config_ids: BTreeSet::new(),
     };
     for (index, line) in text.lines().enumerate() {
         let number = index + 1;
@@ -52,6 +88,31 @@ fn load(text: &str) -> Result<Corpus, String> {
             .and_then(Value::as_str)
             .ok_or_else(|| format!("legacy_units.jsonl line {number}: missing kind"))?
             .to_string();
+        if kind == "config" {
+            if let Some(key) = fields
+                .keys()
+                .find(|key| !["kind", "id", "toml"].contains(&key.as_str()))
+            {
+                return Err(format!(
+                    "line {number}: config row with unknown key {key:?}"
+                ));
+            }
+            let id = str_field_of(&fields, "id")
+                .ok_or_else(|| format!("line {number}: config row without id"))?;
+            let toml = str_field_of(&fields, "toml")
+                .ok_or_else(|| format!("line {number}: config row without toml"))?;
+            if id != config_id(toml) {
+                return Err(format!(
+                    "line {number}: config id {id:?} is not the id of its toml"
+                ));
+            }
+            if !corpus.config_ids.insert(id.to_string()) {
+                return Err(format!("line {number}: duplicate config id {id:?}"));
+            }
+            continue;
+        }
+        check_config_refs(&fields, &corpus.config_ids)
+            .map_err(|err| format!("line {number}: {err}"))?;
         let expect = fields.remove("expect");
         let reason = fields.get("reason").cloned();
         let mut identity = fields.clone();
@@ -159,18 +220,59 @@ fn main() -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// The loader must reject an empty file, a malformed line and a duplicate
-/// key, or a damaged corpus would pass as a smaller one.
+/// The loader must reject an empty file, a malformed line, a duplicate key, a
+/// config reference to an unknown id (including one that precedes its header),
+/// a duplicate config id, and a config header with a wrong id or extra key, or
+/// a damaged corpus would pass as a smaller one.
 fn loader_rejects_damage() -> Result<(), String> {
     let row = "{\"kind\":\"excluded\",\"test\":\"a\",\"reason\":\"r\"}\n";
+    let id = config_id("a");
+    let header = format!("{{\"kind\":\"config\",\"id\":\"{id}\",\"toml\":\"a\"}}\n");
+    let reference = format!(
+        "{{\"kind\":\"gate\",\"config\":{{\"rules\":{{\"parse_ref\":\"{id}\"}}}},\"command\":\"ls\",\"expect\":{{}}}}\n"
+    );
     let damaged = [
-        ("empty file", String::new()),
-        ("malformed line", format!("{row}not json\n")),
-        ("duplicate key", format!("{row}{row}")),
+        ("empty file", String::new(), None),
+        ("malformed line", format!("{row}not json\n"), None),
+        ("duplicate key", format!("{row}{row}"), None),
+        (
+            "config header with a duplicate id",
+            format!("{row}{header}{header}"),
+            Some("duplicate config id"),
+        ),
+        (
+            "config header with a wrong id",
+            format!("{row}{{\"kind\":\"config\",\"id\":\"0\",\"toml\":\"a\"}}\n"),
+            Some("is not the id of its toml"),
+        ),
+        (
+            "config header with an unknown key",
+            format!("{row}{{\"kind\":\"config\",\"id\":\"{id}\",\"toml\":\"a\",\"x\":1}}\n"),
+            Some("unknown key"),
+        ),
+        (
+            "config reference before its header",
+            format!("{reference}{header}"),
+            None,
+        ),
+        (
+            "config reference to an unknown id",
+            format!(
+                "{row}{{\"kind\":\"gate\",\"config\":{{\"rules\":{{\"parse_ref\":\"nope\"}}}},\"command\":\"ls\",\"expect\":{{}}}}\n"
+            ),
+            None,
+        ),
     ];
-    for (what, text) in damaged {
-        if load(&text).is_ok() {
+    for (what, text, cause) in damaged {
+        let Err(err) = load(&text) else {
             return Err(format!("the loader accepted a corpus with a {what}"));
+        };
+        if let Some(cause) = cause
+            && !err.contains(cause)
+        {
+            return Err(format!(
+                "the loader rejected a corpus with a {what} for the wrong reason: {err}"
+            ));
         }
     }
     Ok(())
