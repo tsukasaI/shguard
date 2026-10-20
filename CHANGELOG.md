@@ -6,6 +6,12 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- A config-load failure (including under `SHGUARD_STRICT_CONFIG`) no longer
+  produces a verdict for non-Bash tools such as `Edit` and `Write`: they
+  get the same no-decision output as with a loadable config. Bash still
+  gets the config-failure verdict (`ask`, or `deny` under strict mode).
+  The failure message is also no longer repeated by tools that walk the
+  error chain (#684).
 - The hook's stdin read bound is lowered from 30s to 10s, narrowing the
   window in which a hook `timeout` can kill a stalled read and fail open
   (#709). Keep the hook `timeout` above ~15s.

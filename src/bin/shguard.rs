@@ -1285,6 +1285,17 @@ fn run(
     let policy = match shguard::config::Policy::load() {
         Ok(policy) => policy,
         Err(err) => {
+            // A non-Bash tool is out of scope with a loadable config
+            // (issue #462), so a broken config must not turn it into a
+            // verdict either (issue #684). Only a cleanly read, in-cap
+            // payload qualifies; anything else keeps the config-failure
+            // verdict.
+            if read_result.is_ok()
+                && stdin.len() as u64 <= MAX_STDIN_BYTES
+                && let Some(no_decision) = shguard::adapter::non_bash_no_decision(&stdin)
+            {
+                return no_decision;
+            }
             let config = PolicyConfig::none().with_strict_config(strict_config_requested());
             return shguard::adapter::render(&decide(
                 &[Evidence::ConfigUnavailable {
