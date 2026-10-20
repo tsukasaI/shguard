@@ -3033,7 +3033,21 @@ pub(crate) struct ResolvedPath {
 /// is a capability, not rule data, so it never takes part in rule-set
 /// equality. In tests it can also carry a fake-fs table.
 #[derive(Clone, Copy)]
-pub(crate) struct PathCanonicalizer(CanonicalizeFn, #[cfg(test)] Option<&'static [FakeFsEntry]>);
+pub(crate) struct PathCanonicalizer(CanonicalizeFn, #[cfg(test)] CanonicalizerKind);
+
+/// How a [`PathCanonicalizer`] was built, recorded as data so a test never
+/// has to recognise it by function address (which differs across codegen
+/// units in optimized builds).
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum CanonicalizerKind {
+    /// The [`PathCanonicalizer::unavailable`] default.
+    Unavailable,
+    /// A [`PathCanonicalizer::fake_fs`] double answering from this table.
+    FakeFs(&'static [FakeFsEntry]),
+    /// Any canonicalizer injected through [`PathCanonicalizer::new`].
+    Custom,
+}
 
 /// One path of an in-memory filesystem double: `path` resolves to
 /// `resolves_to`. Every path a table does not list is
@@ -3099,8 +3113,7 @@ impl FakeFsEntry {
     }
 }
 
-/// A named `fn` item, not a closure, so a test can recognise the default by
-/// address (`std::ptr::fn_addr_eq`).
+/// The function behind [`PathCanonicalizer::unavailable`].
 fn unavailable_canonicalize(_: &str) -> Result<ResolvedPath, ProbeError> {
     Err(ProbeError::NotFound)
 }
@@ -3113,7 +3126,7 @@ impl PathCanonicalizer {
 
     #[cfg(test)]
     pub(crate) fn new(canonicalize: CanonicalizeFn) -> Self {
-        Self(canonicalize, None)
+        Self(canonicalize, CanonicalizerKind::Custom)
     }
 
     /// A filesystem double that answers from `table`. The table travels with
@@ -3123,7 +3136,7 @@ impl PathCanonicalizer {
     /// ever bypassed.
     #[cfg(test)]
     pub(crate) fn fake_fs(table: &'static [FakeFsEntry]) -> Self {
-        Self(|_| Err(ProbeError::Other), Some(table))
+        Self(|_| Err(ProbeError::Other), CanonicalizerKind::FakeFs(table))
     }
 
     /// The default for a [`Rules`] nobody wired a canonicalizer into:
@@ -3132,12 +3145,15 @@ impl PathCanonicalizer {
     /// filesystem twin probe never adds a spelling. It is also the stand-in
     /// for tests that must not touch the real filesystem.
     pub(crate) fn unavailable() -> Self {
-        Self::new(unavailable_canonicalize)
+        #[cfg(not(test))]
+        return Self::new(unavailable_canonicalize);
+        #[cfg(test)]
+        Self(unavailable_canonicalize, CanonicalizerKind::Unavailable)
     }
 
     fn canonicalize(self, path: &str) -> Result<ResolvedPath, ProbeError> {
         #[cfg(test)]
-        if let Some(table) = self.1 {
+        if let CanonicalizerKind::FakeFs(table) = self.1 {
             return FakeFsEntry::lookup(table, path);
         }
         (self.0)(path)
@@ -8830,17 +8846,17 @@ impl Rules {
     /// recorder can write it into the row.
     #[cfg(test)]
     pub(crate) fn legacy_fake_fs(&self) -> Option<&'static [FakeFsEntry]> {
-        self.path_canonicalizer.1
+        match self.path_canonicalizer.1 {
+            CanonicalizerKind::FakeFs(table) => Some(table),
+            CanonicalizerKind::Unavailable | CanonicalizerKind::Custom => None,
+        }
     }
 
     /// `PathCanonicalizer` never takes part in equality, so the legacy_units
     /// recorder asks this to tell a wired-up filesystem double apart.
     #[cfg(test)]
     pub(crate) fn legacy_has_default_canonicalizer(&self) -> bool {
-        std::ptr::fn_addr_eq(
-            self.path_canonicalizer.0,
-            unavailable_canonicalize as CanonicalizeFn,
-        )
+        matches!(self.path_canonicalizer.1, CanonicalizerKind::Unavailable)
     }
 
     /// The embedded/user-config [`CommandRule`] declared with id `id`, if
