@@ -365,8 +365,8 @@ use crate::policy::{self, Evidence, LimitKind, PolicyConfig, deny_msg_unsupporte
 use crate::rules::{
     AWK_INTERPRETERS, Allowlist, EVAL_BUILTIN, FsProbeBudget, FsProbeFailure, PathForm,
     RedirectRule, Rules, SocatAddress, SymlinkScope, TRAP_BUILTIN, WrapperChainEscalation,
-    has_expanding_glob_qualifier, is_pipeline_interpreter, lexical_normalize, render_cwd_anchor,
-    unresolved_word_may_hide_glob_qualifier, wrapper_chain_changes_cwd,
+    has_expanding_glob_qualifier, is_dirstack_shape, is_pipeline_interpreter, lexical_normalize,
+    render_cwd_anchor, unresolved_word_may_hide_glob_qualifier, wrapper_chain_changes_cwd,
 };
 use crate::semantics::cwd::{AnchorOrigin, CwdAnchor, CwdContext, CwdState, MAX_CWD_STACK_DEPTH};
 use crate::semantics::env::{
@@ -9414,7 +9414,12 @@ fn is_stdin_alias_path(path: &str) -> bool {
     // then read with its ascent ignored, as an unknown-cwd path is.
     let mut stack: Vec<&str> = Vec::new();
     let mut link_seen = false;
-    for part in path.split('/').filter(|p| !p.is_empty() && *p != ".") {
+    let parts = path.split('/').filter(|p| !p.is_empty() && *p != ".");
+    for (index, part) in parts.enumerate() {
+        // A leading `~+`/`~-`/`~N` is an unknown anchor, like an empty stack.
+        if index == 0 && part.strip_prefix('~').is_some_and(is_dirstack_shape) {
+            continue;
+        }
         if part == ".." {
             stack.pop();
             continue;
@@ -15756,6 +15761,8 @@ mod tests {
             "python3 /proc/self/root/tmp/../proc/self/root/../dev/stdin",
             "python3 /proc/self/task/1/root/../dev/stdin",
             "python3 /proc/self/task/1/cwd/../dev/stdin",
+            "python3 ~+/proc/self/root/../dev/stdin",
+            "python3 ~-/proc/self/root/../dev/stdin",
             "python3 /proc/1/root/proc/self/root/dev/fd/3",
             "python3 /dev/stdout",
             "awk -f /dev/stderr f",

@@ -3274,6 +3274,7 @@ const ISSUE_750_CASES: &[(&str, Decision)] = &[
         Decision::Ask,
     ),
     ("python3 /proc/self/task/1/root/../dev/stdin", Decision::Ask),
+    ("python3 ~+/proc/self/root/../dev/stdin", Decision::Ask),
     ("python3 ~/../../dev/stdin", Decision::Ask),
     ("php -f s.php -r 'system(\"id\");'", Decision::Ask),
     ("php -f s.php -F /dev/stdin", Decision::Ask),
