@@ -170,7 +170,7 @@
 //!     bash's heredoc-body expansion rules don't match its ordinary
 //!     word-quoting rules (quotes are inert in an unquoted-delimiter heredoc
 //!     body — `'$(rm -rf /)'` still executes). A body brush cannot delimit
-//!     is `HeredocSubstitutions::Unparsed`, floored to `Ask`.
+//!     is `ExtractedSubstitutions::Unparsed`, floored to `Ask`.
 //!     [`check_redirect_targets`]'s
 //!     existing MVP scope limit — an unresolved redirect target *path* is
 //!     never checked against the dangerous-path list — is unchanged by this
@@ -348,8 +348,8 @@ use std::collections::HashSet;
 
 use crate::HookContext;
 use crate::ast::{
-    ArithmeticSubstitutions, AssignmentValue, Command, CommandLine, CompoundCommand, ElifClause,
-    ExtendedTest, FileRedirectionKind, FunctionDefinition, HeredocSubstitutions, Pipeline,
+    AssignmentValue, Command, CommandLine, CompoundCommand, ElifClause, ExtendedTest,
+    ExtractedSubstitutions, FileRedirectionKind, FunctionDefinition, Pipeline,
     ProcessSubstitutionDirection, Redirection, Separator, SimpleCommand, Word, WordPiece,
 };
 use crate::normalize::{
@@ -7014,12 +7014,12 @@ fn scan_redirections_for_heredoc_candidates(
                 substitutions,
                 ..
             } => match substitutions {
-                HeredocSubstitutions::Parsed(found) => {
+                ExtractedSubstitutions::Parsed(found) => {
                     for inner in found {
                         scan_substitution_text_for_heredoc_candidates(inner, out);
                     }
                 }
-                HeredocSubstitutions::Unparsed => out.uncertain = true,
+                ExtractedSubstitutions::Unparsed => out.uncertain = true,
             },
             Redirection::HereDoc {
                 expand_body: false, ..
@@ -7060,12 +7060,12 @@ fn scan_word_pieces_for_heredoc_candidates(pieces: &[WordPiece], out: &mut Hered
             WordPiece::ArithmeticExpansion(subs) => {
                 out.note_arithmetic(&[]);
                 match subs {
-                    ArithmeticSubstitutions::Parsed(found) => {
+                    ExtractedSubstitutions::Parsed(found) => {
                         for inner in found {
                             scan_substitution_text_for_heredoc_candidates(inner, out);
                         }
                     }
-                    ArithmeticSubstitutions::Unparsed => out.uncertain = true,
+                    ExtractedSubstitutions::Unparsed => out.uncertain = true,
                 }
             }
             WordPiece::DoubleQuoted(inner) => scan_word_pieces_for_heredoc_candidates(inner, out),
@@ -7373,8 +7373,8 @@ fn scan_redirection_expansions(
 
                 if *expand_body {
                     let found: &[String] = match substitutions {
-                        HeredocSubstitutions::Parsed(found) => found,
-                        HeredocSubstitutions::Unparsed => {
+                        ExtractedSubstitutions::Parsed(found) => found,
+                        ExtractedSubstitutions::Unparsed => {
                             accum.raise(
                                 Decision::Ask,
                                 "the heredoc body contains a `$(`/`` ` `` that never closes \
@@ -8393,10 +8393,10 @@ fn collect_substitutions_into<'a>(
             // opaque-kind floor alone: assignment values and redirection
             // targets never reach it.
             WordPiece::ArithmeticExpansion(subs) => match subs {
-                ArithmeticSubstitutions::Parsed(found) => {
+                ExtractedSubstitutions::Parsed(found) => {
                     out.extend(found.iter().map(|s| Cow::Borrowed(s.as_str())));
                 }
-                ArithmeticSubstitutions::Unparsed => uncertain = true,
+                ExtractedSubstitutions::Unparsed => uncertain = true,
             },
             WordPiece::DoubleQuoted(inner) => {
                 uncertain |= collect_substitutions_into(inner, false, out);

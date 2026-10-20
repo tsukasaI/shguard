@@ -1060,34 +1060,24 @@ pub(crate) enum Redirection {
         body: String,
         /// The command and backquote substitutions `body` expands, found by
         /// brush's heredoc grammar at parse time. Always
-        /// [`HeredocSubstitutions::Parsed`] with no entries when
+        /// [`ExtractedSubstitutions::Parsed`] with no entries when
         /// `expand_body` is `false`: a quoted-delimiter body is inert.
-        substitutions: HeredocSubstitutions,
+        substitutions: ExtractedSubstitutions,
     },
 }
 
-/// What the parser found in a heredoc body: either the substitutions it will
-/// expand, or the fact that it could not delimit them. A sum type so a caller
-/// cannot read an empty list for "nothing found" when the real answer is
-/// "could not tell"; the gate floors [`Self::Unparsed`] to `Ask`.
+/// What the parser found in text it will expand, a heredoc body or a
+/// `$((...))` arithmetic expansion: either the substitutions it will expand,
+/// or the fact that it could not delimit them. A sum type so a caller cannot
+/// read an empty list for "nothing found" when the real answer is "could not
+/// tell"; the gate floors [`Self::Unparsed`] to `Ask`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HeredocSubstitutions {
-    /// The raw inner text of each top-level `$(...)`/backquote substitution.
-    Parsed(Vec<String>),
-    /// The body has a substitution opener that cannot be delimited (for
-    /// example a `$(` that never closes), or brush rejected the body.
-    Unparsed,
-}
-
-/// What the parser found in a `$((...))` body; same shape and fail-closed
-/// meaning as [`HeredocSubstitutions`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ArithmeticSubstitutions {
+pub(crate) enum ExtractedSubstitutions {
     /// The raw inner text of each top-level `$(...)`/backquote substitution.
     Parsed(Vec<String>),
     /// The text has a substitution opener that cannot be delimited (for
-    /// example `${ rm -rf /; }` or a `$(` that never closes), or brush
-    /// rejected it.
+    /// example a `$(` that never closes, or `${ rm -rf /; }` in an
+    /// arithmetic expansion), or brush rejected it.
     Unparsed,
 }
 
@@ -1195,7 +1185,7 @@ pub(crate) enum WordPiece {
     /// (`$(( $(rm -rf /) ))` really does run the `rm`), so the parser
     /// extracts them once, like a heredoc body's, and `crate::gate` walks
     /// them rather than treating the whole expression as inert.
-    ArithmeticExpansion(ArithmeticSubstitutions),
+    ArithmeticExpansion(ExtractedSubstitutions),
     /// `<(...)`/`>(...)` (issue #75) — process substitution. Unlike
     /// [`WordPiece::CommandSubstitution`], the inner command is **not** raw
     /// text: brush-parser already parses it into a structural command list
