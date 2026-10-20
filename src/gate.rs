@@ -17856,39 +17856,22 @@ mod tests {
 
     mod resolve_symlinks {
         use super::*;
-        use crate::rules::{PathCanonicalizer, ProbeError, ResolvedPath};
-
-        fn file(path: &str) -> Result<ResolvedPath, ProbeError> {
-            Ok(ResolvedPath {
-                path: path.to_string(),
-                is_dir: false,
-                link_count: 1,
-            })
-        }
+        use crate::rules::{FakeFsEntry, PathCanonicalizer};
 
         /// `/scratch` holds regular files `ok.md` and `rel.md`, a `sub`
         /// directory with its own `rel.md` and a symlinked `ok.md`
         /// (pointing out of `/scratch`), and a symlinked `link.md`. `/work`
         /// holds `ok.md`.
-        fn fake_fs(path: &str) -> Result<ResolvedPath, ProbeError> {
-            match path {
-                "/scratch/ok.md" | "/scratch/rel.md" | "/scratch/sub/rel.md" | "/work/ok.md" => {
-                    file(path)
-                }
-                "/scratch/sub/ok.md" | "/scratch/link.md" => file("/outside/secret"),
-                "/scratch/sub" => Ok(ResolvedPath {
-                    path: path.to_string(),
-                    is_dir: true,
-                    link_count: 3,
-                }),
-                "/scratch/flat" => Ok(ResolvedPath {
-                    path: path.to_string(),
-                    is_dir: true,
-                    link_count: 1,
-                }),
-                _ => Err(ProbeError::NotFound),
-            }
-        }
+        const FAKE_FS: &[FakeFsEntry] = &[
+            FakeFsEntry::file("/scratch/ok.md"),
+            FakeFsEntry::file("/scratch/rel.md"),
+            FakeFsEntry::file("/scratch/sub/rel.md"),
+            FakeFsEntry::file("/work/ok.md"),
+            FakeFsEntry::link("/scratch/sub/ok.md", "/outside/secret"),
+            FakeFsEntry::link("/scratch/link.md", "/outside/secret"),
+            FakeFsEntry::dir("/scratch/sub", "/scratch/sub", 3),
+            FakeFsEntry::dir("/scratch/flat", "/scratch/flat", 1),
+        ];
 
         fn rules(kind: &str) -> (Rules, Allowlist) {
             let (rules, allowlist) = policy_from_config(&format!(
@@ -17902,7 +17885,7 @@ mod tests {
             "#
             ));
             (
-                rules.with_path_canonicalizer(PathCanonicalizer::new(fake_fs)),
+                rules.with_path_canonicalizer(PathCanonicalizer::fake_fs(FAKE_FS)),
                 allowlist,
             )
         }

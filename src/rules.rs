@@ -3031,13 +3031,93 @@ pub(crate) struct ResolvedPath {
 
 /// The injected [`CanonicalizeFn`]. Compares equal to every other value: it
 /// is a capability, not rule data, so it never takes part in rule-set
-/// equality.
+/// equality. In tests it can also carry a fake-fs table.
 #[derive(Clone, Copy)]
-pub(crate) struct PathCanonicalizer(CanonicalizeFn);
+pub(crate) struct PathCanonicalizer(CanonicalizeFn, #[cfg(test)] Option<&'static [FakeFsEntry]>);
+
+/// One path of an in-memory filesystem double: `path` resolves to
+/// `resolves_to`. Every path a table does not list is
+/// [`ProbeError::NotFound`].
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FakeFsEntry {
+    pub(crate) path: &'static str,
+    pub(crate) resolves_to: &'static str,
+    pub(crate) is_dir: bool,
+    pub(crate) link_count: u64,
+}
+
+#[cfg(test)]
+impl FakeFsEntry {
+    /// A regular file that resolves to itself.
+    pub(crate) const fn file(path: &'static str) -> Self {
+        Self::link(path, path)
+    }
+
+    /// A regular file reached through a symlink to `resolves_to`.
+    pub(crate) const fn link(path: &'static str, resolves_to: &'static str) -> Self {
+        Self {
+            path,
+            resolves_to,
+            is_dir: false,
+            link_count: 1,
+        }
+    }
+
+    pub(crate) const fn hard_linked(path: &'static str, link_count: u64) -> Self {
+        Self {
+            path,
+            resolves_to: path,
+            is_dir: false,
+            link_count,
+        }
+    }
+
+    pub(crate) const fn dir(
+        path: &'static str,
+        resolves_to: &'static str,
+        link_count: u64,
+    ) -> Self {
+        Self {
+            path,
+            resolves_to,
+            is_dir: true,
+            link_count,
+        }
+    }
+
+    fn lookup(table: &[Self], path: &str) -> Result<ResolvedPath, ProbeError> {
+        table
+            .iter()
+            .find(|entry| entry.path == path)
+            .map(|entry| ResolvedPath {
+                path: entry.resolves_to.to_string(),
+                is_dir: entry.is_dir,
+                link_count: entry.link_count,
+            })
+            .ok_or(ProbeError::NotFound)
+    }
+}
 
 impl PathCanonicalizer {
+    #[cfg(not(test))]
     pub(crate) fn new(canonicalize: CanonicalizeFn) -> Self {
         Self(canonicalize)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new(canonicalize: CanonicalizeFn) -> Self {
+        Self(canonicalize, None)
+    }
+
+    /// A filesystem double that answers from `table`. The table travels with
+    /// the canonicalizer so the legacy_units recorder reads the map back
+    /// instead of guessing it from an opaque function; the function slot is
+    /// never called, and fails closed (`ProbeError::Other`) if the table were
+    /// ever bypassed.
+    #[cfg(test)]
+    pub(crate) fn fake_fs(table: &'static [FakeFsEntry]) -> Self {
+        Self(|_| Err(ProbeError::Other), Some(table))
     }
 
     /// The default for a [`Rules`] nobody wired a canonicalizer into:
@@ -3046,10 +3126,14 @@ impl PathCanonicalizer {
     /// filesystem twin probe never adds a spelling. It is also the stand-in
     /// for tests that must not touch the real filesystem.
     pub(crate) fn unavailable() -> Self {
-        Self(|_| Err(ProbeError::NotFound))
+        Self::new(|_| Err(ProbeError::NotFound))
     }
 
     fn canonicalize(self, path: &str) -> Result<ResolvedPath, ProbeError> {
+        #[cfg(test)]
+        if let Some(table) = self.1 {
+            return FakeFsEntry::lookup(table, path);
+        }
         (self.0)(path)
     }
 }
@@ -3413,7 +3497,13 @@ impl CommandRule {
     /// ([`Self::target_match_candidates`]), and the except candidates are
     /// the flag values that matched `targets`.
     #[must_use]
-    fn matches(&self, argv: &[NormalizedWord]) -> bool {
+    pub(crate) fn matches(&self, argv: &[NormalizedWord]) -> bool {
+        #[cfg(test)]
+        let _legacy = crate::legacy_units::rules_call(
+            crate::legacy_units::Receiver::Rule(self),
+            "rule_matches",
+            &crate::legacy_units::Call::Argv(argv),
+        );
         self.matches_in(
             argv,
             SymlinkScope::default(),
@@ -8730,6 +8820,13 @@ impl Rules {
         })
     }
 
+    /// The table a [`PathCanonicalizer::fake_fs`] double answers from, so the
+    /// recorder can write it into the row.
+    #[cfg(test)]
+    pub(crate) fn legacy_fake_fs(&self) -> Option<&'static [FakeFsEntry]> {
+        self.path_canonicalizer.1
+    }
+
     /// `PathCanonicalizer` never takes part in equality, so the legacy_units
     /// recorder asks this to tell a wired-up filesystem double apart.
     #[cfg(test)]
@@ -8776,6 +8873,12 @@ impl Rules {
         argv: &[NormalizedWord],
         scope: SymlinkScope<'_>,
     ) -> Option<&CommandRule> {
+        #[cfg(test)]
+        let _legacy = crate::legacy_units::rules_call(
+            crate::legacy_units::Receiver::Rules(self),
+            "match_command_in",
+            &crate::legacy_units::Call::ArgvScope(argv, scope.base, scope.refuse_all),
+        );
         worst_wins(&self.command_rules, CommandRule::decision, |rule| {
             rule.matches_in(argv, scope, self.path_canonicalizer)
         })
@@ -15328,14 +15431,6 @@ mod tests {
     mod resolve_symlinks {
         use super::*;
 
-        fn resolved(path: &str, is_dir: bool, link_count: u64) -> Result<ResolvedPath, ProbeError> {
-            Ok(ResolvedPath {
-                path: path.to_string(),
-                is_dir,
-                link_count,
-            })
-        }
-
         /// In-memory stand-in for the filesystem adapter: `/scratch/ok.md`
         /// is a regular file, `/scratch/link.md` a symlink out of the
         /// scratch directory, `/scratch/hard.md` a file with a second hard
@@ -15343,17 +15438,14 @@ mod tests {
         /// `/tmp/scratch` a directory behind a symlinked `/tmp`, and
         /// everything else (dangling links, files not created yet) fails to
         /// resolve.
-        fn fake_canonicalize(path: &str) -> Result<ResolvedPath, ProbeError> {
-            match path {
-                "/scratch/ok.md" => resolved("/scratch/ok.md", false, 1),
-                "/scratch/link.md" => resolved("/outside/secret", false, 1),
-                "/scratch/hard.md" => resolved("/scratch/hard.md", false, 2),
-                "/scratch/sub" => resolved("/scratch/sub", true, 3),
-                "/scratch/flat" => resolved("/scratch/flat", true, 1),
-                "/tmp/scratch" => resolved("/private/tmp/scratch", true, 2),
-                _ => Err(ProbeError::NotFound),
-            }
-        }
+        const FAKE_FS: &[FakeFsEntry] = &[
+            FakeFsEntry::file("/scratch/ok.md"),
+            FakeFsEntry::link("/scratch/link.md", "/outside/secret"),
+            FakeFsEntry::hard_linked("/scratch/hard.md", 2),
+            FakeFsEntry::dir("/scratch/sub", "/scratch/sub", 3),
+            FakeFsEntry::dir("/scratch/flat", "/scratch/flat", 1),
+            FakeFsEntry::dir("/tmp/scratch", "/private/tmp/scratch", 2),
+        ];
 
         fn rules_excepting(dir: &str) -> Rules {
             Rules::parse(&format!(
@@ -15368,7 +15460,7 @@ mod tests {
             "#
             ))
             .unwrap()
-            .with_path_canonicalizer(PathCanonicalizer::new(fake_canonicalize))
+            .with_path_canonicalizer(PathCanonicalizer::fake_fs(FAKE_FS))
         }
 
         #[test]
