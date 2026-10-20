@@ -23,7 +23,6 @@
 use std::fs;
 use std::path::PathBuf;
 
-use assert_cmd::Command;
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -37,14 +36,8 @@ fn write_config(contents: &str) -> (TempDir, PathBuf) {
     (dir, path)
 }
 
-fn isolated_command(config_path: &std::path::Path) -> Command {
-    let mut cmd = cmd::shguard();
-    cmd.env("SHGUARD_CONFIG", config_path);
-    cmd
-}
-
 fn run_check_json(config_path: &std::path::Path, command: &str) -> Value {
-    let assert = isolated_command(config_path)
+    let assert = cmd::isolated_command(config_path)
         .args(["check", command, "--json"])
         .assert();
     let output = assert.get_output();
@@ -52,7 +45,7 @@ fn run_check_json(config_path: &std::path::Path, command: &str) -> Value {
 }
 
 fn run_hook(config_path: &std::path::Path, stdin: &str) -> Value {
-    let assert = isolated_command(config_path)
+    let assert = cmd::isolated_command(config_path)
         .write_stdin(stdin)
         .assert()
         .success();
@@ -321,7 +314,7 @@ fn watchdog_timeout_ask_is_not_remapped_even_when_ask_outcome_is_deny() {
         ask_outcome = "deny"
         "#,
     );
-    let assert = isolated_command(&config_path)
+    let assert = cmd::isolated_command(&config_path)
         .timeout(std::time::Duration::from_secs(30))
         .args(["check", "<<$( |] ", "--json"])
         .assert()
@@ -422,10 +415,11 @@ fn oversized_stdin_denies_when_ask_outcome_is_deny() {
     assert!(permission_reason(&output).contains("exceeds"));
 }
 
-/// A stdin producer slower than the 2s evaluation budget (issue #689) must
-/// still get the size-cap verdict: the budget starts after the stdin read,
-/// so a contended writer cannot turn "exceeds" into the outer-time-budget
-/// reason.
+/// A stdin producer slower than the outer evaluation budget (issue #689)
+/// must still get the size-cap verdict: the budget starts after the stdin
+/// read, so a contended writer cannot turn "exceeds" into the outer-time-budget
+/// reason. The budget is pinned to 1s, below the 2.5s producer delay, so a
+/// budget starting before the read would trip it.
 #[test]
 fn oversized_stdin_from_a_slow_producer_still_reports_the_size_cap() {
     use std::io::Write;
@@ -436,6 +430,7 @@ fn oversized_stdin_from_a_slow_producer_still_reports_the_size_cap() {
     let (_dir, config_path) = write_config("");
     let mut cmd = cmd::shguard_std();
     cmd.env("SHGUARD_CONFIG", &config_path)
+        .env("SHGUARD_TEST_EVAL_TIMEOUT_MS", "1000")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped());
     let mut child = cmd.spawn().expect("shguard should spawn");
@@ -464,7 +459,7 @@ fn oversized_stdin_from_a_slow_producer_still_reports_the_size_cap() {
 #[test]
 fn invalid_utf8_stdin_asks_with_no_ask_outcome_configured() {
     let (_dir, config_path) = write_config("");
-    let assert = isolated_command(&config_path)
+    let assert = cmd::isolated_command(&config_path)
         .write_stdin(&b"\xff\xfe not valid utf-8"[..])
         .assert()
         .success();
@@ -483,7 +478,7 @@ fn invalid_utf8_stdin_denies_when_ask_outcome_is_deny() {
         ask_outcome = "deny"
         "#,
     );
-    let assert = isolated_command(&config_path)
+    let assert = cmd::isolated_command(&config_path)
         .write_stdin(&b"\xff\xfe not valid utf-8"[..])
         .assert()
         .success();

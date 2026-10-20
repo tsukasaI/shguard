@@ -460,8 +460,8 @@ fn stdin_read_finished(read_done_rx: &Receiver<()>, timeout: Duration) -> bool {
 }
 
 /// The only caller of [`resolve_first_result`], invoked from [`main`]: applies
-/// [`MEMORY_LIMIT_BYTES`] (or its debug-only test override) and
-/// [`EVALUATION_TIMEOUT`], then emits whatever it resolved to. On either
+/// [`MEMORY_LIMIT_BYTES`] and [`EVALUATION_TIMEOUT`] (or their debug-only
+/// test overrides, [`memory_limit_bytes`] / [`evaluation_timeout`]), then emits whatever it resolved to. On either
 /// trip (or a worker disconnect), emits the fail-closed decision, makes a
 /// best-effort attempt to log it ([`log_trip_best_effort`], bounded by
 /// [`TRIP_LOG_TIMEOUT`]), and only then exits the process — see the module
@@ -474,7 +474,7 @@ fn emit_first_result(
     log_state: &LogState,
 ) {
     let first = if stdin_read_finished(read_done_rx, STDIN_READ_TIMEOUT) {
-        resolve_first_result(rx, memory_limit_bytes(), EVALUATION_TIMEOUT)
+        resolve_first_result(rx, memory_limit_bytes(), evaluation_timeout())
     } else {
         FirstResult::TimeTrip(LimitKind::OuterTime)
     };
@@ -604,6 +604,36 @@ fn memory_limit_bytes() -> u64 {
         return mb.saturating_mul(1024 * 1024);
     }
     MEMORY_LIMIT_BYTES
+}
+
+/// Effective outer wall-clock budget used by [`resolve_first_result`] —
+/// [`EVALUATION_TIMEOUT`] in release builds. Debug builds additionally honour
+/// `SHGUARD_TEST_EVAL_TIMEOUT_MS`, so hook-path integration tests can run
+/// under a relaxed budget instead of racing the production 2s bound on a
+/// loaded machine, and the tests that need the outer time trip can opt into
+/// a short one. Anything but an integer in 1..=[`MAX_EVAL_TIMEOUT_OVERRIDE_MS`]
+/// falls back to [`EVALUATION_TIMEOUT`]: a malformed value must never widen or disable the
+/// bound.
+fn evaluation_timeout() -> Duration {
+    #[cfg(debug_assertions)]
+    if let Some(timeout) =
+        parse_eval_timeout_override(std::env::var_os("SHGUARD_TEST_EVAL_TIMEOUT_MS").as_deref())
+    {
+        return timeout;
+    }
+    EVALUATION_TIMEOUT
+}
+
+/// Cap on the override: a typo like `99999999999` must not make the outer
+/// budget effectively unbounded.
+const MAX_EVAL_TIMEOUT_OVERRIDE_MS: u64 = 600_000;
+
+#[cfg_attr(not(any(debug_assertions, test)), allow(dead_code))]
+fn parse_eval_timeout_override(value: Option<&std::ffi::OsStr>) -> Option<Duration> {
+    let ms = value?.to_str()?.parse::<u64>().ok()?;
+    (1..=MAX_EVAL_TIMEOUT_OVERRIDE_MS)
+        .contains(&ms)
+        .then(|| Duration::from_millis(ms))
 }
 
 /// Installs a one-line panic hook in place of the Rust default (which
@@ -1233,7 +1263,8 @@ fn evaluate_with_timeout(
 /// So does the watchdog timeout: `run` executes entirely on the worker
 /// thread `main` spawns, so a hang anywhere in here is bounded: the stdin
 /// read by [`STDIN_READ_TIMEOUT`], config load and command evaluation by
-/// [`EVALUATION_TIMEOUT`], which starts once the read finishes. The `--version`/`--check-config`/`check`/`init` branches in
+/// [`evaluation_timeout`] (a debug-only test override of
+/// [`EVALUATION_TIMEOUT`]), which starts once the read finishes. The `--version`/`--check-config`/`check`/`init` branches in
 /// `main` are all deliberately outside both boundaries: `--version` never
 /// touches config, stdin, or command evaluation, so there is nothing there
 /// for the fail-closed guarantee to protect; `--check-config`
@@ -1275,7 +1306,7 @@ fn run(
         .lock()
         .take(MAX_STDIN_BYTES + 1)
         .read_to_string(&mut stdin);
-    // Ends `main`'s stdin-read phase and starts its `EVALUATION_TIMEOUT`
+    // Ends `main`'s stdin-read phase and starts its `evaluation_timeout()`
     // (issue #689). A closed receiver means `main` already tripped the read
     // phase and is on its way out.
     let _ = read_done_tx.send(());
@@ -1326,6 +1357,16 @@ fn run(
                 });
             }
             let sink = DedupSink { state: log_state };
+            // Test-only: parks the worker after the `EarlyInfo` send and
+            // before evaluation, so a test can force exactly the outer time
+            // trip and pin that the early send precedes the evaluation call.
+            // Debug-only, like `SHGUARD_TEST_PANIC`.
+            #[cfg(debug_assertions)]
+            if std::env::var_os("SHGUARD_TEST_HANG_AFTER_EARLY").is_some() {
+                loop {
+                    std::thread::sleep(Duration::from_secs(3600));
+                }
+            }
             shguard::adapter::handle_with_policy(&stdin, &policy, &sink)
         }
         // A read error also covers the case where the input is oversized
@@ -1376,7 +1417,31 @@ fn emit(output: serde_json::Value) {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
-    use super::{Duration, FirstResult, resolve_first_result};
+    use super::{Duration, FirstResult, parse_eval_timeout_override, resolve_first_result};
+
+    #[test]
+    fn eval_timeout_override_accepts_only_a_bounded_positive_integer() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let parse = |v: &[u8]| parse_eval_timeout_override(Some(OsStr::from_bytes(v)));
+        assert_eq!(parse_eval_timeout_override(None), None);
+        for bad in [
+            &b""[..],
+            b"0",
+            b"-1",
+            b" 100",
+            b"abc",
+            b"1e3",
+            b"\xff\xfe",
+            b"600001",
+            b"99999999999999999999",
+        ] {
+            assert_eq!(parse(bad), None, "{bad:?}");
+        }
+        assert_eq!(parse(b"3000"), Some(Duration::from_secs(3)));
+        assert_eq!(parse(b"600000"), Some(Duration::from_millis(600_000)));
+    }
 
     fn output_value() -> serde_json::Value {
         serde_json::json!({"hookSpecificOutput": {"permissionDecision": "deny"}})

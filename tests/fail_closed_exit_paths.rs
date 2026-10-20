@@ -520,24 +520,26 @@ fn injected_panic_fails_closed_to_ask() {
 /// this input never exceeds it), so no decision was ever emitted and the
 /// process ran until the OS killed it for memory exhaustion. Pins that the
 /// real binary now exits 0 with a well-formed `ask` decision instead,
-/// within the `EVALUATION_TIMEOUT`/`MEMORY_LIMIT_BYTES` budget
-/// (`src/bin/shguard.rs`). Which of the two trips first for this repro is
+/// within the binary's outer bounds (time pinned to 5s here) or the library
+/// watchdog's. Which bound trips first for this repro is
 /// allocation-rate-dependent — live-confirmed to be the memory bound in
 /// both a debug build (well under a second) and a release build (~0.5s,
-/// well under `EVALUATION_TIMEOUT`) on this machine, but that could differ
+/// well under 2s) on this machine, but that could differ
 /// on a slower or more memory-constrained host, so this only asserts
 /// fail-closed `ask` with *a* watchdog reason, not which one.
 ///
 /// Inlines `run_hook` to add a child-process timeout: if *both* watchdog
 /// bounds regress, this input reverts to an unbounded multi-GB/s
 /// allocating hang, and without a bound the test would thrash and wait
-/// for the OS to OOM-kill something rather than fail cleanly. 30s is
-/// ~15x the 2s `EVALUATION_TIMEOUT`, so it can never fire on the passing
-/// path.
+/// for the OS to OOM-kill something rather than fail cleanly. The outer
+/// budget is pinned to 5s via `SHGUARD_TEST_EVAL_TIMEOUT_MS` (the shared
+/// `cmd::shguard()` default is a relaxed 60s), so 30s is 6x that and can
+/// never fire on the passing path.
 #[test]
 fn heredoc_inside_unterminated_command_substitution_fails_closed_to_ask() {
     let mut cmd = cmd::shguard();
     let assert = cmd
+        .env("SHGUARD_TEST_EVAL_TIMEOUT_MS", "5000")
         .timeout(std::time::Duration::from_secs(30))
         .write_stdin(bash_command("<<$( |] "))
         .assert()
