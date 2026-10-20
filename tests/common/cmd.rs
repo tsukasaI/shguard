@@ -26,9 +26,12 @@ pub fn shguard() -> Command {
         .env_remove("SHGUARD_TEST_HANG_AFTER_EARLY")
         .env_remove("RUST_BACKTRACE");
     // Not the production 2s: a test that is not about the outer time trip
-    // must not flake when a loaded machine stretches evaluation past it. A
-    // test that needs the trip overrides this with a short value after the
-    // call. Debug-only in the binary, so a no-op in release builds.
+    // must not flake when a loaded machine slows the binary's stdin parse,
+    // config load or thread start-up past it. Only the binary's OUTER
+    // budget is relaxed; the library watchdog's fixed 2s evaluation bound
+    // is unchanged, so evaluation itself running past 2s can still trip. A
+    // test that needs the outer trip overrides this with a short value after
+    // the call. Debug-only in the binary, so a no-op in release builds.
     cmd.env("SHGUARD_TEST_EVAL_TIMEOUT_MS", "60000");
     cmd
 }

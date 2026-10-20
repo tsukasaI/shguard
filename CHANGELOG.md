@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- The hook's stdin read bound is lowered from 30s to 10s, narrowing the
+  window in which a hook `timeout` can kill a stalled read and fail open
+  (#709). Keep the hook `timeout` above ~15s.
+
 ## [0.9.5] - 2026-10-19
 
 ### Fixed
