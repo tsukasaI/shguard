@@ -4757,10 +4757,18 @@ fn apply_tar_dashless_floor(verdict: Verdict, floor: Option<(Decision, String)>)
 /// place.
 fn scan_unmodeled_option_floor(argv: &[NormalizedWord]) -> Option<(Decision, String)> {
     if let Some(finding) = crate::rules::first_unmodeled_wrapper_option(argv) {
-        return Some((
-            Decision::Ask,
-            format!("unmodelled option for `{}`", finding.command()),
-        ));
+        let reason = match finding.word() {
+            Some(word) => {
+                let shown: String = word.chars().take(64).collect();
+                let suffix = if word.chars().count() > 64 { "…" } else { "" };
+                format!(
+                    "unmodelled option {shown:?}{suffix} for `{}`",
+                    finding.command()
+                )
+            }
+            None => format!("unmodelled option for `{}`", finding.command()),
+        };
+        return Some((Decision::Ask, reason));
     }
     if crate::rules::placeholder_in_command_slot(argv, &[]) || placeholder_in_scripts(argv, &[], 0)
     {
@@ -18643,6 +18651,42 @@ mod tests {
     }
 
     #[test]
+    fn sudo_and_doas_shell_switches_run_their_operands_as_a_shell_string() {
+        // Issue #723 (B2): `sudo -s/-i` backslash-escape metacharacters in
+        // the joined `-c` string but leave `$` alone, so `$IFS`/`$VAR`
+        // expansion is the real vector. The joined string is recursed as an
+        // over-approximation. `doas -s` rejects a command outright and is
+        // kept for symmetry.
+        for command in [
+            "sudo -s 'rm$IFS-rf$IFS/'",
+            r#"sudo -s "rm -rf /""#,
+            r#"sudo -i "rm -rf /""#,
+            r#"sudo --shell "rm -rf /""#,
+            r#"sudo --login "rm -rf /""#,
+            r#"sudo -u root -s "rm -rf /""#,
+            "sudo -s rm -rf /",
+            "sudo -i rm -rf /",
+            r#"doas -s "rm -rf /""#,
+            "doas -s rm -rf /",
+        ] {
+            assert_decision(command, Decision::Block);
+        }
+    }
+
+    #[test]
+    fn sudo_shell_switches_with_benign_operands_stay_at_the_escalation_floor() {
+        for command in [
+            "sudo -s",
+            "sudo -i",
+            "sudo -i ls",
+            "sudo -s ls -la",
+            "doas -s ls",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+    }
+
+    #[test]
     fn time_and_exec_wrappers_do_not_hide_the_wrapped_command() {
         // Issue #638: brush-parser strips only the leading reserved word
         // `time`, so every other spelling reaches the gate as a command.
@@ -18682,6 +18726,23 @@ mod tests {
             "numactl -C 0 rm -rf /",
         ] {
             assert_decision(command, Decision::Block);
+        }
+    }
+
+    #[test]
+    fn wrapper_shapes_whose_grammar_reads_no_wrapped_command_stay_allow() {
+        // Issue #723 (A8), pinned so a grammar change cannot flip them
+        // unnoticed. `firejail --profile x` and `prlimit --nofile 10` take
+        // their value as a separate word that the catalog reads as the
+        // wrapped command (`x`, `10`), so the `rm` is only that command's
+        // argument. `chrt -m` prints the scheduler limits and exits, and
+        // `rm` is consumed as its priority operand: nothing runs.
+        for command in [
+            "firejail --profile x rm -rf /",
+            "prlimit --nofile 10 rm -rf /",
+            "chrt -m rm -rf /",
+        ] {
+            assert_decision(command, Decision::Allow);
         }
     }
 
@@ -19053,12 +19114,30 @@ mod tests {
         assert_eq!(verdict.decision(), Decision::Ask);
         assert_eq!(
             verdict.reason().map(super::Reason::as_str),
-            Some("unmodelled option for `nice`")
+            Some(r#"unmodelled option "--bogus" for `nice`"#)
         );
         let chained = decide("env nice --bogus ls");
         assert_eq!(
             chained.reason().map(super::Reason::as_str),
-            Some("unmodelled option for `nice`")
+            Some(r#"unmodelled option "--bogus" for `nice`"#)
+        );
+        let wrapped_block = decide("nice --bogus rm -rf /");
+        assert_eq!(wrapped_block.decision(), Decision::Block);
+        let floor = decide("nice -Z ls");
+        assert_eq!(
+            floor.reason().map(super::Reason::as_str),
+            Some(r#"unmodelled option "-Z" for `nice`"#)
+        );
+        let escaped = decide("nice $'--\\e[31m\\n' ls");
+        assert_eq!(
+            escaped.reason().map(super::Reason::as_str),
+            Some(r#"unmodelled option "--\u{1b}[31m\n" for `nice`"#)
+        );
+        let long = format!("--{}", "a".repeat(62));
+        let truncated = decide(&format!("nice {long}a ls"));
+        assert_eq!(
+            truncated.reason().map(super::Reason::as_str),
+            Some(format!("unmodelled option {long:?}… for `nice`").as_str())
         );
     }
 

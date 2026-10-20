@@ -148,6 +148,13 @@ pub(crate) enum Slot {
     /// The operands, joined, are always run through a shell (`ssh host CMD`,
     /// `tmux new-session CMD`).
     OperandsJoinedShellScript,
+    /// The operands, joined, are recursed as a shell string when any of
+    /// these switches is present (`sudo -s`/`-i`, `doas -s`); without one,
+    /// the first operand is the command. An over-approximation: sudo
+    /// backslash-escapes metacharacters in the joined string but leaves `$`
+    /// alone, so `$IFS`/`$VAR` expansion is the real vector, and `doas -s`
+    /// rejects a command outright (kept for symmetry).
+    OperandsAsShellScriptWith(&'static [(char, &'static str)]),
     /// The command only wraps another when its first operands spell one of
     /// these word sequences (`poetry run`, `ip netns exec`); anything else
     /// (`poetry install`) is not a wrapper call. Options may surround it.
@@ -216,6 +223,16 @@ impl CommandSpec {
         self.slots
             .iter()
             .any(|slot| matches!(slot, Slot::OperandsJoinedShellScript))
+    }
+
+    pub(crate) fn operands_as_shell_script_switches(&self) -> &'static [(char, &'static str)] {
+        self.slots
+            .iter()
+            .find_map(|slot| match slot {
+                Slot::OperandsAsShellScriptWith(switches) => Some(*switches),
+                _ => None,
+            })
+            .unwrap_or(&[])
     }
 
     pub(crate) fn subcommands(&self) -> Option<&'static [&'static [&'static str]]> {

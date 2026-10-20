@@ -188,6 +188,7 @@ pub(super) static CATALOG: &[CommandSpec] = &[
                 long: "shell",
                 effect: CwdEffect::Relocates,
             },
+            Slot::OperandsAsShellScriptWith(&[('s', "shell"), ('i', "login")]),
         ],
     },
     CommandSpec {
@@ -227,7 +228,11 @@ pub(super) static CATALOG: &[CommandSpec] = &[
             short_values: "aCu",
             ..BASE
         },
-        slots: &[EXEC, Slot::Privilege],
+        slots: &[
+            EXEC,
+            Slot::Privilege,
+            Slot::OperandsAsShellScriptWith(&[('s', "")]),
+        ],
     },
     CommandSpec {
         names: &["su"],
