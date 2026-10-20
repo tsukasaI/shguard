@@ -5770,8 +5770,7 @@ pub(crate) fn effective_command(
 /// stops there and reports the wrapper itself as the effective command,
 /// rather than unwrapping through it. Scoped to the callers that need the
 /// wrapper's own flags intact (`crate::gate::resolve_static_substitution_output`
-/// excludes `xargs`, whose output is not statically determined;
-/// `evaluate_env_dash_c_override` excludes `env`).
+/// excludes `xargs`, whose output is not statically determined).
 #[must_use]
 pub(crate) fn effective_command_excluding<'a>(
     stage: &'a [NormalizedWord],
@@ -5795,6 +5794,23 @@ pub(crate) fn effective_command_excluding<'a>(
             Step::Unresolvable | Step::Empty => return None,
         }
     }
+}
+
+/// The canonical name and the `stage` index range of the own option words
+/// (wrapper word excluded) of every wrapper hop along `stage`'s chain,
+/// outermost first.
+#[must_use]
+pub(crate) fn wrapper_option_ranges(
+    stage: &[NormalizedWord],
+) -> Vec<(String, std::ops::Range<usize>)> {
+    let mut ranges = Vec::new();
+    let mut at = 0;
+    while let Step::Wrapper(hop) = step(&stage[at..], &[]) {
+        let end = at + 1 + hop.parsed.command_at();
+        ranges.push((canonical_command_name(hop.base), at + 1..end));
+        at = end;
+    }
+    ranges
 }
 
 /// The first option along `stage`'s wrapper chain that the catalog does not
