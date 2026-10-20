@@ -28,6 +28,9 @@ pub mod watchdog;
 
 use std::path::Path;
 
+// Test-only: compiled in solely under the `test-support` feature (enabled by
+// the self dev-dependency in Cargo.toml), so it is not public API otherwise.
+#[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub const BUILD_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 

@@ -825,6 +825,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "shguard",
  "tempfile",
  "thiserror",
  "toml",

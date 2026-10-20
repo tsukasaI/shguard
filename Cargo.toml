@@ -54,10 +54,25 @@ dbg_macro = "warn"
 todo = "warn"
 unimplemented = "warn"
 
+# Test-only surface (e.g. `BUILD_MANIFEST_DIR`). Off by default; the self
+# dev-dependency below turns it on for every `cargo test`/`cargo clippy
+# --all-targets` build without `--features`.
+# - Absent from builds that do not activate dev-dependencies (`cargo build`,
+#   `cargo install`, release.yaml), but `cargo test` (including `--release`,
+#   the nix checkPhase) builds the binary under test with it on, so never gate
+#   runtime behaviour on it.
+# - Internal: not covered by semver, may be removed without notice.
+# - Unit tests under src/ must use `crate::` paths, not `shguard::`: the lib's
+#   unit-test target also links the lib through the self dev-dependency, so
+#   the two sets of types would not match.
+[features]
+test-support = []
+
 [[test]]
 name = "legacy_units"
 harness = false
 
 [dev-dependencies]
+shguard = { path = ".", features = ["test-support"] }
 assert_cmd = "2.2.2"
 tempfile = "3.27.0"
