@@ -667,7 +667,7 @@ pub(crate) const MAX_RAW_EXTENDED_TEST_COUNT: usize = 64;
 /// `if`/`while`/`until`/`for`/`case` and `coproc` (`coproc_clause` takes
 /// any command as its body, and a compound command can itself be a
 /// `coproc_clause`; [`STACK_COST_KEYWORD`] via `NESTING_KEYWORDS`, floors
-/// ~200 debug / ~750 release, so the keyword weight is conservative for
+/// ~170 debug / ~770 release, so the keyword weight is conservative for
 /// it); `[[ ! ... ]]` operators ([`STACK_COST_EXTENDED_TEST_OP`]). Not
 /// recursive: `time` (a prefix on a pipeline); `select` (brush rejects it
 /// with a syntax error). Re-audit the grammar's compound-command and
