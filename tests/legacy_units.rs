@@ -131,7 +131,7 @@ fn load(text: &str) -> Result<Corpus, String> {
             ));
         }
         match kind {
-            Kind::Config => {}
+            Kind::Config => unreachable!("config rows are handled above"),
             Kind::Gate => {
                 if !legacy_rows::is_public_gate(&fields) {
                     corpus.gate_internal += 1;
@@ -200,20 +200,22 @@ const MAX_REPLAY_THREADS: usize = 8;
 
 /// Replays `rows` on up to [`MAX_REPLAY_THREADS`] threads, each taking one
 /// contiguous chunk. Chunks are joined in spawn order, so failures come out
-/// in corpus order whatever the scheduling.
+/// in corpus order whatever the scheduling. A row that trips the watchdog is
+/// re-run once serially: the trip may come from the parallel load, not the
+/// row. Mismatches are not retried.
 fn replay_all(rows: &[Value]) -> Vec<Failure> {
     let threads = std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
         .min(MAX_REPLAY_THREADS);
     let chunk_len = rows.len().div_ceil(threads).max(1);
-    std::thread::scope(|scope| {
+    let failed: Vec<(&Value, Failure)> = std::thread::scope(|scope| {
         let handles: Vec<_> = rows
             .chunks(chunk_len)
             .map(|chunk| {
                 scope.spawn(|| {
                     chunk
                         .iter()
-                        .filter_map(|row| replay(row).err())
+                        .filter_map(|row| replay(row).err().map(|failure| (row, failure)))
                         .collect::<Vec<_>>()
                 })
             })
@@ -226,7 +228,14 @@ fn replay_all(rows: &[Value]) -> Vec<Failure> {
                     .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
             })
             .collect()
-    })
+    });
+    failed
+        .into_iter()
+        .filter_map(|(row, failure)| match failure {
+            Failure::Watchdog(_) => replay(row).err(),
+            Failure::Mismatch(_) => Some(failure),
+        })
+        .collect()
 }
 
 fn main() -> ExitCode {

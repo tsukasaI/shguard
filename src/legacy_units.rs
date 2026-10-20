@@ -8,8 +8,9 @@
 //! `<path>`; `scripts/regen-legacy-units` turns that into the corpus.
 //! Check: without it, the same calls must already be in the corpus with the
 //! same result, so a new or changed unit test cannot escape it.
-//! A test libtest runs inline on an unnamed `main` thread (its fallback when
-//! it cannot spawn a thread) is neither captured nor checked.
+//! A test libtest runs inline on the `main` thread (its fallback when it
+//! cannot spawn a thread) does not carry its test name, so it is neither
+//! captured nor checked.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
