@@ -29,6 +29,7 @@
 //! The config loader reads `SHGUARD_CONFIG` from the process environment,
 //! which is only safe to set before any thread exists.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -51,25 +52,90 @@ const CONFIGS: [(&str, &str); 4] = [
     ("allow", "allow.toml"),
 ];
 
-/// `(name, path from the checkout root, required)`. A required corpus that is
-/// missing fails the run; an optional one is skipped with a note.
-const CORPORA: [(&str, &str, bool); 8] = [
-    ("guardfall", "tests/golden/guardfall.jsonl", true),
-    ("fuzz", "tests/golden/fuzz.jsonl", true),
-    ("denials", "tests/golden/denials.jsonl", true),
-    ("benign", "tests/golden/benign_corpus.jsonl", true),
-    ("bypass", "tests/golden/bypass_corpus.jsonl", true),
-    ("must_not_allow", "tests/golden/must_not_allow.jsonl", true),
+type Reader = fn(&Path) -> Result<Vec<String>, String>;
+
+/// `(name, path from the checkout root, reader)`. Every corpus is required: a
+/// missing file fails the run.
+const CORPORA: [(&str, &str, Reader); 8] = [
+    (
+        "guardfall",
+        "tests/golden/guardfall.jsonl",
+        corpus::read_commands,
+    ),
+    ("fuzz", "tests/golden/fuzz.jsonl", corpus::read_commands),
+    (
+        "denials",
+        "tests/golden/denials.jsonl",
+        corpus::read_commands,
+    ),
+    (
+        "benign",
+        "tests/golden/benign_corpus.jsonl",
+        corpus::read_commands,
+    ),
+    (
+        "bypass",
+        "tests/golden/bypass_corpus.jsonl",
+        corpus::read_commands,
+    ),
+    (
+        "must_not_allow",
+        "tests/golden/must_not_allow.jsonl",
+        corpus::read_commands,
+    ),
     // Reaches the rules the checked-in configs add (allow.toml, owner.toml).
     (
         "fixture_rules",
         "tests/fixtures/differential/rows.jsonl",
-        true,
+        corpus::read_commands,
     ),
-    // TODO(#836): make this required once the legacy_units.jsonl extraction
-    // (gate.rs and rules.rs unit-test inputs) lands.
-    ("legacy", "tests/golden/legacy_units.jsonl", false),
+    (
+        "legacy",
+        "tests/golden/legacy_units.jsonl",
+        read_legacy_gate_commands,
+    ),
 ];
+
+/// Commands of the `kind == "gate"` rows of `legacy_units.jsonl` recorded on
+/// the embedded rule set (no `config`) with no `cwd`, deduplicated: the
+/// differential applies its own four configs, so a row recorded under another
+/// rule set or directory would not mean what it recorded. Other kinds are
+/// skipped; a malformed line or a gate row without a string `command` fails.
+fn read_legacy_gate_commands(path: &Path) -> Result<Vec<String>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    let mut seen = BTreeSet::new();
+    let mut commands = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let at = format!("{}:{}", path.display(), index + 1);
+        let row: serde_json::Value =
+            serde_json::from_str(line).map_err(|err| format!("{at}: malformed line: {err}"))?;
+        let kind = row
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("{at}: missing string `kind`"))?;
+        if kind != "gate" {
+            continue;
+        }
+        let command = row
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("{at}: gate row missing string `command`"))?;
+        if row.get("config").is_some() || row.get("cwd").is_some() {
+            continue;
+        }
+        if seen.insert(command.to_string()) {
+            commands.push(command.to_string());
+        }
+    }
+    if commands.is_empty() {
+        return Err(format!("{}: no embedded-config gate rows", path.display()));
+    }
+    Ok(commands)
+}
 
 /// What the differential compares: the decision and its reason text.
 #[derive(Debug, PartialEq, Eq)]
@@ -165,13 +231,8 @@ fn run() -> Result<(), String> {
     }
 
     let mut corpora = Vec::new();
-    for (corpus_name, file, required) in CORPORA {
-        let path = root.join(file);
-        if !required && !path.exists() {
-            println!("differential: skipping corpus {corpus_name}: {file} does not exist yet");
-            continue;
-        }
-        corpora.push((corpus_name, corpus::read_commands(&path)?));
+    for (corpus_name, file, read) in CORPORA {
+        corpora.push((corpus_name, read(&root.join(file))?));
     }
 
     if !evaluate {
