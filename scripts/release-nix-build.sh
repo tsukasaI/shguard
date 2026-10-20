@@ -14,9 +14,14 @@
 # refs/heads/chore/release-* are checked; every other ref, tag push and branch
 # deletion is skipped silently. Builds `git+file://<toplevel>?rev=<sha>`, not
 # the working tree, so uncommitted edits can neither mask nor cause a failure.
-# Fails closed: a release push without `nix` on PATH, or with nix not running
-# sandbox = true and sandbox-fallback = false, is refused.
+# Fails closed: a release push without `nix` on PATH, or whose system nix
+# config (not the user's nix.conf or NIX_CONFIG, which do not govern the
+# daemon) lacks sandbox = true and sandbox-fallback = false, is refused.
 set -euo pipefail
+
+system_nix_config() {
+  env -u NIX_CONF_DIR NIX_USER_CONF_FILES=/dev/null NIX_CONFIG= nix config show "$1"
+}
 
 zero_sha=0000000000000000000000000000000000000000
 
@@ -33,8 +38,11 @@ while read -r local_ref local_sha remote_ref _remote_sha; do
 
   # Darwin nix defaults to no sandbox, which would let the #779 class pass;
   # `--option sandbox true` is ignored by the daemon for untrusted users.
-  if ! sandbox=$(nix config show sandbox 2>/dev/null) ||
-    ! sandbox_fallback=$(nix config show sandbox-fallback 2>/dev/null); then
+  # Not a plain `nix config show`: it merges the user's own nix.conf and
+  # NIX_CONFIG, which do not govern the daemon's sandbox for an untrusted user
+  # (#802), so only the system config may satisfy this check.
+  if ! sandbox=$(system_nix_config sandbox 2>/dev/null) ||
+    ! sandbox_fallback=$(system_nix_config sandbox-fallback 2>/dev/null); then
     echo "release-nix-build: cannot read nix config (needs nix >= 2.20 with nix-command); refusing to push $remote_ref." >&2
     exit 1
   fi
