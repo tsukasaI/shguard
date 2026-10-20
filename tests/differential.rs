@@ -100,8 +100,8 @@ const CORPORA: [(&str, &str, Reader); 8] = [
 /// the embedded rule set (no `config`) with no `cwd`, deduplicated: the
 /// differential applies its own four configs, so a row recorded under another
 /// rule set or directory would not mean what it recorded. Other kinds (the
-/// `config` header rows included) are skipped; a malformed line or a used gate row without a string `command`
-/// fails.
+/// `config` header rows included) are skipped; a malformed line or a used
+/// gate row without a string `command` fails.
 fn read_legacy_gate_commands(path: &Path) -> Result<Vec<String>, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|err| format!("failed to read {}: {err}", path.display()))?;

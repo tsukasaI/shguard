@@ -44,7 +44,9 @@ pub(crate) enum Source {
     #[default]
     Embedded,
     Parse(String),
-    /// The embedded blocklist text followed by this suffix, parsed.
+    /// The embedded blocklist text followed by this suffix, parsed. It replays
+    /// against the current embedded blocklist, like `Embedded`; pinning the
+    /// full ~130 KB text per row is what issue #855 removed.
     EmbeddedPlus(String),
     /// On-disk form of `Parse`: the id of a `config` header row. `parse_corpus`
     /// resolves it back to `Parse`, so it never survives loading.
@@ -264,7 +266,10 @@ impl Row {
 }
 
 /// Parses the corpus strictly: every non-final line must be one valid row,
-/// no key may repeat, and an empty corpus is an error.
+/// no key may repeat, and an empty corpus is an error. `config` header rows
+/// must carry the id of their toml (`config_id`), must not repeat an id, and
+/// must precede every row that cites them; a citation of an id not yet seen
+/// is an error.
 pub(crate) fn parse_corpus(text: &str) -> Result<HashMap<String, Row>, String> {
     let mut rows = HashMap::new();
     let mut configs: HashMap<String, String> = HashMap::new();
@@ -502,14 +507,24 @@ fn identify(rules: Option<&Rules>, allowlist: Option<&Allowlist>) -> Config {
     }
 }
 
+/// A recorded `Parse`/`EmbeddedPlus` text parsed when the row was captured, so
+/// a failure now means the config format regressed: fail loudly instead of
+/// letting the row drop out as skipped.
+fn parse_recorded<T, E: std::fmt::Display>(parsed: Result<T, E>) -> T {
+    parsed.unwrap_or_else(|err| panic!("legacy_units config no longer parses: {err}"))
+}
+
 /// Rebuilds the rule set a row was recorded with, or `None` if the row is
-/// flagged unreplayable.
+/// flagged unreplayable. A recorded text that no longer parses panics.
 fn build(config: &Config) -> Option<(Rules, Allowlist)> {
     let (embedded_rules, embedded_allowlist) = embedded();
     let (rules, coupled) = match &config.rules {
         Source::Embedded => (embedded_rules.clone(), None),
-        Source::Parse(text) => (Rules::parse(text).ok()?, None),
-        Source::EmbeddedPlus(suffix) => (Rules::parse(&embedded_plus_text(suffix)).ok()?, None),
+        Source::Parse(text) => (parse_recorded(Rules::parse(text)), None),
+        Source::EmbeddedPlus(suffix) => (
+            parse_recorded(Rules::parse(&embedded_plus_text(suffix))),
+            None,
+        ),
         Source::ParseRef(id) => panic!("config reference {id:?} was not resolved by parse_corpus"),
         Source::UserConfig(text) => {
             let (rules, allowlist) = merged(text)?;
@@ -519,8 +534,10 @@ fn build(config: &Config) -> Option<(Rules, Allowlist)> {
     };
     let allowlist = match &config.allowlist {
         Source::Embedded => embedded_allowlist.clone(),
-        Source::Parse(text) => Allowlist::parse(text).ok()?,
-        Source::EmbeddedPlus(suffix) => Allowlist::parse(&embedded_plus_text(suffix)).ok()?,
+        Source::Parse(text) => parse_recorded(Allowlist::parse(text)),
+        Source::EmbeddedPlus(suffix) => {
+            parse_recorded(Allowlist::parse(&embedded_plus_text(suffix)))
+        }
         Source::ParseRef(id) => panic!("config reference {id:?} was not resolved by parse_corpus"),
         Source::UserConfig(text) => match coupled {
             Some((coupled_text, allowlist)) if coupled_text == *text => allowlist,
@@ -883,8 +900,15 @@ mod tests {
         let mut gate = 0usize;
         let mut rules_rows = 0usize;
         let mut skipped = 0usize;
+        let mut unreplayable_rows = 0usize;
         let mut failures = Vec::new();
         for row in corpus().values() {
+            if let Row::Gate { config, .. } | Row::Rules { config, .. } = row
+                && (matches!(config.rules, Source::Unreplayable(_))
+                    || matches!(config.allowlist, Source::Unreplayable(_)))
+            {
+                unreplayable_rows += 1;
+            }
             match row {
                 Row::Gate {
                     config,
@@ -937,6 +961,10 @@ mod tests {
         eprintln!(
             "legacy_units: replayed {gate} gate rows and {rules_rows} rules rows internally, \
              skipped {skipped} unreplayable"
+        );
+        assert_eq!(
+            skipped, unreplayable_rows,
+            "every skipped row must be flagged unreplayable"
         );
         assert!(
             failures.is_empty(),
@@ -1003,6 +1031,23 @@ mod tests {
             panic!("expected one gate row");
         };
         assert_eq!(config.rules, Source::Parse(toml.to_string()));
+    }
+
+    #[test]
+    fn duplicate_config_id_is_rejected() {
+        let id = config_id("a");
+        let header = format!("{{\"kind\":\"config\",\"id\":\"{id}\",\"toml\":\"a\"}}\n");
+        let err = parse_corpus(&format!("{header}{header}")).unwrap_err();
+        assert!(err.contains("duplicate config id"), "{err}");
+    }
+
+    #[test]
+    fn reference_before_header_is_rejected() {
+        let id = config_id("a");
+        let header = format!("{{\"kind\":\"config\",\"id\":\"{id}\",\"toml\":\"a\"}}\n");
+        let line = gate_line(&format!("{{\"rules\":{{\"parse_ref\":\"{id}\"}}}}"));
+        let err = parse_corpus(&format!("{line}{header}")).unwrap_err();
+        assert!(err.contains("unknown config id"), "{err}");
     }
 
     #[test]
