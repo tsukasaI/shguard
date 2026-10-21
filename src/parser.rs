@@ -70,10 +70,9 @@ use brush_parser::word::{self as bword};
 use brush_parser::{Parser as BrushParser, ast as bast};
 
 use crate::ast::{
-    ArithmeticSubstitutions, Assignment, AssignmentValue, Command, CommandLine, CompoundCommand,
-    ElifClause, ExtendedTest, FileRedirectionKind, FunctionDefinition, HeredocSubstitutions,
-    MAX_BRACE_NESTING_DEPTH, Pipeline, ProcessSubstitutionDirection, Redirection, Separator,
-    SimpleCommand, Word, WordPiece,
+    Assignment, AssignmentValue, Command, CommandLine, CompoundCommand, ElifClause, ExtendedTest,
+    ExtractedSubstitutions, FileRedirectionKind, FunctionDefinition, MAX_BRACE_NESTING_DEPTH,
+    Pipeline, ProcessSubstitutionDirection, Redirection, Separator, SimpleCommand, Word, WordPiece,
 };
 use crate::syntax::compat::{self, catch_parser_panic};
 use crate::syntax::{ParseError, parser_options, reject_unresolved_dollar_run};
@@ -904,10 +903,12 @@ fn convert_heredoc(heredoc: &bast::IoHereDocument) -> Result<Redirection, ParseE
         ));
     }
     let substitutions = if heredoc.requires_expansion {
-        heredoc::parse_body(&heredoc::strip_line_continuations(&body))
-            .map_or(HeredocSubstitutions::Unparsed, HeredocSubstitutions::Parsed)
+        heredoc::parse_body(&heredoc::strip_line_continuations(&body)).map_or(
+            ExtractedSubstitutions::Unparsed,
+            ExtractedSubstitutions::Parsed,
+        )
     } else {
-        HeredocSubstitutions::Parsed(Vec::new())
+        ExtractedSubstitutions::Parsed(Vec::new())
     };
     Ok(Redirection::HereDoc {
         strip_leading_tabs: heredoc.remove_tabs,
@@ -1403,8 +1404,8 @@ fn convert_word_piece(
         }
         bword::WordPiece::ArithmeticExpression(expr) => Ok(WordPiece::ArithmeticExpansion(
             heredoc::parse_body(&expr.value).map_or(
-                ArithmeticSubstitutions::Unparsed,
-                ArithmeticSubstitutions::Parsed,
+                ExtractedSubstitutions::Unparsed,
+                ExtractedSubstitutions::Parsed,
             ),
         )),
     }
@@ -1827,13 +1828,13 @@ mod tests {
                 assert!(!strip_leading_tabs);
                 assert!(expand_body);
                 assert_eq!(body.trim_end_matches('\n'), "rm -rf /");
-                assert_eq!(*substitutions, HeredocSubstitutions::Parsed(Vec::new()));
+                assert_eq!(*substitutions, ExtractedSubstitutions::Parsed(Vec::new()));
             }
             other => panic!("expected HereDoc, got {other:?}"),
         }
     }
 
-    fn heredoc_substitutions(command: &str) -> HeredocSubstitutions {
+    fn heredoc_substitutions(command: &str) -> ExtractedSubstitutions {
         let cmd = parse_ok(command);
         match &simple(&cmd.first.first).redirections[0] {
             Redirection::HereDoc { substitutions, .. } => substitutions.clone(),
@@ -1845,7 +1846,7 @@ mod tests {
     fn heredoc_unquoted_body_records_its_substitutions() {
         assert_eq!(
             heredoc_substitutions("cat <<EOF\nhi $(rm -rf /) `id`\nEOF\n"),
-            HeredocSubstitutions::Parsed(vec!["rm -rf /".to_string(), "id".to_string()])
+            ExtractedSubstitutions::Parsed(vec!["rm -rf /".to_string(), "id".to_string()])
         );
     }
 
@@ -1853,7 +1854,7 @@ mod tests {
     fn heredoc_quoted_delimiter_records_no_substitutions() {
         assert_eq!(
             heredoc_substitutions("cat <<'EOF'\n$(rm -rf /)\nEOF\n"),
-            HeredocSubstitutions::Parsed(Vec::new())
+            ExtractedSubstitutions::Parsed(Vec::new())
         );
     }
 
@@ -1861,7 +1862,7 @@ mod tests {
     fn heredoc_unterminated_substitution_is_unparsed_not_empty() {
         assert_eq!(
             heredoc_substitutions("cat <<EOF\n$(rm -rf /\nEOF\n"),
-            HeredocSubstitutions::Unparsed
+            ExtractedSubstitutions::Unparsed
         );
     }
 
@@ -3582,7 +3583,7 @@ mod tests {
         assert_eq!(
             word.0,
             vec![WordPiece::ArithmeticExpansion(
-                ArithmeticSubstitutions::Unparsed
+                ExtractedSubstitutions::Unparsed
             )]
         );
     }
@@ -3594,7 +3595,7 @@ mod tests {
         assert_eq!(
             word.0,
             vec![WordPiece::ArithmeticExpansion(
-                ArithmeticSubstitutions::Parsed(vec!["rm -rf /".to_string()])
+                ExtractedSubstitutions::Parsed(vec!["rm -rf /".to_string()])
             )]
         );
     }
