@@ -413,7 +413,7 @@ mod tests {
     }
 
     #[test]
-    fn ansi_c_continuation_parse_failure_keeps_its_bespoke_hint_under_deny_config() {
+    fn ansi_c_continuation_parse_failure_hint_is_independent_of_ask_outcome() {
         let construct = crate::syntax::compat::ANSI_C_WITH_CONTINUATION_CONSTRUCT;
         let evidence = Evidence::ParseFailure {
             message: format!("unsupported construct: {construct}"),

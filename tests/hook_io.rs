@@ -85,6 +85,25 @@ fn ansi_c_with_line_continuation_asks_with_both_triggers_named() {
     );
 }
 
+/// Issue #634: under `ask_outcome = "deny"` the same command is floored to a
+/// deny, and the construct-specific hint must survive the floor.
+#[test]
+fn ansi_c_with_line_continuation_hint_survives_the_deny_floor() {
+    let (_dir, config_path) = write_config("ask_outcome = \"deny\"\n");
+    let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"rg -n 'foo' src \\\n  | rg -v '^\\s*$'"},"hook_event_name":"PreToolUse"}"#;
+    let assert = cmd::isolated_command(&config_path)
+        .write_stdin(stdin)
+        .assert()
+        .success();
+    let output: Value =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout should be valid JSON");
+    assert_eq!(permission_decision(&output), "deny");
+    let context = output["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .expect("additionalContext should be a string");
+    assert!(context.contains("close the single quote"), "{context}");
+}
+
 /// DoD 3: a benign Bash command allows.
 #[test]
 fn allow_case_allows() {
