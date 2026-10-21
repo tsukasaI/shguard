@@ -75,13 +75,13 @@ fn ansi_c_with_line_continuation_asks_with_both_triggers_named() {
         .expect("additionalContext should be a string");
     assert!(context.contains("ANSI-C"), "{context}");
     assert!(context.contains("backslash-newline"), "{context}");
+    assert!(context.contains("unquoted `\\`+newline"), "{context}");
+    assert!(context.contains("close the single quote"), "{context}");
+    assert!(context.contains("decoded value literally"), "{context}");
+    assert!(!context.contains("use its literal form"), "{context}");
     assert!(
-        context.contains("Join the backslash-continued lines"),
-        "{context}"
-    );
-    assert!(
-        context.contains("move the `$'` out of the command"),
-        "{context}"
+        permission_reason(&output).contains("brush and bash disagree"),
+        "{output}"
     );
 }
 

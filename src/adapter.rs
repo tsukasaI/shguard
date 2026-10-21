@@ -793,13 +793,16 @@ mod tests {
         let context = additional_context(&output);
         assert!(context.contains("ANSI-C"), "{context}");
         assert!(context.contains("backslash-newline"), "{context}");
-        assert!(
-            context.contains("Join the backslash-continued lines"),
-            "{context}"
-        );
-        assert!(
-            context.contains("move the `$'` out of the command"),
-            "{context}"
+        assert!(context.contains("unquoted `\\`+newline"), "{context}");
+        assert!(context.contains("close the single quote"), "{context}");
+        assert!(context.contains("decoded value literally"), "{context}");
+        assert!(!context.contains("use its literal form"), "{context}");
+        assert_eq!(
+            permission_reason(&output),
+            format!(
+                "could not parse command: unsupported construct: {}",
+                crate::syntax::compat::ANSI_C_WITH_CONTINUATION_CONSTRUCT
+            )
         );
     }
 
