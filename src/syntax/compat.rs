@@ -448,6 +448,10 @@ pub(super) fn strip_raw_line_continuations_blind(command: &str) -> std::borrow::
     }
 }
 
+/// The construct text [`reject_ansi_c_quote_with_line_continuation`] reports;
+/// `crate::policy` matches on it to pick this construct's own rewrite hint.
+pub(crate) const ANSI_C_WITH_CONTINUATION_CONSTRUCT: &str = "ANSI-C ($'...') quoting combined with a backslash-newline line continuation cannot be safely analyzed: brush and bash disagree on whether the continuation survives inside $'...', which could hide a command on the dropped line";
+
 /// Fails closed (`Ask`) if `command` contains both a `$'...'` (ANSI-C
 /// quoting) opener — checked in `command` itself and in `blind`, the
 /// already-computed [`strip_raw_line_continuations_blind`] copy, since
@@ -474,9 +478,7 @@ fn reject_ansi_c_quote_with_line_continuation(
     blind: &str,
 ) -> Result<(), ParseError> {
     if command.contains("\\\n") && (command.contains("$'") || blind.contains("$'")) {
-        return Err(ParseError::unsupported(
-            "ANSI-C ($'...') quoting combined with a backslash-newline line continuation cannot be safely analyzed: brush and bash disagree on whether the continuation survives inside $'...', which could hide a command on the dropped line",
-        ));
+        return Err(ParseError::unsupported(ANSI_C_WITH_CONTINUATION_CONSTRUCT));
     }
     Ok(())
 }

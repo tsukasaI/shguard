@@ -218,6 +218,14 @@ fn resource_limit_reason(kind: LimitKind) -> String {
 /// is available at the call site: the parser's unsupported-construct text,
 /// or a human-readable name for an unresolvable word kind.
 pub(crate) fn deny_msg_unsupported_construct(construct: &str) -> DenyMessage {
+    if construct == crate::syntax::compat::ANSI_C_WITH_CONTINUATION_CONSTRUCT {
+        return DenyMessage::new(
+            "shguard cannot statically analyze an ANSI-C quote (`$'...'`) combined with a \
+             backslash-newline line continuation. Join the backslash-continued lines into one, \
+             or move the `$'` out of the command (e.g. write a regex end anchor as `\"$\"` \
+             instead of `'$'`).",
+        );
+    }
     DenyMessage::new(format!(
         "shguard cannot statically analyze this construct ({construct}); use its literal form, \
          or split the command across separate lines so each piece is inspectable."

@@ -786,6 +786,24 @@ mod tests {
     }
 
     #[test]
+    fn ansi_c_with_line_continuation_names_both_triggers_and_both_rewrites() {
+        let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"rg -n 'foo' src \\\n  | rg -v '^\\s*$'"}}"#;
+        let output = handle(stdin);
+        assert_eq!(permission_decision(&output), "ask");
+        let context = additional_context(&output);
+        assert!(context.contains("ANSI-C"), "{context}");
+        assert!(context.contains("backslash-newline"), "{context}");
+        assert!(
+            context.contains("Join the backslash-continued lines"),
+            "{context}"
+        );
+        assert!(
+            context.contains("move the `$'` out of the command"),
+            "{context}"
+        );
+    }
+
+    #[test]
     fn arithmetic_expansion_is_named_in_the_guidance() {
         // `$((...))` parses successfully (unlike `${arr[@]}`) but normalises
         // to `Unresolvable(ArithmeticExpansion)` -- a different code path

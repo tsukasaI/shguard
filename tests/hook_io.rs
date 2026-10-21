@@ -62,6 +62,29 @@ fn ask_case_asks() {
     assert_eq!(permission_decision(&output), "ask");
 }
 
+/// Issue #634: the `$'` here is a regex end anchor inside single quotes, but
+/// the combination with the backslash-newline still asks (decision unchanged);
+/// the hint must name both triggers and both rewrites.
+#[test]
+fn ansi_c_with_line_continuation_asks_with_both_triggers_named() {
+    let stdin = r#"{"tool_name":"Bash","tool_input":{"command":"rg -n 'foo' src \\\n  | rg -v '^\\s*$'"},"hook_event_name":"PreToolUse"}"#;
+    let output = run_hook(stdin);
+    assert_eq!(permission_decision(&output), "ask");
+    let context = output["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .expect("additionalContext should be a string");
+    assert!(context.contains("ANSI-C"), "{context}");
+    assert!(context.contains("backslash-newline"), "{context}");
+    assert!(
+        context.contains("Join the backslash-continued lines"),
+        "{context}"
+    );
+    assert!(
+        context.contains("move the `$'` out of the command"),
+        "{context}"
+    );
+}
+
 /// DoD 3: a benign Bash command allows.
 #[test]
 fn allow_case_allows() {
