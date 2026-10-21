@@ -488,6 +488,38 @@ pub(crate) const MAX_RAW_LEGACY_ARITH_COUNT: usize = 8;
 /// and accepted.
 pub(crate) const MAX_RAW_BRACKET_OPENER_COUNT: usize = 64;
 
+/// Cap on the total count of `$(`, `$[` and `${` byte pairs in one command,
+/// enforced by `src/syntax/compat.rs` before it lets brush's own tokenizer
+/// run on a command the byte-level caps rejected (issue #627). Quote-blind
+/// and never decremented, over the whole command including heredoc bodies,
+/// so it can only over-count (the `Ask` direction).
+///
+/// # Why a separate gate
+///
+/// brush-parser 0.4.0's tokenizer recurses once per `$(`, `$[` and `${`
+/// (`next_token_until` -> `consume_nested_construct` / the `${` loop ->
+/// `next_token_until`) with no depth limit, so the tokenizer itself can
+/// overflow the stack on input the byte-level caps exist to stop. A backtick
+/// scans in a loop and does not recurse (4194303 survived, debug, 2 MiB).
+/// The tokenizer is only used to find quoted-delimiter heredoc bodies, whose
+/// text the byte-level caps then skip, so this gate must hold before that run.
+///
+/// # Why 48
+///
+/// Smallest aborting N, `echo ` + the unit repeated N times,
+/// `uncached_tokenize_str` on a 2 MiB thread (the watchdog worker's default
+/// stack), debug build / release build: `$(` 151 / 1668, `$[` 151 / 1668,
+/// `${` 169 / 2533, closed `$(echo ` 151 / 1667. The three are counted
+/// together, so the `$(` floor is the bound: 48 is ~3.1x below the debug
+/// floor and ~35x below the release one. Re-measure on any `brush-parser`
+/// bump.
+///
+/// # Known trade-off
+///
+/// A command over the cap never gets the quoted-heredoc-body exemption and
+/// keeps its original raw-cap rejection (`Ask`).
+pub(crate) const MAX_RAW_TOKENIZER_RECURSION_OPENERS: usize = 48;
+
 /// Cap on the total count of reserved-word compound-command openers (`if`,
 /// `while`, `until`, `for`, `case`, and `coproc`) `src/parser.rs`'s raw pre-scan tolerates
 /// in one command, enforced by [`crate::parser::reject_excessive_raw_nesting`]
