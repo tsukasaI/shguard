@@ -20,6 +20,9 @@ All notable changes to this project are documented in this file.
 - A config-load failure message is no longer repeated by
   `std::error::Error::source` chain walkers (anyhow-style reporters): it
   renders once (#684).
+- A quoted-delimiter heredoc body (`<<'EOF'`, `<<"EOF"`, `<<\EOF`) no longer
+  counts toward the raw nesting caps, so `cat > file <<'EOF'` writing code
+  or markdown is analyzed instead of asking (#627).
 
 ## [0.9.5] - 2026-10-19
 

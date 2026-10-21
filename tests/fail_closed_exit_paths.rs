@@ -930,6 +930,12 @@ fn large_quoted_delimiter_heredoc_file_write_is_allow() {
     assert_allow(&format!("cat > x.md <<'EOF'\n{}EOF\n", markdown_body()));
     assert_allow(&format!("cat > x.rs <<\"EOF\"\n{}EOF", rust_body()));
     assert_allow(&format!("cat > x.rs <<\\EOF\n{}EOF", rust_body()));
+    assert_allow(&format!(
+        "cat > x.rs <<'EOF'\n{}{}EOF",
+        "$(".repeat(48),
+        rust_body()
+    ));
+    assert_allow(&format!("cat <<A <<'B'\nhi\nA\n{}B", markdown_body()));
     let tabbed: String = rust_body().lines().map(|l| format!("\t{l}\n")).collect();
     assert_allow(&format!("cat > x.rs <<-'EOF'\n{tabbed}\tEOF"));
     assert_allow(&format!(
@@ -967,6 +973,8 @@ fn quoted_heredoc_exemption_does_not_cover_text_outside_the_body() {
         format!("cat > x.rs <<'EOF'\n{}{rust}EOF", "$(".repeat(49)),
         format!("cat > x.rs <<'EOF'\n{}{rust}EOF", "${".repeat(49)),
         format!("cat > x.rs <<'EOF'\n{}{rust}EOF", "$[".repeat(49)),
+        // A heredoc nested in a substitution is not a top-level token.
+        format!("echo $(cat <<'EOF'\n{rust}EOF\n)"),
         // A second, unquoted heredoc keeps its body counted.
         format!("cat > x.rs <<'A' <<B\nhi\nA\n{rust}B"),
     ];
