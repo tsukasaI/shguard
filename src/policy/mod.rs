@@ -216,8 +216,19 @@ fn resource_limit_reason(kind: LimitKind) -> String {
 /// Category-3 guidance (issue #471): a construct the gate cannot statically
 /// resolve at all. Names the specific construct via whichever description
 /// is available at the call site: the parser's unsupported-construct text,
-/// or a human-readable name for an unresolvable word kind.
+/// or a human-readable name for an unresolvable word kind. The ANSI-C plus
+/// line-continuation construct gets its own rewrite hint.
 pub(crate) fn deny_msg_unsupported_construct(construct: &str) -> DenyMessage {
+    if construct == crate::syntax::compat::ANSI_C_WITH_CONTINUATION_CONSTRUCT {
+        return DenyMessage::new(
+            "shguard cannot statically analyze a `$'` sequence (an ANSI-C `$'...'` opener, or a \
+             `$` right before a closing `'`) combined with a backslash-newline line \
+             continuation. Join the lines of an unquoted `\\`+newline continuation into one. \
+             If the `$` is a regex end anchor, close the single quote before it \
+             (`'^\\s*'\"$\"`) or double-quote the whole pattern (`\"^\\s*$\"`). For a real \
+             `$'...'`, write its decoded value literally (e.g. an actual tab inside `'...'`).",
+        );
+    }
     DenyMessage::new(format!(
         "shguard cannot statically analyze this construct ({construct}); use its literal form, \
          or split the command across separate lines so each piece is inspectable."
@@ -399,6 +410,25 @@ mod tests {
         assert!(guidance.contains("ask the user"), "{guidance}");
         assert!(guidance.contains("valid UTF-8"), "{guidance}");
         assert!(!guidance.contains("Edit or Write"), "{guidance}");
+    }
+
+    #[test]
+    fn ansi_c_continuation_parse_failure_hint_is_independent_of_ask_outcome() {
+        let construct = crate::syntax::compat::ANSI_C_WITH_CONTINUATION_CONSTRUCT;
+        let evidence = Evidence::ParseFailure {
+            message: format!("unsupported construct: {construct}"),
+            construct: Some(construct.to_string()),
+        };
+        let asked = decide_one_item(evidence.clone(), &PolicyConfig::none());
+        let configured = decide_one_item(evidence, &deny_config());
+        assert_eq!(configured.decision(), asked.decision());
+        let hint = configured
+            .deny_message()
+            .map(DenyMessage::as_str)
+            .unwrap_or_default();
+        assert!(hint.contains("ANSI-C"), "{hint}");
+        assert!(hint.contains("backslash-newline"), "{hint}");
+        assert!(!hint.contains("use its literal form"), "{hint}");
     }
 
     #[test]
