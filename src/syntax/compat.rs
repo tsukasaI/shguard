@@ -8,9 +8,13 @@
 //!
 //! - The nesting caps ([`reject_excessive_raw_nesting`]) stay byte-level on
 //!   purpose: they protect brush's recursive descent from stack overflow
-//!   *before* any brush code runs, so they cannot use brush's tokenizer, and
-//!   they deliberately over-count (quote-blind), which is the `Ask`
-//!   direction.
+//!   *before* any brush code runs, and they deliberately over-count
+//!   (quote-blind), which is the `Ask` direction. They always run first.
+//!   Only after a cap rejects a command containing `<<` does brush's
+//!   tokenizer run, and only behind [`MAX_RAW_TOKENIZER_RECURSION_OPENERS`]
+//!   (the tokenizer itself recurses): it locates quoted-delimiter heredoc
+//!   bodies, which bash and brush never re-parse, and the caps are re-run
+//!   with those bodies blanked (issue #627).
 //! - The io-number rewrite is built on brush's own `tokenize_str` spans, so a
 //!   quoted digit run is never touched.
 
@@ -25,8 +29,9 @@ use crate::ast::{
     MAX_RAW_BRACKET_OPENER_COUNT, MAX_RAW_EXTENDED_TEST_COUNT, MAX_RAW_LEGACY_ARITH_COUNT,
     MAX_RAW_PARAM_EXPANSION_COUNT, MAX_RAW_PAREN_NESTING_DEPTH, MAX_RAW_PAREN_OPEN_COUNT,
     MAX_RAW_PROCESS_SUBST_COUNT, MAX_RAW_QUOTED_OPENER_COUNT, MAX_RAW_STACK_BUDGET,
-    STACK_COST_BRACE, STACK_COST_BRACKET, STACK_COST_EXTENDED_TEST_OP, STACK_COST_KEYWORD,
-    STACK_COST_LEGACY_ARITH_EXTRA, STACK_COST_PARAM_EXPANSION_EXTRA, STACK_COST_PAREN,
+    MAX_RAW_TOKENIZER_RECURSION_OPENERS, STACK_COST_BRACE, STACK_COST_BRACKET,
+    STACK_COST_EXTENDED_TEST_OP, STACK_COST_KEYWORD, STACK_COST_LEGACY_ARITH_EXTRA,
+    STACK_COST_PARAM_EXPANSION_EXTRA, STACK_COST_PAREN,
 };
 
 /// Runs every pre-parse check and rewrite on `command`.
@@ -44,12 +49,121 @@ pub(crate) fn prepare(command: &str) -> Result<Cow<'_, str>, ParseError> {
     // Run against both the comment-aware and the blind scan copies — see
     // `strip_raw_line_continuations_blind`'s docs for why neither alone
     // suffices and why running both closes the gap.
-    reject_excessive_raw_nesting(strip_raw_line_continuations(command).as_ref())?;
     let blind = strip_raw_line_continuations_blind(command);
-    reject_excessive_raw_nesting(blind.as_ref())?;
+    if let Err(rejection) = reject_excessive_raw_nesting_both(command, blind.as_ref())
+        && !(command.contains("<<") && passes_with_quoted_heredoc_bodies_blanked(command))
+    {
+        return Err(rejection);
+    }
     reject_ansi_c_quote_with_line_continuation(command, blind.as_ref())?;
     neutralize_overflowing_io_redirect_numbers(command)
 }
+
+/// Runs [`reject_excessive_raw_nesting`] on both scan copies of `text`;
+/// `blind` is `strip_raw_line_continuations_blind(text)`.
+fn reject_excessive_raw_nesting_both(text: &str, blind: &str) -> Result<(), ParseError> {
+    reject_excessive_raw_nesting(strip_raw_line_continuations(text).as_ref())?;
+    reject_excessive_raw_nesting(blind)
+}
+
+/// Issue #627: whether `command` passes both raw scans once the body of every
+/// quoted-delimiter heredoc is blanked. `false` on any doubt, so the caller
+/// keeps the original rejection.
+fn passes_with_quoted_heredoc_bodies_blanked(command: &str) -> bool {
+    if count_tokenizer_recursion_openers(command) > MAX_RAW_TOKENIZER_RECURSION_OPENERS {
+        return false;
+    }
+    let options = parser_options().tokenizer_options();
+    let Ok(Ok(tokens)) = catch_parser_panic(|| uncached_tokenize_str(command, &options)) else {
+        return false;
+    };
+    let Some(blanked) = blank_quoted_heredoc_bodies(command, &tokens) else {
+        return false;
+    };
+    let blanked_blind = strip_raw_line_continuations_blind(&blanked);
+    reject_excessive_raw_nesting_both(&blanked, blanked_blind.as_ref()).is_ok()
+}
+
+/// Quote-blind, never-decremented count of the byte pairs at which brush's
+/// tokenizer recurses (`$(`, `$[`, `${`); see
+/// [`MAX_RAW_TOKENIZER_RECURSION_OPENERS`].
+fn count_tokenizer_recursion_openers(command: &str) -> usize {
+    command
+        .as_bytes()
+        .windows(2)
+        .filter(|pair| pair[0] == b'$' && matches!(pair[1], b'(' | b'[' | b'{'))
+        .count()
+}
+
+/// Returns a copy of `command` with the body of every top-level heredoc whose
+/// delimiter is quoted (the same `'`, `"`, `\` test brush uses for
+/// `requires_expansion`) overwritten by spaces, newlines kept. The end-tag
+/// line is left alone. `None` when the copy is not valid UTF-8.
+///
+/// brush emits a heredoc as `<<`/`<<-`, tag, body, zero-width end tag, in
+/// that order; the body span runs from the line after the operator line
+/// through the end-tag line. A candidate that does not have exactly that
+/// shape (for instance a `<<` operator inside `(( ))`) is left counted. A
+/// heredoc nested in `$(...)` never appears as a top-level token and is left
+/// counted too.
+fn blank_quoted_heredoc_bodies(command: &str, tokens: &[Token]) -> Option<String> {
+    let byte_offsets = char_byte_offsets(command);
+    let byte_at = |char_index: usize| -> Option<usize> {
+        if char_index == byte_offsets.len() {
+            Some(command.len())
+        } else {
+            byte_offsets.get(char_index).copied()
+        }
+    };
+    let mut blanked: Vec<u8> = command.as_bytes().to_vec();
+    for quad in tokens.windows(4) {
+        let [
+            Token::Operator(operator, _),
+            Token::Word(tag, _),
+            Token::Word(_, body_span),
+            Token::Word(end_tag, end_span),
+        ] = quad
+        else {
+            continue;
+        };
+        if !matches!(operator.as_str(), "<<" | "<<-")
+            || !tag.contains(['\'', '"', '\\'])
+            || end_span.start.index != body_span.end.index
+            || end_span.end.index != body_span.end.index
+        {
+            continue;
+        }
+        let (Some(start), Some(end)) =
+            (byte_at(body_span.start.index), byte_at(body_span.end.index))
+        else {
+            continue;
+        };
+        if start > end || (start > 0 && command.as_bytes()[start - 1] != b'\n') {
+            continue;
+        }
+        let region = &command[start..end];
+        let without_final_newline = region.strip_suffix('\n').unwrap_or(region);
+        let end_line_start = without_final_newline.rfind('\n').map_or(0, |at| at + 1);
+        if !without_final_newline[end_line_start..]
+            .trim_start_matches('\t')
+            .ends_with(end_tag.as_str())
+        {
+            continue;
+        }
+        for byte in &mut blanked[start..start + end_line_start] {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+    }
+    String::from_utf8(blanked).ok()
+}
+
+/// Byte offset of each `char` of `text`; token spans count characters.
+fn char_byte_offsets(text: &str) -> Vec<usize> {
+    text.char_indices().map(|(offset, _)| offset).collect()
+}
+
 /// Runs a brush-parser entry point and converts an internal panic (a
 /// pinned dependency's own unchecked `unwrap()` — brush-parser 0.4.0 has
 /// four known instances in its tilde (unsigned/`+`-prefixed dir-stack
@@ -141,7 +255,7 @@ fn neutralize_overflowing_io_redirect_numbers(command: &str) -> Result<Cow<'_, s
         return Ok(Cow::Borrowed(command));
     }
 
-    let byte_offsets: Vec<usize> = command.char_indices().map(|(offset, _)| offset).collect();
+    let byte_offsets = char_byte_offsets(command);
     let mut rewritten = String::with_capacity(command.len() + insert_at_char.len());
     let mut copied = 0;
     for char_index in insert_at_char {

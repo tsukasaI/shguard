@@ -898,3 +898,87 @@ fn ordinary_substitution_heavy_commands_stay_under_the_raw_caps() {
     let output = run_hook(&bash_command("echo $(date) ${HOME} $(echo $(echo hi))"));
     assert_eq!(permission_decision(&output), "allow");
 }
+
+// Issue #627: a quoted-delimiter heredoc body is inert text, so the raw
+// nesting caps skip it. Everything else still counts.
+
+fn rust_body() -> String {
+    (0..20)
+        .map(|i| format!("fn f{i}() {{ let v = vec![{i}]; drop(v); }}\n"))
+        .collect()
+}
+
+fn markdown_body() -> String {
+    (0..40)
+        .map(|i| format!("- item{i}: see `foo({i})` and [link](url)\n"))
+        .collect()
+}
+
+fn assert_allow(command: &str) {
+    let output = run_hook(&bash_command(command));
+    assert_eq!(
+        permission_decision(&output),
+        "allow",
+        "command: {command:.120}, reason: {}",
+        permission_reason(&output)
+    );
+}
+
+#[test]
+fn large_quoted_delimiter_heredoc_file_write_is_allow() {
+    assert_allow(&format!("cat > x.rs <<'EOF'\n{}EOF", rust_body()));
+    assert_allow(&format!("cat > x.md <<'EOF'\n{}EOF\n", markdown_body()));
+    assert_allow(&format!("cat > x.rs <<\"EOF\"\n{}EOF", rust_body()));
+    assert_allow(&format!("cat > x.rs <<\\EOF\n{}EOF", rust_body()));
+    assert_allow(&format!(
+        "cat > x.rs <<'EOF'\n{}{}EOF",
+        "$(".repeat(48),
+        rust_body()
+    ));
+    assert_allow(&format!("cat <<A <<'B'\nhi\nA\n{}B", markdown_body()));
+    let tabbed: String = rust_body().lines().map(|l| format!("\t{l}\n")).collect();
+    assert_allow(&format!("cat > x.rs <<-'EOF'\n{tabbed}\tEOF"));
+    assert_allow(&format!(
+        "cat > x.md <<'A' && cat > y.rs <<'B'\n{}A\n{}B",
+        markdown_body(),
+        rust_body()
+    ));
+}
+
+#[test]
+fn quoted_heredoc_exemption_does_not_cover_text_outside_the_body() {
+    let rust = rust_body();
+    let md = markdown_body();
+    let opens = "(".repeat(100);
+    let cases = [
+        // Unquoted delimiter: the body is expanded and re-parsed.
+        format!("cat > x.rs <<EOF\n{rust}EOF"),
+        format!("cat > x.md <<EOF\n{md}EOF"),
+        // Payload after the terminator line.
+        format!("cat > x.rs <<'EOF'\nhi\nEOF\n{rust}"),
+        format!("cat > x.md <<'EOF'\nhi\nEOF\n{md}"),
+        // Payload before the `<<`.
+        format!("{opens}\ncat > x.rs <<'EOF'\nhi\nEOF"),
+        format!("echo {opens} <<'EOF'\nhi\nEOF"),
+        // Fake heredoc shapes.
+        format!("echo \"<<'EOF'\"\n{rust}"),
+        format!("# <<'EOF'\n{rust}"),
+        format!("echo $'<<'\n{rust}"),
+        format!("echo \\<<'EOF'\n{rust}"),
+        format!("(( 1 << 'x' ))\n{rust}"),
+        // Terminator never appears.
+        format!("cat > x.rs <<'EOF'\n{rust}"),
+        format!("cat > x.rs <<'EOF'\n{rust}EOF2\n"),
+        // Tokenizer-safety gate: too many recursion openers anywhere.
+        format!("cat > x.rs <<'EOF'\n{}{rust}EOF", "$(".repeat(49)),
+        format!("cat > x.rs <<'EOF'\n{}{rust}EOF", "${".repeat(49)),
+        format!("cat > x.rs <<'EOF'\n{}{rust}EOF", "$[".repeat(49)),
+        // A heredoc nested in a substitution is not a top-level token.
+        format!("echo $(cat <<'EOF'\n{rust}EOF\n)"),
+        // A second, unquoted heredoc keeps its body counted.
+        format!("cat > x.rs <<'A' <<B\nhi\nA\n{rust}B"),
+    ];
+    for command in &cases {
+        assert_raw_cap_ask(command, "raw");
+    }
+}
