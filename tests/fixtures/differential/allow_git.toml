@@ -1,0 +1,7 @@
+# must_not_allow config fixture: an `[[allow]]` for `git`, the relaxation
+# that issues #682 and #702 show must not cover config injection or a `$C`
+# standing in for `-c`.
+[[allow]]
+id = "fixture-allow-git"
+reason = "exercise the allowlist downgrade path over git"
+command = "git"

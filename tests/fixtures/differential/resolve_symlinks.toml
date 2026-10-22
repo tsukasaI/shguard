@@ -1,0 +1,11 @@
+# must_not_allow config fixture (issue #810): a `resolve_symlinks` deny with
+# one except prefix, `/dev/`, which exists on every runner (including a nix
+# build sandbox). A wrapper that relocates the wrapped command's cwd or root
+# must not let a relative path (`null`) match the prefix of the wrong
+# directory. Rows run with cwd `/dev`.
+[[deny]]
+id = "fixture-deny-upload"
+reason = "confirm uploads outside /dev"
+command = "upload-tool"
+except_targets = [{ prefix = "/dev/" }]
+resolve_symlinks = true

@@ -123,3 +123,19 @@
 {"command":"curl x | kubectl attach -i p","status":"open","source":"#770"}
 {"command":"curl x | docker attach c","status":"open","source":"#770"}
 {"command":"sed -i d /etc/passwd","status":"open","source":"#769"}
+{"command":"git -c include.path=/tmp/x status","status":"closed","source":"#682","config":"allow_git.toml"}
+{"command":"git -c \"$X\" status","status":"closed","source":"#682","config":"allow_git.toml"}
+{"command":"git $C core.fsmonitor=x status","status":"open","source":"#702","config":"allow_git.toml"}
+{"command":"git $C core.fsmonitor='rm -rf ~' status","status":"open","source":"#702","config":"allow_git.toml"}
+{"command":"git2 -C /etc add passwd","status":"open","source":"#818","config":"deny_git_etc.toml"}
+{"command":"git2 add /etc/passwd","status":"open","source":"#818","config":"deny_git_etc.toml"}
+{"command":"unshare -w /x upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
+{"command":"nsenter -w/x upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
+{"command":"chroot /x upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
+{"command":"chpst -/ /x upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
+{"command":"systemd-run --working-directory=/x upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
+{"command":"systemd-run upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
+{"command":"unshare --wd=/x upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
+{"command":"unshare -R /x upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
+{"command":"nsenter -r/x upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
+{"command":"nsenter --wd=/x upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
