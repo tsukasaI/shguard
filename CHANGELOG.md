@@ -39,7 +39,10 @@ All notable changes to this project are documented in this file.
   (#709). Keep the hook `timeout` above ~15s.
 - A stdin read timeout now reports "stdin read exceeded its time budget"
   instead of the outer evaluation time budget reason, since no evaluation
-  has started (#864).
+  has started (#864). Library callers: the public enum
+  `shguard::policy::LimitKind` gained a `LimitKind::StdinReadTime` variant
+  and is not `#[non_exhaustive]`, so a downstream exhaustive `match` no
+  longer compiles; add a wildcard arm.
 - A stdin read timeout is now written to `decision_log_path` (empty
   `command`, no context), found by a bounded config load after the
   decision is emitted (#895).
@@ -48,7 +51,10 @@ All notable changes to this project are documented in this file.
 
 - A config-load failure message is no longer repeated by
   `std::error::Error::source` chain walkers (anyhow-style reporters): it
-  renders once (#684).
+  renders once (#684). Library callers: `LoadError::source()` on
+  `shguard::config::LoadError` now returns `None`; to reach the underlying
+  `ConfigError`, call `LoadError::error()` instead of walking the source
+  chain.
 - A quoted-delimiter heredoc body (`<<'EOF'`, `<<"EOF"`, `<<\EOF`) no longer
   counts toward the raw nesting caps, so `cat > file <<'EOF'` writing code
   or markdown is analyzed instead of asking (#627).
