@@ -14,6 +14,9 @@ All notable changes to this project are documented in this file.
 - The hook's stdin read bound is lowered from 30s to 10s, narrowing the
   window in which a hook `timeout` can kill a stalled read and fail open
   (#709). Keep the hook `timeout` above ~15s.
+- A stdin read timeout now reports "stdin read exceeded its time budget"
+  instead of the outer evaluation time budget reason, since no evaluation
+  has started (#864).
 
 ### Fixed
 

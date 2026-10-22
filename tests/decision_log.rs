@@ -391,6 +391,61 @@ fn hook_path_watchdog_trip_is_still_logged() {
     );
 }
 
+/// Issue #864: a stalled stdin read is reported as a stdin-read timeout, not
+/// as an evaluation overrun, since no evaluation has started. Takes the real
+/// 10s `STDIN_READ_TIMEOUT` (no override exists); the decision log is not
+/// asserted: issue #895.
+#[test]
+fn stalled_stdin_reports_the_stdin_read_timeout_reason() {
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let mut command = cmd::shguard_std();
+    command.stdin(Stdio::piped()).stdout(Stdio::piped());
+    let mut child = command.spawn().expect("shguard should spawn");
+    // Held open and never written to, so the read can only end by timeout.
+    let _stdin = child.stdin.take().expect("stdin should be piped");
+    let mut child_stdout = child.stdout.take().expect("stdout should be piped");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = child_stdout.read_to_end(&mut buf);
+        let _ = tx.send(buf);
+    });
+    let Ok(stdout) = rx.recv_timeout(Duration::from_secs(30)) else {
+        child.kill().expect("hung shguard should be killable");
+        child.wait().expect("killed shguard should be reaped");
+        panic!("shguard did not answer a stalled stdin within 30s");
+    };
+    // Stdout closing does not prove the process exited: bound the wait too.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("polling shguard should work") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill().expect("hung shguard should be killable");
+            child.wait().expect("killed shguard should be reaped");
+            panic!("shguard did not exit within 30s of answering a stalled stdin");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(status.success(), "shguard exited with {status}");
+    let output: Value = serde_json::from_slice(&stdout).expect("stdout should be valid JSON");
+    assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "ask");
+    let reason = output["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("decision should carry a reason");
+    assert!(
+        reason.contains(
+            "shguard: stdin read exceeded its time budget; refusing to evaluate (fail-closed)"
+        ),
+        "unexpected reason: {reason}"
+    );
+    assert!(!reason.contains("evaluation exceeded"));
+}
+
 // Issue #468: `permission_mode`/`agent_id` from PreToolUse stdin are
 // recorded on the decision log line, and `null` when the hook stdin omits
 // them (or, for `shguard check`, doesn't exist at all).

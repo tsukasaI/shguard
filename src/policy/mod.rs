@@ -192,6 +192,10 @@ fn resource_limit_reason(kind: LimitKind) -> String {
         LimitKind::OuterTime => "shguard: evaluation exceeded its outer time budget; refusing to \
                                  evaluate (fail-closed)"
             .to_string(),
+        LimitKind::StdinReadTime => {
+            "shguard: stdin read exceeded its time budget; refusing to evaluate (fail-closed)"
+                .to_string()
+        }
         LimitKind::OuterMemory(rss) => format!(
             "shguard: evaluation exceeded its memory budget ({rss} bytes RSS); refusing to \
              evaluate (fail-closed)"
