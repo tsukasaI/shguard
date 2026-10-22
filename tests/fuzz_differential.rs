@@ -786,7 +786,9 @@ impl Sandbox {
 }
 
 /// Wall-clock cap on one whole-candidate bash run; a hung candidate is
-/// killed and skipped, never waited on.
+/// killed and skipped, never waited on. A looping candidate grows the xtrace
+/// file without bound until this timeout kills it, so the timeout is what
+/// bounds xtrace file growth (deliberately no `ulimit -f`).
 const WHOLE_RUN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Parses the shim log: one record per line, the shim's own path followed by
@@ -871,13 +873,13 @@ fn next_xtrace_marker() -> String {
 
 /// Statements prepended to the candidate (same bash process, so the
 /// candidate's builtins are traced): open the trace fd, point
-/// `BASH_XTRACEFD` at it, set `PS4`, then `set -x` last so none of this is
-/// itself traced.
+/// `BASH_XTRACEFD` at it, set `PS4`, make both readonly, then `set -x` last
+/// so none of this is itself traced.
 fn xtrace_preamble(trace_path: &Path, marker: &str) -> String {
     // `\036`/`\037` as ANSI-C escapes keep the control bytes out of argv.
     let ps4 = marker.replace('\u{1f}', "\\037");
     format!(
-        "exec {XTRACE_FD}>>{path}\nBASH_XTRACEFD={XTRACE_FD}\nPS4=$'\\036{ps4}'\nset -x\n",
+        "exec {XTRACE_FD}>>{path}\nBASH_XTRACEFD={XTRACE_FD}\nPS4=$'\\036{ps4}'\nreadonly PS4 BASH_XTRACEFD\nset -x\n",
         path = shell_single_quote(&trace_path.display().to_string()),
     )
 }
@@ -1098,7 +1100,10 @@ impl Sandbox {
     /// so `eval`, `exec`, `source`, `command` and `builtin` appear in the
     /// trace like any other command. A candidate that closes fd 200 or runs
     /// `set +x` blinds the trace for the rest of the run; the shim log still
-    /// covers it, and [`WholeRun::observed`] unions the two.
+    /// covers it, and [`WholeRun::observed`] unions the two. `PS4` and
+    /// `BASH_XTRACEFD` are readonly, so assigning them cannot corrupt the
+    /// records, but readonly does not stop `set +x` or `exec 200>&-`
+    /// ([`XTRACE_FD`]): builtins after that point can be missed.
     fn run_whole(&self, text: &str) -> Option<WholeRun> {
         if is_unsafe_to_execute(text) {
             return None;
@@ -1449,6 +1454,33 @@ fn xtrace_oracle_reports_other_builtin_command_launchers() {
             run.trace
         );
     }
+}
+
+#[test]
+fn xtrace_oracle_survives_a_candidate_assigning_ps4_or_xtracefd() {
+    let sandbox = Sandbox::new();
+    let echo_a = strings(&["echo", "a"]);
+    for text in ["PS4=x\necho a", "BASH_XTRACEFD=2\necho a"] {
+        let run = sandbox
+            .run_whole(text)
+            .unwrap_or_else(|| panic!("{text:?} should run"));
+        assert!(
+            run.trace.contains(&echo_a),
+            "{text:?}: echo missing from trace {:?}",
+            run.trace
+        );
+    }
+
+    // A readonly assignment error makes bash skip the rest of the line, so
+    // nothing after it runs: the oracle misses nothing that executed.
+    let run = sandbox
+        .run_whole("PS4=x; echo a")
+        .expect("candidate should run");
+    assert!(
+        !run.observed().contains(&echo_a),
+        "echo ran after a readonly PS4 assignment error: {:?}",
+        run.observed()
+    );
 }
 
 #[test]
