@@ -23,7 +23,11 @@ All notable changes to this project are documented in this file.
   ref by shape: a `./`-prefixed or trailing-slash operand, a glob
   metacharacter (`*`, `?`, `[`), or more than one operand (`git checkout
   ./src/a.rs`, `git checkout 'src/*.rs'`, `git checkout main src/a.rs`).
-  Branch names such as `main` and `feature/x` still pass (#850).
+  An operand containing `..` or starting with `/` (`../x`, `a..b`,
+  `/abs/path`) and any `--pathspec-from-file` also ask. An unresolved
+  `$VAR`/`$(...)` word counts toward the more-than-one-operand ask; the
+  values of `-b`/`-B`/`--orphan`/`--conflict` are excluded from the operand
+  count. Branch names such as `main` and `feature/x` still pass (#850).
 - A config-load failure (including under `SHGUARD_STRICT_CONFIG`) no longer
   produces a verdict for non-Bash tools such as `Edit` and `Write`: they
   get the same no-decision output as with a loadable config. Bash still

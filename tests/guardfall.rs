@@ -426,6 +426,15 @@ const GIT_CASES: &[(&str, Decision)] = &[
     ("git checkout a b", Decision::Ask),
     ("git checkout src/", Decision::Ask),
     ("git checkout feature/x", Decision::Allow),
+    ("git checkout --pathspec-from-file=-", Decision::Ask),
+    ("git checkout --pathspec-from-file list.txt", Decision::Ask),
+    ("git checkout main --pathspec-from-file=f", Decision::Ask),
+    ("git checkout ../x", Decision::Ask),
+    ("git checkout src/../a", Decision::Ask),
+    ("git checkout a..b", Decision::Ask),
+    ("git checkout /abs/path", Decision::Ask),
+    ("git checkout HEAD~1", Decision::Allow),
+    ("git checkout main^", Decision::Allow),
     ("git checkout -b new start", Decision::Allow),
     // issue #452, fix 3: `-d -f`/`-df` and the long-form
     // `--delete --force` are the same force-delete-of-unmerged-branch

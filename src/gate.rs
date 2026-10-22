@@ -12306,7 +12306,14 @@ const GIT_CHECKOUT_VALUE_FLAGS: &[&str] =
 ///   `git check-ref-format` forbids `..` in a refname);
 /// - `./`-prefixed, or ending in `/` (neither is a valid refname);
 /// - containing `*`, `?` or `[` (invalid in a refname; a pathspec glob to
-///   git).
+///   git);
+/// - containing `..` anywhere (`../x`, `src/../a.rs`, `a..b`) or starting
+///   with `/` (an absolute path, including a `~/` word that resolves to
+///   one); `git check-ref-format` forbids both in a refname;
+/// - preceded by `--pathspec-from-file` (either spelling), which reads the
+///   paths from a file and so is the path form with no operand to inspect.
+///
+/// `HEAD~1`, `main^`, `@{-1}` and `a@{1}` stay Allow.
 ///
 /// No filesystem existence check: a slash-named branch such as `feature/x`
 /// stays Allow. Any `--` makes git treat the rest as paths, which
@@ -12321,6 +12328,11 @@ fn git_checkout_path_operand(argv: &[NormalizedWord]) -> bool {
     while index < operands.len() {
         match operands[index].resolution() {
             Resolution::Resolved(s) if s == "--" => return false,
+            Resolution::Resolved(s)
+                if s == "--pathspec-from-file" || s.starts_with("--pathspec-from-file=") =>
+            {
+                return true;
+            }
             Resolution::Resolved(s) if s.starts_with('-') && s != "-" => {
                 index += if GIT_CHECKOUT_VALUE_FLAGS.contains(&s.as_str()) {
                     2
@@ -12333,6 +12345,8 @@ fn git_checkout_path_operand(argv: &[NormalizedWord]) -> bool {
                 if s.starts_with("./")
                     || s.ends_with('/')
                     || s.contains(['*', '?', '['])
+                    || s.contains("..")
+                    || s.starts_with('/')
                     || matches!(
                         lexical_normalize(s),
                         PathForm::Rel { ref comps, .. } if comps.is_empty()
@@ -12812,6 +12826,14 @@ mod tests {
             "git checkout main src/a.rs",
             "git checkout src/",
             "git checkout -q ./a.rs",
+            "git checkout --pathspec-from-file=-",
+            "git checkout --pathspec-from-file=list.txt",
+            "git checkout --pathspec-from-file list.txt --pathspec-file-nul",
+            "git checkout main --pathspec-from-file=f",
+            "git checkout ../x",
+            "git checkout src/../a",
+            "git checkout a..b",
+            "git checkout /abs/path",
         ] {
             assert_decision(command, Decision::Ask);
         }
@@ -12825,6 +12847,8 @@ mod tests {
             "git checkout -",
             "git checkout @{-1}",
             "git checkout HEAD~1",
+            "git checkout main^",
+            "git checkout a@{1}",
             "git checkout v1.2",
             "git checkout abc123",
             "git checkout -q --detach main",
