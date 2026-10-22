@@ -5,7 +5,8 @@
 //! Allow under the embedded rules with no user config when the row has no
 //! `config` (the `analyze` entry point, equivalent to `SHGUARD_CONFIG=/dev/null`)
 //! and under that fixture's policy when it has one: every payload that is
-//! Allow under the embedded rules with no config and is named in the RFC
+//! Allow under its row's policy (the embedded rules, or the row's fixture)
+//! and is named in the RFC
 //! "Problem" section or in the issues the RFC maps to R1 and R2. The golden
 //! snapshots encode today's fail-open Allows, so "no new Allow" alone would
 //! keep them; this file is the baseline that says which Allows are bugs.
