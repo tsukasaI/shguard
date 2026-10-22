@@ -338,7 +338,7 @@ pub(crate) fn fs_path_canonicalizer() -> rules::PathCanonicalizer {
 /// outer watchdog always wins the wall-clock race in release builds (debug
 /// builds can lengthen the outer watchdog's budget via
 /// `SHGUARD_TEST_EVAL_TIMEOUT_MS`, so there this function's own watchdog
-/// may trip first) — so in release builds this function's own fail-closed
+/// may trip first); in release builds, then, this function's own fail-closed
 /// `Ask` above is never reached at all, and neither is its `sink.append`
 /// call. (The memory arm is not strictly ordered the same way: both
 /// watchdogs poll RSS independently, so either can cross its own threshold
