@@ -46,6 +46,7 @@ pub enum LimitKind {
     InnerTime,
     InnerMemory(u64),
     OuterTime,
+    StdinReadTime,
     OuterMemory(u64),
     Disconnected,
     SpawnFailed,

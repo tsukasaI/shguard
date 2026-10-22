@@ -426,12 +426,12 @@ fn stdin_read_finished(read_done_rx: &Receiver<()>, timeout: Duration) -> bool {
 /// [`MEMORY_LIMIT_BYTES`] and [`EVALUATION_TIMEOUT`] (or their debug-only
 /// test overrides, [`memory_limit_bytes`] / [`evaluation_timeout`]) once the
 /// stdin read has finished within [`STDIN_READ_TIMEOUT`] (a read timeout is
-/// itself a time trip), then emits whatever it resolved to. On either
-/// trip (or a worker disconnect), emits the fail-closed decision, makes a
-/// best-effort attempt to log it ([`log_trip_best_effort`], bounded by
-/// [`TRIP_LOG_TIMEOUT`]), and only then exits the process — see the module
-/// docs' "evaluation watchdog" section for why exiting, not merely
-/// returning, is required.
+/// itself a time trip, reported as [`LimitKind::StdinReadTime`]), then emits
+/// whatever it resolved to. On either trip (or a worker disconnect), emits the
+/// fail-closed decision, makes a best-effort attempt to log it
+/// ([`log_trip_best_effort`], bounded by [`TRIP_LOG_TIMEOUT`]), and only then
+/// exits the process — see the module docs' "evaluation watchdog" section for
+/// why exiting, not merely returning, is required.
 fn emit_first_result(
     rx: &Receiver<serde_json::Value>,
     read_done_rx: &Receiver<()>,
@@ -441,7 +441,7 @@ fn emit_first_result(
     let first = if stdin_read_finished(read_done_rx, STDIN_READ_TIMEOUT) {
         resolve_first_result(rx, memory_limit_bytes(), evaluation_timeout())
     } else {
-        FirstResult::TimeTrip(LimitKind::OuterTime)
+        FirstResult::TimeTrip(LimitKind::StdinReadTime)
     };
     match first {
         FirstResult::Output(output) => emit(output),
