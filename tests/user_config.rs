@@ -2711,11 +2711,9 @@ fn python3_allow_entry_still_fails_closed_via_hook() {
     assert!(permission_reason(&output).contains("must not match"));
 }
 
-// Issue #807: the nine wrappers below are catalog wrappers
-// (`knowledge::always_wrapping_names`), so an `[[allow]]` rule naming one
-// would downgrade the wrapped command's verdict to Allow. Each must keep
-// failing config load (fail-closed), surfacing as the load-failure Ask
-// that names the rejected entry.
+// Issue #807: an `[[allow]]` naming a catalog exec wrapper must keep
+// failing config load; the reason names the entry, so this cannot pass on
+// some other Ask.
 #[test]
 fn catalog_wrapper_allow_entries_fail_closed_via_hook() {
     for wrapper in [
