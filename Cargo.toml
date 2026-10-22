@@ -12,10 +12,10 @@ include = [
     "src/**", "rules/**", "tests/**", "/Cargo.toml", "/README.md", "/CHANGELOG.md", "/LICENSE-*",
     "!tests/benign_corpus.rs", "!tests/bypass_corpus.rs", "!tests/bypass_corpus.toml",
     "!tests/coverage_metrics.rs", "!tests/differential.rs", "!tests/fuzz_differential.rs",
-    "!tests/golden_snapshot.rs", "!tests/guardfall.rs", "!tests/legacy_units.rs",
+    "!tests/golden_snapshot.rs", "!tests/guardfall.rs",
     "!tests/metrics.rs", "!tests/must_not_allow.rs",
     "!tests/common/golden.rs", "!tests/common/corpus.rs", "!tests/common/metrics.rs",
-    "!tests/common/legacy_rows.rs", "!tests/fixtures/differential/**", "!tests/golden/**",
+    "!tests/fixtures/differential/**", "!tests/golden/**",
     "tests/golden/legacy_units.jsonl",
 ]
 # Every test crate negated above includes tests/common/golden.rs, whose
@@ -23,8 +23,10 @@ include = [
 # item. Only the path-only self dev-dependency turns that feature on, and
 # `cargo publish` drops that dependency, so they would not compile from the
 # published package; they and the data only they read stay out of it.
-# `tests/golden/legacy_units.jsonl` stays: the lib's `#[cfg(test)]`
-# `src/legacy_units.rs` embeds it with `include_str!`.
+# `tests/legacy_units.rs` ships: it uses only `tests/common/legacy_rows.rs`
+# and `tests/common/watchdog_reason.rs` (no `test-support`) and embeds
+# `tests/golden/legacy_units.jsonl` with `include_str!`, as the lib's
+# `#[cfg(test)]` `src/legacy_units.rs` does.
 
 [[bin]]
 name = "shguard"
