@@ -135,3 +135,7 @@
 {"command":"chpst -/ /x upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
 {"command":"systemd-run --working-directory=/x upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
 {"command":"systemd-run upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
+{"command":"unshare --wd=/x upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
+{"command":"unshare -R /x upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
+{"command":"nsenter -r/x upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
+{"command":"nsenter --wd=/x upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}

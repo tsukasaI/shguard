@@ -2,8 +2,9 @@
 //! "Risks", stage R0, issue #836).
 //!
 //! `tests/golden/must_not_allow.jsonl` lists commands that must never be
-//! Allow under the embedded rules with no user config (the `analyze` entry
-//! point, equivalent to `SHGUARD_CONFIG=/dev/null`): every payload that is
+//! Allow under the embedded rules with no user config when the row has no
+//! `config` (the `analyze` entry point, equivalent to `SHGUARD_CONFIG=/dev/null`)
+//! and under that fixture's policy when it has one: every payload that is
 //! Allow under the embedded rules with no config and is named in the RFC
 //! "Problem" section or in the issues the RFC maps to R1 and R2. The golden
 //! snapshots encode today's fail-open Allows, so "no new Allow" alone would
@@ -49,7 +50,7 @@ mod golden;
 mod policy;
 
 /// Rows that are still Allow on main. Lower it when rows flip to `closed`.
-const EXPECTED_OPEN: usize = 125;
+const EXPECTED_OPEN: usize = 129;
 
 /// Rows that are not Allow today. Raise it when a row is added as `closed` or
 /// flipped from `open`.
@@ -292,6 +293,16 @@ fn run(path: &Path) -> Result<(), Vec<String>> {
     let rows = parse_rows(&path.display().to_string(), &text).map_err(|err| vec![err])?;
     let fixtures = golden::checkout_dir().join("tests/fixtures/differential");
     let policies = load_policies(&rows, &fixtures)?;
+    if let Some(control) = policies.get("resolve_symlinks.toml")
+        && policy::analyze_under_cwd(control, "upload-tool null", Some("/dev")).decision()
+            != Decision::Allow
+    {
+        return Err(vec![
+            "resolve_symlinks.toml control no longer excepted; the #810 rows no longer \
+             exercise relocation"
+                .to_string(),
+        ]);
+    }
     let (open, closed) = evaluate(&rows, &policies)?;
     println!("must_not_allow: {open} open / {closed} closed rows");
     let mut problems = Vec::new();
