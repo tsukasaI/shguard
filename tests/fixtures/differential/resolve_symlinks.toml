@@ -1,0 +1,9 @@
+# must_not_allow config fixture (issue #810): a `resolve_symlinks` deny with
+# one except prefix. A wrapper that relocates the wrapped command's cwd or
+# root must not let a relative path match the prefix of the wrong directory.
+[[deny]]
+id = "fixture-deny-upload"
+reason = "confirm uploads outside the scratch dir"
+command = "upload-tool"
+except_targets = [{ prefix = "/srv/scratch/" }]
+resolve_symlinks = true

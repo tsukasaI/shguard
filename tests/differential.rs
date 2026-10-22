@@ -35,7 +35,6 @@ use std::process::ExitCode;
 
 use shguard::config::Policy;
 use shguard::verdict::{Decision, Verdict};
-use shguard::{DecisionLogSink, HookContext};
 
 #[path = "common/corpus.rs"]
 mod corpus;
@@ -44,6 +43,8 @@ mod corpus;
 mod golden;
 #[path = "common/legacy_rows.rs"]
 mod legacy_rows;
+#[path = "common/policy.rs"]
+mod policy;
 
 const SAMPLE_PER_CORPUS: usize = 40;
 
@@ -157,37 +158,14 @@ fn outcome(verdict: &Verdict) -> Outcome {
     }
 }
 
-/// Not `FileDecisionLog`: the differential must not write a decision log.
-struct NoDecisionLog;
-
-impl DecisionLogSink for NoDecisionLog {
-    fn append(&self, _path: &Path, _command: &str, _verdict: &Verdict, _context: &HookContext) {}
-}
-
 fn old_core(policy: &Policy, command: &str) -> Outcome {
-    outcome(&shguard::analyze_with_policy(
-        command,
-        policy,
-        &HookContext::none(),
-        &NoDecisionLog,
-    ))
+    outcome(&policy::analyze_under(policy, command))
 }
 
 /// R2: replace with the new evaluation core. Until then it is the old entry
 /// point, which makes every comparison an identity check of the harness.
 fn new_core(policy: &Policy, command: &str) -> Outcome {
     old_core(policy, command)
-}
-
-fn load_policy(path: &Path) -> Result<Policy, String> {
-    // SAFETY: called from `main` before any thread is spawned; the analysis
-    // watchdog threads start only afterwards.
-    unsafe {
-        std::env::set_var("SHGUARD_CONFIG", path);
-        std::env::remove_var("XDG_CONFIG_HOME");
-        std::env::remove_var("HOME");
-    }
-    Policy::load().map_err(|err| format!("{}: {err:?}", path.display()))
 }
 
 fn env_is_one(name: &str) -> bool {
@@ -224,7 +202,7 @@ fn run() -> Result<(), String> {
 
     let mut policies = Vec::new();
     for (name, file) in CONFIGS {
-        policies.push((name, load_policy(&fixtures.join(file))?));
+        policies.push((name, policy::load_policy(&fixtures.join(file))?));
     }
 
     let mut corpora = Vec::new();
