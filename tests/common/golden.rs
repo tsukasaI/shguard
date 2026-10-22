@@ -15,9 +15,11 @@ use shguard::verdict::Decision;
 const UPDATE_ENV: &str = "SHGUARD_GOLDEN_UPDATE";
 const MAX_REPORTED_PER_BUCKET: usize = 40;
 
-#[path = "watchdog.rs"]
-mod watchdog;
-pub use watchdog::WATCHDOG_REASON_SUFFIX;
+// Not defined here: tests/legacy_units.rs ships in the package and cannot
+// include this test-support file (Cargo.toml include).
+#[path = "watchdog_reason.rs"]
+mod watchdog_reason;
+pub use watchdog_reason::WATCHDOG_REASON_SUFFIX;
 
 // Field order is the serialized key order; kept alphabetical so a record
 // reads the same as a sorted-keys JSON dump.

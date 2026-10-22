@@ -16,8 +16,8 @@ use serde_json::Value;
 
 #[path = "common/legacy_rows.rs"]
 mod legacy_rows;
-#[path = "common/watchdog.rs"]
-mod watchdog;
+#[path = "common/watchdog_reason.rs"]
+mod watchdog_reason;
 
 use legacy_rows::Kind;
 
@@ -173,10 +173,11 @@ fn replay(row: &Value) -> Result<(), Failure> {
     let command = str_field(row, "command").unwrap_or_default();
     let expect = &row["expect"];
     let verdict = shguard::analyze(command);
-    if verdict
-        .reason()
-        .is_some_and(|reason| reason.as_str().ends_with(watchdog::WATCHDOG_REASON_SUFFIX))
-    {
+    if verdict.reason().is_some_and(|reason| {
+        reason
+            .as_str()
+            .ends_with(watchdog_reason::WATCHDOG_REASON_SUFFIX)
+    }) {
         return Err(Failure::Watchdog(format!("{command:?}")));
     }
     let got = serde_json::json!({

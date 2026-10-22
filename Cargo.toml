@@ -24,9 +24,9 @@ include = [
 # `cargo publish` drops that dependency, so they would not compile from the
 # published package; they and the data only they read stay out of it.
 # `tests/legacy_units.rs` ships: it uses only `tests/common/legacy_rows.rs`
-# and `tests/common/watchdog.rs` (no `test-support`) and reads
-# `tests/golden/legacy_units.jsonl`, which the lib's `#[cfg(test)]`
-# `src/legacy_units.rs` also embeds with `include_str!`.
+# and `tests/common/watchdog_reason.rs` (no `test-support`) and embeds
+# `tests/golden/legacy_units.jsonl` with `include_str!`, as the lib's
+# `#[cfg(test)]` `src/legacy_units.rs` does.
 
 [[bin]]
 name = "shguard"
