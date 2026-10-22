@@ -179,8 +179,8 @@ const TRIP_LOG_TIMEOUT: Duration = MEMORY_POLL_INTERVAL;
 /// [`TRIP_LOG_TIMEOUT`]: that is sized for one append, and a config load
 /// reads and validates files. Not near [`EVALUATION_TIMEOUT`]: this path
 /// must stay inside the worst case documented on [`STDIN_READ_TIMEOUT`].
-/// About 60ms load plus append measured in a debug build under parallel
-/// tests; re-measure if the embedded rule set grows.
+/// About 60ms load plus append measured in a debug build in a standalone
+/// run; re-measure if the embedded rule set grows.
 const TRIP_CONFIG_LOAD_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// [`LogState`]'s "nobody has touched the decision log for this invocation
