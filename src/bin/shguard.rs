@@ -1263,8 +1263,7 @@ fn run(
     // told apart from one that lands exactly at the boundary; `Take` alone
     // would silently truncate an oversized stream to exactly `n` bytes,
     // making it indistinguishable from legitimate input of that exact
-    // size. `in_cap` is the single place the cap is applied, and input of
-    // exactly the cap size is in cap (issue #869).
+    // size.
     let mut stdin = String::new();
     let read_result = io::stdin()
         .lock()
