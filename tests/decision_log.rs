@@ -393,15 +393,24 @@ fn hook_path_watchdog_trip_is_still_logged() {
 
 /// Issue #864: a stalled stdin read is reported as a stdin-read timeout, not
 /// as an evaluation overrun, since no evaluation has started. Takes the real
-/// 10s `STDIN_READ_TIMEOUT` (no override exists); the decision log is not
-/// asserted: issue #895.
+/// 10s `STDIN_READ_TIMEOUT` (no override exists). The trip is also logged
+/// (issue #895).
 #[test]
 fn stalled_stdin_reports_the_stdin_read_timeout_reason() {
     use std::io::Read;
     use std::process::Stdio;
     use std::time::{Duration, Instant};
 
+    let log_dir = tempfile::tempdir().expect("tempdir should create");
+    let log_path = log_dir.path().join("decisions.jsonl");
+    let (_config_dir, config_path) = write_config(&format!(
+        r#"
+        decision_log_path = {:?}
+        "#,
+        log_path.to_string_lossy()
+    ));
     let mut command = cmd::shguard_std();
+    command.env("SHGUARD_CONFIG", &config_path);
     command.stdin(Stdio::piped()).stdout(Stdio::piped());
     let mut child = command.spawn().expect("shguard should spawn");
     // Held open and never written to, so the read can only end by timeout.
@@ -444,6 +453,20 @@ fn stalled_stdin_reports_the_stdin_read_timeout_reason() {
         "unexpected reason: {reason}"
     );
     assert!(!reason.contains("evaluation exceeded"));
+
+    let lines = read_jsonl_lines(&log_path);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["decision"], "Ask");
+    let logged = lines[0]["reason"]
+        .as_str()
+        .expect("log line should carry a reason");
+    assert!(
+        logged.contains(
+            "shguard: stdin read exceeded its time budget; refusing to evaluate (fail-closed)"
+        ),
+        "unexpected logged reason: {logged}"
+    );
+    assert!(!logged.contains("evaluation exceeded"));
 }
 
 // Issue #468: `permission_mode`/`agent_id` from PreToolUse stdin are

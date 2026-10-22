@@ -355,11 +355,12 @@ pub(crate) fn fs_path_canonicalizer() -> rules::PathCanonicalizer {
 /// trip arms (`log_trip_best_effort`) append a fail-closed `Ask` line
 /// against the command and context `run` sent over a side channel
 /// immediately after parsing stdin, bounded independently so a hung log
-/// target can't turn this best-effort write into a second hang. One case
-/// stays unlogged, because there is no command yet to attribute a trip to:
-/// a hang during config load or the stdin read itself, before `run` has
-/// anything to send. `shguard check` (issue #109) wraps this whole call in
-/// the same `EVALUATION_TIMEOUT` bound for the same underlying reason
+/// target can't turn this best-effort write into a second hang. A stdin read
+/// timeout (issue #895) is logged with an empty command and no context, via a
+/// bounded config load of its own. One case stays unlogged, because there is
+/// no command yet to attribute a trip to: a hang during config load, before
+/// `run` has anything to send. `shguard check` (issue #109) wraps this whole
+/// call in the same `EVALUATION_TIMEOUT` bound for the same underlying reason
 /// (`src/bin/shguard.rs`'s `evaluate_with_timeout`), but with enough grace
 /// margin added that this function's own internal trip has time to surface
 /// and be logged normally instead of losing that race — see
