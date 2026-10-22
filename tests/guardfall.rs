@@ -433,6 +433,8 @@ const GIT_CASES: &[(&str, Decision)] = &[
     ("git checkout src/../a", Decision::Ask),
     ("git checkout a..b", Decision::Ask),
     ("git checkout /abs/path", Decision::Ask),
+    ("git checkout ~/x", Decision::Ask),
+    ("git checkout ~user/x", Decision::Ask),
     ("git checkout HEAD~1", Decision::Allow),
     ("git checkout main^", Decision::Allow),
     ("git checkout -b new start", Decision::Allow),

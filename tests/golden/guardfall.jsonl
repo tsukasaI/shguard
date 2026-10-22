@@ -849,6 +849,8 @@
 {"command":"git checkout main^","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"git checkout src/","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"git checkout src/../a","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"git checkout ~/x","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"git checkout ~user/x","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"git clean -fd","decision":"Block","deny_message":null,"matched_rule":"git-clean-any"}
 {"command":"git clean -n","decision":"Block","deny_message":null,"matched_rule":"git-clean-any"}
 {"command":"git commit --amen","decision":"Block","deny_message":null,"matched_rule":"git-commit-amend"}

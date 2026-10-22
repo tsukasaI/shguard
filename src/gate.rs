@@ -12308,8 +12308,9 @@ const GIT_CHECKOUT_VALUE_FLAGS: &[&str] =
 /// - containing `*`, `?` or `[` (invalid in a refname; a pathspec glob to
 ///   git);
 /// - containing `..` anywhere (`../x`, `src/../a.rs`, `a..b`) or starting
-///   with `/` (an absolute path, including a `~/` word that resolves to
-///   one); `git check-ref-format` forbids both in a refname;
+///   with `/` or `~` (an absolute or home-relative path; a `~` word stays
+///   literal in `NormalizedWord`, so it is matched by its own prefix);
+///   `git check-ref-format` forbids all of these in a refname;
 /// - preceded by `--pathspec-from-file` (either spelling), which reads the
 ///   paths from a file and so is the path form with no operand to inspect.
 ///
@@ -12347,6 +12348,7 @@ fn git_checkout_path_operand(argv: &[NormalizedWord]) -> bool {
                     || s.contains(['*', '?', '['])
                     || s.contains("..")
                     || s.starts_with('/')
+                    || s.starts_with('~')
                     || matches!(
                         lexical_normalize(s),
                         PathForm::Rel { ref comps, .. } if comps.is_empty()
@@ -12834,6 +12836,8 @@ mod tests {
             "git checkout src/../a",
             "git checkout a..b",
             "git checkout /abs/path",
+            "git checkout ~/x",
+            "git checkout ~user/x",
         ] {
             assert_decision(command, Decision::Ask);
         }
