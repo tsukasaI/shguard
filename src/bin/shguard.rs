@@ -136,12 +136,14 @@ const MAX_STDIN_BYTES: u64 = 10 * 1024 * 1024;
 ///
 /// Not 30s or more: the worst case is `STDIN_READ_TIMEOUT` +
 /// [`EVALUATION_TIMEOUT`] + [`TRIP_LOG_TIMEOUT`] (10s + 2s + 50ms, plus
-/// process start-up), and if Claude Code kills the hook first, empty stdout
-/// is treated as allow (fail-open), so a higher value only widens that
-/// window. Users must keep the hook `timeout` above that total. Not much
-/// lower either: a producer writing the hook JSON finishes in milliseconds,
-/// so 10s is well above any realistic contention stall, while a lower value
-/// risks spurious asks on a loaded machine. Not tuned against measurements.
+/// process start-up; a read timeout instead adds [`TRIP_CONFIG_LOAD_TIMEOUT`]
+/// and [`TRIP_LOG_TIMEOUT`], well inside it), and if Claude Code kills the
+/// hook first, empty stdout is treated as allow (fail-open), so a higher
+/// value only widens that window. Users must keep the hook `timeout` above
+/// that total. Not much lower either: a producer writing the hook JSON
+/// finishes in milliseconds, so 10s is well above any realistic contention
+/// stall, while a lower value risks spurious asks on a loaded machine. Not
+/// tuned against measurements.
 const STDIN_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The command and context [`run`] sends over a dedicated channel
@@ -172,6 +174,14 @@ struct EarlyInfo {
 /// meaningfully more headroom on exactly the memory-constrained host this
 /// arm exists to protect.
 const TRIP_LOG_TIMEOUT: Duration = MEMORY_POLL_INTERVAL;
+
+/// Bound on [`stdin_read_trip_early_info`]'s config load. Not
+/// [`TRIP_LOG_TIMEOUT`]: that is sized for one append, and a config load
+/// reads and validates files. Not near [`EVALUATION_TIMEOUT`]: this path
+/// must stay inside the worst case documented on [`STDIN_READ_TIMEOUT`].
+/// About 60ms load plus append measured in a debug build in a standalone
+/// run; re-measure if the embedded rule set grows.
+const TRIP_CONFIG_LOAD_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// [`LogState`]'s "nobody has touched the decision log for this invocation
 /// yet" value — the only state [`AtomicU8::new`] is ever constructed with.
@@ -429,7 +439,8 @@ fn stdin_read_finished(read_done_rx: &Receiver<()>, timeout: Duration) -> bool {
 /// itself a time trip, reported as [`LimitKind::StdinReadTime`]), then emits
 /// whatever it resolved to. On either trip (or a worker disconnect), emits the
 /// fail-closed decision, makes a best-effort attempt to log it
-/// ([`log_trip_best_effort`], bounded by [`TRIP_LOG_TIMEOUT`]), and only then
+/// ([`log_trip_best_effort`], bounded by [`TRIP_LOG_TIMEOUT`], plus
+/// [`TRIP_CONFIG_LOAD_TIMEOUT`] on a stdin read timeout), and only then
 /// exits the process — see the module docs' "evaluation watchdog" section for
 /// why exiting, not merely returning, is required.
 fn emit_first_result(
@@ -457,9 +468,15 @@ fn emit_first_result(
             emit(shguard::adapter::render(&verdict));
             // Emitted to stdout first, deliberately: the decision Claude
             // Code actually waits on must never be delayed by this
-            // best-effort log write (see `log_trip_best_effort`'s own
-            // docs for its bound).
-            log_trip_best_effort(early_rx.try_recv().ok(), &verdict, prior_state, log_state);
+            // best-effort log write (or the config load behind it on a
+            // stdin read timeout); see `log_trip_best_effort`'s own docs
+            // for its bound.
+            let early_info = early_rx.try_recv().ok().or_else(|| {
+                matches!(kind, LimitKind::StdinReadTime)
+                    .then(stdin_read_trip_early_info)
+                    .flatten()
+            });
+            log_trip_best_effort(early_info, &verdict, prior_state, log_state);
             std::process::exit(0);
         }
     }
@@ -491,9 +508,9 @@ fn emit_first_result(
 /// - [`LOG_UNCLAIMED`]: this trip arm won outright — falls through to
 ///   perform the write itself, below.
 ///
-/// `early_info` is `None` when [`run`] never got as far as sending one — a
-/// hang during config load or the stdin read itself, before there is any
-/// command to attribute a trip to; this is a no-op in that case, same as
+/// `early_info` is `None` when [`run`] never got as far as sending one and
+/// the trip is not a stdin read timeout (see [`stdin_read_trip_early_info`]),
+/// e.g. a hang during config load; this is a no-op in that case, same as
 /// when the resolved policy has no `decision_log_path` configured at all.
 ///
 /// Runs the actual [`shguard::DecisionLogSink::append`] call on its own
@@ -553,6 +570,31 @@ fn log_trip_best_effort(
     if spawned.is_ok() {
         let _ = done_rx.recv_timeout(TRIP_LOG_TIMEOUT);
     }
+}
+
+/// What [`log_trip_best_effort`] logs for a stdin read timeout, where [`run`]
+/// has not loaded the config yet and there is no command to attribute: the
+/// user's `decision_log_path` with an empty command and no context. `None`
+/// when no `decision_log_path` is found within [`TRIP_CONFIG_LOAD_TIMEOUT`];
+/// the decision already went to stdout, so nothing else changes.
+fn stdin_read_trip_early_info() -> Option<EarlyInfo> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    // Never joined: a panic drops `tx`, which `recv_timeout` reports as no
+    // log, and a blocked load is abandoned when `main` exits.
+    std::thread::Builder::new()
+        .name("shguard-trip-config".to_string())
+        .spawn(move || {
+            if let Ok(policy) = shguard::config::Policy::load() {
+                let _ = tx.send(policy.decision_log_path().map(std::path::Path::to_path_buf));
+            }
+        })
+        .ok()?;
+    let decision_log_path = rx.recv_timeout(TRIP_CONFIG_LOAD_TIMEOUT).ok()?;
+    Some(EarlyInfo {
+        decision_log_path,
+        command: String::new(),
+        context: shguard::HookContext::none(),
+    })
 }
 
 /// Effective RSS budget used by [`resolve_first_result`] —

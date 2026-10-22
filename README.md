@@ -1307,9 +1307,11 @@ appends its own fail-closed `Ask` line to `decision_log_path`, using the
 command and context it captured right after parsing stdin, bounded
 independently (matching the inner watchdog's own RSS-poll interval) so
 that a log target which is *itself* the thing hanging can't turn this
-best-effort write into a second hang on top of the first. This still
-leaves one case unlogged: a hang during config load or the stdin read
-itself, before there is any command yet to attribute the trip to. `check`
+best-effort write into a second hang on top of the first. A stdin
+read timeout is logged too, with an empty `command` and no context, using a
+separate bounded config load to find `decision_log_path`. This still
+leaves one case unlogged: a hang during config load, before there is any
+command yet to attribute the trip to. `check`
 has no equivalent; its own outer bound (`evaluate_with_timeout`) adds
 enough grace margin over `analyze_with_policy`'s internal one that a
 genuine internal trip there still surfaces normally and gets logged the

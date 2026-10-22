@@ -17,6 +17,9 @@ All notable changes to this project are documented in this file.
 - A stdin read timeout now reports "stdin read exceeded its time budget"
   instead of the outer evaluation time budget reason, since no evaluation
   has started (#864).
+- A stdin read timeout is now written to `decision_log_path` (empty
+  `command`, no context), found by a bounded config load after the
+  decision is emitted (#895).
 
 ### Fixed
 
