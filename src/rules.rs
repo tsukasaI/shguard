@@ -705,7 +705,7 @@ fn git_config_key_is_hooks_path(key_value: &str) -> bool {
 /// unresolvable value that could resolve to the flag it needs — the floor
 /// has no way to tell "this is a marker no real command line could ever
 /// spell" apart from "this is real user input". A hand-verdict structural
-/// check (mirroring `crate::gate::git_checkout_dot`'s own shape) knows
+/// check (mirroring `crate::gate::git_checkout_path_operand`'s own shape) knows
 /// which value it's looking at is a `-c`/`--config-env` value specifically,
 /// so it can floor an unresolvable one to Ask on its own terms without
 /// touching any other rule's unrelated except-flags floor.

@@ -19,6 +19,11 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- A bare `git checkout` (no `--`) now asks when its operands cannot be a
+  ref by shape: a `./`-prefixed or trailing-slash operand, a glob
+  metacharacter (`*`, `?`, `[`), or more than one operand (`git checkout
+  ./src/a.rs`, `git checkout 'src/*.rs'`, `git checkout main src/a.rs`).
+  Branch names such as `main` and `feature/x` still pass (#850).
 - A config-load failure (including under `SHGUARD_STRICT_CONFIG`) no longer
   produces a verdict for non-Bash tools such as `Edit` and `Write`: they
   get the same no-decision output as with a loadable config. Bash still

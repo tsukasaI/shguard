@@ -828,12 +828,18 @@
 {"command":"git branch -D feature/old","decision":"Block","deny_message":null,"matched_rule":"git-branch-force-delete"}
 {"command":"git branch -d feature","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"git branch -df feature","decision":"Block","deny_message":null,"matched_rule":"git-branch-force-delete-flags"}
+{"command":"git checkout 'src/*.rs'","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"git checkout -- .","decision":"Block","deny_message":null,"matched_rule":"git-checkout-dashdash"}
 {"command":"git checkout -- src/main.rs","decision":"Block","deny_message":null,"matched_rule":"git-checkout-dashdash"}
+{"command":"git checkout -b new start","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"git checkout -f","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"git checkout .","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"git checkout ..","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"git checkout ./src/a.rs","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"git checkout a b","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"git checkout feature","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git checkout feature/x","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git checkout src/","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"git clean -fd","decision":"Block","deny_message":null,"matched_rule":"git-clean-any"}
 {"command":"git clean -n","decision":"Block","deny_message":null,"matched_rule":"git-clean-any"}
 {"command":"git commit --amen","decision":"Block","deny_message":null,"matched_rule":"git-commit-amend"}
