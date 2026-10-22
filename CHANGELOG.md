@@ -4,6 +4,14 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Breaking
+
+- `[[allow]]` rules whose `command` names `nsenter`, `setpriv`, `runcon`,
+  `choom`, `chpst`, `setuidgid`, `envuidgid`, `envdir` or `softlimit` fail
+  config load, like the other command wrappers in the catalog (#807).
+  Remove such entries before upgrading; to allow a wrapped command, write
+  the `[[allow]]` rule for the command it runs, not for the wrapper.
+
 ### Changed
 
 - A config-load failure (including under `SHGUARD_STRICT_CONFIG`) no longer
