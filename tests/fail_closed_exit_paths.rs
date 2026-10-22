@@ -478,6 +478,19 @@ fn oversized_stdin_fails_closed_to_ask() {
     assert!(permission_reason(&output).contains("exceeds"));
 }
 
+/// Input of exactly `MAX_STDIN_BYTES` is accepted and evaluated normally;
+/// only one byte more is rejected (`oversized_stdin_fails_closed_to_ask`).
+/// Trailing JSON whitespace pads a benign payload to the exact cap.
+#[test]
+fn stdin_of_exactly_the_cap_is_accepted() {
+    const MAX_STDIN_BYTES: usize = 10 * 1024 * 1024;
+    let mut stdin = bash_command("echo hi");
+    stdin.push_str(&" ".repeat(MAX_STDIN_BYTES - stdin.len()));
+    assert_eq!(stdin.len(), MAX_STDIN_BYTES);
+    let output = run_hook(&stdin);
+    assert_eq!(permission_decision(&output), "allow");
+}
+
 // ==== B-3: catch_unwind boundary ====
 
 /// Before the fix: no `catch_unwind` boundary existed at all, so any panic
