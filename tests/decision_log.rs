@@ -399,7 +399,7 @@ fn hook_path_watchdog_trip_is_still_logged() {
 fn stalled_stdin_reports_the_stdin_read_timeout_reason() {
     use std::io::Read;
     use std::process::Stdio;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     let mut command = cmd::shguard_std();
     command.stdin(Stdio::piped()).stdout(Stdio::piped());
@@ -419,12 +419,12 @@ fn stalled_stdin_reports_the_stdin_read_timeout_reason() {
         panic!("shguard did not answer a stalled stdin within 30s");
     };
     // Stdout closing does not prove the process exited: bound the wait too.
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(30);
     let status = loop {
         if let Some(status) = child.try_wait().expect("polling shguard should work") {
             break status;
         }
-        if std::time::Instant::now() >= deadline {
+        if Instant::now() >= deadline {
             child.kill().expect("hung shguard should be killable");
             child.wait().expect("killed shguard should be reaped");
             panic!("shguard did not exit within 30s of answering a stalled stdin");
