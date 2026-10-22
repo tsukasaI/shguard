@@ -27,8 +27,9 @@ impl DecisionLogSink for NoDecisionLog {
 ///
 /// When the file is missing or the config does not load.
 pub fn load_policy(path: &Path) -> Result<Policy, String> {
-    // Not left to `Policy::load`: it may treat an absent file as no config,
-    // which would silently run the row under the default policy.
+    // Checked here so a renamed fixture fails naming the fixture (an explicit
+    // `SHGUARD_CONFIG` that is missing would otherwise surface only as a
+    // `ConfigError::Io` from `Policy::load`).
     std::fs::metadata(path).map_err(|err| format!("config fixture {}: {err}", path.display()))?;
     // SAFETY: callers run this from `main` before any thread is spawned; the
     // analysis watchdog threads start only afterwards.
@@ -41,5 +42,11 @@ pub fn load_policy(path: &Path) -> Result<Policy, String> {
 }
 
 pub fn analyze_under(policy: &Policy, command: &str) -> Verdict {
-    shguard::analyze_with_policy(command, policy, &HookContext::none(), &NoDecisionLog)
+    analyze_under_cwd(policy, command, None)
+}
+
+/// Like [`analyze_under`], with the hook payload's `cwd` set to `cwd`.
+pub fn analyze_under_cwd(policy: &Policy, command: &str, cwd: Option<&str>) -> Verdict {
+    let context = HookContext::none().with_cwd(cwd.map(str::to_string));
+    shguard::analyze_with_policy(command, policy, &context, &NoDecisionLog)
 }

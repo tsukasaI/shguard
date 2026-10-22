@@ -1,9 +1,11 @@
 # must_not_allow config fixture (issue #810): a `resolve_symlinks` deny with
-# one except prefix. A wrapper that relocates the wrapped command's cwd or
-# root must not let a relative path match the prefix of the wrong directory.
+# one except prefix, `/dev/`, which exists on every runner (including a nix
+# build sandbox). A wrapper that relocates the wrapped command's cwd or root
+# must not let a relative path (`null`) match the prefix of the wrong
+# directory. Rows run with cwd `/dev`.
 [[deny]]
 id = "fixture-deny-upload"
-reason = "confirm uploads outside the scratch dir"
+reason = "confirm uploads outside /dev"
 command = "upload-tool"
-except_targets = [{ prefix = "/srv/scratch/" }]
+except_targets = [{ prefix = "/dev/" }]
 resolve_symlinks = true

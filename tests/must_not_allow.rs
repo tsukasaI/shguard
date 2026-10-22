@@ -9,10 +9,11 @@
 //! snapshots encode today's fail-open Allows, so "no new Allow" alone would
 //! keep them; this file is the baseline that says which Allows are bugs.
 //!
-//! Each row is `{"command", "status", "source", "note"?, "config"?}`. A row
-//! with `config` names a fixture under `tests/fixtures/differential/` and is
-//! evaluated under that policy (`analyze_with_policy`); a row without it is
-//! evaluated under the embedded rules alone. A `config` that is not a bare
+//! Each row is `{"command", "status", "source", "note"?, "config"?, "cwd"?}`.
+//! A row with `config` names a fixture under `tests/fixtures/differential/`
+//! and is evaluated under that policy (`analyze_with_policy`), and under that
+//! absolute `cwd` when it has one; a row without `config` is evaluated under
+//! the embedded rules alone. A `config` that is not a bare
 //! file name, or whose fixture is missing or does not load, fails the run
 //! instead of falling back to the default policy. The fixtures load before
 //! the first analysis, because loading sets a process environment variable.
@@ -48,11 +49,11 @@ mod golden;
 mod policy;
 
 /// Rows that are still Allow on main. Lower it when rows flip to `closed`.
-const EXPECTED_OPEN: usize = 119;
+const EXPECTED_OPEN: usize = 125;
 
 /// Rows that are not Allow today. Raise it when a row is added as `closed` or
 /// flipped from `open`.
-const EXPECTED_CLOSED: usize = 17;
+const EXPECTED_CLOSED: usize = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -72,6 +73,8 @@ struct Row {
     note: Option<String>,
     /// A bare file name under `tests/fixtures/differential/`.
     config: Option<String>,
+    /// The hook payload's `cwd`: an absolute path.
+    cwd: Option<String>,
 }
 
 fn parse_rows(origin: &str, text: &str) -> Result<Vec<Row>, String> {
@@ -97,11 +100,18 @@ fn parse_rows(origin: &str, text: &str) -> Result<Vec<Row>, String> {
                 "{at}: `config` must be a bare fixture file name, got {config:?}"
             ));
         }
-        if !seen.insert((row.command.clone(), row.config.clone())) {
-            return Err(format!(
-                "{at}: duplicate command {:?} under config {:?}",
-                row.command, row.config
-            ));
+        if let Some(cwd) = &row.cwd {
+            if !cwd.starts_with('/') {
+                return Err(format!("{at}: `cwd` must be an absolute path, got {cwd:?}"));
+            }
+            if row.config.is_none() {
+                return Err(format!(
+                    "{at}: `cwd` is only honored together with `config`"
+                ));
+            }
+        }
+        if !seen.insert(row.command.clone()) {
+            return Err(format!("{at}: duplicate command {:?}", row.command));
         }
         rows.push(row);
     }
@@ -145,6 +155,22 @@ fn check_reader() -> Result<(), String> {
             "non-string config",
             r#"{"command":"ls","status":"open","source":"x","config":1}"#,
         ),
+        (
+            "empty cwd",
+            r#"{"command":"ls","status":"open","source":"x","config":"allow.toml","cwd":""}"#,
+        ),
+        (
+            "relative cwd",
+            r#"{"command":"ls","status":"open","source":"x","config":"allow.toml","cwd":"dev"}"#,
+        ),
+        (
+            "cwd without config",
+            r#"{"command":"ls","status":"open","source":"x","cwd":"/dev"}"#,
+        ),
+        (
+            "non-string cwd",
+            r#"{"command":"ls","status":"open","source":"x","config":"allow.toml","cwd":1}"#,
+        ),
     ];
     for (what, text) in cases {
         if parse_rows(what, text).is_ok() {
@@ -161,7 +187,21 @@ fn check_reader() -> Result<(), String> {
         r#"{"command":"ls","status":"open","source":"x","config":"allow.toml"}"#,
         "\n",
     );
-    parse_rows("two configs", same_command_two_configs)?;
+    if parse_rows("two configs", same_command_two_configs).is_ok() {
+        return Err("reader accepted: one command under two configs".to_string());
+    }
+    let missing = parse_rows(
+        "missing fixture",
+        r#"{"command":"ls","status":"open","source":"x","config":"does-not-exist.toml"}"#,
+    )?;
+    if load_policies(
+        &missing,
+        &golden::checkout_dir().join("tests/fixtures/differential"),
+    )
+    .is_ok()
+    {
+        return Err("load_policies accepted a missing fixture".to_string());
+    }
     Ok(())
 }
 
@@ -193,7 +233,7 @@ fn verdict_of(row: &Row, policies: &BTreeMap<String, Policy>) -> Result<Verdict,
         None => Ok(shguard::analyze(&row.command)),
         Some(name) => policies
             .get(name)
-            .map(|loaded| policy::analyze_under(loaded, &row.command))
+            .map(|loaded| policy::analyze_under_cwd(loaded, &row.command, row.cwd.as_deref()))
             .ok_or_else(|| format!("config fixture {name:?} was not loaded")),
     }
 }

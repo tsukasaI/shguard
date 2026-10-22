@@ -127,10 +127,11 @@
 {"command":"git -c \"$X\" status","status":"closed","source":"#682","config":"allow_git.toml"}
 {"command":"git $C core.fsmonitor=x status","status":"open","source":"#702","config":"allow_git.toml"}
 {"command":"git $C core.fsmonitor='rm -rf ~' status","status":"open","source":"#702","config":"allow_git.toml"}
-{"command":"git2 -C /etc add passwd","status":"open","source":"#818","config":"allow_git.toml"}
-{"command":"git2 add /etc/passwd","status":"open","source":"#818","config":"allow_git.toml"}
-{"command":"chroot / upload-tool /srv/scratch/ok.md","status":"closed","source":"#810","config":"resolve_symlinks.toml"}
-{"command":"unshare -w /x upload-tool ok.md","status":"closed","source":"#810","config":"resolve_symlinks.toml"}
-{"command":"nsenter -w/x upload-tool ok.md","status":"closed","source":"#810","config":"resolve_symlinks.toml"}
-{"command":"systemd-run --working-directory=/x upload-tool ok.md","status":"closed","source":"#810","config":"resolve_symlinks.toml"}
-{"command":"pkexec upload-tool ok.md","status":"closed","source":"#810","config":"resolve_symlinks.toml"}
+{"command":"git2 -C /etc add passwd","status":"open","source":"#818","config":"deny_git_etc.toml"}
+{"command":"git2 add /etc/passwd","status":"open","source":"#818","config":"deny_git_etc.toml"}
+{"command":"unshare -w /x upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
+{"command":"nsenter -w/x upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
+{"command":"chroot /x upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
+{"command":"chpst -/ /x upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
+{"command":"systemd-run --working-directory=/x upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
+{"command":"systemd-run upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
