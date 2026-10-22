@@ -42,7 +42,8 @@ All notable changes to this project are documented in this file.
   has started (#864). Library callers: the public enum
   `shguard::policy::LimitKind` gained a `LimitKind::StdinReadTime` variant
   and is not `#[non_exhaustive]`, so a downstream exhaustive `match` no
-  longer compiles; add a wildcard arm.
+  longer compiles; handle `LimitKind::StdinReadTime` (or add a wildcard
+  arm).
 - A stdin read timeout is now written to `decision_log_path` (empty
   `command`, no context), found by a bounded config load after the
   decision is emitted (#895).
@@ -54,7 +55,8 @@ All notable changes to this project are documented in this file.
   renders once (#684). Library callers: `LoadError::source()` on
   `shguard::config::LoadError` now returns `None`; to reach the underlying
   `ConfigError`, call `LoadError::error()` instead of walking the source
-  chain.
+  chain; the `source()` of that `ConfigError` still reaches a nested
+  `std::io::Error` for read failures.
 - A quoted-delimiter heredoc body (`<<'EOF'`, `<<"EOF"`, `<<\EOF`) no longer
   counts toward the raw nesting caps, so `cat > file <<'EOF'` writing code
   or markdown is analyzed instead of asking (#627).
