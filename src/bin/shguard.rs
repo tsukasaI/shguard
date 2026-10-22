@@ -1263,14 +1263,13 @@ fn run(
     // told apart from one that lands exactly at the boundary; `Take` alone
     // would silently truncate an oversized stream to exactly `n` bytes,
     // making it indistinguishable from legitimate input of that exact
-    // size. `stdin.len()` after the read is the actual byte count actually
-    // read; only `> MAX_STDIN_BYTES` (not `>=`) rejects, so input of
-    // exactly the cap size is still accepted.
+    // size.
     let mut stdin = String::new();
     let read_result = io::stdin()
         .lock()
         .take(MAX_STDIN_BYTES + 1)
         .read_to_string(&mut stdin);
+    let in_cap = stdin.len() as u64 <= MAX_STDIN_BYTES;
     // Ends `main`'s stdin-read phase and starts its `evaluation_timeout()`
     // (issue #689). A closed receiver means `main` already tripped the read
     // phase and is on its way out.
@@ -1291,7 +1290,7 @@ fn run(
             // payload qualifies; anything else keeps the config-failure
             // verdict.
             if read_result.is_ok()
-                && stdin.len() as u64 <= MAX_STDIN_BYTES
+                && in_cap
                 && let Some(no_decision) = shguard::adapter::non_bash_no_decision(&stdin)
             {
                 return no_decision;
@@ -1309,9 +1308,7 @@ fn run(
     };
 
     match read_result {
-        Ok(_) if stdin.len() as u64 > MAX_STDIN_BYTES => {
-            reject_input(&policy, InputStage::StdinOverCap(MAX_STDIN_BYTES))
-        }
+        Ok(_) if !in_cap => reject_input(&policy, InputStage::StdinOverCap(MAX_STDIN_BYTES)),
         Ok(_) => {
             // Issue #459: sent before `handle_with_policy`'s own call into
             // `analyze_with_policy` — the one call in this function that
