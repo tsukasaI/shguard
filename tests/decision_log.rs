@@ -418,8 +418,22 @@ fn stalled_stdin_reports_the_stdin_read_timeout_reason() {
         child.wait().expect("killed shguard should be reaped");
         panic!("shguard did not answer a stalled stdin within 30s");
     };
-    child.wait().expect("shguard should exit");
+    // Stdout closing does not prove the process exited: bound the wait too.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("polling shguard should work") {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().expect("hung shguard should be killable");
+            child.wait().expect("killed shguard should be reaped");
+            panic!("shguard did not exit within 30s of answering a stalled stdin");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(status.success(), "shguard exited with {status}");
     let output: Value = serde_json::from_slice(&stdout).expect("stdout should be valid JSON");
+    assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "ask");
     let reason = output["hookSpecificOutput"]["permissionDecisionReason"]
         .as_str()
         .expect("decision should carry a reason");

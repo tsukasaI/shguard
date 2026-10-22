@@ -39,13 +39,14 @@ pub enum InputStage {
     StdinReadError(String),
 }
 
-/// Which bound, trip or internal failure cut evaluation short. Payloads
-/// are the measurements the reason text reports.
+/// Which bound, trip or internal failure cut evaluation short, or kept it
+/// from starting. Payloads are the measurements the reason text reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LimitKind {
     InnerTime,
     InnerMemory(u64),
     OuterTime,
+    /// The hook's stdin read outlasted `STDIN_READ_TIMEOUT`; no evaluation had started.
     StdinReadTime,
     OuterMemory(u64),
     Disconnected,
