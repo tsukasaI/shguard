@@ -140,9 +140,10 @@ const MAX_STDIN_BYTES: u64 = 10 * 1024 * 1024;
 /// and [`TRIP_LOG_TIMEOUT`], well inside it), and if Claude Code kills the
 /// hook first, empty stdout is treated as allow (fail-open), so a higher
 /// value only widens that window. Users must keep the hook `timeout` above
-/// that total. Not much lower either: a producer writing the hook JSON finishes in milliseconds,
-/// so 10s is well above any realistic contention stall, while a lower value
-/// risks spurious asks on a loaded machine. Not tuned against measurements.
+/// that total. Not much lower either: a producer writing the hook JSON
+/// finishes in milliseconds, so 10s is well above any realistic contention
+/// stall, while a lower value risks spurious asks on a loaded machine. Not
+/// tuned against measurements.
 const STDIN_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The command and context [`run`] sends over a dedicated channel
@@ -178,6 +179,8 @@ const TRIP_LOG_TIMEOUT: Duration = MEMORY_POLL_INTERVAL;
 /// [`TRIP_LOG_TIMEOUT`]: that is sized for one append, and a config load
 /// reads and validates files. Not near [`EVALUATION_TIMEOUT`]: this path
 /// must stay inside the worst case documented on [`STDIN_READ_TIMEOUT`].
+/// About 60ms load plus append measured in a debug build under parallel
+/// tests; re-measure if the embedded rule set grows.
 const TRIP_CONFIG_LOAD_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// [`LogState`]'s "nobody has touched the decision log for this invocation
@@ -436,7 +439,8 @@ fn stdin_read_finished(read_done_rx: &Receiver<()>, timeout: Duration) -> bool {
 /// itself a time trip, reported as [`LimitKind::StdinReadTime`]), then emits
 /// whatever it resolved to. On either trip (or a worker disconnect), emits the
 /// fail-closed decision, makes a best-effort attempt to log it
-/// ([`log_trip_best_effort`], bounded by [`TRIP_LOG_TIMEOUT`]), and only then
+/// ([`log_trip_best_effort`], bounded by [`TRIP_LOG_TIMEOUT`], plus
+/// [`TRIP_CONFIG_LOAD_TIMEOUT`] on a stdin read timeout), and only then
 /// exits the process — see the module docs' "evaluation watchdog" section for
 /// why exiting, not merely returning, is required.
 fn emit_first_result(
@@ -464,8 +468,9 @@ fn emit_first_result(
             emit(shguard::adapter::render(&verdict));
             // Emitted to stdout first, deliberately: the decision Claude
             // Code actually waits on must never be delayed by this
-            // best-effort log write (see `log_trip_best_effort`'s own
-            // docs for its bound).
+            // best-effort log write (or the config load behind it on a
+            // stdin read timeout); see `log_trip_best_effort`'s own docs
+            // for its bound.
             let early_info = early_rx.try_recv().ok().or_else(|| {
                 matches!(kind, LimitKind::StdinReadTime)
                     .then(stdin_read_trip_early_info)
@@ -570,9 +575,8 @@ fn log_trip_best_effort(
 /// What [`log_trip_best_effort`] logs for a stdin read timeout, where [`run`]
 /// has not loaded the config yet and there is no command to attribute: the
 /// user's `decision_log_path` with an empty command and no context. `None`
-/// when the config fails to load, panics, or outlasts
-/// [`TRIP_CONFIG_LOAD_TIMEOUT`]; the decision already went to stdout, so
-/// none of those changes anything else.
+/// when no `decision_log_path` is found within [`TRIP_CONFIG_LOAD_TIMEOUT`];
+/// the decision already went to stdout, so nothing else changes.
 fn stdin_read_trip_early_info() -> Option<EarlyInfo> {
     let (tx, rx) = std::sync::mpsc::channel();
     // Never joined: a panic drops `tx`, which `recv_timeout` reports as no
