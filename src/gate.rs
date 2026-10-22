@@ -4510,23 +4510,21 @@ fn evaluate_simple_command_core(
         .with_deny_message(rule.deny_message().cloned())
     });
 
-    // Issue #452, fix 2: `git checkout <path>` with no `--` separator is
+    // Issues #452/#850: `git checkout <path>` with no `--` separator is
     // positionally indistinguishable from `git checkout <branch>` for pure
-    // rule data, EXCEPT when a resolved operand normalizes to a bare,
-    // no-descent path (`.`, `..`, and their trailing-slash/descend-then-
-    // ascend equivalents) — see `git_checkout_dot`'s own docs. Ask, not
-    // Block: the issue's expected column reserves Block for the
-    // unambiguous `--` spelling, already handled above by
+    // rule data, EXCEPT when the operands cannot be a ref by shape — see
+    // `git_checkout_path_operand`'s own docs. Ask, not Block: the
+    // unambiguous `--` spelling is already handled above by
     // `git-checkout-dashdash`.
     let rule_or_checkout_verdict = rule_verdict.or_else(|| {
-        git_checkout_dot(&argv).then(|| {
+        git_checkout_path_operand(&argv).then(|| {
             Verdict::ask(
                 Reason::new(
-                    "git checkout <path> with a resolved operand normalizing to a bare, \
-                     no-descent path (`.`, `..`, or an equivalent respelling) discards every \
-                     uncommitted working-tree change reachable from this invocation's cwd — the \
-                     same intent as `git checkout -- .` (Block), but without the `--` separator \
-                     a rule-data match can key off of",
+                    "git checkout with operands that cannot be a ref (a bare `.`/`..` path, a \
+                     `./`-prefixed or trailing-slash operand, a glob pattern, or more than one \
+                     operand) is a path checkout that overwrites uncommitted working-tree \
+                     changes — the same intent as `git checkout -- <path>` (Block), but without \
+                     the `--` separator a rule-data match can key off of",
                 ),
                 argv.clone(),
             )
@@ -12290,28 +12288,81 @@ fn git_push_plus_refspec(argv: &[NormalizedWord]) -> bool {
     false
 }
 
-/// Issue #452, fix 2: `git checkout <path>` with no `--` separator is
-/// positionally indistinguishable from `git checkout <branch>` — pure
-/// rule data can't tell "this operand is a path" from "this operand is a
-/// branch/commit-ish name" — EXCEPT when the operand lexically normalizes
-/// to a bare, no-descent [`PathForm::Rel`] (empty `comps`, any `ascent`:
-/// `.`, `./`, `..`, `../`, `foo/..`, …). `git check-ref-format` forbids
-/// `..` anywhere in a refname, so a purely-ascending operand — same as a
-/// bare `.` — can never be a branch/commit-ish name either; this shape can
-/// only ever be the destructive path form, discarding every uncommitted
-/// working-tree change under (or, for `..`, above) the invocation's cwd.
-/// Ask, not Block — the issue's own expected column reserves Block for
-/// the unambiguous `--` spelling.
-fn git_checkout_dot(argv: &[NormalizedWord]) -> bool {
+/// `git checkout` flags that consume their value as a SEPARATE following
+/// token, so the operand walk in [`git_checkout_path_operand`] doesn't count
+/// that value (`-b new`'s `new`) as a second positional operand.
+const GIT_CHECKOUT_VALUE_FLAGS: &[&str] =
+    &["-b", "-B", "--orphan", "--conflict", "--pathspec-from-file"];
+
+/// Issue #452, fix 2 and issue #850: `git checkout <path>` with no `--`
+/// separator is positionally indistinguishable from `git checkout <branch>`
+/// for pure rule data. Lexical shape settles it only when an operand (or
+/// the operand list) cannot be a ref, so it can only be the destructive
+/// path form. True when the operands, after skipping flags and their
+/// separate values, are any of:
+///
+/// - two or more words (`git checkout <branch> <path>` overwrites `<path>`);
+/// - a bare, no-descent [`PathForm::Rel`] (`.`, `./`, `..`, `foo/..`, ...;
+///   `git check-ref-format` forbids `..` in a refname);
+/// - `./`-prefixed, or ending in `/` (neither is a valid refname);
+/// - containing `*`, `?` or `[` (invalid in a refname; a pathspec glob to
+///   git);
+/// - containing `..` anywhere (`../x`, `src/../a.rs`, `a..b`) or starting
+///   with `/` or `~` (an absolute or home-relative path; a `~` word stays
+///   literal in `NormalizedWord`, so it is matched by its own prefix);
+///   `git check-ref-format` forbids all of these in a refname;
+/// - preceded by `--pathspec-from-file` (either spelling), which reads the
+///   paths from a file and so is the path form with no operand to inspect.
+///
+/// `HEAD~1`, `main^`, `@{-1}` and `a@{1}` stay Allow.
+///
+/// No filesystem existence check: a slash-named branch such as `feature/x`
+/// stays Allow. Any `--` makes git treat the rest as paths, which
+/// `git-checkout-dashdash` already Blocks, so the walk bails out there.
+/// Ask, not Block: the unambiguous `--` spelling keeps Block.
+fn git_checkout_path_operand(argv: &[NormalizedWord]) -> bool {
     let Some(operands) = git_subcommand_operands(argv, "checkout") else {
         return false;
     };
-    operands.iter().any(|word| match word.resolution() {
-        Resolution::Resolved(s) if !s.starts_with('-') => {
-            matches!(lexical_normalize(s), PathForm::Rel { ref comps, .. } if comps.is_empty())
+    let mut positional = 0usize;
+    let mut index = 0;
+    while index < operands.len() {
+        match operands[index].resolution() {
+            Resolution::Resolved(s) if s == "--" => return false,
+            Resolution::Resolved(s)
+                if s == "--pathspec-from-file" || s.starts_with("--pathspec-from-file=") =>
+            {
+                return true;
+            }
+            Resolution::Resolved(s) if s.starts_with('-') && s != "-" => {
+                index += if GIT_CHECKOUT_VALUE_FLAGS.contains(&s.as_str()) {
+                    2
+                } else {
+                    1
+                };
+                continue;
+            }
+            Resolution::Resolved(s) => {
+                if s.starts_with("./")
+                    || s.ends_with('/')
+                    || s.contains(['*', '?', '['])
+                    || s.contains("..")
+                    || s.starts_with('/')
+                    || s.starts_with('~')
+                    || matches!(
+                        lexical_normalize(s),
+                        PathForm::Rel { ref comps, .. } if comps.is_empty()
+                    )
+                {
+                    return true;
+                }
+                positional += 1;
+            }
+            _ => positional += 1,
         }
-        _ => false,
-    })
+        index += 1;
+    }
+    positional > 1
 }
 
 const GIT_CONFIG_ALIAS_REASON: &str = "git -c alias.<name>=<value>/--config-env=alias.<name>=<value> defines or overrides a \
@@ -12337,7 +12388,7 @@ const GIT_CONFIG_RUNS_COMMAND_ASK_REASON: &str = "git -c/--config-env sets crede
 /// why a `required_flags`-keyed rule isn't used here (a synthetic marker
 /// flag can't be told apart from a genuinely unresolvable one by
 /// `crate::rules::CommandRule`'s except-flags floor). Structural,
-/// hand-verdict shape mirrors [`git_checkout_dot`] just above. `alias`
+/// hand-verdict shape mirrors [`git_checkout_path_operand`] just above. `alias`
 /// outranks `include.path` when both are present on the same line —
 /// checked in that order, first match wins, consistent with this scan not
 /// needing to report both.
@@ -12764,6 +12815,54 @@ mod tests {
             verdict.decision(),
             verdict.reason().map(super::Reason::as_str)
         );
+    }
+
+    #[test]
+    fn git_checkout_bare_operand_that_cannot_be_a_ref_asks() {
+        for command in [
+            "git checkout ./src/a.rs",
+            "git checkout 'src/*.rs'",
+            "git checkout 'src/a?.rs'",
+            "git checkout 'src/[ab].rs'",
+            "git checkout a b",
+            "git checkout main src/a.rs",
+            "git checkout src/",
+            "git checkout -q ./a.rs",
+            "git checkout --pathspec-from-file=-",
+            "git checkout --pathspec-from-file=list.txt",
+            "git checkout --pathspec-from-file list.txt --pathspec-file-nul",
+            "git checkout main --pathspec-from-file=f",
+            "git checkout ../x",
+            "git checkout src/../a",
+            "git checkout a..b",
+            "git checkout /abs/path",
+            "git checkout ~/x",
+            "git checkout ~user/x",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+    }
+
+    #[test]
+    fn git_checkout_bare_operand_that_can_be_a_ref_allows() {
+        for command in [
+            "git checkout main",
+            "git checkout feature/x",
+            "git checkout -",
+            "git checkout @{-1}",
+            "git checkout HEAD~1",
+            "git checkout main^",
+            "git checkout a@{1}",
+            "git checkout v1.2",
+            "git checkout abc123",
+            "git checkout -q --detach main",
+            "git checkout -b new start",
+            "git checkout -B new start",
+            "git checkout --orphan new",
+            "git checkout --conflict merge main",
+        ] {
+            assert_decision(command, Decision::Allow);
+        }
     }
 
     /// A word made of nothing but repeated overflowing-tilde runs: the

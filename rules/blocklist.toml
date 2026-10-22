@@ -931,9 +931,11 @@ required_flags = ["--"]
 # switching, yet `-f` alone doesn't name a specific path the way `-- .`
 # does) — Ask rather than Block. A flagless `git checkout .`/`git checkout
 # <path>` is positionally indistinguishable from `git checkout <branch>`
-# in rule data at all; `src/gate.rs`'s `git_checkout_or_restore_dot` covers
-# the one case that's unambiguous regardless of position: an operand that
-# lexically normalizes to `.` can never be a branch/commit-ish name.
+# in rule data at all; `src/gate.rs`'s `git_checkout_path_operand` covers
+# the cases that are unambiguous regardless of position: an operand that
+# lexically normalizes to `.`, starts with `./`, ends in `/`, contains a glob
+# metacharacter, or a second operand can never be a branch/commit-ish name
+# (issue #850).
 [[command]]
 id = "git-checkout-force-ask"
 decision = "ask"
