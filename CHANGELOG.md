@@ -4,6 +4,19 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Breaking
+
+- The wrappers `nsenter`, `setpriv`, `runcon`, `choom`, `chpst`,
+  `setuidgid`, `envuidgid`, `envdir` and `softlimit` entered the catalog in
+  0.9.3 (#724) without a note here. Since 0.9.3 an `[[allow]]` entry whose
+  `command` names one fails config load, like the other command wrappers
+  in the catalog, which fails shguard closed for every command until the
+  entry is removed (#807). A `command_prefix` that any of these names
+  starts with, e.g. `ns`, `soft`, `setp`, `cho`, is rejected the same way.
+  Remove or narrow the entry. To allow a wrapped command, write the
+  `[[allow]]` rule for the command it runs, not for the wrapper; a wrapper
+  flag shguard does not model still floors to Ask.
+
 ### Changed
 
 - A config-load failure (including under `SHGUARD_STRICT_CONFIG`) no longer

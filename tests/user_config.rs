@@ -2711,6 +2711,43 @@ fn python3_allow_entry_still_fails_closed_via_hook() {
     assert!(permission_reason(&output).contains("must not match"));
 }
 
+// Issue #807: an `[[allow]]` naming a catalog exec wrapper must keep
+// failing config load; the reason names the entry, so this cannot pass on
+// some other Ask.
+#[test]
+fn catalog_wrapper_allow_entries_fail_closed_via_hook() {
+    for wrapper in [
+        "nsenter",
+        "setpriv",
+        "runcon",
+        "choom",
+        "chpst",
+        "setuidgid",
+        "envuidgid",
+        "envdir",
+        "softlimit",
+    ] {
+        let id = format!("allow-{wrapper}");
+        let (_dir, config_path) = write_config(&format!(
+            r#"
+        [[allow]]
+        id = "{id}"
+        reason = "test"
+        command = "{wrapper}"
+    "#
+        ));
+
+        let output = run_hook(
+            &bash_command(&format!("{wrapper} x rm -rf /")),
+            &[("SHGUARD_CONFIG", config_path.to_str().unwrap())],
+        );
+        assert_eq!(permission_decision(&output), "ask", "{wrapper}");
+        let reason = permission_reason(&output);
+        assert!(reason.contains(&id), "{wrapper}: {reason}");
+        assert!(reason.contains("must not match"), "{wrapper}: {reason}");
+    }
+}
+
 // Issue #461: `SHGUARD_CONFIG=/dev/null` is documented (`scripts/smoke.sh`)
 // as loading an empty config so only the embedded ruleset applies. Before
 // the fix, `self_protection_directories("/dev/null")` yielded the literal
