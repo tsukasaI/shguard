@@ -14,11 +14,10 @@ use std::process::ExitCode;
 
 use serde_json::Value;
 
-#[path = "common/golden.rs"]
-#[allow(dead_code)]
-mod golden;
 #[path = "common/legacy_rows.rs"]
 mod legacy_rows;
+#[path = "common/watchdog.rs"]
+mod watchdog;
 
 use legacy_rows::Kind;
 
@@ -176,7 +175,7 @@ fn replay(row: &Value) -> Result<(), Failure> {
     let verdict = shguard::analyze(command);
     if verdict
         .reason()
-        .is_some_and(|reason| reason.as_str().ends_with(golden::WATCHDOG_REASON_SUFFIX))
+        .is_some_and(|reason| reason.as_str().ends_with(watchdog::WATCHDOG_REASON_SUFFIX))
     {
         return Err(Failure::Watchdog(format!("{command:?}")));
     }
