@@ -500,6 +500,32 @@ targets = [
     { strip = "of=", normalized = "/etc/shadow" },
 ]
 
+# Issue #888: `find /x -exec dd if=/dev/zero of={} \;` zeroes (or otherwise
+# overwrites) every matched file — the same find-placeholder class
+# `rm-force-find-placeholder-target` covers for rm -f, via the same `{}`,
+# `/{}`, `~/{}` normalized re-roots (see that rule for the collapse
+# semantics). Separate rules from dd-write-device/dcfldd-write-device so
+# their device-specific reasons stay accurate.
+[[command]]
+id = "dd-find-placeholder-target"
+reason = "dd writing to find's own {} placeholder overwrites every matched file, unrecoverably"
+command = "dd"
+targets = [
+    { strip = "of=", normalized = "{}" },
+    { strip = "of=", normalized = "/{}" },
+    { strip = "of=", normalized = "~/{}" },
+]
+
+[[command]]
+id = "dcfldd-find-placeholder-target"
+reason = "dcfldd writing to find's own {} placeholder overwrites every matched file, unrecoverably"
+command = "dcfldd"
+targets = [
+    { strip = "of=", normalized = "{}" },
+    { strip = "of=", normalized = "/{}" },
+    { strip = "of=", normalized = "~/{}" },
+]
+
 # Issue #136: rsync/mv/install writing a regular file's bytes onto a /dev/
 # device special file is the same destructive effect as the already-Block
 # dd/tee/redirect shapes, but none of these three had ANY /dev/* coverage.

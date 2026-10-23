@@ -91,6 +91,7 @@
 {"kind":"excluded","test":"gate::tests::compose_argv_against_cwd_now_rewrites_argv_0_too","reason":"no gate or rules engine call with a command or argv input"}
 {"kind":"excluded","test":"gate::tests::escalation_floor_allow_is_rejected_at_config_load","reason":"no gate or rules engine call with a command or argv input"}
 {"kind":"excluded","test":"gate::tests::escalation_floor_rejects_unknown_value","reason":"no gate or rules engine call with a command or argv input"}
+{"kind":"excluded","test":"gate::tests::git_checkout_short_bundle_ending_in_b_consumes_its_value","reason":"no gate or rules engine call with a command or argv input"}
 {"kind":"excluded","test":"gate::tests::invariant_violation_fallback_asks_not_allow","reason":"no gate or rules engine call with a command or argv input"}
 {"kind":"excluded","test":"gate::tests::issue_139_split_with_ifs_all_delimiter_value_under_non_whitespace_ifs","reason":"no gate or rules engine call with a command or argv input"}
 {"kind":"excluded","test":"gate::tests::issue_139_split_with_ifs_all_delimiter_value_under_whitespace_ifs","reason":"no gate or rules engine call with a command or argv input"}
@@ -1294,8 +1295,8 @@
 {"kind":"gate","command":"git checkout -q --detach main","expect":{"decision":"allow","reason":null,"rule":null,"deny_message":null,"suppressed_by":null}}
 {"kind":"gate","command":"git checkout -q ./a.rs","expect":{"decision":"ask","reason":"git checkout with operands that cannot be a ref (a bare `.`/`..` path, a `./`-prefixed or trailing-slash operand, a glob pattern, or more than one operand) is a path checkout that overwrites uncommitted working-tree changes — the same intent as `git checkout -- <path>` (Block), but without the `--` separator a rule-data match can key off of","rule":null,"deny_message":null,"suppressed_by":null}}
 {"kind":"gate","command":"git checkout -q a b","expect":{"decision":"ask","reason":"git checkout with operands that cannot be a ref (a bare `.`/`..` path, a `./`-prefixed or trailing-slash operand, a glob pattern, or more than one operand) is a path checkout that overwrites uncommitted working-tree changes — the same intent as `git checkout -- <path>` (Block), but without the `--` separator a rule-data match can key off of","rule":null,"deny_message":null,"suppressed_by":null}}
-{"kind":"gate","command":"git checkout -qb new start","expect":{"decision":"allow","reason":null,"rule":null,"deny_message":null,"suppressed_by":null}}
 {"kind":"gate","command":"git checkout -qb new start a","expect":{"decision":"ask","reason":"git checkout with operands that cannot be a ref (a bare `.`/`..` path, a `./`-prefixed or trailing-slash operand, a glob pattern, or more than one operand) is a path checkout that overwrites uncommitted working-tree changes — the same intent as `git checkout -- <path>` (Block), but without the `--` separator a rule-data match can key off of","rule":null,"deny_message":null,"suppressed_by":null}}
+{"kind":"gate","command":"git checkout -qb new start","expect":{"decision":"allow","reason":null,"rule":null,"deny_message":null,"suppressed_by":null}}
 {"kind":"gate","command":"git checkout -qbnew a b","expect":{"decision":"ask","reason":"git checkout with operands that cannot be a ref (a bare `.`/`..` path, a `./`-prefixed or trailing-slash operand, a glob pattern, or more than one operand) is a path checkout that overwrites uncommitted working-tree changes — the same intent as `git checkout -- <path>` (Block), but without the `--` separator a rule-data match can key off of","rule":null,"deny_message":null,"suppressed_by":null}}
 {"kind":"gate","command":"git checkout -tb x origin/main","expect":{"decision":"allow","reason":null,"rule":null,"deny_message":null,"suppressed_by":null}}
 {"kind":"gate","command":"git checkout ../x","expect":{"decision":"ask","reason":"git checkout with operands that cannot be a ref (a bare `.`/`..` path, a `./`-prefixed or trailing-slash operand, a glob pattern, or more than one operand) is a path checkout that overwrites uncommitted working-tree changes — the same intent as `git checkout -- <path>` (Block), but without the `--` separator a rule-data match can key off of","rule":null,"deny_message":null,"suppressed_by":null}}
@@ -2668,10 +2669,17 @@
 {"kind":"rules","method":"match_command","input":{"argv":["cp","evil.toml","~alice/../bob/.config/shguard/config.toml"]},"expect":null}
 {"kind":"rules","method":"match_command","input":{"argv":["cp","evil.toml","~alice/../home/bob/.config/shguard/config.toml"]},"expect":null}
 {"kind":"rules","method":"match_command","input":{"argv":["cp","payload","~/.config/"]},"expect":null}
+{"kind":"rules","method":"match_command","input":{"argv":["dcfldd","if=/dev/zero","of=/{}"]},"expect":"dcfldd-find-placeholder-target"}
+{"kind":"rules","method":"match_command","input":{"argv":["dcfldd","if=/dev/zero","of={}"]},"expect":"dcfldd-find-placeholder-target"}
+{"kind":"rules","method":"match_command","input":{"argv":["dcfldd","if=/dev/zero","of=~/{}"]},"expect":"dcfldd-find-placeholder-target"}
 {"kind":"rules","method":"match_command","input":{"argv":["dd","if=/dev/zero","of=./backup.img"]},"expect":null}
 {"kind":"rules","method":"match_command","input":{"argv":["dd","if=/dev/zero","of=/dev/sda"]},"expect":"dd-write-device"}
+{"kind":"rules","method":"match_command","input":{"argv":["dd","if=/dev/zero","of=/{}"]},"expect":"dd-find-placeholder-target"}
+{"kind":"rules","method":"match_command","input":{"argv":["dd","if=/dev/zero","of={}"]},"expect":"dd-find-placeholder-target"}
 {"kind":"rules","method":"match_command","input":{"argv":["dd","if=/dev/zero","of=~/.config/shguard"]},"expect":"self-protect-config-dd-tilde"}
 {"kind":"rules","method":"match_command","input":{"argv":["dd","if=/dev/zero","of=~/.config/shguard/config.toml"]},"expect":"self-protect-config-dd-tilde"}
+{"kind":"rules","method":"match_command","input":{"argv":["dd","if=/dev/zero","of=~/{}"]},"expect":"dd-find-placeholder-target"}
+{"kind":"rules","method":"match_command","input":{"argv":["dd","if=a","of=out.img"]},"expect":null}
 {"kind":"rules","method":"match_command","input":{"argv":["dd","of=../../../../dev/sda"]},"expect":null}
 {"kind":"rules","method":"match_command","input":{"argv":["dd","of=~-/../dev/sda"]},"expect":null}
 {"kind":"rules","method":"match_command","input":{"argv":["dd","of=~-/dev/sda"]},"expect":null}
@@ -2988,7 +2996,9 @@
 {"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"blkdiscard-any-device"},"expect":false}
 {"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"cp-remove-destination-device"},"expect":false}
 {"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"cp-write-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"dcfldd-find-placeholder-target"},"expect":false}
 {"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"dcfldd-write-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"dd-find-placeholder-target"},"expect":false}
 {"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"dd-write-device"},"expect":false}
 {"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"enable-loadable-builtin"},"expect":false}
 {"kind":"rules","method":"rule_matches","input":{"argv":["alice","-c","ls"],"rule":"find-delete"},"expect":false}
@@ -3078,7 +3088,9 @@
 {"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"blkdiscard-any-device"},"expect":false}
 {"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"cp-remove-destination-device"},"expect":false}
 {"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"cp-write-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"dcfldd-find-placeholder-target"},"expect":false}
 {"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"dcfldd-write-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"dd-find-placeholder-target"},"expect":false}
 {"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"dd-write-device"},"expect":false}
 {"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"enable-loadable-builtin"},"expect":false}
 {"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"find-delete"},"expect":false}
@@ -3166,7 +3178,9 @@
 {"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"truncate-zero"},"expect":false}
 {"kind":"rules","method":"rule_matches","input":{"argv":["git","-c","git pull"],"rule":"wipefs-any-device"},"expect":false}
 {"kind":"rules","method":"rule_matches","input":{"argv":["git","push","--force","origin","main"],"rule":"blkdiscard-any-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","push","--force","origin","main"],"rule":"dcfldd-find-placeholder-target"},"expect":false}
 {"kind":"rules","method":"rule_matches","input":{"argv":["git","push","--force","origin","main"],"rule":"dcfldd-write-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git","push","--force","origin","main"],"rule":"dd-find-placeholder-target"},"expect":false}
 {"kind":"rules","method":"rule_matches","input":{"argv":["git","push","--force","origin","main"],"rule":"dd-write-device"},"expect":false}
 {"kind":"rules","method":"rule_matches","input":{"argv":["git","push","--force","origin","main"],"rule":"find-delete"},"expect":false}
 {"kind":"rules","method":"rule_matches","input":{"argv":["git","push","--force","origin","main"],"rule":"git-push-force"},"expect":true}
@@ -3192,7 +3206,9 @@
 {"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"blkdiscard-any-device"},"expect":false}
 {"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"cp-remove-destination-device"},"expect":false}
 {"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"cp-write-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"dcfldd-find-placeholder-target"},"expect":false}
 {"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"dcfldd-write-device"},"expect":false}
+{"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"dd-find-placeholder-target"},"expect":false}
 {"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"dd-write-device"},"expect":false}
 {"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"enable-loadable-builtin"},"expect":false}
 {"kind":"rules","method":"rule_matches","input":{"argv":["git"],"rule":"find-delete"},"expect":false}
