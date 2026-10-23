@@ -8,8 +8,9 @@
 //! Configs (checked-in fixtures in `tests/fixtures/differential/`):
 //! `empty`, `owner` (the shape of a long-lived user config),
 //! `ask_outcome_deny`, `allow` (one `[[allow]]`).
-//! The other fixtures there (`allow_git`, `deny_git_etc`, `resolve_symlinks`) are
-//! must_not_allow-only: `tests/golden/must_not_allow.jsonl` rows name them in
+//! The other config fixtures there (`allow_git`, `deny_git_etc`,
+//! `resolve_symlinks`) are must_not_allow-only:
+//! `tests/golden/must_not_allow.jsonl` rows name them (as `<name>.toml`) in
 //! their `config` field.
 //!
 //! Corpora (`tests/golden/*.jsonl`, command column): guardfall, fuzz,
