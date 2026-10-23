@@ -1025,6 +1025,16 @@ const ISSUE_736_FD_EXEC_AND_G_PREFIXED_COREUTILS_CASES: &[(&str, Decision)] = &[
     // Other Homebrew g-prefixed GNU tools.
     ("gfind / -exec rm -rf {} +", Decision::Block),
     ("gfind / -delete", Decision::Block),
+    // Issue #887: find's file-writing actions overwrite their file operand
+    // like `> FILE`, so they take the redirect-target verdict.
+    ("find /x -fprint /dev/sda", Decision::Block),
+    ("find /x -fprint0 /dev/sda", Decision::Block),
+    ("find /x -fprintf /dev/sda '%p'", Decision::Block),
+    ("find /x -fls /dev/sda", Decision::Block),
+    ("find /x -fprint /etc/passwd", Decision::Block),
+    ("gfind /x -fprint /dev/sda", Decision::Block),
+    ("find . -fprint ~/.zshrc", Decision::Ask),
+    ("find . -fprint out.txt", Decision::Allow),
     ("gtar xfC a.tar /", Decision::Block),
     ("find . | gxargs rm -rf", Decision::Block),
     // Flags before the `fd` word or after a bare `--` are not `fd`'s.

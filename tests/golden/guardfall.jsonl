@@ -677,6 +677,8 @@
 {"command":"find . -exec {} \\;","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"find . -execdir env {} rm -rf / \\;","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"find . -execdir sh \\;","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"find . -fprint out.txt","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"find . -fprint ~/.zshrc","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"find . -name '*.log' -print0 | xargs -0 rm -rf","decision":"Block","deny_message":null,"matched_rule":"find-pipe-rm-force"}
 {"command":"find . -name '*.o' | xargs ls","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"find . -name '*.sh' -exec sh -n {} \\;","decision":"Ask","deny_message":null,"matched_rule":null}
@@ -718,6 +720,11 @@
 {"command":"find /x -exec rm -r {} +","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"find /x -exec rm -rf //{} \\;","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"find /x -execdir rm -f {} +","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"find /x -fls /dev/sda","decision":"Block","deny_message":null,"matched_rule":"redirect-overwrite-device-or-critical-file"}
+{"command":"find /x -fprint /dev/sda","decision":"Block","deny_message":null,"matched_rule":"redirect-overwrite-device-or-critical-file"}
+{"command":"find /x -fprint /etc/passwd","decision":"Block","deny_message":null,"matched_rule":"redirect-overwrite-device-or-critical-file"}
+{"command":"find /x -fprint0 /dev/sda","decision":"Block","deny_message":null,"matched_rule":"redirect-overwrite-device-or-critical-file"}
+{"command":"find /x -fprintf /dev/sda '%p'","decision":"Block","deny_message":null,"matched_rule":"redirect-overwrite-device-or-critical-file"}
 {"command":"find /x -ok rm -f {} +","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"find /x -okdir rm -f {} +","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"find /x -type f -exec rm -f /{} \\;","decision":"Block","deny_message":null,"matched_rule":null}
@@ -759,6 +766,7 @@
 {"command":"gfind . -print0 | xargs -0 rm -f","decision":"Block","deny_message":null,"matched_rule":"find-pipe-rm-force"}
 {"command":"gfind / -delete","decision":"Block","deny_message":null,"matched_rule":"find-delete"}
 {"command":"gfind / -exec rm -rf {} +","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"gfind /x -fprint /dev/sda","decision":"Block","deny_message":null,"matched_rule":"redirect-overwrite-device-or-critical-file"}
 {"command":"gfind ~ -delete","decision":"Block","deny_message":null,"matched_rule":"find-delete"}
 {"command":"gh pr create --title t --body \"$(cat <<'EOF'\n(x\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"gh pr create --title t --body \"$(cat <<'EOF'\ndon't\nEOF\n)\"","decision":"Allow","deny_message":null,"matched_rule":null}
