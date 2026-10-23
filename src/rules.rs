@@ -232,7 +232,7 @@ impl FlagMatcher {
 
 /// Whether `arg` (`--x` or `--x=value`) spells a non-empty prefix of the
 /// `--`-prefixed long option `token` — see [`FlagMatcher::satisfied`].
-fn is_long_option_abbrev(arg: &str, token: &str) -> bool {
+pub(crate) fn is_long_option_abbrev(arg: &str, token: &str) -> bool {
     let (Some(arg_rest), Some(full)) = (arg.strip_prefix("--"), token.strip_prefix("--")) else {
         return false;
     };

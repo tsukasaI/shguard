@@ -365,8 +365,9 @@ use crate::policy::{self, Evidence, LimitKind, PolicyConfig, deny_msg_unsupporte
 use crate::rules::{
     AWK_INTERPRETERS, Allowlist, EVAL_BUILTIN, FsProbeBudget, FsProbeFailure, PathForm,
     RedirectRule, Rules, SocatAddress, SymlinkScope, TRAP_BUILTIN, WrapperChainEscalation,
-    has_expanding_glob_qualifier, is_dirstack_shape, is_pipeline_interpreter, lexical_normalize,
-    render_cwd_anchor, unresolved_word_may_hide_glob_qualifier, wrapper_chain_changes_cwd,
+    has_expanding_glob_qualifier, is_dirstack_shape, is_long_option_abbrev,
+    is_pipeline_interpreter, lexical_normalize, render_cwd_anchor,
+    unresolved_word_may_hide_glob_qualifier, wrapper_chain_changes_cwd,
 };
 use crate::semantics::cwd::{AnchorOrigin, CwdAnchor, CwdContext, CwdState, MAX_CWD_STACK_DEPTH};
 use crate::semantics::env::{
@@ -12294,10 +12295,12 @@ fn git_push_plus_refspec(argv: &[NormalizedWord]) -> bool {
 const GIT_CHECKOUT_VALUE_FLAGS: &[&str] =
     &["-b", "-B", "--orphan", "--conflict", "--pathspec-from-file"];
 
-/// Issue #917: a short-option bundle (`-qb`, `-tb`) whose first `b`/`B`
+/// Issue #917: a short-option bundle (`-qb`, `-lb`) whose first `b`/`B`
 /// is its last character, so git's parse-options takes that flag's value
 /// from the NEXT word. A `b`/`B` followed by more characters (`-bnew`)
-/// carries its value attached and consumes nothing further.
+/// carries its value attached and consumes nothing further. `-tb` is
+/// rejected by git (since 2.35 `-t` swallows the rest of the bundle), so
+/// its Allow is the harmless side.
 fn short_bundle_ends_in_branch_flag(word: &str) -> bool {
     word.len() > 2
         && !word.starts_with("--")
@@ -12324,7 +12327,7 @@ fn short_bundle_ends_in_branch_flag(word: &str) -> bool {
 ///   with `/` or `~` (an absolute or home-relative path; a `~` word stays
 ///   literal in `NormalizedWord`, so it is matched by its own prefix);
 ///   `git check-ref-format` forbids all of these in a refname;
-/// - preceded by `--pathspec-from-file` (either spelling), which reads the
+/// - preceded by `--pathspec-from-file` (either spelling, or any long-option prefix abbreviation), which reads the
 ///   paths from a file and so is the path form with no operand to inspect.
 ///
 /// `HEAD~1`, `main^`, `@{-1}` and `a@{1}` stay Allow.
@@ -12342,9 +12345,7 @@ fn git_checkout_path_operand(argv: &[NormalizedWord]) -> bool {
     while index < operands.len() {
         match operands[index].resolution() {
             Resolution::Resolved(s) if s == "--" => return false,
-            Resolution::Resolved(s)
-                if s == "--pathspec-from-file" || s.starts_with("--pathspec-from-file=") =>
-            {
+            Resolution::Resolved(s) if is_long_option_abbrev(s, "--pathspec-from-file") => {
                 return true;
             }
             Resolution::Resolved(s) if s.starts_with('-') && s != "-" => {
@@ -12876,6 +12877,7 @@ mod tests {
         assert!(!short_bundle_ends_in_branch_flag("-b"));
         assert!(!short_bundle_ends_in_branch_flag("-bnew"));
         assert!(!short_bundle_ends_in_branch_flag("-qbq"));
+        assert!(!short_bundle_ends_in_branch_flag("-Bb"));
         assert!(!short_bundle_ends_in_branch_flag("--orphanb"));
     }
 
