@@ -193,11 +193,7 @@ fn evaluate(
 
 fn run(path: &Path) -> Result<(), Vec<String>> {
     check_reader().map_err(|err| vec![err])?;
-    let text = std::fs::read_to_string(path)
-        .map_err(|err| vec![format!("failed to read {}: {err}", path.display())])?;
-    let rows = parse_rows(&path.display().to_string(), &text).map_err(|err| vec![err])?;
-    let fixtures = golden::checkout_dir().join("tests/fixtures/differential");
-    let policies = load_policies(&rows, &fixtures)?;
+    let (rows, policies) = must_not_allow_rows::load(path)?;
     if let Some(control) = policies.get("resolve_symlinks.toml")
         && policy::analyze_under_cwd(control, "upload-tool null", Some("/dev")).decision()
             != Decision::Allow

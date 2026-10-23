@@ -29,8 +29,7 @@ use std::path::Path;
 use shguard::verdict::{Decision, Verdict};
 
 use super::corpus;
-use super::golden;
-use super::must_not_allow_rows::{load_policies, parse_rows, verdict_of};
+use super::must_not_allow_rows::{load, verdict_of};
 
 /// Needles per kind, in match order.
 const KIND_NEEDLES: [(&str, &[&str]); 9] = [
@@ -154,7 +153,7 @@ pub fn measure(golden_dir: &Path, name: &str) -> Result<CorpusStats, String> {
 
 /// Evaluates every row of `golden/must_not_allow.jsonl` under its own
 /// `config` and `cwd`, as `tests/must_not_allow.rs` does, so `allow` equals
-/// that target's open count.
+/// that target's open count whenever that target passes.
 ///
 /// Loads the config fixtures, which sets a process environment variable, so
 /// call it before the first analysis of the run.
@@ -162,13 +161,9 @@ pub fn measure(golden_dir: &Path, name: &str) -> Result<CorpusStats, String> {
 /// # Errors
 ///
 /// When the file cannot be read or parsed, or a fixture does not load.
-pub fn measure_must_not_allow(golden_dir: &Path) -> Result<CorpusStats, String> {
+fn measure_must_not_allow(golden_dir: &Path) -> Result<CorpusStats, String> {
     let path = golden_dir.join("must_not_allow.jsonl");
-    let text = std::fs::read_to_string(&path)
-        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
-    let rows = parse_rows(&path.display().to_string(), &text)?;
-    let fixtures = golden::checkout_dir().join("tests/fixtures/differential");
-    let policies = load_policies(&rows, &fixtures).map_err(|problems| problems.join("; "))?;
+    let (rows, policies) = load(&path).map_err(|problems| problems.join("; "))?;
     let verdicts = rows
         .iter()
         .map(|row| verdict_of(row, &policies))
@@ -202,7 +197,8 @@ fn percent(part: usize, whole: usize) -> String {
 ///
 /// # Errors
 ///
-/// When a corpus cannot be read.
+/// When a corpus cannot be read or parsed, or a must_not_allow config fixture
+/// does not load.
 pub fn report(golden_dir: &Path) -> Result<Vec<String>, String> {
     // First: loading the must_not_allow fixtures sets a process environment
     // variable, which is only safe before the analysis watchdog spawns threads.

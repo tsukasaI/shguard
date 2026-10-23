@@ -102,6 +102,18 @@ pub fn load_policies(
     }
 }
 
+pub type Loaded = (Vec<Row>, BTreeMap<String, Policy>);
+
+/// Reads and parses the rows at `path` and loads the fixtures they name.
+pub fn load(path: &Path) -> Result<Loaded, Vec<String>> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|err| vec![format!("failed to read {}: {err}", path.display())])?;
+    let rows = parse_rows(&path.display().to_string(), &text).map_err(|err| vec![err])?;
+    let fixtures = super::golden::checkout_dir().join("tests/fixtures/differential");
+    let policies = load_policies(&rows, &fixtures)?;
+    Ok((rows, policies))
+}
+
 pub fn verdict_of(row: &Row, policies: &BTreeMap<String, Policy>) -> Result<Verdict, String> {
     match row.config.as_deref() {
         None => Ok(shguard::analyze(&row.command)),
