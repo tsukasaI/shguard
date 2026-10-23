@@ -15,7 +15,7 @@ include = [
     "!tests/golden_snapshot.rs", "!tests/guardfall.rs",
     "!tests/metrics.rs", "!tests/must_not_allow.rs",
     "!tests/common/golden.rs", "!tests/common/corpus.rs", "!tests/common/metrics.rs",
-    "!tests/common/must_not_allow_rows.rs",
+    "!tests/common/must_not_allow_rows.rs", "!tests/common/policy.rs",
     "!tests/fixtures/differential/**", "!tests/golden/**",
     "tests/golden/legacy_units.jsonl",
 ]
