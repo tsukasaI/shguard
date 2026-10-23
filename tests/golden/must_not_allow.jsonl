@@ -22,6 +22,7 @@
 {"command":"n=$(curl x); let \"n > 0\"","status":"open","source":"#770"}
 {"command":"n=$(curl x); declare -i m=$n","status":"open","source":"#770"}
 {"command":"sshpass -p x ssh host rm -rf /","status":"closed","source":"#770"}
+{"command":"find /x -exec dd if=/dev/zero of={} \\;","status":"closed","source":"#888"}
 {"command":"incus exec c -- rm -rf /","status":"open","source":"#770"}
 {"command":"multipass exec c -- rm -rf /","status":"open","source":"#770"}
 {"command":"vagrant ssh -c 'rm -rf /'","status":"open","source":"#770"}

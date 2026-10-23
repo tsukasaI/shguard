@@ -12389,6 +12389,42 @@ mod tests {
     }
 
     #[test]
+    fn dd_of_find_placeholder_matches() {
+        let rules = Rules::embedded().unwrap();
+        for of in ["of={}", "of=/{}", "of=~/{}"] {
+            let m = rules.match_command(&argv(&["dd", "if=/dev/zero", of]));
+            assert_eq!(
+                m.map(|m| m.id.as_str()),
+                Some("dd-find-placeholder-target"),
+                "{of}"
+            );
+        }
+    }
+
+    #[test]
+    fn dcfldd_of_find_placeholder_matches() {
+        let rules = Rules::embedded().unwrap();
+        for of in ["of={}", "of=/{}", "of=~/{}"] {
+            let m = rules.match_command(&argv(&["dcfldd", "if=/dev/zero", of]));
+            assert_eq!(
+                m.map(|m| m.id.as_str()),
+                Some("dcfldd-find-placeholder-target"),
+                "{of}"
+            );
+        }
+    }
+
+    #[test]
+    fn dd_of_plain_file_does_not_match_find_placeholder_rule() {
+        let rules = Rules::embedded().unwrap();
+        assert!(
+            rules
+                .match_command(&argv(&["dd", "if=a", "of=out.img"]))
+                .is_none()
+        );
+    }
+
+    #[test]
     fn dd_without_dev_target_does_not_match() {
         let rules = Rules::embedded().unwrap();
         assert!(
