@@ -26,7 +26,8 @@ include = [
 # `tests/legacy_units.rs` ships: it uses only `tests/common/legacy_rows.rs`
 # and `tests/common/watchdog_reason.rs` (no `test-support`) and embeds
 # `tests/golden/legacy_units.jsonl` with `include_str!`, as the lib's
-# `#[cfg(test)]` `src/legacy_units.rs` does.
+# `#[cfg(test)]` `src/legacy_units.rs` does. The pre-push `package-compile`
+# job (scripts/package-compile-check.sh) builds the packaged tests to check this.
 
 [[bin]]
 name = "shguard"

@@ -33,3 +33,5 @@ pre-push:
     # Via the script, not a bare run: see scripts/hermetic-cargo-test.sh.
     rust-test:
       run: bash scripts/hermetic-cargo-test.sh
+    package-compile:
+      run: bash scripts/package-compile-check.sh
