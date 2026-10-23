@@ -1,8 +1,9 @@
 //! Prints the R0 metrics of the evaluation-core redesign (docs/rfc-redesign.md,
 //! issue #836) in plain `cargo test` output.
 //!
-//! Exits nonzero when a corpus cannot be read. `scripts/metrics` runs it
-//! alone. The metric definitions, including the Unknown-kind mapping, live in
+//! Exits nonzero when a corpus cannot be read or parsed, or a must_not_allow
+//! config fixture does not load. `scripts/metrics` runs it alone. The metric
+//! definitions, including the Unknown-kind mapping, live in
 //! `tests/common/metrics.rs`.
 
 #[path = "common/corpus.rs"]
@@ -12,6 +13,11 @@ mod corpus;
 mod golden;
 #[path = "common/metrics.rs"]
 mod metrics;
+#[path = "common/must_not_allow_rows.rs"]
+#[expect(dead_code)]
+mod must_not_allow_rows;
+#[path = "common/policy.rs"]
+mod policy;
 
 fn main() {
     match metrics::report(&golden::golden_dir()) {

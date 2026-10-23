@@ -4,7 +4,8 @@
 //!
 //! Every number comes from running `shguard::analyze` (embedded rules, no
 //! config, no filesystem) over the command column of a golden corpus, so it
-//! is current even before a snapshot is re-blessed.
+//! is current even before a snapshot is re-blessed. The exception is
+//! `must_not_allow`, whose rows run under their own `config`/`cwd`.
 //!
 //! # Unknown kinds
 //!
@@ -25,9 +26,10 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use shguard::verdict::Decision;
+use shguard::verdict::{Decision, Verdict};
 
 use super::corpus;
+use super::must_not_allow_rows::{load, verdict_of};
 
 /// Needles per kind, in match order.
 const KIND_NEEDLES: [(&str, &[&str]); 9] = [
@@ -144,9 +146,34 @@ impl CorpusStats {
 /// When the corpus cannot be read (see `corpus::read_commands`).
 pub fn measure(golden_dir: &Path, name: &str) -> Result<CorpusStats, String> {
     let commands = corpus::read_commands(&golden_dir.join(format!("{name}.jsonl")))?;
+    Ok(tally(
+        commands.iter().map(|command| shguard::analyze(command)),
+    ))
+}
+
+/// Evaluates every row of `golden/must_not_allow.jsonl` under its own
+/// `config` and `cwd`, as `tests/must_not_allow.rs` does, so `allow` equals
+/// that target's open count whenever that target passes.
+///
+/// Loads the config fixtures, which sets a process environment variable, so
+/// call it before the first analysis of the run.
+///
+/// # Errors
+///
+/// When the file cannot be read or parsed, or a fixture does not load.
+fn measure_must_not_allow(golden_dir: &Path) -> Result<CorpusStats, String> {
+    let path = golden_dir.join("must_not_allow.jsonl");
+    let (rows, policies) = load(&path).map_err(|problems| problems.join("; "))?;
+    let verdicts = rows
+        .iter()
+        .map(|row| verdict_of(row, &policies))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(tally(verdicts))
+}
+
+fn tally(verdicts: impl IntoIterator<Item = Verdict>) -> CorpusStats {
     let mut stats = CorpusStats::default();
-    for command in &commands {
-        let verdict = shguard::analyze(command);
+    for verdict in verdicts {
         stats.total += 1;
         match verdict.decision() {
             Decision::Allow => stats.allow += 1,
@@ -158,7 +185,7 @@ pub fn measure(golden_dir: &Path, name: &str) -> Result<CorpusStats, String> {
             *stats.unknown_by_kind.entry(kind).or_insert(0) += 1;
         }
     }
-    Ok(stats)
+    stats
 }
 
 fn percent(part: usize, whole: usize) -> String {
@@ -170,12 +197,15 @@ fn percent(part: usize, whole: usize) -> String {
 ///
 /// # Errors
 ///
-/// When a corpus cannot be read.
+/// When a corpus cannot be read or parsed, or a must_not_allow config fixture
+/// does not load.
 pub fn report(golden_dir: &Path) -> Result<Vec<String>, String> {
+    // First: loading the must_not_allow fixtures sets a process environment
+    // variable, which is only safe before the analysis watchdog spawns threads.
+    let must_not_allow = measure_must_not_allow(golden_dir)?;
     let benign = measure(golden_dir, "benign_corpus")?;
     let denials = measure(golden_dir, "denials")?;
     let bypass = measure(golden_dir, "bypass_corpus")?;
-    let must_not_allow = measure(golden_dir, "must_not_allow")?;
     let mut lines = Vec::new();
     for (key, stats) in [("benign", &benign), ("denials", &denials)] {
         lines.push(format!(

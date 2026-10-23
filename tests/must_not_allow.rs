@@ -36,19 +36,22 @@
 //!
 //! The strict-parse checks of the reader run first, in `main`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::ExitCode;
 
-use serde::Deserialize;
 use shguard::config::Policy;
-use shguard::verdict::{Decision, Verdict};
+use shguard::verdict::Decision;
 
 #[path = "common/golden.rs"]
 #[allow(dead_code)]
 mod golden;
+#[path = "common/must_not_allow_rows.rs"]
+mod must_not_allow_rows;
 #[path = "common/policy.rs"]
 mod policy;
+
+use must_not_allow_rows::{Row, Status, load_policies, parse_rows, verdict_of};
 
 /// Rows that are still Allow on main. Lower it when rows flip to `closed`.
 const EXPECTED_OPEN: usize = 129;
@@ -56,72 +59,6 @@ const EXPECTED_OPEN: usize = 129;
 /// Rows that are not Allow today. Raise it when a row is added as `closed` or
 /// flipped from `open`.
 const EXPECTED_CLOSED: usize = 14;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum Status {
-    Open,
-    Closed,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Row {
-    command: String,
-    status: Status,
-    /// The issue number (`#836`) or RFC section the payload comes from.
-    source: String,
-    #[allow(dead_code)]
-    note: Option<String>,
-    /// A bare file name under `tests/fixtures/differential/`.
-    config: Option<String>,
-    /// The hook payload's `cwd`: an absolute path.
-    cwd: Option<String>,
-}
-
-fn parse_rows(origin: &str, text: &str) -> Result<Vec<Row>, String> {
-    let mut seen = BTreeSet::new();
-    let mut rows = Vec::new();
-    for (index, line) in text.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let at = format!("{origin}:{}", index + 1);
-        let row: Row =
-            serde_json::from_str(line).map_err(|err| format!("{at}: malformed row: {err}"))?;
-        if row.source.trim().is_empty() {
-            return Err(format!("{at}: empty `source`"));
-        }
-        if row.command.trim().is_empty() {
-            return Err(format!("{at}: empty `command`"));
-        }
-        if let Some(config) = &row.config
-            && (config.is_empty() || config.contains(['/', '\\']) || config.starts_with('.'))
-        {
-            return Err(format!(
-                "{at}: `config` must be a bare fixture file name, got {config:?}"
-            ));
-        }
-        if let Some(cwd) = &row.cwd {
-            if !cwd.starts_with('/') {
-                return Err(format!("{at}: `cwd` must be an absolute path, got {cwd:?}"));
-            }
-            if row.config.is_none() {
-                return Err(format!(
-                    "{at}: `cwd` is only honored together with `config`"
-                ));
-            }
-        }
-        if !seen.insert(row.command.clone()) {
-            return Err(format!("{at}: duplicate command {:?}", row.command));
-        }
-        rows.push(row);
-    }
-    if rows.is_empty() {
-        return Err(format!("{origin}: no rows"));
-    }
-    Ok(rows)
-}
 
 /// The reader must reject what a hand edit is likely to get wrong.
 fn check_reader() -> Result<(), String> {
@@ -207,39 +144,6 @@ fn check_reader() -> Result<(), String> {
     Ok(())
 }
 
-/// Loads every fixture the rows name; any failure aborts the run.
-fn load_policies(rows: &[Row], fixtures: &Path) -> Result<BTreeMap<String, Policy>, Vec<String>> {
-    let names: BTreeSet<&str> = rows
-        .iter()
-        .filter_map(|row| row.config.as_deref())
-        .collect();
-    let mut policies = BTreeMap::new();
-    let mut problems = Vec::new();
-    for name in names {
-        match policy::load_policy(&fixtures.join(name)) {
-            Ok(loaded) => {
-                policies.insert(name.to_string(), loaded);
-            }
-            Err(err) => problems.push(format!("cannot load config fixture {name:?}: {err}")),
-        }
-    }
-    if problems.is_empty() {
-        Ok(policies)
-    } else {
-        Err(problems)
-    }
-}
-
-fn verdict_of(row: &Row, policies: &BTreeMap<String, Policy>) -> Result<Verdict, String> {
-    match row.config.as_deref() {
-        None => Ok(shguard::analyze(&row.command)),
-        Some(name) => policies
-            .get(name)
-            .map(|loaded| policy::analyze_under_cwd(loaded, &row.command, row.cwd.as_deref()))
-            .ok_or_else(|| format!("config fixture {name:?} was not loaded")),
-    }
-}
-
 fn evaluate(
     rows: &[Row],
     policies: &BTreeMap<String, Policy>,
@@ -289,11 +193,7 @@ fn evaluate(
 
 fn run(path: &Path) -> Result<(), Vec<String>> {
     check_reader().map_err(|err| vec![err])?;
-    let text = std::fs::read_to_string(path)
-        .map_err(|err| vec![format!("failed to read {}: {err}", path.display())])?;
-    let rows = parse_rows(&path.display().to_string(), &text).map_err(|err| vec![err])?;
-    let fixtures = golden::checkout_dir().join("tests/fixtures/differential");
-    let policies = load_policies(&rows, &fixtures)?;
+    let (rows, policies) = must_not_allow_rows::load(path)?;
     if let Some(control) = policies.get("resolve_symlinks.toml")
         && policy::analyze_under_cwd(control, "upload-tool null", Some("/dev")).decision()
             != Decision::Allow
