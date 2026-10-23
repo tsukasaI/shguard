@@ -429,6 +429,8 @@ const GIT_CASES: &[(&str, Decision)] = &[
     ("git checkout --pathspec-from-file=-", Decision::Ask),
     ("git checkout --pathspec-from-file list.txt", Decision::Ask),
     ("git checkout main --pathspec-from-file=f", Decision::Ask),
+    ("git checkout --pathspec-from=list.txt", Decision::Ask),
+    ("git checkout --pathspec-from-fil list.txt", Decision::Ask),
     ("git checkout ../x", Decision::Ask),
     ("git checkout src/../a", Decision::Ask),
     ("git checkout a..b", Decision::Ask),
@@ -438,6 +440,14 @@ const GIT_CASES: &[(&str, Decision)] = &[
     ("git checkout HEAD~1", Decision::Allow),
     ("git checkout main^", Decision::Allow),
     ("git checkout -b new start", Decision::Allow),
+    // issue #917: a short bundle ending in `b`/`B` takes the next word as its value.
+    ("git checkout -qb new start", Decision::Allow),
+    ("git checkout -tb x origin/main", Decision::Allow),
+    ("git checkout -Bb new start", Decision::Ask),
+    ("git checkout -bB new start", Decision::Ask),
+    ("git checkout -fb new start", Decision::Ask),
+    ("git checkout -qB new start", Decision::Allow),
+    ("git checkout -q a b", Decision::Ask),
     // issue #452, fix 3: `-d -f`/`-df` and the long-form
     // `--delete --force` are the same force-delete-of-unmerged-branch
     // operation as `-D`.
