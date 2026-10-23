@@ -55,7 +55,7 @@ const EXPECTED_OPEN: usize = 129;
 
 /// Rows that are not Allow today. Raise it when a row is added as `closed` or
 /// flipped from `open`.
-const EXPECTED_CLOSED: usize = 13;
+const EXPECTED_CLOSED: usize = 14;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]

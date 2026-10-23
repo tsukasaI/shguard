@@ -5680,6 +5680,10 @@ pub(crate) struct RecursableSlot {
     pub(crate) terminators: &'static [&'static str],
 }
 
+/// `find` actions that truncate and overwrite the file named by the word
+/// right after them (issue #887); `-fprintf` takes its format after the file.
+pub(crate) const FIND_FILE_WRITE_FLAGS: &[&str] = &["-fprint", "-fprint0", "-fprintf", "-fls"];
+
 /// See [`RecursableSlot`]'s docs. `crate::gate::scan_recursable_slots` walks
 /// it directly (`find` has no wrapper chain to unwrap).
 pub(crate) const RECURSABLE_SLOTS: &[RecursableSlot] = &[

@@ -3287,6 +3287,18 @@ fn evaluate_simple_command(
         ..
     } = ctx;
     let mut argv = normalize::normalize_argv(command);
+    let with_find_writes;
+    let command = match find_file_write_redirections(command, &argv) {
+        Some(extra) => {
+            with_find_writes = SimpleCommand {
+                assignments: command.assignments.clone(),
+                words: command.words.clone(),
+                redirections: command.redirections.iter().cloned().chain(extra).collect(),
+            };
+            &with_find_writes
+        }
+        None => command,
+    };
     let evaluated_process_substitutions =
         clear_input_process_substitutions(command, &mut argv, env, ctx, cwd);
     let wrapper_moves_cwd = wrapper_chain_changes_cwd(&argv);
@@ -7478,6 +7490,34 @@ fn raise_expansion_floor(
     if should_replace {
         *floor = Some((decision, reason));
     }
+}
+
+/// Issue #887: `find`'s file-writing actions (`-fprint FILE`, ...) overwrite
+/// their file operand exactly as `> FILE` would, so each operand is returned
+/// as a synthetic output redirection and takes the redirect-target rules'
+/// verdict. `None` when the effective command is not `find` or no action is
+/// present.
+fn find_file_write_redirections(
+    command: &SimpleCommand,
+    argv: &[NormalizedWord],
+) -> Option<Vec<Redirection>> {
+    let (name, _) = crate::rules::effective_command(argv)?;
+    if name != "find" {
+        return None;
+    }
+    let redirections: Vec<Redirection> = command
+        .words
+        .windows(2)
+        .filter(|pair| {
+            single_resolved(&pair[0])
+                .is_some_and(|flag| crate::rules::FIND_FILE_WRITE_FLAGS.contains(&flag.as_str()))
+        })
+        .map(|pair| Redirection::File {
+            kind: FileRedirectionKind::Output,
+            target: pair[1].clone(),
+        })
+        .collect();
+    (!redirections.is_empty()).then_some(redirections)
 }
 
 /// The result of [`scan_recursable_slots`] (issues #64/#66/#72): whether
