@@ -12,6 +12,11 @@ mod corpus;
 mod golden;
 #[path = "common/metrics.rs"]
 mod metrics;
+#[path = "common/must_not_allow_rows.rs"]
+#[allow(dead_code)]
+mod must_not_allow_rows;
+#[path = "common/policy.rs"]
+mod policy;
 
 fn main() {
     match metrics::report(&golden::golden_dir()) {
