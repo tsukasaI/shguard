@@ -12294,6 +12294,19 @@ fn git_push_plus_refspec(argv: &[NormalizedWord]) -> bool {
 const GIT_CHECKOUT_VALUE_FLAGS: &[&str] =
     &["-b", "-B", "--orphan", "--conflict", "--pathspec-from-file"];
 
+/// Issue #917: a short-option bundle (`-qb`, `-tb`) whose first `b`/`B`
+/// is its last character, so git's parse-options takes that flag's value
+/// from the NEXT word. A `b`/`B` followed by more characters (`-bnew`)
+/// carries its value attached and consumes nothing further.
+fn short_bundle_ends_in_branch_flag(word: &str) -> bool {
+    word.len() > 2
+        && !word.starts_with("--")
+        && word
+            .strip_prefix('-')
+            .and_then(|bundle| bundle.find(['b', 'B']).map(|at| (bundle, at)))
+            .is_some_and(|(bundle, at)| at + 1 == bundle.len())
+}
+
 /// Issue #452, fix 2 and issue #850: `git checkout <path>` with no `--`
 /// separator is positionally indistinguishable from `git checkout <branch>`
 /// for pure rule data. Lexical shape settles it only when an operand (or
@@ -12335,7 +12348,9 @@ fn git_checkout_path_operand(argv: &[NormalizedWord]) -> bool {
                 return true;
             }
             Resolution::Resolved(s) if s.starts_with('-') && s != "-" => {
-                index += if GIT_CHECKOUT_VALUE_FLAGS.contains(&s.as_str()) {
+                index += if GIT_CHECKOUT_VALUE_FLAGS.contains(&s.as_str())
+                    || short_bundle_ends_in_branch_flag(s)
+                {
                     2
                 } else {
                     1
@@ -12844,6 +12859,27 @@ mod tests {
     }
 
     #[test]
+    fn git_checkout_q_a_b_still_asks() {
+        for command in [
+            "git checkout -q a b",
+            "git checkout -qb new start a",
+            "git checkout -qbnew a b",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+    }
+
+    #[test]
+    fn git_checkout_short_bundle_ending_in_b_consumes_its_value() {
+        assert!(short_bundle_ends_in_branch_flag("-qb"));
+        assert!(short_bundle_ends_in_branch_flag("-tB"));
+        assert!(!short_bundle_ends_in_branch_flag("-b"));
+        assert!(!short_bundle_ends_in_branch_flag("-bnew"));
+        assert!(!short_bundle_ends_in_branch_flag("-qbq"));
+        assert!(!short_bundle_ends_in_branch_flag("--orphanb"));
+    }
+
+    #[test]
     fn git_checkout_bare_operand_that_can_be_a_ref_allows() {
         for command in [
             "git checkout main",
@@ -12860,6 +12896,9 @@ mod tests {
             "git checkout -B new start",
             "git checkout --orphan new",
             "git checkout --conflict merge main",
+            "git checkout -qb new start",
+            "git checkout -tb x origin/main",
+            "git checkout -bnew start",
         ] {
             assert_decision(command, Decision::Allow);
         }

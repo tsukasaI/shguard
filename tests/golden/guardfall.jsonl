@@ -835,6 +835,9 @@
 {"command":"git checkout --pathspec-from-file=-","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"git checkout -b new start","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"git checkout -f","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"git checkout -q a b","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"git checkout -qb new start","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"git checkout -tb x origin/main","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"git checkout .","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"git checkout ..","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"git checkout ../x","decision":"Ask","deny_message":null,"matched_rule":null}

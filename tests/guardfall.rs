@@ -438,6 +438,10 @@ const GIT_CASES: &[(&str, Decision)] = &[
     ("git checkout HEAD~1", Decision::Allow),
     ("git checkout main^", Decision::Allow),
     ("git checkout -b new start", Decision::Allow),
+    // issue #917: a short bundle ending in `b`/`B` takes the next word as its value.
+    ("git checkout -qb new start", Decision::Allow),
+    ("git checkout -tb x origin/main", Decision::Allow),
+    ("git checkout -q a b", Decision::Ask),
     // issue #452, fix 3: `-d -f`/`-df` and the long-form
     // `--delete --force` are the same force-delete-of-unmerged-branch
     // operation as `-D`.
