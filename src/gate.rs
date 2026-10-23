@@ -12327,8 +12327,10 @@ fn short_bundle_ends_in_branch_flag(word: &str) -> bool {
 ///   with `/` or `~` (an absolute or home-relative path; a `~` word stays
 ///   literal in `NormalizedWord`, so it is matched by its own prefix);
 ///   `git check-ref-format` forbids all of these in a refname;
-/// - preceded by `--pathspec-from-file` (either spelling, or any long-option prefix abbreviation), which reads the
-///   paths from a file and so is the path form with no operand to inspect.
+/// - preceded by `--pathspec-from-file` (either spelling, or any
+///   unambiguous long-option prefix such as `--pathspec-from=`), which reads
+///   the paths from a file and so is the path form with no operand to
+///   inspect.
 ///
 /// `HEAD~1`, `main^`, `@{-1}` and `a@{1}` stay Allow.
 ///
