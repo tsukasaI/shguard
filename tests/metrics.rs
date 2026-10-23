@@ -2,7 +2,8 @@
 //! issue #836) in plain `cargo test` output.
 //!
 //! Exits nonzero when a corpus cannot be read or parsed, or a must_not_allow
-//! config fixture does not load. `scripts/metrics` runs it alone. The metric definitions, including the Unknown-kind mapping, live in
+//! config fixture does not load. `scripts/metrics` runs it alone. The metric
+//! definitions, including the Unknown-kind mapping, live in
 //! `tests/common/metrics.rs`.
 
 #[path = "common/corpus.rs"]
