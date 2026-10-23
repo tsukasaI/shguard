@@ -1066,6 +1066,22 @@ fn guardfall_issue_736_fd_exec_and_g_prefixed_coreutils() {
     }
 }
 
+/// Issue #887: wrapper forms and edge operands of `find`'s file-writing actions.
+const ISSUE_887_FIND_FILE_WRITE_CASES: &[(&str, Decision)] = &[
+    ("env find /x -fprint /dev/sda", Decision::Block),
+    ("xargs find -fprint /dev/sda", Decision::Block),
+    ("busybox find /x -fprint /dev/sda", Decision::Block),
+    ("sudo find /x -fprint /dev/sda", Decision::Block),
+    ("find /x -fprint $F", Decision::Ask),
+    // The file operand of `-fprintf` is the first word (`%p`), not the device.
+    ("find /x -fprintf '%p' /dev/sda", Decision::Allow),
+    ("echo -fprint /dev/sda", Decision::Allow),
+    ("find /x -fprint /dev/tcp/h/1", Decision::Block),
+    // Known conservative false positive: `-fprint` after `-exec` belongs to
+    // `echo`. This pins current behaviour so narrowing it is a visible decision.
+    ("find . -exec echo -fprint /dev/sda \\;", Decision::Block),
+];
+
 const ISSUE_740_G_WRAPPERS_AND_PLACEHOLDER_COMMAND_CASES: &[(&str, Decision)] = &[
     // The issue's g-prefixed coreutils rows: each is the unprefixed tool.
     ("gtimeout 5 rm -rf ~", Decision::Block),
@@ -3700,6 +3716,7 @@ const DECISION_TABLES: &[(&str, &[(&str, Decision)])] = &[
     named_table!(TRANSPARENT_WRAPPER_CASES),
     named_table!(ISSUE_638_TIME_AND_EXEC_WRAPPER_CASES),
     named_table!(ISSUE_736_FD_EXEC_AND_G_PREFIXED_COREUTILS_CASES),
+    named_table!(ISSUE_887_FIND_FILE_WRITE_CASES),
     named_table!(ISSUE_740_G_WRAPPERS_AND_PLACEHOLDER_COMMAND_CASES),
     named_table!(ISSUE_722_WRAPPER_SHELL_STRING_SINK_CASES),
     named_table!(ISSUE_739_ENV_ASSIGNMENT_CASES),
