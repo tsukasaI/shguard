@@ -1082,6 +1082,19 @@ const ISSUE_887_FIND_FILE_WRITE_CASES: &[(&str, Decision)] = &[
     ("find . -exec echo -fprint /dev/sda \\;", Decision::Block),
 ];
 
+#[test]
+fn guardfall_issue_887_find_file_write() {
+    for (command, expected) in ISSUE_887_FIND_FILE_WRITE_CASES {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
 const ISSUE_740_G_WRAPPERS_AND_PLACEHOLDER_COMMAND_CASES: &[(&str, Decision)] = &[
     // The issue's g-prefixed coreutils rows: each is the unprefixed tool.
     ("gtimeout 5 rm -rf ~", Decision::Block),
