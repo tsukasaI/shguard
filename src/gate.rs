@@ -1739,11 +1739,11 @@ fn literal_for_items(words: Option<&[Word]>) -> Option<Vec<String>> {
 
 /// Evaluates `substituted`, the form of `original` with its same-line
 /// literal bindings filled in. A word that can become the effective command
-/// (the command word, or one reached through wrappers (`find -exec` payloads
-/// excepted, see [`replaced_word_may_be_command`])) is never trusted to
+/// (the command word, or one reached through wrappers) is never trusted to
 /// turn an unresolved verdict into an Allow: `B=ls; env $B` stays as
-/// undecidable as `B=ls; $B`. Only a stricter verdict may come from the
-/// substituted form there. An Ask the substituted form keeps without
+/// undecidable as `B=ls; $B`. A `find -exec` payload is not such a word; see
+/// [`replaced_word_may_be_command`]. Only a stricter verdict may come from
+/// the substituted form there. An Ask the substituted form keeps without
 /// guidance borrows the guidance the unsubstituted form's Ask carried: the
 /// unresolved word that carried it is gone, the reason to ask is not.
 #[allow(clippy::too_many_arguments)]
