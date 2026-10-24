@@ -25,6 +25,15 @@ cargo install cargo-deny --locked
 lefthook install
 ```
 
+## Change scope
+
+PRs are squash-merged, so every PR lands as one commit and a separate
+commit inside a PR does not survive. When a feature or fix needs a refactor
+extraction first (for example, moving fixture loading into a shared
+`tests/common/` module so the feature can reuse it), open the refactor as
+its own PR and merge it before the feature PR, which then builds on it.
+Do not fold the extraction into the feature's squash commit.
+
 ## The differential fuzzer (`tests/fuzz_differential.rs`)
 
 shguard's whole pitch (README "What it is") is that it decides by
