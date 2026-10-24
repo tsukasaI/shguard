@@ -54,6 +54,10 @@ fn scaffolded_config_loads_cleanly_via_check_config() {
         .arg("--check-config")
         .env("SHGUARD_CONFIG", &config_path)
         .assert()
+        // Exit 1 is a --check-config finding on an embedded rule: mixed url_host
+        // and exact/prefix except_targets (`Policy::rules_with_mixed_except_targets`)
+        // or a non-canonical resolve_symlinks entry
+        // (`Policy::resolve_symlinks_spelling_warnings`). Don't relax this assert.
         .success();
 }
 
