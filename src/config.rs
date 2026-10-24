@@ -165,6 +165,11 @@ pub enum ConfigError {
     /// degradation.
     #[error("could not resolve the symlink chain for {path:?}: {reason}")]
     SymlinkChain { path: PathBuf, reason: String },
+    /// The command catalog embedded in the binary (`rules/catalog.toml`)
+    /// failed to load. Checked before anything else, since the rules and
+    /// every evaluation read it.
+    #[error("{0}")]
+    EmbeddedCatalog(String),
 }
 
 /// A [`ConfigError`] together with the config path [`Policy::load`]
@@ -503,7 +508,8 @@ impl Policy {
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError`] if `SHGUARD_CONFIG` is set (including to a
+    /// Returns [`ConfigError`] if the embedded command catalog fails to load
+    /// ([`ConfigError::EmbeddedCatalog`]), if `SHGUARD_CONFIG` is set (including to a
     /// non-UTF-8 value) but the file it names cannot be read or does not
     /// exist, if the resolved default path exists but fails to read, if
     /// the resolved default path resolves to nothing at all
@@ -553,6 +559,9 @@ impl Policy {
         home: Option<String>,
         canonicalizer: PathCanonicalizer,
     ) -> Result<Self, ConfigError> {
+        if let Some(err) = crate::knowledge::catalog_load_error() {
+            return Err(ConfigError::EmbeddedCatalog(crate::catalog_failure(err)));
+        }
         let blocklist = Rules::embedded()?;
         let allowlist = Allowlist::embedded()?;
 

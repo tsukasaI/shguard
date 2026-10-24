@@ -1,6 +1,9 @@
-//! The embedded command catalog: one [`CommandSpec`] per command (or group
-//! of names sharing a grammar). Adding an exec wrapper is one entry here
-//! plus its name in `reference::EXEC_WRAPPER_REFERENCE`.
+//! The command catalog as Rust literals: one [`CommandSpec`] per command
+//! (or group of names sharing a grammar). Test-only: `rules/catalog.toml` is
+//! what shguard loads, and this file is the oracle the roundtrip test below
+//! compares it against until it is deleted (issue #837). Adding an exec
+//! wrapper is one entry here, a regenerated `rules/catalog.toml`, and its
+//! name in `reference::EXEC_WRAPPER_REFERENCE`.
 //!
 //! Grammar rules of thumb: an option listed with the wrong arity hides the
 //! wrapped command, so only options with a documented arity are listed;
@@ -1717,3 +1720,425 @@ const NPM_EXEC_OPTIONS: OptionGrammar = OptionGrammar {
     ],
     ..BASE
 };
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::knowledge::load;
+
+    const REGEN_ENV: &str = "SHGUARD_CATALOG_REGEN";
+
+    /// The shared grammars, written as `[grammar.<name>]` tables.
+    const NAMED_GRAMMARS: &[(&str, &str, OptionGrammar)] = &[
+        ("setarch", "", SETARCH_OPTIONS),
+        (
+            "uv_run",
+            "`uv run`, `uv tool run` and `uvx` share their options.",
+            UV_RUN_OPTIONS,
+        ),
+        ("bun", "`bun x` and `bunx`.", BUN_OPTIONS),
+        (
+            "npm_exec",
+            "`npx` and `npm exec` share their options.",
+            NPM_EXEC_OPTIONS,
+        ),
+    ];
+
+    /// The comments above, keyed by the first name of the row they precede.
+    const NOTES: &[(&str, &str)] = &[
+        (
+            "run0",
+            "Not only a non-root target: any `-u` is treated as running in that \
+             user's home, so the exception fails closed.",
+        ),
+        (
+            "watch",
+            "`-d` takes an optional glued value, so `-dx` is `-d` with value `x`, \
+             never `-d -x`.",
+        ),
+        (
+            "linux32",
+            "The personality aliases take the same options but no ARCH operand.",
+        ),
+        (
+            "prlimit",
+            "Resource limits (`-n[=soft:hard]`, `--nofile[=...]`) are \
+             optional-argument and `=`-joined, so a separate word is the command, \
+             not a value.",
+        ),
+        (
+            "firejail",
+            "Every firejail option is `--name` or `--name=value`; none takes a \
+             separated value, so the option names need no enumeration.",
+        ),
+        (
+            "script",
+            "BSD `-F` is deliberately absent: a boolean on macOS but a pipe path on \
+             older FreeBSD, so it stays unmodelled.",
+        ),
+        (
+            "make",
+            "`make` runs no wrapped command; its entry only tells `-C` composition \
+             how the cluster `-kC dir` is laid out (every short letter not listed as \
+             a value-taker is boolean on GNU make).",
+        ),
+        (
+            "nsenter",
+            "Reference-list wrappers without an earlier table entry. The grammar is \
+             deliberately small: anything else is unmodelled and floors to Ask, \
+             while the wrapped command stays visible to rule matching.",
+        ),
+        (
+            "eatmydata",
+            "Issue #740: command runners that were Allow with any inner command. \
+             Tools whose wrapper form is one subcommand (`poetry run`, `docker \
+             exec`) carry a `subcommands` slot, so their other subcommands stay \
+             ordinary commands.",
+        ),
+        (
+            "gdb",
+            "The program is only run under `--args`; without it the first operand \
+             is a file to debug, which is a harmless \"command\" here. \
+             `floor_options` run gdb commands, `shell ...` among them.",
+        ),
+        (
+            "tmux",
+            "The options are the union of the options of the subcommands below. \
+             `-l` is split-window's size and `-d` new-session's flag, so `tmux -l` \
+             and `run-shell -d DELAY` are misread.",
+        ),
+        (
+            "arch",
+            "macOS `arch`: architecture selectors are whole single-dash words.",
+        ),
+        ("valgrind", "Every valgrind option is `--name[=value]`."),
+        (
+            "rlwrap",
+            "Only options with a documented arity; the rest floor to Ask.",
+        ),
+    ];
+
+    const HEADER: &str = "\
+# The command catalog: one row per command, or per group of names sharing a
+# grammar.
+#
+# Grammar rules of thumb: an option listed with the wrong arity hides the
+# wrapped command, so only options with a documented arity are listed;
+# everything else stays unmodelled and floors to Ask. Optional values that
+# are attached only (`--mount[=file]`, `xargs -i[str]`, env's
+# `--block-signal[=sig]`) are `*_glued`, never separated values.
+#
+# Layout: `[grammar.<name>]` is an option grammar that several rows share.
+# A row's `grammar = \"<name>\"` starts it from that grammar instead of the
+# empty one, and its `[command.options]` table sets fields on top, like
+# Rust's `..BASE`. A field left out keeps the base's value; in the empty
+# grammar every string is \"\", every list [], every switch false, and
+# `order` is \"first_operand\". A row whose grammar is its own has no
+# `grammar` key and writes every non-empty field in `[command.options]`.
+#
+# Generated from src/knowledge/catalog.rs, which stays the source of truth
+# until it is deleted (issue #837): edit that file, then run
+#   SHGUARD_CATALOG_REGEN=1 cargo test --lib knowledge::catalog::tests::regenerate -- --ignored
+# The roundtrip test there fails while the two differ.
+";
+
+    fn quote(text: &str) -> String {
+        serde_json::to_string(text).expect("a string serializes")
+    }
+
+    fn quote_char(letter: char) -> String {
+        quote(&letter.to_string())
+    }
+
+    fn inline_list(items: &[&str]) -> String {
+        format!(
+            "[{}]",
+            items
+                .iter()
+                .map(|item| quote(item))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+
+    /// One line when it fits, one item per line otherwise.
+    fn list(key: &str, items: &[String]) -> String {
+        let inline = format!("[{}]", items.join(", "));
+        if key.len() + 3 + inline.len() <= 79 {
+            return inline;
+        }
+        let mut out = String::from("[\n");
+        for item in items {
+            out.push_str("    ");
+            out.push_str(item);
+            out.push_str(",\n");
+        }
+        out.push(']');
+        out
+    }
+
+    fn str_list(key: &str, items: &[&str]) -> String {
+        list(
+            key,
+            &items.iter().map(|item| quote(item)).collect::<Vec<_>>(),
+        )
+    }
+
+    fn table(fields: &[String]) -> String {
+        format!("{{ {} }}", fields.join(", "))
+    }
+
+    fn effect(effect: CwdEffect) -> String {
+        quote(match effect {
+            CwdEffect::Composed => "composed",
+            CwdEffect::Relocates => "relocates",
+        })
+    }
+
+    fn grammar_fields(grammar: &OptionGrammar) -> Vec<(&'static str, String)> {
+        let order = match grammar.order {
+            ArgOrder::FirstOperand => "first_operand",
+            ArgOrder::PermuteUntilCommand => "permute_until_command",
+        };
+        let floor_values: Vec<String> = grammar
+            .floor_values
+            .iter()
+            .map(|(short, values)| {
+                table(&[
+                    format!("short = {}", quote_char(*short)),
+                    format!("values = {}", inline_list(values)),
+                ])
+            })
+            .collect();
+        let strs = |key: &'static str, items: &[&str]| (key, str_list(key, items));
+        vec![
+            ("short_flags", quote(grammar.short_flags)),
+            ("short_values", quote(grammar.short_values)),
+            ("short_glued", quote(grammar.short_glued)),
+            (
+                "short_values_unless_dash",
+                quote(grammar.short_values_unless_dash),
+            ),
+            strs("long_flags", grammar.long_flags),
+            strs("long_values", grammar.long_values),
+            strs("long_glued", grammar.long_glued),
+            strs("dash_words", grammar.dash_words),
+            strs("dash_word_values", grammar.dash_word_values),
+            ("any_long_attached", grammar.any_long_attached.to_string()),
+            ("bare_dash_option", grammar.bare_dash_option.to_string()),
+            (
+                "dash_command_unmodeled",
+                grammar.dash_command_unmodeled.to_string(),
+            ),
+            ("numeric_option", grammar.numeric_option.to_string()),
+            ("assignments", grammar.assignments.to_string()),
+            ("leading_operand", grammar.leading_operand.to_string()),
+            ("order", quote(order)),
+            strs("long_pairs", grammar.long_pairs),
+            ("single_dash_long", grammar.single_dash_long.to_string()),
+            strs("command_after", grammar.command_after),
+            strs("skip_first_operand", grammar.skip_first_operand),
+            ("plus_operand", grammar.plus_operand.to_string()),
+            strs("floor_options", grammar.floor_options),
+            ("floor_values", list("floor_values", &floor_values)),
+        ]
+    }
+
+    /// The `key = value` lines of `grammar` that differ from `base`.
+    fn grammar_diff(grammar: &OptionGrammar, base: &OptionGrammar) -> Vec<String> {
+        grammar_fields(grammar)
+            .into_iter()
+            .zip(grammar_fields(base))
+            .filter(|(field, base_field)| field != base_field)
+            .map(|((key, value), _)| format!("{key} = {value}"))
+            .collect()
+    }
+
+    fn slot(slot: &Slot) -> String {
+        let kind = |kind: &str| format!("kind = {}", quote(kind));
+        let pair = |name: &str, short: char, long: &str| {
+            table(&[
+                kind(name),
+                format!("short = {}", quote_char(short)),
+                format!("long = {}", quote(long)),
+            ])
+        };
+        let alternatives = |name: &str, alternatives: &[&[&str]]| {
+            let inner: Vec<String> = alternatives.iter().map(|alt| inline_list(alt)).collect();
+            table(&[kind(name), format!("alternatives = [{}]", inner.join(", "))])
+        };
+        let cwd = |name: &str, short: char, long: &str, cwd_effect: CwdEffect| {
+            table(&[
+                kind(name),
+                format!("short = {}", quote_char(short)),
+                format!("long = {}", quote(long)),
+                format!("effect = {}", effect(cwd_effect)),
+            ])
+        };
+        match *slot {
+            Slot::Exec => table(&[kind("exec")]),
+            Slot::Operands(count) => table(&[kind("operands"), format!("count = {count}")]),
+            Slot::ShellScript { short, long } => {
+                let mut fields = vec![kind("shell_script")];
+                if let Some(short) = short {
+                    fields.push(format!("short = {}", quote_char(short)));
+                }
+                if let Some(long) = long {
+                    fields.push(format!("long = {}", quote(long)));
+                }
+                table(&fields)
+            }
+            Slot::ShellPassthrough => table(&[kind("shell_passthrough")]),
+            Slot::SplitString { short, long } => pair("split_string", short, long),
+            Slot::PipedOutput { short, long } => pair("piped_output", short, long),
+            Slot::OperandsAsShellScript {
+                exec_short,
+                exec_long,
+            } => table(&[
+                kind("operands_as_shell_script"),
+                format!("exec_short = {}", quote_char(exec_short)),
+                format!("exec_long = {}", quote(exec_long)),
+            ]),
+            Slot::OperandsJoinedShellScript => table(&[kind("operands_joined_shell_script")]),
+            Slot::OperandsAsShellScriptWith(switches) => {
+                let switches: Vec<String> = switches
+                    .iter()
+                    .map(|(short, long)| {
+                        table(&[
+                            format!("short = {}", quote_char(*short)),
+                            format!("long = {}", quote(long)),
+                        ])
+                    })
+                    .collect();
+                table(&[
+                    kind("operands_as_shell_script_with"),
+                    format!("switches = [{}]", switches.join(", ")),
+                ])
+            }
+            Slot::Subcommands(alts) => alternatives("subcommands", alts),
+            Slot::UnmodeledSubcommands(alts) => alternatives("unmodeled_subcommands", alts),
+            Slot::KeyedShellScript { short, keys } => table(&[
+                kind("keyed_shell_script"),
+                format!("short = {}", quote_char(short)),
+                format!("keys = {}", inline_list(keys)),
+            ]),
+            Slot::Cwd {
+                short,
+                long,
+                effect,
+            } => cwd("cwd", short, long, effect),
+            Slot::CwdSwitch {
+                short,
+                long,
+                effect,
+            } => cwd("cwd_switch", short, long, effect),
+            Slot::CwdBareDash { effect: cwd_effect } => table(&[
+                kind("cwd_bare_dash"),
+                format!("effect = {}", effect(cwd_effect)),
+            ]),
+            Slot::Privilege => table(&[kind("privilege")]),
+        }
+    }
+
+    fn comment(out: &mut String, text: &str) {
+        let mut line = String::from("#");
+        for word in text.split_whitespace() {
+            if line.len() + 1 + word.len() > 76 {
+                out.push_str(&line);
+                out.push('\n');
+                line = String::from("#");
+            }
+            line.push(' ');
+            line.push_str(word);
+        }
+        out.push_str(&line);
+        out.push('\n');
+    }
+
+    /// The named grammar a row is written against, if any, and the option
+    /// lines it needs on top: the base with the fewest differing fields,
+    /// the empty grammar on a tie.
+    fn row_grammar(options: &OptionGrammar) -> (Option<&'static str>, Vec<String>) {
+        let mut best = (None, grammar_diff(options, &OptionGrammar::EMPTY));
+        for (name, _, grammar) in NAMED_GRAMMARS {
+            let diff = grammar_diff(options, grammar);
+            if diff.len() < best.1.len() {
+                best = (Some(*name), diff);
+            }
+        }
+        best
+    }
+
+    fn render() -> String {
+        let mut out = String::from(HEADER);
+        for (name, note, grammar) in NAMED_GRAMMARS {
+            out.push('\n');
+            if !note.is_empty() {
+                comment(&mut out, note);
+            }
+            out.push_str(&format!("[grammar.{name}]\n"));
+            for line in grammar_diff(grammar, &OptionGrammar::EMPTY) {
+                out.push_str(&line);
+                out.push('\n');
+            }
+        }
+        for spec in CATALOG {
+            out.push('\n');
+            if let Some((_, note)) = NOTES.iter().find(|(name, _)| *name == spec.names[0]) {
+                comment(&mut out, note);
+            }
+            out.push_str("[[command]]\n");
+            out.push_str(&format!("names = {}\n", str_list("names", spec.names)));
+            let (grammar, options) = row_grammar(&spec.options);
+            if let Some(grammar) = grammar {
+                out.push_str(&format!("grammar = {}\n", quote(grammar)));
+            }
+            if !spec.slots.is_empty() {
+                let slots: Vec<String> = spec.slots.iter().map(slot).collect();
+                out.push_str(&format!("slots = {}\n", list("slots", &slots)));
+            }
+            if !options.is_empty() {
+                out.push_str("\n[command.options]\n");
+                for line in options {
+                    out.push_str(&line);
+                    out.push('\n');
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    #[ignore = "rewrites rules/catalog.toml; run with SHGUARD_CATALOG_REGEN=1"]
+    fn regenerate() {
+        assert_eq!(
+            std::env::var(REGEN_ENV).as_deref(),
+            Ok("1"),
+            "set {REGEN_ENV}=1 to rewrite rules/catalog.toml"
+        );
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/rules/catalog.toml");
+        std::fs::write(path, render()).expect("rules/catalog.toml is writable");
+    }
+
+    #[test]
+    fn every_note_names_a_row() {
+        for (name, _) in NOTES {
+            assert!(
+                CATALOG.iter().any(|spec| spec.names[0] == *name),
+                "{name:?} starts no row"
+            );
+        }
+    }
+
+    #[test]
+    fn the_toml_catalog_is_the_rust_catalog() {
+        let loaded = load::parse(load::EMBEDDED_CATALOG).expect("rules/catalog.toml loads");
+        assert_eq!(loaded.len(), CATALOG.len(), "row count");
+        for (toml, rust) in loaded.iter().zip(CATALOG) {
+            assert_eq!(toml.names, rust.names);
+            assert_eq!(toml.options, rust.options, "options of {:?}", rust.names);
+            assert_eq!(toml.slots, rust.slots, "slots of {:?}", rust.names);
+        }
+    }
+}
