@@ -514,10 +514,13 @@ pub(crate) const MAX_RAW_BRACKET_OPENER_COUNT: usize = 64;
 /// floor and ~35x below the release one. Re-measure on any `brush-parser`
 /// bump. The gated `uncached_tokenize_str` call is reachable at every
 /// substitution depth up to `MAX_SUBSTITUTION_DEPTH` (8, `src/gate.rs`) via
-/// nested interpreter heredoc bodies, because `scan_redirection_expansions`
-/// recurses with `analyze_at_depth` before the stdin-reading-interpreter
-/// `Ask` is raised, so the 2 MiB measurement must hold at that depth:
-/// re-measure if that cap, or the stack the recursion runs on, changes.
+/// nested quoted-delimiter interpreter heredoc bodies, because
+/// `scan_redirection_expansions` recurses with `analyze_at_depth` before the
+/// stdin-reading-interpreter `Ask` is raised. The floors above were measured
+/// at depth 0 only; the margin must also hold under 8 levels of analysis
+/// frames, which is not measured. Re-measure with a depth-8 nested
+/// quoted-heredoc payload if `MAX_SUBSTITUTION_DEPTH`, the worker stack, or
+/// the per-level analysis call chain changes.
 ///
 /// # Known trade-off
 ///
