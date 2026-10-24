@@ -25,10 +25,11 @@ cargo install cargo-deny --locked
 lefthook install
 ```
 
-## Change scope
+## Splitting refactors from features
 
-PRs are squash-merged, so every PR lands as one commit and a separate
-commit inside a PR does not survive. When a feature or fix needs a refactor
+PRs are merged with squash (`gh pr merge --squash`), so each PR lands on
+`main` as one commit; separate commits inside a PR are visible during
+review but gone after the merge. When a feature or fix needs a refactor
 extraction first (for example, moving fixture loading into a shared
 `tests/common/` module so the feature can reuse it), open the refactor as
 its own PR and merge it before the feature PR, which then builds on it.
