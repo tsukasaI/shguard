@@ -335,20 +335,27 @@ pub(crate) fn fs_path_canonicalizer() -> rules::PathCanonicalizer {
 /// regardless of where the hang comes from, and that outer deadline starts
 /// earlier than this function's own (right after the stdin read, before
 /// config load, not just before this call), so for a genuine hang the
-/// outer watchdog always wins the wall-clock race in release builds (debug
-/// builds can lengthen the outer watchdog's budget via
+/// outer watchdog wins the wall-clock race in release builds (debug
+/// builds can override the outer watchdog's budget via
 /// `SHGUARD_TEST_EVAL_TIMEOUT_MS`, so there this function's own watchdog
-/// may trip first); in release builds, then, this function's own fail-closed
-/// `Ask` above is never reached at all, and neither is its `sink.append`
-/// call. (The memory arm is not strictly ordered the same way: both
-/// watchdogs poll RSS independently, so either can cross its own threshold
-/// first; `run`'s `LogState` gives the outer trip priority whenever it
-/// fires, so it wins that race too except for the narrow window where the
-/// worker's own `sink.append` claims the log a few microseconds earlier —
-/// in that case the outer trip waits briefly for the worker's write rather
-/// than adding a second one, so a genuine duplicate never happens; the tie
-/// can only mean the logged reason is the worker's own rather than the one
-/// this function would have returned.) Issue #459:
+/// may trip first). A main-thread scheduler delay (waking after the stdin
+/// read, or at the trip) longer than the outer watchdog's head start (config
+/// load plus adapter parse) can let the worker's own fail-closed `Ask` land
+/// first instead: the same `Ask` decision, under the inner watchdog's own
+/// time-budget reason; and if `main` wakes after the worker has claimed the
+/// log but before its result arrives, stdout carries the outer reason while
+/// the log line carries the inner one (the tie described below).
+/// In release builds, then, this function's own fail-closed `Ask` normally
+/// never reaches stdout, and its `sink.append` writes nothing (`DedupSink`
+/// sees the trip's `LOG_MAIN` claim). (The memory arm is not strictly
+/// ordered either: both watchdogs poll RSS independently, so either can
+/// cross its own threshold first; `run`'s `LogState` gives the outer trip
+/// priority whenever it fires, so it wins that race too except for the
+/// narrow window where the worker's own `sink.append` claims the log a few
+/// microseconds earlier — in that case the outer trip waits briefly for the
+/// worker's write rather than adding a second one, so a genuine duplicate
+/// never happens; the tie can only mean the logged reason is the worker's
+/// own rather than the one this function would have returned.) Issue #459:
 /// this used to mean a hook-path trip left no trace in the decision log
 /// whatsoever, since the worker that would have logged it is abandoned
 /// mid-evaluation. `run`'s outer watchdog now closes that gap itself — its
