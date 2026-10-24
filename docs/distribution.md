@@ -25,6 +25,17 @@ completes.
    `nix.settings`; for an untrusted user a user-level nix.conf does not reach
    the daemon, so the script requires both the system config and your
    effective user config to set them) and refuses the push otherwise.
+   The script does not pin where the `nix build` runs: it reads neither the
+   store URL (`NIX_REMOTE` or a `store` setting, e.g. `ssh-ng://`) nor
+   `builders` (or `/etc/nix/machines`), which could send the derivation to a
+   machine whose sandbox config was never read. It also does not check for a
+   system-level `sandbox-paths` / `extra-sandbox-paths` entry that exposes
+   `/Users`, which would defeat the sandbox check (#779). These are out of scope
+   (accepted): on the maintainer's Mac today, the system config sets
+   `builders =` and `extra-sandbox-paths =` empty, the store URL is `daemon`,
+   and the user is not in `trusted-users`; an untrusted user can only clear
+   `builders`, not add them, and cannot set `sandbox-paths`. Revisit this if any
+   of these change.
    The nix build's checkPhase runs the test suite in release mode, where
    `SHGUARD_TEST_EVAL_TIMEOUT_MS` is compiled out, so hook-path tests run
    against the production 2s bound; flakes from a loaded builder there are
