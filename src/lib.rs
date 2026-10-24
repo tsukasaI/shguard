@@ -342,8 +342,9 @@ pub(crate) fn fs_path_canonicalizer() -> rules::PathCanonicalizer {
 /// read, or at the trip) longer than the outer watchdog's head start (config
 /// load plus adapter parse) can let the worker's own fail-closed `Ask` land
 /// first instead: the same `Ask` decision, under the inner watchdog's own
-/// time-budget reason, and the log line can then carry that inner reason
-/// (the tie described below). In release builds, then, this function's own
+/// time-budget reason; and if `main` wakes after the worker has claimed the
+/// log but before its result arrives, stdout carries the outer reason while
+/// the log line carries the inner one (the tie described below). In release builds, then, this function's own
 /// fail-closed `Ask` normally never reaches stdout, and its `sink.append`
 /// writes nothing (`DedupSink` sees the trip's `LOG_MAIN` claim). (The
 /// memory arm is not strictly ordered either: both watchdogs poll RSS

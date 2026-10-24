@@ -1298,8 +1298,9 @@ gets a chance to return, let alone log, before the outer bound fires
 at the trip) longer than the outer watchdog's head start (config load plus
 adapter parse) can let the internal watchdog's own fail-closed `Ask` land
 first instead: the same `Ask` decision, under the internal watchdog's own
-time-budget reason, which the log line can then carry too (the tie described
-below). (The memory arms are not strictly ordered either, since each polls
+time-budget reason; and if `main` wakes after the worker has claimed the log
+but before its result arrives, stdout carries the outer reason while the log
+line carries the inner one (the tie described below). (The memory arms are not strictly ordered either, since each polls
 RSS independently, so the outer trip claims ownership of the log the instant
 it fires, before it even writes to stdout, and wins that race whenever it
 gets there first. The one narrow exception is the worker claiming it a few

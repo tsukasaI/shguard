@@ -63,12 +63,12 @@
 //! barring a main-thread scheduler delay (waking after the stdin read, or at
 //! the trip) longer than that head start (config load plus adapter parse),
 //! which can let this watchdog's own fail-closed `Ask` land first: the same
-//! `Ask` decision under this watchdog's own time-budget reason, which the
-//! log line can then carry too. Debug builds can override the binary's
-//! budget via `SHGUARD_TEST_EVAL_TIMEOUT_MS`, so there this watchdog may
-//! trip first. The memory bound is not ordered the same way: its absolute
-//! cap is always `<=` this module's `baseline + `[`MEMORY_LIMIT_BYTES`]` (`baseline`
-//! cannot be negative), but both watchdogs poll RSS on independent,
+//! `Ask` decision under this watchdog's own time-budget reason. Debug
+//! builds can override the binary's budget via
+//! `SHGUARD_TEST_EVAL_TIMEOUT_MS`, so there this watchdog may trip first.
+//! The memory bound is not ordered the same way: its absolute cap is always
+//! `<=` this module's `baseline + `[`MEMORY_LIMIT_BYTES`]`
+//! (`baseline` cannot be negative), but both watchdogs poll RSS on independent,
 //! unsynchronised cycles (`src/bin/shguard.rs`'s `LogState` docs cover
 //! this), so whichever one's poll happens to land after the crossing
 //! observes it first — the binary's watchdog usually trips first, given the
