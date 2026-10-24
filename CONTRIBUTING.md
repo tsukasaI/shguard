@@ -13,15 +13,16 @@ to `main` and on Dependabot PRs, which never pass through a local hook; an
 on-demand `workflow_dispatch` runs only its `nix-build` job.
 
 Release (`chore/release-*`) pushes also need nix >= 2.20 with
-`experimental-features = nix-command flakes` in your nix config (the
-script's `nix build` of a flake ref needs both), and `sandbox = true` plus
+`experimental-features = nix-command flakes` in your nix config (the script's
+`nix build` of a flake ref needs both), and `sandbox = true` plus
 `sandbox-fallback = false` set in the daemon's system config
 (`/etc/nix/nix.conf` or nix-darwin's `nix.settings`), with no user-level
 setting (user nix.conf or `NIX_CONFIG`) overriding them. For an untrusted
 user a user-level nix.conf (or `NIX_CONFIG`) does not reach the daemon; a
 trusted user or single-user install honours user-level overrides, which is
-why the script checks both. `scripts/release-nix-build.sh` refuses the push
-(or its `nix build` fails) otherwise.
+why the script checks both the system config and your effective user config.
+`scripts/release-nix-build.sh` refuses the push (or its `nix build` fails)
+otherwise.
 
 One-time setup (also needs Node >= 24 on `PATH`):
 
