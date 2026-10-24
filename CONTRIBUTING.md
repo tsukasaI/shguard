@@ -39,7 +39,9 @@ review but not part of `main`'s history after the merge. When a feature or
 fix needs a refactor extraction first (for example, moving fixture loading
 into a shared `tests/common/` module so the feature can reuse it), open the
 refactor as its own PR and merge it before the feature PR, which then
-builds on it. Do not fold the extraction into the feature's squash commit.
+builds on it. A small extraction may instead go in a separate commit inside
+the feature PR; that commit is visible for review but squashed away on
+`main`. Either way, keep the extraction out of the feature's own commit.
 
 ## The differential fuzzer (`tests/fuzz_differential.rs`)
 
