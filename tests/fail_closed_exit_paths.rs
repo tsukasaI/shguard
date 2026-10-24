@@ -861,7 +861,7 @@ fn grammar_composed_payload_at_the_budget_runs_and_one_past_it_is_rejected() {
 
 /// `coproc` takes any command as its body, so a run of bare `coproc`
 /// keywords nests one parse frame each with no brace, paren or other
-/// opener to count: it used to abort (release ~750, debug ~200) and stack
+/// opener to count: it used to abort (release ~770, debug ~170) and stack
 /// on top of the budget. It is a counted nesting keyword now.
 #[test]
 fn coproc_runs_fail_closed_alone_and_with_an_at_budget_payload() {
