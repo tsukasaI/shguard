@@ -64,6 +64,11 @@ All notable changes to this project are documented in this file.
 - A quoted-delimiter heredoc body (`<<'EOF'`, `<<"EOF"`, `<<\EOF`) no longer
   counts toward the raw nesting caps, so `cat > file <<'EOF'` writing code
   or markdown is analyzed instead of asking (#627).
+- `dd`/`dcfldd` writing to `find`'s `{}` placeholder (`of={}`, `of=/{}`,
+  `of=~/{}`, e.g. `find /x -exec dd if=/dev/zero of={} \;`) now blocks,
+  like `rm -f {}`: it overwrites every matched file. The rule matches the
+  `of=` operand itself, so a literal `dd of={}` outside `find` blocks too
+  (#888).
 
 ## [0.9.5] - 2026-10-19
 
