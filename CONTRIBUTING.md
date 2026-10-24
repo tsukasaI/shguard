@@ -29,11 +29,11 @@ lefthook install
 
 PRs are merged with squash (`gh pr merge --squash`), so each PR lands on
 `main` as one commit; separate commits inside a PR are visible during
-review but gone after the merge. When a feature or fix needs a refactor
-extraction first (for example, moving fixture loading into a shared
-`tests/common/` module so the feature can reuse it), open the refactor as
-its own PR and merge it before the feature PR, which then builds on it.
-Do not fold the extraction into the feature's squash commit.
+review but not part of `main`'s history after the merge. When a feature or
+fix needs a refactor extraction first (for example, moving fixture loading
+into a shared `tests/common/` module so the feature can reuse it), open the
+refactor as its own PR and merge it before the feature PR, which then
+builds on it. Do not fold the extraction into the feature's squash commit.
 
 ## The differential fuzzer (`tests/fuzz_differential.rs`)
 
