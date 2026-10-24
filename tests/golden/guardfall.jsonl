@@ -21,6 +21,7 @@
 {"command":">> /etc/shadow","decision":"Block","deny_message":null,"matched_rule":"redirect-overwrite-device-or-critical-file"}
 {"command":"B=\"${x:-'$(rm -rf ~)'}\"","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"B=ls; find . -exec $B {} +","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"B=rm; find / -exec $B -rf {} +","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"F='--expression=w out'; sed -n p \"$F\" README.md","decision":"Ask","deny_message":"Keep the sed script to read-and-print commands (`p`, `s`, `d`, ...) and let the shell write files (`sed ... > out`); `w`/`W`/`r`/`R`/`e`, `s///w` (even `w /dev/stdout`), `s///e`, `-f` script files and scripts built from unresolved expansions (`sed \"s/$a/$b/\" f`) are never inspected. A variable file operand (`sed -n p \"$file\"`) cannot be told apart from a script word, so expand it to a literal file path.","matched_rule":null}
 {"command":"FOO=bar ls","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"IFS=' '; bash -c \"rm$IFS-rf$IFS/\"","decision":"Ask","deny_message":null,"matched_rule":null}

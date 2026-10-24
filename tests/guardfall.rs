@@ -1551,8 +1551,24 @@ fn guardfall_trap_cases() {
 }
 
 /// Issue #746: a same-line binding substituted into a `find -exec` slot.
-const ISSUE_746_FIND_EXEC_SUBSTITUTED_SLOT_CASES: &[(&str, Decision)] =
-    &[("B=ls; find . -exec $B {} +", Decision::Allow)];
+const ISSUE_746_FIND_EXEC_SUBSTITUTED_SLOT_CASES: &[(&str, Decision)] = &[
+    ("B=ls; find . -exec $B {} +", Decision::Allow),
+    // Control: the substituted form still reaches the target rules.
+    ("B=rm; find / -exec $B -rf {} +", Decision::Block),
+];
+
+#[test]
+fn guardfall_issue_746_find_exec_substituted_slot() {
+    for (command, expected) in ISSUE_746_FIND_EXEC_SUBSTITUTED_SLOT_CASES {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
 
 const FIND_EXEC_BARE_INTERPRETER_CASES: &[(&str, Decision)] = &[
     // The issue's own repro.
@@ -3739,8 +3755,8 @@ const DECISION_TABLES: &[(&str, &[(&str, Decision)])] = &[
     named_table!(ISSUE_739_ENV_ASSIGNMENT_CASES),
     named_table!(EVAL_CASES),
     named_table!(TRAP_CASES),
-    named_table!(FIND_EXEC_BARE_INTERPRETER_CASES),
     named_table!(ISSUE_746_FIND_EXEC_SUBSTITUTED_SLOT_CASES),
+    named_table!(FIND_EXEC_BARE_INTERPRETER_CASES),
     named_table!(FIND_EXEC_RM_FORCE_PLACEHOLDER_CASES),
     named_table!(SELF_PROTECTION_NORMALIZATION_CASES),
     named_table!(ISSUE_77_BRACE_COMMAND_POSITION_CASES),
