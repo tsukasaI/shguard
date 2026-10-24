@@ -518,9 +518,9 @@ pub(crate) const MAX_RAW_BRACKET_OPENER_COUNT: usize = 64;
 /// `scan_redirection_expansions` recurses with `analyze_at_depth` before the
 /// stdin-reading-interpreter `Ask` is raised. The floors above were measured
 /// at depth 0 only; the margin must also hold under 8 levels of analysis
-/// frames, which is not measured. Re-measure with a depth-8 nested
-/// quoted-heredoc payload if `MAX_SUBSTITUTION_DEPTH`, the worker stack, or
-/// the per-level analysis call chain changes.
+/// frames, which is not measured. Measure with a depth-8 nested
+/// quoted-heredoc payload, and again if `MAX_SUBSTITUTION_DEPTH`, the worker
+/// stack, or the per-level analysis call chain changes.
 ///
 /// # Known trade-off
 ///
