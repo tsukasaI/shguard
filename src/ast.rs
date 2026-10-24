@@ -512,7 +512,15 @@ pub(crate) const MAX_RAW_BRACKET_OPENER_COUNT: usize = 64;
 /// `${` 169 / 2533, closed `$(echo ` 151 / 1667. The three are counted
 /// together, so the `$(` floor is the bound: 48 is ~3.1x below the debug
 /// floor and ~35x below the release one. Re-measure on any `brush-parser`
-/// bump.
+/// bump. The gated `uncached_tokenize_str` call is reachable at every
+/// substitution depth up to `MAX_SUBSTITUTION_DEPTH` (8, `src/gate.rs`) via
+/// nested quoted-delimiter interpreter heredoc bodies, because
+/// `scan_redirection_expansions` recurses with `analyze_at_depth` before the
+/// stdin-reading-interpreter `Ask` is raised. The floors above were measured
+/// at depth 0 only; the margin must also hold under 8 levels of analysis
+/// frames, which is not measured. Measure with a depth-8 nested
+/// quoted-heredoc payload, and again if `MAX_SUBSTITUTION_DEPTH`, the worker
+/// stack, or the per-level analysis call chain changes.
 ///
 /// # Known trade-off
 ///

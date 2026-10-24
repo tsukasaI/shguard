@@ -15,12 +15,13 @@ on-demand `workflow_dispatch` runs only its `nix-build` job.
 Release (`chore/release-*`) pushes also need nix >= 2.20 with
 `experimental-features = nix-command flakes` in your nix config (the script's
 `nix build` of a flake ref needs both), and `sandbox = true` plus
-`sandbox-fallback = false` set in the daemon's system config
-(`/etc/nix/nix.conf` or nix-darwin's `nix.settings`), with no user-level
-setting (user nix.conf or `NIX_CONFIG`) overriding them. For an untrusted
-user a user-level nix.conf (or `NIX_CONFIG`) does not reach the daemon; a
-trusted user or single-user install honours user-level overrides, which is
-why the script checks both the system config and your effective user config.
+`sandbox-fallback = false` set in the system nix config (`/etc/nix/nix.conf`,
+which the daemon reads; nix-darwin generates it from `nix.settings`), with
+no user-level setting (user nix.conf or `NIX_CONFIG`) overriding them. For an
+untrusted user a user-level nix.conf (or `NIX_CONFIG`)
+does not reach the daemon; a trusted user or single-user install honours
+user-level overrides, which is why the script checks both the system config
+and your effective user config.
 `scripts/release-nix-build.sh` refuses the push (or its `nix build` fails)
 otherwise.
 
@@ -39,7 +40,9 @@ review but not part of `main`'s history after the merge. When a feature or
 fix needs a refactor extraction first (for example, moving fixture loading
 into a shared `tests/common/` module so the feature can reuse it), open the
 refactor as its own PR and merge it before the feature PR, which then
-builds on it. Do not fold the extraction into the feature's squash commit.
+builds on it. A small extraction may instead go in its own commit inside the
+feature PR, separate from the feature's commits (it is squashed into the
+feature's commit on `main`).
 
 ## The differential fuzzer (`tests/fuzz_differential.rs`)
 

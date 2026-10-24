@@ -861,8 +861,9 @@ fn grammar_composed_payload_at_the_budget_runs_and_one_past_it_is_rejected() {
 
 /// `coproc` takes any command as its body, so a run of bare `coproc`
 /// keywords nests one parse frame each with no brace, paren or other
-/// opener to count: it used to abort (debug ~170, release ~770) and compound
-/// with the budget. It is a counted nesting keyword now.
+/// opener to count: it used to abort (floors measured in the
+/// `src/ast.rs::MAX_RAW_STACK_BUDGET` docs) and compound with the budget. It
+/// is a counted nesting keyword now.
 #[test]
 fn coproc_runs_fail_closed_alone_and_with_an_at_budget_payload() {
     assert_raw_cap_ask(&"coproc ".repeat(300), "keyword nesting");

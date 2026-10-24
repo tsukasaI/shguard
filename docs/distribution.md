@@ -20,11 +20,14 @@ completes.
    the lefthook pre-push hook runs `nix build` on the exact pushed commit
    (`scripts/release-nix-build.sh`, for pushes to `refs/heads/chore/release-*`).
    That covers aarch64-darwin only, on the maintainer's Mac, and needs nix with
-   the sandbox enabled (`sandbox = true`, `sandbox-fallback = false` in the
-   daemon's system config: `/etc/nix/nix.conf`, or nix-darwin's
-   `nix.settings`; for an untrusted user a user-level nix.conf does not reach
-   the daemon, so the script requires both the system config and your
-   effective user config to set them) and refuses the push otherwise.
+   the sandbox enabled (`sandbox = true`, `sandbox-fallback = false` set in
+   the system nix config, with no user-level override) and refuses the push
+   otherwise. The system nix config is `/etc/nix/nix.conf`, which the daemon
+   reads; nix-darwin generates it from `nix.settings`. The script checks both
+   the system config and your effective user config, since a trusted user or
+   single-user install honours user-level overrides; for an untrusted user a
+   user-level nix.conf (or `NIX_CONFIG`) does not reach the daemon, which is
+   why the system config is checked.
    The script does not pin where the `nix build` runs: it reads neither the
    store URL (`NIX_REMOTE` or a `store` setting, e.g. `ssh-ng://`) nor
    `builders` (or `/etc/nix/machines`), which could send the derivation to a
