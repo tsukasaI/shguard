@@ -29,6 +29,13 @@ completes.
    `SHGUARD_TEST_EVAL_TIMEOUT_MS` is compiled out, so hook-path tests run
    against the production 2s bound; flakes from a loaded builder there are
    out of scope (accepted).
+   The script does not pin where the `nix build` runs: it checks neither the
+   store or remote daemon (`NIX_REMOTE` / `--store`, e.g. `ssh-ng://`), nor the
+   daemon's `builders` (or `/etc/nix/machines`), which could send the derivation
+   to a machine whose sandbox settings it never saw, nor a system-level
+   `extra-sandbox-paths` that exposes `/Users` and defeats the #779 check. These
+   are out of scope (accepted): `builders` is empty and the store is the local
+   `daemon`, and an untrusted user can only clear `builders`, not add them.
    x86_64-linux and aarch64-darwin are first built in CI by `main-check.yaml`'s
    `nix-build` job (ubuntu-latest and macos-latest) on the push to `main` when
    the release PR merges. x86_64-darwin is not gated: there is no hosted Intel
