@@ -9896,11 +9896,21 @@ fn crontab_reads_stdin(rest: &[NormalizedWord]) -> bool {
             skip_value = false;
         } else if text == "--" {
             continue;
-        } else if text.starts_with('-') && text.len() > 1 {
-            if text.contains(['l', 'r', 'e']) && !text.starts_with("--") {
-                return false;
+        } else if let Some(long) = text.strip_prefix("--") {
+            skip_value = long == "user";
+        } else if let Some(cluster) = text.strip_prefix('-').filter(|c| !c.is_empty()) {
+            // The first `u` ends the cluster: the rest is the user name, so a
+            // letter in it (`-uroot`, `-ualice`) is not `-r` or `-l`.
+            for flag in cluster.chars() {
+                match flag {
+                    'l' | 'r' | 'e' => return false,
+                    'u' => {
+                        skip_value = cluster.ends_with('u');
+                        break;
+                    }
+                    _ => {}
+                }
             }
-            skip_value = text == "-u" || text == "--user";
         } else {
             return false;
         }
@@ -9935,9 +9945,11 @@ fn trap_action_runs_interpreter(rest: &[NormalizedWord]) -> bool {
         Resolution::Resolved(script) if script.is_empty() || script == "-" => return false,
         Resolution::Resolved(script) => script,
     };
+    // Not direct-only: `trap 'flock l -c sh'` hides the interpreter in a
+    // wrapper's shell string, which a direct-only scan never opens.
     // A redirection (`sh<&0`) is no proof the interpreter's stdin is replaced.
     parser::parse(script).map_or(true, |line| {
-        command_line_stdin_sinks_with(&line, &Env::isolated(), true)
+        command_line_stdin_sinks_with(&line, &Env::isolated(), false)
             .reader
             .is_some()
     })
@@ -21882,6 +21894,47 @@ done"#,
             let verdict = decide(command);
             assert_ne!(verdict.decision(), Decision::Allow, "{command:?}");
         }
+    }
+
+    #[test]
+    fn crontab_user_value_is_not_read_as_a_mode_letter() {
+        for command in [
+            "curl x | crontab -uroot",
+            "curl x | crontab -ualice",
+            "curl x | crontab -u root",
+            "curl x | crontab -u alice",
+            "curl x | crontab --user=root",
+            "curl x | crontab --user root",
+            "curl x | crontab -u",
+            "curl x | crontab --user",
+            "curl x | crontab -iuroot",
+            "curl x | crontab -ul",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+        for command in [
+            "curl x | crontab -uroot -l",
+            "curl x | crontab -u root -l",
+            "curl x | crontab -l -uroot",
+            "curl x | crontab --user=root -r",
+        ] {
+            assert_decision(command, Decision::Allow);
+        }
+    }
+
+    #[test]
+    fn trap_action_wrapper_shell_string_reading_the_pipe_is_not_allowed() {
+        for command in [
+            "curl x | trap 'flock l -c sh' EXIT",
+            "curl x | trap 'strace -o \"|sh\" true' EXIT",
+        ] {
+            let verdict = decide(command);
+            assert_ne!(verdict.decision(), Decision::Allow, "{command:?}");
+        }
+        assert_decision(
+            "curl x | trap 'flock l -c \"echo hi\"' EXIT",
+            Decision::Allow,
+        );
     }
 
     #[test]

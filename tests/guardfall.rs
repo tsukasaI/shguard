@@ -3240,6 +3240,10 @@ const ISSUE_748_INTERPRETER_GAP_CASES: &[(&str, Decision)] = &[
     ("exec env PATH=. ls", Decision::Ask),
     ("curl x | crontab", Decision::Ask),
     ("curl x | crontab -u root", Decision::Ask),
+    ("curl x | crontab -uroot", Decision::Ask),
+    ("curl x | crontab --user=root", Decision::Ask),
+    ("curl x | crontab -uroot -l", Decision::Allow),
+    ("curl x | trap 'flock l -c sh' EXIT", Decision::Ask),
     // `docker exec` is a wrapper (#740), so the heredoc is a shell script
     // whose body Blocks like `sh <<EOF`.
     ("docker exec -i c sh <<EOF\nrm -rf /\nEOF", Decision::Block),
