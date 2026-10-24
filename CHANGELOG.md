@@ -16,6 +16,12 @@ All notable changes to this project are documented in this file.
   Remove or narrow the entry. To allow a wrapped command, write the
   `[[allow]]` rule for the command it runs, not for the wrapper; a wrapper
   flag shguard does not model still floors to Ask.
+- Library API: `shguard::policy::LimitKind` gained a `StdinReadTime`
+  variant and is not `#[non_exhaustive]`, so a downstream exhaustive
+  `match` no longer compiles (#864).
+- Library API: `LoadError::source()` on `shguard::config::LoadError` now
+  returns `None`; call `LoadError::error()` to reach the underlying
+  `ConfigError` (#684).
 
 ### Changed
 
