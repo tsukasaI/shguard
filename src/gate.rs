@@ -1741,8 +1741,9 @@ fn literal_for_items(words: Option<&[Word]>) -> Option<Vec<String>> {
 /// literal bindings filled in. A word that can become the effective command
 /// (the command word, or one reached through wrappers) is never trusted to
 /// turn an unresolved verdict into an Allow: `B=ls; env $B` stays as
-/// undecidable as `B=ls; $B`. Only a stricter verdict may come from the
-/// substituted form there. An Ask the substituted form keeps without
+/// undecidable as `B=ls; $B`. A `find -exec` payload is not such a word; see
+/// [`replaced_word_may_be_command`]. For such a word, only a stricter verdict
+/// may come from the substituted form. An Ask the substituted form keeps without
 /// guidance borrows the guidance the unsubstituted form's Ask carried: the
 /// unresolved word that carried it is gone, the reason to ask is not.
 #[allow(clippy::too_many_arguments)]
@@ -1785,6 +1786,11 @@ fn evaluate_substituted_command(
 
 /// Whether any of the `replaced` word indices of `command` is at or before
 /// the word that runs as the effective command once wrappers are peeled.
+///
+/// `find -exec $B` is not treated as a wrapper: `find` is the effective
+/// command, so a replaced word in a `-exec`/`-execdir`/`-ok`/`-okdir` payload
+/// keeps the substituted form's verdict (`B=ls; find . -exec $B {} +` Allows)
+/// instead of falling back to the unsubstituted one (issue #746).
 fn replaced_word_may_be_command(command: &SimpleCommand, replaced: &[usize]) -> bool {
     let argv = normalize::normalize_argv(command);
     let Some((_, tail)) = crate::rules::effective_command(&argv) else {
