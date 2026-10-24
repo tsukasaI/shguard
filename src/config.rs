@@ -176,7 +176,9 @@ pub enum ConfigError {
 /// resolved when it failed (issue #630), so the fail-closed reason can name
 /// the file to fix. `path` is `None` only when no path was resolved at all
 /// (an env var that is not valid UTF-8, or nothing configured and no usable
-/// `$HOME`). Displays as the underlying error.
+/// `$HOME`), or when the embedded catalog failed to load
+/// ([`ConfigError::EmbeddedCatalog`]), which no config file can fix.
+/// Displays as the underlying error.
 #[derive(Debug, thiserror::Error)]
 #[error("{error}")]
 pub struct LoadError {
@@ -536,6 +538,9 @@ impl Policy {
     /// `resolve_symlinks` rules and [`Self::resolve_symlinks_spelling_warnings`]
     /// use it.
     pub(crate) fn load_with(canonicalizer: PathCanonicalizer) -> Result<Self, LoadError> {
+        // Before discovery: the failure is in the binary, not in any config
+        // file, so no path is attached for the user to go and fix.
+        Self::check_embedded_catalog().map_err(|error| LoadError { path: None, error })?;
         let (shguard_config, xdg_config_home, home) =
             Self::read_env_paths().map_err(|error| LoadError { path: None, error })?;
         let explicit = shguard_config.is_some();
@@ -550,6 +555,13 @@ impl Policy {
             .map_err(|error| LoadError { path, error })
     }
 
+    fn check_embedded_catalog() -> Result<(), ConfigError> {
+        match crate::knowledge::catalog_load_error() {
+            Some(err) => Err(ConfigError::EmbeddedCatalog(crate::catalog_failure(err))),
+            None => Ok(()),
+        }
+    }
+
     /// The load proper, once discovery has resolved `path` (`None`: nothing
     /// configured and no usable `$HOME`) and whether `SHGUARD_CONFIG` named
     /// it (`explicit`).
@@ -559,9 +571,7 @@ impl Policy {
         home: Option<String>,
         canonicalizer: PathCanonicalizer,
     ) -> Result<Self, ConfigError> {
-        if let Some(err) = crate::knowledge::catalog_load_error() {
-            return Err(ConfigError::EmbeddedCatalog(crate::catalog_failure(err)));
-        }
+        Self::check_embedded_catalog()?;
         let blocklist = Rules::embedded()?;
         let allowlist = Allowlist::embedded()?;
 

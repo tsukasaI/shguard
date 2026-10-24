@@ -835,9 +835,10 @@ short_flags = "bmBdeikLnpqrRsStvw"
 short_values = "CfIjloW"
 long_values = ["directory"]
 
-# Reference-list wrappers without an earlier table entry. The grammar is
-# deliberately small: anything else is unmodelled and floors to Ask, while
-# the wrapped command stays visible to rule matching.
+# This row and the rows down to `softlimit`: reference-list wrappers without
+# an earlier table entry. The grammar is deliberately small: anything else
+# is unmodelled and floors to Ask, while the wrapped command stays visible
+# to rule matching.
 [[command]]
 names = ["nsenter"]
 slots = [{ kind = "exec" }]
@@ -937,9 +938,10 @@ slots = [{ kind = "exec" }]
 [command.options]
 short_values = "acdflmoprst"
 
-# Issue #740: command runners that were Allow with any inner command. Tools
-# whose wrapper form is one subcommand (`poetry run`, `docker exec`) carry a
-# `subcommands` slot, so their other subcommands stay ordinary commands.
+# This row and every row after it, down to `rlwrap` (issue #740): command
+# runners that were Allow with any inner command. Tools whose wrapper form
+# is one subcommand (`poetry run`, `docker exec`) carry a `subcommands`
+# slot, so their other subcommands stay ordinary commands.
 [[command]]
 names = ["eatmydata"]
 slots = [{ kind = "exec" }]

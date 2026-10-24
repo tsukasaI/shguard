@@ -1785,13 +1785,15 @@ mod tests {
         ),
         (
             "nsenter",
-            "Reference-list wrappers without an earlier table entry. The grammar is \
+            "This row and the rows down to `softlimit`: reference-list wrappers \
+             without an earlier table entry. The grammar is \
              deliberately small: anything else is unmodelled and floors to Ask, \
              while the wrapped command stays visible to rule matching.",
         ),
         (
             "eatmydata",
-            "Issue #740: command runners that were Allow with any inner command. \
+            "This row and every row after it, down to `rlwrap` (issue #740): \
+             command runners that were Allow with any inner command. \
              Tools whose wrapper form is one subcommand (`poetry run`, `docker \
              exec`) carry a `subcommands` slot, so their other subcommands stay \
              ordinary commands.",
@@ -2140,5 +2142,16 @@ mod tests {
             assert_eq!(toml.options, rust.options, "options of {:?}", rust.names);
             assert_eq!(toml.slots, rust.slots, "slots of {:?}", rust.names);
         }
+    }
+
+    #[test]
+    fn the_toml_file_is_the_generator_output() {
+        // `assert!`, not `assert_eq!`: a dump of both whole files hides the
+        // fix, which is to regenerate.
+        assert!(
+            load::EMBEDDED_CATALOG == render(),
+            "rules/catalog.toml is stale; run {REGEN_ENV}=1 cargo test --lib \
+             knowledge::catalog::tests::regenerate -- --ignored"
+        );
     }
 }
