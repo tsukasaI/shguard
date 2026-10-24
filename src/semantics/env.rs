@@ -302,6 +302,8 @@ pub(crate) struct Env {
     ps4_written: bool,
     /// `set -x` (or `-o xtrace`, `setopt xtrace`, ...) may be in effect. Never
     /// cleared: a later `set +x` does not undo an expansion already done.
+    /// Only a `set -x` seen in the analysed text counts: xtrace inherited
+    /// from the session (`bash -x`, `SHELLOPTS`) is not modelled; issue #746.
     xtrace_on: bool,
 }
 
