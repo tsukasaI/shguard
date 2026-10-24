@@ -273,7 +273,7 @@ All notable changes to this project are documented in this file.
   `grep -rn '${' .` stays Allow.
 - CI and tests: `scripts/check-up-to-date.sh` (the lefthook `pre-push`
   up-to-date guard) is now committed executable (mode 100755), and a
-  `Policy` doc comment points at the
+  `Policy::rules_with_mixed_except_targets` doc comment points at the
   `scaffolded_config_loads_cleanly_via_check_config` test instead of a
   hypothetical CI job (#596). The golden snapshot gate now also checks the
   checkout the test binary's lib was built from and takes its denials input

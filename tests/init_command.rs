@@ -54,6 +54,8 @@ fn scaffolded_config_loads_cleanly_via_check_config() {
         .arg("--check-config")
         .env("SHGUARD_CONFIG", &config_path)
         .assert()
+        // Exit 1 here means an embedded rule mixes url_host with exact/prefix
+        // except_targets; see `Policy::rules_with_mixed_except_targets`.
         .success();
 }
 
