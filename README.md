@@ -1290,10 +1290,14 @@ For the real hook path specifically, the outer watchdog's wall-clock
 deadline starts *after* the stdin read (which has its own separate 10s
 bound) and before config load, so for a
 genuine hang inside the analysis pipeline itself, not just a blocking log
-write, it always wins the race against `analyze_with_policy`'s own internal
-watchdog: `analyze_with_policy` never gets a chance to return, let alone
-log, before the outer bound fires (issue #459). (The two watchdogs' memory
-arms are not strictly ordered the same way, since each polls RSS
+write, it wins the race against `analyze_with_policy`'s own internal
+watchdog (in release builds; debug builds can override the outer budget via
+`SHGUARD_TEST_EVAL_TIMEOUT_MS`), barring a main-thread scheduler delay longer
+than its head start (config load plus adapter parse), in which case the
+internal watchdog's own fail-closed `Ask` can land first with the same
+verdict. Normally `analyze_with_policy` never gets a chance to return, let
+alone log, before the outer bound fires (issue #459). (The two watchdogs'
+memory arms are not strictly ordered the same way, since each polls RSS
 independently, so the outer trip claims ownership of the log the instant
 it fires, before it even writes to stdout, and wins that race whenever it
 gets there first. The one narrow exception is the worker claiming it a few

@@ -335,13 +335,15 @@ pub(crate) fn fs_path_canonicalizer() -> rules::PathCanonicalizer {
 /// regardless of where the hang comes from, and that outer deadline starts
 /// earlier than this function's own (right after the stdin read, before
 /// config load, not just before this call), so for a genuine hang the
-/// outer watchdog always wins the wall-clock race in release builds (debug
-/// builds can lengthen the outer watchdog's budget via
+/// outer watchdog wins the wall-clock race in release builds (debug
+/// builds can override the outer watchdog's budget via
 /// `SHGUARD_TEST_EVAL_TIMEOUT_MS`, so there this function's own watchdog
-/// may trip first); in release builds, then, this function's own fail-closed
-/// `Ask` above is never reached at all, and neither is its `sink.append`
-/// call. (The memory arm is not strictly ordered the same way: both
-/// watchdogs poll RSS independently, so either can cross its own threshold
+/// may trip first), barring a main-thread scheduler delay longer than that
+/// head start (config load plus adapter parse), in which case the worker's
+/// own fail-closed `Ask` can land first with the same verdict; in release
+/// builds, then, this function's own fail-closed `Ask` above is normally
+/// never reached at all, and neither is its `sink.append` call. (The memory
+/// arm is not strictly ordered the same way: both watchdogs poll RSS independently, so either can cross its own threshold
 /// first; `run`'s `LogState` gives the outer trip priority whenever it
 /// fires, so it wins that race too except for the narrow window where the
 /// worker's own `sink.append` claims the log a few microseconds earlier —
