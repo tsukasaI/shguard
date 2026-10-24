@@ -9885,7 +9885,9 @@ fn is_gated_stdin_sink(name: &str, rest: &[NormalizedWord]) -> bool {
 }
 
 /// `crontab` with no file operand installs the table from stdin; `-l`, `-r`
-/// and `-e` never read it. `-u` takes a value. Unresolvable words fail closed.
+/// and `-e` never read it. `-u` takes a value. `--user[=value]` is accepted
+/// defensively: no known crontab supports long options, so it only ever adds
+/// an Ask. Unresolvable words fail closed.
 fn crontab_reads_stdin(rest: &[NormalizedWord]) -> bool {
     let mut skip_value = false;
     for word in rest {
@@ -9901,11 +9903,11 @@ fn crontab_reads_stdin(rest: &[NormalizedWord]) -> bool {
         } else if let Some(cluster) = text.strip_prefix('-').filter(|c| !c.is_empty()) {
             // The first `u` ends the cluster: the rest is the user name, so a
             // letter in it (`-uroot`, `-ualice`) is not `-r` or `-l`.
-            for flag in cluster.chars() {
+            for (index, flag) in cluster.char_indices() {
                 match flag {
                     'l' | 'r' | 'e' => return false,
                     'u' => {
-                        skip_value = cluster.ends_with('u');
+                        skip_value = index + 1 == cluster.len();
                         break;
                     }
                     _ => {}
@@ -21917,6 +21919,7 @@ done"#,
             "curl x | crontab -u root -l",
             "curl x | crontab -l -uroot",
             "curl x | crontab --user=root -r",
+            "curl x | crontab -uu file",
         ] {
             assert_decision(command, Decision::Allow);
         }

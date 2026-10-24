@@ -3240,6 +3240,8 @@ const ISSUE_748_INTERPRETER_GAP_CASES: &[(&str, Decision)] = &[
     ("exec env PATH=. ls", Decision::Ask),
     ("curl x | crontab", Decision::Ask),
     ("curl x | crontab -u root", Decision::Ask),
+    // #770: a glued -u value is not a mode letter, and trap actions open
+    // wrapper shell strings.
     ("curl x | crontab -uroot", Decision::Ask),
     ("curl x | crontab --user=root", Decision::Ask),
     ("curl x | crontab -uroot -l", Decision::Allow),
