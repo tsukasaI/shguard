@@ -289,6 +289,12 @@ slots = [
 short_flags = "Lns"
 short_values = "aCu"
 
+# `shell_script` places su's own `-c`/`--command`. `shell_passthrough` covers
+# what that cannot: su hands every argument after the user to the target shell
+# (`su root -- -ic CMD`, `su root -s /bin/bash -- -ec CMD`), and bash's own `-c`
+# clusters (`-ic`, `-ec`) are not su options. Any `-`/`+` cluster containing `c`
+# is scanned, reporting the word after it and the first operand after the
+# options, since bash takes the script from the latter.
 [[command]]
 names = ["su"]
 slots = [
@@ -539,6 +545,9 @@ long_glued = [
     "mount-proc",
 ]
 
+# Same passthrough as `su`: runuser hands the arguments after the user (and
+# `--`) to the target shell, so `runuser root -- -ic CMD` carries a script that
+# `shell_script`'s `-c`/`--command` cannot place.
 [[command]]
 names = ["runuser"]
 slots = [
