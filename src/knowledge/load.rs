@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use serde::Deserialize;
 
-use super::spec::{ArgOrder, CommandSpec, CwdEffect, OptionGrammar, Slot};
+use super::spec::{ArgOrder, CommandSpec, CwdEffect, OptionGrammar, Slot, SubcommandSet};
 
 pub(super) const EMBEDDED_CATALOG: &str = include_str!("../../rules/catalog.toml");
 
@@ -20,6 +20,10 @@ pub(crate) enum CatalogError {
     UnknownGrammar { command: String, grammar: String },
     #[error("{0:?} is named by two commands")]
     DuplicateName(String),
+    #[error("the command {command:?} is open but gives no justification")]
+    OpenWithoutJustification { command: String },
+    #[error("the command {command:?} gives a justification but is closed")]
+    JustificationOnClosed { command: String },
 }
 
 #[derive(Debug, Deserialize)]
@@ -40,6 +44,28 @@ struct CommandDto {
     options: GrammarDto,
     #[serde(default)]
     slots: Vec<SlotDto>,
+    #[serde(default)]
+    code_options: Vec<String>,
+    #[serde(default)]
+    code_subcommands: Vec<Vec<String>>,
+    #[serde(default)]
+    env_code: Vec<String>,
+    #[serde(default)]
+    reads_files: Vec<String>,
+    #[serde(default)]
+    persists: Vec<String>,
+    cwd_effect: Option<CwdEffectDto>,
+    #[serde(default)]
+    subcommands: SubcommandSetDto,
+    justification: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SubcommandSetDto {
+    #[default]
+    Closed,
+    Open,
 }
 
 /// Every field is optional so that a row can set fields on top of a named
@@ -187,10 +213,30 @@ pub(super) fn parse(text: &str) -> Result<&'static [CommandSpec], CatalogError> 
                 return Err(CatalogError::DuplicateName(name.clone()));
             }
         }
+        let command = || row.names.first().cloned().unwrap_or_default();
+        let subcommands = match (row.subcommands, row.justification.as_deref().map(str::trim)) {
+            (SubcommandSetDto::Closed, None) => SubcommandSet::Closed,
+            (SubcommandSetDto::Closed, Some(_)) => {
+                return Err(CatalogError::JustificationOnClosed { command: command() });
+            }
+            (SubcommandSetDto::Open, Some(text)) if !text.is_empty() => SubcommandSet::Open {
+                justification: leak_str(text.to_owned()),
+            },
+            (SubcommandSetDto::Open, _) => {
+                return Err(CatalogError::OpenWithoutJustification { command: command() });
+            }
+        };
         specs.push(CommandSpec {
-            names: leak_strs(row.names),
             options: row.options.over(base),
             slots: leak_slice(row.slots.into_iter().map(SlotDto::into_slot)),
+            code_options: leak_strs(row.code_options),
+            code_subcommands: leak_slice(row.code_subcommands.into_iter().map(leak_strs)),
+            env_code: leak_strs(row.env_code),
+            reads_files: leak_strs(row.reads_files),
+            persists: leak_strs(row.persists),
+            cwd_effect: row.cwd_effect.map(CwdEffectDto::into_effect),
+            subcommands,
+            names: leak_strs(row.names),
         });
     }
     Ok(leak_slice(specs))
@@ -377,6 +423,7 @@ mod tests {
             "[[command]]\nnames = [\"x\"]\nbogus = 1",
             "[[command]]\nnames = [\"x\"]\n[command.options]\nbogus = 1",
             "[grammar.g]\nbogus = 1",
+            "[[command]]\nnames = [\"x\"]\ncode_option = [\"eval\"]",
             "[[command]]\nnames = [\"x\"]\nslots = [{ kind = \"exec\", bogus = 1 }]",
             "[[command]]\nnames = [\"x\"]\nslots = [{ kind = \"operands\", count = 1, bogus = 1 }]",
             "[[command]]\nnames = [\"x\"]\nslots = [{ kind = \"bogus\" }]",
@@ -420,6 +467,111 @@ mod tests {
                 matches!(error(text), CatalogError::DuplicateName(name) if name == "x"),
                 "{text:?}"
             );
+        }
+    }
+
+    #[test]
+    fn an_open_row_must_justify_itself() {
+        for text in [
+            "[[command]]\nnames = [\"x\"]\nsubcommands = \"open\"",
+            "[[command]]\nnames = [\"x\"]\nsubcommands = \"open\"\njustification = \"  \"",
+        ] {
+            assert!(
+                matches!(error(text), CatalogError::OpenWithoutJustification { command } if command == "x"),
+                "{text:?}"
+            );
+        }
+        let text = "[[command]]\nnames = [\"x\"]\njustification = \"why\"";
+        assert!(matches!(
+            error(text),
+            CatalogError::JustificationOnClosed { .. }
+        ));
+        let specs =
+            parse("[[command]]\nnames = [\"x\"]\nsubcommands = \"open\"\njustification = \"why\"")
+                .expect("loads");
+        assert_eq!(
+            specs[0].subcommands,
+            SubcommandSet::Open {
+                justification: "why"
+            }
+        );
+    }
+
+    #[test]
+    fn the_rfc_row_fields_parse() {
+        let specs = parse(
+            r#"
+            [[command]]
+            names = ["x", "y"]
+            code_options = ["eval"]
+            code_subcommands = [["run", "script"], ["exec"]]
+            env_code = ["NODE_OPTIONS"]
+            reads_files = ["~/.xrc"]
+            persists = ["cron entry"]
+            cwd_effect = "relocates"
+            subcommands = "open"
+            justification = "every subcommand is read-only"
+            "#,
+        )
+        .expect("loads");
+        let spec = &specs[0];
+        assert_eq!(spec.code_options, ["eval"]);
+        assert_eq!(
+            spec.code_subcommands,
+            [&["run", "script"][..], &["exec"][..]]
+        );
+        assert_eq!(spec.env_code, ["NODE_OPTIONS"]);
+        assert_eq!(spec.reads_files, ["~/.xrc"]);
+        assert_eq!(spec.persists, ["cron entry"]);
+        assert_eq!(spec.cwd_effect, Some(CwdEffect::Relocates));
+        assert_eq!(
+            spec.subcommands,
+            SubcommandSet::Open {
+                justification: "every subcommand is read-only"
+            }
+        );
+    }
+
+    #[test]
+    fn the_rfc_row_fields_default_to_empty_and_closed() {
+        let specs = parse("[[command]]\nnames = [\"x\"]").expect("loads");
+        let spec = &specs[0];
+        assert!(spec.code_options.is_empty() && spec.code_subcommands.is_empty());
+        assert!(spec.env_code.is_empty() && spec.reads_files.is_empty());
+        assert!(spec.persists.is_empty());
+        assert_eq!(spec.cwd_effect, None);
+        assert_eq!(spec.subcommands, SubcommandSet::Closed);
+    }
+
+    #[test]
+    fn leaf_rows_share_no_name_with_exec_rows_and_open_rows_justify() {
+        let specs = parse(EMBEDDED_CATALOG).expect("rules/catalog.toml loads");
+        let mut owner = BTreeMap::new();
+        for (index, spec) in specs.iter().enumerate() {
+            for name in spec.names {
+                assert_eq!(
+                    owner.insert(*name, index),
+                    None,
+                    "{name:?} is named by more than one row"
+                );
+            }
+        }
+        let (exec, leaf): (Vec<_>, Vec<_>) = specs.iter().partition(|spec| spec.runs_command());
+        let exec_names: HashSet<_> = exec.iter().flat_map(|spec| spec.names).collect();
+        for name in leaf.iter().flat_map(|spec| spec.names) {
+            assert!(
+                !exec_names.contains(name),
+                "leaf row name {name:?} is also an exec row"
+            );
+        }
+        for spec in specs {
+            if let SubcommandSet::Open { justification } = spec.subcommands {
+                assert!(
+                    !justification.trim().is_empty(),
+                    "{:?} is open without a justification",
+                    spec.names
+                );
+            }
         }
     }
 }

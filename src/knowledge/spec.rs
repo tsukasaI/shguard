@@ -190,12 +190,36 @@ pub(crate) enum Slot {
     Privilege,
 }
 
+/// Whether a row lists every subcommand that matters. Closed is the safe
+/// default; an open row says why an unlisted subcommand is acceptable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubcommandSet {
+    Closed,
+    Open { justification: &'static str },
+}
+
 /// One catalogued command (or a group of names sharing one grammar).
+///
+/// Fields after `slots` are RFC #837 row fields: loaded and validated, but
+/// nothing in the gate reads them yet.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct CommandSpec {
     pub(crate) names: &'static [&'static str],
     pub(crate) options: OptionGrammar,
     pub(crate) slots: &'static [Slot],
+    /// Options whose value is code the command runs.
+    pub(crate) code_options: &'static [&'static str],
+    /// Subcommand paths whose operands are code the command runs.
+    pub(crate) code_subcommands: &'static [&'static [&'static str]],
+    /// Environment variables whose value is code the command runs.
+    pub(crate) env_code: &'static [&'static str],
+    /// Paths the command reads and may execute or source.
+    pub(crate) reads_files: &'static [&'static str],
+    /// What the command leaves behind that runs later.
+    pub(crate) persists: &'static [&'static str],
+    /// Relocation of the wrapped command that no option triggers.
+    pub(crate) cwd_effect: Option<CwdEffect>,
+    pub(crate) subcommands: SubcommandSet,
 }
 
 impl CommandSpec {
