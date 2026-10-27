@@ -1117,6 +1117,7 @@
 {"command":"npx -y rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"npx prettier --check .","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"npx rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"nsenter -W/x rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"numactl rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"nvm() { source \"$NVM_DIR/nvm.sh\"; }","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"oils-for-unix osh -c 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
@@ -1549,6 +1550,7 @@
 {"command":"ssh host rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"sshpass -f pw ssh host ls","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"sshpass -p pw rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"strace --seccomp-bpf rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"strace rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"su -- root -ic 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"su -l root -- -ic 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}

@@ -591,6 +591,7 @@ long_flags = [
     "instruction-pointer",
     "stack-traces",
     "syscall-number",
+    "seccomp-bpf",
 ]
 long_values = [
     "output",
@@ -851,7 +852,7 @@ slots = [{ kind = "exec" }]
 [command.options]
 short_flags = "FZeahV"
 short_values = "tSG"
-short_glued = "muinpCUTrw"
+short_glued = "muinpCUTrwW"
 long_flags = [
     "no-fork",
     "follow-context",
@@ -872,6 +873,7 @@ long_glued = [
     "user",
     "root",
     "wd",
+    "wdns",
 ]
 
 [[command]]
