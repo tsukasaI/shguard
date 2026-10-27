@@ -260,11 +260,14 @@ pub fn analyze(command: &str) -> Verdict {
     })
 }
 
-/// Loads the embedded blocklist and allowlist (the composition root's job,
-/// not the gate's) and hands them to [`gate::analyze`]. A load failure is a
-/// fail-closed `Ask`: every command is refused until the embedded files are
-/// fixed.
+/// Loads the embedded catalog, blocklist and allowlist (the composition
+/// root's job, not the gate's) and hands them to [`gate::analyze`]. A load
+/// failure is a fail-closed `Ask`: every command is refused until the
+/// embedded files are fixed.
 fn analyze_embedded(command: &str) -> Verdict {
+    if let Some(err) = knowledge::catalog_load_error() {
+        return Verdict::ask(verdict::Reason::new(catalog_failure(err)), Vec::new());
+    }
     let rules = match rules::Rules::embedded() {
         Ok(rules) => rules,
         Err(err) => {
@@ -288,6 +291,14 @@ fn analyze_embedded(command: &str) -> Verdict {
         }
     };
     gate::analyze(command, &rules, &allowlist)
+}
+
+/// The fail-closed reason both entry points give for a catalog that did not
+/// load.
+pub(crate) fn catalog_failure(err: &knowledge::CatalogError) -> String {
+    format!(
+        "the embedded catalog failed to load ({err}); refusing to evaluate any command until this is fixed"
+    )
 }
 
 /// The symlink-resolution adapter handed to `rules` (composition root): the

@@ -165,13 +165,20 @@ pub enum ConfigError {
     /// degradation.
     #[error("could not resolve the symlink chain for {path:?}: {reason}")]
     SymlinkChain { path: PathBuf, reason: String },
+    /// The command catalog embedded in the binary (`rules/catalog.toml`)
+    /// failed to load. Checked before anything else, since the rules and
+    /// every evaluation read it.
+    #[error("{0}")]
+    EmbeddedCatalog(String),
 }
 
 /// A [`ConfigError`] together with the config path [`Policy::load`]
 /// resolved when it failed (issue #630), so the fail-closed reason can name
 /// the file to fix. `path` is `None` only when no path was resolved at all
 /// (an env var that is not valid UTF-8, or nothing configured and no usable
-/// `$HOME`). Displays as the underlying error.
+/// `$HOME`), or when the embedded catalog failed to load
+/// ([`ConfigError::EmbeddedCatalog`]), which no config file can fix.
+/// Displays as the underlying error.
 #[derive(Debug, thiserror::Error)]
 #[error("{error}")]
 pub struct LoadError {
@@ -503,7 +510,8 @@ impl Policy {
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError`] if `SHGUARD_CONFIG` is set (including to a
+    /// Returns [`ConfigError`] if the embedded command catalog fails to load
+    /// ([`ConfigError::EmbeddedCatalog`]), if `SHGUARD_CONFIG` is set (including to a
     /// non-UTF-8 value) but the file it names cannot be read or does not
     /// exist, if the resolved default path exists but fails to read, if
     /// the resolved default path resolves to nothing at all
@@ -530,6 +538,9 @@ impl Policy {
     /// `resolve_symlinks` rules and [`Self::resolve_symlinks_spelling_warnings`]
     /// use it.
     pub(crate) fn load_with(canonicalizer: PathCanonicalizer) -> Result<Self, LoadError> {
+        // Before discovery: the failure is in the binary, not in any config
+        // file, so no path is attached for the user to go and fix.
+        Self::check_embedded_catalog().map_err(|error| LoadError { path: None, error })?;
         let (shguard_config, xdg_config_home, home) =
             Self::read_env_paths().map_err(|error| LoadError { path: None, error })?;
         let explicit = shguard_config.is_some();
@@ -544,6 +555,13 @@ impl Policy {
             .map_err(|error| LoadError { path, error })
     }
 
+    fn check_embedded_catalog() -> Result<(), ConfigError> {
+        match crate::knowledge::catalog_load_error() {
+            Some(err) => Err(ConfigError::EmbeddedCatalog(crate::catalog_failure(err))),
+            None => Ok(()),
+        }
+    }
+
     /// The load proper, once discovery has resolved `path` (`None`: nothing
     /// configured and no usable `$HOME`) and whether `SHGUARD_CONFIG` named
     /// it (`explicit`).
@@ -553,6 +571,7 @@ impl Policy {
         home: Option<String>,
         canonicalizer: PathCanonicalizer,
     ) -> Result<Self, ConfigError> {
+        Self::check_embedded_catalog()?;
         let blocklist = Rules::embedded()?;
         let allowlist = Allowlist::embedded()?;
 

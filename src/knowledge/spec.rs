@@ -1,5 +1,6 @@
 //! The typed shape of one catalogued command: its option grammar and the
-//! roles its words play. Plain `&'static` data, no serde (RFC #658 stage 2).
+//! roles its words play. Plain `&'static` data, no serde (RFC #658 stage 2):
+//! `super::load` builds it from `rules/catalog.toml`.
 
 /// How a [`CommandSpec`]'s options and operands are ordered, matching what
 /// the tool's own getopt does.
@@ -16,7 +17,7 @@ pub(crate) enum ArgOrder {
 
 /// One command's option grammar. A letter or name that appears in none of
 /// the lists is unmodelled, which `parse` reports as `Unmodeled`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct OptionGrammar {
     /// Short letters that take no value.
     pub(crate) short_flags: &'static str,
@@ -115,7 +116,7 @@ pub(crate) enum CwdEffect {
 }
 
 /// A role one part of the command line plays.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Slot {
     /// A command operand follows: the command is transparent, and the word
     /// after its own arguments is what runs.
@@ -190,7 +191,7 @@ pub(crate) enum Slot {
 }
 
 /// One catalogued command (or a group of names sharing one grammar).
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct CommandSpec {
     pub(crate) names: &'static [&'static str],
     pub(crate) options: OptionGrammar,

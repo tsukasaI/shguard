@@ -3,27 +3,56 @@
 //! A [`CommandSpec`] describes one command's option grammar and the roles
 //! its words play (the command it runs, a shell string, operands consumed
 //! before the command, a cwd effect, privilege escalation). The catalog is
-//! embedded `&'static` data: no user extension, no serde, no I/O. Specs are
-//! knowledge about reading an argv, not policy; what to do with a reading
-//! is decided elsewhere.
+//! `rules/catalog.toml`, embedded in the binary and loaded once into
+//! `&'static` data: no user extension, no I/O. Specs are knowledge about
+//! reading an argv, not policy; what to do with a reading is decided
+//! elsewhere.
 //!
 //! Invariant: for a catalogued command, an option the grammar does not
 //! describe is [`Unmodeled`], never a guess. The only place that turns it
 //! into a decision is `crate::gate`'s unmodelled-option floor.
 
+#[cfg(test)]
 mod catalog;
+mod load;
 mod parse;
 #[cfg(test)]
 mod reference;
 mod spec;
 
+use std::sync::OnceLock;
+
 use crate::normalize::{NormalizedWord, Resolution};
 
+pub(crate) use load::CatalogError;
 pub(crate) use parse::{
     Finding, OptionName, OptionValue, ParsedArgv, ParsedOption, ShortValue, Unmodeled,
 };
 pub(crate) use spec::CwdEffect;
 use spec::{CommandSpec, Slot};
+
+static LOADED: OnceLock<Result<&'static [CommandSpec], CatalogError>> = OnceLock::new();
+
+fn loaded() -> &'static Result<&'static [CommandSpec], CatalogError> {
+    LOADED.get_or_init(|| load::parse(load::EMBEDDED_CATALOG))
+}
+
+/// Why the embedded catalog failed to load, if it did. Every entry point
+/// checks this before evaluating a command: the readers below cannot
+/// report the failure.
+pub(crate) fn catalog_load_error() -> Option<&'static CatalogError> {
+    loaded().as_ref().err()
+}
+
+fn specs() -> &'static [CommandSpec] {
+    match loaded() {
+        Ok(specs) => specs,
+        // Not an empty catalog: that would read every wrapper as a plain
+        // command. Entry points refuse first, and a panic under them still
+        // fails closed (the watchdog and `main`'s `catch_unwind`).
+        Err(err) => panic!("the embedded catalog failed to load ({err})"),
+    }
+}
 
 /// A catalogued command found by name, with the name it was found under.
 #[derive(Debug, Clone, Copy)]
@@ -34,7 +63,7 @@ pub(crate) struct Known {
 
 /// Looks `folded` (case-folded, path-stripped) up in the catalog.
 pub(crate) fn lookup(folded: &str) -> Option<Known> {
-    catalog::CATALOG.iter().find_map(|spec| {
+    specs().iter().find_map(|spec| {
         spec.names
             .iter()
             .find(|name| **name == folded)
@@ -51,7 +80,7 @@ pub(crate) fn is_exec_wrapper(folded: &str) -> bool {
 /// Every name of a catalogued exec wrapper.
 #[cfg(test)]
 pub(crate) fn exec_wrapper_names() -> impl Iterator<Item = &'static str> {
-    catalog::CATALOG
+    specs()
         .iter()
         .filter(|spec| spec.runs_command())
         .flat_map(|spec| spec.names.iter().copied())
@@ -62,7 +91,7 @@ pub(crate) fn exec_wrapper_names() -> impl Iterator<Item = &'static str> {
 /// tool people legitimately allow for its other subcommands, so it is left
 /// out.
 pub(crate) fn always_wrapping_names() -> impl Iterator<Item = &'static str> {
-    catalog::CATALOG
+    specs()
         .iter()
         .filter(|spec| spec.runs_command() && spec.subcommands().is_none())
         .flat_map(|spec| spec.names.iter().copied())
@@ -71,7 +100,7 @@ pub(crate) fn always_wrapping_names() -> impl Iterator<Item = &'static str> {
 /// Every name of a catalogued command that escalates privileges.
 #[cfg(test)]
 pub(crate) fn escalation_vectors() -> impl Iterator<Item = &'static str> {
-    catalog::CATALOG
+    specs()
         .iter()
         .filter(|spec| spec.escalates_privileges())
         .flat_map(|spec| spec.names.iter().copied())
@@ -402,9 +431,14 @@ mod tests {
     }
 
     #[test]
+    fn the_embedded_catalog_loads() {
+        assert!(catalog_load_error().is_none(), "{:?}", catalog_load_error());
+    }
+
+    #[test]
     fn no_name_is_claimed_by_two_specs() {
         let mut seen = std::collections::HashSet::new();
-        for spec in catalog::CATALOG {
+        for spec in specs() {
             for name in spec.names {
                 assert!(seen.insert(*name), "{name:?} has two specs");
             }

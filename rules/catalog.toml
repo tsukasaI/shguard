@@ -1,0 +1,1568 @@
+# The command catalog: one row per command, or per group of names sharing a
+# grammar.
+#
+# Grammar rules of thumb: an option listed with the wrong arity hides the
+# wrapped command, so only options with a documented arity are listed;
+# everything else stays unmodelled and floors to Ask. Optional values that
+# are attached only (`--mount[=file]`, `xargs -i[str]`, env's
+# `--block-signal[=sig]`) are `*_glued`, never separated values.
+#
+# Layout: `[grammar.<name>]` is an option grammar that several rows share.
+# A row's `grammar = "<name>"` starts it from that grammar instead of the
+# empty one, and its `[command.options]` table sets fields on top, like
+# Rust's `..BASE`. A field left out keeps the base's value; in the empty
+# grammar every string is "", every list [], every switch false, and
+# `order` is "first_operand". A row whose grammar is its own has no
+# `grammar` key and writes every non-empty field in `[command.options]`.
+#
+# Generated from src/knowledge/catalog.rs, which stays the source of truth
+# until it is deleted (issue #837): edit that file, then run
+#   SHGUARD_CATALOG_REGEN=1 cargo test --lib knowledge::catalog::tests::regenerate -- --ignored
+# The roundtrip test there fails while the two differ.
+
+[grammar.setarch]
+short_flags = "v34BFILRSTXZhV"
+long_flags = [
+    "verbose",
+    "3gb",
+    "4gb",
+    "32bit",
+    "fdpic-funcptrs",
+    "short-inode",
+    "addr-compat-layout",
+    "addr-no-randomize",
+    "whole-seconds",
+    "sticky-timeouts",
+    "read-implies-exec",
+    "mmap-page-zero",
+    "uname-2.6",
+    "list",
+    "help",
+    "version",
+]
+
+# `uv run`, `uv tool run` and `uvx` share their options.
+[grammar.uv_run]
+short_flags = "qvmhV"
+short_values = "pwC"
+long_flags = [
+    "no-sync",
+    "frozen",
+    "locked",
+    "isolated",
+    "active",
+    "module",
+    "no-project",
+    "quiet",
+    "verbose",
+    "offline",
+    "no-cache",
+    "no-dev",
+    "dev",
+    "all-extras",
+    "no-editable",
+    "exact",
+    "no-env-file",
+    "help",
+    "version",
+]
+long_values = [
+    "with",
+    "with-editable",
+    "with-requirements",
+    "python",
+    "project",
+    "directory",
+    "package",
+    "extra",
+    "group",
+    "only-group",
+    "no-group",
+    "env-file",
+    "index",
+    "color",
+    "cache-dir",
+    "config-file",
+    "from",
+]
+
+# `bun x` and `bunx`.
+[grammar.bun]
+short_flags = "hv"
+long_flags = ["bun", "silent", "no-install", "help", "version"]
+long_values = ["cwd", "config", "registry", "package"]
+
+# `npx` and `npm exec` share their options.
+[grammar.npm_exec]
+short_flags = "yhvqng"
+short_values = "pcw"
+long_flags = [
+    "yes",
+    "no",
+    "no-install",
+    "quiet",
+    "silent",
+    "verbose",
+    "offline",
+    "prefer-online",
+    "prefer-offline",
+    "ignore-existing",
+    "help",
+    "version",
+]
+long_values = [
+    "package",
+    "call",
+    "workspace",
+    "loglevel",
+    "registry",
+    "cache",
+    "userconfig",
+]
+
+[[command]]
+names = ["env"]
+slots = [
+    { kind = "exec" },
+    { kind = "split_string", short = "S", long = "split-string" },
+    { kind = "cwd", short = "C", long = "chdir", effect = "composed" },
+]
+
+[command.options]
+short_flags = "0iv"
+short_values = "uCSPa"
+long_flags = [
+    "ignore-environment",
+    "null",
+    "debug",
+    "list-signal-handling",
+    "help",
+    "version",
+]
+long_values = ["unset", "chdir", "split-string", "argv0"]
+long_glued = ["default-signal", "ignore-signal", "block-signal"]
+bare_dash_option = true
+assignments = true
+
+[[command]]
+names = ["command"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_flags = "pVv"
+
+[[command]]
+names = ["nohup"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+long_flags = ["help", "version"]
+
+[[command]]
+names = ["nice"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_values = "n"
+long_flags = ["help", "version"]
+long_values = ["adjustment"]
+numeric_option = true
+
+[[command]]
+names = ["exec"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_flags = "cl"
+short_values = "a"
+
+[[command]]
+names = ["stdbuf"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_values = "ioe"
+long_flags = ["help", "version"]
+long_values = ["input", "output", "error"]
+
+[[command]]
+names = ["setsid"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_flags = "cfwhV"
+long_flags = ["ctty", "fork", "wait", "help", "version"]
+
+[[command]]
+names = ["sudo"]
+slots = [
+    { kind = "exec" },
+    { kind = "privilege" },
+    { kind = "cwd", short = "D", long = "chdir", effect = "relocates" },
+    { kind = "cwd", short = "R", long = "chroot", effect = "relocates" },
+    { kind = "cwd_switch", short = "i", long = "login", effect = "relocates" },
+    { kind = "cwd_switch", short = "s", long = "shell", effect = "relocates" },
+    { kind = "operands_as_shell_script_with", switches = [{ short = "s", long = "shell" }, { short = "i", long = "login" }] },
+]
+
+[command.options]
+short_flags = "AbBEeHiKklnPSsVv"
+short_values = "ugCDhpRrtTUac"
+long_flags = [
+    "askpass",
+    "background",
+    "bell",
+    "edit",
+    "set-home",
+    "help",
+    "login",
+    "remove-timestamp",
+    "reset-timestamp",
+    "list",
+    "non-interactive",
+    "preserve-groups",
+    "stdin",
+    "shell",
+    "version",
+    "validate",
+]
+long_values = [
+    "user",
+    "group",
+    "close-from",
+    "chdir",
+    "host",
+    "prompt",
+    "chroot",
+    "role",
+    "type",
+    "command-timeout",
+    "other-user",
+    "auth-type",
+    "login-class",
+]
+long_glued = ["preserve-env"]
+
+[[command]]
+names = ["xargs"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_flags = "0oprtx"
+short_values = "EIJLnPRSsad"
+short_glued = "eil"
+long_flags = [
+    "null",
+    "open-tty",
+    "interactive",
+    "no-run-if-empty",
+    "verbose",
+    "exit",
+    "show-limits",
+    "help",
+    "version",
+]
+long_values = [
+    "arg-file",
+    "delimiter",
+    "max-args",
+    "max-procs",
+    "max-chars",
+    "process-slot-var",
+]
+long_glued = ["eof", "replace", "max-lines"]
+
+[[command]]
+names = ["doas"]
+slots = [
+    { kind = "exec" },
+    { kind = "privilege" },
+    { kind = "operands_as_shell_script_with", switches = [{ short = "s", long = "" }] },
+]
+
+[command.options]
+short_flags = "Lns"
+short_values = "aCu"
+
+[[command]]
+names = ["su"]
+slots = [
+    { kind = "exec" },
+    { kind = "privilege" },
+    { kind = "operands", count = 1 },
+    { kind = "shell_script", short = "c", long = "command" },
+    { kind = "shell_script", long = "session-command" },
+    { kind = "shell_passthrough" },
+    { kind = "cwd_switch", short = "l", long = "login", effect = "relocates" },
+    { kind = "cwd_bare_dash", effect = "relocates" },
+]
+
+[command.options]
+short_flags = "lmpfPVhL"
+short_values = "cgGsw"
+long_flags = [
+    "login",
+    "preserve-environment",
+    "fast",
+    "pty",
+    "help",
+    "version",
+]
+long_values = [
+    "command",
+    "group",
+    "supp-group",
+    "shell",
+    "whitelist-environment",
+    "session-command",
+]
+bare_dash_option = true
+order = "permute_until_command"
+
+[[command]]
+names = ["pkexec"]
+slots = [{ kind = "exec" }, { kind = "privilege" }]
+
+[command.options]
+long_flags = ["disable-internal-agent", "keep-cwd", "version", "help"]
+long_values = ["user"]
+
+# Not only a non-root target: any `-u` is treated as running in that user's
+# home, so the exception fails closed.
+[[command]]
+names = ["run0"]
+slots = [
+    { kind = "exec" },
+    { kind = "privilege" },
+    { kind = "cwd", short = "D", long = "chdir", effect = "relocates" },
+    { kind = "cwd", short = "u", long = "user", effect = "relocates" },
+]
+
+[command.options]
+short_flags = "h"
+short_values = "ugDM"
+long_flags = [
+    "no-ask-password",
+    "slice-inherit",
+    "empower",
+    "pty",
+    "help",
+    "version",
+]
+long_values = [
+    "unit",
+    "property",
+    "description",
+    "slice",
+    "user",
+    "group",
+    "nice",
+    "chdir",
+    "setenv",
+    "machine",
+    "background",
+]
+
+[[command]]
+names = ["timeout"]
+slots = [{ kind = "exec" }, { kind = "operands", count = 1 }]
+
+[command.options]
+short_flags = "fpv"
+short_values = "sk"
+long_flags = ["foreground", "preserve-status", "verbose", "help", "version"]
+long_values = ["signal", "kill-after"]
+
+[[command]]
+names = ["ionice"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_flags = "thV"
+short_values = "cnpPu"
+long_flags = ["ignore", "help", "version"]
+long_values = ["class", "classdata", "pid", "pgid", "uid"]
+
+[[command]]
+names = ["flock"]
+slots = [
+    { kind = "exec" },
+    { kind = "operands", count = 1 },
+    { kind = "shell_script", short = "c", long = "command" },
+]
+
+[command.options]
+short_flags = "sxunoFhVv"
+short_values = "wEc"
+long_flags = [
+    "shared",
+    "exclusive",
+    "unlock",
+    "nonblock",
+    "nb",
+    "close",
+    "no-fork",
+    "verbose",
+    "help",
+    "version",
+]
+long_values = ["timeout", "wait", "conflict-exit-code", "command"]
+
+[[command]]
+names = ["chrt"]
+slots = [{ kind = "exec" }, { kind = "operands", count = 1 }]
+
+[command.options]
+short_flags = "bfiordRmpavhV"
+short_values = "TPD"
+long_flags = [
+    "batch",
+    "fifo",
+    "idle",
+    "other",
+    "rr",
+    "deadline",
+    "reset-on-fork",
+    "max",
+    "pid",
+    "all-tasks",
+    "verbose",
+    "help",
+    "version",
+]
+long_values = ["sched-runtime", "sched-period", "sched-deadline"]
+
+[[command]]
+names = ["taskset"]
+slots = [{ kind = "exec" }, { kind = "operands", count = 1 }]
+
+[command.options]
+short_flags = "apchV"
+long_flags = ["all-tasks", "pid", "cpu-list", "help", "version"]
+
+[[command]]
+names = ["busybox", "toybox", "oils-for-unix", "oils_for_unix"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+long_flags = ["help", "install", "list", "list-full", "show", "version"]
+
+[[command]]
+names = ["coreutils"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_flags = "hV"
+long_flags = ["help", "version", "list"]
+
+[[command]]
+names = ["builtin"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_flags = "dlps"
+short_values = "f"
+
+[[command]]
+names = ["time"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_flags = "apqvVlh"
+short_values = "fo"
+long_flags = ["append", "portability", "quiet", "verbose", "version", "help"]
+long_values = ["format", "output"]
+
+[[command]]
+names = ["caffeinate"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_flags = "dimsu"
+short_values = "tw"
+
+[[command]]
+names = ["chroot"]
+slots = [{ kind = "exec" }, { kind = "operands", count = 1 }]
+
+[command.options]
+short_values = "ugG"
+long_flags = ["skip-chdir", "help", "version"]
+long_values = ["userspec", "groups"]
+
+[[command]]
+names = ["unshare"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_flags = "muinpUCTfrchV"
+short_values = "SGRwl"
+long_flags = [
+    "fork",
+    "map-root-user",
+    "map-current-user",
+    "map-auto",
+    "keep-caps",
+    "help",
+    "version",
+]
+long_values = [
+    "setuid",
+    "setgid",
+    "root",
+    "wd",
+    "map-user",
+    "map-group",
+    "map-users",
+    "map-groups",
+    "setgroups",
+    "propagation",
+    "monotonic",
+    "boottime",
+    "load-interp",
+]
+long_glued = [
+    "mount",
+    "uts",
+    "ipc",
+    "net",
+    "pid",
+    "user",
+    "cgroup",
+    "time",
+    "kill-child",
+    "mount-proc",
+]
+
+[[command]]
+names = ["runuser"]
+slots = [
+    { kind = "exec" },
+    { kind = "privilege" },
+    { kind = "shell_script", short = "c", long = "command" },
+    { kind = "shell_script", long = "session-command" },
+    { kind = "shell_passthrough" },
+]
+
+[command.options]
+short_flags = "flmpPhV"
+short_values = "ugGswc"
+long_flags = [
+    "login",
+    "fast",
+    "preserve-environment",
+    "pty",
+    "help",
+    "version",
+]
+long_values = [
+    "user",
+    "group",
+    "supp-group",
+    "shell",
+    "whitelist-environment",
+    "command",
+    "session-command",
+]
+
+[[command]]
+names = ["strace"]
+slots = [
+    { kind = "exec" },
+    { kind = "piped_output", short = "o", long = "output" },
+]
+
+[command.options]
+short_flags = "ACcdDfFhiknqrtTvVwxyYzZ"
+short_values = "oepsuEabIOPSXU"
+long_flags = [
+    "follow-forks",
+    "output-separately",
+    "summary-only",
+    "summary",
+    "debug",
+    "help",
+    "version",
+    "instruction-pointer",
+    "stack-traces",
+    "syscall-number",
+]
+long_values = [
+    "output",
+    "trace",
+    "signal",
+    "status",
+    "env",
+    "user",
+    "string-limit",
+    "attach",
+    "trace-path",
+    "summary-sort-by",
+    "summary-columns",
+    "columns",
+    "detach-on",
+    "interruptible",
+    "const-print-style",
+    "abbrev",
+    "verbose",
+    "raw",
+    "read",
+    "write",
+    "inject",
+    "fault",
+    "syscall-limit",
+    "decode-pids",
+]
+
+# `-d` takes an optional glued value, so `-dx` is `-d` with value `x`, never
+# `-d -x`.
+[[command]]
+names = ["watch"]
+slots = [
+    { kind = "exec" },
+    { kind = "operands_as_shell_script", exec_short = "x", exec_long = "exec" },
+]
+
+[command.options]
+short_flags = "bcCegprtwxhv"
+short_values = "nqs"
+short_glued = "d"
+long_flags = [
+    "beep",
+    "color",
+    "no-color",
+    "errexit",
+    "chgexit",
+    "precise",
+    "no-rerun",
+    "no-title",
+    "no-wrap",
+    "exec",
+    "help",
+    "version",
+]
+long_values = ["interval", "equexit", "shotsdir"]
+long_glued = ["differences"]
+
+[[command]]
+names = ["setarch"]
+grammar = "setarch"
+slots = [{ kind = "exec" }]
+
+[command.options]
+leading_operand = true
+
+# The personality aliases take the same options but no ARCH operand.
+[[command]]
+names = ["linux32", "linux64", "i386", "x86_64", "uname26"]
+grammar = "setarch"
+slots = [{ kind = "exec" }]
+
+# Resource limits (`-n[=soft:hard]`, `--nofile[=...]`) are optional-argument
+# and `=`-joined, so a separate word is the command, not a value.
+[[command]]
+names = ["prlimit"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_flags = "hV"
+short_values = "po"
+short_glued = "cdefilmnqrstuvxy"
+long_flags = ["noheadings", "raw", "verbose", "help", "version"]
+long_values = ["pid", "output"]
+long_glued = [
+    "core",
+    "data",
+    "nice",
+    "fsize",
+    "sigpending",
+    "memlock",
+    "rss",
+    "nofile",
+    "msgqueue",
+    "rtprio",
+    "stack",
+    "cpu",
+    "nproc",
+    "as",
+    "locks",
+    "rttime",
+]
+
+# Every firejail option is `--name` or `--name=value`; none takes a
+# separated value, so the option names need no enumeration.
+[[command]]
+names = ["firejail"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+any_long_attached = true
+
+[[command]]
+names = ["systemd-run"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_flags = "rdtPqGSh"
+short_values = "upEMHC"
+long_flags = [
+    "system",
+    "user",
+    "scope",
+    "remain-after-exit",
+    "no-ask-password",
+    "pty",
+    "pipe",
+    "wait",
+    "collect",
+    "quiet",
+    "no-block",
+    "send-sighup",
+    "same-dir",
+    "shell",
+    "no-pager",
+    "help",
+    "version",
+]
+long_values = [
+    "unit",
+    "property",
+    "setenv",
+    "machine",
+    "host",
+    "uid",
+    "gid",
+    "nice",
+    "working-directory",
+    "description",
+    "slice",
+    "service-type",
+    "on-active",
+    "on-boot",
+    "on-startup",
+    "on-unit-active",
+    "on-unit-inactive",
+    "on-calendar",
+    "timer-property",
+    "capsule",
+    "path-property",
+    "socket-property",
+    "job-mode",
+]
+
+[[command]]
+names = ["unbuffer"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_flags = "p"
+
+[[command]]
+names = ["numactl"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_flags = "absHltdDuTh"
+short_values = "cCNmpiPwSfoLMI"
+long_flags = [
+    "all",
+    "hardware",
+    "show",
+    "localalloc",
+    "touch",
+    "dump",
+    "dump-nodes",
+    "strict",
+    "huge",
+    "help",
+    "version",
+]
+long_values = [
+    "physcpubind",
+    "cpubind",
+    "cpunodebind",
+    "membind",
+    "preferred",
+    "interleave",
+    "preferred-many",
+    "weighted-interleave",
+    "shm",
+    "file",
+    "offset",
+    "length",
+    "shmmode",
+    "shmid",
+]
+
+# BSD `-F` is deliberately absent: a boolean on macOS but a pipe path on
+# older FreeBSD, so it stays unmodelled.
+[[command]]
+names = ["script"]
+slots = [
+    { kind = "exec" },
+    { kind = "operands", count = 1 },
+    { kind = "shell_script", short = "c", long = "command" },
+]
+
+[command.options]
+short_flags = "adefkpqrhV"
+short_values = "cTEIOBmo"
+short_values_unless_dash = "t"
+long_flags = ["append", "return", "flush", "force", "quiet", "help", "version"]
+long_values = [
+    "command",
+    "echo",
+    "log-in",
+    "log-out",
+    "log-io",
+    "log-timing",
+    "logging-format",
+    "output-limit",
+]
+dash_command_unmodeled = true
+
+# `make` runs no wrapped command; its entry only tells `-C` composition how
+# the cluster `-kC dir` is laid out (every short letter not listed as a
+# value-taker is boolean on GNU make).
+[[command]]
+names = ["make"]
+slots = [
+    { kind = "cwd", short = "C", long = "directory", effect = "composed" },
+]
+
+[command.options]
+short_flags = "bmBdeikLnpqrRsStvw"
+short_values = "CfIjloW"
+long_values = ["directory"]
+
+# This row and the rows down to `softlimit`: reference-list wrappers without
+# an earlier table entry. The grammar is deliberately small: anything else
+# is unmodelled and floors to Ask, while the wrapped command stays visible
+# to rule matching.
+[[command]]
+names = ["nsenter"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_flags = "FZeahV"
+short_values = "tSG"
+short_glued = "muinpCUTrw"
+long_flags = [
+    "no-fork",
+    "follow-context",
+    "preserve-credentials",
+    "all",
+    "help",
+    "version",
+]
+long_values = ["target", "setuid", "setgid"]
+long_glued = [
+    "mount",
+    "uts",
+    "ipc",
+    "net",
+    "pid",
+    "cgroup",
+    "time",
+    "user",
+    "root",
+    "wd",
+]
+
+[[command]]
+names = ["setpriv"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+long_flags = [
+    "clear-groups",
+    "keep-groups",
+    "init-groups",
+    "no-new-privs",
+    "reset-env",
+    "dump",
+    "list-caps",
+    "help",
+    "version",
+]
+long_values = [
+    "reuid",
+    "regid",
+    "ruid",
+    "euid",
+    "rgid",
+    "egid",
+    "groups",
+    "inh-caps",
+    "ambient-caps",
+    "bounding-set",
+    "securebits",
+    "selinux-label",
+    "apparmor-profile",
+    "pdeathsig",
+]
+
+[[command]]
+names = ["runcon"]
+slots = [{ kind = "exec" }, { kind = "operands", count = 1 }]
+
+[command.options]
+long_flags = ["help", "version"]
+
+[[command]]
+names = ["choom"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_flags = "hV"
+short_values = "np"
+long_flags = ["help", "version"]
+long_values = ["adjust", "pid"]
+
+[[command]]
+names = ["chpst"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_flags = "vP012"
+short_values = "uUe/nmdopfc"
+
+[[command]]
+names = ["setuidgid", "envuidgid", "envdir"]
+slots = [{ kind = "exec" }, { kind = "operands", count = 1 }]
+
+[[command]]
+names = ["softlimit"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_values = "acdflmoprst"
+
+# This row and every row after it, down to `rlwrap` (issue #740): command
+# runners that were Allow with any inner command. Tools whose wrapper form
+# is one subcommand (`poetry run`, `docker exec`) carry a `subcommands`
+# slot, so their other subcommands stay ordinary commands.
+[[command]]
+names = ["eatmydata"]
+slots = [{ kind = "exec" }]
+
+[[command]]
+names = ["bwrap"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+long_flags = [
+    "unshare-user",
+    "unshare-user-try",
+    "unshare-ipc",
+    "unshare-pid",
+    "unshare-net",
+    "unshare-uts",
+    "unshare-cgroup",
+    "unshare-cgroup-try",
+    "unshare-all",
+    "share-net",
+    "die-with-parent",
+    "new-session",
+    "as-pid-1",
+    "disable-userns",
+    "assert-userns-disabled",
+    "clearenv",
+    "help",
+    "version",
+]
+long_values = [
+    "tmpfs",
+    "proc",
+    "dev",
+    "mqueue",
+    "dir",
+    "unsetenv",
+    "uid",
+    "gid",
+    "hostname",
+    "chdir",
+    "userns",
+    "userns2",
+    "pidns",
+    "cap-add",
+    "cap-drop",
+    "seccomp",
+    "block-fd",
+    "sync-fd",
+    "lock-file",
+    "argv0",
+    "remount-ro",
+    "size",
+    "perms",
+    "info-fd",
+    "json-status-fd",
+    "userns-block-fd",
+    "exec-label",
+    "file-label",
+]
+long_pairs = [
+    "bind",
+    "bind-try",
+    "ro-bind",
+    "ro-bind-try",
+    "dev-bind",
+    "dev-bind-try",
+    "symlink",
+    "setenv",
+    "file",
+    "bind-data",
+    "ro-bind-data",
+    "chmod",
+]
+
+[[command]]
+names = ["proot"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_flags = "0hV"
+short_values = "rRSbqwvk"
+long_flags = ["help", "version", "kill-on-exit", "link2symlink", "sysvipc"]
+long_values = [
+    "rootfs",
+    "bind",
+    "mount",
+    "qemu",
+    "cwd",
+    "pwd",
+    "verbose",
+    "kernel-release",
+]
+
+[[command]]
+names = ["ltrace"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_flags = "cCdfiLrStTbhVg"
+short_values = "oepsuaAlnwxF"
+
+# The program is only run under `--args`; without it the first operand is a
+# file to debug, which is a harmless "command" here. `floor_options` run gdb
+# commands, `shell ...` among them.
+[[command]]
+names = ["gdb"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+long_flags = [
+    "args",
+    "batch",
+    "quiet",
+    "q",
+    "nx",
+    "nh",
+    "silent",
+    "readnow",
+    "write",
+    "tui",
+    "fullname",
+    "help",
+    "version",
+]
+long_values = [
+    "ex",
+    "iex",
+    "eval-command",
+    "init-eval-command",
+    "command",
+    "x",
+    "ix",
+    "directory",
+    "cd",
+    "tty",
+    "core",
+    "pid",
+    "symbols",
+    "exec",
+    "se",
+    "data-directory",
+    "init-command",
+]
+single_dash_long = true
+floor_options = [
+    "ex",
+    "iex",
+    "eval-command",
+    "init-eval-command",
+    "command",
+    "x",
+    "ix",
+    "init-command",
+]
+
+# The options are the union of the options of the subcommands below. `-l` is
+# split-window's size and `-d` new-session's flag, so `tmux -l` and
+# `run-shell -d DELAY` are misread.
+[[command]]
+names = ["tmux"]
+slots = [
+    { kind = "subcommands", alternatives = [["new-session"], ["new"], ["new-window"], ["neww"], ["split-window"], ["splitw"], ["run-shell"], ["run"], ["respawn-pane"], ["respawnp"], ["respawn-window"], ["respawnw"], ["display-popup"], ["popup"], ["pipe-pane"], ["pipep"]] },
+    { kind = "unmodeled_subcommands", alternatives = [["send-keys"], ["send"], ["if-shell"], ["if"]] },
+    { kind = "exec" },
+    { kind = "shell_script", short = "c" },
+    { kind = "operands_joined_shell_script" },
+]
+
+[command.options]
+short_flags = "2CNuvVDAdEPXkabhZBOoIHKMR"
+short_values = "cfLSTeFnstxylpw"
+
+[[command]]
+names = ["screen"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_flags = "aAdDfilLmOqUvw"
+short_values = "hpsStTceX"
+short_glued = "rRx"
+dash_words = ["fn", "fa", "ln"]
+dash_word_values = ["Logfile"]
+floor_values = [
+    { short = "X", values = ["stuff", "eval", "source", "register", "paste", "readreg", "readbuf"] },
+]
+
+[[command]]
+names = ["faketime"]
+slots = [{ kind = "exec" }, { kind = "operands", count = 1 }]
+
+[command.options]
+short_flags = "mfh"
+long_flags = ["exclude-monotonic", "disable-cache", "help", "version"]
+
+[[command]]
+names = ["xvfb-run"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_flags = "ahl"
+short_values = "efnpsw"
+long_flags = ["auto-servernum", "help", "listen-tcp"]
+long_values = [
+    "error-file",
+    "auth-file",
+    "server-num",
+    "xauth-protocol",
+    "server-args",
+    "wait",
+]
+
+[[command]]
+names = ["sg"]
+slots = [
+    { kind = "exec" },
+    { kind = "operands", count = 1 },
+    { kind = "shell_script", short = "c" },
+    { kind = "operands_joined_shell_script" },
+]
+
+[command.options]
+short_values = "c"
+bare_dash_option = true
+order = "permute_until_command"
+
+[[command]]
+names = ["cgexec"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_flags = "h"
+short_values = "g"
+long_flags = ["sticky"]
+
+[[command]]
+names = ["ip"]
+slots = [
+    { kind = "subcommands", alternatives = [["netns", "exec"]] },
+    { kind = "exec" },
+    { kind = "operands", count = 1 },
+]
+
+[command.options]
+short_flags = "46B0sdrhVjpTtDoOqa"
+short_values = "nbf"
+
+[[command]]
+names = ["sshpass"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_flags = "ehvV"
+short_values = "pfdP"
+
+[[command]]
+names = ["entr"]
+slots = [{ kind = "exec" }, { kind = "shell_script", short = "s" }]
+
+[command.options]
+short_flags = "acdnprxz"
+short_values = "s"
+
+[[command]]
+names = ["chronic"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_flags = "ev"
+
+[[command]]
+names = ["ifne"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_flags = "n"
+
+[[command]]
+names = ["poetry"]
+slots = [{ kind = "subcommands", alternatives = [["run"]] }, { kind = "exec" }]
+
+[command.options]
+short_flags = "vVqnh"
+short_values = "CP"
+long_flags = [
+    "ansi",
+    "no-ansi",
+    "quiet",
+    "verbose",
+    "version",
+    "no-interaction",
+    "no-plugins",
+    "no-cache",
+    "help",
+]
+long_values = ["directory", "project"]
+
+[[command]]
+names = ["uv"]
+grammar = "uv_run"
+slots = [
+    { kind = "subcommands", alternatives = [["run"], ["tool", "run"]] },
+    { kind = "exec" },
+]
+
+[[command]]
+names = ["npx"]
+grammar = "npm_exec"
+slots = [
+    { kind = "exec" },
+    { kind = "shell_script", short = "c", long = "call" },
+]
+
+[[command]]
+names = ["npm"]
+grammar = "npm_exec"
+slots = [
+    { kind = "subcommands", alternatives = [["exec"], ["x"]] },
+    { kind = "exec" },
+    { kind = "shell_script", short = "c", long = "call" },
+]
+
+[[command]]
+names = ["pnpm"]
+slots = [
+    { kind = "subcommands", alternatives = [["exec"], ["dlx"]] },
+    { kind = "exec" },
+]
+
+[command.options]
+short_flags = "rwh"
+short_values = "CF"
+long_flags = ["recursive", "workspace-root", "help"]
+long_values = ["filter", "dir"]
+
+[[command]]
+names = ["bundle"]
+slots = [
+    { kind = "subcommands", alternatives = [["exec"]] },
+    { kind = "exec" },
+]
+
+[command.options]
+long_flags = ["keep-file-descriptors", "help"]
+
+[[command]]
+names = ["mise"]
+slots = [
+    { kind = "subcommands", alternatives = [["exec"], ["x"]] },
+    { kind = "exec" },
+]
+
+[command.options]
+short_flags = "hqvy"
+short_values = "Cj"
+long_flags = ["raw", "quiet", "verbose", "yes", "help"]
+long_values = ["cd", "jobs"]
+command_after = ["--"]
+
+[[command]]
+names = ["direnv"]
+slots = [
+    { kind = "subcommands", alternatives = [["exec"]] },
+    { kind = "exec" },
+    { kind = "operands", count = 1 },
+]
+
+[[command]]
+names = ["rustup"]
+slots = [
+    { kind = "subcommands", alternatives = [["run"]] },
+    { kind = "exec" },
+    { kind = "operands", count = 1 },
+]
+
+[command.options]
+short_flags = "vqh"
+long_flags = ["install", "verbose", "quiet", "help"]
+plus_operand = true
+
+[[command]]
+names = ["nix"]
+slots = [
+    { kind = "subcommands", alternatives = [["develop"], ["shell"]] },
+    { kind = "exec" },
+]
+
+[command.options]
+short_flags = "cLvqik"
+short_values = "u"
+long_flags = [
+    "command",
+    "print-build-logs",
+    "verbose",
+    "quiet",
+    "impure",
+    "refresh",
+    "no-write-lock-file",
+    "ignore-environment",
+    "keep-going",
+    "help",
+    "version",
+]
+long_values = [
+    "profile",
+    "extra-experimental-features",
+    "unset",
+    "keep",
+    "log-format",
+]
+command_after = ["-c", "--command"]
+
+[[command]]
+names = ["nix-shell"]
+slots = [
+    { kind = "exec" },
+    { kind = "shell_script", long = "run" },
+    { kind = "shell_script", long = "command" },
+]
+
+[command.options]
+short_flags = "qvk"
+short_values = "pIAjiE"
+long_flags = [
+    "pure",
+    "impure",
+    "quiet",
+    "verbose",
+    "show-trace",
+    "keep-going",
+    "help",
+    "version",
+]
+long_values = [
+    "run",
+    "command",
+    "packages",
+    "attr",
+    "max-jobs",
+    "keep",
+    "include",
+    "expr",
+]
+long_pairs = ["arg", "argstr", "option"]
+
+[[command]]
+names = ["uvx"]
+grammar = "uv_run"
+slots = [{ kind = "exec" }]
+
+[[command]]
+names = ["bun"]
+grammar = "bun"
+slots = [{ kind = "subcommands", alternatives = [["x"]] }, { kind = "exec" }]
+
+[[command]]
+names = ["bunx"]
+grammar = "bun"
+slots = [{ kind = "exec" }]
+
+[[command]]
+names = ["pipx"]
+slots = [{ kind = "subcommands", alternatives = [["run"]] }, { kind = "exec" }]
+
+[command.options]
+short_flags = "vqh"
+long_flags = ["no-cache", "system-site-packages", "verbose", "quiet", "help"]
+long_values = ["spec", "python", "pip-args", "index-url", "suffix"]
+
+[[command]]
+names = ["devbox"]
+slots = [{ kind = "subcommands", alternatives = [["run"]] }, { kind = "exec" }]
+
+[command.options]
+short_flags = "qh"
+short_values = "ce"
+long_flags = ["pure", "quiet", "help"]
+long_values = ["config", "env"]
+
+[[command]]
+names = ["op"]
+slots = [{ kind = "subcommands", alternatives = [["run"]] }, { kind = "exec" }]
+
+[command.options]
+long_flags = ["no-masking", "cache", "no-cache", "help"]
+long_values = ["env-file", "account", "vault", "environment"]
+
+[[command]]
+names = ["dotenv"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_flags = "oh"
+short_values = "evfp"
+short_glued = "c"
+long_flags = ["override", "help"]
+long_values = ["file"]
+command_after = ["--"]
+skip_first_operand = ["run"]
+
+[[command]]
+names = ["ssh"]
+slots = [
+    { kind = "exec" },
+    { kind = "operands", count = 1 },
+    { kind = "operands_joined_shell_script" },
+    { kind = "keyed_shell_script", short = "o", keys = ["proxycommand", "localcommand"] },
+]
+
+[command.options]
+short_flags = "1246AaCfGgKkMNnqsTtVvXxYy"
+short_values = "bBcDEeFIiJLlmOopPQRSWw"
+order = "permute_until_command"
+
+[[command]]
+names = ["docker"]
+slots = [
+    { kind = "subcommands", alternatives = [["exec"], ["container", "exec"]] },
+    { kind = "exec" },
+    { kind = "operands", count = 1 },
+]
+
+[command.options]
+short_flags = "ditDhv"
+short_values = "Hcleuw"
+long_flags = [
+    "debug",
+    "detach",
+    "interactive",
+    "tty",
+    "privileged",
+    "tls",
+    "tlsverify",
+    "help",
+    "version",
+]
+long_values = [
+    "host",
+    "context",
+    "config",
+    "log-level",
+    "env",
+    "env-file",
+    "user",
+    "workdir",
+    "detach-keys",
+    "tlscacert",
+    "tlscert",
+    "tlskey",
+]
+
+[[command]]
+names = ["kubectl"]
+slots = [
+    { kind = "subcommands", alternatives = [["exec"]] },
+    { kind = "exec" },
+    { kind = "operands", count = 1 },
+]
+
+[command.options]
+short_flags = "itqh"
+short_values = "cfns"
+long_flags = ["stdin", "tty", "quiet", "help"]
+long_values = [
+    "container",
+    "filename",
+    "namespace",
+    "server",
+    "pod-running-timeout",
+    "context",
+    "kubeconfig",
+    "cluster",
+    "user",
+    "as",
+    "token",
+]
+order = "permute_until_command"
+
+# macOS `arch`: architecture selectors are whole single-dash words.
+[[command]]
+names = ["arch"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_flags = "ch"
+short_values = "de"
+dash_words = ["x86_64", "x86_64h", "arm64", "arm64e", "i386", "ppc", "ppc64"]
+dash_word_values = ["arch"]
+numeric_option = true
+
+[[command]]
+names = ["sandbox-exec"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_values = "nfpD"
+
+# Every valgrind option is `--name[=value]`.
+[[command]]
+names = ["valgrind"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_flags = "vqdh"
+any_long_attached = true
+
+[[command]]
+names = ["fakeroot"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_flags = "uhv"
+short_values = "lfisb"
+long_flags = ["unknown-is-real", "help", "version"]
+long_values = ["lib", "faked", "fd-base"]
+
+# Only options with a documented arity; the rest floor to Ask.
+[[command]]
+names = ["rlwrap"]
+slots = [{ kind = "exec" }]
+
+[command.options]
+short_flags = "AcFhiInNorRTUv"
+short_values = "bCDefgHlMOPqsStwz"
+short_glued = "apm"
