@@ -14,19 +14,19 @@ pre-commit:
       glob: "*.rs"
       run: cargo clippy --workspace --all-targets -- -D warnings
 
-# Why every pre-push job reported "no matching push files" (#1010):
-# lefthook 2.1.15 builds {push_files} with `git diff --name-only HEAD @{push}`.
-# On a branch with no upstream (every first push of a new branch, and every
-# `--no-track` worktree branch) `@{push}` does not resolve ("fatal: no
-# upstream configured"), the list is empty, and build_command.go returns
-# SkipError{NoPushFiles} for any command that has no files template in its
-# `run`. It returns early, and so does not skip, when `run` contains a files
-# template that expands to something (or when --force is given).
+# Every pre-push job reported "no matching push files" and skipped (#1010),
+# observed on `--no-track` worktree branches with lefthook 2.1.15: when the
+# push-file list comes out empty, build_command.go returns
+# SkipError{NoPushFiles} for any command whose `run` has no files template.
+# It does not skip when `run` contains a files template that expands to
+# something (or when --force is given).
 #
 # These jobs are whole-workspace gates and never need the changed-file list,
 # so each one starts with `: {all_files}`: a no-op whose only purpose is to
-# make the template non-empty. `glob: "Cargo.toml"` keeps the expansion to
-# one path. (`files:` overrides and a hook-level `files:` do NOT help; a
+# make the template non-empty. `glob` keeps the expansion to one path. It is
+# matched against repo-relative paths BEFORE `root` strips its prefix, so a
+# job with `root` must glob the full path, or every file is filtered out
+# ("no files for inspection"). (`files:` overrides and a hook-level `files:` do NOT help; a
 # `# {all_files}` comment does not count; {files}/{push_files} are the empty
 # push list itself.)
 pre-push:
@@ -51,7 +51,7 @@ pre-push:
     # creusot-std (M3); on a crate without it `cargo creusot` errors out.
     proof:
       root: "spikes/lattice/"
-      glob: "Cargo.toml"
+      glob: "spikes/lattice/Cargo.toml"
       skip:
         - run: "! command -v cargo-creusot"
       run: ": {all_files}; cargo creusot --span-mode relative"
