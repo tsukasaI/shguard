@@ -5,6 +5,13 @@
 //! `pub(crate)` and the types with an invariant are built through checked
 //! constructors. Key uniqueness is not enforced here; the catalog loader
 //! rejects duplicates.
+//!
+//! Two refinements over the plan's sketch:
+//! - `Grammar::rest` is an `Option<Role>` (`None` means no operands beyond
+//!   `positionals`), not a bare `Role`.
+//! - An option is `Opt { name: OptName, value: OptValue }`, not
+//!   `{ short, long, takes_value, value_role }`, so it always has a name and a
+//!   flag cannot carry a value role.
 
 #[cfg(creusot)]
 use creusot_std::prelude::{Clone, PartialEq, *};
@@ -21,83 +28,67 @@ pub enum Role {
     Code,
 }
 
+/// A long option name, without the leading `--`. Never empty.
+#[derive(Clone, Debug)]
+#[cfg_attr(not(creusot), derive(PartialEq, Eq))]
+pub struct LongName {
+    pub(crate) bytes: Vec<u8>,
+}
+
+/// A long name has at least one byte.
+#[cfg(creusot)]
+#[logic(open)]
+pub fn long_name_wf(bytes: Seq<u8>) -> bool {
+    bytes.len() > 0
+}
+
+#[cfg(creusot)]
+impl Invariant for LongName {
+    #[logic(open(crate))]
+    fn invariant(self) -> bool {
+        pearlite! { long_name_wf(self.bytes@) }
+    }
+}
+
+impl LongName {
+    /// Builds a long name, or `None` when `bytes` is empty.
+    #[cfg_attr(creusot, check(terminates))]
+    #[cfg_attr(creusot, ensures(match result {
+        Some(n) => n.bytes@ == bytes@,
+        None => !long_name_wf(bytes@),
+    }))]
+    #[must_use]
+    pub fn new(bytes: Vec<u8>) -> Option<LongName> {
+        if <[_]>::is_empty(&bytes) {
+            None
+        } else {
+            Some(LongName { bytes })
+        }
+    }
+
+    /// The name's bytes.
+    #[cfg_attr(creusot, check(terminates))]
+    #[cfg_attr(creusot, ensures(result@ == self.bytes@))]
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
 /// The name of an option; an option always has at least one name.
 ///
-/// A long name excludes the leading `--` and is non-empty. The variants that
-/// carry a long name are `#[non_exhaustive]`, so other crates cannot build an
-/// empty one and must use [`OptName::long`] or [`OptName::both`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(creusot, derive(DeepModel))]
+/// The long name lives in a [`LongName`], whose invariant (non-empty) the
+/// enum inherits. A bare `Vec<u8>` payload would stay mutable through a
+/// `&mut` pattern even with `#[non_exhaustive]` variants.
+#[derive(Clone, Debug)]
+#[cfg_attr(not(creusot), derive(PartialEq, Eq))]
 pub enum OptName {
     /// Only a short name: `-v` is `Short(b'v')`.
     Short(u8),
-    /// Only a long name: `--verbose` is `Long("verbose")`.
-    #[non_exhaustive]
-    Long(Vec<u8>),
+    /// Only a long name: `--verbose` is `Long(..)`.
+    Long(LongName),
     /// Both spellings: `-v` and `--verbose`.
-    #[non_exhaustive]
-    Both(u8, Vec<u8>),
-}
-
-/// Well-formedness of an option name.
-#[cfg(creusot)]
-#[logic(open)]
-pub fn opt_name_wf(n: OptName) -> bool {
-    pearlite! {
-        match n {
-            OptName::Short(_) => true,
-            OptName::Long(l) => l@.len() > 0,
-            OptName::Both(_, l) => l@.len() > 0,
-        }
-    }
-}
-
-#[cfg(creusot)]
-impl Invariant for OptName {
-    #[logic(open)]
-    fn invariant(self) -> bool {
-        opt_name_wf(self)
-    }
-}
-
-impl OptName {
-    /// A short-only name.
-    #[cfg_attr(creusot, check(terminates))]
-    #[cfg_attr(creusot, ensures(result == OptName::Short(short)))]
-    #[must_use]
-    pub fn short(short: u8) -> OptName {
-        OptName::Short(short)
-    }
-
-    /// A long-only name, or `None` when `long` is empty.
-    #[cfg_attr(creusot, check(terminates))]
-    #[cfg_attr(creusot, ensures(match result {
-        Some(n) => n == OptName::Long(long),
-        None => long@.len() == 0,
-    }))]
-    #[must_use]
-    pub fn long(long: Vec<u8>) -> Option<OptName> {
-        if <[_]>::is_empty(&long) {
-            None
-        } else {
-            Some(OptName::Long(long))
-        }
-    }
-
-    /// A name with both spellings, or `None` when `long` is empty.
-    #[cfg_attr(creusot, check(terminates))]
-    #[cfg_attr(creusot, ensures(match result {
-        Some(n) => n == OptName::Both(short, long),
-        None => long@.len() == 0,
-    }))]
-    #[must_use]
-    pub fn both(short: u8, long: Vec<u8>) -> Option<OptName> {
-        if <[_]>::is_empty(&long) {
-            None
-        } else {
-            Some(OptName::Both(short, long))
-        }
-    }
+    Both(u8, LongName),
 }
 
 /// Whether an option takes a value, and what the value does.
@@ -426,7 +417,7 @@ impl Catalog {
 
 #[cfg(test)]
 mod tests {
-    use super::{Catalog, Global, Grammar, Opt, OptName, OptValue, Role, Row, key_ok};
+    use super::{Catalog, Global, Grammar, LongName, Opt, OptName, OptValue, Role, Row, key_ok};
 
     fn bytes(s: &str) -> Vec<u8> {
         s.as_bytes().to_vec()
@@ -437,18 +428,13 @@ mod tests {
     }
 
     #[test]
-    fn opt_name_constructors() {
-        assert_eq!(OptName::short(b'v'), OptName::Short(b'v'));
-        assert_eq!(
-            OptName::long(bytes("verbose")),
-            Some(OptName::Long(bytes("verbose")))
-        );
-        assert_eq!(OptName::long(Vec::new()), None);
-        assert_eq!(
-            OptName::both(b'v', bytes("verbose")),
-            Some(OptName::Both(b'v', bytes("verbose")))
-        );
-        assert_eq!(OptName::both(b'v', Vec::new()), None);
+    fn long_name_constructor() {
+        let name = LongName::new(bytes("verbose")).expect("non-empty");
+        assert_eq!(name.bytes(), b"verbose");
+        assert!(LongName::new(Vec::new()).is_none());
+
+        let both = OptName::Both(b'v', name.clone());
+        assert_ne!(both, OptName::Long(name));
     }
 
     #[test]

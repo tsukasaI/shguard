@@ -77,11 +77,12 @@ singletons, newtypes and enums instead of flag structs.
 - Constants that an open logic function mentions must be `pub`: Creusot
   refuses to unfold an open function that names a less visible item.
 - Data model (`ast`, `catalog`, `rule`): fields are `pub(crate)`; other crates
-  build a type that carries an invariant only through its checked `new`
+  build a type that carries an invariant only through its checked constructors
   (returns `Option`, contract `Some(x) ==> fields equal inputs`,
   `None ==> !wf(inputs)`), and the type has a `#[cfg(creusot)] impl Invariant`.
-  Enum variants cannot be hidden, so a variant with a constrained payload
-  (`OptName::Long`) is `#[non_exhaustive]`.
+  Enum variants cannot be hidden, so wrap a constrained payload in a sealed
+  newtype (`OptName::Long(LongName)`); `#[non_exhaustive]` does not stop
+  mutation through `&mut` patterns.
   - A logic item or `Invariant` impl that reads a `pub(crate)` field must be
     `#[logic(open(crate))]`; plain `open` fails with "would call a
     less-visible item". The `wf` predicates over views stay `open`.
