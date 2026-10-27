@@ -394,6 +394,16 @@ short_values = "cnpPu"
 long_flags = ["ignore", "help", "version"]
 long_values = ["class", "classdata", "pid", "pgid", "uid"]
 
+# Grammar from util-linux sys-utils/flock.c (v2.40): getopt_long with the
+# optstring "+sexnoFuw:E:hV?". The long names are shared, `nonblocking` and
+# `nb`. `-c`/`--command` are not getopt options at all: after FILE the code
+# strcmp's argv[optind + 1] against them, which is why `command` stays in
+# long_values (the shell_script slot finds the flag through the long-name
+# table) while `c` is not in short_values.
+#
+# Not permute_until_command: the optstring starts with '+', so getopt stops
+# at the first non-option and options after FILE belong to the command
+# (`flock FILE -n -- rm -rf /` runs a program named `-n`, not rm; issue #809).
 [[command]]
 names = ["flock"]
 slots = [
@@ -403,13 +413,13 @@ slots = [
 ]
 
 [command.options]
-short_flags = "sxunoFhVv"
-short_values = "wEc"
+short_flags = "sexunoFhV?"
+short_values = "wE"
 long_flags = [
     "shared",
     "exclusive",
     "unlock",
-    "nonblock",
+    "nonblocking",
     "nb",
     "close",
     "no-fork",
