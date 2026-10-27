@@ -200,8 +200,8 @@ pub(crate) enum SubcommandSet {
 
 /// One catalogued command (or a group of names sharing one grammar).
 ///
-/// Fields after `slots` are RFC #837 row fields: loaded and validated, but
-/// nothing in the gate reads them yet.
+/// Fields after `slots` are the R1 (#837) row fields of docs/rfc-redesign.md:
+/// loaded, but nothing in the gate reads them yet.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct CommandSpec {
     pub(crate) names: &'static [&'static str],

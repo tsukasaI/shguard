@@ -24,6 +24,15 @@ pub(crate) enum CatalogError {
     OpenWithoutJustification { command: String },
     #[error("the command {command:?} gives a justification but is closed")]
     JustificationOnClosed { command: String },
+    #[error("the catalog has no commands")]
+    Empty,
+    #[error("a command row has no names")]
+    EmptyNames,
+    #[error("the command {command:?} has an empty entry in {field}")]
+    EmptyEntry {
+        command: String,
+        field: &'static str,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -31,7 +40,6 @@ pub(crate) enum CatalogError {
 struct CatalogDto {
     #[serde(default)]
     grammar: BTreeMap<String, GrammarDto>,
-    #[serde(default)]
     command: Vec<CommandDto>,
 }
 
@@ -188,9 +196,14 @@ enum SlotDto {
 ///
 /// [`CatalogError`] when the TOML does not match the schema (an unknown
 /// field, a character field that is not exactly one character), a row names
-/// an unknown grammar, or two rows claim the same name.
+/// an unknown grammar, two rows claim the same name, there are no rows, a row
+/// has no names, an open row lacks a justification, or a row's list holds an
+/// empty entry.
 pub(super) fn parse(text: &str) -> Result<&'static [CommandSpec], CatalogError> {
     let dto: CatalogDto = toml::from_str(text)?;
+    if dto.command.is_empty() {
+        return Err(CatalogError::Empty);
+    }
     let grammars: BTreeMap<String, OptionGrammar> = dto
         .grammar
         .into_iter()
@@ -199,6 +212,9 @@ pub(super) fn parse(text: &str) -> Result<&'static [CommandSpec], CatalogError> 
     let mut seen = HashSet::new();
     let mut specs = Vec::with_capacity(dto.command.len());
     for row in dto.command {
+        if row.names.is_empty() {
+            return Err(CatalogError::EmptyNames);
+        }
         let base = match row.grammar {
             None => OptionGrammar::EMPTY,
             Some(name) => *grammars
@@ -214,6 +230,26 @@ pub(super) fn parse(text: &str) -> Result<&'static [CommandSpec], CatalogError> 
             }
         }
         let command = || row.names.first().cloned().unwrap_or_default();
+        let blank = |text: &String| text.trim().is_empty();
+        for (field, empty) in [
+            ("code_options", row.code_options.iter().any(blank)),
+            (
+                "code_subcommands",
+                row.code_subcommands
+                    .iter()
+                    .any(|path| path.is_empty() || path.iter().any(blank)),
+            ),
+            ("env_code", row.env_code.iter().any(blank)),
+            ("reads_files", row.reads_files.iter().any(blank)),
+            ("persists", row.persists.iter().any(blank)),
+        ] {
+            if empty {
+                return Err(CatalogError::EmptyEntry {
+                    command: command(),
+                    field,
+                });
+            }
+        }
         let subcommands = match (row.subcommands, row.justification.as_deref().map(str::trim)) {
             (SubcommandSetDto::Closed, None) => SubcommandSet::Closed,
             (SubcommandSetDto::Closed, Some(_)) => {
@@ -465,6 +501,36 @@ mod tests {
         ] {
             assert!(
                 matches!(error(text), CatalogError::DuplicateName(name) if name == "x"),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_catalog_or_nameless_row_is_rejected() {
+        for text in ["", "[grammar.g]\nshort_flags = \"a\"", "command = []"] {
+            assert!(parse(text).is_err(), "{text:?} should be rejected");
+        }
+        assert!(matches!(error("command = []"), CatalogError::Empty));
+        assert!(matches!(
+            error("[[command]]\nnames = []"),
+            CatalogError::EmptyNames
+        ));
+    }
+
+    #[test]
+    fn an_empty_entry_in_a_row_list_is_rejected() {
+        for (field, value) in [
+            ("code_options", "[\"\"]"),
+            ("code_subcommands", "[[]]"),
+            ("code_subcommands", "[[\"run\", \" \"]]"),
+            ("env_code", "[\"  \"]"),
+            ("reads_files", "[\"\"]"),
+            ("persists", "[\" \"]"),
+        ] {
+            let text = format!("[[command]]\nnames = [\"x\"]\n{field} = {value}");
+            assert!(
+                matches!(error(&text), CatalogError::EmptyEntry { field: got, .. } if got == field),
                 "{text:?}"
             );
         }

@@ -15,6 +15,13 @@
 # `order` is "first_operand". A row whose grammar is its own has no
 # `grammar` key and writes every non-empty field in `[command.options]`.
 #
+# Row fields beyond the grammar: `subcommands = "closed"` (the default) or
+# `"open"`. An open row needs a non-empty `justification`; a justification on
+# a closed row is an error. `code_options`, `code_subcommands`, `env_code`,
+# `reads_files`, `persists` and `cwd_effect` are optional lists (and one
+# enum) that the loader validates (no empty entries) but nothing reads until
+# R2.
+#
 # This file is the source of truth for the catalog and is edited by hand;
 # nothing generates it.
 
