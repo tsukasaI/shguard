@@ -930,6 +930,12 @@ const ISSUE_638_TIME_AND_EXEC_WRAPPER_CASES: &[(&str, Decision)] = &[
     ("su -l root -- -ic 'rm -rf /'", Decision::Block),
     ("su -- root -ic 'rm -rf /'", Decision::Block),
     ("strace rm -rf /", Decision::Block),
+    // issue #808: -W/--wdns optional glued value, --seccomp-bpf takes none
+    ("nsenter -W /x true", Decision::Allow),
+    ("strace --seccomp-bpf true", Decision::Allow),
+    ("strace --seccomp-bpf rm -rf /", Decision::Block),
+    ("nsenter -W/x rm -rf /", Decision::Block),
+    ("nsenter -W rm -rf /", Decision::Block),
     ("watch rm -rf /", Decision::Block),
     // setarch ARCH positional
     ("setarch x86_64 rm -rf /", Decision::Block),
