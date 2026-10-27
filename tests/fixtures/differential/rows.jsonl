@@ -1,8 +1,0 @@
-{"command":"difftool sync x"}
-{"command":"difftool wipe x"}
-{"command":"difftool sync x; rm -rf /"}
-{"command":"ownertool x"}
-{"command":"upload-tool /etc/x"}
-{"command":"diskutil erase disk0"}
-{"command":"sed -i s/a/b/ f"}
-{"command":"curl -o /tmp/x https://example.com"}
