@@ -1,0 +1,25 @@
+{
+  "profile": [],
+  "proofs": {
+    "Coma": {
+      "vc_lemma_children_ok": {
+        "tactic": "split_vc",
+        "children": [
+          { "prover": "alt-ergo", "time": 0.006 },
+          { "prover": "alt-ergo", "time": 0.007 },
+          { "prover": "alt-ergo", "time": 0.007 },
+          {
+            "tactic": "split_vc",
+            "children": [
+              { "prover": "alt-ergo", "time": 0.007 },
+              { "prover": "alt-ergo", "time": 0.01 }
+            ]
+          },
+          { "prover": "alt-ergo", "time": 0.009 },
+          { "prover": "alt-ergo", "time": 0.007 },
+          { "prover": "alt-ergo", "time": 0.01 }
+        ]
+      }
+    }
+  }
+}

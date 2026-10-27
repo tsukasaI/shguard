@@ -1,0 +1,29 @@
+(* #"src/decision.rs" 84 0 84 49 *)
+
+let%span sdecision = "src/decision.rs" 83 10 83 41
+let%span sdecision'0 = "src/decision.rs" 25 4 25 22
+let%span sdecision'1 = "src/decision.rs" 15 4 19 5
+
+use int.Int
+
+type t_Decision = Allow | Ask | Block
+
+function rank [#"src/decision.rs" 14 0 14 31] (d: t_Decision) : int = [%#sdecision'1] match d with
+    | Allow -> 0
+    | Ask -> 1
+    | Block -> 2
+    end
+
+predicate le [#"src/decision.rs" 24 0 24 43] (a: t_Decision) (b: t_Decision) = [%#sdecision'0] rank a <= rank b
+
+meta "compute_max_steps" 1000000
+
+meta "select_lsinst" "all"
+
+constant a : t_Decision
+
+constant b : t_Decision
+
+function lemma_le_antisym [#"src/decision.rs" 84 0 84 49] (a: t_Decision) (b: t_Decision) : ()
+
+goal vc_lemma_le_antisym: [@stop_split] [@expl:lemma_le_antisym ensures] [%#sdecision] le a b /\ le b a -> a = b

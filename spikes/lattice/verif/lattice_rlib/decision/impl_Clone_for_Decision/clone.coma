@@ -1,0 +1,30 @@
+(* #"src/decision.rs" 5 9 5 14 *)
+
+(* <decision::Decision as std::clone::Clone> *)
+
+let%span sdecision = "src/decision.rs" 5 9 5 14
+
+use creusot.prelude.Any
+
+type t_Decision = Allow | Ask | Block
+
+type tup2_Decision_Decision = { f0: t_Decision; f1: t_Decision }
+
+meta "compute_max_steps" 1000000
+
+meta "select_lsinst" "all"
+
+let clone_Decision [#"src/decision.rs" 5 9 5 14] (self: t_Decision) (return (x: t_Decision)) = (! bb0
+  [ bb0 = any [ br0 -> {self = Allow} (! bb6) | br1 -> {self = Ask} (! bb5) | br2 -> {self = Block} (! bb4) ]
+  | bb4 = s0 [ s0 = [ &_ret <- Block ] s1 | s1 = return {_ret} ]
+  | bb5 = s0 [ s0 = [ &_ret <- Ask ] s1 | s1 = return {_ret} ]
+  | bb6 = s0 [ s0 = [ &_ret <- Allow ] s1 | s1 = return {_ret} ] ]
+  [ & _ret: t_Decision = Any.any_l () | & self: t_Decision = self ])
+  [ return (result: t_Decision) -> {[@stop_split] [@expl:clone ensures] [%#sdecision] match { f0 = self;
+                                                                                              f1 = result } with
+      | {f0 = Allow; f1 = Allow} -> true
+      | {f0 = Ask; f1 = Ask} -> true
+      | {f0 = Block; f1 = Block} -> true
+      | _ -> false
+      end}
+    (! return {result}) ]

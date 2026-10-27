@@ -1,0 +1,15 @@
+{
+  "profile": [],
+  "proofs": {
+    "Coma": {
+      "vc_check'": { "prover": "z3", "time": 0.021 },
+      "vc_elim_Leaf": { "prover": "alt-ergo", "time": 0.008 },
+      "vc_elim_Node": { "prover": "alt-ergo", "time": 0.008 },
+      "vc_from_elem_bool": { "prover": "alt-ergo", "time": 0.008 },
+      "vc_index_Vec_Node2_Global": { "prover": "alt-ergo", "time": 0.009 },
+      "vc_index_Vec_bool_Global'0": { "prover": "alt-ergo", "time": 0.008 },
+      "vc_index_mut_Vec_bool_Global": { "prover": "alt-ergo", "time": 0.007 },
+      "vc_len_Node2": { "prover": "alt-ergo", "time": 0.009 }
+    }
+  }
+}

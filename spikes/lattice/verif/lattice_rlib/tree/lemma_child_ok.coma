@@ -1,0 +1,66 @@
+(* #"src/tree.rs" 85 0 85 35 *)
+
+let%span sord = "../../../../../../../../../nix/store/yyhknmxa1m1gsfgwc6xsipqcd1hf5ccp-creusot-wrapped/share/creusot-std/src/logic/ord.rs" 34 8 34 21
+let%span stree = "src/tree.rs" 82 11 82 16
+let%span stree'0 = "src/tree.rs" 83 11 83 31
+let%span stree'1 = "src/tree.rs" 84 10 84 25
+let%span stree'2 = "src/tree.rs" 36 4 40 5
+let%span stree'3 = "src/tree.rs" 56 10 56 21
+let%span stree'4 = "src/tree.rs" 58 4 61 5
+let%span stree'5 = "src/tree.rs" 66 11 66 31
+let%span stree'6 = "src/tree.rs" 68 4 77 5
+let%span stree'7 = "src/tree.rs" 30 16 30 23
+
+use creusot.int.UInt8
+use int.Int
+
+type t_T = Leaf UInt8.t | Node t_T t_T | Nil
+
+predicate leaf_ok [#"src/tree.rs" 29 0 29 29] (v: UInt8.t) = [%#stree'7] UInt8.t'int v < 10
+
+predicate ok [#"src/tree.rs" 35 0 35 23] (t: t_T) =
+  [%#stree'2] match t with
+    | Leaf v -> leaf_ok v
+    | Node h tl -> ok h /\ ok tl
+    | Nil -> true
+    end
+
+predicate ge_log_Int [@inline:trivial] (self: int) (other: int) = [%#sord] other <= self
+
+meta "rewrite_def" predicate ge_log_Int
+
+function len [#"src/tree.rs" 57 0 57 23] (t: t_T) : int = [%#stree'4] match t with
+    | Node _ tl -> len tl + 1
+    | Leaf _ | Nil -> 0
+    end
+
+axiom len_spec: forall t: t_T [len t]. [%#stree'3] ge_log_Int (len t) 0
+
+function child [#"src/tree.rs" 67 0 67 31] (t: t_T) (i: int) : t_T = [%#stree'6] match t with
+    | Node h tl -> if i = 0 then h else child tl (i - 1)
+    | Leaf _ | Nil -> Nil
+    end
+
+meta "compute_max_steps" 1000000
+
+meta "select_lsinst" "all"
+
+constant t : t_T
+
+constant i : int
+
+function lemma_child_ok [#"src/tree.rs" 85 0 85 35] (t: t_T) (i: int) : ()
+
+goal vc_lemma_child_ok: ([%#stree] ok t)
+  -> ([%#stree'0] 0 <= i /\ i < len t)
+  -> match t with
+    | Node _ tl -> if i <> 0 then
+      ([@stop_split] [@expl:lemma_child_ok requires] ([@stop_split] [@expl:lemma_child_ok requires #0] [%#stree] ok tl)
+        /\ ([@stop_split] [@expl:lemma_child_ok requires #1] [%#stree'0] 0 <= i - 1 /\ i - 1 < len tl))
+      /\ (([@stop_split] [@expl:lemma_child_ok ensures] [%#stree'1] ok (child tl (i - 1)))
+      -> ([@stop_split] [@expl:lemma_child_ok ensures] [%#stree'1] ok (child t i)))
+    else
+      [@stop_split] [@expl:lemma_child_ok ensures] [%#stree'1] ok (child t i)
+    
+    | Leaf _ | Nil -> [@stop_split] [@expl:lemma_child_ok ensures] [%#stree'1] ok (child t i)
+    end

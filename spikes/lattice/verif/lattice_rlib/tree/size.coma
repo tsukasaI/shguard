@@ -1,0 +1,29 @@
+(* #"src/tree.rs" 46 0 46 24 *)
+
+let%span sord = "../../../../../../../../../nix/store/yyhknmxa1m1gsfgwc6xsipqcd1hf5ccp-creusot-wrapped/share/creusot-std/src/logic/ord.rs" 34 8 34 21
+let%span stree = "src/tree.rs" 45 10 45 21
+
+use creusot.int.UInt8
+use int.Int
+
+type t_T = Leaf UInt8.t | Node t_T t_T | Nil
+
+predicate ge_log_Int [@inline:trivial] (self: int) (other: int) = [%#sord] other <= self
+
+meta "rewrite_def" predicate ge_log_Int
+
+meta "compute_max_steps" 1000000
+
+meta "select_lsinst" "all"
+
+constant t : t_T
+
+function size [#"src/tree.rs" 46 0 46 24] (t: t_T) : int
+
+goal vc_size: match t with
+    | Leaf _ -> [@stop_split] [@expl:size ensures] [%#stree] ge_log_Int 1 1
+    | Node h tl -> ([@stop_split] [@expl:size ensures] [%#stree] ge_log_Int (size h) 1)
+    -> ([@stop_split] [@expl:size ensures] [%#stree] ge_log_Int (size tl) 1)
+    -> ([@stop_split] [@expl:size ensures] [%#stree] ge_log_Int (size h + size tl + 1) 1)
+    | Nil -> [@stop_split] [@expl:size ensures] [%#stree] ge_log_Int 1 1
+    end

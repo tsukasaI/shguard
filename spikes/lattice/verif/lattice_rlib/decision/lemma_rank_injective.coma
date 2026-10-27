@@ -1,0 +1,24 @@
+(* #"src/decision.rs" 48 0 48 53 *)
+
+let%span sdecision = "src/decision.rs" 47 10 47 39
+let%span sdecision'0 = "src/decision.rs" 15 4 19 5
+
+type t_Decision = Allow | Ask | Block
+
+function rank [#"src/decision.rs" 14 0 14 31] (d: t_Decision) : int = [%#sdecision'0] match d with
+    | Allow -> 0
+    | Ask -> 1
+    | Block -> 2
+    end
+
+meta "compute_max_steps" 1000000
+
+meta "select_lsinst" "all"
+
+constant a : t_Decision
+
+constant b : t_Decision
+
+function lemma_rank_injective [#"src/decision.rs" 48 0 48 53] (a: t_Decision) (b: t_Decision) : ()
+
+goal vc_lemma_rank_injective: [@stop_split] [@expl:lemma_rank_injective ensures] [%#sdecision] rank a = rank b -> a = b
