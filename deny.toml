@@ -1,13 +1,15 @@
 # cargo-deny configuration. Run locally with `cargo deny check`; runs as the
 # `cargo-deny` job of the lefthook pre-push gate (lefthook.yaml) and in
-# main-check.yaml (pushes to main, Dependabot PRs).
+# verify.yaml's `rust` job.
 # Ref: coding-guidelines/languages/rust.md "Tooling",
 # github.com/EmbarkStudios/cargo-deny.
 
 [graph]
-# Only the shipping triples. cargo-deny then evaluates `cfg(creusot)` as
-# false, so the verification-only creusot-std (LGPL-2.1-or-later) and its
-# dependencies stay out of the graph and the `licenses` check.
+# Only the shipping triples; keep this list equal to the release triples.
+# cargo-deny then evaluates `cfg(creusot)` as false, so the
+# verification-only creusot-std (LGPL-2.1-or-later) and its dependencies are
+# pruned from the graph for every check (licenses, bans, sources and
+# advisories alike), not only `licenses`.
 targets = [
   "aarch64-apple-darwin",
   "x86_64-apple-darwin",

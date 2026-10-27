@@ -4,6 +4,8 @@
 //! The lattice laws are proved on the logic mirror `join_l`; `join` is tied
 //! to it by its contract.
 
+// Under cfg(creusot) these Clone/PartialEq derives shadow std's; that is
+// behaviour-equivalent for a fieldless enum. Re-check if `Decision` gains fields.
 #[cfg(creusot)]
 use creusot_std::prelude::{Clone, PartialEq, *};
 

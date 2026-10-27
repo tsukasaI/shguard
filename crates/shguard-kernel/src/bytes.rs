@@ -42,6 +42,10 @@ pub fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// `prefix` is a prefix of `s`.
+///
+/// This is a byte prefix, not a path-component prefix: `/etc` matches
+/// `/etcfoo`. That is safe only for rules that can raise a decision; any rule
+/// that scopes an Allow needs a component-boundary check as well.
 #[cfg_attr(creusot, check(terminates))]
 #[cfg_attr(creusot, ensures(result == (prefix@.len() <= s@.len()
     && s@.subsequence(0, prefix@.len()) == prefix@)))]
@@ -312,6 +316,11 @@ fn emit_seg(out: &mut Vec<u8>, p: &[u8], s: usize, e: usize, first: bool) -> boo
 ///
 /// With nothing left, an absolute path gives `/` and a relative one `.`.
 /// The empty path gives the empty path.
+///
+/// Use it only to compare path operands with rule targets. Never apply it to
+/// a command name or use it to decide whether a word is an option: dropping
+/// `./` changes how the shell looks the word up (`./ls` runs a file, `ls`
+/// searches `PATH`).
 #[cfg_attr(creusot, check(terminates))]
 #[cfg_attr(creusot, ensures(result@ == norm_l(p@)))]
 #[must_use]

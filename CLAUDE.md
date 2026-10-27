@@ -34,7 +34,9 @@ ADR (confirmed Creusot 0.14 spellings) is `spikes/README.md`.
 - `crates/shguard-kernel/`: verified. Its only dependency is `creusot-std`,
   declared under `[target.'cfg(creusot)'.dependencies]`, so it exists only
   under `cargo creusot`. It is LGPL-2.1-or-later and never enters a shipped
-  build; `deny.toml`'s `[graph] targets` keeps it out of the license check.
+  build. `deny.toml`'s `[graph] targets` prunes it (and every other
+  `cfg(creusot)` dependency) from all cargo-deny checks, not only licenses;
+  keep that list equal to the release triples.
 - `crates/shguard-syntax/`: subset lexer/parser to the kernel AST; Kani,
   proptest and differential tests.
 - `crates/shguard/`: lib + bin; hook adapter, CLI, config, TOML loader,
@@ -84,7 +86,10 @@ singletons, newtypes and enums instead of flag structs.
   `creusot-std` (no `source`/`checksum`); that form is a local artifact and
   must never be committed. After a proof run, repair it by running any stable
   cargo command (`cargo metadata --format-version 1 > /dev/null`), then
-  confirm with `cargo metadata --locked --format-version 1 > /dev/null`.
+  confirm with `cargo metadata --locked --format-version 1 > /dev/null`
+  and finally `git diff --exit-code Cargo.lock`. The repair re-resolves to
+  the highest compatible versions, so `--locked` alone cannot catch drift
+  (e.g. a newly published creusot-std 0.14.1).
 
 ## Tests and catalog
 
