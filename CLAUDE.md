@@ -66,7 +66,11 @@ singletons, newtypes and enums instead of flag structs.
 - Every `pub fn` has a contract; every loop and recursion has a `#[variant]`.
 - Lemmas are `lemma_*` and live next to the code they are about.
 - Allow can only be built from a `Witness` bound to the input it certifies
-  (#1006): `Verdict` owns the `Script`, or the witness borrows it.
+  (#1006): the `Witness` (built only by `classify_script`) owns the
+  `Script`, and its invariant is `covered_script`.
+- A ghost field (`Snapshot<..>`) takes `#[cfg(creusot)]` both on the struct
+  field and on the field in the struct literal
+  (`#[cfg(creusot)] cat: snapshot!(*cat)`), so normal builds have neither.
 - Nothing may reference `creusot-std` unconditionally, because normal builds
   do not have it. Contracts go through `cfg_attr` only
   (`#[cfg_attr(creusot, ensures(..))]`, likewise `requires`, `check`,
