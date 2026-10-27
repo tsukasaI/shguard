@@ -123,6 +123,13 @@
 {"command":"cd ~/.config && rm -rf nvim/*","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"cd ~/.config && rm -rf s*","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"cgexec -g cpu:grp rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"choom -n 5 -- python3 -c 'x'","decision":"Ask","deny_message":"Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f prog.awk`) — inline interpreter code is never inspected.","matched_rule":null}
+{"command":"choom -n 5 -- rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"choom -n 5 ls","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"choom -n 5 ls -- -la","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"choom -n 5 perl -- -e 'x'","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"choom -n 5 python3 -- -c 'import os'","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"choom -n 5 rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"chronic rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"chroot / rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"chrt -f 99 rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
@@ -1411,6 +1418,8 @@
 {"command":"runcon --type=foo_t rm -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"runcon -tfoo_t rm -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"runcon ctx rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"runuser -u root -- rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"runuser -u root ls","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"runuser -u root rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"runuser root -- -Nc 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"runuser root -- -c +O extglob 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
@@ -1440,8 +1449,11 @@
 {"command":"script -q out.txt -e -qc 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"script -q out.txt -qc 'echo hi'","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"script -qc 'rm -rf /' /dev/null","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"script -t -q out.txt","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"script -t -q out.txt -c 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"script -t -qc 'rm -rf /' out.txt","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"script -t 0 -q out.txt rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"script -tfoo -q out.txt -c 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"script out.txt --command='rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"script out.txt -c 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"script out.txt -qc 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
@@ -1566,6 +1578,9 @@
 {"command":"su -- root -ic 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"su -l root -- -ic 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
 {"command":"su root -- -ic 'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":null}
+{"command":"sudo -h host rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"sudo -h host whoami","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"sudo -hhost rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"sudo find /x -fprint /dev/sda","decision":"Block","deny_message":null,"matched_rule":"redirect-overwrite-device-or-critical-file"}
 {"command":"systemd-run rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"tar --extract --directory=/ -f evil.tar","decision":"Block","deny_message":null,"matched_rule":"tar-extract-over-root-or-home"}

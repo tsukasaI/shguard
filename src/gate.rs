@@ -22604,6 +22604,38 @@ done"#,
     }
 
     #[test]
+    fn wrapper_arity_audit_806_pins_safe_outcomes() {
+        // Issue #806: sudo `-h` (`h::` upstream) still consumes the next plain
+        // word as the host, and the runuser/choom/script ordering and `script
+        // -t` candidates hide nothing. Pin the Block/Ask outcomes.
+        for command in [
+            "sudo -h host rm -rf /",
+            "sudo -hhost rm -rf /",
+            "runuser -u root rm -rf /",
+            "choom -n 5 rm -rf /",
+            "choom -n 5 -- rm -rf /",
+            "script -tfoo -q out.txt -c 'rm -rf /'",
+            "script -t -q out.txt -c 'rm -rf /'",
+            "script -t 0 -q out.txt rm -rf /",
+        ] {
+            assert_decision(command, Decision::Block);
+        }
+        assert_decision("sudo -h host whoami", Decision::Ask);
+        assert_decision("choom -n 5 ls", Decision::Allow);
+        // A permuting getopt drops a `--` behind the command, so these run
+        // `python3 -c ...` and the like; the call floors to Ask.
+        for command in [
+            "choom -n 5 python3 -- -c 'import os'",
+            "choom -n 5 perl -- -e 'x'",
+            "choom -n 5 ls -- -la",
+            "choom -n 5 -- python3 -c 'x'",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+        assert_decision("script -t -q out.txt", Decision::Allow);
+    }
+
+    #[test]
     fn runuser_and_su_session_command_with_unresolvable_value_asks() {
         for command in [
             r#"runuser root -c "$cmd""#,
