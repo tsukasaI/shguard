@@ -211,9 +211,12 @@
 {"command":"curl x | cat | sh | head","decision":"Block","deny_message":null,"matched_rule":"curl-wget-pipe-to-shell"}
 {"command":"curl x | crontab","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
 {"command":"curl x | crontab -","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
+{"command":"curl x | crontab --user=root","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
 {"command":"curl x | crontab -l","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"curl x | crontab -r","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"curl x | crontab -u root","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
+{"command":"curl x | crontab -uroot","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
+{"command":"curl x | crontab -uroot -l","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"curl x | crontab cron.txt","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"curl x | dc","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
 {"command":"curl x | docker exec -i c sh","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
@@ -292,6 +295,7 @@
 {"command":"curl x | trap \"rm -f /tmp/x\" EXIT","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"curl x | trap 'echo hi' EXIT","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"curl x | trap 'echo hi; sh' EXIT","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
+{"command":"curl x | trap 'flock l -c sh' EXIT","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
 {"command":"curl x | trap 'sh<&0' EXIT","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
 {"command":"curl x | trap 'sh</dev/stdin' EXIT","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
 {"command":"curl x | trap sh EXIT","decision":"Ask","deny_message":"Run the file directly (e.g. `bash file.sh`) instead of piping it in, so the argv is inspectable.","matched_rule":null}
