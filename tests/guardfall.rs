@@ -3790,6 +3790,7 @@ const DECISION_TABLES: &[(&str, &[(&str, Decision)])] = &[
     named_table!(SOCAT_EXEC_SINK_CASES),
     named_table!(ISSUE_747_PIPELINE_MIDDLE_STAGE_INTERPRETER_CASES),
     named_table!(ISSUE_631_HEREDOC_IN_SUBSTITUTION_CASES),
+    named_table!(ISSUE_806_WRAPPER_ARITY_CASES),
 ];
 
 // Case-table-shaped consts that are deliberately not in DECISION_TABLES: the
@@ -4255,6 +4256,42 @@ const ISSUE_631_HEREDOC_IN_SUBSTITUTION_CASES: &[(&str, Decision)] = &[
 #[test]
 fn guardfall_issue_631_heredoc_in_command_substitution_cases() {
     for (command, expected) in ISSUE_631_HEREDOC_IN_SUBSTITUTION_CASES {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
+/// Issue #806: wrapper rows audited against upstream getopt. The candidate
+/// fail-opens (`sudo -h`, runuser/choom/script ordering, `script -t`) were
+/// checked against the sources and none hides a payload; these rows pin the
+/// current, safe outcomes so a later "exact grammar" edit cannot open them.
+const ISSUE_806_WRAPPER_ARITY_CASES: &[(&str, Decision)] = &[
+    // sudo `-h` is `h::`, but `-h WORD` still consumes WORD as the host.
+    ("sudo -h host rm -rf /", Decision::Block),
+    ("sudo -hhost rm -rf /", Decision::Block),
+    ("sudo -h host whoami", Decision::Ask),
+    // runuser and choom permute upstream; the command is the same word.
+    ("runuser -u root -- rm -rf /", Decision::Block),
+    ("runuser -u root rm -rf /", Decision::Block),
+    ("runuser -u root ls", Decision::Ask),
+    ("choom -n 5 rm -rf /", Decision::Block),
+    ("choom -n 5 -- rm -rf /", Decision::Block),
+    ("choom -n 5 ls", Decision::Allow),
+    // script `-t`: attached value on util-linux, next word on BSD.
+    ("script -tfoo -q out.txt -c 'rm -rf /'", Decision::Block),
+    ("script -t -q out.txt -c 'rm -rf /'", Decision::Block),
+    ("script -t 0 -q out.txt rm -rf /", Decision::Block),
+    ("script -t -q out.txt", Decision::Allow),
+];
+
+#[test]
+fn guardfall_issue_806_wrapper_arity_cases() {
+    for (command, expected) in ISSUE_806_WRAPPER_ARITY_CASES {
         let verdict = shguard::analyze(command);
         assert_eq!(
             verdict.decision(),

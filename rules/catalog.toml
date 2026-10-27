@@ -212,6 +212,13 @@ slots = [
 
 [command.options]
 short_flags = "AbBEeHiKklnPSsVv"
+# `h` stays a separate value although sudo's optstring is `h::` (issue #806).
+# parse_args.c reads `-h` followed by a plain word as `-h HOST` and bumps
+# optind past it ("Optional args support -hhostname, not -h hostname"), so
+# `sudo -h rm -rf x` consumes `rm` as the host exactly like this model. When
+# the next word starts with `-` or is NAME=value, sudo enters help mode and
+# exits without running anything; swallowing that word here only over-asks.
+# Moving `h` to short_glued would expose the host word as the command.
 short_values = "ugCDhpRrtTUac"
 long_flags = [
     "askpass",
@@ -548,6 +555,12 @@ long_glued = [
 # Same passthrough as `su`: runuser hands the arguments after the user (and
 # `--`) to the target shell, so `runuser root -- -ic CMD` carries a script that
 # `shell_script`'s `-c`/`--command` cannot place.
+# `order` stays the default here (issue #806). util-linux's optstring has no
+# `+`, so options after the command are permuted, but with `-u` the command
+# is still the first non-option word, which is also where this model puts it,
+# and `-c`/`-s`/`-f`/`-l` with `-u` is an upstream error. Without a leading
+# operand slot, `permute_until_command` stops at that same word, so setting it
+# would change nothing.
 [[command]]
 names = ["runuser"]
 slots = [
@@ -811,6 +824,11 @@ long_values = [
 
 # BSD `-F` is deliberately absent: a boolean on macOS but a pipe path on
 # older FreeBSD, so it stays unmodelled.
+# `order` stays the default here (issue #806). util-linux permutes (no `+`) but
+# has no command word at all: a second operand is an error, and `-c` is found
+# by the shell_script slot wherever it sits. The positional command is the BSD
+# form, where getopt stops at the typescript file. `permute_until_command`
+# would only turn `script -q out.txt -qc 'echo hi'` from Ask into Allow.
 [[command]]
 names = ["script"]
 slots = [
@@ -822,6 +840,11 @@ slots = [
 [command.options]
 short_flags = "adefkpqrhV"
 short_values = "cTEIOBmo"
+# util-linux's `t::` takes an attached value only (`-t` or `-tFILE`), while BSD
+# `-t time` takes the next word. unless_dash serves both (issue #806): a bare
+# `-t` followed by a dash word takes nothing; short_glued would break BSD
+# `script -t 0 out.txt cmd`. The only effect on util-linux is swallowing one
+# non-dash word, never a `-c`, so no payload is hidden.
 short_values_unless_dash = "t"
 long_flags = ["append", "return", "flush", "force", "quiet", "help", "version"]
 long_values = [
@@ -928,6 +951,10 @@ slots = [{ kind = "exec" }, { kind = "operands", count = 1 }]
 [command.options]
 long_flags = ["help", "version"]
 
+# `order` stays the default here (issue #806). choom permutes (`hn:p:V`), but
+# the command is the first non-option word either way, and later `-n`/`-p`
+# words are options upstream, so the model only sees extra words. Without a
+# leading operand slot, `permute_until_command` stops at the same word.
 [[command]]
 names = ["choom"]
 slots = [{ kind = "exec" }]
