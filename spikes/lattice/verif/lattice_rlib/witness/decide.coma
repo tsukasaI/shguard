@@ -1,0 +1,116 @@
+(* #"src/witness.rs" 56 0 56 37 *)
+
+let%span svec = "../../../../../../../../../nix/store/yyhknmxa1m1gsfgwc6xsipqcd1hf5ccp-creusot-wrapped/share/creusot-std/src/std/vec.rs" 18 14 18 41
+let%span suint_macros = "../../../../../../../../../rustc/11177f2235f0c842b00f82c558ad9480c0c3a895/library/core/src/num/uint_macros.rs" 51 8 51 27
+let%span swords = "src/words.rs" 31 16 31 16
+let%span swords'0 = "src/words.rs" 25 16 25 16
+let%span swords'1 = "src/words.rs" 16 4 19 5
+let%span switness = "src/witness.rs" 57 10 57 21
+let%span switness'0 = "src/witness.rs" 56 30 56 37
+let%span switness'1 = "src/witness.rs" 51 10 54 1
+let%span switness'2 = "src/witness.rs" 39 31 39 46
+let%span switness'3 = "src/witness.rs" 35 10 38 1
+let%span switness'4 = "src/witness.rs" 24 20 24 42
+
+use creusot.slice.Slice64
+use seq.Seq
+use creusot.int.UInt64
+use creusot.prelude.Any
+use int.Int
+
+type t_Vec_Part_Global
+
+type t_Word = { parts: t_Vec_Part_Global }
+
+type t_Witness = { _sealed: (); words: Seq.seq t_Word }
+
+type t_Option_Witness = None | Some t_Witness
+
+type t_Vec_u8_Global
+
+type t_Part = Lit t_Vec_u8_Global | Opaque t_Vec_u8_Global
+
+constant const_MAX: UInt64.t = [%#suint_macros] (18446744073709551615: UInt64.t)
+
+function view_Vec_Part_Global (self: t_Vec_Part_Global) : Seq.seq t_Part
+
+axiom view_Vec_Part_Global_spec:
+  forall self: t_Vec_Part_Global [view_Vec_Part_Global self]. [%#svec] Seq.length (view_Vec_Part_Global self)
+    <= UInt64.t'int const_MAX
+
+predicate is_lit [#"src/words.rs" 15 0 15 30] (p: t_Part) =
+  [%#swords'1] match p with
+    | Lit _ -> true
+    | Opaque _ -> false
+    end
+
+predicate word_lit [#"src/words.rs" 24 0 24 32] (w: t_Word) =
+  [%#swords'0] forall j: int. 0 <= j /\ j < Seq.length (view_Vec_Part_Global w.parts)
+    -> is_lit (Seq.get (view_Vec_Part_Global w.parts) j)
+
+predicate words_lit [#"src/words.rs" 30 0 30 39] (ws: Seq.seq t_Word) =
+  [%#swords] forall i: int. 0 <= i /\ i < Seq.length ws -> word_lit (Seq.get ws i)
+
+predicate invariant_Witness [#"src/witness.rs" 23 4 23 30] (self: t_Witness) = [%#switness'4] words_lit self.words
+
+predicate inv_Witness (_1: t_Witness)
+
+axiom inv_axiom [@rewrite]: forall _1: t_Witness [inv_Witness _1]. inv_Witness _1 = invariant_Witness _1
+
+predicate inv_Option_Witness (_1: t_Option_Witness)
+
+axiom inv_axiom'0 [@rewrite]: forall _1: t_Option_Witness [inv_Option_Witness _1]. inv_Option_Witness _1
+    = match _1 with
+      | None -> true
+      | Some f0 -> inv_Witness f0
+      end
+
+let certify (ws: Slice64.slice t_Word) (return (x: t_Option_Witness)) = any
+  [ return (result: t_Option_Witness) ->
+  {[@stop_split] [@expl:certify ensures] ([@stop_split] [@expl:certify result type invariant] [%#switness'2] inv_Option_Witness result)
+    /\ ([@stop_split] [@expl:certify ensures] [%#switness'3] match result with
+      | Some w -> w.words = Slice64.view ws
+      | None -> not words_lit (Slice64.view ws)
+      end)}
+    (! return {result}) ]
+
+let elim_Some (_x: t_Option_Witness) (return (f0: t_Witness)) = any
+  [ _k (f0: t_Witness) -> {Some f0 = _x} (! return {f0})
+  | _chk -> (! {[@expl:elim Some] match _x with
+      | Some _ -> true
+      | _ -> false
+      end}
+    any) ]
+
+type t_Verdict = Allow t_Witness | Ask
+
+predicate inv_Verdict (_1: t_Verdict)
+
+axiom inv_axiom'1 [@rewrite]: forall _1: t_Verdict [inv_Verdict _1]. inv_Verdict _1
+    = match _1 with
+      | Allow f0 -> inv_Witness f0
+      | Ask -> true
+      end
+
+meta "compute_max_steps" 1000000
+
+meta "select_lsinst" "all"
+
+let decide [#"src/witness.rs" 56 0 56 37] (ws: Slice64.slice t_Word) (return (x: t_Verdict)) = (! bb0
+  [ bb0 = s0
+    [ s0 = certify [%#switness] {ws} (fun (_x: t_Option_Witness) -> [ &_4 <- _x ] s1)
+    | s1 = any [ br0 -> {_4 = None} (! bb4) | br1 (x0: t_Witness) -> {_4 = Some x0} (! bb5) ] ]
+  | bb5 = s0
+    [ s0 = elim_Some {_4} (fun (r0: t_Witness) -> [ &w <- r0 ] s1) | s1 = [ &_ret <- Allow w ] s2 | s2 = return {_ret} ]
+  | bb4 = s0 [ s0 = [ &_ret <- Ask ] s1 | s1 = return {_ret} ] ]
+  [ & _ret: t_Verdict = Any.any_l ()
+  | & ws: Slice64.slice t_Word = ws
+  | & _4: t_Option_Witness = Any.any_l ()
+  | & w: t_Witness = Any.any_l () ])
+  [ return (result: t_Verdict) ->
+  {[@stop_split] [@expl:decide ensures] ([@stop_split] [@expl:decide result type invariant] [%#switness'0] inv_Verdict result)
+    /\ ([@stop_split] [@expl:decide ensures] [%#switness'1] match result with
+      | Allow w -> w.words = Slice64.view ws /\ words_lit (Slice64.view ws)
+      | Ask -> not words_lit (Slice64.view ws)
+      end)}
+    (! return {result}) ]

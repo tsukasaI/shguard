@@ -1,0 +1,32 @@
+(* #"src/decision.rs" 5 29 5 38 *)
+
+(* <decision::Decision as std::cmp::PartialEq> *)
+
+let%span sdecision = "src/decision.rs" 5 29 5 38
+let%span sdecision'0 = "src/decision.rs" 5 44 5 53
+let%span smodel = "../../../../../../../../../nix/store/yyhknmxa1m1gsfgwc6xsipqcd1hf5ccp-creusot-wrapped/share/creusot-std/src/model.rs" 37 8 37 28
+let%span scmp = "../../../../../../../../../nix/store/yyhknmxa1m1gsfgwc6xsipqcd1hf5ccp-creusot-wrapped/share/creusot-std/src/std/cmp.rs" 14 26 14 75
+
+type t_Decision = Allow | Ask | Block
+
+type t_DecisionDeepModel = Allow'0 | Ask'0 | Block'0
+
+function deep_model_Decision [#"src/decision.rs" 5 44 5 53] (self: t_Decision) : t_DecisionDeepModel =
+  [%#sdecision'0] match self with
+    | Allow -> Allow'0
+    | Ask -> Ask'0
+    | Block -> Block'0
+    end
+
+function deep_model_ref_Decision [@inline:trivial] (self: t_Decision) : t_DecisionDeepModel =
+  [%#smodel] deep_model_Decision self
+
+meta "rewrite_def" function deep_model_ref_Decision
+
+meta "compute_max_steps" 1000000
+
+meta "select_lsinst" "all"
+
+goal refines: forall self: t_Decision, other: t_Decision. forall result: bool. ([%#sdecision] result
+        = (deep_model_ref_Decision self = deep_model_ref_Decision other))
+      -> ([%#scmp] result = (deep_model_ref_Decision self = deep_model_ref_Decision other))

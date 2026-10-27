@@ -1,0 +1,103 @@
+(* #"src/tree.rs" 128 0 128 34 *)
+
+let%span swell_founded = "../../../../../../../../../nix/store/yyhknmxa1m1gsfgwc6xsipqcd1hf5ccp-creusot-wrapped/share/creusot-std/src/logic/well_founded.rs" 43 8 43 33
+let%span sord = "../../../../../../../../../nix/store/yyhknmxa1m1gsfgwc6xsipqcd1hf5ccp-creusot-wrapped/share/creusot-std/src/logic/ord.rs" 34 8 34 21
+let%span sord'0 = "../../../../../../../../../nix/store/yyhknmxa1m1gsfgwc6xsipqcd1hf5ccp-creusot-wrapped/share/creusot-std/src/logic/ord.rs" 22 8 22 20
+let%span stree = "src/tree.rs" 132 25 132 29
+let%span stree'0 = "src/tree.rs" 131 33 131 41
+let%span stree'1 = "src/tree.rs" 131 45 131 54
+let%span stree'2 = "src/tree.rs" 131 33 131 54
+let%span stree'3 = "src/tree.rs" 130 34 130 36
+let%span stree'4 = "src/tree.rs" 125 10 125 18
+let%span stree'5 = "src/tree.rs" 126 10 126 26
+let%span stree'6 = "src/tree.rs" 45 10 45 21
+let%span stree'7 = "src/tree.rs" 47 4 51 5
+let%span stree'8 = "src/tree.rs" 36 4 40 5
+let%span stree'9 = "src/tree.rs" 30 16 30 23
+
+use creusot.int.UInt8
+use creusot.prelude.Any
+use int.Int
+
+type t_ConsTree = Leaf UInt8.t | Node t_ConsTree t_ConsTree | Nil
+
+let elim_Node (_x: t_ConsTree) (return (f0: t_ConsTree) (f1: t_ConsTree)) = any
+  [ _k (f0: t_ConsTree) (f1: t_ConsTree) -> {Node f0 f1 = _x} (! return {f0} {f1})
+  | _chk -> (! {[@expl:elim Node] match _x with
+      | Node _ _ -> true
+      | _ -> false
+      end}
+    any) ]
+
+predicate ge_log_Int [@inline:trivial] (self: int) (other: int) = [%#sord] other <= self
+
+meta "rewrite_def" predicate ge_log_Int
+
+function size [#"src/tree.rs" 46 0 46 31] (t: t_ConsTree) : int = [%#stree'7] match t with
+    | Leaf _ -> 1
+    | Node h tl -> size h + size tl + 1
+    | Nil -> 1
+    end
+
+axiom size_spec: forall t: t_ConsTree [size t]. [%#stree'6] ge_log_Int (size t) 1
+
+predicate leaf_ok [#"src/tree.rs" 29 0 29 29] (v: UInt8.t) = [%#stree'9] UInt8.t'int v < 10
+
+predicate ok [#"src/tree.rs" 35 0 35 30] (t: t_ConsTree) =
+  [%#stree'8] match t with
+    | Leaf v -> leaf_ok v
+    | Node h tl -> ok h /\ ok tl
+    | Nil -> true
+    end
+
+let check' (t: t_ConsTree) (return (x: bool)) = any
+  [ return (result: bool) -> {[@stop_split] [@expl:check ensures] [%#stree'5] result = ok t} (! return {result}) ]
+
+let elim_Leaf (_x: t_ConsTree) (return (f0: UInt8.t)) = any
+  [ _k (f0: UInt8.t) -> {Leaf f0 = _x} (! return {f0})
+  | _chk -> (! {[@expl:elim Leaf] match _x with
+      | Leaf _ -> true
+      | _ -> false
+      end}
+    any) ]
+
+predicate gt_log_Int [@inline:trivial] (self: int) (other: int) = [%#sord'0] other < self
+
+meta "rewrite_def" predicate gt_log_Int
+
+predicate well_founded_relation_Int [@inline:trivial] (self: int) (other: int) =
+  [%#swell_founded] ge_log_Int self 0 /\ gt_log_Int self other
+
+meta "rewrite_def" predicate well_founded_relation_Int
+
+meta "compute_max_steps" 1000000
+
+meta "select_lsinst" "all"
+
+let check''0 [#"src/tree.rs" 128 0 128 34] (t: t_ConsTree) (return (x: bool)) = (! bb0
+  [ bb0 = any
+    [ br0 (x0: UInt8.t) -> {t = Leaf x0} (! bb6)
+    | br1 (x0: t_ConsTree) (x1: t_ConsTree) -> {t = Node x0 x1} (! bb5)
+    | br2 -> {t = Nil} (! bb4) ]
+  | bb4 = s0 [ s0 = [ &_ret <- [%#stree] true ] s1 | s1 = return {_ret} ]
+  | bb5 = s0
+    [ s0 = elim_Node {t} (fun (r0: t_ConsTree) (r1: t_ConsTree) -> [ &h <- r0 ] s1)
+    | s1 = elim_Node {t} (fun (r0: t_ConsTree) (r1: t_ConsTree) -> [ &tl <- r1 ] s2)
+    | s2 = check' [%#stree'0] {h} (fun (_x: bool) -> [ &_11 <- _x ] s3)
+    | s3 = any [ br0 -> {_11 = false} (! bb9) | br1 -> {_11} (! bb8) ] ]
+  | bb8 = s0 [ s0 = check' [%#stree'1] {tl} (fun (_x: bool) -> [ &_ret <- _x ] s1) | s1 = return {_ret} ]
+  | bb9 = s0 [ s0 = [ &_ret <- [%#stree'2] false ] s1 | s1 = return {_ret} ]
+  | bb6 = s0
+    [ s0 = elim_Leaf {t} (fun (r0: UInt8.t) -> [ &v <- r0 ] s1)
+    | s1 = [ &_ret <- UInt8.lt v ([%#stree'3] (10: UInt8.t)) ] s2
+    | s2 = return {_ret} ] ]
+  [ & _ret: bool = Any.any_l ()
+  | & t: t_ConsTree = t
+  | & v: UInt8.t = Any.any_l ()
+  | & h: t_ConsTree = Any.any_l ()
+  | & tl: t_ConsTree = Any.any_l ()
+  | & _11: bool = Any.any_l () ]
+  [ check' (t: t_ConsTree) (_k (_ret: bool)) ->
+  {[@expl:function variant] well_founded_relation_Int function_variant ([%#stree'4] size t)}
+    check' {t} (_k) ] [ function_variant: int = [%#stree'4] size t ])
+  [ return (result: bool) -> {[@stop_split] [@expl:check ensures] [%#stree'5] result = ok t} (! return {result}) ]
