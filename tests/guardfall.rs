@@ -1108,6 +1108,12 @@ const ISSUE_809_FLOCK_OPTION_ORDER_CASES: &[(&str, Decision)] = &[
     ("flock FILE -n -- rm -rf /", Decision::Allow),
     // control: the command directly after FILE is the wrapped command
     ("flock FILE rm -rf /", Decision::Block),
+    ("flock -e FILE rm -rf /", Decision::Block),
+    ("flock --nonblock FILE rm -rf /", Decision::Block),
+    // `-c` before FILE is not a getopt option, so it stays unmodelled
+    ("flock -c 'echo hi' FILE", Decision::Ask),
+    // `?` is a glob: a file named `-w` would make this `flock -w 5 X ...`
+    ("flock -? 5 X rm -rf /", Decision::Ask),
 ];
 
 #[test]

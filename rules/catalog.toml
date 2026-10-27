@@ -404,6 +404,15 @@ long_values = ["class", "classdata", "pid", "pgid", "uid"]
 # Not permute_until_command: the optstring starts with '+', so getopt stops
 # at the first non-option and options after FILE belong to the command
 # (`flock FILE -n -- rm -rf /` runs a program named `-n`, not rm; issue #809).
+#
+# `-?` is in the optstring but stays unmodelled: `?` is a shell glob, so a
+# file named `-w` in the cwd makes the shell run `flock -w ...` while the
+# normalizer sees `-?`. `-v` is not a util-linux option (usage error); it is
+# listed because Homebrew's discoteq/flock accepts it (`+suxeonhE:w:Vv`).
+# util-linux v2.41 added `--fcntl` and v2.42 added `--start`/`--length`; they
+# are unmodelled and Ask. Master's `--fd <n>` takes no FILE operand, which
+# the slots cannot express yet, so `fd` must stay unmodelled: listing it in
+# long_values would make `flock --fd 3 rm -rf /` a bypass.
 [[command]]
 names = ["flock"]
 slots = [
@@ -413,7 +422,7 @@ slots = [
 ]
 
 [command.options]
-short_flags = "sexunoFhV?"
+short_flags = "sexunoFhVv"
 short_values = "wE"
 long_flags = [
     "shared",

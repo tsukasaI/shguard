@@ -762,6 +762,10 @@
 {"command":"fish -ic'rm -rf /'","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"fish -n script.fish","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"fish script.fish -c 'rm -rf /'","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"flock --nonblock FILE rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"flock -? 5 X rm -rf /","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"flock -c 'echo hi' FILE","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"flock -e FILE rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"flock /tmp/l -c 'echo hi'","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"flock FILE -n -- rm -rf /","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"flock FILE rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
