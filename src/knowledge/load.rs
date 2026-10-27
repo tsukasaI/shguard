@@ -455,6 +455,8 @@ mod tests {
     #[test]
     fn an_unknown_field_is_rejected() {
         for text in [
+            "bogus = 1\n[[command]]\nnames = [\"x\"]",
+            "[[command]]\nnames = [\"x\"]\n[[comand]]\nnames = [\"y\"]",
             "[[command]]\nnames = [\"x\"]\nbogus = 1",
             "[[command]]\nnames = [\"x\"]\n[command.options]\nbogus = 1",
             "[[command]]\nnames = [\"x\"]\n[grammar.g]\nbogus = 1",
@@ -469,7 +471,11 @@ mod tests {
             );
         }
         let text = "[[command]]\nnames = [\"x\"]\nslots = [{ kind = \"bogus\" }]";
-        assert!(matches!(error(text), CatalogError::Toml(_)));
+        let err = error(text);
+        assert!(
+            matches!(err, CatalogError::Toml(_)) && err.to_string().contains("unknown variant"),
+            "{err}"
+        );
     }
 
     #[test]
