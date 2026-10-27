@@ -44,14 +44,14 @@ pre-push:
     cargo-deny:
       glob: "Cargo.toml"
       run: ": {all_files}; cargo deny check"
-    # Replays the committed verif/**/proof.json (no proof search). Run from
+    # Proves from source (verif/ is gitignored, #1005). Run from
     # the crate directory: 0.14 has no `prove` subcommand and no `-p`. Skipped
     # where Creusot is not installed (verify.yaml's `proofs` job runs the
-    # same replay in CI). Points at the spike until the kernel depends on
+    # proof in CI). Points at the spike until the kernel depends on
     # creusot-std (M3); on a crate without it `cargo creusot` errors out.
-    proof-replay:
+    proof:
       root: "spikes/lattice/"
       glob: "Cargo.toml"
       skip:
         - run: "! command -v cargo-creusot"
-      run: ": {all_files}; cargo creusot --span-mode relative --replay"
+      run: ": {all_files}; cargo creusot --span-mode relative"
