@@ -14,23 +14,44 @@ pre-commit:
       glob: "*.rs"
       run: cargo clippy --workspace --all-targets -- -D warnings
 
-# No `glob` on the cargo jobs: a Cargo.toml/Cargo.lock-only change, or a
-# merge commit (which skips pre-commit), must still be checked before push.
+# Why every pre-push job reported "no matching push files" (#1010):
+# lefthook 2.1.15 builds {push_files} with `git diff --name-only HEAD @{push}`.
+# On a branch with no upstream (every first push of a new branch, and every
+# `--no-track` worktree branch) `@{push}` does not resolve ("fatal: no
+# upstream configured"), the list is empty, and build_command.go returns
+# SkipError{NoPushFiles} for any command that has no files template in its
+# `run`. It returns early, and so does not skip, when `run` contains a files
+# template that expands to something (or when --force is given).
+#
+# These jobs are whole-workspace gates and never need the changed-file list,
+# so each one starts with `: {all_files}`: a no-op whose only purpose is to
+# make the template non-empty. `glob: "Cargo.toml"` keeps the expansion to
+# one path. (`files:` overrides and a hook-level `files:` do NOT help; a
+# `# {all_files}` comment does not count; {files}/{push_files} are the empty
+# push list itself.)
 pre-push:
   parallel: true
   commands:
     rust-format:
-      run: cargo fmt --all -- --check
+      glob: "Cargo.toml"
+      run: ": {all_files}; cargo fmt --all -- --check"
     rust-lint:
-      run: cargo clippy --workspace --all-targets -- -D warnings
+      glob: "Cargo.toml"
+      run: ": {all_files}; cargo clippy --workspace --all-targets -- -D warnings"
     rust-test:
-      run: cargo test --workspace
+      glob: "Cargo.toml"
+      run: ": {all_files}; cargo test --workspace"
     cargo-deny:
-      run: cargo deny check
-    # Replays the committed proof.json; skipped where Creusot is not installed,
-    # since verify.yaml in CI runs the same replay.
+      glob: "Cargo.toml"
+      run: ": {all_files}; cargo deny check"
+    # Replays the committed verif/**/proof.json (no proof search). Run from
+    # the crate directory: 0.14 has no `prove` subcommand and no `-p`. Skipped
+    # where Creusot is not installed (verify.yaml's `proofs` job runs the
+    # same replay in CI). Points at the spike until the kernel depends on
+    # creusot-std (M3); on a crate without it `cargo creusot` errors out.
     proof-replay:
-      glob: "crates/shguard-kernel/**"
+      root: "spikes/lattice/"
+      glob: "Cargo.toml"
       skip:
         - run: "! command -v cargo-creusot"
-      run: cargo creusot prove --replay -p shguard-kernel
+      run: ": {all_files}; cargo creusot --span-mode relative --replay"

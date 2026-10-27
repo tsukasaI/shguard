@@ -1,32 +1,126 @@
 # shguard
 
-The repository is being rebuilt from zero; the previous implementation is at
-the tag `legacy-v0.9.5`. The workspace, the style rules for the verified
-kernel, and the verification commands arrive with the workspace scaffold.
+A `PreToolUse` hook for Claude Code that decides Allow / Ask / Block for a
+Bash command. The decision logic is a small kernel proved with Creusot.
+
+## The promise
+
+Allow means: the parser read the whole command, every simple command in it is
+covered by the closed catalog, no rule hit, and no code-running position is
+present. It holds under three assumptions:
+
+- P1: bash reads every string our parser accepts as the same AST.
+- P2: each catalog row's grammar matches the real tool's argv parsing.
+- P3: the environment is not hostile (PATH, `BASH_FUNC_*`, repo-local hooks).
+
+Allow is NOT "safe". Never write docs, messages or tests that say it is.
+Unknown input is Ask; the old engine's Allow-by-default is gone (legacy code is
+at tag `legacy-v0.9.5`).
 
 ## Before writing or reviewing any code
 
 Consult the `coding-guidelines/` git submodule first:
 
-- `coding-guidelines/principles.md` — architecture: parse-don't-validate,
-  invalid states unrepresentable, dependencies point inward, one composition
-  root.
-- `coding-guidelines/languages/rust.md` — Rust style and tooling.
-- `coding-guidelines/patterns/tooling.md` — lint/format/pre-commit mechanism.
+- `principles.md`: parse-don't-validate, invalid states unrepresentable,
+  dependencies point inward, one composition root.
+- `languages/rust.md`: Rust style and tooling.
+- `patterns/tooling.md`: lint/format/pre-commit mechanism.
 
-Precedence when guides conflict: language guide > principles.
+Precedence when guides conflict: language guide > principles. The proof-shape
+ADR (confirmed Creusot 0.14 spellings) is `spikes/README.md`.
+
+## Layout
+
+- `crates/shguard-kernel/`: verified; depends on `creusot-std` only.
+- `crates/shguard-syntax/`: subset lexer/parser to the kernel AST; Kani,
+  proptest and differential tests.
+- `crates/shguard/`: lib + bin; hook adapter, CLI, config, TOML loader,
+  decision log. `main` is the composition root (env/config read once there).
+- `catalog/*.toml`: embedded default catalog and rules.
+- `acceptance/`: corpora (`must_not_allow`, `guardfall`, ...). Their
+  old-engine fields are not expectations.
+- `spikes/`: separate workspace (Creusot experiments); not built by the root.
+
+Recorded exceptions to `rust.md`: the workspace split (the kernel needs zero
+deps besides `creusot-std` to be verifiable), and the nightly Creusot
+toolchain, confined to its own CI job; production stays on stable.
+
+## Rust style
+
+2024 edition, stable, `unsafe_code = "forbid"`, lints in `[workspace.lints]`
+(including `wildcard_enum_match_arm = "deny"`). One `thiserror` type per seam,
+no `unwrap`/`expect` outside tests, no `catch_unwind`, no `OnceLock`
+singletons, newtypes and enums instead of flag structs.
+
+## Kernel rules (`shguard-kernel`)
+
+- Bytes, not strings. No iterators, closures, `dyn`, async or traits: index
+  loops with `#[invariant]`s.
+- No `_` arm when matching our own enums.
+- Every `pub fn` has a contract; every loop and recursion has a `#[variant]`.
+- Lemmas are `lemma_*` and live next to the code they are about.
+- Allow can only be built from a `Witness` bound to the input it certifies
+  (#1006): `Verdict` owns the `Script`, or the witness borrows it.
+- Logic-only imports need `#[cfg(creusot)]`; spec-only parameters need
+  `#[cfg_attr(not(creusot), expect(unused_variables, reason = "..."))]`.
+- Lint policy (#1007): only this crate gets
+  `#![expect(clippy::indexing_slicing, reason = "bounds proved by Creusot")]`;
+  every other lint, `missing_docs` included, stays on. Add the attribute with
+  the first indexing code (M3); on an empty crate an `expect` would itself warn.
+- Commit `verif/**` (translated with `--span-mode relative`); ignore
+  `.why3find/`. Replay must pass before merge.
+- Lockfile policy (#1009): the committed `Cargo.lock` is the registry form
+  written by stable cargo. `cargo creusot` rewrites it to the nix-patched
+  `creusot-std` (no `source`/`checksum`); that form is a local artifact and
+  must never be committed. After a proof run, restore it with
+  `cargo generate-lockfile` on stable, then check `git diff Cargo.lock`.
+
+## Tests and catalog
+
+- Tests pin only command to decision, never messages or rule ids.
+- Every catalog row records its upstream source (GNU/BSD docs or source). A
+  row without one is rejected by the loader.
 
 ## Tooling facts
 
-- lefthook + gitleaks are the mandated pre-commit stack (`lefthook.yaml` at
-  repo root; `gitleaks git --staged --redact`).
+- lefthook + gitleaks are the mandated pre-commit stack (`lefthook.yaml`;
+  `gitleaks git --staged --redact`). `pre-push` runs fmt, clippy, test,
+  `cargo deny check` and the proof replay.
 - `git commit --no-verify` and `SKIP=` bypasses are banned except as a
   documented emergency recorded in the commit message.
-- `rustfmt.toml` is INTENTIONALLY ABSENT: the template's
-  `hex_literal_case` is nightly-only on rustfmt 1.99 and warns on every
-  stable run, and rustfmt's defaults are otherwise the Google settings.
-- Clippy lint levels live in the workspace `Cargo.toml`'s
-  `[workspace.lints]` table, lint parameters (`disallowed-*`, test scoping)
-  in `clippy.toml`.
-- `lefthook.yaml`, `clippy.toml` and `.gitleaks.toml` are protected from
-  agent edits; the owner applies changes to them.
+- `rustfmt.toml` is intentionally absent: the rustfmt bundled with rustc 1.99
+  rejects `hex_literal_case` as nightly-only, so the template cannot be used on
+  stable. rustfmt runs at defaults. Do not add the file.
+- Clippy levels live in `[workspace.lints]`; parameters in `clippy.toml`.
+- `lefthook.yaml`, `clippy.toml`, `rustfmt.toml`, `.gitleaks.toml` and
+  `.claude/skills/**` are protected from agents: draft under the scratchpad and
+  the owner applies them.
+- Actions in `.github/workflows` are pinned by full commit SHA with a
+  `# vX.Y.Z` comment; Dependabot renews them.
+
+## Running proofs
+
+```
+nix develop                              # stable rust + Creusot 0.14 (free build)
+cd crates/shguard-kernel                 # or spikes/lattice
+cargo creusot --span-mode relative       # translate + prove, writes verif/
+cargo creusot --span-mode relative --replay  # CI gate: no search, fails on any unproved goal
+cargo creusot clean                      # after renames (interactive; `echo y |`)
+```
+
+There is no `prove` subcommand and no `-p`; run from the crate directory.
+`cargo creusot 'mod::*'` proves one module.
+
+For agents in the sandbox: set `HOME` and `CARGO_HOME` to scratchpad
+directories and put the Creusot `bin` first on `PATH`, run it in the
+background, and never pipe it into `head`/`tail` (it hangs).
+
+## Workflow
+
+Work in a worktree (`git worktree add --no-track -b <type>/<slug> <path>
+origin/main`), never in the shared checkout. One milestone per PR; branches
+are `<type>/<short-slug>`; commits follow Contextual Commits (English). Verify
+before pushing: `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace`, `cargo deny check`, plus the proof replay for kernel
+changes. Human PRs get `verify.yaml`; confirm it is green before merging.
