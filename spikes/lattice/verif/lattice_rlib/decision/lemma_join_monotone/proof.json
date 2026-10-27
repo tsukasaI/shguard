@@ -1,8 +1,0 @@
-{
-  "profile": [],
-  "proofs": {
-    "Coma": {
-      "vc_lemma_join_monotone": { "prover": "alt-ergo", "time": 0.008 }
-    }
-  }
-}

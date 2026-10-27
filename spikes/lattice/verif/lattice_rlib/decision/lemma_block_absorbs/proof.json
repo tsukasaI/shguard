@@ -1,8 +1,0 @@
-{
-  "profile": [],
-  "proofs": {
-    "Coma": {
-      "vc_lemma_block_absorbs": { "prover": "alt-ergo", "time": 0.007 }
-    }
-  }
-}

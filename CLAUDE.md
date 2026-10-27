@@ -67,8 +67,9 @@ singletons, newtypes and enums instead of flag structs.
   `#![expect(clippy::indexing_slicing, reason = "bounds proved by Creusot")]`;
   every other lint, `missing_docs` included, stays on. Add the attribute with
   the first indexing code (M3); on an empty crate an `expect` would itself warn.
-- Commit `verif/**` (translated with `--span-mode relative`); ignore
-  `.why3find/`. Replay must pass before merge.
+- `verif/` and `.why3find/` are generated and gitignored (#1005): their spans
+  depend on the checkout path and leak the home directory. Every gate proves
+  from source with `--span-mode relative`; the proof must pass before merge.
 - Lockfile policy (#1009): the committed `Cargo.lock` is the registry form
   written by stable cargo. `cargo creusot` rewrites it to the nix-patched
   `creusot-std` (no `source`/`checksum`); that form is a local artifact and
@@ -85,7 +86,7 @@ singletons, newtypes and enums instead of flag structs.
 
 - lefthook + gitleaks are the mandated pre-commit stack (`lefthook.yaml`;
   `gitleaks git --staged --redact`). `pre-push` runs fmt, clippy, test,
-  `cargo deny check` and the proof replay.
+  `cargo deny check` and the proof run.
 - `git commit --no-verify` and `SKIP=` bypasses are banned except as a
   documented emergency recorded in the commit message.
 - `rustfmt.toml` is intentionally absent: the rustfmt bundled with rustc 1.99
@@ -103,8 +104,8 @@ singletons, newtypes and enums instead of flag structs.
 ```
 nix develop                              # stable rust + Creusot 0.14 (free build)
 cd crates/shguard-kernel                 # or spikes/lattice
-cargo creusot --span-mode relative       # translate + prove, writes verif/
-cargo creusot --span-mode relative --replay  # CI gate: no search, fails on any unproved goal
+cargo creusot --span-mode relative       # translate + prove (the gate); writes ignored verif/
+cargo creusot --span-mode relative --replay  # fast local re-check against your own verif/
 cargo creusot clean                      # after renames (interactive; `echo y |`)
 ```
 
@@ -122,5 +123,5 @@ origin/main`), never in the shared checkout. One milestone per PR; branches
 are `<type>/<short-slug>`; commits follow Contextual Commits (English). Verify
 before pushing: `cargo fmt --all -- --check`,
 `cargo clippy --workspace --all-targets -- -D warnings`,
-`cargo test --workspace`, `cargo deny check`, plus the proof replay for kernel
+`cargo test --workspace`, `cargo deny check`, plus the proof run for kernel
 changes. Human PRs get `verify.yaml`; confirm it is green before merging.

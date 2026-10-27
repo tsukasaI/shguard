@@ -1,8 +1,0 @@
-{
-  "profile": [],
-  "proofs": {
-    "Coma": {
-      "vc_lemma_rank_injective": { "prover": "alt-ergo", "time": 0.006 }
-    }
-  }
-}

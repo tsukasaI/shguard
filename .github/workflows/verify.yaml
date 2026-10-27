@@ -37,13 +37,11 @@ jobs:
         with:
           persist-credentials: false
       - uses: cachix/install-nix-action@a49548c11d9846ad46ecc0115273879b045f001c # v31.10.7
-      # `--replay` re-checks the committed verif/**/proof.json without proof
-      # search and fails on any unproved goal, so it is deterministic. A
-      # changed contract or body whose proof.json was not regenerated fails
-      # here.
-      - name: Replay spike proofs
+      # verif/ is not committed (#1005), so CI proves from source; the solvers
+      # and their versions are pinned by flake.lock and why3find.json.
+      - name: Prove spike
         working-directory: spikes/lattice
-        run: nix develop ../.. -c cargo creusot --span-mode relative --replay
-      # Add the kernel once it has verif/ (M3):
+        run: nix develop ../.. -c cargo creusot --span-mode relative
+      # Add the kernel once it depends on creusot-std (M3):
       #   working-directory: crates/shguard-kernel
-      #   run: nix develop ../.. -c cargo creusot --span-mode relative --replay
+      #   run: nix develop ../.. -c cargo creusot --span-mode relative
