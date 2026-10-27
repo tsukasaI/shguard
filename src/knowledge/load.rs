@@ -212,7 +212,7 @@ pub(super) fn parse(text: &str) -> Result<&'static [CommandSpec], CatalogError> 
     let mut seen = HashSet::new();
     let mut specs = Vec::with_capacity(dto.command.len());
     for row in dto.command {
-        if row.names.is_empty() {
+        if row.names.is_empty() || row.names.iter().any(|name| name.trim().is_empty()) {
             return Err(CatalogError::EmptyNames);
         }
         let base = match row.grammar {
@@ -455,20 +455,21 @@ mod tests {
     #[test]
     fn an_unknown_field_is_rejected() {
         for text in [
-            "bogus = 1",
             "[[command]]\nnames = [\"x\"]\nbogus = 1",
             "[[command]]\nnames = [\"x\"]\n[command.options]\nbogus = 1",
-            "[grammar.g]\nbogus = 1",
+            "[[command]]\nnames = [\"x\"]\n[grammar.g]\nbogus = 1",
             "[[command]]\nnames = [\"x\"]\ncode_option = [\"eval\"]",
             "[[command]]\nnames = [\"x\"]\nslots = [{ kind = \"exec\", bogus = 1 }]",
             "[[command]]\nnames = [\"x\"]\nslots = [{ kind = \"operands\", count = 1, bogus = 1 }]",
-            "[[command]]\nnames = [\"x\"]\nslots = [{ kind = \"bogus\" }]",
         ] {
+            let err = error(text);
             assert!(
-                matches!(error(text), CatalogError::Toml(_)),
-                "{text:?} should be rejected"
+                matches!(err, CatalogError::Toml(_)) && err.to_string().contains("unknown field"),
+                "{text:?} should be rejected as an unknown field: {err}"
             );
         }
+        let text = "[[command]]\nnames = [\"x\"]\nslots = [{ kind = \"bogus\" }]";
+        assert!(matches!(error(text), CatalogError::Toml(_)));
     }
 
     #[test]
@@ -512,10 +513,13 @@ mod tests {
             assert!(parse(text).is_err(), "{text:?} should be rejected");
         }
         assert!(matches!(error("command = []"), CatalogError::Empty));
-        assert!(matches!(
-            error("[[command]]\nnames = []"),
-            CatalogError::EmptyNames
-        ));
+        for text in [
+            "[[command]]\nnames = []",
+            "[[command]]\nnames = [\"\"]",
+            "[[command]]\nnames = [\"x\", \"  \"]",
+        ] {
+            assert!(matches!(error(text), CatalogError::EmptyNames), "{text:?}");
+        }
     }
 
     #[test]
