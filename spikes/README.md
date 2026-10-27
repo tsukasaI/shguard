@@ -174,28 +174,24 @@ Force a retranslation, then clean:
 touch src/lib.rs && cargo creusot --only coma && echo y | cargo creusot clean
 ```
 
-## Files to commit and replay
+## Files to commit and how proofs run
 
-- **Commit:**
-  - `src/`, `Cargo.toml` and `why3find.json`.
-  - `verif/**` (`*.coma` plus a `proof.json` per function, holding the
-    prover/time per goal).
-- **Ignore:**
-  - `target/`.
-  - `.why3find/`, a local prover-result cache. Replay succeeded with it
-    deleted.
-- **Translate with relative spans:** `cargo creusot --span-mode relative`.
-  The default `absolute` embeds `/private/tmp/...` paths in the `.coma`
-  files.
-- **Replay:** `cargo creusot --replay` (CI gate: no proof search, fails on
-  any unproved goal). Re-prove one module with `cargo creusot 'tree::*'`.
+- **Commit:** `src/`, `Cargo.toml`, `Cargo.lock` (registry form) and
+  `why3find.json`.
+- **Ignore:** `target/`, `verif/` and `.why3find/` (#1005). Even with
+  `--span-mode relative`, `verif/*.coma` embeds `../`-relative spans into
+  wherever `creusot-std` lives (the nix store, or `~/.cargo/registry` with a
+  registry-form lockfile), so the files change with the checkout path and
+  would leak the home directory. Every gate re-proves from source instead.
+- **Prove:** `cargo creusot --span-mode relative` (about 6 s for this crate).
+  `--replay` only works against a local `verif/` from an earlier run.
+  Re-prove one module with `cargo creusot 'tree::*'`.
 - **Clean up after renames:** run `cargo creusot clean` after removing
   functions. It is interactive, so `echo y |` works; otherwise stale
   `verif/` dirs linger as "dangling" warnings.
-- **Avoid lockfile churn:** `cargo creusot` rewrites `Cargo.lock` to the
-  patched nix `creusot-std`, which drops the `source`/`checksum` lines, and a
-  plain `cargo build` puts them back. Either commit the registry form and
-  ignore the churn, or keep the kernel out of the main workspace lock.
+- **Lockfile:** `cargo creusot` can rewrite `Cargo.lock` to the patched nix
+  `creusot-std` (no `source`/`checksum`). The committed form is the registry
+  one (#1009); restore it before committing.
 
 ## Stable build
 

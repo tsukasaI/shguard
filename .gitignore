@@ -1,6 +1,9 @@
 /.claude/
 target/
-# why3find's local prover cache; proofs replay from verif/**/proof.json.
+# Creusot output is regenerated on every proof run (#1005): verif/ embeds
+# spans whose relative paths depend on the checkout location and on where
+# creusot-std lives, and .why3find/ is the local prover cache.
+verif/
 .why3find/
 # nix build output symlink.
 /result
