@@ -54,11 +54,11 @@ mod policy;
 use must_not_allow_rows::{Row, Status, load_policies, parse_rows, verdict_of};
 
 /// Rows that are still Allow on main. Lower it when rows flip to `closed`.
-const EXPECTED_OPEN: usize = 129;
+const EXPECTED_OPEN: usize = 125;
 
 /// Rows that are not Allow today. Raise it when a row is added as `closed` or
 /// flipped from `open`.
-const EXPECTED_CLOSED: usize = 14;
+const EXPECTED_CLOSED: usize = 18;
 
 /// The reader must reject what a hand edit is likely to get wrong.
 fn check_reader() -> Result<(), String> {

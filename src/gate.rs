@@ -1741,8 +1741,9 @@ fn literal_for_items(words: Option<&[Word]>) -> Option<Vec<String>> {
 /// literal bindings filled in. A word that can become the effective command
 /// (the command word, or one reached through wrappers) is never trusted to
 /// turn an unresolved verdict into an Allow: `B=ls; env $B` stays as
-/// undecidable as `B=ls; $B`. Only a stricter verdict may come from the
-/// substituted form there. An Ask the substituted form keeps without
+/// undecidable as `B=ls; $B`. A `find -exec` payload is not such a word; see
+/// [`replaced_word_may_be_command`]. For such a word, only a stricter verdict
+/// may come from the substituted form. An Ask the substituted form keeps without
 /// guidance borrows the guidance the unsubstituted form's Ask carried: the
 /// unresolved word that carried it is gone, the reason to ask is not.
 #[allow(clippy::too_many_arguments)]
@@ -1785,6 +1786,11 @@ fn evaluate_substituted_command(
 
 /// Whether any of the `replaced` word indices of `command` is at or before
 /// the word that runs as the effective command once wrappers are peeled.
+///
+/// `find -exec $B` is not treated as a wrapper: `find` is the effective
+/// command, so a replaced word in a `-exec`/`-execdir`/`-ok`/`-okdir` payload
+/// keeps the substituted form's verdict (`B=ls; find . -exec $B {} +` Allows)
+/// instead of falling back to the unsubstituted one (issue #746).
 fn replaced_word_may_be_command(command: &SimpleCommand, replaced: &[usize]) -> bool {
     let argv = normalize::normalize_argv(command);
     let Some((_, tail)) = crate::rules::effective_command(&argv) else {
@@ -9885,7 +9891,9 @@ fn is_gated_stdin_sink(name: &str, rest: &[NormalizedWord]) -> bool {
 }
 
 /// `crontab` with no file operand installs the table from stdin; `-l`, `-r`
-/// and `-e` never read it. `-u` takes a value. Unresolvable words fail closed.
+/// and `-e` never read it. `-u` takes a value. `--user[=value]` is accepted
+/// defensively: no known crontab supports long options, so it only ever adds
+/// an Ask. Unresolvable words fail closed.
 fn crontab_reads_stdin(rest: &[NormalizedWord]) -> bool {
     let mut skip_value = false;
     for word in rest {
@@ -9896,11 +9904,21 @@ fn crontab_reads_stdin(rest: &[NormalizedWord]) -> bool {
             skip_value = false;
         } else if text == "--" {
             continue;
-        } else if text.starts_with('-') && text.len() > 1 {
-            if text.contains(['l', 'r', 'e']) && !text.starts_with("--") {
-                return false;
+        } else if let Some(long) = text.strip_prefix("--") {
+            skip_value = long == "user";
+        } else if let Some(cluster) = text.strip_prefix('-').filter(|c| !c.is_empty()) {
+            // The first `u` ends the cluster: the rest is the user name, so a
+            // letter in it (`-uroot`, `-ualice`) is not `-r` or `-l`.
+            for (index, flag) in cluster.char_indices() {
+                match flag {
+                    'l' | 'r' | 'e' => return false,
+                    'u' => {
+                        skip_value = index + 1 == cluster.len();
+                        break;
+                    }
+                    _ => {}
+                }
             }
-            skip_value = text == "-u" || text == "--user";
         } else {
             return false;
         }
@@ -9935,9 +9953,11 @@ fn trap_action_runs_interpreter(rest: &[NormalizedWord]) -> bool {
         Resolution::Resolved(script) if script.is_empty() || script == "-" => return false,
         Resolution::Resolved(script) => script,
     };
+    // Not direct-only: `trap 'flock l -c sh'` hides the interpreter in a
+    // wrapper's shell string, which a direct-only scan never opens.
     // A redirection (`sh<&0`) is no proof the interpreter's stdin is replaced.
     parser::parse(script).map_or(true, |line| {
-        command_line_stdin_sinks_with(&line, &Env::isolated(), true)
+        command_line_stdin_sinks_with(&line, &Env::isolated(), false)
             .reader
             .is_some()
     })
@@ -21882,6 +21902,48 @@ done"#,
             let verdict = decide(command);
             assert_ne!(verdict.decision(), Decision::Allow, "{command:?}");
         }
+    }
+
+    #[test]
+    fn crontab_user_value_is_not_read_as_a_mode_letter() {
+        for command in [
+            "curl x | crontab -uroot",
+            "curl x | crontab -ualice",
+            "curl x | crontab -u root",
+            "curl x | crontab -u alice",
+            "curl x | crontab --user=root",
+            "curl x | crontab --user root",
+            "curl x | crontab -u",
+            "curl x | crontab --user",
+            "curl x | crontab -iuroot",
+            "curl x | crontab -ul",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
+        for command in [
+            "curl x | crontab -uroot -l",
+            "curl x | crontab -u root -l",
+            "curl x | crontab -l -uroot",
+            "curl x | crontab --user=root -r",
+            "curl x | crontab -uu file",
+        ] {
+            assert_decision(command, Decision::Allow);
+        }
+    }
+
+    #[test]
+    fn trap_action_wrapper_shell_string_reading_the_pipe_is_not_allowed() {
+        for command in [
+            "curl x | trap 'flock l -c sh' EXIT",
+            "curl x | trap 'strace -o \"|sh\" true' EXIT",
+        ] {
+            let verdict = decide(command);
+            assert_ne!(verdict.decision(), Decision::Allow, "{command:?}");
+        }
+        assert_decision(
+            "curl x | trap 'flock l -c \"echo hi\"' EXIT",
+            Decision::Allow,
+        );
     }
 
     #[test]

