@@ -45,6 +45,6 @@ jobs:
       - name: Prove spike
         working-directory: spikes/lattice
         run: nix develop ../.. -c cargo creusot --span-mode relative
-      # Add the kernel once it depends on creusot-std (M3):
-      #   working-directory: crates/shguard-kernel
-      #   run: nix develop ../.. -c cargo creusot --span-mode relative
+      - name: Prove kernel
+        working-directory: crates/shguard-kernel
+        run: nix develop ../.. -c cargo creusot --span-mode relative
