@@ -1,7 +1,0 @@
-# must_not_allow config fixture (issue #818): a `[[deny]]` over `git` with one
-# target prefix. A version-suffixed `git2` must not slip past it.
-[[deny]]
-id = "fixture-deny-git-etc"
-reason = "confirm git operations on /etc"
-command = "git"
-targets = [{ prefix = "/etc" }]

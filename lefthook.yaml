@@ -1,37 +1,36 @@
 # Per coding-guidelines/patterns/tooling.md: lefthook is the mandated
 # pre-commit orchestrator; every job here is a zero-warnings gate (a warning
-# fails the commit). Rust-only repo — language jobs for go/ts omitted.
+# fails the commit). Rust-only workspace.
 
 pre-commit:
   parallel: true
   commands:
     gitleaks:
       run: gitleaks git --staged --redact
-
     rust-format:
       glob: "*.rs"
-      run: cargo fmt -- --check
+      run: cargo fmt --all -- --check
     rust-lint:
       glob: "*.rs"
-      run: cargo clippy --all-targets -- -D warnings
+      run: cargo clippy --workspace --all-targets -- -D warnings
+
 # No `glob` on the cargo jobs: a Cargo.toml/Cargo.lock-only change, or a
 # merge commit (which skips pre-commit), must still be checked before push.
 pre-push:
   parallel: true
   commands:
-    pre-push-refs:
-      use_stdin: true
-      run: bash scripts/pre-push-refs.sh
     rust-format:
-      run: cargo fmt -- --check
+      run: cargo fmt --all -- --check
     rust-lint:
-      run: cargo clippy --all-targets -- -D warnings
+      run: cargo clippy --workspace --all-targets -- -D warnings
+    rust-test:
+      run: cargo test --workspace
     cargo-deny:
       run: cargo deny check
-    workflow-scripts-test:
-      run: node --test .claude/workflows/bypass-hunt.test.mjs
-    # Via the script, not a bare run: see scripts/hermetic-cargo-test.sh.
-    rust-test:
-      run: bash scripts/hermetic-cargo-test.sh
-    package-compile:
-      run: bash scripts/package-compile-check.sh
+    # Replays the committed proof.json; skipped where Creusot is not installed,
+    # since verify.yaml in CI runs the same replay.
+    proof-replay:
+      glob: "crates/shguard-kernel/**"
+      skip:
+        - run: "! command -v cargo-creusot"
+      run: cargo creusot prove --replay -p shguard-kernel

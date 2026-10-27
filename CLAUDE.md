@@ -1,5 +1,9 @@
 # shguard
 
+The repository is being rebuilt from zero; the previous implementation is at
+the tag `legacy-v0.9.5`. The workspace, the style rules for the verified
+kernel, and the verification commands arrive with the workspace scaffold.
+
 ## Before writing or reviewing any code
 
 Consult the `coding-guidelines/` git submodule first:
@@ -16,22 +20,13 @@ Precedence when guides conflict: language guide > principles.
 
 - lefthook + gitleaks are the mandated pre-commit stack (`lefthook.yaml` at
   repo root; `gitleaks git --staged --redact`).
-- Human PRs get no CI: lefthook `pre-push` (fmt, clippy, test,
-  `cargo deny check`, bypass-hunt workflow script tests,
-  up-to-date-with-`origin/main` check) is the merge gate. For
-  `chore/release-*` pushes it also runs a sandboxed `nix build` of the pushed
-  commit (`scripts/release-nix-build.sh`). `main-check.yaml` covers only
-  pushes to `main`, Dependabot PRs, and on-demand `workflow_dispatch` runs
-  (nix-build only); release and the nightly fuzzer stay on GitHub Actions.
 - `git commit --no-verify` and `SKIP=` bypasses are banned except as a
   documented emergency recorded in the commit message.
-- `rustfmt.toml` is INTENTIONALLY ABSENT: rustfmt runs at defaults per
-  `languages/rust.md` — do not add the file.
-- Clippy lint levels live in `Cargo.toml`'s `[lints.clippy]` table, lint
-  parameters (`disallowed-*`) in `clippy.toml` — never blanket-enable
-  pedantic/nursery groups.
-
-## Project references
-
-- Design doc: `plan.md` at the repo root.
-- Implementation issues: GitHub (tsukasaI/shguard).
+- `rustfmt.toml` is INTENTIONALLY ABSENT: the template's
+  `hex_literal_case` is nightly-only on rustfmt 1.99 and warns on every
+  stable run, and rustfmt's defaults are otherwise the Google settings.
+- Clippy lint levels live in the workspace `Cargo.toml`'s
+  `[workspace.lints]` table, lint parameters (`disallowed-*`, test scoping)
+  in `clippy.toml`.
+- `lefthook.yaml`, `clippy.toml` and `.gitleaks.toml` are protected from
+  agent edits; the owner applies changes to them.
