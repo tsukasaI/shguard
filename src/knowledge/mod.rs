@@ -12,8 +12,6 @@
 //! describe is [`Unmodeled`], never a guess. The only place that turns it
 //! into a decision is `crate::gate`'s unmodelled-option floor.
 
-#[cfg(test)]
-mod catalog;
 mod load;
 mod parse;
 #[cfg(test)]

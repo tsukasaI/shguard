@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use serde::Deserialize;
 
-use super::spec::{ArgOrder, CommandSpec, CwdEffect, OptionGrammar, Slot};
+use super::spec::{ArgOrder, CommandSpec, CwdEffect, OptionGrammar, Slot, SubcommandSet};
 
 pub(super) const EMBEDDED_CATALOG: &str = include_str!("../../rules/catalog.toml");
 
@@ -20,6 +20,19 @@ pub(crate) enum CatalogError {
     UnknownGrammar { command: String, grammar: String },
     #[error("{0:?} is named by two commands")]
     DuplicateName(String),
+    #[error("the command {command:?} is open but gives no justification")]
+    OpenWithoutJustification { command: String },
+    #[error("the command {command:?} gives a justification but is closed")]
+    JustificationOnClosed { command: String },
+    #[error("the catalog has no commands")]
+    Empty,
+    #[error("a command row has no names")]
+    EmptyNames,
+    #[error("the command {command:?} has an empty entry in {field}")]
+    EmptyEntry {
+        command: String,
+        field: &'static str,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -27,7 +40,6 @@ pub(crate) enum CatalogError {
 struct CatalogDto {
     #[serde(default)]
     grammar: BTreeMap<String, GrammarDto>,
-    #[serde(default)]
     command: Vec<CommandDto>,
 }
 
@@ -40,6 +52,28 @@ struct CommandDto {
     options: GrammarDto,
     #[serde(default)]
     slots: Vec<SlotDto>,
+    #[serde(default)]
+    code_options: Vec<String>,
+    #[serde(default)]
+    code_subcommands: Vec<Vec<String>>,
+    #[serde(default)]
+    env_code: Vec<String>,
+    #[serde(default)]
+    reads_files: Vec<String>,
+    #[serde(default)]
+    persists: Vec<String>,
+    cwd_effect: Option<CwdEffectDto>,
+    #[serde(default)]
+    subcommands: SubcommandSetDto,
+    justification: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SubcommandSetDto {
+    #[default]
+    Closed,
+    Open,
 }
 
 /// Every field is optional so that a row can set fields on top of a named
@@ -162,9 +196,14 @@ enum SlotDto {
 ///
 /// [`CatalogError`] when the TOML does not match the schema (an unknown
 /// field, a character field that is not exactly one character), a row names
-/// an unknown grammar, or two rows claim the same name.
+/// an unknown grammar, two rows claim the same name, there are no rows, a row
+/// has no names, an open row lacks a justification, or a row's list holds an
+/// empty entry.
 pub(super) fn parse(text: &str) -> Result<&'static [CommandSpec], CatalogError> {
     let dto: CatalogDto = toml::from_str(text)?;
+    if dto.command.is_empty() {
+        return Err(CatalogError::Empty);
+    }
     let grammars: BTreeMap<String, OptionGrammar> = dto
         .grammar
         .into_iter()
@@ -173,6 +212,9 @@ pub(super) fn parse(text: &str) -> Result<&'static [CommandSpec], CatalogError> 
     let mut seen = HashSet::new();
     let mut specs = Vec::with_capacity(dto.command.len());
     for row in dto.command {
+        if row.names.is_empty() || row.names.iter().any(|name| name.trim().is_empty()) {
+            return Err(CatalogError::EmptyNames);
+        }
         let base = match row.grammar {
             None => OptionGrammar::EMPTY,
             Some(name) => *grammars
@@ -187,10 +229,50 @@ pub(super) fn parse(text: &str) -> Result<&'static [CommandSpec], CatalogError> 
                 return Err(CatalogError::DuplicateName(name.clone()));
             }
         }
+        let command = || row.names.first().cloned().unwrap_or_default();
+        let blank = |text: &String| text.trim().is_empty();
+        for (field, empty) in [
+            ("code_options", row.code_options.iter().any(blank)),
+            (
+                "code_subcommands",
+                row.code_subcommands
+                    .iter()
+                    .any(|path| path.is_empty() || path.iter().any(blank)),
+            ),
+            ("env_code", row.env_code.iter().any(blank)),
+            ("reads_files", row.reads_files.iter().any(blank)),
+            ("persists", row.persists.iter().any(blank)),
+        ] {
+            if empty {
+                return Err(CatalogError::EmptyEntry {
+                    command: command(),
+                    field,
+                });
+            }
+        }
+        let subcommands = match (row.subcommands, row.justification.as_deref().map(str::trim)) {
+            (SubcommandSetDto::Closed, None) => SubcommandSet::Closed,
+            (SubcommandSetDto::Closed, Some(_)) => {
+                return Err(CatalogError::JustificationOnClosed { command: command() });
+            }
+            (SubcommandSetDto::Open, Some(text)) if !text.is_empty() => SubcommandSet::Open {
+                justification: leak_str(text.to_owned()),
+            },
+            (SubcommandSetDto::Open, _) => {
+                return Err(CatalogError::OpenWithoutJustification { command: command() });
+            }
+        };
         specs.push(CommandSpec {
-            names: leak_strs(row.names),
             options: row.options.over(base),
             slots: leak_slice(row.slots.into_iter().map(SlotDto::into_slot)),
+            code_options: leak_strs(row.code_options),
+            code_subcommands: leak_slice(row.code_subcommands.into_iter().map(leak_strs)),
+            env_code: leak_strs(row.env_code),
+            reads_files: leak_strs(row.reads_files),
+            persists: leak_strs(row.persists),
+            cwd_effect: row.cwd_effect.map(CwdEffectDto::into_effect),
+            subcommands,
+            names: leak_strs(row.names),
         });
     }
     Ok(leak_slice(specs))
@@ -373,19 +455,27 @@ mod tests {
     #[test]
     fn an_unknown_field_is_rejected() {
         for text in [
-            "bogus = 1",
+            "bogus = 1\n[[command]]\nnames = [\"x\"]",
+            "[[command]]\nnames = [\"x\"]\n[[comand]]\nnames = [\"y\"]",
             "[[command]]\nnames = [\"x\"]\nbogus = 1",
             "[[command]]\nnames = [\"x\"]\n[command.options]\nbogus = 1",
-            "[grammar.g]\nbogus = 1",
+            "[[command]]\nnames = [\"x\"]\n[grammar.g]\nbogus = 1",
+            "[[command]]\nnames = [\"x\"]\ncode_option = [\"eval\"]",
             "[[command]]\nnames = [\"x\"]\nslots = [{ kind = \"exec\", bogus = 1 }]",
             "[[command]]\nnames = [\"x\"]\nslots = [{ kind = \"operands\", count = 1, bogus = 1 }]",
-            "[[command]]\nnames = [\"x\"]\nslots = [{ kind = \"bogus\" }]",
         ] {
+            let err = error(text);
             assert!(
-                matches!(error(text), CatalogError::Toml(_)),
-                "{text:?} should be rejected"
+                matches!(err, CatalogError::Toml(_)) && err.to_string().contains("unknown field"),
+                "{text:?} should be rejected as an unknown field: {err}"
             );
         }
+        let text = "[[command]]\nnames = [\"x\"]\nslots = [{ kind = \"bogus\" }]";
+        let err = error(text);
+        assert!(
+            matches!(err, CatalogError::Toml(_)) && err.to_string().contains("unknown variant"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -420,6 +510,144 @@ mod tests {
                 matches!(error(text), CatalogError::DuplicateName(name) if name == "x"),
                 "{text:?}"
             );
+        }
+    }
+
+    #[test]
+    fn an_empty_catalog_or_nameless_row_is_rejected() {
+        for text in ["", "[grammar.g]\nshort_flags = \"a\"", "command = []"] {
+            assert!(parse(text).is_err(), "{text:?} should be rejected");
+        }
+        assert!(matches!(error("command = []"), CatalogError::Empty));
+        for text in [
+            "[[command]]\nnames = []",
+            "[[command]]\nnames = [\"\"]",
+            "[[command]]\nnames = [\"x\", \"  \"]",
+        ] {
+            assert!(matches!(error(text), CatalogError::EmptyNames), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn an_empty_entry_in_a_row_list_is_rejected() {
+        for (field, value) in [
+            ("code_options", "[\"\"]"),
+            ("code_subcommands", "[[]]"),
+            ("code_subcommands", "[[\"run\", \" \"]]"),
+            ("env_code", "[\"  \"]"),
+            ("reads_files", "[\"\"]"),
+            ("persists", "[\" \"]"),
+        ] {
+            let text = format!("[[command]]\nnames = [\"x\"]\n{field} = {value}");
+            assert!(
+                matches!(error(&text), CatalogError::EmptyEntry { field: got, .. } if got == field),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_open_row_must_justify_itself() {
+        for text in [
+            "[[command]]\nnames = [\"x\"]\nsubcommands = \"open\"",
+            "[[command]]\nnames = [\"x\"]\nsubcommands = \"open\"\njustification = \"  \"",
+        ] {
+            assert!(
+                matches!(error(text), CatalogError::OpenWithoutJustification { command } if command == "x"),
+                "{text:?}"
+            );
+        }
+        let text = "[[command]]\nnames = [\"x\"]\njustification = \"why\"";
+        assert!(matches!(
+            error(text),
+            CatalogError::JustificationOnClosed { .. }
+        ));
+        let specs =
+            parse("[[command]]\nnames = [\"x\"]\nsubcommands = \"open\"\njustification = \"why\"")
+                .expect("loads");
+        assert_eq!(
+            specs[0].subcommands,
+            SubcommandSet::Open {
+                justification: "why"
+            }
+        );
+    }
+
+    #[test]
+    fn the_rfc_row_fields_parse() {
+        let specs = parse(
+            r#"
+            [[command]]
+            names = ["x", "y"]
+            code_options = ["eval"]
+            code_subcommands = [["run", "script"], ["exec"]]
+            env_code = ["NODE_OPTIONS"]
+            reads_files = ["~/.xrc"]
+            persists = ["cron entry"]
+            cwd_effect = "relocates"
+            subcommands = "open"
+            justification = "every subcommand is read-only"
+            "#,
+        )
+        .expect("loads");
+        let spec = &specs[0];
+        assert_eq!(spec.code_options, ["eval"]);
+        assert_eq!(
+            spec.code_subcommands,
+            [&["run", "script"][..], &["exec"][..]]
+        );
+        assert_eq!(spec.env_code, ["NODE_OPTIONS"]);
+        assert_eq!(spec.reads_files, ["~/.xrc"]);
+        assert_eq!(spec.persists, ["cron entry"]);
+        assert_eq!(spec.cwd_effect, Some(CwdEffect::Relocates));
+        assert_eq!(
+            spec.subcommands,
+            SubcommandSet::Open {
+                justification: "every subcommand is read-only"
+            }
+        );
+    }
+
+    #[test]
+    fn the_rfc_row_fields_default_to_empty_and_closed() {
+        let specs = parse("[[command]]\nnames = [\"x\"]").expect("loads");
+        let spec = &specs[0];
+        assert!(spec.code_options.is_empty() && spec.code_subcommands.is_empty());
+        assert!(spec.env_code.is_empty() && spec.reads_files.is_empty());
+        assert!(spec.persists.is_empty());
+        assert_eq!(spec.cwd_effect, None);
+        assert_eq!(spec.subcommands, SubcommandSet::Closed);
+    }
+
+    #[test]
+    fn leaf_rows_share_no_name_with_exec_rows_and_open_rows_justify() {
+        let specs = parse(EMBEDDED_CATALOG).expect("rules/catalog.toml loads");
+        let mut owner = BTreeMap::new();
+        for (index, spec) in specs.iter().enumerate() {
+            for name in spec.names {
+                assert_eq!(
+                    owner.insert(*name, index),
+                    None,
+                    "{name:?} is named by more than one row"
+                );
+            }
+        }
+        let (exec, leaf): (Vec<_>, Vec<_>) = specs.iter().partition(|spec| spec.runs_command());
+        let exec_names: HashSet<_> = exec.iter().flat_map(|spec| spec.names).collect();
+        for name in leaf.iter().flat_map(|spec| spec.names) {
+            assert!(
+                !exec_names.contains(name),
+                "leaf row name {name:?} is also an exec row"
+            );
+        }
+        for spec in specs {
+            if let SubcommandSet::Open { justification } = spec.subcommands {
+                assert!(
+                    !justification.trim().is_empty(),
+                    "{:?} is open without a justification",
+                    spec.names
+                );
+            }
         }
     }
 }
