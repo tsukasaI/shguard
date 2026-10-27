@@ -18980,6 +18980,26 @@ mod tests {
     }
 
     #[test]
+    fn nsenter_wdns_and_strace_seccomp_bpf_are_modelled() {
+        // (issue #808) `nsenter -W /x ...` runs `/x` as the command, exactly
+        // as `-w /x` does.
+        for (command, expected) in [
+            ("nsenter -W /x true", Decision::Allow),
+            ("nsenter -W/x true", Decision::Allow),
+            ("nsenter --wdns=/x true", Decision::Allow),
+            ("strace --seccomp-bpf true", Decision::Allow),
+            ("nsenter -W/x rm -rf /", Decision::Block),
+            ("nsenter --wdns=/x rm -rf /", Decision::Block),
+            ("nsenter --wdns rm -rf /", Decision::Block),
+            ("nsenter -W rm -rf /", Decision::Block),
+            ("strace --seccomp-bpf rm -rf /", Decision::Block),
+            ("strace -f --seccomp-bpf rm -rf /", Decision::Block),
+        ] {
+            assert_decision(command, expected);
+        }
+    }
+
+    #[test]
     fn time_and_exec_wrapper_second_review_findings_keep_their_decision() {
         for (command, expected) in [
             // Issue #731: the `!` after `time --` opens the pipeline.
