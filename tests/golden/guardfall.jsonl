@@ -123,8 +123,12 @@
 {"command":"cd ~/.config && rm -rf nvim/*","decision":"Allow","deny_message":null,"matched_rule":null}
 {"command":"cd ~/.config && rm -rf s*","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"cgexec -g cpu:grp rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
+{"command":"choom -n 5 -- python3 -c 'x'","decision":"Ask","deny_message":"Write the program to a file and run that file instead (e.g. `python3 file.py`, `awk -f prog.awk`) — inline interpreter code is never inspected.","matched_rule":null}
 {"command":"choom -n 5 -- rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"choom -n 5 ls","decision":"Allow","deny_message":null,"matched_rule":null}
+{"command":"choom -n 5 ls -- -la","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"choom -n 5 perl -- -e 'x'","decision":"Ask","deny_message":null,"matched_rule":null}
+{"command":"choom -n 5 python3 -- -c 'import os'","decision":"Ask","deny_message":null,"matched_rule":null}
 {"command":"choom -n 5 rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"chronic rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}
 {"command":"chroot / rm -rf /","decision":"Block","deny_message":null,"matched_rule":"rm-recursive-force-dangerous-target"}

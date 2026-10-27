@@ -93,6 +93,7 @@ struct GrammarDto {
     any_long_attached: Option<bool>,
     bare_dash_option: Option<bool>,
     dash_command_unmodeled: Option<bool>,
+    permutes: Option<bool>,
     numeric_option: Option<bool>,
     assignments: Option<bool>,
     leading_operand: Option<bool>,
@@ -300,6 +301,7 @@ impl GrammarDto {
             dash_command_unmodeled: self
                 .dash_command_unmodeled
                 .unwrap_or(base.dash_command_unmodeled),
+            permutes: self.permutes.unwrap_or(base.permutes),
             numeric_option: self.numeric_option.unwrap_or(base.numeric_option),
             assignments: self.assignments.unwrap_or(base.assignments),
             leading_operand: self.leading_operand.unwrap_or(base.leading_operand),

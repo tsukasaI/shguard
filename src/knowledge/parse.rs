@@ -565,6 +565,20 @@ pub(crate) fn parse<'a>(
         parser.culprit.get_or_insert(command_at);
     }
 
+    // A permuting getopt (no leading `+`) drops a `--` behind the command and
+    // moves the words before it ahead of the rest, so `--` does not end the
+    // wrapper's options there: `choom -n 5 python3 -- -c x` runs `python3 -c
+    // x`, which a model reading `python3 -- -c x` would call a plain script
+    // name. Exact emulation is not attempted (the wrapper errors on any other
+    // dash word it does not know anyway); the call floors to Ask instead.
+    if grammar.permutes
+        && let Some(offset) = argv.iter().skip(command_at + 1).position(
+            |word| matches!(word.resolution(), Resolution::Resolved(text) if text == "--"),
+        )
+    {
+        parser.culprit.get_or_insert(command_at + 1 + offset);
+    }
+
     // An unresolvable word where the subcommand belongs might be it.
     let unresolved_subcommand = sub_pending.is_some()
         && matches!(

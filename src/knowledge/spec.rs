@@ -48,6 +48,11 @@ pub(crate) struct OptionGrammar {
     /// tool's dialects disagree on whether it is an option (util-linux
     /// `script out -qc cmd` permutes, BSD `script` runs `-qc`).
     pub(crate) dash_command_unmodeled: bool,
+    /// The tool's getopt has no leading `+` and permutes: a `--` after the
+    /// command is removed and the words before it move ahead of the rest, so
+    /// `--` is not an option terminator there (`choom -n 5 python3 -- -c x`
+    /// runs `python3 -c x`). Such a `--` makes the call unmodelled.
+    pub(crate) permutes: bool,
     /// `-<digits>` is an option (`nice -10`).
     pub(crate) numeric_option: bool,
     /// `NAME=value` operands before the command are skipped (`env`).
@@ -91,6 +96,7 @@ impl OptionGrammar {
         any_long_attached: false,
         bare_dash_option: false,
         dash_command_unmodeled: false,
+        permutes: false,
         numeric_option: false,
         assignments: false,
         leading_operand: false,

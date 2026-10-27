@@ -22622,6 +22622,16 @@ done"#,
         }
         assert_decision("sudo -h host whoami", Decision::Ask);
         assert_decision("choom -n 5 ls", Decision::Allow);
+        // A permuting getopt drops a `--` behind the command, so these run
+        // `python3 -c ...` and the like; the call floors to Ask.
+        for command in [
+            "choom -n 5 python3 -- -c 'import os'",
+            "choom -n 5 perl -- -e 'x'",
+            "choom -n 5 ls -- -la",
+            "choom -n 5 -- python3 -c 'x'",
+        ] {
+            assert_decision(command, Decision::Ask);
+        }
         assert_decision("script -t -q out.txt", Decision::Allow);
     }
 

@@ -4282,6 +4282,12 @@ const ISSUE_806_WRAPPER_ARITY_CASES: &[(&str, Decision)] = &[
     ("choom -n 5 rm -rf /", Decision::Block),
     ("choom -n 5 -- rm -rf /", Decision::Block),
     ("choom -n 5 ls", Decision::Allow),
+    // glibc drops a `--` after the command and moves the words before it
+    // ahead, so `choom -n 5 python3 -- -c X` runs `python3 -c X`.
+    ("choom -n 5 python3 -- -c 'import os'", Decision::Ask),
+    ("choom -n 5 perl -- -e 'x'", Decision::Ask),
+    ("choom -n 5 ls -- -la", Decision::Ask),
+    ("choom -n 5 -- python3 -c 'x'", Decision::Ask),
     // script `-t`: attached value on util-linux, next word on BSD.
     ("script -tfoo -q out.txt -c 'rm -rf /'", Decision::Block),
     ("script -t -q out.txt -c 'rm -rf /'", Decision::Block),

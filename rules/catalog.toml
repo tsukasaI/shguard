@@ -12,7 +12,9 @@
 # empty one, and its `[command.options]` table sets fields on top, like
 # Rust's `..BASE`. A field left out keeps the base's value; in the empty
 # grammar every string is "", every list [], every switch false, and
-# `order` is "first_operand". A row whose grammar is its own has no
+# `order` is "first_operand". `permutes = true` marks a tool whose getopt has
+# no leading `+`: a `--` behind the command is dropped by permutation rather
+# than ending the options, so such a `--` floors the call to Ask. A row whose grammar is its own has no
 # `grammar` key and writes every non-empty field in `[command.options]`.
 #
 # Row fields beyond the grammar: `subcommands = "closed"` (the default) or
@@ -213,11 +215,12 @@ slots = [
 [command.options]
 short_flags = "AbBEeHiKklnPSsVv"
 # `h` stays a separate value although sudo's optstring is `h::` (issue #806).
-# parse_args.c reads `-h` followed by a plain word as `-h HOST` and bumps
-# optind past it ("Optional args support -hhostname, not -h hostname"), so
-# `sudo -h rm -rf x` consumes `rm` as the host exactly like this model. When
-# the next word starts with `-` or is NAME=value, sudo enters help mode and
-# exits without running anything; swallowing that word here only over-asks.
+# parse_args.c reads a standalone `-h` token followed by a plain word as
+# `-h HOST` and bumps optind past it ("Optional args support -hhostname, not
+# -h hostname"), so `sudo -h rm -rf x` consumes `rm` as the host exactly like
+# this model. When the next word starts with `-` or is NAME=value, or `h`
+# sits in a cluster like `-nh`, sudo enters help mode and exits without
+# running anything; swallowing that word here only over-asks.
 # Moving `h` to short_glued would expose the host word as the command.
 short_values = "ugCDhpRrtTUac"
 long_flags = [
@@ -336,6 +339,8 @@ long_values = [
 ]
 bare_dash_option = true
 order = "permute_until_command"
+# su-common.c v2.40 line 1086: `c:fg:G:lmpPTs:u:hVw:`, no leading `+`.
+permutes = true
 
 [[command]]
 names = ["pkexec"]
@@ -560,7 +565,10 @@ long_glued = [
 # is still the first non-option word, which is also where this model puts it,
 # and `-c`/`-s`/`-f`/`-l` with `-u` is an upstream error. Without a leading
 # operand slot, `permute_until_command` stops at that same word, so setting it
-# would change nothing.
+# would change nothing. A `--` after the command is removed by permutation and
+# the non-options before it move ahead of the rest (`runuser -u root python3
+# -- -c X` runs `python3 -c X`); `permutes = true` floors that to Ask, and the
+# privilege Ask floor is what keeps the row safe on its own.
 [[command]]
 names = ["runuser"]
 slots = [
@@ -591,6 +599,8 @@ long_values = [
     "command",
     "session-command",
 ]
+# Same optstring as `su` (su-common.c v2.40 line 1086), no leading `+`.
+permutes = true
 
 [[command]]
 names = ["strace"]
@@ -858,6 +868,8 @@ long_values = [
     "output-limit",
 ]
 dash_command_unmodeled = true
+# script.c v2.40 line 812: `aB:c:eE:fI:O:o:qm:T:t::Vh`, no leading `+`.
+permutes = true
 
 # `make` runs no wrapped command; its entry only tells `-C` composition how
 # the cluster `-kC dir` is laid out (every short letter not listed as a
@@ -951,10 +963,15 @@ slots = [{ kind = "exec" }, { kind = "operands", count = 1 }]
 [command.options]
 long_flags = ["help", "version"]
 
-# `order` stays the default here (issue #806). choom permutes (`hn:p:V`), but
-# the command is the first non-option word either way, and later `-n`/`-p`
-# words are options upstream, so the model only sees extra words. Without a
-# leading operand slot, `permute_until_command` stops at the same word.
+# `order` stays the default here (issue #806). choom.c v2.40 line 99 uses
+# `hn:p:V` with no leading `+`, so it permutes. The command is still the first
+# non-option word, and `permute_until_command` stops at that same word, so
+# setting it would change nothing. What permutation does change is words after
+# the command: a later `--` is dropped and the skipped non-options move ahead
+# of the rest, so `choom -n 5 python3 -- -c X` runs `python3 -c X`, which the
+# model would read as `python3 -- -c X`. `permutes = true` floors that to Ask.
+# Exact emulation is not attempted: choom errors on every other dash word it
+# does not know, so only `--` can carry a flag through.
 [[command]]
 names = ["choom"]
 slots = [{ kind = "exec" }]
@@ -964,6 +981,7 @@ short_flags = "hV"
 short_values = "np"
 long_flags = ["help", "version"]
 long_values = ["adjust", "pid"]
+permutes = true
 
 [[command]]
 names = ["chpst"]
