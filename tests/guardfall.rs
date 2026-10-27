@@ -1101,6 +1101,36 @@ fn guardfall_issue_887_find_file_write() {
     }
 }
 
+/// Issue #809: util-linux flock.c's optstring starts with `+`, so getopt stops
+/// at FILE and an option after it is the command. Pins that as by design.
+const ISSUE_809_FLOCK_OPTION_ORDER_CASES: &[(&str, Decision)] = &[
+    // issue #809: runs a program named `-n`, never `rm`
+    ("flock FILE -n -- rm -rf /", Decision::Allow),
+    // control: the command directly after FILE is the wrapped command
+    ("flock FILE rm -rf /", Decision::Block),
+    ("flock -e FILE echo hi", Decision::Allow),
+    ("flock --nonblocking FILE echo hi", Decision::Allow),
+    ("flock --nonblock FILE echo hi", Decision::Allow),
+    ("flock -v FILE echo hi", Decision::Allow),
+    // `-c` before FILE is not a getopt option, so it stays unmodelled
+    ("flock -c 'echo hi' FILE", Decision::Ask),
+    // `?` is a glob: a file named `-w` would make this `flock -w 5 X ...`
+    ("flock -? 5 X rm -rf /", Decision::Ask),
+];
+
+#[test]
+fn guardfall_issue_809_flock_option_order() {
+    for (command, expected) in ISSUE_809_FLOCK_OPTION_ORDER_CASES {
+        let verdict = shguard::analyze(command);
+        assert_eq!(
+            verdict.decision(),
+            *expected,
+            "command {command:?}: expected {expected:?}, got {:?}",
+            verdict.decision()
+        );
+    }
+}
+
 const ISSUE_740_G_WRAPPERS_AND_PLACEHOLDER_COMMAND_CASES: &[(&str, Decision)] = &[
     // The issue's g-prefixed coreutils rows: each is the unprefixed tool.
     ("gtimeout 5 rm -rf ~", Decision::Block),
@@ -3790,6 +3820,7 @@ const DECISION_TABLES: &[(&str, &[(&str, Decision)])] = &[
     named_table!(SOCAT_EXEC_SINK_CASES),
     named_table!(ISSUE_747_PIPELINE_MIDDLE_STAGE_INTERPRETER_CASES),
     named_table!(ISSUE_631_HEREDOC_IN_SUBSTITUTION_CASES),
+    named_table!(ISSUE_809_FLOCK_OPTION_ORDER_CASES),
 ];
 
 // Case-table-shaped consts that are deliberately not in DECISION_TABLES: the
