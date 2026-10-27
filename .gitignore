@@ -2,3 +2,5 @@
 target/
 # why3find's local prover cache; proofs replay from verif/**/proof.json.
 .why3find/
+# nix build output symlink.
+/result

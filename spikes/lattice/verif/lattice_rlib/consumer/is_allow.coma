@@ -1,10 +1,10 @@
-(* #"src/consumer.rs" 18 0 18 36 *)
+(* #"src/consumer.rs" 19 0 19 36 *)
 
 let%span svec = "../../../../../../../../../nix/store/yyhknmxa1m1gsfgwc6xsipqcd1hf5ccp-creusot-wrapped/share/creusot-std/src/std/vec.rs" 18 14 18 41
 let%span suint_macros = "../../../../../../../../../rustc/11177f2235f0c842b00f82c558ad9480c0c3a895/library/core/src/num/uint_macros.rs" 51 8 51 27
-let%span sconsumer = "src/consumer.rs" 21 24 21 29
-let%span sconsumer'0 = "src/consumer.rs" 20 29 20 33
-let%span sconsumer'1 = "src/consumer.rs" 18 16 18 17
+let%span sconsumer = "src/consumer.rs" 22 24 22 29
+let%span sconsumer'0 = "src/consumer.rs" 21 29 21 33
+let%span sconsumer'1 = "src/consumer.rs" 19 16 19 17
 let%span sconsumer'2 = "src/consumer.rs" 14 10 17 1
 let%span swords = "src/words.rs" 31 16 31 16
 let%span swords'0 = "src/words.rs" 25 16 25 16
@@ -81,7 +81,7 @@ meta "compute_max_steps" 1000000
 
 meta "select_lsinst" "all"
 
-let is_allow [#"src/consumer.rs" 18 0 18 36] (v: t_Verdict) (return (x: bool)) =
+let is_allow [#"src/consumer.rs" 19 0 19 36] (v: t_Verdict) (return (x: bool)) =
 {[@stop_split] [@expl:is_allow 'v' type invariant] [%#sconsumer'1] inv_ref_Verdict v}
   (! bb0
   [ bb0 = any [ br0 (x0: t_Witness) -> {v = Allow x0} (! bb4) | br1 -> {v = Ask} (! bb3) ]

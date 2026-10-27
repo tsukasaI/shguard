@@ -1,11 +1,11 @@
-//! Negative controls: every item here MUST fail to prove. Not part of the
-//! crate by default; enable with `#[cfg(creusot)] pub mod mutants;` in
-//! `lib.rs` and run `cargo creusot 'mutants::*'` to confirm the provers are
-//! not vacuously succeeding. Observed (M1): all three fail.
+//! Negative controls: every item here MUST fail to prove. Compiled only
+//! under `#[cfg(all(creusot, shguard_mutants))]` (see `lib.rs` and
+//! `spikes/README.md` for the command), so they never break the default run
+//! but cannot rot unnoticed when switched on.
 //!
-//! A fourth control, forging a `Witness` without `certify`, has to live
-//! inside `witness.rs` (the field is private):
-//! `Witness { _sealed: (), words: snapshot!(*ws) }` -> `vc_mutant_forge ✘`.
+//! There are three controls: the two below, plus `witness::mutant_forge`,
+//! which must live inside `witness.rs` because `Witness::_sealed` is
+//! private. Observed (M1): all three fail.
 
 use crate::decision::{Decision, join_l};
 use creusot_std::prelude::*;
@@ -17,10 +17,10 @@ pub fn mutant_false_lemma(a: Decision, b: Decision) {}
 
 /// Non-decreasing variant in a function WITHOUT `#[check(terminates)]`
 /// -> `vc_mutant_spin ✘ (1/2)`: loop variants are proved regardless.
-#[allow(clippy::self_assignment, clippy::assign_op_pattern)]
 pub fn mutant_spin(mut x: u32) {
     #[variant(x@)]
     while x > 0 {
-        x = x;
+        let unchanged = x;
+        x = unchanged;
     }
 }

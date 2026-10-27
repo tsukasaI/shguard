@@ -33,6 +33,7 @@ pub fn words_lit(ws: Seq<Word>) -> bool {
 
 #[check(terminates)]
 #[ensures(result == words_lit(ws@))]
+#[must_use]
 pub fn all_lit(ws: &[Word]) -> bool {
     let mut i: usize = 0;
     #[variant(ws@.len() - i@)]
@@ -58,6 +59,7 @@ pub fn all_lit(ws: &[Word]) -> bool {
 
 #[check(terminates)]
 #[ensures(result == (a@ == b@))]
+#[must_use]
 pub fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;

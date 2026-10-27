@@ -12,14 +12,14 @@ and `proof.json`, and `cargo creusot 'mod::*'` proves one module.
 
 | Module | Deliverable | Result | Cold prove (`--no-cache`, wall) |
 |---|---|---|---|
-| `decision.rs` | (a) lattice + 10 lemmas | proved | 1.9 s |
+| `decision.rs` | (a) lattice + 12 lemmas | proved | 1.9 s |
 | `words.rs` | (b) nested index loops, `bytes_eq` | proved | 1.0 s |
 | `tree.rs` | (c) recursion: `Vec<Self>` **rejected**; Box cons-spine proved | partial | 1.1 s |
 | `arena.rs` | (c') arena, index loops, no recursion | proved | 1.0 s |
 | `witness.rs` + `consumer.rs` | (d) sealed `Witness` + `Invariant` + `Snapshot` | proved | 0.9 + 1.0 s |
-| `mutants.rs` | negative controls (not compiled by default) | all fail as intended | n/a |
+| `mutants.rs` + `witness::mutant_forge` | 3 negative controls (cfg `shguard_mutants`, off by default) | all fail as intended | n/a |
 
-The whole crate takes 3.9 s wall cold (27 files, 20 s CPU). The cached replay
+The whole crate takes 6.0 s wall cold (33 files, 28 s CPU). The cached replay
 is about the same.
 
 ## Confirmed 0.14 spellings
@@ -44,7 +44,7 @@ is about the same.
   - `#[variant(e)]` goes on loops, recursive program fns and recursive logic
     fns.
   - Loop variants are proved even without `terminates`: mutant
-    `vc_mutant_spin ✘`.
+    `vc_mutant_spin ✘ (1/2)`.
   - Allocation (`vec![x; n]` → `std::vec::from_elem`, `push`) is **not**
     terminates. The error is "called program function `std::vec::from_elem`
     in program (terminates) context".
@@ -79,6 +79,16 @@ is about the same.
 - The lemmas are stated on the logic mirror `join_l`: comm, assoc, idem,
   Allow identity, Block absorbs, `le(a, join(a,b))`, and le
   refl/trans/antisym, plus `rank` injectivity.
+- Also proved: least upper bound
+  (`le(a,c) ∧ le(b,c) ⇒ le(join(a,b), c)`) and monotonicity
+  (`le(a,a2) ⇒ le(join(a,b), join(a2,b))`).
+- `Decision` derives `Clone, Copy, Debug, PartialEq, Eq, DeepModel`.
+  - Creusot's `PartialEq` derive requires `DeepModel`; without it you get
+    E0277 "`Decision: DeepModel` is not satisfied".
+  - `PartialOrd`/`Ord` are left out: creusot-std's `Ord` spec requires
+    `DeepModelTy: OrdLogic`, and the derived deep model has no `OrdLogic`.
+    Adding one means a hand-written `OrdLogic` impl with its laws; the
+    lattice order lives in `rank`/`le` instead.
 
 **(b) Proved on the first try.**
 - `all_lit` uses nested index `while` loops with the per-level invariant
@@ -96,8 +106,8 @@ is about the same.
   function over them is mutually recursive, and that is rejected:
   `error: Mutually recursive functions: when calling tree::ok_forest...`.
 - What proved is a single self-recursive type,
-  `T { Leaf(u8), Node(Box<T>, Box<T>), Nil }`, where children form a cons
-  spine:
+  `ConsTree { Leaf(u8), Node(Box<ConsTree>, Box<ConsTree>), Nil }`, where
+  children form a cons spine:
   - `ok`, `size`, `len` and `child` are structurally recursive with no
     variant.
   - `check` is self-recursive with `#[check(terminates)] #[variant(size(*t))]`
@@ -109,8 +119,8 @@ is about the same.
     `is_spine` well-formedness predicate.
 
 **(c') Proved on the first try.**
-- The tree is `Tree { nodes: Vec<Node2> }`, where `Node2::Node { first, len }`
-  points to strictly later indices.
+- The tree is `Tree { nodes: Vec<ArenaNode> }`, where
+  `ArenaNode::Node { first, len }` points to strictly later indices.
 - `wf(s)` is a quantified bounds/ordering predicate.
 - `ok_at(s, k)` is a logic fn that recurses inside a `forall`, with
   `#[variant(s.len() - k)]`.
@@ -125,15 +135,44 @@ is about the same.
 - In `consumer.rs`, a separate module with no precondition linking `v` to
   inputs:
   - `is_allow` proves `Allow(w) ⇒ words_lit(*w.words)`.
-  - `part_is_lit` asserts that a given part is `Lit`.
+  - `part_is_lit` ensures `Allow(w) ⇒ result ∧ is_lit(w.words[i].parts[j])`
+    for any in-range `i`, `j`.
   - Both proofs rely only on the implicit `inv(*v)`.
 - Forging `Witness { .. snapshot!(ws@) }` without the check fails:
   `vc_mutant_forge ✘`.
 - The field is `pub` because pearlite obeys Rust privacy. With it private,
   `consumer.rs` specs fail with `E0616: field words of struct
   witness::Witness is private`. A private field plus an `open` logic
-  accessor was not tried. Construction stays sealed by `_sealed`. `#[non_exhaustive]` would only seal across crates, which is
-  enough for a separate kernel crate.
+  accessor was not tried. Construction stays sealed by `_sealed`.
+  `#[non_exhaustive]` would only seal across crates, which is enough for a
+  separate kernel crate.
+
+## Negative controls
+
+`src/mutants.rs` (a false lattice law, a loop whose variant never decreases)
+and `witness::mutant_forge` (a `Witness` built without `all_lit`) sit behind
+`#[cfg(all(creusot, shguard_mutants))]`. They are declared in `lib.rs` so
+`cargo creusot` with `--cfg shguard_mutants` picks them up; no other build
+compiles them. `shguard_mutants` is in
+`Cargo.toml`'s `unexpected_cfgs` check-cfg list. There is no cargo feature.
+Run them with:
+
+```
+RUSTFLAGS="--cfg shguard_mutants" cargo creusot --span-mode relative 'mutants::*' 'witness::mutant_forge'
+```
+
+The run **must fail** with exactly `vc_mutant_false_lemma ✘`,
+`vc_mutant_forge ✘` and `vc_mutant_spin ✘ (1/2)` ("3 unproved files").
+Observed in M1: exactly these three fail.
+
+Changing `RUSTFLAGS` rebuilds creusot-std. The run leaves `verif/` entries
+for the mutants. A plain `cargo creusot` afterwards does **not** retranslate,
+because cargo's no-flags build is still fresh, so the mutants keep failing.
+Force a retranslation, then clean:
+
+```
+touch src/lib.rs && cargo creusot --only coma && echo y | cargo creusot clean
+```
 
 ## Files to commit and replay
 

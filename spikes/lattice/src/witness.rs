@@ -52,9 +52,20 @@ pub fn certify(ws: &[Word]) -> Option<Witness> {
     Verdict::Allow(w) => *w.words == ws@ && words_lit(ws@),
     Verdict::Ask => !words_lit(ws@),
 })]
+#[must_use]
 pub fn decide(ws: &[Word]) -> Verdict {
     match certify(ws) {
         Some(w) => Verdict::Allow(w),
         None => Verdict::Ask,
+    }
+}
+
+/// Negative control (see `mutants.rs`): building a `Witness` without the
+/// `all_lit` check must fail its type invariant -> `vc_mutant_forge ✘`.
+#[cfg(all(creusot, shguard_mutants))]
+pub fn mutant_forge(ws: &[Word]) -> Witness {
+    Witness {
+        _sealed: (),
+        words: snapshot!(ws@),
     }
 }

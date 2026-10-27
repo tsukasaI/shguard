@@ -1,4 +1,4 @@
-(* #"src/arena.rs" 43 0 43 43 *)
+(* #"src/arena.rs" 43 0 43 47 *)
 
 let%span sarena = "src/arena.rs" 42 10 42 21
 let%span sarena'0 = "src/arena.rs" 40 11 40 16
@@ -14,9 +14,9 @@ use creusot.int.UInt64
 use seq.Seq
 use int.Int
 
-type t_Node2 = Leaf UInt8.t | Node UInt64.t UInt64.t
+type t_ArenaNode = Leaf UInt8.t | Node UInt64.t UInt64.t
 
-predicate wf [#"src/arena.rs" 29 0 29 32] (s: Seq.seq t_Node2) =
+predicate wf [#"src/arena.rs" 29 0 29 36] (s: Seq.seq t_ArenaNode) =
   [%#sarena'2] forall k: int. 0 <= k /\ k < Seq.length s
     -> match Seq.get s k with
       | Leaf _ -> true
@@ -42,11 +42,11 @@ meta "compute_max_steps" 1000000
 
 meta "select_lsinst" "all"
 
-constant s : Seq.seq t_Node2
+constant s : Seq.seq t_ArenaNode
 
 constant k : int
 
-predicate ok_at [#"src/arena.rs" 43 0 43 43] (s: Seq.seq t_Node2) (k: int)
+predicate ok_at [#"src/arena.rs" 43 0 43 47] (s: Seq.seq t_ArenaNode) (k: int)
 
 goal vc_ok_at: ([%#sarena'0] wf s)
   -> ([%#sarena'1] 0 <= k /\ k < Seq.length s)

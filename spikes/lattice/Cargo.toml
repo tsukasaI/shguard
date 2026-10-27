@@ -7,6 +7,6 @@ edition = "2024"
 creusot-std = "0.14.0"
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(creusot)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(creusot)', 'cfg(shguard_mutants)'] }
 
 [workspace]

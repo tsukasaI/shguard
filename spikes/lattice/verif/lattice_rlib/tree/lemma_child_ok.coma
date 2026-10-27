@@ -1,4 +1,4 @@
-(* #"src/tree.rs" 85 0 85 35 *)
+(* #"src/tree.rs" 85 0 85 42 *)
 
 let%span sord = "../../../../../../../../../nix/store/yyhknmxa1m1gsfgwc6xsipqcd1hf5ccp-creusot-wrapped/share/creusot-std/src/logic/ord.rs" 34 8 34 21
 let%span stree = "src/tree.rs" 82 11 82 16
@@ -14,11 +14,11 @@ let%span stree'7 = "src/tree.rs" 30 16 30 23
 use creusot.int.UInt8
 use int.Int
 
-type t_T = Leaf UInt8.t | Node t_T t_T | Nil
+type t_ConsTree = Leaf UInt8.t | Node t_ConsTree t_ConsTree | Nil
 
 predicate leaf_ok [#"src/tree.rs" 29 0 29 29] (v: UInt8.t) = [%#stree'7] UInt8.t'int v < 10
 
-predicate ok [#"src/tree.rs" 35 0 35 23] (t: t_T) =
+predicate ok [#"src/tree.rs" 35 0 35 30] (t: t_ConsTree) =
   [%#stree'2] match t with
     | Leaf v -> leaf_ok v
     | Node h tl -> ok h /\ ok tl
@@ -29,14 +29,14 @@ predicate ge_log_Int [@inline:trivial] (self: int) (other: int) = [%#sord] other
 
 meta "rewrite_def" predicate ge_log_Int
 
-function len [#"src/tree.rs" 57 0 57 23] (t: t_T) : int = [%#stree'4] match t with
+function len [#"src/tree.rs" 57 0 57 30] (t: t_ConsTree) : int = [%#stree'4] match t with
     | Node _ tl -> len tl + 1
     | Leaf _ | Nil -> 0
     end
 
-axiom len_spec: forall t: t_T [len t]. [%#stree'3] ge_log_Int (len t) 0
+axiom len_spec: forall t: t_ConsTree [len t]. [%#stree'3] ge_log_Int (len t) 0
 
-function child [#"src/tree.rs" 67 0 67 31] (t: t_T) (i: int) : t_T = [%#stree'6] match t with
+function child [#"src/tree.rs" 67 0 67 45] (t: t_ConsTree) (i: int) : t_ConsTree = [%#stree'6] match t with
     | Node h tl -> if i = 0 then h else child tl (i - 1)
     | Leaf _ | Nil -> Nil
     end
@@ -45,11 +45,11 @@ meta "compute_max_steps" 1000000
 
 meta "select_lsinst" "all"
 
-constant t : t_T
+constant t : t_ConsTree
 
 constant i : int
 
-function lemma_child_ok [#"src/tree.rs" 85 0 85 35] (t: t_T) (i: int) : ()
+function lemma_child_ok [#"src/tree.rs" 85 0 85 42] (t: t_ConsTree) (i: int) : ()
 
 goal vc_lemma_child_ok: ([%#stree] ok t)
   -> ([%#stree'0] 0 <= i /\ i < len t)

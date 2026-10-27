@@ -1,4 +1,4 @@
-(* #"src/words.rs" 36 0 36 35 *)
+(* #"src/words.rs" 37 0 37 35 *)
 
 let%span swell_founded = "../../../../../../../../../nix/store/yyhknmxa1m1gsfgwc6xsipqcd1hf5ccp-creusot-wrapped/share/creusot-std/src/logic/well_founded.rs" 43 8 43 33
 let%span sord = "../../../../../../../../../nix/store/yyhknmxa1m1gsfgwc6xsipqcd1hf5ccp-creusot-wrapped/share/creusot-std/src/logic/ord.rs" 34 8 34 21
@@ -11,25 +11,25 @@ let%span suint_macros = "../../../../../../../../../rustc/11177f2235f0c842b00f82
 let%span sslice = "../../../../../../../../../nix/store/yyhknmxa1m1gsfgwc6xsipqcd1hf5ccp-creusot-wrapped/share/creusot-std/src/std/slice.rs" 335 18 335 22
 let%span sslice'0 = "../../../../../../../../../nix/store/yyhknmxa1m1gsfgwc6xsipqcd1hf5ccp-creusot-wrapped/share/creusot-std/src/std/slice.rs" 155 20 155 37
 let%span sslice'1 = "../../../../../../../../../nix/store/yyhknmxa1m1gsfgwc6xsipqcd1hf5ccp-creusot-wrapped/share/creusot-std/src/std/slice.rs" 160 20 160 37
-let%span swords = "src/words.rs" 37 23 37 24
-let%span swords'0 = "src/words.rs" 38 14 38 28
-let%span swords'1 = "src/words.rs" 41 14 41 22
-let%span swords'2 = "src/words.rs" 40 16 40 16
-let%span swords'3 = "src/words.rs" 39 16 39 31
-let%span swords'4 = "src/words.rs" 42 21 42 26
-let%span swords'5 = "src/words.rs" 42 20 42 32
-let%span swords'6 = "src/words.rs" 43 27 43 28
-let%span swords'7 = "src/words.rs" 44 18 44 35
-let%span swords'8 = "src/words.rs" 47 18 47 29
-let%span swords'9 = "src/words.rs" 46 20 46 20
-let%span swords'10 = "src/words.rs" 45 20 45 38
-let%span swords'11 = "src/words.rs" 48 24 48 27
-let%span swords'12 = "src/words.rs" 52 17 52 18
-let%span swords'13 = "src/words.rs" 52 12 52 18
-let%span swords'14 = "src/words.rs" 54 13 54 14
-let%span swords'15 = "src/words.rs" 54 8 54 14
-let%span swords'16 = "src/words.rs" 50 42 50 47
-let%span swords'17 = "src/words.rs" 56 4 56 8
+let%span swords = "src/words.rs" 38 23 38 24
+let%span swords'0 = "src/words.rs" 39 14 39 28
+let%span swords'1 = "src/words.rs" 42 14 42 22
+let%span swords'2 = "src/words.rs" 41 16 41 16
+let%span swords'3 = "src/words.rs" 40 16 40 31
+let%span swords'4 = "src/words.rs" 43 21 43 26
+let%span swords'5 = "src/words.rs" 43 20 43 32
+let%span swords'6 = "src/words.rs" 44 27 44 28
+let%span swords'7 = "src/words.rs" 45 18 45 35
+let%span swords'8 = "src/words.rs" 48 18 48 29
+let%span swords'9 = "src/words.rs" 47 20 47 20
+let%span swords'10 = "src/words.rs" 46 20 46 38
+let%span swords'11 = "src/words.rs" 49 24 49 27
+let%span swords'12 = "src/words.rs" 53 17 53 18
+let%span swords'13 = "src/words.rs" 53 12 53 18
+let%span swords'14 = "src/words.rs" 55 13 55 14
+let%span swords'15 = "src/words.rs" 55 8 55 14
+let%span swords'16 = "src/words.rs" 51 42 51 47
+let%span swords'17 = "src/words.rs" 57 4 57 8
 let%span swords'18 = "src/words.rs" 35 10 35 34
 let%span swords'19 = "src/words.rs" 25 16 25 16
 let%span swords'20 = "src/words.rs" 16 4 19 5
@@ -114,7 +114,7 @@ meta "compute_max_steps" 1000000
 
 meta "select_lsinst" "all"
 
-let all_lit [#"src/words.rs" 36 0 36 35] (ws: Slice64.slice t_Word) (return (x: bool)) = (! bb0
+let all_lit [#"src/words.rs" 37 0 37 35] (ws: Slice64.slice t_Word) (return (x: bool)) = (! bb0
   [ bb0 = s0 [ s0 = [ &i <- [%#swords] (0: UInt64.t) ] s1 | s1 = bb1 ]
   | bb1 = bb1invariant
     [ bb1 = {[@expl:loop variant] well_founded_relation_Int variant_old_bb1 ([%#swords'0] Seq.length (Slice64.view ws)

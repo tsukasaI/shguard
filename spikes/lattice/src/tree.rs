@@ -15,11 +15,11 @@
 
 use creusot_std::prelude::*;
 
-pub enum T {
+pub enum ConsTree {
     Leaf(u8),
     /// A node: `Node(first_child, rest)`, where `rest` is itself a node
     /// holding the remaining siblings (or `Nil`).
-    Node(Box<T>, Box<T>),
+    Node(Box<ConsTree>, Box<ConsTree>),
     /// The empty node / end of a sibling spine.
     Nil,
 }
@@ -32,48 +32,48 @@ pub fn leaf_ok(v: u8) -> bool {
 
 /// Every leaf satisfies `leaf_ok`.
 #[logic(open)]
-pub fn ok(t: T) -> bool {
+pub fn ok(t: ConsTree) -> bool {
     match t {
-        T::Leaf(v) => leaf_ok(v),
-        T::Node(h, tl) => ok(*h) && ok(*tl),
-        T::Nil => true,
+        ConsTree::Leaf(v) => leaf_ok(v),
+        ConsTree::Node(h, tl) => ok(*h) && ok(*tl),
+        ConsTree::Nil => true,
     }
 }
 
 /// Termination measure for the executable walker.
 #[logic(open)]
 #[ensures(result >= 1)]
-pub fn size(t: T) -> Int {
+pub fn size(t: ConsTree) -> Int {
     match t {
-        T::Leaf(_) => 1,
-        T::Node(h, tl) => size(*h) + size(*tl) + 1,
-        T::Nil => 1,
+        ConsTree::Leaf(_) => 1,
+        ConsTree::Node(h, tl) => size(*h) + size(*tl) + 1,
+        ConsTree::Nil => 1,
     }
 }
 
 /// Number of children of a node (length of its sibling spine).
 #[logic(open)]
 #[ensures(result >= 0)]
-pub fn len(t: T) -> Int {
+pub fn len(t: ConsTree) -> Int {
     match t {
-        T::Node(_, tl) => len(*tl) + 1,
-        T::Leaf(_) | T::Nil => 0,
+        ConsTree::Node(_, tl) => len(*tl) + 1,
+        ConsTree::Leaf(_) | ConsTree::Nil => 0,
     }
 }
 
 /// The `i`-th child of a node.
 #[logic(open)]
 #[requires(0 <= i && i < len(t))]
-pub fn child(t: T, i: Int) -> T {
+pub fn child(t: ConsTree, i: Int) -> ConsTree {
     match t {
-        T::Node(h, tl) => {
+        ConsTree::Node(h, tl) => {
             if i == 0 {
                 *h
             } else {
                 child(*tl, i - 1)
             }
         }
-        T::Leaf(_) | T::Nil => T::Nil,
+        ConsTree::Leaf(_) | ConsTree::Nil => ConsTree::Nil,
     }
 }
 
@@ -82,14 +82,14 @@ pub fn child(t: T, i: Int) -> T {
 #[requires(ok(t))]
 #[requires(0 <= i && i < len(t))]
 #[ensures(ok(child(t, i)))]
-pub fn lemma_child_ok(t: T, i: Int) {
+pub fn lemma_child_ok(t: ConsTree, i: Int) {
     match t {
-        T::Node(_, tl) => {
+        ConsTree::Node(_, tl) => {
             if i != 0 {
                 lemma_child_ok(*tl, i - 1)
             }
         }
-        T::Leaf(_) | T::Nil => (),
+        ConsTree::Leaf(_) | ConsTree::Nil => (),
     }
 }
 
@@ -98,11 +98,11 @@ pub fn lemma_child_ok(t: T, i: Int) {
 /// below needs this predicate to exclude it (first attempt, requiring only
 /// "not a Leaf" at the top, failed: `vc_lemma_children_ok ✘ (7/8)`).
 #[logic(open)]
-pub fn is_spine(t: T) -> bool {
+pub fn is_spine(t: ConsTree) -> bool {
     match t {
-        T::Node(_, tl) => is_spine(*tl),
-        T::Nil => true,
-        T::Leaf(_) => false,
+        ConsTree::Node(_, tl) => is_spine(*tl),
+        ConsTree::Nil => true,
+        ConsTree::Leaf(_) => false,
     }
 }
 
@@ -111,23 +111,24 @@ pub fn is_spine(t: T) -> bool {
 #[requires(forall<i> 0 <= i && i < len(t) ==> ok(child(t, i)))]
 #[requires(is_spine(t))]
 #[ensures(ok(t))]
-pub fn lemma_children_ok(t: T) {
+pub fn lemma_children_ok(t: ConsTree) {
     match t {
-        T::Node(_, tl) => {
+        ConsTree::Node(_, tl) => {
             pearlite! { proof_assert!(forall<i> 0 <= i && i < len(*tl) ==> child(*tl, i) == child(t, i + 1)) };
             lemma_children_ok(*tl)
         }
-        T::Leaf(_) | T::Nil => (),
+        ConsTree::Leaf(_) | ConsTree::Nil => (),
     }
 }
 
 #[check(terminates)]
 #[variant(size(*t))]
 #[ensures(result == ok(*t))]
-pub fn check(t: &T) -> bool {
+#[must_use]
+pub fn check(t: &ConsTree) -> bool {
     match t {
-        T::Leaf(v) => *v < 10,
-        T::Node(h, tl) => check(h) && check(tl),
-        T::Nil => true,
+        ConsTree::Leaf(v) => *v < 10,
+        ConsTree::Node(h, tl) => check(h) && check(tl),
+        ConsTree::Nil => true,
     }
 }

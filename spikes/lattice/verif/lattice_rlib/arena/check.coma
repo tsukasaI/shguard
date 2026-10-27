@@ -1,31 +1,31 @@
-(* #"src/arena.rs" 74 0 74 33 *)
+(* #"src/arena.rs" 77 0 77 33 *)
 
-let%span sarena = "src/arena.rs" 76 12 76 23
-let%span sarena'0 = "src/arena.rs" 77 35 77 40
-let%span sarena'1 = "src/arena.rs" 79 14 79 16
-let%span sarena'2 = "src/arena.rs" 83 14 83 15
-let%span sarena'3 = "src/arena.rs" 82 16 82 16
-let%span sarena'4 = "src/arena.rs" 81 16 81 33
-let%span sarena'5 = "src/arena.rs" 80 16 80 24
-let%span sarena'6 = "src/arena.rs" 84 13 84 14
-let%span sarena'7 = "src/arena.rs" 84 8 84 14
-let%span sarena'8 = "src/arena.rs" 85 28 85 31
-let%span sarena'9 = "src/arena.rs" 88 26 88 39
-let%span sarena'10 = "src/arena.rs" 90 30 90 34
-let%span sarena'11 = "src/arena.rs" 91 26 91 35
-let%span sarena'12 = "src/arena.rs" 93 28 93 89
-let%span sarena'13 = "src/arena.rs" 92 28 92 54
-let%span sarena'14 = "src/arena.rs" 95 37 95 40
-let%span sarena'15 = "src/arena.rs" 95 26 95 40
-let%span sarena'16 = "src/arena.rs" 96 25 96 26
-let%span sarena'17 = "src/arena.rs" 96 20 96 26
-let%span sarena'18 = "src/arena.rs" 86 35 86 37
-let%span sarena'19 = "src/arena.rs" 101 12 101 15
-let%span sarena'20 = "src/arena.rs" 103 9 103 10
-let%span sarena'21 = "src/arena.rs" 103 8 103 11
-let%span sarena'22 = "src/arena.rs" 71 11 71 26
-let%span sarena'23 = "src/arena.rs" 72 11 72 32
-let%span sarena'24 = "src/arena.rs" 73 10 73 41
+let%span sarena = "src/arena.rs" 79 12 79 23
+let%span sarena'0 = "src/arena.rs" 80 35 80 40
+let%span sarena'1 = "src/arena.rs" 82 14 82 16
+let%span sarena'2 = "src/arena.rs" 86 14 86 15
+let%span sarena'3 = "src/arena.rs" 85 16 85 16
+let%span sarena'4 = "src/arena.rs" 84 16 84 33
+let%span sarena'5 = "src/arena.rs" 83 16 83 24
+let%span sarena'6 = "src/arena.rs" 87 13 87 14
+let%span sarena'7 = "src/arena.rs" 87 8 87 14
+let%span sarena'8 = "src/arena.rs" 88 28 88 31
+let%span sarena'9 = "src/arena.rs" 91 26 91 39
+let%span sarena'10 = "src/arena.rs" 93 30 93 34
+let%span sarena'11 = "src/arena.rs" 94 26 94 35
+let%span sarena'12 = "src/arena.rs" 96 28 96 89
+let%span sarena'13 = "src/arena.rs" 95 28 95 54
+let%span sarena'14 = "src/arena.rs" 98 37 98 40
+let%span sarena'15 = "src/arena.rs" 98 26 98 40
+let%span sarena'16 = "src/arena.rs" 99 25 99 26
+let%span sarena'17 = "src/arena.rs" 99 20 99 26
+let%span sarena'18 = "src/arena.rs" 89 39 89 41
+let%span sarena'19 = "src/arena.rs" 104 12 104 15
+let%span sarena'20 = "src/arena.rs" 106 9 106 10
+let%span sarena'21 = "src/arena.rs" 106 8 106 11
+let%span sarena'22 = "src/arena.rs" 73 11 73 26
+let%span sarena'23 = "src/arena.rs" 74 11 74 32
+let%span sarena'24 = "src/arena.rs" 75 10 75 41
 let%span sarena'25 = "src/arena.rs" 42 10 42 21
 let%span sarena'26 = "src/arena.rs" 40 11 40 16
 let%span sarena'27 = "src/arena.rs" 41 11 41 32
@@ -60,23 +60,23 @@ use creusot.prelude.MutBorrow
 use creusot.prelude.Any
 use int.Int
 
-type t_Vec_Node2_Global
+type t_Vec_ArenaNode_Global
 
-type t_Tree = { nodes: t_Vec_Node2_Global }
+type t_Tree = { nodes: t_Vec_ArenaNode_Global }
 
-type t_Node2 = Leaf UInt8.t | Node UInt64.t UInt64.t
+type t_ArenaNode = Leaf UInt8.t | Node UInt64.t UInt64.t
 
 constant const_MAX: UInt64.t = [%#suint_macros] (18446744073709551615: UInt64.t)
 
-function view_Vec_Node2_Global (self: t_Vec_Node2_Global) : Seq.seq t_Node2
+function view_Vec_ArenaNode_Global (self: t_Vec_ArenaNode_Global) : Seq.seq t_ArenaNode
 
-axiom view_Vec_Node2_Global_spec:
-  forall self: t_Vec_Node2_Global [view_Vec_Node2_Global self]. [%#svec'3] Seq.length (view_Vec_Node2_Global self)
+axiom view_Vec_ArenaNode_Global_spec:
+  forall self: t_Vec_ArenaNode_Global [view_Vec_ArenaNode_Global self]. [%#svec'3] Seq.length (view_Vec_ArenaNode_Global self)
     <= UInt64.t'int const_MAX
 
-let len_Node2 (self: t_Vec_Node2_Global) (return (x: UInt64.t)) = any
+let len_ArenaNode (self: t_Vec_ArenaNode_Global) (return (x: UInt64.t)) = any
   [ return (result: UInt64.t) -> {[@stop_split] [@expl:len ensures] [%#svec'0] UInt64.t'int result
-    = Seq.length (view_Vec_Node2_Global self)}
+    = Seq.length (view_Vec_ArenaNode_Global self)}
     (! return {result}) ]
 
 type t_Vec_bool_Global
@@ -113,7 +113,7 @@ predicate well_founded_relation_Int [@inline:trivial] (self: int) (other: int) =
 
 meta "rewrite_def" predicate well_founded_relation_Int
 
-predicate wf [#"src/arena.rs" 29 0 29 32] (s: Seq.seq t_Node2) =
+predicate wf [#"src/arena.rs" 29 0 29 36] (s: Seq.seq t_ArenaNode) =
   [%#sarena'29] forall k: int. 0 <= k /\ k < Seq.length s
     -> match Seq.get s k with
       | Leaf _ -> true
@@ -122,9 +122,9 @@ predicate wf [#"src/arena.rs" 29 0 29 32] (s: Seq.seq t_Node2) =
 
 predicate leaf_ok [#"src/arena.rs" 22 0 22 29] (v: UInt8.t) = [%#sarena'30] UInt8.t'int v < 10
 
-predicate ok_at [#"src/arena.rs" 43 0 43 43] (s: Seq.seq t_Node2) (k: int)
+predicate ok_at [#"src/arena.rs" 43 0 43 47] (s: Seq.seq t_ArenaNode) (k: int)
 
-axiom ok_at_def: forall s: Seq.seq t_Node2, k: int [ok_at s k]. ([%#sarena'26] wf s)
+axiom ok_at_def: forall s: Seq.seq t_ArenaNode, k: int [ok_at s k]. ([%#sarena'26] wf s)
     -> ([%#sarena'27] 0 <= k /\ k < Seq.length s)
     -> ok_at s k
     = ([%#sarena'28] match Seq.get s k with
@@ -133,24 +133,24 @@ axiom ok_at_def: forall s: Seq.seq t_Node2, k: int [ok_at s k]. ([%#sarena'26] w
         -> ok_at s c
       end)
 
-predicate in_bounds_usize [@inline:trivial] (self: UInt64.t) (seq: Seq.seq t_Node2) =
+predicate in_bounds_usize [@inline:trivial] (self: UInt64.t) (seq: Seq.seq t_ArenaNode) =
   [%#sslice] UInt64.t'int self < Seq.length seq
 
 meta "rewrite_def" predicate in_bounds_usize
 
-predicate has_value_usize [@inline:trivial] (self: UInt64.t) (seq: Seq.seq t_Node2) (out: t_Node2) =
+predicate has_value_usize [@inline:trivial] (self: UInt64.t) (seq: Seq.seq t_ArenaNode) (out: t_ArenaNode) =
   [%#sslice'0] Seq.get seq (UInt64.t'int self) = out
 
 meta "rewrite_def" predicate has_value_usize
 
-let index_Vec_Node2_Global (self: t_Vec_Node2_Global) (index: UInt64.t) (return (x: t_Node2)) =
-{[@stop_split] [@expl:index requires] [%#svec'4] in_bounds_usize index (view_Vec_Node2_Global self)}
+let index_Vec_ArenaNode_Global (self: t_Vec_ArenaNode_Global) (index: UInt64.t) (return (x: t_ArenaNode)) =
+{[@stop_split] [@expl:index requires] [%#svec'4] in_bounds_usize index (view_Vec_ArenaNode_Global self)}
   any
-  [ return (result: t_Node2) ->
-  {[@stop_split] [@expl:index ensures] [%#svec'5] has_value_usize index (view_Vec_Node2_Global self) result}
+  [ return (result: t_ArenaNode) ->
+  {[@stop_split] [@expl:index ensures] [%#svec'5] has_value_usize index (view_Vec_ArenaNode_Global self) result}
     (! return {result}) ]
 
-let elim_Node (_x: t_Node2) (return (first: UInt64.t) (len: UInt64.t)) = any
+let elim_Node (_x: t_ArenaNode) (return (first: UInt64.t) (len: UInt64.t)) = any
   [ _k (first: UInt64.t) (len: UInt64.t) -> {Node first len = _x} (! return {first} {len})
   | _chk -> (! {[@expl:elim Node] match _x with
       | Node _ _ -> true
@@ -175,7 +175,7 @@ let index_Vec_bool_Global'0 (self: t_Vec_bool_Global) (index: UInt64.t) (return 
   {[@stop_split] [@expl:index ensures] [%#svec'5] has_value_usize'0 index (view_Vec_bool_Global self) result}
     (! return {result}) ]
 
-let elim_Leaf (_x: t_Node2) (return (f0: UInt8.t)) = any
+let elim_Leaf (_x: t_ArenaNode) (return (f0: UInt8.t)) = any
   [ _k (f0: UInt8.t) -> {Leaf f0 = _x} (! return {f0})
   | _chk -> (! {[@expl:elim Leaf] match _x with
       | Leaf _ -> true
@@ -207,13 +207,13 @@ meta "compute_max_steps" 1000000
 
 meta "select_lsinst" "all"
 
-let check' [#"src/arena.rs" 74 0 74 33] (tree: t_Tree) (return (x: bool)) =
-{[@stop_split] [@expl:check requires] ([@stop_split] [@expl:check requires #0] [%#sarena'22] wf (view_Vec_Node2_Global tree.nodes))
-  /\ ([@stop_split] [@expl:check requires #1] [%#sarena'23] gt_log_Int (Seq.length (view_Vec_Node2_Global tree.nodes)) 0)}
+let check' [#"src/arena.rs" 77 0 77 33] (tree: t_Tree) (return (x: bool)) =
+{[@stop_split] [@expl:check requires] ([@stop_split] [@expl:check requires #0] [%#sarena'22] wf (view_Vec_ArenaNode_Global tree.nodes))
+  /\ ([@stop_split] [@expl:check requires #1] [%#sarena'23] gt_log_Int (Seq.length (view_Vec_ArenaNode_Global tree.nodes)) 0)}
   (! bb0
   [ bb0 = s0
     [ s0 = [ &nodes'0 <- tree.nodes ] s1
-    | s1 = len_Node2 [%#sarena] {nodes'0} (fun (_x: UInt64.t) -> [ &n <- _x ] s2)
+    | s1 = len_ArenaNode [%#sarena] {nodes'0} (fun (_x: UInt64.t) -> [ &n <- _x ] s2)
     | s2 = from_elem_bool [%#svec] {[%#sarena'0] false} {n} (fun (_x: t_Vec_bool_Global) -> [ &good <- _x ] s3)
     | s3 = [ &k <- n ] s4
     | s4 = bb3 ]
@@ -222,13 +222,13 @@ let check' [#"src/arena.rs" 74 0 74 33] (tree: t_Tree) (return (x: bool)) =
     | bb3invariant = {[@expl:loop invariant #0] [%#sarena'5] UInt64.t'int k <= UInt64.t'int n}
       {[@expl:loop invariant #1] [%#sarena'4] Seq.length (view_Vec_bool_Global good) = UInt64.t'int n}
       {[@expl:loop invariant #2] [%#sarena'3] forall j: int. UInt64.t'int k <= j /\ j < UInt64.t'int n
-        -> Seq.get (view_Vec_bool_Global good) j = ok_at (view_Vec_Node2_Global nodes'0) j}
+        -> Seq.get (view_Vec_bool_Global good) j = ok_at (view_Vec_ArenaNode_Global nodes'0) j}
       (! [ &variant_old_bb3 <- [%#sarena'1] UInt64.t'int k ] s0)
       [ s0 = [ &_30 <- UInt64.gt k ([%#sarena'2] (0: UInt64.t)) ] s1
       | s1 = any [ br0 -> {_30 = false} (! bb21) | br1 -> {_30} (! bb5) ] ]
       [ bb5 = s0
         [ s0 = UInt64.sub [%#sarena'7] {k} {[%#sarena'6] (1: UInt64.t)} (fun (_x: UInt64.t) -> [ &k <- _x ] s1)
-        | s1 = index_Vec_Node2_Global [%#sarena'8] {nodes'0} {k} (fun (_x: t_Node2) -> [ &_34 <- _x ] s2)
+        | s1 = index_Vec_ArenaNode_Global [%#sarena'8] {nodes'0} {k} (fun (_x: t_ArenaNode) -> [ &_34 <- _x ] s2)
         | s2 = [ &_33 <- _34 ] s3
         | s3 = any
           [ br0 (x0: UInt8.t) -> {_33 = Leaf x0} (! bb10)
@@ -247,7 +247,8 @@ let check' [#"src/arena.rs" 74 0 74 33] (tree: t_Tree) (return (x: bool)) =
         | bb11invariant = {[@expl:loop invariant #0] [%#sarena'13] UInt64.t'int first <= UInt64.t'int c
           /\ UInt64.t'int c <= UInt64.t'int end'}
           {[@expl:loop invariant #1] [%#sarena'12] all
-          = (forall d: int. UInt64.t'int first <= d /\ d < UInt64.t'int c -> ok_at (view_Vec_Node2_Global nodes'0) d)}
+          = (forall d: int. UInt64.t'int first <= d /\ d < UInt64.t'int c
+            -> ok_at (view_Vec_ArenaNode_Global nodes'0) d)}
           (! [ &variant_old_bb11 <- [%#sarena'11] UInt64.t'int end' - UInt64.t'int c ] s0)
           [ s0 = [ &_61 <- UInt64.lt c end' ] s1 | s1 = any [ br0 -> {_61 = false} (! bb18) | br1 -> {_61} (! bb13) ] ]
           [ bb13 = any [ br0 -> {all = false} (! bb15) | br1 -> {all} (! bb14) ]
@@ -279,14 +280,14 @@ let check' [#"src/arena.rs" 74 0 74 33] (tree: t_Tree) (return (x: bool)) =
     | s2 = return {_ret} ] ]
   [ & _ret: bool = Any.any_l ()
   | & tree: t_Tree = tree
-  | & nodes'0: t_Vec_Node2_Global = Any.any_l ()
+  | & nodes'0: t_Vec_ArenaNode_Global = Any.any_l ()
   | & n: UInt64.t = Any.any_l ()
   | & good: t_Vec_bool_Global = Any.any_l ()
   | & k: UInt64.t = Any.any_l ()
   | & _30: bool = Any.any_l ()
   | & g: bool = Any.any_l ()
-  | & _33: t_Node2 = Any.any_l ()
-  | & _34: t_Node2 = Any.any_l ()
+  | & _33: t_ArenaNode = Any.any_l ()
+  | & _34: t_ArenaNode = Any.any_l ()
   | & v: UInt8.t = Any.any_l ()
   | & first: UInt64.t = Any.any_l ()
   | & len: UInt64.t = Any.any_l ()
@@ -302,5 +303,5 @@ let check' [#"src/arena.rs" 74 0 74 33] (tree: t_Tree) (return (x: bool)) =
   | & variant_old_bb3: int = Any.any_l ()
   | & variant_old_bb11: int = Any.any_l () ])
   [ return (result: bool) -> {[@stop_split] [@expl:check ensures] [%#sarena'24] result
-    = ok_at (view_Vec_Node2_Global tree.nodes) 0}
+    = ok_at (view_Vec_ArenaNode_Global tree.nodes) 0}
     (! return {result}) ]

@@ -1,8 +1,8 @@
 //! (a) The verdict lattice: `Allow < Ask < Block`, `join` = max.
 
-use creusot_std::prelude::{Clone, *};
+use creusot_std::prelude::{Clone, PartialEq, *};
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, DeepModel)]
 pub enum Decision {
     Allow,
     Ask,
@@ -82,3 +82,13 @@ pub fn lemma_le_trans(a: Decision, b: Decision, c: Decision) {}
 #[logic]
 #[ensures(le(a, b) && le(b, a) ==> a == b)]
 pub fn lemma_le_antisym(a: Decision, b: Decision) {}
+
+/// `join` is the least upper bound: any common upper bound dominates it.
+#[logic]
+#[ensures(le(a, c) && le(b, c) ==> le(join_l(a, b), c))]
+pub fn lemma_join_lub(a: Decision, b: Decision, c: Decision) {}
+
+/// `join` is monotone (in the left argument; right follows by `lemma_join_comm`).
+#[logic]
+#[ensures(le(a, a2) ==> le(join_l(a, b), join_l(a2, b)))]
+pub fn lemma_join_monotone(a: Decision, a2: Decision, b: Decision) {}

@@ -1,15 +1,16 @@
-(* #"src/consumer.rs" 35 0 35 59 *)
+(* #"src/consumer.rs" 41 0 41 59 *)
 
 let%span svec = "../../../../../../../../../nix/store/yyhknmxa1m1gsfgwc6xsipqcd1hf5ccp-creusot-wrapped/share/creusot-std/src/std/vec.rs" 18 14 18 41
 let%span suint_macros = "../../../../../../../../../rustc/11177f2235f0c842b00f82c558ad9480c0c3a895/library/core/src/num/uint_macros.rs" 51 8 51 27
-let%span sconsumer = "src/consumer.rs" 44 24 44 29
-let%span sconsumer'0 = "src/consumer.rs" 38 26 41 13
-let%span sconsumer'1 = "src/consumer.rs" 42 12 42 16
-let%span sconsumer'2 = "src/consumer.rs" 35 19 35 20
-let%span sconsumer'3 = "src/consumer.rs" 27 11 30 1
-let%span swords = "src/words.rs" 31 16 31 16
-let%span swords'0 = "src/words.rs" 25 16 25 16
-let%span swords'1 = "src/words.rs" 16 4 19 5
+let%span sconsumer = "src/consumer.rs" 47 24 47 29
+let%span sconsumer'0 = "src/consumer.rs" 44 26 44 56
+let%span sconsumer'1 = "src/consumer.rs" 45 12 45 16
+let%span sconsumer'2 = "src/consumer.rs" 41 19 41 20
+let%span sconsumer'3 = "src/consumer.rs" 28 11 31 1
+let%span sconsumer'4 = "src/consumer.rs" 32 10 35 1
+let%span swords = "src/words.rs" 16 4 19 5
+let%span swords'0 = "src/words.rs" 31 16 31 16
+let%span swords'1 = "src/words.rs" 25 16 25 16
 let%span sinvariant = "../../../../../../../../../nix/store/yyhknmxa1m1gsfgwc6xsipqcd1hf5ccp-creusot-wrapped/share/creusot-std/src/invariant.rs" 90 8 90 18
 let%span switness = "src/witness.rs" 24 20 24 42
 
@@ -40,6 +41,12 @@ type t_Vec_u8_Global
 
 type t_Part = Lit t_Vec_u8_Global | Opaque t_Vec_u8_Global
 
+predicate is_lit [#"src/words.rs" 15 0 15 30] (p: t_Part) =
+  [%#swords] match p with
+    | Lit _ -> true
+    | Opaque _ -> false
+    end
+
 constant const_MAX: UInt64.t = [%#suint_macros] (18446744073709551615: UInt64.t)
 
 function view_Vec_Part_Global (self: t_Vec_Part_Global) : Seq.seq t_Part
@@ -48,18 +55,12 @@ axiom view_Vec_Part_Global_spec:
   forall self: t_Vec_Part_Global [view_Vec_Part_Global self]. [%#svec] Seq.length (view_Vec_Part_Global self)
     <= UInt64.t'int const_MAX
 
-predicate is_lit [#"src/words.rs" 15 0 15 30] (p: t_Part) =
-  [%#swords'1] match p with
-    | Lit _ -> true
-    | Opaque _ -> false
-    end
-
 predicate word_lit [#"src/words.rs" 24 0 24 32] (w: t_Word) =
-  [%#swords'0] forall j: int. 0 <= j /\ j < Seq.length (view_Vec_Part_Global w.parts)
+  [%#swords'1] forall j: int. 0 <= j /\ j < Seq.length (view_Vec_Part_Global w.parts)
     -> is_lit (Seq.get (view_Vec_Part_Global w.parts) j)
 
 predicate words_lit [#"src/words.rs" 30 0 30 39] (ws: Seq.seq t_Word) =
-  [%#swords] forall i: int. 0 <= i /\ i < Seq.length ws -> word_lit (Seq.get ws i)
+  [%#swords'0] forall i: int. 0 <= i /\ i < Seq.length ws -> word_lit (Seq.get ws i)
 
 predicate invariant_Witness [#"src/witness.rs" 23 4 23 30] (self: t_Witness) = [%#switness] words_lit self.words
 
@@ -90,7 +91,7 @@ meta "compute_max_steps" 1000000
 
 meta "select_lsinst" "all"
 
-let part_is_lit [#"src/consumer.rs" 35 0 35 59] (v: t_Verdict) (i: UInt64.t) (j: UInt64.t) (return (x: bool)) =
+let part_is_lit [#"src/consumer.rs" 41 0 41 59] (v: t_Verdict) (i: UInt64.t) (j: UInt64.t) (return (x: bool)) =
 {[@stop_split] [@expl:part_is_lit requires] ([@stop_split] [@expl:part_is_lit 'v' type invariant] [%#sconsumer'2] inv_ref_Verdict v)
   /\ ([@stop_split] [@expl:part_is_lit requires] [%#sconsumer'3] match v with
     | Allow w -> UInt64.t'int i < Seq.length w.words
@@ -103,10 +104,7 @@ let part_is_lit [#"src/consumer.rs" 35 0 35 59] (v: t_Verdict) (i: UInt64.t) (j:
   | bb4 = s0
     [ s0 = elim_Allow {v} (fun (r0: t_Witness) -> [ &w <- r0 ] s1)
     | s1 =
-      {[@expl:assertion] [%#sconsumer'0] match Seq.get (view_Vec_Part_Global (Seq.get w.words (UInt64.t'int i)).parts) (UInt64.t'int j) with
-        | Lit _ -> true
-        | Opaque _ -> false
-        end}
+      {[@expl:assertion] [%#sconsumer'0] is_lit (Seq.get (view_Vec_Part_Global (Seq.get w.words (UInt64.t'int i)).parts) (UInt64.t'int j))}
       s2
     | s2 = [ &_ret <- [%#sconsumer'1] true ] s3
     | s3 = return {_ret} ] ]
@@ -114,4 +112,10 @@ let part_is_lit [#"src/consumer.rs" 35 0 35 59] (v: t_Verdict) (i: UInt64.t) (j:
   | & v: t_Verdict = v
   | & i: UInt64.t = i
   | & j: UInt64.t = j
-  | & w: t_Witness = Any.any_l () ]) [ return (result: bool) -> (! return {result}) ]
+  | & w: t_Witness = Any.any_l () ])
+  [ return (result: bool) -> {[@stop_split] [@expl:part_is_lit ensures] [%#sconsumer'4] match v with
+      | Allow w -> result
+      /\ is_lit (Seq.get (view_Vec_Part_Global (Seq.get w.words (UInt64.t'int i)).parts) (UInt64.t'int j))
+      | Ask -> not result
+      end}
+    (! return {result}) ]

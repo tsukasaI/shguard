@@ -4,7 +4,7 @@
 
 use creusot_std::prelude::{vec, *};
 
-pub enum Node2 {
+pub enum ArenaNode {
     Leaf(u8),
     /// Children are `nodes[first .. first + len]`, all strictly after this
     /// node's own index.
@@ -15,7 +15,7 @@ pub enum Node2 {
 }
 
 pub struct Tree {
-    pub nodes: Vec<Node2>,
+    pub nodes: Vec<ArenaNode>,
 }
 
 #[logic(open)]
@@ -26,11 +26,11 @@ pub fn leaf_ok(v: u8) -> bool {
 /// Well-formedness: every child range is in bounds and strictly after its
 /// parent. This is what makes `ok_at` terminate.
 #[logic(open)]
-pub fn wf(s: Seq<Node2>) -> bool {
+pub fn wf(s: Seq<ArenaNode>) -> bool {
     pearlite! {
         forall<k> 0 <= k && k < s.len() ==> match s[k] {
-            Node2::Leaf(_) => true,
-            Node2::Node { first, len } => k < first@ && first@ + len@ <= s.len(),
+            ArenaNode::Leaf(_) => true,
+            ArenaNode::Node { first, len } => k < first@ && first@ + len@ <= s.len(),
         }
     }
 }
@@ -40,26 +40,28 @@ pub fn wf(s: Seq<Node2>) -> bool {
 #[requires(wf(s))]
 #[requires(0 <= k && k < s.len())]
 #[variant(s.len() - k)]
-pub fn ok_at(s: Seq<Node2>, k: Int) -> bool {
+pub fn ok_at(s: Seq<ArenaNode>, k: Int) -> bool {
     pearlite! {
         match s[k] {
-            Node2::Leaf(v) => leaf_ok(v),
-            Node2::Node { first, len } =>
+            ArenaNode::Leaf(v) => leaf_ok(v),
+            ArenaNode::Node { first, len } =>
                 forall<c> first@ <= c && c < first@ + len@ ==> ok_at(s, c),
         }
     }
 }
 
-/// An ok node has only ok children (by unfolding `ok_at` once).
+/// An ok node has only ok children. Definitional: the postcondition is
+/// `ok_at`'s own body unfolded once, so the empty body suffices; it exists
+/// to name the fact for callers, not as an induction.
 #[logic]
 #[requires(wf(s))]
 #[requires(0 <= k && k < s.len())]
 #[requires(ok_at(s, k))]
 #[ensures(match s[k] {
-    Node2::Leaf(_) => true,
-    Node2::Node { first, len } => forall<c> first@ <= c && c < first@ + len@ ==> ok_at(s, c),
+    ArenaNode::Leaf(_) => true,
+    ArenaNode::Node { first, len } => forall<c> first@ <= c && c < first@ + len@ ==> ok_at(s, c),
 })]
-pub fn lemma_child_ok(s: Seq<Node2>, k: Int) {}
+pub fn lemma_child_ok(s: Seq<ArenaNode>, k: Int) {}
 
 /// Bottom-up evaluation: `good[k]` is computed after every `good[c]` with
 /// `c > k`, so each node reads only already-final children.
@@ -71,6 +73,7 @@ pub fn lemma_child_ok(s: Seq<Node2>, k: Int) {}
 #[requires(wf(tree.nodes@))]
 #[requires(tree.nodes@.len() > 0)]
 #[ensures(result == ok_at(tree.nodes@, 0))]
+#[must_use]
 pub fn check(tree: &Tree) -> bool {
     let nodes = &tree.nodes;
     let n = nodes.len();
@@ -83,8 +86,8 @@ pub fn check(tree: &Tree) -> bool {
     while k > 0 {
         k -= 1;
         let g = match &nodes[k] {
-            Node2::Leaf(v) => *v < 10,
-            Node2::Node { first, len } => {
+            ArenaNode::Leaf(v) => *v < 10,
+            ArenaNode::Node { first, len } => {
                 let end = *first + *len;
                 let mut c = *first;
                 let mut all = true;
