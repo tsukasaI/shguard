@@ -34,8 +34,9 @@ ADR (confirmed Creusot 0.14 spellings) is `spikes/README.md`.
 - `crates/shguard-kernel/`: verified. Its only dependency is `creusot-std`,
   declared under `[target.'cfg(creusot)'.dependencies]`, so it exists only
   under `cargo creusot`. It is LGPL-2.1-or-later and never enters a shipped
-  build. `deny.toml`'s `[graph] targets` prunes it (and every other
-  `cfg(creusot)` dependency) from all cargo-deny checks, not only licenses;
+  build. `deny.toml`'s `[graph] targets` prunes it (and every dependency
+  whose `cfg` is false on all listed triples, custom cfgs included) from all
+  cargo-deny checks, not only licenses;
   keep that list equal to the release triples.
 - `crates/shguard-syntax/`: subset lexer/parser to the kernel AST; Kani,
   proptest and differential tests.
