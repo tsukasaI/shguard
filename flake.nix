@@ -4,8 +4,8 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     # Pinned to the release the proofs were built against. Its pinned nightly
-    # rustc, why3 and solvers come with it; flake.lock freezes them and the
-    # committed verif/**/proof.json replay catches drift.
+    # rustc, why3 and solvers come with it; flake.lock freezes the solver
+    # versions and every gate re-proves from source (#1005).
     creusot.url = "github:creusot-rs/creusot/v0.14.0";
   };
 

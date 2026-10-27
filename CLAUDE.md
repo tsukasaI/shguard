@@ -31,7 +31,8 @@ ADR (confirmed Creusot 0.14 spellings) is `spikes/README.md`.
 
 ## Layout
 
-- `crates/shguard-kernel/`: verified; depends on `creusot-std` only.
+- `crates/shguard-kernel/`: verified; will depend only on
+  `creusot-std` (added in M3).
 - `crates/shguard-syntax/`: subset lexer/parser to the kernel AST; Kani,
   proptest and differential tests.
 - `crates/shguard/`: lib + bin; hook adapter, CLI, config, TOML loader,
@@ -71,16 +72,16 @@ singletons, newtypes and enums instead of flag structs.
   depend on the checkout path and leak the home directory. Every gate proves
   from source with `--span-mode relative`; the proof must pass before merge.
 - Lockfile policy (#1009): the committed `Cargo.lock` is the registry form
-  written by stable cargo. `cargo creusot` rewrites it to the nix-patched
+  written by stable cargo. `cargo creusot` can rewrite it to a nix-patched
   `creusot-std` (no `source`/`checksum`); that form is a local artifact and
   must never be committed. After a proof run, restore it with
-  `cargo generate-lockfile` on stable, then check `git diff Cargo.lock`.
+  `git restore Cargo.lock`, then confirm `git diff --exit-code Cargo.lock`.
 
 ## Tests and catalog
 
 - Tests pin only command to decision, never messages or rule ids.
-- Every catalog row records its upstream source (GNU/BSD docs or source). A
-  row without one is rejected by the loader.
+- Every catalog row records its upstream source (GNU/BSD docs or source). The
+  catalog loader (M12) rejects a row without one.
 
 ## Tooling facts
 
@@ -89,9 +90,10 @@ singletons, newtypes and enums instead of flag structs.
   `cargo deny check` and the proof run.
 - `git commit --no-verify` and `SKIP=` bypasses are banned except as a
   documented emergency recorded in the commit message.
-- `rustfmt.toml` is intentionally absent: the rustfmt bundled with rustc 1.99
-  rejects `hex_literal_case` as nightly-only, so the template cannot be used on
-  stable. rustfmt runs at defaults. Do not add the file.
+- `rustfmt.toml` is intentionally absent: stable rustfmt (1.10 with rustc
+  1.99 at the time of writing) rejects `hex_literal_case` as nightly-only, so
+  the template cannot be used on stable. rustfmt runs at defaults. Do not add
+  the file.
 - Clippy levels live in `[workspace.lints]`; parameters in `clippy.toml`.
 - `lefthook.yaml`, `clippy.toml`, `rustfmt.toml`, `.gitleaks.toml` and
   `.claude/skills/**` are protected from agents: draft under the scratchpad and
@@ -124,4 +126,4 @@ are `<type>/<short-slug>`; commits follow Contextual Commits (English). Verify
 before pushing: `cargo fmt --all -- --check`,
 `cargo clippy --workspace --all-targets -- -D warnings`,
 `cargo test --workspace`, `cargo deny check`, plus the proof run for kernel
-changes. Human PRs get `verify.yaml`; confirm it is green before merging.
+changes. Every PR runs `verify.yaml`; confirm it is green before merging.
