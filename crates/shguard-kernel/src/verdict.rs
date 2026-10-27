@@ -37,6 +37,11 @@ pub enum UnknownKind {
     OpaqueOption,
     /// An option that takes a value has none.
     MissingValue,
+    /// A flag (an option without a value) is given one: `--force=1`.
+    FlagGivenValue,
+    /// A `--` in option position, for a grammar where `--` does not end
+    /// options.
+    DashDashNotAllowed,
     /// An operand beyond what the grammar allows.
     ExtraOperand,
     /// A position whose role is code.
