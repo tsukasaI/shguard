@@ -852,6 +852,9 @@ slots = [{ kind = "exec" }]
 [command.options]
 short_flags = "FZeahV"
 short_values = "tSG"
+# Not short_values/long_values for W/wdns: usage() prints "--wdns <dir>", but
+# getopt is "W::"/optional_argument (util-linux 2.40), so in "nsenter -W rm ..."
+# rm is the command.
 short_glued = "muinpCUTrwW"
 long_flags = [
     "no-fork",
