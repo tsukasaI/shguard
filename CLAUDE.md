@@ -145,6 +145,10 @@ singletons, newtypes and enums instead of flag structs.
 - lefthook + gitleaks are the mandated pre-commit stack (`lefthook.yaml`;
   `gitleaks git --staged --redact`). `pre-push` runs fmt, clippy, test,
   `cargo deny check` and the proof run.
+- Kani harnesses (`crates/shguard-syntax/src/kani.rs`) are not in the flake or
+  pre-push. Locally: `cargo install --locked kani-verifier --version 0.68.0 &&
+  cargo kani setup`, then `cargo kani -p shguard-syntax`. CI runs them in
+  `kani.yaml`.
 - `git commit --no-verify` and `SKIP=` bypasses are banned except as a
   documented emergency recorded in the commit message.
 - `rustfmt.toml` is intentionally absent: stable rustfmt (1.10 with rustc

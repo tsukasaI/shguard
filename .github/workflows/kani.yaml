@@ -1,0 +1,69 @@
+name: kani
+
+on:
+  pull_request:
+    paths:
+      - 'crates/shguard-syntax/**'
+      - 'crates/shguard-kernel/src/ast.rs'
+      - 'Cargo.lock'
+      - '.github/workflows/kani.yaml'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/shguard-syntax/**'
+      - 'crates/shguard-kernel/src/ast.rs'
+      - 'Cargo.lock'
+      - '.github/workflows/kani.yaml'
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kani-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  KANI_VERSION: 0.68.0
+
+jobs:
+  kani:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The official kani-github-action installs Rust through an unpinned
+      # dtolnay/rust-toolchain@stable, so Kani is installed here by pinned
+      # version instead.
+      #
+      # The installed binaries and ~/.kani (the CBMC bundle and the Kani
+      # toolchain) are cached by Kani version, so `cargo kani setup` does not
+      # rerun every time. Only main saves it, after a green run; PR runs only
+      # restore.
+      - id: kani-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/bin/kani*
+            ~/.cargo/bin/cargo-kani
+            ~/.kani
+          key: kani-${{ runner.os }}-${{ env.KANI_VERSION }}
+      - name: Install Kani
+        if: steps.kani-cache.outputs.cache-hit != 'true'
+        run: |
+          cargo install --locked kani-verifier --version "$KANI_VERSION"
+          cargo kani setup
+      - name: Run Kani harnesses
+        run: cargo kani -p shguard-syntax
+      - if: github.ref == 'refs/heads/main' && steps.kani-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/bin/kani*
+            ~/.cargo/bin/cargo-kani
+            ~/.kani
+          key: ${{ steps.kani-cache.outputs.cache-primary-key }}

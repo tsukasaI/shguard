@@ -10,6 +10,8 @@
 mod differential;
 #[cfg(test)]
 mod generate;
+#[cfg(kani)]
+mod kani;
 mod lex;
 mod parse;
 
