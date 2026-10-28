@@ -181,6 +181,7 @@ fn accepted_inputs() {
             vec![bare("git"), bare("log"), bare("HEAD~1")],
         ),
         ("scp h:~/f .", vec![bare("scp"), bare("h:~/f"), bare(".")]),
+        ("x a+b=~", vec![bare("x"), bare("a+b=~")]),
         ("x --opt=~/x", vec![bare("x"), bare("--opt=~/x")]),
         ("a='x'~", vec![word(vec![unq("a="), quo("x"), unq("~")])]),
         ("'a\nb'", vec![word(vec![quo("a\nb")])]),
@@ -256,6 +257,9 @@ fn unsupported_inputs() {
         (b"make prefix=~/x", K::TildeAssignment, 12),
         (b"a=b:~/c", K::TildeAssignment, 4),
         (b"a=~", K::TildeAssignment, 2),
+        (b"a+=~", K::TildeAssignment, 3),
+        (b"make CFLAGS+=~/x", K::TildeAssignment, 13),
+        (b"a+=b:~/c", K::TildeAssignment, 5),
         (b"a 12>&1", K::MultiDigitFd, 2),
         (b"x>&1y", K::DupOperand, 1),
         (b"x >&12", K::DupOperand, 2),
@@ -311,13 +315,15 @@ enum Seg {
     Unq(String),
     Sq(String),
     Dq(Vec<DqSeg>),
+    Esc(char),
+    TildeSlash,
 }
 
 #[derive(Clone, Debug)]
 enum Gen {
     Word(Vec<Seg>),
     Op(Op),
-    Redir(LexRedir),
+    Redir(LexRedir, u8),
 }
 
 fn seg() -> impl Strategy<Value = Seg> {
@@ -332,12 +338,18 @@ fn seg() -> impl Strategy<Value = Seg> {
             0..4,
         )
         .prop_map(Seg::Dq),
+        "[ -~]".prop_map(|c| Seg::Esc(c.chars().next().unwrap_or('a'))),
     ]
 }
 
 fn gen_token() -> impl Strategy<Value = Gen> {
     prop_oneof![
-        3 => prop::collection::vec(seg(), 1..4).prop_map(Gen::Word),
+        3 => (any::<bool>(), prop::collection::vec(seg(), 1..4)).prop_map(|(tilde, mut segs)| {
+            if tilde {
+                segs.insert(0, Seg::TildeSlash);
+            }
+            Gen::Word(segs)
+        }),
         1 => prop_oneof![
             Just(Op::Semi),
             Just(Op::Newline),
@@ -346,8 +358,8 @@ fn gen_token() -> impl Strategy<Value = Gen> {
             Just(Op::Pipe)
         ]
         .prop_map(Gen::Op),
-        1 => (0u8..10, 0u8..10).prop_map(|(from, to)| Gen::Redir(LexRedir::Dup { from, to })),
-        1 => (0u8..10).prop_map(|fd| Gen::Redir(LexRedir::DevNull { fd })),
+        1 => (0u8..10, 0u8..10, 0u8..6).prop_map(|(from, to, style)| Gen::Redir(LexRedir::Dup { from, to }, style)),
+        1 => (0u8..10, 0u8..6).prop_map(|(fd, style)| Gen::Redir(LexRedir::DevNull { fd }, style)),
     ]
 }
 
@@ -381,6 +393,8 @@ fn render(g: &Gen) -> String {
                 Seg::Unq(u) => u.clone(),
                 Seg::Sq(q) => format!("'{q}'"),
                 Seg::Dq(d) => render_dq(d),
+                Seg::Esc(c) => format!("\\{c}"),
+                Seg::TildeSlash => "~/".to_string(),
             })
             .collect(),
         Gen::Op(Op::Semi) => ";".into(),
@@ -388,9 +402,58 @@ fn render(g: &Gen) -> String {
         Gen::Op(Op::AndIf) => "&&".into(),
         Gen::Op(Op::OrIf) => "||".into(),
         Gen::Op(Op::Pipe) => "|".into(),
-        Gen::Redir(LexRedir::Dup { from, to }) => format!("{from}>&{to}"),
-        Gen::Redir(LexRedir::DevNull { fd }) => format!("{fd}>/dev/null"),
+        Gen::Redir(LexRedir::Dup { from, to }, style) => {
+            let fd = if *style >= 3 && *from == 1 {
+                String::new()
+            } else {
+                from.to_string()
+            };
+            format!("{fd}>&{to}")
+        }
+        Gen::Redir(LexRedir::DevNull { fd }, style) => {
+            let fd_text = if *style >= 3 && *fd == 1 {
+                String::new()
+            } else {
+                fd.to_string()
+            };
+            let target = match style % 3 {
+                0 => ">/dev/null",
+                1 => "> /dev/null",
+                _ => ">\"/dev/null\"",
+            };
+            format!("{fd_text}{target}")
+        }
     }
+}
+
+/// Blanks are dropped next to an operator, and between a non-numeric word
+/// and a redirect without a descriptor; elsewhere they are needed (`2` then `>&1` would be a
+/// descriptor, `>&2` then a word a bad dup operand).
+fn join(tokens: &[Gen], rendered: &[String]) -> String {
+    let mut out = String::new();
+    for (i, text) in rendered.iter().enumerate() {
+        if let (Some(prev), Some(cur)) =
+            (i.checked_sub(1).and_then(|j| tokens.get(j)), tokens.get(i))
+        {
+            let tight = match (prev, cur) {
+                (Gen::Op(_), Gen::Op(_)) => false,
+                (Gen::Op(_), _) | (_, Gen::Op(_)) => true,
+                (Gen::Word(_), Gen::Redir(..)) => {
+                    let ends_in_digit = i
+                        .checked_sub(1)
+                        .and_then(|j| rendered.get(j))
+                        .is_some_and(|w| w.bytes().last().is_some_and(|b| b.is_ascii_digit()));
+                    text.starts_with('>') && !ends_in_digit
+                }
+                (Gen::Word(_) | Gen::Redir(..), _) => false,
+            };
+            if !tight {
+                out.push(' ');
+            }
+        }
+        out.push_str(text);
+    }
+    out
 }
 
 fn push_lit(parts: &mut Vec<LexPart>, s: &str, quoting: Quoting) {
@@ -409,13 +472,18 @@ fn push_lit(parts: &mut Vec<LexPart>, s: &str, quoting: Quoting) {
 fn expected(g: &Gen) -> Token {
     match g {
         Gen::Op(op) => Token::Op(*op),
-        Gen::Redir(r) => Token::Redir(*r),
+        Gen::Redir(r, _) => Token::Redir(*r),
         Gen::Word(segs) => {
             let mut parts = Vec::new();
             for s in segs {
                 match s {
                     Seg::Unq(u) => push_lit(&mut parts, u, Quoting::Unquoted),
                     Seg::Sq(q) => push_lit(&mut parts, q, Quoting::Quoted),
+                    Seg::Esc(c) => push_lit(&mut parts, &c.to_string(), Quoting::Quoted),
+                    Seg::TildeSlash => {
+                        parts.push(LexPart::Tilde);
+                        push_lit(&mut parts, "/", Quoting::Unquoted);
+                    }
                     Seg::Dq(d) => {
                         let mut any = false;
                         for x in d {
@@ -449,9 +517,22 @@ proptest! {
     }
 
     #[test]
+    fn never_panics_on_interesting_bytes(
+        bytes in prop::collection::vec(
+            prop_oneof![
+                9 => prop::sample::select(b" \t\n;&|<>()'\"\\$`{}*?[~#=:+/0123456789aA_".to_vec()),
+                1 => any::<u8>(),
+            ],
+            0..128,
+        )
+    ) {
+        let _ = lex(&bytes);
+    }
+
+    #[test]
     fn round_trip(tokens in prop::collection::vec(gen_token(), 0..8)) {
         let rendered: Vec<String> = tokens.iter().map(render).collect();
-        let input = rendered.join(" ");
+        let input = join(&tokens, &rendered);
         let want: Vec<Token> = tokens.iter().map(expected).collect();
         prop_assert_eq!(lex(input.as_bytes()).unwrap(), want, "input: {:?}", input);
     }

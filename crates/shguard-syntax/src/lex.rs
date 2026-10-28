@@ -275,7 +275,8 @@ fn is_name_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
-/// True when `bytes` starts with `NAME=`.
+/// True when `bytes` starts with `NAME=` or `NAME+=` (bash's `assignment()`
+/// accepts both, and tilde-expands after either).
 fn starts_with_assignment(bytes: &[u8]) -> bool {
     let Some((&first, rest)) = bytes.split_first() else {
         return false;
@@ -284,7 +285,7 @@ fn starts_with_assignment(bytes: &[u8]) -> bool {
         return false;
     }
     let name_len = rest.iter().take_while(|&&b| is_name_byte(b)).count();
-    rest.get(name_len) == Some(&b'=')
+    matches!(rest.get(name_len..), Some([b'=', ..] | [b'+', b'=', ..]))
 }
 
 /// Parts of a word under construction. Adjacent literals with the same
