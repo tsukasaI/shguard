@@ -48,12 +48,36 @@ jobs:
         with:
           primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock') }}
           restore-prefixes-first-match: nix-${{ runner.os }}-
-      # verif/ is not committed (#1005), so CI proves from source; solver
+      # verif/ is not committed (#1005), so CI translates from source; solver
       # versions are pinned by flake.lock; why3find.json selects provers,
       # tactics and timeouts.
+      #
+      # Solver results are reused from why3find's cache (.why3find/): per-prover
+      # {status, time} entries keyed by goal digest, so a changed goal is
+      # always proved again, but one forged "Valid" entry fakes a proof. Only
+      # main saves it (the last step, so only a fully green run). PR runs
+      # restore their own scope first, then main's, so the main push run,
+      # which sees main's scope only, is the authoritative proof. Never let PR
+      # runs save it, and never run PR code in a workflow that runs in main's
+      # ref context (pull_request_target, workflow_run, schedule).
+      - id: why3find-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .why3find
+            spikes/lattice/.why3find
+          key: why3find-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'why3find.json', 'spikes/lattice/why3find.json') }}-${{ github.sha }}
+          restore-keys: why3find-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'why3find.json', 'spikes/lattice/why3find.json') }}-
       - name: Prove spike
         working-directory: spikes/lattice
         run: nix develop ../.. -c cargo creusot --span-mode relative
       - name: Prove kernel
         working-directory: crates/shguard-kernel
         run: nix develop ../.. -c cargo creusot --span-mode relative
+      - if: github.ref == 'refs/heads/main'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .why3find
+            spikes/lattice/.why3find
+          key: ${{ steps.why3find-cache.outputs.cache-primary-key }}
