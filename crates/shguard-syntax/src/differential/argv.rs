@@ -23,10 +23,10 @@
 //! Variables the input references get an adversarial value, which proves that
 //! `"$X"` stays one word and is not expanded again.
 
-use super::{Case, bash_program, corpus, require_bash5, run_command};
+use super::{Case, bash_program, corpus, is_name, require_bash5, run_command};
 use crate::{Token, lex, parse};
-use shguard_kernel::ast::{Opaque, Part, Script, Simple};
-use std::collections::BTreeMap;
+use shguard_kernel::ast::{Opaque, Part, Script, Simple, Word};
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -71,10 +71,12 @@ const MANAGED: &[&str] = &[
     "POSIXLY_CORRECT",
     "GLOBIGNORE",
     "ENV",
+    "LANG",
 ];
 
-/// Prefixes of managed names: all of `BASH*`, plus the dynamic loader.
-const MANAGED_PREFIXES: &[&str] = &["BASH", "LD_", "DYLD_"];
+/// Prefixes of managed names: all of `BASH*`, the locale (`LC_*` changes how
+/// bash reads bytes >= 0x80) and the dynamic loader.
+const MANAGED_PREFIXES: &[&str] = &["BASH", "LC_", "LD_", "DYLD_"];
 
 /// Variables whose value differs between two processes, or between the
 /// capture of `"$name"` alone and of the whole command, so the two sides
@@ -150,7 +152,6 @@ impl Sandbox {
             .ok()
             .and_then(|count| count.parse().ok())
             .ok_or("no argument count in the output")?;
-        // The count, `count` arguments and the empty piece after the last NUL.
         if fields.len() != count + 2 || fields.last().is_some_and(|last| !last.is_empty()) {
             return Err(format!(
                 "count {count} but {} fields: {:?}",
@@ -188,18 +189,32 @@ fn simples(script: &Script) -> Vec<&Simple> {
     out
 }
 
-fn variable_names(simples: &[&Simple]) -> Vec<String> {
-    let mut names = BTreeMap::new();
-    for simple in simples {
-        for word in simple.words() {
-            for part in word.parts() {
-                if let Part::Opaque(Opaque::Var(name)) = part {
-                    names.insert(String::from_utf8_lossy(name).into_owned(), ());
-                }
+fn is_volatile(name: &str) -> bool {
+    VOLATILE.contains(&name)
+}
+
+/// The variables one simple command references. A name that is not a
+/// `[A-Za-z_][A-Za-z0-9_]*` name means the lexer over-extended a `$NAME`.
+fn command_names(simple: &Simple) -> Vec<String> {
+    let mut names = Vec::new();
+    for word in simple.words() {
+        for part in word.parts() {
+            if let Part::Opaque(Opaque::Var(name)) = part {
+                assert!(
+                    is_name(name),
+                    "not a variable name: {:?}",
+                    String::from_utf8_lossy(name)
+                );
+                names.push(String::from_utf8_lossy(name).into_owned());
             }
         }
     }
-    names.into_keys().collect()
+    names
+}
+
+fn variable_names(simples: &[&Simple]) -> Vec<String> {
+    let names: BTreeSet<String> = simples.iter().flat_map(|s| command_names(s)).collect();
+    names.into_iter().collect()
 }
 
 /// The source text of the words of each simple command: lexemes split on
@@ -297,7 +312,27 @@ fn check_spliceable(text: &[u8]) {
 #[derive(Default)]
 struct Tally {
     simple_commands: usize,
-    skipped: usize,
+    skipped_commands: usize,
+}
+
+/// The bytes our AST says `word` is, given the values bash has for the
+/// variables and the tilde.
+fn expected_word(
+    word: &Word,
+    values: &BTreeMap<String, Vec<u8>>,
+    tilde: &Result<Vec<u8>, String>,
+) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    for part in word.parts() {
+        match part {
+            Part::Lit(lit) => bytes.extend_from_slice(lit),
+            Part::Opaque(Opaque::Var(name)) => {
+                bytes.extend_from_slice(values.get(String::from_utf8_lossy(name).as_ref())?);
+            }
+            Part::Opaque(Opaque::Tilde) => bytes.extend_from_slice(tilde.as_ref().ok()?),
+        }
+    }
+    Some(bytes)
 }
 
 /// Compares every simple command of `case`; failures are appended.
@@ -306,80 +341,56 @@ fn check_case(sandbox: &Sandbox, case: &Case, tally: &mut Tally, failures: &mut 
     let script = parse(input).expect("corpus inputs are accepted");
     let simples = simples(&script);
     let names = variable_names(&simples);
-    if names.iter().any(|name| VOLATILE.contains(&name.as_str())) {
-        tally.skipped += 1;
-        return;
-    }
     let vars: Vec<(String, String)> = names
         .iter()
         .filter(|name| !is_managed(name))
         .map(|name| (name.clone(), ADVERSARIAL.to_string()))
         .collect();
     let mut values: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    let mut fail = |index: usize, why: String| {
-        failures.push(format!(
-            "input: {:?}\n  simple command {index}: {why}",
-            case.input
-        ));
-    };
-    for name in &names {
+    let mut fail = |what: String| failures.push(format!("input: {:?}\n  {what}", case.input));
+    for name in names.iter().filter(|name| !is_volatile(name)) {
         match sandbox.value(&format!("\"${name}\""), &vars) {
             Ok(value) => {
                 values.insert(name.clone(), value);
             }
-            Err(why) => fail(0, format!("value of ${name}: {why}")),
+            Err(why) => fail(format!("value of ${name}: {why}")),
         }
     }
     let tilde = sandbox.value("~", &vars);
+    if let Err(why) = &tilde {
+        fail(format!("value of ~: {why}"));
+    }
     for (index, (simple, texts)) in simples.iter().zip(word_texts(input, &simples)).enumerate() {
-        tally.simple_commands += 1;
+        if command_names(simple).iter().any(|name| is_volatile(name)) {
+            tally.skipped_commands += 1;
+            continue;
+        }
         for text in &texts {
             check_spliceable(text);
         }
-        let ours: Result<Vec<Vec<u8>>, String> = simple
+        let Some(ours) = simple
             .words()
             .iter()
-            .map(|word| {
-                let mut bytes = Vec::new();
-                for part in word.parts() {
-                    match part {
-                        Part::Lit(lit) => bytes.extend_from_slice(lit),
-                        Part::Opaque(Opaque::Var(name)) => {
-                            let name = String::from_utf8_lossy(name);
-                            bytes.extend_from_slice(
-                                values
-                                    .get(name.as_ref())
-                                    .ok_or("variable without a value")?,
-                            );
-                        }
-                        Part::Opaque(Opaque::Tilde) => {
-                            bytes.extend_from_slice(tilde.as_ref().map_err(Clone::clone)?);
-                        }
-                    }
-                }
-                Ok(bytes)
-            })
-            .collect();
-        let Ok(ours) = ours else {
-            fail(index, "no value for a variable or the tilde".to_string());
+            .map(|word| expected_word(word, &values, &tilde))
+            .collect::<Option<Vec<_>>>()
+        else {
+            // The failed value capture above is the report.
             continue;
         };
+        tally.simple_commands += 1;
         let spliced = texts.join(&b' ');
         match sandbox.capture(&spliced, &vars) {
             Ok(theirs) if theirs == ours => {}
-            Ok(theirs) => fail(
-                index,
-                format!(
-                    "words {:?}\n  ours:  {}\n  bash:  {}",
-                    String::from_utf8_lossy(&spliced),
-                    show(&ours),
-                    show(&theirs)
-                ),
-            ),
-            Err(why) => fail(
-                index,
-                format!("words {:?}: {why}", String::from_utf8_lossy(&spliced)),
-            ),
+            Ok(theirs) => fail(format!(
+                "simple command {index}: words {:?}\n  ours:  {}\n  bash:  {}",
+                String::from_utf8_lossy(&spliced),
+                show(&ours),
+                show(&theirs)
+            )),
+            Err(why) => fail(format!(
+                "simple command {index}: words {:?}: {why}",
+                String::from_utf8_lossy(&spliced)
+            )),
         }
     }
 }
@@ -406,11 +417,11 @@ fn bash_builds_the_argv_we_expect() {
     }
     corpus.report("bash argv");
     eprintln!(
-        "bash argv: compared {} simple commands in {} inputs, skipped {} inputs \
-         that reference a volatile variable",
+        "bash argv: compared {} simple commands in {} inputs, skipped {} simple \
+         commands that reference a volatile variable",
         tally.simple_commands,
-        corpus.cases.len() - tally.skipped,
-        tally.skipped
+        corpus.cases.len(),
+        tally.skipped_commands
     );
     assert!(tally.simple_commands > 0, "no simple command was compared");
     assert!(
