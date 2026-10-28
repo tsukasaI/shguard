@@ -6,6 +6,10 @@
 //! finding therefore takes precedence over a parser finding wherever each one
 //! sits in the input.
 
+#[cfg(test)]
+mod differential;
+#[cfg(test)]
+mod generate;
 mod lex;
 mod parse;
 
