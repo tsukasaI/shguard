@@ -76,6 +76,23 @@ singletons, newtypes and enums instead of flag structs.
   `#[cfg_attr(not(creusot), expect(unused_variables, reason = "..."))]`.
 - Constants that an open logic function mentions must be `pub`: Creusot
   refuses to unfold an open function that names a less visible item.
+- Data model (`ast`, `catalog`, `rule`): fields are `pub(crate)`; other crates
+  build a type that carries an invariant only through its checked constructors
+  (returns `Option`, contract `Some(x) ==> fields equal inputs`,
+  `None ==> !wf(inputs)`), and the type has a `#[cfg(creusot)] impl Invariant`.
+  Enum variants cannot be hidden, so wrap a constrained payload in a sealed
+  newtype (`OptName::Long(LongName)`); `#[non_exhaustive]` does not stop
+  mutation through `&mut` patterns.
+  - A logic item or `Invariant` impl that reads a `pub(crate)` field must be
+    `#[logic(open(crate))]`; plain `open` fails with "would call a
+    less-visible item". The `wf` predicates over views stay `open`.
+  - `derive(DeepModel)` (so Creusot's `PartialEq`) fails on a struct with
+    `pub(crate)` fields for the same reason. Such structs derive
+    `PartialEq, Eq` only under `cfg_attr(not(creusot), ..)`; logic `==` needs
+    neither.
+  - `Vec::is_empty` is not `terminates`; write `<[_]>::is_empty(&v)`.
+  - Even inside a `#[cfg(creusot)]` item, `x@` must sit in `pearlite! { .. }`
+    because the item is parsed before the cfg is applied.
 - Lint policy (#1007): only this crate has
   `#![expect(clippy::indexing_slicing, reason = "bounds proved by Creusot")]`;
   every other lint, `missing_docs` included, stays on.

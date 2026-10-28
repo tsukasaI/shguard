@@ -3,5 +3,9 @@
 //! proves.
 #![expect(clippy::indexing_slicing, reason = "bounds proved by Creusot")]
 
+pub mod ast;
 pub mod bytes;
+pub mod catalog;
 pub mod decision;
+pub mod rule;
+pub mod verdict;
