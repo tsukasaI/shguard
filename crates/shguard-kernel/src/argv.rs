@@ -399,7 +399,7 @@ pub fn after_operand_l(g: Grammar, b: Seq<u8>, opaque: bool) -> WordL {
 
 /// The phase after an operand read in phase `ph`.
 #[cfg(creusot)]
-#[logic(open)]
+#[logic(open(crate))]
 pub fn operand_phase_l(ph: Phase, permute: bool) -> Phase {
     match ph {
         Phase::Options => {

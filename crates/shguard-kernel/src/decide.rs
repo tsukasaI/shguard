@@ -1768,14 +1768,16 @@ mod tests {
         check_with(&[], seq(vec![cmd(&["rm", "-r", "x"])]), Decision::Allow);
     }
 
-    /// The test catalog plus `cp [-t DIR] path...`.
+    /// The test catalog plus `cp [-t DIR] [--opt[=DIR]] path...`.
     fn catalog_with_cp() -> Catalog {
         let mut cat = catalog();
         let t = Opt::new(
             OptName::Both(b't', long("target-directory")),
             OptValue::Takes(Role::Path),
         );
-        cat.rows.push(row(&["cp"], gnu(vec![t], Role::Path), false));
+        let o = Opt::new(OptName::Long(long("opt")), OptValue::Optional(Role::Path));
+        cat.rows
+            .push(row(&["cp"], gnu(vec![t, o], Role::Path), false));
         cat
     }
 
@@ -1794,6 +1796,23 @@ mod tests {
             seq(vec![cmd(&["cp", "-t", "/x", "a"])]),
             Decision::Allow,
         );
+    }
+
+    #[test]
+    fn optional_inline_path_is_ask_like_takes() {
+        let cat = catalog_with_cp();
+        let cp = |w: &str, want| check_in(&cat, &[], seq(vec![cmd(&["cp", w, "a"])]), want);
+        // An empty inline value is still an inline path slot, as with `Takes`.
+        for w in [
+            "--opt=x",
+            "--target-directory=x",
+            "--opt=",
+            "--target-directory=",
+        ] {
+            cp(w, Decision::Ask);
+        }
+        // Without an inline value, there is no path slot at all.
+        cp("--opt", Decision::Allow);
     }
 
     #[test]
