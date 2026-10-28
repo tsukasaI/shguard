@@ -55,6 +55,8 @@ pub enum Slot {
 #[cfg_attr(not(creusot), derive(PartialEq, Eq))]
 pub struct Parse {
     /// One slot per word from `start`: `slots[j]` is word `start + j`.
+    /// [`parse_argv`]'s contract proves the length; the alignment holds by
+    /// construction of `argv_go` and is not stated separately.
     pub(crate) slots: Vec<Slot>,
     /// Indices into the grammar's `opts` of every option that occurs, in
     /// order, one entry per occurrence (`-rf` adds two).
@@ -793,6 +795,10 @@ fn operand_role(g: &Grammar, k: usize) -> Option<Role> {
 /// The result is exactly `argv_spec`: see the module docs for how words are
 /// read. Besides, an Unknown index is a word of `ws`, and a parse has one
 /// slot per word from `start`.
+///
+/// Only the length (`slots.len() == ws.len() - start`) is proved. That
+/// `slots[j]` describes word `start + j` holds by construction of
+/// `argv_go`, but the contract does not state it separately.
 #[cfg_attr(creusot, check(terminates))]
 #[cfg_attr(creusot, ensures(argv_view(result) == argv_spec(*g, ws@, start@)))]
 #[cfg_attr(creusot, ensures(match result {
@@ -1209,6 +1215,97 @@ mod tests {
         assert_eq!(
             parse_argv(&g, &ws, 2),
             unknown(UnknownKind::UnknownOption, 2)
+        );
+    }
+
+    #[test]
+    fn review_edge_cases() {
+        let g = gnu();
+        // A value word is taken whatever it is, even `--`.
+        assert_eq!(
+            parse(&g, &argv(&["-n", "--", "-r"])),
+            parsed(&[OPTS, Slot::OptValue(Role::Inert), OPTS], &[N, R])
+        );
+        assert_eq!(
+            parse(&g, &argv(&["---x"])),
+            unknown(UnknownKind::UnknownOption, 1)
+        );
+        assert_eq!(
+            parse(&g, &argv(&["-n=5"])),
+            parsed(&[Slot::Opts(Some(Role::Inert))], &[N])
+        );
+
+        let strict = Grammar::new(opts(), Vec::new(), Some(Role::Path), false, true);
+        assert_eq!(
+            parse(&strict, &argv(&["-", "-r"])),
+            parsed(&[PATH, PATH], &[])
+        );
+        assert_eq!(
+            parse(&strict, &argv(&["--", "-r"])),
+            parsed(&[Slot::DashDash, PATH], &[])
+        );
+
+        let out = Grammar::new(
+            vec![Opt::new(
+                OptName::Both(b'o', long("output")),
+                OptValue::Takes(Role::Path),
+            )],
+            Vec::new(),
+            None,
+            true,
+            true,
+        );
+        assert_eq!(
+            parse(&out, &argv(&["-o", "x"])),
+            parsed(&[OPTS, Slot::OptValue(Role::Path)], &[0])
+        );
+        assert_eq!(
+            parse(&out, &argv(&["--output=x"])),
+            parsed(&[Slot::Opts(Some(Role::Path))], &[0])
+        );
+
+        // An option value is not counted as an operand.
+        let one = Grammar::new(opts(), vec![Role::Inert], None, true, true);
+        assert_eq!(
+            parse(&one, &argv(&["-n", "5", "a"])),
+            parsed(
+                &[
+                    OPTS,
+                    Slot::OptValue(Role::Inert),
+                    Slot::Operand(Role::Inert)
+                ],
+                &[N]
+            )
+        );
+
+        // `~/x` has an empty known prefix, so it fails closed.
+        let ws = vec![
+            word(vec![lit("cmd")]),
+            word(vec![Part::Opaque(Opaque::Tilde), lit("/x")]),
+        ];
+        assert_eq!(parse(&g, &ws), unknown(UnknownKind::OpaqueOption, 1));
+
+        // On a name collision the first option in `opts` wins.
+        let clash = Grammar::new(
+            vec![
+                Opt::new(OptName::Short(b'f'), OptValue::Flag),
+                Opt::new(
+                    OptName::Both(b'f', long("file")),
+                    OptValue::Takes(Role::Path),
+                ),
+            ],
+            Vec::new(),
+            Some(Role::Path),
+            true,
+            true,
+        );
+        assert_eq!(
+            parse(&clash, &argv(&["-f", "a"])),
+            parsed(&[OPTS, PATH], &[0])
+        );
+        assert_eq!(
+            parse(&clash, &argv(&["--file", "a"])),
+            parsed(&[OPTS, Slot::OptValue(Role::Path)], &[1])
         );
     }
 }

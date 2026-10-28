@@ -37,7 +37,8 @@ pub enum UnknownKind {
     OpaqueCommandName,
     /// An option the row's grammar does not list.
     UnknownOption,
-    /// An option position holds a word that is not a literal.
+    /// A word in option position that is not a literal and whose known prefix
+    /// is empty or starts with `-`.
     OpaqueOption,
     /// An option that takes a value has none.
     MissingValue,
@@ -52,9 +53,10 @@ pub enum UnknownKind {
     CodeRole,
     /// The row marks the command as running other code.
     RunsCode,
-    /// Only a parent row (one whose key another row extends) matches, and
-    /// the command has an operand there: likely a subcommand the catalog
-    /// does not list (`git push` with only `["git"]` and `["git", "status"]`).
+    /// The first matching row in catalog order is a parent row (one whose
+    /// key another row extends) and the command has an operand there:
+    /// likely a subcommand the catalog does not list (`git push` with only
+    /// `["git"]` and `["git", "status"]`).
     UnknownSubcommand,
     /// A redirect the model cannot reason about.
     Redirect,
