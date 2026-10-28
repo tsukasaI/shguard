@@ -3,4 +3,6 @@
 
 mod lex;
 
-pub use lex::{LexPart, LexRedir, LexWord, Op, Quoting, Token, Unsupported, UnsupportedKind, lex};
+pub use lex::{
+    LexPart, LexRedir, LexWord, Lexeme, Op, Quoting, Token, Unsupported, UnsupportedKind, lex,
+};

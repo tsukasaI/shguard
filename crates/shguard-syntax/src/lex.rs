@@ -51,32 +51,41 @@ pub enum LexPart {
     Tilde,
 }
 
-/// A word: one or more parts.
+/// A word: a first part and the parts after it, so it is never empty.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LexWord {
-    parts: Vec<LexPart>,
+    first: LexPart,
+    rest: Vec<LexPart>,
 }
 
 impl LexWord {
-    /// Builds a word, or `None` when `parts` is empty.
+    /// Builds a word from its first part and the parts after it.
     #[must_use]
-    pub fn new(parts: Vec<LexPart>) -> Option<LexWord> {
-        if parts.is_empty() {
-            None
-        } else {
-            Some(LexWord { parts })
-        }
+    pub fn new(first: LexPart, rest: Vec<LexPart>) -> LexWord {
+        LexWord { first, rest }
     }
 
-    /// The parts of the word.
+    /// The first part.
     #[must_use]
-    pub fn parts(&self) -> &[LexPart] {
-        &self.parts
+    pub fn first(&self) -> &LexPart {
+        &self.first
+    }
+
+    /// The parts after the first.
+    #[must_use]
+    pub fn rest(&self) -> &[LexPart] {
+        &self.rest
+    }
+
+    /// Splits the word into its first part and the parts after it.
+    #[must_use]
+    pub fn into_parts(self) -> (LexPart, Vec<LexPart>) {
+        (self.first, self.rest)
     }
 
     fn is_dev_null(&self) -> bool {
         let mut all = Vec::new();
-        for part in &self.parts {
+        for part in std::iter::once(&self.first).chain(&self.rest) {
             match part {
                 LexPart::Lit { bytes, .. } => all.extend_from_slice(bytes),
                 LexPart::Var(_) | LexPart::Tilde => return false,
@@ -209,10 +218,6 @@ pub enum UnsupportedKind {
     /// A `>` target other than `/dev/null`.
     #[error("redirect target other than /dev/null")]
     RedirectTarget,
-    /// A word with no parts. Unreachable by construction; kept so the word
-    /// invariant fails closed instead of panicking.
-    #[error("empty word")]
-    EmptyWord,
 }
 
 /// The first construct outside the subset, and where it starts.
@@ -226,13 +231,23 @@ pub struct Unsupported {
     pub offset: usize,
 }
 
+/// A token and the byte offset where it starts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Lexeme {
+    /// Byte index in the input where the token starts. For a redirect it is
+    /// the start of the whole redirect, descriptor included.
+    pub offset: usize,
+    /// The token.
+    pub token: Token,
+}
+
 /// Lexes `input`, or reports the first construct outside the subset.
 ///
 /// # Errors
 ///
 /// Returns [`Unsupported`] for the first byte sequence the subset does not
 /// cover.
-pub fn lex(input: &[u8]) -> Result<Vec<Token>, Unsupported> {
+pub fn lex(input: &[u8]) -> Result<Vec<Lexeme>, Unsupported> {
     if input.len() > MAX_INPUT_LEN {
         return Err(fail(UnsupportedKind::InputTooLarge, 0));
     }
@@ -277,7 +292,7 @@ fn is_name_byte(b: u8) -> bool {
 
 /// True when `bytes` starts with `NAME=` or `NAME+=` (bash's `assignment()`
 /// accepts both, and tilde-expands after either).
-fn starts_with_assignment(bytes: &[u8]) -> bool {
+pub(crate) fn starts_with_assignment(bytes: &[u8]) -> bool {
     let Some((&first, rest)) = bytes.split_first() else {
         return false;
     };
@@ -288,42 +303,98 @@ fn starts_with_assignment(bytes: &[u8]) -> bool {
     matches!(rest.get(name_len..), Some([b'=', ..] | [b'+', b'=', ..]))
 }
 
-/// Parts of a word under construction. Adjacent literals with the same
-/// quoting merge, so `a'b'c` keeps its quoting boundaries and `'a''b'` does
-/// not.
-#[derive(Default)]
-struct Parts(Vec<LexPart>);
+/// Parts of a word under construction: the parts before the last one, and the
+/// last one, so the value is never empty. Adjacent literals with the same
+/// quoting merge: `'a''b'` is one literal, while `a'b'` keeps the boundary
+/// between the unquoted and the quoted part.
+struct Parts {
+    init: Vec<LexPart>,
+    last: LexPart,
+}
 
 impl Parts {
-    fn push_lit(&mut self, bytes: &[u8], quoting: Quoting) {
-        if let Some(LexPart::Lit {
+    fn of(last: LexPart) -> Parts {
+        Parts {
+            init: Vec::new(),
+            last,
+        }
+    }
+
+    fn lit(bytes: Vec<u8>, quoting: Quoting) -> Parts {
+        Parts::of(LexPart::Lit { bytes, quoting })
+    }
+
+    /// Adds a part at the end, merging it into the last one when both are
+    /// literals with the same quoting.
+    fn push(&mut self, part: LexPart) {
+        if let LexPart::Lit {
             bytes: last,
             quoting: last_quoting,
-        }) = self.0.last_mut()
-            && *last_quoting == quoting
+        } = &mut self.last
+            && let LexPart::Lit { bytes, quoting } = &part
+            && last_quoting == quoting
         {
             last.extend_from_slice(bytes);
             return;
         }
-        self.0.push(LexPart::Lit {
-            bytes: bytes.to_vec(),
-            quoting,
-        });
+        self.init.push(std::mem::replace(&mut self.last, part));
+    }
+
+    fn append(&mut self, other: Parts) {
+        for part in other.init {
+            self.push(part);
+        }
+        self.push(other.last);
+    }
+
+    /// Adds a byte inside double quotes, where every literal is quoted.
+    fn push_quoted_byte(&mut self, byte: u8) {
+        if let LexPart::Lit { bytes, .. } = &mut self.last {
+            bytes.push(byte);
+        } else {
+            let lit = LexPart::Lit {
+                bytes: vec![byte],
+                quoting: Quoting::Quoted,
+            };
+            self.init.push(std::mem::replace(&mut self.last, lit));
+        }
+    }
+
+    /// Adds a variable inside double quotes. The empty literal that `""`
+    /// starts with is dropped, so `"$X"` is exactly one `Var`.
+    fn push_var(&mut self, name: Vec<u8>) {
+        let old = std::mem::replace(&mut self.last, LexPart::Var(name));
+        if !matches!(&old, LexPart::Lit { bytes, .. } if bytes.is_empty()) {
+            self.init.push(old);
+        }
     }
 
     /// The word so far looks like `NAME=...` and ends in an unquoted `=` or
     /// `:`, which is where bash tilde-expands outside POSIX mode.
     fn tilde_would_expand(&self) -> bool {
+        let first = self.init.first().unwrap_or(&self.last);
         let starts_assignment = matches!(
-            self.0.first(),
-            Some(LexPart::Lit { bytes, quoting: Quoting::Unquoted }) if starts_with_assignment(bytes)
+            first,
+            LexPart::Lit { bytes, quoting: Quoting::Unquoted } if starts_with_assignment(bytes)
         );
         let after_separator = matches!(
-            self.0.last(),
-            Some(LexPart::Lit { bytes, quoting: Quoting::Unquoted })
+            &self.last,
+            LexPart::Lit { bytes, quoting: Quoting::Unquoted }
                 if matches!(bytes.last(), Some(b'=' | b':'))
         );
         starts_assignment && after_separator
+    }
+
+    fn into_word(self) -> LexWord {
+        let mut init = self.init.into_iter();
+        match init.next() {
+            Some(first) => {
+                let mut rest: Vec<LexPart> = init.collect();
+                rest.push(self.last);
+                LexWord::new(first, rest)
+            }
+            None => LexWord::new(self.last, Vec::new()),
+        }
     }
 }
 
@@ -341,8 +412,8 @@ impl Lexer<'_> {
         self.input.get(self.pos + ahead).copied()
     }
 
-    fn run(mut self) -> Result<Vec<Token>, Unsupported> {
-        let mut tokens = Vec::new();
+    fn run(mut self) -> Result<Vec<Lexeme>, Unsupported> {
+        let mut lexemes = Vec::new();
         while let Some(b) = self.peek() {
             let start = self.pos;
             if is_control(b) {
@@ -365,12 +436,15 @@ impl Lexer<'_> {
                 b'>' => self.redirect(start, 1)?,
                 _ => match self.io_number()? {
                     Some(fd) => self.redirect(start, fd)?,
-                    None => Token::Word(self.word()?),
+                    None => Token::Word(self.word(b)?),
                 },
             };
-            tokens.push(token);
+            lexemes.push(Lexeme {
+                offset: start,
+                token,
+            });
         }
-        Ok(tokens)
+        Ok(lexemes)
     }
 
     fn semicolon(&mut self) -> Result<Token, Unsupported> {
@@ -454,65 +528,70 @@ impl Lexer<'_> {
                     self.pos += 1;
                 }
                 match self.peek() {
-                    Some(b) if !is_word_terminator(b) => {}
-                    Some(_) | None => {
-                        return Err(fail(UnsupportedKind::RedirectTarget, start));
+                    Some(b) if !is_word_terminator(b) => {
+                        if self.word(b)?.is_dev_null() {
+                            Ok(Token::Redir(LexRedir::DevNull { fd: from }))
+                        } else {
+                            Err(fail(UnsupportedKind::RedirectTarget, start))
+                        }
                     }
-                }
-                if self.word()?.is_dev_null() {
-                    Ok(Token::Redir(LexRedir::DevNull { fd: from }))
-                } else {
-                    Err(fail(UnsupportedKind::RedirectTarget, start))
+                    Some(_) | None => Err(fail(UnsupportedKind::RedirectTarget, start)),
                 }
             }
         }
     }
 
-    /// Lexes one word. The caller guarantees the next byte is not a word
-    /// terminator.
-    fn word(&mut self) -> Result<LexWord, Unsupported> {
-        let word_start = self.pos;
-        let mut parts = Parts::default();
-        while let Some(b) = self.peek() {
-            if is_word_terminator(b) {
-                break;
+    /// Lexes one word starting with `first`, the byte at `self.pos`. The
+    /// caller guarantees `first` is not a word terminator.
+    fn word(&mut self, first: u8) -> Result<LexWord, Unsupported> {
+        let mut parts = self.chunk(first, None)?;
+        while let Some(b) = self.peek()
+            && !is_word_terminator(b)
+        {
+            let next = self.chunk(b, Some(&parts))?;
+            parts.append(next);
+        }
+        Ok(parts.into_word())
+    }
+
+    /// Lexes the next unit of a word: a quoted string, an escaped byte, a
+    /// leading tilde or one plain byte. `b` is the byte at `self.pos`;
+    /// `so_far` is `None` for the first unit of the word.
+    fn chunk(&mut self, b: u8, so_far: Option<&Parts>) -> Result<Parts, Unsupported> {
+        let at = self.pos;
+        if is_control(b) {
+            return Err(fail(UnsupportedKind::ControlByte, at));
+        }
+        match b {
+            b'\'' => self.single_quoted(),
+            b'"' => self.double_quoted(),
+            b'\\' => {
+                let escaped = self.escaped_byte()?;
+                self.pos += 2;
+                Ok(Parts::lit(vec![escaped], Quoting::Quoted))
             }
-            let at = self.pos;
-            if is_control(b) {
-                return Err(fail(UnsupportedKind::ControlByte, at));
-            }
-            match b {
-                b'\'' => self.single_quoted(&mut parts)?,
-                b'"' => self.double_quoted(&mut parts)?,
-                b'\\' => {
-                    let escaped = self.escaped_byte()?;
-                    parts.push_lit(&[escaped], Quoting::Quoted);
-                    self.pos += 2;
-                }
-                b'$' => return Err(fail(UnsupportedKind::UnquotedDollar, at)),
-                b'`' => return Err(fail(UnsupportedKind::Backquote, at)),
-                b'{' | b'}' => return Err(fail(UnsupportedKind::Brace, at)),
-                b'*' | b'?' | b'[' => return Err(fail(UnsupportedKind::Glob, at)),
-                b'#' if at == word_start => return Err(fail(UnsupportedKind::Comment, at)),
-                b'~' if at == word_start => {
-                    let next = self.peek_at(1);
-                    if is_token_end(next) || next == Some(b'/') {
-                        parts.0.push(LexPart::Tilde);
-                        self.pos += 1;
-                    } else {
-                        return Err(fail(UnsupportedKind::TildeForm, at));
-                    }
-                }
-                b'~' if parts.tilde_would_expand() => {
-                    return Err(fail(UnsupportedKind::TildeAssignment, at));
-                }
-                _ => {
-                    parts.push_lit(&[b], Quoting::Unquoted);
+            b'$' => Err(fail(UnsupportedKind::UnquotedDollar, at)),
+            b'`' => Err(fail(UnsupportedKind::Backquote, at)),
+            b'{' | b'}' => Err(fail(UnsupportedKind::Brace, at)),
+            b'*' | b'?' | b'[' => Err(fail(UnsupportedKind::Glob, at)),
+            b'#' if so_far.is_none() => Err(fail(UnsupportedKind::Comment, at)),
+            b'~' if so_far.is_none() => {
+                let next = self.peek_at(1);
+                if is_token_end(next) || next == Some(b'/') {
                     self.pos += 1;
+                    Ok(Parts::of(LexPart::Tilde))
+                } else {
+                    Err(fail(UnsupportedKind::TildeForm, at))
                 }
+            }
+            b'~' if so_far.is_some_and(Parts::tilde_would_expand) => {
+                Err(fail(UnsupportedKind::TildeAssignment, at))
+            }
+            _ => {
+                self.pos += 1;
+                Ok(Parts::lit(vec![b], Quoting::Unquoted))
             }
         }
-        LexWord::new(parts.0).ok_or_else(|| fail(UnsupportedKind::EmptyWord, word_start))
     }
 
     /// The byte after the backslash at `self.pos`, after checking that it is
@@ -526,7 +605,7 @@ impl Lexer<'_> {
         }
     }
 
-    fn single_quoted(&mut self, parts: &mut Parts) -> Result<(), Unsupported> {
+    fn single_quoted(&mut self) -> Result<Parts, Unsupported> {
         let start = self.pos;
         self.pos += 1;
         let body_start = self.pos;
@@ -541,16 +620,16 @@ impl Lexer<'_> {
             }
         }
         let body = self.input.get(body_start..self.pos).unwrap_or_default();
-        parts.push_lit(body, Quoting::Quoted);
         self.pos += 1;
-        Ok(())
+        Ok(Parts::lit(body.to_vec(), Quoting::Quoted))
     }
 
-    fn double_quoted(&mut self, parts: &mut Parts) -> Result<(), Unsupported> {
+    fn double_quoted(&mut self) -> Result<Parts, Unsupported> {
         let start = self.pos;
         self.pos += 1;
-        let mut buf: Vec<u8> = Vec::new();
-        let mut emitted_var = false;
+        // `""` is a word, so the parts start with an empty literal; the first
+        // variable replaces it, so `"$X"` does not grow one.
+        let mut parts = Parts::lit(Vec::new(), Quoting::Quoted);
         loop {
             let at = self.pos;
             match self.peek() {
@@ -565,43 +644,32 @@ impl Lexer<'_> {
                     // Only these four are escapable; bash keeps the
                     // backslash before anything else.
                     if !matches!(escaped, b'$' | b'`' | b'"' | b'\\') {
-                        buf.push(b'\\');
+                        parts.push_quoted_byte(b'\\');
                     }
-                    buf.push(escaped);
+                    parts.push_quoted_byte(escaped);
                     self.pos += 2;
                 }
-                Some(b'$') => {
-                    if let Some(name) = self.dollar_in_quotes(&mut buf)? {
-                        if !buf.is_empty() {
-                            parts.push_lit(&buf, Quoting::Quoted);
-                            buf.clear();
-                        }
-                        parts.0.push(LexPart::Var(name));
-                        emitted_var = true;
-                    }
-                }
+                Some(b'$') => match self.dollar_in_quotes()? {
+                    Some(name) => parts.push_var(name),
+                    None => parts.push_quoted_byte(b'$'),
+                },
                 Some(c) => {
-                    buf.push(c);
+                    parts.push_quoted_byte(c);
                     self.pos += 1;
                 }
             }
         }
-        // `""` is a word, but `"$X"` must not grow an empty literal.
-        if !buf.is_empty() || !emitted_var {
-            parts.push_lit(&buf, Quoting::Quoted);
-        }
         self.pos += 1;
-        Ok(())
+        Ok(parts)
     }
 
     /// `self.pos` is at a `$` inside double quotes. Returns the variable name
-    /// for `$NAME`/`${NAME}`; a `$` right before the closing quote is pushed
-    /// to `buf` as a literal and yields `None`.
-    fn dollar_in_quotes(&mut self, buf: &mut Vec<u8>) -> Result<Option<Vec<u8>>, Unsupported> {
+    /// for `$NAME`/`${NAME}`; a `$` right before the closing quote is a
+    /// literal `$` and yields `None`.
+    fn dollar_in_quotes(&mut self) -> Result<Option<Vec<u8>>, Unsupported> {
         let at = self.pos;
         match self.peek_at(1) {
             Some(b'"') => {
-                buf.push(b'$');
                 self.pos += 1;
                 Ok(None)
             }

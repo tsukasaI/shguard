@@ -22,7 +22,9 @@ fn var(s: &str) -> LexPart {
 }
 
 fn word(parts: Vec<LexPart>) -> Token {
-    Token::Word(LexWord::new(parts).unwrap())
+    let mut parts = parts.into_iter();
+    let first = parts.next().unwrap();
+    Token::Word(LexWord::new(first, parts.collect()))
 }
 
 fn bare(s: &str) -> Token {
@@ -30,7 +32,32 @@ fn bare(s: &str) -> Token {
 }
 
 fn ok(input: &str) -> Vec<Token> {
-    lex(input.as_bytes()).unwrap()
+    lex(input.as_bytes())
+        .unwrap()
+        .into_iter()
+        .map(|l| l.token)
+        .collect()
+}
+
+#[test]
+fn lexemes_carry_start_offsets() {
+    let got: Vec<(usize, Token)> = lex(b"ab  2>&1 ; c\n|d")
+        .unwrap()
+        .into_iter()
+        .map(|l| (l.offset, l.token))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (0, bare("ab")),
+            (4, Token::Redir(LexRedir::Dup { from: 2, to: 1 })),
+            (9, SEMI),
+            (11, bare("c")),
+            (12, NL),
+            (13, PIPE),
+            (14, bare("d")),
+        ]
+    );
 }
 
 fn err(input: &[u8]) -> (K, usize) {
@@ -534,7 +561,7 @@ proptest! {
         let rendered: Vec<String> = tokens.iter().map(render).collect();
         let input = join(&tokens, &rendered);
         let want: Vec<Token> = tokens.iter().map(expected).collect();
-        prop_assert_eq!(lex(input.as_bytes()).unwrap(), want, "input: {:?}", input);
+        prop_assert_eq!(ok(&input), want, "input: {:?}", input);
     }
 
     #[test]
