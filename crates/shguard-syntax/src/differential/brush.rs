@@ -1,12 +1,13 @@
 //! Oracle 1: `brush-parser` 0.4.0.
 //!
-//! Entry points: `Parser::new(reader, &ParserOptions::default())
-//! .parse_program()` for the command structure (default options are bash
-//! mode: not POSIX, not `sh`), and `brush_parser::word::parse` for the value
-//! of each word. `ParserOptions::default()` enables tilde expansion at the
-//! start of a word and not after a colon, as bash does.
+//! Entry points: `Parser::new(reader, &options()).parse_program()` for the
+//! command structure, and `brush_parser::word::parse` for the value of each
+//! word. The options are the defaults (bash mode: not POSIX, not `sh`;
+//! tilde expansion at the start of a word and not after a colon) with
+//! extended globbing off, because non-interactive bash starts with `extglob`
+//! off.
 
-use super::{AndOrS, CPart, Conn, Shape, SimpleS, canon, corpus};
+use super::{AndOrS, CPart, Conn, Shape, SimpleS, canon, corpus, fd_digits, is_name};
 use brush_parser::ast::{
     AndOr, AndOrList, Command, CommandPrefixOrSuffixItem, IoFileRedirectKind, IoFileRedirectTarget,
     IoRedirect, Pipeline, SeparatorOperator, SimpleCommand, Word,
@@ -16,7 +17,10 @@ use brush_parser::{Parser, ParserOptions};
 use shguard_kernel::ast::Redir;
 
 fn options() -> ParserOptions {
-    ParserOptions::default()
+    ParserOptions {
+        enable_extended_globbing: false,
+        ..ParserOptions::default()
+    }
 }
 
 /// Text from an `EscapeSequence` piece: `\c` gives `c`, backslash-newline
@@ -47,6 +51,7 @@ fn parameter(expr: &ParameterExpr) -> Result<CPart, String> {
         parameter: Parameter::Named(name),
         indirect: false,
     } = expr
+        && is_name(name.as_bytes())
     {
         Ok(CPart::Var(name.as_bytes().to_vec()))
     } else {
@@ -73,8 +78,10 @@ fn map_piece(node: &WordPiece, in_double: bool, out: &mut Vec<CPart>) -> Result<
             }
         }
         WordPiece::TildeExpansion(TildeExpr::Home) if !in_double => out.push(CPart::Tilde),
-        WordPiece::ParameterExpansion(expr) => out.push(parameter(expr)?),
-        WordPiece::AnsiCQuotedText(_)
+        WordPiece::ParameterExpansion(expr) if in_double => out.push(parameter(expr)?),
+        // An unquoted expansion is outside the subset.
+        WordPiece::ParameterExpansion(_)
+        | WordPiece::AnsiCQuotedText(_)
         | WordPiece::DoubleQuotedSequence(_)
         | WordPiece::GettextDoubleQuotedSequence(_)
         | WordPiece::TildeExpansion(_)
@@ -95,6 +102,25 @@ fn word(word: &Word) -> Result<Vec<CPart>, String> {
         map_piece(&item.piece, false, &mut out)?;
     }
     Ok(canon(out))
+}
+
+/// Parses the text of an assignment-shaped argument with tilde expansion at
+/// the start and after colons, and fails if any tilde expansion comes out.
+fn assignment_has_no_tilde(word: &Word) -> Result<(), String> {
+    let opts = ParserOptions {
+        tilde_expansion_at_word_start: true,
+        tilde_expansion_after_colon: true,
+        ..options()
+    };
+    let pieces = brush_parser::word::parse(&word.value, &opts)
+        .map_err(|err| format!("word parse error on {:?}: {err}", word.value))?;
+    if pieces
+        .iter()
+        .any(|item| matches!(item.piece, WordPiece::TildeExpansion(_)))
+    {
+        return Err(format!("tilde expanded inside {:?}", word.value));
+    }
+    Ok(())
 }
 
 fn fd_number(fd: i32) -> Result<u8, String> {
@@ -118,9 +144,7 @@ fn redirect(redirect: &IoRedirect) -> Result<Redir, String> {
             let value = word(target)?;
             match value.as_slice() {
                 [CPart::Lit(digits)] => {
-                    let to = std::str::from_utf8(digits)
-                        .ok()
-                        .and_then(|s| s.parse::<u8>().ok())
+                    let to = fd_digits(digits)
                         .ok_or_else(|| format!("duplicate target {target:?} is not a number"))?;
                     Ok(Redir::Dup { from, to })
                 }
@@ -163,9 +187,14 @@ fn simple(command: &SimpleCommand) -> Result<SimpleS, String> {
                 CommandPrefixOrSuffixItem::IoRedirect(r) => redirs.push(redirect(r)?),
                 CommandPrefixOrSuffixItem::Word(w) => words.push(word(w)?),
                 // brush-parser tags an argument like `A=b` as an assignment
-                // word but keeps the argument's text in the word; after the
-                // command name bash reads it as a plain argument.
-                CommandPrefixOrSuffixItem::AssignmentWord(_, w) => words.push(word(w)?),
+                // word but keeps the argument's text in the word. After the
+                // command name bash reads it as an argument, but outside
+                // POSIX mode it still expands a tilde after `=` or `:`, so
+                // any tilde expansion there is a disagreement.
+                CommandPrefixOrSuffixItem::AssignmentWord(_, w) => {
+                    assignment_has_no_tilde(w)?;
+                    words.push(word(w)?);
+                }
                 CommandPrefixOrSuffixItem::ProcessSubstitution(..) => {
                     return Err(format!("unmappable suffix item {item:?}"));
                 }

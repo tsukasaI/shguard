@@ -8,7 +8,9 @@
 //!
 //! The last two are `#[ignore]`d because they need the tools from the flake
 //! devShell: run them with
-//! `nix develop -c cargo test -p shguard-syntax --locked -- --include-ignored`.
+//! `nix develop -c cargo test -p shguard-syntax --locked -- --include-ignored --nocapture`
+//! (`--nocapture`, because a failing test under the devShell aborts and loses
+//! the captured panic message).
 //! When run, a missing tool is a failure, not a skip.
 //!
 //! Both our AST and each oracle's tree are mapped into the canonical
@@ -25,8 +27,9 @@ use crate::parse;
 use proptest::strategy::{Strategy, ValueTree};
 use proptest::test_runner::TestRunner;
 use shguard_kernel::ast::{AndOr, Connector, Opaque, Part, Pipeline, Redir, Script, Simple, Word};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// Generated scripts per oracle.
 const GENERATED: usize = 256;
@@ -46,11 +49,42 @@ struct SimpleS {
     redirs: Vec<Redir>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum CPart {
     Lit(Vec<u8>),
     Var(Vec<u8>),
     Tilde,
+}
+
+/// Prints bytes as text, so a failure reads `Lit("echo")` and not a list of
+/// numbers.
+impl std::fmt::Debug for CPart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CPart::Lit(bytes) => write!(f, "Lit(\"{}\")", bytes.escape_ascii()),
+            CPart::Var(bytes) => write!(f, "Var(\"{}\")", bytes.escape_ascii()),
+            CPart::Tilde => write!(f, "Tilde"),
+        }
+    }
+}
+
+/// A file descriptor written as ASCII digits only (`+1` is not one).
+fn fd_digits(text: &[u8]) -> Option<u8> {
+    if text.is_empty() || !text.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(text).ok()?.parse().ok()
+}
+
+/// `[A-Za-z_][A-Za-z0-9_]*`
+fn is_name(text: &[u8]) -> bool {
+    match text.split_first() {
+        Some((first, rest)) => {
+            (first.is_ascii_alphabetic() || *first == b'_')
+                && rest.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+        }
+        None => false,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -420,17 +454,17 @@ fn corpus() -> Corpus {
 impl Corpus {
     /// Prints the counts and fails when the corpus is too thin to mean
     /// anything.
-    fn report(&self, oracle: &str, compared: usize) {
+    fn report(&self, oracle: &str) {
         eprintln!(
             "{oracle}: acceptance {}/{} accepted, edge {}/{} accepted, generated {}; \
-             compared {compared} accepted inputs",
+             compared {} accepted inputs",
             self.acceptance_accepted,
             self.acceptance_total,
             self.edge_accepted,
             self.edge_total,
             self.generated,
+            self.cases.len(),
         );
-        assert_eq!(compared, self.cases.len());
         assert!(self.acceptance_accepted > 0, "no acceptance command parsed");
         assert!(self.edge_accepted > 0, "no edge input parsed");
     }
@@ -452,7 +486,7 @@ impl Corpus {
                 )),
             }
         }
-        self.report(oracle, self.cases.len());
+        self.report(oracle);
         assert!(
             failures.is_empty(),
             "{} of {} accepted inputs disagree with {oracle}:\n{}",
@@ -480,7 +514,37 @@ fn run(program: &str, args: &[&str], input: &str) -> std::process::Output {
     let writer = std::thread::spawn(move || {
         let _ = stdin.write_all(&bytes);
     });
-    let output = child.wait_with_output().expect("wait for the child");
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let mut stderr = child.stderr.take().expect("piped stderr");
+    let out_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        buf
+    });
+    let err_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr.read_to_end(&mut buf);
+        buf
+    });
+    let deadline = Instant::now() + TIMEOUT;
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("wait for the child") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("{program} did not finish within {TIMEOUT:?} on {input:?}");
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    };
     writer.join().expect("stdin writer");
-    output
+    std::process::Output {
+        status,
+        stdout: out_reader.join().expect("stdout reader"),
+        stderr: err_reader.join().expect("stderr reader"),
+    }
 }
+
+/// How long a spawned tool may run on one input.
+const TIMEOUT: Duration = Duration::from_secs(10);

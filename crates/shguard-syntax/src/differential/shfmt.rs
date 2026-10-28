@@ -7,7 +7,8 @@
 //! and `a 2>&1` 68. Any other code is a disagreement.
 
 use super::{
-    AndOrS, CPart, Conn, Shape, SimpleS, canon, corpus, run, unescape_double, unescape_unquoted,
+    AndOrS, CPart, Conn, Shape, SimpleS, canon, corpus, fd_digits, is_name, run, unescape_double,
+    unescape_unquoted,
 };
 use serde_json::Value;
 use shguard_kernel::ast::Redir;
@@ -56,6 +57,9 @@ fn param_exp(node: &Value) -> Result<CPart, String> {
         "Param",
     )?;
     let name = str_field(param, "Value").ok_or("Param without Value")?;
+    if !is_name(name.as_bytes()) {
+        return Err(format!("parameter {name:?} is not a plain variable name"));
+    }
     Ok(CPart::Var(name.as_bytes().to_vec()))
 }
 
@@ -128,7 +132,7 @@ fn word(node: &Value) -> Result<Vec<CPart>, String> {
                 }
                 double_quoted(part, &mut out)?;
             }
-            Some("ParamExp") => out.push(param_exp(part)?),
+            Some("ParamExp") => return Err("unquoted parameter expansion".to_string()),
             Some(other) => return Err(format!("unmappable word part {other}")),
             None => return Err("word part without Type".to_string()),
         }
@@ -143,19 +147,19 @@ fn redirect(node: &Value) -> Result<Redir, String> {
         "Redirect",
     )?;
     let from = match node.get("N") {
-        Some(n) => str_field(n, "Value")
-            .and_then(|s| s.parse::<u8>().ok())
-            .ok_or("redirect N is not a descriptor number")?,
+        Some(n) => {
+            only_keys(n, &["Pos", "End", "ValuePos", "ValueEnd", "Value"], "N")?;
+            str_field(n, "Value")
+                .and_then(|s| fd_digits(s.as_bytes()))
+                .ok_or("redirect N is not a descriptor number")?
+        }
         None => 1,
     };
     let target = word(node.get("Word").ok_or("redirect without Word")?)?;
     match node.get("Op").and_then(Value::as_u64) {
         Some(OP_DUP_OUT) => match target.as_slice() {
             [CPart::Lit(digits)] => {
-                let to = std::str::from_utf8(digits)
-                    .ok()
-                    .and_then(|s| s.parse::<u8>().ok())
-                    .ok_or("duplicate target is not a number")?;
+                let to = fd_digits(digits).ok_or("duplicate target is not a number")?;
                 Ok(Redir::Dup { from, to })
             }
             _ => Err(format!("unmappable duplicate target {target:?}")),
@@ -201,6 +205,64 @@ fn cmd_of(stmt: &Value) -> Result<&Value, String> {
 /// `typeset`): the builtin name, then each argument. mvdan/sh parses the
 /// arguments as assignments; inside the accepted subset the argv bash builds
 /// equals the plain words, so each one maps back to its text.
+/// Whether an unquoted `~` follows an unquoted `=` or `:` in an
+/// assignment-shaped word (`NAME=` or `NAME+=` at the start), where bash
+/// expands it outside POSIX mode. Written here, not borrowed from the lexer,
+/// so the oracle stays independent of it.
+fn assignment_tilde(parts: &[Value]) -> bool {
+    let Some(first) = parts.first() else {
+        return false;
+    };
+    if str_field(first, "Type") != Some("Lit") {
+        return false;
+    }
+    let raw = str_field(first, "Value").unwrap_or("").as_bytes();
+    let name_len = raw
+        .iter()
+        .position(|b| !(b.is_ascii_alphanumeric() || *b == b'_'))
+        .unwrap_or(raw.len());
+    let rest = raw.get(name_len..).unwrap_or(&[]);
+    let after_name = rest.strip_prefix(b"+").unwrap_or(rest);
+    if !is_name(raw.get(..name_len).unwrap_or(&[])) || !after_name.starts_with(b"=") {
+        return false;
+    }
+    // After the first `=`, `sep` says the previous byte was an unescaped `=`
+    // or `:`; a quoted part resets it.
+    let mut sep = false;
+    let mut started = false;
+    for part in parts {
+        if str_field(part, "Type") != Some("Lit") {
+            sep = false;
+            continue;
+        }
+        let bytes = str_field(part, "Value").unwrap_or("").as_bytes();
+        let mut i = 0;
+        while let Some(&b) = bytes.get(i) {
+            if !started {
+                // Skip to just after the first `=`.
+                if b == b'=' {
+                    started = true;
+                    sep = true;
+                }
+                i += 1;
+                continue;
+            }
+            match b {
+                b'\\' => {
+                    sep = false;
+                    i += 2;
+                    continue;
+                }
+                b'~' if sep => return true,
+                b'=' | b':' => sep = true,
+                _ => sep = false,
+            }
+            i += 1;
+        }
+    }
+    false
+}
+
 fn decl_words(cmd: &Value) -> Result<Vec<Vec<CPart>>, String> {
     only_keys(
         cmd,
@@ -262,12 +324,17 @@ fn simple(stmt: &Value) -> Result<SimpleS, String> {
             {
                 return Err("assignment".to_string());
             }
-            cmd.get("Args")
+            let args = cmd
+                .get("Args")
                 .and_then(Value::as_array)
-                .ok_or("CallExpr without Args")?
-                .iter()
-                .map(word)
-                .collect::<Result<Vec<_>, _>>()?
+                .ok_or("CallExpr without Args")?;
+            for arg in args {
+                let parts = arg.get("Parts").and_then(Value::as_array);
+                if assignment_tilde(parts.map_or(&[][..], Vec::as_slice)) {
+                    return Err("tilde expanded inside an assignment-shaped word".to_string());
+                }
+            }
+            args.iter().map(word).collect::<Result<Vec<_>, _>>()?
         }
         Some("DeclClause") => decl_words(cmd)?,
         other => return Err(format!("unmappable command {other:?}")),

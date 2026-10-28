@@ -41,7 +41,7 @@ fn bash_n_accepts_accepted_inputs() {
             ));
         }
     }
-    corpus.report("bash -n", corpus.cases.len());
+    corpus.report("bash -n");
     assert!(
         failures.is_empty(),
         "{} of {} accepted inputs rejected by bash -n:\n{}",
