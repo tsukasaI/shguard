@@ -648,8 +648,8 @@ impl Lexer<'_> {
     /// of a multibyte character, and bash then does not treat it as an escape
     /// (`echo \x83\;printf BOOM` runs `printf`). The test is "previous byte
     /// is at least 0x80", not "previous byte is a lead byte", because that
-    /// depends on the encoding: `日\` is a `\` after a complete character in SJIS terms, but
-    /// `A5 5C` is a single GBK character.
+    /// depends on the encoding: `日\` is a `\` after a complete character in
+    /// SJIS terms, but `A5 5C` is a single GBK character.
     fn reject_backslash_after_non_ascii(&self) -> Result<(), Unsupported> {
         let before = self.pos.checked_sub(1).and_then(|i| self.input.get(i));
         if before.is_some_and(|b| *b >= 0x80) {
