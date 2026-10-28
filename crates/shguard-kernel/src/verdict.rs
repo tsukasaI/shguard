@@ -1,10 +1,14 @@
 //! Addresses into a script and the reasons a verdict carries.
 //!
-//! `Verdict` and `Witness` arrive in M6.
+//! The sealed `Witness` lives in [`crate::classify`]; [`covered_at`] shows
+//! how a consumer uses its invariant. `Verdict` arrives in M7.
 
 #[cfg(creusot)]
 use crate::ast::Pipeline;
 use crate::ast::{Script, Simple};
+use crate::classify::Witness;
+#[cfg(creusot)]
+use crate::classify::covered_simple;
 use crate::rule::RuleId;
 #[cfg(creusot)]
 use creusot_std::prelude::{Clone, PartialEq, *};
@@ -49,6 +53,11 @@ pub enum UnknownKind {
     CodeRole,
     /// The row marks the command as running other code.
     RunsCode,
+    /// The first matching row in catalog order is a parent row (one whose
+    /// key another row extends) and the command has an operand there:
+    /// likely a subcommand the catalog does not list (`git push` with only
+    /// `["git"]` and `["git", "status"]`).
+    UnknownSubcommand,
     /// A redirect the model cannot reason about.
     Redirect,
 }
@@ -128,6 +137,22 @@ pub fn simple_at(s: &Script, a: Addr) -> Option<&Simple> {
         return None;
     }
     Some(cmd)
+}
+
+/// The simple command at `a` of a certified script, or `None` when `a` is
+/// out of range.
+///
+/// The contract's `covered_simple` comes only from the [`Witness`]
+/// invariant: nothing ties `w` to a catalog or a check here.
+#[cfg_attr(creusot, check(terminates))]
+#[cfg_attr(creusot, ensures(match result {
+    Some(x) => valid_addr(w.script, a) && *x == simple_at_l(w.script, a)
+        && covered_simple(*w.cat, *x),
+    None => !valid_addr(w.script, a),
+}))]
+#[must_use]
+pub fn covered_at(w: &Witness, a: Addr) -> Option<&Simple> {
+    simple_at(w.script(), a)
 }
 
 #[cfg(test)]

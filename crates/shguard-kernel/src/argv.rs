@@ -55,6 +55,8 @@ pub enum Slot {
 #[cfg_attr(not(creusot), derive(PartialEq, Eq))]
 pub struct Parse {
     /// One slot per word from `start`: `slots[j]` is word `start + j`.
+    /// [`parse_argv`]'s contract proves the length; the alignment holds by
+    /// construction of `argv_go` and is not stated separately.
     pub(crate) slots: Vec<Slot>,
     /// Indices into the grammar's `opts` of every option that occurs, in
     /// order, one entry per occurrence (`-rf` adds two).
@@ -460,7 +462,7 @@ fn push_ix(seen: &mut Vec<usize>, o: usize) {
 #[cfg_attr(creusot, check(terminates))]
 #[cfg_attr(creusot, ensures(result.0@ == lit_prefix(w.parts@, 0)))]
 #[cfg_attr(creusot, ensures(result.1 == has_opaque(w.parts@, 0)))]
-fn word_view(w: &Word) -> (Vec<u8>, bool) {
+pub(crate) fn word_view(w: &Word) -> (Vec<u8>, bool) {
     let parts = &w.parts;
     let mut out: Vec<u8> = Vec::new();
     #[cfg(creusot)]
@@ -697,9 +699,18 @@ fn operand_role(g: &Grammar, k: usize) -> Option<Role> {
 /// there are no arguments.
 ///
 /// The result is exactly `argv_spec`: see the module docs for how words are
-/// read.
+/// read. Besides, an Unknown index is a word of `ws`, and a parse has one
+/// slot per word from `start`.
+///
+/// Only the length (`slots.len() == ws.len() - start`) is proved. That
+/// `slots[j]` describes word `start + j` holds by construction of
+/// `argv_go`, but the contract does not state it separately.
 #[cfg_attr(creusot, check(terminates))]
 #[cfg_attr(creusot, ensures(argv_view(result) == argv_spec(*g, ws@, start@)))]
+#[cfg_attr(creusot, ensures(match result {
+    ArgvResult::Parsed(p) => start@ <= ws@.len() ==> p.slots@.len() == ws@.len() - start@,
+    ArgvResult::Unknown(_, i) => i@ < ws@.len(),
+}))]
 #[must_use]
 #[expect(
     clippy::module_name_repetitions,
@@ -718,6 +729,8 @@ pub fn parse_argv(g: &Grammar, ws: &[Word], start: usize) -> ArgvResult {
     };
     #[cfg_attr(creusot, variant(ws@.len() - i@))]
     #[cfg_attr(creusot, invariant(k@ <= i@))]
+    #[cfg_attr(creusot, invariant(start@ <= ws@.len() ==>
+        i@ <= ws@.len() && slots@.len() == i@ - start@))]
     #[cfg_attr(creusot, invariant(
         argv_go(*g, ws@, i@, ended, k@, slots@, ints(seen@)) == argv_spec(*g, ws@, start@)))]
     while i < ws.len() {
