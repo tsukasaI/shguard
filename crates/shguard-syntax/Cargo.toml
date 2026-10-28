@@ -10,6 +10,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+shguard-kernel = { path = "../shguard-kernel", version = "0.0.0" }
 thiserror = "2.0.21"
 
 [dev-dependencies]

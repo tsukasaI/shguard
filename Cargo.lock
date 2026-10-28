@@ -437,6 +437,7 @@ name = "shguard-syntax"
 version = "0.0.0"
 dependencies = [
  "proptest",
+ "shguard-kernel",
  "thiserror",
 ]
 

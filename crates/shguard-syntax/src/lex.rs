@@ -218,9 +218,39 @@ pub enum UnsupportedKind {
     /// A `>` target other than `/dev/null`.
     #[error("redirect target other than /dev/null")]
     RedirectTarget,
+    /// A `;` where a command must start: at the start of the script or right
+    /// after another separator (`;a`, `a; ;b`, `a\n;b`). Reported by the
+    /// parser.
+    #[error("`;` where a command must start")]
+    LeadingSeparator,
+    /// A `|`, `&&` or `||` where a command must start, or the end of the
+    /// input right after one (`| a`, `a |`, `a &&`). Reported by the parser.
+    #[error("missing command")]
+    MissingCommand,
+    /// A command with redirects but no word (`>/dev/null`). Reported by the
+    /// parser.
+    #[error("redirect without a command")]
+    RedirectOnly,
+    /// An assignment-shaped first word (`FOO=1 cmd`). Reported by the
+    /// parser.
+    #[error("assignment")]
+    Assignment,
+    /// An unquoted reserved word as the first word of a command (`if`,
+    /// `time`, `!`, ...). Reported by the parser.
+    #[error("reserved word")]
+    ReservedWord,
+    /// More than 4096 words in the script. Reported by the parser.
+    #[error("more than 4096 words")]
+    TooManyWords,
+    /// A token the grammar cannot have after a complete and-or list. The
+    /// grammar as implemented never produces it; it stays so that the parser
+    /// fails closed instead of reading on. Reported by the parser.
+    #[error("unexpected token")]
+    UnexpectedToken,
 }
 
-/// The first construct outside the subset, and where it starts.
+/// A construct outside the subset, and where it starts. The lexer reports the
+/// first one it meets; the parser only runs on input the lexer accepted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("unsupported at byte {offset}: {kind}")]
 pub struct Unsupported {
