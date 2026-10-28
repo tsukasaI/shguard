@@ -119,6 +119,9 @@ fn assignment_has_no_tilde(assignment: &Assignment) -> Result<(), String> {
         tilde_expansion_after_colon: true,
         ..options()
     };
+    // Left strict, not corrected: brush-parser treats an escaped `\:` as a
+    // separator, so `a=b\:~` is reported although bash keeps it literal. The
+    // error is on the failing side, never a missed disagreement.
     let pieces = brush_parser::word::parse(&value.value, &opts)
         .map_err(|err| format!("word parse error on {:?}: {err}", value.value))?;
     if pieces
