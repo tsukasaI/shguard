@@ -70,8 +70,7 @@ const RESERVED: &[&[u8]] = &[
 pub fn parse(input: &[u8]) -> Result<Script, Unsupported> {
     let lexemes = lex(input)?;
     Parser {
-        lexemes: lexemes.into_iter(),
-        back: None,
+        lexemes: lexemes.into_iter().peekable(),
         eof: input.len(),
         words: 0,
     }
@@ -82,10 +81,24 @@ fn fail(kind: UnsupportedKind, offset: usize) -> Unsupported {
     Unsupported { kind, offset }
 }
 
+/// What ended a pipeline, other than `|`.
+#[derive(Clone, Copy)]
+enum AfterPipeline {
+    AndIf,
+    OrIf,
+    Semi,
+    Newline,
+}
+
+/// What ended an and-or list.
+#[derive(Clone, Copy)]
+enum Sep {
+    Semi,
+    Newline,
+}
+
 struct Parser {
-    lexemes: std::vec::IntoIter<Lexeme>,
-    /// One lexeme of lookahead.
-    back: Option<Lexeme>,
+    lexemes: std::iter::Peekable<std::vec::IntoIter<Lexeme>>,
     /// The input length, the offset of end-of-input errors.
     eof: usize,
     /// Words taken so far.
@@ -93,89 +106,83 @@ struct Parser {
 }
 
 impl Parser {
-    fn next(&mut self) -> Option<Lexeme> {
-        self.back.take().or_else(|| self.lexemes.next())
-    }
-
-    fn unread(&mut self, lexeme: Lexeme) {
-        self.back = Some(lexeme);
-    }
-
-    fn peek(&mut self) -> Option<&Lexeme> {
-        if self.back.is_none() {
-            self.back = self.lexemes.next();
-        }
-        self.back.as_ref()
-    }
-
     fn skip_newlines(&mut self) {
-        while let Some(lexeme) = self.next() {
-            if lexeme.token != Token::Op(Op::Newline) {
-                self.unread(lexeme);
-                return;
-            }
-        }
+        while self
+            .lexemes
+            .next_if(|lexeme| lexeme.token == Token::Op(Op::Newline))
+            .is_some()
+        {}
     }
 
     fn script(&mut self) -> Result<Script, Unsupported> {
         let mut items = Vec::new();
         self.skip_newlines();
-        while self.peek().is_some() {
-            items.push(self.and_or()?);
-            match self.next() {
+        while self.lexemes.peek().is_some() {
+            let (item, sep) = self.and_or()?;
+            items.push(item);
+            match sep {
                 None => break,
-                Some(Lexeme {
-                    token: Token::Op(Op::Semi | Op::Newline),
-                    ..
-                }) => self.skip_newlines(),
-                Some(other) => {
-                    return Err(fail(UnsupportedKind::UnexpectedToken, other.offset));
-                }
+                Some(Sep::Semi | Sep::Newline) => self.skip_newlines(),
             }
         }
         Ok(Script::new(items))
     }
 
-    fn and_or(&mut self) -> Result<AndOr, Unsupported> {
-        let first = self.pipeline()?;
+    /// Parses an and-or list and returns the separator that ended it, or
+    /// `None` at the end of the input.
+    fn and_or(&mut self) -> Result<(AndOr, Option<Sep>), Unsupported> {
+        let (first, mut after) = self.pipeline()?;
         let mut rest = Vec::new();
-        while let Some(lexeme) = self.next() {
-            let op = match lexeme.token {
-                Token::Op(Op::AndIf) => Connector::And,
-                Token::Op(Op::OrIf) => Connector::Or,
-                Token::Word(_) | Token::Redir(_) | Token::Op(_) => {
-                    self.unread(lexeme);
-                    break;
-                }
+        let sep = loop {
+            let connector = match after {
+                Some(AfterPipeline::AndIf) => Connector::And,
+                Some(AfterPipeline::OrIf) => Connector::Or,
+                Some(AfterPipeline::Semi) => break Some(Sep::Semi),
+                Some(AfterPipeline::Newline) => break Some(Sep::Newline),
+                None => break None,
             };
             self.skip_newlines();
-            rest.push(Link::new(op, self.pipeline()?));
-        }
-        Ok(AndOr::new(first, rest))
+            let (pipeline, next) = self.pipeline()?;
+            rest.push(Link::new(connector, pipeline));
+            after = next;
+        };
+        Ok((AndOr::new(first, rest), sep))
     }
 
-    fn pipeline(&mut self) -> Result<Pipeline, Unsupported> {
-        let first = self.simple()?;
+    /// Parses a pipeline and returns the operator that ended it, or `None`
+    /// at the end of the input.
+    fn pipeline(&mut self) -> Result<(Pipeline, Option<AfterPipeline>), Unsupported> {
+        let (first, mut end) = self.simple()?;
         let mut rest = Vec::new();
-        while let Some(lexeme) = self.next() {
-            if lexeme.token == Token::Op(Op::Pipe) {
-                self.skip_newlines();
-                rest.push(self.simple()?);
-            } else {
-                self.unread(lexeme);
-                break;
+        let after = loop {
+            match end {
+                Some(Op::Pipe) => {
+                    self.skip_newlines();
+                    let (simple, next) = self.simple()?;
+                    rest.push(simple);
+                    end = next;
+                }
+                Some(Op::AndIf) => break Some(AfterPipeline::AndIf),
+                Some(Op::OrIf) => break Some(AfterPipeline::OrIf),
+                Some(Op::Semi) => break Some(AfterPipeline::Semi),
+                Some(Op::Newline) => break Some(AfterPipeline::Newline),
+                None => break None,
             }
-        }
-        Ok(Pipeline::with_first(first, rest))
+        };
+        Ok((Pipeline::with_first(first, rest), after))
     }
 
-    fn simple(&mut self) -> Result<Simple, Unsupported> {
+    /// Parses a simple command and returns the operator that ended it, or
+    /// `None` at the end of the input.
+    fn simple(&mut self) -> Result<(Simple, Option<Op>), Unsupported> {
         let eof = self.eof;
-        let start = self.peek().map_or(eof, |lexeme| lexeme.offset);
+        let start = self.lexemes.peek().map_or(eof, |lexeme| lexeme.offset);
         let mut first: Option<Word> = None;
         let mut rest = Vec::new();
         let mut redirs = Vec::new();
-        while let Some(Lexeme { offset, token }) = self.next() {
+        // The operator that ended the command and where it stands.
+        let mut end: Option<(Op, usize)> = None;
+        for Lexeme { offset, token } in self.lexemes.by_ref() {
             match token {
                 Token::Word(lex_word) => {
                     if self.words >= MAX_WORDS {
@@ -191,33 +198,31 @@ impl Parser {
                 }
                 Token::Redir(redir) => redirs.push(convert_redir(redir)),
                 Token::Op(op) => {
-                    self.unread(Lexeme {
-                        offset,
-                        token: Token::Op(op),
-                    });
+                    end = Some((op, offset));
                     break;
                 }
             }
         }
         match first {
-            Some(first) => Ok(Simple::with_first(first, rest, redirs)),
-            None if redirs.is_empty() => Err(self.missing_command()),
+            Some(first) => Ok((
+                Simple::with_first(first, rest, redirs),
+                end.map(|(op, _)| op),
+            )),
+            None if redirs.is_empty() => Err(missing_command(end, eof)),
             None => Err(fail(UnsupportedKind::RedirectOnly, start)),
         }
     }
+}
 
-    /// The error for a command that is expected but not there, looking at
-    /// what stands in its place.
-    fn missing_command(&mut self) -> Unsupported {
-        let eof = self.eof;
-        match self.peek() {
-            Some(Lexeme {
-                offset,
-                token: Token::Op(Op::Semi),
-            }) => fail(UnsupportedKind::LeadingSeparator, *offset),
-            Some(lexeme) => fail(UnsupportedKind::MissingCommand, lexeme.offset),
-            None => fail(UnsupportedKind::MissingCommand, eof),
+/// The error for a command that is expected but not there, looking at the
+/// operator (or the end of the input) that stands in its place.
+fn missing_command(end: Option<(Op, usize)>, eof: usize) -> Unsupported {
+    match end {
+        Some((Op::Semi, offset)) => fail(UnsupportedKind::LeadingSeparator, offset),
+        Some((Op::Newline | Op::Pipe | Op::AndIf | Op::OrIf, offset)) => {
+            fail(UnsupportedKind::MissingCommand, offset)
         }
+        None => fail(UnsupportedKind::MissingCommand, eof),
     }
 }
 

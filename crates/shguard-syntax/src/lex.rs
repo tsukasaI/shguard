@@ -242,11 +242,6 @@ pub enum UnsupportedKind {
     /// More than 4096 words in the script. Reported by the parser.
     #[error("more than 4096 words")]
     TooManyWords,
-    /// A token the grammar cannot have after a complete and-or list. The
-    /// grammar as implemented never produces it; it stays so that the parser
-    /// fails closed instead of reading on. Reported by the parser.
-    #[error("unexpected token")]
-    UnexpectedToken,
 }
 
 /// A construct outside the subset, and where it starts. The lexer reports the
