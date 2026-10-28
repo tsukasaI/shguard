@@ -33,30 +33,36 @@ const MAX_WORDS: usize = 4096;
 /// Words that bash treats as reserved when they start a command. `[[`, `{`
 /// and `}` never reach the parser (the lexer rejects them); they stay so the
 /// list equals bash's `word_token_alist`.
-const RESERVED: &[&[u8]] = &[
-    b"if",
-    b"then",
-    b"else",
-    b"elif",
-    b"fi",
-    b"case",
-    b"esac",
-    b"for",
-    b"select",
-    b"while",
-    b"until",
-    b"do",
-    b"done",
-    b"in",
-    b"function",
-    b"time",
-    b"coproc",
-    b"!",
-    b"[[",
-    b"]]",
-    b"{",
-    b"}",
-];
+///
+/// A `matches!` rather than a slice search, so it has no loop for Kani to
+/// unwind.
+fn is_reserved(bytes: &[u8]) -> bool {
+    matches!(
+        bytes,
+        b"if"
+            | b"then"
+            | b"else"
+            | b"elif"
+            | b"fi"
+            | b"case"
+            | b"esac"
+            | b"for"
+            | b"select"
+            | b"while"
+            | b"until"
+            | b"do"
+            | b"done"
+            | b"in"
+            | b"function"
+            | b"time"
+            | b"coproc"
+            | b"!"
+            | b"[["
+            | b"]]"
+            | b"{"
+            | b"}"
+    )
+}
 
 /// Parses `input` into the kernel AST, or reports a construct outside the
 /// subset.
@@ -237,7 +243,7 @@ fn check_command_name(word: &LexWord, offset: usize) -> Result<(), Unsupported> 
         } => {
             if starts_with_assignment(bytes) {
                 Err(fail(UnsupportedKind::Assignment, offset))
-            } else if word.rest().is_empty() && RESERVED.contains(&bytes.as_slice()) {
+            } else if word.rest().is_empty() && is_reserved(bytes) {
                 Err(fail(UnsupportedKind::ReservedWord, offset))
             } else {
                 Ok(())

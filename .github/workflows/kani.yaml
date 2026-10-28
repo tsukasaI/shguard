@@ -43,10 +43,10 @@ jobs:
       fail-fast: false
       matrix:
         harness:
-          - parse_any_bytes_len_8
-          - parse_alphabet_len_12
+          - parse_any_bytes
+          - parse_alphabet
           - parse_dev_null_redirect
-          - lex_any_bytes_len_8
+          - lex_any_bytes
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

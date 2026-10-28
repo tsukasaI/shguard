@@ -5,9 +5,10 @@
 //! module exists only under `cfg(kani)`, so it indexes freely because Kani
 //! proves every index in bounds.
 //!
-//! Bounds: every input byte at length 8 (`*_any_bytes_len_8`), and the
-//! alphabet below at length 12. The unwind value must cover the longest loop
-//! a harness reaches (see the comment on the `parse` harnesses).
+//! Bounds: every input byte (`*_any_bytes`), or the alphabet below
+//! (`parse_alphabet`), at a small length. The bounds are measured, and each
+//! harness's length const records its measured CI time once known. The unwind
+//! value covers the longest loop a harness reaches.
 
 use crate::{lex, parse};
 
@@ -57,13 +58,15 @@ fn symbolic_input<const N: usize>() -> ([u8; N], usize) {
     (bytes, len)
 }
 
-// Not the input length plus a margin: `parse` searches the 22 reserved words
-// with a loop, so every `parse` harness needs at least 23.
+/// Longest input of `parse_any_bytes`. Measured CI time: not yet known.
+const PARSE_ANY_LEN: usize = 4;
+
+// Unwind: the input length plus the loop exits.
 #[::kani::proof]
-#[::kani::unwind(24)]
+#[::kani::unwind(6)]
 #[::kani::solver(cadical)]
-fn parse_any_bytes_len_8() {
-    let (bytes, len) = symbolic_input::<8>();
+fn parse_any_bytes() {
+    let (bytes, len) = symbolic_input::<PARSE_ANY_LEN>();
     match parse(&bytes[..len]) {
         Ok(_) => ::kani::cover!(true, "parse accepts"),
         Err(e) => {
@@ -73,12 +76,15 @@ fn parse_any_bytes_len_8() {
     }
 }
 
-// The alphabet bounds the branching, so the length can go to 12.
+/// Longest input of `parse_alphabet`. Measured CI time: not yet known.
+const PARSE_ALPHABET_LEN: usize = 6;
+
+// Unwind: the input length plus the loop exits.
 #[::kani::proof]
-#[::kani::unwind(24)]
+#[::kani::unwind(8)]
 #[::kani::solver(cadical)]
-fn parse_alphabet_len_12() {
-    let (bytes, len) = symbolic_input::<12>();
+fn parse_alphabet() {
+    let (bytes, len) = symbolic_input::<PARSE_ALPHABET_LEN>();
     let mut i = 0;
     while i < len {
         ::kani::assume(in_alphabet(bytes[i]));
@@ -94,20 +100,25 @@ fn parse_alphabet_len_12() {
 }
 
 /// `>/dev/null` between symbolic affixes: the only way to reach the
-/// `DevNull` success path of the redirect lexer.
+/// `DevNull` success path of the redirect lexer. Measured CI time: not yet
+/// known.
+const DEV_NULL_AFFIX_LEN: usize = 1;
+
+// Unwind: the literal's 10 bytes plus the loop exits, with a margin for the
+// affixes.
 #[::kani::proof]
-#[::kani::unwind(24)]
+#[::kani::unwind(14)]
 #[::kani::solver(cadical)]
 fn parse_dev_null_redirect() {
     const LITERAL: &[u8; 10] = b">/dev/null";
-    let prefix: [u8; 3] = ::kani::any();
+    let prefix: [u8; DEV_NULL_AFFIX_LEN] = ::kani::any();
     let prefix_len: usize = ::kani::any();
-    ::kani::assume(prefix_len <= 3);
-    let suffix: [u8; 3] = ::kani::any();
+    ::kani::assume(prefix_len <= DEV_NULL_AFFIX_LEN);
+    let suffix: [u8; DEV_NULL_AFFIX_LEN] = ::kani::any();
     let suffix_len: usize = ::kani::any();
-    ::kani::assume(suffix_len <= 3);
+    ::kani::assume(suffix_len <= DEV_NULL_AFFIX_LEN);
 
-    let mut input = [0u8; 16];
+    let mut input = [0u8; LITERAL.len() + 2 * DEV_NULL_AFFIX_LEN];
     let mut len = 0;
     let mut i = 0;
     while i < prefix_len {
@@ -136,11 +147,15 @@ fn parse_dev_null_redirect() {
     }
 }
 
+/// Longest input of `lex_any_bytes`. Measured CI time: not yet known.
+const LEX_ANY_LEN: usize = 4;
+
+// Unwind: the input length plus the loop exits.
 #[::kani::proof]
-#[::kani::unwind(10)]
+#[::kani::unwind(6)]
 #[::kani::solver(cadical)]
-fn lex_any_bytes_len_8() {
-    let (bytes, len) = symbolic_input::<8>();
+fn lex_any_bytes() {
+    let (bytes, len) = symbolic_input::<LEX_ANY_LEN>();
     match lex(&bytes[..len]) {
         Ok(lexemes) => {
             ::kani::cover!(true, "lex accepts");
