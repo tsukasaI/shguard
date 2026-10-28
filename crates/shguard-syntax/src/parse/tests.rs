@@ -218,6 +218,7 @@ fn rejected_inputs() {
         ("a | >/dev/null", K::RedirectOnly, 4),
         ("FOO=1 cmd", K::Assignment, 0),
         ("FOO=1", K::Assignment, 0),
+        ("ê=1 cmd", K::Assignment, 0),
         ("a; FOO+=1 b", K::Assignment, 3),
         (">/dev/null A=b cmd", K::Assignment, 11),
         ("if true", K::ReservedWord, 0),
