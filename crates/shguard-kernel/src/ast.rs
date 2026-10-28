@@ -67,6 +67,17 @@ impl Word {
         }
     }
 
+    /// Builds a word from its first part and the rest; infallible, since the
+    /// first part is present by construction.
+    #[cfg_attr(creusot, check(terminates))]
+    #[cfg_attr(creusot, ensures(result.parts@ == Seq::singleton(first).concat(rest@)))]
+    #[must_use]
+    pub fn with_first(first: Part, rest: Vec<Part>) -> Word {
+        let mut parts = rest;
+        parts.insert(0, first);
+        Word { parts }
+    }
+
     /// The parts of the word.
     #[cfg_attr(creusot, check(terminates))]
     #[cfg_attr(creusot, ensures(result@ == self.parts@))]
@@ -133,6 +144,19 @@ impl Simple {
         }
     }
 
+    /// Builds a simple command from its first word, the other words and the
+    /// redirects; infallible, since the first word is present by construction.
+    #[cfg_attr(creusot, check(terminates))]
+    #[cfg_attr(creusot, ensures(
+        result.words@ == Seq::singleton(first).concat(rest@) && result.redirs@ == redirs@
+    ))]
+    #[must_use]
+    pub fn with_first(first: Word, rest: Vec<Word>, redirs: Vec<Redir>) -> Simple {
+        let mut words = rest;
+        words.insert(0, first);
+        Simple { words, redirs }
+    }
+
     /// The words; the first is the command name.
     #[cfg_attr(creusot, check(terminates))]
     #[cfg_attr(creusot, ensures(result@ == self.words@))]
@@ -186,6 +210,17 @@ impl Pipeline {
         } else {
             Some(Pipeline { cmds })
         }
+    }
+
+    /// Builds a pipeline from its first command and the rest; infallible,
+    /// since the first command is present by construction.
+    #[cfg_attr(creusot, check(terminates))]
+    #[cfg_attr(creusot, ensures(result.cmds@ == Seq::singleton(first).concat(rest@)))]
+    #[must_use]
+    pub fn with_first(first: Simple, rest: Vec<Simple>) -> Pipeline {
+        let mut cmds = rest;
+        cmds.insert(0, first);
+        Pipeline { cmds }
     }
 
     /// The commands.
@@ -298,5 +333,48 @@ impl Script {
     #[must_use]
     pub fn items(&self) -> &[AndOr] {
         &self.items
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lit(s: &str) -> Part {
+        Part::Lit(s.as_bytes().to_vec())
+    }
+
+    fn word(s: &str) -> Word {
+        Word::with_first(lit(s), Vec::new())
+    }
+
+    fn cmd(s: &str) -> Simple {
+        Simple::with_first(word(s), Vec::new(), Vec::new())
+    }
+
+    #[test]
+    fn word_with_first_puts_first_in_front() {
+        let w = Word::with_first(lit("a"), vec![lit("b"), Part::Opaque(Opaque::Tilde)]);
+        assert_eq!(w.parts(), [lit("a"), lit("b"), Part::Opaque(Opaque::Tilde)]);
+        assert_eq!(Word::new(vec![lit("a")]), Some(word("a")));
+    }
+
+    #[test]
+    fn simple_with_first_puts_first_in_front() {
+        let redir = Redir::DevNull { fd: 1 };
+        let c = Simple::with_first(word("a"), vec![word("b")], vec![redir]);
+        assert_eq!(c.words(), [word("a"), word("b")]);
+        assert_eq!(c.redirs(), [redir]);
+        assert_eq!(Simple::new(vec![word("a")], Vec::new()), Some(cmd("a")));
+    }
+
+    #[test]
+    fn pipeline_with_first_puts_first_in_front() {
+        let p = Pipeline::with_first(cmd("a"), vec![cmd("b")]);
+        assert_eq!(p.cmds(), [cmd("a"), cmd("b")]);
+        assert_eq!(
+            Pipeline::new(vec![cmd("a")]),
+            Some(Pipeline::with_first(cmd("a"), Vec::new()))
+        );
     }
 }

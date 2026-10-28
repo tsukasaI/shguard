@@ -22,7 +22,9 @@ fn var(s: &str) -> LexPart {
 }
 
 fn word(parts: Vec<LexPart>) -> Token {
-    Token::Word(LexWord::new(parts).unwrap())
+    let mut parts = parts.into_iter();
+    let first = parts.next().unwrap();
+    Token::Word(LexWord::new(first, parts.collect()))
 }
 
 fn bare(s: &str) -> Token {
@@ -30,7 +32,32 @@ fn bare(s: &str) -> Token {
 }
 
 fn ok(input: &str) -> Vec<Token> {
-    lex(input.as_bytes()).unwrap()
+    lex(input.as_bytes())
+        .unwrap()
+        .into_iter()
+        .map(|l| l.token)
+        .collect()
+}
+
+#[test]
+fn lexemes_carry_start_offsets() {
+    let got: Vec<(usize, Token)> = lex(b"ab  2>&1 ; c\n|d")
+        .unwrap()
+        .into_iter()
+        .map(|l| (l.offset, l.token))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (0, bare("ab")),
+            (4, Token::Redir(LexRedir::Dup { from: 2, to: 1 })),
+            (9, SEMI),
+            (11, bare("c")),
+            (12, NL),
+            (13, PIPE),
+            (14, bare("d")),
+        ]
+    );
 }
 
 fn err(input: &[u8]) -> (K, usize) {
@@ -510,6 +537,17 @@ fn expected(g: &Gen) -> Token {
     }
 }
 
+/// Bytes biased to the shell metacharacters, shared with the parser tests.
+pub(crate) fn interesting_bytes() -> impl Strategy<Value = Vec<u8>> {
+    prop::collection::vec(
+        prop_oneof![
+            9 => prop::sample::select(b" \t\n;&|<>()'\"\\$`{}*?[~#=:+/0123456789aA_!".to_vec()),
+            1 => any::<u8>(),
+        ],
+        0..128,
+    )
+}
+
 proptest! {
     #[test]
     fn never_panics(bytes in prop::collection::vec(any::<u8>(), 0..512)) {
@@ -517,15 +555,7 @@ proptest! {
     }
 
     #[test]
-    fn never_panics_on_interesting_bytes(
-        bytes in prop::collection::vec(
-            prop_oneof![
-                9 => prop::sample::select(b" \t\n;&|<>()'\"\\$`{}*?[~#=:+/0123456789aA_".to_vec()),
-                1 => any::<u8>(),
-            ],
-            0..128,
-        )
-    ) {
+    fn never_panics_on_interesting_bytes(bytes in interesting_bytes()) {
         let _ = lex(&bytes);
     }
 
@@ -534,7 +564,7 @@ proptest! {
         let rendered: Vec<String> = tokens.iter().map(render).collect();
         let input = join(&tokens, &rendered);
         let want: Vec<Token> = tokens.iter().map(expected).collect();
-        prop_assert_eq!(lex(input.as_bytes()).unwrap(), want, "input: {:?}", input);
+        prop_assert_eq!(ok(&input), want, "input: {:?}", input);
     }
 
     #[test]
