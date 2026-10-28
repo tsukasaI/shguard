@@ -74,6 +74,10 @@ jobs:
       - name: Prove kernel
         working-directory: crates/shguard-kernel
         run: nix develop ../.. -c cargo creusot --span-mode relative
+      # The shfmt and bash 5 oracles live in the devShell, so the ignored
+      # differential tests run here rather than in the `rust` job.
+      - name: Differential tests
+        run: nix develop -c cargo test -p shguard-syntax --locked -- --include-ignored
       - if: github.ref == 'refs/heads/main'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
