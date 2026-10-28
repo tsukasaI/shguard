@@ -736,4 +736,100 @@ mod tests {
         };
         check_second_uncovered(sc, want, UnknownKind::UnknownOption);
     }
+
+    #[test]
+    fn split_literal_key_word_matches() {
+        // `gi''t status`: the key word's bytes are the concatenation.
+        let gi_t = Word::new(vec![
+            Part::Lit(b"gi".to_vec()),
+            Part::Lit(Vec::new()),
+            Part::Lit(b"t".to_vec()),
+        ])
+        .expect("non-empty");
+        let s = Simple::new(vec![gi_t, lit_word("status")], Vec::new()).expect("non-empty");
+        assert_eq!(
+            classify_simple(&catalog(), &s),
+            SimpleClass::Covered { row: 2 }
+        );
+    }
+
+    #[test]
+    fn opaque_operand_of_parent_is_unknown() {
+        // `git $X`: the parent `["git"]` must not cover it.
+        let var = Word::new(vec![Part::Opaque(Opaque::Var(b"X".to_vec()))]).expect("non-empty");
+        let s = Simple::new(vec![lit_word("git"), var], Vec::new()).expect("non-empty");
+        assert_eq!(
+            classify_simple(&catalog(), &s),
+            unknown(UnknownKind::OpaqueOption, 1)
+        );
+    }
+
+    #[test]
+    fn non_permuting_parent_operand_after_option() {
+        // `git_grammar` has `permute: false`.
+        assert_eq!(
+            classify_simple(&catalog(), &cmd(&["git", "--version", "push"])),
+            unknown(UnknownKind::UnknownSubcommand, 2)
+        );
+    }
+
+    #[test]
+    fn redirects_do_not_affect_coverage() {
+        use crate::ast::Redir;
+        let words = || vec![lit_word("ls"), lit_word("-la")];
+        let redirs = [
+            Redir::Dup { from: 2, to: 1 },
+            Redir::Dup { from: 1, to: 2 },
+            Redir::DevNull { fd: 1 },
+        ];
+        for r in redirs {
+            let s = Simple::new(words(), vec![r]).expect("non-empty");
+            assert_eq!(
+                classify_simple(&catalog(), &s),
+                SimpleClass::Covered { row: 0 },
+                "{r:?}"
+            );
+        }
+        let all = Simple::new(words(), redirs.to_vec()).expect("non-empty");
+        assert_eq!(
+            classify_simple(&catalog(), &all),
+            SimpleClass::Covered { row: 0 }
+        );
+    }
+
+    #[test]
+    fn first_uncovered_in_a_later_item() {
+        // `ls ; unknowntool ; ls`
+        let sc = Script::new(vec![
+            AndOr::new(pipeline(vec![cmd(&["ls"])]), Vec::new()),
+            AndOr::new(pipeline(vec![cmd(&["unknowntool"])]), Vec::new()),
+            AndOr::new(pipeline(vec![cmd(&["ls"])]), Vec::new()),
+        ]);
+        let want = Addr {
+            item: 1,
+            link: 0,
+            cmd: 0,
+            word: Some(0),
+        };
+        check_second_uncovered(sc, want, UnknownKind::NoRow);
+    }
+
+    #[test]
+    fn first_uncovered_in_a_link_pipeline() {
+        // `ls && ls | sh x` reports the third command, at link 1, cmd 1.
+        let sc = Script::new(vec![AndOr::new(
+            pipeline(vec![cmd(&["ls"])]),
+            vec![Link::new(
+                Connector::And,
+                pipeline(vec![cmd(&["ls"]), cmd(&["sh", "x"])]),
+            )],
+        )]);
+        let want = Addr {
+            item: 0,
+            link: 1,
+            cmd: 1,
+            word: Some(0),
+        };
+        check_second_uncovered(sc, want, UnknownKind::RunsCode);
+    }
 }

@@ -55,6 +55,8 @@ pub enum Slot {
 #[cfg_attr(not(creusot), derive(PartialEq, Eq))]
 pub struct Parse {
     /// One slot per word from `start`: `slots[j]` is word `start + j`.
+    /// [`parse_argv`]'s contract proves the length; the alignment holds by
+    /// construction of `argv_go` and is not stated separately.
     pub(crate) slots: Vec<Slot>,
     /// Indices into the grammar's `opts` of every option that occurs, in
     /// order, one entry per occurrence (`-rf` adds two).
@@ -699,6 +701,10 @@ fn operand_role(g: &Grammar, k: usize) -> Option<Role> {
 /// The result is exactly `argv_spec`: see the module docs for how words are
 /// read. Besides, an Unknown index is a word of `ws`, and a parse has one
 /// slot per word from `start`.
+///
+/// Only the length (`slots.len() == ws.len() - start`) is proved. That
+/// `slots[j]` describes word `start + j` holds by construction of
+/// `argv_go`, but the contract does not state it separately.
 #[cfg_attr(creusot, check(terminates))]
 #[cfg_attr(creusot, ensures(argv_view(result) == argv_spec(*g, ws@, start@)))]
 #[cfg_attr(creusot, ensures(match result {
