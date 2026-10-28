@@ -90,7 +90,18 @@ singletons, newtypes and enums instead of flag structs.
     `pub(crate)` fields for the same reason. Such structs derive
     `PartialEq, Eq` only under `cfg_attr(not(creusot), ..)`; logic `==` needs
     neither.
+  - Likewise a logic fn over a private type (e.g. a private program enum)
+    cannot be `open`, not even when the fn itself is private; give it plain
+    `#[logic]`, whose body is still visible inside its own module.
   - `Vec::is_empty` is not `terminates`; write `<[_]>::is_empty(&v)`.
+  - A refinement of a loop is easiest against a tail-recursive spec that
+    carries the loop state as accumulators (`argv_go(.., i, ended, k,
+    slots, seen)`): the invariant is `go(state) == spec(input)`, and each
+    iteration unfolds `go` once. Mutually recursive fns were rejected in
+    the M1 spike (0.14: "Mutually recursive functions: when calling ..",
+    `spikes/README.md` (c)); M5 did not retry them for logic fns, so
+    per-step helpers (`word_l`, `cluster_l`) return a description of
+    the step and the one recursive fn acts on it.
   - Even inside a `#[cfg(creusot)]` item, `x@` must sit in `pearlite! { .. }`
     because the item is parsed before the cfg is applied.
 - Lint policy (#1007): only this crate has

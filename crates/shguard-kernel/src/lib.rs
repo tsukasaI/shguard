@@ -3,6 +3,7 @@
 //! proves.
 #![expect(clippy::indexing_slicing, reason = "bounds proved by Creusot")]
 
+pub mod argv;
 pub mod ast;
 pub mod bytes;
 pub mod catalog;
