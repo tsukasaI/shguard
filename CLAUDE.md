@@ -106,6 +106,16 @@ singletons, newtypes and enums instead of flag structs.
     `spikes/README.md` (c)); M5 did not retry them for logic fns, so
     per-step helpers (`word_l`, `cluster_l`) return a description of
     the step and the one recursive fn acts on it.
+  - A loop over script addresses is easiest against "before position"
+    predicates (`block_upto(.., i, k, c)` = some valid address before
+    `(i, k, c)` satisfies P): the invariant is `flag == X_upto(pos)`, with
+    one step lemma per command and one each for crossing a link, an item
+    and the ends (`decide.rs`).
+  - An empty-body lemma whose goal chains existentials (T4) can fail;
+    give it an intermediate lemma whose `ensures` is the per-element
+    implication under a `forall`, and call that from the body.
+  - `creusot-std` specifies `Option::or`/`is_none`; closures are not
+    allowed, so where clippy asks for `.map(|..| ..)` write `if let`.
   - Even inside a `#[cfg(creusot)]` item, `x@` must sit in `pearlite! { .. }`
     because the item is parsed before the cfg is applied.
 - Lint policy (#1007): only this crate has

@@ -427,6 +427,91 @@ pub fn lemma_ints_snoc(s: Seq<usize>, x: usize) {
     lemma_snoc_pop(s, x)
 }
 
+/// `ints` keeps the length and maps each element to its `Int` view.
+#[cfg(creusot)]
+#[logic]
+#[variant(s.len())]
+#[ensures(ints(s).len() == s.len())]
+#[ensures(forall<u> 0 <= u && u < s.len() ==> ints(s)[u] == s[u]@)]
+pub fn lemma_ints_index(s: Seq<usize>) {
+    if s.len() > 0 {
+        lemma_ints_index(s.pop_back())
+    }
+}
+
+/// The slot is not a code position. `argv_spec` never builds one: every
+/// `Code` role is Unknown.
+#[cfg(creusot)]
+#[logic(open)]
+pub fn slot_no_code(s: Slot) -> bool {
+    match s {
+        Slot::Opts(Some(r)) => r != Role::Code,
+        Slot::OptValue(r) => r != Role::Code,
+        Slot::Operand(r) => r != Role::Code,
+        Slot::Opts(None) | Slot::DashDash => true,
+    }
+}
+
+/// No slot of `slots` is a code position.
+#[cfg(creusot)]
+#[logic(open)]
+pub fn no_code(slots: Seq<Slot>) -> bool {
+    pearlite! { forall<t> 0 <= t && t < slots.len() ==> slot_no_code(slots[t]) }
+}
+
+/// A successful parse has no code position, given none so far.
+#[cfg(creusot)]
+#[logic(open(crate))]
+#[variant(ws.len() - i)]
+#[requires(no_code(slots))]
+#[ensures(match argv_go(g, ws, i, ended, k, slots, seen) {
+    ArgvL::Parsed(s2, _) => no_code(s2),
+    ArgvL::Unknown(_, _) => true,
+})]
+pub fn lemma_go_no_code(
+    g: Grammar,
+    ws: Seq<Word>,
+    i: Int,
+    ended: bool,
+    k: Int,
+    slots: Seq<Slot>,
+    seen: Seq<Int>,
+) {
+    pearlite! {
+        if i < ws.len() {
+            let w = if ended {
+                WordL::Operand
+            } else {
+                word_l(g, lit_prefix(ws[i].parts@, 0), has_opaque(ws[i].parts@, 0), seen)
+            };
+            match w {
+                WordL::Operand => match operand_role_l(g, k) {
+                    None => (),
+                    Some(Role::Code) => (),
+                    Some(r) => lemma_go_no_code(g, ws, i + 1, ended || !g.permute, k + 1,
+                        slots.push_back(Slot::Operand(r)), seen),
+                },
+                WordL::Fail(_) => (),
+                WordL::EndOpts => lemma_go_no_code(g, ws, i + 1, true, k,
+                    slots.push_back(Slot::DashDash), seen),
+                WordL::Opts(s, Tail::Done) => lemma_go_no_code(g, ws, i + 1, ended, k,
+                    slots.push_back(Slot::Opts(None)), s),
+                WordL::Opts(s, Tail::Inline(r)) => if r == Role::Code {
+                    ()
+                } else {
+                    lemma_go_no_code(g, ws, i + 1, ended, k, slots.push_back(Slot::Opts(Some(r))), s)
+                },
+                WordL::Opts(s, Tail::Next(r)) => if i + 1 >= ws.len() || r == Role::Code {
+                    ()
+                } else {
+                    lemma_go_no_code(g, ws, i + 2, ended, k,
+                        slots.push_back(Slot::Opts(None)).push_back(Slot::OptValue(r)), s)
+                },
+            }
+        }
+    }
+}
+
 /// The program-side reading of one word in option position; `word_kind`'s
 /// result plus its update of `seen` mirror [`WordL`].
 enum Kind {
@@ -463,18 +548,27 @@ fn push_ix(seen: &mut Vec<usize>, o: usize) {
 #[cfg_attr(creusot, ensures(result.0@ == lit_prefix(w.parts@, 0)))]
 #[cfg_attr(creusot, ensures(result.1 == has_opaque(w.parts@, 0)))]
 pub(crate) fn word_view(w: &Word) -> (Vec<u8>, bool) {
-    let parts = &w.parts;
+    parts_view(&w.parts, 0)
+}
+
+/// The literal view of `parts[from..]`: the bytes of its `Lit` parts up to
+/// the first `Opaque`, and whether there is an `Opaque`.
+#[cfg_attr(creusot, check(terminates))]
+#[cfg_attr(creusot, requires(from@ <= parts@.len()))]
+#[cfg_attr(creusot, ensures(result.0@ == lit_prefix(parts@, from@)))]
+#[cfg_attr(creusot, ensures(result.1 == has_opaque(parts@, from@)))]
+pub(crate) fn parts_view(parts: &[Part], from: usize) -> (Vec<u8>, bool) {
     let mut out: Vec<u8> = Vec::new();
     #[cfg(creusot)]
     proof_assert! {
-        lemma_concat_laws(lit_prefix(parts@, 0), Seq::empty(), Seq::empty(), 0u8);
+        lemma_concat_laws(lit_prefix(parts@, from@), Seq::empty(), Seq::empty(), 0u8);
         out@.ext_eq(Seq::empty())
     };
-    let mut j: usize = 0;
+    let mut j: usize = from;
     #[cfg_attr(creusot, variant(parts@.len() - j@))]
-    #[cfg_attr(creusot, invariant(j@ <= parts@.len()))]
-    #[cfg_attr(creusot, invariant(out@.concat(lit_prefix(parts@, j@)) == lit_prefix(parts@, 0)))]
-    #[cfg_attr(creusot, invariant(has_opaque(parts@, j@) == has_opaque(parts@, 0)))]
+    #[cfg_attr(creusot, invariant(from@ <= j@ && j@ <= parts@.len()))]
+    #[cfg_attr(creusot, invariant(out@.concat(lit_prefix(parts@, j@)) == lit_prefix(parts@, from@)))]
+    #[cfg_attr(creusot, invariant(has_opaque(parts@, j@) == has_opaque(parts@, from@)))]
     while j < parts.len() {
         match &parts[j] {
             Part::Lit(lit) => {
@@ -521,7 +615,7 @@ pub(crate) fn word_view(w: &Word) -> (Vec<u8>, bool) {
 /// `o` has the short name `c`.
 #[cfg_attr(creusot, check(terminates))]
 #[cfg_attr(creusot, ensures(result == has_short(*o, c)))]
-fn short_is(o: &Opt, c: u8) -> bool {
+pub(crate) fn short_is(o: &Opt, c: u8) -> bool {
     match &o.name {
         OptName::Short(s) => *s == c,
         OptName::Long(_) => false,
@@ -532,7 +626,7 @@ fn short_is(o: &Opt, c: u8) -> bool {
 /// `o` has the long name `name`.
 #[cfg_attr(creusot, check(terminates))]
 #[cfg_attr(creusot, ensures(result == has_long(*o, name@)))]
-fn long_is(o: &Opt, name: &[u8]) -> bool {
+pub(crate) fn long_is(o: &Opt, name: &[u8]) -> bool {
     match &o.name {
         OptName::Short(_) => false,
         OptName::Long(n) => bytes_eq(&n.bytes, name),

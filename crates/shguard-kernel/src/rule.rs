@@ -1,9 +1,9 @@
 //! Rules: patterns that raise a decision for a matching simple command.
 //!
-//! Matching is defined in M7. A rule hits a simple command when the command's
-//! key matches `key`, every entry of `opts` is present, and any target
-//! matches (an empty `targets` means any). Rules only raise the verdict; user
-//! allows are catalog rows, never rules.
+//! Matching is defined in [`crate::decide`]. A rule hits a simple command when
+//! the command's key matches `key`, every entry of `opts` is present, and any
+//! target matches (an empty `targets` means any). Rules only raise the
+//! verdict; user allows are catalog rows, never rules.
 
 use crate::ast::Part;
 use crate::catalog::OptName;
@@ -45,6 +45,10 @@ pub enum PatKind {
 
 /// A target pattern. It reuses [`Part`], so `~/.bashrc` is
 /// `[Opaque(Tilde), Lit("/.bashrc")]`.
+///
+/// A `/`-led pattern never covers a word that starts with `~`: to cover the
+/// home directory, add a `~` `Prefix` target as well (see
+/// [`crate::decide`] for how patterns match).
 #[derive(Clone, Debug)]
 #[cfg_attr(not(creusot), derive(PartialEq, Eq))]
 pub struct Pat {
