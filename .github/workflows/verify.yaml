@@ -39,12 +39,21 @@ jobs:
         with:
           persist-credentials: false
       - uses: cachix/install-nix-action@a49548c11d9846ad46ecc0115273879b045f001c # v31.10.7
+      # The Creusot overlay (creusot-rustc, why3, the solvers) has no binary
+      # cache and takes about 70 minutes to build from source, so /nix is kept
+      # in the Actions cache keyed by the flake (#1014). PR runs restore an
+      # exact or newest-prefix match from their own scope, then main's; only
+      # successful runs save.
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
       # verif/ is not committed (#1005), so CI proves from source; solver
       # versions are pinned by flake.lock; why3find.json selects provers,
       # tactics and timeouts.
       - name: Prove spike
         working-directory: spikes/lattice
         run: nix develop ../.. -c cargo creusot --span-mode relative
-      # Add the kernel once it depends on creusot-std (M3):
-      #   working-directory: crates/shguard-kernel
-      #   run: nix develop ../.. -c cargo creusot --span-mode relative
+      - name: Prove kernel
+        working-directory: crates/shguard-kernel
+        run: nix develop ../.. -c cargo creusot --span-mode relative

@@ -8,3 +8,8 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+# Creusot is a verification-only dependency (LGPL-2.1-or-later): it exists
+# only under `cargo creusot`, which passes `--cfg creusot`.
+[target.'cfg(creusot)'.dependencies]
+creusot-std = "0.14.0"

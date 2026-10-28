@@ -31,8 +31,13 @@ ADR (confirmed Creusot 0.14 spellings) is `spikes/README.md`.
 
 ## Layout
 
-- `crates/shguard-kernel/`: verified; will depend only on
-  `creusot-std` (added in M3).
+- `crates/shguard-kernel/`: verified. Its only dependency is `creusot-std`,
+  declared under `[target.'cfg(creusot)'.dependencies]`, so it exists only
+  under `cargo creusot`. It is LGPL-2.1-or-later and never enters a shipped
+  build. `deny.toml`'s `[graph] targets` prunes it (and every dependency
+  whose `cfg` is false on all listed triples, custom cfgs included) from all
+  cargo-deny checks, not only licenses;
+  keep that list equal to the release triples.
 - `crates/shguard-syntax/`: subset lexer/parser to the kernel AST; Kani,
   proptest and differential tests.
 - `crates/shguard/`: lib + bin; hook adapter, CLI, config, TOML loader,
@@ -62,20 +67,30 @@ singletons, newtypes and enums instead of flag structs.
 - Lemmas are `lemma_*` and live next to the code they are about.
 - Allow can only be built from a `Witness` bound to the input it certifies
   (#1006): `Verdict` owns the `Script`, or the witness borrows it.
-- Logic-only imports need `#[cfg(creusot)]`; spec-only parameters need
+- Nothing may reference `creusot-std` unconditionally, because normal builds
+  do not have it. Contracts go through `cfg_attr` only
+  (`#[cfg_attr(creusot, ensures(..))]`, likewise `requires`, `check`,
+  `variant`, `invariant`, `derive(DeepModel)`); logic functions, lemmas,
+  `proof_assert!`, `snapshot!` and the prelude import take `#[cfg(creusot)]`
+  on the whole item or statement. Spec-only parameters need
   `#[cfg_attr(not(creusot), expect(unused_variables, reason = "..."))]`.
-- Lint policy (#1007): only this crate gets
+- Constants that an open logic function mentions must be `pub`: Creusot
+  refuses to unfold an open function that names a less visible item.
+- Lint policy (#1007): only this crate has
   `#![expect(clippy::indexing_slicing, reason = "bounds proved by Creusot")]`;
-  every other lint, `missing_docs` included, stays on. Add the attribute with
-  the first indexing code (M3); on an empty crate an `expect` would itself warn.
+  every other lint, `missing_docs` included, stays on.
 - `verif/` and `.why3find/` are generated and gitignored (#1005): their spans
   depend on the checkout path and leak the home directory. Every gate proves
   from source with `--span-mode relative`; the proof must pass before merge.
 - Lockfile policy (#1009): the committed `Cargo.lock` is the registry form
   written by stable cargo. `cargo creusot` can rewrite it to a nix-patched
   `creusot-std` (no `source`/`checksum`); that form is a local artifact and
-  must never be committed. After a proof run, restore it with
-  `git restore Cargo.lock`, then confirm `git diff --exit-code Cargo.lock`.
+  must never be committed. After a proof run, repair it by running any stable
+  cargo command (`cargo metadata --format-version 1 > /dev/null`), then
+  confirm with `cargo metadata --locked --format-version 1 > /dev/null`
+  and finally `git diff --exit-code Cargo.lock`. The repair re-resolves to
+  the highest compatible versions, so `--locked` alone cannot catch drift
+  (e.g. a newly published creusot-std 0.14.1).
 
 ## Tests and catalog
 
@@ -112,6 +127,9 @@ cargo creusot clean                      # after renames (interactive; `echo y |
 ```
 
 There is no `prove` subcommand and no `-p`; run from the crate directory.
+`why3find.json` and the generated `verif/` live at the workspace root, which
+is where `cargo creusot` looks for and writes them; proofs of the kernel are
+run from `crates/shguard-kernel`.
 `cargo creusot 'mod::*'` proves one module.
 
 For agents in the sandbox: set `HOME` and `CARGO_HOME` to scratchpad
