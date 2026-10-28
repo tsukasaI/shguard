@@ -691,7 +691,7 @@ mod tests {
         assert_eq!(*w.script(), sc);
     }
 
-    /// Three simple commands; the second is uncovered.
+    /// The script is uncovered at `want` with reason `kind`, and comes back unchanged.
     fn check_second_uncovered(sc: Script, want: Addr, kind: UnknownKind) {
         let Classified::Uncovered(back, reason) = classify_script(&catalog(), sc.clone()) else {
             panic!("uncovered");
