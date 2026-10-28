@@ -180,7 +180,7 @@ impl Parser {
         let mut redirs = Vec::new();
         // The operator that ended the command and where it stands.
         let mut end: Option<(Op, usize)> = None;
-        for Lexeme { offset, token } in self.lexemes.by_ref() {
+        for Lexeme { offset, token, .. } in self.lexemes.by_ref() {
             match token {
                 Token::Word(lex_word) => {
                     if self.words >= MAX_WORDS {

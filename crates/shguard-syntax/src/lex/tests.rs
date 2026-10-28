@@ -40,24 +40,36 @@ fn ok(input: &str) -> Vec<Token> {
 }
 
 #[test]
-fn lexemes_carry_start_offsets() {
-    let got: Vec<(usize, Token)> = lex(b"ab  2>&1 ; c\n|d")
+fn lexemes_carry_start_and_end_offsets() {
+    let got: Vec<(usize, usize, Token)> = lex(b"ab  2>&1 ; c\n|d")
         .unwrap()
         .into_iter()
-        .map(|l| (l.offset, l.token))
+        .map(|l| (l.offset, l.end, l.token))
         .collect();
     assert_eq!(
         got,
         vec![
-            (0, bare("ab")),
-            (4, Token::Redir(LexRedir::Dup { from: 2, to: 1 })),
-            (9, SEMI),
-            (11, bare("c")),
-            (12, NL),
-            (13, PIPE),
-            (14, bare("d")),
+            (0, 2, bare("ab")),
+            (4, 8, Token::Redir(LexRedir::Dup { from: 2, to: 1 })),
+            (9, 10, SEMI),
+            (11, 12, bare("c")),
+            (12, 13, NL),
+            (13, 14, PIPE),
+            (14, 15, bare("d")),
         ]
     );
+}
+
+#[test]
+fn word_end_spans_quotes_and_escapes() {
+    let input = br#"x 'a b'"c"\  >/dev/null  y"#;
+    let texts: Vec<&[u8]> = lex(input)
+        .unwrap()
+        .iter()
+        .map(|l| &input[l.offset..l.end])
+        .collect();
+    let expected: [&[u8]; 4] = [b"x", br#"'a b'"c"\ "#, b">/dev/null", b"y"];
+    assert_eq!(texts, expected);
 }
 
 fn err(input: &[u8]) -> (K, usize) {
