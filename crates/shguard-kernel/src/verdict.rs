@@ -37,7 +37,8 @@ pub enum UnknownKind {
     OpaqueCommandName,
     /// An option the row's grammar does not list.
     UnknownOption,
-    /// An option position holds a word that is not a literal.
+    /// A word in option position that is not a literal and whose known prefix
+    /// is empty or starts with `-`.
     OpaqueOption,
     /// An option that takes a value has none.
     MissingValue,

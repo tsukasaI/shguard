@@ -101,8 +101,10 @@ singletons, newtypes and enums instead of flag structs.
   - A refinement of a loop is easiest against a tail-recursive spec that
     carries the loop state as accumulators (`argv_go(.., i, ended, k,
     slots, seen)`): the invariant is `go(state) == spec(input)`, and each
-    iteration unfolds `go` once. Logic fns cannot be mutually recursive,
-    so per-step helpers (`word_l`, `cluster_l`) return a description of
+    iteration unfolds `go` once. Mutually recursive fns were rejected in
+    the M1 spike (0.14: "Mutually recursive functions: when calling ..",
+    `spikes/README.md` (c)); M5 did not retry them for logic fns, so
+    per-step helpers (`word_l`, `cluster_l`) return a description of
     the step and the one recursive fn acts on it.
   - Even inside a `#[cfg(creusot)]` item, `x@` must sit in `pearlite! { .. }`
     because the item is parsed before the cfg is applied.
