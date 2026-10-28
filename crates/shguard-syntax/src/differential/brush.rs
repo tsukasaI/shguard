@@ -9,8 +9,9 @@
 
 use super::{AndOrS, CPart, Conn, Shape, SimpleS, canon, corpus, fd_digits, is_name};
 use brush_parser::ast::{
-    AndOr, AndOrList, Command, CommandPrefixOrSuffixItem, IoFileRedirectKind, IoFileRedirectTarget,
-    IoRedirect, Pipeline, SeparatorOperator, SimpleCommand, Word,
+    AndOr, AndOrList, Assignment, AssignmentValue, Command, CommandPrefixOrSuffixItem,
+    IoFileRedirectKind, IoFileRedirectTarget, IoRedirect, Pipeline, SeparatorOperator,
+    SimpleCommand, Word,
 };
 use brush_parser::word::{Parameter, ParameterExpr, TildeExpr, WordPiece, WordPieceWithSource};
 use brush_parser::{Parser, ParserOptions};
@@ -104,21 +105,27 @@ fn word(word: &Word) -> Result<Vec<CPart>, String> {
     Ok(canon(out))
 }
 
-/// Parses the text of an assignment-shaped argument with tilde expansion at
-/// the start and after colons, and fails if any tilde expansion comes out.
-fn assignment_has_no_tilde(word: &Word) -> Result<(), String> {
+/// Parses the value of an assignment-shaped argument (the text after the
+/// `=`, as brush-parser splits it) with tilde expansion at the start and
+/// after colons, and fails if any tilde expansion comes out. brush-parser
+/// itself never expands a tilde after `=`, so the split is what makes this
+/// check see `a=~/x`.
+fn assignment_has_no_tilde(assignment: &Assignment) -> Result<(), String> {
+    let AssignmentValue::Scalar(value) = &assignment.value else {
+        return Err(format!("array assignment {assignment:?}"));
+    };
     let opts = ParserOptions {
         tilde_expansion_at_word_start: true,
         tilde_expansion_after_colon: true,
         ..options()
     };
-    let pieces = brush_parser::word::parse(&word.value, &opts)
-        .map_err(|err| format!("word parse error on {:?}: {err}", word.value))?;
+    let pieces = brush_parser::word::parse(&value.value, &opts)
+        .map_err(|err| format!("word parse error on {:?}: {err}", value.value))?;
     if pieces
         .iter()
         .any(|item| matches!(item.piece, WordPiece::TildeExpansion(_)))
     {
-        return Err(format!("tilde expanded inside {:?}", word.value));
+        return Err(format!("tilde expanded inside {:?}", value.value));
     }
     Ok(())
 }
@@ -187,12 +194,13 @@ fn simple(command: &SimpleCommand) -> Result<SimpleS, String> {
                 CommandPrefixOrSuffixItem::IoRedirect(r) => redirs.push(redirect(r)?),
                 CommandPrefixOrSuffixItem::Word(w) => words.push(word(w)?),
                 // brush-parser tags an argument like `A=b` as an assignment
-                // word but keeps the argument's text in the word. After the
-                // command name bash reads it as an argument, but outside
-                // POSIX mode it still expands a tilde after `=` or `:`, so
-                // any tilde expansion there is a disagreement.
-                CommandPrefixOrSuffixItem::AssignmentWord(_, w) => {
-                    assignment_has_no_tilde(w)?;
+                // word and keeps the argument's whole text in the word. After
+                // the command name bash reads it as an argument, but outside
+                // POSIX mode it still expands a tilde after `=` or `:`. The
+                // value after the `=` is re-parsed with tilde expansion on,
+                // and any tilde expansion there is a disagreement.
+                CommandPrefixOrSuffixItem::AssignmentWord(assignment, w) => {
+                    assignment_has_no_tilde(assignment)?;
                     words.push(word(w)?);
                 }
                 CommandPrefixOrSuffixItem::ProcessSubstitution(..) => {

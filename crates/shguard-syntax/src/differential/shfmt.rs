@@ -201,14 +201,38 @@ fn cmd_of(stmt: &Value) -> Result<&Value, String> {
         .ok_or_else(|| "statement without Cmd".to_string())
 }
 
-/// The words of a `DeclClause` (`export`, `declare`, `local`, `readonly`,
-/// `typeset`): the builtin name, then each argument. mvdan/sh parses the
-/// arguments as assignments; inside the accepted subset the argv bash builds
-/// equals the plain words, so each one maps back to its text.
-/// Whether an unquoted `~` follows an unquoted `=` or `:` in an
-/// assignment-shaped word (`NAME=` or `NAME+=` at the start), where bash
-/// expands it outside POSIX mode. Written here, not borrowed from the lexer,
-/// so the oracle stays independent of it.
+/// Whether an unquoted `~` follows an unquoted `=` or `:` in `parts`, where
+/// bash expands it outside POSIX mode. The first `skip` bytes of the first
+/// part are not scanned; `sep` says whether the scan starts right after an
+/// `=` or `:`. A quoted part resets `sep`.
+fn tilde_after_sep(parts: &[Value], skip: usize, mut sep: bool) -> bool {
+    for (index, part) in parts.iter().enumerate() {
+        if str_field(part, "Type") != Some("Lit") {
+            sep = false;
+            continue;
+        }
+        let bytes = str_field(part, "Value").unwrap_or("").as_bytes();
+        let mut i = if index == 0 { skip } else { 0 };
+        while let Some(&b) = bytes.get(i) {
+            match b {
+                b'\\' => {
+                    sep = false;
+                    i += 2;
+                    continue;
+                }
+                b'~' if sep => return true,
+                b'=' | b':' => sep = true,
+                _ => sep = false,
+            }
+            i += 1;
+        }
+    }
+    false
+}
+
+/// Whether an assignment-shaped word (`NAME=` or `NAME+=` at the start) has
+/// an unquoted `~` after an unquoted `=` or `:`. Written here, not borrowed
+/// from the lexer, so the oracle stays independent of it.
 fn assignment_tilde(parts: &[Value]) -> bool {
     let Some(first) = parts.first() else {
         return false;
@@ -226,43 +250,15 @@ fn assignment_tilde(parts: &[Value]) -> bool {
     if !is_name(raw.get(..name_len).unwrap_or(&[])) || !after_name.starts_with(b"=") {
         return false;
     }
-    // After the first `=`, `sep` says the previous byte was an unescaped `=`
-    // or `:`; a quoted part resets it.
-    let mut sep = false;
-    let mut started = false;
-    for part in parts {
-        if str_field(part, "Type") != Some("Lit") {
-            sep = false;
-            continue;
-        }
-        let bytes = str_field(part, "Value").unwrap_or("").as_bytes();
-        let mut i = 0;
-        while let Some(&b) = bytes.get(i) {
-            if !started {
-                // Skip to just after the first `=`.
-                if b == b'=' {
-                    started = true;
-                    sep = true;
-                }
-                i += 1;
-                continue;
-            }
-            match b {
-                b'\\' => {
-                    sep = false;
-                    i += 2;
-                    continue;
-                }
-                b'~' if sep => return true,
-                b'=' | b':' => sep = true,
-                _ => sep = false,
-            }
-            i += 1;
-        }
-    }
-    false
+    // Scan what follows the first `=`.
+    let value_start = name_len + (rest.len() - after_name.len()) + 1;
+    tilde_after_sep(parts, value_start, true)
 }
 
+/// The words of a `DeclClause` (`export`, `declare`, `local`, `readonly`,
+/// `typeset`): the builtin name, then each argument. mvdan/sh parses the
+/// arguments as assignments; inside the accepted subset the argv bash builds
+/// equals the plain words, so each one maps back to its text.
 fn decl_words(cmd: &Value) -> Result<Vec<Vec<CPart>>, String> {
     only_keys(
         cmd,
@@ -292,6 +288,15 @@ fn decl_words(cmd: &Value) -> Result<Vec<Vec<CPart>>, String> {
             None => None,
         };
         let value = arg.get("Value").map(word).transpose()?;
+        if !is_true(arg, "Naked") {
+            let value_parts = arg
+                .get("Value")
+                .and_then(|v| v.get("Parts"))
+                .and_then(Value::as_array);
+            if tilde_after_sep(value_parts.map_or(&[][..], Vec::as_slice), 0, true) {
+                return Err("tilde expanded inside a declaration value".to_string());
+            }
+        }
         if is_true(arg, "Naked") {
             // A flag or a bare name: exactly one of Value and Name.
             match (name, value) {
