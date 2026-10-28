@@ -33,19 +33,35 @@
 //! Words and patterns are compared on a canonical view: adjacent `Lit`s
 //! merged, empty `Lit`s dropped. Of that view the kernel keeps the head
 //! (does it start with `~`), the lead (the literal bytes after the head, up
-//! to the next opaque part) and whether more opaque parts follow. A fully
-//! literal word that starts with `/`, and the lead of a `~` word with no
-//! further opaque part, are normalized with `normalize_path` first. Then:
-//! - `Exact`: the word has no further opaque part, the heads agree and the
-//!   (normalized) lead equals the pattern's lead;
-//! - `Prefix`: the heads agree and the pattern's lead is a byte prefix of
-//!   the word's (normalized) lead. A byte prefix over-matches (`/etc`
-//!   matches `/etcfoo`), which is acceptable for raise-only rules. A pattern
-//!   whose canonical view is empty matches every word.
+//! to the next opaque part) and whether more opaque parts follow.
+//!
+//! Words and patterns alike get a key (`path_key`) when no opaque part
+//! follows the lead: a bare `~` has the key `/`, so `~`, `~/`, `~/.` and
+//! `~//` share one key; a lead that starts with `/` is normalized with
+//! `normalize_path` (`/etc/` and `/etc` share one key); any other lead is
+//! its own key. With an opaque part after the lead, the key is the lead.
+//! The heads must agree, and then a pattern matches when either reading
+//! holds:
+//! - on keys: `Exact` when the word has no further opaque part and the keys
+//!   are equal; `Prefix` when the pattern's key is a byte prefix of the
+//!   word's;
+//! - on the pattern's raw lead against the word's normalized lead (without
+//!   the `~` rule): the same two comparisons. This reading is the previous
+//!   one, kept so the key reading only adds hits.
+//!
+//! A byte prefix over-matches (`/etc` matches `/etcfoo`), which is
+//! acceptable for raise-only rules. A pattern whose canonical view is empty
+//! (only empty `Lit`s) matches every word as `Prefix`, and as `Exact`
+//! matches only a word that is itself empty.
+//!
+//! A `/`-led pattern never covers a `~` word, since the heads differ: to
+//! cover the home directory, add a `~` `Prefix` target (`[Tilde]` as
+//! `Prefix` matches every `~` word, `~` and `~/x` included).
 //!
 //! This equals the canonical-sequence comparison for every pattern without
-//! an opaque part beyond a leading `~`. Deliberately more permissive: a
-//! pattern with such a part (`$HOME/x`) matches every word.
+//! an opaque part beyond a leading `~`, up to path normalization.
+//! Deliberately more permissive: a pattern with such a part (`$HOME/x`)
+//! matches every word.
 //!
 //! # Path checks (`word_path_fails`)
 //!
@@ -190,15 +206,27 @@ pub fn starts_slash(b: Seq<u8>) -> bool {
     pearlite! { b.len() > 0 && b[0] == SLASH }
 }
 
-/// The lead a word is compared on: normalized when nothing opaque follows
-/// it and it starts with `/`.
+/// The lead, normalized when nothing opaque follows it and it starts with
+/// `/`.
 #[cfg(creusot)]
 #[logic(open)]
-pub fn path_key(parts: Seq<Part>) -> Seq<u8> {
+pub fn path_norm(parts: Seq<Part>) -> Seq<u8> {
     if !path_more(parts) && starts_slash(path_lead(parts)) {
         norm_l(path_lead(parts))
     } else {
         path_lead(parts)
+    }
+}
+
+/// The key a word or pattern is compared on: `path_norm`, except that a
+/// bare `~` (nothing after it) has the key `/`, like `~/`.
+#[cfg(creusot)]
+#[logic(open)]
+pub fn path_key(parts: Seq<Part>) -> Seq<u8> {
+    if path_tilde(parts) && !path_more(parts) && path_lead(parts).len() == 0 {
+        Seq::singleton(SLASH)
+    } else {
+        path_norm(parts)
     }
 }
 
@@ -209,11 +237,11 @@ pub fn is_prefix(q: Seq<u8>, s: Seq<u8>) -> bool {
     pearlite! { q.len() <= s.len() && s.subsequence(0, q.len()) == q }
 }
 
-/// `pat` matches a word whose view is head `wt`, compared lead `wkey` and
-/// trailing-opaque flag `wmore`.
+/// `pat` matches a word whose view is head `wt`, normalized lead `wnorm`,
+/// key `wkey` and trailing-opaque flag `wmore`.
 #[cfg(creusot)]
 #[logic(open(crate))]
-pub fn pat_match_view(pat: Pat, wt: bool, wkey: Seq<u8>, wmore: bool) -> bool {
+pub fn pat_match_view(pat: Pat, wt: bool, wnorm: Seq<u8>, wkey: Seq<u8>, wmore: bool) -> bool {
     pearlite! {
         if path_more(pat.parts@) {
             true
@@ -222,8 +250,10 @@ pub fn pat_match_view(pat: Pat, wt: bool, wkey: Seq<u8>, wmore: bool) -> bool {
                 && pat.kind == PatKind::Prefix
         } else {
             match pat.kind {
-                PatKind::Exact => !wmore && wkey == path_lead(pat.parts@),
-                PatKind::Prefix => is_prefix(path_lead(pat.parts@), wkey),
+                PatKind::Exact => !wmore
+                    && (wnorm == path_lead(pat.parts@) || wkey == path_key(pat.parts@)),
+                PatKind::Prefix => is_prefix(path_lead(pat.parts@), wnorm)
+                    || is_prefix(path_key(pat.parts@), wkey),
             }
         }
     }
@@ -233,7 +263,13 @@ pub fn pat_match_view(pat: Pat, wt: bool, wkey: Seq<u8>, wmore: bool) -> bool {
 #[cfg(creusot)]
 #[logic(open(crate))]
 pub fn pat_matches(pat: Pat, parts: Seq<Part>) -> bool {
-    pat_match_view(pat, path_tilde(parts), path_key(parts), path_more(parts))
+    pat_match_view(
+        pat,
+        path_tilde(parts),
+        path_norm(parts),
+        path_key(parts),
+        path_more(parts),
+    )
 }
 
 /// Some pattern of `targets` matches the word with parts `parts`.
@@ -605,9 +641,19 @@ pub fn lemma_cmd_monotone(c: Catalog, r: Seq<Rule>, r2: Seq<Rule>, s: Script) {}
 /// check (and no code position, by [`lemma_covered_no_code`]).
 #[cfg(creusot)]
 #[logic]
-#[ensures(decision_of(c, r, s) == Decision::Allow
-    ==> covered_script(c, s) && no_hits(c, r, s) && no_path_fail(c, s))]
-pub fn lemma_allow_corollary(c: Catalog, r: Seq<Rule>, s: Script) {}
+#[ensures(decision_of(c, r, s) == Decision::Allow ==> covered_script(c, s))]
+#[ensures(decision_of(c, r, s) == Decision::Allow ==> no_hits(c, r, s))]
+#[ensures(decision_of(c, r, s) == Decision::Allow ==> no_path_fail(c, s))]
+pub fn lemma_allow_corollary(c: Catalog, r: Seq<Rule>, s: Script) {
+    lemma_hit_finding(c, r, s)
+}
+
+/// Every hit is a per-command Block or Ask finding, by its outcome.
+#[cfg(creusot)]
+#[logic]
+#[ensures(forall<x, a: Addr> 0 <= x && x < r.len() && hits_at(c, r[x], s, a)
+    ==> cmd_block(c, r, s, a) || cmd_ask(c, r, s, a))]
+pub fn lemma_hit_finding(c: Catalog, r: Seq<Rule>, s: Script) {}
 
 /// A covering row's parse has no code position: `argv_spec` makes every
 /// `Code` role Unknown.
@@ -846,11 +892,11 @@ fn path_shape(parts: &[Part]) -> (bool, Vec<u8>, bool) {
     (tilde, lead, more)
 }
 
-/// The lead a word is compared on (see `path_key`).
+/// The normalized lead (see `path_norm`).
 #[cfg_attr(creusot, check(terminates))]
 #[cfg_attr(creusot, ensures(result@
     == if !more && starts_slash(lead@) { norm_l(lead@) } else { lead@ }))]
-fn path_key_of(lead: Vec<u8>, more: bool) -> Vec<u8> {
+fn path_norm_of(lead: Vec<u8>, more: bool) -> Vec<u8> {
     if !more && !<[u8]>::is_empty(&lead) && lead[0] == SLASH {
         normalize_path(&lead)
     } else {
@@ -858,25 +904,79 @@ fn path_key_of(lead: Vec<u8>, more: bool) -> Vec<u8> {
     }
 }
 
-/// `pat` matches a word with the given view.
+/// The one-byte path `/`.
 #[cfg_attr(creusot, check(terminates))]
-#[cfg_attr(creusot, ensures(result == pat_match_view(*pat, wt, wkey@, wmore)))]
-fn pat_match(pat: &Pat, wt: bool, wkey: &[u8], wmore: bool) -> bool {
-    let (pt, plead, pmore) = path_shape(&pat.parts);
-    if pmore {
+#[cfg_attr(creusot, ensures(result@ == Seq::singleton(SLASH)))]
+#[expect(
+    clippy::vec_init_then_push,
+    reason = "`vec!` would need creusot-std's own macro; `push` is already specified"
+)]
+fn slash() -> Vec<u8> {
+    let mut v: Vec<u8> = Vec::new();
+    v.push(SLASH);
+    #[cfg(creusot)]
+    proof_assert!(v@.ext_eq(Seq::singleton(SLASH)));
+    v
+}
+
+/// The program view of a word or pattern (see the logic functions named in
+/// `path_view`'s contract).
+struct PathView {
+    tilde: bool,
+    lead: Vec<u8>,
+    norm: Vec<u8>,
+    key: Vec<u8>,
+    more: bool,
+}
+
+/// The view of `parts`: head, lead, normalized lead, key and whether an
+/// opaque part follows the lead.
+#[cfg_attr(creusot, check(terminates))]
+#[cfg_attr(creusot, ensures(result.tilde == path_tilde(parts@)))]
+#[cfg_attr(creusot, ensures(result.lead@ == path_lead(parts@)))]
+#[cfg_attr(creusot, ensures(result.norm@ == path_norm(parts@)))]
+#[cfg_attr(creusot, ensures(result.key@ == path_key(parts@)))]
+#[cfg_attr(creusot, ensures(result.more == path_more(parts@)))]
+fn path_view(parts: &[Part]) -> PathView {
+    let (tilde, lead, more) = path_shape(parts);
+    let (_, lead2, _) = path_shape(parts);
+    let (_, lead3, _) = path_shape(parts);
+    let norm = path_norm_of(lead2, more);
+    // A bare `~` has the key `/`, like `~/`.
+    let bare = tilde && !more && <[u8]>::is_empty(&lead);
+    let key = if bare {
+        slash()
+    } else {
+        path_norm_of(lead3, more)
+    };
+    PathView {
+        tilde,
+        lead,
+        norm,
+        key,
+        more,
+    }
+}
+
+/// `pat` matches a word with the view `w`.
+#[cfg_attr(creusot, check(terminates))]
+#[cfg_attr(creusot, ensures(result == pat_match_view(*pat, w.tilde, w.norm@, w.key@, w.more)))]
+fn pat_match(pat: &Pat, w: &PathView) -> bool {
+    let p = path_view(&pat.parts);
+    if p.more {
         return true;
     }
     let prefix = match pat.kind {
         PatKind::Exact => false,
         PatKind::Prefix => true,
     };
-    if pt != wt {
-        return !pt && <[u8]>::is_empty(&plead) && prefix;
+    if p.tilde != w.tilde {
+        return !p.tilde && <[u8]>::is_empty(&p.lead) && prefix;
     }
     if prefix {
-        starts_with(wkey, &plead)
+        starts_with(&w.norm, &p.lead) || starts_with(&w.key, &p.key)
     } else {
-        !wmore && bytes_eq(wkey, &plead)
+        !w.more && (bytes_eq(&w.norm, &p.lead) || bytes_eq(&w.key, &p.key))
     }
 }
 
@@ -884,15 +984,14 @@ fn pat_match(pat: &Pat, wt: bool, wkey: &[u8], wmore: bool) -> bool {
 #[cfg_attr(creusot, check(terminates))]
 #[cfg_attr(creusot, ensures(result == some_pat_matches(targets@, w.parts@)))]
 fn any_pat_matches(targets: &[Pat], w: &Word) -> bool {
-    let (wt, lead, wmore) = path_shape(&w.parts);
-    let wkey = path_key_of(lead, wmore);
+    let wv = path_view(&w.parts);
     let mut t: usize = 0;
     #[cfg_attr(creusot, variant(targets@.len() - t@))]
     #[cfg_attr(creusot, invariant(t@ <= targets@.len()))]
     #[cfg_attr(creusot, invariant(forall<x> 0 <= x && x < t@
         ==> !pat_matches(targets@[x], w.parts@)))]
     while t < targets.len() {
-        if pat_match(&targets[t], wt, &wkey, wmore) {
+        if pat_match(&targets[t], &wv) {
             return true;
         }
         t += 1;
@@ -1577,5 +1676,196 @@ mod tests {
         };
         assert_eq!(*a.script(), sc);
         assert_eq!(*a.witness().script(), sc);
+    }
+
+    fn check_in(cat: &Catalog, rules: &[Rule], sc: Script, want: Decision) {
+        let v = decide(cat, rules, sc.clone());
+        assert_eq!(v.decision(), want, "{sc:?}");
+        assert_eq!(*v.script(), sc, "the verdict owns the input script");
+    }
+
+    fn tilde_word(rest: &str) -> Word {
+        if rest.is_empty() {
+            word(vec![Part::Opaque(Opaque::Tilde)])
+        } else {
+            word(vec![Part::Opaque(Opaque::Tilde), lit(rest)])
+        }
+    }
+
+    /// `rm -r -- <target>`
+    fn rm_r_dashdash(target: Word) -> Script {
+        seq(vec![simple(vec![
+            word(vec![lit("rm")]),
+            word(vec![lit("-r")]),
+            word(vec![lit("--")]),
+            target,
+        ])])
+    }
+
+    fn block_rule(k: &str, opts: Vec<OptName>, targets: Vec<Pat>) -> Rule {
+        Rule::new(
+            RuleId(9),
+            Scope::Simple,
+            key(&[k]),
+            opts,
+            targets,
+            Outcome::Block,
+        )
+        .expect("valid")
+    }
+
+    #[test]
+    fn bare_tilde_hits_a_tilde_prefix_target() {
+        // `rm -r -- ~` under `[Tilde, Lit("/")]` Prefix.
+        check(rm_r_dashdash(tilde_word("")), Decision::Block);
+        check(rm_r_dashdash(tilde_word("/.")), Decision::Block);
+        check(rm_r_dashdash(tilde_word("//")), Decision::Block);
+    }
+
+    #[test]
+    fn bare_tilde_pattern_is_home() {
+        // `[Tilde]` Exact vs `rm -r -- ~/` and `rm -r -- ~`.
+        let home = Pat::new(vec![Part::Opaque(Opaque::Tilde)], PatKind::Exact).expect("non-empty");
+        let r = [block_rule("rm", vec![OptName::Short(b'r')], vec![home])];
+        check_with(&r, rm_r_dashdash(tilde_word("/")), Decision::Block);
+        check_with(&r, rm_r_dashdash(tilde_word("")), Decision::Block);
+        check_with(&r, rm_r_dashdash(tilde_word("/x")), Decision::Allow);
+    }
+
+    #[test]
+    fn patterns_are_normalized() {
+        // `/etc/` Exact vs `rm -r /etc/` and `rm -r /etc`.
+        let etc = Pat::new(vec![lit("/etc/")], PatKind::Exact).expect("non-empty");
+        let r = [block_rule("rm", vec![OptName::Short(b'r')], vec![etc])];
+        check_with(&r, seq(vec![cmd(&["rm", "-r", "/etc/"])]), Decision::Block);
+        check_with(&r, seq(vec![cmd(&["rm", "-r", "/etc"])]), Decision::Block);
+        check_with(&r, seq(vec![cmd(&["rm", "-r", "/etc/x"])]), Decision::Allow);
+    }
+
+    #[test]
+    fn ask_rule_is_ask() {
+        let ask = Rule::new(
+            RuleId(10),
+            Scope::Simple,
+            key(&["rm"]),
+            vec![OptName::Short(b'r')],
+            Vec::new(),
+            Outcome::Ask,
+        )
+        .expect("valid");
+        check_with(&[ask], seq(vec![cmd(&["rm", "-r", "x"])]), Decision::Ask);
+        check_with(&[], seq(vec![cmd(&["rm", "-r", "x"])]), Decision::Allow);
+    }
+
+    /// The test catalog plus `cp [-t DIR] path...`.
+    fn catalog_with_cp() -> Catalog {
+        let mut cat = catalog();
+        let t = Opt::new(
+            OptName::Both(b't', long("target-directory")),
+            OptValue::Takes(Role::Path),
+        );
+        cat.rows.push(row(&["cp"], gnu(vec![t], Role::Path), false));
+        cat
+    }
+
+    #[test]
+    fn inline_path_value_is_ask() {
+        let cat = catalog_with_cp();
+        check_in(
+            &cat,
+            &[],
+            seq(vec![cmd(&["cp", "--target-directory=/x", "a"])]),
+            Decision::Ask,
+        );
+        check_in(
+            &cat,
+            &[],
+            seq(vec![cmd(&["cp", "-t", "/x", "a"])]),
+            Decision::Allow,
+        );
+    }
+
+    #[test]
+    fn option_value_path_is_a_target() {
+        let cat = catalog_with_cp();
+        let root = Pat::new(vec![lit("/")], PatKind::Exact).expect("non-empty");
+        let r = [block_rule("cp", Vec::new(), vec![root])];
+        check_in(
+            &cat,
+            &r,
+            seq(vec![cmd(&["cp", "-t", "/", "a"])]),
+            Decision::Block,
+        );
+        check_in(
+            &cat,
+            &r,
+            seq(vec![cmd(&["cp", "-t", "/x", "a"])]),
+            Decision::Allow,
+        );
+    }
+
+    #[test]
+    fn relative_path_after_cd_across_connectors() {
+        // `cd /; rm usr`
+        check(
+            seq(vec![cmd(&["cd", "/"]), cmd(&["rm", "usr"])]),
+            Decision::Ask,
+        );
+        // `cd / || rm usr`
+        let or = Script::new(vec![AndOr::new(
+            pipe(vec![cmd(&["cd", "/"])]),
+            vec![Link::new(Connector::Or, pipe(vec![cmd(&["rm", "usr"])]))],
+        )]);
+        check(or, Decision::Ask);
+        // `cd / | rm usr`
+        let piped = Script::new(vec![AndOr::new(
+            pipe(vec![cmd(&["cd", "/"]), cmd(&["rm", "usr"])]),
+            Vec::new(),
+        )]);
+        check(piped, Decision::Ask);
+        // `rm usr; cd /`: the cd comes after.
+        check(
+            seq(vec![cmd(&["rm", "usr"]), cmd(&["cd", "/"])]),
+            Decision::Allow,
+        );
+    }
+
+    #[test]
+    fn tilde_dotdot_is_ask() {
+        // `rm -- ~/../x`
+        let sc = seq(vec![simple(vec![
+            word(vec![lit("rm")]),
+            word(vec![lit("--")]),
+            tilde_word("/../x"),
+        ])]);
+        check_with(&[], sc, Decision::Ask);
+    }
+
+    #[test]
+    fn rules_see_the_first_covering_row() {
+        let short_only = row(
+            &["rm"],
+            gnu(vec![flag(OptName::Short(b'r'))], Role::Path),
+            false,
+        );
+        let both = row(
+            &["rm"],
+            gnu(
+                vec![flag(OptName::Both(b'r', long("recursive")))],
+                Role::Path,
+            ),
+            false,
+        );
+        // The rule names only `--recursive`, so it overlaps `both` alone.
+        let r = [block_rule(
+            "rm",
+            vec![OptName::Long(long("recursive"))],
+            Vec::new(),
+        )];
+        let sc = seq(vec![cmd(&["rm", "-r", "x"])]);
+        let first_short = Catalog::new(vec![short_only.clone(), both.clone()], Vec::new());
+        check_in(&first_short, &r, sc.clone(), Decision::Allow);
+        let first_both = Catalog::new(vec![both, short_only], Vec::new());
+        check_in(&first_both, &r, sc, Decision::Block);
     }
 }

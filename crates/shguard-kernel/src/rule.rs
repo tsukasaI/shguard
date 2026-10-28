@@ -45,6 +45,10 @@ pub enum PatKind {
 
 /// A target pattern. It reuses [`Part`], so `~/.bashrc` is
 /// `[Opaque(Tilde), Lit("/.bashrc")]`.
+///
+/// A `/`-led pattern never covers a word that starts with `~`: to cover the
+/// home directory, add a `~` `Prefix` target as well (see
+/// [`crate::decide`] for how patterns match).
 #[derive(Clone, Debug)]
 #[cfg_attr(not(creusot), derive(PartialEq, Eq))]
 pub struct Pat {
