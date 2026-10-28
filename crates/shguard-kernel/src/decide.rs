@@ -938,6 +938,8 @@ struct PathView {
 #[cfg_attr(creusot, ensures(result.key@ == path_key(parts@)))]
 #[cfg_attr(creusot, ensures(result.more == path_more(parts@)))]
 fn path_view(parts: &[Part]) -> PathView {
+    // Three owned copies of the lead from three calls, each carrying the
+    // `path_shape` contract, instead of relying on a spec for `Vec::clone`.
     let (tilde, lead, more) = path_shape(parts);
     let (_, lead2, _) = path_shape(parts);
     let (_, lead3, _) = path_shape(parts);
