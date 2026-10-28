@@ -1,7 +1,7 @@
 //! Addresses into a script and the reasons a verdict carries.
 //!
 //! The sealed `Witness` lives in [`crate::classify`]; [`covered_at`] shows
-//! how a consumer uses its invariant. `Verdict` arrives in M7.
+//! how a consumer uses its invariant. `Verdict` lives in [`crate::decide`].
 
 #[cfg(creusot)]
 use crate::ast::Pipeline;
@@ -58,6 +58,17 @@ pub enum UnknownKind {
     UnknownSubcommand,
     /// A redirect the model cannot reason about.
     Redirect,
+    /// A path word that is neither literal nor `~` followed by literal
+    /// bytes, so it cannot be compared with rule targets.
+    PathOpaque,
+    /// A literal path word with a `..` segment.
+    PathDotDot,
+    /// A relative literal path word after an earlier command that changes
+    /// the working directory (`cd / && rm -rf usr`).
+    PathAfterCd,
+    /// A path given inline in an option word (`-t/x`, `--dir=/x`), whose
+    /// bytes the kernel cannot locate yet (#1034).
+    PathInlineValue,
 }
 
 /// Why a verdict is not Allow.

@@ -196,7 +196,7 @@ pub enum SimpleClass {
 /// The words `ws` start with the literal key `key`.
 #[cfg_attr(creusot, check(terminates))]
 #[cfg_attr(creusot, ensures(result == key_matches(key@, ws@)))]
-fn key_match(key: &[Vec<u8>], ws: &[Word]) -> bool {
+pub(crate) fn key_match(key: &[Vec<u8>], ws: &[Word]) -> bool {
     if key.len() > ws.len() {
         return false;
     }
@@ -320,7 +320,8 @@ fn row_fit(rows: &[Row], j: usize, ws: &[Word]) -> RowFit {
 #[cfg_attr(creusot, check(terminates))]
 #[cfg_attr(creusot, ensures(match result {
     SimpleClass::Covered { row } => row_covers(cat.rows@, row@, s.words@)
-        && covered_simple(*cat, *s),
+        && covered_simple(*cat, *s)
+        && forall<m> 0 <= m && m < row@ ==> !row_covers(cat.rows@, m, s.words@),
     SimpleClass::Unknown(_, w) => !covered_simple(*cat, *s) && w@ < s.words@.len(),
 }))]
 #[must_use]

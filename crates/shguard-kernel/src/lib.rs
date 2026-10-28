@@ -8,6 +8,7 @@ pub mod ast;
 pub mod bytes;
 pub mod catalog;
 pub mod classify;
+pub mod decide;
 pub mod decision;
 pub mod rule;
 pub mod verdict;

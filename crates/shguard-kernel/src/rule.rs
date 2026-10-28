@@ -1,9 +1,9 @@
 //! Rules: patterns that raise a decision for a matching simple command.
 //!
-//! Matching is defined in M7. A rule hits a simple command when the command's
-//! key matches `key`, every entry of `opts` is present, and any target
-//! matches (an empty `targets` means any). Rules only raise the verdict; user
-//! allows are catalog rows, never rules.
+//! Matching is defined in [`crate::decide`]. A rule hits a simple command when
+//! the command's key matches `key`, every entry of `opts` is present, and any
+//! target matches (an empty `targets` means any). Rules only raise the
+//! verdict; user allows are catalog rows, never rules.
 
 use crate::ast::Part;
 use crate::catalog::OptName;
