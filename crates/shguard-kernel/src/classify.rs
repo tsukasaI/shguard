@@ -645,6 +645,11 @@ mod tests {
             classify_simple(&catalog(), &cmd(&["git", "-C", "x", "status"])),
             SimpleClass::Unknown(_, _)
         ));
+        // `-C` is not in the `["git"]` grammar, and `["git", "status"]` fails at word 1.
+        assert_eq!(
+            classify_simple(&catalog(), &cmd(&["git", "-C", "x", "status"])),
+            unknown(UnknownKind::UnknownOption, 1)
+        );
     }
 
     #[test]
