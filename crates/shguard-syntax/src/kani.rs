@@ -6,15 +6,38 @@
 //! proves every index in bounds.
 //!
 //! Bounds: every input byte at length 8 (`*_any_bytes_len_8`), and the
-//! alphabet below at length 12. Unwind values are the input length plus a
-//! small margin for the loops in `lex`, `parse` and the `Vec` operations.
+//! alphabet below at length 12. The unwind value must cover the longest loop
+//! a harness reaches (see the comment on the `parse` harnesses).
 
 use crate::{lex, parse};
 
 /// Every byte that drives a different lexer or parser branch: blanks and
 /// newline, the operator bytes, quotes, backslash, `$`, `~`, `#`, `=`, `:`,
-/// `/`, and a digit and a letter standing for ordinary word bytes.
-const ALPHABET: &[u8] = b" \t\n;&|<>'\"\\$~#=:/0123a";
+/// `/`, and digits and a letter standing for ordinary word bytes.
+// A `matches!`, not `slice::contains`: the slice search is a loop that would
+// need its own unwind bound on every byte.
+fn in_alphabet(b: u8) -> bool {
+    matches!(
+        b,
+        b' ' | b'\t'
+            | b'\n'
+            | b';'
+            | b'&'
+            | b'|'
+            | b'<'
+            | b'>'
+            | b'\''
+            | b'"'
+            | b'\\'
+            | b'$'
+            | b'~'
+            | b'#'
+            | b'='
+            | b':'
+            | b'/'
+            | b'0'..=b'3' | b'a'
+    )
+}
 
 /// A symbolic byte string of length at most `N`, together with its length.
 fn symbolic_input<const N: usize>() -> ([u8; N], usize) {
@@ -24,8 +47,10 @@ fn symbolic_input<const N: usize>() -> ([u8; N], usize) {
     (bytes, len)
 }
 
+// Not the input length plus a margin: `parse` searches the 22 reserved words
+// with a loop, so every `parse` harness needs at least 23.
 #[::kani::proof]
-#[::kani::unwind(10)]
+#[::kani::unwind(24)]
 #[::kani::solver(cadical)]
 fn parse_any_bytes_len_8() {
     let (bytes, len) = symbolic_input::<8>();
@@ -37,13 +62,13 @@ fn parse_any_bytes_len_8() {
 // Why not any byte at length 12: not measured yet; the alphabet bounds the
 // branching instead. Record the measured limit here if CI shows a timeout.
 #[::kani::proof]
-#[::kani::unwind(14)]
+#[::kani::unwind(24)]
 #[::kani::solver(cadical)]
 fn parse_alphabet_len_12() {
     let (bytes, len) = symbolic_input::<12>();
     let mut i = 0;
     while i < len {
-        ::kani::assume(ALPHABET.contains(&bytes[i]));
+        ::kani::assume(in_alphabet(bytes[i]));
         i += 1;
     }
     if let Err(e) = parse(&bytes[..len]) {
