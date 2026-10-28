@@ -482,7 +482,9 @@ pub fn classify_script(cat: &Catalog, sc: Script) -> Classified {
 mod tests {
     use super::{Classified, SimpleClass, classify_script, classify_simple};
     use crate::ast::{AndOr, Connector, Link, Opaque, Part, Pipeline, Script, Simple, Word};
-    use crate::catalog::{Catalog, Grammar, LongName, Opt, OptName, OptValue, Role, Row};
+    use crate::catalog::{
+        Catalog, Grammar, LongName, Opt, OptName, OptValue, PlusWords, Role, Row,
+    };
     use crate::verdict::{Addr, Reason, UnknownKind};
 
     fn key(segs: &[&str]) -> Vec<Vec<u8>> {
@@ -510,6 +512,7 @@ mod tests {
             Some(Role::Path),
             true,
             true,
+            PlusWords::Reject,
         )
     }
 
@@ -521,11 +524,12 @@ mod tests {
             Some(Role::Inert),
             false,
             true,
+            PlusWords::Reject,
         )
     }
 
     fn no_args() -> Grammar {
-        Grammar::new(Vec::new(), Vec::new(), None, false, true)
+        Grammar::new(Vec::new(), Vec::new(), None, false, true, PlusWords::Reject)
     }
 
     fn catalog() -> Catalog {
@@ -597,8 +601,13 @@ mod tests {
             unknown(UnknownKind::UnknownSubcommand, 1)
         );
         assert_eq!(
-            classify_simple(&catalog(), &cmd(&["git", "push", "--force"])),
+            classify_simple(&catalog(), &cmd(&["git", "push", "origin"])),
             unknown(UnknownKind::UnknownSubcommand, 1)
+        );
+        // `git_grammar` has no `permute`, so the argv parse fails first.
+        assert_eq!(
+            classify_simple(&catalog(), &cmd(&["git", "push", "--force"])),
+            unknown(UnknownKind::OptionAfterOperand, 2)
         );
     }
 

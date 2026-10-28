@@ -49,6 +49,17 @@ pub enum UnknownKind {
     DashDashNotAllowed,
     /// An operand beyond what the grammar allows.
     ExtraOperand,
+    /// For a grammar without `permute`, a word after the first operand that
+    /// the real tool might still read as an option: a literal of two or
+    /// more bytes starting with `-`, or a non-literal whose known prefix is
+    /// empty or starts with `-`.
+    OptionAfterOperand,
+    /// For a grammar with [`PlusWords::Reject`], a word in option position
+    /// (or after the first operand without `permute`) whose known bytes
+    /// start with `+`, such as vim's `+cmd`.
+    ///
+    /// [`PlusWords::Reject`]: crate::catalog::PlusWords::Reject
+    PlusWord,
     /// A position whose role is code.
     CodeRole,
     /// The row marks the command as running other code.
