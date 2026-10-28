@@ -189,6 +189,14 @@ fn accepted_inputs() {
         ("''", vec![word(vec![quo("")])]),
         ("\"$X\"", vec![word(vec![var("X")])]),
         ("\"${X}y\"", vec![word(vec![var("X"), quo("y")])]),
+        (
+            "echo \"${HOME}日\"",
+            vec![bare("echo"), word(vec![var("HOME"), quo("日")])],
+        ),
+        (
+            "echo \"日$HOME\"",
+            vec![bare("echo"), word(vec![quo("日"), var("HOME")])],
+        ),
         ("\"$X_1-\"", vec![word(vec![var("X_1"), quo("-")])]),
         ("\"a$X\"\"\"", vec![word(vec![quo("a"), var("X"), quo("")])]),
         ("\"$\"", vec![word(vec![quo("$")])]),
@@ -258,6 +266,8 @@ fn unsupported_inputs() {
         (b"echo a$", K::UnquotedDollar, 6),
         (b"echo `x`", K::Backquote, 5),
         (b"echo \"`x`\"", K::Backquote, 6),
+        ("echo \"$HOME日\"".as_bytes(), K::NameBeforeNonAscii, 6),
+        ("echo \"a$Xé\"".as_bytes(), K::NameBeforeNonAscii, 7),
         (b"echo \"$(x)\"", K::DollarParen, 6),
         (b"echo \"$((1))\"", K::DollarParen, 6),
         (b"echo \"${X:-y}\"", K::BracedParameter, 6),

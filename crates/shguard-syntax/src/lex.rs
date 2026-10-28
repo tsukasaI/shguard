@@ -192,6 +192,10 @@ pub enum UnsupportedKind {
     /// A special or positional parameter inside double quotes.
     #[error("special or positional parameter")]
     SpecialParameter,
+    /// `$NAME` inside double quotes with a non-ASCII byte right after the
+    /// name: bash may count that byte as part of the name.
+    #[error("`$NAME` followed by a non-ASCII byte")]
+    NameBeforeNonAscii,
     /// A `$` inside double quotes that starts no variable and is not followed
     /// by the closing quote.
     #[error("bare `$` in double quotes")]
@@ -715,6 +719,16 @@ impl Lexer<'_> {
             }
             Some(c) if is_name_start(c) => {
                 let name = self.name_at(self.pos + 1).to_vec();
+                // Which bytes form a name is locale-dependent (the C locale
+                // took 0xE6 into `$HOME日`), so a non-ASCII byte right after
+                // the name makes the boundary ambiguous.
+                if self
+                    .input
+                    .get(self.pos + 1 + name.len())
+                    .is_some_and(|b| *b >= 0x80)
+                {
+                    return Err(fail(UnsupportedKind::NameBeforeNonAscii, at));
+                }
                 self.pos += name.len() + 1;
                 Ok(Some(name))
             }
