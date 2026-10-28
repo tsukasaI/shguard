@@ -47,11 +47,18 @@ pre-push:
     # Proves from source (verif/ is gitignored, #1005). Run from
     # the crate directory: 0.14 has no `prove` subcommand and no `-p`. Skipped
     # where Creusot is not installed (verify.yaml's `proofs` job runs the
-    # proof in CI). Points at the spike until the kernel depends on
-    # creusot-std (M3); on a crate without it `cargo creusot` errors out.
+    # proof in CI). The spike keeps its own job as the M1 ADR's evidence.
     proof:
       root: "spikes/lattice/"
       glob: "spikes/lattice/Cargo.toml"
+      skip:
+        - run: "! command -v cargo-creusot"
+      run: ": {all_files}; cargo creusot --span-mode relative"
+    # The kernel is a workspace member: why3find.json and verif/ live at the
+    # workspace root, and the run starts from the crate directory.
+    proof-kernel:
+      root: "crates/shguard-kernel/"
+      glob: "crates/shguard-kernel/Cargo.toml"
       skip:
         - run: "! command -v cargo-creusot"
       run: ": {all_files}; cargo creusot --span-mode relative"
