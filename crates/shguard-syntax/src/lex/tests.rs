@@ -370,7 +370,7 @@ fn render_dq(segs: &[DqSeg]) -> String {
             DqSeg::Lit(l) => out.push_str(l),
             DqSeg::Var(name, braced) => {
                 let next_is_name_byte = matches!(
-                    segs.get(i + 1),
+                    segs.iter().skip(i + 1).find(|s| !matches!(s, DqSeg::Lit(l) if l.is_empty())),
                     Some(DqSeg::Lit(l)) if l.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_')
                 );
                 if *braced || next_is_name_byte {
