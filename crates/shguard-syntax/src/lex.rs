@@ -6,7 +6,7 @@
 //! is safe.
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// Longest input the lexer looks at, in bytes.
 const MAX_INPUT_LEN: usize = 64 * 1024;
@@ -219,8 +219,8 @@ pub enum UnsupportedKind {
     #[error("redirect target other than /dev/null")]
     RedirectTarget,
     /// A `;` where a command must start: at the start of the script or right
-    /// after another separator (`;a`, `a; ;b`, `a\n;b`). Reported by the
-    /// parser.
+    /// after another separator (`;a`, `a; ;b`, `a\n;b`), or right after `|`,
+    /// `&&` or `||` (`a |;`). Reported by the parser.
     #[error("`;` where a command must start")]
     LeadingSeparator,
     /// A `|`, `&&` or `||` where a command must start, or the end of the
@@ -279,7 +279,7 @@ pub fn lex(input: &[u8]) -> Result<Vec<Lexeme>, Unsupported> {
     Lexer { input, pos: 0 }.run()
 }
 
-fn fail(kind: UnsupportedKind, offset: usize) -> Unsupported {
+pub(crate) fn fail(kind: UnsupportedKind, offset: usize) -> Unsupported {
     Unsupported { kind, offset }
 }
 
@@ -374,7 +374,11 @@ impl Parts {
 
     /// Adds a byte inside double quotes, where every literal is quoted.
     fn push_quoted_byte(&mut self, byte: u8) {
-        if let LexPart::Lit { bytes, .. } = &mut self.last {
+        if let LexPart::Lit {
+            bytes,
+            quoting: Quoting::Quoted,
+        } = &mut self.last
+        {
             bytes.push(byte);
         } else {
             let lit = LexPart::Lit {

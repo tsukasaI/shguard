@@ -537,6 +537,17 @@ fn expected(g: &Gen) -> Token {
     }
 }
 
+/// Bytes biased to the shell metacharacters, shared with the parser tests.
+pub(crate) fn interesting_bytes() -> impl Strategy<Value = Vec<u8>> {
+    prop::collection::vec(
+        prop_oneof![
+            9 => prop::sample::select(b" \t\n;&|<>()'\"\\$`{}*?[~#=:+/0123456789aA_!".to_vec()),
+            1 => any::<u8>(),
+        ],
+        0..128,
+    )
+}
+
 proptest! {
     #[test]
     fn never_panics(bytes in prop::collection::vec(any::<u8>(), 0..512)) {
@@ -544,15 +555,7 @@ proptest! {
     }
 
     #[test]
-    fn never_panics_on_interesting_bytes(
-        bytes in prop::collection::vec(
-            prop_oneof![
-                9 => prop::sample::select(b" \t\n;&|<>()'\"\\$`{}*?[~#=:+/0123456789aA_".to_vec()),
-                1 => any::<u8>(),
-            ],
-            0..128,
-        )
-    ) {
+    fn never_panics_on_interesting_bytes(bytes in interesting_bytes()) {
         let _ = lex(&bytes);
     }
 

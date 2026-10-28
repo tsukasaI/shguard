@@ -20,8 +20,8 @@
 mod tests;
 
 use crate::lex::{
-    LexPart, LexRedir, LexWord, Lexeme, Op, Quoting, Token, Unsupported, UnsupportedKind, lex,
-    starts_with_assignment,
+    LexPart, LexRedir, LexWord, Lexeme, Op, Quoting, Token, Unsupported, UnsupportedKind, fail,
+    lex, starts_with_assignment,
 };
 use shguard_kernel::ast::{
     AndOr, Connector, Link, Opaque, Part, Pipeline, Redir, Script, Simple, Word,
@@ -30,7 +30,9 @@ use shguard_kernel::ast::{
 /// Most words the parser accepts in one script.
 const MAX_WORDS: usize = 4096;
 
-/// Words that bash treats as reserved when they start a command.
+/// Words that bash treats as reserved when they start a command. `[[`, `{`
+/// and `}` never reach the parser (the lexer rejects them); they stay so the
+/// list equals bash's `word_token_alist`.
 const RESERVED: &[&[u8]] = &[
     b"if",
     b"then",
@@ -75,10 +77,6 @@ pub fn parse(input: &[u8]) -> Result<Script, Unsupported> {
         words: 0,
     }
     .script()
-}
-
-fn fail(kind: UnsupportedKind, offset: usize) -> Unsupported {
-    Unsupported { kind, offset }
 }
 
 /// What ended a pipeline, other than `|`.
@@ -215,7 +213,8 @@ impl Parser {
 }
 
 /// The error for a command that is expected but not there, looking at the
-/// operator (or the end of the input) that stands in its place.
+/// operator (or the end of the input) that stands in its place. A `Newline`
+/// cannot reach it, because every caller skips newlines first.
 fn missing_command(end: Option<(Op, usize)>, eof: usize) -> Unsupported {
     match end {
         Some((Op::Semi, offset)) => fail(UnsupportedKind::LeadingSeparator, offset),

@@ -1,4 +1,5 @@
 use super::parse;
+use crate::lex::tests::interesting_bytes;
 use crate::{Unsupported, UnsupportedKind as K};
 use proptest::prelude::*;
 use shguard_kernel::ast::{
@@ -258,20 +259,23 @@ fn word_limit() {
 
 // ---- proptest ----
 
-fn interesting_bytes() -> impl Strategy<Value = Vec<u8>> {
-    prop::collection::vec(
-        prop_oneof![
-            9 => prop::sample::select(b" \t\n;&|<>()'\"\\$`{}*?[~#=:+/0123456789aA_!".to_vec()),
-            1 => any::<u8>(),
-        ],
-        0..128,
-    )
-}
-
+/// Every reserved word that can reach the parser (`[[`, `{` and `}` are
+/// rejected by the lexer).
 const RESERVED_SAMPLES: &[&str] = &[
     "if", "then", "else", "elif", "fi", "case", "esac", "for", "select", "while", "until", "do",
     "done", "in", "function", "time", "coproc", "!", "]]",
 ];
+
+#[test]
+fn every_reserved_word_is_rejected() {
+    for word in RESERVED_SAMPLES {
+        assert_eq!(
+            err(&format!("{word} x")),
+            (K::ReservedWord, 0),
+            "word: {word:?}"
+        );
+    }
+}
 
 const BAD_NAMES: &[&str] = &["FOO=1", "a_b=", "X+=y", "_1=2"];
 
@@ -281,6 +285,10 @@ enum GWord {
     Single(String),
     Mixed(String, String),
     DqVar(String),
+    /// Double-quoted text without expansions; may be empty.
+    Dq(String),
+    /// Every byte backslash-escaped.
+    Esc(String),
     Tilde,
 }
 
@@ -291,13 +299,15 @@ impl GWord {
             GWord::Single(s) => format!("'{s}'"),
             GWord::Mixed(a, b) => format!("{a}'{b}'"),
             GWord::DqVar(n) => format!("\"${n}\""),
+            GWord::Dq(s) => format!("\"{s}\""),
+            GWord::Esc(s) => s.chars().map(|c| format!("\\{c}")).collect(),
             GWord::Tilde => "~".to_string(),
         }
     }
 
     fn word(&self) -> Word {
         match self {
-            GWord::Bare(s) | GWord::Single(s) => w(vec![lit(s)]),
+            GWord::Bare(s) | GWord::Single(s) | GWord::Dq(s) | GWord::Esc(s) => w(vec![lit(s)]),
             GWord::Mixed(a, b) => w(vec![lit(a), lit(b)]),
             GWord::DqVar(n) => w(vec![Part::Opaque(Opaque::Var(n.as_bytes().to_vec()))]),
             GWord::Tilde => w(vec![Part::Opaque(Opaque::Tilde)]),
@@ -313,6 +323,8 @@ fn gword() -> impl Strategy<Value = GWord> {
         2 => quoted.prop_map(GWord::Single),
         1 => (bare_s, quoted).prop_map(|(a, b)| GWord::Mixed(a, b)),
         1 => "[A-Za-z_][A-Za-z0-9_]{0,4}".prop_map(GWord::DqVar),
+        1 => "[a-z ;|&<>()]{0,6}".prop_map(GWord::Dq),
+        1 => "[a-z;|&<>()$ ]{1,4}".prop_map(GWord::Esc),
         1 => Just(GWord::Tilde),
     ]
 }
@@ -331,7 +343,9 @@ struct GSimple {
     name: GWord,
     args: Vec<GWord>,
     redirs: Vec<Redir>,
-    redirs_first: bool,
+    /// 0: redirects before the name; 1: after the last word; 2: between the
+    /// words (leftovers after the last word).
+    placement: u8,
 }
 
 fn gredir() -> impl Strategy<Value = Redir> {
@@ -353,13 +367,13 @@ fn gsimple() -> impl Strategy<Value = GSimple> {
         gname(),
         prop::collection::vec(gword(), 0..4),
         prop::collection::vec(gredir(), 0..3),
-        any::<bool>(),
+        0u8..3,
     )
-        .prop_map(|(name, args, redirs, redirs_first)| GSimple {
+        .prop_map(|(name, args, redirs, placement)| GSimple {
             name,
             args,
             redirs,
-            redirs_first,
+            placement,
         })
 }
 
@@ -367,15 +381,19 @@ impl GSimple {
     /// Renders with `name` standing in for the command name when given.
     fn render(&self, name: Option<&str>) -> String {
         let mut parts: Vec<String> = Vec::new();
-        let redirs: Vec<String> = self.redirs.iter().copied().map(render_redir).collect();
-        if self.redirs_first {
-            parts.extend(redirs.iter().cloned());
+        let mut redirs = self.redirs.iter().copied().map(render_redir);
+        if self.placement == 0 {
+            parts.extend(redirs.by_ref());
         }
         parts.push(name.map_or_else(|| self.name.render(), str::to_string));
-        parts.extend(self.args.iter().map(GWord::render));
-        if !self.redirs_first {
-            parts.extend(redirs);
+        for arg in &self.args {
+            // Placement 2 puts a redirect after every word, between the words.
+            if self.placement == 2 {
+                parts.extend(redirs.next());
+            }
+            parts.push(arg.render());
         }
+        parts.extend(redirs);
         parts.join(" ")
     }
 
