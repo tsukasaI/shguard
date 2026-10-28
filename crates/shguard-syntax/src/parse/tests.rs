@@ -343,9 +343,18 @@ struct GSimple {
     name: GWord,
     args: Vec<GWord>,
     redirs: Vec<Redir>,
-    /// 0: redirects before the name; 1: after the last word; 2: between the
-    /// words (leftovers after the last word).
-    placement: u8,
+    placement: Placement,
+}
+
+/// Where the redirects of a generated command are rendered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Placement {
+    /// Before the command name.
+    Before,
+    /// After the last word.
+    After,
+    /// One after each word, between the words; leftovers go last.
+    Between,
 }
 
 fn gredir() -> impl Strategy<Value = Redir> {
@@ -367,7 +376,11 @@ fn gsimple() -> impl Strategy<Value = GSimple> {
         gname(),
         prop::collection::vec(gword(), 0..4),
         prop::collection::vec(gredir(), 0..3),
-        0u8..3,
+        prop_oneof![
+            Just(Placement::Before),
+            Just(Placement::After),
+            Just(Placement::Between),
+        ],
     )
         .prop_map(|(name, args, redirs, placement)| GSimple {
             name,
@@ -382,13 +395,12 @@ impl GSimple {
     fn render(&self, name: Option<&str>) -> String {
         let mut parts: Vec<String> = Vec::new();
         let mut redirs = self.redirs.iter().copied().map(render_redir);
-        if self.placement == 0 {
+        if self.placement == Placement::Before {
             parts.extend(redirs.by_ref());
         }
         parts.push(name.map_or_else(|| self.name.render(), str::to_string));
         for arg in &self.args {
-            // Placement 2 puts a redirect after every word, between the words.
-            if self.placement == 2 {
+            if self.placement == Placement::Between {
                 parts.extend(redirs.next());
             }
             parts.push(arg.render());
