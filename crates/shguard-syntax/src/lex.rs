@@ -8,6 +8,9 @@
 #[cfg(test)]
 pub(crate) mod tests;
 
+#[cfg(kani)]
+mod kani;
+
 /// Longest input the lexer looks at, in bytes.
 const MAX_INPUT_LEN: usize = 64 * 1024;
 

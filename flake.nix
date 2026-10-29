@@ -36,8 +36,7 @@
             # it must stay AFTER the stable toolchain above so a plain
             # `cargo` resolves to stable. `cargo creusot` sets CARGO itself.
             creusot.packages.${system}.free
-            # TODO(M9): add Kani (`cargo kani -p shguard-syntax`); not wired
-            # here because it needs its own CBMC bundle and is not verified.
+            # Kani is not in nixpkgs; `.github/workflows/kani.yaml` installs it.
           ];
         };
       });

@@ -1,0 +1,66 @@
+name: kani
+
+on:
+  pull_request:
+    paths:
+      - 'crates/shguard-syntax/**'
+      - 'crates/shguard-kernel/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/kani.yaml'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/shguard-syntax/**'
+      - 'crates/shguard-kernel/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/kani.yaml'
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kani-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  KANI_VERSION: 0.68.0
+
+# The Kani binaries decide whether this check is green, so this workflow must
+# never run PR code in main's ref context (pull_request_target, workflow_run).
+# Kani is installed from scratch on every run (about 16 s): a cached ~/.kani
+# holds a dangling toolchain symlink into ~/.rustup that `cargo kani setup`
+# does not notice.
+jobs:
+  kani:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        harness:
+          - io_number_any
+          - escaped_byte_any
+          - name_at_any
+          - starts_with_assignment_any
+          - single_quoted_any
+          - dollar_in_quotes_any
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The official kani-github-action installs Rust through an unpinned
+      # dtolnay/rust-toolchain@stable, so Kani is installed here by pinned
+      # version instead.
+      - name: Install stable toolchain
+        run: rustup toolchain install stable --profile minimal --no-self-update
+      - name: Install Kani
+        run: |
+          cargo install --locked kani-verifier --version "$KANI_VERSION"
+          cargo kani setup
+      - name: Run Kani harness
+        run: cargo kani -p shguard-syntax --harness "${{ matrix.harness }}"
